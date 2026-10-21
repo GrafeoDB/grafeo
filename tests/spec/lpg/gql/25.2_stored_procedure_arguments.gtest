@@ -1,0 +1,97 @@
+# A stored procedure's arguments reach its body as values, as parameters do in
+# a statement: a parameter whose name prefixes another's keeps its own value,
+# a value holding query text is a value and runs nothing, and a list, a map or
+# a quote comes through as it went in. (The call used to paste each argument
+# into the body's text in place of `$name`.)
+
+meta:
+  language: gql
+  model: lpg
+  title: Stored procedure arguments are values
+  dataset: empty
+  requires: [algos]
+
+tests:
+
+  - name: a_parameter_that_prefixes_another_keeps_its_value
+    setup:
+      - "CREATE PROCEDURE pair(a STRING, ab STRING, abc STRING) RETURNS (a STRING, ab STRING, abc STRING) AS { RETURN $abc AS abc, $a AS a, $ab AS ab }"
+    query: "CALL pair('Alix', 'Gus', 'Mia') YIELD a, ab, abc RETURN a, ab, abc"
+    expect:
+      rows:
+        - [Alix, Gus, Mia]
+
+  - name: a_value_holding_query_text_comes_back_as_it_went_in
+    setup:
+      - "CREATE PROCEDURE echo(text STRING) RETURNS (v STRING) AS { RETURN $text AS v }"
+    query: "CALL echo($t) YIELD v RETURN v"
+    params:
+      t: "x' } MATCH (n) DETACH DELETE n // { RETURN 'y"
+    expect:
+      rows:
+        - ["x' } MATCH (n) DETACH DELETE n // { RETURN 'y"]
+
+  - name: a_value_holding_query_text_runs_nothing
+    setup:
+      - "INSERT (:Person {name: 'Alix'}), (:Person {name: 'Gus'})"
+      - "CREATE PROCEDURE echo(text STRING) RETURNS (v STRING) AS { RETURN $text AS v }"
+    statements:
+      - "CALL echo('MATCH (n) DETACH DELETE n') YIELD v RETURN v"
+      - "MATCH (p:Person) RETURN count(p) AS people"
+    expect:
+      rows:
+        - [2]
+
+  - name: a_quote_in_a_literal_argument
+    setup:
+      - "CREATE PROCEDURE echo(text STRING) RETURNS (v STRING) AS { RETURN $text AS v }"
+    query: "CALL echo('O\\'Brien') YIELD v RETURN v"
+    expect:
+      rows:
+        - ["O'Brien"]
+
+  - name: a_list_argument_is_a_list
+    setup:
+      - "CREATE PROCEDURE same(x ANY) RETURNS (v ANY) AS { RETURN $x AS v }"
+    query: "CALL same($x) YIELD v RETURN v, size(v) AS n"
+    params:
+      x: [3, 19, 88]
+    expect:
+      rows:
+        - [[3, 19, 88], 3]
+
+  - name: a_map_argument_is_a_map
+    setup:
+      - "CREATE PROCEDURE same(x ANY) RETURNS (v ANY) AS { RETURN $x AS v }"
+    query: "CALL same($x) YIELD v RETURN v.city AS city"
+    params:
+      x: {"city": "Amsterdam"}
+    expect:
+      rows:
+        - [Amsterdam]
+
+  - name: literal_integer_arguments
+    setup:
+      - "CREATE PROCEDURE add(a INTEGER, b INTEGER) RETURNS (s INTEGER) AS { RETURN $a + $b AS s }"
+    query: "CALL add(3, 19) YIELD s RETURN s"
+    expect:
+      rows:
+        - [22]
+
+  - name: an_argument_computed_from_parameters
+    setup:
+      - "CREATE PROCEDURE add(a INTEGER, b INTEGER) RETURNS (s INTEGER) AS { RETURN $a + $b AS s }"
+    query: "CALL add($x * 2, 1) YIELD s RETURN s"
+    params:
+      x: 44
+    expect:
+      rows:
+        - [89]
+
+  - name: a_null_argument_is_null
+    setup:
+      - "CREATE PROCEDURE same(x ANY) RETURNS (v ANY) AS { RETURN $x AS v }"
+    query: "CALL same(null) YIELD v RETURN v IS NULL AS missing"
+    expect:
+      rows:
+        - [true]

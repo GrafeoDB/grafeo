@@ -1,0 +1,153 @@
+# Rosetta: exact decimals in GQL and Cypher (#610)
+#
+# toDecimal makes a decimal of a number or a numeric string in both
+# languages; GQL also reads 1.50 as a decimal literal, while Cypher's 1.50 is
+# a float. Decimal arithmetic is exact, a decimal with a float gives a float,
+# and decimals compare, group and sort with integers and floats by value. A
+# float below the 38 digits a decimal holds (1.0e-300) equals no decimal and
+# sorts on its own side of zero.
+
+meta:
+  model: lpg
+  section: rosetta
+  title: Exact decimal values cross-language equivalence
+  dataset: empty
+  requires: [cypher]
+
+tests:
+
+  # ---------------------------------------------------------------------------
+  # Literals and toDecimal
+  # ---------------------------------------------------------------------------
+
+  - name: a_cypher_number_with_a_point_is_a_float
+    variants:
+      cypher: "RETURN 1.50 AS v, 0.1 + 0.2 = 0.3 AS exact"
+    expect:
+      rows:
+        - [1.5, false]
+
+  - name: to_decimal_keeps_the_scale_of_its_text
+    variants:
+      gql: "RETURN toDecimal('1.50') AS a, toDecimal('-0.010') AS b"
+      cypher: "RETURN toDecimal('1.50') AS a, toDecimal('-0.010') AS b"
+    expect:
+      rows:
+        - [1.50, -0.010]
+
+  - name: to_decimal_with_precision_and_scale_rounds_half_away_from_zero
+    variants:
+      gql: "RETURN toDecimal(2.345e0, 10, 2) AS up, toDecimal(-2.345e0, 10, 2) AS down, toDecimal('2.344', 10, 2) AS near"
+      cypher: "RETURN toDecimal(2.345, 10, 2) AS up, toDecimal(-2.345, 10, 2) AS down, toDecimal('2.344', 10, 2) AS near"
+    expect:
+      rows:
+        - [2.35, -2.35, 2.34]
+
+  - name: to_decimal_of_something_else_is_null
+    variants:
+      gql: "RETURN toDecimal('Alix') AS text, toDecimal(null) AS missing, toDecimal(true) AS flag"
+      cypher: "RETURN toDecimal('Alix') AS text, toDecimal(null) AS missing, toDecimal(true) AS flag"
+    expect:
+      rows:
+        - [null, null, null]
+
+  - name: to_decimal_with_too_many_integer_digits_is_null
+    variants:
+      gql: "RETURN toDecimal(12345.6e0, 5, 2) AS d"
+      cypher: "RETURN toDecimal(12345.6, 5, 2) AS d"
+    expect:
+      rows:
+        - [null]
+
+  # ---------------------------------------------------------------------------
+  # Arithmetic
+  # ---------------------------------------------------------------------------
+
+  - name: decimal_arithmetic_is_exact
+    variants:
+      gql: "RETURN toDecimal('0.1') + toDecimal('0.2') = toDecimal('0.3') AS exact, toDecimal('0.1') * 3 AS triple"
+      cypher: "RETURN toDecimal('0.1') + toDecimal('0.2') = toDecimal('0.3') AS exact, toDecimal('0.1') * 3 AS triple"
+    expect:
+      rows:
+        - [true, 0.3]
+
+  - name: a_decimal_with_a_float_gives_a_float
+    variants:
+      gql: "RETURN toDecimal('1.5') + 1.0e0 AS sum, toDecimal('0.1') + 0.2e0 = 0.30000000000000004e0 AS float_sum"
+      cypher: "RETURN toDecimal('1.5') + 1.0 AS sum, toDecimal('0.1') + 0.2 = 0.30000000000000004 AS float_sum"
+    expect:
+      rows:
+        - [2.5, true]
+
+  - name: a_decimal_division_by_zero_fails
+    variants:
+      gql: "RETURN toDecimal('1.5') / 0 AS d"
+      cypher: "RETURN toDecimal('1.5') / 0 AS d"
+    expect:
+      error: "division by zero"
+      gql_status: "22012"
+
+  # ---------------------------------------------------------------------------
+  # Comparison, grouping and order across numeric types
+  # ---------------------------------------------------------------------------
+
+  - name: a_decimal_equals_an_integer_and_a_float_of_its_value
+    variants:
+      gql: "RETURN toDecimal('2.00') = 2 AS int, toDecimal('1.5') = 1.5e0 AS float, toDecimal('0.1') = 0.1e0 AS shortest_text"
+      cypher: "RETURN toDecimal('2.00') = 2 AS int, toDecimal('1.5') = 1.5 AS float, toDecimal('0.1') = 0.1 AS shortest_text"
+    expect:
+      rows:
+        - [true, true, true]
+
+  - name: a_float_below_the_decimal_range_equals_no_decimal
+    variants:
+      gql: "RETURN toDecimal('0') = 1.0e-300 AS tiny, toDecimal('0') < 1.0e-300 AS below, toDecimal('0') > -1.0e-300 AS above"
+      cypher: "RETURN toDecimal('0') = 1.0e-300 AS tiny, toDecimal('0') < 1.0e-300 AS below, toDecimal('0') > -1.0e-300 AS above"
+    expect:
+      rows:
+        - [false, true, true]
+
+  - name: decimals_sort_among_integers_and_floats
+    setup:
+      - "INSERT (:N {name: 'Alix', v: 2}), (:N {name: 'Gus', v: 1.5e0}), (:N {name: 'Vincent', v: -1.0e-300}), (:N {name: 'Jules', v: 1.0e-300})"
+      - "MATCH (n:N {name: 'Alix'}) INSERT (:N {name: 'Mia', v: toDecimal('1.75')}), (:N {name: 'Butch', v: toDecimal('0')})"
+    variants:
+      gql: "MATCH (n:N) RETURN n.name ORDER BY n.v"
+      cypher: "MATCH (n:N) RETURN n.name ORDER BY n.v"
+    expect:
+      ordered: true
+      rows:
+        - [Vincent]
+        - [Butch]
+        - [Jules]
+        - [Gus]
+        - [Mia]
+        - [Alix]
+
+  - name: equal_numbers_group_together_whatever_their_type
+    variants:
+      gql: "UNWIND [toDecimal('2.00'), 2, 2.0e0, toDecimal('2.5'), 2.5e0] AS x RETURN x = 2 AS two, count(*) AS n"
+      cypher: "UNWIND [toDecimal('2.00'), 2, 2.0, toDecimal('2.5'), 2.5] AS x RETURN x = 2 AS two, count(*) AS n"
+    expect:
+      rows:
+        - [true, 3]
+        - [false, 2]
+
+  - name: min_max_sum_and_avg_of_decimals
+    variants:
+      gql: "UNWIND [toDecimal('1.25'), toDecimal('0.50'), toDecimal('2.00')] AS x RETURN min(x) AS lo, max(x) AS hi, sum(x) AS total, avg(x) = toDecimal('1.25') AS mean"
+      cypher: "UNWIND [toDecimal('1.25'), toDecimal('0.50'), toDecimal('2.00')] AS x RETURN min(x) AS lo, max(x) AS hi, sum(x) AS total, avg(x) = toDecimal('1.25') AS mean"
+    expect:
+      rows:
+        - [0.50, 2.00, 3.75, true]
+
+  - name: a_stored_decimal_is_found_by_an_equal_integer
+    setup:
+      - "INSERT (:Item {sku: 'A'})"
+      - "MATCH (i:Item) SET i.price = toDecimal('3.00')"
+    variants:
+      gql: "MATCH (i:Item) WHERE i.price = 3 RETURN i.sku, i.price"
+      cypher: "MATCH (i:Item) WHERE i.price = 3 RETURN i.sku, i.price"
+    expect:
+      rows:
+        - [A, 3.00]

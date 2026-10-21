@@ -121,10 +121,14 @@ fn a_missing_property_reads_as_null() {
     );
 }
 
-#[cfg(feature = "temporal")]
 #[test]
 fn a_read_at_a_past_epoch_sees_the_values_of_then() {
-    let db = GrafeoDB::new_in_memory();
+    // History kept: a read at an earlier epoch needs it.
+    let db = GrafeoDB::with_config(
+        grafeo_engine::Config::in_memory()
+            .with_history_retention(grafeo_engine::HistoryRetention::Forever),
+    )
+    .unwrap();
     db.execute("INSERT (:Person {name: 'Shosanna', city: 'Paris'})")
         .unwrap();
     let before = db.current_epoch();

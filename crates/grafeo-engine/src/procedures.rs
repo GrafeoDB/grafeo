@@ -32,7 +32,7 @@ use grafeo_common::types::{ReadView, Value};
 use grafeo_common::utils::error::{Error, QueryError, QueryErrorKind, Result};
 use grafeo_core::graph::GraphStoreSearch;
 #[cfg(feature = "lpg")]
-use grafeo_core::graph::lpg::LpgStore;
+use grafeo_core::graph::rowgroup::RowGroupStore;
 use hashbrown::HashMap;
 
 /// Unified interface for built-in procedures callable via `CALL`.
@@ -80,7 +80,7 @@ pub struct ProcedureContext<'a> {
     /// to reach vector and text indexes. `None` when the active backend is
     /// not an LPG store (e.g., pure RDF) or in contexts that do not need it.
     #[cfg(feature = "lpg")]
-    pub lpg_store: Option<&'a LpgStore>,
+    pub lpg_store: Option<&'a RowGroupStore>,
 
     /// The view the calling query reads at, when it has one: the search
     /// procedures return only the nodes it sees.
@@ -102,7 +102,7 @@ impl<'a> ProcedureContext<'a> {
     /// Creates a context with a graph store and LPG store available.
     #[cfg(feature = "lpg")]
     #[must_use]
-    pub fn with_lpg_store(store: &'a dyn GraphStoreSearch, lpg_store: &'a LpgStore) -> Self {
+    pub fn with_lpg_store(store: &'a dyn GraphStoreSearch, lpg_store: &'a RowGroupStore) -> Self {
         Self {
             store,
             lpg_store: Some(lpg_store),
@@ -117,21 +117,14 @@ impl<'a> ProcedureContext<'a> {
         self
     }
 
-    /// The results whose node the context's view sees, in their order;
-    /// every one without a view. A search index holds what open
-    /// transactions wrote too (#412).
+    /// The view a search procedure reads `lpg` at: the calling query's, or
+    /// a committed reader at the store's epoch without one. The store's
+    /// searches answer at it (a search index holds what open transactions
+    /// wrote too, #412, which the store rechecks at the view).
     #[cfg(all(feature = "lpg", any(feature = "vector-index", feature = "text-index")))]
-    fn visible<T>(
-        &self,
-        results: Vec<(grafeo_common::types::NodeId, T)>,
-    ) -> Vec<(grafeo_common::types::NodeId, T)> {
-        match self.view {
-            Some(view) => results
-                .into_iter()
-                .filter(|(id, _)| self.store.is_node_visible_at(*id, view))
-                .collect(),
-            None => results,
-        }
+    fn search_view(&self, lpg: &RowGroupStore) -> ReadView {
+        self.view
+            .unwrap_or_else(|| ReadView::committed(lpg.current_epoch()))
     }
 }
 
@@ -273,7 +266,7 @@ impl Procedure for PropertyKeysProcedure {
 // ---------------------------------------------------------------------------
 
 #[cfg(all(feature = "lpg", feature = "vector-index"))]
-fn require_lpg_store<'a>(ctx: &ProcedureContext<'a>, proc_name: &str) -> Result<&'a LpgStore> {
+fn require_lpg_store<'a>(ctx: &ProcedureContext<'a>, proc_name: &str) -> Result<&'a RowGroupStore> {
     ctx.lpg_store.ok_or_else(|| {
         grafeo_common::utils::error::Error::Query(
             grafeo_common::utils::error::QueryError::unsupported(format!(
@@ -384,8 +377,6 @@ impl Procedure for SearchVectorProcedure {
     }
 
     fn execute(&self, ctx: &ProcedureContext<'_>, params: &Parameters) -> Result<AlgorithmResult> {
-        use grafeo_core::index::vector::{PropertyVectorAccessor, VectorAccessorKind};
-
         let lpg = require_lpg_store(ctx, "CALL grafeo.search.vector")?;
         let label = params.get_string("label").ok_or_else(|| {
             grafeo_common::utils::error::Error::InvalidValue(
@@ -400,23 +391,23 @@ impl Procedure for SearchVectorProcedure {
         let query = coerce_params_to_vector(params, "query")?;
         let k = k_limit(params, 10);
 
-        let index = lpg.get_vector_index(label, property).ok_or_else(|| {
+        let missing = || {
             grafeo_common::utils::error::Error::InvalidValue(format!(
                 "there is no vector index on :{label}({property}); create one first"
             ))
-        })?;
-        grafeo_core::index::vector::check_query_vector(
-            &query,
-            index.config().dimensions,
-            label,
-            property,
-        )?;
+        };
+        let config =
+            GraphStoreSearch::vector_index_config(lpg, label, property).ok_or_else(missing)?;
+        grafeo_core::index::vector::check_query_vector(&query, config.dimensions, label, property)?;
 
-        let accessor = VectorAccessorKind::Property(PropertyVectorAccessor::new(
-            ctx.store as &dyn grafeo_core::graph::GraphStore,
-            property,
-        ));
-        let results = ctx.visible(index.search(&query, k, &accessor));
+        let search = grafeo_core::graph::rowgroup::IndexSearch {
+            k,
+            ef: None,
+            allowed: None,
+        };
+        let results = lpg
+            .vector_index_search_at(label, property, &query, search, ctx.search_view(lpg))
+            .ok_or_else(missing)?;
 
         let mut result = AlgorithmResult::new(vec!["node_id".into(), "distance".into()]);
         for (node_id, distance) in results {
@@ -508,9 +499,7 @@ impl Procedure for SearchMmrProcedure {
     }
 
     fn execute(&self, ctx: &ProcedureContext<'_>, params: &Parameters) -> Result<AlgorithmResult> {
-        use grafeo_core::index::vector::{
-            PropertyVectorAccessor, VectorAccessor, VectorAccessorKind, mmr_select,
-        };
+        use grafeo_core::index::vector::mmr_select;
 
         let lpg = require_lpg_store(ctx, "CALL grafeo.search.mmr")?;
         let label = params.get_string("label").ok_or_else(|| {
@@ -536,23 +525,24 @@ impl Procedure for SearchMmrProcedure {
         )]
         let lambda = params.get_float("lambda").unwrap_or(0.5) as f32;
 
-        let index = lpg.get_vector_index(label, property).ok_or_else(|| {
+        let missing = || {
             grafeo_common::utils::error::Error::InvalidValue(format!(
                 "there is no vector index on :{label}({property}); create one first"
             ))
-        })?;
-        grafeo_core::index::vector::check_query_vector(
-            &query,
-            index.config().dimensions,
-            label,
-            property,
-        )?;
+        };
+        let config =
+            GraphStoreSearch::vector_index_config(lpg, label, property).ok_or_else(missing)?;
+        grafeo_core::index::vector::check_query_vector(&query, config.dimensions, label, property)?;
 
-        let accessor = VectorAccessorKind::Property(PropertyVectorAccessor::new(
-            ctx.store as &dyn grafeo_core::graph::GraphStore,
-            property,
-        ));
-        let initial = ctx.visible(index.search(&query, fetch_k, &accessor));
+        let view = ctx.search_view(lpg);
+        let search = grafeo_core::graph::rowgroup::IndexSearch {
+            k: fetch_k,
+            ef: None,
+            allowed: None,
+        };
+        let initial = lpg
+            .vector_index_search_at(label, property, &query, search, view)
+            .ok_or_else(missing)?;
         if initial.is_empty() {
             return Ok(AlgorithmResult::new(vec![
                 "node_id".into(),
@@ -560,17 +550,17 @@ impl Procedure for SearchMmrProcedure {
             ]));
         }
 
+        // The candidates' vectors at the view.
         let candidates: Vec<(grafeo_common::types::NodeId, f32, std::sync::Arc<[f32]>)> = initial
             .into_iter()
-            .filter_map(|(id, dist)| accessor.get_vector(id).map(|v| (id, dist, v)))
+            .filter_map(|(id, dist)| lpg.vector_at(id, property, view).map(|v| (id, dist, v)))
             .collect();
         let candidate_refs: Vec<(grafeo_common::types::NodeId, f32, &[f32])> = candidates
             .iter()
             .map(|(id, dist, vec)| (*id, *dist, vec.as_ref()))
             .collect();
 
-        let metric = index.config().metric;
-        let selected = mmr_select(&query, &candidate_refs, k, lambda, metric);
+        let selected = mmr_select(&query, &candidate_refs, k, lambda, config.metric);
 
         let mut result = AlgorithmResult::new(vec!["node_id".into(), "distance".into()]);
         for (node_id, distance) in selected {
@@ -672,13 +662,18 @@ impl Procedure for SearchTextProcedure {
         })?;
         let k = k_limit(params, 10);
 
-        let index = lpg.get_text_index(label, property).ok_or_else(|| {
-            grafeo_common::utils::error::Error::InvalidValue(format!(
-                "there is no text index on :{label}({property}); create one first"
-            ))
-        })?;
-
-        let results = ctx.visible(index.read().search(query, k));
+        let search = grafeo_core::graph::rowgroup::IndexSearch {
+            k,
+            ef: None,
+            allowed: None,
+        };
+        let results = lpg
+            .text_index_search_at(label, property, query, search, ctx.search_view(lpg))
+            .ok_or_else(|| {
+                grafeo_common::utils::error::Error::InvalidValue(format!(
+                    "there is no text index on :{label}({property}); create one first"
+                ))
+            })?;
 
         let mut result = AlgorithmResult::new(vec!["node_id".into(), "score".into()]);
         for (node_id, score) in results {
@@ -1053,6 +1048,7 @@ pub fn procedures_result(registry: &BuiltinProcedures) -> AlgorithmResult {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use grafeo_core::graph::{GraphStore as _, GraphStoreMut as _};
 
     #[test]
     fn test_registry_has_all_algorithms() {
@@ -1575,7 +1571,7 @@ mod tests {
         use grafeo_common::utils::error::ErrorCode;
         use grafeo_core::index::vector::{DistanceMetric, HnswConfig, HnswIndex, VectorIndexKind};
 
-        let store = LpgStore::new().expect("store");
+        let store = RowGroupStore::new();
         for vector in [[1.0f32, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]] {
             let node = store.create_node(&["Doc"]);
             store.set_node_property(node, "emb", Value::Vector(vector.to_vec().into()));

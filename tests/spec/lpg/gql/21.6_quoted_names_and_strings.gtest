@@ -1,0 +1,116 @@
+# GQL names in backticks and string literals with a doubled quote. A name in
+# backticks is the name inside them everywhere, SET and REMOVE included, and
+# a doubled backtick inside one is one backtick. In a character string
+# literal a doubled quote of the literal's own kind is that quote (ISO/IEC
+# 39075:2024 21.2, <character string literal>).
+
+meta:
+  language: gql
+  model: lpg
+  section: "21.2"
+  title: Quoted names and doubled quotes
+  dataset: empty
+
+tests:
+
+  # ---------------------------------------------------------------------------
+  # Names in backticks in SET and REMOVE
+  # ---------------------------------------------------------------------------
+
+  - name: set_stores_the_key_inside_the_backticks
+    setup:
+      - "INSERT (:Person {name: 'Alix'})"
+    statements:
+      - "MATCH (n:Person) SET n.`two words` = 2"
+      - "MATCH (n:Person) RETURN n.`two words` AS v, keys(n) AS k"
+    expect:
+      rows:
+        - [2, [name, two words]]
+
+  - name: set_adds_the_labels_inside_the_backticks
+    setup:
+      - "INSERT (:Person {name: 'Alix'})"
+    statements:
+      - "MATCH (n:Person) SET n:`Odd Label`:`A`"
+      - "MATCH (n:`Odd Label`) RETURN n.name AS name, labels(n) AS l"
+    expect:
+      rows:
+        - [Alix, [A, Odd Label, Person]]
+
+  - name: remove_takes_the_key_and_label_inside_the_backticks
+    setup:
+      - "INSERT (:Person:`Odd Label` {name: 'Gus', `odd key`: 1})"
+    statements:
+      - "MATCH (n:Person) REMOVE n.`odd key`, n:`Odd Label`"
+      - "MATCH (n:Person) RETURN keys(n) AS k, labels(n) AS l"
+    expect:
+      rows:
+        - [[name], [Person]]
+
+  - name: a_backticked_variable_in_set_and_remove
+    setup:
+      - "INSERT (:Person {name: 'Vincent', `odd key`: 1})"
+    query: "MATCH (`the person`:Person) SET `the person`.age = 30 REMOVE `the person`.`odd key` RETURN `the person`.age AS age, keys(`the person`) AS k"
+    expect:
+      rows:
+        - [30, [age, name]]
+
+  - name: a_doubled_backtick_is_one_backtick
+    setup:
+      - "INSERT (:Person {name: 'Mia'})"
+    statements:
+      - "MATCH (n:Person) SET n.`a``b` = 1"
+      - "MATCH (n:Person) RETURN keys(n) AS k, n.`a``b` AS v"
+    expect:
+      rows:
+        - [[a`b, name], 1]
+
+  - name: a_doubled_backtick_in_insert_and_return
+    setup:
+      - "INSERT (:Person {name: 'Jules', `c``d`: 2})"
+    query: "MATCH (n:Person) RETURN n.`c``d` AS v"
+    expect:
+      rows:
+        - [2]
+
+  # ---------------------------------------------------------------------------
+  # Doubled quotes in string literals
+  # ---------------------------------------------------------------------------
+
+  - name: a_doubled_single_quote_is_one_quote
+    query: "RETURN 'O''Brien' AS s"
+    expect:
+      rows:
+        - ["O'Brien"]
+
+  - name: a_doubled_double_quote_is_one_quote
+    query: "RETURN \"say \"\"hi\"\"\" AS s"
+    expect:
+      rows:
+        - ["say \"hi\""]
+
+  - name: a_literal_of_only_a_doubled_quote
+    query: "RETURN '''' AS one, size('''') AS length, '' AS empty"
+    expect:
+      rows:
+        - ["'", 1, ""]
+
+  - name: the_other_quote_kind_is_kept_as_written
+    query: "RETURN 'a\"\"b' AS in_single, \"a''b\" AS in_double"
+    expect:
+      rows:
+        - ["a\"\"b", "a''b"]
+
+  - name: a_doubled_quote_is_stored_and_matched_as_one
+    setup:
+      - "INSERT (:Person {name: 'O''Brien'})"
+    query: "MATCH (p:Person) WHERE p.name = 'O''Brien' RETURN p.name AS name, size(p.name) AS length"
+    expect:
+      rows:
+        - ["O'Brien", 7]
+
+  - name: an_unterminated_literal_is_an_error
+    query: "RETURN 'a'' AS s"
+    expect:
+      error: "syntax error"
+      gql_status: "42001"

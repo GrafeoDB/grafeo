@@ -24,7 +24,9 @@ use grafeo_common::utils::hash::{FxHashMap, FxHashSet};
 use parking_lot::RwLock;
 
 use super::RowGroupStore;
-use super::section::{GraphToWrite, LoadedGraph, read_lpg_section, write_lpg_section};
+use super::section::{
+    GraphToWrite, LoadedGraph, read_lpg_section_with_backward_edges, write_lpg_section_with_history,
+};
 use crate::graph::apply::ApplyError;
 
 /// A store's place among the graphs: the named graphs it holds (a root's),
@@ -68,10 +70,15 @@ impl Graphs {
         Ok(id)
     }
 
-    /// A new store for a named graph, with the next graph id.
-    fn new_graph(&self) -> std::result::Result<Arc<RowGroupStore>, AllocError> {
-        let store = RowGroupStore::new();
+    /// A new store for a named graph of `root`, with the next graph id,
+    /// keeping history and backward edges as the root does.
+    fn new_graph(
+        &self,
+        root: &RowGroupStore,
+    ) -> std::result::Result<Arc<RowGroupStore>, AllocError> {
+        let store = RowGroupStore::with_backward_edges(root.keeps_backward_edges());
         store.graphs.id.store(self.take_id()?, Ordering::Release);
+        store.set_keeps_history(root.keeps_history());
         Ok(Arc::new(store))
     }
 }
@@ -101,7 +108,7 @@ impl RowGroupStore {
         if let Some(graph) = named.get(name) {
             return Ok(Arc::clone(graph));
         }
-        let graph = self.graphs.new_graph()?;
+        let graph = self.graphs.new_graph(self)?;
         named.insert(name.to_string(), Arc::clone(&graph));
         Ok(graph)
     }
@@ -118,7 +125,7 @@ impl RowGroupStore {
         if named.contains_key(name) {
             return Ok(false);
         }
-        let graph = self.graphs.new_graph()?;
+        let graph = self.graphs.new_graph(self)?;
         named.insert(name.to_string(), graph);
         Ok(true)
     }
@@ -232,14 +239,15 @@ impl RowGroupStore {
                 graph.graphs.id.store(id, Ordering::Release);
             }
         }
+        let backward_edges = self.keeps_backward_edges();
         let mut restored = Vec::with_capacity(graphs.len());
         for &(id, name) in graphs {
-            let graph = Arc::clone(
-                named
-                    .entry(name.to_string())
-                    .or_insert_with(|| Arc::new(RowGroupStore::new())),
-            );
+            let graph =
+                Arc::clone(named.entry(name.to_string()).or_insert_with(|| {
+                    Arc::new(RowGroupStore::with_backward_edges(backward_edges))
+                }));
             graph.graphs.id.store(id, Ordering::Release);
+            graph.set_keeps_history(self.keeps_history());
             restored.push(graph);
         }
         Ok(restored)
@@ -263,7 +271,7 @@ impl RowGroupStore {
     ///
     /// # Errors
     ///
-    /// As [`write_lpg_section`].
+    /// As [`write_lpg_section`](super::section::write_lpg_section).
     pub fn write_section(&self, caps: ChunkCaps, sink: &mut dyn SectionSink) -> Result<()> {
         let epoch = self
             .graph_names()
@@ -287,10 +295,31 @@ impl RowGroupStore {
     ///
     /// # Errors
     ///
-    /// As [`write_lpg_section`].
+    /// As [`write_lpg_section`](super::section::write_lpg_section).
     pub fn write_section_at(
         &self,
         epoch: EpochId,
+        caps: ChunkCaps,
+        sink: &mut dyn SectionSink,
+    ) -> Result<()> {
+        self.write_section_with_history(epoch, None, caps, sink)
+    }
+
+    /// Writes the `LPG_STORE` section as
+    /// [`write_section_at`](Self::write_section_at) does, and with
+    /// `history_from` (an epoch H before `epoch`, at or after the horizon
+    /// the graphs were last collected at) each graph's history from H: what
+    /// a reader at any epoch from H to `epoch` reads (see
+    /// [`write_lpg_section_with_history`]). A checkpoint of a database that
+    /// keeps history passes the start of its retention window.
+    ///
+    /// # Errors
+    ///
+    /// As [`write_lpg_section_with_history`].
+    pub fn write_section_with_history(
+        &self,
+        epoch: EpochId,
+        history_from: Option<EpochId>,
         caps: ChunkCaps,
         sink: &mut dyn SectionSink,
     ) -> Result<()> {
@@ -314,22 +343,33 @@ impl RowGroupStore {
         }))
         .collect();
         // Read after the graphs: above every graph id written.
-        write_lpg_section(&graphs, self.next_graph_id(), epoch, caps, sink)
+        write_lpg_section_with_history(
+            &graphs,
+            self.next_graph_id(),
+            epoch,
+            history_from,
+            caps,
+            sink,
+        )
     }
 
     /// Reads an `LPG_STORE` section of version 4 into this store, a root:
     /// the default graph's data into the store itself, each named graph's
     /// into the store of its name (one created before the load is kept,
-    /// see [`restore_graphs`](Self::restore_graphs)), with the file's ids
+    /// see `restore_graphs`), with the file's ids
     /// and next graph id. What a graph held before is replaced; a graph
-    /// the section does not name keeps its data.
+    /// the section does not name keeps its data. The graphs keep the
+    /// adjacency this store keeps, whatever the section holds (see
+    /// [`read_lpg_section_with_backward_edges`]).
     ///
     /// # Errors
     ///
-    /// As [`read_lpg_section`], and [`Error::Corruption`] for a default graph
-    /// with a name or a name two graphs share. Nothing changed then.
+    /// As [`read_lpg_section_with_backward_edges`], and
+    /// [`Error::Corruption`] for a default graph with a name or a name two
+    /// graphs share. Nothing changed then.
     pub fn read_section(&self, source: &dyn SectionSource) -> Result<()> {
-        let (next_graph_id, loaded) = read_lpg_section(source)?;
+        let (next_graph_id, loaded) =
+            read_lpg_section_with_backward_edges(source, self.keeps_backward_edges())?;
         let mut default: Option<RowGroupStore> = None;
         let mut named: Vec<LoadedGraph> = Vec::with_capacity(loaded.len());
         let mut names: FxHashSet<String> = FxHashSet::default();
@@ -373,7 +413,12 @@ impl RowGroupStore {
     /// next ids and the epoch move to the loaded ones when those are later.
     /// The named graphs and the graph id stay.
     fn install(&self, loaded: RowGroupStore) {
+        let listed = loaded.has_listed();
         *self.inner.write() = loaded.inner.into_inner();
+        if listed {
+            // The history it loaded: the next collect has work.
+            self.note_listed();
+        }
         self.next_node_id
             .fetch_max(loaded.next_node_id.into_inner(), Ordering::AcqRel);
         self.next_edge_id

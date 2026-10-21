@@ -254,6 +254,14 @@ def leads(grafeo):
     return db
 
 
+def quoted(grafeo):
+    """Alix alone, for section CK, whose cases set and remove names in backticks in
+    order."""
+    db = grafeo.GrafeoDB()
+    db.execute("INSERT (:Person {name: 'Alix'})")
+    return db
+
+
 def mixed_indexed(grafeo):
     """`mixed` with a property index on `p`."""
     return mixed(grafeo, indexed=True)
@@ -267,6 +275,7 @@ WRITE_FIXTURES = {
     "writes": {"BR", "BS", "BU"},
     "merges": {"CC"},
     "leads": {"CF"},
+    "quoted": {"CK"},
 }
 
 FIXTURES = {
@@ -286,6 +295,7 @@ FIXTURES = {
     "merges": merges,
     "weighted": weighted,
     "leads": leads,
+    "quoted": quoted,
 }
 
 CASES: list[Case] = []
@@ -1740,5 +1750,77 @@ for case_id, query in [
     ("CG8", "MATCH (a:Person) RETURN DISTINCT a.age > 29 AS old ORDER BY a.name"),
 ]:
     case(case_id, query, BOTH, "social")
+
+# CH: IS TYPED DECIMAL holds for a decimal (#610): a literal, the result of arithmetic and a
+#     list of decimals (it was false outside a LIST<...> type)
+for case_id, query in [
+    ("CH1", "RETURN 1.50 IS TYPED DECIMAL AS d, 1.50 IS TYPED DEC AS dec, 1.50 IS TYPED FLOAT64 AS f"),
+    ("CH2", "RETURN (1.50 + 1) IS TYPED DECIMAL AS d, toDecimal(2) IS TYPED DECIMAL AS t"),
+    ("CH3", "RETURN [1.5, 2.25] IS TYPED LIST<DECIMAL> AS l, 1.5e0 IS TYPED DECIMAL AS f"),
+]:
+    case(case_id, query, GQL, "empty")
+
+# CI: abs of the smallest integer fails as out of range (22003, #639), as its negation does;
+#     abs of other integers is unchanged
+for case_id, query in [
+    ("CI1", "UNWIND [-9223372036854775807 - 1] AS x RETURN abs(x) AS a"),
+    ("CI2", "UNWIND [-9223372036854775807, -3, 0] AS x RETURN abs(x) AS a"),
+]:
+    case(case_id, query, BOTH, "empty")
+
+# CJ: float = and <> are exact (IEEE 754): a float sum is not its rounded value (CJ1, CJ2), -0.0
+#     equals 0.0 and NaN equals nothing (CJ3), a value near 0 or just below 1 is not 0 or 1
+#     (CJ4), an integer equals only a float of exactly its value (CJ5), DISTINCT keeps NaN
+#     together (CJ6)
+for case_id, query, languages in [
+    ("CJ1", "RETURN 0.1e0 + 0.2e0 = 0.3e0 AS eq, 0.1e0 + 0.2e0 <> 0.3e0 AS ne", GQL),
+    ("CJ2", "RETURN 0.1 + 0.2 = 0.3 AS eq, 0.1 + 0.2 <> 0.3 AS ne", CYPHER),
+    ("CJ3", "RETURN -0.0e0 = 0.0e0 AS z, NaN = NaN AS nan, NaN <> NaN AS ne", GQL),
+    ("CJ4", "RETURN 1.0e-300 = 0 AS tiny, 0.9999999999999999e0 = 1 AS one", GQL),
+    ("CJ5", "RETURN 9007199254740993 = 9007199254740992.0e0 AS above, 9007199254740992 = 9007199254740992.0e0 AS exact", GQL),
+    ("CJ6", "UNWIND [NaN, NaN, 0.0e0, -0.0e0] AS x RETURN count(DISTINCT x) AS n", GQL),
+]:
+    case(case_id, query, languages, "empty")
+
+# CK: GQL names in backticks and doubled quotes. SET and REMOVE take the name inside the
+#     backticks (CK1 to CK3: the key and label kept their backticks, so REMOVE missed the
+#     real ones), and a doubled backtick is one (CK4). In a string literal a doubled quote is
+#     the quote (CK5, CK6: syntax errors; ISO GQL 21.2). The cases write, in order, on a
+#     database of their own (fixture `quoted`)
+for case_id, query in [
+    ("CK1", "MATCH (n:Person) SET n.`two words` = 2 RETURN n.`two words` AS v, keys(n) AS k"),
+    ("CK2", "MATCH (n:Person) SET n:`Odd Label` RETURN labels(n) AS l"),
+    ("CK3", "MATCH (n:Person) REMOVE n.`two words`, n:`Odd Label` RETURN keys(n) AS k, labels(n) AS l"),
+    ("CK4", "MATCH (n:Person) SET n.`a``b` = 1 RETURN keys(n) AS k"),
+    ("CK5", "RETURN 'O''Brien' AS s, '''' AS one_quote"),
+    ("CK6", 'RETURN "say ""hi""" AS s'),
+]:
+    case(case_id, query, GQL, "quoted")
+
+# CL: <, <=, > and >= compare an integer with a float exactly, as ORDER BY and = do: an integer
+#     above 2^53 against its nearest float (CL1, CL2), a filter over stored values (CL3), NaN
+#     is neither less nor greater than a number (CL4)
+for case_id, query in [
+    ("CL1", "RETURN 9007199254740993 > 9007199254740992.0e0 AS gt, 9007199254740993 <= 9007199254740992.0e0 AS le"),
+    ("CL2", "RETURN 9007199254740992.0e0 < 9007199254740993 AS lt, 9007199254740992 >= 9007199254740992.0e0 AS ge"),
+    ("CL3", "UNWIND [9007199254740992, 9007199254740993, 9007199254740994] AS v WITH v WHERE v > 9007199254740992.0e0 RETURN v ORDER BY v"),
+    ("CL4", "RETURN NaN < 1 AS lt, NaN > 1 AS gt, 1 >= NaN AS ge, NaN <= NaN AS le"),
+]:
+    case(case_id, query, GQL, "empty")
+
+# CM: numeric literal forms. A point with digits on one side only is a number (CM1: `.5` in
+#     both languages, exact in GQL and a float in Cypher; CM2: `5.` in GQL), `_` between digits is a separator in GQL (CM3; in
+#     Cypher it ends the number, CM4), and a float literal past the float range is an error,
+#     22003 in GQL and a syntax error in Cypher (CM5), not infinity. A range after an
+#     integer stays a range (CM6)
+for case_id, query, languages in [
+    ("CM1", "RETURN .5 = 0.5 AS a, -.25 < 0 AS b, .5e1 AS c", BOTH),
+    ("CM2", "RETURN 5. = 5 AS same, 5.e1 AS f, [5.,6.][1] AS second", GQL),
+    ("CM3", "RETURN 1_000 AS a, 0x7F_FF AS b, 0b1010_0101 AS c, 1_000.5 AS d", GQL),
+    ("CM4", "RETURN 1_000 AS a", CYPHER),
+    ("CM5", "RETURN 1e400 AS a", BOTH),
+    ("CM6", "RETURN [10, 20, 30][1..2] AS slice", BOTH),
+]:
+    case(case_id, query, languages, "empty")
 
 # fmt: on

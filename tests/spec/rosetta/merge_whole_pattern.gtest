@@ -1,0 +1,139 @@
+# MERGE of a whole pattern, in GQL and Cypher: the pattern is matched as a
+# whole, with the variables bound before the MERGE reused, or all of it is
+# created (openCypher 9, MERGE). A part that exists on its own is not reused:
+# the missing part is not created next to it.
+
+meta:
+  language: gql
+  model: lpg
+  title: MERGE matches the whole pattern or creates all of it
+  dataset: empty
+  requires: [cypher]
+
+tests:
+
+  # ---------------------------------------------------------------------------
+  # Matching and creating the whole pattern
+  # ---------------------------------------------------------------------------
+
+  - name: a_pattern_of_two_relationships_is_created_once
+    setup:
+      - "INSERT (:Person {name: 'Alix'}), (:Person {name: 'Gus'})"
+      - "MATCH (a:Person {name: 'Alix'}), (g:Person {name: 'Gus'}) MERGE (a)-[:KNOWS]->(g)-[:LIVES_IN]->(:City {name: 'Paris'})"
+      - "MATCH (a:Person {name: 'Alix'}), (g:Person {name: 'Gus'}) MERGE (a)-[:KNOWS]->(g)-[:LIVES_IN]->(:City {name: 'Paris'})"
+    variants:
+      gql: "MATCH ()-[k:KNOWS]->(), ()-[l:LIVES_IN]->(c:City) RETURN count(DISTINCT k) AS knows, count(DISTINCT l) AS lives, count(DISTINCT c) AS cities"
+      cypher: "MATCH ()-[k:KNOWS]->(), ()-[l:LIVES_IN]->(c:City) RETURN count(DISTINCT k) AS knows, count(DISTINCT l) AS lives, count(DISTINCT c) AS cities"
+    expect:
+      rows:
+        - [1, 1, 1]
+
+  - name: a_part_that_exists_alone_is_created_again_with_the_rest
+    # Alix KNOWS Gus exists, but Gus LIVES_IN Paris does not: the whole
+    # pattern does not match, so all of it is created, a second KNOWS too.
+    setup:
+      - "INSERT (a:Person {name: 'Alix'})-[:KNOWS]->(g:Person {name: 'Gus'})"
+    variants:
+      gql: "MATCH (a:Person {name: 'Alix'}), (g:Person {name: 'Gus'}) MERGE (a)-[:KNOWS]->(g)-[:LIVES_IN]->(:City {name: 'Paris'}) WITH 1 AS one MATCH (:Person {name: 'Alix'})-[k:KNOWS]->(:Person {name: 'Gus'}) RETURN count(k) AS knows"
+      cypher: "MATCH (a:Person {name: 'Alix'}), (g:Person {name: 'Gus'}) MERGE (a)-[:KNOWS]->(g)-[:LIVES_IN]->(:City {name: 'Paris'}) WITH 1 AS one MATCH (:Person {name: 'Alix'})-[k:KNOWS]->(:Person {name: 'Gus'}) RETURN count(k) AS knows"
+    expect:
+      rows:
+        - [2]
+
+  - name: a_named_node_the_merge_does_not_bind_is_not_reused
+    # Gus exists, but not as Vincent's friend: the MERGE creates a second Gus.
+    setup:
+      - "INSERT (:Person {name: 'Vincent'}), (:Person {name: 'Gus'})"
+    variants:
+      gql: "MATCH (v:Person {name: 'Vincent'}) MERGE (v)-[:KNOWS]->(g:Person {name: 'Gus'}) WITH 1 AS one MATCH (p:Person {name: 'Gus'}) RETURN count(p) AS guses"
+      cypher: "MATCH (v:Person {name: 'Vincent'}) MERGE (v)-[:KNOWS]->(g:Person {name: 'Gus'}) WITH 1 AS one MATCH (p:Person {name: 'Gus'}) RETURN count(p) AS guses"
+    expect:
+      rows:
+        - [2]
+
+  - name: a_bound_node_is_reused_and_the_pattern_matches_the_second_time
+    setup:
+      - "INSERT (:Person {name: 'Vincent'}), (:Person {name: 'Jules'})"
+      - "MATCH (v:Person {name: 'Vincent'}), (j:Person {name: 'Jules'}) MERGE (v)-[:KNOWS]->(j)"
+    variants:
+      gql: "MATCH (v:Person {name: 'Vincent'}), (j:Person {name: 'Jules'}) MERGE (v)-[:KNOWS]->(j) WITH 1 AS one MATCH (:Person)-[k:KNOWS]->(:Person) RETURN count(k) AS knows"
+      cypher: "MATCH (v:Person {name: 'Vincent'}), (j:Person {name: 'Jules'}) MERGE (v)-[:KNOWS]->(j) WITH 1 AS one MATCH (:Person)-[k:KNOWS]->(:Person) RETURN count(k) AS knows"
+    expect:
+      rows:
+        - [1]
+
+  - name: repeated_rows_see_what_the_earlier_rows_created
+    # Rows 1 and 1 merge the same pattern: the second finds what the first
+    # created, so 1 and 2 give two patterns, not three.
+    variants:
+      gql: "UNWIND [1, 1, 2] AS i MERGE (:A {i: i})-[:R]->(:B {i: i}) WITH 1 AS one MATCH (a:A)-[:R]->(b:B) RETURN count(DISTINCT a) AS a, count(DISTINCT b) AS b"
+      cypher: "UNWIND [1, 1, 2] AS i MERGE (:A {i: i})-[:R]->(:B {i: i}) WITH 1 AS one MATCH (a:A)-[:R]->(b:B) RETURN count(DISTINCT a) AS a, count(DISTINCT b) AS b"
+    expect:
+      rows:
+        - [2, 2]
+
+  # ---------------------------------------------------------------------------
+  # ON CREATE, ON MATCH and the path variable
+  # ---------------------------------------------------------------------------
+
+  - name: on_create_and_on_match_on_a_longer_pattern
+    setup:
+      - "INSERT (:Person {name: 'Mia'})"
+    statements:
+      - "MATCH (m:Person {name: 'Mia'}) MERGE (m)-[:OWNS]->(d:Dog {name: 'Rex'})-[:LIKES]->(b:Ball) ON CREATE SET d.seen = 1 ON MATCH SET d.seen = d.seen + 1"
+      - "MATCH (m:Person {name: 'Mia'}) MERGE (m)-[:OWNS]->(d:Dog {name: 'Rex'})-[:LIKES]->(b:Ball) ON CREATE SET d.seen = 1 ON MATCH SET d.seen = d.seen + 1"
+      - "MATCH (d:Dog) RETURN d.name AS name, d.seen AS seen"
+    expect:
+      rows:
+        - [Rex, 2]
+
+  - name: a_path_variable_is_the_merged_path
+    setup:
+      - "INSERT (:Person {name: 'Butch'})"
+    variants:
+      cypher: "MATCH (b:Person {name: 'Butch'}) MERGE p = (b)-[:DRIVES]->(:Car)-[:PARKED_IN]->(:City {name: 'Prague'}) RETURN length(p) AS hops, size(nodes(p)) AS nodes"
+    expect:
+      rows:
+        - [2, 3]
+
+  - name: a_path_variable_is_the_merged_path_in_gql
+    skip: "GQL MERGE takes no path variable yet (syntax error at `p =`); Cypher has it"
+    setup:
+      - "INSERT (:Person {name: 'Butch'})"
+    query: "MATCH (b:Person {name: 'Butch'}) MERGE p = (b)-[:DRIVES]->(:Car)-[:PARKED_IN]->(:City {name: 'Prague'}) RETURN length(p) AS hops, size(nodes(p)) AS nodes"
+    expect:
+      rows:
+        - [2, 3]
+
+  # ---------------------------------------------------------------------------
+  # Refused shapes
+  # ---------------------------------------------------------------------------
+
+  - name: a_relationship_without_a_type_is_refused
+    variants:
+      gql: "MERGE (:A)-[]->(:B)"
+      cypher: "MERGE (:A)-[]->(:B)"
+    expect:
+      error: "MERGE relationship pattern requires"
+
+  - name: a_variable_length_relationship_is_refused
+    variants:
+      gql: "MERGE (:A)-[:R*1..2]->(:B)"
+      cypher: "MERGE (:A)-[:R*1..2]->(:B)"
+    expect:
+      error: "MERGE cannot merge a variable-length"
+
+  - name: an_inline_where_is_refused
+    variants:
+      gql: "MERGE (:A)-[r:R WHERE r.w > 1]->(:B)"
+      cypher: "MERGE (:A)-[r:R WHERE r.w > 1]->(:B)"
+    expect:
+      error: "MERGE cannot have a WHERE inside"
+
+  - name: a_node_an_optional_match_did_not_find_is_an_error
+    variants:
+      gql: "OPTIONAL MATCH (m:Missing) MERGE (m)-[:R]->(:B)"
+      cypher: "OPTIONAL MATCH (m:Missing) MERGE (m)-[:R]->(:B)"
+    expect:
+      error: "the start of the created relationship"
+      gql_status: "22G03"

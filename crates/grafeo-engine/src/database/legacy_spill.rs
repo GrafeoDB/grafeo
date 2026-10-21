@@ -815,6 +815,7 @@ impl super::GrafeoDB {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use grafeo_core::graph::GraphStore as _;
 
     /// Writes an old spill file with `records`, as `MmapStorage` did.
     fn write_old(path: &Path, dimensions: usize, records: &[(u64, Vec<f32>)]) {
@@ -1187,42 +1188,6 @@ mod tests {
             folded.kept[0].because
         );
         assert_eq!(folded.filled, 0);
-    }
-
-    /// A stored value the fold cannot read (a spilled value whose file cannot
-    /// be read) stops the file's read and keeps the file: the old value is
-    /// not filled over it (#594).
-    #[cfg(not(feature = "temporal"))]
-    #[test]
-    fn a_stored_value_the_fold_cannot_read_keeps_the_file() {
-        use std::sync::Arc;
-
-        let dir = tempfile::tempdir().unwrap();
-        let (db, ids) = items(1);
-        let alix = ids[0];
-        db.set_node_property(alix, "embedding", Value::Vector(vec![19.0, 88.0].into()))
-            .unwrap();
-        let store = db.lpg_store();
-        super::super::test_backing::spill(
-            &store,
-            "embedding",
-            Arc::new(super::super::test_backing::Unreadable(alix)),
-        );
-        write_old(
-            &dir.path().join("vectors_Item%3Aembedding.bin"),
-            2,
-            &[(alix.as_u64(), vec![3.0, 19.0])],
-        );
-
-        let folded = fold_in(&*store, &find(dir.path(), true));
-        assert!(folded.files.is_empty(), "the file is to be deleted");
-        assert!(folded.kept.is_empty());
-        assert_eq!(folded.filled, 0);
-        assert_eq!(
-            store.node_property_column_ids(&PropertyKey::new("embedding")),
-            vec![alix],
-            "the stored value is still there"
-        );
     }
 
     /// The fold reads a file in batches of bounded size: five records of 16

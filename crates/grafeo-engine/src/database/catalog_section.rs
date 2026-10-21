@@ -49,7 +49,6 @@ use grafeo_common::storage::section::{
     legacy_bytes,
 };
 use grafeo_common::utils::error::{Error, Result};
-use grafeo_core::graph::lpg::LpgStore;
 use grafeo_core::graph::rowgroup::RowGroupStore;
 use grafeo_core::index::text::TextIndexOptions;
 use grafeo_core::index::vector::{DistanceMetric, QuantizationType};
@@ -133,10 +132,9 @@ struct IndexExtension {
 
 /// What the catalog section reads of a store and writes to it: the named
 /// graphs (a schema's default graph is created as its record is read) and
-/// the definitions of each graph's indexes. `LpgStore` and the row-group
-/// store answer it with the same names, so the section checkpoints and opens
-/// either: the engine runs on `LpgStore` until the switch to the row-group
-/// store (#412 H2d), which flips the default of [`CatalogSection`].
+/// the definitions of each graph's indexes: what the section needs of the
+/// row-group store, which answers it by its inherent methods of the same
+/// names.
 pub(crate) trait CatalogStore: Send + Sync + 'static {
     /// The names of the named graphs, in no promised order.
     fn graph_names(&self) -> Vec<String>;
@@ -211,7 +209,6 @@ macro_rules! catalog_store {
     };
 }
 
-catalog_store!(LpgStore);
 catalog_store!(RowGroupStore);
 
 /// The indexes of one graph, as a checkpoint saves them: definitions only.
@@ -430,8 +427,8 @@ struct SnapshotTextIndex {
 /// and always kept in RAM.
 ///
 /// `S` is the store whose named graphs and index definitions it reads and
-/// whose schema graphs it creates: `LpgStore`, or the row-group store.
-pub struct CatalogSection<S: CatalogStore = LpgStore> {
+/// whose schema graphs it creates: the row-group store.
+pub struct CatalogSection<S: CatalogStore = RowGroupStore> {
     catalog: Arc<Catalog>,
     store: Arc<S>,
     epoch_fn: Box<dyn Fn() -> u64 + Send + Sync>,
@@ -1158,7 +1155,7 @@ mod tests {
 
     fn make_section() -> CatalogSection {
         let catalog = Arc::new(Catalog::new());
-        let store = Arc::new(grafeo_core::graph::lpg::LpgStore::new().unwrap());
+        let store = Arc::new(grafeo_core::graph::rowgroup::RowGroupStore::new());
         CatalogSection::new(catalog, store, || 42)
     }
 
@@ -1169,7 +1166,7 @@ mod tests {
         assert!(!bytes.is_empty(), "bytes is empty");
 
         let catalog2 = Arc::new(Catalog::new());
-        let store2 = Arc::new(grafeo_core::graph::lpg::LpgStore::new().unwrap());
+        let store2 = Arc::new(grafeo_core::graph::rowgroup::RowGroupStore::new());
         let mut section2 = CatalogSection::new(catalog2, store2, || 0);
         section2
             .deserialize(&bytes)
@@ -1202,7 +1199,7 @@ mod tests {
         assert!(read < bytes.len(), "the names follow the snapshot");
 
         let catalog = Arc::new(Catalog::new());
-        let store = Arc::new(grafeo_core::graph::lpg::LpgStore::new().unwrap());
+        let store = Arc::new(grafeo_core::graph::rowgroup::RowGroupStore::new());
         let mut reopened = CatalogSection::new(Arc::clone(&catalog), store, || 0);
         reopened.deserialize(&bytes).unwrap();
         assert_eq!(catalog.constraints(), vec![city_name]);
@@ -1293,7 +1290,7 @@ mod tests {
         let bytes = section.serialize().unwrap();
 
         let catalog2 = Arc::new(Catalog::new());
-        let store2 = Arc::new(grafeo_core::graph::lpg::LpgStore::new().unwrap());
+        let store2 = Arc::new(grafeo_core::graph::rowgroup::RowGroupStore::new());
         let mut section2 = CatalogSection::new(catalog2, store2, || 0);
         section2.deserialize(&bytes).unwrap();
 
@@ -1320,7 +1317,7 @@ mod tests {
         let bytes = section.serialize().unwrap();
 
         let catalog2 = Arc::new(Catalog::new());
-        let store2 = Arc::new(grafeo_core::graph::lpg::LpgStore::new().unwrap());
+        let store2 = Arc::new(grafeo_core::graph::rowgroup::RowGroupStore::new());
         let mut section2 = CatalogSection::new(catalog2, store2, || 0);
         section2.deserialize(&bytes).unwrap();
 
@@ -1406,7 +1403,7 @@ mod tests {
         let bytes = section.serialize().unwrap();
 
         let catalog = Arc::new(Catalog::new());
-        let store = Arc::new(LpgStore::new().unwrap());
+        let store = Arc::new(RowGroupStore::new());
         let mut loaded = CatalogSection::new(Arc::clone(&catalog), store, || 0);
         loaded.deserialize(&bytes).unwrap();
         assert_eq!(
@@ -2107,7 +2104,7 @@ mod tests {
         .unwrap();
         let section = CatalogSection::new(
             Arc::clone(&db.catalog),
-            Arc::new(LpgStore::new().unwrap()),
+            Arc::new(RowGroupStore::new()),
             || 0,
         );
         let loaded = load(&MemoryImage::from_sections(&[&section]).unwrap()).unwrap();

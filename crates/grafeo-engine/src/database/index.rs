@@ -19,7 +19,7 @@ use grafeo_common::utils::error::{Error, Result};
 #[cfg(any(feature = "vector-index", feature = "text-index"))]
 use grafeo_core::graph::GraphStoreSearch;
 #[cfg(any(feature = "vector-index", feature = "text-index"))]
-use grafeo_core::graph::lpg::LpgStore;
+use grafeo_core::graph::rowgroup::RowGroupStore;
 
 #[cfg(any(feature = "vector-index", feature = "text-index"))]
 use crate::transaction::BuiltIndex;
@@ -143,13 +143,21 @@ pub(crate) fn vector_index_from_data(
     let quantization = super::GrafeoDB::parse_quantization(quantization)?;
 
     let key = PropertyKey::new(property);
+    let nodes = graph.nodes_by_label(label);
+    let vector_of = |node_id| match graph.get_node_property(node_id, &key) {
+        Some(Value::Vector(v)) => Some(v),
+        _ => None,
+    };
+    // A first pass checks the vectors and counts them, a second inserts
+    // them: no copy of every vector is held while the index is built (an
+    // open builds every vector index from the rows).
     let mut found_dims = dimensions;
-    let mut vectors: Vec<(grafeo_common::types::NodeId, Vec<f32>)> = Vec::new();
-    for node_id in graph.nodes_by_label(label) {
-        if let Some(Value::Vector(v)) = graph.get_node_property(node_id, &key) {
+    let mut count = 0;
+    for &node_id in &nodes {
+        if let Some(v) = vector_of(node_id) {
             let expected = *found_dims.get_or_insert(v.len());
             check_vector_for_index(node_id, &v, expected)?;
-            vectors.push((node_id, v.to_vec()));
+            count += 1;
         }
     }
     let Some(dims) = found_dims else {
@@ -158,30 +166,27 @@ pub(crate) fn vector_index_from_data(
         )));
     };
 
-    let index = super::GrafeoDB::build_vector_index(
-        dims,
-        metric,
-        m,
-        ef_construction,
-        quantization,
-        vectors.len(),
-    );
+    let index =
+        super::GrafeoDB::build_vector_index(dims, metric, m, ef_construction, quantization, count);
     match &index {
         VectorIndexKind::Hnsw(_) => {
             let accessor = grafeo_core::index::vector::PropertyVectorAccessor::new(graph, property);
-            for (node_id, vec) in &vectors {
-                index.insert(*node_id, vec, &accessor);
+            for &node_id in &nodes {
+                if let Some(v) = vector_of(node_id) {
+                    index.insert(node_id, &v, &accessor);
+                }
             }
         }
         VectorIndexKind::Quantized(quantized) => {
-            for (node_id, vec) in &vectors {
-                quantized.insert(*node_id, vec);
+            for &node_id in &nodes {
+                if let Some(v) = vector_of(node_id) {
+                    quantized.insert(node_id, &v);
+                }
             }
         }
     }
     grafeo_info!(
-        "Vector index built: :{label}({property}) - {} vectors, {dims} dimensions, metric={}",
-        vectors.len(),
+        "Vector index built: :{label}({property}) - {count} vectors, {dims} dimensions, metric={}",
         metric.name()
     );
     Ok(index)
@@ -509,7 +514,7 @@ impl super::GrafeoDB {
     fn index_target(
         &self,
         graph: Option<&str>,
-    ) -> Result<(Arc<dyn GraphStoreSearch>, Arc<LpgStore>)> {
+    ) -> Result<(Arc<dyn GraphStoreSearch>, Arc<RowGroupStore>)> {
         match graph {
             None => Ok((self.graph_store(), self.lpg_store())),
             Some(key) => {
@@ -525,7 +530,7 @@ impl super::GrafeoDB {
     /// The store that takes an index of the graph with storage key `graph`
     /// (`None` for the default graph).
     #[cfg(any(feature = "vector-index", feature = "text-index"))]
-    fn install_target(&self, graph: Option<&str>) -> Result<Arc<LpgStore>> {
+    fn install_target(&self, graph: Option<&str>) -> Result<Arc<RowGroupStore>> {
         self.index_target(graph).map(|(_, target)| target)
     }
 
@@ -651,14 +656,14 @@ impl super::GrafeoDB {
         grafeo_info!("Vector index dropped: :{label}({property})");
         // A spilled column no index reads any more comes back from its
         // cache file: nothing else would reload it (#594).
-        #[cfg(all(feature = "vector-index", not(feature = "temporal")))]
+        #[cfg(feature = "vector-index")]
         self.reload_unindexed_column(property);
         Ok(true)
     }
 
     /// Reloads the spilled column `property` when no vector index uses it any
     /// more. A column that cannot be read stays spilled (and readable).
-    #[cfg(all(feature = "vector-index", not(feature = "temporal")))]
+    #[cfg(feature = "vector-index")]
     fn reload_unindexed_column(&self, property: &str) {
         let store = self.lpg_store();
         let still_indexed = store.vector_index_entries().iter().any(|(key, _)| {

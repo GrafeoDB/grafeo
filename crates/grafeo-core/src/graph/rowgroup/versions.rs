@@ -7,17 +7,24 @@
 //! reader's epoch) stamps the vector, as DuckDB's `ChunkVectorInfo` does:
 //! who created its rows is one constant stamp while they share it (a vector
 //! one transaction filled, open and once committed) and a stamp per row
-//! once they differ; who deleted them is a stamp per row, allocated with
-//! the vector's first delete. When every stamp of a vector is committed at
-//! or before the horizon (the oldest epoch a reader can still read at), the
-//! vector collapses back to its bits and the rows deleted by then are gone.
-//! So rows cost one bit each for their versions, but where a reader can
-//! still tell them apart.
+//! once they differ; who deleted them is, from the vector's first delete
+//! on, a bit per row that has a delete stamp and the stamps themselves: a
+//! short list while few rows have one, a stamp per row past that. When
+//! every stamp of a vector is committed at or before the horizon (the
+//! oldest epoch a reader can still read at), the vector collapses back to
+//! its bits and the rows deleted by then are gone. So rows cost one bit
+//! each for their versions, but where a reader can still tell them apart,
+//! and a collapse costs what the vector's deletes do, not its rows: a
+//! collect after each commit (see `collect.rs`) visits a vector a few
+//! deletes met for a few words, not for its 2,048 rows, and allocates no
+//! array for them.
 
 use std::ops::Range;
 
+use smallvec::SmallVec;
+
 use super::bitset::Bitset;
-use super::{ABSENT, PENDING, RowVersion};
+use super::{ABSENT, PENDING, Read, RowVersion};
 
 /// The rows of a vector.
 pub(crate) const VECTOR_ROWS: usize = 2_048;
@@ -28,9 +35,131 @@ const ALWAYS: RowVersion = RowVersion {
     deleted: ABSENT,
 };
 
+/// The words of a bit per row of a vector.
+const WORDS: usize = VECTOR_ROWS / 64;
+
 /// A stamp per row of a vector, [`ABSENT`] where it has none.
 fn stamp_array() -> Box<[u64]> {
     vec![ABSENT; VECTOR_ROWS].into_boxed_slice()
+}
+
+/// How many rows of a vector keep their delete stamps in a short list;
+/// the vector's next delete takes a stamp per row.
+const FEW_DELETES: usize = 32;
+
+/// The delete stamps of a vector's rows.
+#[derive(Debug)]
+enum DeleteStamps {
+    /// The stamps of at most [`FEW_DELETES`] rows, by row ascending: a
+    /// vector a few deletes met costs a short list, not a stamp per row.
+    Few(SmallVec<[(u16, u64); 4]>),
+    /// A stamp per row, [`ABSENT`] where no one deleted it.
+    PerRow(Box<[u64]>),
+}
+
+/// Who deleted a vector's rows, from its first delete on.
+#[derive(Debug)]
+struct Deletes {
+    /// A bit per row with a delete stamp: the rows a collapse, its check
+    /// and [`Versions::deleted_by`] visit, a word at a time, so they cost
+    /// what the vector's deletes do, not its rows.
+    rows: [u64; WORDS],
+    stamps: DeleteStamps,
+}
+
+impl Deletes {
+    fn new() -> Box<Self> {
+        Box::new(Self {
+            rows: [0; WORDS],
+            stamps: DeleteStamps::Few(SmallVec::new()),
+        })
+    }
+
+    /// Who deleted `row` ([`ABSENT`]: no one).
+    ///
+    /// Out of line: inlined into every visibility check, it made the scans
+    /// over flat vectors that never reach it slower (the in-degree scan of a
+    /// store without backward edges took twice as long in `store_apply`).
+    #[inline(never)]
+    fn get(&self, row: usize) -> u64 {
+        if self.rows[row / 64] & (1 << (row % 64)) == 0 {
+            return ABSENT;
+        }
+        match &self.stamps {
+            DeleteStamps::Few(few) => few
+                .binary_search_by_key(&key(row), |(at, _)| *at)
+                .map_or(ABSENT, |place| few[place].1),
+            DeleteStamps::PerRow(stamps) => stamps[row],
+        }
+    }
+
+    /// Sets who deleted `row` ([`ABSENT`]: no one).
+    fn set(&mut self, row: usize, stamp: u64) {
+        let bit = 1 << (row % 64);
+        if stamp == ABSENT {
+            self.rows[row / 64] &= !bit;
+        } else {
+            self.rows[row / 64] |= bit;
+        }
+        match &mut self.stamps {
+            DeleteStamps::PerRow(stamps) => stamps[row] = stamp,
+            DeleteStamps::Few(few) => {
+                match (few.binary_search_by_key(&key(row), |(at, _)| *at), stamp) {
+                    (Ok(place), ABSENT) => {
+                        few.remove(place);
+                    }
+                    (Ok(place), _) => few[place].1 = stamp,
+                    (Err(_), ABSENT) => {}
+                    (Err(place), _) if few.len() < FEW_DELETES => {
+                        few.insert(place, (key(row), stamp));
+                    }
+                    (Err(_), _) => {
+                        let mut stamps = stamp_array();
+                        for (at, stamp) in few.iter() {
+                            stamps[usize::from(*at)] = *stamp;
+                        }
+                        stamps[row] = stamp;
+                        self.stamps = DeleteStamps::PerRow(stamps);
+                    }
+                }
+            }
+        }
+    }
+
+    /// The rows of `exists` with a delete stamp, ascending, each with it.
+    fn of<'a>(&'a self, exists: &'a Bitset) -> impl Iterator<Item = (usize, u64)> + 'a {
+        self.rows
+            .iter()
+            .enumerate()
+            .flat_map(move |(index, word)| {
+                let mut bits = word & exists.word(index);
+                std::iter::from_fn(move || {
+                    if bits == 0 {
+                        return None;
+                    }
+                    let bit = bits.trailing_zeros() as usize;
+                    bits &= bits - 1;
+                    Some(index * 64 + bit)
+                })
+            })
+            .map(|row| (row, self.get(row)))
+    }
+
+    fn heap_bytes(&self) -> usize {
+        std::mem::size_of::<Self>()
+            + match &self.stamps {
+                DeleteStamps::Few(few) if few.spilled() => {
+                    few.capacity() * std::mem::size_of::<(u16, u64)>()
+                }
+                DeleteStamps::Few(_) => 0,
+                DeleteStamps::PerRow(stamps) => std::mem::size_of_val::<[u64]>(stamps),
+            }
+    }
+}
+
+/// A row of a vector as the short list of delete stamps keeps it.
+fn key(row: usize) -> u16 {
+    u16::try_from(row).expect("a row of a vector is below 2,048")
 }
 
 /// Who created a stamped vector's rows.
@@ -50,7 +179,7 @@ struct Stamped {
     exists: Bitset,
     created: Inserts,
     /// Who deleted each row, from the vector's first delete on.
-    deleted: Option<Box<[u64]>>,
+    deleted: Option<Box<Deletes>>,
 }
 
 impl Stamped {
@@ -73,7 +202,9 @@ impl Stamped {
 
     /// Who deleted `row` ([`ABSENT`]: no one).
     fn deleter(&self, row: usize) -> u64 {
-        self.deleted.as_ref().map_or(ABSENT, |stamps| stamps[row])
+        self.deleted
+            .as_ref()
+            .map_or(ABSENT, |deletes| deletes.get(row))
     }
 
     fn get(&self, row: usize) -> RowVersion {
@@ -119,12 +250,12 @@ impl Stamped {
 
     fn set_deleted(&mut self, row: usize, stamp: u64) {
         match &mut self.deleted {
-            Some(stamps) => stamps[row] = stamp,
+            Some(deletes) => deletes.set(row, stamp),
             None if stamp == ABSENT => {}
             None => {
-                let mut stamps = stamp_array();
-                stamps[row] = stamp;
-                self.deleted = Some(stamps);
+                let mut deletes = Deletes::new();
+                deletes.set(row, stamp);
+                self.deleted = Some(deletes);
             }
         }
     }
@@ -134,8 +265,8 @@ impl Stamped {
         if let Inserts::PerRow(stamps) = &mut self.created {
             stamps[row] = ABSENT;
         }
-        if let Some(stamps) = &mut self.deleted {
-            stamps[row] = ABSENT;
+        if let Some(deletes) = &mut self.deleted {
+            deletes.set(row, ABSENT);
         }
     }
 
@@ -175,10 +306,10 @@ impl Stamped {
             Inserts::PerRow(stamps) => self.exists.rows().all(|row| settled(stamps[row])),
         };
         created
-            && self.deleted.as_ref().is_none_or(|stamps| {
-                self.exists
-                    .rows()
-                    .all(|row| stamps[row] == ABSENT || settled(stamps[row]))
+            && self.deleted.as_ref().is_none_or(|deletes| {
+                deletes
+                    .of(&self.exists)
+                    .all(|(_, stamp)| stamp == ABSENT || settled(stamp))
             })
     }
 
@@ -190,7 +321,10 @@ impl Stamped {
                 Inserts::Constant(_) => 0,
                 Inserts::PerRow(stamps) => array(stamps),
             }
-            + self.deleted.as_deref().map_or(0, array)
+            + self
+                .deleted
+                .as_ref()
+                .map_or(0, |deletes| deletes.heap_bytes())
     }
 }
 
@@ -249,6 +383,17 @@ impl Versions {
 
     /// Whether `row` exists in any reader's view (created, by anyone, and
     /// not undone): a bit test in either form of its vector.
+    /// Whether `read` sees `row`, in one lookup: a row of a flat vector,
+    /// the common case, is seen by every reader once it exists (a bit
+    /// test); a stamped vector's row by its stamps.
+    pub(super) fn visible(&self, row: usize, read: Read) -> bool {
+        match self.vectors.get(row / VECTOR_ROWS) {
+            None => false,
+            Some(Vector::Flat(exists)) => exists.get(row % VECTOR_ROWS),
+            Some(Vector::Stamped(stamped)) => stamped.get(row % VECTOR_ROWS).visible(read),
+        }
+    }
+
     pub(super) fn exists(&self, row: usize) -> bool {
         match self.vectors.get(row / VECTOR_ROWS) {
             None => false,
@@ -410,14 +555,25 @@ impl Versions {
         if !stamped.settled_by(horizon) {
             return;
         }
-        // Built anew, so it holds what a load would.
+        // Built anew, a word at a time in ascending order as a load sets
+        // its rows, so it holds what a load would; the rows with a delete
+        // stamp alone are looked at.
         let mut exists = Bitset::default();
-        for row in stamped.exists.rows() {
-            if stamped.deleter(row) == ABSENT {
-                exists.set(row);
-            } else {
-                gone.push(index * VECTOR_ROWS + row);
+        let base = index * VECTOR_ROWS;
+        for (at, word) in stamped.exists.words().iter().enumerate() {
+            let mut kept = *word;
+            if let Some(deletes) = &stamped.deleted {
+                let mut bits = kept & deletes.rows[at];
+                while bits != 0 {
+                    let bit = bits.trailing_zeros() as usize;
+                    bits &= bits - 1;
+                    if deletes.get(at * 64 + bit) != ABSENT {
+                        kept &= !(1 << bit);
+                        gone.push(base + at * 64 + bit);
+                    }
+                }
             }
+            exists.set_word(at, kept);
         }
         *vector = Vector::Flat(exists);
     }
@@ -473,13 +629,13 @@ impl Versions {
     pub(super) fn deleted_by(&self, horizon: u64) -> impl Iterator<Item = usize> + '_ {
         self.stamped_vectors().flat_map(move |(base, stamped)| {
             stamped
-                .exists
-                .rows()
-                .filter(move |row| {
-                    let deleter = stamped.deleter(*row);
-                    deleter != ABSENT && deleter & PENDING == 0 && deleter <= horizon
+                .deleted
+                .iter()
+                .flat_map(|deletes| deletes.of(&stamped.exists))
+                .filter(move |(_, deleter)| {
+                    *deleter != ABSENT && deleter & PENDING == 0 && *deleter <= horizon
                 })
-                .map(move |row| base + row)
+                .map(move |(row, _)| base + row)
         })
     }
 
@@ -497,7 +653,7 @@ impl Versions {
 
 #[cfg(test)]
 mod tests {
-    use super::{ALWAYS, VECTOR_ROWS, Versions};
+    use super::{ALWAYS, FEW_DELETES, VECTOR_ROWS, Versions};
     use crate::graph::conformance::Rng;
     use crate::graph::rowgroup::{ABSENT, PENDING, RowVersion};
 
@@ -507,6 +663,9 @@ mod tests {
 
     /// The bytes of a stamp per row of a vector.
     const ARRAY: usize = VECTOR_ROWS * std::mem::size_of::<u64>();
+
+    /// The bytes of a bit per row of a vector.
+    const BITS: usize = VECTOR_ROWS / 8;
 
     #[test]
     fn loaded_rows_stay_flat_and_a_write_stamps_its_vector_alone() {
@@ -693,7 +852,9 @@ mod tests {
     }
 
     /// A vector holds no delete stamps until its first delete, which
-    /// allocates them; undoing it keeps them until the vector collapses.
+    /// allocates a bit per row and a short list; past [`FEW_DELETES`] rows
+    /// the vector takes a stamp per row. Undoing a delete keeps the stamps
+    /// until the vector collapses, which drops them all.
     #[test]
     fn the_first_delete_allocates_the_delete_stamps() {
         let transaction = PENDING | 1;
@@ -709,23 +870,52 @@ mod tests {
             "taking no delete off allocates none"
         );
         versions.set_deleted(50, transaction);
-        assert_eq!(versions.heap_bytes(), before + ARRAY);
+        let few = versions.heap_bytes();
+        assert!(
+            few > before + BITS && few < before + BITS + 1_024,
+            "a bit per row and a short list: {} bytes",
+            few - before
+        );
         assert_eq!(versions.get(50).deleted, transaction);
         assert_eq!(versions.get(49).deleted, ABSENT);
         versions.set_deleted(51, transaction);
-        assert_eq!(
-            versions.heap_bytes(),
-            before + ARRAY,
-            "one array per vector"
-        );
         versions.set_deleted(50, ABSENT);
         versions.set_deleted(51, 4);
         assert_eq!(versions.get(50).deleted, ABSENT);
+        assert_eq!(versions.get(51).deleted, 4);
         assert_eq!(versions.collapse(4), [51]);
         assert!(
             versions.heap_bytes() < before,
             "the collapse drops every stamp"
         );
+
+        // Past the short list: a stamp per row, each row keeping its own.
+        let mut versions = Versions::default();
+        for row in 0..VECTOR_ROWS {
+            versions.set_created(row, 3);
+        }
+        let before = versions.heap_bytes();
+        for row in 0..=FEW_DELETES {
+            versions.set_deleted(2 * row, 10 + row as u64);
+        }
+        assert!(
+            versions.heap_bytes() >= before + ARRAY + BITS,
+            "{} deletes take a stamp per row",
+            FEW_DELETES + 1
+        );
+        for row in 0..VECTOR_ROWS {
+            let expected = if row % 2 == 0 && row / 2 <= FEW_DELETES {
+                10 + (row / 2) as u64
+            } else {
+                ABSENT
+            };
+            assert_eq!(versions.get(row).deleted, expected, "row {row}");
+        }
+        let horizon = 10 + FEW_DELETES as u64;
+        let gone: Vec<usize> = (0..=FEW_DELETES).map(|row| 2 * row).collect();
+        assert_eq!(versions.deleted_by(horizon).collect::<Vec<_>>(), gone);
+        assert_eq!(versions.collapse(horizon), gone);
+        assert_eq!(versions.stamped(), 0);
     }
 
     /// Random creates, deletes, commits (row by row and by range, in any
@@ -817,6 +1007,17 @@ mod tests {
                     }
                     7 => {
                         let horizon = rng.below(usize::try_from(epoch).unwrap() + 1) as u64;
+                        let deleted: Vec<usize> = versions.deleted_by(horizon).collect();
+                        let expected_deleted: Vec<usize> = (0..ROWS)
+                            .filter(|row| {
+                                let deleter = model[*row].deleted;
+                                model[*row].created != ABSENT
+                                    && deleter != ABSENT
+                                    && deleter & PENDING == 0
+                                    && deleter <= horizon
+                            })
+                            .collect();
+                        assert_eq!(deleted, expected_deleted, "{what}: deleted by {horizon}");
                         let gone = versions.collapse(horizon);
                         let mut expected_gone = Vec::new();
                         // A collapsed vector holds bits: its rows are every

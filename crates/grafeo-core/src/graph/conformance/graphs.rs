@@ -519,3 +519,17 @@ mod rowgroup {
 
     graph_suite!(RowGroupStore, RowGroupStore::new, GAPS);
 }
+
+/// The row-group store's named graphs on a root that keeps no incoming
+/// edges (10b), whose named graphs keep none either.
+mod rowgroup_without_backward_edges {
+    use super::{KnownGap, RowGroupStore};
+
+    const GAPS: &[KnownGap] = &[];
+
+    fn store() -> RowGroupStore {
+        RowGroupStore::with_backward_edges(false)
+    }
+
+    graph_suite!(RowGroupStore, store, GAPS);
+}

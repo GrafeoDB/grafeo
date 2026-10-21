@@ -1730,6 +1730,7 @@ mod tests {
                 memory_limit: None,
                 spill_path: None,
                 sections: Vec::new(),
+                history_retention: crate::storage::catalog_record::HistoryRetentionRecord::Forever,
             }),
         ]
     }
@@ -2043,7 +2044,7 @@ mod tests {
         }
         assert_eq!(
             (bytes.len(), fnv1a(&bytes)),
-            (2360, 14_030_477_899_162_761_609),
+            (2361, 14_977_091_226_357_234_082),
             "{bytes:?}"
         );
     }

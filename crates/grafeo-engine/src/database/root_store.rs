@@ -1,18 +1,16 @@
 //! The root store a database's loads, replays and standalone changes write:
 //! its named graphs, their indexes, its epoch, and its rows
-//! ([`LoadTarget`]). `LpgStore` and the row-group store answer it with the
-//! same names, so the readers of earlier formats (a 0.5.x file and its WAL,
-//! a 0.5.x WAL directory, a snapshot, the embeddings an older build spilled),
-//! the replay of a standalone change and a graph copy run on either: the
-//! engine runs them on `LpgStore` until the switch to the row-group store
-//! (#412 H2d), and the tests run them on the row-group store now (P5).
+//! ([`LoadTarget`]): the row-group store. The readers of earlier formats (a
+//! 0.5.x file and its WAL, a 0.5.x WAL directory, a snapshot, the embeddings
+//! an older build spilled), the replay of a standalone change and a graph
+//! copy are written against this trait, which the row-group store answers
+//! by its inherent methods of the same names (H4, #416, settles the store
+//! contract these become part of).
 
 use grafeo_common::change::DataOp;
 use grafeo_common::types::EpochId;
 use grafeo_core::graph::apply::ChangeTarget;
 use grafeo_core::graph::load::LoadTarget;
-use grafeo_core::graph::lpg::LpgStore;
-#[cfg(test)]
 use grafeo_core::graph::rowgroup::RowGroupStore;
 
 use super::catalog_section::CatalogStore;
@@ -63,7 +61,7 @@ pub(crate) trait RootStore: CatalogStore + LoadTarget + ChangeTarget {
 
     /// Fills values of `key` an older build spilled (#594) into the nodes
     /// of `label` that have none; returns how many it filled (see
-    /// `LpgStore::fill_missing_node_values`).
+    /// `RowGroupStore::fill_missing_node_values`).
     ///
     /// # Errors
     ///
@@ -93,9 +91,9 @@ pub(crate) trait RootStore: CatalogStore + LoadTarget + ChangeTarget {
     /// Moves the store's epoch to `epoch` when it is later.
     fn sync_epoch(&self, epoch: EpochId);
 
-    /// A commit of the WAL of the first log format, replayed: `LpgStore`
-    /// with `temporal` moves to a new epoch, so the versions of the next
-    /// commit are kept at it; a store that keeps no versions stays.
+    /// A commit of the WAL of the first log format, replayed: the store
+    /// moves to a new epoch, so the rows the next commit writes are stamped
+    /// after it.
     #[cfg(feature = "wal")]
     fn replayed_commit(&self);
 
@@ -203,62 +201,6 @@ macro_rules! root_store_indexes {
     };
 }
 
-impl RootStore for LpgStore {
-    root_store_indexes!();
-
-    #[cfg(feature = "grafeo-file")]
-    fn load_image(
-        store: &std::sync::Arc<Self>,
-        image: &dyn grafeo_common::storage::ImageSource,
-        file: Option<&std::path::Path>,
-        catalog: &std::sync::Arc<crate::catalog::Catalog>,
-        #[cfg(feature = "triple-store")] rdf_store: &std::sync::Arc<
-            grafeo_core::graph::rdf::RdfStore,
-        >,
-    ) -> grafeo_common::utils::error::Result<super::sections::LoadedSections> {
-        super::sections::load_sections(
-            image,
-            file,
-            store,
-            catalog,
-            #[cfg(feature = "triple-store")]
-            rdf_store,
-        )
-    }
-
-    #[cfg(feature = "wal")]
-    fn replayed_commit(&self) {
-        #[cfg(feature = "temporal")]
-        self.new_epoch();
-    }
-
-    fn copied(&self, epoch: EpochId) -> Box<dyn Iterator<Item = DataOp> + '_> {
-        use grafeo_common::types::EdgeId;
-
-        let nodes = self
-            .all_node_ids()
-            .into_iter()
-            .filter_map(move |id| self.get_node_at_epoch(id, epoch))
-            .map(|node| DataOp::CreateNode {
-                id: node.id,
-                labels: node.labels,
-                properties: node.properties.into_iter().collect(),
-            });
-        let edges = (0..self.next_edge_id())
-            .filter_map(move |id| self.get_edge_at_epoch(EdgeId::new(id), epoch))
-            .map(|edge| DataOp::CreateEdge {
-                id: edge.id,
-                src: edge.src,
-                dst: edge.dst,
-                edge_type: edge.edge_type,
-                properties: edge.properties.into_iter().collect(),
-            });
-        Box::new(nodes.chain(edges))
-    }
-}
-
-// For tests only until the switch (H2d), as its sections' loader is.
-#[cfg(test)]
 impl RootStore for RowGroupStore {
     root_store_indexes!();
 
@@ -275,7 +217,7 @@ impl RootStore for RowGroupStore {
             grafeo_core::graph::rdf::RdfStore,
         >,
     ) -> grafeo_common::utils::error::Result<super::sections::LoadedSections> {
-        super::row_group_sections::load_row_group_sections(
+        let history = super::row_group_sections::load_row_group_sections(
             image,
             file,
             store,
@@ -283,12 +225,11 @@ impl RootStore for RowGroupStore {
             #[cfg(feature = "triple-store")]
             rdf_store,
         )?;
-        Ok(super::sections::LoadedSections::default())
+        Ok(super::sections::LoadedSections::with_history(history))
     }
 
     /// Each replayed commit gets an epoch of its own, as a commit of the
-    /// log does: the rows the next one writes are stamped after it, as
-    /// `LpgStore` with `temporal` keeps them.
+    /// log does: the rows the next one writes are stamped after it.
     #[cfg(feature = "wal")]
     fn replayed_commit(&self) {
         self.new_epoch();

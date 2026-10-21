@@ -109,6 +109,7 @@ type Expect struct {
 	Count     *int
 	Empty     bool
 	Error     *string
+	GQLStatus *string
 	Hash      *string
 	Precision *int
 	Columns   []string
@@ -894,6 +895,10 @@ func parseExpectBlock(ctx *parseContext) Expect {
 			s := unquote(value)
 			exp.Error = &s
 			ctx.idx++
+		case "gql_status":
+			s := unquote(value)
+			exp.GQLStatus = &s
+			ctx.idx++
 		case "hash":
 			s := unquote(value)
 			exp.Hash = &s
@@ -1318,7 +1323,7 @@ func runSingleTest(t *testing.T, gf *GtestFile, tc TestCase, variantLang, varian
 		queries = tc.Statements
 	} else if query != "" {
 		queries = []string{query}
-	} else if tc.Expect.Error != nil {
+	} else if tc.Expect.Error != nil || tc.Expect.GQLStatus != nil {
 		// Allow empty-string queries for error tests (e.g. empty input)
 		queries = []string{query}
 	} else {
@@ -1334,8 +1339,8 @@ func runSingleTest(t *testing.T, gf *GtestFile, tc TestCase, variantLang, varian
 	}
 
 	// Error tests
-	if exp.Error != nil {
-		runErrorTest(t, db, language, queries, *exp.Error, paramsJSON)
+	if exp.Error != nil || exp.GQLStatus != nil {
+		runErrorTest(t, db, language, queries, exp.Error, exp.GQLStatus, paramsJSON)
 		return
 	}
 
@@ -1392,12 +1397,14 @@ func runSingleTest(t *testing.T, gf *GtestFile, tc TestCase, variantLang, varian
 		} else {
 			assertRowsSorted(t, result, expRows)
 		}
-	// If none of the above, the test just checks the query does not error
+		// If none of the above, the test just checks the query does not error
 	}
 }
 
-// runErrorTest executes queries expecting the last one to produce an error.
-func runErrorTest(t *testing.T, db *grafeo.Database, language string, queries []string, expectedSubstr string, paramsJSON string) {
+// runErrorTest executes queries expecting the last one to produce an error:
+// one whose message contains expectedSubstr and whose GQLSTATUS is
+// expectedStatus, for each that is given.
+func runErrorTest(t *testing.T, db *grafeo.Database, language string, queries []string, expectedSubstr *string, expectedStatus *string, paramsJSON string) {
 	t.Helper()
 
 	// Execute all-but-last normally (with params so $param works)
@@ -1424,16 +1431,39 @@ func runErrorTest(t *testing.T, db *grafeo.Database, language string, queries []
 		_, err = executeQuery(db, language, queries[len(queries)-1])
 	}
 	if err == nil {
-		t.Fatalf("Expected error containing %q but query succeeded", expectedSubstr)
+		t.Fatalf("Expected error %s but query succeeded", describeError(expectedSubstr, expectedStatus))
 	}
 
 	errMsg := err.Error()
-	if !strings.Contains(errMsg, expectedSubstr) {
+	if expectedSubstr != nil && !strings.Contains(errMsg, *expectedSubstr) {
 		// Case-insensitive fallback
-		if !strings.Contains(strings.ToLower(errMsg), strings.ToLower(expectedSubstr)) {
-			t.Fatalf("Error %q does not contain %q", errMsg, expectedSubstr)
+		if !strings.Contains(strings.ToLower(errMsg), strings.ToLower(*expectedSubstr)) {
+			t.Fatalf("Error %q does not contain %q", errMsg, *expectedSubstr)
 		}
 	}
+	if expectedStatus != nil {
+		// An error without a status fails the case: a status the binding
+		// does not expose is a gap, not a pass.
+		var grafeoErr *grafeo.Error
+		if !errors.As(err, &grafeoErr) || grafeoErr.GQLStatus == "" {
+			t.Fatalf("Error %q (%T) has no GQLSTATUS", errMsg, err)
+		}
+		if grafeoErr.GQLStatus != *expectedStatus {
+			t.Fatalf("Error %q has GQLSTATUS %s, expected %s", errMsg, grafeoErr.GQLStatus, *expectedStatus)
+		}
+	}
+}
+
+// describeError says what an error case expects, for its failure message.
+func describeError(expectedSubstr *string, expectedStatus *string) string {
+	var parts []string
+	if expectedSubstr != nil {
+		parts = append(parts, fmt.Sprintf("containing %q", *expectedSubstr))
+	}
+	if expectedStatus != nil {
+		parts = append(parts, "with GQLSTATUS "+*expectedStatus)
+	}
+	return strings.Join(parts, " ")
 }
 
 // isUnsupportedLanguageError checks if an error indicates the language is not

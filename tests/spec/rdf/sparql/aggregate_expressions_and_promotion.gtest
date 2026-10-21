@@ -1,0 +1,206 @@
+# SPARQL SELECT expressions over aggregates, and aggregate result types
+# (SPARQL 1.1 sec 11.4, 11.5, 18.5.1)
+#
+# A SELECT expression that holds an aggregate (SUM(?x) / COUNT(?x),
+# STR(COUNT(?x)), MAX(?x) - MIN(?x)) or reads a group key (STR(?g)) is
+# computed after the aggregation; it was dropped from the result. SUM and AVG
+# follow XPath's numeric promotion: integers sum to an integer, AVG of
+# integers and decimals is a decimal, a double makes a double. An empty
+# VALUES defines its variables with no solution.
+
+meta:
+  language: sparql
+  model: rdf
+  section: "11.4"
+  title: Aggregate expressions and their types
+  dataset: empty
+  requires: [sparql, rdf]
+
+tests:
+
+  # ---------------------------------------------------------------------------
+  # Expressions over aggregates
+  # ---------------------------------------------------------------------------
+
+  - name: arithmetic_over_an_aggregate
+    query: |
+      SELECT (SUM(?x) + 1 AS ?next) (SUM(?x) * 2 AS ?double) WHERE { VALUES ?x { 1 2 } }
+    expect:
+      columns: [next, double]
+      rows:
+        - [4, 6]
+
+  - name: an_expression_over_two_aggregates
+    query: |
+      SELECT (SUM(?x) / COUNT(?x) = 2.5 AS ?mean) (MAX(?x) - MIN(?x) AS ?range) WHERE { VALUES ?x { 1 4 } }
+    expect:
+      columns: [mean, range]
+      rows:
+        - [true, 3]
+
+  - name: a_function_over_an_aggregate
+    query: |
+      PREFIX xsd: <http://www.w3.org/2001/XMLSchema#>
+      SELECT (STR(COUNT(?x)) AS ?text) (ABS(SUM(?x)) AS ?abs) (DATATYPE(SUM(?x)) = xsd:integer AS ?int) WHERE { VALUES ?x { -1 -2 } }
+    expect:
+      columns: [text, abs, int]
+      rows:
+        - ["2", 3, true]
+
+  - name: an_aggregate_and_an_expression_over_it_side_by_side
+    query: |
+      SELECT (SUM(?x) AS ?total) (SUM(?x) * 10 AS ?scaled) WHERE { VALUES ?x { 1 2 } }
+    expect:
+      columns: [total, scaled]
+      rows:
+        - [3, 30]
+
+  - name: expressions_over_aggregates_per_group_and_ordered_by_one
+    query: |
+      SELECT ?city (COUNT(?p) AS ?n) (STR(?city) AS ?name) (COUNT(?p) + 100 AS ?code) WHERE {
+        VALUES (?city ?p) { ("Amsterdam" "Alix") ("Amsterdam" "Gus") ("Berlin" "Mia") }
+      }
+      GROUP BY ?city
+      ORDER BY DESC(?code)
+    expect:
+      ordered: true
+      columns: [city, n, name, code]
+      rows:
+        - [Amsterdam, 2, Amsterdam, 102]
+        - [Berlin, 1, Berlin, 101]
+
+  - name: having_next_to_an_expression_over_an_aggregate
+    query: |
+      SELECT ?city (COUNT(?p) * 2 AS ?doubled) WHERE {
+        VALUES (?city ?p) { ("Amsterdam" "Alix") ("Amsterdam" "Gus") ("Berlin" "Mia") }
+      }
+      GROUP BY ?city
+      HAVING (COUNT(?p) > 1)
+    expect:
+      columns: [city, doubled]
+      rows:
+        - [Amsterdam, 4]
+
+  # ---------------------------------------------------------------------------
+  # Result types (XPath promotion)
+  # ---------------------------------------------------------------------------
+
+  - name: sum_of_integers_is_an_integer
+    query: |
+      PREFIX xsd: <http://www.w3.org/2001/XMLSchema#>
+      SELECT (SUM(?x) AS ?s) (DATATYPE(SUM(?x)) = xsd:integer AS ?int) WHERE { VALUES ?x { 1 2 } }
+    expect:
+      rows:
+        - [3, true]
+
+  - name: sum_with_a_decimal_is_a_decimal_and_with_a_double_a_double
+    query: |
+      PREFIX xsd: <http://www.w3.org/2001/XMLSchema#>
+      SELECT (DATATYPE(SUM(?d)) = xsd:decimal AS ?decimal) (DATATYPE(SUM(?f)) = xsd:double AS ?double) WHERE {
+        VALUES (?d ?f) { (1 1) (2.5 2.5e0) }
+      }
+    expect:
+      rows:
+        - [true, true]
+
+  - name: avg_of_integers_is_a_decimal
+    query: |
+      PREFIX xsd: <http://www.w3.org/2001/XMLSchema#>
+      SELECT (AVG(?x) = 1.5 AS ?half) (DATATYPE(AVG(?x)) = xsd:decimal AS ?decimal) WHERE { VALUES ?x { 1 2 } }
+    expect:
+      rows:
+        - [true, true]
+
+  - name: avg_with_a_double_is_a_double
+    query: |
+      PREFIX xsd: <http://www.w3.org/2001/XMLSchema#>
+      SELECT (AVG(?x) AS ?a) (DATATYPE(AVG(?x)) = xsd:double AS ?double) WHERE { VALUES ?x { 1 2.0e0 } }
+    expect:
+      rows:
+        - [1.5, true]
+
+  - name: avg_of_distinct_integers_is_a_decimal
+    query: |
+      PREFIX xsd: <http://www.w3.org/2001/XMLSchema#>
+      SELECT (AVG(DISTINCT ?x) = 1.5 AS ?half) (DATATYPE(AVG(DISTINCT ?x)) = xsd:decimal AS ?decimal) WHERE { VALUES ?x { 1 1 2 } }
+    expect:
+      rows:
+        - [true, true]
+
+  - name: avg_of_decimals_is_exact
+    query: |
+      SELECT (AVG(?x) = 0.2 AS ?exact) WHERE { VALUES ?x { 0.1 0.2 0.3 } }
+    expect:
+      rows:
+        - [true]
+
+  # ---------------------------------------------------------------------------
+  # Empty VALUES
+  # ---------------------------------------------------------------------------
+
+  - name: an_empty_values_has_no_solution
+    query: |
+      SELECT ?x WHERE { VALUES ?x { } }
+    expect:
+      empty: true
+
+  - name: count_over_an_empty_values_is_zero
+    query: |
+      SELECT (COUNT(?x) AS ?c) WHERE { VALUES ?x { } }
+    expect:
+      rows:
+        - [0]
+
+  - name: values_and_triples_take_signed_numbers
+    setup:
+      - "INSERT DATA { <http://ex.org/alix> <http://ex.org/balance> -12 . <http://ex.org/gus> <http://ex.org/balance> 3.5 }"
+    query: |
+      SELECT ?who ?b WHERE { VALUES ?b { -12 +3.5 } ?who <http://ex.org/balance> ?b }
+    expect:
+      rows:
+        - [http://ex.org/alix, -12]
+        - [http://ex.org/gus, 3.5]
+
+  - name: values_keeps_a_language_tag
+    query: |
+      SELECT ?x (LANG(?x) AS ?tag) WHERE { VALUES ?x { "hallo"@nl "hi" } }
+    expect:
+      rows:
+        - [hallo, nl]
+        - [hi, ""]
+
+  # SPARQL 1.1, 18.5.1.3 and 18.5.1.4: the sum and the average of no values
+  # are 0 ("0"^^xsd:integer); GQL and Cypher give null.
+  - name: sum_and_avg_of_no_values_are_zero
+    query: |
+      SELECT (SUM(?x) AS ?s) (AVG(?x) AS ?a) (COUNT(?x) AS ?c) WHERE { VALUES ?x { } }
+    expect:
+      rows:
+        - [0, 0, 0]
+
+  - name: sum_and_avg_over_a_pattern_that_matches_nothing_are_zero
+    query: |
+      PREFIX xsd: <http://www.w3.org/2001/XMLSchema#>
+      SELECT (SUM(?x) AS ?s) (AVG(?x) AS ?a) (DATATYPE(SUM(?x)) = xsd:integer AS ?int) WHERE { ?who <http://ex.org/nothing> ?x }
+    expect:
+      rows:
+        - [0, 0, true]
+
+  - name: a_group_by_over_nothing_has_no_group
+    query: |
+      SELECT ?who (SUM(?x) AS ?s) WHERE { ?who <http://ex.org/nothing> ?x } GROUP BY ?who
+    expect:
+      empty: true
+
+  # ---------------------------------------------------------------------------
+  # Known gaps
+  # ---------------------------------------------------------------------------
+
+
+  - name: sum_with_a_non_numeric_value_is_unbound
+    skip: "SUM skips a value that is no number; SPARQL 1.1 makes the aggregate an error, so unbound (inbox sparql/aggregates-of-empty-and-non-numeric-groups.md)"
+    query: |
+      SELECT (SUM(?x) AS ?s) WHERE { VALUES ?x { 1 "Alix" } }
+    expect:
+      rows:
+        - [null]

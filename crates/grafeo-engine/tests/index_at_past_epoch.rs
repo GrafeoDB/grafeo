@@ -1,13 +1,14 @@
 //! A read of a past epoch, outside a transaction, finds the nodes that had a
-//! value at that epoch: a property index holds the values of now, so such a
-//! read scans instead of looking a value up (#455). At the current epoch and
-//! in a transaction the index is used.
+//! value at that epoch (#455). The row-group store's property index holds
+//! every value a version a reader may see holds, and a lookup at a view
+//! rechecks each candidate at the view, so the index serves a read of a past
+//! epoch as it serves one of now and a transaction.
 //!
 //! ```bash
 //! cargo test -p grafeo-engine --all-features --test index_at_past_epoch
 //! ```
 
-#![cfg(all(feature = "lpg", feature = "gql", feature = "temporal"))]
+#![cfg(all(feature = "lpg", feature = "gql"))]
 
 use grafeo_common::types::{EpochId, Value};
 use grafeo_engine::{GrafeoDB, Session};
@@ -15,7 +16,12 @@ use grafeo_engine::{GrafeoDB, Session};
 /// `X:Y` Alix and `X` Gus, both with `k` 1 at the returned epoch; Alix has `k`
 /// 2 since. With `indexed`, a property index on `k`.
 fn changed(indexed: bool) -> (GrafeoDB, EpochId) {
-    let db = GrafeoDB::new_in_memory();
+    // History kept: a read at an earlier epoch needs it.
+    let db = GrafeoDB::with_config(
+        grafeo_engine::Config::in_memory()
+            .with_history_retention(grafeo_engine::HistoryRetention::Forever),
+    )
+    .unwrap();
     if indexed {
         db.create_property_index("k").unwrap();
     }
@@ -112,19 +118,19 @@ fn a_read_of_a_past_epoch_finds_the_values_of_that_epoch() {
     }
 }
 
-/// `EXPLAIN` agrees: no index at a past epoch, the index at the current epoch
-/// and in a transaction.
+/// `EXPLAIN` agrees: the index at a past epoch, at the current epoch and in
+/// a transaction.
 #[test]
-fn explain_shows_the_index_only_where_it_is_used() {
+fn explain_shows_the_index_where_it_is_used() {
     let (db, before) = changed(true);
     let mut session = db.session();
     for (query, _, hint) in cases() {
-        let past = plan(&session, query, Some(before));
-        assert!(
-            !past.contains("[index") && !past.contains("[range"),
-            "`{query}` at the earlier epoch:\n{past}"
-        );
         if let Some(hint) = hint {
+            let past = plan(&session, query, Some(before));
+            assert!(
+                past.contains(hint),
+                "`{query}` at the earlier epoch:\n{past}"
+            );
             let now = plan(&session, query, None);
             assert!(now.contains(hint), "`{query}` now:\n{now}");
             session.begin_transaction().unwrap();

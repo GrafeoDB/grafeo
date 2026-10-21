@@ -140,10 +140,16 @@ fn commit_with<T: Send + 'static>(
 /// once `commit()` returned, the same write lands after the commit: the
 /// committed value holds at the commit's epoch and the direct write's value
 /// is the latest.
-#[cfg(feature = "temporal")]
 #[test]
 fn a_direct_write_during_a_commit_conflicts_and_after_it_lands() {
-    let db = Arc::new(GrafeoDB::new_in_memory());
+    // History kept: the test reads the commit's epoch after a later write.
+    let db = Arc::new(
+        GrafeoDB::with_config(
+            grafeo_engine::Config::in_memory()
+                .with_history_retention(grafeo_engine::HistoryRetention::Forever),
+        )
+        .unwrap(),
+    );
     let hub = db.create_node(&["Hub"]).unwrap();
     let commit_epoch = grafeo_common::types::EpochId::new(db.current_epoch().as_u64() + 1);
     let during = commit_with(&db, hub, |db, hub| {
@@ -157,7 +163,8 @@ fn a_direct_write_during_a_commit_conflicts_and_after_it_lands() {
     db.set_node_property(hub, "by", Value::from("direct"))
         .unwrap();
     assert_eq!(
-        db.get_node_property_at_epoch(hub, "by", commit_epoch),
+        db.get_node_property_at_epoch(hub, "by", commit_epoch)
+            .unwrap(),
         Some(Value::from("transaction"))
     );
     assert_eq!(by(&db, hub), Some(Value::from("direct")));

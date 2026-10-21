@@ -45,12 +45,19 @@ pub struct RowGroupMemory {
     pub node_cold_bytes: usize,
     /// The chunks the edge property columns still hold encoded.
     pub edge_cold_bytes: usize,
+    /// The bytes of the node property columns' chunks in spill files: off
+    /// the heap, so not in [`total_bytes`](Self::total_bytes).
+    pub node_spilled_bytes: usize,
+    /// The bytes of the edge property columns' chunks in spill files.
+    pub edge_spilled_bytes: usize,
     /// The property columns as `LpgStore` counts them: one per key a table
     /// has a column of, in each graph (each row group holds a part of it).
     pub property_columns: usize,
     /// The columns of row groups that still hold their chunks encoded: a
     /// column decodes on its first use.
     pub cold_columns: usize,
+    /// The cold columns of row groups whose chunks are in spill files.
+    pub spilled_columns: usize,
     /// The node rows' version info: who created and deleted each row, and
     /// the update chains of their values and labels.
     pub node_versions_bytes: usize,
@@ -105,8 +112,11 @@ impl RowGroupMemory {
         self.edge_columns_bytes += other.edge_columns_bytes;
         self.node_cold_bytes += other.node_cold_bytes;
         self.edge_cold_bytes += other.edge_cold_bytes;
+        self.node_spilled_bytes += other.node_spilled_bytes;
+        self.edge_spilled_bytes += other.edge_spilled_bytes;
         self.property_columns += other.property_columns;
         self.cold_columns += other.cold_columns;
+        self.spilled_columns += other.spilled_columns;
         self.node_versions_bytes += other.node_versions_bytes;
         self.edge_versions_bytes += other.edge_versions_bytes;
         self.outgoing_bytes += other.outgoing_bytes;
@@ -149,7 +159,9 @@ impl Inner {
                     + group.labels.capacity() * (size_of::<u32>() + size_of::<Bitset>());
             memory.node_columns_bytes += group.columns.hot_bytes();
             memory.node_cold_bytes += group.columns.cold_bytes();
+            memory.node_spilled_bytes += group.columns.spilled_bytes();
             memory.cold_columns += group.columns.cold_count();
+            memory.spilled_columns += group.columns.spilled_count();
             memory.outgoing_bytes += group.outgoing.heap_bytes();
             memory.incoming_bytes += group.incoming.heap_bytes();
             node_keys.extend(group.columns.keys());
@@ -164,7 +176,9 @@ impl Inner {
                 group.versions.heap_bytes() + group.columns.updates_bytes();
             memory.edge_columns_bytes += group.columns.hot_bytes();
             memory.edge_cold_bytes += group.columns.cold_bytes();
+            memory.edge_spilled_bytes += group.columns.spilled_bytes();
             memory.cold_columns += group.columns.cold_count();
+            memory.spilled_columns += group.columns.spilled_count();
             edge_keys.extend(group.columns.keys());
         }
         memory.property_columns = node_keys.len() + edge_keys.len();
@@ -229,8 +243,10 @@ impl RowGroupStore {
     ///
     /// The version chains count the rows' version info and the update
     /// chains of their values and labels; their depth is reported as one,
-    /// as the update chains are counted in bytes and not per row. The store
-    /// holds no property, vector or text index: those parts are empty.
+    /// as the update chains are counted in bytes and not per row. The
+    /// property, vector and text indexes of every graph are counted with the
+    /// indexes (a named graph's vector and text indexes named
+    /// `graph/label:property`), a property index as an estimate per entry.
     #[must_use]
     pub fn memory_breakdown(&self) -> (StoreMemory, IndexMemory, MvccMemory, StringPoolMemory) {
         let memory = self.memory();
@@ -248,6 +264,7 @@ impl RowGroupStore {
         indexes.forward_adjacency_bytes = memory.outgoing_bytes;
         indexes.backward_adjacency_bytes = memory.incoming_bytes;
         indexes.label_index_bytes = memory.label_bitmaps_bytes;
+        self.add_index_memory(&mut indexes);
         indexes.compute_total();
 
         let any_rows = memory.node_groups + memory.edge_groups > 0;
@@ -266,6 +283,73 @@ impl RowGroupStore {
         string_pool.compute_total();
 
         (store, indexes, mvcc, string_pool)
+    }
+
+    /// Adds the property, vector and text indexes of this store and its
+    /// named graphs to `indexes`.
+    fn add_index_memory(&self, indexes: &mut IndexMemory) {
+        let mut graphs: Vec<(String, std::sync::Arc<Self>)> = self
+            .graph_names()
+            .into_iter()
+            .filter_map(|name| self.graph(&name).map(|graph| (name, graph)))
+            .collect();
+        graphs.sort_by(|a, b| a.0.cmp(&b.0));
+        let all = || {
+            std::iter::once(("", self))
+                .chain(graphs.iter().map(|(name, graph)| (name.as_str(), &**graph)))
+        };
+        for (_, store) in all() {
+            for key in store.property_index_keys() {
+                let entries = store.property_index_len(&key).unwrap_or(0);
+                // As LpgStore estimates it: a value and a set of ids per
+                // entry, and the map's own overhead.
+                indexes.property_index_bytes += entries
+                    * (size_of::<grafeo_common::types::HashableValue>()
+                        + size_of::<FxHashSet<grafeo_common::types::NodeId>>()
+                        + 32);
+            }
+        }
+        #[cfg(any(feature = "vector-index", feature = "text-index"))]
+        for (graph, store) in all() {
+            store.add_search_index_memory(graph, indexes);
+        }
+        indexes.vector_indexes.sort_by(|a, b| a.name.cmp(&b.name));
+        indexes.text_indexes.sort_by(|a, b| a.name.cmp(&b.name));
+    }
+
+    /// Adds the vector and text indexes of this store, the graph `graph` of
+    /// its root (empty for the root itself), to `indexes`, named
+    /// `graph/Label:property` for a named graph.
+    #[cfg(any(feature = "vector-index", feature = "text-index"))]
+    fn add_search_index_memory(&self, graph: &str, indexes: &mut IndexMemory) {
+        let named = |key: String| {
+            if graph.is_empty() {
+                key
+            } else {
+                format!("{graph}/{key}")
+            }
+        };
+        #[cfg(feature = "vector-index")]
+        for (key, index) in self.vector_index_entries() {
+            indexes
+                .vector_indexes
+                .push(grafeo_common::memory::NamedMemory {
+                    name: named(key),
+                    bytes: index.heap_memory_bytes(),
+                    item_count: index.len(),
+                });
+        }
+        #[cfg(feature = "text-index")]
+        for (key, index) in self.text_index_entries() {
+            let index = index.read();
+            indexes
+                .text_indexes
+                .push(grafeo_common::memory::NamedMemory {
+                    name: named(key),
+                    bytes: index.heap_memory_bytes(),
+                    item_count: index.len(),
+                });
+        }
     }
 
     /// The heap bytes its row groups and dictionaries hold, with its named
@@ -373,8 +457,8 @@ mod tests {
 
     use crate::graph::conformance::{Store, Tx, people};
     use crate::graph::lpg::{Edge, LpgStore, Node};
-    use crate::graph::rowgroup::RowGroupStore;
     use crate::graph::rowgroup::section::LPG_SECTION_VERSION;
+    use crate::graph::rowgroup::{RowGroupMemory, RowGroupStore};
     use crate::graph::traits::GraphStore;
 
     /// A node as the iterators list it: id, sorted labels, values by key.
@@ -708,6 +792,78 @@ mod tests {
             .unwrap();
         tx.commit().unwrap();
         vincent
+    }
+
+    /// A root without backward edges (10b), and its named graph, hold no
+    /// incoming adjacency: the breakdown reports none, the outgoing bytes
+    /// and every other part are a root's with them, and so after a write of
+    /// 2,000 edges and a reload of the section into such a root.
+    #[test]
+    fn without_backward_edges_the_breakdown_has_no_incoming_bytes() {
+        let (kept, scanned) = (
+            RowGroupStore::new(),
+            RowGroupStore::with_backward_edges(false),
+        );
+        for root in [&kept, &scanned] {
+            travels(root);
+            let mut tx = Tx::begin(root, 11);
+            let nodes: Vec<NodeId> = (0..40)
+                .map(|_| {
+                    tx.create_node(&["Person"], &[("name", Value::from("Jules"))])
+                        .unwrap()
+                })
+                .collect();
+            for index in 0..2_000 {
+                tx.create_edge(nodes[index % 40], nodes[(index * 7) % 40], "KNOWS", &[])
+                    .unwrap();
+            }
+            tx.commit().unwrap();
+        }
+        let trips = scanned.graph("trips").unwrap();
+        assert!(
+            !trips.keeps_backward_edges(),
+            "a named graph keeps none either"
+        );
+        assert_eq!(trips.memory().incoming_bytes, 0);
+        let (with, without) = (kept.memory(), scanned.memory());
+        assert!(with.incoming_bytes > 0);
+        assert_eq!(without.incoming_bytes, 0);
+        assert_eq!(
+            RowGroupMemory {
+                incoming_bytes: with.incoming_bytes,
+                ..without.clone()
+            },
+            with,
+            "every other part is the same"
+        );
+        assert_eq!(
+            scanned.heap_bytes() + with.incoming_bytes,
+            kept.heap_bytes()
+        );
+        let (_, indexes, _, _) = scanned.memory_breakdown();
+        assert_eq!(indexes.backward_adjacency_bytes, 0);
+        assert_eq!(
+            indexes.forward_adjacency_bytes,
+            kept.memory_breakdown().1.forward_adjacency_bytes
+        );
+        assert!(indexes.forward_adjacency_bytes > 0);
+
+        let mut image = MemoryImage::new();
+        image
+            .begin_section(SectionType::LpgStore, LPG_SECTION_VERSION)
+            .unwrap();
+        kept.write_section(ChunkCaps::DEFAULT, &mut image).unwrap();
+        let loaded = RowGroupStore::with_backward_edges(false);
+        loaded
+            .read_section(&*image.section_source(SectionType::LpgStore).unwrap())
+            .unwrap();
+        assert_eq!(loaded.memory().incoming_bytes, 0, "the file's are dropped");
+        assert_eq!(loaded.memory().graphs, 2);
+        assert_eq!(
+            loaded.graph("trips").unwrap().in_degree(NodeId::new(1)),
+            1,
+            "Paris has its edge from Vincent, found in the edge table"
+        );
     }
 
     /// A root's figures are its own and its named graphs': a dropped graph

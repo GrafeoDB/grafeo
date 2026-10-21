@@ -17,7 +17,8 @@ use std::sync::Arc;
 use grafeo_common::types::{EdgeId, EpochId, NodeId, PropertyKey, Value};
 use grafeo_common::utils::error::Result;
 use grafeo_core::graph::Direction;
-use grafeo_core::graph::lpg::{Edge, LpgStore, Node};
+use grafeo_core::graph::lpg::{Edge, Node};
+use grafeo_core::graph::rowgroup::RowGroupStore;
 
 use super::direct::{BatchEdge, DirectTarget};
 
@@ -25,7 +26,7 @@ impl super::GrafeoDB {
     /// The store of the current graph: the one `set_current_graph` and
     /// `set_current_schema` select, or the default graph when they select
     /// none (or one that no longer exists).
-    pub(crate) fn current_lpg_store(&self) -> Arc<LpgStore> {
+    pub(crate) fn current_lpg_store(&self) -> Arc<RowGroupStore> {
         crate::session::graph_storage_key(
             self.current_schema.read().as_deref(),
             self.current_graph.read().as_deref(),
@@ -125,24 +126,45 @@ impl super::GrafeoDB {
     /// is visible if and only if `created_epoch <= epoch` and it was not
     /// deleted at or before `epoch`. An epoch after the
     /// [current one](Self::current_epoch) reads at the current one.
-    #[must_use]
-    pub fn get_node_at_epoch(&self, id: NodeId, epoch: EpochId) -> Option<Node> {
+    ///
+    /// # Errors
+    ///
+    /// For an epoch before the history the database keeps (see
+    /// [`HistoryRetention`](crate::config::HistoryRetention)): "history
+    /// before epoch ... is not retained", never an answer from versions
+    /// garbage collection may have dropped.
+    pub fn get_node_at_epoch(&self, id: NodeId, epoch: EpochId) -> Result<Option<Node>> {
+        let (_pin, epoch) = self.pin_epoch(epoch)?;
+        Ok(self
+            .read_store(DirectTarget::Current)?
+            .get_node_at_epoch(id, epoch))
+    }
+
+    /// Pins a direct read at `epoch` (at the current epoch for a later one)
+    /// for as long as the pin lives, so no collect takes a version it reads.
+    /// An epoch before the history floor (see
+    /// [`history_floor`](crate::transaction::TransactionManager::history_floor)),
+    /// whose versions the database may no longer hold, is the "not retained"
+    /// error.
+    fn pin_epoch(&self, epoch: EpochId) -> Result<(crate::transaction::ReadPin, EpochId)> {
         let epoch = epoch.min(self.read_epoch());
-        self.read_store(DirectTarget::Current)
-            .ok()?
-            .get_node_at_epoch(id, epoch)
+        let pin = self.transaction_manager.pin_read_at(epoch)?;
+        Ok((pin, epoch))
     }
 
     /// Gets an edge as it existed at a specific epoch.
     ///
     /// Uses pure epoch-based visibility (not transaction-aware). An epoch
     /// after the [current one](Self::current_epoch) reads at the current one.
-    #[must_use]
-    pub fn get_edge_at_epoch(&self, id: EdgeId, epoch: EpochId) -> Option<Edge> {
-        let epoch = epoch.min(self.read_epoch());
-        self.read_store(DirectTarget::Current)
-            .ok()?
-            .get_edge_at_epoch(id, epoch)
+    ///
+    /// # Errors
+    ///
+    /// As [`get_node_at_epoch`](Self::get_node_at_epoch).
+    pub fn get_edge_at_epoch(&self, id: EdgeId, epoch: EpochId) -> Result<Option<Edge>> {
+        let (_pin, epoch) = self.pin_epoch(epoch)?;
+        Ok(self
+            .read_store(DirectTarget::Current)?
+            .get_edge_at_epoch(id, epoch))
     }
 
     /// Returns all versions of a node with their creation/deletion epochs,
@@ -175,29 +197,32 @@ impl super::GrafeoDB {
 
     /// Returns a property value as it existed at a specific epoch.
     ///
-    /// Uses the internal `VersionLog` to do a point-in-time read. Returns
-    /// `None` if the property didn't exist or was deleted at that epoch. An
-    /// epoch after the [current one](Self::current_epoch) reads at the
-    /// current one.
-    #[cfg(feature = "temporal")]
-    #[must_use]
+    /// A point-in-time read of the versions the database keeps (see
+    /// [`HistoryRetention`](crate::config::HistoryRetention)). `None` if the
+    /// property didn't exist or was deleted at that epoch. An epoch after the
+    /// [current one](Self::current_epoch) reads at the current one.
+    ///
+    /// # Errors
+    ///
+    /// As [`get_node_at_epoch`](Self::get_node_at_epoch).
     pub fn get_node_property_at_epoch(
         &self,
         id: NodeId,
         key: &str,
         epoch: EpochId,
-    ) -> Option<Value> {
-        let epoch = epoch.min(self.read_epoch());
-        self.current_lpg_store()
-            .get_node_property_at_epoch(id, &PropertyKey::new(key), epoch)
+    ) -> Result<Option<Value>> {
+        let (_pin, epoch) = self.pin_epoch(epoch)?;
+        Ok(self
+            .current_lpg_store()
+            .get_node_property_at_epoch(id, &PropertyKey::new(key), epoch))
     }
 
     /// Returns the version timeline for a single property of a node, up to
     /// the current epoch.
     ///
     /// Each entry is `(epoch, value)` in ascending epoch order. Tombstones
-    /// (deletions) appear as `Value::Null`.
-    #[cfg(feature = "temporal")]
+    /// (deletions) appear as `Value::Null`. It holds the versions the
+    /// database keeps (see [`HistoryRetention`](crate::config::HistoryRetention)).
     #[must_use]
     pub fn get_node_property_history(&self, id: NodeId, key: &str) -> Vec<(EpochId, Value)> {
         let epoch = self.read_epoch();
@@ -212,8 +237,8 @@ impl super::GrafeoDB {
     /// current epoch.
     ///
     /// Each entry is `(property_key, Vec<(epoch, value)>)`; a property whose
-    /// versions are all later is left out.
-    #[cfg(feature = "temporal")]
+    /// versions are all later is left out. It holds the versions the
+    /// database keeps (see [`HistoryRetention`](crate::config::HistoryRetention)).
     #[must_use]
     pub fn get_all_node_property_history(
         &self,

@@ -538,11 +538,6 @@ impl TransactionChanges {
         read(&self.state.lock().set)
     }
 
-    /// Whether the transaction has an entry in a labeled property graph.
-    pub(crate) fn writes_any_graph(&self) -> bool {
-        self.writes_where(|_| true)
-    }
-
     /// Whether the transaction has an entry in the labeled property graph
     /// with storage key `key` (`None` for the default graph).
     #[cfg(any(feature = "lpg", feature = "vector-index", feature = "text-index"))]
@@ -559,27 +554,6 @@ impl TransactionChanges {
                 written.model == DataModel::Lpg && graph(written.key.as_deref())
             })
         })
-    }
-
-    /// The committed state of what the transactions of `sets` changed, from
-    /// their entries, for a checkpoint: the caller holds their writes,
-    /// rollbacks and commits until the store is written (see
-    /// [`OpenChangesByGraph`](grafeo_core::graph::lpg::OpenChangesByGraph)).
-    #[cfg(feature = "lpg")]
-    pub(crate) fn index(sets: &[Arc<Self>]) -> grafeo_core::graph::lpg::OpenChangesByGraph {
-        let states: Vec<_> = sets.iter().map(|changes| changes.state.lock()).collect();
-        let graphs = states.iter().flat_map(|state| {
-            state.targets.iter().flatten().map(move |(slot, _)| {
-                (
-                    state
-                        .set
-                        .graph(*slot)
-                        .and_then(|graph| graph.key.as_deref()),
-                    state.set.in_graph(*slot),
-                )
-            })
-        });
-        grafeo_core::graph::lpg::OpenChangesByGraph::index(graphs)
     }
 }
 

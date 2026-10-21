@@ -179,7 +179,8 @@ impl HashKey {
             // Inside a list or map, NULL equals NULL.
             Value::Null => HashKey::Null,
             Value::Bool(b) => HashKey::Bool(*b),
-            // `=` compares an integer with a float as this `f64`.
+            // An integer equals only a float of exactly its value, which is
+            // this `f64`.
             Value::Int64(i) => Self::number_key(*i as f64),
             Value::Float64(f) => Self::number_key(*f),
             // A decimal equals the integer and the float of its value.
@@ -229,13 +230,13 @@ impl HashKey {
         }
     }
 
-    /// The key of a number: `=` compares numbers as `f64` within
-    /// `f64::EPSILON`. Below 2 in magnitude distinct values can be that close,
-    /// so they share a key; from 2 up, distinct values differ by at least
-    /// `f64::EPSILON` and are never equal. NaN and the infinities equal
-    /// nothing.
+    /// The key of a number: `=` compares numbers exactly (IEEE for floats),
+    /// so equal numbers have the same `f64`, with `-0.0` equal to `0.0`. An
+    /// integer above 2^53 shares the key of the integers that round to the
+    /// same float, which the filter above the join tells apart. NaN equals
+    /// nothing, so its key matters only for that filter.
     fn number_key(number: f64) -> Self {
-        let number = if number.abs() < 2.0 { 0.0 } else { number };
+        let number = if number == 0.0 { 0.0 } else { number };
         HashKey::Int64(number.to_bits().cast_signed())
     }
 }
@@ -2187,19 +2188,13 @@ mod tests {
                 (Value::from("5"), Value::Float64(5.0)),
                 (Value::from("5.0"), Value::Float64(5.0)),
                 (Value::from("1e3"), Value::Float64(1000.0)),
-                (Value::from("-0"), Value::Float64(1e-17)),
+                (Value::from("-0"), Value::Float64(0.0)),
                 (Value::from("NaN"), Value::from("NaN")),
                 (Value::Int64(5), Value::Float64(5.0)),
-                (Value::Int64(0), Value::Float64(1e-17)),
-                (Value::Float64(1e-17), Value::Float64(-1e-17)),
+                (Value::Int64(0), Value::Float64(-0.0)),
                 (Value::Float64(0.0), Value::Float64(-0.0)),
-                (Value::Float64(0.999_999_999_999_999_9), Value::Int64(1)),
-                (Value::Float64(0.999_999_999_999_999_9), Value::Float64(1.0)),
-                (Value::Float64(-0.999_999_999_999_999_9), Value::Int64(-1)),
-                (
-                    Value::Int64(two_to_53 + 1),
-                    Value::Float64(two_to_53 as f64),
-                ),
+                (Value::Float64(f64::INFINITY), Value::Float64(f64::INFINITY)),
+                (Value::Int64(two_to_53), Value::Float64(two_to_53 as f64)),
                 (list(vec![Value::Null]), list(vec![Value::Null])),
                 (
                     list(vec![Value::Int64(1), Value::Null]),
@@ -2224,9 +2219,18 @@ mod tests {
             for (a, b) in [
                 (Value::from("5.0"), Value::Int64(5)),
                 (Value::Int64(two_to_53), Value::Int64(two_to_53 + 1)),
+                (
+                    Value::Int64(two_to_53 + 1),
+                    Value::Float64(two_to_53 as f64),
+                ),
                 (Value::Float64(f64::NAN), Value::Float64(f64::NAN)),
-                (Value::Float64(f64::INFINITY), Value::Float64(f64::INFINITY)),
                 (Value::Float64(2.0), Value::Float64(1.999_999_999_999_999_8)),
+                (Value::Float64(0.1 + 0.2), Value::Float64(0.3)),
+                (Value::Float64(1e-17), Value::Float64(-1e-17)),
+                (Value::Int64(0), Value::Float64(1e-17)),
+                (Value::from("-0"), Value::Float64(1e-17)),
+                (Value::Float64(0.999_999_999_999_999_9), Value::Int64(1)),
+                (Value::Float64(0.999_999_999_999_999_9), Value::Float64(1.0)),
                 (time("13:00:00"), time("13:00:00Z")),
                 (Value::Null, Value::Null),
             ] {
@@ -2250,6 +2254,10 @@ mod tests {
                 (Value::Int64(2), Value::Int64(3)),
                 (Value::Int64(2), Value::Float64(2.5)),
                 (Value::Float64(1e3), Value::Float64(1e3 + 1.0)),
+                // Exact equality needs no shared key for close numbers.
+                (Value::Float64(0.1 + 0.2), Value::Float64(0.3)),
+                (Value::Float64(1e-17), Value::Float64(0.0)),
+                (Value::Float64(0.999_999_999_999_999_9), Value::Int64(1)),
                 (Value::from("abc"), Value::from("abd")),
                 (Value::from("abc"), Value::Int64(0)),
                 (Value::Bool(true), Value::Bool(false)),

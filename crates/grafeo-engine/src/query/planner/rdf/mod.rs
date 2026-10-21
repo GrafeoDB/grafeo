@@ -810,11 +810,22 @@ impl RdfPlanner {
         output_columns.push(bind.variable.clone());
         input_types.push(LogicalType::Any);
 
-        let operator = Box::new(RdfBindOperator::new(
+        // The language tag of the bound literal goes into the variable's
+        // hidden __lang_<var> companion, as the triple scan fills it, so
+        // LANG, LANGMATCHES and DATATYPE of the new variable read it.
+        let lang_expr = FilterExpression::SparqlCall {
+            name: "LANG".to_string(),
+            args: vec![filter_expr.clone()],
+        };
+        let operator: Box<dyn Operator> = Box::new(RdfBindOperator::new(
             input_op,
             filter_expr,
-            variable_columns,
+            variable_columns.clone(),
         ));
+        let operator: Box<dyn Operator> =
+            Box::new(RdfBindOperator::new(operator, lang_expr, variable_columns));
+        output_columns.push(format!("__lang_{}", bind.variable));
+        input_types.push(LogicalType::Any);
         Ok((operator, output_columns, input_types))
     }
 
@@ -3528,6 +3539,72 @@ impl RdfExpressionPredicate {
         }
     }
 
+    /// The language tag of the literal `expr` evaluates to, or `""` when it
+    /// has none. A variable's tag is in its hidden `__lang_<var>` companion
+    /// column (the triple scan and BIND fill it); `STRLANG` gives its second
+    /// argument; `COALESCE` and `IF` the tag of the argument they choose; the
+    /// functions SPARQL 1.1 defines to keep the tag of their first argument
+    /// (`UCASE`, `LCASE`, `SUBSTR`, `STRBEFORE`, `STRAFTER`, `REPLACE`) keep it;
+    /// `CONCAT` keeps a tag all its arguments share. Every other expression
+    /// gives a literal without a tag.
+    fn expression_language(
+        &self,
+        expr: &FilterExpression,
+        chunk: &DataChunk,
+        row: usize,
+    ) -> String {
+        match expr {
+            FilterExpression::Variable(var_name) => self
+                .variable_columns
+                .get(&format!("__lang_{var_name}"))
+                .and_then(|&col_idx| chunk.column(col_idx)?.get_value(row))
+                .and_then(|value| match value {
+                    Value::String(tag) => Some(tag.to_string()),
+                    _ => None,
+                })
+                .unwrap_or_default(),
+            FilterExpression::SparqlCall { name, args } => match name.to_uppercase().as_str() {
+                "STRLANG" => match args.get(1).and_then(|tag| self.eval_expr(tag, chunk, row)) {
+                    Some(Value::String(tag)) => tag.to_string(),
+                    _ => String::new(),
+                },
+                "COALESCE" => args
+                    .iter()
+                    .find(|arg| {
+                        self.eval_expr(arg, chunk, row)
+                            .is_some_and(|value| !matches!(value, Value::Null))
+                    })
+                    .map(|arg| self.expression_language(arg, chunk, row))
+                    .unwrap_or_default(),
+                "IF" if args.len() >= 3 => {
+                    match self
+                        .eval_expr(&args[0], chunk, row)
+                        .and_then(|c| c.as_bool())
+                    {
+                        Some(true) => self.expression_language(&args[1], chunk, row),
+                        Some(false) => self.expression_language(&args[2], chunk, row),
+                        None => String::new(),
+                    }
+                }
+                "UCASE" | "LCASE" | "SUBSTR" | "STRBEFORE" | "STRAFTER" | "REPLACE" => args
+                    .first()
+                    .map(|arg| self.expression_language(arg, chunk, row))
+                    .unwrap_or_default(),
+                "CONCAT" => {
+                    let mut tags = args
+                        .iter()
+                        .map(|arg| self.expression_language(arg, chunk, row));
+                    match tags.next() {
+                        Some(first) if !first.is_empty() && tags.all(|tag| tag == first) => first,
+                        _ => String::new(),
+                    }
+                }
+                _ => String::new(),
+            },
+            _ => String::new(),
+        }
+    }
+
     /// Evaluates SPARQL function calls.
     fn eval_function_call(
         &self,
@@ -3880,19 +3957,26 @@ impl RdfExpressionPredicate {
                     return None;
                 }
                 let val = self.eval_expr(&args[0], chunk, row)?;
+                // A numeric literal reads as a number of its type; a plain or
+                // ill-typed literal stays text and is not numeric ("1").
                 let is_numeric =
-                    matches!(val, Value::Int64(_) | Value::Float64(_) | Value::Decimal(_))
-                        || matches!(&val, Value::String(s) if s.parse::<f64>().is_ok());
+                    matches!(val, Value::Int64(_) | Value::Float64(_) | Value::Decimal(_));
                 Some(Value::Bool(is_numeric))
             }
 
-            // ABS - absolute value
+            // ABS - absolute value; past the i64 range it goes on as a
+            // decimal, as XPath integers are unbounded
             "ABS" => {
                 if args.is_empty() {
                     return None;
                 }
                 match self.eval_expr(&args[0], chunk, row)? {
-                    Value::Int64(v) => Some(Value::Int64(v.abs())),
+                    Value::Int64(v) => {
+                        Some(v.checked_abs().map_or_else(
+                            || Value::Decimal(Decimal::from_i64(v).abs()),
+                            Value::Int64,
+                        ))
+                    }
                     Value::Float64(v) => Some(Value::Float64(v.abs())),
                     Value::Decimal(v) => Some(Value::Decimal(v.abs())),
                     _ => None,
@@ -3925,15 +4009,19 @@ impl RdfExpressionPredicate {
                 }
             }
 
-            // ROUND - round to nearest integer
+            // ROUND - fn:round: the nearest integer, of two equally near ones
+            // the one nearer positive infinity (ROUND(-2.5) is -2)
             "ROUND" => {
                 if args.is_empty() {
                     return None;
                 }
                 match self.eval_expr(&args[0], chunk, row)? {
                     Value::Int64(v) => Some(Value::Int64(v)),
-                    Value::Float64(v) => Some(Value::Float64(v.round())),
-                    Value::Decimal(v) => Some(Value::Decimal(v.round())),
+                    Value::Float64(v) => Some(Value::Float64(round_half_up(v))),
+                    Value::Decimal(v) => Some(Value::Decimal(
+                        v.checked_add(&Decimal::new(5, 1).ok()?)
+                            .map_or_else(|_| v.round(), |half_up| half_up.floor()),
+                    )),
                     _ => None,
                 }
             }
@@ -4218,20 +4306,10 @@ impl RdfExpressionPredicate {
 
             // LANG - language tag of a literal
             "LANG" => {
-                // Look up the companion language-tag column for the variable.
-                // The triple scan emits a hidden __lang_<var> column alongside
-                // each object variable.
-                if let Some(FilterExpression::Variable(var_name)) = args.first() {
-                    let lang_col_name = format!("__lang_{var_name}");
-                    if let Some(&col_idx) = self.variable_columns.get(&lang_col_name)
-                        && let Some(col) = chunk.column(col_idx)
-                        && let Some(Value::String(tag)) = col.get_value(row)
-                    {
-                        return Some(Value::String(tag));
-                    }
-                }
-                // No language tag found: return empty string per SPARQL spec
-                Some(Value::String(String::new().into()))
+                // The tag of the literal the argument evaluates to; "" when it
+                // has none (SPARQL 1.1, 17.4.2.7).
+                let tag = self.expression_language(args.first()?, chunk, row);
+                Some(Value::String(tag.into()))
             }
 
             // LANGMATCHES - BCP47 language range matching (Section 17.4.2.9)
@@ -4277,6 +4355,15 @@ impl RdfExpressionPredicate {
                     }
                 }
                 let val = self.eval_expr(args.first()?, chunk, row)?;
+                // A language-tagged literal is an rdf:langString (SPARQL 1.1,
+                // 17.4.2.8).
+                if matches!(val, Value::String(_))
+                    && !self.expression_language(&args[0], chunk, row).is_empty()
+                {
+                    return Some(Value::String(
+                        "http://www.w3.org/1999/02/22-rdf-syntax-ns#langString".into(),
+                    ));
+                }
                 let dt = match &val {
                     Value::String(_) => "http://www.w3.org/2001/XMLSchema#string",
                     Value::Int64(_) => "http://www.w3.org/2001/XMLSchema#integer",
@@ -4285,7 +4372,9 @@ impl RdfExpressionPredicate {
                     Value::Bool(_) => "http://www.w3.org/2001/XMLSchema#boolean",
                     Value::Date(_) => "http://www.w3.org/2001/XMLSchema#date",
                     Value::Time(_) => "http://www.w3.org/2001/XMLSchema#time",
-                    Value::Timestamp(_) => "http://www.w3.org/2001/XMLSchema#dateTime",
+                    Value::Timestamp(_) | Value::ZonedDatetime(_) => {
+                        "http://www.w3.org/2001/XMLSchema#dateTime"
+                    }
                     Value::Duration(_) => "http://www.w3.org/2001/XMLSchema#duration",
                     _ => return None,
                 };
@@ -4426,7 +4515,8 @@ impl RdfExpressionPredicate {
 }
 
 /// The XPath cast of `value` to the XSD type `name` (in capitals): `DECIMAL`,
-/// `DOUBLE`, `FLOAT`, `INTEGER` (and `INT`, `LONG`), `STRING` or `BOOLEAN`.
+/// `DOUBLE`, `FLOAT`, `INTEGER` (and `INT`, `LONG`), `STRING`, `BOOLEAN`,
+/// `DATE`, `TIME` or `DATETIME`.
 /// A number casts to a number (a double by its shortest text to a decimal, a
 /// decimal or a double to an integer by truncation); a string casts as the
 /// lexical form of the type. `None` for another type, a value that does not
@@ -4478,8 +4568,53 @@ fn xsd_cast(name: &str, value: &Value) -> Option<Value> {
             },
             _ => None,
         },
+        // A date from its text or from a dateTime (its local date).
+        "DATE" => match value {
+            Value::Date(d) => Some(Value::Date(*d)),
+            Value::String(s) => grafeo_common::types::Date::parse(s.trim()).map(Value::Date),
+            Value::Timestamp(_) | Value::ZonedDatetime(_) => {
+                parse_datetime_date(&value_to_string(value)).map(Value::Date)
+            }
+            _ => None,
+        },
+        // A time from its text or from a dateTime (its local time).
+        "TIME" => match value {
+            Value::Time(t) => Some(Value::Time(*t)),
+            Value::String(s) => grafeo_common::types::Time::parse(s.trim()).map(Value::Time),
+            Value::Timestamp(_) | Value::ZonedDatetime(_) => {
+                parse_datetime_time(&value_to_string(value)).map(Value::Time)
+            }
+            _ => None,
+        },
+        // A dateTime from its text (zoned when it has an offset) or from a
+        // date (its midnight).
+        "DATETIME" => match value {
+            Value::Timestamp(_) | Value::ZonedDatetime(_) => Some(value.clone()),
+            Value::String(s) => parse_xsd_datetime(s.trim()),
+            Value::Date(d) => grafeo_common::types::Time::parse("00:00:00").map(|midnight| {
+                Value::Timestamp(grafeo_common::types::Timestamp::from_date_time(
+                    *d, midnight,
+                ))
+            }),
+            _ => None,
+        },
         _ => None,
     }
+}
+
+/// The value of an `xsd:dateTime` lexical form: a zoned datetime when it has
+/// an offset, otherwise a timestamp of its date and time. `None` when it is no
+/// dateTime (a date alone has no `T`).
+fn parse_xsd_datetime(text: &str) -> Option<Value> {
+    if let Some(zoned) = grafeo_common::types::ZonedDatetime::parse(text) {
+        return Some(Value::ZonedDatetime(zoned));
+    }
+    let pos = text.find('T')?;
+    let date = grafeo_common::types::Date::parse(&text[..pos])?;
+    let time = grafeo_common::types::Time::parse(&text[pos + 1..])?;
+    Some(Value::Timestamp(
+        grafeo_common::types::Timestamp::from_date_time(date, time),
+    ))
 }
 
 /// Parses the date component from a dateTime or date string.
@@ -4908,6 +5043,19 @@ fn numeric(value: &Value) -> Option<Numeric> {
     }
 }
 
+/// fn:round of a double: the nearest integer, of two equally near ones the
+/// one nearer positive infinity, keeping the sign of a negative value that
+/// rounds to zero. `v - v.floor()` is exact for every finite double.
+fn round_half_up(v: f64) -> f64 {
+    let floor = v.floor();
+    let rounded = if v - floor >= 0.5 { floor + 1.0 } else { floor };
+    if rounded == 0.0 {
+        0.0_f64.copysign(v)
+    } else {
+        rounded
+    }
+}
+
 /// `+`, `-`, `*` and `/` by the XPath numeric promotion of SPARQL 1.1
 /// (`op:numeric-add` and the others): a double makes a double; otherwise a
 /// decimal makes a decimal; two integers give an integer, except a division,
@@ -4930,7 +5078,8 @@ fn numeric_op(left: &Value, op: BinaryFilterOp, right: &Value) -> Option<Value> 
             BinaryFilterOp::Add => Some(Value::Float64(a + b)),
             BinaryFilterOp::Sub => Some(Value::Float64(a - b)),
             BinaryFilterOp::Mul => Some(Value::Float64(a * b)),
-            BinaryFilterOp::Div if b != 0.0 => Some(Value::Float64(a / b)),
+            // IEEE 754: a double divided by zero is INF, -INF or NaN.
+            BinaryFilterOp::Div => Some(Value::Float64(a / b)),
             _ => None,
         };
     }
@@ -4981,24 +5130,25 @@ where
                 l.cmp(r)
             }
         }
-        (Value::Int64(l), Value::Float64(r)) => (*l as f64).partial_cmp(r)?,
-        (Value::Float64(l), Value::Int64(r)) => l.partial_cmp(&(*r as f64))?,
+        // An integer and a double compare exactly, as ORDER BY and = do.
+        (Value::Int64(l), Value::Float64(r)) => {
+            grafeo_core::execution::operators::value_utils::partial_cmp_int_float(*l, *r)?
+        }
+        (Value::Float64(l), Value::Int64(r)) => {
+            grafeo_core::execution::operators::value_utils::partial_cmp_int_float(*r, *l)?.reverse()
+        }
         // RDF values are often stored as strings - try numeric conversion
         (Value::String(s), Value::Int64(r)) => {
-            let l_num = s.parse::<f64>().ok()?;
-            l_num.partial_cmp(&(*r as f64))?
+            grafeo_core::execution::operators::value_utils::partial_cmp_text_int(s, *r)?
         }
         (Value::String(s), Value::Float64(r)) => {
-            let l_num = s.parse::<f64>().ok()?;
-            l_num.partial_cmp(r)?
+            grafeo_core::execution::operators::value_utils::partial_cmp_text_float(s, *r)?
         }
         (Value::Int64(l), Value::String(s)) => {
-            let r_num = s.parse::<f64>().ok()?;
-            (*l as f64).partial_cmp(&r_num)?
+            grafeo_core::execution::operators::value_utils::partial_cmp_text_int(s, *l)?.reverse()
         }
         (Value::Float64(l), Value::String(s)) => {
-            let r_num = s.parse::<f64>().ok()?;
-            l.partial_cmp(&r_num)?
+            grafeo_core::execution::operators::value_utils::partial_cmp_text_float(s, *l)?.reverse()
         }
         _ => return None,
     };
@@ -5017,17 +5167,18 @@ fn rdf_values_equal(left: &Value, right: &Value) -> bool {
         }
         (Value::Bool(a), Value::Bool(b)) => a == b,
         (Value::Int64(a), Value::Int64(b)) => a == b,
-        (Value::Float64(a), Value::Float64(b)) => (a - b).abs() < f64::EPSILON,
+        // op:numeric-equal on doubles is IEEE: NaN equals nothing.
+        (Value::Float64(a), Value::Float64(b)) => a == b,
         (Value::String(a), Value::String(b)) => a == b,
         (Value::Int64(a), Value::Float64(b)) | (Value::Float64(b), Value::Int64(a)) => {
-            (*a as f64 - b).abs() < f64::EPSILON
+            grafeo_core::execution::operators::value_utils::int_equals_float(*a, *b)
         }
         // RDF stores numeric literals as strings: allow cross-type equality
         (Value::String(s), Value::Int64(i)) | (Value::Int64(i), Value::String(s)) => {
             s.parse::<i64>().is_ok_and(|n| n == *i)
         }
         (Value::String(s), Value::Float64(f)) | (Value::Float64(f), Value::String(s)) => {
-            s.parse::<f64>().is_ok_and(|n| (n - f).abs() < f64::EPSILON)
+            grafeo_core::execution::operators::value_utils::text_equals_float(s, *f)
         }
         _ => false,
     }
@@ -5394,10 +5545,13 @@ mod tests {
         });
 
         let (_op, columns, types) = planner.plan_operator(&bind).unwrap();
-        assert_eq!(columns.last(), Some(&"label".to_string()));
+        // The BIND variable, then its hidden language-tag companion
+        let n = columns.len();
+        assert_eq!(columns[n - 2], "label");
+        assert_eq!(columns[n - 1], "__lang_label");
         // The input columns keep their types (the object, name, is Any), and
         // the BIND column is Any
-        let last_idx = types.len() - 1;
+        let last_idx = n - 2;
         assert_eq!(
             types[last_idx],
             LogicalType::Any,
@@ -6914,5 +7068,53 @@ mod tests {
         ));
         let any = op.into_any();
         assert!(any.downcast::<RdfTripleScanOperator>().is_ok());
+    }
+
+    /// fn:round takes a half towards positive infinity, keeps the sign of a
+    /// negative value that rounds to zero, and passes infinities and NaN on.
+    #[test]
+    fn round_half_up_follows_fn_round() {
+        assert_eq!(round_half_up(2.5), 3.0);
+        assert_eq!(round_half_up(-2.5), -2.0);
+        assert_eq!(round_half_up(-2.6), -3.0);
+        assert_eq!(round_half_up(0.49999999999999994), 0.0);
+        assert!(round_half_up(-0.4).is_sign_negative());
+        assert_eq!(round_half_up(-0.4), 0.0);
+        assert_eq!(round_half_up(-0.5), 0.0);
+        assert!(round_half_up(-0.5).is_sign_negative());
+        assert_eq!(round_half_up(f64::INFINITY), f64::INFINITY);
+        assert_eq!(round_half_up(f64::NEG_INFINITY), f64::NEG_INFINITY);
+        assert!(round_half_up(f64::NAN).is_nan());
+        assert_eq!(
+            round_half_up(4_503_599_627_370_495.5),
+            4_503_599_627_370_496.0
+        );
+    }
+
+    /// A double divided by zero follows IEEE 754; integer and decimal
+    /// division by zero leave the result unbound.
+    #[test]
+    fn numeric_division_by_zero() {
+        let divide = |left: Value, right: Value| numeric_op(&left, BinaryFilterOp::Div, &right);
+        assert_eq!(
+            divide(Value::Float64(1.0), Value::Int64(0)),
+            Some(Value::Float64(f64::INFINITY))
+        );
+        assert_eq!(
+            divide(Value::Float64(-1.0), Value::Int64(0)),
+            Some(Value::Float64(f64::NEG_INFINITY))
+        );
+        assert!(matches!(
+            divide(Value::Float64(0.0), Value::Float64(0.0)),
+            Some(Value::Float64(v)) if v.is_nan()
+        ));
+        assert_eq!(divide(Value::Int64(1), Value::Int64(0)), None);
+        assert_eq!(
+            divide(
+                Value::Decimal(Decimal::new(15, 1).unwrap()),
+                Value::Int64(0)
+            ),
+            None
+        );
     }
 }

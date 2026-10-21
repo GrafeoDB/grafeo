@@ -49,7 +49,8 @@ use grafeo_core::execution::operators::{
     WriteInProgress, WriteTarget,
 };
 use grafeo_core::graph::apply::{ChangeTarget, Writer};
-use grafeo_core::graph::lpg::{Edge, LpgStore, Node};
+use grafeo_core::graph::lpg::{Edge, Node};
+use grafeo_core::graph::rowgroup::RowGroupStore;
 use grafeo_core::graph::{Direction, GraphStoreMut, GraphStoreSearch};
 
 use super::GrafeoDB;
@@ -161,7 +162,7 @@ struct ImmediateCall<'a> {
     /// Holds commits off until the call's epoch is published.
     commits: CommitsHeld<'a>,
     /// The database's root store, which follows the call's epoch.
-    root: Arc<LpgStore>,
+    root: Arc<RowGroupStore>,
     /// The epoch the call commits at.
     epoch: EpochId,
     /// The call's writer.
@@ -250,7 +251,7 @@ impl GrafeoDB {
     fn direct_store(
         &self,
         target: DirectTarget<'_>,
-    ) -> Result<Option<(Arc<LpgStore>, Option<String>)>> {
+    ) -> Result<Option<(Arc<RowGroupStore>, Option<String>)>> {
         let Some(root) = self.root_store() else {
             return Ok(None);
         };
@@ -328,7 +329,7 @@ impl GrafeoDB {
     /// Fails, like a commit, once the database is closed.
     fn write_immediate<T>(
         &self,
-        store: &Arc<LpgStore>,
+        store: &Arc<RowGroupStore>,
         graph: Option<&str>,
         write: impl FnOnce(&GraphWriter) -> std::result::Result<T, OperatorError>,
     ) -> Result<T> {
@@ -350,7 +351,7 @@ impl GrafeoDB {
     /// the stores to the call's epoch and builds its writer.
     fn start_immediate<'a>(
         &'a self,
-        store: &Arc<LpgStore>,
+        store: &Arc<RowGroupStore>,
         graph: Option<&str>,
     ) -> Result<ImmediateCall<'a>> {
         let commits = self.transaction_manager.hold_commits_for_change()?;
@@ -396,7 +397,7 @@ impl GrafeoDB {
     /// whether the call happened.
     ///
     /// [`TransactionError::CommitOutcomeUnknown`]: grafeo_common::utils::error::TransactionError::CommitOutcomeUnknown
-    fn finish_immediate(&self, call: ImmediateCall<'_>, store: &Arc<LpgStore>) -> Result<()> {
+    fn finish_immediate(&self, call: ImmediateCall<'_>, store: &Arc<RowGroupStore>) -> Result<()> {
         let ImmediateCall {
             commits,
             root,
@@ -405,11 +406,14 @@ impl GrafeoDB {
         } = call;
         drop(writer);
         let changes = self.immediate_recorder().finish();
+        // While the database keeps history, the time of the call: its WAL
+        // group carries it, and the time index records it once published.
+        let at = self.transaction_manager.commit_time();
 
         #[cfg(feature = "wal")]
         if let Some(wal) = &self.wal
             && !changes.is_empty()
-            && let Err(error) = Self::log_immediate(wal, &changes, epoch)
+            && let Err(error) = Self::log_immediate(wal, &changes, epoch, at)
         {
             self.transaction_manager.poison(&format!(
                 "a direct write at epoch {epoch:?} is applied but not in the WAL: {error}"
@@ -430,6 +434,9 @@ impl GrafeoDB {
         #[cfg(not(any(feature = "wal", feature = "cdc")))]
         drop(changes);
         self.transaction_manager.sync_epoch(epoch);
+        if let Some(at) = at {
+            self.transaction_manager.record_commit_time(epoch, at);
+        }
         drop(commits);
         self.prune_versions(&root, store);
         Ok(())
@@ -446,15 +453,17 @@ impl GrafeoDB {
         wal: &grafeo_storage::wal::Wal,
         changes: &grafeo_common::change::ChangeSet,
         epoch: EpochId,
+        at: Option<u64>,
     ) -> Result<()> {
         let mut group = wal
             .begin_group(TransactionId::SYSTEM)
             .map_err(crate::database::wal_log::commit_error)?;
-        crate::database::wal_log::write_group(
+        crate::database::wal_log::write_group_at(
             &mut group,
             changes,
             epoch,
             grafeo_common::storage::log_record::Origin::Direct,
+            at,
         )?;
         group
             .finish()
@@ -468,7 +477,7 @@ impl GrafeoDB {
     /// catalog.
     fn direct_writer(
         &self,
-        store: &Arc<LpgStore>,
+        store: &Arc<RowGroupStore>,
         graph: Option<&str>,
         context: (EpochId, Option<TransactionId>),
         recording: Recording,
@@ -518,10 +527,9 @@ impl GrafeoDB {
 
     /// After a direct call that wrote `store`, collects the versions no
     /// reader needs any more in the root store and `store`, at the read
-    /// horizon: after every call on a store that collects after every
-    /// write, every `gc_interval` commits on `LpgStore` (see
+    /// horizon, when a collect is due for them (see
     /// [`AfterWrite`](crate::database::collect::AfterWrite)).
-    fn prune_versions(&self, root: &Arc<LpgStore>, store: &Arc<LpgStore>) {
+    fn prune_versions(&self, root: &Arc<RowGroupStore>, store: &Arc<RowGroupStore>) {
         crate::database::collect::AfterWrite::next(&self.commit_counter, self.config.gc_interval())
             .run(&self.transaction_manager, &[&**root, &**store]);
     }
@@ -533,7 +541,7 @@ impl GrafeoDB {
     /// commit, once the database is closed.
     fn write_private<T>(
         &self,
-        store: &Arc<LpgStore>,
+        store: &Arc<RowGroupStore>,
         graph: Option<&str>,
         write: impl FnOnce(&GraphWriter) -> std::result::Result<T, OperatorError>,
     ) -> Result<T> {
@@ -560,7 +568,7 @@ impl GrafeoDB {
     /// [`write_private`](Self::write_private)) and builds its writer.
     fn start_private(
         &self,
-        store: &Arc<LpgStore>,
+        store: &Arc<RowGroupStore>,
         graph: Option<&str>,
     ) -> Result<(TransactionId, Arc<TransactionChanges>, GraphWriter)> {
         let (transaction, changes) = self.transaction_manager.begin_private()?;
@@ -610,7 +618,7 @@ impl GrafeoDB {
         &self,
         transaction: TransactionId,
         changes: &TransactionChanges,
-        store: &Arc<LpgStore>,
+        store: &Arc<RowGroupStore>,
     ) -> Result<()> {
         let commit = match self.transaction_manager.start_commit(transaction) {
             Ok(commit) => commit,

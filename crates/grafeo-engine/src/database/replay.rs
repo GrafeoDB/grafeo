@@ -10,6 +10,11 @@
 //! [`standalone::apply`] or [`standalone::apply_rdf`]. A group the scan finds
 //! incomplete (no LAST frame) was never committed and is not applied.
 //!
+//! While the database keeps history, each group's time is recorded in the
+//! history's time index (the time its commit recorded live), and the store,
+//! told it keeps history, keeps what the group's writes replace, stamped at
+//! its epoch: a crash keeps the history the log holds (H2c).
+//!
 //! [`GroupBegin`]: grafeo_common::storage::log_record::GroupBegin
 //! [`ChangeTarget::apply`]: grafeo_core::graph::apply::ChangeTarget::apply
 //! [`Writer::Replay`]: grafeo_core::graph::apply::Writer::Replay
@@ -21,13 +26,14 @@ use grafeo_common::change::{DataModel, DataOp, StandaloneOp};
 use grafeo_common::storage::{LogRecord, read_log_records};
 use grafeo_common::types::EpochId;
 use grafeo_common::utils::error::{Error, Result, StorageError};
-use grafeo_core::graph::apply::{ChangeTarget, Writer};
-use grafeo_core::graph::lpg::LpgStore;
+use grafeo_core::graph::apply::Writer;
 #[cfg(feature = "triple-store")]
 use grafeo_core::graph::rdf::RdfStore;
+use grafeo_core::graph::rowgroup::RowGroupStore;
 use grafeo_storage::wal::{ScanEnd, ScanOptions, WalScan};
 
 use super::catalog_section::GraphIndexes;
+use super::root_store::RootStore;
 use super::standalone::{self, Applying};
 use crate::catalog::Catalog;
 
@@ -42,9 +48,9 @@ pub(crate) struct Replayed {
 }
 
 /// The stores and the catalog a replay applies groups to.
-pub(crate) struct Targets<'a> {
+pub(crate) struct Targets<'a, S: RootStore = RowGroupStore> {
     /// The root LPG store, which holds the named graphs.
-    pub(crate) store: &'a Arc<LpgStore>,
+    pub(crate) store: &'a Arc<S>,
     /// The RDF store.
     #[cfg(feature = "triple-store")]
     pub(crate) rdf: &'a RdfStore,
@@ -53,6 +59,9 @@ pub(crate) struct Targets<'a> {
     /// The vector and text indexes the replayed index records put, built
     /// once the data is loaded.
     pub(crate) unbuilt: &'a mut Vec<GraphIndexes>,
+    /// The transaction manager whose history records each group's time;
+    /// `None` records nothing.
+    pub(crate) history: Option<&'a crate::transaction::TransactionManager>,
 }
 
 /// Replays the groups of the WAL in `dir` that follow `options.from_lsn`
@@ -66,10 +75,10 @@ pub(crate) struct Targets<'a> {
 /// and a record that does not apply (the log does not fit the image); the
 /// scanner's errors (damage the scan does not end at, a gap, a foreign or
 /// newer segment, a wrong key) as I/O or storage errors.
-pub(crate) fn replay(
+pub(crate) fn replay<S: RootStore>(
     dir: &Path,
     options: ScanOptions,
-    targets: &mut Targets<'_>,
+    targets: &mut Targets<'_, S>,
 ) -> Result<Replayed> {
     let mut scan = WalScan::open(dir, options).map_err(Error::from)?;
     let mut groups = 0;
@@ -98,6 +107,9 @@ pub(crate) fn replay(
                 .map_err(|error| failed(error.to_string()))?;
         }
         targets.store.sync_epoch(begin.epoch);
+        if let Some(manager) = targets.history {
+            manager.record_commit_time(begin.epoch, begin.timestamp_ms);
+        }
         groups += 1;
     }
     let end = scan.finish().map_err(Error::from)?;
@@ -105,7 +117,11 @@ pub(crate) fn replay(
 }
 
 /// Applies one record of a group at `epoch`.
-fn apply_record(record: LogRecord, epoch: EpochId, targets: &mut Targets<'_>) -> Result<()> {
+fn apply_record<S: RootStore>(
+    record: LogRecord,
+    epoch: EpochId,
+    targets: &mut Targets<'_, S>,
+) -> Result<()> {
     match record {
         LogRecord::GroupBegin(_) => Err(Error::Internal(
             "a second GroupBegin inside a group".to_string(),
@@ -131,7 +147,11 @@ fn apply_record(record: LogRecord, epoch: EpochId, targets: &mut Targets<'_>) ->
 
 /// Applies a logged triple insert or delete to the RDF store.
 #[cfg(feature = "triple-store")]
-fn apply_triple(graph: Option<&str>, op: DataOp, targets: &Targets<'_>) -> Result<()> {
+fn apply_triple<S: RootStore>(
+    graph: Option<&str>,
+    op: DataOp,
+    targets: &Targets<'_, S>,
+) -> Result<()> {
     use grafeo_core::graph::rdf::Triple;
 
     match op {
@@ -150,7 +170,11 @@ fn apply_triple(graph: Option<&str>, op: DataOp, targets: &Targets<'_>) -> Resul
 /// A build without the triple store cannot replay a triple: the next
 /// checkpoint would write the file without it.
 #[cfg(not(feature = "triple-store"))]
-fn apply_triple(_graph: Option<&str>, _op: DataOp, _targets: &Targets<'_>) -> Result<()> {
+fn apply_triple<S: RootStore>(
+    _graph: Option<&str>,
+    _op: DataOp,
+    _targets: &Targets<'_, S>,
+) -> Result<()> {
     Err(Error::Internal(
         "the log holds RDF triples, which this build (without the triple store) cannot keep"
             .to_string(),
@@ -158,7 +182,7 @@ fn apply_triple(_graph: Option<&str>, _op: DataOp, _targets: &Targets<'_>) -> Re
 }
 
 /// Applies a logged standalone op as the statement that logged it did.
-fn apply_standalone(op: &StandaloneOp, targets: &mut Targets<'_>) -> Result<()> {
+fn apply_standalone<S: RootStore>(op: &StandaloneOp, targets: &mut Targets<'_, S>) -> Result<()> {
     if matches!(op, StandaloneOp::RdfGraph(_)) {
         #[cfg(feature = "triple-store")]
         {
@@ -198,7 +222,8 @@ mod tests {
     use grafeo_common::storage::log_record::Origin;
     use grafeo_common::types::{ArcStr, EpochId, NodeId, PropertyKey, TransactionId, Value};
     use grafeo_common::utils::error::{Error, StorageError};
-    use grafeo_core::graph::lpg::LpgStore;
+    use grafeo_core::graph::GraphStore as _;
+    use grafeo_core::graph::rowgroup::RowGroupStore;
     use grafeo_storage::wal::{DurabilityMode, ScanOptions, TailKind, Wal, WalOptions};
 
     use super::{Replayed, Targets, replay};
@@ -265,7 +290,7 @@ mod tests {
     fn replay_into(
         dir: &std::path::Path,
         from_lsn: u64,
-        store: &Arc<LpgStore>,
+        store: &Arc<RowGroupStore>,
         catalog: &Catalog,
     ) -> grafeo_common::utils::error::Result<Replayed> {
         #[cfg(feature = "triple-store")]
@@ -280,11 +305,12 @@ mod tests {
                 rdf: &rdf,
                 catalog,
                 unbuilt: &mut unbuilt,
+                history: None,
             },
         )
     }
 
-    fn name_and_city(store: &LpgStore, id: u64) -> (Option<Value>, Option<Value>) {
+    fn name_and_city(store: &RowGroupStore, id: u64) -> (Option<Value>, Option<Value>) {
         (
             store.get_node_property(NodeId::new(id), &PropertyKey::new("name")),
             store.get_node_property(NodeId::new(id), &PropertyKey::new("city")),
@@ -306,7 +332,7 @@ mod tests {
             );
             commit(&wal, 3, &set_of(None, vec![set_city(3, "Amsterdam")]), 2);
         }
-        let store = Arc::new(LpgStore::new().unwrap());
+        let store = Arc::new(RowGroupStore::new());
         let replayed = replay_into(dir.path(), 0, &store, &Catalog::new()).unwrap();
 
         assert_eq!(replayed.groups, 2);
@@ -333,9 +359,9 @@ mod tests {
             commit(&wal, 3, &set_of(None, vec![set_city(3, "Berlin")]), 2);
         }
         // The image of the checkpoint: Alix, without a city.
-        let store = Arc::new(LpgStore::new().unwrap());
+        let store = Arc::new(RowGroupStore::new());
         replay_into(dir.path(), 0, &store, &Catalog::new()).unwrap();
-        let image = Arc::new(LpgStore::new().unwrap());
+        let image = Arc::new(RowGroupStore::new());
         {
             let first_only = tempfile::tempdir().unwrap();
             let wal = wal(first_only.path(), 0);
@@ -363,7 +389,7 @@ mod tests {
             // A property of a node no group created.
             commit(&wal, 2, &set_of(None, vec![set_city(88, "Paris")]), 1);
         }
-        let store = Arc::new(LpgStore::new().unwrap());
+        let store = Arc::new(RowGroupStore::new());
         let error = replay_into(dir.path(), 0, &store, &Catalog::new()).unwrap_err();
         let Error::Storage(StorageError::RecoveryFailed(message)) = &error else {
             panic!("not a recovery failure: {error}");
@@ -402,7 +428,7 @@ mod tests {
         file.set_len(length - 3).unwrap();
         drop(file);
 
-        let store = Arc::new(LpgStore::new().unwrap());
+        let store = Arc::new(RowGroupStore::new());
         let replayed = replay_into(dir.path(), 0, &store, &Catalog::new()).unwrap();
         assert_eq!(replayed.groups, 1);
         assert_eq!(replayed.end.end_lsn, committed_end);
@@ -434,7 +460,7 @@ mod tests {
                 1,
             );
         }
-        let store = Arc::new(LpgStore::new().unwrap());
+        let store = Arc::new(RowGroupStore::new());
         let replayed = replay_into(dir.path(), 0, &store, &Catalog::new()).unwrap();
         assert_eq!(replayed.groups, 2);
         let trips = store.graph("trips").expect("the graph was created");
@@ -482,7 +508,7 @@ mod tests {
             .unwrap();
             commit(&wal, 2, &set, 1);
         }
-        let store = Arc::new(LpgStore::new().unwrap());
+        let store = Arc::new(RowGroupStore::new());
         let rdf = RdfStore::new();
         let mut unbuilt = Vec::new();
         replay(
@@ -493,6 +519,7 @@ mod tests {
                 rdf: &rdf,
                 catalog: &Catalog::new(),
                 unbuilt: &mut unbuilt,
+                history: None,
             },
         )
         .unwrap();

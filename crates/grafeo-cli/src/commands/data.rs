@@ -314,7 +314,7 @@ fn for_each_record(input: &Path, mut each: impl FnMut(u64, Record) -> Result<()>
 }
 
 fn dump_jsonl(path: &std::path::Path, out: &std::path::Path, quiet: bool) -> Result<()> {
-    let db = super::open_existing(path)?;
+    let db = super::open_existing_read_only(path)?;
     let file = std::fs::File::create(out)
         .with_context(|| format!("Failed to create output file: {}", out.display()))?;
     let mut writer = std::io::BufWriter::new(file);
@@ -370,7 +370,7 @@ fn dump_arrow(path: &std::path::Path, out: &std::path::Path, quiet: bool) -> Res
     use grafeo_common::LogicalType;
     use grafeo_common::types::Value;
 
-    let db = super::open_existing(path)?;
+    let db = super::open_existing_read_only(path)?;
 
     // Build nodes RecordBatch
     let nodes: Vec<_> = db.iter_nodes().collect();
@@ -510,7 +510,7 @@ fn dump_arrow(_path: &std::path::Path, _out: &std::path::Path, _quiet: bool) -> 
 }
 
 fn dump_gexf(path: &std::path::Path, out: &std::path::Path, quiet: bool) -> Result<()> {
-    let db = super::open_existing(path)?;
+    let db = super::open_existing_read_only(path)?;
     let nodes: Vec<_> = db.iter_nodes().collect();
     let edges: Vec<_> = db.iter_edges().collect();
 
@@ -535,7 +535,7 @@ fn dump_gexf(path: &std::path::Path, out: &std::path::Path, quiet: bool) -> Resu
 }
 
 fn dump_graphml(path: &std::path::Path, out: &std::path::Path, quiet: bool) -> Result<()> {
-    let db = super::open_existing(path)?;
+    let db = super::open_existing_read_only(path)?;
     let nodes: Vec<_> = db.iter_nodes().collect();
     let edges: Vec<_> = db.iter_edges().collect();
 

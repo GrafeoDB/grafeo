@@ -31,6 +31,19 @@ impl Bitset {
         }
     }
 
+    /// Sets the rows of `bits` in word `index`, rows `[64 * index, 64 *
+    /// (index + 1))`: what [`set`](Self::set) of each does, the bitset
+    /// growing alike (not at all for no rows).
+    pub(super) fn set_word(&mut self, index: usize, bits: u64) {
+        if bits == 0 {
+            return;
+        }
+        if index >= self.words.len() {
+            self.words.resize(index + 1, 0);
+        }
+        self.words[index] |= bits;
+    }
+
     /// Sets `row` to `value`.
     pub(super) fn put(&mut self, row: usize, value: bool) {
         if value {

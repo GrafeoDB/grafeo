@@ -404,7 +404,6 @@ fn searches_of_indexes_made_after_compact_skip_deleted_compacted_nodes() {
 /// A delete that is not committed yet hides nothing from the other readers;
 /// its rollback leaves the node found, and a committed delete hides it.
 #[test]
-#[ignore = "#412: the plain store's indexes drop a node at an uncommitted delete"]
 fn an_open_delete_hides_nothing_until_it_commits() {
     let db = indexed_then_compacted();
     let canals = |db: &GrafeoDB| {

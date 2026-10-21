@@ -32,6 +32,8 @@ pub mod database;
 pub mod embedding;
 pub mod execution;
 pub mod export;
+#[cfg(feature = "gql")]
+pub mod import;
 pub mod memory_usage;
 #[cfg(feature = "metrics")]
 pub mod metrics;
@@ -50,10 +52,12 @@ pub use admin::{
 };
 pub use auth::{Grant, Identity, Role, StatementKind};
 pub use catalog::{Catalog, CatalogError, IndexDefinition, IndexType};
-pub use config::{AccessMode, Config, ConfigError, DurabilityMode, GraphModel};
+pub use config::{AccessMode, Config, ConfigError, DurabilityMode, GraphModel, HistoryRetention};
 pub use database::GrafeoDB;
 #[cfg(feature = "lpg")]
 pub use database::GraphHandle;
+#[cfg(feature = "lpg")]
+pub use database::{AsOfView, TimePoint};
 pub use grafeo_core::graph::{Direction, GraphStore, GraphStoreMut, ProjectionSpec};
 /// The options `GrafeoDB::create_text_index_with` takes.
 #[cfg(feature = "text-index")]

@@ -12,6 +12,7 @@ use pyo3_async_runtimes::tokio::future_into_py;
 
 use grafeo_common::storage::{SectionMemoryConfig, SectionType, TierOverride};
 use grafeo_common::types::{EdgeId, LogicalType, NodeId, Value};
+use grafeo_core::graph::GraphStore as _;
 use grafeo_engine::config::Config;
 use grafeo_engine::database::GrafeoDB;
 
@@ -56,6 +57,7 @@ fn section_type_to_str(section_type: SectionType) -> &'static str {
         SectionType::RdfStore => "RdfStore",
         SectionType::CompactStore => "CompactStore",
         SectionType::OverlayDeletions => "OverlayDeletions",
+        SectionType::TimeIndex => "TimeIndex",
         SectionType::VectorStore => "VectorStore",
         SectionType::TextIndex => "TextIndex",
         SectionType::RdfRing => "RdfRing",
@@ -132,6 +134,15 @@ use crate::gil::without_gil;
 use crate::graph::{PyEdge, PyNode};
 use crate::query::{PyQueryBuilder, PyQueryResult};
 use crate::types::PyValue;
+
+/// A view of the committed graph of now, pinned while it lives: the store
+/// reads at its [`read_view`](grafeo_engine::AsOfView::read_view) see one
+/// committed state, garbage collection keeps what they read, and no commit
+/// that has not completed shows. Every binding method that makes several
+/// store calls for one answer reads through one.
+pub(crate) fn committed_now(db: &GrafeoDB) -> Result<grafeo_engine::AsOfView, PyGrafeoError> {
+    Ok(db.as_of(db.current_epoch())?)
+}
 
 /// Holds results from async query execution.
 ///
@@ -356,6 +367,28 @@ impl PyGrafeoDB {
         work: impl FnOnce(&GrafeoDB) -> Result<T, PyGrafeoError> + Send,
     ) -> PyResult<T> {
         without_gil(py, || work(&self.inner.read()))
+    }
+
+    /// [`grafeo_engine::import::import_nodes`] in a session of its own,
+    /// without the GIL; a missing file is a `FileNotFoundError`.
+    fn import_nodes(
+        &self,
+        path: &str,
+        label: &str,
+        format: grafeo_engine::import::ImportFormat,
+        py: Python<'_>,
+    ) -> PyResult<u64> {
+        std::fs::metadata(path)
+            .map_err(|e| pyo3::exceptions::PyFileNotFoundError::new_err(format!("{path}: {e}")))?;
+        let path = std::path::Path::new(path);
+        self.released(py, |db| {
+            Ok(grafeo_engine::import::import_nodes(
+                &db.session(),
+                path,
+                label,
+                format,
+            )?)
+        })
     }
 
     /// Executes a query in the given language, converting Python params and
@@ -946,13 +979,17 @@ impl PyGrafeoDB {
     /// Returns the node as it existed at the given epoch, including
     /// properties and labels at that point in time.
     ///
-    /// Returns None if the node didn't exist at that epoch.
+    /// Returns None if the node didn't exist at that epoch, and raises
+    /// GrafeoError for an epoch older than the history the database keeps.
     fn get_node_at_epoch(&self, id: u64, epoch: u64) -> PyResult<Option<PyNode>> {
         let db = self.inner.read();
         let node_id = NodeId(id);
         let epoch_id = grafeo_common::types::EpochId::new(epoch);
 
-        if let Some(node) = db.get_node_at_epoch(node_id, epoch_id) {
+        if let Some(node) = db
+            .get_node_at_epoch(node_id, epoch_id)
+            .map_err(PyGrafeoError::from)?
+        {
             let labels: Vec<String> = node.labels.iter().map(|s| s.to_string()).collect();
             let properties: HashMap<
                 grafeo_common::types::PropertyKey,
@@ -969,13 +1006,17 @@ impl PyGrafeoDB {
     /// Returns the edge as it existed at the given epoch, including
     /// properties at that point in time.
     ///
-    /// Returns None if the edge didn't exist at that epoch.
+    /// Returns None if the edge didn't exist at that epoch, and raises
+    /// GrafeoError for an epoch older than the history the database keeps.
     fn get_edge_at_epoch(&self, id: u64, epoch: u64) -> PyResult<Option<PyEdge>> {
         let db = self.inner.read();
         let edge_id = EdgeId(id);
         let epoch_id = grafeo_common::types::EpochId::new(epoch);
 
-        if let Some(edge) = db.get_edge_at_epoch(edge_id, epoch_id) {
+        if let Some(edge) = db
+            .get_edge_at_epoch(edge_id, epoch_id)
+            .map_err(PyGrafeoError::from)?
+        {
             let properties: HashMap<
                 grafeo_common::types::PropertyKey,
                 grafeo_common::types::Value,
@@ -995,8 +1036,9 @@ impl PyGrafeoDB {
     /// Get the version history of a node.
     ///
     /// Returns a list of (created_epoch, deleted_epoch, node) tuples
-    /// representing each version of the node. When the `temporal` feature
-    /// is enabled, each version includes the correct properties at that epoch.
+    /// representing each version of the node, with its properties at that
+    /// version, as far back as the database keeps history (its history
+    /// retention).
     fn get_node_history(&self, id: u64) -> PyResult<Vec<(u64, Option<u64>, PyNode)>> {
         let db = self.inner.read();
         let node_id = NodeId(id);
@@ -1050,29 +1092,29 @@ impl PyGrafeoDB {
     /// Get a property value at a specific historical epoch.
     ///
     /// Returns the property value as it existed at the given epoch,
-    /// or None if the property didn't exist at that epoch.
-    ///
-    /// Requires the `temporal` feature.
-    #[cfg(feature = "temporal")]
+    /// or None if the property didn't exist at that epoch; raises GrafeoError
+    /// for an epoch older than the history the database keeps (its history
+    /// retention).
     fn get_node_property_at_epoch(
         &self,
         id: u64,
         key: &str,
         epoch: u64,
         py: Python<'_>,
-    ) -> Option<Py<PyAny>> {
+    ) -> PyResult<Option<Py<PyAny>>> {
         let db = self.inner.read();
         let node_id = NodeId(id);
         let epoch_id = grafeo_common::types::EpochId::new(epoch);
-        db.get_node_property_at_epoch(node_id, key, epoch_id)
-            .map(|v| PyValue::to_py(&v, py))
+        Ok(db
+            .get_node_property_at_epoch(node_id, key, epoch_id)
+            .map_err(PyGrafeoError::from)?
+            .map(|v| PyValue::to_py(&v, py)))
     }
 
     /// Get the full version history for a specific property of a node.
     ///
-    /// Returns a list of (epoch, value) tuples in ascending epoch order.
-    /// Requires the `temporal` feature.
-    #[cfg(feature = "temporal")]
+    /// Returns a list of (epoch, value) tuples in ascending epoch order, as
+    /// far back as the database keeps history.
     fn get_node_property_history(
         &self,
         id: u64,
@@ -1090,9 +1132,8 @@ impl PyGrafeoDB {
 
     /// Get the full version history for ALL properties of a node.
     ///
-    /// Returns a dict mapping property names to lists of (epoch, value) tuples.
-    /// Requires the `temporal` feature.
-    #[cfg(feature = "temporal")]
+    /// Returns a dict mapping property names to lists of (epoch, value) tuples,
+    /// as far back as the database keeps history.
     fn get_all_node_property_history(
         &self,
         id: u64,
@@ -1155,8 +1196,11 @@ impl PyGrafeoDB {
         offset: usize,
     ) -> PyResult<Vec<(u64, Py<pyo3::types::PyDict>)>> {
         let (node_ids, props_batch) = self.released(py, |db| {
-            // Get node IDs by label
-            let mut node_ids = db.store().nodes_by_label(label);
+            // One pinned read for both calls: the nodes and their values
+            // of one committed state.
+            let now = committed_now(db)?;
+            let (store, view) = (db.store(), now.read_view());
+            let mut node_ids = store.nodes_by_label_at(label, view);
 
             // Apply offset and limit
             node_ids.drain(..offset.min(node_ids.len()));
@@ -1165,7 +1209,7 @@ impl PyGrafeoDB {
             }
 
             // Batch get all properties
-            let props_batch = db.store().get_nodes_properties_batch(&node_ids);
+            let props_batch = store.get_nodes_properties_batch_at(&node_ids, view);
             Ok((node_ids, props_batch))
         })?;
 
@@ -1204,7 +1248,12 @@ impl PyGrafeoDB {
     ) -> PyResult<Vec<Option<Py<pyo3::prelude::PyAny>>>> {
         let ids: Vec<NodeId> = node_ids.into_iter().map(NodeId).collect();
         let key = grafeo_common::types::PropertyKey::new(property);
-        let values = self.released(py, |db| Ok(db.store().get_node_property_batch(&ids, &key)))?;
+        let values = self.released(py, |db| {
+            let now = committed_now(db)?;
+            Ok(db
+                .store()
+                .get_node_property_batch_at(&ids, &key, now.read_view()))
+        })?;
 
         Ok(values
             .into_iter()
@@ -3040,13 +3089,13 @@ impl PyGrafeoDB {
         // Slow fallback: element-by-element via PyO3
 
         let db = self.inner.read();
-        let store = db.store();
 
         // Collect all nodes and discover property keys.
         // Skip properties whose names collide with structural columns
         // to prevent silent overwrites (GrafeoDB/grafeo#254).
         const RESERVED_NODE_COLS: &[&str] = &["_id", "_labels"];
-        let nodes: Vec<_> = store.all_nodes().collect();
+        // A pinned read of the committed graph (see `GrafeoDB::iter_nodes`).
+        let nodes: Vec<_> = db.iter_nodes().collect();
         let mut prop_keys: Vec<String> = Vec::new();
         let mut prop_key_set = std::collections::HashSet::new();
         for node in &nodes {
@@ -3196,13 +3245,13 @@ impl PyGrafeoDB {
         // Slow fallback: element-by-element via PyO3
 
         let db = self.inner.read();
-        let store = db.store();
 
         // Collect all edges and discover property keys.
         // Skip properties whose names collide with structural columns
         // to prevent silent overwrites (GrafeoDB/grafeo#254).
         const RESERVED_EDGE_COLS: &[&str] = &["_id", "_source", "_target", "_type"];
-        let edges: Vec<_> = store.all_edges().collect();
+        // A pinned read of the committed graph (see `GrafeoDB::iter_edges`).
+        let edges: Vec<_> = db.iter_edges().collect();
         let mut prop_keys: Vec<String> = Vec::new();
         let mut prop_key_set = std::collections::HashSet::new();
         for edge in &edges {
@@ -3396,100 +3445,35 @@ impl PyGrafeoDB {
 
     /// Import a CSV file as graph nodes.
     ///
-    /// Each row becomes a node with the given label. Column headers are used
-    /// as property names. Returns the number of nodes created.
+    /// Each row becomes a node with the given label, and each column a
+    /// property named as the header spells it (``home city`` stays
+    /// ``home city``); an empty field sets no property. Without headers the
+    /// columns are ``column0``, ``column1``, and so on. Values are strings.
+    /// The label is used as given. Returns the number of nodes created.
     ///
     /// Example:
     ///     count = db.import_csv("people.csv", label="Person")
     #[pyo3(signature = (path, label="Row", headers=true))]
     fn import_csv(&self, path: &str, label: &str, headers: bool, py: Python<'_>) -> PyResult<u64> {
-        let abs_path = std::path::Path::new(path)
-            .canonicalize()
-            .map_err(|e| pyo3::exceptions::PyFileNotFoundError::new_err(format!("{path}: {e}")))?;
-        let path_str = escape_gql_string(&abs_path.to_string_lossy().replace('\\', "/"));
-        let safe_label = sanitize_gql_identifier(label);
-
-        let header_clause = if headers { " WITH HEADERS" } else { "" };
-
-        // Read column headers to build property mapping
-        let insert_clause = if headers {
-            let columns = read_csv_headers(&abs_path, ',')?;
-            if columns.is_empty() {
-                format!("INSERT (:{safe_label} {{}})")
-            } else {
-                let props = columns
-                    .iter()
-                    .map(|col| {
-                        let safe = sanitize_gql_identifier(col);
-                        format!("{safe}: row.{safe}")
-                    })
-                    .collect::<Vec<_>>()
-                    .join(", ");
-                format!("INSERT (:{safe_label} {{{props}}})")
-            }
-        } else {
-            format!("INSERT (:{safe_label} {{}})")
+        let format = grafeo_engine::import::ImportFormat::Csv {
+            headers,
+            delimiter: None,
         };
-
-        let query =
-            format!("LOAD DATA FROM '{path_str}' FORMAT CSV{header_clause} AS row {insert_clause}");
-
-        let count = self.released(py, |db| {
-            let session = db.session();
-            let before_count = count_nodes_with_label(&session, &safe_label);
-            session.execute(&query)?;
-            Ok(count_nodes_with_label(&session, &safe_label) - before_count)
-        })?;
-
-        // reason: .max(0) guarantees non-negative, so cast to u64 is safe
-        #[allow(clippy::cast_sign_loss)]
-        Ok(count.max(0) as u64)
+        self.import_nodes(path, label, format, py)
     }
 
     /// Import a JSON Lines file as graph nodes.
     ///
-    /// Each line must be a valid JSON object. Object keys become property names.
-    /// Returns the number of nodes created.
+    /// Each line must be a JSON object. Each key becomes a property named as
+    /// the file spells it, whichever line it first appears on, and keeps its
+    /// JSON type. The label is used as given. Returns the number of nodes
+    /// created.
     ///
     /// Example:
     ///     count = db.import_jsonl("events.jsonl", label="Event")
     #[pyo3(signature = (path, label="Row"))]
     fn import_jsonl(&self, path: &str, label: &str, py: Python<'_>) -> PyResult<u64> {
-        let abs_path = std::path::Path::new(path)
-            .canonicalize()
-            .map_err(|e| pyo3::exceptions::PyFileNotFoundError::new_err(format!("{path}: {e}")))?;
-        let path_str = escape_gql_string(&abs_path.to_string_lossy().replace('\\', "/"));
-        let safe_label = sanitize_gql_identifier(label);
-
-        // Read first line to discover JSON keys
-        let keys = read_jsonl_keys(&abs_path)?;
-
-        let insert_clause = if keys.is_empty() {
-            format!("INSERT (:{safe_label} {{}})")
-        } else {
-            let props = keys
-                .iter()
-                .map(|key| {
-                    let safe = sanitize_gql_identifier(key);
-                    format!("{safe}: row.{safe}")
-                })
-                .collect::<Vec<_>>()
-                .join(", ");
-            format!("INSERT (:{safe_label} {{{props}}})")
-        };
-
-        let query = format!("LOAD DATA FROM '{path_str}' FORMAT JSONL AS row {insert_clause}");
-
-        let count = self.released(py, |db| {
-            let session = db.session();
-            let before_count = count_nodes_with_label(&session, &safe_label);
-            session.execute(&query)?;
-            Ok(count_nodes_with_label(&session, &safe_label) - before_count)
-        })?;
-
-        // reason: .max(0) guarantees non-negative, so cast to u64 is safe
-        #[allow(clippy::cast_sign_loss)]
-        Ok(count.max(0) as u64)
+        self.import_nodes(path, label, grafeo_engine::import::ImportFormat::Jsonl, py)
     }
 
     fn __repr__(&self) -> String {
@@ -4475,89 +4459,6 @@ fn is_pandas_na(py: Python<'_>, obj: &Bound<'_, PyAny>) -> bool {
         return b;
     }
     false
-}
-
-/// Read CSV headers from the first line of a file.
-/// Escape single quotes in a string for embedding in a GQL string literal.
-fn escape_gql_string(s: &str) -> String {
-    s.replace('\'', "\\'")
-}
-
-/// Sanitize a name for use as a GQL identifier.
-fn sanitize_gql_identifier(name: &str) -> String {
-    let sanitized: String = name
-        .chars()
-        .map(|c| {
-            if c.is_alphanumeric() || c == '_' {
-                c
-            } else {
-                '_'
-            }
-        })
-        .collect();
-    if sanitized.is_empty() {
-        "_col".to_string()
-    } else if sanitized.starts_with(|c: char| c.is_ascii_digit()) {
-        format!("_{sanitized}")
-    } else {
-        sanitized
-    }
-}
-
-/// Count nodes with a given label.
-fn count_nodes_with_label(session: &grafeo_engine::Session, label: &str) -> i64 {
-    session
-        .execute(&format!("MATCH (n:{label}) RETURN count(n) AS c"))
-        .ok()
-        .and_then(|r| r.rows().first().cloned())
-        .and_then(|row| row.first().cloned())
-        .and_then(|v| match v {
-            grafeo_common::types::Value::Int64(n) => Some(n),
-            _ => None,
-        })
-        .unwrap_or(0)
-}
-
-fn read_csv_headers(path: &std::path::Path, delimiter: char) -> PyResult<Vec<String>> {
-    use std::io::{BufRead, BufReader};
-    let f = std::fs::File::open(path).map_err(|e| {
-        pyo3::exceptions::PyFileNotFoundError::new_err(format!("{}: {e}", path.display()))
-    })?;
-    let mut reader = BufReader::new(f);
-    let mut header_line = String::new();
-    reader.read_line(&mut header_line).map_err(|e| {
-        pyo3::exceptions::PyIOError::new_err(format!("Failed to read headers: {e}"))
-    })?;
-    Ok(header_line
-        .trim()
-        .split(delimiter)
-        .map(|h| h.trim().trim_matches('"').to_string())
-        .filter(|h| !h.is_empty())
-        .collect())
-}
-
-/// Read JSON keys from the first non-empty line of a JSONL file.
-fn read_jsonl_keys(path: &std::path::Path) -> PyResult<Vec<String>> {
-    use std::io::{BufRead, BufReader};
-    let f = std::fs::File::open(path).map_err(|e| {
-        pyo3::exceptions::PyFileNotFoundError::new_err(format!("{}: {e}", path.display()))
-    })?;
-    let reader = BufReader::new(f);
-    for line in reader.lines() {
-        let line = line.map_err(|e| {
-            pyo3::exceptions::PyIOError::new_err(format!("Failed to read JSONL file: {e}"))
-        })?;
-        let trimmed = line.trim();
-        if trimmed.is_empty() {
-            continue;
-        }
-        if let Ok(obj) = serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(trimmed)
-        {
-            return Ok(obj.keys().cloned().collect());
-        }
-        break;
-    }
-    Ok(Vec::new())
 }
 
 /// Convert a Value to a NodeId, validating that it's a valid integer.

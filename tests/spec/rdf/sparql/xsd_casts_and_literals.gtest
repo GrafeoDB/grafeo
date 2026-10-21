@@ -1,0 +1,262 @@
+# SPARQL XPath casts and literal functions (SPARQL 1.1 sec 17.1, 17.4.2, 17.5)
+#
+# Covers: the xsd: constructor functions on text, numbers and booleans,
+# including whitespace, signs and lexical forms XSD refuses (which leave the
+# variable unbound); casts to and from dates, times and dateTimes; DATATYPE
+# of each kind of literal; isNumeric and isLiteral; STRDT; value equality of
+# typed literals.
+
+meta:
+  language: sparql
+  model: rdf
+  section: "17.5"
+  title: XPath casts and literal functions
+  dataset: empty
+  requires: [sparql, rdf]
+
+tests:
+
+  # ---------------------------------------------------------------------------
+  # xsd:integer
+  # ---------------------------------------------------------------------------
+
+  - name: xsd_integer_reads_text_with_whitespace_and_a_sign
+    query: |
+      PREFIX xsd: <http://www.w3.org/2001/XMLSchema#>
+      SELECT (xsd:integer(" 42 ") AS ?spaced) (xsd:integer("+42") AS ?plus) (xsd:integer("-0") AS ?zero) WHERE {}
+    expect:
+      rows:
+        - [42, 42, 0]
+
+  - name: xsd_integer_truncates_numbers_and_reads_booleans
+    query: |
+      PREFIX xsd: <http://www.w3.org/2001/XMLSchema#>
+      SELECT (xsd:integer(4.7) AS ?decimal) (xsd:integer(-4.7e0) AS ?double) (xsd:integer(true) AS ?yes) (xsd:integer(false) AS ?no) WHERE {}
+    expect:
+      rows:
+        - [4, -4, 1, 0]
+
+  - name: xsd_integer_of_what_is_no_integer_is_unbound
+    query: |
+      PREFIX xsd: <http://www.w3.org/2001/XMLSchema#>
+      SELECT (xsd:integer("4.2") AS ?point) (xsd:integer("Alix") AS ?text) (xsd:integer("") AS ?empty) (xsd:integer(0.0e0 / 0.0e0) AS ?nan) WHERE {}
+    expect:
+      rows:
+        - [null, null, null, null]
+
+  # ---------------------------------------------------------------------------
+  # xsd:decimal
+  # ---------------------------------------------------------------------------
+
+  - name: xsd_decimal_keeps_the_scale_of_its_text
+    query: |
+      PREFIX xsd: <http://www.w3.org/2001/XMLSchema#>
+      SELECT (xsd:decimal("1.50") AS ?scaled) (xsd:decimal(" 2.5 ") AS ?spaced) (xsd:decimal(2) AS ?int) (xsd:decimal(false) AS ?no) WHERE {}
+    expect:
+      rows:
+        - [1.50, 2.5, 2, 0]
+
+  - name: xsd_decimal_of_a_double_is_its_shortest_text
+    query: |
+      PREFIX xsd: <http://www.w3.org/2001/XMLSchema#>
+      SELECT (xsd:decimal(0.1e0) AS ?tenth) (xsd:decimal(0.1e0) = 0.1 AS ?exact) WHERE {}
+    expect:
+      rows:
+        - [0.1, true]
+
+  # The decimal lexical form has no exponent.
+  - name: xsd_decimal_refuses_an_exponent
+    query: |
+      PREFIX xsd: <http://www.w3.org/2001/XMLSchema#>
+      SELECT (xsd:decimal("1e3") AS ?exponent) (xsd:decimal("Gus") AS ?text) WHERE {}
+    expect:
+      rows:
+        - [null, null]
+
+  # ---------------------------------------------------------------------------
+  # xsd:double
+  # ---------------------------------------------------------------------------
+
+  - name: xsd_double_reads_exponents_and_the_special_values
+    query: |
+      PREFIX xsd: <http://www.w3.org/2001/XMLSchema#>
+      SELECT (xsd:double("1e3") AS ?exponent) (xsd:double("INF") AS ?inf) (xsd:double("-INF") AS ?neg) (xsd:double("NaN") AS ?nan) WHERE {}
+    expect:
+      rows:
+        - [1000, Infinity, -Infinity, NaN]
+
+  - name: xsd_double_of_numbers_and_of_what_is_no_number
+    query: |
+      PREFIX xsd: <http://www.w3.org/2001/XMLSchema#>
+      SELECT (xsd:double(2) AS ?int) (xsd:double(1.50) AS ?decimal) (xsd:double("Vincent") AS ?text) WHERE {}
+    expect:
+      rows:
+        - [2, 1.5, null]
+
+  # ---------------------------------------------------------------------------
+  # xsd:boolean and xsd:string
+  # ---------------------------------------------------------------------------
+
+  - name: xsd_boolean_reads_its_four_lexical_forms
+    query: |
+      PREFIX xsd: <http://www.w3.org/2001/XMLSchema#>
+      SELECT (xsd:boolean("true") AS ?t) (xsd:boolean("false") AS ?f) (xsd:boolean("1") AS ?one) (xsd:boolean("0") AS ?zero) (xsd:boolean("TRUE") AS ?upper) WHERE {}
+    expect:
+      rows:
+        - [true, false, true, false, null]
+
+  - name: xsd_boolean_of_a_number_is_whether_it_is_nonzero
+    query: |
+      PREFIX xsd: <http://www.w3.org/2001/XMLSchema#>
+      SELECT (xsd:boolean(0) AS ?zero) (xsd:boolean(2) AS ?two) (xsd:boolean(0.0e0) AS ?float_zero) (xsd:boolean(0.0e0 / 0.0e0) AS ?nan) WHERE {}
+    expect:
+      rows:
+        - [false, true, false, false]
+
+  - name: xsd_string_of_each_kind
+    query: |
+      PREFIX xsd: <http://www.w3.org/2001/XMLSchema#>
+      SELECT (xsd:string(19) AS ?int) (xsd:string(1.50) AS ?decimal) (xsd:string(true) AS ?bool) (xsd:string("Mia") AS ?text) WHERE {}
+    expect:
+      rows:
+        - ["19", "1.50", "true", Mia]
+
+  # ---------------------------------------------------------------------------
+  # Dates, times and dateTimes
+  # ---------------------------------------------------------------------------
+
+  - name: xsd_date_reads_its_text
+    query: |
+      PREFIX xsd: <http://www.w3.org/2001/XMLSchema#>
+      SELECT (xsd:date("2024-03-15") AS ?d) (DATATYPE(xsd:date("2024-03-15")) = xsd:date AS ?typed) (xsd:date("2024-13-01") AS ?bad) WHERE {}
+    expect:
+      rows:
+        - [2024-03-15, true, null]
+
+  - name: xsd_datetime_reads_its_text
+    query: |
+      PREFIX xsd: <http://www.w3.org/2001/XMLSchema#>
+      SELECT (DATATYPE(xsd:dateTime("2024-03-15T10:00:00Z")) = xsd:dateTime AS ?zoned)
+             (DATATYPE(xsd:dateTime("2024-03-15T10:00:00")) = xsd:dateTime AS ?local)
+             (HOURS(xsd:dateTime("2024-03-15T10:30:00+01:00")) AS ?h)
+             (xsd:dateTime("2024-03-15") AS ?date_only)
+      WHERE {}
+    expect:
+      rows:
+        - [true, true, 10, null]
+
+  - name: a_datetime_cast_to_a_date_and_a_time_keeps_its_local_parts
+    query: |
+      PREFIX xsd: <http://www.w3.org/2001/XMLSchema#>
+      SELECT (xsd:date(xsd:dateTime("2024-03-15T23:30:00+01:00")) AS ?d) (HOURS(xsd:time(xsd:dateTime("2024-03-15T23:30:00+01:00"))) AS ?h) WHERE {}
+    expect:
+      rows:
+        - [2024-03-15, 23]
+
+  - name: a_date_cast_to_a_datetime_is_its_midnight
+    query: |
+      PREFIX xsd: <http://www.w3.org/2001/XMLSchema#>
+      SELECT (HOURS(xsd:dateTime(xsd:date("2024-03-15"))) AS ?h) (DAY(xsd:dateTime(xsd:date("2024-03-15"))) AS ?d) WHERE {}
+    expect:
+      rows:
+        - [0, 15]
+
+  - name: datatype_of_a_computed_datetime_is_xsd_datetime
+    query: |
+      PREFIX xsd: <http://www.w3.org/2001/XMLSchema#>
+      SELECT (DATATYPE(NOW()) = xsd:dateTime AS ?now) (DATATYPE(xsd:dateTime("2024-03-15T10:00:00+01:00")) = xsd:dateTime AS ?cast) WHERE {}
+    expect:
+      rows:
+        - [true, true]
+
+  - name: xsd_time_reads_its_text
+    query: |
+      PREFIX xsd: <http://www.w3.org/2001/XMLSchema#>
+      SELECT (MINUTES(xsd:time("13:45:00")) AS ?m) (xsd:time("25:00:00") AS ?bad) WHERE {}
+    expect:
+      rows:
+        - [45, null]
+
+  # ---------------------------------------------------------------------------
+  # DATATYPE, isNumeric, isLiteral, STRDT
+  # ---------------------------------------------------------------------------
+
+  - name: datatype_of_each_kind_of_literal
+    query: |
+      PREFIX xsd: <http://www.w3.org/2001/XMLSchema#>
+      SELECT (DATATYPE("Alix") = xsd:string AS ?s) (DATATYPE(1) = xsd:integer AS ?i) (DATATYPE(1.5) = xsd:decimal AS ?d)
+             (DATATYPE(1.5e0) = xsd:double AS ?f) (DATATYPE(true) = xsd:boolean AS ?b) (DATATYPE("2024-03-15"^^xsd:date) = xsd:date AS ?dt)
+      WHERE {}
+    expect:
+      rows:
+        - [true, true, true, true, true, true]
+
+  - name: is_numeric_holds_for_numbers_only
+    query: |
+      PREFIX xsd: <http://www.w3.org/2001/XMLSchema#>
+      SELECT (isNumeric(1) AS ?int) (isNumeric(1.5) AS ?decimal) (isNumeric(1.5e0) AS ?double) (isNumeric("1") AS ?text) (isNumeric(true) AS ?bool) WHERE {}
+    expect:
+      rows:
+        - [true, true, true, false, false]
+
+  - name: is_numeric_of_stored_literals
+    setup:
+      - |
+        PREFIX xsd: <http://www.w3.org/2001/XMLSchema#>
+        INSERT DATA {
+          <http://ex.org/alix> <http://ex.org/age> "30"^^xsd:integer .
+          <http://ex.org/gus> <http://ex.org/age> "30" .
+          <http://ex.org/mia> <http://ex.org/age> "thirty"^^xsd:integer .
+        }
+    query: |
+      SELECT ?who WHERE { ?who <http://ex.org/age> ?age FILTER(isNumeric(?age)) }
+    expect:
+      rows:
+        - [http://ex.org/alix]
+
+  - name: strdt_makes_a_typed_literal_that_reads_as_its_value
+    query: |
+      PREFIX xsd: <http://www.w3.org/2001/XMLSchema#>
+      SELECT (STRDT("42", xsd:integer) + 1 AS ?next) (DATATYPE(STRDT("42", xsd:integer)) = xsd:integer AS ?typed) WHERE {}
+    expect:
+      rows:
+        - [43, true]
+
+  - name: is_literal_of_each_kind
+    query: |
+      SELECT (isLiteral("Alix") AS ?s) (isLiteral(1) AS ?i) (isLiteral(<http://ex.org/alix>) AS ?iri) WHERE {}
+    expect:
+      rows:
+        - [true, true, false]
+
+  # ---------------------------------------------------------------------------
+  # Value equality of typed literals
+  # ---------------------------------------------------------------------------
+
+  - name: numeric_literals_are_equal_by_value
+    query: |
+      PREFIX xsd: <http://www.w3.org/2001/XMLSchema#>
+      SELECT ("1"^^xsd:integer = "01"^^xsd:integer AS ?lexical) (1 = 1.0 AS ?decimal) (1 = 1.0e0 AS ?double) WHERE {}
+    expect:
+      rows:
+        - [true, true, true]
+
+  - name: a_plain_and_a_language_tagged_literal_differ
+    query: |
+      SELECT ("Alix" = "Alix"@en AS ?tagged) ("Alix" = "Alix" AS ?same) WHERE {}
+    expect:
+      rows:
+        - [false, true]
+
+  # ---------------------------------------------------------------------------
+  # Known gaps
+  # ---------------------------------------------------------------------------
+
+  - name: same_term_tells_lexical_forms_apart
+    skip: "a numeric literal reads as its value, so sameTerm(\"1\"^^xsd:integer, \"01\"^^xsd:integer) is true (inbox rdf/same-term-of-numeric-literals.md)"
+    query: |
+      PREFIX xsd: <http://www.w3.org/2001/XMLSchema#>
+      SELECT (sameTerm("1"^^xsd:integer, "01"^^xsd:integer) AS ?lexical) (sameTerm("1"^^xsd:integer, "1"^^xsd:integer) AS ?same) WHERE {}
+    expect:
+      rows:
+        - [false, true]

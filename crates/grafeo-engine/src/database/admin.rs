@@ -2,7 +2,7 @@
 
 use std::path::Path;
 
-use grafeo_common::types::{ArcStr, EdgeId, EpochId};
+use grafeo_common::types::{ArcStr, EpochId};
 use grafeo_common::utils::error::Result;
 use grafeo_common::utils::hash::FxHashMap;
 use grafeo_core::graph::{Direction, GraphStoreSearch};
@@ -36,16 +36,12 @@ impl super::GrafeoDB {
     }
 
     /// The edges of `store` visible at `epoch`. The database's own store
-    /// numbers its edges densely, so each is looked up; another store's
-    /// edges are found through the nodes that have them, which misses an
-    /// edge that a commit not complete yet deleted (its adjacency entry is
-    /// gone at once).
+    /// counts them from its rows; another store's edges are found through
+    /// the nodes that have them, which misses an edge that a commit not
+    /// complete yet deleted (its adjacency entry is gone at once).
     fn edge_count_at(&self, store: &dyn GraphStoreSearch, epoch: EpochId) -> usize {
         if self.external_read_store.is_none() {
-            let lpg = self.lpg_store();
-            return (0..lpg.next_edge_id())
-                .filter(|&id| lpg.is_edge_visible_at_epoch(EdgeId::new(id), epoch))
-                .count();
+            return self.lpg_store().edge_count_at_epoch(epoch);
         }
         store
             .all_node_ids()

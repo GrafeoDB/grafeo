@@ -9,20 +9,16 @@ tags:
 
 # Temporal Properties & Time-Travel
 
-!!! warning "Feature flag required for versioned properties"
-    Temporal *types* (Date, Time, Duration, etc.) are always available. Temporal *properties* (versioned history, time-travel queries) require the `temporal` feature flag, which is **not** included in any named profile (`embedded`, `browser`, `server`, `full`). Enable it explicitly:
+Grafeo has two complementary temporal features:
 
-    ```toml
-    [dependencies]
-    grafeo = { version = "0.5", features = ["temporal"] }
-    ```
+1. **Temporal types**: Date, Time, Duration and zoned variants for storing temporal data. They are always available.
+2. **History and time travel**: a database can keep the committed states of a retention window, and any query, view
+   or direct read can then read the database as it was at an earlier epoch or time. History is off by default and
+   costs nothing while it is off.
 
-    Or combine it with a profile: `features = ["embedded", "temporal"]`.
-
-Grafeo supports two complementary temporal features:
-
-1. **Temporal types**: Date, Time, Duration and zoned variants for storing temporal data. These are always available with no feature flags required.
-2. **Temporal properties**: opt-in versioned property and label history with time-travel queries. This requires the `temporal` feature flag (available since 0.5.24).
+!!! note "The `temporal` feature flag"
+    Since 0.6.0 the `temporal` Cargo feature is deprecated and enables nothing: history is a per-database setting
+    (see [History retention](#history-retention)), and the history APIs are in every build. It is removed in 0.7.0.
 
 ## Temporal Types
 
@@ -109,60 +105,38 @@ For the full list of temporal functions, see the [Temporal Functions](gql/functi
 
 ---
 
-## Temporal Properties
+## History Retention
 
-*Requires the `temporal` feature flag. Available since 0.5.24.*
+A database keeps the versions that open transactions still read, and with a retention window also the versions of
+every commit within that window. Retention is a setting of the database, stored in its file, so a reopen keeps it:
 
-When enabled, Grafeo records an append-only version history for every property and label change. Each mutation creates a new version tagged with the current epoch, so you can later reconstruct the exact state of any node or edge at any point in time.
+| Setting | What the database keeps |
+|---------|-------------------------|
+| `HistoryRetention::Off` (default) | only what open transactions read; no extra cost |
+| `HistoryRetention::Duration(d)` | every committed state of the last `d` |
+| `HistoryRetention::Forever` | every committed state |
+
+```rust
+use std::time::Duration;
+use grafeo::{Config, GrafeoDB, HistoryRetention};
+
+let db = GrafeoDB::with_config(
+    Config::persistent("travels.grafeo")
+        .with_history_retention(HistoryRetention::Duration(Duration::from_secs(7 * 24 * 3600))),
+)?;
+```
 
 ### How It Works
 
-1. Every committed transaction advances the database epoch
-2. When a property is set or a label is added/removed, the change is recorded in an append-only `VersionLog`
-3. The version log stores the epoch and the new value for each change
-4. Rollbacks undo version creation, so aborted transactions leave no trace
+1. Every commit advances the database epoch and records its time.
+2. Garbage collection keeps every version a reader at an epoch inside the window still needs: the horizon is the
+   older of the oldest open snapshot and the start of the window.
+3. A checkpoint writes the kept versions with the data, and a crash or a reopen keeps them: the history of a window
+   reads the same after a restart.
+4. A read before what the database keeps fails with "history before epoch ... is not retained": it never answers
+   with versions garbage collection may already have dropped.
 
-### Example: Tracking Property Changes
-
-```python
-from grafeo import GrafeoDB
-
-db = GrafeoDB()
-
-# Create a person (epoch advances on commit)
-with db.begin_transaction() as tx:
-    tx.execute("INSERT (:Person {name: 'Alix', city: 'Amsterdam'})")
-    tx.commit()
-
-epoch_v1 = db.current_epoch()
-
-# Update city
-with db.begin_transaction() as tx:
-    tx.execute("MATCH (p:Person {name: 'Alix'}) SET p.city = 'Berlin'")
-    tx.commit()
-
-epoch_v2 = db.current_epoch()
-
-# Update again
-with db.begin_transaction() as tx:
-    tx.execute("MATCH (p:Person {name: 'Alix'}) SET p.city = 'Paris'")
-    tx.commit()
-
-# Current state: Paris
-result = db.execute("MATCH (p:Person {name: 'Alix'}) RETURN p.city")
-# => 'Paris'
-
-# Historical state at epoch_v1: Amsterdam
-result = db.execute_at_epoch(
-    "MATCH (p:Person {name: 'Alix'}) RETURN p.city",
-    epoch=epoch_v1,
-)
-# => 'Amsterdam'
-```
-
-### Snapshot Persistence
-
-Temporal version history survives snapshot save/load cycles. Snapshot format v4 (0.5.24+) serializes the full `VersionLog` for each property and label, so restoring a snapshot preserves the complete history.
+Changing the retention takes effect from then on: what was collected before stays gone.
 
 ---
 
@@ -198,6 +172,29 @@ The simplest way to query a past state: pass an epoch number alongside the query
         println!("{:?}", row);
     }
     ```
+
+### `as_of`: a view of the database at a point in time
+
+`GrafeoDB::as_of` gives a read-only view of the database at a point in time, which you query like the database
+itself. The view holds its epoch while it lives, so its reads stay the same. A point in time is an epoch, a time, a
+GQL `ZONED DATETIME` value, or a duration ago. The names follow SQL:2011's `FOR SYSTEM_TIME AS OF`.
+
+```rust
+use std::time::Duration;
+use grafeo::TimePoint;
+
+// The database as it was five minutes ago.
+let view = db.as_of(TimePoint::ago(Duration::from_secs(300)))?;
+let people = view.execute("MATCH (p:Person) RETURN p.name")?;
+
+// One query at an epoch or a time, without keeping a view.
+let then = db.execute_as_of("MATCH (p:Person) RETURN count(p)", then_epoch)?;
+
+// The epoch a point in time reads at.
+let epoch = db.epoch_as_of(TimePoint::ago(Duration::from_secs(300)))?;
+```
+
+A write through a view fails: a view of the past is read-only.
 
 ### Session-Level Viewing Epoch
 
@@ -239,7 +236,7 @@ These APIs return the full version history of a node or edge, including creation
 
 ### `get_node_at_epoch` / `get_edge_at_epoch`
 
-Retrieve a single node or edge as it existed at a specific epoch. Returns `None` if the entity did not exist at that epoch.
+Retrieve a single node or edge as it existed at a specific epoch. It is `None` if the entity did not exist at that epoch; an epoch older than the history the database keeps is an error ("history before epoch ... is not retained"), never an answer.
 
 === "Python"
 
@@ -258,12 +255,12 @@ Retrieve a single node or edge as it existed at a specific epoch. Returns `None`
 === "Rust"
 
     ```rust
-    if let Some(node) = db.get_node_at_epoch(node_id, EpochId::new(3)) {
+    if let Some(node) = db.get_node_at_epoch(node_id, EpochId::new(3))? {
         println!("Labels: {:?}", node.labels);
         println!("Properties: {:?}", node.properties);
     }
 
-    if let Some(edge) = db.get_edge_at_epoch(edge_id, EpochId::new(3)) {
+    if let Some(edge) = db.get_edge_at_epoch(edge_id, EpochId::new(3))? {
         println!("Type: {:?}", edge.edge_type);
         println!("Properties: {:?}", edge.properties);
     }
@@ -334,23 +331,13 @@ for created, deleted, node in history:
 
 ## Performance Considerations
 
-Temporal versioning adds overhead to write operations because each mutation appends to the `VersionLog`. Read performance is optimized with several strategies:
-
-| Scenario | Cost | Details |
-|----------|------|---------|
-| Current-epoch reads | O(1) | Fast path: the latest entry is checked first, skipping the binary search |
-| Historical reads | O(log N) | Binary search over the version log for the target epoch |
-| Write overhead | Append-only | Each property/label change appends one entry to the version log |
-
-### Overhead Benchmarks
-
-| Version | Read overhead (vs. non-temporal) |
-|---------|----------------------------------|
-| 0.5.24 | ~16% |
-| 0.5.25 | ~6% (optimized `VersionLog::at()` fast path, eliminated double HashMap lookup) |
+| Retention | Cost |
+|-----------|------|
+| Off (default) | none: writes, reads and memory are the same as without history |
+| A window or `Forever` | each kept version takes about 72 bytes in memory and about 25 bytes in a checkpoint; reads at the current epoch are unchanged |
 
 ### Tips
 
-- **Enable only when needed**: the `temporal` feature is opt-in. If you do not need property versioning, leave it disabled for zero overhead.
-- **Epoch advances on commit**: epochs only increment when explicit transactions commit. Auto-commit queries each produce one epoch.
-- **Snapshots preserve history**: saving and loading snapshots retains the full version log, so you can time-travel across restarts.
+- **Keep the window as short as your use case allows**: memory and file size grow with the number of versions in it.
+- **Epochs advance on commit**: each committed transaction or auto-commit statement is one epoch.
+- **History survives restarts**: checkpoints, crashes and reopens keep the window's versions.

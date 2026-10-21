@@ -559,7 +559,12 @@ mod subqueries_see_what_the_query_sees {
     }
 
     fn people() -> GrafeoDB {
-        let db = GrafeoDB::new_in_memory();
+        // History kept: a read at an earlier epoch needs it.
+        let db = GrafeoDB::with_config(
+            grafeo_engine::Config::in_memory()
+                .with_history_retention(grafeo_engine::HistoryRetention::Forever),
+        )
+        .unwrap();
         db.execute(
             "INSERT (alix:Person {name: 'Alix'})-[:KNOWS]->(gus:Person {name: 'Gus'}), \
              (gus)-[:KNOWS]->(:Person {name: 'Vincent'}), (:Person {name: 'Mia'})",

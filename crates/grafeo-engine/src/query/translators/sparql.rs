@@ -9,9 +9,10 @@ use crate::query::plan::Callee;
 use crate::query::plan::{
     AddGraphOp, AggregateExpr, AggregateFunction, AggregateOp, AntiJoinOp, BinaryOp, BindOp,
     ClearGraphOp, ConstructOp, CopyGraphOp, CreateGraphOp, DatasetRestriction, DeleteTripleOp,
-    DropGraphOp, InsertTripleOp, JoinCondition, JoinOp, JoinType, LeftJoinOp, LoadGraphOp,
-    LogicalExpression, LogicalOperator, LogicalPlan, ModifyOp, MoveGraphOp, ProjectOp, Projection,
-    SortKey, SortOrder, TripleComponent, TripleScanOp, TripleTemplate, UnaryOp, UnionOp,
+    DropGraphOp, FilterOp, InsertTripleOp, JoinCondition, JoinOp, JoinType, LeftJoinOp,
+    LoadGraphOp, LogicalExpression, LogicalOperator, LogicalPlan, ModifyOp, MoveGraphOp, ProjectOp,
+    Projection, SortKey, SortOrder, TripleComponent, TripleScanOp, TripleTemplate, UnaryOp,
+    UnionOp,
 };
 use grafeo_adapters::query::sparql::{self, ast};
 use grafeo_common::storage::log_record::RdfGraphTarget;
@@ -152,6 +153,26 @@ impl SparqlTranslator {
             // SELECT, or of one computed for the HAVING only
             let mut aggregates = aggregates;
             let projected_aggregates = aggregates.len();
+            // A SELECT expression that is neither an aggregate nor a variable
+            // (`SUM(?x) / COUNT(?x)`, `STR(COUNT(?x))`, `STR(?group_key)`) is
+            // computed after the aggregation: each aggregate in it reads its
+            // column, as in HAVING. It was dropped from the result.
+            let mut computed: Vec<(String, LogicalExpression)> = Vec::new();
+            if let ast::Projection::Variables(vars) = &select.projection {
+                for pv in vars {
+                    if self.is_aggregate_expression(&pv.expression)
+                        || matches!(pv.expression, ast::Expression::Variable(_))
+                    {
+                        continue;
+                    }
+                    let Some(name) = pv.alias.clone() else {
+                        continue;
+                    };
+                    let mut expression = pv.expression.clone();
+                    self.take_having_aggregates(&mut expression, &mut aggregates)?;
+                    computed.push((name, self.translate_expression(&expression)?));
+                }
+            }
             let having_expr = if let Some(having) = &select.solution_modifiers.having {
                 let mut having = having.clone();
                 self.take_having_aggregates(&mut having, &mut aggregates)?;
@@ -167,8 +188,11 @@ impl SparqlTranslator {
                 input: Box::new(plan),
                 having: having_expr,
             });
-            // The aggregates the HAVING alone computes are not results.
-            if hidden_aggregates && let ast::Projection::Variables(vars) = &select.projection {
+            // The aggregates the HAVING or a SELECT expression alone computes
+            // are not results; the SELECT expressions are computed here.
+            if (hidden_aggregates || !computed.is_empty())
+                && let ast::Projection::Variables(vars) = &select.projection
+            {
                 plan = LogicalOperator::Project(ProjectOp {
                     projections: vars
                         .iter()
@@ -177,6 +201,15 @@ impl SparqlTranslator {
                                 ast::Expression::Variable(name) => Some(name.clone()),
                                 _ => None,
                             })?;
+                            if let Some((_, expression)) = computed
+                                .iter()
+                                .find(|(computed_name, _)| *computed_name == name)
+                            {
+                                return Some(Projection {
+                                    expression: expression.clone(),
+                                    alias: Some(name),
+                                });
+                            }
                             Some(Projection {
                                 expression: LogicalExpression::Variable(name),
                                 alias: None,
@@ -1055,17 +1088,30 @@ impl SparqlTranslator {
             ast::GraphPattern::InlineData(data) => {
                 // VALUES clause: each row becomes a chain of BIND operators
                 // starting from Empty, and all rows are combined with UNION.
+                // No rows: no solution, with the variables defined (an
+                // aggregate over them sees an empty group).
                 if data.values.is_empty() {
-                    return Ok(LogicalOperator::Empty);
+                    let mut plan = LogicalOperator::Empty;
+                    for var in &data.variables {
+                        plan = LogicalOperator::Bind(BindOp {
+                            expression: LogicalExpression::Literal(Value::Null),
+                            variable: var.clone(),
+                            input: Box::new(plan),
+                        });
+                    }
+                    return Ok(LogicalOperator::Filter(FilterOp {
+                        predicate: LogicalExpression::Literal(Value::Bool(false)),
+                        input: Box::new(plan),
+                        pushdown_hint: None,
+                    }));
                 }
                 let mut branches = Vec::new();
                 for row in &data.values {
                     let mut plan = LogicalOperator::Empty;
                     for (var, val) in data.variables.iter().zip(row.iter()) {
                         if let Some(dv) = val {
-                            let value = self.data_value_to_value(dv);
                             plan = LogicalOperator::Bind(BindOp {
-                                expression: LogicalExpression::Literal(value),
+                                expression: self.data_value_expression(dv),
                                 variable: var.clone(),
                                 input: Box::new(plan),
                             });
@@ -1297,6 +1343,20 @@ impl SparqlTranslator {
                 self.resolve_iri(iri).into(),
             ))),
 
+            // A language-tagged literal keeps its tag as STRLANG(value, tag):
+            // its value is the text, and LANG, DATATYPE and BIND read the tag
+            // from the call (comparisons with one are rewritten above).
+            ast::Expression::Literal(lit) if lit.language.is_some() => {
+                Ok(LogicalExpression::SparqlCall {
+                    name: "STRLANG".to_string(),
+                    args: vec![
+                        LogicalExpression::Literal(Value::String(lit.value.clone().into())),
+                        LogicalExpression::Literal(Value::String(
+                            lit.language.clone().unwrap_or_default().into(),
+                        )),
+                    ],
+                })
+            }
             ast::Expression::Literal(lit) => {
                 Ok(LogicalExpression::Literal(self.literal_to_value(lit)))
             }
@@ -2039,6 +2099,26 @@ impl SparqlTranslator {
     }
 
     /// Converts a SPARQL `DataValue` (from VALUES inline data) to a `Value`.
+    /// The expression a VALUES entry binds: its value, and for a
+    /// language-tagged literal `STRLANG(value, tag)`, so the tag reaches the
+    /// variable's `__lang_` companion as a BIND of it does.
+    fn data_value_expression(&self, dv: &ast::DataValue) -> LogicalExpression {
+        match dv {
+            ast::DataValue::Literal(lit) if lit.language.is_some() => {
+                LogicalExpression::SparqlCall {
+                    name: "STRLANG".to_string(),
+                    args: vec![
+                        LogicalExpression::Literal(Value::String(lit.value.clone().into())),
+                        LogicalExpression::Literal(Value::String(
+                            lit.language.clone().unwrap_or_default().into(),
+                        )),
+                    ],
+                }
+            }
+            _ => LogicalExpression::Literal(self.data_value_to_value(dv)),
+        }
+    }
+
     fn data_value_to_value(&self, dv: &ast::DataValue) -> Value {
         match dv {
             ast::DataValue::Iri(iri) => Value::String(self.resolve_iri(iri).into()),

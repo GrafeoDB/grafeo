@@ -264,41 +264,36 @@ impl Operator for NodeSeekOperator {
 }
 
 /// The node IDs `=` finds equal to a key, as the filter `id(n) = key`
-/// compares an ID (an integer) with it: the integer itself, a float within
-/// `f64::EPSILON` of it, a whole decimal of its value, or a string that
-/// parses as it.
+/// compares an ID (an integer) with it: the integer itself, a float of
+/// exactly its value, a whole decimal of its value, or a string that parses
+/// as it.
 fn node_ids(key: &Value) -> Vec<NodeId> {
-    let ids: Vec<i64> = match key {
-        Value::Int64(id) => vec![*id],
-        Value::Float64(f) => integers_near(*f),
-        Value::Decimal(d) if d.floor() == *d => d.trunc_to_i64().into_iter().collect(),
-        Value::String(s) => s.parse::<i64>().ok().into_iter().collect(),
-        _ => Vec::new(),
+    let id = match key {
+        Value::Int64(id) => Some(*id),
+        Value::Float64(f) => exact_integer(*f),
+        Value::Decimal(d) if d.floor() == *d => d.trunc_to_i64(),
+        Value::String(s) => s.parse::<i64>().ok(),
+        _ => None,
     };
-    ids.into_iter()
-        .filter_map(|id| u64::try_from(id).ok().map(NodeId::new))
+    id.and_then(|id| u64::try_from(id).ok())
+        .map(NodeId::new)
+        .into_iter()
         .collect()
 }
 
-/// The integers `=` finds equal to a float: those within `f64::EPSILON`.
-/// Only the floor and the ceiling can be.
-fn integers_near(f: f64) -> Vec<i64> {
+/// The integer `=` finds equal to a float: the float's own value, when it is
+/// whole and within the `i64` range.
+fn exact_integer(f: f64) -> Option<i64> {
     // 2^63 as f64 is exact; every integral float in [-2^63, 2^63) fits i64.
     const LIMIT: f64 = 9_223_372_036_854_775_808.0;
-    let mut near = Vec::new();
-    for candidate in [f.floor(), f.ceil()] {
-        if (-LIMIT..LIMIT).contains(&candidate) && (candidate - f).abs() < f64::EPSILON {
-            #[allow(
-                clippy::cast_possible_truncation,
-                reason = "candidate is integral and within [-2^63, 2^63), checked above"
-            )]
-            let integer = candidate as i64;
-            if !near.contains(&integer) {
-                near.push(integer);
-            }
-        }
+    if f.fract() != 0.0 || !(-LIMIT..LIMIT).contains(&f) {
+        return None;
     }
-    near
+    #[allow(
+        clippy::cast_possible_truncation,
+        reason = "f is integral and within [-2^63, 2^63), checked above, so the cast is exact"
+    )]
+    Some(f as i64)
 }
 
 #[cfg(all(test, feature = "lpg"))]

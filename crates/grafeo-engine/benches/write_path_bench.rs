@@ -24,6 +24,7 @@ use criterion::{BatchSize, Bencher, BenchmarkGroup, Criterion, SamplingMode, cri
 
 use grafeo_common::types::{NodeId, PropertyKey, Value};
 use grafeo_engine::database::BatchEdge;
+use grafeo_engine::transaction::TransactionManager;
 use grafeo_engine::{GrafeoDB, Session};
 
 // ============================================================================
@@ -701,17 +702,56 @@ fn bench_reads(c: &mut Criterion) {
     group.finish();
 }
 
+// ============================================================================
+// The transaction manager's part of every write
+// ============================================================================
+
+/// The read horizon each immediate call and commit asks for before its
+/// collect: with no transaction finished, and with 100 committed ones that
+/// the manager's periodic cleanup has not dropped yet.
+fn bench_read_horizon(c: &mut Criterion) {
+    let mut group = c.benchmark_group("transaction_manager");
+    for finished in [0, 100] {
+        let manager = TransactionManager::new();
+        for _ in 0..finished {
+            let transaction = manager.begin();
+            manager.commit(transaction).expect("commit");
+        }
+        group.bench_function(format!("read_horizon/{finished}_finished"), |b| {
+            b.iter(|| black_box(manager.read_horizon()));
+        });
+    }
+    // A transaction's begin and commit, with the manager's cleanup every
+    // 64 commits (the default `gc_interval` is 100).
+    let manager = TransactionManager::new();
+    let mut commits = 0_u32;
+    group.bench_function("begin_commit", |b| {
+        b.iter(|| {
+            let transaction = manager.begin();
+            black_box(manager.commit(transaction).expect("commit"));
+            commits += 1;
+            if commits.is_multiple_of(64) {
+                manager.gc();
+            }
+        });
+    });
+    group.finish();
+}
+
 /// The benchmark groups, in a private module so the generated function needs
 /// no doc comment.
 mod groups {
-    use super::{bench_batch_calls, bench_query_writes, bench_reads, bench_rollback};
+    use super::{
+        bench_batch_calls, bench_query_writes, bench_read_horizon, bench_reads, bench_rollback,
+    };
 
     criterion::criterion_group!(
         benches,
         bench_query_writes,
         bench_batch_calls,
         bench_rollback,
-        bench_reads
+        bench_reads,
+        bench_read_horizon
     );
 }
 

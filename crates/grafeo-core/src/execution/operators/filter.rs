@@ -149,6 +149,19 @@ impl Predicate for ComparisonPredicate {
     }
 }
 
+/// Whether `op` holds for two operands in the order `order`.
+#[cfg(test)]
+fn compare_holds(op: CompareOp, order: std::cmp::Ordering) -> bool {
+    match op {
+        CompareOp::Eq => order.is_eq(),
+        CompareOp::Ne => order.is_ne(),
+        CompareOp::Lt => order.is_lt(),
+        CompareOp::Le => order.is_le(),
+        CompareOp::Gt => order.is_gt(),
+        CompareOp::Ge => order.is_ge(),
+    }
+}
+
 #[cfg(test)]
 impl ComparisonPredicate {
     /// Whether row `row` of `chunk` passes the comparison.
@@ -171,8 +184,8 @@ impl ComparisonPredicate {
                 CompareOp::Ge => a >= b,
             },
             (Value::Float64(a), Value::Float64(b)) => match self.op {
-                CompareOp::Eq => (a - b).abs() < f64::EPSILON,
-                CompareOp::Ne => (a - b).abs() >= f64::EPSILON,
+                CompareOp::Eq => a == b,
+                CompareOp::Ne => a != b,
                 CompareOp::Lt => a < b,
                 CompareOp::Le => a <= b,
                 CompareOp::Gt => a > b,
@@ -187,27 +200,18 @@ impl ComparisonPredicate {
                 CompareOp::Ge => a >= b,
             },
             // Cross-type Int64/Float64 coercion
-            (Value::Int64(a), Value::Float64(b)) => {
-                let a = *a as f64;
-                match self.op {
-                    CompareOp::Eq => (a - b).abs() < f64::EPSILON,
-                    CompareOp::Ne => (a - b).abs() >= f64::EPSILON,
-                    CompareOp::Lt => a < *b,
-                    CompareOp::Le => a <= *b,
-                    CompareOp::Gt => a > *b,
-                    CompareOp::Ge => a >= *b,
-                }
+            // An integer and a float compare exactly; NaN only differs.
+            (Value::Int64(int), Value::Float64(b)) => {
+                super::value_utils::partial_cmp_int_float(*int, *b)
+                    .map_or(self.op == CompareOp::Ne, |order| {
+                        compare_holds(self.op, order)
+                    })
             }
-            (Value::Float64(a), Value::Int64(b)) => {
-                let b = *b as f64;
-                match self.op {
-                    CompareOp::Eq => (a - b).abs() < f64::EPSILON,
-                    CompareOp::Ne => (a - b).abs() >= f64::EPSILON,
-                    CompareOp::Lt => *a < b,
-                    CompareOp::Le => *a <= b,
-                    CompareOp::Gt => *a > b,
-                    CompareOp::Ge => *a >= b,
-                }
+            (Value::Float64(a), Value::Int64(int)) => {
+                super::value_utils::partial_cmp_int_float(*int, *a)
+                    .map_or(self.op == CompareOp::Ne, |order| {
+                        compare_holds(self.op, order.reverse())
+                    })
             }
             (Value::Bool(a), Value::Bool(b)) => match self.op {
                 CompareOp::Eq => a == b,
@@ -1759,6 +1763,13 @@ impl ExpressionPredicate {
                     Some(Value::Bool(!Self::values_equal(left, right)))
                 }
             }
+            // NaN is neither less nor greater than a number (IEEE): the
+            // comparison is false, not unknown.
+            BinaryFilterOp::Lt | BinaryFilterOp::Le | BinaryFilterOp::Gt | BinaryFilterOp::Ge
+                if Self::nan_against_a_number(left, right) =>
+            {
+                Some(Value::Bool(false))
+            }
             BinaryFilterOp::Lt => self.compare_values(left, right).map(|c| Value::Bool(c < 0)),
             BinaryFilterOp::Le => self
                 .compare_values(left, right)
@@ -2502,30 +2513,16 @@ impl ExpressionPredicate {
                 let Value::String(type_name) = self.eval_expr(&args[1], chunk, row)? else {
                     return None;
                 };
-                let matches = match type_name.to_uppercase().as_str() {
-                    "BOOLEAN" | "BOOL" => matches!(val, Value::Bool(_)),
-                    "INTEGER" | "INT" | "INT64" => matches!(val, Value::Int64(_)),
-                    "FLOAT" | "FLOAT64" | "DOUBLE" => matches!(val, Value::Float64(_)),
-                    "STRING" => matches!(val, Value::String(_)),
-                    "LIST" => matches!(val, Value::List(_)),
-                    "MAP" | "RECORD" => matches!(val, Value::Map(_)),
-                    "NULL" => matches!(val, Value::Null),
-                    "DATE" => matches!(val, Value::Date(_)),
-                    "TIME" => matches!(val, Value::Time(_)),
-                    "DATETIME" | "TIMESTAMP" => matches!(val, Value::Timestamp(_)),
-                    "DURATION" => matches!(val, Value::Duration(_)),
-                    "PATH" => matches!(val, Value::Path { .. }),
-                    "NODE" | "EDGE" | "GRAPH" => false,
-                    s if s.starts_with("LIST<") && s.ends_with('>') => {
-                        let elem_type = &s[5..s.len() - 1];
-                        match &val {
-                            Value::List(items) => {
-                                items.iter().all(|v| Self::value_matches_type(v, elem_type))
-                            }
-                            _ => false,
-                        }
-                    }
-                    _ => false,
+                let type_name = type_name.to_uppercase();
+                let element_type = type_name
+                    .strip_prefix("LIST<")
+                    .and_then(|rest| rest.strip_suffix('>'));
+                let matches = match (element_type, &val) {
+                    (Some(element_type), Value::List(items)) => items
+                        .iter()
+                        .all(|v| Self::value_matches_type(v, element_type)),
+                    (Some(_), _) => false,
+                    (None, _) => Self::value_matches_type(&val, &type_name),
                 };
                 Some(Value::Bool(matches))
             }
@@ -3161,7 +3158,10 @@ impl ExpressionPredicate {
                 }
                 let val = self.eval_expr(&args[0], chunk, row)?;
                 match val {
-                    Value::Int64(i) => Some(Value::Int64(i.abs())),
+                    Value::Int64(i) => match i.checked_abs() {
+                        Some(magnitude) => Some(Value::Int64(magnitude)),
+                        None => self.fail(OperatorError::numeric_out_of_range(format!("abs({i})"))),
+                    },
                     Value::Float64(f) => Some(Value::Float64(f.abs())),
                     Value::Decimal(d) => Some(Value::Decimal(d.abs())),
                     _ => None,
@@ -4147,6 +4147,18 @@ impl ExpressionPredicate {
         }
     }
 
+    /// Whether one operand is a NaN float and the other a number.
+    fn nan_against_a_number(left: &Value, right: &Value) -> bool {
+        let nan = |value: &Value| matches!(value, Value::Float64(f) if f.is_nan());
+        let number = |value: &Value| {
+            matches!(
+                value,
+                Value::Int64(_) | Value::Float64(_) | Value::Decimal(_)
+            )
+        };
+        (nan(left) && number(right)) || (nan(right) && number(left))
+    }
+
     /// Structural equality for DISTINCT, GROUP BY, and list/map comparison.
     ///
     /// Treats NULL == NULL as `true` (grouping semantics). For SQL/GQL
@@ -4161,17 +4173,18 @@ impl ExpressionPredicate {
             }
             (Value::Bool(a), Value::Bool(b)) => a == b,
             (Value::Int64(a), Value::Int64(b)) => a == b,
-            (Value::Float64(a), Value::Float64(b)) => (a - b).abs() < f64::EPSILON,
+            // IEEE: NaN equals nothing, -0.0 equals 0.0.
+            (Value::Float64(a), Value::Float64(b)) => a == b,
             (Value::String(a), Value::String(b)) => a == b,
             (Value::Int64(a), Value::Float64(b)) | (Value::Float64(b), Value::Int64(a)) => {
-                (*a as f64 - b).abs() < f64::EPSILON
+                super::value_utils::int_equals_float(*a, *b)
             }
             // RDF stores numeric literals as strings; allow cross-type equality
             (Value::String(s), Value::Int64(i)) | (Value::Int64(i), Value::String(s)) => {
                 s.parse::<i64>().is_ok_and(|n| n == *i)
             }
             (Value::String(s), Value::Float64(f)) | (Value::Float64(f), Value::String(s)) => {
-                s.parse::<f64>().is_ok_and(|n| (n - f).abs() < f64::EPSILON)
+                super::value_utils::text_equals_float(s, *f)
             }
             (Value::List(a), Value::List(b)) => {
                 a.len() == b.len()
@@ -4292,35 +4305,29 @@ impl ExpressionPredicate {
                 super::value_utils::compare_with_decimal(left, right).map(|o| o as i32)
             }
             (Value::Int64(a), Value::Int64(b)) => Some(a.cmp(b) as i32),
-            (Value::Float64(a), Value::Float64(b)) => {
-                if a < b {
-                    Some(-1)
-                } else if a > b {
-                    Some(1)
-                } else {
-                    Some(0)
-                }
-            }
+            // NaN is neither less nor greater than anything (IEEE).
+            (Value::Float64(a), Value::Float64(b)) => a.partial_cmp(b).map(|o| o as i32),
             (Value::String(a), Value::String(b)) => Some(a.cmp(b) as i32),
-            (Value::Int64(a), Value::Float64(b)) => (*a as f64).partial_cmp(b).map(|o| o as i32),
-            (Value::Float64(a), Value::Int64(b)) => a.partial_cmp(&(*b as f64)).map(|o| o as i32),
+            // An integer and a float compare exactly, as ORDER BY and = do.
+            (Value::Int64(a), Value::Float64(b)) => {
+                super::value_utils::partial_cmp_int_float(*a, *b).map(|o| o as i32)
+            }
+            (Value::Float64(a), Value::Int64(b)) => {
+                super::value_utils::partial_cmp_int_float(*b, *a).map(|o| o.reverse() as i32)
+            }
             // RDF stores numeric literals as strings; allow cross-type comparison
-            (Value::String(s), Value::Int64(i)) => s
-                .parse::<f64>()
-                .ok()
-                .and_then(|n| n.partial_cmp(&(*i as f64)).map(|o| o as i32)),
-            (Value::Int64(i), Value::String(s)) => s
-                .parse::<f64>()
-                .ok()
-                .and_then(|n| (*i as f64).partial_cmp(&n).map(|o| o as i32)),
-            (Value::String(s), Value::Float64(f)) => s
-                .parse::<f64>()
-                .ok()
-                .and_then(|n| n.partial_cmp(f).map(|o| o as i32)),
-            (Value::Float64(f), Value::String(s)) => s
-                .parse::<f64>()
-                .ok()
-                .and_then(|n| f.partial_cmp(&n).map(|o| o as i32)),
+            (Value::String(s), Value::Int64(i)) => {
+                super::value_utils::partial_cmp_text_int(s, *i).map(|o| o as i32)
+            }
+            (Value::Int64(i), Value::String(s)) => {
+                super::value_utils::partial_cmp_text_int(s, *i).map(|o| o.reverse() as i32)
+            }
+            (Value::String(s), Value::Float64(f)) => {
+                super::value_utils::partial_cmp_text_float(s, *f).map(|o| o as i32)
+            }
+            (Value::Float64(f), Value::String(s)) => {
+                super::value_utils::partial_cmp_text_float(s, *f).map(|o| o.reverse() as i32)
+            }
             // Temporal comparisons
             (Value::Timestamp(a), Value::Timestamp(b)) => Some(a.cmp(b) as i32),
             (Value::Date(a), Value::Date(b)) => Some(a.cmp(b) as i32),

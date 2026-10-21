@@ -737,12 +737,7 @@ fn an_encrypted_database_has_no_spill_path() {
 /// vector index to a spill file next to it; an encrypted one keeps them in
 /// memory and writes nothing next to its file but the file and its sidecar
 /// WAL. (The vectors spill only without `temporal`.)
-#[cfg(all(
-    feature = "vector-index",
-    feature = "spill",
-    feature = "mmap",
-    not(feature = "temporal")
-))]
+#[cfg(all(feature = "vector-index", feature = "spill", feature = "mmap"))]
 #[test]
 fn an_encrypted_database_spills_nothing_to_disk() {
     let dir = tempfile::tempdir().unwrap();

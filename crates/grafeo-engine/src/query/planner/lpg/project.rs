@@ -1868,14 +1868,14 @@ pub(super) fn text_score_column_name(
 mod tests {
     use super::super::{Arc, GraphStoreSearch, LogicalExpression, Planner, Value};
     use crate::query::plan::Callee;
-    use grafeo_core::graph::lpg::LpgStore;
+    use grafeo_core::graph::rowgroup::RowGroupStore;
 
     /// The top-k rewrite takes a vector function in any spelling (it matches
     /// the resolved function), so the score column it projects must be found
     /// in any spelling too, or the score is computed a second time per row.
     #[test]
     fn a_projected_score_is_found_in_any_spelling() {
-        let planner = Planner::new(Arc::new(LpgStore::new().unwrap()) as Arc<dyn GraphStoreSearch>);
+        let planner = Planner::new(Arc::new(RowGroupStore::new()) as Arc<dyn GraphStoreSearch>);
         let query = LogicalExpression::List(vec![
             LogicalExpression::Literal(Value::Float64(1.0)),
             LogicalExpression::Literal(Value::Float64(0.0)),

@@ -215,6 +215,10 @@ print(f"Imported {count} nodes")
 count = db.import_jsonl("events.jsonl", "Event")
 ```
 
+Each column or JSON key becomes a property under the name the file gives it (`home city` stays `home city`), and
+the label is used as given. A CSV without headers (`headers=False`) names its columns `column0`, `column1`, and so
+on. CSV values are strings; JSON values keep their types. An empty CSV field sets no property.
+
 ## Change Data Capture
 
 Control CDC on a per-transaction basis:

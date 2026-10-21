@@ -3,8 +3,6 @@
 #[cfg(any(feature = "wal", feature = "grafeo-file"))]
 use std::path::Path;
 
-#[cfg(any(feature = "vector-index", feature = "text-index"))]
-use grafeo_common::grafeo_warn;
 use grafeo_common::types::{EdgeId, EpochId, NodeId, Value};
 use grafeo_common::utils::error::{Error, Result};
 use hashbrown::HashSet;
@@ -40,7 +38,9 @@ struct SnapshotV5 {
     rdf_named_graphs: Vec<RdfNamedGraphSnapshot>,
     /// The catalog's records, framed.
     catalog: Vec<u8>,
-    /// Current store epoch at snapshot time (0 when temporal is disabled).
+    /// The epoch the snapshot holds the database at, which an import
+    /// continues at (0 in the snapshots builds without `temporal` wrote
+    /// before 0.6.0).
     epoch: u64,
 }
 
@@ -110,31 +110,14 @@ fn decode_snapshot(data: &[u8], action: &str) -> Result<DecodedSnapshot> {
     }
 }
 
-/// Applies the catalog records of a v5 snapshot to `db`, whose data is
-/// restored already, as the replay of a WAL applies logged catalog puts (a
-/// definition the catalog holds already is replaced or kept), then builds
-/// the vector and text indexes they define from the data. As in the load of
-/// a catalog section, a constraint record restores only the name: the node
-/// type records hold the type constraints that enforce it. A stored
-/// configuration in the records is left out: it belongs to the database
-/// file.
-///
-/// # Errors
-///
-/// The error of a record the catalog refuses.
-fn apply_snapshot_records(
-    db: &super::GrafeoDB,
-    records: Vec<grafeo_common::storage::CatalogRecord>,
-) -> Result<()> {
-    let unbuilt = apply_catalog_records(&db.lpg_store(), &db.catalog, records)?;
-    db.build_unbuilt(unbuilt);
-    Ok(())
-}
-
 /// Applies the catalog records of a v5 snapshot to `catalog` and to
-/// `store`, the root store whose data is restored already (see
-/// [`apply_snapshot_records`]). Returns the vector and text indexes they
-/// define, for the caller to build from the data.
+/// `store`, the root store whose data is restored already, as the replay of
+/// a WAL applies logged catalog puts (a definition the catalog holds already
+/// is replaced or kept). As in the load of a catalog section, a constraint
+/// record restores only the name: the node type records hold the type
+/// constraints that enforce it. A stored configuration in the records is
+/// left out: it belongs to the database file. Returns the vector and text
+/// indexes they define, for the caller to build from the data.
 ///
 /// # Errors
 ///
@@ -269,95 +252,9 @@ struct SnapshotEdge {
     properties: Vec<(String, Vec<(EpochId, Value)>)>,
 }
 
-/// Collects all nodes from a store into snapshot format.
-///
-/// With `temporal`: stores full property version history.
-/// Without: wraps each current value as a single-entry version list at epoch 0.
-/// The nodes of `store` as a snapshot holds them, read one at a time. A node
-/// record or a spilled property value that cannot be read fails the export
-/// instead of leaving the copy without it.
-fn collect_snapshot_nodes(store: &grafeo_core::graph::lpg::LpgStore) -> Result<Vec<SnapshotNode>> {
-    // With `temporal` the snapshot holds each property's history, read
-    // below: the current values are not read.
-    #[cfg(feature = "temporal")]
-    let source = store
-        .try_nodes_without_properties()?
-        .map(Ok::<_, grafeo_common::utils::error::Error>);
-    #[cfg(not(feature = "temporal"))]
-    let source = store.try_nodes()?;
-    let mut nodes: Vec<SnapshotNode> = Vec::new();
-    for n in source {
-        let n = n?;
-        #[cfg(feature = "temporal")]
-        let mut properties: Vec<(String, Vec<(EpochId, Value)>)> = store
-            .node_property_history(n.id)
-            .into_iter()
-            .map(|(k, entries)| (k.to_string(), entries))
-            .collect();
-
-        #[cfg(not(feature = "temporal"))]
-        let mut properties: Vec<(String, Vec<(EpochId, Value)>)> = n
-            .properties
-            .into_iter()
-            .map(|(k, v)| (k.to_string(), vec![(EpochId::new(0), v)]))
-            .collect();
-
-        properties.sort_by(|(a, _), (b, _)| a.cmp(b));
-
-        let mut labels: Vec<String> = n.labels.iter().map(|l| l.to_string()).collect();
-        labels.sort();
-
-        nodes.push(SnapshotNode {
-            id: n.id,
-            labels,
-            properties,
-        });
-    }
-    nodes.sort_by_key(|n| n.id);
-    Ok(nodes)
-}
-
-/// Collects all edges from a store into snapshot format.
-///
-/// With `temporal`: stores full property version history.
-/// Without: wraps each current value as a single-entry version list at epoch 0.
-fn collect_snapshot_edges(store: &grafeo_core::graph::lpg::LpgStore) -> Vec<SnapshotEdge> {
-    let mut edges: Vec<SnapshotEdge> = store
-        .all_edges()
-        .map(|e| {
-            #[cfg(feature = "temporal")]
-            let mut properties: Vec<(String, Vec<(EpochId, Value)>)> = store
-                .edge_property_history(e.id)
-                .into_iter()
-                .map(|(k, entries)| (k.to_string(), entries))
-                .collect();
-
-            #[cfg(not(feature = "temporal"))]
-            let mut properties: Vec<(String, Vec<(EpochId, Value)>)> = e
-                .properties
-                .into_iter()
-                .map(|(k, v)| (k.to_string(), vec![(EpochId::new(0), v)]))
-                .collect();
-
-            properties.sort_by(|(a, _), (b, _)| a.cmp(b));
-
-            SnapshotEdge {
-                id: e.id,
-                src: e.src,
-                dst: e.dst,
-                edge_type: e.edge_type.to_string(),
-                properties,
-            }
-        })
-        .collect();
-    edges.sort_by_key(|e| e.id);
-    edges
-}
-
 /// Populates a store from snapshot node/edge data, each property's versions
 /// oldest first (see [`load_versions`](grafeo_core::graph::lpg::load_versions)):
-/// with `temporal` `LpgStore` keeps them all, without it and in the
-/// row-group store the latest is the value.
+/// the row-group store keeps the latest as the value.
 fn populate_store_from_snapshot<S: grafeo_core::graph::load::LoadTarget>(
     store: &S,
     nodes: &[SnapshotNode],
@@ -732,68 +629,6 @@ pub(super) fn load_snapshot_into_store<S: super::root_store::RootStore>(
     Ok(())
 }
 
-/// Copies the nodes and edges of `source` into `target` with their IDs, and
-/// those of each named graph, as the LPG section would load them: with
-/// `temporal`, every property keeps its history and the stores their epoch.
-fn copy_graph_data(
-    source: &grafeo_core::graph::lpg::LpgStore,
-    target: &grafeo_core::graph::lpg::LpgStore,
-) -> Result<()> {
-    // A node record or a spilled value that cannot be read fails the copy
-    // instead of leaving it out. The nodes are read one at a time, each just
-    // before it is written, so the copy never holds them all. With
-    // `temporal` each property's history is copied: the current values are
-    // not read.
-    #[cfg(feature = "temporal")]
-    let nodes = source
-        .try_nodes_without_properties()?
-        .map(Ok::<_, grafeo_common::utils::error::Error>);
-    #[cfg(not(feature = "temporal"))]
-    let nodes = source.try_nodes()?;
-    for node in nodes {
-        let node = node?;
-        let labels: Vec<&str> = node.labels.iter().map(|label| &**label).collect();
-        target.create_node_with_id(node.id, &labels)?;
-        #[cfg(feature = "temporal")]
-        for (key, history) in source.node_property_history(node.id) {
-            for (epoch, value) in history {
-                target.set_node_property_at_epoch(node.id, key.as_str(), value, epoch);
-            }
-        }
-        #[cfg(not(feature = "temporal"))]
-        for (key, value) in node.properties {
-            target.set_node_property(node.id, key.as_str(), value);
-        }
-    }
-    for edge in source.all_edges() {
-        target.create_edge_with_id(edge.id, edge.src, edge.dst, &edge.edge_type)?;
-        #[cfg(feature = "temporal")]
-        for (key, history) in source.edge_property_history(edge.id) {
-            for (epoch, value) in history {
-                target.set_edge_property_at_epoch(edge.id, key.as_str(), value, epoch);
-            }
-        }
-        #[cfg(not(feature = "temporal"))]
-        for (key, value) in edge.properties {
-            target.set_edge_property(edge.id, key.as_str(), value);
-        }
-    }
-    #[cfg(feature = "temporal")]
-    target.sync_epoch(source.current_epoch());
-
-    for name in source.graph_names() {
-        if let Some(source_graph) = source.graph(&name) {
-            target
-                .create_graph(&name)
-                .map_err(|e| Error::Internal(e.to_string()))?;
-            if let Some(target_graph) = target.graph(&name) {
-                copy_graph_data(&source_graph, &target_graph)?;
-            }
-        }
-    }
-    Ok(())
-}
-
 /// Restores schema definitions from a snapshot into the catalog.
 ///
 /// Also ensures each schema has its `__default__` graph partition, which
@@ -823,48 +658,6 @@ fn restore_schema_from_snapshot<S: super::catalog_section::CatalogStore>(
     }
     for (graph_name, type_name) in &schema.graph_type_bindings {
         let _ = catalog.bind_graph_type(graph_name, type_name.clone());
-    }
-}
-
-/// Restores indexes from snapshot metadata by rebuilding them from existing data.
-///
-/// Must be called after all nodes/edges have been populated, since index
-/// creation scans existing data. A build without `vector-index` or
-/// `text-index` has refused a snapshot with such definitions before (see
-/// [`refuse_unreadable_snapshot`]).
-fn restore_indexes_from_snapshot(db: &super::GrafeoDB, indexes: &SnapshotIndexes) {
-    for name in &indexes.property_indexes {
-        db.lpg_store().create_property_index(name);
-    }
-
-    #[cfg(feature = "vector-index")]
-    for vi in &indexes.vector_indexes {
-        if let Err(err) = db.create_vector_index(
-            &vi.label,
-            &vi.property,
-            Some(vi.dimensions),
-            Some(vi.metric.name()),
-            Some(vi.m),
-            Some(vi.ef_construction),
-            None,
-        ) {
-            grafeo_warn!(
-                "Failed to restore vector index :{label}({property}): {err}",
-                label = vi.label,
-                property = vi.property,
-            );
-        }
-    }
-
-    #[cfg(feature = "text-index")]
-    for ti in &indexes.text_indexes {
-        if let Err(err) = db.create_text_index(&ti.label, &ti.property) {
-            grafeo_warn!(
-                "Failed to restore text index :{label}({property}): {err}",
-                label = ti.label,
-                property = ti.property,
-            );
-        }
     }
 }
 
@@ -999,10 +792,20 @@ impl super::GrafeoDB {
     /// Returns an error if the copy operation fails, or after a commit that
     /// did not complete.
     pub fn to_memory(&self) -> Result<Self> {
-        let target = Self::with_config(Config::in_memory())?;
+        // The copy keeps the backward edges this database keeps (10b), and
+        // its history retention, with the history its sections hold.
+        let mut config = Config::in_memory()
+            .with_history_retention(self.transaction_manager.history_retention());
+        if self
+            .root_store()
+            .is_some_and(|store| !store.keeps_backward_edges())
+        {
+            config = config.without_backward_edges();
+        }
+        let target = Self::with_config(config)?;
         // Each section is served once and freed as soon as it is loaded.
         let image = grafeo_common::storage::ServedOnce::new(self.copy_into(&target)?);
-        let loaded = super::sections::load_sections(
+        let mut loaded = super::sections::load_sections(
             &image,
             None,
             &target.lpg_store(),
@@ -1016,30 +819,31 @@ impl super::GrafeoDB {
         target
             .lpg_store()
             .sync_epoch(target.transaction_manager.current_epoch());
+        super::row_group_sections::restore_row_group_history(
+            &target.lpg_store(),
+            &target.transaction_manager,
+            loaded.take_history(),
+        );
         Self::continue_epochs(&target.lpg_store(), &target.transaction_manager);
         target.finish_load(loaded);
         Ok(target)
     }
 
-    /// Copies this database's nodes and edges into `target`, and returns an
-    /// image of every other section of a checkpoint, for
-    /// [`to_memory`](Self::to_memory) to load. `target`'s transaction
+    /// Returns an image of every section of a checkpoint of this database,
+    /// for [`to_memory`](Self::to_memory) to load; `target`'s transaction
     /// manager takes the epoch of the commits they hold.
     ///
-    /// Both are taken under one commit hold, so they hold the same commits:
-    /// every commit whole, none that did not complete, and nothing of a
-    /// transaction still open (the hold also holds its writes). The LPG
-    /// section is left out of the image: its nodes and edges are copied from store to store instead, which is
-    /// much faster than encoding them. While a transaction is open the stores
-    /// hold what it wrote, so the image holds the LPG section, which writes
-    /// the committed state, and the copy loads it as a reopen does.
+    /// The sections are taken under one commit hold, so they hold every
+    /// commit whole, none that did not complete, and nothing of a
+    /// transaction still open: the LPG section writes every graph as a
+    /// reader at the checkpoint's epoch sees it.
     ///
     /// # Errors
     ///
-    /// Returns an error if commits cannot be held, a section fails to write,
-    /// or the nodes and edges cannot be copied.
+    /// Returns an error if commits cannot be held or a section fails to
+    /// write.
     pub(super) fn copy_into(&self, target: &Self) -> Result<grafeo_common::storage::MemoryImage> {
-        use grafeo_common::storage::{MemoryImage, SectionType};
+        use grafeo_common::storage::MemoryImage;
 
         let mut image = MemoryImage::new();
         let commits = self.transaction_manager.hold_commits()?;
@@ -1049,14 +853,9 @@ impl super::GrafeoDB {
         target
             .transaction_manager
             .sync_epoch(EpochId::new(sources.epoch()));
-        let open = sources.has_open_changes(&commits);
         for section in sources.sections(&commits) {
-            if section.section_type() == SectionType::LpgStore && !open {
-                copy_graph_data(&self.lpg_store(), &target.lpg_store())?;
-            } else {
-                image.begin_section(section.section_type(), section.version())?;
-                section.write_to(&mut image)?;
-            }
+            image.begin_section(section.section_type(), section.version())?;
+            section.write_to(&mut image)?;
         }
         Ok(image)
     }
@@ -1130,14 +929,14 @@ impl super::GrafeoDB {
     /// safely as the data itself. For an encrypted copy, use
     /// [`save`](Self::save) with a `.grafeo` path.
     ///
-    /// Properties are stored as version-history lists. When `temporal` is
-    /// enabled, the full history is captured. Otherwise, each property is
-    /// wrapped as a single-entry list at epoch 0.
+    /// Properties are stored as version-history lists, each holding the
+    /// value a reader at the export's epoch sees, at epoch 0. The snapshot
+    /// holds the export's epoch, which an import or restore continues at.
     ///
     /// The snapshot holds the committed state: what a transaction still open
     /// deleted is in it, with the values and labels it changed as they were
-    /// committed, and nothing it created is (while one is open, the data is
-    /// read from a committed copy, which takes as much memory again).
+    /// committed, and nothing it created is. Every graph is read as a
+    /// committed reader at the export's epoch sees it, so no copy is made.
     ///
     /// # Errors
     ///
@@ -1148,67 +947,28 @@ impl super::GrafeoDB {
         // (whose stamped part the store holds), and nothing of a transaction
         // still open (the hold also holds its writes).
         let commits = self.transaction_manager.hold_commits()?;
-        let committed = self
-            .checkpoint_sources()
-            .committed(&commits)?
-            .ok_or_else(|| {
-                Error::Query(grafeo_common::utils::error::QueryError::unsupported(
-                    "a snapshot export needs the built-in LPG store",
-                ))
-            })?;
-        let store = &committed.store;
-        let (nodes, edges) = (
-            collect_snapshot_nodes(store)?,
-            collect_snapshot_edges(store),
-        );
+        let root = self.root_store().ok_or_else(|| {
+            Error::Query(grafeo_common::utils::error::QueryError::unsupported(
+                "a snapshot export needs the built-in LPG store",
+            ))
+        })?;
+        let epoch = EpochId::new(self.checkpoint_sources().epoch());
+        let exported = row_groups::export(&self.snapshot_parts(&root), epoch);
+        drop(commits);
+        exported
+    }
 
-        // Collect named graphs, by name: the export of the same data gives
-        // the same bytes.
-        let mut named_graphs: Vec<NamedGraphSnapshot> = Vec::new();
-        let mut graph_names = store.graph_names();
-        graph_names.sort_unstable();
-        for name in graph_names {
-            if let Some(graph_store) = store.graph(&name) {
-                named_graphs.push(NamedGraphSnapshot {
-                    name,
-                    nodes: collect_snapshot_nodes(&graph_store)?,
-                    edges: collect_snapshot_edges(&graph_store),
-                });
-            }
+    /// The parts of this database a snapshot reads and writes.
+    fn snapshot_parts<'a>(
+        &'a self,
+        root: &'a std::sync::Arc<grafeo_core::graph::rowgroup::RowGroupStore>,
+    ) -> row_groups::Parts<'a> {
+        row_groups::Parts {
+            root,
+            catalog: &self.catalog,
+            #[cfg(feature = "triple-store")]
+            rdf: &self.rdf_store,
         }
-
-        // Collect RDF triples
-        #[cfg(feature = "triple-store")]
-        let (rdf_triples, rdf_named_graphs) = rdf_snapshot(&self.rdf_store);
-        #[cfg(not(feature = "triple-store"))]
-        let (rdf_triples, rdf_named_graphs) = (Vec::new(), Vec::new());
-
-        // The catalog's records, with the indexes of every graph of the
-        // database (the committed copy holds none).
-        let catalog = super::catalog_section::CatalogSection::new(
-            std::sync::Arc::clone(&self.catalog),
-            self.lpg_store(),
-            || 0,
-        )
-        .snapshot_records()?;
-
-        let snapshot = SnapshotV5 {
-            version: SNAPSHOT_VERSION,
-            nodes,
-            edges,
-            named_graphs,
-            rdf_triples,
-            rdf_named_graphs,
-            catalog,
-            #[cfg(feature = "temporal")]
-            epoch: self.transaction_manager.current_epoch().as_u64(),
-            #[cfg(not(feature = "temporal"))]
-            epoch: 0,
-        };
-
-        let config = bincode::config::standard();
-        bincode::serde::encode_to_vec(&snapshot, config)
-            .map_err(|e| Error::Internal(format!("snapshot export failed: {e}")))
     }
 
     /// Creates a new in-memory database from a binary snapshot.
@@ -1232,64 +992,15 @@ impl super::GrafeoDB {
     /// N-Triples term, or deserialization fails; and, naming the data and the
     /// feature, if it holds data this build cannot read.
     pub fn import_snapshot(data: &[u8]) -> Result<Self> {
+        // Decoded, validated and refused (data this build cannot read)
+        // before the database is created.
         let decoded = decode_snapshot(data, "import")?;
-        // Before the database is created: this build would import the
-        // snapshot without the data it cannot read.
         refuse_unreadable_snapshot(&decoded, "import")?;
-        let DecodedSnapshot { snapshot, records } = decoded;
-
-        // Validate default graph data
-        validate_snapshot_data(&snapshot.nodes, &snapshot.edges)?;
-
-        // Validate each named graph
-        for ng in &snapshot.named_graphs {
-            validate_snapshot_data(&ng.nodes, &ng.edges)?;
-        }
-        #[cfg(feature = "triple-store")]
-        let rdf_graphs = read_rdf_snapshot(&snapshot.rdf_triples, &snapshot.rdf_named_graphs)?;
-
         let db = Self::new_in_memory();
-        populate_store_from_snapshot(&*db.lpg_store(), &snapshot.nodes, &snapshot.edges)?;
-
-        // Restore epoch from snapshot
-        #[cfg(feature = "temporal")]
-        {
-            let epoch = EpochId::new(snapshot.epoch);
-            db.lpg_store().sync_epoch(epoch);
-            db.transaction_manager.sync_epoch(epoch);
-        }
-
-        // Capture epoch before moving snapshot fields
-        #[cfg(feature = "temporal")]
-        let snapshot_epoch = EpochId::new(snapshot.epoch);
-
-        // Restore named graphs
-        for ng in snapshot.named_graphs {
-            db.lpg_store()
-                .create_graph(&ng.name)
-                .map_err(|e| Error::Internal(e.to_string()))?;
-            if let Some(graph_store) = db.lpg_store().graph(&ng.name) {
-                populate_store_from_snapshot(&*graph_store, &ng.nodes, &ng.edges)?;
-                // Named graph stores need the same epoch so temporal property
-                // lookups via current_epoch() return the correct values.
-                #[cfg(feature = "temporal")]
-                graph_store.sync_epoch(snapshot_epoch);
-            }
-        }
-
-        // Restore RDF triples
-        #[cfg(feature = "triple-store")]
-        {
-            populate_rdf_store(&db.rdf_store, rdf_graphs);
-        }
-
-        // Restore schema
-        restore_schema_from_snapshot(&db.lpg_store(), &db.catalog, &snapshot.schema);
-
-        // Restore indexes (must come after data population)
-        restore_indexes_from_snapshot(&db, &snapshot.indexes);
-        apply_snapshot_records(&db, records)?;
-
+        let root = db.lpg_store();
+        row_groups::restore(&db.snapshot_parts(&root), data, "import")?;
+        // The database continues at the snapshot's epoch.
+        Self::continue_epochs(&root, &db.transaction_manager);
         Ok(db)
     }
 
@@ -1333,66 +1044,13 @@ impl super::GrafeoDB {
         }
         self.transaction_manager.check_no_incomplete_commit()?;
         self.transaction_manager.check_open()?;
-        let decoded = decode_snapshot(data, "restore")?;
-
-        // Validate all data before making any changes, and refuse data this
-        // build cannot read, which it would restore the database without.
-        refuse_unreadable_snapshot(&decoded, "restore")?;
-        let DecodedSnapshot { snapshot, records } = decoded;
-        validate_snapshot_data(&snapshot.nodes, &snapshot.edges)?;
-        for ng in &snapshot.named_graphs {
-            validate_snapshot_data(&ng.nodes, &ng.edges)?;
-        }
-        #[cfg(feature = "triple-store")]
-        let rdf_graphs = read_rdf_snapshot(&snapshot.rdf_triples, &snapshot.rdf_named_graphs)?;
-
-        // Drop all existing named graphs, then clear default store
-        for name in self.lpg_store().graph_names() {
-            self.lpg_store().drop_graph(&name);
-        }
-        self.lpg_store().clear();
-
-        populate_store_from_snapshot(&*self.lpg_store(), &snapshot.nodes, &snapshot.edges)?;
-
-        // Restore epoch from temporal snapshot
-        #[cfg(feature = "temporal")]
-        let snapshot_epoch = {
-            let epoch = EpochId::new(snapshot.epoch);
-            self.lpg_store().sync_epoch(epoch);
-            self.transaction_manager.sync_epoch(epoch);
-            epoch
-        };
-
-        // Restore named graphs
-        for ng in snapshot.named_graphs {
-            self.lpg_store()
-                .create_graph(&ng.name)
-                .map_err(|e| Error::Internal(e.to_string()))?;
-            if let Some(graph_store) = self.lpg_store().graph(&ng.name) {
-                populate_store_from_snapshot(&*graph_store, &ng.nodes, &ng.edges)?;
-                #[cfg(feature = "temporal")]
-                graph_store.sync_epoch(snapshot_epoch);
-            }
-        }
-
-        // Restore RDF data
-        #[cfg(feature = "triple-store")]
-        {
-            // Clear existing RDF data
-            self.rdf_store.clear();
-            for name in self.rdf_store.graph_names() {
-                self.rdf_store.drop_graph(&name);
-            }
-            populate_rdf_store(&self.rdf_store, rdf_graphs);
-        }
-
-        // Restore schema
-        restore_schema_from_snapshot(&self.lpg_store(), &self.catalog, &snapshot.schema);
-
-        // Restore indexes (must come after data population)
-        restore_indexes_from_snapshot(self, &snapshot.indexes);
-        apply_snapshot_records(self, records)?;
-
+        // Validates the snapshot and refuses data this build cannot read
+        // before it changes anything (see `row_groups::restore`).
+        let root = self.lpg_store();
+        row_groups::restore(&self.snapshot_parts(&root), data, "restore")?;
+        // The database continues at the snapshot's epoch, or above it when
+        // it had committed further (epochs never go back).
+        Self::continue_epochs(&root, &self.transaction_manager);
         Ok(())
     }
 
@@ -1404,46 +1062,57 @@ impl super::GrafeoDB {
     /// epoch (see [`current_epoch`](Self::current_epoch)), in id order.
     ///
     /// Useful for dump/export operations.
+    ///
+    /// The read is pinned at its epoch while the iterator lives, so a
+    /// collect between two steps keeps every node it still reads.
     pub fn iter_nodes(&self) -> impl Iterator<Item = grafeo_core::graph::lpg::Node> + '_ {
+        use grafeo_core::graph::GraphStore;
+
+        let pin = self.transaction_manager.pin_read();
         let epoch = self.read_epoch();
         let store = self.lpg_store();
-        store
-            .all_node_ids()
-            .into_iter()
-            .filter_map(move |id| store.get_node_at_epoch(id, epoch))
+        store.all_node_ids().into_iter().filter_map(move |id| {
+            let _pinned = &pin;
+            store.get_node_at_epoch(id, epoch)
+        })
     }
 
     /// Returns an iterator over all edges in the database, as of the current
     /// epoch (see [`current_epoch`](Self::current_epoch)), in id order.
     ///
     /// Useful for dump/export operations.
+    ///
+    /// The read is pinned at its epoch while the iterator lives (see
+    /// [`iter_nodes`](Self::iter_nodes)).
     pub fn iter_edges(&self) -> impl Iterator<Item = grafeo_core::graph::lpg::Edge> + '_ {
+        use grafeo_core::graph::GraphStore;
+
+        let pin = self.transaction_manager.pin_read();
         let epoch = self.read_epoch();
         let store = self.lpg_store();
         // The store numbers its edges densely.
         (0..store.next_edge_id()).filter_map(move |id| {
+            let _pinned = &pin;
             store.get_edge_at_epoch(grafeo_common::types::EdgeId::new(id), epoch)
         })
     }
 }
 
 /// The snapshot paths on the row-group store (#412 P5): export, import and
-/// restore of a database whose root store is a row-group root, with the
+/// restore of a database's root store and its named graphs, with the
 /// snapshot layout, validation and refusals of [`GrafeoDB::export_snapshot`],
-/// [`GrafeoDB::import_snapshot`] and [`GrafeoDB::restore_snapshot`]. Built
-/// for tests until the switch (H2d) makes them the database's.
+/// [`GrafeoDB::import_snapshot`] and [`GrafeoDB::restore_snapshot`].
 ///
 /// An export reads each graph as a committed reader at the export's epoch
 /// sees it, so it needs no committed copy while a transaction is open; it
-/// holds each value once, as a build without `temporal` writes it, and the
-/// export's epoch, which an import continues at. An import or restore loads
-/// the rows through the replay writer ([`LoadTarget`](grafeo_core::graph::load::LoadTarget)),
-/// keeping the latest of each property's versions.
+/// holds each value once, and the export's epoch, which an import continues
+/// at. An import or restore loads the rows through the replay writer
+/// ([`LoadTarget`](grafeo_core::graph::load::LoadTarget)), keeping the
+/// latest of each property's versions.
 ///
 /// [`GrafeoDB::export_snapshot`]: super::GrafeoDB::export_snapshot
 /// [`GrafeoDB::import_snapshot`]: super::GrafeoDB::import_snapshot
 /// [`GrafeoDB::restore_snapshot`]: super::GrafeoDB::restore_snapshot
-#[cfg(all(test, feature = "grafeo-file", feature = "wal"))]
 pub(super) mod row_groups {
     use std::sync::Arc;
 
@@ -1644,159 +1313,12 @@ pub(super) mod row_groups {
 #[cfg(test)]
 mod tests {
     use grafeo_common::types::{EdgeId, NodeId, Value};
+    use grafeo_core::graph::GraphStore as _;
 
     use super::super::GrafeoDB;
     use super::{
         SNAPSHOT_VERSION, Snapshot, SnapshotEdge, SnapshotIndexes, SnapshotNode, SnapshotSchema,
     };
-
-    /// A database with Alix, whose embedding is spilled into a backing that
-    /// cannot be read, and Gus, who has no embedding.
-    #[cfg(not(feature = "temporal"))]
-    fn with_an_unreadable_embedding() -> (GrafeoDB, NodeId) {
-        use grafeo_common::types::PropertyKey;
-
-        let db = GrafeoDB::new_in_memory();
-        let alix = db
-            .create_node_with_props(
-                &["Item"],
-                [
-                    ("name", Value::from("Alix")),
-                    ("embedding", Value::Vector(vec![3.0, 19.0].into())),
-                ],
-            )
-            .unwrap();
-        db.create_node_with_props(&["Item"], [("name", Value::from("Gus"))])
-            .unwrap();
-        assert!(db.export_snapshot().is_ok());
-        let key = PropertyKey::new("embedding");
-        let store = db.lpg_store();
-        let snapshot = store.node_property_column_entries(&key).unwrap();
-        assert!(store.spill_node_property_column(
-            &key,
-            std::sync::Arc::new(super::super::test_backing::Unreadable(alix)),
-            &snapshot
-        ));
-        (db, alix)
-    }
-
-    /// An export reads spilled values, and fails rather than leave out one it
-    /// cannot read (#594).
-    #[cfg(not(feature = "temporal"))]
-    #[test]
-    fn an_export_fails_on_a_spilled_value_it_cannot_read() {
-        let (db, _) = with_an_unreadable_embedding();
-        assert!(
-            db.export_snapshot().is_err(),
-            "a snapshot without the embedding"
-        );
-        assert!(db.to_memory().is_err(), "a copy without the embedding");
-    }
-
-    /// A statement that would change a spilled value it cannot read errors and
-    /// changes nothing: its rollback could not restore the value (#594).
-    #[cfg(not(feature = "temporal"))]
-    #[test]
-    fn a_statement_on_a_spilled_value_it_cannot_read_errors() {
-        let (db, alix) = with_an_unreadable_embedding();
-        for statement in [
-            "MATCH (n:Item {name: 'Alix'}) SET n.embedding = vector([88.0, 3.19])",
-            "MATCH (n:Item {name: 'Alix'}) REMOVE n.embedding",
-            "MATCH (n:Item {name: 'Alix'}) DELETE n",
-        ] {
-            let error = db.execute(statement).expect_err(statement);
-            assert!(
-                error.to_string().contains("cannot be read"),
-                "{statement}: {error}"
-            );
-        }
-        assert!(db.get_node(alix).is_some(), "Alix was not deleted");
-        db.execute("MATCH (n:Item {name: 'Gus'}) SET n.embedding = vector([88.0, 3.19])")
-            .unwrap();
-    }
-
-    /// A copy takes the nodes in one at a time: it reads a node's values just
-    /// before it writes the node, so it never holds every node of the source
-    /// at once (#594).
-    #[cfg(not(feature = "temporal"))]
-    #[test]
-    fn a_copy_reads_each_node_just_before_it_writes_it() {
-        use std::sync::Arc;
-
-        use grafeo_common::types::PropertyKey;
-        use grafeo_core::graph::lpg::{ColumnBacking, LpgStore};
-        use parking_lot::Mutex;
-
-        /// A backing that notes how many nodes the copy's target holds at
-        /// each read.
-        struct Watching {
-            values: std::collections::HashMap<NodeId, Value>,
-            target: Arc<LpgStore>,
-            seen: Mutex<Vec<usize>>,
-        }
-        impl ColumnBacking<NodeId> for Watching {
-            fn get(&self, id: NodeId) -> std::io::Result<Option<Value>> {
-                self.seen.lock().push(self.target.node_count());
-                Ok(self.values.get(&id).cloned())
-            }
-            fn contains(&self, id: NodeId) -> bool {
-                self.values.contains_key(&id)
-            }
-            fn ids(&self) -> Vec<NodeId> {
-                self.values.keys().copied().collect()
-            }
-            fn len(&self) -> usize {
-                self.values.len()
-            }
-            fn heap_bytes(&self) -> usize {
-                0
-            }
-        }
-
-        let source = LpgStore::new().unwrap();
-        for x in [3.0, 19.0, 88.0] {
-            source
-                .create_node_with_props(&["Item"], [("embedding", Value::Vector(vec![x].into()))]);
-        }
-        let key = PropertyKey::new("embedding");
-        let snapshot = source.node_property_column_entries(&key).unwrap();
-        let target = Arc::new(LpgStore::new().unwrap());
-        let backing = Arc::new(Watching {
-            values: snapshot.iter().cloned().collect(),
-            target: Arc::clone(&target),
-            seen: Mutex::new(Vec::new()),
-        });
-        assert!(source.spill_node_property_column(&key, backing.clone(), &snapshot));
-
-        super::copy_graph_data(&source, &target).unwrap();
-        assert_eq!(
-            *backing.seen.lock(),
-            vec![0, 1, 2],
-            "nodes the target held at each read"
-        );
-        assert_eq!(target.node_count(), 3);
-    }
-
-    /// A direct call that removes a spilled value it cannot read (setting it
-    /// to null, outside a transaction) errors and changes nothing: it hid the
-    /// value and reported success while its WAL record and change event were
-    /// left out (#594).
-    #[cfg(not(feature = "temporal"))]
-    #[test]
-    fn a_direct_removal_of_a_spilled_value_it_cannot_read_errors() {
-        use grafeo_common::types::PropertyKey;
-
-        let (db, alix) = with_an_unreadable_embedding();
-        let result = db.set_node_property(alix, "embedding", Value::Null);
-        assert!(
-            db.lpg_store()
-                .node_property_column_ids(&PropertyKey::new("embedding"))
-                .contains(&alix),
-            "the call hid the value"
-        );
-        let error = result.expect_err("a removal of a value it cannot read");
-        assert!(error.to_string().contains("cannot be read"), "{error}");
-    }
 
     #[test]
     fn test_restore_snapshot_basic() {
@@ -1916,15 +1438,19 @@ mod tests {
         assert_eq!(result.rows.len(), 1);
     }
 
-    /// With `temporal`, copies taken while a transaction is open hold none of
+    /// Copies taken while a transaction is open hold none of
     /// its versions: no property version of the copy is pending (it would
     /// never be finalized there), and no label it added is there (#412).
-    #[cfg(feature = "temporal")]
     #[test]
-    fn a_temporal_copy_holds_no_version_of_an_open_transaction() {
+    fn a_copy_holds_no_version_of_an_open_transaction() {
         use grafeo_common::types::EpochId;
 
-        let db = GrafeoDB::new_in_memory();
+        // History kept: a read at an earlier epoch needs it.
+        let db = GrafeoDB::with_config(
+            crate::config::Config::in_memory()
+                .with_history_retention(crate::config::HistoryRetention::Forever),
+        )
+        .unwrap();
         db.execute("INSERT (:Person {name: 'Alix', age: 19})")
             .unwrap();
         let mut session = db.session();

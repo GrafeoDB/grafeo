@@ -587,8 +587,14 @@ fn compare_values(a: &Value, b: &Value) -> Option<Ordering> {
         (Value::Float64(a), Value::Float64(b)) => a.partial_cmp(b),
         (Value::String(a), Value::String(b)) => Some(a.cmp(b)),
         (Value::Bool(a), Value::Bool(b)) => Some(a.cmp(b)),
-        (Value::Int64(a), Value::Float64(b)) => (*a as f64).partial_cmp(b),
-        (Value::Float64(a), Value::Int64(b)) => a.partial_cmp(&(*b as f64)),
+        // An integer and a float compare exactly, as a filter does.
+        (Value::Int64(a), Value::Float64(b)) => {
+            crate::execution::operators::value_utils::partial_cmp_int_float(*a, *b)
+        }
+        (Value::Float64(a), Value::Int64(b)) => {
+            crate::execution::operators::value_utils::partial_cmp_int_float(*b, *a)
+                .map(Ordering::reverse)
+        }
         (Value::Timestamp(a), Value::Timestamp(b)) => Some(a.cmp(b)),
         (Value::Date(a), Value::Date(b)) => Some(a.cmp(b)),
         (Value::Time(a), Value::Time(b)) => Some(a.cmp(b)),
@@ -611,6 +617,30 @@ mod tests {
         assert!(entry.might_contain_equal(&Value::Int64(100)));
         assert!(!entry.might_contain_equal(&Value::Int64(5)));
         assert!(!entry.might_contain_equal(&Value::Int64(105)));
+    }
+
+    /// A chunk of integers just above 2^53 is kept for a float bound they
+    /// pass exactly: converting the integer to a float would make the chunk's
+    /// maximum equal to the bound and prune a matching row.
+    #[test]
+    fn integers_above_2_53_against_a_float_bound_are_not_pruned() {
+        let two_to_53 = 1_i64 << 53;
+        let entry = ZoneMapEntry::with_min_max(
+            Value::Int64(two_to_53 + 1),
+            Value::Int64(two_to_53 + 1),
+            0,
+            1,
+        );
+        let bound = Value::Float64(9_007_199_254_740_992.0);
+        assert!(entry.might_contain_greater_than(&bound, false));
+        assert!(!entry.might_contain_less_than(&bound, true));
+        assert!(!entry.might_contain_equal(&bound));
+        assert!(entry.might_contain_range(Some(&bound), None, false, true));
+        // A chunk of exactly 2^53 meets the bound at equality only.
+        let exact =
+            ZoneMapEntry::with_min_max(Value::Int64(two_to_53), Value::Int64(two_to_53), 0, 1);
+        assert!(!exact.might_contain_greater_than(&bound, false));
+        assert!(exact.might_contain_greater_than(&bound, true));
     }
 
     #[test]

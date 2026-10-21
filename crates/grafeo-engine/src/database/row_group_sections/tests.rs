@@ -13,9 +13,12 @@ use grafeo_core::graph::apply::ChangeTarget;
 use grafeo_core::graph::rowgroup::RowGroupStore;
 use grafeo_core::graph::{Direction, GraphStore, GraphStoreMut};
 
-use super::super::sections::{CheckpointSources, LpgRoot};
-use super::{continue_row_group_epochs, load_row_group_sections};
+use super::super::sections::CheckpointSources;
+use super::{
+    continue_row_group_epochs, load_row_group_sections, restore_row_group_history, row_group_root,
+};
 use crate::catalog::Catalog;
+use crate::config::Config;
 use crate::transaction::{TransactionChanges, TransactionManager};
 
 /// A database on a row-group root, as `GrafeoDB` holds its parts: the root
@@ -26,6 +29,10 @@ struct Database {
     transaction_manager: Arc<TransactionManager>,
     #[cfg(feature = "triple-store")]
     rdf_store: Arc<grafeo_core::graph::rdf::RdfStore>,
+    /// The WAL commits write their groups to, and checkpoints start a new
+    /// segment of, when the test gives one.
+    #[cfg(feature = "wal")]
+    wal: Option<Arc<grafeo_storage::wal::Wal>>,
 }
 
 /// A transaction that is open: its id, its changes and its writer.
@@ -37,25 +44,33 @@ struct Open {
 
 impl Database {
     fn new() -> Self {
+        Self::with_config(&Config::in_memory())
+    }
+
+    /// A database whose root is the one `config` builds (see
+    /// [`row_group_root`]).
+    fn with_config(config: &Config) -> Self {
         Self {
-            root: Arc::new(RowGroupStore::new()),
+            root: row_group_root(config),
             catalog: Arc::new(Catalog::new()),
             transaction_manager: Arc::new(TransactionManager::new()),
             #[cfg(feature = "triple-store")]
             rdf_store: Arc::new(grafeo_core::graph::rdf::RdfStore::new()),
+            #[cfg(feature = "wal")]
+            wal: None,
         }
     }
 
     /// What a checkpoint of this database writes from.
     fn sources(&self) -> CheckpointSources {
         CheckpointSources {
-            store: Some(LpgRoot::RowGroups(Arc::clone(&self.root))),
+            store: Some(Arc::clone(&self.root)),
             catalog: Arc::clone(&self.catalog),
             transaction_manager: Arc::clone(&self.transaction_manager),
             #[cfg(feature = "triple-store")]
             rdf_store: Arc::clone(&self.rdf_store),
             #[cfg(feature = "wal")]
-            wal: None,
+            wal: self.wal.clone(),
             #[cfg(feature = "wal")]
             wal_records_at_checkpoint: Arc::new(std::sync::atomic::AtomicU64::new(0)),
         }
@@ -100,6 +115,25 @@ impl Database {
         drop(writer);
         let commit = self.transaction_manager.start_commit(transaction).unwrap();
         let epoch = commit.epoch();
+        // With a WAL, the commit's group first, as a database commits.
+        #[cfg(feature = "wal")]
+        let commit = match &self.wal {
+            Some(wal) => {
+                let (commit, logged) = super::super::wal_log::write_commit(
+                    wal,
+                    commit,
+                    transaction,
+                    &changes,
+                    grafeo_common::storage::log_record::Origin::Transaction,
+                )
+                .unwrap();
+                if let Some(logged) = logged {
+                    super::super::wal_log::sync_commit(wal, logged).unwrap();
+                }
+                commit
+            }
+            None => commit,
+        };
         commit
             .written()
             .complete_with(|| {
@@ -138,8 +172,18 @@ impl Database {
     /// A database loaded from `image` (of the database file `file`), with
     /// its epochs continued as an open continues them.
     fn load(image: &dyn ImageSource, file: Option<&std::path::Path>) -> Result<Self> {
-        let database = Self::new();
-        load_row_group_sections(
+        Self::load_with(image, file, &Config::in_memory())
+    }
+
+    /// A database with `config`'s root (see [`row_group_root`]) loaded from
+    /// `image`, as [`load`](Self::load) loads one.
+    fn load_with(
+        image: &dyn ImageSource,
+        file: Option<&std::path::Path>,
+        config: &Config,
+    ) -> Result<Self> {
+        let database = Self::with_config(config);
+        let history = load_row_group_sections(
             image,
             file,
             &database.root,
@@ -147,6 +191,7 @@ impl Database {
             #[cfg(feature = "triple-store")]
             &database.rdf_store,
         )?;
+        restore_row_group_history(&database.root, &database.transaction_manager, history);
         continue_row_group_epochs(&database.root, &database.transaction_manager);
         Ok(database)
     }
@@ -546,8 +591,18 @@ mod file {
     impl FileDatabase {
         /// A new database file at `path`.
         pub(super) fn create(path: &std::path::Path) -> Self {
+            Self::create_with(path, &Config::persistent(path))
+        }
+
+        /// A new database file at `path` created with `config`, which it
+        /// stores (#551) as `GrafeoDB` stores it when it creates the file.
+        pub(super) fn create_with(path: &std::path::Path, config: &Config) -> Self {
+            let database = Database::with_config(config);
+            database.catalog.set_stored_config(Some(
+                super::super::super::stored_config::record_of(config, path),
+            ));
             Self {
-                database: Database::new(),
+                database,
                 fm: GrafeoFileManager::create(path, None).unwrap(),
             }
         }
@@ -555,15 +610,31 @@ mod file {
         /// Opens the database file at `path`: loads its active image and
         /// continues at the epoch of its last checkpoint.
         pub(super) fn open(path: &std::path::Path) -> Self {
+            Self::open_with(path, Config::persistent(path)).unwrap()
+        }
+
+        /// Opens the database file at `path` with `config`, to which the
+        /// configuration the file stores applies before the root is built,
+        /// as `GrafeoDB` opens a file: the stored values of what `config`
+        /// does not set, a refusal of a fixed one it sets otherwise.
+        pub(super) fn open_with(path: &std::path::Path, config: Config) -> Result<Self> {
+            let stored_config = super::super::super::stored_config::read(
+                path,
+                &super::super::super::encryption::DatabaseKeys::from_config(&config),
+            )?;
+            let config = match stored_config {
+                Some(stored) => super::super::super::stored_config::applied(config, &stored, path)?,
+                None => config,
+            };
             let fm = GrafeoFileManager::open(path, None).unwrap();
             let database = fm
-                .read_image(|image| Database::load(image, Some(path)))
+                .read_image(|image| Database::load_with(image, Some(path), &config))
                 .unwrap();
             database
                 .root
                 .sync_epoch(EpochId::new(fm.active_header().epoch));
             continue_row_group_epochs(&database.root, &database.transaction_manager);
-            Self { database, fm }
+            Ok(Self { database, fm })
         }
 
         /// A checkpoint, through the flush every checkpoint of a database
@@ -679,6 +750,24 @@ const CHECKPOINT_POINTS: [&str; 7] = [
 #[cfg(all(feature = "grafeo-file", feature = "testing-crash-injection"))]
 #[test]
 fn a_crash_during_the_next_checkpoint_keeps_the_last_valid_one() {
+    crash_during_the_next_checkpoint(|path| Config::persistent(path));
+}
+
+/// [`a_crash_during_the_next_checkpoint_keeps_the_last_valid_one`] for a
+/// database created without backward edges (10b): every reopen after a
+/// crash keeps none, in the root and in trips.
+#[cfg(all(feature = "grafeo-file", feature = "testing-crash-injection"))]
+#[test]
+fn a_crash_without_backward_edges_keeps_the_last_valid_checkpoint() {
+    crash_during_the_next_checkpoint(|path| Config::persistent(path).without_backward_edges());
+}
+
+/// A valid checkpoint of a database created with `config`, then a crash at
+/// each point of the next one (see
+/// [`a_crash_during_the_next_checkpoint_keeps_the_last_valid_one`]); each
+/// reopen keeps the backward edges the database was created with.
+#[cfg(all(feature = "grafeo-file", feature = "testing-crash-injection"))]
+fn crash_during_the_next_checkpoint(config: impl Fn(&std::path::Path) -> Config) {
     use std::panic::AssertUnwindSafe;
 
     use grafeo_common::testing::crash::{CrashResult, with_crash_at};
@@ -689,7 +778,9 @@ fn a_crash_during_the_next_checkpoint_keeps_the_last_valid_one() {
         let name = CHECKPOINT_POINTS.get(point - 1).unwrap_or(&"none");
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("travels.grafeo");
-        let database = FileDatabase::create(&path);
+        let config = config(&path);
+        let backward_edges = config.backward_edges();
+        let database = FileDatabase::create_with(&path, &config);
         travels(&database.database);
         database.checkpoint().unwrap();
         let first = images(&database.database);
@@ -733,6 +824,16 @@ fn a_crash_during_the_next_checkpoint_keeps_the_last_valid_one() {
         drop(database);
 
         let reopened = FileDatabase::open(&path);
+        for store in [
+            Arc::clone(&reopened.database.root),
+            reopened.database.store(Some("trips")),
+        ] {
+            assert_eq!(
+                store.keeps_backward_edges(),
+                backward_edges,
+                "point {point} ({name}): the backward edges it was created with"
+            );
+        }
         let header_written = point >= 5;
         let (expected, iteration) = if header_written {
             (&second, first_iteration + 1)
@@ -764,3 +865,12 @@ fn a_crash_during_the_next_checkpoint_keeps_the_last_valid_one() {
 // The paths of earlier formats, snapshots and copies on a row-group root:
 #[cfg(all(feature = "grafeo-file", feature = "wal"))]
 mod legacy;
+
+// History and time travel on a row-group root (H2c): every tier, the
+// retention window, a crash and a reopen.
+#[cfg(all(feature = "grafeo-file", feature = "wal"))]
+mod history;
+
+// A row-group root without backward edges (10b): incoming reads, detach
+// deletes, checkpoints and reopens.
+mod backward_edges;

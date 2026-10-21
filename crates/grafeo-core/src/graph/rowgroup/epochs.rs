@@ -11,10 +11,13 @@
 //!
 //! An immediate write keeps what it replaces, as a transaction's does: the
 //! store does not know its readers, and a reader at an earlier epoch must
-//! not see the write. The engine collects right after each immediate call
-//! and each commit, at its read horizon, so what such a write kept lasts as
-//! long as an older reader needs it and no longer (decision B); the collect
-//! visits only the vectors that hold versions (`collect`).
+//! not see the write. The engine asks for a collect after each immediate
+//! call and each commit, at its read horizon
+//! ([`gc_versions_after_write`](RowGroupStore::gc_versions_after_write)), so
+//! what such a write kept lasts as long as an older reader needs it, and no
+//! longer than a bounded number of further writes once none does (decision
+//! B, amortized: `collect`); the collect visits only the vectors that hold
+//! versions.
 
 use std::sync::atomic::Ordering;
 
@@ -54,13 +57,31 @@ impl RowGroupStore {
         self.epoch.fetch_max(epoch.as_u64(), Ordering::AcqRel);
     }
 
-    /// Whether the engine runs [`gc_versions`](Self::gc_versions) after every
+    /// Whether the engine runs
+    /// [`gc_versions_after_write`](Self::gc_versions_after_write) after every
     /// immediate call and commit, at its read horizon: this store does, as
-    /// an immediate write keeps what it replaces and a collect visits only
-    /// the vectors written since the last one (`LpgStore` is collected
+    /// an immediate write keeps what it replaces; the call collects when a
+    /// collect is due and returns at once otherwise (`LpgStore` is collected
     /// every `gc_interval` commits).
     #[doc(hidden)]
     pub const COLLECTS_AFTER_EVERY_WRITE: bool = true;
+
+    /// What the engine runs after each immediate call and commit, at its
+    /// read horizon `min_epoch`: [`collect_after_write`](Self::collect_after_write)
+    /// of this store and of every named graph that lists a vector, each
+    /// collecting only when a collect is due for it (once a bounded number
+    /// of writes came since its last collect, or a reader that held its last
+    /// collect back ended). Returns how many versions it dropped, as
+    /// [`gc_versions`](Self::gc_versions) does; a call on a named graph
+    /// covers that graph alone.
+    #[doc(hidden)]
+    pub fn gc_versions_after_write(&self, min_epoch: EpochId) -> usize {
+        let mut dropped = self.collect_after_write(min_epoch);
+        for graph in self.listing_graphs() {
+            dropped += graph.gc_versions_after_write(min_epoch);
+        }
+        dropped
+    }
 
     /// Garbage collects what no reader at `min_epoch` or later can see any
     /// more, in this store and every named graph it holds: a
@@ -73,8 +94,9 @@ impl RowGroupStore {
     /// call on a named graph collects that graph alone.
     ///
     /// Each store visits only the vectors it lists, and one that lists none
-    /// costs a flag test, so the engine can call it after every immediate
-    /// call and commit.
+    /// costs a flag test. It collects whether or not a collect is due: the
+    /// engine's explicit collect; after a write the engine runs
+    /// [`gc_versions_after_write`](Self::gc_versions_after_write).
     #[doc(hidden)]
     pub fn gc_versions(&self, min_epoch: EpochId) -> usize {
         let collected = self.collect_versions(min_epoch);

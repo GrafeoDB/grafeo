@@ -1,0 +1,145 @@
+# Rosetta: numeric literal syntax in GQL and Cypher
+#
+# Decimal, hexadecimal (0x) and octal (0o) integers, a binary (0b) integer in
+# GQL, exponents in either case, leading zeros (decimal), signs, and the
+# 64-bit integer range: its bounds are literals, one past them is a syntax
+# error. GQL's 1.50 is an exact decimal and its suffixes F, D and M pick the
+# type (see decimal_numbers.gtest); Cypher's 1.50 is a float. Both write .5;
+# GQL also writes 5. and 1_000 (ISO GQL), Cypher neither (openCypher). A float
+# literal past the float range is an error: 22003 in GQL, a syntax error in
+# Cypher, as openCypher refuses it when it parses the query.
+
+meta:
+  model: lpg
+  section: rosetta
+  title: Numeric literal syntax cross-language equivalence
+  dataset: empty
+  requires: [cypher]
+
+tests:
+
+  - name: hexadecimal_and_octal_integers
+    variants:
+      gql: "RETURN 0x1F AS hex, 0o17 AS oct, -0x1F AS neg, 0x7FFFFFFFFFFFFFFF AS max"
+      cypher: "RETURN 0x1F AS hex, 0o17 AS oct, -0x1F AS neg, 0x7FFFFFFFFFFFFFFF AS max"
+    expect:
+      rows:
+        - [31, 15, -31, 9223372036854775807]
+
+  - name: a_binary_integer_in_gql
+    variants:
+      gql: "RETURN 0b101 AS bin"
+    expect:
+      rows:
+        - [5]
+
+  - name: leading_zeros_are_decimal
+    variants:
+      gql: "RETURN 017 AS a, 007 AS b"
+      cypher: "RETURN 017 AS a, 007 AS b"
+    expect:
+      rows:
+        - [17, 7]
+
+  - name: exponents_make_a_float
+    variants:
+      gql: "RETURN 1e3 AS a, 1E3 AS b, 1.5e-3 AS c, 2.5E+2 AS d"
+      cypher: "RETURN 1e3 AS a, 1E3 AS b, 1.5e-3 AS c, 2.5E+2 AS d"
+    expect:
+      rows:
+        - [1000, 1000, 0.0015, 250]
+
+  - name: the_bounds_of_the_integer_range_are_literals
+    variants:
+      gql: "RETURN 9223372036854775807 AS max, -9223372036854775808 AS min"
+      cypher: "RETURN 9223372036854775807 AS max, -9223372036854775808 AS min"
+    expect:
+      rows:
+        - [9223372036854775807, -9223372036854775808]
+
+  - name: an_integer_literal_past_the_range_is_a_syntax_error
+    variants:
+      gql: "RETURN 9223372036854775808 AS v"
+      cypher: "RETURN 9223372036854775808 AS v"
+    expect:
+      error: "Integer literal '9223372036854775808' overflows the valid range"
+      gql_status: "42001"
+
+  - name: a_point_makes_a_decimal_in_gql_and_a_float_in_cypher
+    variants:
+      gql: "RETURN 1.50 IS TYPED DECIMAL AS decimal"
+    expect:
+      rows:
+        - [true]
+
+  - name: a_cypher_number_with_a_point_is_a_float
+    variants:
+      cypher: "RETURN 1.50 AS v, 1.50 = 1.5 AS same"
+    expect:
+      rows:
+        - [1.5, true]
+
+  - name: a_fraction_without_a_leading_digit
+    variants:
+      gql: "RETURN .5 AS v, -.25 AS w, .5e1 AS f"
+      cypher: "RETURN .5 AS v, -.25 AS w, .5e1 AS f"
+    expect:
+      rows:
+        - [0.5, -0.25, 5]
+
+  - name: a_point_without_digits_after_it_in_gql
+    variants:
+      gql: "RETURN 5. = 5 AS same, 5. IS TYPED DECIMAL AS exact, 5.e1 AS f, [5.,6.][1] AS second"
+    expect:
+      rows:
+        - [true, true, 50, 6]
+
+  - name: a_range_after_an_integer_is_no_point
+    variants:
+      gql: "RETURN [x IN range(1, 3) | x * 2] AS doubled, [10, 20, 30][1..2] AS slice"
+      cypher: "RETURN [x IN range(1, 3) | x * 2] AS doubled, [10, 20, 30][1..2] AS slice"
+    expect:
+      rows:
+        - [[2, 4, 6], [20]]
+
+  - name: digit_separators_in_gql
+    variants:
+      gql: "RETURN 1_000 AS a, 0x7F_FF AS b, 0b1010_0101 AS c, 1_000.5 IS TYPED DECIMAL AS d, -1_000 AS e"
+    expect:
+      rows:
+        - [1000, 32767, 165, true, -1000]
+
+  - name: cypher_has_no_digit_separators
+    variants:
+      cypher: "RETURN 1_000 AS a"
+    expect:
+      error: "_000"
+      gql_status: "42001"
+
+  - name: a_float_literal_past_the_float_range_is_an_error_in_gql
+    variants:
+      gql: "RETURN 1e400 AS v"
+    expect:
+      error: "Float literal '1e400' is outside the FLOAT64 range"
+      gql_status: "22003"
+
+  - name: a_negative_float_literal_past_the_float_range_is_an_error_in_gql
+    variants:
+      gql: "RETURN -1.5e400 AS v"
+    expect:
+      error: "Float literal '1.5e400' is outside the FLOAT64 range"
+      gql_status: "22003"
+
+  - name: a_float_literal_past_the_float_range_is_a_syntax_error_in_cypher
+    variants:
+      cypher: "RETURN 1e400 AS v"
+    expect:
+      error: "Float literal '1e400' is too large"
+      gql_status: "42001"
+
+  - name: a_negative_float_literal_past_the_float_range_is_a_syntax_error_in_cypher
+    variants:
+      cypher: "RETURN -1.5e400 AS v"
+    expect:
+      error: "Float literal '1.5e400' is too large"
+      gql_status: "42001"

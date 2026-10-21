@@ -1,0 +1,236 @@
+# Rosetta: numeric errors in GQL and Cypher (#639)
+#
+# An integer result past the 64-bit range fails with "numeric value out of
+# range" (GQLSTATUS 22003), an integer division or remainder by zero with
+# "division by zero" (22012); the message names the operation. A float keeps
+# its IEEE result, a null operand gives null, and a false left side of AND (a
+# true one of OR) decides without evaluating the right side.
+#
+# Each error case checks the message text and the GQLSTATUS (`gql_status`),
+# which every binding exposes.
+
+meta:
+  model: lpg
+  section: rosetta
+  title: Numeric errors cross-language equivalence
+  dataset: empty
+  requires: [cypher]
+
+tests:
+
+  # ---------------------------------------------------------------------------
+  # Integer overflow (22003)
+  # ---------------------------------------------------------------------------
+
+  - name: integer_addition_past_the_range_fails
+    variants:
+      gql: "RETURN 9223372036854775807 + 1 AS v"
+      cypher: "RETURN 9223372036854775807 + 1 AS v"
+    expect:
+      error: "numeric value out of range: 9223372036854775807 + 1"
+      gql_status: "22003"
+
+  - name: integer_subtraction_past_the_range_fails
+    variants:
+      gql: "RETURN -9223372036854775807 - 2 AS v"
+      cypher: "RETURN -9223372036854775807 - 2 AS v"
+    expect:
+      error: "numeric value out of range: -9223372036854775807 - 2"
+      gql_status: "22003"
+
+  - name: integer_multiplication_past_the_range_fails
+    variants:
+      gql: "RETURN 4611686018427387904 * 2 AS v"
+      cypher: "RETURN 4611686018427387904 * 2 AS v"
+    expect:
+      error: "numeric value out of range: 4611686018427387904 * 2"
+      gql_status: "22003"
+
+  - name: integer_arithmetic_up_to_the_bounds_succeeds
+    variants:
+      gql: "RETURN 9223372036854775806 + 1 AS hi, -9223372036854775807 - 1 AS lo, 4611686018427387903 * 2 AS twice"
+      cypher: "RETURN 9223372036854775806 + 1 AS hi, -9223372036854775807 - 1 AS lo, 4611686018427387903 * 2 AS twice"
+    expect:
+      rows:
+        - [9223372036854775807, -9223372036854775808, 9223372036854775806]
+
+  - name: negating_the_smallest_integer_fails
+    setup:
+      - "INSERT (:N {name: 'Alix', v: -9223372036854775807 - 1})"
+    variants:
+      gql: "MATCH (n:N) RETURN -n.v AS v"
+      cypher: "MATCH (n:N) RETURN -n.v AS v"
+    expect:
+      error: "numeric value out of range: -(-9223372036854775808)"
+      gql_status: "22003"
+
+  - name: abs_of_the_smallest_integer_fails
+    setup:
+      - "INSERT (:N {name: 'Alix', v: -9223372036854775807 - 1})"
+    variants:
+      gql: "MATCH (n:N) RETURN abs(n.v) AS v"
+      cypher: "MATCH (n:N) RETURN abs(n.v) AS v"
+    expect:
+      error: "numeric value out of range: abs(-9223372036854775808)"
+      gql_status: "22003"
+
+  - name: the_smallest_integer_divided_by_minus_one_fails
+    setup:
+      - "INSERT (:N {name: 'Alix', v: -9223372036854775807 - 1})"
+    variants:
+      gql: "MATCH (n:N) RETURN n.v / -1 AS v"
+      cypher: "MATCH (n:N) RETURN n.v / -1 AS v"
+    expect:
+      error: "numeric value out of range: -9223372036854775808 / -1"
+      gql_status: "22003"
+
+  - name: the_smallest_integer_modulo_minus_one_is_zero
+    setup:
+      - "INSERT (:N {name: 'Alix', v: -9223372036854775807 - 1})"
+    variants:
+      gql: "MATCH (n:N) RETURN n.v % -1 AS v"
+      cypher: "MATCH (n:N) RETURN n.v % -1 AS v"
+    expect:
+      rows:
+        - [0]
+
+  # ---------------------------------------------------------------------------
+  # Division and remainder by zero (22012)
+  # ---------------------------------------------------------------------------
+
+  - name: integer_division_by_zero_fails
+    setup:
+      - "INSERT (:N {name: 'Gus', v: 0})"
+    variants:
+      gql: "MATCH (n:N) RETURN 10 / n.v AS v"
+      cypher: "MATCH (n:N) RETURN 10 / n.v AS v"
+    expect:
+      error: "division by zero: 10 / 0"
+      gql_status: "22012"
+
+  - name: integer_remainder_by_zero_fails
+    variants:
+      gql: "RETURN 10 % 0 AS v"
+      cypher: "RETURN 10 % 0 AS v"
+    expect:
+      error: "division by zero: 10 % 0"
+      gql_status: "22012"
+
+  - name: a_division_by_zero_is_known_by_its_gqlstatus_alone
+    variants:
+      gql: "RETURN 7 % 0 AS v"
+      cypher: "RETURN 7 % 0 AS v"
+    expect:
+      gql_status: "22012"
+
+  - name: integer_division_truncates_towards_zero
+    variants:
+      gql: "RETURN 7 / -2 AS q, -7 % 3 AS r, -7 / 2 AS n"
+      cypher: "RETURN 7 / -2 AS q, -7 % 3 AS r, -7 / 2 AS n"
+    expect:
+      rows:
+        - [-3, -1, -3]
+
+  # ---------------------------------------------------------------------------
+  # Floats and nulls
+  # ---------------------------------------------------------------------------
+
+  - name: float_division_by_zero_keeps_its_ieee_result
+    variants:
+      gql: "RETURN toFloat(1) / 0 AS pos, toFloat(-1) / 0 AS neg, 0.0e0 / 0.0e0 AS nan"
+      cypher: "RETURN toFloat(1) / 0 AS pos, toFloat(-1) / 0 AS neg, 0.0 / 0.0 AS nan"
+    expect:
+      rows:
+        - [Infinity, -Infinity, NaN]
+
+  - name: a_null_operand_gives_null_even_by_zero
+    variants:
+      gql: "RETURN null / 0 AS a, 10 / null AS b, null % 0 AS c"
+      cypher: "RETURN null / 0 AS a, 10 / null AS b, null % 0 AS c"
+    expect:
+      rows:
+        - [null, null, null]
+
+  # ---------------------------------------------------------------------------
+  # sum
+  # ---------------------------------------------------------------------------
+
+  - name: an_integer_sum_whose_running_total_leaves_the_range_but_ends_inside_it
+    variants:
+      gql: "UNWIND [9223372036854775807, 1, -1] AS x RETURN sum(x) AS total"
+      cypher: "UNWIND [9223372036854775807, 1, -1] AS x RETURN sum(x) AS total"
+    expect:
+      rows:
+        - [9223372036854775807]
+
+  - name: an_integer_sum_past_the_range_fails
+    variants:
+      gql: "UNWIND [9223372036854775807, 1] AS x RETURN sum(x) AS total"
+      cypher: "UNWIND [9223372036854775807, 1] AS x RETURN sum(x) AS total"
+    expect:
+      error: "numeric value out of range: sum 9223372036854775808"
+      gql_status: "22003"
+
+  - name: an_integer_sum_below_the_range_fails
+    variants:
+      gql: "UNWIND [-9223372036854775807, -2] AS x RETURN sum(x) AS total"
+      cypher: "UNWIND [-9223372036854775807, -2] AS x RETURN sum(x) AS total"
+    expect:
+      error: "numeric value out of range: sum -9223372036854775809"
+      gql_status: "22003"
+
+  - name: a_grouped_sum_fails_only_for_the_group_past_the_range
+    setup:
+      - "INSERT (:N {city: 'Amsterdam', v: 9223372036854775807}), (:N {city: 'Amsterdam', v: 1}), (:N {city: 'Berlin', v: 2})"
+    variants:
+      gql: "MATCH (n:N) RETURN n.city AS city, sum(n.v) AS total"
+      cypher: "MATCH (n:N) RETURN n.city AS city, sum(n.v) AS total"
+    expect:
+      error: "numeric value out of range: sum 9223372036854775808"
+      gql_status: "22003"
+
+  # ---------------------------------------------------------------------------
+  # Short circuit
+  # ---------------------------------------------------------------------------
+
+  - name: a_false_left_side_of_and_skips_the_right_side
+    setup:
+      - "INSERT (:N {name: 'Gus', v: 0}), (:N {name: 'Vincent', v: 5}), (:N {name: 'Mia', v: 20})"
+    variants:
+      gql: "MATCH (n:N) WHERE n.v <> 0 AND 10 / n.v > 1 RETURN n.name"
+      cypher: "MATCH (n:N) WHERE n.v <> 0 AND 10 / n.v > 1 RETURN n.name"
+    expect:
+      rows:
+        - [Vincent]
+
+  - name: a_true_left_side_of_or_skips_the_right_side
+    setup:
+      - "INSERT (:N {name: 'Gus', v: 0}), (:N {name: 'Vincent', v: 5}), (:N {name: 'Mia', v: 20})"
+    variants:
+      gql: "MATCH (n:N) WHERE n.v = 0 OR 10 / n.v > 1 RETURN n.name"
+      cypher: "MATCH (n:N) WHERE n.v = 0 OR 10 / n.v > 1 RETURN n.name"
+    expect:
+      rows:
+        - [Gus]
+        - [Vincent]
+
+  - name: a_division_by_zero_on_the_left_of_and_fails
+    setup:
+      - "INSERT (:N {name: 'Gus', v: 0}), (:N {name: 'Vincent', v: 5})"
+    variants:
+      gql: "MATCH (n:N) WHERE 10 / n.v > 1 AND n.v <> 0 RETURN n.name"
+      cypher: "MATCH (n:N) WHERE 10 / n.v > 1 AND n.v <> 0 RETURN n.name"
+    expect:
+      error: "division by zero: 10 / 0"
+      gql_status: "22012"
+
+  - name: case_guards_a_division
+    setup:
+      - "INSERT (:N {name: 'Gus', v: 0}), (:N {name: 'Vincent', v: 5})"
+    variants:
+      gql: "MATCH (n:N) RETURN n.name AS name, CASE WHEN n.v = 0 THEN 0 ELSE 10 / n.v END AS q"
+      cypher: "MATCH (n:N) RETURN n.name AS name, CASE WHEN n.v = 0 THEN 0 ELSE 10 / n.v END AS q"
+    expect:
+      rows:
+        - [Gus, 0]
+        - [Vincent, 2]

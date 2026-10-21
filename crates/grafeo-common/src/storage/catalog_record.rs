@@ -575,6 +575,22 @@ pub struct StoredConfigRecord {
     /// The memory configuration of each section that has one, by section
     /// type, ascending.
     pub sections: Vec<SectionMemoryRecord>,
+    /// How long the database keeps history (time travel).
+    pub history_retention: HistoryRetentionRecord,
+}
+
+/// How long a database keeps history.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum HistoryRetentionRecord {
+    /// No history: only what open snapshots read.
+    Off,
+    /// The states committed within this many milliseconds before now.
+    Duration {
+        /// The window, in milliseconds.
+        millis: u64,
+    },
+    /// Every state from when history was turned on.
+    Forever,
 }
 
 /// A graph data model.
@@ -1678,6 +1694,7 @@ mod tests {
                     max_ram: None,
                     tier: TierRecord::ForceRam,
                 }],
+                history_retention: HistoryRetentionRecord::Duration { millis: 3_600_000 },
             }),
         ]
     }
@@ -2054,7 +2071,7 @@ mod tests {
                 85, 82, 78, 32, 112, 46, 110, 97, 109, 101, 32, 65, 83, 32, 110, 97, 109, 101,
             ],
             &[
-                10, 1, 34, 0, 0, 0, // kind 10 (StoredConfig), required, 34 bytes
+                10, 1, 40, 0, 0, 0, // kind 10 (StoredConfig), required, 40 bytes
                 0, // graph model: LPG
                 0, 1, 1, // no backward edges, schema constraints, the WAL on
                 1, 19, 88, // Batch durability: 19 ms, 88 records
@@ -2062,6 +2079,8 @@ mod tests {
                 // spill path Some("amsterdam.spill")
                 1, 15, 97, 109, 115, 116, 101, 114, 100, 97, 109, 46, 115, 112, 105, 108, 108,
                 1, 10, 0, 1, // one section: VectorStore (10), no RAM cap, ForceRam
+                // history retention Duration { millis: 3,600,000 }: u32 marker, then LE
+                1, 252, 128, 238, 54, 0,
             ],
         ];
         let encoded: Vec<Vec<u8>> = one_of_each().iter().map(framed).collect();
@@ -2160,6 +2179,15 @@ mod tests {
             ]
             .map(|variant| bincode_of(&variant)),
             [[0], [1], [2]]
+        );
+        assert_eq!(
+            [
+                HistoryRetentionRecord::Off,
+                HistoryRetentionRecord::Duration { millis: 19 },
+                HistoryRetentionRecord::Forever,
+            ]
+            .map(|variant| bincode_of(&variant)),
+            [vec![0], vec![1, 19], vec![2]]
         );
         // A text index: the variant, label and property (empty), k1 and b
         // as 8-byte little-endian floats, the tokenizer, and the stop words:

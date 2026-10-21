@@ -9,7 +9,8 @@ use std::sync::Arc;
 use grafeo_common::change::{ChangeSet, DataModel, DataOp, GraphRef};
 use grafeo_common::types::{EpochId, NodeId, TransactionId, Value};
 use grafeo_core::graph::apply::{Applied, ChangeTarget, Writer};
-use grafeo_core::graph::lpg::LpgStore;
+use grafeo_core::graph::rowgroup::RowGroupStore;
+use grafeo_core::graph::{GraphStore as _, GraphStoreMut as _};
 use grafeo_engine::{
     GrafeoDB,
     transaction::{TransactionManager, TransactionState},
@@ -20,7 +21,7 @@ use grafeo_engine::{
 /// does: the change set is what the transaction's commit stamps and its
 /// rollback undoes.
 fn create_recorded(
-    store: &LpgStore,
+    store: &RowGroupStore,
     changes: &mut ChangeSet,
     (snapshot, transaction): (EpochId, TransactionId),
     label: &str,
@@ -53,19 +54,34 @@ fn create_recorded(
     id
 }
 
+/// A node with `labels` and the values `properties`.
+fn with_props<const N: usize>(
+    store: &RowGroupStore,
+    labels: &[&str],
+    properties: [(&str, Value); N],
+) -> NodeId {
+    let properties: Vec<(grafeo_common::types::PropertyKey, Value)> = properties
+        .into_iter()
+        .map(|(key, value)| (key.into(), value))
+        .collect();
+    store.create_node_with_props(labels, &properties)
+}
+
 /// Helper to create a test store with some initial data.
-fn create_test_store() -> Arc<LpgStore> {
-    let store = Arc::new(LpgStore::new().unwrap());
+fn create_test_store() -> Arc<RowGroupStore> {
+    let store = Arc::new(RowGroupStore::new());
 
     // Create some initial nodes
-    let alice_id = store.create_node_with_props(
+    let alice_id = with_props(
+        &store,
         &["Person"],
         [
             ("name", Value::String("Alix".into())),
             ("age", Value::Int64(30)),
         ],
     );
-    let bob_id = store.create_node_with_props(
+    let bob_id = with_props(
+        &store,
         &["Person"],
         [
             ("name", Value::String("Gus".into())),
@@ -88,6 +104,8 @@ fn test_snapshot_isolation_reads_see_consistent_data() {
     // A transaction should see a consistent snapshot of data at its start time
     let store = create_test_store();
     let tx_manager = Arc::new(TransactionManager::new());
+    // The transactions start where the store's direct writes left it.
+    tx_manager.sync_epoch(store.current_epoch());
 
     // Start T1
     let tx1 = tx_manager.begin();
@@ -117,7 +135,7 @@ fn test_snapshot_isolation_reads_see_consistent_data() {
 #[test]
 fn test_transaction_sees_own_writes() {
     // A transaction should always see its own uncommitted writes
-    let store = Arc::new(LpgStore::new().unwrap());
+    let store = Arc::new(RowGroupStore::new());
     let tx_manager = Arc::new(TransactionManager::new());
 
     let tx1 = tx_manager.begin();
@@ -137,7 +155,7 @@ fn test_transaction_sees_own_writes() {
 #[test]
 fn test_committed_writes_visible_to_new_transactions() {
     // After commit, writes should be visible to new transactions
-    let store = Arc::new(LpgStore::new().unwrap());
+    let store = Arc::new(RowGroupStore::new());
     let tx_manager = Arc::new(TransactionManager::new());
 
     // T1 creates and commits: its change set is stamped with the commit
@@ -286,7 +304,7 @@ fn test_non_overlapping_writes_succeed() {
 #[test]
 fn test_rollback_makes_writes_invisible() {
     // After rollback, a transaction's writes should not be visible
-    let store = Arc::new(LpgStore::new().unwrap());
+    let store = Arc::new(RowGroupStore::new());
     let tx_manager = Arc::new(TransactionManager::new());
 
     // T1 creates a node
@@ -498,7 +516,7 @@ fn test_commit_after_abort_fails() {
 #[test]
 fn test_many_concurrent_transactions() {
     // Verify system handles many concurrent transactions
-    let store = Arc::new(LpgStore::new().unwrap());
+    let store = Arc::new(RowGroupStore::new());
     let tx_manager = Arc::new(TransactionManager::new());
 
     let mut transactions = Vec::new();

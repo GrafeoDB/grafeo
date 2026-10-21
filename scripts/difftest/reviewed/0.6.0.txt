@@ -556,8 +556,8 @@ CF3|cypher 062dcc1245 properties reads the node startNode(r) yields; it returned
 CF3|gql 062dcc1245 properties reads the node startNode(r) yields; it returned null.
 CF4|cypher cb62d95ce2 properties of a map is the map (openCypher); it returned null.
 CF4|gql cb62d95ce2 properties of a map is the map (openCypher); it returned null.
-CF5|cypher a3daef970e date, time and datetime read a zoned datetime: its local date, its local time of day with the offset (Python drops a time's offset) and its instant; they returned null.
-CF5|gql a3daef970e date, time and datetime read a zoned datetime: its local date, its local time of day with the offset (Python drops a time's offset) and its instant; they returned null.
+CF5|cypher f31b54ca7c date, time and datetime read a zoned datetime: its local date, its local time of day with its offset (an aware datetime.time in Python) and its instant; they returned null.
+CF5|gql f31b54ca7c date, time and datetime read a zoned datetime: its local date, its local time of day with its offset (an aware datetime.time in Python) and its instant; they returned null.
 CF6|gql fcd746ade6 A label added to a node converts its values to the types of the label's node type, as a write does; an integer of a FLOAT64 property failed with expects Float64.
 CF7|cypher d465c9b19b A label added to a node converts its values to the types of the label's node type, as a write does; an integer of a FLOAT64 property failed with expects Float64.
 CG1|cypher 2c0519a916 After a WITH that neither aggregates nor is DISTINCT, ORDER BY reads the WITH's input as well (openCypher); GQL failed with Undefined variable, and 0.5.44's Cypher too.
@@ -574,3 +574,30 @@ CG5|cypher 2d8a50291b With DISTINCT, ORDER BY reads only what the WITH returns (
 CG5|gql 2d8a50291b With DISTINCT, ORDER BY reads only what the WITH returns (openCypher, SQL); the error now names the variable and says why. GQL had no ORDER BY after WITH.
 CG8|cypher 0007e81c96 With DISTINCT, ORDER BY reads only what the RETURN returns (openCypher TCK ReturnOrderBy2, SQL): it added the sort key to the distinct row and returned duplicates.
 CG8|gql 0007e81c96 With DISTINCT, ORDER BY reads only what the RETURN returns (openCypher TCK ReturnOrderBy2, SQL): it added the sort key to the distinct row and returned duplicates.
+CH1|gql 14f508d351 IS TYPED DECIMAL and DEC hold for a decimal (#610); 1.50 was the float 1.5.
+CH2|gql fcff68cb42 IS TYPED DECIMAL holds for the result of decimal arithmetic and toDecimal (#610); they were a float and null.
+CH3|gql 54ffe9a53f IS TYPED LIST<DECIMAL> holds for a list of decimals (#610); 1.5 was a float.
+CI1|cypher a5336ae099 abs of the smallest integer fails as out of range (22003, #639); it returned the negative number itself.
+CI1|gql a5336ae099 abs of the smallest integer fails as out of range (22003, #639); it returned the negative number itself.
+BV1|gql 1833f3e5c6 Float = is exact (IEEE 754); 0.1e0 + 0.2e0 = 0.3e0 was true within f64::EPSILON.
+CJ1|gql 2974ef3846 Float = and <> are exact (IEEE 754); 0.1e0 + 0.2e0 was equal to 0.3e0 within f64::EPSILON.
+CJ2|cypher 2974ef3846 Float = and <> are exact (IEEE 754); 0.1 + 0.2 was equal to 0.3 within f64::EPSILON.
+CJ4|gql 2c1063fb01 Float = is exact (IEEE 754); 1.0e-300 equalled 0 and 0.9999999999999999e0 equalled 1 within f64::EPSILON.
+CJ5|gql 3fedd5fe3a An integer equals only a float of exactly its value; 2^53 + 1 equalled the float 2^53.
+CJ6|gql 251a434f71 DISTINCT keeps NaN together and -0.0 with 0.0 (openCypher equivalence); each NaN was its own value.
+CK1|gql 8fbd540786 A name in backticks in SET is the name inside them; the key was stored with its backticks.
+CK2|gql d04b66d83c A label in backticks in SET is the label inside them; it was stored with its backticks.
+CK4|gql d55a61715a A doubled backtick inside a backticked name is one backtick; the key kept both backticks and the quotes.
+CK5|gql 40275f3876 In a GQL string literal a doubled quote is the quote (ISO GQL 21.2); it was a syntax error.
+CK6|gql 588bb3cb19 In a double-quoted GQL string literal a doubled double quote is the quote (ISO GQL 21.2); it was a syntax error.
+CL1|gql 4c62bf5377 An integer above 2^53 compares exactly with a float; it was converted to the float, so 2^53 + 1 > 2^53 was false.
+CL2|gql 18908d5658 A float compares exactly with an integer above 2^53; 2^53 < 2^53 + 1 was false.
+CL3|gql 4c61684e6f A filter on an integer above 2^53 against a float bound keeps the integer that passes it exactly; it was dropped.
+CL4|gql 8de3da8e40 A comparison of NaN with a number is false (IEEE); it was null, and NaN <= NaN was true.
+CM1|cypher c17edcb39c A float with no digit before its point (.5, .5e1) is a number, as openCypher writes it; it was a syntax error.
+CM1|gql c17edcb39c A number with no digit before its point (.5 exact, .5e1 approximate) is a number, as ISO GQL writes it; it was a syntax error.
+CM2|gql 081b084f0e A number with no digit after its point (5., 5.e1) is a number, as ISO GQL writes it; it was a syntax error.
+CM3|gql e527573b6a An underscore between two digits is a separator, in every radix and in a decimal, as ISO GQL defines it; it was a syntax error.
+CM4|cypher 904fecd430 The error starts with its code, GRAFEO-Q001 (#588); openCypher has no digit separators, so the message is unchanged.
+CM5|cypher e52ba6d736 A float literal past the float range is a syntax error, as openCypher refuses it; it was infinity.
+CM5|gql ab08f300db A float literal past the FLOAT64 range is a data exception (22003), as ISO GQL defines it; it was infinity.

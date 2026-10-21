@@ -51,6 +51,31 @@ collect_cases!(RowGroupStore::new;
     replay_writes_no_version,
 );
 
+/// The suite and the collect cases again, on a store that keeps no incoming
+/// edges (`backward_edges` off, 10b): every incoming read the cases check
+/// (`edges_from` and `edges_from_at` incoming and both ways, the in-degree,
+/// the refusal to delete a node an edge points to) is answered by a scan of
+/// the edge table, at every view, with transactions open and after a
+/// collect, and the store reports no backward adjacency.
+mod without_backward_edges {
+    use super::{GAPS, RowGroupStore};
+    use crate::graph::conformance::conformance_suite;
+
+    fn store() -> RowGroupStore {
+        RowGroupStore::with_backward_edges(false)
+    }
+
+    conformance_suite!(RowGroupStore, store, GAPS);
+
+    collect_cases!(store;
+        collect_keeps_every_read_path_at_the_horizon,
+        collect_returns_the_version_info_to_its_flat_size,
+        a_transactions_pending_writes_survive_collect,
+        others_keep_the_committed_values_through_collect,
+        replay_writes_no_version,
+    );
+}
+
 /// The suite and the collect cases again, on a store with property indexes
 /// on the keys the reads at a view probe: every equality and maybe-equal
 /// lookup at a view then goes through an index that holds old and pending
@@ -397,8 +422,9 @@ fn a_vector_filled_by_one_transaction_holds_one_constant_stamp() {
     tx.delete_node(jules).unwrap();
     let deletes = store.version_bytes() - before;
     assert!(
-        (ARRAY..2 * ARRAY).contains(&deletes),
-        "the first delete allocates the vector's delete stamps: {deletes} bytes"
+        (VECTOR_ROWS / 8..VECTOR_ROWS / 8 + 1_024).contains(&deletes),
+        "the first delete allocates the vector's delete stamps, a bit per row \
+         and a short list: {deletes} bytes"
     );
     let own = tx.view();
     assert!(!own.nodes.contains_key(&jules.as_u64()) && own.nodes.contains_key(&mia.as_u64()));
@@ -751,4 +777,224 @@ fn adjacency_past_its_merges_agrees_with_the_edges() {
             }
         }
     }
+}
+
+/// The incoming reads of one store, per node: without a view and at each
+/// of `views`, the edges listed incoming and both ways (as sets: the scan
+/// lists them by edge id, the adjacency by type and other node), per edge
+/// type, the neighbors, and the degrees.
+fn incoming_reads(store: &RowGroupStore, nodes: &[NodeId], views: &[ReadView]) -> Vec<String> {
+    use std::collections::BTreeSet;
+
+    use grafeo_common::types::EdgeId;
+
+    let set = |listed: Vec<(NodeId, EdgeId)>| -> BTreeSet<(u64, u64)> {
+        listed
+            .into_iter()
+            .map(|(other, edge)| (other.as_u64(), edge.as_u64()))
+            .collect()
+    };
+    let mut reads = Vec::new();
+    for node in nodes {
+        for direction in [Direction::Incoming, Direction::Both] {
+            let mut neighbors: Vec<u64> = store
+                .neighbors(*node, direction)
+                .into_iter()
+                .map(|id| id.as_u64())
+                .collect();
+            neighbors.sort_unstable();
+            reads.push(format!(
+                "{node:?} {direction:?}: {:?} neighbors {neighbors:?}",
+                set(store.edges_from(*node, direction))
+            ));
+            for edge_type in ["KNOWS", "LIVES_IN", "NONE_SUCH"] {
+                reads.push(format!(
+                    "{node:?} {direction:?} {edge_type}: {:?}",
+                    set(store.edges_of_type(*node, direction, edge_type))
+                ));
+            }
+            for view in views {
+                let mut neighbors: Vec<u64> = store
+                    .neighbors_at(*node, direction, *view)
+                    .into_iter()
+                    .map(|id| id.as_u64())
+                    .collect();
+                neighbors.sort_unstable();
+                reads.push(format!(
+                    "{node:?} {direction:?} at {view:?}: {:?} neighbors {neighbors:?}",
+                    set(store.edges_from_at(*node, direction, *view))
+                ));
+            }
+        }
+        reads.push(format!(
+            "{node:?} degrees: in {} out {}",
+            store.in_degree(*node),
+            store.out_degree(*node)
+        ));
+    }
+    reads
+}
+
+/// A store that keeps no incoming edges (`backward_edges` off, 10b) answers
+/// every incoming read as one that keeps them: a seeded graph of 24 people
+/// and 300 edges of two types (self-loops included), a commit that deletes
+/// every seventh edge, a rolled-back transaction, and one still open that
+/// creates edges and deletes others. Both stores give the same edges,
+/// edges per type, neighbors and degrees without a view, at the epoch
+/// before the deletes, at the latest commit and at the open transaction's
+/// own view; again once the open one commits and both collect, which takes
+/// the deleted edges out. Only the store that keeps them holds incoming
+/// adjacency bytes.
+#[test]
+fn incoming_reads_agree_with_and_without_backward_edges() {
+    use grafeo_common::types::EdgeId;
+
+    const NAMES: [&str; 5] = ["Alix", "Gus", "Vincent", "Jules", "Mia"];
+    const TYPES: [&str; 2] = ["KNOWS", "LIVES_IN"];
+
+    /// The workload, alike on each store (same seed, same ids): the
+    /// nodes, the epochs to read at, the transaction left open and the
+    /// edges it deletes.
+    fn workload(
+        store: &RowGroupStore,
+    ) -> (Vec<NodeId>, EpochId, EpochId, Tx<'_, RowGroupStore>, usize) {
+        let mut rng = Rng::new(41);
+        let mut tx = Tx::begin(store, 10);
+        let nodes: Vec<NodeId> = (0..24)
+            .map(|index| {
+                tx.create_node(
+                    &["Person"],
+                    &[("name", Value::from(NAMES[index % NAMES.len()]))],
+                )
+                .unwrap()
+            })
+            .collect();
+        let edges: Vec<EdgeId> = (0..300)
+            .map(|_| {
+                let (src, dst) = (*rng.pick(&nodes).unwrap(), *rng.pick(&nodes).unwrap());
+                tx.create_edge(src, dst, TYPES[rng.below(TYPES.len())], &[])
+                    .unwrap()
+            })
+            .collect();
+        let created = tx.commit().unwrap();
+        let mut tx = Tx::begin(store, 11);
+        for edge in edges.iter().step_by(7) {
+            tx.delete_edge(*edge).unwrap();
+        }
+        let deleted = tx.commit().unwrap();
+        let mut undone = Tx::begin(store, 12);
+        for _ in 0..40 {
+            let (src, dst) = (*rng.pick(&nodes).unwrap(), *rng.pick(&nodes).unwrap());
+            undone.create_edge(src, dst, "KNOWS", &[]).unwrap();
+        }
+        undone.roll_back().unwrap();
+        let mut open = Tx::begin(store, 13);
+        for _ in 0..20 {
+            let (src, dst) = (*rng.pick(&nodes).unwrap(), *rng.pick(&nodes).unwrap());
+            open.create_edge(src, dst, "LIVES_IN", &[]).unwrap();
+        }
+        let mut open_deletes = 0;
+        for edge in edges.iter().skip(1).step_by(11) {
+            if edges.iter().step_by(7).all(|gone| gone != edge) {
+                open.delete_edge(*edge).unwrap();
+                open_deletes += 1;
+            }
+        }
+        (nodes, created, deleted, open, open_deletes)
+    }
+
+    let (kept, scanned) = (
+        RowGroupStore::new(),
+        RowGroupStore::with_backward_edges(false),
+    );
+    assert!(kept.has_backward_adjacency() && kept.keeps_backward_edges());
+    assert!(!scanned.has_backward_adjacency() && !scanned.keeps_backward_edges());
+    let (nodes, created, deleted, kept_open, open_deletes) = workload(&kept);
+    let (_, _, _, scanned_open, _) = workload(&scanned);
+    assert!(open_deletes > 0);
+    let views = [
+        ReadView::committed(created),
+        ReadView::committed(deleted),
+        ReadView::transaction(kept_open.id, kept_open.snapshot),
+    ];
+    let before = incoming_reads(&kept, &nodes, &views);
+    assert_eq!(incoming_reads(&scanned, &nodes, &views), before);
+    let listed: usize = nodes
+        .iter()
+        .map(|node| kept.edges_from(*node, Direction::Incoming).len())
+        .sum();
+    assert_eq!(
+        listed,
+        300 + 20,
+        "every edge not collected, the open ones too"
+    );
+    let own: usize = nodes
+        .iter()
+        .map(|node| {
+            kept.edges_from_at(*node, Direction::Incoming, views[2])
+                .len()
+        })
+        .sum();
+    assert_eq!(
+        own,
+        300 - 300_usize.div_ceil(7) + 20 - open_deletes,
+        "the open transaction sees its creates and not its deletes"
+    );
+
+    let (kept_epoch, scanned_epoch) = (kept_open.commit().unwrap(), scanned_open.commit().unwrap());
+    assert_eq!(kept_epoch, scanned_epoch);
+    let gone = kept.collect(kept_epoch);
+    assert_eq!(
+        gone,
+        300_usize.div_ceil(7) + open_deletes,
+        "the deleted edges"
+    );
+    assert_eq!(scanned.collect(scanned_epoch), gone);
+    let views = [ReadView::committed(kept_epoch)];
+    assert_eq!(
+        incoming_reads(&scanned, &nodes, &views),
+        incoming_reads(&kept, &nodes, &views),
+        "after the collect"
+    );
+    assert!(kept.memory().incoming_bytes > 0);
+    assert_eq!(scanned.memory().incoming_bytes, 0, "no incoming adjacency");
+    assert_eq!(
+        scanned.memory().outgoing_bytes,
+        kept.memory().outgoing_bytes
+    );
+}
+
+/// A store without backward edges (10b) finds a node's incoming edges for
+/// a delete: a raw delete of Mia, whom Gus's edge points to, is refused,
+/// `delete_node_edges` (a detach delete's first step) deletes that edge,
+/// and the delete then goes through; Alix keeps her edge to Gus.
+#[test]
+fn a_detach_delete_finds_the_incoming_edges_without_backward_edges() {
+    use crate::graph::traits::GraphStoreMut;
+
+    let store = RowGroupStore::with_backward_edges(false);
+    let people = people(&store).unwrap();
+    assert!(
+        !GraphStoreMut::delete_node(&store, people.mia),
+        "Gus's edge points to Mia"
+    );
+    assert_eq!(store.in_degree(people.mia), 1);
+    store.delete_node_edges(people.mia);
+    assert!(!store.is_edge_visible_at_epoch(people.gus_mia, store.current_epoch()));
+    assert_eq!(store.in_degree(people.mia), 0);
+    assert_eq!(store.out_degree(people.gus), 0);
+    assert!(GraphStoreMut::delete_node(&store, people.mia));
+    assert_eq!(
+        store.edges_from(people.gus, Direction::Both).len(),
+        2,
+        "Alix's edge to Gus, and the deleted one to Mia until a collect"
+    );
+    assert_eq!(
+        store.edges_from_at(
+            people.gus,
+            Direction::Both,
+            ReadView::committed(store.current_epoch())
+        ),
+        vec![(people.alix, people.alix_gus)]
+    );
 }

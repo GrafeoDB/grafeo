@@ -140,8 +140,8 @@ impl ColumnPredicate {
                 CompareOp::Ge => a >= b,
             },
             (Value::Float64(a), Value::Float64(b)) => match self.op {
-                CompareOp::Eq => (a - b).abs() < f64::EPSILON,
-                CompareOp::Ne => (a - b).abs() >= f64::EPSILON,
+                CompareOp::Eq => a == b,
+                CompareOp::Ne => a != b,
                 CompareOp::Lt => a < b,
                 CompareOp::Le => a <= b,
                 CompareOp::Gt => a > b,
@@ -160,15 +160,16 @@ impl ColumnPredicate {
                 CompareOp::Ne => a != b,
                 _ => false,
             },
-            (Value::Int64(a), Value::Float64(b)) | (Value::Float64(b), Value::Int64(a)) => {
-                let af = *a as f64;
-                match self.op {
-                    CompareOp::Eq => (af - b).abs() < f64::EPSILON,
-                    CompareOp::Ne => (af - b).abs() >= f64::EPSILON,
-                    CompareOp::Lt => af < *b,
-                    CompareOp::Le => af <= *b,
-                    CompareOp::Gt => af > *b,
-                    CompareOp::Ge => af >= *b,
+            (Value::Int64(int), Value::Float64(float)) => {
+                match super::value_utils::partial_cmp_int_float(*int, *float) {
+                    Some(order) => holds(self.op, order),
+                    None => self.op == CompareOp::Ne,
+                }
+            }
+            (Value::Float64(float), Value::Int64(int)) => {
+                match super::value_utils::partial_cmp_int_float(*int, *float) {
+                    Some(order) => holds(self.op, order.reverse()),
+                    None => self.op == CompareOp::Ne,
                 }
             }
             (Value::Timestamp(a), Value::Timestamp(b)) => match self.op {
@@ -298,8 +299,8 @@ impl PropertyPredicate {
                 CompareOp::Ge => a >= b,
             },
             (Value::Float64(a), Value::Float64(b)) => match self.op {
-                CompareOp::Eq => (a - b).abs() < f64::EPSILON,
-                CompareOp::Ne => (a - b).abs() >= f64::EPSILON,
+                CompareOp::Eq => a == b,
+                CompareOp::Ne => a != b,
                 CompareOp::Lt => a < b,
                 CompareOp::Le => a <= b,
                 CompareOp::Gt => a > b,

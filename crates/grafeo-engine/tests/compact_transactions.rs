@@ -92,7 +92,6 @@ fn compacted_people() -> GrafeoDB {
 /// and his edges; other sessions and transactions, older or newer, still see
 /// them, and the rollback brings them back for the deleting session too.
 #[test]
-#[ignore = "#412: the plain store shows an uncommitted delete to other sessions"]
 fn a_rolled_back_base_delete_restores_the_node_and_its_edges() {
     let db = compacted_people();
     assert_eq!(db.state(), everyone());
@@ -124,7 +123,6 @@ fn a_rolled_back_base_delete_restores_the_node_and_its_edges() {
 
 /// A committed base delete is seen by every transaction begun after it.
 #[test]
-#[ignore = "#412: the plain store shows an uncommitted delete to other sessions"]
 fn a_committed_base_delete_is_seen_after_the_commit() {
     let db = compacted_people();
     let mut deleter = db.session();
@@ -145,7 +143,6 @@ fn a_committed_base_delete_is_seen_after_the_commit() {
 /// A savepoint rollback brings back what was deleted after the savepoint and
 /// keeps what was deleted before it, also once committed.
 #[test]
-#[ignore = "#412: the plain store shows an uncommitted delete to other sessions"]
 fn a_savepoint_rollback_restores_only_the_later_base_deletes() {
     let db = compacted_people();
     let mut deleter = db.session();

@@ -637,13 +637,10 @@ mod session_wal_durability {
                 let epoch = db.current_epoch();
                 let error = with_wal_failure(failure, || update_property(db, caller, "attempted"))
                     .expect_err("the property update must report its WAL failure");
-                // A commit whose outcome is unknown keeps its pending property
-                // version until the reopen, and reads see it (#412): the live
-                // value is checked only when the update was rolled back or is
-                // a direct call, which wrote no pending version.
-                if rolled_back || matches!(caller, PropertyCaller::Direct) {
-                    assert_revision(db, "before");
-                }
+                // A commit whose outcome is unknown keeps its pending
+                // property version until the reopen, which no read sees
+                // (#412): every caller reads the value before it.
+                assert_revision(db, "before");
                 #[cfg(feature = "cdc")]
                 assert_eq!(
                     db.changes_between(EpochId::new(0), EpochId::new(u64::MAX))

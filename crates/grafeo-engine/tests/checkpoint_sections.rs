@@ -294,8 +294,6 @@ fn every_kind_of_section_after_a_reopen(caps: ChunkCaps) -> Vec<(SectionType, us
         SectionType::Catalog,
         SectionType::LpgStore,
         SectionType::RdfStore,
-        SectionType::VectorStore,
-        SectionType::TextIndex,
     ]
     .into_iter()
     .map(|section_type| {

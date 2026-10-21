@@ -17,10 +17,18 @@
 //! A reader takes the column's value unless a node it does not see holds
 //! the row: then the oldest such node's value is what the row held before
 //! every write the reader does not see. A vector without nodes costs a
-//! reader one test. `collect` drops the nodes every reader sees, so a row
-//! costs nothing more once no reader is older than its last write. The
-//! store lists the vectors that have a chain, so its collect visits those
-//! alone (`collect`).
+//! reader one test, and so does a chain whose every node the reader sees
+//! (each chain knows its newest commit and its open nodes). `collect` drops
+//! the nodes every reader sees, so a row costs nothing more once no reader
+//! is older than its last write. The store lists the vectors that have a
+//! chain, so its collect visits those alone (`collect`).
+//!
+//! The common case, one vector with a chain of one node holding one row (a
+//! write, collected before the next one in its vector), takes no allocation:
+//! the list of chains, a chain's nodes and a node's rows each hold their
+//! first entry inline, and go to the heap from the second on.
+
+use smallvec::SmallVec;
 
 use super::bitset::Bitset;
 use super::versions::VECTOR_ROWS;
@@ -31,6 +39,33 @@ fn offset(row: usize) -> u16 {
     u16::try_from(row % VECTOR_ROWS).expect("a row of a vector is below 2,048")
 }
 
+/// The vector of a row of a row group.
+fn vector_of(row: usize) -> usize {
+    row / VECTOR_ROWS
+}
+
+/// The mark of a chain at `place` in the list of chains.
+fn mark(place: usize) -> u8 {
+    u8::try_from(place + 1).expect("a row group has 32 vectors")
+}
+
+/// The epoch `read` reads at: what it sees of committed nodes.
+fn epoch_of(read: Read) -> u64 {
+    match read {
+        Read::Transaction { snapshot, .. } => snapshot,
+        Read::At(epoch) => epoch,
+    }
+}
+
+/// The heap bytes of a list that holds its first entry inline.
+fn spilled_bytes<A: smallvec::Array>(list: &SmallVec<A>) -> usize {
+    if list.spilled() {
+        list.capacity() * std::mem::size_of::<A::Item>()
+    } else {
+        0
+    }
+}
+
 /// One writer's undo node: what the rows it wrote held before.
 #[derive(Debug)]
 struct UndoNode<T> {
@@ -38,7 +73,7 @@ struct UndoNode<T> {
     stamp: u64,
     /// The rows of the vector, ascending, each with what it held before
     /// the writer's first write of it.
-    rows: Vec<(u16, T)>,
+    rows: SmallVec<[(u16, T); 1]>,
 }
 
 impl<T> UndoNode<T> {
@@ -47,20 +82,66 @@ impl<T> UndoNode<T> {
     }
 
     fn get(&self, row: u16) -> Option<&T> {
-        self.find(row).ok().map(|index| &self.rows[index].1)
+        let rows = self.rows.as_slice();
+        let index = rows.binary_search_by_key(&row, |(at, _)| *at).ok()?;
+        rows.get(index).map(|(_, kept)| kept)
+    }
+
+    fn is_pending(&self) -> bool {
+        self.stamp & PENDING != 0
     }
 }
 
 /// The undo nodes of one vector, oldest first.
 #[derive(Debug)]
 struct Chain<T> {
-    nodes: Vec<UndoNode<T>>,
+    nodes: SmallVec<[UndoNode<T>; 1]>,
+    /// The newest commit epoch of its committed nodes, 0 with none.
+    newest: u64,
+    /// How many of its nodes are of open transactions.
+    pending: u32,
 }
 
 impl<T> Chain<T> {
+    fn new() -> Self {
+        Self {
+            nodes: SmallVec::new(),
+            newest: 0,
+            pending: 0,
+        }
+    }
+
     /// The index of the newest node that holds `row`.
     fn newest_with(&self, row: u16) -> Option<usize> {
         self.nodes.iter().rposition(|node| node.find(row).is_ok())
+    }
+
+    /// Adds `node`, the newest.
+    fn push(&mut self, node: UndoNode<T>) {
+        if node.is_pending() {
+            self.pending += 1;
+        } else {
+            self.newest = self.newest.max(node.stamp);
+        }
+        self.nodes.push(node);
+    }
+
+    /// Counts the open nodes and the newest commit again, after nodes went.
+    fn recount(&mut self) {
+        self.pending = 0;
+        self.newest = 0;
+        for node in &self.nodes {
+            if node.is_pending() {
+                self.pending += 1;
+            } else {
+                self.newest = self.newest.max(node.stamp);
+            }
+        }
+    }
+
+    /// Whether `read` sees every node: it then reads the column's value.
+    fn seen_whole_by(&self, read: Read) -> bool {
+        self.pending == 0 && self.newest <= epoch_of(read)
     }
 }
 
@@ -69,39 +150,89 @@ pub(super) const VECTORS: usize = 32;
 
 const _: () = assert!(VECTORS * VECTOR_ROWS == 65_536);
 
-/// The chain of each vector of a row group, `None` where it has none.
-type Chains<T> = [Option<Box<Chain<T>>>; VECTORS];
-
 /// The update chains of one column, or of one row group's labels: `T` is
 /// what a row held (`Option<Value>` for a value, no value being `None`; the
-/// label ids for labels). One pointer while no vector has a chain; the
-/// first chain allocates a pointer per vector, freed with the last chain.
+/// label ids for labels): the chains of the vectors that have one, in the
+/// order of their vectors, the first inline, and per vector where its chain
+/// is. No allocation while one vector has a chain of one node, and none at
+/// all while no vector has one.
 #[derive(Debug)]
 pub(super) struct Updates<T> {
-    chains: Option<Box<Chains<T>>>,
+    /// Per vector, one past the place of its chain in `chains`; 0 for a
+    /// vector without one.
+    places: [u8; VECTORS],
+    chains: SmallVec<[Chain<T>; 1]>,
 }
 
 impl<T> Default for Updates<T> {
     fn default() -> Self {
-        Self { chains: None }
+        Self {
+            places: [0; VECTORS],
+            chains: SmallVec::new(),
+        }
     }
 }
 
 impl<T> Updates<T> {
+    /// Where the chain of vector `vector` is in the list (`Ok`), or would
+    /// go (`Err`): after the chains of the vectors below it.
+    fn find(&self, vector: usize) -> Result<usize, usize> {
+        match self.places[vector] {
+            0 => Err(self.places[..vector]
+                .iter()
+                .filter(|place| **place != 0)
+                .count()),
+            place => Ok(usize::from(place) - 1),
+        }
+    }
+
+    /// Puts `chain` in the list for vector `vector`, at `place`.
+    fn insert_chain(&mut self, place: usize, vector: usize, chain: Chain<T>) {
+        self.chains.insert(place, chain);
+        for later in &mut self.places {
+            if usize::from(*later) > place {
+                *later += 1;
+            }
+        }
+        self.places[vector] = mark(place);
+    }
+
     /// The chain of `row`'s vector.
     fn chain(&self, row: usize) -> Option<&Chain<T>> {
-        self.chains.as_ref()?[row / VECTOR_ROWS].as_deref()
+        let place = self.find(vector_of(row)).ok()?;
+        Some(&self.chains[place])
+    }
+
+    /// The chain of `row`'s vector, with its place in the list.
+    fn chain_mut(&mut self, row: usize) -> Option<(usize, &mut Chain<T>)> {
+        let place = self.find(vector_of(row)).ok()?;
+        Some((place, &mut self.chains[place]))
+    }
+
+    /// Takes out the chain of vector `vector`, at `place` in the list.
+    fn remove_chain(&mut self, place: usize, vector: usize) {
+        self.chains.remove(place);
+        self.places[vector] = 0;
+        for later in &mut self.places {
+            if usize::from(*later) > place + 1 {
+                *later -= 1;
+            }
+        }
+        self.trim();
     }
 
     /// Whether no vector has a chain.
     pub(super) fn is_empty(&self) -> bool {
-        self.chains.is_none()
+        self.chains.is_empty()
     }
 
     /// What `row` held for `read`, when a node `read` does not see holds
     /// it; `None` when the column's value is what it reads.
     pub(super) fn saved(&self, row: usize, read: Read) -> Option<&T> {
         let chain = self.chain(row)?;
+        if chain.seen_whole_by(read) {
+            return None;
+        }
         let row = offset(row);
         let mut saved = None;
         for node in chain.nodes.iter().rev() {
@@ -110,12 +241,12 @@ impl<T> Updates<T> {
                     // An older node of the row may hold what came before.
                     saved = Some(value);
                 }
-            } else if node.stamp & PENDING != 0 && node.find(row).is_ok() {
-                // The reader's own write: the newest of the row.
-                return None;
+            } else if node.find(row).is_ok() {
+                // The reader's own write is the newest of the row; a
+                // committed node it sees has the row's older writes
+                // committed before it, so it sees them too.
+                return if node.is_pending() { None } else { saved };
             }
-            // A committed node the reader sees: the older writes of its
-            // rows are committed before it, so the reader sees them too.
         }
         saved
     }
@@ -140,28 +271,30 @@ impl<T> Updates<T> {
                 if node.stamp == stamp && node.find(at).is_ok() {
                     return false;
                 }
-                if node.stamp & PENDING == 0 && node.stamp <= snapshot {
+                if !node.is_pending() && node.stamp <= snapshot {
                     break;
                 }
             }
         }
-        let chains = self
-            .chains
-            .get_or_insert_with(|| Box::new(std::array::from_fn(|_| None)));
-        let chain = chains[row / VECTOR_ROWS].get_or_insert_with(|| {
-            Box::new(Chain {
-                nodes: Vec::with_capacity(1),
-            })
-        });
+        let vector = vector_of(row);
+        let place = match self.find(vector) {
+            Ok(place) => place,
+            Err(place) => {
+                self.insert_chain(place, vector, Chain::new());
+                place
+            }
+        };
+        let chain = &mut self.chains[place];
         match chain.nodes.last_mut() {
             Some(node) if node.stamp == stamp => {
                 let position = node.find(at).unwrap_err();
                 node.rows.insert(position, (at, current()));
             }
-            _ => chain.nodes.push(UndoNode {
-                stamp,
-                rows: vec![(at, current())],
-            }),
+            _ => {
+                let mut rows = SmallVec::new();
+                rows.push((at, current()));
+                chain.push(UndoNode { stamp, rows });
+            }
         }
         true
     }
@@ -171,12 +304,14 @@ impl<T> Updates<T> {
     /// no node holds the row). A node another entry of the same commit
     /// stamped already is found at `at`.
     pub(super) fn stamp(&mut self, row: usize, pending: u64, at: u64) -> Option<u64> {
-        let chain = self.chains.as_mut()?[row / VECTOR_ROWS].as_deref_mut()?;
+        let (_, chain) = self.chain_mut(row)?;
         let index = chain.newest_with(offset(row))?;
         let node = &mut chain.nodes[index];
         let before = node.stamp;
         if before == pending {
             node.stamp = at;
+            chain.pending -= 1;
+            chain.newest = chain.newest.max(at);
         }
         Some(before)
     }
@@ -186,9 +321,8 @@ impl<T> Updates<T> {
     /// the transaction wrote it: a rollback of the transaction's first
     /// write of the row. A node left empty goes, and a chain left empty.
     pub(super) fn undo(&mut self, row: usize, pending: u64) -> Option<T> {
-        let slot = &mut self.chains.as_mut()?[row / VECTOR_ROWS];
-        let chain = slot.as_deref_mut()?;
         let at = offset(row);
+        let (place, chain) = self.chain_mut(row)?;
         let index = chain.newest_with(at)?;
         if chain.nodes[index].stamp != pending {
             return None;
@@ -198,10 +332,10 @@ impl<T> Updates<T> {
         let (_, saved) = node.rows.remove(position);
         if node.rows.is_empty() {
             chain.nodes.remove(index);
+            chain.pending -= 1;
         }
         if chain.nodes.is_empty() {
-            *slot = None;
-            self.trim();
+            self.remove_chain(place, vector_of(row));
         }
         Some(saved)
     }
@@ -210,103 +344,108 @@ impl<T> Updates<T> {
     /// the horizon or later sees it, and so the newer values it replaced.
     /// Returns the kept values (or label sets) it dropped.
     pub(super) fn collect(&mut self, horizon: u64) -> usize {
-        let Some(chains) = self.chains.as_mut() else {
+        if self.chains.is_empty() {
             return 0;
-        };
-        let dropped = chains
-            .iter_mut()
-            .map(|slot| Self::collect_slot(slot, horizon))
-            .sum();
+        }
+        let mut dropped = 0;
+        // The chains are in the order of their vectors: each that stays
+        // gets its new place as the walk passes it.
+        let mut place = 0;
+        for vector in 0..VECTORS {
+            if self.places[vector] == 0 {
+                continue;
+            }
+            let chain = &mut self.chains[place];
+            dropped += Self::collect_chain(chain, horizon);
+            if chain.nodes.is_empty() {
+                self.chains.remove(place);
+                self.places[vector] = 0;
+            } else {
+                self.places[vector] = mark(place);
+                place += 1;
+            }
+        }
         self.trim();
         dropped
     }
 
     /// [`collect`](Self::collect) of vector `vector` alone.
     pub(super) fn collect_vector(&mut self, vector: usize, horizon: u64) -> usize {
-        let Some(chains) = self.chains.as_mut() else {
+        let Ok(place) = self.find(vector) else {
             return 0;
         };
-        let dropped = Self::collect_slot(&mut chains[vector], horizon);
-        if dropped > 0 {
-            self.trim();
+        let chain = &mut self.chains[place];
+        let dropped = Self::collect_chain(chain, horizon);
+        if chain.nodes.is_empty() {
+            self.remove_chain(place, vector);
         }
         dropped
     }
 
     /// Drops the nodes of one vector's chain committed at or before
-    /// `horizon`, and the chain once it is empty; returns the kept values
-    /// it dropped.
-    fn collect_slot(slot: &mut Option<Box<Chain<T>>>, horizon: u64) -> usize {
-        let Some(chain) = slot else {
-            return 0;
-        };
+    /// `horizon`; returns the kept values it dropped.
+    fn collect_chain(chain: &mut Chain<T>, horizon: u64) -> usize {
+        if chain.pending == 0 && chain.newest <= horizon {
+            // Every node is committed by the horizon: all of them go.
+            let dropped = chain.nodes.iter().map(|node| node.rows.len()).sum();
+            chain.nodes = SmallVec::new();
+            chain.recount();
+            return dropped;
+        }
         let mut dropped = 0;
         chain.nodes.retain(|node| {
-            let keep = node.stamp & PENDING != 0 || node.stamp > horizon;
+            let keep = node.is_pending() || node.stamp > horizon;
             if !keep {
                 dropped += node.rows.len();
             }
             keep
         });
-        if chain.nodes.is_empty() {
-            *slot = None;
-        }
+        chain.recount();
         dropped
     }
 
     /// Whether vector `vector` has a chain.
     pub(super) fn has_chain(&self, vector: usize) -> bool {
-        self.chains
-            .as_ref()
-            .is_some_and(|chains| chains[vector].is_some())
+        self.places[vector] != 0
     }
 
     /// Takes `row` out of every node, for a row that is gone.
     pub(super) fn remove_row(&mut self, row: usize) {
-        let Some(chains) = self.chains.as_mut() else {
-            return;
-        };
-        let slot = &mut chains[row / VECTOR_ROWS];
-        let Some(chain) = slot.as_deref_mut() else {
-            return;
-        };
         let at = offset(row);
+        let Some((place, chain)) = self.chain_mut(row) else {
+            return;
+        };
         for node in &mut chain.nodes {
             if let Ok(position) = node.find(at) {
                 node.rows.remove(position);
             }
         }
         chain.nodes.retain(|node| !node.rows.is_empty());
+        chain.recount();
         if chain.nodes.is_empty() {
-            *slot = None;
-            self.trim();
+            self.remove_chain(place, vector_of(row));
         }
     }
 
-    /// Frees the pointers per vector once no vector has a chain.
+    /// Gives back the list's heap once no vector has a chain.
     fn trim(&mut self) {
-        if self
-            .chains
-            .as_ref()
-            .is_some_and(|chains| chains.iter().all(Option::is_none))
-        {
-            self.chains = None;
+        if self.chains.is_empty() && self.chains.spilled() {
+            self.chains = SmallVec::new();
         }
     }
 
     /// The chains of the vectors that have one, with their vector index.
     fn each(&self) -> impl Iterator<Item = (usize, &Chain<T>)> + '_ {
-        self.chains.iter().flat_map(|chains| {
-            chains
-                .iter()
-                .enumerate()
-                .filter_map(|(index, chain)| Some((index, chain.as_deref()?)))
-        })
+        (0..VECTORS)
+            .filter(|vector| self.places[*vector] != 0)
+            .zip(&self.chains)
     }
 
     /// The rows some node holds, `None` when no vector has a chain.
     pub(super) fn rows(&self) -> Option<Bitset> {
-        self.chains.as_ref()?;
+        if self.chains.is_empty() {
+            return None;
+        }
         let mut rows = Bitset::default();
         for (index, chain) in self.each() {
             for node in &chain.nodes {
@@ -338,23 +477,49 @@ impl<T> Updates<T> {
             .filter_map(move |node| Some((node.stamp, node.get(at)?)))
     }
 
-    /// The heap bytes the chains take, with what `held` says each kept
-    /// value holds on the heap.
-    pub(super) fn heap_bytes(&self, held: impl Fn(&T) -> usize) -> usize {
-        if self.chains.is_none() {
-            return 0;
+    /// Adds the chains a load restores from a file's history: `kept` holds,
+    /// per row, the epoch of each committed write a reader at an earlier
+    /// epoch must not see, with what the row held before it (one entry per
+    /// row and epoch). Each vector gets one node per epoch, oldest first, as
+    /// the commits in epoch order would have made them; the store holds no
+    /// chain of these rows before.
+    pub(super) fn load(&mut self, mut kept: Vec<(usize, u64, T)>) {
+        kept.sort_unstable_by_key(|(row, stamp, _)| (vector_of(*row), *stamp, *row));
+        for (row, stamp, value) in kept {
+            let vector = vector_of(row);
+            let place = match self.find(vector) {
+                Ok(place) => place,
+                Err(place) => {
+                    self.insert_chain(place, vector, Chain::new());
+                    place
+                }
+            };
+            let chain = &mut self.chains[place];
+            match chain.nodes.last_mut() {
+                Some(node) if node.stamp == stamp => node.rows.push((offset(row), value)),
+                _ => {
+                    let mut rows = SmallVec::new();
+                    rows.push((offset(row), value));
+                    chain.push(UndoNode { stamp, rows });
+                }
+            }
         }
-        std::mem::size_of::<Chains<T>>()
+    }
+
+    /// The heap bytes the chains take, with what `held` says each kept
+    /// value holds on the heap. The first chain, its first node and that
+    /// node's first row are inline, in the column.
+    pub(super) fn heap_bytes(&self, held: impl Fn(&T) -> usize) -> usize {
+        spilled_bytes(&self.chains)
             + self
                 .each()
                 .map(|(_, chain)| {
-                    std::mem::size_of::<Chain<T>>()
-                        + chain.nodes.capacity() * std::mem::size_of::<UndoNode<T>>()
+                    spilled_bytes(&chain.nodes)
                         + chain
                             .nodes
                             .iter()
                             .map(|node| {
-                                node.rows.capacity() * std::mem::size_of::<(u16, T)>()
+                                spilled_bytes(&node.rows)
                                     + node.rows.iter().map(|(_, kept)| held(kept)).sum::<usize>()
                             })
                             .sum::<usize>()
@@ -457,6 +622,72 @@ mod tests {
         column.updates.collect(3);
         assert_eq!(column.updates.nodes(), 1, "a reader at 3 still needs it");
         column.updates.collect(4);
+        assert!(column.updates.is_empty());
+        assert_eq!(column.updates.heap_bytes(|_| 0), 0, "nothing is left");
+    }
+
+    /// Chains made in vectors out of their order, and taken out by an
+    /// undo, a collect of one vector and a whole collect, each leave every
+    /// other vector's chain where its reads find it; the last chain gone,
+    /// nothing is left on the heap.
+    #[test]
+    fn chains_of_many_vectors_stay_found_as_others_come_and_go() {
+        let id = 19;
+        let writer = PENDING | id;
+        let other = Read::Transaction { id: 7, snapshot: 3 };
+        let vectors = [7, 2, 30, 0, 31, 15];
+        let mut column = Column::new(32 * VECTOR_ROWS);
+        let row = |vector: usize| vector * VECTOR_ROWS + 9;
+        for (value, vector) in (100..).zip(vectors) {
+            assert!(column.write(row(vector), value, writer, 3));
+            // A second row: the node holds two now.
+            assert!(column.write(row(vector) + 1, value + 50, writer, 3));
+        }
+        let check = |column: &Column, with: &[usize], what: &str| {
+            for vector in 0..32 {
+                assert_eq!(
+                    column.updates.has_chain(vector),
+                    with.contains(&vector),
+                    "{what}: vector {vector}"
+                );
+                let expected = if with.contains(&vector) {
+                    Some(0)
+                } else {
+                    column.value[row(vector)]
+                };
+                assert_eq!(column.read(row(vector), other), expected, "{what}");
+            }
+        };
+        check(&column, &vectors, "made");
+        assert_eq!(column.updates.nodes(), vectors.len());
+
+        // An undo of both rows of vector 2 takes its chain out.
+        assert_eq!(column.updates.undo(row(2), writer), Some(Some(0)));
+        assert_eq!(column.updates.undo(row(2) + 1, writer), Some(Some(0)));
+        column.value[row(2)] = Some(0);
+        column.value[row(2) + 1] = Some(0);
+        check(&column, &[7, 30, 0, 31, 15], "vector 2 undone");
+
+        // Vector 30 is committed at 4 and collected alone.
+        assert_eq!(column.updates.stamp(row(30), writer, 4), Some(writer));
+        assert_eq!(
+            column.updates.stamp(row(30) + 1, writer, 4),
+            Some(4),
+            "the node is stamped already"
+        );
+        assert_eq!(column.updates.collect_vector(30, 4), 2);
+        assert_eq!(column.read(row(30), other), Some(102), "the newest now");
+        check(&column, &[7, 0, 31, 15], "vector 30 collected");
+
+        // The rest are committed at 5: a collect at 4 keeps them, at 5
+        // drops them all.
+        for vector in [7, 0, 31, 15] {
+            assert_eq!(column.updates.stamp(row(vector), writer, 5), Some(writer));
+            assert_eq!(column.updates.stamp(row(vector) + 1, writer, 5), Some(5));
+        }
+        assert_eq!(column.updates.collect(4), 0);
+        check(&column, &[7, 0, 31, 15], "kept at 4");
+        assert_eq!(column.updates.collect(5), 8);
         assert!(column.updates.is_empty());
         assert_eq!(column.updates.heap_bytes(|_| 0), 0, "nothing is left");
     }

@@ -123,29 +123,12 @@ impl Optimizer {
         }
     }
 
-    /// Creates an optimizer with cardinality estimates from the store's statistics.
-    ///
-    /// Pre-populates the cardinality estimator with per-label row counts and
-    /// edge type fanout. Feeds per-edge-type degree stats, label cardinalities,
-    /// and graph totals into the cost model for accurate estimation.
-    #[cfg(feature = "lpg")]
-    #[must_use]
-    pub fn from_store(store: &grafeo_core::graph::lpg::LpgStore) -> Self {
-        store.ensure_statistics_fresh();
-        let stats = store.statistics();
-        Self {
-            indexed_properties: store.property_index_keys().into_iter().collect(),
-            incoming_edges: IncomingEdges::of(store),
-            ..Self::from_statistics(&stats)
-        }
-    }
-
-    /// Creates an optimizer from any GraphStore implementation.
-    ///
-    /// Unlike [`from_store`](Self::from_store), this does not call
-    /// `ensure_statistics_fresh()` since external stores manage their own
-    /// statistics. The store's [`statistics()`](grafeo_core::graph::GraphStore::statistics) method
-    /// is called directly.
+    /// Creates an optimizer from any GraphStore implementation, the
+    /// database's own row-group store among them: cardinality estimates
+    /// from the store's [`statistics()`](grafeo_core::graph::GraphStore::statistics)
+    /// (per-label row counts, edge type fanout and degrees, graph totals,
+    /// which the store keeps current at each commit), the properties with a
+    /// property index, and whether the store keeps backward adjacency.
     #[must_use]
     pub fn from_graph_store(store: &dyn grafeo_core::graph::GraphStore) -> Self {
         let stats = store.statistics();
@@ -4276,6 +4259,26 @@ mod tests {
             assert_eq!(
                 optimized_by(&optimizer, written(ExpandDirection::Incoming)),
                 expected.explain_tree()
+            );
+        }
+
+        /// A row-group store built without backward edges (10b) tells the
+        /// planner so: an optimizer from it plans as one without incoming
+        /// edges, and from one with them as one with them.
+        #[cfg(feature = "lpg")]
+        #[test]
+        fn a_row_group_store_without_backward_edges_plans_without_them() {
+            use grafeo_core::graph::rowgroup::RowGroupStore;
+
+            let kept = RowGroupStore::new();
+            let scanned = RowGroupStore::with_backward_edges(false);
+            assert_eq!(
+                Optimizer::from_graph_store(&kept).incoming_edges,
+                IncomingEdges::Kept
+            );
+            assert_eq!(
+                Optimizer::from_graph_store(&scanned).incoming_edges,
+                IncomingEdges::NotKept
             );
         }
 

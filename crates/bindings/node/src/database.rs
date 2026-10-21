@@ -1471,111 +1471,61 @@ impl JsGrafeoDB {
 impl JsGrafeoDB {
     /// Import a CSV file as graph nodes.
     ///
-    /// Each row becomes a node with the given label. Column headers are used
-    /// as property names. Returns the number of nodes created.
+    /// Each row becomes a node with the given label, and each column a
+    /// property named as the header spells it (`home city` stays `home
+    /// city`); an empty field sets no property. Without headers the columns
+    /// are `column0`, `column1`, and so on. Values are strings. The label is
+    /// used as given. Returns the number of nodes created.
     #[napi(js_name = "importCsv")]
     pub async fn import_csv(&self, path: String, options: Option<CsvImportOptions>) -> Result<i64> {
-        let db = self.inner.clone();
-        tokio::task::spawn_blocking(move || {
-            let opts = options.unwrap_or_default();
-            let label = sanitize_gql_identifier(&opts.label.unwrap_or_else(|| "Row".to_string()));
-            let headers = opts.headers.unwrap_or(true);
-
-            let abs_path = std::path::Path::new(&path)
-                .canonicalize()
-                .map_err(|e| NodeGrafeoError::Database(format!("{path}: {e}")))?;
-            let path_str = escape_gql_string(&abs_path.to_string_lossy().replace('\\', "/"));
-
-            let header_clause = if headers { " WITH HEADERS" } else { "" };
-
-            let insert_clause = if headers {
-                let columns = read_csv_headers(&abs_path, ',')
-                    .map_err(|e| NodeGrafeoError::Database(e.clone()))?;
-                if columns.is_empty() {
-                    format!("INSERT (:{label} {{}})")
-                } else {
-                    let props = columns
-                        .iter()
-                        .map(|col| {
-                            let safe = sanitize_gql_identifier(col);
-                            format!("{safe}: row.{safe}")
-                        })
-                        .collect::<Vec<_>>()
-                        .join(", ");
-                    format!("INSERT (:{label} {{{props}}})")
-                }
-            } else {
-                format!("INSERT (:{label} {{}})")
-            };
-
-            let query = format!(
-                "LOAD DATA FROM '{path_str}' FORMAT CSV{header_clause} AS row {insert_clause}"
-            );
-
-            let db = db.read();
-            let session = db.session();
-
-            let before_count = count_nodes(&session, &label);
-
-            session.execute(&query).map_err(NodeGrafeoError::from)?;
-
-            let count = count_nodes(&session, &label) - before_count;
-
-            Ok(count)
-        })
-        .await
-        .map_err(|e| napi::Error::from_reason(e.to_string()))?
+        let opts = options.unwrap_or_default();
+        let format = grafeo_engine::import::ImportFormat::Csv {
+            headers: opts.headers.unwrap_or(true),
+            delimiter: None,
+        };
+        self.import_nodes(path, opts.label, format).await
     }
 
     /// Import a JSON Lines file as graph nodes.
     ///
-    /// Each line must be a valid JSON object. Object keys become property names.
-    /// Returns the number of nodes created.
+    /// Each line must be a JSON object. Each key becomes a property named as
+    /// the file spells it, whichever line it first appears on, and keeps its
+    /// JSON type. The label is used as given. Returns the number of nodes
+    /// created.
     #[napi(js_name = "importJsonl")]
     pub async fn import_jsonl(
         &self,
         path: String,
         options: Option<JsonlImportOptions>,
     ) -> Result<i64> {
+        let label = options.unwrap_or_default().label;
+        self.import_nodes(path, label, grafeo_engine::import::ImportFormat::Jsonl)
+            .await
+    }
+}
+
+impl JsGrafeoDB {
+    /// [`grafeo_engine::import::import_nodes`] in a session of its own, off
+    /// the event loop; the label is "Row" when none is given.
+    async fn import_nodes(
+        &self,
+        path: String,
+        label: Option<String>,
+        format: grafeo_engine::import::ImportFormat,
+    ) -> Result<i64> {
         let db = self.inner.clone();
         tokio::task::spawn_blocking(move || {
-            let opts = options.unwrap_or_default();
-            let label = sanitize_gql_identifier(&opts.label.unwrap_or_else(|| "Row".to_string()));
-
-            let abs_path = std::path::Path::new(&path)
-                .canonicalize()
-                .map_err(|e| NodeGrafeoError::Database(format!("{path}: {e}")))?;
-            let path_str = escape_gql_string(&abs_path.to_string_lossy().replace('\\', "/"));
-
-            let keys =
-                read_jsonl_keys(&abs_path).map_err(|e| NodeGrafeoError::Database(e.clone()))?;
-
-            let insert_clause = if keys.is_empty() {
-                format!("INSERT (:{label} {{}})")
-            } else {
-                let props = keys
-                    .iter()
-                    .map(|key| {
-                        let safe = sanitize_gql_identifier(key);
-                        format!("{safe}: row.{safe}")
-                    })
-                    .collect::<Vec<_>>()
-                    .join(", ");
-                format!("INSERT (:{label} {{{props}}})")
-            };
-
-            let query = format!("LOAD DATA FROM '{path_str}' FORMAT JSONL AS row {insert_clause}");
-
+            let label = label.unwrap_or_else(|| "Row".to_string());
             let db = db.read();
-            let session = db.session();
-
-            let before_count = count_nodes(&session, &label);
-
-            session.execute(&query).map_err(NodeGrafeoError::from)?;
-
-            let count = count_nodes(&session, &label) - before_count;
-
-            Ok(count)
+            let created = grafeo_engine::import::import_nodes(
+                &db.session(),
+                std::path::Path::new(&path),
+                &label,
+                format,
+            )
+            .map_err(NodeGrafeoError::from)?;
+            i64::try_from(created)
+                .map_err(|_| NodeGrafeoError::Database(format!("{created} nodes created")).into())
         })
         .await
         .map_err(|e| napi::Error::from_reason(e.to_string()))?
@@ -1615,86 +1565,6 @@ pub struct CsvImportOptions {
 pub struct JsonlImportOptions {
     /// Label to assign to created nodes (default: "Row")
     pub label: Option<String>,
-}
-
-/// Read CSV headers from the first line of a file.
-fn read_csv_headers(
-    path: &std::path::Path,
-    delimiter: char,
-) -> std::result::Result<Vec<String>, String> {
-    use std::io::{BufRead, BufReader};
-    let f = std::fs::File::open(path).map_err(|e| format!("{}: {e}", path.display()))?;
-    let mut reader = BufReader::new(f);
-    let mut header_line = String::new();
-    reader
-        .read_line(&mut header_line)
-        .map_err(|e| format!("Failed to read headers: {e}"))?;
-    Ok(header_line
-        .trim()
-        .split(delimiter)
-        .map(|h| h.trim().trim_matches('"').to_string())
-        .filter(|h| !h.is_empty())
-        .collect())
-}
-
-/// Escape single quotes in a string for embedding in a GQL string literal.
-fn escape_gql_string(s: &str) -> String {
-    s.replace('\'', "\\'")
-}
-
-/// Sanitize a name for use as a GQL identifier.
-fn sanitize_gql_identifier(name: &str) -> String {
-    let sanitized: String = name
-        .chars()
-        .map(|c| {
-            if c.is_alphanumeric() || c == '_' {
-                c
-            } else {
-                '_'
-            }
-        })
-        .collect();
-    if sanitized.is_empty() {
-        "_col".to_string()
-    } else if sanitized.starts_with(|c: char| c.is_ascii_digit()) {
-        format!("_{sanitized}")
-    } else {
-        sanitized
-    }
-}
-
-/// Count nodes with a given label.
-fn count_nodes(session: &grafeo_engine::Session, label: &str) -> i64 {
-    session
-        .execute(&format!("MATCH (n:{label}) RETURN count(n) AS c"))
-        .ok()
-        .and_then(|r| r.rows().first().cloned())
-        .and_then(|row| row.first().cloned())
-        .and_then(|v| match v {
-            Value::Int64(n) => Some(n),
-            _ => None,
-        })
-        .unwrap_or(0)
-}
-
-/// Read JSON keys from the first non-empty line of a JSONL file.
-fn read_jsonl_keys(path: &std::path::Path) -> std::result::Result<Vec<String>, String> {
-    use std::io::{BufRead, BufReader};
-    let f = std::fs::File::open(path).map_err(|e| format!("{}: {e}", path.display()))?;
-    let reader = BufReader::new(f);
-    for line in reader.lines() {
-        let line = line.map_err(|e| format!("Failed to read JSONL file: {e}"))?;
-        let trimmed = line.trim();
-        if trimmed.is_empty() {
-            continue;
-        }
-        if let Ok(obj) = serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(trimmed)
-        {
-            return Ok(obj.keys().cloned().collect());
-        }
-        break;
-    }
-    Ok(Vec::new())
 }
 
 /// Execute a query in a given language with optional JSON params.

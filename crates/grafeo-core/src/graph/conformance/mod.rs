@@ -590,24 +590,24 @@ pub(crate) fn image<S: Store + ?Sized>(store: &S, reader: Reader) -> Image {
         }
     }
 
-    if store.has_backward_adjacency() {
-        for &node in nodes.keys() {
-            let incoming: BTreeSet<u64> = store
-                .edges_from(NodeId::new(node), Direction::Incoming)
-                .into_iter()
-                .filter(|(_, edge)| edge_view(store, reader, *edge).is_some())
-                .map(|(_, edge)| edge.as_u64())
-                .collect();
-            let expected: BTreeSet<u64> = edges
-                .iter()
-                .filter(|(_, (_, dst, _, _))| *dst == node)
-                .map(|(edge, _)| *edge)
-                .collect();
-            if incoming != expected {
-                problems.push(format!(
-                    "node {node}'s incoming adjacency lists {incoming:?}, its edges are {expected:?}"
-                ));
-            }
+    // Incoming edges: from the incoming adjacency, or by a scan of a store
+    // that keeps none; either way every edge into the node.
+    for &node in nodes.keys() {
+        let incoming: BTreeSet<u64> = store
+            .edges_from(NodeId::new(node), Direction::Incoming)
+            .into_iter()
+            .filter(|(_, edge)| edge_view(store, reader, *edge).is_some())
+            .map(|(_, edge)| edge.as_u64())
+            .collect();
+        let expected: BTreeSet<u64> = edges
+            .iter()
+            .filter(|(_, (_, dst, _, _))| *dst == node)
+            .map(|(edge, _)| *edge)
+            .collect();
+        if incoming != expected {
+            problems.push(format!(
+                "node {node}'s incoming adjacency lists {incoming:?}, its edges are {expected:?}"
+            ));
         }
     }
 
@@ -992,10 +992,8 @@ pub(crate) fn paths_at<S: Store + ?Sized>(
     }
 
     // Adjacency.
-    let mut directions = vec![Direction::Outgoing];
-    if store.has_backward_adjacency() {
-        directions.extend([Direction::Incoming, Direction::Both]);
-    }
+    // Every direction, also on a store that keeps no incoming edges.
+    let directions = [Direction::Outgoing, Direction::Incoming, Direction::Both];
     for &raw in expected.nodes.keys() {
         for &direction in &directions {
             let mut wanted: Vec<(u64, u64)> = expected

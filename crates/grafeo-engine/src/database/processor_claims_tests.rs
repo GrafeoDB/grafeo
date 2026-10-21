@@ -7,7 +7,7 @@
 use std::sync::Arc;
 
 use grafeo_common::types::{EpochId, TransactionId, Value};
-use grafeo_core::graph::lpg::LpgStore;
+use grafeo_core::graph::rowgroup::RowGroupStore;
 
 use crate::GrafeoDB;
 use crate::query::{QueryLanguage, QueryProcessor};
@@ -16,7 +16,7 @@ use crate::query::{QueryLanguage, QueryProcessor};
 /// `transaction` of `db`'s transaction manager, which reads at `epoch`.
 fn processor(
     db: &GrafeoDB,
-    store: Arc<LpgStore>,
+    store: Arc<RowGroupStore>,
     graph: Option<&str>,
     (epoch, transaction): (EpochId, TransactionId),
 ) -> QueryProcessor {

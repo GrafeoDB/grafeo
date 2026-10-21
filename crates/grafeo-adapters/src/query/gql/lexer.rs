@@ -335,6 +335,8 @@ impl<'a> Lexer<'a> {
                 self.advance();
                 TokenKind::Comma
             }
+            // `.5`: a number with no digit before its point.
+            '.' if self.peek_char().is_ascii_digit() => self.scan_number(),
             '.' => {
                 self.advance();
                 if self.current_char() == '.' {
@@ -453,7 +455,14 @@ impl<'a> Lexer<'a> {
             }
         };
 
-        let text = self.input[start..self.position].to_string();
+        let mut text = self.input[start..self.position].to_string();
+        // A number's digit separators are no part of its value.
+        if matches!(
+            kind,
+            TokenKind::Integer | TokenKind::Decimal | TokenKind::Float
+        ) {
+            text.retain(|ch| ch != '_');
+        }
         Token {
             kind,
             text,
@@ -543,6 +552,13 @@ impl<'a> Lexer<'a> {
         while self.position < self.input.len() {
             let ch = self.current_char();
             if ch == quote {
+                // A doubled quote is the quote itself (ISO/IEC 39075:2024
+                // 21.2, <character string literal>): `'O''Brien'`.
+                if self.peek_char() == quote {
+                    self.advance();
+                    self.advance();
+                    continue;
+                }
                 self.advance();
                 return TokenKind::String;
             }
@@ -580,51 +596,77 @@ impl<'a> Lexer<'a> {
         TokenKind::Error // Unterminated quoted identifier
     }
 
+    /// The digits `is_digit` accepts, with one underscore between two of
+    /// them (ISO GQL `[ <underscore> ] <digit>`); `after_prefix` allows the
+    /// underscore before the first digit too, as after `0x`.
+    fn scan_digits(&mut self, is_digit: fn(char) -> bool, after_prefix: bool) {
+        let mut separator_allowed = after_prefix;
+        loop {
+            let ch = self.current_char();
+            if is_digit(ch) {
+                self.advance();
+                separator_allowed = true;
+            } else if ch == '_' && separator_allowed && is_digit(self.peek_char()) {
+                self.advance();
+                separator_allowed = false;
+            } else {
+                return;
+            }
+        }
+    }
+
+    /// The character `offset` characters after the current one.
+    fn char_at(&self, offset: usize) -> char {
+        self.input[self.position..]
+            .chars()
+            .nth(offset)
+            .unwrap_or('\0')
+    }
+
+    /// Whether the `.` at the current position belongs to the number before
+    /// it: followed by a digit, an exponent or a suffix (`5.5`, `5.e3`,
+    /// `5.M`), or by anything that starts no name and no second point (`5.`
+    /// before a comma). `1..5` is a range and `5.MB` a property access.
+    fn point_continues_number(&self) -> bool {
+        let next = self.peek_char();
+        if next.is_ascii_digit() {
+            return true;
+        }
+        let after = self.char_at(2);
+        match next.to_ascii_uppercase() {
+            'E' => {
+                after.is_ascii_digit()
+                    || (matches!(after, '+' | '-') && self.char_at(3).is_ascii_digit())
+            }
+            'M' | 'F' | 'D' => !(after.is_alphanumeric() || after == '_'),
+            _ => next != '.' && !(next.is_alphabetic() || next == '_'),
+        }
+    }
+
     fn scan_number(&mut self) -> TokenKind {
-        // Check for hex (0x/0X) or octal (0o/0O) prefix
+        // A radix prefix: hex (0x), octal (0o) or binary (0b).
         if self.current_char() == '0' {
-            let next = self.peek_char();
-            if next == 'x' || next == 'X' {
+            let is_digit: Option<fn(char) -> bool> = match self.peek_char() {
+                'x' | 'X' => Some(|ch| ch.is_ascii_hexdigit()),
+                'o' | 'O' => Some(|ch| ('0'..='7').contains(&ch)),
+                'b' | 'B' => Some(|ch| ch == '0' || ch == '1'),
+                _ => None,
+            };
+            if let Some(is_digit) = is_digit {
                 self.advance(); // '0'
-                self.advance(); // 'x'
-                while self.position < self.input.len() && self.current_char().is_ascii_hexdigit() {
-                    self.advance();
-                }
-                return TokenKind::Integer;
-            }
-            if next == 'o' || next == 'O' {
-                self.advance(); // '0'
-                self.advance(); // 'o'
-                while self.position < self.input.len() && ('0'..='7').contains(&self.current_char())
-                {
-                    self.advance();
-                }
-                return TokenKind::Integer;
-            }
-            if next == 'b' || next == 'B' {
-                self.advance(); // '0'
-                self.advance(); // 'b'
-                while self.position < self.input.len()
-                    && (self.current_char() == '0' || self.current_char() == '1')
-                {
-                    self.advance();
-                }
+                self.advance(); // the radix letter
+                self.scan_digits(is_digit, true);
                 return TokenKind::Integer;
             }
         }
 
-        while self.position < self.input.len() && self.current_char().is_ascii_digit() {
-            self.advance();
-        }
+        self.scan_digits(|ch| ch.is_ascii_digit(), false);
 
-        // Only consume '.' if followed by a digit (to avoid consuming '..' as part of a number)
         let mut point = false;
-        if self.current_char() == '.' && self.peek_char().is_ascii_digit() {
+        if self.current_char() == '.' && self.point_continues_number() {
             point = true;
             self.advance();
-            while self.position < self.input.len() && self.current_char().is_ascii_digit() {
-                self.advance();
-            }
+            self.scan_digits(|ch| ch.is_ascii_digit(), false);
         }
         // Scientific notation, with or without a point: 1.5e10, 2E-3
         let mut exponent = false;
@@ -634,9 +676,7 @@ impl<'a> Lexer<'a> {
             if self.current_char() == '+' || self.current_char() == '-' {
                 self.advance();
             }
-            while self.position < self.input.len() && self.current_char().is_ascii_digit() {
-                self.advance();
-            }
+            self.scan_digits(|ch| ch.is_ascii_digit(), false);
         }
         // ISO GQL number suffixes: `M` exact, `F` and `D` approximate; a
         // letter, digit or `_` after it makes it the start of a name instead.
@@ -814,6 +854,20 @@ mod tests {
         let s2 = lexer.next_token();
         assert_eq!(s2.kind, TokenKind::String);
         assert_eq!(s2.text, "\"world\"");
+    }
+
+    /// A doubled quote of the literal's own kind continues it; the other
+    /// kind does not end it either way.
+    #[test]
+    fn test_doubled_quote_in_string() {
+        let mut lexer = Lexer::new("'O''Brien' \"say \"\"hi\"\"\" '''' 'a\"\"b' x");
+        for text in ["'O''Brien'", "\"say \"\"hi\"\"\"", "''''", "'a\"\"b'"] {
+            let token = lexer.next_token();
+            assert_eq!(token.kind, TokenKind::String, "{text}");
+            assert_eq!(token.text, text);
+        }
+        assert_eq!(lexer.next_token().kind, TokenKind::Identifier);
+        assert_eq!(Lexer::new("'a''").next_token().kind, TokenKind::Error);
     }
 
     #[test]
@@ -1220,5 +1274,124 @@ mod tests {
         assert_eq!(lexer.next_token().kind, TokenKind::Tilde);
         assert_eq!(lexer.next_token().kind, TokenKind::Tilde);
         assert_eq!(lexer.next_token().kind, TokenKind::Eof);
+    }
+
+    fn kinds_and_texts(text: &str) -> Vec<(TokenKind, String)> {
+        let mut lexer = Lexer::new(text);
+        let mut tokens = Vec::new();
+        loop {
+            let token = lexer.next_token();
+            if token.kind == TokenKind::Eof {
+                return tokens;
+            }
+            tokens.push((token.kind, token.text));
+        }
+    }
+
+    /// ISO GQL writes an exact number with digits on one side of the point
+    /// only (`.5`, `5.`), and such a number takes an exponent or a suffix.
+    #[test]
+    fn test_a_point_with_digits_on_one_side() {
+        for (text, kind) in [
+            (".5", TokenKind::Decimal),
+            ("5.", TokenKind::Decimal),
+            (".5e3", TokenKind::Float),
+            ("5.e3", TokenKind::Float),
+            ("5.E-3", TokenKind::Float),
+            (".5M", TokenKind::Decimal),
+            ("5.D", TokenKind::Float),
+        ] {
+            assert_eq!(kinds_and_texts(text), [(kind, text.to_string())], "{text}");
+        }
+        // A number before a closing bracket or a comma keeps its point.
+        assert_eq!(
+            kinds_and_texts("[5.,.5]"),
+            [
+                (TokenKind::LBracket, "[".to_string()),
+                (TokenKind::Decimal, "5.".to_string()),
+                (TokenKind::Comma, ",".to_string()),
+                (TokenKind::Decimal, ".5".to_string()),
+                (TokenKind::RBracket, "]".to_string()),
+            ]
+        );
+    }
+
+    /// A range, a property and a sum lex as they did before `.5` and `5.`
+    /// were numbers: the point of `1..5` is the range, and a name after a
+    /// point is a property.
+    #[test]
+    fn test_points_that_are_no_number() {
+        let integer = |text: &str| (TokenKind::Integer, text.to_string());
+        let token = |kind, text: &str| (kind, text.to_string());
+        assert_eq!(
+            kinds_and_texts("1..5"),
+            [integer("1"), token(TokenKind::DotDot, ".."), integer("5")]
+        );
+        assert_eq!(
+            kinds_and_texts("*..5"),
+            [
+                token(TokenKind::Star, "*"),
+                token(TokenKind::DotDot, ".."),
+                integer("5")
+            ]
+        );
+        assert_eq!(
+            kinds_and_texts("n.name"),
+            [
+                token(TokenKind::Identifier, "n"),
+                token(TokenKind::Dot, "."),
+                token(TokenKind::Identifier, "name"),
+            ]
+        );
+        assert_eq!(
+            kinds_and_texts("5.MB"),
+            [
+                integer("5"),
+                token(TokenKind::Dot, "."),
+                token(TokenKind::Identifier, "MB"),
+            ]
+        );
+        assert_eq!(
+            kinds_and_texts("x+1"),
+            [
+                token(TokenKind::Identifier, "x"),
+                token(TokenKind::Plus, "+"),
+                integer("1"),
+            ]
+        );
+    }
+
+    /// ISO GQL allows one underscore between two digits, in every radix and
+    /// in the fraction and the exponent; the token's text is the number
+    /// without them.
+    #[test]
+    fn test_digit_separators() {
+        for (text, kind, digits) in [
+            ("1_000", TokenKind::Integer, "1000"),
+            ("1_000_000", TokenKind::Integer, "1000000"),
+            ("0x7F_FF", TokenKind::Integer, "0x7FFF"),
+            ("0x_7F", TokenKind::Integer, "0x7F"),
+            ("0o7_7", TokenKind::Integer, "0o77"),
+            ("0b1010_0101", TokenKind::Integer, "0b10100101"),
+            ("1_000.000_5", TokenKind::Decimal, "1000.0005"),
+            ("1e1_0", TokenKind::Float, "1e10"),
+            ("1_5M", TokenKind::Decimal, "15M"),
+        ] {
+            assert_eq!(
+                kinds_and_texts(text),
+                [(kind, digits.to_string())],
+                "{text}"
+            );
+        }
+        // Not between two digits: the number ends before the underscore.
+        for (text, number) in [("1__0", "1"), ("1_", "1"), ("1_e3", "1"), ("1._5", "1")] {
+            let tokens = kinds_and_texts(text);
+            assert_eq!(
+                tokens[0],
+                (TokenKind::Integer, number.to_string()),
+                "{text}"
+            );
+            assert!(tokens.len() > 1, "{text}");
+        }
     }
 }

@@ -33,6 +33,16 @@ use grafeo_engine::GrafeoDB;
 /// Must match `SNAPSHOT_VERSION` in `persistence.rs`.
 const EXPECTED_SNAPSHOT_VERSION: u8 = 5;
 
+/// A snapshot's bytes without its epoch, the last field: a varint, one byte
+/// for an epoch below 251, as in these small graphs. The fixture holds 0
+/// (written before snapshots held the database's epoch); an export holds
+/// the epoch of the database, which an import continues at.
+fn without_epoch(bytes: &[u8]) -> (&[u8], u8) {
+    let (epoch, rest) = bytes.split_last().expect("a snapshot");
+    assert!(*epoch < 251, "a one-byte epoch");
+    (rest, *epoch)
+}
+
 /// Load the committed golden fixture bytes.
 fn golden_bytes() -> &'static [u8] {
     include_bytes!("fixtures/snapshot_v5.bin")
@@ -63,9 +73,14 @@ fn a_v4_snapshot_still_imports() {
     let exported = db.export_snapshot().unwrap();
     assert_eq!(exported[0], EXPECTED_SNAPSHOT_VERSION);
     assert_eq!(
-        exported,
-        golden_bytes(),
+        without_epoch(&exported).0,
+        without_epoch(golden_bytes()).0,
         "the v4 graph exports as the v5 fixture"
+    );
+    assert_eq!(
+        u64::from(without_epoch(&exported).1),
+        db.current_epoch().as_u64(),
+        "the export holds the database's epoch"
     );
 }
 
@@ -243,8 +258,15 @@ fn golden_byte_equality() {
     );
 
     assert_eq!(
-        fresh_bytes.as_slice(),
-        golden,
+        without_epoch(&fresh_bytes).0,
+        without_epoch(golden).0,
         "snapshot bytes differ despite same graph data, export may not be deterministic",
+    );
+    // The fixture is built through the store's direct writes, each at an
+    // epoch of its own: the export holds the store's epoch, at or above the
+    // database's.
+    assert!(
+        u64::from(without_epoch(&fresh_bytes).1) >= db.current_epoch().as_u64(),
+        "the export holds the database's epoch or a later one"
     );
 }

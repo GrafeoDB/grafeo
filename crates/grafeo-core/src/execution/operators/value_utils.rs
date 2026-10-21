@@ -63,13 +63,17 @@ pub fn compare_values(a: &Value, b: &Value) -> Option<Ordering> {
             }
         }
         (Value::Bool(a), Value::Bool(b)) => Some(a.cmp(b)),
-        (Value::Int64(a), Value::Float64(b)) => (*a as f64).partial_cmp(b),
-        (Value::Float64(a), Value::Int64(b)) => a.partial_cmp(&(*b as f64)),
+        (Value::Int64(a), Value::Float64(b)) => partial_cmp_int_float(*a, *b),
+        (Value::Float64(a), Value::Int64(b)) => {
+            partial_cmp_int_float(*b, *a).map(Ordering::reverse)
+        }
         // String-to-numeric comparisons for RDF
-        (Value::String(s), Value::Int64(i)) => s.parse::<f64>().ok()?.partial_cmp(&(*i as f64)),
-        (Value::String(s), Value::Float64(f)) => s.parse::<f64>().ok()?.partial_cmp(f),
-        (Value::Int64(i), Value::String(s)) => (*i as f64).partial_cmp(&s.parse::<f64>().ok()?),
-        (Value::Float64(f), Value::String(s)) => f.partial_cmp(&s.parse::<f64>().ok()?),
+        (Value::String(s), Value::Int64(i)) => partial_cmp_text_int(s, *i),
+        (Value::String(s), Value::Float64(f)) => partial_cmp_text_float(s, *f),
+        (Value::Int64(i), Value::String(s)) => partial_cmp_text_int(s, *i).map(Ordering::reverse),
+        (Value::Float64(f), Value::String(s)) => {
+            partial_cmp_text_float(s, *f).map(Ordering::reverse)
+        }
         (Value::Timestamp(a), Value::Timestamp(b)) => Some(a.cmp(b)),
         (Value::Date(a), Value::Date(b)) => Some(a.cmp(b)),
         (Value::Time(a), Value::Time(b)) => Some(a.cmp(b)),
@@ -191,6 +195,54 @@ pub(crate) fn compare_floats(a: f64, b: f64) -> Ordering {
         (false, true) => Ordering::Less,
         // Without NaN, `partial_cmp` always has an answer.
         (false, false) => a.partial_cmp(&b).unwrap_or(Ordering::Equal),
+    }
+}
+
+/// Whether `=` finds an integer equal to a float: exactly, as
+/// `compare_int_float` orders them, so `2^53 + 1` does not equal the float
+/// `2^53`. NaN equals no integer.
+#[must_use]
+pub fn int_equals_float(int: i64, float: f64) -> bool {
+    compare_int_float(int, float).is_eq()
+}
+
+/// Whether `=` finds a numeric string equal to a float (RDF stores numeric
+/// literals as strings): integer text exactly as that integer, so
+/// `'9007199254740993'` does not equal the float `2^53`; other number text
+/// as the float it parses as.
+#[must_use]
+pub fn text_equals_float(text: &str, float: f64) -> bool {
+    match text.parse::<i64>() {
+        Ok(integer) => int_equals_float(integer, float),
+        Err(_) => text.parse::<f64>().is_ok_and(|number| number == float),
+    }
+}
+
+/// The order of an integer and a float for `<`, `<=`, `>` and `>=`: exact, as
+/// `compare_int_float` orders them (`2^53 + 1` is above the float `2^53`),
+/// and `None` for NaN, which is neither less nor greater.
+#[must_use]
+pub fn partial_cmp_int_float(int: i64, float: f64) -> Option<Ordering> {
+    (!float.is_nan()).then(|| compare_int_float(int, float))
+}
+
+/// The order of a numeric string and an integer (RDF stores numeric literals
+/// as strings): integer text exactly, other number text as its float.
+#[must_use]
+pub fn partial_cmp_text_int(text: &str, int: i64) -> Option<Ordering> {
+    match text.parse::<i64>() {
+        Ok(number) => Some(number.cmp(&int)),
+        Err(_) => partial_cmp_int_float(int, text.parse::<f64>().ok()?).map(Ordering::reverse),
+    }
+}
+
+/// The order of a numeric string and a float: integer text exactly, other
+/// number text as its float.
+#[must_use]
+pub fn partial_cmp_text_float(text: &str, float: f64) -> Option<Ordering> {
+    match text.parse::<i64>() {
+        Ok(number) => partial_cmp_int_float(number, float),
+        Err(_) => text.parse::<f64>().ok()?.partial_cmp(&float),
     }
 }
 

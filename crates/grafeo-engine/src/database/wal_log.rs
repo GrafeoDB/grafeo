@@ -54,11 +54,12 @@ impl<'group, 'wal> Encoder<'group, 'wal> {
     }
 
     /// The group's first record: the epoch its changes take, when it was
-    /// written, and what wrote it.
-    fn begin(&mut self, epoch: EpochId, origin: Origin) -> Result<()> {
+    /// written (the commit's time `at` while the database keeps history,
+    /// now otherwise), and what wrote it.
+    fn begin(&mut self, epoch: EpochId, origin: Origin, at: Option<u64>) -> Result<()> {
         self.push(&LogRecordRef::GroupBegin(GroupBegin {
             epoch,
-            timestamp_ms: now_ms(),
+            timestamp_ms: at.unwrap_or_else(now_ms),
             origin,
         }))
     }
@@ -73,14 +74,33 @@ impl<'group, 'wal> Encoder<'group, 'wal> {
 ///
 /// As [`Encoder::push`]: a record that does not encode, or a commit error
 /// when a frame write failed.
+#[cfg(test)]
 pub(crate) fn write_group(
     group: &mut GroupWriter<'_>,
     set: &ChangeSet,
     epoch: EpochId,
     origin: Origin,
 ) -> Result<()> {
+    write_group_at(group, set, epoch, origin, None)
+}
+
+/// [`write_group`] of a commit that took the time `at` (milliseconds since
+/// the Unix epoch, see `TransactionManager::commit_time`): its group carries
+/// that time, so a replay records the time the live commit recorded. `None`
+/// writes the time of now.
+///
+/// # Errors
+///
+/// As [`write_group`].
+pub(crate) fn write_group_at(
+    group: &mut GroupWriter<'_>,
+    set: &ChangeSet,
+    epoch: EpochId,
+    origin: Origin,
+    at: Option<u64>,
+) -> Result<()> {
     let mut encoder = Encoder::new(group);
-    encoder.begin(epoch, origin)?;
+    encoder.begin(epoch, origin, at)?;
     for record in set.log_records() {
         encoder.push(&record)?;
     }
@@ -102,7 +122,7 @@ pub(crate) fn write_standalone(
     origin: Origin,
 ) -> Result<()> {
     let mut encoder = Encoder::new(group);
-    encoder.begin(epoch, origin)?;
+    encoder.begin(epoch, origin, None)?;
     for op in change.ops() {
         encoder.push(&LogRecordRef::Standalone(op))?;
     }
@@ -127,7 +147,7 @@ pub(crate) fn write_copy(
     copied: impl Iterator<Item = grafeo_common::change::DataOp>,
 ) -> Result<()> {
     let mut encoder = Encoder::new(group);
-    encoder.begin(epoch, Origin::Schema)?;
+    encoder.begin(epoch, Origin::Schema, None)?;
     for op in change.ops() {
         encoder.push(&LogRecordRef::Standalone(op))?;
     }
@@ -183,7 +203,8 @@ pub(crate) fn write_commit<'a>(
         }
     };
     let epoch = commit.epoch();
-    if let Err(error) = changes.read(|set| write_group(&mut group, set, epoch, origin)) {
+    let at = commit.commit_time();
+    if let Err(error) = changes.read(|set| write_group_at(&mut group, set, epoch, origin, at)) {
         // The group is cut back as it is dropped.
         drop(group);
         commit.abort();

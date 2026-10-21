@@ -219,69 +219,13 @@ impl LpgStore {
             .collect()
     }
 
-    /// Checks if a node property value matches a filter value.
+    /// Checks if a node property value matches a filter value (see
+    /// [`property_filter::matches_filter`](crate::graph::property_filter::matches_filter)).
     ///
     /// - Scalar filter: equality check
     /// - Map filter with `$`-prefixed keys: operator evaluation
     pub fn matches_filter(node_value: &Value, filter_value: &Value) -> bool {
-        match filter_value {
-            Value::Map(ops) if ops.keys().any(|k| k.as_str().starts_with('$')) => {
-                ops.iter().all(|(op_key, op_val)| {
-                    match op_key.as_str() {
-                        "$gt" => {
-                            Self::compare_values(node_value, op_val)
-                                == Some(std::cmp::Ordering::Greater)
-                        }
-                        "$gte" => matches!(
-                            Self::compare_values(node_value, op_val),
-                            Some(std::cmp::Ordering::Greater | std::cmp::Ordering::Equal)
-                        ),
-                        "$lt" => {
-                            Self::compare_values(node_value, op_val)
-                                == Some(std::cmp::Ordering::Less)
-                        }
-                        "$lte" => matches!(
-                            Self::compare_values(node_value, op_val),
-                            Some(std::cmp::Ordering::Less | std::cmp::Ordering::Equal)
-                        ),
-                        "$ne" => node_value != op_val,
-                        "$in" => match op_val {
-                            Value::List(items) => items.iter().any(|v| v == node_value),
-                            _ => false,
-                        },
-                        "$nin" => match op_val {
-                            Value::List(items) => !items.iter().any(|v| v == node_value),
-                            _ => true,
-                        },
-                        "$contains" => match (node_value, op_val) {
-                            (Value::String(a), Value::String(b)) => a.contains(b.as_str()),
-                            _ => false,
-                        },
-                        _ => false, // Unknown operator: no match
-                    }
-                })
-            }
-            _ => node_value == filter_value, // Equality (backward compatible)
-        }
-    }
-
-    /// Compares two values for ordering (cross-type numeric comparison supported).
-    fn compare_values(a: &Value, b: &Value) -> Option<std::cmp::Ordering> {
-        match (a, b) {
-            (Value::Decimal(_), _) | (_, Value::Decimal(_)) => a.compare_decimal(b),
-            (Value::Int64(a), Value::Int64(b)) => Some(a.cmp(b)),
-            (Value::Float64(a), Value::Float64(b)) => a.partial_cmp(b),
-            (Value::String(a), Value::String(b)) => Some(a.cmp(b)),
-            (Value::Bool(a), Value::Bool(b)) => Some(a.cmp(b)),
-            (Value::Int64(a), Value::Float64(b)) => (*a as f64).partial_cmp(b),
-            (Value::Float64(a), Value::Int64(b)) => a.partial_cmp(&(*b as f64)),
-            (Value::Timestamp(a), Value::Timestamp(b)) => Some(a.cmp(b)),
-            (Value::Date(a), Value::Date(b)) => Some(a.cmp(b)),
-            (Value::Time(a), Value::Time(b)) => Some(a.cmp(b)),
-            // Zoned datetimes, also against a timestamp: by their instant, as
-            // a filter compares them.
-            _ => a.compare_instants(b),
-        }
+        crate::graph::property_filter::matches_filter(node_value, filter_value)
     }
 
     // === Zone Map Support ===

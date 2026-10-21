@@ -1,0 +1,233 @@
+# What ORDER BY reads after a WITH or a RETURN, in GQL and Cypher (openCypher
+# 9, ORDER BY): after a WITH that neither aggregates nor is DISTINCT, the
+# WITH's input too; after an aggregating or DISTINCT clause, only what it
+# returns, where a key that repeats a returned expression reads its column.
+# And where nulls go: last in GQL in both directions (#571), the largest
+# value in Cypher.
+
+meta:
+  language: gql
+  model: lpg
+  title: ORDER BY scope, DISTINCT and nulls
+  dataset: empty
+  requires: [cypher]
+
+tests:
+
+  # ---------------------------------------------------------------------------
+  # After a WITH that neither aggregates nor is DISTINCT
+  # ---------------------------------------------------------------------------
+
+  - name: an_order_by_after_with_reads_its_input
+    setup:
+      - "INSERT (:Person {name: 'Alix', age: 30}), (:Person {name: 'Gus', age: 25}), (:Person {name: 'Mia', age: 41})"
+    variants:
+      gql: "MATCH (p:Person) WITH p.name AS name ORDER BY p.age RETURN name"
+      cypher: "MATCH (p:Person) WITH p.name AS name ORDER BY p.age RETURN name"
+    expect:
+      ordered: true
+      rows:
+        - [Gus]
+        - [Alix]
+        - [Mia]
+
+  - name: an_order_by_after_with_then_limit
+    setup:
+      - "INSERT (:Person {name: 'Alix', age: 30}), (:Person {name: 'Gus', age: 25}), (:Person {name: 'Mia', age: 41})"
+    variants:
+      gql: "MATCH (p:Person) WITH p.name AS name ORDER BY p.age DESC LIMIT 2 RETURN name"
+      cypher: "MATCH (p:Person) WITH p.name AS name ORDER BY p.age DESC LIMIT 2 RETURN name"
+    expect:
+      ordered: true
+      rows:
+        - [Mia]
+        - [Alix]
+
+  - name: the_input_variable_is_gone_after_the_sort
+    setup:
+      - "INSERT (:Person {name: 'Alix', age: 30})"
+    variants:
+      gql: "MATCH (p:Person) WITH p.name AS name ORDER BY p.age RETURN p.age AS age"
+      cypher: "MATCH (p:Person) WITH p.name AS name ORDER BY p.age RETURN p.age AS age"
+    expect:
+      error: "'p'"
+      gql_status: "42002"
+
+  # ---------------------------------------------------------------------------
+  # After an aggregating RETURN or WITH
+  # ---------------------------------------------------------------------------
+
+  - name: a_returned_aggregate_sorts_by_its_column
+    setup:
+      - "INSERT (:Person {name: 'Gus', age: 25}), (:Person {name: 'Gus', age: 19}), (:Person {name: 'Alix', age: 30}), (:Person {name: 'Mia', age: 41})"
+    variants:
+      gql: "MATCH (p:Person) RETURN p.name AS name, max(p.age) AS oldest ORDER BY max(p.age) DESC"
+      cypher: "MATCH (p:Person) RETURN p.name AS name, max(p.age) AS oldest ORDER BY max(p.age) DESC"
+    expect:
+      ordered: true
+      rows:
+        - [Mia, 41]
+        - [Alix, 30]
+        - [Gus, 25]
+
+  - name: a_returned_aggregate_inside_a_larger_key
+    setup:
+      - "INSERT (:Person {name: 'Gus', age: 25}), (:Person {name: 'Gus', age: 19}), (:Person {name: 'Alix', age: 30})"
+    variants:
+      gql: "MATCH (p:Person) RETURN p.name AS name, count(*) AS n ORDER BY -count(*), name"
+      cypher: "MATCH (p:Person) RETURN p.name AS name, count(*) AS n ORDER BY -count(*), name"
+    expect:
+      ordered: true
+      rows:
+        - [Gus, 2]
+        - [Alix, 1]
+
+  - name: a_grouping_key_sorts_by_its_column_through_its_expression
+    setup:
+      - "INSERT (:Person {name: 'Gus', age: 25}), (:Person {name: 'Gus', age: 19}), (:Person {name: 'Alix', age: 30})"
+    variants:
+      gql: "MATCH (p:Person) RETURN p.name AS name, count(*) AS n ORDER BY p.name DESC"
+      cypher: "MATCH (p:Person) RETURN p.name AS name, count(*) AS n ORDER BY p.name DESC"
+    expect:
+      ordered: true
+      rows:
+        - [Gus, 2]
+        - [Alix, 1]
+
+  - name: a_dropped_variable_after_an_aggregating_return_is_undefined
+    setup:
+      - "INSERT (:Person {name: 'Alix', age: 30})"
+    variants:
+      gql: "MATCH (p:Person) RETURN count(*) AS n ORDER BY p.age"
+      cypher: "MATCH (p:Person) RETURN count(*) AS n ORDER BY p.age"
+    expect:
+      error: "Undefined variable 'p': after an aggregating RETURN"
+      gql_status: "42002"
+
+  - name: an_aggregate_the_return_does_not_compute_is_refused
+    setup:
+      - "INSERT (:Person {name: 'Alix', age: 30})"
+    variants:
+      gql: "MATCH (p:Person) RETURN p.name AS name, count(*) AS n ORDER BY min(p.age)"
+      cypher: "MATCH (p:Person) RETURN p.name AS name, count(*) AS n ORDER BY min(p.age)"
+    expect:
+      error: "is not an aggregate the RETURN returns"
+
+  - name: a_dropped_variable_after_an_aggregating_with_is_undefined
+    setup:
+      - "INSERT (:Person {name: 'Alix', age: 30})"
+    variants:
+      gql: "MATCH (p:Person) WITH p.name AS name, count(*) AS n ORDER BY p.age RETURN name"
+      cypher: "MATCH (p:Person) WITH p.name AS name, count(*) AS n ORDER BY p.age RETURN name"
+    expect:
+      error: "Undefined variable 'p': after an aggregating WITH"
+      gql_status: "42002"
+
+  # ---------------------------------------------------------------------------
+  # DISTINCT
+  # ---------------------------------------------------------------------------
+
+  - name: distinct_sorts_by_a_returned_expression
+    setup:
+      - "INSERT (:Person {name: 'Gus', age: 25}), (:Person {name: 'Gus', age: 19}), (:Person {name: 'Alix', age: 30})"
+    variants:
+      gql: "MATCH (p:Person) RETURN DISTINCT p.name ORDER BY p.name DESC"
+      cypher: "MATCH (p:Person) RETURN DISTINCT p.name ORDER BY p.name DESC"
+    expect:
+      ordered: true
+      rows:
+        - [Gus]
+        - [Alix]
+
+  - name: distinct_sorts_by_an_alias
+    setup:
+      - "INSERT (:Person {name: 'Gus', age: 25}), (:Person {name: 'Gus', age: 19}), (:Person {name: 'Alix', age: 30})"
+    variants:
+      gql: "MATCH (p:Person) RETURN DISTINCT p.name AS name ORDER BY name"
+      cypher: "MATCH (p:Person) RETURN DISTINCT p.name AS name ORDER BY name"
+    expect:
+      ordered: true
+      rows:
+        - [Alix]
+        - [Gus]
+
+  - name: distinct_return_refuses_a_dropped_variable
+    # The two Guses are one row, with two ages: there is no age to sort by.
+    setup:
+      - "INSERT (:Person {name: 'Gus', age: 25}), (:Person {name: 'Gus', age: 19})"
+    variants:
+      gql: "MATCH (p:Person) RETURN DISTINCT p.name AS name ORDER BY p.age"
+      cypher: "MATCH (p:Person) RETURN DISTINCT p.name AS name ORDER BY p.age"
+    expect:
+      error: "ORDER BY reads 'p', which the RETURN DISTINCT does not return"
+      gql_status: "42002"
+
+  - name: distinct_with_refuses_a_dropped_variable
+    setup:
+      - "INSERT (:Person {name: 'Gus', age: 25}), (:Person {name: 'Gus', age: 19})"
+    variants:
+      gql: "MATCH (p:Person) WITH DISTINCT p.name AS name ORDER BY p.age RETURN name"
+      cypher: "MATCH (p:Person) WITH DISTINCT p.name AS name ORDER BY p.age RETURN name"
+    expect:
+      error: "ORDER BY reads 'p', which the WITH DISTINCT does not return"
+      gql_status: "42002"
+
+  # ---------------------------------------------------------------------------
+  # Nulls: last in GQL both ways, the largest value in Cypher
+  # ---------------------------------------------------------------------------
+
+  - name: gql_return_puts_nulls_last_descending
+    setup:
+      - "INSERT (:Person {name: 'Alix', rank: 19}), (:Person {name: 'Gus', rank: 3}), (:Person {name: 'Vincent'})"
+    query: "MATCH (p:Person) RETURN p.rank AS rank ORDER BY rank DESC"
+    expect:
+      ordered: true
+      rows:
+        - [19]
+        - [3]
+        - [null]
+
+  - name: gql_order_by_statement_after_with_puts_nulls_last
+    setup:
+      - "INSERT (:Person {name: 'Alix', rank: 19}), (:Person {name: 'Gus', rank: 3}), (:Person {name: 'Vincent'})"
+    query: "MATCH (p:Person) WITH p.rank AS rank ORDER BY rank DESC RETURN rank"
+    expect:
+      ordered: true
+      rows:
+        - [19]
+        - [3]
+        - [null]
+
+  - name: gql_order_by_statement_on_its_own_puts_nulls_last
+    setup:
+      - "INSERT (:Person {name: 'Alix', rank: 19}), (:Person {name: 'Gus', rank: 3}), (:Person {name: 'Vincent'})"
+    query: "MATCH (p:Person) ORDER BY p.rank DESC RETURN p.rank AS rank"
+    expect:
+      ordered: true
+      rows:
+        - [19]
+        - [3]
+        - [null]
+
+  - name: gql_nulls_first_when_asked
+    setup:
+      - "INSERT (:Person {name: 'Alix', rank: 19}), (:Person {name: 'Gus', rank: 3}), (:Person {name: 'Vincent'})"
+    query: "MATCH (p:Person) RETURN p.rank AS rank ORDER BY rank DESC NULLS FIRST"
+    expect:
+      ordered: true
+      rows:
+        - [null]
+        - [19]
+        - [3]
+
+  - name: cypher_puts_nulls_first_descending
+    setup:
+      - "INSERT (:Person {name: 'Alix', rank: 19}), (:Person {name: 'Gus', rank: 3}), (:Person {name: 'Vincent'})"
+    variants:
+      cypher: "MATCH (p:Person) RETURN p.rank AS rank ORDER BY rank DESC"
+    expect:
+      ordered: true
+      rows:
+        - [null]
+        - [19]
+        - [3]

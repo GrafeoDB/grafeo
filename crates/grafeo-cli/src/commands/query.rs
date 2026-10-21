@@ -56,7 +56,7 @@ pub fn run(opts: QueryRunOptions<'_>) -> Result<()> {
     // Parse parameters
     let param_map = parse_params(params)?;
 
-    let db = super::open_existing(path)?;
+    let db = open_for(path, &query_str, lang)?;
     let session = db.session();
 
     let result = if param_map.is_empty() {
@@ -101,6 +101,45 @@ pub fn run(opts: QueryRunOptions<'_>) -> Result<()> {
     Ok(())
 }
 
+/// Opens the database read-only when the statement only reads, and
+/// read-write when it writes (`Session::statement_writes`), so a query leaves
+/// the file as it was and does not migrate a 0.5.x database.
+fn open_for(path: &Path, query: &str, lang: QueryLanguage) -> Result<grafeo_engine::GrafeoDB> {
+    let db = super::open_existing_read_only(path)?;
+    // A language this build lacks fails when it runs, with its own message.
+    let Some(language) = engine_language(lang) else {
+        return Ok(db);
+    };
+    if db
+        .session()
+        .statement_writes(query, language)
+        .context("Query execution failed")?
+    {
+        drop(db);
+        return super::open_existing(path);
+    }
+    Ok(db)
+}
+
+/// The engine's name of `lang`, when this build has it.
+fn engine_language(lang: QueryLanguage) -> Option<&'static str> {
+    match lang {
+        QueryLanguage::Gql => Some("gql"),
+        #[cfg(feature = "cypher")]
+        QueryLanguage::Cypher => Some("cypher"),
+        #[cfg(feature = "sparql")]
+        QueryLanguage::Sparql => Some("sparql"),
+        #[cfg(feature = "sql-pgq")]
+        QueryLanguage::Sql => Some("sql"),
+        #[cfg(not(feature = "cypher"))]
+        QueryLanguage::Cypher => None,
+        #[cfg(not(feature = "sparql"))]
+        QueryLanguage::Sparql => None,
+        #[cfg(not(feature = "sql-pgq"))]
+        QueryLanguage::Sql => None,
+    }
+}
+
 /// Execute a query without parameters.
 fn execute_query(
     session: &grafeo_engine::Session,
@@ -140,9 +179,8 @@ fn execute_query_with_params(
 ) -> Result<grafeo_engine::database::QueryResult> {
     let result = match lang {
         QueryLanguage::Gql => session.execute_with_params(query, params),
-        // Cypher with params falls back to GQL execute_with_params
         #[cfg(feature = "cypher")]
-        QueryLanguage::Cypher => session.execute_with_params(query, params),
+        QueryLanguage::Cypher => session.execute_cypher_with_params(query, params),
         #[cfg(not(feature = "cypher"))]
         QueryLanguage::Cypher => {
             anyhow::bail!("Cypher support not enabled (compile with --features cypher)")

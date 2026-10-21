@@ -23,7 +23,7 @@ struct StatsOutput {
 
 /// Run the stats command.
 pub fn run(path: &Path, format: OutputFormat, quiet: bool) -> Result<()> {
-    let db = super::open_existing(path)?;
+    let db = super::open_existing_read_only(path)?;
     let stats = db.detailed_stats();
 
     let output = StatsOutput {

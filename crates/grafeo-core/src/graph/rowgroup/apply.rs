@@ -12,11 +12,14 @@
 //! commit epoch, `undo` writes the kept state back and takes it out of the
 //! node, or writes the before-image back for a replaced version. Replay and
 //! an immediate write stamp as they apply, through the same functions:
-//! replay keeps nothing (no reader runs during recovery), an immediate write
-//! keeps what it replaces in a node stamped with its epoch, for the readers
-//! at earlier epochs, until `collect`, which the engine runs right after the
-//! write at its read horizon. Every write that stamps a vector or may keep
-//! something lists its vector for `collect` (`collect`). A property set to
+//! replay keeps nothing (no reader runs during recovery) unless the store
+//! keeps history (`history`), an immediate write keeps what it replaces in a
+//! node stamped with its epoch, for the readers at earlier epochs, until
+//! `collect`, which the engine asks for after each write at its read
+//! horizon. Every write that stamps a vector or may keep
+//! something lists its vector for `collect`, and every write stamped at once
+//! and every entry a commit stamps counts toward the next collect after a
+//! write (`collect`). A property set to
 //! null removes the property: the store holds no null (#412 decision Q8).
 
 use std::ops::Range;
@@ -28,6 +31,7 @@ use grafeo_common::change::{
 use grafeo_common::types::{ArcStr, EdgeId, EpochId, NodeId, PropertyKey, TransactionId, Value};
 
 use super::column::Columns;
+use super::versions::VECTOR_ROWS;
 use super::{
     ABSENT, Adjacent, Inner, PENDING, ROWS_PER_GROUP, Read, RowGroupStore, label_ids, locate,
 };
@@ -46,11 +50,15 @@ struct Mode {
     epoch: Option<EpochId>,
     /// Whether it builds before-images.
     images: bool,
+    /// Whether the store keeps history: replay then keeps what it replaces
+    /// (`history`).
+    history: bool,
 }
 
 impl Mode {
-    /// How `writer` writes.
-    fn of(writer: Writer) -> Result<Self, ApplyError> {
+    /// How `writer` writes, in a store that keeps history (`history`) or
+    /// not.
+    fn of(writer: Writer, history: bool) -> Result<Self, ApplyError> {
         match writer {
             Writer::Transaction { id, snapshot } => Ok(Self {
                 writer,
@@ -58,6 +66,7 @@ impl Mode {
                 stamp: pending_stamp(id)?,
                 epoch: None,
                 images: true,
+                history,
             }),
             Writer::Replay { epoch } | Writer::Immediate { epoch, .. } => {
                 if epoch.as_u64() >= PENDING {
@@ -72,6 +81,7 @@ impl Mode {
                     stamp: epoch.as_u64(),
                     epoch: Some(epoch),
                     images: writer.builds_images(),
+                    history,
                 })
             }
         }
@@ -85,9 +95,11 @@ impl Mode {
     /// what it replaces, for the readers that must not see it, and under
     /// which stamp and snapshot: a transaction's write of a row it did not
     /// create; an immediate write of a row an earlier epoch created, for
-    /// the readers before the write's epoch, whether or not one runs (the
-    /// collect right after the write drops it when none does; #412 S6,
-    /// decision B); replay never (no reader runs during recovery).
+    /// the readers before the write's epoch, whether or not one runs (a
+    /// collect after the write drops it once one is due, when none does;
+    /// #412 S6, decision B); replay only in a store that keeps history, as
+    /// an immediate write keeps it, for the readers of the history the log
+    /// holds (no reader runs during recovery otherwise).
     fn keeps(self, created: u64) -> Option<(u64, u64)> {
         if created == self.stamp {
             return None;
@@ -95,16 +107,16 @@ impl Mode {
         match self.writer {
             Writer::Transaction { snapshot, .. } => Some((self.stamp, snapshot.as_u64())),
             Writer::Immediate { epoch, .. } => Some((self.stamp, epoch.as_u64())),
-            Writer::Replay { .. } => None,
+            Writer::Replay { epoch } => self.history.then_some((self.stamp, epoch.as_u64())),
         }
     }
 
     /// The vector `op` makes versions in, which the store lists for
     /// `collect`: a create's or a delete's (it stamps the vector), a value
-    /// or label write's but in replay (which keeps nothing). `None` for an
-    /// RDF op.
+    /// or label write's but in replay without history (which keeps
+    /// nothing). `None` for an RDF op.
     fn lists(self, op: &DataOp) -> Option<(Table, u64)> {
-        let replay = matches!(self.writer, Writer::Replay { .. });
+        let replay = matches!(self.writer, Writer::Replay { .. }) && !self.history;
         match op {
             DataOp::CreateNode { id, .. } | DataOp::DeleteNode { id } => {
                 Some((Table::Nodes, id.as_u64()))
@@ -181,6 +193,12 @@ fn reserve(next: &AtomicU64, count: u64, what: &str) -> Result<Range<u64>, Apply
             Err(current) => start = current,
         }
     }
+}
+
+/// The vectors a bulk range spans, at most: what its commit may stamp.
+fn bulk_vectors(range: &BulkRange) -> usize {
+    let rows = range.ids.end.saturating_sub(range.ids.start);
+    usize::try_from(rows / VECTOR_ROWS as u64 + 1).unwrap_or(usize::MAX)
 }
 
 /// The error of a broken invariant: an entry the store has no pending
@@ -323,17 +341,17 @@ impl Inner {
         for (key, value) in values {
             group.columns.set(key, row, value);
         }
-        for (node, other, outgoing) in [(src, dst, true), (dst, src, false)] {
-            let (group, row) = locate(node.as_u64());
+        for (node, other, outgoing) in self.kept_ends(src.as_u64(), dst.as_u64()) {
+            let (group, row) = locate(node);
             self.nodes
                 .get_mut(&group)
-                .ok_or(ApplyError::Missing(Entity::Node(node)))?
+                .ok_or(ApplyError::Missing(Entity::Node(NodeId::new(node))))?
                 .adjacency_mut(outgoing)
                 .push(
                     row,
                     Adjacent {
                         edge_type: type_id,
-                        other: other.as_u64(),
+                        other,
                         edge: raw,
                     },
                 );
@@ -463,7 +481,7 @@ impl ChangeTarget for RowGroupStore {
     }
 
     fn apply(&self, op: &DataOp, writer: Writer) -> Result<Applied, ApplyError> {
-        let mode = Mode::of(writer)?;
+        let mode = Mode::of(writer, self.keeps_history())?;
         self.refuse_if_dropped()?;
         let applied = {
             let mut inner = self.inner.write();
@@ -473,9 +491,15 @@ impl ChangeTarget for RowGroupStore {
             // it leaves the list at the next collect.
             if !matches!(applied, Ok(Applied::Unchanged))
                 && let Some((table, raw)) = mode.lists(op)
-                && inner.list(table, raw)
             {
-                self.note_listed();
+                if inner.list(table, raw) {
+                    self.note_listed();
+                }
+                // Stamped at once: what it kept or stamped waits for a
+                // reader before its epoch alone.
+                if mode.stamped() {
+                    self.note_settled(1);
+                }
             }
             applied?
         };
@@ -506,12 +530,27 @@ impl ChangeTarget for RowGroupStore {
         let at = epoch.as_u64();
         {
             let mut inner = self.inner.write();
+            let mut settled = 0;
+            let mut stamped = Ok(());
             for change in entries {
                 match change {
-                    Change::Data { op, before, .. } => inner.stamp_op(op, before, pending, at)?,
-                    Change::Bulk(range) => inner.stamp_bulk(range, pending, at),
+                    Change::Data { op, before, .. } => {
+                        settled += 1;
+                        stamped = inner.stamp_op(op, before, pending, at);
+                    }
+                    Change::Bulk(range) => {
+                        settled += bulk_vectors(range);
+                        inner.stamp_bulk(range, pending, at);
+                    }
+                }
+                if stamped.is_err() {
+                    break;
                 }
             }
+            // Counted also when a stamp failed halfway: what it stamped
+            // waits for the collect like the rest.
+            self.note_settled(settled);
+            stamped?;
         }
         self.sync_epoch(epoch);
         Ok(())
@@ -857,14 +896,14 @@ impl Inner {
         }
     }
 
-    /// Takes an edge row out with its two adjacency entries.
+    /// Takes an edge row out with its adjacency entries.
     pub(super) fn remove_edge_row(&mut self, raw: u64) {
         let Some((group, row)) = self.edge_mut(raw) else {
             return;
         };
         let (src, dst, _) = group.ends(row);
         group.remove(row);
-        for (node, outgoing) in [(src, true), (dst, false)] {
+        for (node, _, outgoing) in self.kept_ends(src, dst) {
             let (group, row) = locate(node);
             if let Some(group) = self.nodes.get_mut(&group) {
                 group.adjacency_mut(outgoing).remove(row, raw);

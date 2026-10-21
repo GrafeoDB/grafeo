@@ -260,9 +260,6 @@ impl super::GrafeoDB {
         }
         drop(held);
 
-        // Refresh statistics so the optimizer has fresh data.
-        self.lpg_store().ensure_statistics_fresh();
-
         Ok((rows.len(), edge_count))
     }
 

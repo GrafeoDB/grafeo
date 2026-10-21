@@ -178,6 +178,48 @@ impl fmt::Display for StorageFormat {
     }
 }
 
+/// How long a database keeps history: the committed states a time-travel
+/// read (`execute_at_epoch`, `execute_as_of`, [`GrafeoDB::as_of`]) can still ask
+/// for. A stored setting (#551): a database file keeps it, and
+/// [`GrafeoDB::set_stored_config`] changes it, from then on (what was
+/// collected before stays gone; history the old setting kept stays until the
+/// new one lets it go).
+///
+/// Off by default, which costs nothing: garbage collection keeps only what
+/// open snapshots read. With a retention window it keeps every version a
+/// reader at an epoch committed within the window reads, in memory, in a
+/// checkpoint (as the file's `History` chunks, with an index from commit
+/// times to epochs) and across a crash. A read before what the database
+/// keeps fails with an error, never with a silent answer.
+///
+/// [`GrafeoDB::as_of`]: crate::GrafeoDB::as_of
+/// [`GrafeoDB::set_stored_config`]: crate::GrafeoDB::set_stored_config
+///
+/// ```
+/// use std::time::Duration;
+///
+/// use grafeo_engine::{Config, HistoryRetention};
+///
+/// let config = Config::in_memory()
+///     .with_history_retention(HistoryRetention::Duration(Duration::from_secs(3_600)));
+/// assert_eq!(
+///     config.history_retention(),
+///     HistoryRetention::Duration(Duration::from_secs(3_600))
+/// );
+/// assert_eq!(Config::in_memory().history_retention(), HistoryRetention::Off);
+/// ```
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[non_exhaustive]
+pub enum HistoryRetention {
+    /// No history: only what open snapshots read is kept.
+    #[default]
+    Off,
+    /// The states committed within this long before now.
+    Duration(Duration),
+    /// Every state from when history was turned on.
+    Forever,
+}
+
 /// WAL durability mode controlling the trade-off between safety and speed.
 ///
 /// This enum lives in config so that `Config` can always carry the desired
@@ -651,6 +693,9 @@ pub struct Config {
     /// Checkpoint once the WAL holds this many bytes since the last
     /// checkpoint (see [`Config::with_checkpoint_wal_size`]).
     checkpoint_wal_size: Option<u64>,
+    /// How long the database keeps history (see
+    /// [`Config::with_history_retention`]).
+    history_retention: HistoryRetention,
     /// The settings a builder set: they win over the values a database file
     /// stores (see `GrafeoDB::open`), where a default does not.
     set: SetFields,
@@ -670,6 +715,7 @@ impl SetFields {
     pub(crate) const WAL_DURABILITY: Self = Self(1 << 5);
     pub(crate) const SCHEMA_CONSTRAINTS: Self = Self(1 << 6);
     pub(crate) const SECTION_CONFIGS: Self = Self(1 << 7);
+    pub(crate) const HISTORY_RETENTION: Self = Self(1 << 8);
 
     fn insert(&mut self, field: Self) {
         self.0 |= field.0;
@@ -815,6 +861,7 @@ impl Default for Config {
             encryption: None,
             wal_salvage: false,
             checkpoint_wal_size: None,
+            history_retention: HistoryRetention::Off,
             set: SetFields::default(),
         }
     }
@@ -1226,6 +1273,15 @@ impl Config {
         self
     }
 
+    /// Sets how long the database keeps history (see [`HistoryRetention`]):
+    /// a stored setting, which a database file keeps.
+    #[must_use]
+    pub fn with_history_retention(mut self, retention: HistoryRetention) -> Self {
+        self.history_retention = retention;
+        self.set.insert(SetFields::HISTORY_RETENTION);
+        self
+    }
+
     /// Encrypts the database at rest with the keys `encryption` derives (see
     /// [`Config::encryption`] for what is encrypted and which settings it
     /// refuses).
@@ -1398,6 +1454,13 @@ impl Config {
     #[must_use]
     pub fn checkpoint_wal_size(&self) -> Option<u64> {
         self.checkpoint_wal_size
+    }
+
+    /// How long the database keeps history (see
+    /// [`with_history_retention`](Self::with_history_retention)).
+    #[must_use]
+    pub fn history_retention(&self) -> HistoryRetention {
+        self.history_retention
     }
 
     /// The automatic checkpoint triggers this configuration sets.
@@ -1971,6 +2034,7 @@ mod tests {
             .with_section_tier(SectionType::VectorStore, TierOverride::ForceRam)
             .with_checkpoint_interval(Duration::from_secs(88))
             .with_checkpoint_wal_size(19 * 1024 * 1024)
+            .with_history_retention(HistoryRetention::Duration(Duration::from_secs(88)))
             .with_wal_salvage();
         #[cfg(feature = "cdc")]
         let config = config.with_cdc_retention(
@@ -2016,11 +2080,17 @@ mod tests {
             encryption,
             wal_salvage,
             checkpoint_wal_size,
+            history_retention,
             // What the builders set: see the stored-configuration tests.
             set: _,
         } = config;
 
         assert_eq!(checkpoint_wal_size, Some(19 * 1024 * 1024));
+        assert_eq!(
+            history_retention,
+            HistoryRetention::Duration(Duration::from_secs(88)),
+            "with_history_retention sets the retention"
+        );
 
         assert!(wal_salvage, "with_wal_salvage salvages at this open");
 

@@ -140,12 +140,11 @@ fn a_session_sees_its_own_uncommitted_edges() {
         session.get_node_edges(g.gus, Direction::Incoming, &["KNOWS"]),
         vec![(g.vincent, added)]
     );
-    // The uncommitted edge is the session's own. (Its uncommitted delete
-    // already hides `knows_gus` from the database too: #412.)
-    assert!(
-        !g.db
-            .get_node_edges(g.gus, Direction::Incoming, &["KNOWS"])
-            .contains(&(g.vincent, added))
+    // The uncommitted edge and the uncommitted delete are the session's own:
+    // the database still sees `knows_gus`, and not the new edge (#412).
+    assert_eq!(
+        g.db.get_node_edges(g.gus, Direction::Incoming, &["KNOWS"]),
+        vec![(g.alix, g.knows_gus)]
     );
 
     session.rollback().unwrap();

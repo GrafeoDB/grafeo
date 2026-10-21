@@ -1,19 +1,18 @@
 //! Changes to spilled embeddings (#522).
 //!
-//! A vector index spill moves its embeddings into a cache file that the
-//! property column reads through (#594). A change made while spilled (an
-//! update, a removal, a node delete, a rolled-back transaction) must win over
-//! the spilled value on every reader: queries, the engine calls the bindings
-//! make, vector search and the HNSW graph. Each case is checked while
-//! spilled, after an in-process reload, after a reopen (closed after the
-//! reload, closed while spilled, and spilled again after the reopen) and
-//! after a crash.
+//! A vector index spill moves its embedding column into spill files the
+//! column reads through (#594). A change made while spilled (an update, a
+//! removal, a node delete, a rolled-back transaction) brings its row group's
+//! column back into memory (#412 decision Q9) and must win over the spilled
+//! value on every reader: queries, the engine calls the bindings make,
+//! vector search and the HNSW graph. Each case is checked spilled again
+//! after the change, after an in-process reload, after a reopen (closed
+//! after the reload, closed while spilled, and spilled again after the
+//! reopen) and after a crash.
 //!
 //! ```bash
 //! cargo test -p grafeo-engine --features full --test spilled_embedding_changes
 //! ```
-//!
-//! (`--all-features` turns on `temporal`, which has no vector spill.)
 
 #![cfg(all(
     feature = "vector-index",
@@ -21,7 +20,6 @@
     feature = "grafeo-file",
     feature = "gql",
     feature = "wal",
-    not(feature = "temporal"),
     not(miri)
 ))]
 
@@ -31,6 +29,7 @@ use std::path::Path;
 use grafeo_common::storage::{SectionMemoryConfig, SectionType, TierOverride};
 use grafeo_common::testing::child_process;
 use grafeo_common::types::{NodeId, PropertyKey, Value};
+use grafeo_core::graph::GraphStore as _;
 use grafeo_engine::{Config, GrafeoDB};
 
 const DIMENSIONS: usize = 4;
@@ -143,7 +142,13 @@ fn spilled(path: &Path, count: u8) -> (GrafeoDB, Vec<NodeId>) {
         None,
     )
     .unwrap();
-    assert!(db.buffer_manager().spill_all() > 0, "nothing was spilled");
+    // A small column frees no heap (its encoded chunks take as much), so
+    // what counts is that it spilled.
+    db.buffer_manager().spill_all();
+    assert!(
+        !db.store().spilled_node_property_columns().is_empty(),
+        "nothing was spilled"
+    );
     assert_spilled(&db, true, "after the spill");
     (db, ids)
 }
@@ -251,7 +256,10 @@ fn check(db: &GrafeoDB, ids: &[NodeId], expected: &[Expected], search: Search, p
         .collect();
     let current = |id: NodeId| live.iter().find(|&&(n, _)| n == id).map(|&(_, v)| v);
 
-    // The index holds exactly the nodes with an embedding.
+    // The index holds exactly the nodes with an embedding, once a collect
+    // took out the entries of what a removal or a delete replaced (the
+    // index keeps them while a reader may need them, #412 decision Q4).
+    db.gc();
     let index = db
         .store()
         .get_vector_index("Item", "embedding")
@@ -365,7 +373,10 @@ fn verify(count: u8, change: impl Fn(&GrafeoDB, &[NodeId]), expected: &[Expected
     let path = dir.path().join("amsterdam.grafeo");
     let (db, ids) = spilled(&path, count);
     change(&db, &ids);
-    assert_spilled(&db, true, "after the change");
+    // A write thaws the column of its row group (#412 decision Q9): the
+    // change is in memory, and the column spills again with it.
+    db.buffer_manager().spill_all();
+    assert_spilled(&db, true, "spilled again after the change");
     check(&db, &ids, expected, search, "while spilled");
     assert_spilled(&db, true, "after the checks while spilled");
     assert!(db.reload_eligible(1.0) > 0, "nothing was reloaded");
@@ -383,7 +394,8 @@ fn verify(count: u8, change: impl Fn(&GrafeoDB, &[NodeId]), expected: &[Expected
     let path = dir.path().join("berlin.grafeo");
     let (db, ids) = spilled(&path, count);
     change(&db, &ids);
-    assert_spilled(&db, true, "after the change");
+    db.buffer_manager().spill_all();
+    assert_spilled(&db, true, "spilled again after the change");
     close(db);
     let db = GrafeoDB::open(&path).unwrap();
     check(
@@ -680,6 +692,7 @@ fn crash_child() {
         db.wal_checkpoint().unwrap();
     }
     if case == "checkpointed_and_reloaded" {
+        db.buffer_manager().spill_all();
         assert_spilled(&db, true, "after the checkpoint in the crash child");
         assert!(db.reload_eligible(1.0) > 0);
     }

@@ -5,8 +5,8 @@
 //! of the first log format), and the copies of graph data.
 //!
 //! A reader writes through [`LoadTarget`], which both stores implement, so
-//! one reader fills `LpgStore` (the engine's store until the switch to the
-//! row-group store, #412 H2d) and the row-group store, which takes every row
+//! one reader fills `LpgStore` (the engine's store until 0.6.0 switched to
+//! the row-group store, #412 H2d) and the row-group store, which takes every row
 //! through its change target's replay writer at its current epoch: no
 //! reader reads `LpgStore` to fill the row-group store. A load runs while
 //! nothing else reads or writes the store, so it builds no before-image and

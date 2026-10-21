@@ -1,9 +1,11 @@
 //! `=` finds the same rows with and without a property index, whatever plan
 //! runs it (#535).
 //!
-//! The filter's `=` is lenient: a number equals a string it parses as
-//! (`'042' = 42`), numbers compare within `f64::EPSILON` (`0.1 + 0.2 = 0.3`)
-//! and lists compare element by element. A property index finds values by
+//! The filter's `=` is lenient across kinds: a number equals a string it
+//! parses as (`'042' = 42`), an integer, a float and a decimal of one value
+//! are equal, and lists compare element by element. Numbers compare exactly
+//! (IEEE for floats: `0.1e0 + 0.2e0 <> 0.3e0`, `-0.0e0 = 0.0e0`, NaN equals
+//! nothing). A property index finds values by
 //! exact value, so every plan that looks a key up in it (the lookup of a
 //! constant key, an `IN` list, the seek of a key from the row, and `id()`)
 //! has to find every value `=` finds equal. These tests run every pair of
@@ -43,12 +45,30 @@ const LITERALS: &[&str] = &[
     "1.0",
     "0.9999999999999999",
     "1.9999999999999998",
+    "0.1e0 + 0.2e0",
+    "0.3e0",
+    "'0.30000000000000004'",
+    "0.0e0",
+    "-0.0e0",
+    "'-0'",
+    "1.0e0",
+    "0.9999999999999999e0",
+    "1.0e-300",
+    "-1.0e-300",
+    "NaN",
+    "Infinity",
+    "-Infinity",
+    "1.0e300",
+    "'1e3'",
+    "1000",
     "2",
     "'2'",
     "true",
     "'true'",
     "9007199254740993",
     "9007199254740992.0",
+    "9007199254740992.0e0",
+    "9007199254740992",
     "'9007199254740993'",
     "'NaN'",
     "'inf'",
@@ -186,11 +206,16 @@ fn equality_finds_the_same_rows_with_and_without_an_index_in_every_plan() {
 
 #[test]
 fn the_reported_rows_are_found_with_an_index() {
-    // The reproduction of #535: '42.0' and 0.1 + 0.2, keys from the row.
+    // The reproduction of #535: '42.0' and 0.1 + 0.2, keys from the row. The
+    // float sum 0.1e0 + 0.2e0 is 0.30000000000000004, which `=` tells from
+    // 0.3e0; the exact decimal sum 0.1 + 0.2 is 0.3.
     for indexed in [false, true] {
         let db = GrafeoDB::new_in_memory();
-        db.execute("INSERT (:Doc {k: 3, p: '42.0'}), (:Doc {k: 19, p: 0.1e0 + 0.2e0})")
-            .unwrap();
+        db.execute(
+            "INSERT (:Doc {k: 3, p: '42.0'}), (:Doc {k: 19, p: 0.1e0 + 0.2e0}), \
+             (:Doc {k: 88, p: 0.1 + 0.2})",
+        )
+        .unwrap();
         if indexed {
             db.create_property_index("p").unwrap();
         }
@@ -199,7 +224,46 @@ fn the_reported_rows_are_found_with_an_index() {
             "UNWIND [42.0e0, 0.3e0] AS key MATCH (d:Doc) WHERE d.p = key RETURN d.k",
             None,
         );
-        assert_eq!(found, BTreeSet::from([3, 19]), "indexed: {indexed}");
+        assert_eq!(found, BTreeSet::from([3, 88]), "indexed: {indexed}");
+    }
+}
+
+#[test]
+fn floats_compare_exactly_with_and_without_an_index() {
+    for indexed in [false, true] {
+        let db = GrafeoDB::new_in_memory();
+        db.execute(
+            "INSERT (:Doc {k: 1, p: 0.1e0 + 0.2e0}), (:Doc {k: 2, p: 0.3e0}), \
+             (:Doc {k: 3, p: -0.0e0}), (:Doc {k: 4, p: 0}), (:Doc {k: 5, p: NaN}), \
+             (:Doc {k: 6, p: 1.0e-300}), (:Doc {k: 7, p: 9007199254740993}), \
+             (:Doc {k: 8, p: 9007199254740992.0e0})",
+        )
+        .unwrap();
+        if indexed {
+            db.create_property_index("p").unwrap();
+        }
+        let find = |key: &str| {
+            keys(
+                &db,
+                &format!("MATCH (d:Doc) WHERE d.p = {key} RETURN d.k"),
+                None,
+            )
+        };
+        let context = format!("indexed: {indexed}");
+        assert_eq!(find("0.3e0"), BTreeSet::from([2]), "{context}");
+        assert_eq!(find("0.1e0 + 0.2e0"), BTreeSet::from([1]), "{context}");
+        assert_eq!(find("0.0e0"), BTreeSet::from([3, 4]), "{context}");
+        assert_eq!(find("NaN"), BTreeSet::new(), "{context}");
+        assert_eq!(find("0"), BTreeSet::from([3, 4]), "{context}");
+        assert_eq!(find("1.0e-300"), BTreeSet::from([6]), "{context}");
+        assert_eq!(find("9007199254740993"), BTreeSet::from([7]), "{context}");
+        assert_eq!(find("9007199254740992"), BTreeSet::from([8]), "{context}");
+        let different = keys(
+            &db,
+            "MATCH (d:Doc) WHERE d.p <> 0.3e0 AND d.k <= 2 RETURN d.k",
+            None,
+        );
+        assert_eq!(different, BTreeSet::from([1]), "{context}");
     }
 }
 

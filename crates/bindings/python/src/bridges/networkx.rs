@@ -12,12 +12,19 @@ use parking_lot::RwLock;
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyTuple};
 
-use grafeo_common::types::NodeId;
-use grafeo_core::graph::Direction;
+use grafeo_common::types::{NodeId, ReadView};
+use grafeo_core::graph::rowgroup::RowGroupStore;
+use grafeo_core::graph::{Direction, GraphStore};
 use grafeo_engine::database::GrafeoDB;
 
+use crate::database::committed_now;
 use crate::error::PyGrafeoError;
 use crate::gil::without_gil;
+
+/// The nodes `view` sees, in ID order.
+fn node_ids(store: &RowGroupStore, view: ReadView) -> Vec<NodeId> {
+    store.filter_visible_node_ids_at(&store.all_node_ids(), view)
+}
 
 /// Work with your Grafeo graph using NetworkX conventions.
 ///
@@ -80,19 +87,23 @@ impl PyNetworkXAdapter {
     /// Get list of all node IDs.
     fn nodes(&self) -> PyResult<Vec<u64>> {
         let db = self.db.read();
-        let store = db.store();
-        Ok(store.node_ids().into_iter().map(|n| n.0).collect())
+        let (store, now) = (db.store(), committed_now(&db)?);
+        Ok(node_ids(&store, now.read_view())
+            .into_iter()
+            .map(|n| n.0)
+            .collect())
     }
 
     /// Get list of all edges as (source, target) tuples.
     fn edges(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         let db = self.db.read();
-        let store = db.store();
-        let nodes = store.node_ids();
+        let (store, now) = (db.store(), committed_now(&db)?);
+        let view = now.read_view();
+        let nodes = node_ids(&store, view);
 
         let mut edges: Vec<(u64, u64)> = Vec::new();
         for node in nodes {
-            for (neighbor, _) in store.edges_from(node, Direction::Outgoing) {
+            for (neighbor, _) in store.edges_from_at(node, Direction::Outgoing, view) {
                 edges.push((node.0, neighbor.0));
             }
         }
@@ -103,10 +114,11 @@ impl PyNetworkXAdapter {
     /// Get neighbors of a node.
     fn neighbors(&self, node_id: u64) -> PyResult<Vec<u64>> {
         let db = self.db.read();
-        let store = db.store();
+        let (store, now) = (db.store(), committed_now(&db)?);
         let neighbors: Vec<u64> = store
-            .edges_from(NodeId::new(node_id), Direction::Outgoing)
-            .map(|(n, _)| n.0)
+            .neighbors_at(NodeId::new(node_id), Direction::Outgoing, now.read_view())
+            .into_iter()
+            .map(|n| n.0)
             .collect();
         Ok(neighbors)
     }
@@ -114,15 +126,19 @@ impl PyNetworkXAdapter {
     /// Get in-degree of a node.
     fn in_degree(&self, node_id: u64) -> PyResult<usize> {
         let db = self.db.read();
-        let store = db.store();
-        Ok(store.in_degree(NodeId::new(node_id)))
+        let (store, now) = (db.store(), committed_now(&db)?);
+        Ok(store
+            .edges_from_at(NodeId::new(node_id), Direction::Incoming, now.read_view())
+            .len())
     }
 
     /// Get out-degree of a node.
     fn out_degree(&self, node_id: u64) -> PyResult<usize> {
         let db = self.db.read();
-        let store = db.store();
-        Ok(store.out_degree(NodeId::new(node_id)))
+        let (store, now) = (db.store(), committed_now(&db)?);
+        Ok(store
+            .edges_from_at(NodeId::new(node_id), Direction::Outgoing, now.read_view())
+            .len())
     }
 
     /// Get degree of a node (in + out for directed, total for undirected).
@@ -138,13 +154,11 @@ impl PyNetworkXAdapter {
     /// Check if an edge exists.
     fn has_edge(&self, source: u64, target: u64) -> PyResult<bool> {
         let db = self.db.read();
-        let store = db.store();
-        for (neighbor, _) in store.edges_from(NodeId::new(source), Direction::Outgoing) {
-            if neighbor.0 == target {
-                return Ok(true);
-            }
-        }
-        Ok(false)
+        let (store, now) = (db.store(), committed_now(&db)?);
+        Ok(store
+            .neighbors_at(NodeId::new(source), Direction::Outgoing, now.read_view())
+            .into_iter()
+            .any(|neighbor| neighbor.0 == target))
     }
 
     /// Check if a node exists.
@@ -171,15 +185,16 @@ impl PyNetworkXAdapter {
         };
 
         let db = self.db.read();
-        let store = db.store();
-        let nodes = store.node_ids();
+        let (store, now) = (db.store(), committed_now(&db)?);
+        let view = now.read_view();
+        let nodes = node_ids(&store, view);
 
         // Build a mapping from Grafeo NodeId -> NetworkX node identifier.
         let mut id_map: HashMap<u64, Py<PyAny>> = HashMap::new();
 
         // Add nodes with properties
         for node_id in &nodes {
-            if let Some(node) = store.get_node(*node_id) {
+            if let Some(node) = store.get_node_at(*node_id, view) {
                 let attrs = PyDict::new(py);
 
                 // Add labels
@@ -205,8 +220,8 @@ impl PyNetworkXAdapter {
 
         // Add edges with properties
         for node_id in &nodes {
-            for (neighbor, edge_id) in store.edges_from(*node_id, Direction::Outgoing) {
-                if let Some(edge) = store.get_edge(edge_id) {
+            for (neighbor, edge_id) in store.edges_from_at(*node_id, Direction::Outgoing, view) {
+                if let Some(edge) = store.get_edge_at(edge_id, view) {
                     let attrs = PyDict::new(py);
 
                     // Add edge type
@@ -551,15 +566,16 @@ impl PyNetworkXAdapter {
     #[getter]
     fn adj(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         let db = self.db.read();
-        let store = db.store();
-        let nodes = store.node_ids();
+        let (store, now) = (db.store(), committed_now(&db)?);
+        let view = now.read_view();
+        let nodes = node_ids(&store, view);
 
         let outer = PyDict::new(py);
         for node_id in &nodes {
             let inner = PyDict::new(py);
-            for (neighbor, edge_id) in store.edges_from(*node_id, Direction::Outgoing) {
+            for (neighbor, edge_id) in store.edges_from_at(*node_id, Direction::Outgoing, view) {
                 let attrs = PyDict::new(py);
-                if let Some(edge) = store.get_edge(edge_id) {
+                if let Some(edge) = store.get_edge_at(edge_id, view) {
                     attrs.set_item("type", edge.edge_type.to_string())?;
                     for (key, value) in &edge.properties {
                         attrs.set_item(key.as_str(), crate::types::PyValue::to_py(value, py))?;
@@ -593,14 +609,15 @@ impl PyNetworkXAdapter {
         };
 
         let db = self.db.read();
-        let store = db.store();
+        let (store, now) = (db.store(), committed_now(&db)?);
+        let view = now.read_view();
 
         let node_set: std::collections::HashSet<u64> = nodes.iter().copied().collect();
 
         // Add nodes with properties
         for &node_id in &nodes {
             let nid = NodeId::new(node_id);
-            if let Some(node) = store.get_node(nid) {
+            if let Some(node) = store.get_node_at(nid, view) {
                 let attrs = PyDict::new(py);
                 let labels: Vec<String> = node.labels.iter().map(|s| s.to_string()).collect();
                 attrs.set_item("labels", labels)?;
@@ -614,9 +631,9 @@ impl PyNetworkXAdapter {
         // Add edges between included nodes
         for &node_id in &nodes {
             let nid = NodeId::new(node_id);
-            for (neighbor, edge_id) in store.edges_from(nid, Direction::Outgoing) {
+            for (neighbor, edge_id) in store.edges_from_at(nid, Direction::Outgoing, view) {
                 if node_set.contains(&neighbor.0)
-                    && let Some(edge) = store.get_edge(edge_id)
+                    && let Some(edge) = store.get_edge_at(edge_id, view)
                 {
                     let attrs = PyDict::new(py);
                     attrs.set_item("type", edge.edge_type.to_string())?;

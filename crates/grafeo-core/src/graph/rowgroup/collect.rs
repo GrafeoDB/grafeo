@@ -3,20 +3,29 @@
 //! Every vector of 2,048 rows, of either table, that gains a version stamp
 //! (a create or a delete) or an undo node of a value or label chain is
 //! listed once in its store: a bit per vector in its row group, and the row
-//! group once in the store's list. An immediate write keeps what it
-//! replaces whatever readers there are, and the engine collects right after
-//! each immediate call and each commit, so the list holds what the last
-//! writes left and what an older reader still needs:
-//! [`collect`](RowGroupStore::collect) visits those vectors alone, and
-//! returns at once, without the lock, while nothing is listed. A vector stays
-//! listed while something in it is above the horizon (a stamp or an undo
-//! node not committed by then), and leaves the list once it is flat with no
-//! chain.
+//! group once in the store's list. [`collect`](RowGroupStore::collect)
+//! visits those vectors alone, and returns at once, without the lock, while
+//! nothing is listed. A vector stays listed while something in it is above
+//! the horizon (a stamp or an undo node not committed by then), and leaves
+//! the list once it is flat with no chain.
 //!
 //! The list may hold more than that (a rollback emptied a vector since),
 //! never less: every vector with a stamp or a chain is listed.
 //! [`collect_all`](RowGroupStore::collect_all) walks every vector, for tests
 //! and as a fallback, and lists exactly the vectors with versions left.
+//!
+//! An immediate write keeps what it replaces whatever readers there are, and
+//! the engine asks for a collect after each immediate call and each commit
+//! ([`collect_after_write`](RowGroupStore::collect_after_write)), which runs
+//! only when it is due: once [`COLLECT_BOUND`] writes stamped at once and
+//! entries stamped by commits came since the last collect, or once the
+//! horizon passed the one at which the last collect left committed versions
+//! (the reader that held them ended). Most writes skip it, and what no
+//! reader needs stays bounded: past the versions a reader still needs, a
+//! store holds what at most `COLLECT_BOUND` such writes and entries left, a
+//! kept value or label set each and the stamps of at most one vector each
+//! (up to about 32 KiB, for a vector whose rows two creators and more than
+//! 32 deletes met).
 
 use std::collections::BTreeMap;
 use std::sync::atomic::Ordering;
@@ -32,6 +41,10 @@ const _: () = assert!(
     VECTORS == u32::BITS as usize,
     "a bit per vector of a row group"
 );
+
+/// How many writes stamped at once and entries stamped by commits a store
+/// takes before a collect after a write runs (see the module docs).
+pub(crate) const COLLECT_BOUND: usize = 32;
 
 /// The row groups with a listed vector, each once, per table.
 #[derive(Debug, Default)]
@@ -236,7 +249,7 @@ impl Inner {
     }
 
     /// Lists exactly the vectors that hold versions.
-    fn relist(&mut self) {
+    pub(super) fn relist(&mut self) {
         self.listed = Listed::default();
         for (index, group) in &mut self.nodes {
             group.listed = mask_of(|vector| group.unsettled(vector));
@@ -258,7 +271,7 @@ impl Inner {
         for edge in edges {
             let (group, row) = locate(*edge);
             let (src, dst, _) = self.edges[&group].ends(row);
-            for (node, outgoing) in [(src, true), (dst, false)] {
+            for (node, _, outgoing) in self.kept_ends(src, dst) {
                 let (group, row) = locate(node);
                 if let Some(group) = self.nodes.get_mut(&group) {
                     group.adjacency_mut(outgoing).remove(row, *edge);
@@ -290,9 +303,11 @@ impl RowGroupStore {
     /// the next collect. With nothing listed, it returns at once.
     ///
     /// `horizon` is the oldest epoch a reader still reads at (the engine's
-    /// read horizon: open and committing snapshots, pinned reads, the
-    /// published epoch; H2c adds the retention window): a reader before it
-    /// may lose rows it saw. Returns the rows taken out.
+    /// collect horizon: open and committing snapshots, pinned reads, the
+    /// published epoch, and the start of the retention window of a database
+    /// that keeps history): a reader before it may lose rows it saw, so the
+    /// store's [history floor](Self::history_floor) moves to it. Returns
+    /// the rows taken out.
     ///
     /// This store alone: [`gc_versions`](Self::gc_versions) collects its
     /// named graphs too.
@@ -308,8 +323,7 @@ impl RowGroupStore {
     pub fn collect_all(&self, horizon: EpochId) -> usize {
         let mut inner = self.inner.write();
         let collected = inner.collect_all(horizon.as_u64());
-        self.has_listed
-            .store(!inner.listed.is_empty(), Ordering::Release);
+        self.collected(&inner, horizon);
         collected.rows
     }
 
@@ -320,9 +334,66 @@ impl RowGroupStore {
         }
         let mut inner = self.inner.write();
         let collected = inner.collect_listed(horizon.as_u64());
-        self.has_listed
-            .store(!inner.listed.is_empty(), Ordering::Release);
+        self.collected(&inner, horizon);
         collected
+    }
+
+    /// Notes what a collect at `horizon` left, with the lock held: whether
+    /// anything is listed, and whether a reader at the horizon may still
+    /// need a committed version (something is listed and the horizon is
+    /// before the store's epoch, so a commit after it may have left one);
+    /// the count toward the next collect after a write starts again; the
+    /// floor of the history the store answers reads at moves to the
+    /// horizon.
+    fn collected(&self, inner: &Inner, horizon: EpochId) {
+        self.note_floor(horizon);
+        let listed = !inner.listed.is_empty();
+        self.has_listed.store(listed, Ordering::Release);
+        let held = listed && horizon < self.current_epoch();
+        self.held_at.store(
+            if held { horizon.as_u64() + 1 } else { 0 },
+            Ordering::Relaxed,
+        );
+        self.settled.store(0, Ordering::Relaxed);
+    }
+
+    /// The collect the engine asks for after each immediate call and each
+    /// commit, at its read horizon: a [`collect`](Self::collect) when one is
+    /// due (see the module docs), nothing otherwise. Returns the rows taken
+    /// out and the kept values and label sets dropped.
+    ///
+    /// This store alone: [`gc_versions_after_write`](Self::gc_versions_after_write)
+    /// covers its named graphs too.
+    pub fn collect_after_write(&self, horizon: EpochId) -> usize {
+        if !self.collect_due(horizon) {
+            return 0;
+        }
+        let collected = self.collect_versions(horizon);
+        collected.rows + collected.values
+    }
+
+    /// Whether a collect after a write at `horizon` runs: something is
+    /// listed, and [`COLLECT_BOUND`] writes and entries came since the last
+    /// collect while the horizon moved past the last collect's (every
+    /// version a write since made is newer than that horizon, so a collect
+    /// at it again drops nothing: a retention window that holds the horizon
+    /// back does not rescan the chains every few writes), or the horizon
+    /// passed the one at which the last collect left committed versions.
+    /// Read without the lock: a write counted meanwhile waits for the next
+    /// call.
+    pub(super) fn collect_due(&self, horizon: EpochId) -> bool {
+        if !self.has_listed() {
+            return false;
+        }
+        let held_at = self.held_at.load(Ordering::Relaxed);
+        (self.settled.load(Ordering::Relaxed) >= COLLECT_BOUND && horizon > self.history_floor())
+            || (held_at != 0 && horizon.as_u64() >= held_at)
+    }
+
+    /// Counts `count` writes stamped at once or entries stamped by a commit
+    /// toward the next collect after a write; called with the lock held.
+    pub(super) fn note_settled(&self, count: usize) {
+        self.settled.fetch_add(count, Ordering::Relaxed);
     }
 
     /// Whether the store lists a vector: a collect has work for it.
@@ -445,13 +516,16 @@ mod tests {
     use std::collections::BTreeSet;
 
     use grafeo_common::change::{ChangeMark, DataOp, Table};
-    use grafeo_common::types::{ArcStr, EdgeId, EpochId, NodeId, PropertyKey, Value};
+    use grafeo_common::types::{ArcStr, EdgeId, EpochId, NodeId, PropertyKey, ReadView, Value};
 
     use crate::graph::apply::{Applied, ChangeTarget, Writer};
     use crate::graph::conformance::{
         Image, Reader, Rng, Tx, apply_all, image, labels, next_epoch, properties,
     };
     use crate::graph::rowgroup::{ROWS_PER_GROUP, RowGroupStore, VECTOR_ROWS};
+    use crate::graph::traits::GraphStore;
+
+    use super::COLLECT_BOUND;
 
     /// No vector, as `listed_vectors` lists them.
     const NOTHING: [(Table, u64); 0] = [];
@@ -629,6 +703,136 @@ mod tests {
         assert_eq!(store.property_index_len("age"), Some(2));
         assert_eq!(store.listed_vectors(), NOTHING);
         assert_eq!(store.heap_bytes(), bytes, "the memory is flat");
+    }
+
+    /// Alix, Gus or Vincent (by `write`) turns `30 + write % 2`, as an
+    /// immediate write; returns whom it wrote.
+    fn age_write(store: &RowGroupStore, people: &[NodeId; 3], write: usize) -> NodeId {
+        let id = people[write % people.len()];
+        let op = DataOp::SetNodeProperty {
+            id,
+            key: PropertyKey::new("age"),
+            value: Value::Int64(30 + i64::try_from(write % 2).unwrap()),
+        };
+        assert!(matches!(
+            immediate(store, &op).unwrap(),
+            Applied::Changed { .. }
+        ));
+        id
+    }
+
+    /// With no reader older than the writes, the collect after each write
+    /// lets the first `COLLECT_BOUND - 1` writes keep what they replaced and
+    /// runs at the bound: the store's memory and its index return to flat,
+    /// nothing is listed, and the count starts again.
+    #[test]
+    fn a_collect_after_a_write_runs_at_the_bound_and_memory_returns_to_flat() {
+        let store = RowGroupStore::new();
+        store.create_property_index("age");
+        let people = spread_people(&store);
+        store.collect(store.current_epoch());
+        let bytes = store.heap_bytes();
+        let mut write = 0;
+        for round in 0..3 {
+            for count in 1..=COLLECT_BOUND {
+                write += 1;
+                age_write(&store, &people, write);
+                let dropped = store.collect_after_write(store.current_epoch());
+                let what = format!("round {round}, write {count}");
+                if count < COLLECT_BOUND {
+                    assert_eq!(dropped, 0, "{what}: not due");
+                    assert_eq!(store.update_nodes(), count, "{what}: each kept");
+                } else {
+                    assert_eq!(dropped, COLLECT_BOUND, "{what}: every kept value");
+                    assert_eq!(store.update_nodes(), 0, "{what}");
+                    assert_eq!(store.listed_vectors(), NOTHING, "{what}");
+                    assert_eq!(store.heap_bytes(), bytes, "{what}: the memory is flat");
+                }
+            }
+        }
+        // Every person holds 30 or 31 now: the index holds those two.
+        assert_eq!(store.property_index_len("age"), Some(2));
+    }
+
+    /// A reader before the writes holds the collect back: the collect at
+    /// the bound runs at its horizon and keeps what it reads, the writes
+    /// after it skip the collect while the horizon stays, and the first
+    /// write once the reader ended collects everything, far from the bound.
+    #[test]
+    fn an_older_reader_keeps_its_values_and_its_end_starts_the_next_collect() {
+        let store = RowGroupStore::new();
+        let people = spread_people(&store);
+        store.collect(store.current_epoch());
+        let bytes = store.heap_bytes();
+        let pinned = store.current_epoch();
+        let ages_at = |view: ReadView| -> Vec<Option<Value>> {
+            people
+                .iter()
+                .map(|id| store.node_property_at(*id, "age", view))
+                .collect()
+        };
+        let seen = ages_at(ReadView::committed(pinned));
+        assert_eq!(seen, vec![Some(Value::Int64(30)); 3]);
+        for write in 1..=COLLECT_BOUND {
+            age_write(&store, &people, write);
+            assert_eq!(store.collect_after_write(pinned), 0, "write {write}");
+        }
+        assert_eq!(store.update_nodes(), COLLECT_BOUND, "the reader needs each");
+        assert_eq!(
+            ages_at(ReadView::committed(pinned)),
+            seen,
+            "the pinned reader"
+        );
+        let newest = ages_at(ReadView::committed(store.current_epoch()));
+        age_write(&store, &people, COLLECT_BOUND + 1);
+        assert_eq!(store.collect_after_write(pinned), 0, "still pinned");
+        assert_eq!(store.update_nodes(), COLLECT_BOUND + 1);
+
+        // The reader ends: the horizon moves to the newest write.
+        age_write(&store, &people, COLLECT_BOUND + 2);
+        assert_eq!(
+            store.collect_after_write(store.current_epoch()),
+            COLLECT_BOUND + 2,
+            "the collect the reader held back"
+        );
+        assert_eq!(store.update_nodes(), 0);
+        assert_eq!(store.listed_vectors(), NOTHING);
+        assert_eq!(store.heap_bytes(), bytes, "the memory is flat");
+        assert_ne!(newest, seen, "the writes changed what a new reader reads");
+    }
+
+    /// A commit counts the entries it stamped toward the next collect after
+    /// a write: a small transaction's commit leaves its kept values, one of
+    /// `COLLECT_BOUND` writes makes the collect after it run, also when a
+    /// collect ran while it was open and kept its pending writes.
+    #[test]
+    fn a_commit_counts_its_entries_toward_the_next_collect() {
+        let store = RowGroupStore::new();
+        let [alix, gus, vincent] = spread_people(&store);
+        store.collect(store.current_epoch());
+        let mut tx = Tx::begin(&store, 10);
+        tx.set_node(alix, "age", Value::Int64(40)).unwrap();
+        let epoch = tx.commit().unwrap();
+        assert_eq!(store.collect_after_write(epoch), 0, "one entry");
+        assert_eq!(store.update_nodes(), 1);
+
+        let mut tx = Tx::begin(&store, 11);
+        for write in 0..COLLECT_BOUND {
+            let id = [alix, gus, vincent][write % 3];
+            let age = 50 + i64::try_from(write).unwrap();
+            tx.set_node(id, "age", Value::Int64(age)).unwrap();
+        }
+        // A collect while it is open keeps its writes and counts afresh.
+        store.collect(store.current_epoch());
+        assert_eq!(store.update_nodes(), 3, "a node per vector it wrote");
+        let epoch = tx.commit().unwrap();
+        assert_eq!(
+            store.collect_after_write(epoch),
+            3,
+            "the values its writes kept"
+        );
+        assert_eq!(store.update_nodes(), 0);
+        assert_eq!(store.listed_vectors(), NOTHING);
     }
 
     /// One writer of the lockstep test: the same transaction on both

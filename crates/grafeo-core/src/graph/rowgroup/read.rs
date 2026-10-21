@@ -27,6 +27,7 @@ use grafeo_common::types::{
 use grafeo_common::utils::error::Result;
 use grafeo_common::utils::hash::FxHashMap;
 
+use super::adjacency::Adjacent;
 use super::column::Columns;
 #[cfg(feature = "text-index")]
 use super::index::TextLimit;
@@ -39,20 +40,21 @@ use crate::index::vector::{DistanceMetric, HnswConfig};
 use crate::statistics::{EdgeTypeStatistics, LabelStatistics, Statistics};
 
 /// Compares two values for a range check (as `LpgStore` does).
-fn compare_for_range(a: &Value, b: &Value) -> Option<CmpOrdering> {
+pub(super) fn compare_for_range(a: &Value, b: &Value) -> Option<CmpOrdering> {
     match (a, b) {
+        // Decimals by value, also against integers and floats, as a filter
+        // compares them (#610).
+        (Value::Decimal(_), _) | (_, Value::Decimal(_)) => a.compare_decimal(b),
         (Value::Int64(a), Value::Int64(b)) => Some(a.cmp(b)),
         (Value::Float64(a), Value::Float64(b)) => a.partial_cmp(b),
-        #[expect(
-            clippy::cast_precision_loss,
-            reason = "a range check compares an integer with a float as a float, as a filter does"
-        )]
-        (Value::Int64(a), Value::Float64(b)) => (*a as f64).partial_cmp(b),
-        #[expect(
-            clippy::cast_precision_loss,
-            reason = "a range check compares an integer with a float as a float, as a filter does"
-        )]
-        (Value::Float64(a), Value::Int64(b)) => a.partial_cmp(&(*b as f64)),
+        // An integer and a float compare exactly, as a filter does.
+        (Value::Int64(a), Value::Float64(b)) => {
+            crate::execution::operators::value_utils::partial_cmp_int_float(*a, *b)
+        }
+        (Value::Float64(a), Value::Int64(b)) => {
+            crate::execution::operators::value_utils::partial_cmp_int_float(*b, *a)
+                .map(CmpOrdering::reverse)
+        }
         (Value::String(a), Value::String(b)) => Some(a.cmp(b)),
         (Value::Bool(a), Value::Bool(b)) => Some(a.cmp(b)),
         (Value::Timestamp(a), Value::Timestamp(b)) => Some(a.cmp(b)),
@@ -119,19 +121,13 @@ impl Inner {
 
     /// The value of `key` of node `id` as `read` sees the node.
     pub(super) fn node_value_at(&self, id: u64, key: &str, read: Read) -> Option<Value> {
-        let (group, row) = self.node(id)?;
-        if !group.version(row).visible(read) {
-            return None;
-        }
+        let (group, row) = self.node_seen(id, read)?;
         self.value_at(&group.columns, row, key, read)
     }
 
     /// The value of `key` of edge `id` as `read` sees the edge.
     fn edge_value_at(&self, id: u64, key: &str, read: Read) -> Option<Value> {
-        let (group, row) = self.edge(id)?;
-        if !group.version(row).visible(read) {
-            return None;
-        }
+        let (group, row) = self.edge_seen(id, read)?;
         self.value_at(&group.columns, row, key, read)
     }
 
@@ -293,9 +289,16 @@ impl Inner {
         ids
     }
 
-    /// A node's adjacency entries, as (other node, edge): each direction's
-    /// sorted list, then its delta.
-    pub(super) fn adjacency(&self, node: NodeId, direction: Direction) -> Vec<(NodeId, EdgeId)> {
+    /// A node's entries in `direction`, of one edge type id or of all, as
+    /// (other node, edge), outgoing ones first: each kept direction's sorted
+    /// list, then its delta; without the incoming edges kept, the incoming
+    /// ones from the edge table, by edge id.
+    fn entries_in(
+        &self,
+        node: NodeId,
+        direction: Direction,
+        edge_type: Option<u32>,
+    ) -> Vec<(NodeId, EdgeId)> {
         let Some((group, row)) = self.node(node.as_u64()) else {
             return Vec::new();
         };
@@ -304,11 +307,32 @@ impl Inner {
             Direction::Incoming => &[false],
             Direction::Both => &[true, false],
         };
-        directions
-            .iter()
-            .flat_map(|outgoing| group.adjacency(*outgoing).of(row))
-            .map(|adjacent| (NodeId::new(adjacent.other), EdgeId::new(adjacent.edge)))
-            .collect()
+        let pair = |adjacent: Adjacent| (NodeId::new(adjacent.other), EdgeId::new(adjacent.edge));
+        let mut entries = Vec::new();
+        for &outgoing in directions {
+            if outgoing || self.keeps_incoming() {
+                let adjacency = group.adjacency(outgoing);
+                match edge_type {
+                    None => entries.extend(adjacency.of(row).map(pair)),
+                    Some(edge_type) => entries.extend(adjacency.of_type(row, edge_type).map(pair)),
+                }
+            } else {
+                entries.extend(
+                    self.incoming_by_scan(node.as_u64())
+                        .filter(|adjacent| {
+                            edge_type.is_none_or(|wanted| adjacent.edge_type == wanted)
+                        })
+                        .map(pair),
+                );
+            }
+        }
+        entries
+    }
+
+    /// A node's adjacency entries, as (other node, edge): each direction's
+    /// sorted list, then its delta (see [`entries`](Self::entries)).
+    pub(super) fn adjacency(&self, node: NodeId, direction: Direction) -> Vec<(NodeId, EdgeId)> {
+        self.entries_in(node, direction, None)
     }
 
     /// A node's adjacency entries of one edge type, as (other node, edge).
@@ -318,31 +342,21 @@ impl Inner {
         direction: Direction,
         edge_type: &str,
     ) -> Vec<(NodeId, EdgeId)> {
-        let (Some((group, row)), Some(edge_type)) =
-            (self.node(node.as_u64()), self.edge_types.get_id(edge_type))
-        else {
-            return Vec::new();
-        };
-        let directions: &[bool] = match direction {
-            Direction::Outgoing => &[true],
-            Direction::Incoming => &[false],
-            Direction::Both => &[true, false],
-        };
-        directions
-            .iter()
-            .flat_map(|outgoing| group.adjacency(*outgoing).of_type(row, edge_type))
-            .map(|adjacent| (NodeId::new(adjacent.other), EdgeId::new(adjacent.edge)))
-            .collect()
+        match self.edge_types.get_id(edge_type) {
+            Some(edge_type) => self.entries_in(node, direction, Some(edge_type)),
+            None => Vec::new(),
+        }
     }
 
     /// How many of a node's edges in one direction `read` sees.
     fn degree(&self, node: NodeId, outgoing: bool, read: Read) -> usize {
+        let seen = |adjacent: &Adjacent| self.edge_visible(adjacent.edge, read);
         self.node(node.as_u64()).map_or(0, |(group, row)| {
-            group
-                .adjacency(outgoing)
-                .of(row)
-                .filter(|adjacent| self.edge_visible(adjacent.edge, read))
-                .count()
+            if outgoing || self.keeps_incoming() {
+                group.adjacency(outgoing).of(row).filter(seen).count()
+            } else {
+                self.incoming_by_scan(node.as_u64()).filter(seen).count()
+            }
         })
     }
 
@@ -435,6 +449,18 @@ impl GraphStore for RowGroupStore {
         self.inner.read().read_edge(id.as_u64(), Read::at(epoch))
     }
 
+    /// The node's versions as the store holds them, each with its own
+    /// values and labels (see `history`).
+    fn get_node_history(&self, id: NodeId) -> Vec<(EpochId, Option<EpochId>, Node)> {
+        self.node_history(id)
+    }
+
+    /// The edge's versions as the store holds them, each with its own
+    /// values (see `history`).
+    fn get_edge_history(&self, id: EdgeId) -> Vec<(EpochId, Option<EpochId>, Edge)> {
+        self.edge_history(id)
+    }
+
     fn get_node_property(&self, id: NodeId, key: &PropertyKey) -> Option<Value> {
         self.inner
             .read()
@@ -503,8 +529,11 @@ impl GraphStore for RowGroupStore {
         self.inner.read().degree(node, false, self.now())
     }
 
+    /// Whether it keeps each node's incoming edges: without them an
+    /// incoming read scans the edge table (see
+    /// [`RowGroupStore::with_backward_edges`]).
     fn has_backward_adjacency(&self) -> bool {
-        true
+        self.keeps_backward_edges()
     }
 
     fn node_ids(&self) -> Vec<NodeId> {
@@ -590,23 +619,53 @@ impl GraphStore for RowGroupStore {
         )
     }
 
+    /// By the zone maps of the hot columns (every value they held, so every
+    /// version a reader may see), and always for a column still cold.
     fn node_property_might_match(
         &self,
-        _property: &PropertyKey,
-        _op: CompareOp,
-        _value: &Value,
+        property: &PropertyKey,
+        op: CompareOp,
+        value: &Value,
     ) -> bool {
-        // No zone maps on hot row groups yet (H1c): every row group might.
-        true
+        let inner = self.inner.read();
+        // A key no row group has a column of might match, as for a store
+        // without zone maps (the planner keeps the filter).
+        let Some(key) = inner.keys.get_id(property.as_str()) else {
+            return true;
+        };
+        let mut held = false;
+        for group in inner.nodes.values() {
+            match group.columns.might_match(key, op, value) {
+                Some(true) => return true,
+                Some(false) => held = true,
+                None => {}
+            }
+        }
+        !held
     }
 
+    /// As [`node_property_might_match`](Self::node_property_might_match).
     fn edge_property_might_match(
         &self,
-        _property: &PropertyKey,
-        _op: CompareOp,
-        _value: &Value,
+        property: &PropertyKey,
+        op: CompareOp,
+        value: &Value,
     ) -> bool {
-        true
+        let inner = self.inner.read();
+        // A key no row group has a column of might match, as for a store
+        // without zone maps (the planner keeps the filter).
+        let Some(key) = inner.keys.get_id(property.as_str()) else {
+            return true;
+        };
+        let mut held = false;
+        for group in inner.edges.values() {
+            match group.columns.might_match(key, op, value) {
+                Some(true) => return true,
+                Some(false) => held = true,
+                None => {}
+            }
+        }
+        !held
     }
 
     fn statistics(&self) -> Arc<Statistics> {
@@ -1011,6 +1070,7 @@ impl GraphStoreSearch for RowGroupStore {
             property,
             query,
             TextLimit::Top(k),
+            None,
             Read::view(view),
         )
     }
@@ -1029,6 +1089,7 @@ impl GraphStoreSearch for RowGroupStore {
             property,
             query,
             TextLimit::AtLeast(threshold),
+            None,
             Read::view(view),
         )
     }
@@ -1129,9 +1190,146 @@ impl RowGroupStore {
 
 #[cfg(test)]
 mod tests {
-    use grafeo_common::types::Value;
+    use grafeo_common::types::{PropertyKey, Value};
 
     use super::in_range;
+    use crate::graph::conformance::{Tx, people};
+    use crate::graph::rowgroup::RowGroupStore;
+    use crate::graph::traits::GraphStore;
+
+    /// The zone maps of hot columns prune by every value a column held: a
+    /// value replaced since (a reader may still see it) still might match,
+    /// one never held does not; a key without a column always might.
+    #[test]
+    fn hot_zone_maps_cover_every_value_a_column_held() {
+        use crate::graph::GraphStoreMut;
+        use crate::graph::lpg::CompareOp;
+
+        let store = RowGroupStore::new();
+        let age = PropertyKey::new("age");
+        let alix = store.create_node_with_props(&["Person"], &[(age.clone(), Value::Int64(19))]);
+        store.set_node_property(alix, "age", Value::Int64(88));
+        for (op, value, might) in [
+            (CompareOp::Eq, 19, true),
+            (CompareOp::Eq, 88, true),
+            (CompareOp::Eq, 50, true),
+            (CompareOp::Eq, 89, false),
+            (CompareOp::Gt, 88, false),
+            (CompareOp::Ge, 88, true),
+            (CompareOp::Lt, 19, false),
+            (CompareOp::Le, 19, true),
+        ] {
+            assert_eq!(
+                store.node_property_might_match(&age, op, &Value::Int64(value)),
+                might,
+                "{op:?} {value}"
+            );
+        }
+        assert!(
+            store.node_property_might_match(&age, CompareOp::Eq, &Value::from("Prague")),
+            "a value that does not order against the column might"
+        );
+        assert!(
+            store.node_property_might_match(
+                &PropertyKey::new("city"),
+                CompareOp::Eq,
+                &Value::from("Prague")
+            ),
+            "a key without a column might, as without zone maps"
+        );
+        assert!(store.edge_property_might_match(&age, CompareOp::Eq, &Value::Int64(19)));
+    }
+
+    /// A decimal is found by an equal decimal of another scale, and a range
+    /// of decimals compares them by value, with and without a property
+    /// index (#610 on the row-group store).
+    #[test]
+    fn decimals_are_found_by_value_and_in_a_range() {
+        use crate::graph::GraphStoreMut;
+        use grafeo_common::types::Decimal;
+
+        let decimal = |text: &str| Value::Decimal(Decimal::parse(text).unwrap());
+        for indexed in [false, true] {
+            let store = RowGroupStore::new();
+            if indexed {
+                store.create_property_index("price");
+            }
+            let mia = store
+                .create_node_with_props(&["Item"], &[(PropertyKey::new("price"), decimal("1.50"))]);
+            let gus = store.create_node_with_props(
+                &["Item"],
+                &[(PropertyKey::new("price"), decimal("197.97"))],
+            );
+            assert_eq!(
+                store.find_nodes_by_property("price", &decimal("1.5")),
+                [mia],
+                "indexed: {indexed}"
+            );
+            assert_eq!(
+                store.find_nodes_in_range("price", Some(&decimal("197.50")), None, false, true),
+                [gus],
+                "indexed: {indexed}"
+            );
+        }
+    }
+
+    /// A read without a view reads the committed state at the store's
+    /// epoch, through stamped and flat vectors alike: an open transaction's
+    /// create, its value writes and its deletes stay unseen until the
+    /// commit, and an edge or node it deleted is gone once it commits.
+    #[test]
+    fn a_read_without_a_view_sees_no_open_transactions_writes() {
+        let store = RowGroupStore::new();
+        let people = people(&store).unwrap();
+        let (age, name, since) = (
+            PropertyKey::new("age"),
+            PropertyKey::new("name"),
+            PropertyKey::new("since"),
+        );
+        let mut tx = Tx::begin(&store, 10);
+        let vincent = tx
+            .create_node(&["Person"], &[("name", Value::from("Vincent"))])
+            .unwrap();
+        tx.set_node(people.alix, "age", Value::Int64(20)).unwrap();
+        tx.set_edge(people.alix_gus, "since", Value::Int64(1990))
+            .unwrap();
+        tx.delete_edge(people.gus_mia).unwrap();
+        tx.delete_node(people.mia).unwrap();
+        assert_eq!(store.get_node_property(vincent, &name), None, "a create");
+        assert_eq!(
+            store.get_node_property(people.alix, &age),
+            Some(Value::Int64(19))
+        );
+        assert_eq!(
+            store.get_edge_property(people.alix_gus, &since),
+            Some(Value::Int64(1988))
+        );
+        assert_eq!(
+            store.get_edge_property(people.gus_mia, &since),
+            Some(Value::Int64(319)),
+            "a delete"
+        );
+        assert_eq!(
+            store.get_node_property(people.mia, &name),
+            Some(Value::from("Mia"))
+        );
+
+        tx.commit().unwrap();
+        assert_eq!(
+            store.get_node_property(vincent, &name),
+            Some(Value::from("Vincent"))
+        );
+        assert_eq!(
+            store.get_node_property(people.alix, &age),
+            Some(Value::Int64(20))
+        );
+        assert_eq!(
+            store.get_edge_property(people.alix_gus, &since),
+            Some(Value::Int64(1990))
+        );
+        assert_eq!(store.get_edge_property(people.gus_mia, &since), None);
+        assert_eq!(store.get_node_property(people.mia, &name), None);
+    }
 
     #[test]
     fn range_bounds_include_or_exclude_their_ends() {

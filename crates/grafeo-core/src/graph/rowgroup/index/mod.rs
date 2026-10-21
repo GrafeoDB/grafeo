@@ -84,6 +84,22 @@ impl Indexes {
     }
 }
 
+/// How a search through a text or vector index of the store picks its
+/// results: the best `k`, with the beam width `ef` of a vector index (the
+/// index's own when `None`; a text search has none), among the nodes of
+/// `allowed` only when given (the nodes an engine's property filters
+/// leave).
+#[cfg(any(feature = "text-index", feature = "vector-index"))]
+#[derive(Debug, Clone, Copy)]
+pub struct IndexSearch<'a> {
+    /// How many results, at most.
+    pub k: usize,
+    /// The beam width of a vector index search.
+    pub ef: Option<usize>,
+    /// The nodes to search among; `None` searches every node.
+    pub allowed: Option<&'a std::collections::HashSet<NodeId>>,
+}
+
 /// The key of a text or vector index, `label:property`, as `LpgStore` keys
 /// them (a label holding a ':' may give two indexes one key there too).
 #[cfg(any(feature = "text-index", feature = "vector-index"))]
@@ -365,7 +381,7 @@ impl Inner {
 
     /// Whether a chain holds node row `row`'s value of key `key` or its
     /// labels (see [`changed_rows`](Self::changed_rows)).
-    #[cfg(any(feature = "text-index", feature = "vector-index"))]
+    #[cfg(feature = "text-index")]
     fn changed(group: &NodeGroup, row: usize, key: Option<u32>) -> bool {
         key.is_some_and(|key| group.columns.kept(key, row).next().is_some())
             || group.label_updates.kept(row).next().is_some()
@@ -461,7 +477,6 @@ impl RowGroupStore {
     /// How many distinct values the index on `property` holds, `None`
     /// without one: old and pending values count until undo or `collect`
     /// takes them out.
-    #[cfg(test)]
     pub(crate) fn property_index_len(&self, property: &str) -> Option<usize> {
         self.inner
             .read()

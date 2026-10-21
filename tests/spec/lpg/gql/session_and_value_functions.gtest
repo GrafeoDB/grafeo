@@ -1,0 +1,124 @@
+# GQL functions no other file calls: IS DIRECTED, octet_length, zoned times,
+# cosine_distance and the session value functions
+#
+# IS DIRECTED holds for every edge, as Grafeo's edges have a direction, also
+# when an undirected pattern matched it; octet_length counts the UTF-8 bytes
+# of a string (char_length its characters); toZonedTime and CAST AS ZONED TIME
+# read a time with an offset, compared by its UTC instant; cosine_distance is
+# 1 minus the cosine of two lists of numbers; SESSION_USER, CURRENT_SCHEMA and
+# CURRENT_GRAPH name the session's user, schema and graph.
+
+meta:
+  language: gql
+  model: lpg
+  section: "20.25"
+  title: Session and value functions
+  dataset: empty
+
+tests:
+
+  # ---------------------------------------------------------------------------
+  # IS DIRECTED
+  # ---------------------------------------------------------------------------
+
+  - name: an_edge_is_directed
+    setup:
+      - "INSERT (:P {name: 'Alix'})-[:KNOWS]->(:P {name: 'Gus'})"
+    query: "MATCH (a)-[e]->(b) RETURN e IS DIRECTED AS directed, e IS NOT DIRECTED AS undirected"
+    expect:
+      rows:
+        - [true, false]
+
+  - name: an_edge_an_undirected_pattern_matched_is_directed
+    setup:
+      - "INSERT (:P {name: 'Alix'})-[:KNOWS]->(:P {name: 'Gus'})"
+    query: "MATCH (a {name: 'Gus'})-[e]-(b) RETURN e IS DIRECTED AS directed, b.name"
+    expect:
+      rows:
+        - [true, Alix]
+
+  # ---------------------------------------------------------------------------
+  # octet_length
+  # ---------------------------------------------------------------------------
+
+  - name: octet_length_counts_utf8_bytes
+    query: "RETURN octet_length('Alix') AS ascii, octet_length('Zoë') AS accent, char_length('Zoë') AS chars, byte_length('Amsterdam') AS alias"
+    expect:
+      rows:
+        - [4, 4, 3, 9]
+
+  - name: octet_length_of_empty_null_and_a_number
+    query: "RETURN octet_length('') AS empty, octet_length(null) AS missing, octet_length(42) AS number"
+    expect:
+      rows:
+        - [0, null, null]
+
+  # ---------------------------------------------------------------------------
+  # Zoned times
+  # ---------------------------------------------------------------------------
+
+  - name: zoned_times_compare_by_their_utc_instant
+    query: "RETURN toZonedTime('10:30:00+01:00') = toZonedTime('09:30:00Z') AS same_instant, zonedTime('10:30:00Z') = toZonedTime('10:30:00Z') AS alias"
+    expect:
+      rows:
+        - [true, true]
+
+  - name: cast_text_to_a_zoned_time
+    query: "RETURN CAST('10:30:00+01:00' AS ZONED TIME) = toZonedTime('09:30:00Z') AS same_instant, CAST('25:00:00Z' AS ZONED TIME) AS invalid"
+    expect:
+      rows:
+        - [true, null]
+
+  - name: a_zoned_time_of_what_is_no_time_is_null
+    query: "RETURN toZonedTime('25:00:00Z') AS hour, toZonedTime('Alix') AS text, toZonedTime(null) AS missing"
+    expect:
+      rows:
+        - [null, null, null]
+
+  # ---------------------------------------------------------------------------
+  # cosine_distance
+  # ---------------------------------------------------------------------------
+
+  - name: cosine_distance_of_lists
+    query: "RETURN cosine_distance([1.0e0, 0.0e0], [0.0e0, 1.0e0]) AS orthogonal, cosine_distance([1.0e0, 2.0e0], [2.0e0, 4.0e0]) AS parallel, cosine_distance([1.0e0, 0.0e0], [-1.0e0, 0.0e0]) AS opposite"
+    expect:
+      precision: 6
+      rows:
+        - [1, 0, 2]
+
+  - name: cosine_distance_of_lists_of_different_lengths_is_null
+    query: "RETURN cosine_distance([1.0e0], [1.0e0, 2.0e0]) AS mismatch"
+    expect:
+      rows:
+        - [null]
+
+  # Distances are f32 computations: compared within 1e-6 (the denominator
+  # carries an f32::EPSILON, so identical vectors give 1.2e-7, not 0).
+  - name: cosine_distance_of_identical_vectors_is_zero
+    query: "RETURN cosine_distance(vector([1.0e0, 0.0e0]), vector([1.0e0, 0.0e0])) AS d"
+    expect:
+      precision: 6
+      rows:
+        - [0]
+
+  # ---------------------------------------------------------------------------
+  # Session values
+  # ---------------------------------------------------------------------------
+
+  - name: session_value_functions_of_a_default_session
+    query: "RETURN SESSION_USER AS user, CURRENT_SCHEMA AS schema, CURRENT_GRAPH AS graph"
+    expect:
+      rows:
+        - [default, default, default]
+
+  - name: a_session_value_function_takes_no_parentheses
+    query: "RETURN SESSION_USER() AS user"
+    expect:
+      gql_status: "42001"
+
+  - name: home_schema_and_home_graph_of_a_default_session
+    skip: "HOME_SCHEMA and HOME_GRAPH are null while CURRENT_SCHEMA and CURRENT_GRAPH give 'default' (inbox functions/cosine-distance-and-home-graph.md)"
+    query: "RETURN HOME_SCHEMA AS schema, HOME_GRAPH AS graph"
+    expect:
+      rows:
+        - [default, default]

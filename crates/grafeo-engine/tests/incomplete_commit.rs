@@ -17,11 +17,9 @@
 //! its WAL records were written; after them, the WAL holds the whole commit,
 //! and a reopen replays it whole.
 //!
-//! What these tests do not cover: without the `temporal` feature, property
-//! values and labels have no versions and a deletion takes effect at once, so
-//! a query or a direct read can see the property values and labels written,
-//! and miss what was deleted, by a commit that is not complete, or never
-//! completes (#412); the property assertions below need `temporal`.
+//! Property values, labels and deletes are versioned (#412): no query or
+//! direct read sees a value, a label or a delete of a commit that is not
+//! complete, or never completes.
 //!
 //! These tests panic inside a commit, or run reads from another thread inside
 //! one, with the `testing-statement-injection` commit hook:
@@ -94,7 +92,7 @@ struct Seen {
     epoch: EpochId,
     gus: bool,
     knows: bool,
-    /// Alix's city, with `temporal` (property values have versions).
+    /// Alix's city.
     city: Option<Value>,
     /// The nodes and edges `iter_nodes` and `iter_edges` return.
     iterated: (usize, usize),
@@ -103,12 +101,9 @@ struct Seen {
 }
 
 fn seen(db: &GrafeoDB, alix: NodeId, gus: NodeId, knows: EdgeId) -> Seen {
-    let city = if cfg!(feature = "temporal") {
-        db.get_node(alix)
-            .and_then(|node| node.get_property("city").cloned())
-    } else {
-        None
-    };
+    let city = db
+        .get_node(alix)
+        .and_then(|node| node.get_property("city").cloned());
     Seen {
         nodes: db.node_count(),
         edges: db.edge_count(),
@@ -139,9 +134,7 @@ fn after_a_commit_that_does_not_complete_no_commit_publishes_part_of_it() {
         [Value::from("Alix")],
         "the failed commit's write is not visible"
     );
-    if cfg!(feature = "temporal") {
-        assert_eq!(city_of_alix(&db), Value::Null, "nor its property value");
-    }
+    assert_eq!(city_of_alix(&db), Value::Null, "nor its property value");
     assert_eq!(
         seen(&db, alix, gus, knows),
         Seen {
@@ -641,7 +634,7 @@ fn direct_reads_see_a_commit_only_once_it_is_complete() {
             epoch: after.epoch,
             gus: true,
             knows: true,
-            city: cfg!(feature = "temporal").then(|| Value::from("Paris")),
+            city: Some(Value::from("Paris")),
             iterated: (2, 1),
             no_edges_warning: false,
         },
@@ -858,9 +851,11 @@ fn a_commit_failing_before_its_wal_records_is_not_replayed_on_reopen() {
     assert_eq!(db.current_epoch(), before, "no commit epoch was published");
     assert!(db.get_node(gus).is_none(), "Gus remains unpublished");
     assert!(db.get_edge(knows).is_none(), "the edge remains unpublished");
-    // Alix's city is not checked here: a read sees the transaction's pending
-    // property version until the reopen (#412; the ignored
-    // `session_wal_durability` property tests check it).
+    assert_eq!(
+        city_of_alix(&db),
+        Value::Null,
+        "Alix's city of the failed commit is not read"
+    );
     drop(session);
     let error = db.close().expect_err("close reports the failed commit");
     assert_eq!(error.error_code().as_str(), "GRAFEO-T008");

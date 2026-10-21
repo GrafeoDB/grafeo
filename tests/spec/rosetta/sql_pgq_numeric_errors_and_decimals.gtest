@@ -1,0 +1,157 @@
+# Rosetta: SQL/PGQ numeric errors (#639) and exact decimals (#610) in GRAPH_TABLE
+#
+# The setup writes the nodes in GQL; each query is SQL/PGQ.
+#
+# An integer result past the 64-bit range fails with 22003, an integer or
+# decimal division or remainder by zero with 22012; a float division keeps
+# its IEEE result; AND decides without its right side when the left is false,
+# and CASE guards a division. A number with a point is an exact decimal that
+# keeps its scale; a decimal with a float gives a float.
+
+meta:
+  model: lpg
+  section: rosetta
+  title: Numeric errors and decimals in SQL/PGQ
+  dataset: empty
+  requires: [sql-pgq]
+
+tests:
+
+  # ---------------------------------------------------------------------------
+  # Numeric errors
+  # ---------------------------------------------------------------------------
+
+  - name: integer_addition_past_the_range_fails
+    setup:
+      - "INSERT (:N {name: 'Alix', v: 9223372036854775807})"
+    variants:
+      sql-pgq: |
+        SELECT * FROM GRAPH_TABLE (MATCH (n:N) COLUMNS (n.v + 1 AS a))
+    expect:
+      error: "numeric value out of range: 9223372036854775807 + 1"
+      gql_status: "22003"
+
+  - name: integer_multiplication_past_the_range_fails
+    setup:
+      - "INSERT (:N {name: 'Alix', v: 9223372036854775807})"
+    variants:
+      sql-pgq: |
+        SELECT * FROM GRAPH_TABLE (MATCH (n:N) COLUMNS (n.v * 2 AS a))
+    expect:
+      error: "numeric value out of range: 9223372036854775807 * 2"
+      gql_status: "22003"
+
+  - name: negating_and_abs_of_the_smallest_integer_fail
+    setup:
+      - "INSERT (:N {name: 'Alix', v: -9223372036854775807 - 1})"
+    variants:
+      sql-pgq: |
+        SELECT * FROM GRAPH_TABLE (MATCH (n:N) COLUMNS (abs(n.v) AS a))
+    expect:
+      error: "numeric value out of range: abs(-9223372036854775808)"
+      gql_status: "22003"
+
+  - name: integer_division_by_zero_fails
+    setup:
+      - "INSERT (:N {name: 'Gus', z: 0})"
+    variants:
+      sql-pgq: |
+        SELECT * FROM GRAPH_TABLE (MATCH (n:N) COLUMNS (10 / n.z AS a))
+    expect:
+      error: "division by zero: 10 / 0"
+      gql_status: "22012"
+
+  - name: integer_remainder_by_zero_fails
+    setup:
+      - "INSERT (:N {name: 'Gus', z: 0})"
+    variants:
+      sql-pgq: |
+        SELECT * FROM GRAPH_TABLE (MATCH (n:N) COLUMNS (10 % n.z AS a))
+    expect:
+      error: "division by zero: 10 % 0"
+      gql_status: "22012"
+
+  - name: decimal_division_by_zero_fails
+    setup:
+      - "INSERT (:N {name: 'Gus', d: 1.50, z: 0})"
+    variants:
+      sql-pgq: |
+        SELECT * FROM GRAPH_TABLE (MATCH (n:N) COLUMNS (n.d / n.z AS a))
+    expect:
+      error: "division by zero: 1.50 / 0"
+      gql_status: "22012"
+
+  - name: float_division_by_zero_is_infinity
+    setup:
+      - "INSERT (:N {name: 'Gus', f: 2.5e0, z: 0})"
+    variants:
+      sql-pgq: |
+        SELECT * FROM GRAPH_TABLE (MATCH (n:N) COLUMNS (n.f / n.z AS a))
+    expect:
+      rows:
+        - [Infinity]
+
+  - name: a_false_left_side_of_and_skips_the_division
+    setup:
+      - "INSERT (:N {name: 'Gus', z: 0}), (:N {name: 'Vincent', z: 5})"
+    variants:
+      sql-pgq: |
+        SELECT * FROM GRAPH_TABLE (MATCH (n:N) WHERE n.z <> 0 AND 10 / n.z > 1 COLUMNS (n.name AS name))
+    expect:
+      rows:
+        - [Vincent]
+
+  - name: case_guards_a_division
+    setup:
+      - "INSERT (:N {name: 'Gus', z: 0}), (:N {name: 'Vincent', z: 5})"
+    variants:
+      sql-pgq: |
+        SELECT * FROM GRAPH_TABLE (MATCH (n:N) COLUMNS (n.name AS name, CASE WHEN n.z = 0 THEN 0 ELSE 10 / n.z END AS q))
+    expect:
+      rows:
+        - [Gus, 0]
+        - [Vincent, 2]
+
+  # ---------------------------------------------------------------------------
+  # Decimals
+  # ---------------------------------------------------------------------------
+
+  - name: decimal_arithmetic_keeps_its_scale
+    setup:
+      - "INSERT (:N {name: 'Mia', d: 1.50})"
+    variants:
+      sql-pgq: |
+        SELECT * FROM GRAPH_TABLE (MATCH (n:N) COLUMNS (n.d * 2 AS doubled, n.d / 4 = 0.375 AS quarter, n.d - 0.25 AS less))
+    expect:
+      rows:
+        - [3.00, true, 1.25]
+
+  - name: a_decimal_with_a_float_gives_a_float
+    setup:
+      - "INSERT (:N {name: 'Mia', d: 1.50, f: 2.5e0})"
+    variants:
+      sql-pgq: |
+        SELECT * FROM GRAPH_TABLE (MATCH (n:N) COLUMNS (n.d + n.f AS sum))
+    expect:
+      rows:
+        - [4]
+
+  - name: cast_a_property_to_sql_types
+    setup:
+      - "INSERT (:N {name: 'Mia', d: 1.55, f: 2.7e0, v: 7})"
+    variants:
+      sql-pgq: |
+        SELECT * FROM GRAPH_TABLE (MATCH (n:N) COLUMNS (CAST(n.d AS DECIMAL(5, 1)) AS d, CAST(n.f AS INTEGER) AS i, CAST(n.v AS DOUBLE PRECISION) AS f))
+    expect:
+      rows:
+        - [1.6, 2, 7]
+
+  - name: an_outer_sum_over_graph_table_columns
+    setup:
+      - "INSERT (:N {name: 'Alix', v: 2}), (:N {name: 'Gus', v: 3})"
+    variants:
+      sql-pgq: |
+        SELECT SUM(v) AS total FROM GRAPH_TABLE (MATCH (n:N) COLUMNS (n.v AS v))
+    expect:
+      rows:
+        - [5]

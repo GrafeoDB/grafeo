@@ -1,0 +1,174 @@
+# Conditions on variable-length edges and self-loops in undirected patterns,
+# in GQL and Cypher. A property map or an inline WHERE on a variable-length
+# edge holds for each edge of the path, and may read the row; after the
+# pattern the edge variable is the list of the path's edges. An undirected
+# pattern takes a self-loop once, though the loop is in both adjacency lists
+# of its node.
+
+meta:
+  language: gql
+  model: lpg
+  title: Variable-length edge conditions and undirected self-loops
+  dataset: empty
+  requires: [cypher]
+
+tests:
+
+  # ---------------------------------------------------------------------------
+  # A condition on each edge of the path
+  # ---------------------------------------------------------------------------
+
+  - name: an_inline_where_holds_for_every_edge
+    # 0 -20-> 1 -30-> 2 -5-> 3: only 1 and 2 are reached over edges above 10.
+    setup:
+      - "INSERT (:N {i: 0})-[:R {w: 20}]->(:N {i: 1})-[:R {w: 30}]->(:N {i: 2})-[:R {w: 5}]->(:N {i: 3})"
+    variants:
+      gql: "MATCH (:N {i: 0})-[e:R*1..3 WHERE e.w > 10]->(b) RETURN b.i AS i ORDER BY i"
+      cypher: "MATCH (:N {i: 0})-[e:R*1..3 WHERE e.w > 10]->(b) RETURN b.i AS i ORDER BY i"
+    expect:
+      ordered: true
+      rows:
+        - [1]
+        - [2]
+
+  - name: the_condition_reads_a_variable_of_the_row
+    setup:
+      - "INSERT (:N {i: 0})-[:R {w: 20}]->(:N {i: 1})-[:R {w: 30}]->(:N {i: 2})"
+    variants:
+      gql: "UNWIND [15, 25] AS t MATCH (:N {i: 0})-[e:R*1..2 WHERE e.w > t]->(b) RETURN t, b.i AS i ORDER BY t, i"
+      cypher: "UNWIND [15, 25] AS t MATCH (:N {i: 0})-[e:R*1..2 WHERE e.w > t]->(b) RETURN t, b.i AS i ORDER BY t, i"
+    expect:
+      ordered: true
+      rows:
+        - [15, 1]
+        - [15, 2]
+
+  - name: a_property_map_and_an_inline_where_together
+    setup:
+      - "INSERT (:N {i: 0})-[:R {w: 20, kind: 'x'}]->(:N {i: 1})-[:R {w: 30}]->(:N {i: 2})"
+    variants:
+      gql: "MATCH (:N {i: 0})-[e:R*1..2 {kind: 'x'} WHERE e.w > 10]->(b) RETURN b.i AS i"
+      cypher: "MATCH (:N {i: 0})-[e:R*1..2 {kind: 'x'} WHERE e.w > 10]->(b) RETURN b.i AS i"
+    expect:
+      rows:
+        - [1]
+
+  - name: after_the_pattern_the_edge_variable_is_the_list
+    setup:
+      - "INSERT (:N {i: 0})-[:R {w: 20}]->(:N {i: 1})-[:R {w: 30}]->(:N {i: 2})"
+    variants:
+      gql: "MATCH (:N {i: 0})-[e:R*1..2 WHERE e.w > 10]->(b) RETURN b.i AS i, size(e) AS hops ORDER BY i"
+      cypher: "MATCH (:N {i: 0})-[e:R*1..2 WHERE e.w > 10]->(b) RETURN b.i AS i, size(e) AS hops ORDER BY i"
+    expect:
+      ordered: true
+      rows:
+        - [1, 1]
+        - [2, 2]
+
+  - name: a_condition_no_edge_passes_matches_nothing
+    setup:
+      - "INSERT (:N {i: 0})-[:R {w: 20}]->(:N {i: 1})"
+    variants:
+      gql: "MATCH (:N {i: 0})-[e:R*1..3 WHERE e.w > 100]->(b) RETURN b.i AS i"
+      cypher: "MATCH (:N {i: 0})-[e:R*1..3 WHERE e.w > 100]->(b) RETURN b.i AS i"
+    expect:
+      empty: true
+
+  - name: an_edge_without_the_property_fails_the_condition
+    # A missing w is null, and null > 10 is not true.
+    setup:
+      - "INSERT (:N {i: 0})-[:R]->(:N {i: 1})-[:R {w: 30}]->(:N {i: 2})"
+    variants:
+      gql: "MATCH (:N {i: 0})-[e:R*1..2 WHERE e.w > 10]->(b) RETURN b.i AS i"
+      cypher: "MATCH (:N {i: 0})-[e:R*1..2 WHERE e.w > 10]->(b) RETURN b.i AS i"
+    expect:
+      empty: true
+
+  - name: a_condition_on_the_end_node_filters_the_paths_found
+    setup:
+      - "INSERT (:N {i: 0})-[:R {w: 20}]->(:N {i: 1})-[:R {w: 30}]->(:N {i: 2})-[:R {w: 5}]->(:N {i: 3})"
+    variants:
+      gql: "MATCH p = (:N {i: 0})-[:R*1..3]->(b) WHERE all(r IN edges(p) WHERE r.w > b.i * 2) RETURN b.i AS i ORDER BY i"
+      cypher: "MATCH p = (:N {i: 0})-[:R*1..3]->(b) WHERE all(r IN relationships(p) WHERE r.w > b.i * 2) RETURN b.i AS i ORDER BY i"
+    expect:
+      ordered: true
+      rows:
+        - [1]
+        - [2]
+
+  - name: a_pattern_from_a_node_an_optional_match_did_not_find
+    setup:
+      - "INSERT (:N {i: 0})-[:R {w: 20}]->(:N {i: 1})"
+    variants:
+      gql: "OPTIONAL MATCH (n:Missing) MATCH (n)-[:R*1..3]->(m) RETURN count(m) AS c"
+      cypher: "OPTIONAL MATCH (n:Missing) MATCH (n)-[:R*1..3]->(m) RETURN count(m) AS c"
+    expect:
+      rows:
+        - [0]
+
+  # ---------------------------------------------------------------------------
+  # Undirected patterns take a self-loop once
+  # ---------------------------------------------------------------------------
+
+  - name: an_undirected_self_loop_matches_once
+    setup:
+      - "INSERT (a:N {name: 'Alix'})-[:SELF]->(a)"
+    variants:
+      gql: "MATCH (n)-[r]-(n) RETURN n.name AS name, count(r) AS loops"
+      cypher: "MATCH (n)-[r]-(n) RETURN n.name AS name, count(r) AS loops"
+    expect:
+      rows:
+        - [Alix, 1]
+
+  - name: a_node_with_a_loop_and_an_edge_has_two_undirected_edges
+    setup:
+      - "INSERT (a:N {name: 'Alix'})-[:SELF]->(a), (a)-[:KNOWS]->(:N {name: 'Gus'})"
+    variants:
+      gql: "MATCH (a:N {name: 'Alix'})-[r]-(b) RETURN b.name AS other ORDER BY other"
+      cypher: "MATCH (a:N {name: 'Alix'})-[r]-(b) RETURN b.name AS other ORDER BY other"
+    expect:
+      ordered: true
+      rows:
+        - [Alix]
+        - [Gus]
+
+  - name: every_undirected_edge_of_a_graph_with_a_loop
+    # One KNOWS edge is seen from both ends, the loop once.
+    setup:
+      - "INSERT (a:N {name: 'Alix'})-[:SELF]->(a), (a)-[:KNOWS]->(:N {name: 'Gus'})"
+    variants:
+      gql: "MATCH (a)-[r]-(b) RETURN count(r) AS c"
+      cypher: "MATCH (a)-[r]-(b) RETURN count(r) AS c"
+    expect:
+      rows:
+        - [3]
+
+  - name: an_undirected_variable_length_walk_takes_the_loop_once
+    setup:
+      - "INSERT (a:N {name: 'Mia'})-[:SELF]->(a)"
+    variants:
+      gql: "MATCH (m:N {name: 'Mia'})-[*1..1]-(x) RETURN x.name AS name"
+      cypher: "MATCH (m:N {name: 'Mia'})-[*1..1]-(x) RETURN x.name AS name"
+    expect:
+      rows:
+        - [Mia]
+
+  - name: a_count_subquery_counts_the_loop_once
+    setup:
+      - "INSERT (a:N {name: 'Mia'})-[:SELF]->(a)"
+    variants:
+      gql: "MATCH (m:N {name: 'Mia'}) RETURN COUNT { MATCH (m)-[]-(m) } AS loops"
+      cypher: "MATCH (m:N {name: 'Mia'}) RETURN COUNT { MATCH (m)-[]-(m) } AS loops"
+    expect:
+      rows:
+        - [1]
+
+  - name: a_directed_loop_is_matched_from_either_arrow
+    setup:
+      - "INSERT (a:N {name: 'Jules'})-[:SELF]->(a)"
+    variants:
+      gql: "MATCH (n)-[r]->(n) WITH count(r) AS outward MATCH (n)<-[r]-(n) RETURN outward, count(r) AS inward"
+      cypher: "MATCH (n)-[r]->(n) WITH count(r) AS outward MATCH (n)<-[r]-(n) RETURN outward, count(r) AS inward"
+    expect:
+      rows:
+        - [1, 1]

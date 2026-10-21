@@ -2,14 +2,16 @@
 //! values `=` can find equal to a key that are not among the forms the key
 //! names itself (#535).
 //!
-//! `=` is lenient (see [`HashKey::for_equality`]): a number equals a string
-//! it parses as (`'042' = 42`), numbers compare within `f64::EPSILON`, and
-//! lists and maps compare element by element. The index finds values by
-//! exact value, so a lookup by `=` probes the forms a key names (the key, and
-//! for a number its integer, its float and its decimal string), and the
-//! values no such probe finds (a number spelled another way, a number below
-//! 2 in magnitude, a list) wait in a side table by their `=` class, which is
-//! empty for a property that holds none of them.
+//! `=` is lenient across kinds (see [`HashKey::for_equality`]): a number
+//! equals a string it parses as (`'042' = 42`), an integer, a float and a
+//! decimal of the same value are equal, and lists and maps compare element by
+//! element. Numbers compare exactly (IEEE for floats: `-0.0 = 0.0`, NaN
+//! equals nothing). The index finds values by exact value, so a lookup by `=`
+//! probes the forms a key names (the key, and for a number its integer, its
+//! float, its decimal and its canonical strings), and the values no such
+//! probe finds (a number spelled another way, such as `'042'`, or a list)
+//! wait in a side table by their `=` class, which is empty for a property
+//! that holds none of them.
 
 use dashmap::DashMap;
 use dashmap::mapref::entry::Entry;
@@ -17,14 +19,6 @@ use grafeo_common::types::{Decimal, HashableValue, NodeId, Value};
 use grafeo_common::utils::hash::FxHashSet;
 
 use crate::execution::operators::HashKey;
-
-/// Below this magnitude distinct numbers can be within `f64::EPSILON` of
-/// each other, so `=` finds one equal to several (see
-/// [`HashKey::for_equality`]); from it up, only to the same number.
-const EXACT_FROM: f64 = 2.0;
-
-/// The largest magnitude up to which every integer is exactly a float.
-const EXACT_INTEGERS: f64 = 9_007_199_254_740_992.0;
 
 /// The index of one node property.
 #[derive(Debug, Default)]
@@ -148,41 +142,30 @@ impl MaybeEqual {
     }
 }
 
-/// The number `=` reads `value` as, if any: an integer, a float or a
-/// decimal, or a string that parses as one (not NaN).
-fn number(value: &Value) -> Option<f64> {
-    match value {
-        // `=` compares an integer with a float as this `f64`.
-        Value::Int64(i) => Some(*i as f64),
-        Value::Float64(f) => Some(*f),
-        Value::Decimal(d) => Some(d.to_f64()),
-        Value::String(s) => s.parse::<f64>().ok().filter(|n| !n.is_nan()),
-        _ => None,
-    }
-}
-
-/// The values a key is looked up as: the key itself; for a number, the
-/// integers within `f64::EPSILON` of it (and, for a string, the integer it
-/// parses as); and for a number from 2 up in magnitude, its float and its
-/// decimal string.
+/// The values a key is looked up as: the key itself; for an integer, its
+/// decimal, its text and, when a float has exactly its value, that float's
+/// forms; for a float, its decimal and its forms (see [`push_float_forms`]);
+/// for a decimal, its float's forms and, when whole, its integer and that
+/// integer's text; for a string, the integer, decimal and float it reads as.
 fn probes(key: &Value) -> Vec<HashableValue> {
     let mut probes = vec![HashableValue::new(key.clone())];
     // A decimal equals an integer of its value and a float whose shortest
     // text is its value (see `Value::compare_decimal`); a decimal probe
     // finds a stored decimal at any scale.
     match key {
-        Value::Int64(i) => probes.push(HashableValue::new(Value::Decimal(Decimal::from_i64(*i)))),
+        Value::Int64(i) => push_integer_forms(&mut probes, *i),
         Value::Float64(f) => {
             if let Ok(d) = Decimal::from_f64(*f) {
                 probes.push(HashableValue::new(Value::Decimal(d)));
             }
+            push_float_forms(&mut probes, *f);
         }
         Value::Decimal(d) => {
-            probes.push(HashableValue::new(Value::Float64(d.to_f64())));
+            push_float_forms(&mut probes, d.to_f64());
             if d.floor() == *d
                 && let Some(integer) = d.trunc_to_i64()
             {
-                probes.push(HashableValue::new(Value::Int64(integer)));
+                push_integer_forms(&mut probes, integer);
             }
         }
         // A numeric string equals the decimal of the number it reads as:
@@ -196,48 +179,77 @@ fn probes(key: &Value) -> Vec<HashableValue> {
             if let Some(d) = decimal {
                 probes.push(HashableValue::new(Value::Decimal(d)));
             }
+            if let Ok(integer) = s.parse::<i64>() {
+                push_integer_forms(&mut probes, integer);
+            }
+            if let Ok(number) = s.parse::<f64>() {
+                push_float_forms(&mut probes, number);
+            }
         }
         _ => {}
     }
-    if let Value::String(s) = key
-        && let Ok(integer) = s.parse::<i64>()
-    {
-        probes.push(HashableValue::new(Value::Int64(integer)));
-    }
-    let Some(n) = number(key).filter(|n| n.is_finite()) else {
-        return probes;
-    };
-    for near in [n.floor(), n.ceil()] {
-        // The decimal string of an integral float is its digits, so it
-        // parses as the integer.
-        if (near - n).abs() < f64::EPSILON
-            && near.abs() <= EXACT_INTEGERS
-            && let Ok(integer) = near.to_string().parse::<i64>()
-        {
-            probes.push(HashableValue::new(Value::Int64(integer)));
-        }
-    }
-    if n.abs() >= EXACT_FROM {
-        probes.push(HashableValue::new(Value::Float64(n)));
-        probes.push(HashableValue::new(Value::from(n.to_string())));
-    }
     probes
+}
+
+/// The forms of an integer: itself, its decimal and its text, and the forms
+/// of the float of exactly its value, if there is one.
+fn push_integer_forms(probes: &mut Vec<HashableValue>, integer: i64) {
+    probes.push(HashableValue::new(Value::Int64(integer)));
+    probes.push(HashableValue::new(Value::Decimal(Decimal::from_i64(
+        integer,
+    ))));
+    probes.push(HashableValue::new(Value::from(integer.to_string())));
+    #[allow(
+        clippy::cast_precision_loss,
+        reason = "the float is kept only when it is exactly the integer"
+    )]
+    let float = integer as f64;
+    if crate::execution::operators::value_utils::int_equals_float(integer, float) {
+        push_float_forms(probes, float);
+    }
+}
+
+/// The forms of a float `=` may find equal: the float (both zeros for a
+/// zero) and its shortest text, and for a whole float in the `i64` range its
+/// integer and that integer's text. NaN equals nothing, so it has no forms.
+fn push_float_forms(probes: &mut Vec<HashableValue>, float: f64) {
+    // 2^63 as f64 is exact; every integral float in [-2^63, 2^63) fits i64.
+    const LIMIT: f64 = 9_223_372_036_854_775_808.0;
+    if float.is_nan() {
+        return;
+    }
+    if float == 0.0 {
+        probes.push(HashableValue::new(Value::Float64(0.0)));
+        probes.push(HashableValue::new(Value::Float64(-0.0)));
+    } else {
+        probes.push(HashableValue::new(Value::Float64(float)));
+    }
+    probes.push(HashableValue::new(Value::from(float.to_string())));
+    if float.fract() == 0.0 && (-LIMIT..LIMIT).contains(&float) {
+        #[allow(
+            clippy::cast_possible_truncation,
+            reason = "float is integral and within [-2^63, 2^63), checked above, so the cast is exact"
+        )]
+        let integer = float as i64;
+        probes.push(HashableValue::new(Value::Int64(integer)));
+        probes.push(HashableValue::new(Value::from(integer.to_string())));
+    }
 }
 
 /// Whether the probes of every key `=` finds equal to `value` find `value`
 /// itself.
 fn is_found_by_probes(value: &Value) -> bool {
     match value {
-        // Every key `=` finds equal to an integer probes it, up to 2^53:
-        // beyond, the integer shares its float with other integers.
-        Value::Int64(i) => i.unsigned_abs() <= 1 << 53,
-        // A float below 2 is within EPSILON of others; NaN and the
-        // infinities equal no number.
-        Value::Float64(f) => !f.is_finite() || f.abs() >= EXACT_FROM,
-        // A number in its own decimal spelling is a probe of its class; a
-        // string that is no number equals only itself.
-        Value::String(s) => match s.parse::<f64>() {
-            Ok(n) if n.is_finite() => n.abs() >= EXACT_FROM && n.to_string() == s.as_str(),
+        // Integers, floats and decimals are among the forms of every number
+        // equal to them; NaN equals nothing.
+        Value::Int64(_) | Value::Float64(_) | Value::Decimal(_) => true,
+        // A number is found in its canonical text (`'42'`, `'0.3'`, `'-0'`
+        // for the float, `'0'` for the integer); other spellings (`'042'`,
+        // `'42.0'`, `'4.2e1'`) wait in the side table. A string that is no
+        // number equals only itself.
+        Value::String(s) => match (s.parse::<i64>(), s.parse::<f64>()) {
+            (Ok(integer), _) => integer.to_string() == s.as_str(),
+            (Err(_), Ok(n)) if !n.is_nan() => n.to_string() == s.as_str(),
             _ => true,
         },
         // Elements compare by `=` too.
@@ -318,7 +330,7 @@ mod tests {
     }
 
     #[test]
-    fn numbers_below_two_meet_their_close_neighbours() {
+    fn close_numbers_do_not_meet() {
         let index = index(&[
             Value::Float64(0.1 + 0.2),
             Value::Float64(0.3),
@@ -326,12 +338,49 @@ mod tests {
             Value::Float64(0.999_999_999_999_999_9),
             Value::Int64(88),
         ]);
-        // 0.1 + 0.2 is within EPSILON of 0.3: both found, 88 not.
-        let small = found(&index, Value::Float64(0.3));
-        assert!(small.contains(&0) && small.contains(&1), "{small:?}");
-        assert!(!small.contains(&4));
-        let one = found(&index, Value::Int64(1));
-        assert!(one.contains(&2) && one.contains(&3), "{one:?}");
+        // 0.1 + 0.2 is 0.30000000000000004, not 0.3.
+        assert_eq!(found(&index, Value::Float64(0.3)), vec![1]);
+        assert_eq!(found(&index, Value::Float64(0.1 + 0.2)), vec![0]);
+        assert_eq!(found(&index, Value::Int64(1)), vec![2]);
+        assert_eq!(found(&index, Value::Float64(1.0)), vec![2]);
+        assert!(index.others_by_class.is_empty());
+    }
+
+    #[test]
+    fn zero_meets_negative_zero_and_nan_meets_nothing() {
+        let index = index(&[
+            Value::Float64(0.0),
+            Value::Float64(-0.0),
+            Value::Int64(0),
+            Value::Float64(f64::NAN),
+            Value::Float64(1e-300),
+        ]);
+        assert_eq!(found(&index, Value::Float64(0.0)), vec![0, 1, 2]);
+        assert_eq!(found(&index, Value::Float64(-0.0)), vec![0, 1, 2]);
+        assert_eq!(found(&index, Value::Int64(0)), vec![0, 1, 2]);
+        assert_eq!(found(&index, Value::Float64(1e-300)), vec![4]);
+        // The key itself is a probe, so the stored NaN is a candidate the
+        // filter then refuses; no other number finds it.
+        assert!(!found(&index, Value::Int64(0)).contains(&3));
+    }
+
+    #[test]
+    fn large_integers_meet_only_a_float_of_exactly_their_value() {
+        let above = (1_i64 << 53) + 1;
+        let index = index(&[
+            Value::Int64(above),
+            Value::Float64(9_007_199_254_740_992.0),
+            Value::Int64(1 << 53),
+            Value::from(above.to_string()),
+        ]);
+        // 2^53 + 1 has no float of its value.
+        assert_eq!(found(&index, Value::Int64(above)), vec![0, 3]);
+        assert_eq!(
+            found(&index, Value::Float64(9_007_199_254_740_992.0)),
+            vec![1, 2]
+        );
+        assert_eq!(found(&index, Value::Int64(1 << 53)), vec![1, 2]);
+        assert!(index.others_by_class.is_empty());
     }
 
     #[test]
@@ -342,12 +391,13 @@ mod tests {
         assert!(index.others_by_class.is_empty());
         assert_eq!(found(&index, Value::Int64(1)), vec![1, 2]);
         assert_eq!(found(&index, Value::Int64(0)), vec![0]);
+        assert_eq!(found(&index, Value::Float64(1.0)), vec![1, 2]);
+        assert_eq!(found(&index, Value::from("1")), vec![1, 2]);
         assert_eq!(
             found(&index, Value::Float64(0.999_999_999_999_999_9)),
-            vec![1, 2]
+            Vec::<u64>::new()
         );
-        assert_eq!(found(&index, Value::from("1")), vec![1, 2]);
-        assert_eq!(found(&index, Value::Float64(1e-300)), vec![0]);
+        assert_eq!(found(&index, Value::Float64(1e-300)), Vec::<u64>::new());
     }
 
     #[test]
@@ -366,24 +416,31 @@ mod tests {
     fn values_the_probes_find_need_no_side_table() {
         for value in [
             Value::Int64(42),
-            // A flag of 0 or 1: the integers near a key are probes.
             Value::Int64(0),
             Value::Int64(1),
             Value::Int64(-1 << 53),
+            Value::Int64((1 << 53) + 1),
+            Value::Int64(i64::MIN),
             Value::Float64(42.5),
+            Value::Float64(0.3),
+            Value::Float64(-0.0),
+            Value::Float64(f64::NAN),
+            Value::Float64(f64::INFINITY),
             Value::from("42"),
             Value::from("42.5"),
+            Value::from("0.3"),
             Value::from("abc"),
+            Value::from("NaN"),
             Value::Bool(true),
         ] {
             assert!(is_found_by_probes(&value), "{value:?}");
         }
         for value in [
-            Value::Int64((1 << 53) + 1),
-            Value::Float64(0.3),
             Value::from("042"),
             Value::from("42.0"),
-            Value::from("0.3"),
+            Value::from("0.30"),
+            Value::from("4.2e1"),
+            Value::from("-0"),
             Value::List(vec![Value::Int64(42)].into()),
         ] {
             assert!(!is_found_by_probes(&value), "{value:?}");

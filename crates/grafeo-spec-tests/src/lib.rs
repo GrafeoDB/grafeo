@@ -333,6 +333,42 @@ pub fn assert_hash(result: &QueryResult, expected_hash: &str) {
     );
 }
 
+/// Assert that the last statement failed as an error case expects: its
+/// message contains `message` and its GQLSTATUS is `gql_status`, for each
+/// that is given.
+///
+/// # Panics
+///
+/// Panics if the statement succeeded, if the message lacks `message`, or if
+/// the error's GQLSTATUS is not `gql_status`.
+pub fn assert_error(result: Result<QueryResult>, message: Option<&str>, gql_status: Option<&str>) {
+    let expected = match (message, gql_status) {
+        (Some(message), Some(status)) => {
+            format!("error containing '{message}' with GQLSTATUS {status}")
+        }
+        (Some(message), None) => format!("error containing '{message}'"),
+        (None, Some(status)) => format!("error with GQLSTATUS {status}"),
+        (None, None) => "an error".to_string(),
+    };
+    let Err(error) = result else {
+        panic!("Expected {expected} but query succeeded");
+    };
+    let text = error.to_string();
+    if let Some(message) = message {
+        assert!(
+            text.contains(message),
+            "Error '{text}' does not contain '{message}'"
+        );
+    }
+    if let Some(status) = gql_status {
+        let actual = grafeo_common::utils::GqlStatus::from(&error).to_string();
+        assert_eq!(
+            actual, status,
+            "Error '{text}' has GQLSTATUS {actual}, expected {status}"
+        );
+    }
+}
+
 // Include the generated test code
 #[cfg(test)]
 mod generated {

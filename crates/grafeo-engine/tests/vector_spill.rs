@@ -55,7 +55,7 @@ fn embedding(db: &GrafeoDB, id: grafeo_common::types::NodeId) -> Option<Vec<f32>
 /// An embedding changed while its column is spilled wins over the spilled
 /// one when the column is reloaded.
 #[test]
-#[cfg(all(feature = "vector-index", feature = "mmap", not(feature = "temporal")))]
+#[cfg(all(feature = "vector-index", feature = "mmap"))]
 fn an_embedding_updated_while_spilled_wins() {
     let dir = tempfile::TempDir::new().unwrap();
     let db = force_disk_db(&dir.path().join("updated.grafeo"));
@@ -65,8 +65,14 @@ fn an_embedding_updated_while_spilled_wins() {
     let moved = vec![0.0, 0.0, 0.0, 1.0];
     db.set_node_property(ids[0], "embedding", Value::Vector(moved.clone().into()))
         .unwrap();
+    // The write brings its row group's column back (a write thaws a spilled
+    // column, #412 decision Q9); a reload has nothing left to bring back.
+    assert_eq!(
+        db.store().spilled_node_property_columns(),
+        Vec::<grafeo_common::types::PropertyKey>::new()
+    );
 
-    assert!(db.reload_eligible(1.0) > 0);
+    db.reload_eligible(1.0);
     assert_eq!(embedding(&db, ids[0]), Some(moved));
     assert_eq!(embedding(&db, ids[1]), Some(vec![1.0, 0.1, 0.0, 0.0]));
 }
@@ -74,12 +80,7 @@ fn an_embedding_updated_while_spilled_wins() {
 /// Closed while spilled: the database file holds every embedding (the spill
 /// cache is gone), and one changed while spilled is the one it holds.
 #[test]
-#[cfg(all(
-    feature = "vector-index",
-    feature = "mmap",
-    feature = "grafeo-file",
-    not(feature = "temporal")
-))]
+#[cfg(all(feature = "vector-index", feature = "mmap", feature = "grafeo-file"))]
 fn an_embedding_updated_while_spilled_wins_after_a_reopen() {
     let dir = tempfile::TempDir::new().unwrap();
     let path = dir.path().join("closed.grafeo");
@@ -105,7 +106,7 @@ fn an_embedding_updated_while_spilled_wins_after_a_reopen() {
 }
 
 #[test]
-#[cfg(all(feature = "vector-index", feature = "mmap", not(feature = "temporal")))]
+#[cfg(all(feature = "vector-index", feature = "mmap"))]
 fn force_disk_spills_and_search_works() {
     let dir = tempfile::TempDir::new().unwrap();
     let db_path = dir.path().join("spill_test.grafeo");
@@ -167,7 +168,7 @@ fn force_disk_spills_and_search_works() {
 }
 
 #[test]
-#[cfg(all(feature = "vector-index", feature = "mmap", not(feature = "temporal")))]
+#[cfg(all(feature = "vector-index", feature = "mmap"))]
 fn spill_with_no_vectors_is_noop() {
     let dir = tempfile::TempDir::new().unwrap();
     let db_path = dir.path().join("noop_test.grafeo");
@@ -188,12 +189,7 @@ fn spill_with_no_vectors_is_noop() {
 }
 
 #[test]
-#[cfg(all(
-    feature = "vector-index",
-    feature = "mmap",
-    feature = "grafeo-file",
-    not(feature = "temporal")
-))]
+#[cfg(all(feature = "vector-index", feature = "mmap", feature = "grafeo-file"))]
 fn checkpoint_after_spill_preserves_non_vector_data() {
     let dir = tempfile::TempDir::new().unwrap();
     let db_path = dir.path().join("checkpoint_spill.grafeo");

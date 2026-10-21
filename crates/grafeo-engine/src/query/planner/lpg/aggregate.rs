@@ -589,7 +589,7 @@ mod tests {
         Projection,
     };
     use crate::transaction::TransactionManager;
-    use grafeo_core::graph::lpg::LpgStore;
+    use grafeo_core::graph::rowgroup::RowGroupStore;
     use grafeo_core::graph::{GraphStoreMut, GraphStoreSearch};
     use std::sync::Arc;
 
@@ -618,7 +618,7 @@ mod tests {
     /// `tests/pattern_after_write.rs` check the count).
     #[test]
     fn a_count_over_a_chain_from_a_written_node_is_planned_factorized() {
-        let store = Arc::new(LpgStore::new().unwrap());
+        let store = Arc::new(RowGroupStore::new());
         let transaction_manager = Arc::new(TransactionManager::new());
         let transaction_id = transaction_manager.begin();
         let epoch = transaction_manager.current_epoch();

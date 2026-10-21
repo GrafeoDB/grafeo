@@ -204,8 +204,16 @@ fn assert_each_label_reads_its_nodes(db: &GrafeoDB, stage: &str, nodes: &[(&str,
             expected,
             "{stage}: a {label} count"
         );
+        // The store's label lists without a view hold every version's
+        // members for a reader to check; at the database's epoch they hold
+        // the label's nodes then.
         assert_eq!(
-            store.nodes_by_label(label).len(),
+            store
+                .nodes_by_label_at(
+                    label,
+                    grafeo_common::types::ReadView::committed(db.current_epoch())
+                )
+                .len(),
             names.len(),
             "{stage}: the store's {label} index"
         );

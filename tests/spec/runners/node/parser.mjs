@@ -250,7 +250,7 @@ function parseSingleTest(ctx) {
 // ---------------------------------------------------------------------------
 
 function makeExpect() {
-  return { rows: [], ordered: false, count: null, empty: false, error: null, hash: null, precision: null, columns: [] }
+  return { rows: [], ordered: false, count: null, empty: false, error: null, gqlStatus: null, hash: null, precision: null, columns: [] }
 }
 
 function parseExpectBlock(ctx) {
@@ -271,6 +271,7 @@ function parseExpectBlock(ctx) {
       case 'count': expect.count = parseInt(value, 10); ctx.idx++; break
       case 'empty': expect.empty = value === 'true'; ctx.idx++; break
       case 'error': expect.error = unquote(value); ctx.idx++; break
+      case 'gql_status': expect.gqlStatus = unquote(value); ctx.idx++; break
       case 'hash': expect.hash = unquote(value); ctx.idx++; break
       case 'precision': expect.precision = parseInt(value, 10); ctx.idx++; break
       case 'columns': expect.columns = parseYamlList(value); ctx.idx++; break

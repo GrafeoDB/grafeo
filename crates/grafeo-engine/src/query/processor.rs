@@ -15,7 +15,7 @@ use grafeo_common::utils::error::{Error, Result};
 use grafeo_core::execution::operators::{Recording, WriteTarget};
 use grafeo_core::graph::apply::{ChangeTarget, ExternalTarget};
 #[cfg(feature = "lpg")]
-use grafeo_core::graph::lpg::LpgStore;
+use grafeo_core::graph::rowgroup::RowGroupStore;
 use grafeo_core::graph::{GraphStoreMut, GraphStoreSearch};
 
 use crate::catalog::Catalog;
@@ -91,11 +91,11 @@ pub type QueryParams = HashMap<String, Value>;
 ///
 /// ```no_run
 /// # use std::sync::Arc;
-/// # use grafeo_core::graph::lpg::LpgStore;
+/// # use grafeo_core::graph::rowgroup::RowGroupStore;
 /// use grafeo_engine::query::processor::{QueryProcessor, QueryLanguage};
 ///
 /// # fn main() -> grafeo_common::utils::error::Result<()> {
-/// let store = Arc::new(LpgStore::new().unwrap());
+/// let store = Arc::new(RowGroupStore::new());
 /// let processor = QueryProcessor::for_lpg(store);
 /// let result = processor.process("MATCH (n:Person) RETURN n", QueryLanguage::Gql, None)?;
 /// # Ok(())
@@ -104,7 +104,7 @@ pub type QueryParams = HashMap<String, Value>;
 pub struct QueryProcessor {
     /// LPG store for property graph queries.
     #[cfg(feature = "lpg")]
-    lpg_store: Arc<LpgStore>,
+    lpg_store: Arc<RowGroupStore>,
     /// Graph store trait object for pluggable storage backends (read path).
     graph_store: Arc<dyn GraphStoreSearch>,
     /// Writable graph store (None when read-only).
@@ -123,17 +123,24 @@ pub struct QueryProcessor {
     /// The storage key of the graph the store holds (`None`: the default
     /// graph), see [`with_graph`](Self::with_graph).
     graph: Option<String>,
+    /// Whether the processor's own transaction manager follows the store's
+    /// epoch (see `for_lpg`).
+    follows_store_epoch: bool,
     /// RDF store for triple pattern queries (optional).
     #[cfg(feature = "triple-store")]
     rdf_store: Option<Arc<grafeo_core::graph::rdf::RdfStore>>,
 }
 
 impl QueryProcessor {
-    /// Creates a new query processor for LPG queries.
+    /// Creates a new query processor for LPG queries, with a transaction
+    /// manager of its own, which follows the store's epoch: a statement
+    /// outside a transaction reads every write the store committed before
+    /// it, the store's direct writes (`create_node` and the like, each at an
+    /// epoch of its own) included.
     #[cfg(feature = "lpg")]
     #[must_use]
-    pub fn for_lpg(store: Arc<LpgStore>) -> Self {
-        let optimizer = Optimizer::from_store(&store);
+    pub fn for_lpg(store: Arc<RowGroupStore>) -> Self {
+        let optimizer = Optimizer::from_graph_store(&*store);
         let graph_store = Arc::clone(&store) as Arc<dyn GraphStoreSearch>;
         let write_store = Some(Arc::clone(&store) as Arc<dyn GraphStoreMut>);
         let write_target = Some(WriteTarget::Store(
@@ -149,6 +156,7 @@ impl QueryProcessor {
             optimizer,
             transaction_context: None,
             graph: None,
+            follows_store_epoch: true,
             #[cfg(feature = "triple-store")]
             rdf_store: None,
         }
@@ -158,10 +166,10 @@ impl QueryProcessor {
     #[cfg(feature = "lpg")]
     #[must_use]
     pub fn for_lpg_with_transaction(
-        store: Arc<LpgStore>,
+        store: Arc<RowGroupStore>,
         transaction_manager: Arc<TransactionManager>,
     ) -> Self {
-        let optimizer = Optimizer::from_store(&store);
+        let optimizer = Optimizer::from_graph_store(&*store);
         let graph_store = Arc::clone(&store) as Arc<dyn GraphStoreSearch>;
         let write_store = Some(Arc::clone(&store) as Arc<dyn GraphStoreMut>);
         let write_target = Some(WriteTarget::Store(
@@ -177,6 +185,7 @@ impl QueryProcessor {
             optimizer,
             transaction_context: None,
             graph: None,
+            follows_store_epoch: false,
             #[cfg(feature = "triple-store")]
             rdf_store: None,
         }
@@ -198,7 +207,7 @@ impl QueryProcessor {
         ))));
         Ok(Self {
             #[cfg(feature = "lpg")]
-            lpg_store: Arc::new(LpgStore::new()?),
+            lpg_store: Arc::new(RowGroupStore::new()),
             graph_store: read_store,
             write_store: Some(store),
             write_target,
@@ -207,6 +216,7 @@ impl QueryProcessor {
             optimizer,
             transaction_context: None,
             graph: None,
+            follows_store_epoch: false,
             #[cfg(feature = "triple-store")]
             rdf_store: None,
         })
@@ -228,7 +238,7 @@ impl QueryProcessor {
             .map(|store| WriteTarget::External(Arc::new(ExternalTarget::new(Arc::clone(store)))));
         Ok(Self {
             #[cfg(feature = "lpg")]
-            lpg_store: Arc::new(LpgStore::new()?),
+            lpg_store: Arc::new(RowGroupStore::new()),
             graph_store: read_store,
             write_store,
             write_target,
@@ -237,6 +247,7 @@ impl QueryProcessor {
             optimizer,
             transaction_context: None,
             graph: None,
+            follows_store_epoch: false,
             #[cfg(feature = "triple-store")]
             rdf_store: None,
         })
@@ -366,6 +377,15 @@ impl QueryProcessor {
 
         // 4. Optimize the plan
         let optimized_plan = self.optimizer.optimize(logical_plan)?;
+
+        // A processor with its own transaction manager reads what the
+        // store's direct writes stamped (each at an epoch of its own) outside
+        // a transaction: its manager follows the store's epoch.
+        #[cfg(feature = "lpg")]
+        if self.follows_store_epoch && self.transaction_context.is_none() {
+            self.transaction_manager
+                .sync_epoch(self.lpg_store.current_epoch());
+        }
 
         // 4a. EXPLAIN: annotate pushdown hints and return the plan tree
         if optimized_plan.explain {
@@ -497,7 +517,7 @@ impl QueryProcessor {
     /// Returns a reference to the LPG store.
     #[cfg(feature = "lpg")]
     #[must_use]
-    pub fn lpg_store(&self) -> &Arc<LpgStore> {
+    pub fn lpg_store(&self) -> &Arc<RowGroupStore> {
         &self.lpg_store
     }
 
@@ -532,10 +552,10 @@ impl QueryProcessor {
     #[cfg(feature = "lpg")]
     #[must_use]
     pub fn with_rdf(
-        lpg_store: Arc<LpgStore>,
+        lpg_store: Arc<RowGroupStore>,
         rdf_store: Arc<grafeo_core::graph::rdf::RdfStore>,
     ) -> Self {
-        let optimizer = Optimizer::from_store(&lpg_store);
+        let optimizer = Optimizer::from_graph_store(&*lpg_store);
         let graph_store = Arc::clone(&lpg_store) as Arc<dyn GraphStoreSearch>;
         let write_store = Some(Arc::clone(&lpg_store) as Arc<dyn GraphStoreMut>);
         let write_target = Some(WriteTarget::Store(
@@ -551,6 +571,7 @@ impl QueryProcessor {
             optimizer,
             transaction_context: None,
             graph: None,
+            follows_store_epoch: false,
             rdf_store: Some(rdf_store),
         }
     }
@@ -1322,6 +1343,21 @@ fn substitute_in_expression(expr: &mut LogicalExpression, params: &QueryParams) 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use grafeo_common::types::{NodeId, PropertyKey};
+    use grafeo_core::graph::{GraphStore, GraphStoreMut};
+
+    /// A node with `labels` and the values `properties`.
+    fn with_props<const N: usize>(
+        store: &RowGroupStore,
+        labels: &[&str],
+        properties: [(&str, Value); N],
+    ) -> NodeId {
+        let properties: Vec<(PropertyKey, Value)> = properties
+            .into_iter()
+            .map(|(key, value)| (PropertyKey::new(key), value))
+            .collect();
+        store.create_node_with_props(labels, &properties)
+    }
 
     #[test]
     fn test_query_language_is_lpg() {
@@ -1335,7 +1371,7 @@ mod tests {
 
     #[test]
     fn test_processor_creation() {
-        let store = Arc::new(LpgStore::new().unwrap());
+        let store = Arc::new(RowGroupStore::new());
         let processor = QueryProcessor::for_lpg(store);
         assert_eq!(processor.lpg_store().node_count(), 0);
     }
@@ -1343,7 +1379,7 @@ mod tests {
     #[cfg(feature = "gql")]
     #[test]
     fn test_process_simple_gql() {
-        let store = Arc::new(LpgStore::new().unwrap());
+        let store = Arc::new(RowGroupStore::new());
         store.create_node(&["Person"]);
         store.create_node(&["Person"]);
 
@@ -1359,7 +1395,7 @@ mod tests {
     #[cfg(feature = "cypher")]
     #[test]
     fn test_process_simple_cypher() {
-        let store = Arc::new(LpgStore::new().unwrap());
+        let store = Arc::new(RowGroupStore::new());
         store.create_node(&["Person"]);
 
         let processor = QueryProcessor::for_lpg(store);
@@ -1373,10 +1409,10 @@ mod tests {
     #[cfg(feature = "gql")]
     #[test]
     fn test_process_with_params() {
-        let store = Arc::new(LpgStore::new().unwrap());
-        store.create_node_with_props(&["Person"], [("age", Value::Int64(25))]);
-        store.create_node_with_props(&["Person"], [("age", Value::Int64(35))]);
-        store.create_node_with_props(&["Person"], [("age", Value::Int64(45))]);
+        let store = Arc::new(RowGroupStore::new());
+        with_props(&store, &["Person"], [("age", Value::Int64(25))]);
+        with_props(&store, &["Person"], [("age", Value::Int64(35))]);
+        with_props(&store, &["Person"], [("age", Value::Int64(45))]);
 
         let processor = QueryProcessor::for_lpg(store);
 
@@ -1399,7 +1435,7 @@ mod tests {
     #[cfg(feature = "gql")]
     #[test]
     fn test_missing_param_error() {
-        let store = Arc::new(LpgStore::new().unwrap());
+        let store = Arc::new(RowGroupStore::new());
         store.create_node(&["Person"]);
 
         let processor = QueryProcessor::for_lpg(store);
@@ -1426,9 +1462,9 @@ mod tests {
     #[test]
     fn test_params_in_filter_with_property() {
         // Tests parameter substitution in WHERE clause with property comparison
-        let store = Arc::new(LpgStore::new().unwrap());
-        store.create_node_with_props(&["Num"], [("value", Value::Int64(10))]);
-        store.create_node_with_props(&["Num"], [("value", Value::Int64(20))]);
+        let store = Arc::new(RowGroupStore::new());
+        with_props(&store, &["Num"], [("value", Value::Int64(10))]);
+        with_props(&store, &["Num"], [("value", Value::Int64(20))]);
 
         let processor = QueryProcessor::for_lpg(store);
 
@@ -1453,16 +1489,19 @@ mod tests {
     #[test]
     fn test_params_in_multiple_where_conditions() {
         // Tests multiple parameters in WHERE clause with AND
-        let store = Arc::new(LpgStore::new().unwrap());
-        store.create_node_with_props(
+        let store = Arc::new(RowGroupStore::new());
+        with_props(
+            &store,
             &["Person"],
             [("age", Value::Int64(25)), ("score", Value::Int64(80))],
         );
-        store.create_node_with_props(
+        with_props(
+            &store,
             &["Person"],
             [("age", Value::Int64(35)), ("score", Value::Int64(90))],
         );
-        store.create_node_with_props(
+        with_props(
+            &store,
             &["Person"],
             [("age", Value::Int64(45)), ("score", Value::Int64(70))],
         );
@@ -1489,10 +1528,22 @@ mod tests {
     #[test]
     fn test_params_with_in_list() {
         // Tests parameter as a value checked against IN list
-        let store = Arc::new(LpgStore::new().unwrap());
-        store.create_node_with_props(&["Item"], [("status", Value::String("active".into()))]);
-        store.create_node_with_props(&["Item"], [("status", Value::String("pending".into()))]);
-        store.create_node_with_props(&["Item"], [("status", Value::String("deleted".into()))]);
+        let store = Arc::new(RowGroupStore::new());
+        with_props(
+            &store,
+            &["Item"],
+            [("status", Value::String("active".into()))],
+        );
+        with_props(
+            &store,
+            &["Item"],
+            [("status", Value::String("pending".into()))],
+        );
+        with_props(
+            &store,
+            &["Item"],
+            [("status", Value::String("deleted".into()))],
+        );
 
         let processor = QueryProcessor::for_lpg(store);
 
@@ -1515,9 +1566,9 @@ mod tests {
     #[test]
     fn test_params_same_type_comparison() {
         // Tests that same-type parameter comparisons work correctly
-        let store = Arc::new(LpgStore::new().unwrap());
-        store.create_node_with_props(&["Data"], [("value", Value::Int64(100))]);
-        store.create_node_with_props(&["Data"], [("value", Value::Int64(50))]);
+        let store = Arc::new(RowGroupStore::new());
+        with_props(&store, &["Data"], [("value", Value::Int64(100))]);
+        with_props(&store, &["Data"], [("value", Value::Int64(50))]);
 
         let processor = QueryProcessor::for_lpg(store);
 
@@ -1541,7 +1592,7 @@ mod tests {
     #[test]
     fn test_process_empty_result_has_columns() {
         // Tests that empty results still have correct column names
-        let store = Arc::new(LpgStore::new().unwrap());
+        let store = Arc::new(RowGroupStore::new());
         // Don't create any nodes
 
         let processor = QueryProcessor::for_lpg(store);
@@ -1563,10 +1614,10 @@ mod tests {
     #[test]
     fn test_params_string_equality() {
         // Tests string parameter equality comparison
-        let store = Arc::new(LpgStore::new().unwrap());
-        store.create_node_with_props(&["Item"], [("name", Value::String("alpha".into()))]);
-        store.create_node_with_props(&["Item"], [("name", Value::String("beta".into()))]);
-        store.create_node_with_props(&["Item"], [("name", Value::String("gamma".into()))]);
+        let store = Arc::new(RowGroupStore::new());
+        with_props(&store, &["Item"], [("name", Value::String("alpha".into()))]);
+        with_props(&store, &["Item"], [("name", Value::String("beta".into()))]);
+        with_props(&store, &["Item"], [("name", Value::String("gamma".into()))]);
 
         let processor = QueryProcessor::for_lpg(store);
 
@@ -1590,13 +1641,18 @@ mod tests {
     fn test_params_in_exists_subquery() {
         // Regression: parameters inside EXISTS/COUNT/VALUE subqueries were not
         // substituted, causing type mismatches or silently wrong results.
-        let store = Arc::new(LpgStore::new().unwrap());
-        let alix =
-            store.create_node_with_props(&["Person"], [("name", Value::String("Alix".into()))]);
-        let gus =
-            store.create_node_with_props(&["Person"], [("name", Value::String("Gus".into()))]);
-        let _jules =
-            store.create_node_with_props(&["Person"], [("name", Value::String("Jules".into()))]);
+        let store = Arc::new(RowGroupStore::new());
+        let alix = with_props(
+            &store,
+            &["Person"],
+            [("name", Value::String("Alix".into()))],
+        );
+        let gus = with_props(&store, &["Person"], [("name", Value::String("Gus".into()))]);
+        let _jules = with_props(
+            &store,
+            &["Person"],
+            [("name", Value::String("Jules".into()))],
+        );
 
         // Alix follows Gus (but not Jules)
         store.create_edge(alix, gus, "FOLLOWS");

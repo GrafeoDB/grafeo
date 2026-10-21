@@ -2,20 +2,20 @@
 //! versions no reader needs any more, and the transaction manager's cleanup
 //! (#412 S6).
 //!
-//! A store that collects after every write (the row-group store, whose
-//! immediate writes keep what they replace and whose collect visits only
-//! the vectors written since the last one) collects right after each
-//! immediate call and commit, at the read horizon. `LpgStore`, which the
-//! engine runs on until the store switch, collects every `gc_interval`
-//! commits, as before: the store type's
-//! `COLLECTS_AFTER_EVERY_WRITE` decides, so the switch changes the type and
-//! nothing here. The transaction manager drops its finished transactions
-//! every `gc_interval` commits with either store; an interval of 0 turns
-//! that, and `LpgStore`'s collect, off.
+//! The row-group store collects after every write (its immediate writes
+//! keep what they replace, and its collect visits only the vectors written
+//! since the last one): it gets `gc_versions_after_write` after each
+//! immediate call and commit, at the collect horizon (the read horizon, or
+//! the start of the retention window of a database that keeps history when
+//! that is older), and collects when a collect is due for it (a bounded
+//! number of writes since its last collect, or the end of a reader that
+//! held that collect back). The store type's `COLLECTS_AFTER_EVERY_WRITE`
+//! decides it. The transaction manager drops its finished transactions
+//! every `gc_interval` commits; an interval of 0 turns that off.
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use grafeo_core::graph::lpg::LpgStore;
+use grafeo_core::graph::rowgroup::RowGroupStore;
 
 use crate::transaction::TransactionManager;
 
@@ -45,22 +45,28 @@ impl AfterWrite {
     /// runs after it, on the engine's store type.
     pub(crate) fn next(commits: &AtomicUsize, gc_interval: usize) -> Self {
         let count = commits.fetch_add(1, Ordering::Relaxed) + 1;
-        Self::after(count, gc_interval, LpgStore::COLLECTS_AFTER_EVERY_WRITE)
+        Self::after(
+            count,
+            gc_interval,
+            RowGroupStore::COLLECTS_AFTER_EVERY_WRITE,
+        )
     }
 
     /// Runs it after a call or a commit that wrote `stores`: the root store
     /// among them, so that its collect also covers what every named graph
-    /// lists once the root is a row-group store (its `gc_versions` does).
-    /// A store named twice collects once.
-    pub(crate) fn run(self, manager: &TransactionManager, stores: &[&LpgStore]) {
+    /// lists once the root is a row-group store (its
+    /// `gc_versions_after_write` does). A store named twice collects once.
+    pub(crate) fn run(self, manager: &TransactionManager, stores: &[&RowGroupStore]) {
         if self.collect {
-            let horizon = manager.read_horizon();
+            // The read horizon, or the start of the retention window when
+            // that is older (H2c).
+            let horizon = manager.collect_horizon();
             for (index, store) in stores.iter().enumerate() {
                 if !stores[..index]
                     .iter()
                     .any(|earlier| std::ptr::eq(*earlier, *store))
                 {
-                    store.gc_versions(horizon);
+                    store.gc_versions_after_write(horizon);
                 }
             }
         }

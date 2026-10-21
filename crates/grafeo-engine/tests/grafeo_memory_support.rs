@@ -7,7 +7,6 @@
 //! cargo test -p grafeo-engine --all-features --test grafeo_memory_support
 //! ```
 
-#[cfg(feature = "temporal")]
 use grafeo_common::types::NodeId;
 use grafeo_common::types::{PropertyKey, Value};
 use grafeo_engine::GrafeoDB;
@@ -334,13 +333,21 @@ mod filter_optimization {
 // Temporal property versioning API
 // =============================================================================
 
-#[cfg(feature = "temporal")]
 mod temporal_versioning {
     use super::*;
 
+    /// A database that keeps its history: the versioning API reads it.
+    fn history_db() -> GrafeoDB {
+        GrafeoDB::with_config(
+            grafeo_engine::Config::in_memory()
+                .with_history_retention(grafeo_engine::HistoryRetention::Forever),
+        )
+        .unwrap()
+    }
+
     #[test]
     fn get_node_property_at_epoch() {
-        let db = db();
+        let db = history_db();
         let s = db.session();
 
         s.execute("INSERT (:Person {name: 'Alix'})").unwrap();
@@ -351,17 +358,21 @@ mod temporal_versioning {
         let e2 = db.current_epoch();
 
         // At epoch 1, name should be Alix
-        let val = db.get_node_property_at_epoch(NodeId(0), "name", e1);
+        let val = db
+            .get_node_property_at_epoch(NodeId(0), "name", e1)
+            .unwrap();
         assert_eq!(val, Some(Value::String("Alix".into())));
 
         // At current epoch, name should be Alicia
-        let val = db.get_node_property_at_epoch(NodeId(0), "name", e2);
+        let val = db
+            .get_node_property_at_epoch(NodeId(0), "name", e2)
+            .unwrap();
         assert_eq!(val, Some(Value::String("Alicia".into())));
     }
 
     #[test]
     fn get_node_property_history() {
-        let db = db();
+        let db = history_db();
         let s = db.session();
 
         s.execute("INSERT (:Person {name: 'Alix'})").unwrap();
@@ -383,7 +394,7 @@ mod temporal_versioning {
 
     #[test]
     fn get_all_node_property_history() {
-        let db = db();
+        let db = history_db();
         let s = db.session();
 
         s.execute("INSERT (:Person {name: 'Alix', age: 30})")
@@ -410,31 +421,35 @@ mod temporal_versioning {
 
     #[test]
     fn property_at_epoch_returns_none_for_missing() {
-        let db = db();
+        let db = history_db();
         db.session()
             .execute("INSERT (:Person {name: 'Alix'})")
             .unwrap();
         let epoch = db.current_epoch();
 
         // Property that doesn't exist
-        let val = db.get_node_property_at_epoch(NodeId(0), "nonexistent", epoch);
+        let val = db
+            .get_node_property_at_epoch(NodeId(0), "nonexistent", epoch)
+            .unwrap();
         assert_eq!(val, None);
 
         // Node that doesn't exist
-        let val = db.get_node_property_at_epoch(NodeId(999), "name", epoch);
+        let val = db
+            .get_node_property_at_epoch(NodeId(999), "name", epoch)
+            .unwrap();
         assert_eq!(val, None);
     }
 
     #[test]
     fn property_history_empty_for_nonexistent() {
-        let db = db();
+        let db = history_db();
         let history = db.get_node_property_history(NodeId(999), "name");
         assert!(history.is_empty(), "{history:?}");
     }
 
     #[test]
     fn epochs_are_ascending() {
-        let db = db();
+        let db = history_db();
         let s = db.session();
 
         s.execute("INSERT (:Counter {val: 0})").unwrap();

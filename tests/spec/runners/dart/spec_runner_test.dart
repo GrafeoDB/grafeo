@@ -438,6 +438,7 @@ class _Expect {
   int? count;
   bool empty;
   String? error;
+  String? gqlStatus;
   String? hash;
   int? precision;
   List<String> columns;
@@ -448,6 +449,7 @@ class _Expect {
     this.count,
     this.empty = false,
     this.error,
+    this.gqlStatus,
     this.hash,
     this.precision,
     List<String>? columns,
@@ -692,6 +694,9 @@ _Expect _parseExpectBlock(_ParseContext ctx) {
         ctx.idx++;
       case 'error':
         e.error = _unquote(value);
+        ctx.idx++;
+      case 'gql_status':
+        e.gqlStatus = _unquote(value);
         ctx.idx++;
       case 'hash':
         e.hash = _unquote(value);
@@ -1012,8 +1017,8 @@ void _runTestCase(GrafeoDB db, _TestCase tc, String language,
   }
 
   // Error case
-  if (exp.error != null) {
-    _runErrorTest(db, language, queries, exp.error!,
+  if (exp.error != null || exp.gqlStatus != null) {
+    _runErrorTest(db, language, queries, exp.error, exp.gqlStatus,
         params: tc.params.isNotEmpty ? tc.params : null);
     return;
   }
@@ -1065,11 +1070,15 @@ void _runTestCase(GrafeoDB db, _TestCase tc, String language,
 }
 
 /// Run the error test path: execute queries expecting the last to throw.
+/// Runs [queries], expecting the last one to fail with an error whose message
+/// contains [expectedSubstring] and whose GQLSTATUS is [expectedStatus], for
+/// each that is given.
 void _runErrorTest(
   GrafeoDB db,
   String language,
   List<String> queries,
-  String expectedSubstring, {
+  String? expectedSubstring,
+  String? expectedStatus, {
   Map<String, String>? params,
 }) {
   // Execute all-but-last normally
@@ -1078,13 +1087,28 @@ void _runErrorTest(
   }
 
   // Last query should fail
+  final expected = [
+    if (expectedSubstring != null) "containing '$expectedSubstring'",
+    if (expectedStatus != null) 'with GQLSTATUS $expectedStatus',
+  ].join(' ');
   try {
     _executeQuery(db, language, queries.last, params: params);
-    fail("Expected error containing '$expectedSubstring' but query succeeded");
+    fail('Expected error $expected but query succeeded');
   } on GrafeoException catch (e) {
-    expect(e.message, contains(expectedSubstring),
-        reason:
-            "Error '${e.message}' does not contain '$expectedSubstring'");
+    if (expectedSubstring != null) {
+      expect(e.message, contains(expectedSubstring),
+          reason:
+              "Error '${e.message}' does not contain '$expectedSubstring'");
+    }
+    if (expectedStatus != null) {
+      // An error without a status fails the case: a status the binding does
+      // not expose is a gap, not a pass.
+      expect(e.gqlStatus, isNotNull,
+          reason: "Error '${e.message}' has no GQLSTATUS");
+      expect(e.gqlStatus, equals(expectedStatus),
+          reason: "Error '${e.message}' has GQLSTATUS ${e.gqlStatus}, "
+              'expected $expectedStatus');
+    }
   }
 }
 

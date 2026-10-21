@@ -1,0 +1,107 @@
+# Rosetta: numeric literal syntax in GQL and Cypher
+#
+# Decimal, hexadecimal (0x) and octal (0o) integers, a binary (0b) integer in
+# GQL, exponents in either case, leading zeros (decimal), signs, and the
+# 64-bit integer range: its bounds are literals, one past them is a syntax
+# error. GQL's 1.50 is an exact decimal and its suffixes F, D and M pick the
+# type (see decimal_numbers.gtest); Cypher's 1.50 is a float.
+
+meta:
+  model: lpg
+  section: rosetta
+  title: Numeric literal syntax cross-language equivalence
+  dataset: empty
+  requires: [cypher]
+
+tests:
+
+  - name: hexadecimal_and_octal_integers
+    variants:
+      gql: "RETURN 0x1F AS hex, 0o17 AS oct, -0x1F AS neg, 0x7FFFFFFFFFFFFFFF AS max"
+      cypher: "RETURN 0x1F AS hex, 0o17 AS oct, -0x1F AS neg, 0x7FFFFFFFFFFFFFFF AS max"
+    expect:
+      rows:
+        - [31, 15, -31, 9223372036854775807]
+
+  - name: a_binary_integer_in_gql
+    variants:
+      gql: "RETURN 0b101 AS bin"
+    expect:
+      rows:
+        - [5]
+
+  - name: leading_zeros_are_decimal
+    variants:
+      gql: "RETURN 017 AS a, 007 AS b"
+      cypher: "RETURN 017 AS a, 007 AS b"
+    expect:
+      rows:
+        - [17, 7]
+
+  - name: exponents_make_a_float
+    variants:
+      gql: "RETURN 1e3 AS a, 1E3 AS b, 1.5e-3 AS c, 2.5E+2 AS d"
+      cypher: "RETURN 1e3 AS a, 1E3 AS b, 1.5e-3 AS c, 2.5E+2 AS d"
+    expect:
+      rows:
+        - [1000, 1000, 0.0015, 250]
+
+  - name: the_bounds_of_the_integer_range_are_literals
+    variants:
+      gql: "RETURN 9223372036854775807 AS max, -9223372036854775808 AS min"
+      cypher: "RETURN 9223372036854775807 AS max, -9223372036854775808 AS min"
+    expect:
+      rows:
+        - [9223372036854775807, -9223372036854775808]
+
+  - name: an_integer_literal_past_the_range_is_a_syntax_error
+    variants:
+      gql: "RETURN 9223372036854775808 AS v"
+      cypher: "RETURN 9223372036854775808 AS v"
+    expect:
+      error: "Integer literal '9223372036854775808' overflows the valid range"
+      gql_status: "42001"
+
+  - name: a_point_makes_a_decimal_in_gql_and_a_float_in_cypher
+    variants:
+      gql: "RETURN 1.50 IS TYPED DECIMAL AS decimal"
+    expect:
+      rows:
+        - [true]
+
+  - name: a_cypher_number_with_a_point_is_a_float
+    variants:
+      cypher: "RETURN 1.50 AS v, 1.50 = 1.5 AS same"
+    expect:
+      rows:
+        - [1.5, true]
+
+  # ---------------------------------------------------------------------------
+  # Known gaps
+  # ---------------------------------------------------------------------------
+
+  - name: a_fraction_without_a_leading_digit
+    skip: "'.5' is a syntax error; ISO GQL and openCypher write a decimal as '.5' (inbox gql/numeric-literal-forms.md)"
+    variants:
+      gql: "RETURN .5 AS v"
+      cypher: "RETURN .5 AS v"
+    expect:
+      rows:
+        - [0.5]
+
+  - name: digit_separators
+    skip: "'1_000' is a syntax error; ISO GQL (and Neo4j 5 Cypher) allow '_' between digits (inbox gql/numeric-literal-forms.md)"
+    variants:
+      gql: "RETURN 1_000 AS a, 0x7F_FF AS b"
+      cypher: "RETURN 1_000 AS a, 0x7F_FF AS b"
+    expect:
+      rows:
+        - [1000, 32767]
+
+  - name: a_float_literal_past_the_float_range_is_an_error
+    skip: "'1e400' is Infinity; ISO GQL (22003) and openCypher ('too large') refuse it (inbox gql/numeric-literal-forms.md)"
+    variants:
+      gql: "RETURN 1e400 AS v"
+      cypher: "RETURN 1e400 AS v"
+    expect:
+      error: "1e400"

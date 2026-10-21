@@ -867,7 +867,9 @@ impl Binder {
                 Ok(())
             }
             // DDL operators don't need binding: they're handled before the binder
-            LogicalOperator::CreatePropertyGraph(_) => Ok(()),
+            LogicalOperator::CreatePropertyGraph(_) | LogicalOperator::DropPropertyGraph(_) => {
+                Ok(())
+            }
             // Procedure calls: register yielded columns as variables for downstream operators
             LogicalOperator::CallProcedure(call) => {
                 if let Some(yields) = &call.yield_items {
@@ -3682,6 +3684,8 @@ mod tests {
         let plan = LogicalPlan::new(LogicalOperator::CreatePropertyGraph(
             CreatePropertyGraphOp {
                 name: "social".to_string(),
+                or_replace: false,
+                if_not_exists: false,
                 node_tables: vec![],
                 edge_tables: vec![],
             },

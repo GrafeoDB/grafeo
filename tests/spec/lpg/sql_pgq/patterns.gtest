@@ -122,7 +122,9 @@ tests:
   # Graph name reference
   # ---------------------------------------------------------------------------
 
+  # GRAPH_TABLE (g, ...) reads the graph g, which does not exist here.
   - name: graph_name_reference
     query: "SELECT * FROM GRAPH_TABLE (social_graph, MATCH (a:Person) COLUMNS (a.name AS name))"
     expect:
-      count: 3
+      error: "Graph 'social_graph' does not exist"
+      gql_status: "42002"

@@ -175,6 +175,38 @@ FROM GRAPH_TABLE (
 
 This is equivalent to `OPTIONAL MATCH` in GQL/Cypher: people who do not manage a team still appear in the results with `team = NULL`.
 
+## Defining a Property Graph
+
+`CREATE PROPERTY GRAPH` defines a graph by its tables: a node table becomes a node type and its label, an edge table
+an edge type between the two node tables its `REFERENCES` columns name. The other columns are typed properties, and a
+`PRIMARY KEY` is the node type's key, unique and not null. The statement creates a closed graph type of these types
+and an empty graph of that type, both named as the property graph, so writes into the graph are checked against them.
+
+```sql
+CREATE PROPERTY GRAPH Shop
+    NODE TABLES (
+        Item (id BIGINT PRIMARY KEY, name VARCHAR, price DECIMAL(6, 2), made DATE),
+        Box (code VARCHAR PRIMARY KEY)
+    )
+    EDGE TABLES (
+        Holds (item BIGINT REFERENCES Item(id), box VARCHAR REFERENCES Box(code), qty INT)
+    )
+
+-- Read it: GRAPH_TABLE names the graph it reads
+SELECT * FROM GRAPH_TABLE (Shop MATCH (i:Item) COLUMNS (i.name AS name))
+
+-- Replace it, or keep the one there is
+CREATE OR REPLACE PROPERTY GRAPH Shop NODE TABLES (Item (sku VARCHAR PRIMARY KEY))
+CREATE PROPERTY GRAPH IF NOT EXISTS Shop NODE TABLES (Item (sku VARCHAR PRIMARY KEY))
+
+-- Drop the graph, its graph type and the node and edge types only it has
+DROP PROPERTY GRAPH [IF EXISTS] Shop
+```
+
+Without a graph name, `GRAPH_TABLE` reads the session's current graph. `BIGINT` and `INT` are 64-bit integers, `FLOAT`
+and `DOUBLE` 64-bit floats, and `VARCHAR(n)` a string whose length is not checked. `OR REPLACE` and `DROP` are refused
+while another graph has the graph type.
+
 ## Calling Procedures
 
 SQL/PGQ also supports `CALL` statements for invoking built-in graph algorithms:

@@ -182,7 +182,8 @@ struct IndexMetaV2 {
 /// Wraps a collection of `(key, Arc<VectorIndexKind>)` pairs and serializes
 /// their HNSW topologies for persistence.
 pub struct VectorStoreSection {
-    /// Vector indexes: (key, index) pairs from LpgStore::vector_index_entries()
+    /// Vector indexes: (key, index) pairs, as a store's
+    /// `vector_index_entries()` lists them.
     indexes: Vec<(String, Arc<VectorIndexKind>)>,
     /// The caps [`Section::write_to`] cuts the streams with, taken when the
     /// section is built.

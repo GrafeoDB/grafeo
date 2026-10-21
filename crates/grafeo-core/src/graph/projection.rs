@@ -726,10 +726,11 @@ impl GraphStoreSearch for GraphProjection {}
 #[cfg(feature = "lpg")]
 mod tests {
     use super::*;
-    use crate::graph::lpg::LpgStore;
+    use crate::graph::GraphStoreMut as _;
+    use crate::graph::rowgroup::RowGroupStore;
 
-    fn setup_social_graph() -> Arc<LpgStore> {
-        let store = Arc::new(LpgStore::new().unwrap());
+    fn setup_social_graph() -> Arc<RowGroupStore> {
+        let store = Arc::new(RowGroupStore::new());
         let alix = store.create_node(&["Person"]);
         let gus = store.create_node(&["Person"]);
         let amsterdam = store.create_node(&["City"]);
@@ -774,7 +775,7 @@ mod tests {
     /// Vincent is an `Admin` only, outside the projection of `Person`.
     #[test]
     fn nodes_by_label_holds_the_projected_nodes_with_any_label() {
-        let store = Arc::new(LpgStore::new().unwrap());
+        let store = Arc::new(RowGroupStore::new());
         let alix = store.create_node(&["Person", "Admin"]);
         let gus = store.create_node(&["Person"]);
         let vincent = store.create_node(&["Admin"]);
@@ -870,7 +871,7 @@ mod tests {
         let alix_id = store.node_ids()[0];
 
         // Without projection: Alix has 3 outgoing neighbors (Gus, Amsterdam, Grafeo)
-        let all_neighbors: Vec<_> = store.neighbors(alix_id, Direction::Outgoing).collect();
+        let all_neighbors: Vec<_> = store.neighbors(alix_id, Direction::Outgoing);
         assert_eq!(all_neighbors.len(), 3);
 
         // With Person-only projection: Alix -> Gus only
@@ -937,8 +938,8 @@ mod tests {
     }
 
     /// Helper: returns (node_ids, edge_ids) from the social graph.
-    fn setup_social_graph_with_ids() -> (Arc<LpgStore>, Vec<NodeId>, Vec<EdgeId>) {
-        let store = Arc::new(LpgStore::new().unwrap());
+    fn setup_social_graph_with_ids() -> (Arc<RowGroupStore>, Vec<NodeId>, Vec<EdgeId>) {
+        let store = Arc::new(RowGroupStore::new());
         let alix = store.create_node(&["Person"]);
         let gus = store.create_node(&["Person"]);
         let amsterdam = store.create_node(&["City"]);
@@ -999,9 +1000,8 @@ mod tests {
     fn get_node_versioned_respects_filter() {
         let (store, nodes, _) = setup_social_graph_with_ids();
         let spec = ProjectionSpec::new().with_node_labels(["Person"]);
+        let epoch = store.current_epoch();
         let proj = GraphProjection::new(store, spec);
-
-        let epoch = EpochId(0);
         let txn = TransactionId(0);
 
         // Person node visible
@@ -1014,9 +1014,8 @@ mod tests {
     fn get_edge_versioned_respects_filter() {
         let (store, _, edges) = setup_social_graph_with_ids();
         let spec = ProjectionSpec::new().with_edge_types(["KNOWS"]);
+        let epoch = store.current_epoch();
         let proj = GraphProjection::new(store, spec);
-
-        let epoch = EpochId(0);
         let txn = TransactionId(0);
 
         // KNOWS edge visible
@@ -1031,9 +1030,8 @@ mod tests {
     fn get_node_at_epoch_respects_filter() {
         let (store, nodes, _) = setup_social_graph_with_ids();
         let spec = ProjectionSpec::new().with_node_labels(["City"]);
+        let epoch = store.current_epoch();
         let proj = GraphProjection::new(store, spec);
-
-        let epoch = EpochId(0);
 
         // Amsterdam (City) visible
         assert!(proj.get_node_at_epoch(nodes[2], epoch).is_some());
@@ -1045,9 +1043,8 @@ mod tests {
     fn get_edge_at_epoch_respects_filter() {
         let (store, _, edges) = setup_social_graph_with_ids();
         let spec = ProjectionSpec::new().with_edge_types(["LIVES_IN"]);
+        let epoch = store.current_epoch();
         let proj = GraphProjection::new(store, spec);
-
-        let epoch = EpochId(0);
 
         // LIVES_IN edge visible
         assert!(proj.get_edge_at_epoch(edges[1], epoch).is_some());
@@ -1061,6 +1058,7 @@ mod tests {
     /// view, so the projection answers exactly when the inner store does.
     #[test]
     fn reads_at_a_view_forward_to_the_inner_store() {
+        use crate::graph::GraphStore as _;
         use crate::graph::conformance::{Tx, people};
         use crate::graph::rowgroup::RowGroupStore;
 
@@ -1150,6 +1148,7 @@ mod tests {
         assert!(!knows.is_edge_visible_at_epoch(edges[1], epoch), "LIVES_IN");
 
         assert!(store.delete_edge(edges[0]));
+        store.delete_node_edges(nodes[1]);
         assert!(store.delete_node(nodes[1]));
         let epoch = store.current_epoch();
         assert!(!people.is_node_visible_at_epoch(nodes[1], epoch), "deleted");
@@ -1197,35 +1196,6 @@ mod tests {
         assert_eq!(
             proj.try_get_node_property_batch(&ids, &key).unwrap(),
             proj.get_node_property_batch(&ids, &key)
-        );
-    }
-
-    /// The projection reads its nodes through the inner store's fallible
-    /// read: a spilled value that cannot be read is an error, not a missing
-    /// value. A node outside the projection is not read (#566 `key=`).
-    #[cfg(not(feature = "temporal"))]
-    #[test]
-    fn try_get_node_property_batch_reports_a_value_it_cannot_read() {
-        use crate::graph::lpg::test_backing::MemoryBacking;
-
-        let (store, nodes, _) = setup_social_graph_with_ids();
-        let key = PropertyKey::from("name");
-        let snapshot = store.node_property_column_entries(&key).unwrap();
-        let backing = MemoryBacking::of(&snapshot);
-        assert!(store.spill_node_property_column(&key, backing.clone(), &snapshot));
-        let spec = ProjectionSpec::new().with_node_labels(["Person"]);
-        let proj = GraphProjection::new(store, spec);
-
-        backing.fail_reads(true);
-        // Alix (Person), Amsterdam (City)
-        assert!(
-            proj.try_get_node_property_batch(&[nodes[0], nodes[2]], &key)
-                .is_err()
-        );
-        assert_eq!(
-            proj.try_get_node_property_batch(&[nodes[2]], &key).unwrap(),
-            vec![None],
-            "Amsterdam is outside the projection"
         );
     }
 
@@ -1750,7 +1720,7 @@ mod tests {
         let spec = ProjectionSpec::new();
         let proj = GraphProjection::new(store.clone(), spec);
 
-        // LpgStore default has no property indexes
+        // RowGroupStore default has no property indexes
         assert_eq!(
             proj.has_property_index("name"),
             store.has_property_index("name")

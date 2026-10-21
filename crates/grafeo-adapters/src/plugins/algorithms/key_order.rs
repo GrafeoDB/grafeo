@@ -138,14 +138,16 @@ pub fn order_by_key(
 #[cfg(all(test, feature = "lpg"))]
 mod tests {
     use super::*;
-    use grafeo_core::graph::lpg::LpgStore;
+    use grafeo_core::graph::GraphStoreMut as _;
+    use grafeo_core::graph::rowgroup::RowGroupStore;
 
-    fn store_with(keys: &[Option<Value>]) -> (LpgStore, Vec<NodeId>) {
-        let store = LpgStore::new().unwrap();
+    fn store_with(keys: &[Option<Value>]) -> (RowGroupStore, Vec<NodeId>) {
+        let store = RowGroupStore::new();
         let ids = keys
             .iter()
             .map(|key| match key {
-                Some(value) => store.create_node_with_props(&["Item"], [("key", value.clone())]),
+                Some(value) => store
+                    .create_node_with_props(&["Item"], &[(PropertyKey::new("key"), value.clone())]),
                 None => store.create_node(&["Item"]),
             })
             .collect();

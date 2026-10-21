@@ -9,7 +9,9 @@ use grafeo_common::utils::hash::{FxHashMap, FxHashSet};
 use grafeo_core::graph::Direction;
 use grafeo_core::graph::GraphStore;
 #[cfg(all(test, feature = "lpg"))]
-use grafeo_core::graph::lpg::LpgStore;
+use grafeo_core::graph::GraphStoreMut as _;
+#[cfg(all(test, feature = "lpg"))]
+use grafeo_core::graph::rowgroup::RowGroupStore;
 
 use super::super::{AlgorithmResult, ParameterDef, Parameters};
 use super::traits::{ComponentResultBuilder, GraphAlgorithm, impl_algorithm, visible_edges_from};
@@ -453,8 +455,8 @@ impl GraphAlgorithm for TopologicalSortAlgorithm {
 mod tests {
     use super::*;
 
-    fn create_dag() -> LpgStore {
-        let store = LpgStore::new().unwrap();
+    fn create_dag() -> RowGroupStore {
+        let store = RowGroupStore::new();
 
         // Create a DAG:
         //   0 -> 1 -> 3
@@ -476,8 +478,8 @@ mod tests {
         store
     }
 
-    fn create_cyclic_graph() -> LpgStore {
-        let store = LpgStore::new().unwrap();
+    fn create_cyclic_graph() -> RowGroupStore {
+        let store = RowGroupStore::new();
 
         // Create a cycle: 0 -> 1 -> 2 -> 0
         let n0 = store.create_node(&["Node"]);
@@ -491,8 +493,8 @@ mod tests {
         store
     }
 
-    fn create_disconnected_graph() -> LpgStore {
-        let store = LpgStore::new().unwrap();
+    fn create_disconnected_graph() -> RowGroupStore {
+        let store = RowGroupStore::new();
 
         // Two disconnected components: {0, 1} and {2, 3}
         let n0 = store.create_node(&["Node"]);

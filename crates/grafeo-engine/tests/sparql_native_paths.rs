@@ -664,7 +664,7 @@ fn processor_profile_reports_native_path_cardinality() {
 }
 
 #[test]
-fn unsupported_inner_repetition_returns_semantic_error() {
+fn unsupported_inner_repetition_is_an_unsupported_error() {
     let db = rdf_db();
     insert_data(&db, "e:s e:p e:a .");
     for path in ["(e:p+)*", "(!e:p)+"] {
@@ -673,7 +673,7 @@ fn unsupported_inner_repetition_returns_semantic_error() {
             .expect_err("unsupported path must not return a partial query result");
         assert_eq!(
             error.error_code(),
-            ErrorCode::QuerySemantic,
+            ErrorCode::QueryUnsupported,
             "{path}: {error}"
         );
     }

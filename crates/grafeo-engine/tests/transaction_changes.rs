@@ -240,8 +240,7 @@ fn fastest_micros(runs: usize, mut write: impl FnMut()) -> u128 {
 /// commit and rollback, each the fastest of 20 runs, in microseconds.
 fn write_costs(size: i64) -> [u128; 3] {
     let db = GrafeoDB::new_in_memory();
-    // Batches of 10,000: with `tiered-storage`, one transaction's versions
-    // must fit in one arena chunk.
+    // Batches of 10,000, one statement each.
     for first in (1..=size).step_by(10_000) {
         let last = (first + 9_999).min(size);
         db.execute(&format!(

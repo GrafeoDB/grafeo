@@ -1331,7 +1331,8 @@ impl Operator for ShortestPathOperator {
 #[cfg(all(test, feature = "lpg"))]
 mod tests {
     use super::*;
-    use crate::graph::lpg::LpgStore;
+    use crate::graph::rowgroup::RowGroupStore;
+    use crate::graph::{GraphStore as _, GraphStoreMut as _};
 
     /// A mock operator that returns source/target node pairs, one chunk per
     /// inner vector (empty ones are skipped).
@@ -1403,7 +1404,7 @@ mod tests {
 
     /// Searches outgoing paths of any edge type for the pairs in `chunks`.
     fn search(
-        store: &Arc<LpgStore>,
+        store: &Arc<RowGroupStore>,
         chunks: Vec<Vec<(NodeId, NodeId)>>,
         all_paths: bool,
         (min_hops, max_hops): (u32, Option<u32>),
@@ -1423,7 +1424,7 @@ mod tests {
 
     #[test]
     fn test_find_shortest_path_direct() {
-        let store = Arc::new(LpgStore::new().unwrap());
+        let store = Arc::new(RowGroupStore::new());
 
         // a -> b (1 hop)
         let a = store.create_node(&["Node"]);
@@ -1451,7 +1452,7 @@ mod tests {
 
     #[test]
     fn test_find_shortest_path_same_node() {
-        let store = Arc::new(LpgStore::new().unwrap());
+        let store = Arc::new(RowGroupStore::new());
         let a = store.create_node(&["Node"]);
 
         let input = Box::new(MockPairOperator::new(vec![(a, a)]));
@@ -1475,7 +1476,7 @@ mod tests {
 
     #[test]
     fn test_find_shortest_path_two_hops() {
-        let store = Arc::new(LpgStore::new().unwrap());
+        let store = Arc::new(RowGroupStore::new());
 
         // a -> b -> c (2 hops from a to c)
         let a = store.create_node(&["Node"]);
@@ -1504,7 +1505,7 @@ mod tests {
 
     #[test]
     fn test_find_shortest_path_no_path() {
-        let store = Arc::new(LpgStore::new().unwrap());
+        let store = Arc::new(RowGroupStore::new());
 
         // a and b are disconnected
         let a = store.create_node(&["Node"]);
@@ -1526,7 +1527,7 @@ mod tests {
 
     #[test]
     fn test_find_shortest_path_prefers_shorter() {
-        let store = Arc::new(LpgStore::new().unwrap());
+        let store = Arc::new(RowGroupStore::new());
 
         // Create two paths: a -> d (1 hop) and a -> b -> c -> d (3 hops)
         let a = store.create_node(&["Node"]);
@@ -1560,7 +1561,7 @@ mod tests {
 
     #[test]
     fn test_find_shortest_path_with_edge_type_filter() {
-        let store = Arc::new(LpgStore::new().unwrap());
+        let store = Arc::new(RowGroupStore::new());
 
         // a -KNOWS-> b -LIKES-> c
         let a = store.create_node(&["Node"]);
@@ -1585,7 +1586,7 @@ mod tests {
 
     #[test]
     fn test_all_shortest_paths_single_path() {
-        let store = Arc::new(LpgStore::new().unwrap());
+        let store = Arc::new(RowGroupStore::new());
 
         // a -> b (single path)
         let a = store.create_node(&["Node"]);
@@ -1609,7 +1610,7 @@ mod tests {
 
     #[test]
     fn test_all_shortest_paths_multiple_paths() {
-        let store = Arc::new(LpgStore::new().unwrap());
+        let store = Arc::new(RowGroupStore::new());
 
         // Create diamond: a -> b -> d and a -> c -> d (two paths of length 2)
         let a = store.create_node(&["Node"]);
@@ -1645,7 +1646,7 @@ mod tests {
 
     #[test]
     fn test_multiple_pairs_in_chunk() {
-        let store = Arc::new(LpgStore::new().unwrap());
+        let store = Arc::new(RowGroupStore::new());
 
         // Create: a -> b, c -> d
         let a = store.create_node(&["Node"]);
@@ -1676,7 +1677,7 @@ mod tests {
 
     #[test]
     fn test_operator_reset() {
-        let store = Arc::new(LpgStore::new().unwrap());
+        let store = Arc::new(RowGroupStore::new());
         let a = store.create_node(&["Node"]);
         let b = store.create_node(&["Node"]);
         store.create_edge(a, b, "KNOWS");
@@ -1705,7 +1706,7 @@ mod tests {
 
     #[test]
     fn test_operator_name() {
-        let store = Arc::new(LpgStore::new().unwrap());
+        let store = Arc::new(RowGroupStore::new());
         let input = Box::new(MockPairOperator::new(vec![]));
         let op = ShortestPathOperator::new(
             store.clone() as Arc<dyn GraphStoreSearch>,
@@ -1721,7 +1722,7 @@ mod tests {
 
     #[test]
     fn test_empty_input() {
-        let store = Arc::new(LpgStore::new().unwrap());
+        let store = Arc::new(RowGroupStore::new());
         let input = Box::new(MockPairOperator::new(vec![]));
         let mut op = ShortestPathOperator::new(
             store.clone() as Arc<dyn GraphStoreSearch>,
@@ -1739,7 +1740,7 @@ mod tests {
 
     #[test]
     fn test_all_shortest_paths_no_path() {
-        let store = Arc::new(LpgStore::new().unwrap());
+        let store = Arc::new(RowGroupStore::new());
 
         // Disconnected nodes
         let a = store.create_node(&["Node"]);
@@ -1761,7 +1762,7 @@ mod tests {
 
     #[test]
     fn test_all_shortest_paths_same_node() {
-        let store = Arc::new(LpgStore::new().unwrap());
+        let store = Arc::new(RowGroupStore::new());
         let a = store.create_node(&["Node"]);
 
         let input = Box::new(MockPairOperator::new(vec![(a, a)]));
@@ -1786,7 +1787,7 @@ mod tests {
 
     #[test]
     fn test_bidirectional_bfs_long_chain() {
-        let store = Arc::new(LpgStore::new().unwrap());
+        let store = Arc::new(RowGroupStore::new());
 
         // Chain: n0 -> n1 -> n2 -> ... -> n9 (9 hops)
         let nodes: Vec<NodeId> = (0..10).map(|_| store.create_node(&["Node"])).collect();
@@ -1811,7 +1812,7 @@ mod tests {
 
     #[test]
     fn test_bidirectional_bfs_diamond() {
-        let store = Arc::new(LpgStore::new().unwrap());
+        let store = Arc::new(RowGroupStore::new());
 
         // Diamond: a -> b -> d, a -> c -> d (two paths of length 2)
         let a = store.create_node(&["Node"]);
@@ -1841,7 +1842,7 @@ mod tests {
 
     #[test]
     fn test_bidirectional_bfs_no_path() {
-        let store = Arc::new(LpgStore::new().unwrap());
+        let store = Arc::new(RowGroupStore::new());
 
         let a = store.create_node(&["Node"]);
         let b = store.create_node(&["Node"]);
@@ -1862,7 +1863,7 @@ mod tests {
 
     #[test]
     fn test_bidirectional_bfs_same_node() {
-        let store = Arc::new(LpgStore::new().unwrap());
+        let store = Arc::new(RowGroupStore::new());
         let a = store.create_node(&["Node"]);
 
         let input = Box::new(MockPairOperator::new(vec![(a, a)]));
@@ -1882,7 +1883,7 @@ mod tests {
 
     #[test]
     fn test_bidirectional_bfs_prefers_shorter() {
-        let store = Arc::new(LpgStore::new().unwrap());
+        let store = Arc::new(RowGroupStore::new());
 
         let a = store.create_node(&["Node"]);
         let b = store.create_node(&["Node"]);
@@ -1913,7 +1914,7 @@ mod tests {
 
     #[test]
     fn test_bidirectional_bfs_with_edge_type_filter() {
-        let store = Arc::new(LpgStore::new().unwrap());
+        let store = Arc::new(RowGroupStore::new());
 
         // a -KNOWS-> b -LIKES-> c
         let a = store.create_node(&["Node"]);
@@ -1939,7 +1940,7 @@ mod tests {
     #[test]
     fn test_bidirectional_bfs_has_backward_adjacency() {
         // Default store has backward adjacency enabled
-        let store = Arc::new(LpgStore::new().unwrap());
+        let store = Arc::new(RowGroupStore::new());
         assert!(store.has_backward_adjacency());
 
         let a = store.create_node(&["Node"]);
@@ -1966,7 +1967,7 @@ mod tests {
 
     #[test]
     fn test_shortest_path_into_any() {
-        let store = Arc::new(LpgStore::new().unwrap());
+        let store = Arc::new(RowGroupStore::new());
         let input = Box::new(MockPairOperator::new(vec![]));
         let op = ShortestPathOperator::new(
             store.clone() as Arc<dyn GraphStoreSearch>,
@@ -1986,7 +1987,7 @@ mod tests {
     fn a_chunk_without_paths_does_not_end_the_output() {
         // a -> b; c is isolated. No pair in the first input chunk has a path,
         // the pair in the second one does.
-        let store = Arc::new(LpgStore::new().unwrap());
+        let store = Arc::new(RowGroupStore::new());
         let a = store.create_node(&["Node"]);
         let b = store.create_node(&["Node"]);
         let c = store.create_node(&["Node"]);
@@ -2004,7 +2005,7 @@ mod tests {
 
     #[test]
     fn zero_hop_minimum_keeps_the_zero_length_self_path() {
-        let store = Arc::new(LpgStore::new().unwrap());
+        let store = Arc::new(RowGroupStore::new());
         let a = store.create_node(&["Node"]);
 
         for all_paths in [false, true] {
@@ -2019,7 +2020,7 @@ mod tests {
     #[test]
     fn one_hop_minimum_excludes_the_zero_length_self_path() {
         // a has no edges, so no path of one or more hops leads back to it
-        let store = Arc::new(LpgStore::new().unwrap());
+        let store = Arc::new(RowGroupStore::new());
         let a = store.create_node(&["Node"]);
 
         for all_paths in [false, true] {
@@ -2034,7 +2035,7 @@ mod tests {
     #[test]
     fn one_hop_minimum_finds_the_shortest_cycle() {
         // a -> b -> a (2 hops) and a -> c -> d -> a (3 hops)
-        let store = Arc::new(LpgStore::new().unwrap());
+        let store = Arc::new(RowGroupStore::new());
         let a = store.create_node(&["Node"]);
         let b = store.create_node(&["Node"]);
         let c = store.create_node(&["Node"]);
@@ -2056,7 +2057,7 @@ mod tests {
 
     #[test]
     fn a_self_loop_is_a_one_hop_cycle() {
-        let store = Arc::new(LpgStore::new().unwrap());
+        let store = Arc::new(RowGroupStore::new());
         let a = store.create_node(&["Node"]);
         store.create_edge(a, a, "KNOWS");
 
@@ -2072,7 +2073,7 @@ mod tests {
     #[test]
     fn all_shortest_cycles_are_returned() {
         // a -> b -> d -> a and a -> c -> d -> a: two shortest cycles of 3 hops
-        let store = Arc::new(LpgStore::new().unwrap());
+        let store = Arc::new(RowGroupStore::new());
         let a = store.create_node(&["Node"]);
         let b = store.create_node(&["Node"]);
         let c = store.create_node(&["Node"]);
@@ -2097,7 +2098,7 @@ mod tests {
     fn minimum_above_the_shortest_distance() {
         // Triangle a -> b -> c -> a: b is 1 hop from a, and 4 hops when the
         // path has to go around the triangle once more.
-        let store = Arc::new(LpgStore::new().unwrap());
+        let store = Arc::new(RowGroupStore::new());
         let a = store.create_node(&["Node"]);
         let b = store.create_node(&["Node"]);
         let c = store.create_node(&["Node"]);
@@ -2128,7 +2129,7 @@ mod tests {
     #[test]
     fn maximum_drops_longer_paths() {
         // a -> b -> c
-        let store = Arc::new(LpgStore::new().unwrap());
+        let store = Arc::new(RowGroupStore::new());
         let a = store.create_node(&["Node"]);
         let b = store.create_node(&["Node"]);
         let c = store.create_node(&["Node"]);
@@ -2187,7 +2188,7 @@ mod tests {
 
     /// An operator over `pairs` that outputs paths.
     fn path_search(
-        store: &Arc<LpgStore>,
+        store: &Arc<RowGroupStore>,
         pairs: Vec<(NodeId, NodeId)>,
         all_paths: bool,
         (min_hops, max_hops): (u32, Option<u32>),
@@ -2208,7 +2209,7 @@ mod tests {
     #[test]
     fn the_shortest_path_is_written_node_by_node_and_edge_by_edge() {
         // a -> b -> c -> d and the shortcut a -> c
-        let store = Arc::new(LpgStore::new().unwrap());
+        let store = Arc::new(RowGroupStore::new());
         let a = store.create_node(&["Node"]);
         let b = store.create_node(&["Node"]);
         let c = store.create_node(&["Node"]);
@@ -2236,7 +2237,7 @@ mod tests {
     fn the_one_way_search_finds_the_same_path() {
         // a -> b -> c -> d and the shortcut a -> c. A store without backward
         // adjacency searches one way only: the same path, edge by edge.
-        let store = Arc::new(LpgStore::new().unwrap());
+        let store = Arc::new(RowGroupStore::new());
         let a = store.create_node(&["Node"]);
         let b = store.create_node(&["Node"]);
         let c = store.create_node(&["Node"]);
@@ -2270,7 +2271,7 @@ mod tests {
     #[test]
     fn all_shortest_paths_are_each_written_with_their_own_edges() {
         // Diamond a -> b -> d, a -> c -> d, and a second edge c -> d
-        let store = Arc::new(LpgStore::new().unwrap());
+        let store = Arc::new(RowGroupStore::new());
         let a = store.create_node(&["Node"]);
         let b = store.create_node(&["Node"]);
         let c = store.create_node(&["Node"]);
@@ -2300,7 +2301,7 @@ mod tests {
     fn a_path_past_a_minimum_is_written_from_its_first_steps() {
         // Triangle a -> b -> c -> a: from a to b in at least 2 hops goes round
         // once more, a -> b -> c -> a -> b
-        let store = Arc::new(LpgStore::new().unwrap());
+        let store = Arc::new(RowGroupStore::new());
         let a = store.create_node(&["Node"]);
         let b = store.create_node(&["Node"]);
         let c = store.create_node(&["Node"]);
@@ -2345,7 +2346,7 @@ mod tests {
     #[test]
     fn the_edge_condition_holds_for_every_edge_of_the_path() {
         // a -> b -> c -> d and the shortcut a -> c
-        let store = Arc::new(LpgStore::new().unwrap());
+        let store = Arc::new(RowGroupStore::new());
         let a = store.create_node(&["Node"]);
         let b = store.create_node(&["Node"]);
         let c = store.create_node(&["Node"]);
@@ -2382,7 +2383,7 @@ mod tests {
     #[test]
     fn the_edge_condition_reads_the_input_row() {
         // Two parallel edges a -> b; each input row names one of them
-        let store = Arc::new(LpgStore::new().unwrap());
+        let store = Arc::new(RowGroupStore::new());
         let a = store.create_node(&["Node"]);
         let b = store.create_node(&["Node"]);
         let first = store.create_edge(a, b, "KNOWS");
@@ -2444,7 +2445,7 @@ mod tests {
     #[test]
     fn the_edge_column_holds_the_list_or_the_one_edge() {
         // a -> b -> c
-        let store = Arc::new(LpgStore::new().unwrap());
+        let store = Arc::new(RowGroupStore::new());
         let a = store.create_node(&["Node"]);
         let b = store.create_node(&["Node"]);
         let c = store.create_node(&["Node"]);
@@ -2517,7 +2518,7 @@ mod tests {
     /// A search over `pairs` (from the first node of each to every node with
     /// `to_every_node`) that keeps `selection` among the paths of `mode`.
     fn selective_search(
-        store: &Arc<LpgStore>,
+        store: &Arc<RowGroupStore>,
         pairs: Vec<(NodeId, NodeId)>,
         to_every_node: bool,
         direction: Direction,
@@ -2550,7 +2551,7 @@ mod tests {
     #[test]
     fn shortest_k_keeps_the_k_shortest_walks_of_a_pair() {
         // a -> b -> d, a -> c -> d, and b -> c: walks a to d of 2, 2 and 3
-        let store = Arc::new(LpgStore::new().unwrap());
+        let store = Arc::new(RowGroupStore::new());
         let a = store.create_node(&["Node"]);
         let b = store.create_node(&["Node"]);
         let c = store.create_node(&["Node"]);
@@ -2598,7 +2599,7 @@ mod tests {
     #[test]
     fn a_walk_search_without_a_maximum_ends_on_a_cycle() {
         // a -> b -> c -> a: each node is reached once every three edges
-        let store = Arc::new(LpgStore::new().unwrap());
+        let store = Arc::new(RowGroupStore::new());
         let a = store.create_node(&["Node"]);
         let b = store.create_node(&["Node"]);
         let c = store.create_node(&["Node"]);
@@ -2637,7 +2638,7 @@ mod tests {
     fn a_walk_search_takes_every_step_below_the_minimum() {
         // a <-> b and b -> c: walks a to c of at least 3 edges go back and
         // forth first, 4 and 6 edges long
-        let store = Arc::new(LpgStore::new().unwrap());
+        let store = Arc::new(RowGroupStore::new());
         let a = store.create_node(&["Node"]);
         let b = store.create_node(&["Node"]);
         let c = store.create_node(&["Node"]);
@@ -2668,7 +2669,7 @@ mod tests {
     /// g - v (4 edges, two ways), and no acyclic or simple path exists.
     #[test]
     fn a_path_mode_restricts_the_paths_a_search_selects_among() {
-        let store = Arc::new(LpgStore::new().unwrap());
+        let store = Arc::new(RowGroupStore::new());
         let j = store.create_node(&["Node"]);
         let m = store.create_node(&["Node"]);
         let g = store.create_node(&["Node"]);
@@ -2724,7 +2725,7 @@ mod tests {
     fn a_simple_path_back_at_its_start_goes_no_further() {
         // Undirected triangle a - b - c - a and a - d: a, b, c, a, d is no
         // simple path, as a repeats before the end
-        let store = Arc::new(LpgStore::new().unwrap());
+        let store = Arc::new(RowGroupStore::new());
         let a = store.create_node(&["Node"]);
         let b = store.create_node(&["Node"]);
         let c = store.create_node(&["Node"]);
@@ -2758,7 +2759,7 @@ mod tests {
     #[test]
     fn a_restricted_search_to_every_node_keeps_k_per_node() {
         // Undirected square a - b - c - d - a: two acyclic paths to c
-        let store = Arc::new(LpgStore::new().unwrap());
+        let store = Arc::new(RowGroupStore::new());
         let a = store.create_node(&["Node"]);
         let b = store.create_node(&["Node"]);
         let c = store.create_node(&["Node"]);
@@ -2787,7 +2788,7 @@ mod tests {
 
     #[test]
     fn an_undirected_self_loop_is_one_step() {
-        let store = Arc::new(LpgStore::new().unwrap());
+        let store = Arc::new(RowGroupStore::new());
         let a = store.create_node(&["Node"]);
         let b = store.create_node(&["Node"]);
         let aa = store.create_edge(a, a, "KNOWS");
@@ -2806,7 +2807,7 @@ mod tests {
     #[test]
     fn a_search_from_the_source_binds_every_node_it_reaches() {
         // a -> b -> c, and d alone
-        let store = Arc::new(LpgStore::new().unwrap());
+        let store = Arc::new(RowGroupStore::new());
         let a = store.create_node(&["Node"]);
         let b = store.create_node(&["Node"]);
         let c = store.create_node(&["Node"]);
@@ -2840,8 +2841,8 @@ mod tests {
     /// `diamonds` diamonds in a row: from each joint, two edges to two nodes
     /// and from both on to the next joint, so 2^diamonds shortest paths lead
     /// from the first joint to the last. Returns the store and the joints.
-    fn diamonds(diamonds: usize) -> (Arc<LpgStore>, Vec<NodeId>) {
-        let store = Arc::new(LpgStore::new().unwrap());
+    fn diamonds(diamonds: usize) -> (Arc<RowGroupStore>, Vec<NodeId>) {
+        let store = Arc::new(RowGroupStore::new());
         let mut joints = vec![store.create_node(&["Joint"])];
         for _ in 0..diamonds {
             let from = *joints.last().unwrap();
@@ -2907,7 +2908,7 @@ mod tests {
     fn a_trail_search_over_the_budget_fails_with_an_error() {
         // Two nodes with six edges each way: the trails from one to every
         // node, which the search follows all, are 6^2 * 5^2 * ... many
-        let store = Arc::new(LpgStore::new().unwrap());
+        let store = Arc::new(RowGroupStore::new());
         let alix = store.create_node(&["Node"]);
         let gus = store.create_node(&["Node"]);
         for _ in 0..6 {

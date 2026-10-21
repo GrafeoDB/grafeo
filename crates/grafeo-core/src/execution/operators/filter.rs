@@ -102,7 +102,7 @@ pub trait Predicate: Send + Sync {
 }
 
 /// A comparison operator.
-#[cfg(test)]
+#[cfg(all(test, feature = "lpg"))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum CompareOp {
     /// Equal.
@@ -120,7 +120,7 @@ pub(crate) enum CompareOp {
 }
 
 /// A simple comparison predicate.
-#[cfg(test)]
+#[cfg(all(test, feature = "lpg"))]
 pub(crate) struct ComparisonPredicate {
     /// Column index to compare.
     column: usize,
@@ -130,7 +130,7 @@ pub(crate) struct ComparisonPredicate {
     value: Value,
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "lpg"))]
 impl ComparisonPredicate {
     /// Creates a new comparison predicate.
     pub(crate) fn new(column: usize, op: CompareOp, value: Value) -> Self {
@@ -138,7 +138,7 @@ impl ComparisonPredicate {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "lpg"))]
 impl Predicate for ComparisonPredicate {
     fn evaluate(&self, chunk: &DataChunk, row: usize) -> Result<bool, OperatorError> {
         Ok(self.matches(chunk, row))
@@ -150,7 +150,7 @@ impl Predicate for ComparisonPredicate {
 }
 
 /// Whether `op` holds for two operands in the order `order`.
-#[cfg(test)]
+#[cfg(all(test, feature = "lpg"))]
 fn compare_holds(op: CompareOp, order: std::cmp::Ordering) -> bool {
     match op {
         CompareOp::Eq => order.is_eq(),
@@ -162,7 +162,7 @@ fn compare_holds(op: CompareOp, order: std::cmp::Ordering) -> bool {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "lpg"))]
 impl ComparisonPredicate {
     /// Whether row `row` of `chunk` passes the comparison.
     fn matches(&self, chunk: &DataChunk, row: usize) -> bool {
@@ -4689,10 +4689,10 @@ mod tests {
     #[cfg(any(feature = "regex", feature = "regex-lite"))]
     #[test]
     fn test_regex_operator() {
-        use crate::graph::lpg::LpgStore;
+        use crate::graph::rowgroup::RowGroupStore;
 
         // Create a store and expression predicate to test regex
-        let store: Arc<dyn GraphStoreSearch> = Arc::new(LpgStore::new().unwrap());
+        let store: Arc<dyn GraphStoreSearch> = Arc::new(RowGroupStore::new());
         let variable_columns = HashMap::new();
 
         // Create predicate to test "Smith" =~ ".*Smith$" (should match)
@@ -4732,9 +4732,9 @@ mod tests {
 
     #[test]
     fn test_pow_operator() {
-        use crate::graph::lpg::LpgStore;
+        use crate::graph::rowgroup::RowGroupStore;
 
-        let store: Arc<dyn GraphStoreSearch> = Arc::new(LpgStore::new().unwrap());
+        let store: Arc<dyn GraphStoreSearch> = Arc::new(RowGroupStore::new());
         let variable_columns = HashMap::new();
 
         // Create a minimal chunk for evaluation
@@ -4779,9 +4779,9 @@ mod tests {
 
     #[test]
     fn test_map_expression() {
-        use crate::graph::lpg::LpgStore;
+        use crate::graph::rowgroup::RowGroupStore;
 
-        let store: Arc<dyn GraphStoreSearch> = Arc::new(LpgStore::new().unwrap());
+        let store: Arc<dyn GraphStoreSearch> = Arc::new(RowGroupStore::new());
         let variable_columns = HashMap::new();
 
         // Create a minimal chunk for evaluation
@@ -4821,9 +4821,9 @@ mod tests {
 
     #[test]
     fn test_index_access_list() {
-        use crate::graph::lpg::LpgStore;
+        use crate::graph::rowgroup::RowGroupStore;
 
-        let store: Arc<dyn GraphStoreSearch> = Arc::new(LpgStore::new().unwrap());
+        let store: Arc<dyn GraphStoreSearch> = Arc::new(RowGroupStore::new());
         let variable_columns = HashMap::new();
 
         // Create a minimal chunk for evaluation
@@ -4873,9 +4873,9 @@ mod tests {
 
     #[test]
     fn test_slice_access() {
-        use crate::graph::lpg::LpgStore;
+        use crate::graph::rowgroup::RowGroupStore;
 
-        let store: Arc<dyn GraphStoreSearch> = Arc::new(LpgStore::new().unwrap());
+        let store: Arc<dyn GraphStoreSearch> = Arc::new(RowGroupStore::new());
         let variable_columns = HashMap::new();
 
         // Create a minimal chunk for evaluation
@@ -5087,7 +5087,7 @@ mod tests {
     #[test]
     fn test_unary_operators() {
         let store: Arc<dyn GraphStoreSearch> =
-            Arc::new(crate::graph::lpg::LpgStore::new().unwrap());
+            Arc::new(crate::graph::rowgroup::RowGroupStore::new());
         let variable_columns = HashMap::new();
         let builder = DataChunkBuilder::new(&[LogicalType::Int64]);
         let chunk = builder.finish();
@@ -5144,7 +5144,7 @@ mod tests {
     #[test]
     fn test_arithmetic_operators() {
         let store: Arc<dyn GraphStoreSearch> =
-            Arc::new(crate::graph::lpg::LpgStore::new().unwrap());
+            Arc::new(crate::graph::rowgroup::RowGroupStore::new());
         let variable_columns = HashMap::new();
         let builder = DataChunkBuilder::new(&[LogicalType::Int64]);
         let chunk = builder.finish();
@@ -5233,7 +5233,7 @@ mod tests {
     #[test]
     fn test_string_operators() {
         let store: Arc<dyn GraphStoreSearch> =
-            Arc::new(crate::graph::lpg::LpgStore::new().unwrap());
+            Arc::new(crate::graph::rowgroup::RowGroupStore::new());
         let variable_columns = HashMap::new();
         let builder = DataChunkBuilder::new(&[LogicalType::Int64]);
         let chunk = builder.finish();
@@ -5284,7 +5284,7 @@ mod tests {
     #[test]
     fn test_in_operator() {
         let store: Arc<dyn GraphStoreSearch> =
-            Arc::new(crate::graph::lpg::LpgStore::new().unwrap());
+            Arc::new(crate::graph::rowgroup::RowGroupStore::new());
         let variable_columns = HashMap::new();
         let builder = DataChunkBuilder::new(&[LogicalType::Int64]);
         let chunk = builder.finish();
@@ -5330,7 +5330,7 @@ mod tests {
     #[test]
     fn test_logical_operators() {
         let store: Arc<dyn GraphStoreSearch> =
-            Arc::new(crate::graph::lpg::LpgStore::new().unwrap());
+            Arc::new(crate::graph::rowgroup::RowGroupStore::new());
         let variable_columns = HashMap::new();
         let builder = DataChunkBuilder::new(&[LogicalType::Int64]);
         let chunk = builder.finish();
@@ -5375,7 +5375,7 @@ mod tests {
     #[test]
     fn test_case_expression_simple() {
         let store: Arc<dyn GraphStoreSearch> =
-            Arc::new(crate::graph::lpg::LpgStore::new().unwrap());
+            Arc::new(crate::graph::rowgroup::RowGroupStore::new());
         let variable_columns = HashMap::new();
         let builder = DataChunkBuilder::new(&[LogicalType::Int64]);
         let chunk = builder.finish();
@@ -5411,7 +5411,7 @@ mod tests {
     #[test]
     fn test_case_expression_searched() {
         let store: Arc<dyn GraphStoreSearch> =
-            Arc::new(crate::graph::lpg::LpgStore::new().unwrap());
+            Arc::new(crate::graph::rowgroup::RowGroupStore::new());
         let variable_columns = HashMap::new();
         let builder = DataChunkBuilder::new(&[LogicalType::Int64]);
         let chunk = builder.finish();
@@ -5445,7 +5445,7 @@ mod tests {
     #[test]
     fn test_list_functions() {
         let store: Arc<dyn GraphStoreSearch> =
-            Arc::new(crate::graph::lpg::LpgStore::new().unwrap());
+            Arc::new(crate::graph::rowgroup::RowGroupStore::new());
         let variable_columns = HashMap::new();
         let builder = DataChunkBuilder::new(&[LogicalType::Int64]);
         let chunk = builder.finish();
@@ -5511,7 +5511,7 @@ mod tests {
     #[test]
     fn test_type_conversion_functions() {
         let store: Arc<dyn GraphStoreSearch> =
-            Arc::new(crate::graph::lpg::LpgStore::new().unwrap());
+            Arc::new(crate::graph::rowgroup::RowGroupStore::new());
         let variable_columns = HashMap::new();
         let builder = DataChunkBuilder::new(&[LogicalType::Int64]);
         let chunk = builder.finish();
@@ -5565,7 +5565,7 @@ mod tests {
     #[test]
     fn test_coalesce_function() {
         let store: Arc<dyn GraphStoreSearch> =
-            Arc::new(crate::graph::lpg::LpgStore::new().unwrap());
+            Arc::new(crate::graph::rowgroup::RowGroupStore::new());
         let variable_columns = HashMap::new();
         let builder = DataChunkBuilder::new(&[LogicalType::Int64]);
         let chunk = builder.finish();
@@ -5650,7 +5650,7 @@ mod tests {
     #[test]
     fn test_mixed_type_comparison_int_float() {
         let store: Arc<dyn GraphStoreSearch> =
-            Arc::new(crate::graph::lpg::LpgStore::new().unwrap());
+            Arc::new(crate::graph::rowgroup::RowGroupStore::new());
         let variable_columns = HashMap::new();
         let builder = DataChunkBuilder::new(&[LogicalType::Int64]);
         let chunk = builder.finish();
@@ -5788,7 +5788,7 @@ mod tests {
         use crate::graph::GraphStoreMut;
 
         // Test the labels() function in predicates
-        let store: Arc<dyn GraphStoreMut> = Arc::new(crate::graph::lpg::LpgStore::new().unwrap());
+        let store: Arc<dyn GraphStoreMut> = Arc::new(crate::graph::rowgroup::RowGroupStore::new());
 
         // Create a node with a label
         let node_id = store.create_node(&["Person", "Employee"]);
@@ -5852,9 +5852,9 @@ mod tests {
     /// `Value::Int64(30)`.  The `values_equal` path must coerce.
     #[test]
     fn test_cross_type_string_int_equality() {
-        use crate::graph::lpg::LpgStore;
+        use crate::graph::rowgroup::RowGroupStore;
 
-        let store: Arc<dyn GraphStoreSearch> = Arc::new(LpgStore::new().unwrap());
+        let store: Arc<dyn GraphStoreSearch> = Arc::new(RowGroupStore::new());
         let vc = HashMap::new();
         let builder = DataChunkBuilder::new(&[LogicalType::Int64]);
         let chunk = builder.finish();
@@ -5899,9 +5899,9 @@ mod tests {
     /// String ↔ Float64 equality: "7.25" == Float64(7.25)
     #[test]
     fn test_cross_type_string_float_equality() {
-        use crate::graph::lpg::LpgStore;
+        use crate::graph::rowgroup::RowGroupStore;
 
-        let store: Arc<dyn GraphStoreSearch> = Arc::new(LpgStore::new().unwrap());
+        let store: Arc<dyn GraphStoreSearch> = Arc::new(RowGroupStore::new());
         let vc = HashMap::new();
         let builder = DataChunkBuilder::new(&[LogicalType::Int64]);
         let chunk = builder.finish();
@@ -5936,9 +5936,9 @@ mod tests {
     /// so that `FILTER(?age > 25)` works when `?age` is stored as "30".
     #[test]
     fn test_cross_type_string_numeric_ordering() {
-        use crate::graph::lpg::LpgStore;
+        use crate::graph::rowgroup::RowGroupStore;
 
-        let store: Arc<dyn GraphStoreSearch> = Arc::new(LpgStore::new().unwrap());
+        let store: Arc<dyn GraphStoreSearch> = Arc::new(RowGroupStore::new());
         let vc = HashMap::new();
         let builder = DataChunkBuilder::new(&[LogicalType::Int64]);
         let chunk = builder.finish();
@@ -6036,9 +6036,9 @@ mod tests {
     /// Helper: creates an `ExpressionPredicate` wrapping a literal expression,
     /// evaluates it against an empty chunk, and returns the result `Value`.
     fn eval_literal_expr(expr: FilterExpression) -> Option<Value> {
-        use crate::graph::lpg::LpgStore;
+        use crate::graph::rowgroup::RowGroupStore;
 
-        let store: Arc<dyn GraphStoreSearch> = Arc::new(LpgStore::new().unwrap());
+        let store: Arc<dyn GraphStoreSearch> = Arc::new(RowGroupStore::new());
         let pred = ExpressionPredicate::new(expr, HashMap::new(), store);
         let builder = DataChunkBuilder::new(&[LogicalType::Int64]);
         let chunk = builder.finish();
@@ -6359,9 +6359,9 @@ mod tests {
     fn test_eval_is_null_on_missing_variable() {
         // Accessing a non-existent variable should produce None,
         // which IS NULL treats as true
-        use crate::graph::lpg::LpgStore;
+        use crate::graph::rowgroup::RowGroupStore;
 
-        let store: Arc<dyn GraphStoreSearch> = Arc::new(LpgStore::new().unwrap());
+        let store: Arc<dyn GraphStoreSearch> = Arc::new(RowGroupStore::new());
         let expr = FilterExpression::Unary {
             op: UnaryFilterOp::IsNull,
             operand: Box::new(FilterExpression::Variable("missing_var".to_string())),
@@ -6430,9 +6430,9 @@ mod tests {
 
     #[test]
     fn test_eval_in_operator() {
-        use crate::graph::lpg::LpgStore;
+        use crate::graph::rowgroup::RowGroupStore;
 
-        let store: Arc<dyn GraphStoreSearch> = Arc::new(LpgStore::new().unwrap());
+        let store: Arc<dyn GraphStoreSearch> = Arc::new(RowGroupStore::new());
         let builder = DataChunkBuilder::new(&[LogicalType::Int64]);
         let chunk = builder.finish();
 
@@ -6467,9 +6467,9 @@ mod tests {
 
     #[test]
     fn test_eval_in_operator_strings() {
-        use crate::graph::lpg::LpgStore;
+        use crate::graph::rowgroup::RowGroupStore;
 
-        let store: Arc<dyn GraphStoreSearch> = Arc::new(LpgStore::new().unwrap());
+        let store: Arc<dyn GraphStoreSearch> = Arc::new(RowGroupStore::new());
         let builder = DataChunkBuilder::new(&[LogicalType::Int64]);
         let chunk = builder.finish();
 
@@ -6984,7 +6984,7 @@ mod tests {
     #[test]
     fn test_eval_modulo_by_zero() {
         let store: Arc<dyn GraphStoreSearch> =
-            Arc::new(crate::graph::lpg::LpgStore::new().unwrap());
+            Arc::new(crate::graph::rowgroup::RowGroupStore::new());
         let pred = ExpressionPredicate::new(
             binary(Value::Int64(10), BinaryFilterOp::Mod, Value::Int64(0)),
             HashMap::new(),
@@ -7071,8 +7071,8 @@ mod tests {
 
     #[test]
     fn test_eval_tostring_types() {
-        use crate::graph::lpg::LpgStore;
-        let store: Arc<dyn GraphStoreSearch> = Arc::new(LpgStore::new().unwrap());
+        use crate::graph::rowgroup::RowGroupStore;
+        let store: Arc<dyn GraphStoreSearch> = Arc::new(RowGroupStore::new());
         let vc = HashMap::new();
         let builder = DataChunkBuilder::new(&[LogicalType::Int64]);
         let chunk = builder.finish();
@@ -7119,8 +7119,8 @@ mod tests {
 
     #[test]
     fn test_eval_toboolean() {
-        use crate::graph::lpg::LpgStore;
-        let store: Arc<dyn GraphStoreSearch> = Arc::new(LpgStore::new().unwrap());
+        use crate::graph::rowgroup::RowGroupStore;
+        let store: Arc<dyn GraphStoreSearch> = Arc::new(RowGroupStore::new());
         let vc = HashMap::new();
         let builder = DataChunkBuilder::new(&[LogicalType::Int64]);
         let chunk = builder.finish();
@@ -7158,8 +7158,8 @@ mod tests {
 
     #[test]
     fn test_eval_tofloat() {
-        use crate::graph::lpg::LpgStore;
-        let store: Arc<dyn GraphStoreSearch> = Arc::new(LpgStore::new().unwrap());
+        use crate::graph::rowgroup::RowGroupStore;
+        let store: Arc<dyn GraphStoreSearch> = Arc::new(RowGroupStore::new());
         let vc = HashMap::new();
         let builder = DataChunkBuilder::new(&[LogicalType::Int64]);
         let chunk = builder.finish();
@@ -7191,8 +7191,8 @@ mod tests {
 
     #[test]
     fn test_eval_tointeger_from_float() {
-        use crate::graph::lpg::LpgStore;
-        let store: Arc<dyn GraphStoreSearch> = Arc::new(LpgStore::new().unwrap());
+        use crate::graph::rowgroup::RowGroupStore;
+        let store: Arc<dyn GraphStoreSearch> = Arc::new(RowGroupStore::new());
         let vc = HashMap::new();
         let builder = DataChunkBuilder::new(&[LogicalType::Int64]);
         let chunk = builder.finish();
@@ -7279,8 +7279,9 @@ mod tests {
 mod text_fn_tests {
     use super::*;
     use crate::execution::chunk::DataChunkBuilder;
+    use crate::graph::GraphStoreMut as _;
     use crate::graph::GraphStoreSearch;
-    use crate::graph::lpg::LpgStore;
+    use crate::graph::rowgroup::RowGroupStore;
     use crate::index::text::{BM25Config, InvertedIndex};
     use grafeo_common::types::LogicalType;
     use parking_lot::RwLock;
@@ -7288,11 +7289,11 @@ mod text_fn_tests {
     use std::sync::Arc;
 
     fn setup_store_with_text_index() -> (
-        Arc<LpgStore>,
+        Arc<RowGroupStore>,
         grafeo_common::types::NodeId,
         grafeo_common::types::NodeId,
     ) {
-        let store = Arc::new(LpgStore::new().unwrap());
+        let store = Arc::new(RowGroupStore::new());
 
         // Create nodes with text properties
         let n1 = store.create_node(&["Article"]);
@@ -7368,7 +7369,7 @@ mod text_fn_tests {
     /// the keys.
     #[test]
     fn property_values_line_up_with_keys() {
-        let store = Arc::new(LpgStore::new().unwrap());
+        let store = Arc::new(RowGroupStore::new());
         let alix = store.create_node(&["Person"]);
         // Set in an order other than the key order.
         store.set_node_property(alix, "name", Value::from("Alix"));
@@ -7402,7 +7403,7 @@ mod text_fn_tests {
 
     #[test]
     fn element_functions_read_the_entity_the_column_holds() {
-        let store = Arc::new(LpgStore::new().unwrap());
+        let store = Arc::new(RowGroupStore::new());
         let alix = store.create_node(&["Person"]);
         store.set_node_property(alix, "name", Value::from("Alix"));
         let gus = store.create_node(&["Person"]);
@@ -7504,7 +7505,7 @@ mod text_fn_tests {
 
     #[test]
     fn test_text_score_wrong_arg_count_returns_none() {
-        let store = Arc::new(LpgStore::new().unwrap());
+        let store = Arc::new(RowGroupStore::new());
         let builder = DataChunkBuilder::new(&[LogicalType::Node]);
         let chunk = builder.finish();
         let variable_columns = HashMap::new();
@@ -7524,7 +7525,7 @@ mod text_fn_tests {
     #[test]
     fn test_text_score_no_index_returns_none() {
         // Node has a label but no text index for that label+property
-        let store = Arc::new(LpgStore::new().unwrap());
+        let store = Arc::new(RowGroupStore::new());
         let n1 = store.create_node(&["Article"]);
         store.set_node_property(n1, "body", Value::String("rust graph database".into()));
         // No text index added

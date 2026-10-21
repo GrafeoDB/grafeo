@@ -300,10 +300,16 @@ fn exact_integer(f: f64) -> Option<i64> {
 mod tests {
     use super::*;
     use crate::execution::operators::{FilterExpression, SingleRowOperator};
-    use crate::graph::lpg::LpgStore;
+    use crate::graph::GraphStoreMut as _;
+    use crate::graph::rowgroup::RowGroupStore;
     use std::collections::HashMap;
 
-    fn seek(store: &Arc<LpgStore>, key: SeekKey, value: Value, label: Option<&str>) -> Vec<NodeId> {
+    fn seek(
+        store: &Arc<RowGroupStore>,
+        key: SeekKey,
+        value: Value,
+        label: Option<&str>,
+    ) -> Vec<NodeId> {
         let dyn_store: Arc<dyn GraphStoreSearch> = Arc::clone(store) as Arc<dyn GraphStoreSearch>;
         let key_expression = ExpressionPredicate::new(
             FilterExpression::Literal(value),
@@ -327,7 +333,7 @@ mod tests {
 
     #[test]
     fn seeks_by_id_and_label() {
-        let store = Arc::new(LpgStore::new().unwrap());
+        let store = Arc::new(RowGroupStore::new());
         let alix = store.create_node(&["Person"]);
         let city = store.create_node(&["City"]);
         let id = |node: NodeId| Value::Int64(node.as_u64().cast_signed());
@@ -342,7 +348,7 @@ mod tests {
 
     #[test]
     fn seeks_the_equal_forms_of_a_property_value() {
-        let store = Arc::new(LpgStore::new().unwrap());
+        let store = Arc::new(RowGroupStore::new());
         store.create_property_index("id");
         let as_int = store.create_node(&["Doc"]);
         store.set_node_property(as_int, "id", Value::Int64(42));

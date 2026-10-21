@@ -311,31 +311,28 @@ mod tests {
     use std::sync::Arc;
 
     use grafeo_common::change::Entity;
-    use grafeo_common::storage::{
-        ChunkCaps, ImageSource, MemoryImage, Section, SectionSink, SectionType,
-    };
-    use grafeo_common::types::{EpochId, NodeId, PropertyKey, Value};
+    use grafeo_common::storage::{ImageSource, MemoryImage, Section, SectionSink, SectionType};
+    use grafeo_common::types::{EdgeId, EpochId, NodeId, PropertyKey, Value};
 
     use super::super::RowGroupStore;
     use super::super::section::RowGroupStoreSection;
-    use crate::graph::load::testing::assert_same_rows;
+    use crate::graph::load::testing::{assert_same_rows, fixture_bytes, version_3_fixture};
     use crate::graph::load::{LoadTarget, LoadedNames};
-    use crate::graph::lpg::{LpgStore, LpgStoreSection};
-    use crate::graph::traits::GraphStore;
+    use crate::graph::traits::{GraphStore, GraphStoreMut};
 
-    /// A store of 0.6.0-beta as its sections hold it: nodes of 0, 1 and 3
-    /// labels, values of several kinds, two edge types, a deleted node (a
-    /// gap in the ids), a named graph, and Alix's age changed after it was
-    /// set (with `temporal`, an older version the section keeps).
-    fn beta_store() -> (Arc<LpgStore>, NodeId) {
-        let store = Arc::new(LpgStore::new().unwrap());
+    /// What the `beta` fixtures hold (written by `LpgStore` with the
+    /// writes below, see `tests/fixtures/lpg-v3/README.md`): nodes of 0, 1
+    /// and 3 labels, values of several kinds, two edge types, a deleted node
+    /// (a gap in the ids), a named graph, and Alix's age changed after it
+    /// was set. Returns the store and Alix.
+    fn beta_store() -> (RowGroupStore, NodeId) {
+        let store = RowGroupStore::new();
         let alix = store.create_node(&[]);
         let gus = store.create_node(&["Person"]);
         let vincent = store.create_node(&["Person"]);
         let mia = store.create_node(&["Person", "Employee", "Traveller"]);
         store.set_node_property(alix, "name", Value::from("Alix"));
         store.set_node_property(alix, "age", Value::Int64(19));
-        store.new_epoch();
         store.set_node_property(alix, "age", Value::Int64(88));
         store.set_node_property(gus, "score", Value::Float64(-0.5));
         store.set_node_property(mia, "active", Value::Bool(true));
@@ -381,9 +378,9 @@ mod tests {
         root
     }
 
-    /// Asserts `root` holds what `beta` held, every graph with its id, and
+    /// Asserts `root` holds what `beta` holds, every graph with its id, and
     /// costs what a loaded root does.
-    fn assert_migrated(beta: &LpgStore, alix: NodeId, root: &RowGroupStore) {
+    fn assert_migrated(beta: &RowGroupStore, alix: NodeId, root: &RowGroupStore) {
         assert_same_rows(beta, root, "the default graph");
         let trips = root.graph("trips").expect("the named graph");
         assert_same_rows(&*beta.graph("trips").unwrap(), &*trips, "graph trips");
@@ -398,28 +395,14 @@ mod tests {
         assert_eq!(root.update_nodes(), 0);
     }
 
-    /// A section of version 3 (0.6.0-beta) migrates into a root: the rows,
+    /// A section of version 3 (0.6.0-beta.1) migrates into a root: the rows,
     /// the graphs with their ids, the next ids (Vincent's id is never given
     /// again) and the dictionaries' ids, which a checkpoint of the root
     /// writes and reads back.
     #[test]
     fn a_section_of_version_3_migrates_into_a_root() {
         let (beta, alix) = beta_store();
-        let section = LpgStoreSection::with_caps(
-            Arc::clone(&beta),
-            ChunkCaps {
-                max_rows: 2,
-                max_bytes: 64,
-            },
-        );
-        let image = image_of(&section);
-        assert_eq!(
-            image
-                .section_source(SectionType::LpgStore)
-                .unwrap()
-                .section_version(),
-            3
-        );
+        let image = version_3_fixture("beta_caps_2_64.chunks");
         let root = migrate(&image);
         assert_migrated(&beta, alix, &root);
         assert_eq!(root.next_node_id(), beta.next_node_id());
@@ -443,18 +426,17 @@ mod tests {
         );
     }
 
-    /// An edge whose end the graph does not hold, which `LpgStore` keeps
-    /// (a replay of a 0.5.43 WAL directory makes some), is left out of the
+    /// An edge whose end the graph does not hold, which `LpgStore` kept (a
+    /// replay of a 0.5.43 WAL directory made some), is left out of the
     /// migrated root, and the rest loads.
     #[test]
     fn an_edge_without_its_end_is_left_out() {
         let (beta, alix) = beta_store();
-        let dangling = grafeo_common::types::EdgeId::new(beta.next_edge_id());
-        beta.create_edge_with_id(dangling, alix, NodeId::new(88), "KNOWS")
-            .unwrap();
-        let root = migrate(&image_of(&LpgStoreSection::new(Arc::clone(&beta))));
+        let dangling = EdgeId::new(beta.next_edge_id());
+        let root = migrate(&version_3_fixture("beta_dangling_edge.chunks"));
+        assert_migrated(&beta, alix, &root);
         assert!(root.get_edge(dangling).is_none());
-        assert_eq!(root.edge_count(), beta.edge_count() - 1);
+        assert_eq!(root.edge_count(), beta.edge_count());
         assert_eq!(
             root.edges_from(alix, crate::graph::Direction::Outgoing)
                 .len(),
@@ -472,8 +454,9 @@ mod tests {
     #[test]
     fn a_0_5_section_migrates_into_a_root() {
         let (beta, alix) = beta_store();
-        let bytes = LpgStoreSection::new(Arc::clone(&beta)).serialize().unwrap();
-        let image = MemoryImage::from_raw(vec![(SectionType::LpgStore, bytes)]).unwrap();
+        let image =
+            MemoryImage::from_raw(vec![(SectionType::LpgStore, fixture_bytes("beta_0_5.bin"))])
+                .unwrap();
         let root = migrate(&image);
         assert_migrated(&beta, alix, &root);
         let highest = beta.node_ids().into_iter().max().unwrap();
@@ -487,10 +470,7 @@ mod tests {
     /// chunk is lost) is refused, naming the LPG section.
     #[test]
     fn a_damaged_section_of_version_3_is_refused() {
-        let (beta, _) = beta_store();
-        let mut image = MemoryImage::new();
-        image.begin_section(SectionType::LpgStore, 3).unwrap();
-        LpgStoreSection::new(beta).write_to(&mut image).unwrap();
+        let image = version_3_fixture("beta_caps_2_64.chunks");
         let source = image.section_source(SectionType::LpgStore).unwrap();
         let (_, data) = source.chunks().split_last().unwrap();
         let mut damaged = MemoryImage::new();

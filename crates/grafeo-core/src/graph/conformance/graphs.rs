@@ -12,7 +12,6 @@ use grafeo_common::types::{EpochId, NodeId, PropertyKey, Value};
 
 use super::{KnownGap, Outcome, Store, Tx, committed, ensure, labels, properties, same};
 use crate::graph::apply::{ApplyError, Writer};
-use crate::graph::lpg::LpgStore;
 use crate::graph::rowgroup::RowGroupStore;
 
 /// A store that is a root of named graphs, each a store of the same kind.
@@ -75,7 +74,6 @@ macro_rules! registry {
     };
 }
 
-registry!(LpgStore);
 registry!(RowGroupStore);
 
 /// Instantiates every named-graph case for a store.
@@ -496,19 +494,6 @@ pub(crate) fn restore_graphs_refuses_ids_outside_the_named_range<S: Registry>(
         &(vec![Some(1)], 2),
         "the ids after the refusals",
     )
-}
-
-/// `LpgStore`'s named graphs.
-mod lpg {
-    use super::{KnownGap, LpgStore};
-
-    fn lpg_store() -> LpgStore {
-        LpgStore::new().expect("a new store")
-    }
-
-    const GAPS: &[KnownGap] = &[];
-
-    graph_suite!(LpgStore, lpg_store, GAPS);
 }
 
 /// The row-group store's named graphs.

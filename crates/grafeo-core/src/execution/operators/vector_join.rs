@@ -469,69 +469,12 @@ mod tests {
     use super::*;
     use crate::execution::operators::single_row::NodeListOperator;
     use crate::graph::GraphStoreMut;
-    use crate::graph::lpg::LpgStore;
+    use crate::graph::rowgroup::RowGroupStore;
     use std::sync::Arc as StdArc;
-
-    /// A join with an index over a spilled column reads the vectors in place:
-    /// the backing never copies one out (ruling (d) of #594).
-    #[cfg(all(feature = "vector-index", not(feature = "temporal")))]
-    #[test]
-    fn a_join_over_a_spilled_column_reads_the_vectors_in_place() {
-        use crate::graph::lpg::test_backing::MemoryBacking;
-        use crate::index::vector::{
-            HnswConfig, HnswIndex, PropertyVectorAccessor, VectorIndexKind,
-        };
-        use grafeo_common::types::PropertyKey;
-        use std::sync::atomic::Ordering;
-
-        let lpg = StdArc::new(LpgStore::new().unwrap());
-        let vectors = [[3.0, 19.0, 88.0], [19.0, 88.0, 3.0], [88.0, 3.0, 19.0]];
-        let ids: Vec<NodeId> = vectors
-            .iter()
-            .map(|vector| {
-                lpg.create_node_with_props(
-                    &["Item"],
-                    [("embedding", Value::Vector(vector.to_vec().into()))],
-                )
-            })
-            .collect();
-        let index = HnswIndex::new(HnswConfig::new(3, DistanceMetric::Euclidean));
-        {
-            let accessor = PropertyVectorAccessor::new(&*lpg, "embedding");
-            for (id, vector) in ids.iter().zip(vectors) {
-                index.insert(*id, &vector, &accessor);
-            }
-        }
-        let key = PropertyKey::new("embedding");
-        let snapshot = lpg.node_property_column_entries(&key).unwrap();
-        let backing = MemoryBacking::of(&snapshot);
-        assert!(lpg.spill_node_property_column(&key, backing.clone(), &snapshot));
-
-        let left = Box::new(NodeListOperator::new(vec![ids[0]], 1024));
-        let mut join = VectorJoinOperator::with_static_query(
-            left,
-            StdArc::clone(&lpg) as StdArc<dyn GraphStoreSearch>,
-            vec![3.0, 19.0, 88.0],
-            "embedding",
-            3,
-            DistanceMetric::Euclidean,
-        )
-        .with_index(StdArc::new(VectorIndexKind::Hnsw(index)));
-        let mut rows = 0;
-        while let Ok(Some(chunk)) = join.next() {
-            rows += chunk.row_count();
-        }
-        assert_eq!(rows, 3);
-        assert_eq!(
-            backing.copies.load(Ordering::Relaxed),
-            0,
-            "a vector was copied"
-        );
-    }
 
     #[test]
     fn test_vector_join_static_query() {
-        let store: StdArc<dyn GraphStoreMut> = StdArc::new(LpgStore::new().unwrap());
+        let store: StdArc<dyn GraphStoreMut> = StdArc::new(RowGroupStore::new());
 
         // Create nodes with vector embeddings
         let n1 = store.create_node(&["Item"]);
@@ -567,7 +510,7 @@ mod tests {
 
     #[test]
     fn test_vector_join_entity_to_entity() {
-        let store: StdArc<dyn GraphStoreMut> = StdArc::new(LpgStore::new().unwrap());
+        let store: StdArc<dyn GraphStoreMut> = StdArc::new(RowGroupStore::new());
 
         // Create source nodes
         let src1 = store.create_node(&["Source"]);
@@ -611,7 +554,7 @@ mod tests {
 
     #[test]
     fn test_vector_join_with_distance_filter() {
-        let store: StdArc<dyn GraphStoreMut> = StdArc::new(LpgStore::new().unwrap());
+        let store: StdArc<dyn GraphStoreMut> = StdArc::new(RowGroupStore::new());
 
         // Create nodes with embeddings
         let n1 = store.create_node(&["Item"]);
@@ -647,7 +590,7 @@ mod tests {
 
     #[test]
     fn test_vector_join_name() {
-        let store: StdArc<dyn GraphStoreMut> = StdArc::new(LpgStore::new().unwrap());
+        let store: StdArc<dyn GraphStoreMut> = StdArc::new(RowGroupStore::new());
         let left = Box::new(NodeListOperator::new(vec![], 1024));
 
         let join = VectorJoinOperator::with_static_query(
@@ -664,7 +607,7 @@ mod tests {
 
     #[test]
     fn test_vector_join_into_any() {
-        let store: StdArc<dyn GraphStoreMut> = StdArc::new(LpgStore::new().unwrap());
+        let store: StdArc<dyn GraphStoreMut> = StdArc::new(RowGroupStore::new());
         let left = Box::new(NodeListOperator::new(vec![], 1024));
 
         let op = VectorJoinOperator::with_static_query(

@@ -35,15 +35,12 @@ grafeo-engine = "0.5"
 ### Extension Code
 
 ```rust
-use grafeo_core::graph::LpgStore;
-use grafeo_engine::{GrafeoDB, Session};
+use grafeo_engine::GrafeoDB;
 
 /// Custom graph analysis function
 pub fn analyze_connectivity(db: &GrafeoDB) -> ConnectivityReport {
-    let session = db.session().unwrap();
-
-    // Access the underlying graph store
-    let store = session.graph_store();
+    // Access the underlying graph store (read-only)
+    let store = db.graph_store();
 
     let node_count = store.node_count();
     let edge_count = store.edge_count();
@@ -68,24 +65,21 @@ pub struct ConnectivityReport {
 ### Graph Store
 
 ```rust
-use grafeo_core::graph::lpg::LpgStore;
+use grafeo_core::graph::{Direction, GraphStore};
 
-fn process_graph(store: &LpgStore) {
-    // Iterate over nodes
-    for node in store.nodes() {
-        println!("Node: {:?}", node.id());
-        for label in node.labels() {
-            println!("  Label: {}", label);
+fn process_graph(store: &dyn GraphStore) {
+    for id in store.node_ids() {
+        let Some(node) = store.get_node(id) else { continue };
+        println!("Node: {:?}", node.id);
+        for label in &node.labels {
+            println!("  Label: {label}");
         }
-    }
-
-    // Iterate over edges
-    for edge in store.edges() {
-        println!("Edge: {} -[{}]-> {}",
-            edge.source(),
-            edge.edge_type(),
-            edge.target()
-        );
+        // Its outgoing edges
+        for (target, edge) in store.edges_from(id, Direction::Outgoing) {
+            if let Some(edge_type) = store.edge_type(edge) {
+                println!("Edge: {:?} -[{edge_type}]-> {:?}", node.id, target);
+            }
+        }
     }
 }
 ```

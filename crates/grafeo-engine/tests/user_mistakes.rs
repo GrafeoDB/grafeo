@@ -106,9 +106,10 @@ fn a_vector_search_call_with_a_query_that_is_no_vector_is_a_user_mistake() {
             "CALL grafeo.search.vector('Paper', 'embedding', ['Alix', 'Gus'], 2)",
             ErrorCode::InvalidInput,
         ),
+        // A value of another type than the argument takes (GQLSTATUS 22G03).
         (
             "CALL grafeo.search.vector('Paper', 'embedding', 'Amsterdam', 2)",
-            ErrorCode::QuerySemantic,
+            ErrorCode::QueryExecution,
         ),
     ] {
         let error = db.execute(query).expect_err(query);

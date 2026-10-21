@@ -78,7 +78,7 @@ STORE_IMPL = re.compile(
 # The stores themselves, which implement the store traits without being
 # wrappers; any other type that does is one. A new store is added here only
 # by a user decision (D5's message names them).
-STORES = {"LpgStore", "RowGroupStore"}
+STORES = {"RowGroupStore"}
 LET_UNDERSCORE = re.compile(r"\blet\s+_\s*(:[^=]*)?=")
 REPLAY_PATH = re.compile(
     r"(^|/)(wal|recovery|replay)(/|[_.])|/(recovery|replay)[^/]*\.rs$"
@@ -134,7 +134,7 @@ HINTS = {
     "D2": "em or en dash; rewrite with a comma, colon or parentheses",
     "D3": "public text must stand on its own; restate the content or link a public issue",
     "D4": "crash-injection tests must run in CI; make it fast enough instead of ignoring it",
-    "D5": "cross-cutting concerns derive from the transaction change set, not from store wrappers (only the stores LpgStore and RowGroupStore implement the store traits)",
+    "D5": "cross-cutting concerns derive from the transaction change set, not from store wrappers (only the store RowGroupStore implements the store traits)",
     "D6": "replay and recovery must propagate errors; handle or return the result",
     "W1": "features should add modules, not fork core types",
     "P1": "open the pull request against the current release/<milestone> branch",

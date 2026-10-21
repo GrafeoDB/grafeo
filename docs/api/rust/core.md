@@ -13,9 +13,10 @@ Core graph storage and execution engine.
 ## Graph Storage
 
 ```rust
-use grafeo_core::graph::lpg::{LpgStore, NodeRecord, EdgeRecord};
+use grafeo_core::graph::GraphStoreMut;
+use grafeo_core::graph::rowgroup::RowGroupStore;
 
-let store = LpgStore::new();
+let store = RowGroupStore::new();
 let node_id = store.create_node(&["Person"]);
 ```
 

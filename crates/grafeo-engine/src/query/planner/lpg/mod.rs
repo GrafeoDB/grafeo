@@ -3770,7 +3770,7 @@ mod tests {
     /// We can't inspect VectorScanOperator.k directly — it's private — so the
     /// assertion here is that planning succeeds across all three branches
     /// without panicking or surfacing an internal-state error. Paired with
-    /// `LpgStore::nodes_by_label_count` tests, this guards the full path.
+    /// the store's `nodes_by_label_count` tests, this guards the full path.
     #[cfg(feature = "vector-index")]
     #[test]
     fn test_plan_vector_scan_k_none_bounds_across_label_states() {

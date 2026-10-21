@@ -62,8 +62,7 @@ const RDF_TYPE: &str = "http://www.w3.org/1999/02/22-rdf-syntax-ns#type";
 ///
 /// For algorithms that only use traversal methods (`neighbors`, `edges_from`,
 /// `node_ids`, `out_degree`), the adapter has the same asymptotic performance
-/// as [`LpgStore`](crate::graph::lpg::LpgStore): adjacency lookups are O(1)
-/// indexing into pre-built Vecs.
+/// as the LPG store: adjacency lookups are O(1) indexing into pre-built Vecs.
 pub struct RdfGraphStoreAdapter {
     /// Term -> NodeId mapping (only IRIs and blank nodes).
     term_to_node: FxHashMap<Term, NodeId>,

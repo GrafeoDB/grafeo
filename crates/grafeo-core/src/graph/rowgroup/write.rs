@@ -1,8 +1,10 @@
 //! The row-group store's raw writes (`GraphStoreMut`), through `apply`.
 //!
 //! A raw write commits at once: it is an immediate write at the next epoch.
-//! A `*_versioned` raw write is a pending write of its transaction that no
-//! change set records, as `LpgStore`'s are (raw store handles, QJ).
+//! A `*_versioned` raw write, a create, a delete, a value or a label, is a
+//! pending write of its transaction (at the store's epoch as its snapshot)
+//! that no change set records (raw store handles, QJ): the transaction sees
+//! it, no other reader does, and nothing commits it.
 
 use std::sync::atomic::Ordering;
 
@@ -42,6 +44,22 @@ impl RowGroupStore {
             Writer::Immediate {
                 epoch,
                 before_images,
+            },
+        )
+    }
+
+    /// Applies `op` as a pending write of `transaction`, at the store's
+    /// epoch as its snapshot.
+    fn write_as(
+        &self,
+        op: &DataOp,
+        transaction: TransactionId,
+    ) -> std::result::Result<Applied, ApplyError> {
+        self.apply(
+            op,
+            Writer::Transaction {
+                id: transaction,
+                snapshot: EpochId::new(self.epoch.load(Ordering::Acquire)),
             },
         )
     }
@@ -224,6 +242,94 @@ impl GraphStoreMut for RowGroupStore {
             value,
         };
         let _set = self.write_now(&op, false);
+    }
+
+    fn set_node_property_versioned(
+        &self,
+        id: NodeId,
+        key: &str,
+        value: Value,
+        transaction_id: TransactionId,
+    ) -> Result<()> {
+        let op = DataOp::SetNodeProperty {
+            id,
+            key: PropertyKey::new(key),
+            value,
+        };
+        self.write_as(&op, transaction_id)
+            .map(|_| ())
+            .map_err(|refused| error(&refused))
+    }
+
+    fn set_edge_property_versioned(
+        &self,
+        id: EdgeId,
+        key: &str,
+        value: Value,
+        transaction_id: TransactionId,
+    ) {
+        let op = DataOp::SetEdgeProperty {
+            id,
+            key: PropertyKey::new(key),
+            value,
+        };
+        let _set = self.write_as(&op, transaction_id);
+    }
+
+    fn remove_node_property_versioned(
+        &self,
+        id: NodeId,
+        key: &str,
+        transaction_id: TransactionId,
+    ) -> Result<Option<Value>> {
+        let op = DataOp::RemoveNodeProperty {
+            id,
+            key: PropertyKey::new(key),
+        };
+        Self::removed(self.write_as(&op, transaction_id))
+    }
+
+    fn remove_edge_property_versioned(
+        &self,
+        id: EdgeId,
+        key: &str,
+        transaction_id: TransactionId,
+    ) -> Result<Option<Value>> {
+        let op = DataOp::RemoveEdgeProperty {
+            id,
+            key: PropertyKey::new(key),
+        };
+        Self::removed(self.write_as(&op, transaction_id))
+    }
+
+    fn add_label_versioned(
+        &self,
+        node_id: NodeId,
+        label: &str,
+        transaction_id: TransactionId,
+    ) -> bool {
+        changed(&self.write_as(
+            &DataOp::AddNodeLabel {
+                id: node_id,
+                label: ArcStr::from(label),
+            },
+            transaction_id,
+        ))
+    }
+
+    fn remove_label_versioned(
+        &self,
+        node_id: NodeId,
+        label: &str,
+        transaction_id: TransactionId,
+    ) -> bool {
+        changed(&self.write_as(
+            &DataOp::RemoveNodeLabel {
+                id: node_id,
+                label: ArcStr::from(label),
+            },
+            transaction_id,
+        ))
     }
 
     fn remove_node_property(&self, id: NodeId, key: &str) -> Result<Option<Value>> {

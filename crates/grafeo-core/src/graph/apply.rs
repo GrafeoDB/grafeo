@@ -12,7 +12,7 @@
 //! live writes built.
 //!
 //! One target per graph: each named graph is a store of its own. The
-//! targets are [`LpgStore`](crate::graph::lpg::LpgStore) and
+//! targets are [`RowGroupStore`](crate::graph::rowgroup::RowGroupStore) and
 //! [`ExternalTarget`], which bridges a store a database was built on
 //! ([`GraphStoreMut`]).
 
@@ -816,7 +816,8 @@ mod tests {
     use grafeo_common::types::ArcStr;
 
     use super::*;
-    use crate::graph::lpg::LpgStore;
+    use crate::graph::GraphStore as _;
+    use crate::graph::rowgroup::RowGroupStore;
 
     fn labels(names: &[&str]) -> Labels {
         names.iter().map(|name| ArcStr::from(*name)).collect()
@@ -829,16 +830,24 @@ mod tests {
     /// created, as the store gives its own ids.
     #[test]
     fn an_external_target_builds_images_and_has_no_undo() {
-        let store = Arc::new(LpgStore::new().unwrap());
+        let store = Arc::new(RowGroupStore::new());
         let alix = store.create_node_with_props(
             &["Person"],
-            [
-                ("name", Value::from("Alix")),
-                ("city", Value::from("Amsterdam")),
+            &[
+                (PropertyKey::new("name"), Value::from("Alix")),
+                (PropertyKey::new("city"), Value::from("Amsterdam")),
             ],
         );
-        let gus = store.create_node_with_props(&["Person"], [("name", Value::from("Gus"))]);
-        let knows = store.create_edge_with_props(alix, gus, "KNOWS", [("since", Value::Int64(3))]);
+        let gus = store.create_node_with_props(
+            &["Person"],
+            &[(PropertyKey::new("name"), Value::from("Gus"))],
+        );
+        let knows = store.create_edge_with_props(
+            alix,
+            gus,
+            "KNOWS",
+            &[(PropertyKey::new("since"), Value::Int64(3))],
+        );
         let target = ExternalTarget::new(Arc::clone(&store) as Arc<dyn GraphStoreMut>);
         assert_eq!(target.undo_support(), UndoSupport::None);
         let writer = Writer::Transaction {

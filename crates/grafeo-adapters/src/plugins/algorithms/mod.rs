@@ -1,7 +1,9 @@
 //! Classic graph algorithms - traversals, paths, centrality, communities.
 //!
-//! Everything you'd expect from a graph analytics library, designed to work
-//! seamlessly with Grafeo's LPG store. All algorithms are available from Python too.
+//! Everything you'd expect from a graph analytics library, on any store that
+//! implements [`GraphStore`](grafeo_core::graph::GraphStore), such as the
+//! row-group store the database holds its graphs in. All algorithms are
+//! available from Python too.
 //!
 //! | Category | Algorithms |
 //! | -------- | ---------- |
@@ -15,11 +17,14 @@
 //! ## Usage
 //!
 //! ```no_run
+//! # // The row-group store is built with the `lpg` feature.
+//! # #[cfg(feature = "lpg")]
+//! # {
 //! use grafeo_adapters::plugins::algorithms::{bfs, connected_components, dijkstra};
-//! use grafeo_core::graph::lpg::LpgStore;
-//! use grafeo_common::types::NodeId;
+//! use grafeo_core::graph::GraphStoreMut;
+//! use grafeo_core::graph::rowgroup::RowGroupStore;
 //!
-//! let store = LpgStore::new().unwrap();
+//! let store = RowGroupStore::new();
 //! let n0 = store.create_node(&["Node"]);
 //! let n1 = store.create_node(&["Node"]);
 //! store.create_edge(n0, n1, "CONNECTS");
@@ -32,6 +37,7 @@
 //!
 //! // Run Dijkstra's shortest path
 //! let result = dijkstra(&store, n0, Some("weight"));
+//! # }
 //! ```
 
 mod centrality;

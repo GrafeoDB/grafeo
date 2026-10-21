@@ -36,7 +36,7 @@ Categories:
 | Code          | Name                | Retryable | Meaning                                                    |
 | ------------- | ------------------- | --------- | ---------------------------------------------------------- |
 | `GRAFEO-Q001` | QuerySyntax         | no        | Parser rejected the query. Check the reported line/column. |
-| `GRAFEO-Q002` | QuerySemantic       | no        | Parsed but invalid: unknown label, graph or procedure, a variable nothing binds (in a stored procedure's body too), a call with another number of arguments, an unknown `YIELD` column, type mismatch in a function call, etc. |
+| `GRAFEO-Q002` | QuerySemantic       | no        | Parsed but invalid: unknown label, graph or procedure, a variable nothing binds (in a stored procedure's body too), a call with another number of arguments, an unknown `YIELD` column, etc. GQLSTATUS `42002` for a name that resolves to nothing, `42000` for the rest. |
 | `GRAFEO-Q003` | QueryTimeout        | **yes**   | Query exceeded its deadline. Raise `query_timeout` or narrow the pattern. |
 | `GRAFEO-Q004` | QueryUnsupported    | no        | The database or this build cannot run the statement: a feature the build leaves out (vector or text indexes, procedures, RDF, an import format), a language of another graph model (GQL on an RDF database), or an operation the database cannot do (a backup of an in-memory database). |
 | `GRAFEO-Q005` | QueryOptimization   | no        | Optimizer could not produce a plan. Report with the query text if you hit this. |
@@ -95,12 +95,19 @@ GQLSTATUS says what kind of condition it is, as SQL's SQLSTATE does:
 | --------- | ------------------------------ | ------------------------------------------------ |
 | `22003`   | numeric value out of range     | `RETURN 9223372036854775807 + 1`, a `sum` past 64 bits |
 | `22012`   | division by zero               | `RETURN 10 / 0`, `RETURN 10 % 0`                 |
+| `22G02`   | negative limit value           | `LIMIT $k` with `k = -1`                         |
+| `22G03`   | invalid value type             | `LIMIT $k` with `k = 'three'`, a procedure argument of another type |
 | `22000`   | data exception                 | other failures on the statement's data           |
 | `02000`   | no data                        | a node or edge that does not exist               |
 | `25000`   | invalid transaction state      | a write to a closed database                     |
+| `25G03`   | read-only transaction          | a write or DDL in a read-only transaction or database |
 | `40000`   | transaction rollback           | a write conflict                                 |
 | `42001`   | syntax error                   | `MATCH (n RETURN n`                              |
-| `42002`   | invalid reference              | an unknown property or label                     |
+| `42002`   | invalid reference              | a name that resolves to nothing: an undefined variable, an unknown function, procedure, parameter, graph or type |
+| `42000`   | syntax error or access rule violation | any other rule a statement breaks beyond the grammar (an aggregate in a `WHERE`, a wrong number of arguments, a pattern `MERGE` cannot take), a feature Grafeo lacks, and a permission the user does not have |
+
+`42000` is the code ISO GQL gives a violated syntax or access rule that names no condition of its own; the
+message says which rule it is.
 
 Python has it as `GrafeoError.gql_status`, WASM as the `gqlStatus` property of the thrown `Error`, C as
 `grafeo_last_error_gql_status()` (next to `grafeo_last_error()`), Go as the `GQLStatus` field of `*grafeo.Error`

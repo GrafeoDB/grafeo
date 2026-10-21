@@ -1,6 +1,6 @@
 //! The row-group store: one graph's nodes and edges as tables of row groups
-//! (workstream H, masterplan X1 and 6.5). Not used by the engine yet: it
-//! switches from `LpgStore` once, at H2d.
+//! (workstream H, masterplan X1 and 6.5), the store the engine holds its
+//! graphs in (since 0.6.0, which deleted `LpgStore`).
 //!
 //! Row group `k` of a table holds the ids `[k * 65,536, (k + 1) * 65,536)`,
 //! the rows of the file's row groups, and is created when its first row is.
@@ -34,8 +34,8 @@
 //! Writes go through [`ChangeTarget`](crate::graph::apply::ChangeTarget) (`apply`), the read
 //! traits read; one lock guards the store (H1a).
 //!
-//! A store is also a root of named graphs, each a store of its own, as
-//! `LpgStore` holds them (`graphs`), each with its own property, text and
+//! A store is also a root of named graphs, each a store of its own
+//! (`graphs`), each with its own property, text and
 //! vector indexes, which the writes keep and the reads at a view recheck
 //! (`index`). What the engine reads to report on a store, its memory by part
 //! and every node and edge, is in `diagnostics`; the store's epoch and its
@@ -671,6 +671,25 @@ impl RowGroupStore {
                 .values()
                 .map(|group| group.versions.stamped())
                 .sum::<usize>()
+    }
+
+    /// The label, edge type and property key dictionaries, each as its
+    /// names with their ids (ids ascending) and its next id.
+    #[cfg(test)]
+    pub(crate) fn dictionaries(&self) -> [(Vec<(u32, String)>, u32); 3] {
+        let inner = self.inner.read();
+        let listed = |dictionary: &NameDictionary| {
+            let names = dictionary
+                .iter()
+                .map(|(id, name)| (id, name.to_string()))
+                .collect();
+            (names, dictionary.next_id())
+        };
+        [
+            listed(&inner.labels),
+            listed(&inner.edge_types),
+            listed(&inner.keys),
+        ]
     }
 
     /// The undo nodes of the value and label chains, nodes and edges.

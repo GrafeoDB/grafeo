@@ -145,7 +145,8 @@ fn calls_in_a_subquery_and_as_a_statement() {
 }
 
 /// An argument that reads a row stays an error naming the variable: the
-/// call's arguments are constants.
+/// call's arguments are constants, a limit of Grafeo's (unsupported, not a
+/// mistake in the query).
 #[test]
 fn an_argument_that_reads_the_row_is_an_error() {
     let (db, _) = people();
@@ -156,10 +157,14 @@ fn an_argument_that_reads_the_row_is_an_error() {
             None,
         ) {
             Err(Error::Query(error)) => {
-                assert_eq!(error.kind, QueryErrorKind::Semantic, "{language}: {error}");
+                assert_eq!(
+                    error.kind,
+                    QueryErrorKind::Unsupported,
+                    "{language}: {error}"
+                );
                 assert!(error.message.contains("'x'"), "{language}: {error}");
             }
-            other => panic!("{language}: expected a semantic error, got {other:?}"),
+            other => panic!("{language}: expected an unsupported error, got {other:?}"),
         }
     }
 }

@@ -110,17 +110,17 @@ pub(crate) fn check_function_call(name: &str, arguments: usize) -> Result<()> {
         FunctionSupport::Available(arity) => Err(semantic(format!(
             "Function '{name}' takes {arity}, got {arguments}"
         ))),
-        FunctionSupport::NeedsFeature(feature) => Err(semantic(format!(
-            "Function '{name}' is not available in this build: it needs the '{feature}' feature"
-        ))),
+        FunctionSupport::NeedsFeature(feature) => {
+            Err(Error::Query(QueryError::unsupported(format!(
+                "Function '{name}' is not available in this build: it needs the '{feature}' \
+                 feature"
+            ))))
+        }
         _ => {
             let known: Vec<&str> = function_names()
                 .chain(AggregateFunction::ALIASES.iter().map(|&(alias, _)| alias))
                 .collect();
-            let error = QueryError::new(
-                QueryErrorKind::Semantic,
-                format!("Unknown function '{name}'"),
-            );
+            let error = QueryError::invalid_reference(format!("Unknown function '{name}'"));
             Err(Error::Query(match find_similar(name, &known) {
                 Some(similar) => error.with_hint(format_suggestion(similar)),
                 None => error,
@@ -147,8 +147,11 @@ pub(crate) fn resolve_call(
         Some(aggregate) => Callee::Aggregate(aggregate),
         None => {
             check_function_call(name, args.len())?;
-            let function = BuiltinFunction::from_name(name)
-                .ok_or_else(|| semantic(format!("Unknown function '{name}'")))?;
+            let function = BuiltinFunction::from_name(name).ok_or_else(|| {
+                Error::Query(QueryError::invalid_reference(format!(
+                    "Unknown function '{name}'"
+                )))
+            })?;
             Callee::Builtin(function)
         }
     };
@@ -177,10 +180,10 @@ pub(crate) fn check_pattern_match(op: BinaryOp, pattern: &LogicalExpression) -> 
         _ => return Ok(()),
     };
     if !REGEX_SUPPORT {
-        return Err(semantic(format!(
+        return Err(Error::Query(QueryError::unsupported(format!(
             "{operator} needs regular expressions, and this build has no regular expressions: \
              it needs the 'regex' or 'regex-lite' feature"
-        )));
+        ))));
     }
     if op == BinaryOp::Regex
         && let LogicalExpression::Literal(Value::String(pattern)) = pattern

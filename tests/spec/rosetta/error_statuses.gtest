@@ -1,0 +1,146 @@
+# Rosetta: the GQLSTATUS of query errors
+#
+# ISO/IEC 39075 codes: a name that resolves to nothing is 42002 (invalid
+# reference); any other rule a statement breaks beyond the grammar is 42000,
+# the code ISO gives a violated syntax rule without a condition of its own
+# (section 4), and so is a feature Grafeo lacks; a negative limit is 22G02 and
+# a value of the wrong type 22G03. Every semantic error used to be 42002.
+
+meta:
+  model: lpg
+  section: rosetta
+  title: GQLSTATUS of query errors
+  dataset: empty
+  requires: [cypher]
+
+tests:
+
+  # ---------------------------------------------------------------------------
+  # 42002: a name that resolves to nothing
+  # ---------------------------------------------------------------------------
+
+  - name: an_undefined_variable
+    setup:
+      - "INSERT (:Person {name: 'Alix'})"
+    variants:
+      gql: "MATCH (n:Person) RETURN m"
+      cypher: "MATCH (n:Person) RETURN m"
+    expect:
+      error: "Undefined variable 'm'"
+      gql_status: "42002"
+
+  - name: an_unknown_function
+    variants:
+      gql: "RETURN upperr('x') AS v"
+      cypher: "RETURN upperr('x') AS v"
+    expect:
+      error: "Unknown function 'upperr'"
+      gql_status: "42002"
+
+  - name: a_variable_an_aggregating_return_dropped
+    setup:
+      - "INSERT (:Person {name: 'Alix', age: 30})"
+    variants:
+      gql: "MATCH (n:Person) RETURN count(*) AS c ORDER BY n.age"
+      cypher: "MATCH (n:Person) RETURN count(*) AS c ORDER BY n.age"
+    expect:
+      error: "Undefined variable 'n'"
+      gql_status: "42002"
+
+  - name: a_missing_skip_parameter
+    setup:
+      - "INSERT (:Person {name: 'Alix'})"
+    variants:
+      gql: "MATCH (n:Person) RETURN n.name AS name SKIP $s"
+    expect:
+      error: "Missing parameter for SKIP/LIMIT: $s"
+      gql_status: "42002"
+
+  - name: an_unknown_graph
+    variants:
+      gql: "USE GRAPH nowhere"
+    expect:
+      error: "nowhere"
+      gql_status: "42002"
+
+  # ---------------------------------------------------------------------------
+  # 42000: another rule the statement breaks
+  # ---------------------------------------------------------------------------
+
+  - name: an_aggregate_in_the_where_of_a_match
+    setup:
+      - "INSERT (:Person {name: 'Alix'})"
+    variants:
+      gql: "MATCH (p:Person) WHERE count(p) > 0 RETURN p.name AS name"
+      cypher: "MATCH (p:Person) WHERE count(p) > 0 RETURN p.name AS name"
+    expect:
+      error: "cannot be used here"
+      gql_status: "42000"
+
+  - name: a_wrong_number_of_arguments
+    variants:
+      gql: "RETURN abs(1, 2) AS v"
+      cypher: "RETURN abs(1, 2) AS v"
+    expect:
+      error: "Function 'abs' takes 1 argument, got 2"
+      gql_status: "42000"
+
+  - name: a_variable_length_merge
+    variants:
+      gql: "MERGE (a:Person)-[:KNOWS*1..2]->(b:Person)"
+      cypher: "MERGE (a:Person)-[:KNOWS*1..2]->(b:Person)"
+    expect:
+      error: "variable-length"
+      gql_status: "42000"
+
+  - name: a_create_without_a_relationship_type
+    variants:
+      cypher: "CREATE (a)-[]->(b)"
+    expect:
+      error: "type"
+      gql_status: "42000"
+
+  - name: an_order_by_of_an_aggregate_the_return_does_not_compute
+    setup:
+      - "INSERT (:Person {name: 'Alix', age: 30})"
+    variants:
+      gql: "MATCH (n:Person) RETURN n.name AS name, count(*) AS c ORDER BY min(n.age)"
+      cypher: "MATCH (n:Person) RETURN n.name AS name, count(*) AS c ORDER BY min(n.age)"
+    expect:
+      error: "is not an aggregate the RETURN returns"
+      gql_status: "42000"
+
+  - name: a_feature_grafeo_lacks
+    setup:
+      - "INSERT (:Person {name: 'Alix'})"
+    variants:
+      cypher: "MATCH (n:Person) RETURN n.name AS name SKIP 1 + 1"
+    expect:
+      error: "Expected integer literal or parameter for SKIP/LIMIT"
+      gql_status: "42000"
+
+  # ---------------------------------------------------------------------------
+  # 22G02 and 22G03: a limit parameter of the wrong value
+  # ---------------------------------------------------------------------------
+
+  - name: a_negative_limit_parameter
+    setup:
+      - "INSERT (:Person {name: 'Alix'})"
+    variants:
+      gql: "MATCH (n:Person) RETURN n.name AS name LIMIT $k"
+    params:
+      k: -1
+    expect:
+      error: "must be non-negative, got -1"
+      gql_status: "22G02"
+
+  - name: a_limit_parameter_that_is_no_integer
+    setup:
+      - "INSERT (:Person {name: 'Alix'})"
+    variants:
+      gql: "MATCH (n:Person) RETURN n.name AS name LIMIT $k"
+    params:
+      k: "three"
+    expect:
+      error: "must be an integer"
+      gql_status: "22G03"

@@ -153,7 +153,7 @@ impl GraphQLTranslator {
             ast::OperationType::Query => self.translate_query(op),
             ast::OperationType::Mutation => self.translate_mutation(op),
             ast::OperationType::Subscription => Err(Error::Query(QueryError::new(
-                QueryErrorKind::Semantic,
+                QueryErrorKind::Unsupported,
                 "Subscriptions are not supported",
             ))),
         }

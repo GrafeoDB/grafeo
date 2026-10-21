@@ -258,9 +258,9 @@ impl super::Planner {
                                     output_types.push(LogicalType::Any);
                                 } else {
                                     return Err(grafeo_common::utils::error::Error::Query(
-                                        grafeo_common::utils::error::QueryError::semantic(format!(
-                                            "the argument of {name}() must be a variable"
-                                        )),
+                                        grafeo_common::utils::error::QueryError::unsupported(
+                                            format!("the argument of {name}() must be a variable"),
+                                        ),
                                     ));
                                 }
                             }

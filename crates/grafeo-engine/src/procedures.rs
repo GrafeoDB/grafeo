@@ -996,7 +996,7 @@ fn set_parameter(
                 None => "a number, string, boolean or list",
             };
             return Err(Error::Query(QueryError::new(
-                QueryErrorKind::Semantic,
+                QueryErrorKind::InvalidValueType,
                 format!(
                     "Argument '{name}' of {procedure} must be {wanted}, got a {} value",
                     value.type_name()

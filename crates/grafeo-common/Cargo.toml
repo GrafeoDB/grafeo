@@ -45,8 +45,8 @@ rand = { workspace = true, optional = true }
 
 [features]
 default = []
-tiered-storage = []
-temporal = []
+tiered-storage = []  # Deprecated since 0.6.0: enables nothing (LpgStore, its only user, is gone); removed in 0.7.0
+temporal = []  # Deprecated since 0.6.0: enables nothing (LpgStore, its only user, is gone); removed in 0.7.0
 tracing = ["dep:tracing"]
 testing-crash-injection = []
 testing-statement-injection = []

@@ -281,9 +281,9 @@ BK4|cypher f137fd2ed7 DFS reports depth, discovery and finish; depth was the fin
 BK4|gql f137fd2ed7 DFS reports depth, discovery and finish; depth was the finish order.
 BK5|cypher a18d149ec5 A procedure argument whose evaluation fails fails the call with that error: 1 / 0 is a division by zero (22012, #639); it ran with the default.
 BK5|gql a18d149ec5 A procedure argument whose evaluation fails fails the call with that error: 1 / 0 is a division by zero (22012, #639); it ran with the default.
-BK6|cypher 92e11daab5 A procedure argument read from a row is an error that names it; it failed as a missing start parameter. The error starts with its code (#588).
-BK7|cypher ba288c8f3e A procedure argument of the wrong type is an error; it ran with the default. The error starts with its code (#588).
-BK7|gql ba288c8f3e A procedure argument of the wrong type is an error; it ran with the default. The error starts with its code (#588).
+BK6|cypher a3d97228ce A procedure argument read from a row is an error that names it; it failed as a missing start parameter. The error starts with its code (#588), unsupported: a procedure argument must be a constant.
+BK7|cypher 824aec52bd A procedure argument of the wrong type is an error, an invalid value type (22G03); it ran with the default. The error starts with its code (#588).
+BK7|gql 824aec52bd A procedure argument of the wrong type is an error, an invalid value type (22G03); it ran with the default. The error starts with its code (#588).
 BK9|cypher 79f40f49e6 A constant expression in a required procedure argument runs; it failed as a missing start parameter.
 BK9|gql 79f40f49e6 A constant expression in a required procedure argument runs; it failed as a missing start parameter.
 BM1|cypher 1737c2301d A list literal keeps a null item for a property of an unmatched OPTIONAL MATCH variable; it was [] (size 0).

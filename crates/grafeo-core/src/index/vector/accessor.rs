@@ -122,7 +122,8 @@ where
 #[cfg(all(test, feature = "lpg"))]
 mod tests {
     use super::*;
-    use crate::graph::lpg::LpgStore;
+    use crate::graph::GraphStoreMut as _;
+    use crate::graph::rowgroup::RowGroupStore;
 
     #[test]
     fn test_closure_accessor() {
@@ -142,7 +143,7 @@ mod tests {
 
     #[test]
     fn test_property_vector_accessor() {
-        let store = LpgStore::new().unwrap();
+        let store = RowGroupStore::new();
         let id = store.create_node(&["Test"]);
         let vec_data: Arc<[f32]> = vec![1.0, 2.0, 3.0].into();
         store.set_node_property(id, "embedding", Value::Vector(vec_data.clone()));
@@ -162,14 +163,15 @@ mod tests {
     }
 }
 
-#[cfg(all(test, feature = "lpg", not(feature = "temporal")))]
+#[cfg(all(test, feature = "lpg"))]
 mod borrowed_read_tests {
     use super::*;
-    use crate::graph::lpg::LpgStore;
+    use crate::graph::GraphStoreMut as _;
+    use crate::graph::rowgroup::RowGroupStore;
 
     #[test]
     fn accessor_kind_property_dispatches() {
-        let store = LpgStore::new().unwrap();
+        let store = RowGroupStore::new();
         let jules_id = store.create_node(&["Person"]);
         let vec_data: Arc<[f32]> = vec![0.7, 0.8, 0.9].into();
         store.set_node_property(jules_id, "embedding", Value::Vector(vec_data.clone()));
@@ -182,50 +184,11 @@ mod borrowed_read_tests {
         assert!(accessor.get_vector(NodeId::new(999)).is_none());
     }
 
-    /// A search over a spilled column reads every vector in place: the
-    /// backing never copies one out (ruling (d) of #594).
-    #[cfg(feature = "vector-index")]
-    #[test]
-    fn search_reads_spilled_vectors_without_copying_them() {
-        use crate::graph::lpg::test_backing::MemoryBacking;
-        use crate::index::vector::{DistanceMetric, HnswConfig, HnswIndex};
-        use std::sync::atomic::Ordering;
-
-        let store = LpgStore::new().unwrap();
-        let key = PropertyKey::new("embedding");
-        let vectors = [[3.0, 19.0], [19.0, 88.0], [88.0, 3.0], [3.19, 19.88]];
-        let ids: Vec<NodeId> = vectors
-            .iter()
-            .map(|vector| {
-                store.create_node_with_props(
-                    &["Item"],
-                    [("embedding", Value::Vector(vector.to_vec().into()))],
-                )
-            })
-            .collect();
-        let accessor = PropertyVectorAccessor::new(&store, "embedding");
-        let index = HnswIndex::new(HnswConfig::new(2, DistanceMetric::Euclidean));
-        for (id, vector) in ids.iter().zip(vectors) {
-            index.insert(*id, &vector, &accessor);
-        }
-        let snapshot = store.node_property_column_entries(&key).unwrap();
-        let backing = MemoryBacking::of(&snapshot);
-        assert!(store.spill_node_property_column(&key, backing.clone(), &snapshot));
-
-        let hits = index.search(&[3.0, 19.0], 2, &accessor);
-        assert_eq!(hits.first().map(|hit| hit.0), Some(ids[0]));
-        assert_eq!(
-            backing.copies.load(Ordering::Relaxed),
-            0,
-            "a vector was copied"
-        );
-    }
-
     /// The borrowed read hands out the stored vector, and nothing for a
     /// node without one or a value that is not a vector.
     #[test]
     fn with_vector_lends_the_stored_vector() {
-        let store = LpgStore::new().unwrap();
+        let store = RowGroupStore::new();
         let mia = store.create_node(&["Person"]);
         let butch = store.create_node(&["Person"]);
         store.set_node_property(mia, "embedding", Value::Vector(vec![3.0, 19.0].into()));

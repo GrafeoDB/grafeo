@@ -230,7 +230,9 @@ impl Operator for HorizontalAggregateOperator {
 mod tests {
     use super::*;
     use crate::execution::chunk::DataChunkBuilder;
-    use crate::graph::lpg::LpgStore;
+    use crate::graph::GraphStoreMut as _;
+    use crate::graph::rowgroup::RowGroupStore;
+    use grafeo_common::types::PropertyKey;
 
     struct MockOperator {
         chunks: Vec<DataChunk>,
@@ -273,7 +275,7 @@ mod tests {
     // reason: test IDs are small sequential counters
     #[allow(clippy::cast_possible_wrap)]
     fn setup_store_with_edges() -> (Arc<dyn GraphStoreSearch>, Vec<Value>) {
-        let store = LpgStore::new().unwrap();
+        let store = RowGroupStore::new();
         let n1 = store.create_node(&[]);
         let n2 = store.create_node(&[]);
 
@@ -296,12 +298,21 @@ mod tests {
     // reason: test IDs are small sequential counters
     #[allow(clippy::cast_possible_wrap)]
     fn setup_store_with_nodes() -> (Arc<dyn GraphStoreSearch>, Vec<Value>) {
-        let store = LpgStore::new().unwrap();
+        let store = RowGroupStore::new();
         // Use Float64 properties since the result column is Float64-typed
         // (Int64 values from SumInt finalize would be silently dropped by the Float64 column)
-        let n1 = store.create_node_with_props(&["City"], [("pop", Value::Float64(100.0))]);
-        let n2 = store.create_node_with_props(&["City"], [("pop", Value::Float64(200.0))]);
-        let n3 = store.create_node_with_props(&["City"], [("pop", Value::Float64(300.0))]);
+        let n1 = store.create_node_with_props(
+            &["City"],
+            &[(PropertyKey::new("pop"), Value::Float64(100.0))],
+        );
+        let n2 = store.create_node_with_props(
+            &["City"],
+            &[(PropertyKey::new("pop"), Value::Float64(200.0))],
+        );
+        let n3 = store.create_node_with_props(
+            &["City"],
+            &[(PropertyKey::new("pop"), Value::Float64(300.0))],
+        );
 
         let node_ids: Vec<Value> = vec![
             Value::Int64(n1.0 as i64),
@@ -334,7 +345,7 @@ mod tests {
     /// (which returned 0.0 for `sum(e.w)` over integer weights).
     #[test]
     fn an_integer_sum_stays_an_integer() {
-        let store = LpgStore::new().unwrap();
+        let store = RowGroupStore::new();
         let a = store.create_node(&[]);
         let b = store.create_node(&[]);
         let ids: Vec<Value> = [3, 19, 88]
@@ -372,7 +383,7 @@ mod tests {
     /// DISTINCT reads each value once: the sum of 3, 3 and 19 is 22.
     #[test]
     fn a_distinct_horizontal_sum_reads_each_value_once() {
-        let store = LpgStore::new().unwrap();
+        let store = RowGroupStore::new();
         let a = store.create_node(&[]);
         let b = store.create_node(&[]);
         let ids: Vec<Value> = [3, 3, 19]
@@ -403,13 +414,15 @@ mod tests {
     /// In a transaction the aggregate reads the transaction's own writes.
     #[test]
     fn a_horizontal_aggregate_reads_its_transaction() {
-        let store = LpgStore::new().unwrap();
+        let store = RowGroupStore::new();
         let a = store.create_node(&[]);
         let b = store.create_node(&[]);
         // An edge the open transaction 19 created, with its weight
         let transaction = TransactionId::new(19);
         let epoch = store.current_epoch();
-        let edge = store.create_edge_versioned(a, b, "ROAD", epoch, transaction);
+        let edge = store
+            .create_edge_versioned(a, b, "ROAD", epoch, transaction)
+            .unwrap();
         store.set_edge_property_versioned(edge, "w", Value::Int64(88), transaction);
         let ids = vec![Value::Int64(i64::try_from(edge.as_u64()).unwrap())];
         let store: Arc<dyn GraphStoreSearch> = Arc::new(store);
@@ -622,7 +635,7 @@ mod tests {
 
     #[test]
     fn test_horizontal_empty_list_returns_null() {
-        let store: Arc<dyn GraphStoreSearch> = Arc::new(LpgStore::new().unwrap());
+        let store: Arc<dyn GraphStoreSearch> = Arc::new(RowGroupStore::new());
 
         let mut builder = DataChunkBuilder::new(&[LogicalType::Any]);
         builder
@@ -655,7 +668,7 @@ mod tests {
 
     #[test]
     fn test_horizontal_non_list_column_returns_null() {
-        let store: Arc<dyn GraphStoreSearch> = Arc::new(LpgStore::new().unwrap());
+        let store: Arc<dyn GraphStoreSearch> = Arc::new(RowGroupStore::new());
 
         // Put a non-list value in the list column
         let mut builder = DataChunkBuilder::new(&[LogicalType::Int64]);
@@ -777,7 +790,7 @@ mod tests {
 
     #[test]
     fn test_horizontal_name() {
-        let store: Arc<dyn GraphStoreSearch> = Arc::new(LpgStore::new().unwrap());
+        let store: Arc<dyn GraphStoreSearch> = Arc::new(RowGroupStore::new());
         let mock = MockOperator::new(vec![]);
         let op = HorizontalAggregateOperator::new(
             Box::new(mock),
@@ -793,7 +806,7 @@ mod tests {
 
     #[test]
     fn test_horizontal_child_returns_none() {
-        let store: Arc<dyn GraphStoreSearch> = Arc::new(LpgStore::new().unwrap());
+        let store: Arc<dyn GraphStoreSearch> = Arc::new(RowGroupStore::new());
         let mock = MockOperator::new(vec![]); // No chunks
         let mut op = HorizontalAggregateOperator::new(
             Box::new(mock),
@@ -810,7 +823,7 @@ mod tests {
 
     #[test]
     fn test_horizontal_aggregate_into_any() {
-        let store: Arc<dyn GraphStoreSearch> = Arc::new(LpgStore::new().unwrap());
+        let store: Arc<dyn GraphStoreSearch> = Arc::new(RowGroupStore::new());
         let mock = MockOperator::new(vec![]);
         let op = HorizontalAggregateOperator::new(
             Box::new(mock),

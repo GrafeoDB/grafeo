@@ -125,8 +125,8 @@ fn a_store_level_delete_keeps_a_node_that_has_edges() {
         .unwrap();
     let butch = id_of(&session, "Butch");
     // The store refuses to delete a node that has edges, so no algorithm
-    // meets a node deleted without its edges (`LpgStore::delete_node` left
-    // them in place).
+    // meets a node deleted without its edges (the store of 0.5.x left them
+    // in place).
     assert!(
         !db.store()
             .delete_node(NodeId::new(u64::try_from(butch).unwrap()))

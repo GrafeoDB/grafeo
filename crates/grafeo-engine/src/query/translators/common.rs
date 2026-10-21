@@ -62,7 +62,7 @@ pub(crate) fn expand_subquery_return_star(
     }
     let (Some(outer), Some(bound)) = (outer, ret.input.bound_variables(outer)) else {
         return Err(Error::Query(QueryError::new(
-            QueryErrorKind::Semantic,
+            QueryErrorKind::Unsupported,
             "RETURN * in this CALL subquery cannot tell which variables it binds: return them by name",
         )));
     };
@@ -488,10 +488,8 @@ pub(crate) fn check_sort_reads_projection(
              only in '{name}' are one row; return it, or sort by a returned column"
         )
     };
-    Err(Error::Query(QueryError::new(
-        QueryErrorKind::Semantic,
-        message,
-    )))
+    // The variable is out of scope: a name that resolves to nothing.
+    Err(Error::Query(QueryError::invalid_reference(message)))
 }
 
 /// The error for a `WITH` item that is an expression without a name. As in

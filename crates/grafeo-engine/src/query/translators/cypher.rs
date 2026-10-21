@@ -53,7 +53,7 @@ pub fn translate(query: &str) -> Result<LogicalPlan> {
     match translate_full(query)? {
         CypherTranslationResult::Plan(plan) => Ok(plan),
         _ => Err(Error::Query(QueryError::new(
-            QueryErrorKind::Semantic,
+            QueryErrorKind::Unsupported,
             "Schema commands cannot be translated to a logical plan",
         ))),
     }
@@ -209,10 +209,9 @@ impl CypherTranslator {
             ast::Statement::Schema(_)
             | ast::Statement::ShowIndexes
             | ast::Statement::ShowConstraints
-            | ast::Statement::ShowCurrentGraphType => Err(Error::Query(QueryError::new(
-                QueryErrorKind::Semantic,
-                "Schema commands should be routed through translate_statement_full",
-            ))),
+            | ast::Statement::ShowCurrentGraphType => Err(Error::Internal(
+                "Schema commands should be routed through translate_statement_full".to_string(),
+            )),
         }
     }
 
@@ -1555,7 +1554,7 @@ impl CypherTranslator {
     ) -> Result<Vec<ast::ProjectionItem>> {
         let Some(bound) = input.bound_variables(self.call_scope.borrow().as_ref()) else {
             return Err(Error::Query(QueryError::new(
-                QueryErrorKind::Semantic,
+                QueryErrorKind::Unsupported,
                 format!(
                     "{clause} * with an aggregate cannot tell which variables are in scope \
                      here: name them"
@@ -1840,10 +1839,10 @@ impl CypherTranslator {
             Some(outer) => outer
                 .bound_variables(self.call_scope.borrow().as_ref())
                 .ok_or_else(|| {
-                    semantic(
+                    Error::Query(QueryError::unsupported(
                         "MERGE cannot tell which variables the rows before it bind here; name \
                          them in a WITH before the MERGE",
-                    )
+                    ))
                 })?,
             None => HashSet::new(),
         };
@@ -1965,12 +1964,13 @@ impl CypherTranslator {
         variable: &str,
         takes_labels: bool,
     ) -> Result<(Vec<(String, LogicalExpression)>, Vec<String>)> {
-        let unsupported = |message: String| {
+        let error = |kind: QueryErrorKind, message: String| {
             Err(Error::Query(QueryError::new(
-                QueryErrorKind::Semantic,
+                kind,
                 format!("MERGE ... {clause} SET {message}"),
             )))
         };
+        let unsupported = |message: String| error(QueryErrorKind::Unsupported, message);
         let mut properties = Vec::new();
         let mut labels: Vec<String> = Vec::new();
         for item in set_clause.map_or(&[][..], |set| &set.items) {
@@ -2022,10 +2022,13 @@ impl CypherTranslator {
                 }
                 ast::SetItem::Labels { labels: added, .. } => {
                     if !takes_labels {
-                        return unsupported(format!(
-                            "{item_variable}:{}: a relationship has no labels",
-                            added.join(":")
-                        ));
+                        return error(
+                            QueryErrorKind::Semantic,
+                            format!(
+                                "{item_variable}:{}: a relationship has no labels",
+                                added.join(":")
+                            ),
+                        );
                     }
                     for label in added {
                         if !labels.contains(label) {
@@ -2413,7 +2416,7 @@ impl CypherTranslator {
                 })
             }
             _ => Err(Error::Query(QueryError::new(
-                QueryErrorKind::Semantic,
+                QueryErrorKind::Unsupported,
                 "Unsupported expression wrapping an aggregate",
             ))),
         }
@@ -2911,14 +2914,15 @@ impl CypherTranslator {
     ) -> Result<LogicalOperator> {
         // Without a clause before it, nothing binds what DELETE names.
         let input = input.ok_or_else(|| {
-            let message = match delete_clause.expressions.first() {
-                Some(ast::Expression::Variable(variable)) => format!(
-                    "Undefined variable '{variable}': DELETE needs a clause before it that \
-                     binds it, such as MATCH"
-                ),
-                _ => "DELETE requires input".to_string(),
-            };
-            Error::Query(QueryError::new(QueryErrorKind::Semantic, message))
+            Error::Query(match delete_clause.expressions.first() {
+                Some(ast::Expression::Variable(variable)) => {
+                    QueryError::invalid_reference(format!(
+                        "Undefined variable '{variable}': DELETE needs a clause before it that \
+                         binds it, such as MATCH"
+                    ))
+                }
+                _ => QueryError::new(QueryErrorKind::Semantic, "DELETE requires input"),
+            })
         })?;
 
         let mut plan = input;
@@ -2940,7 +2944,7 @@ impl CypherTranslator {
                 }
             } else {
                 return Err(Error::Query(QueryError::new(
-                    QueryErrorKind::Semantic,
+                    QueryErrorKind::Unsupported,
                     "DELETE only supports variable expressions",
                 )));
             }
@@ -3330,7 +3334,7 @@ impl CypherTranslator {
                 }
                 _ => {
                     return Err(Error::Query(QueryError::new(
-                        QueryErrorKind::Semantic,
+                        QueryErrorKind::Unsupported,
                         "EXISTS and COUNT subqueries only support MATCH, OPTIONAL MATCH and WHERE clauses",
                     )));
                 }
@@ -3388,7 +3392,7 @@ impl CypherTranslator {
             ast::UnaryOp::Neg => UnaryOp::Neg,
             ast::UnaryOp::Pos => {
                 return Err(Error::Query(QueryError::new(
-                    QueryErrorKind::Semantic,
+                    QueryErrorKind::Unsupported,
                     "Unary positive not yet supported",
                 )));
             }
@@ -3408,7 +3412,7 @@ impl CypherTranslator {
             }
             ast::Expression::Parameter(name) => Ok(CountExpr::Parameter(name.clone())),
             _ => Err(Error::Query(QueryError::new(
-                QueryErrorKind::Semantic,
+                QueryErrorKind::Unsupported,
                 "Expected integer literal or parameter for SKIP/LIMIT",
             ))),
         }
@@ -3420,10 +3424,9 @@ impl CypherTranslator {
             LogicalOperator::Expand(expand) => Ok(expand.to_variable.clone()),
             LogicalOperator::Filter(filter) => Self::get_last_variable(&filter.input),
             LogicalOperator::Project(project) => Self::get_last_variable(&project.input),
-            _ => Err(Error::Query(QueryError::new(
-                QueryErrorKind::Semantic,
-                "Cannot get variable from operator",
-            ))),
+            _ => Err(Error::Internal(
+                "Cannot get variable from operator".to_string(),
+            )),
         }
     }
 

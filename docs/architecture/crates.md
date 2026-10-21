@@ -85,12 +85,13 @@ Core data structures and execution engine.
 
 | Module | Purpose |
 |--------|---------|
-| `graph/lpg/` | LPG storage (nodes, edges, properties) |
+| `graph/rowgroup/` | The row-group store: LPG nodes, edges and properties as row groups of columns |
+| `graph/lpg/` | The LPG types (`Node`, `Edge`) and the readers of the LPG sections of earlier releases |
 | `index/` | Hash, B-tree, adjacency indexes |
 | `execution/` | DataChunk, operators, pipelines |
 
 ```rust
-use grafeo_core::graph::LpgStore;
+use grafeo_core::graph::rowgroup::RowGroupStore;
 use grafeo_core::index::HashIndex;
 use grafeo_core::execution::DataChunk;
 ```

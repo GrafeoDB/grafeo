@@ -130,7 +130,7 @@ impl ProcedureCallOperator {
                         // A mistake in the query text: the procedure has no
                         // such column.
                         OperatorError::from(grafeo_common::utils::error::Error::Query(
-                            grafeo_common::utils::error::QueryError::semantic(format!(
+                            grafeo_common::utils::error::QueryError::invalid_reference(format!(
                                 "YIELD column '{}' is no column of the procedure (it has: {})",
                                 field_name,
                                 display_columns.join(", ")

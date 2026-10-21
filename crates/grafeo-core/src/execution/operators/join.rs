@@ -2043,7 +2043,7 @@ mod tests {
             BinaryFilterOp, ExpressionPredicate, FilterExpression,
         };
         use crate::graph::GraphStoreSearch;
-        use crate::graph::lpg::LpgStore;
+        use crate::graph::rowgroup::RowGroupStore;
 
         fn list(items: Vec<Value>) -> Value {
             Value::List(items.into())
@@ -2146,7 +2146,7 @@ mod tests {
 
         /// Whether `a = b` is TRUE, evaluated as a filter evaluates it.
         fn equal(a: &Value, b: &Value) -> bool {
-            let store: Arc<dyn GraphStoreSearch> = Arc::new(LpgStore::new().unwrap());
+            let store: Arc<dyn GraphStoreSearch> = Arc::new(RowGroupStore::new());
             let predicate = ExpressionPredicate::new(
                 FilterExpression::Binary {
                     left: Box::new(FilterExpression::Literal(a.clone())),

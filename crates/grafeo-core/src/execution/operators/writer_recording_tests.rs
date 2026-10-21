@@ -19,9 +19,11 @@ use super::{
     BulkRows, ChangeRecorder, GraphWriter, NewEdge, OperatorError, Recording, WriteClaim,
     WriteClaims, WriteInProgress, WriteTarget, node_labels, property_list,
 };
+use crate::graph::GraphStore as _;
 use crate::graph::GraphStoreMut;
 use crate::graph::apply::{Applied, ApplyError, ChangeTarget, ExternalTarget, Writer};
-use crate::graph::lpg::{Edge, LpgStore, Node};
+use crate::graph::lpg::{Edge, Node};
+use crate::graph::rowgroup::RowGroupStore;
 
 /// The transaction the tests write as.
 const TRANSACTION: u64 = 19;
@@ -40,7 +42,7 @@ enum Event {
 /// A change recorder over one graph: a change set, the claims asked for,
 /// and a write freeze that counts its requests.
 struct Recorder {
-    store: Arc<LpgStore>,
+    store: Arc<RowGroupStore>,
     writer: Writer,
     slot: GraphSlot,
     set: Mutex<ChangeSet>,
@@ -57,13 +59,13 @@ struct Recorder {
 
 impl Recorder {
     /// A recorder of transaction [`TRANSACTION`] in `store`'s default graph.
-    fn new(store: &Arc<LpgStore>) -> Arc<Self> {
+    fn new(store: &Arc<RowGroupStore>) -> Arc<Self> {
         Self::with_bulk(store, None)
     }
 
     /// A recorder as [`new`](Self::new) makes, which takes bulk writes as
     /// `bulk` says.
-    fn with_bulk(store: &Arc<LpgStore>, bulk: Option<BulkRows>) -> Arc<Self> {
+    fn with_bulk(store: &Arc<RowGroupStore>, bulk: Option<BulkRows>) -> Arc<Self> {
         let mut set = ChangeSet::new();
         let slot = set
             .slot(GraphRef {
@@ -223,7 +225,7 @@ impl WriteClaims for Recorder {
 /// A writer of transaction [`TRANSACTION`] in `store` through `target`,
 /// recording in `recorder`.
 fn writer_through(
-    store: &Arc<LpgStore>,
+    store: &Arc<RowGroupStore>,
     target: WriteTarget,
     recorder: &Arc<Recorder>,
 ) -> GraphWriter {
@@ -235,7 +237,7 @@ fn writer_through(
 
 /// A writer of transaction [`TRANSACTION`] in `store`, through the store's
 /// own change target.
-fn recording_writer(store: &Arc<LpgStore>, recorder: &Arc<Recorder>) -> GraphWriter {
+fn recording_writer(store: &Arc<RowGroupStore>, recorder: &Arc<Recorder>) -> GraphWriter {
     writer_through(
         store,
         WriteTarget::Store(Arc::clone(store) as Arc<dyn ChangeTarget>),
@@ -266,7 +268,7 @@ fn describe_edge(edge: &Edge) -> (u64, u64, String, Vec<(String, Value)>) {
 
 /// Every node and edge `reader` sees in `store`, with its labels, type,
 /// endpoints and properties.
-fn dump(store: &LpgStore, reader: &GraphWriter) -> Vec<String> {
+fn dump(store: &RowGroupStore, reader: &GraphWriter) -> Vec<String> {
     let mut lines = Vec::new();
     for raw in 0..store.next_node_id() {
         if let Some(node) = reader.node(NodeId::new(raw)) {
@@ -369,9 +371,9 @@ fn every_writer_method_records_exactly_what_it_applied() {
     }
 }
 
-/// A store that refuses every op of one kind and is `LpgStore` otherwise.
+/// A store that refuses every op of one kind and is `RowGroupStore` otherwise.
 struct Refusing {
-    store: Arc<LpgStore>,
+    store: Arc<RowGroupStore>,
     kind: &'static str,
 }
 

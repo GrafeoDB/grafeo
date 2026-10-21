@@ -1,7 +1,7 @@
 //! Pure in-memory storage backend.
 
 use grafeo_common::memory::arena::AllocError;
-use grafeo_core::graph::lpg::LpgStore;
+use grafeo_core::graph::rowgroup::RowGroupStore;
 use std::sync::Arc;
 
 /// In-memory storage backend.
@@ -9,8 +9,8 @@ use std::sync::Arc;
 /// This is the default storage backend that keeps all data in memory.
 /// Data is lost when the process exits unless WAL is enabled.
 pub struct MemoryBackend {
-    /// The underlying LPG store.
-    store: Arc<LpgStore>,
+    /// The underlying row-group store.
+    store: Arc<RowGroupStore>,
 }
 
 impl MemoryBackend {
@@ -18,28 +18,34 @@ impl MemoryBackend {
     ///
     /// # Errors
     ///
-    /// Returns [`AllocError`] if arena allocation fails.
+    /// None since 0.6.0: the row-group store allocates as it grows. The
+    /// [`AllocError`] stays in the signature, which the arena-based store
+    /// of earlier releases needed.
     pub fn new() -> Result<Self, AllocError> {
         Ok(Self {
-            store: Arc::new(LpgStore::new()?),
+            store: Arc::new(RowGroupStore::new()),
         })
     }
 
     /// Returns a reference to the underlying store.
     #[must_use]
-    pub fn store(&self) -> &Arc<LpgStore> {
+    pub fn store(&self) -> &Arc<RowGroupStore> {
         &self.store
     }
 }
 
 impl Default for MemoryBackend {
     fn default() -> Self {
-        Self::new().expect("arena allocation for default MemoryBackend")
+        Self {
+            store: Arc::new(RowGroupStore::new()),
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use grafeo_core::graph::{GraphStore, GraphStoreMut};
+
     use super::*;
 
     #[test]
@@ -49,5 +55,6 @@ mod tests {
 
         let id = store.create_node(&["Test"]);
         assert!(id.is_valid());
+        assert_eq!(store.node_count(), 1);
     }
 }

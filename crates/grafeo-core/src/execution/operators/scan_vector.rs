@@ -30,12 +30,14 @@ use std::sync::Arc;
 /// ```no_run
 /// use grafeo_core::execution::operators::{Operator, VectorScanOperator};
 /// use grafeo_core::index::vector::DistanceMetric;
-/// use grafeo_core::graph::lpg::LpgStore;
 /// use grafeo_core::graph::GraphStoreSearch;
 /// use std::sync::Arc;
 ///
+/// # // The row-group store is built with the `lpg` feature.
+/// # #[cfg(feature = "lpg")]
 /// # fn example() -> Result<(), grafeo_core::execution::operators::OperatorError> {
-/// let store: Arc<dyn GraphStoreSearch> = Arc::new(LpgStore::new().unwrap());
+/// # use grafeo_core::graph::rowgroup::RowGroupStore;
+/// let store: Arc<dyn GraphStoreSearch> = Arc::new(RowGroupStore::new());
 /// let query = vec![0.1f32, 0.2, 0.3];
 /// let mut scan = VectorScanOperator::new(
 ///     store,
@@ -250,11 +252,12 @@ impl Operator for VectorScanOperator {
 #[cfg(all(test, feature = "lpg", feature = "vector-index"))]
 mod tests {
     use super::*;
-    use crate::graph::lpg::LpgStore;
+    use crate::graph::GraphStoreMut as _;
+    use crate::graph::rowgroup::RowGroupStore;
     use grafeo_common::types::Value;
 
     fn store_with_vectors(docs: &[(&str, Vec<f32>)]) -> Arc<dyn GraphStoreSearch> {
-        let store = Arc::new(LpgStore::new().unwrap());
+        let store = Arc::new(RowGroupStore::new());
         for (property, vector) in docs {
             let node = store.create_node(&["Document"]);
             store.set_node_property(node, property, Value::Vector(vector.clone().into()));
@@ -264,7 +267,7 @@ mod tests {
 
     #[test]
     fn test_vector_scan_brute_force() {
-        let store = Arc::new(LpgStore::new().unwrap());
+        let store = Arc::new(RowGroupStore::new());
 
         let n1 = store.create_node(&["Document"]);
         let n2 = store.create_node(&["Document"]);
@@ -296,7 +299,7 @@ mod tests {
 
     #[test]
     fn test_vector_scan_reset() {
-        let store = Arc::new(LpgStore::new().unwrap());
+        let store = Arc::new(RowGroupStore::new());
         let n1 = store.create_node(&["Doc"]);
         store.set_node_property(n1, "vec", Value::Vector(vec![0.1, 0.2].into()));
 
@@ -320,7 +323,7 @@ mod tests {
 
     #[test]
     fn test_vector_scan_with_max_distance() {
-        let store = Arc::new(LpgStore::new().unwrap());
+        let store = Arc::new(RowGroupStore::new());
         let n1 = store.create_node(&["Doc"]);
         let _n2 = store.create_node(&["Doc"]);
         store.set_node_property(n1, "vec", Value::Vector(vec![0.1, 0.0].into()));
@@ -343,7 +346,7 @@ mod tests {
 
     #[test]
     fn test_vector_scan_empty_results() {
-        let store = Arc::new(LpgStore::new().unwrap());
+        let store = Arc::new(RowGroupStore::new());
         store.create_node(&["Doc"]);
 
         let mut scan = VectorScanOperator::new(
@@ -360,7 +363,7 @@ mod tests {
 
     #[test]
     fn test_vector_scan_with_min_similarity() {
-        let store = Arc::new(LpgStore::new().unwrap());
+        let store = Arc::new(RowGroupStore::new());
         let n1 = store.create_node(&["Doc"]);
         let n2 = store.create_node(&["Doc"]);
         store.set_node_property(n1, "vec", Value::Vector(vec![1.0, 0.0].into()));
@@ -383,7 +386,7 @@ mod tests {
 
     #[test]
     fn test_vector_scan_with_chunk_capacity() {
-        let store = Arc::new(LpgStore::new().unwrap());
+        let store = Arc::new(RowGroupStore::new());
         for i in 0..10 {
             let node = store.create_node(&["Doc"]);
             store.set_node_property(node, "vec", Value::Vector(vec![i as f32, 0.0].into()));
@@ -412,7 +415,7 @@ mod tests {
 
     #[test]
     fn test_vector_scan_name() {
-        let store: Arc<dyn GraphStoreSearch> = Arc::new(LpgStore::new().unwrap());
+        let store: Arc<dyn GraphStoreSearch> = Arc::new(RowGroupStore::new());
         let scan = VectorScanOperator::new(
             store,
             None,

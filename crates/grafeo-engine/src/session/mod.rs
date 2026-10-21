@@ -1005,7 +1005,7 @@ impl Session {
                     let src_key = self.effective_graph_key(src);
                     if self.root_store().graph(&src_key).is_none() {
                         return Err(Error::Query(QueryError::new(
-                            QueryErrorKind::Semantic,
+                            QueryErrorKind::InvalidReference,
                             format!("Source graph '{src}' does not exist"),
                         )));
                     }
@@ -1014,7 +1014,7 @@ impl Session {
                     let src_key = self.effective_graph_key(src);
                     if self.root_store().graph(&src_key).is_none() {
                         return Err(Error::Query(QueryError::new(
-                            QueryErrorKind::Semantic,
+                            QueryErrorKind::InvalidReference,
                             format!("Source graph '{src}' does not exist"),
                         )));
                     }
@@ -1045,7 +1045,7 @@ impl Session {
                     };
                     if self.catalog.get_graph_type_def(&graph_type).is_none() {
                         return Err(Error::Query(QueryError::new(
-                            QueryErrorKind::Semantic,
+                            QueryErrorKind::InvalidReference,
                             crate::catalog::CatalogError::TypeNotFound(graph_type).to_string(),
                         )));
                     }
@@ -1079,7 +1079,7 @@ impl Session {
                     let src_key = self.effective_graph_key(src);
                     let source = self.root_store().graph(&src_key).ok_or_else(|| {
                         Error::Query(QueryError::new(
-                            QueryErrorKind::Semantic,
+                            QueryErrorKind::InvalidReference,
                             format!("Source graph '{src}' does not exist"),
                         ))
                     })?;
@@ -1110,7 +1110,7 @@ impl Session {
                         return Ok(QueryResult::empty());
                     }
                     return Err(Error::Query(QueryError::new(
-                        QueryErrorKind::Semantic,
+                        QueryErrorKind::InvalidReference,
                         format!("Graph '{name}' does not exist"),
                     )));
                 }
@@ -1156,7 +1156,7 @@ impl Session {
                     && self.root_store().graph(&effective_key).is_none()
                 {
                     return Err(Error::Query(QueryError::new(
-                        QueryErrorKind::Semantic,
+                        QueryErrorKind::InvalidReference,
                         format!("Graph '{name}' does not exist"),
                     )));
                 }
@@ -1186,7 +1186,7 @@ impl Session {
                     && self.root_store().graph(&effective_key).is_none()
                 {
                     return Err(Error::Query(QueryError::new(
-                        QueryErrorKind::Semantic,
+                        QueryErrorKind::InvalidReference,
                         format!("Graph '{name}' does not exist"),
                     )));
                 }
@@ -1197,7 +1197,7 @@ impl Session {
                 // ISO/IEC 39075 Section 7.1 GR1: set session schema (independent of graph)
                 if !self.catalog.schema_exists(&name) {
                     return Err(Error::Query(QueryError::new(
-                        QueryErrorKind::Semantic,
+                        QueryErrorKind::InvalidReference,
                         format!("Schema '{name}' does not exist"),
                     )));
                 }
@@ -1324,7 +1324,7 @@ impl Session {
                 let removed = self.projections.write().remove(&name).is_some();
                 if !removed {
                     return Err(Error::Query(QueryError::new(
-                        QueryErrorKind::Semantic,
+                        QueryErrorKind::InvalidReference,
                         format!("Projection '{name}' does not exist"),
                     )));
                 }
@@ -1476,6 +1476,9 @@ impl Session {
 
         let semantic =
             |message: String| Error::Query(QueryError::new(QueryErrorKind::Semantic, message));
+        let invalid_reference = |message: String| {
+            Error::Query(QueryError::new(QueryErrorKind::InvalidReference, message))
+        };
         let done = |result: QueryResult| Ok((result, AfterSchemaChange::Nothing));
 
         match cmd {
@@ -1549,7 +1552,7 @@ impl Session {
                     if if_exists {
                         return done(QueryResult::status("No change"));
                     }
-                    return Err(semantic(
+                    return Err(invalid_reference(
                         CatalogError::TypeNotFound(effective_name).to_string(),
                     ));
                 }
@@ -1564,7 +1567,7 @@ impl Session {
                     if if_exists {
                         return done(QueryResult::status("No change"));
                     }
-                    return Err(semantic(
+                    return Err(invalid_reference(
                         CatalogError::TypeNotFound(effective_name).to_string(),
                     ));
                 }
@@ -1626,7 +1629,7 @@ impl Session {
                     if if_exists {
                         return done(QueryResult::status("No change".to_string()));
                     }
-                    return Err(semantic(format!("Index '{name}' does not exist")));
+                    return Err(invalid_reference(format!("Index '{name}' does not exist")));
                 };
                 change.push(StandaloneOp::DropCatalog(CatalogKey::IndexName(
                     name.clone(),
@@ -1711,7 +1714,9 @@ impl Session {
                             "No constraint '{name}' to drop"
                         )));
                     }
-                    return Err(semantic(format!("constraint '{name}' does not exist")));
+                    return Err(invalid_reference(format!(
+                        "constraint '{name}' does not exist"
+                    )));
                 }
                 change.push(StandaloneOp::DropCatalog(CatalogKey::Constraint(
                     name.clone(),
@@ -1816,7 +1821,7 @@ impl Session {
                             if *is_reference {
                                 // Reference: validate existence; declare nothing.
                                 if self.catalog.get_node_type(&inline_effective).is_none() {
-                                    return Err(semantic(format!(
+                                    return Err(invalid_reference(format!(
                                         "Referenced node type '{inline_effective}' does not exist"
                                     )));
                                 }
@@ -1849,7 +1854,7 @@ impl Session {
                             let inline_effective = self.effective_type_key(name);
                             if *is_reference {
                                 if self.catalog.get_edge_type_def(&inline_effective).is_none() {
-                                    return Err(semantic(format!(
+                                    return Err(invalid_reference(format!(
                                         "Referenced edge type '{inline_effective}' does not exist"
                                     )));
                                 }
@@ -1906,7 +1911,7 @@ impl Session {
                     if if_exists {
                         return done(QueryResult::status("No change"));
                     }
-                    return Err(semantic(
+                    return Err(invalid_reference(
                         CatalogError::TypeNotFound(effective_name).to_string(),
                     ));
                 }
@@ -1977,7 +1982,9 @@ impl Session {
                     if if_exists {
                         return done(QueryResult::status("No change"));
                     }
-                    return Err(semantic(CatalogError::SchemaNotFound(name).to_string()));
+                    return Err(invalid_reference(
+                        CatalogError::SchemaNotFound(name).to_string(),
+                    ));
                 }
                 change.push(StandaloneOp::DropCatalog(CatalogKey::Schema(name.clone())));
                 // The auto-created default graph partition goes with it.
@@ -2002,7 +2009,9 @@ impl Session {
                 // The whole statement or nothing: the alterations apply to a
                 // copy of the type, which replaces it once all of them pass.
                 let mut def = self.catalog.get_node_type(&effective_name).ok_or_else(|| {
-                    semantic(CatalogError::TypeNotFound(effective_name.clone()).to_string())
+                    invalid_reference(
+                        CatalogError::TypeNotFound(effective_name.clone()).to_string(),
+                    )
                 })?;
                 for alt in &stmt.alterations {
                     match alt {
@@ -2035,7 +2044,9 @@ impl Session {
                     .catalog
                     .get_edge_type_def(&effective_name)
                     .ok_or_else(|| {
-                        semantic(CatalogError::TypeNotFound(effective_name.clone()).to_string())
+                        invalid_reference(
+                            CatalogError::TypeNotFound(effective_name.clone()).to_string(),
+                        )
                     })?;
                 for alt in &stmt.alterations {
                     match alt {
@@ -2069,7 +2080,9 @@ impl Session {
                     .catalog
                     .get_graph_type_def(&effective_name)
                     .ok_or_else(|| {
-                        semantic(CatalogError::TypeNotFound(effective_name.clone()).to_string())
+                        invalid_reference(
+                            CatalogError::TypeNotFound(effective_name.clone()).to_string(),
+                        )
                     })?;
                 for alt in &stmt.alterations {
                     match alt {
@@ -2137,7 +2150,9 @@ impl Session {
                     if if_exists {
                         return done(QueryResult::empty());
                     }
-                    return Err(semantic(CatalogError::TypeNotFound(name).to_string()));
+                    return Err(invalid_reference(
+                        CatalogError::TypeNotFound(name).to_string(),
+                    ));
                 }
                 change.push(StandaloneOp::DropCatalog(CatalogKey::Procedure(
                     name.clone(),
@@ -2532,7 +2547,7 @@ impl Session {
 
         let def = self.catalog.get_graph_type_def(name).ok_or_else(|| {
             Error::Query(QueryError::new(
-                QueryErrorKind::Semantic,
+                QueryErrorKind::InvalidReference,
                 format!("Graph type '{name}' not found"),
             ))
         })?;
@@ -3244,15 +3259,12 @@ impl Session {
                 None => match cypher::translate_full(query)? {
                     #[cfg(feature = "lpg")]
                     cypher::CypherTranslationResult::SchemaCommand(cmd) => {
-                        use grafeo_common::utils::error::{
-                            Error as GrafeoError, QueryError, QueryErrorKind,
-                        };
                         self.require_permission(crate::auth::StatementKind::Admin)?;
+                        // As in GQL: a read-only transaction refuses DDL (25G03).
                         if *self.read_only_tx.lock() {
-                            return Err(GrafeoError::Query(QueryError::new(
-                                QueryErrorKind::Semantic,
-                                "Cannot execute schema DDL in a read-only transaction",
-                            )));
+                            return Err(grafeo_common::utils::error::Error::Transaction(
+                                grafeo_common::utils::error::TransactionError::ReadOnly,
+                            ));
                         }
                         return self.execute_schema_command(cmd);
                     }
@@ -5005,7 +5017,7 @@ impl Session {
                     .unwrap_or_else(|| "default".to_string());
                 Err(grafeo_common::utils::error::Error::Query(
                     grafeo_common::utils::error::QueryError::new(
-                        grafeo_common::utils::error::QueryErrorKind::Semantic,
+                        grafeo_common::utils::error::QueryErrorKind::InvalidReference,
                         format!("Graph '{name}' does not exist"),
                     ),
                 ))

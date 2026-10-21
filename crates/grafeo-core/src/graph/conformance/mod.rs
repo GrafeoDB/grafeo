@@ -4,8 +4,8 @@
 //! transaction's writes recorded in a [`ChangeSet`], then stamped at commit
 //! or undone at rollback and savepoints; a direct call as an immediate
 //! write; recovery as replay. It checks what readers see through the read
-//! traits only, so any store passes the same cases: `LpgStore` now, the
-//! row-group store from its first cluster on (workstream H).
+//! traits only, so any store passes the same cases (the row-group store, and
+//! `LpgStore` until 0.6.0 deleted it).
 //!
 //! A store lists the cases it is known to fail, each with its reason (a
 //! [`KnownGap`]). Such a case must keep failing: once it passes, its test
@@ -16,7 +16,6 @@ mod cases;
 mod epochs;
 mod graphs;
 mod indexes;
-mod lpg;
 mod rowgroup;
 #[cfg(any(feature = "text-index", feature = "vector-index"))]
 mod searches;

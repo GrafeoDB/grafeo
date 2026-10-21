@@ -2072,7 +2072,7 @@ pub fn read_lpg_section_with_backward_edges(
 // ── The section of a database file ──────────────────────────────────
 
 /// The row-group store's `LPG_STORE` section (version 4) in a `.grafeo`
-/// container, the part `LpgStoreSection` plays for `LpgStore`: it writes a
+/// container: it writes a
 /// root and its named graphs (see [`RowGroupStore::write_section_at`]) and
 /// reads them back into its root ([`RowGroupStore::read_section`]).
 ///
@@ -2178,8 +2178,8 @@ impl Section for RowGroupStoreSection {
 
     /// Reads the chunks of version 4 into the root (see
     /// [`RowGroupStore::read_section`]), and migrates the sections earlier
-    /// releases wrote: the chunks of version 3 (0.6.0-beta), read by
-    /// `LpgStoreSection`'s reader, and the one raw chunk of 0.5.x
+    /// releases wrote: the chunks of version 3 (0.6.0-beta.1, read by the
+    /// reader of `graph::lpg`), and the one raw chunk of 0.5.x
     /// ([`deserialize`](Section::deserialize)). A migrated section's rows
     /// come in through the replay writer, its dictionaries and ids as the
     /// file holds them, and the versions they were stamped with collapse

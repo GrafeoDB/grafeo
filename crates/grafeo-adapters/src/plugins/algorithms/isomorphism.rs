@@ -14,7 +14,9 @@ use grafeo_common::utils::hash::{FxHashMap, FxHashSet};
 use grafeo_core::graph::Direction;
 use grafeo_core::graph::GraphStore;
 #[cfg(all(test, feature = "lpg"))]
-use grafeo_core::graph::lpg::LpgStore;
+use grafeo_core::graph::GraphStoreMut as _;
+#[cfg(all(test, feature = "lpg"))]
+use grafeo_core::graph::rowgroup::RowGroupStore;
 
 use super::super::{AlgorithmResult, ParameterDef, ParameterType, Parameters};
 use super::traits::{GraphAlgorithm, visible_edges_from};
@@ -447,8 +449,8 @@ impl GraphAlgorithm for SubgraphIsomorphismAlgorithm {
 mod tests {
     use super::*;
 
-    fn create_triangle() -> LpgStore {
-        let store = LpgStore::new().unwrap();
+    fn create_triangle() -> RowGroupStore {
+        let store = RowGroupStore::new();
         let n0 = store.create_node(&["Node"]);
         let n1 = store.create_node(&["Node"]);
         let n2 = store.create_node(&["Node"]);
@@ -463,8 +465,8 @@ mod tests {
         store
     }
 
-    fn create_k4() -> LpgStore {
-        let store = LpgStore::new().unwrap();
+    fn create_k4() -> RowGroupStore {
+        let store = RowGroupStore::new();
         let nodes: Vec<NodeId> = (0..4).map(|_| store.create_node(&["Node"])).collect();
         for i in 0..4 {
             for j in (i + 1)..4 {
@@ -500,7 +502,7 @@ mod tests {
     #[test]
     fn test_edge_in_k4() {
         // Pattern: single edge (2 nodes)
-        let pattern = LpgStore::new().unwrap();
+        let pattern = RowGroupStore::new();
         let p0 = pattern.create_node(&["Node"]);
         let p1 = pattern.create_node(&["Node"]);
         pattern.create_edge(p0, p1, "E");
@@ -561,7 +563,7 @@ mod tests {
     #[test]
     fn test_no_match() {
         // Target is a path (no triangles), pattern is a triangle.
-        let target = LpgStore::new().unwrap();
+        let target = RowGroupStore::new();
         let n0 = target.create_node(&["Node"]);
         let n1 = target.create_node(&["Node"]);
         let n2 = target.create_node(&["Node"]);
@@ -579,7 +581,7 @@ mod tests {
     #[test]
     fn test_empty_pattern() {
         let target = create_k4();
-        let pattern = LpgStore::new().unwrap();
+        let pattern = RowGroupStore::new();
 
         let count = subgraph_isomorphism_count(&target, &pattern);
         assert_eq!(count, 1, "Empty pattern should have 1 mapping (empty)");
@@ -587,7 +589,7 @@ mod tests {
 
     #[test]
     fn test_empty_target() {
-        let target = LpgStore::new().unwrap();
+        let target = RowGroupStore::new();
         let pattern = create_triangle();
 
         let count = subgraph_isomorphism_count(&target, &pattern);

@@ -50,6 +50,7 @@ impl<'a> Parser<'a> {
         let stmt = match self.current.kind {
             TokenKind::Create => self.parse_create_statement()?,
             TokenKind::Call => self.parse_call_statement()?,
+            _ if self.at_word("DROP") => self.parse_drop_statement()?,
             _ => {
                 let select = self.parse_select_statement()?;
 
@@ -386,15 +387,20 @@ impl<'a> Parser<'a> {
         self.expect(TokenKind::GraphTable)?;
         self.expect(TokenKind::LParen)?;
 
-        // Optional graph name reference: GRAPH_TABLE(my_graph, MATCH ...)
-        let graph_name =
-            if self.current.kind == TokenKind::Identifier && self.peek_kind() == TokenKind::Comma {
-                let name = self.expect_identifier()?;
-                self.advance(); // consume comma
-                Some(name)
-            } else {
-                None
-            };
+        // Optional graph name reference: `GRAPH_TABLE (my_graph MATCH ...)`,
+        // as SQL:2023 writes it, or with a comma, `GRAPH_TABLE (my_graph,
+        // MATCH ...)`.
+        let graph_name = if self.can_be_identifier()
+            && matches!(self.peek_kind(), TokenKind::Comma | TokenKind::Match)
+        {
+            let name = self.expect_identifier()?;
+            if self.current.kind == TokenKind::Comma {
+                self.advance();
+            }
+            Some(name)
+        } else {
+            None
+        };
 
         let match_clause = self.parse_match_clause()?;
 
@@ -1377,10 +1383,42 @@ impl<'a> Parser<'a> {
 
     // ==================== DDL Parsing ====================
 
+    /// Whether the current token is the word `word`, in any case, as a
+    /// keyword or a plain name (a quoted name is a name, never a word).
+    fn at_word(&self, word: &str) -> bool {
+        self.current.kind != TokenKind::QuotedIdentifier
+            && self.current.text.eq_ignore_ascii_case(word)
+    }
+
+    /// Consumes the word `word` (see [`Self::at_word`]).
+    fn expect_word(&mut self, word: &str) -> Result<()> {
+        if !self.at_word(word) {
+            return Err(self.error(&format!("Expected {word}")));
+        }
+        self.advance();
+        Ok(())
+    }
+
     fn parse_create_statement(&mut self) -> Result<Statement> {
         self.expect(TokenKind::Create)?;
+        let or_replace = self.at_word("OR");
+        if or_replace {
+            self.advance();
+            self.expect_word("REPLACE")?;
+        }
         self.expect(TokenKind::Property)?;
         self.expect(TokenKind::Graph)?;
+        let if_not_exists = self.at_word("IF");
+        if if_not_exists {
+            self.advance();
+            self.expect_word("NOT")?;
+            self.expect_word("EXISTS")?;
+        }
+        if or_replace && if_not_exists {
+            return Err(
+                self.error("CREATE PROPERTY GRAPH takes OR REPLACE or IF NOT EXISTS, not both")
+            );
+        }
 
         let name = self.expect_identifier()?;
 
@@ -1413,11 +1451,31 @@ impl<'a> Parser<'a> {
         Ok(Statement::CreatePropertyGraph(
             CreatePropertyGraphStatement {
                 name,
+                or_replace,
+                if_not_exists,
                 node_tables,
                 edge_tables,
                 span: None,
             },
         ))
+    }
+
+    /// `DROP PROPERTY GRAPH [IF EXISTS] name`.
+    fn parse_drop_statement(&mut self) -> Result<Statement> {
+        self.expect_word("DROP")?;
+        self.expect(TokenKind::Property)?;
+        self.expect(TokenKind::Graph)?;
+        let if_exists = self.at_word("IF");
+        if if_exists {
+            self.advance();
+            self.expect_word("EXISTS")?;
+        }
+        let name = self.expect_identifier()?;
+        Ok(Statement::DropPropertyGraph(DropPropertyGraphStatement {
+            name,
+            if_exists,
+            span: None,
+        }))
     }
 
     fn parse_node_table_list(&mut self) -> Result<Vec<NodeTableDefinition>> {
@@ -1690,6 +1748,72 @@ mod tests {
         match stmt {
             Statement::CreatePropertyGraph(cpg) => cpg,
             other => panic!("Expected CreatePropertyGraph, got {other:?}"),
+        }
+    }
+
+    /// `CREATE [OR REPLACE] PROPERTY GRAPH [IF NOT EXISTS]`, and `DROP
+    /// PROPERTY GRAPH [IF EXISTS]`, as SQL:2023 writes them.
+    #[test]
+    fn test_property_graph_ddl_options() {
+        let plain = create_pg(parse_ok(
+            "CREATE PROPERTY GRAPH g NODE TABLES (A (id BIGINT))",
+        ));
+        assert!(!plain.or_replace && !plain.if_not_exists);
+        let replace = create_pg(parse_ok(
+            "create or replace property graph g NODE TABLES (A (id BIGINT))",
+        ));
+        assert!(replace.or_replace && !replace.if_not_exists);
+        let kept = create_pg(parse_ok(
+            "CREATE PROPERTY GRAPH IF NOT EXISTS g NODE TABLES (A (id BIGINT))",
+        ));
+        assert!(!kept.or_replace && kept.if_not_exists);
+        assert_eq!(kept.name, "g");
+        assert!(
+            Parser::new(
+                "CREATE OR REPLACE PROPERTY GRAPH IF NOT EXISTS g NODE TABLES (A (id BIGINT))"
+            )
+            .parse()
+            .is_err()
+        );
+
+        for (query, name, if_exists) in [
+            ("DROP PROPERTY GRAPH g", "g", false),
+            ("drop property graph if exists shop", "shop", true),
+        ] {
+            match parse_ok(query) {
+                Statement::DropPropertyGraph(drop) => {
+                    assert_eq!(
+                        (drop.name.as_str(), drop.if_exists),
+                        (name, if_exists),
+                        "{query}"
+                    );
+                }
+                other => panic!("{query}: expected DropPropertyGraph, got {other:?}"),
+            }
+        }
+        assert!(Parser::new("DROP GRAPH g").parse().is_err());
+    }
+
+    /// `GRAPH_TABLE (g MATCH ...)` names the graph g, as SQL:2023 writes it,
+    /// and so does `GRAPH_TABLE (g, MATCH ...)`; without a name it is none.
+    #[test]
+    fn test_graph_table_graph_name() {
+        for (query, name) in [
+            (
+                "SELECT * FROM GRAPH_TABLE (g MATCH (n) COLUMNS (n.x AS x))",
+                Some("g"),
+            ),
+            (
+                "SELECT * FROM GRAPH_TABLE (g, MATCH (n) COLUMNS (n.x AS x))",
+                Some("g"),
+            ),
+            (
+                "SELECT * FROM GRAPH_TABLE (MATCH (n) COLUMNS (n.x AS x))",
+                None,
+            ),
+        ] {
+            let s = select(parse_ok(query));
+            assert_eq!(s.graph_table.graph_name.as_deref(), name, "{query}");
         }
     }
 

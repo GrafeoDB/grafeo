@@ -1,0 +1,103 @@
+# SQL/PGQ CREATE PROPERTY GRAPH and DROP PROPERTY GRAPH
+#
+# CREATE PROPERTY GRAPH declares a node type per node table, an edge type per
+# edge table, a closed graph type of them and an empty graph of that type;
+# GRAPH_TABLE (g ...) reads the graph g. A second CREATE of the same name is
+# refused, IF NOT EXISTS changes nothing, DROP PROPERTY GRAPH takes the graph
+# and its types away. The statement used to report success and create nothing.
+
+meta:
+  language: sql-pgq
+  model: lpg
+  section: "SQL:2023 PGQ"
+  title: CREATE and DROP PROPERTY GRAPH
+  dataset: empty
+  requires: [sql-pgq]
+
+tests:
+
+  - name: a_created_property_graph_is_an_empty_graph
+    setup:
+      - "CREATE PROPERTY GRAPH Shop NODE TABLES (Item (id BIGINT PRIMARY KEY, name VARCHAR))"
+    query: "SELECT * FROM GRAPH_TABLE (Shop MATCH (i:Item) COLUMNS (i.name AS name))"
+    expect:
+      empty: true
+
+  - name: graph_table_with_a_comma_after_the_graph_name
+    setup:
+      - "CREATE PROPERTY GRAPH Shop NODE TABLES (Item (id BIGINT PRIMARY KEY))"
+    query: "SELECT * FROM GRAPH_TABLE (Shop, MATCH (i:Item) COLUMNS (i.id AS id))"
+    expect:
+      empty: true
+
+  - name: graph_table_of_a_graph_that_does_not_exist
+    query: "SELECT * FROM GRAPH_TABLE (Nowhere MATCH (i:Item) COLUMNS (i.name AS name))"
+    expect:
+      error: "Graph 'Nowhere' does not exist"
+      gql_status: "42002"
+
+  - name: a_second_create_of_the_same_name_is_refused
+    setup:
+      - "CREATE PROPERTY GRAPH Shop NODE TABLES (Item (id BIGINT PRIMARY KEY))"
+    query: "CREATE PROPERTY GRAPH Shop NODE TABLES (Item (id BIGINT PRIMARY KEY))"
+    expect:
+      error: "Graph 'Shop' already exists"
+      gql_status: "42000"
+
+  - name: if_not_exists_changes_nothing
+    setup:
+      - "CREATE PROPERTY GRAPH Shop NODE TABLES (Item (id BIGINT PRIMARY KEY))"
+    query: "CREATE PROPERTY GRAPH IF NOT EXISTS Shop NODE TABLES (Box (code VARCHAR))"
+    expect:
+      rows:
+        - ["No change"]
+
+  - name: or_replace_creates_it_again
+    setup:
+      - "CREATE PROPERTY GRAPH Shop NODE TABLES (Item (id BIGINT PRIMARY KEY))"
+    query: "CREATE OR REPLACE PROPERTY GRAPH Shop NODE TABLES (Box (code VARCHAR PRIMARY KEY))"
+    expect:
+      rows:
+        - ["Property graph 'Shop' created (1 node tables, 0 edge tables)"]
+
+  - name: an_edge_table_with_its_source_and_target
+    query: "CREATE PROPERTY GRAPH Shop NODE TABLES (Item (id BIGINT PRIMARY KEY), Box (code VARCHAR PRIMARY KEY)) EDGE TABLES (Holds (item BIGINT REFERENCES Item(id), box VARCHAR REFERENCES Box(code), qty INT))"
+    expect:
+      rows:
+        - ["Property graph 'Shop' created (2 node tables, 1 edge tables)"]
+
+  - name: an_edge_table_without_a_target_is_refused
+    query: "CREATE PROPERTY GRAPH Shop NODE TABLES (Item (id BIGINT PRIMARY KEY)) EDGE TABLES (Holds (item BIGINT REFERENCES Item(id)))"
+    expect:
+      error: "needs two columns that reference node tables"
+      gql_status: "42000"
+
+  - name: drop_takes_the_property_graph_away
+    setup:
+      - "CREATE PROPERTY GRAPH Shop NODE TABLES (Item (id BIGINT PRIMARY KEY))"
+      - "DROP PROPERTY GRAPH Shop"
+    query: "SELECT * FROM GRAPH_TABLE (Shop MATCH (i:Item) COLUMNS (i.id AS id))"
+    expect:
+      error: "Graph 'Shop' does not exist"
+      gql_status: "42002"
+
+  - name: a_dropped_property_graph_can_be_created_again
+    setup:
+      - "CREATE PROPERTY GRAPH Shop NODE TABLES (Item (id BIGINT PRIMARY KEY))"
+      - "DROP PROPERTY GRAPH Shop"
+    query: "CREATE PROPERTY GRAPH Shop NODE TABLES (Item (id BIGINT PRIMARY KEY))"
+    expect:
+      rows:
+        - ["Property graph 'Shop' created (1 node tables, 0 edge tables)"]
+
+  - name: drop_of_a_property_graph_that_does_not_exist
+    query: "DROP PROPERTY GRAPH Nowhere"
+    expect:
+      error: "Property graph 'Nowhere' does not exist"
+      gql_status: "42002"
+
+  - name: drop_if_exists_of_one_that_does_not_exist
+    query: "DROP PROPERTY GRAPH IF EXISTS Nowhere"
+    expect:
+      rows:
+        - ["No change"]

@@ -252,22 +252,6 @@ tests:
   # Known gaps
   # ---------------------------------------------------------------------------
 
-  - name: lang_of_a_tagged_literal_in_an_expression
-    skip: "a language tag is kept only for a variable's stored literal: LANG(\"x\"@en) and LANG(STRLANG(...)) give \"\" (inbox rdf/language-tags-lost-in-expressions.md)"
-    query: |
-      SELECT (LANG("Alix"@en) AS ?tag) (LANG(STRLANG("hallo", "nl")) AS ?made) WHERE {}
-    expect:
-      rows:
-        - [en, nl]
-
-  - name: datatype_of_a_tagged_literal_is_lang_string
-    skip: "a language tag is kept only for a variable's stored literal, so DATATYPE(\"x\"@en) is xsd:string (inbox rdf/language-tags-lost-in-expressions.md)"
-    query: |
-      SELECT (DATATYPE("Alix"@en) = <http://www.w3.org/1999/02/22-rdf-syntax-ns#langString> AS ?lang_string) WHERE {}
-    expect:
-      rows:
-        - [true]
-
   - name: same_term_tells_lexical_forms_apart
     skip: "a numeric literal reads as its value, so sameTerm(\"1\"^^xsd:integer, \"01\"^^xsd:integer) is true (inbox rdf/same-term-of-numeric-literals.md)"
     query: |

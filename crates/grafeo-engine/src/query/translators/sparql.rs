@@ -1297,6 +1297,20 @@ impl SparqlTranslator {
                 self.resolve_iri(iri).into(),
             ))),
 
+            // A language-tagged literal keeps its tag as STRLANG(value, tag):
+            // its value is the text, and LANG, DATATYPE and BIND read the tag
+            // from the call (comparisons with one are rewritten above).
+            ast::Expression::Literal(lit) if lit.language.is_some() => {
+                Ok(LogicalExpression::SparqlCall {
+                    name: "STRLANG".to_string(),
+                    args: vec![
+                        LogicalExpression::Literal(Value::String(lit.value.clone().into())),
+                        LogicalExpression::Literal(Value::String(
+                            lit.language.clone().unwrap_or_default().into(),
+                        )),
+                    ],
+                })
+            }
             ast::Expression::Literal(lit) => {
                 Ok(LogicalExpression::Literal(self.literal_to_value(lit)))
             }

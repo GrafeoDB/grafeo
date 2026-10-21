@@ -810,11 +810,22 @@ impl RdfPlanner {
         output_columns.push(bind.variable.clone());
         input_types.push(LogicalType::Any);
 
-        let operator = Box::new(RdfBindOperator::new(
+        // The language tag of the bound literal goes into the variable's
+        // hidden __lang_<var> companion, as the triple scan fills it, so
+        // LANG, LANGMATCHES and DATATYPE of the new variable read it.
+        let lang_expr = FilterExpression::SparqlCall {
+            name: "LANG".to_string(),
+            args: vec![filter_expr.clone()],
+        };
+        let operator: Box<dyn Operator> = Box::new(RdfBindOperator::new(
             input_op,
             filter_expr,
-            variable_columns,
+            variable_columns.clone(),
         ));
+        let operator: Box<dyn Operator> =
+            Box::new(RdfBindOperator::new(operator, lang_expr, variable_columns));
+        output_columns.push(format!("__lang_{}", bind.variable));
+        input_types.push(LogicalType::Any);
         Ok((operator, output_columns, input_types))
     }
 
@@ -3528,6 +3539,72 @@ impl RdfExpressionPredicate {
         }
     }
 
+    /// The language tag of the literal `expr` evaluates to, or `""` when it
+    /// has none. A variable's tag is in its hidden `__lang_<var>` companion
+    /// column (the triple scan and BIND fill it); `STRLANG` gives its second
+    /// argument; `COALESCE` and `IF` the tag of the argument they choose; the
+    /// functions SPARQL 1.1 defines to keep the tag of their first argument
+    /// (`UCASE`, `LCASE`, `SUBSTR`, `STRBEFORE`, `STRAFTER`, `REPLACE`) keep it;
+    /// `CONCAT` keeps a tag all its arguments share. Every other expression
+    /// gives a literal without a tag.
+    fn expression_language(
+        &self,
+        expr: &FilterExpression,
+        chunk: &DataChunk,
+        row: usize,
+    ) -> String {
+        match expr {
+            FilterExpression::Variable(var_name) => self
+                .variable_columns
+                .get(&format!("__lang_{var_name}"))
+                .and_then(|&col_idx| chunk.column(col_idx)?.get_value(row))
+                .and_then(|value| match value {
+                    Value::String(tag) => Some(tag.to_string()),
+                    _ => None,
+                })
+                .unwrap_or_default(),
+            FilterExpression::SparqlCall { name, args } => match name.to_uppercase().as_str() {
+                "STRLANG" => match args.get(1).and_then(|tag| self.eval_expr(tag, chunk, row)) {
+                    Some(Value::String(tag)) => tag.to_string(),
+                    _ => String::new(),
+                },
+                "COALESCE" => args
+                    .iter()
+                    .find(|arg| {
+                        self.eval_expr(arg, chunk, row)
+                            .is_some_and(|value| !matches!(value, Value::Null))
+                    })
+                    .map(|arg| self.expression_language(arg, chunk, row))
+                    .unwrap_or_default(),
+                "IF" if args.len() >= 3 => {
+                    match self
+                        .eval_expr(&args[0], chunk, row)
+                        .and_then(|c| c.as_bool())
+                    {
+                        Some(true) => self.expression_language(&args[1], chunk, row),
+                        Some(false) => self.expression_language(&args[2], chunk, row),
+                        None => String::new(),
+                    }
+                }
+                "UCASE" | "LCASE" | "SUBSTR" | "STRBEFORE" | "STRAFTER" | "REPLACE" => args
+                    .first()
+                    .map(|arg| self.expression_language(arg, chunk, row))
+                    .unwrap_or_default(),
+                "CONCAT" => {
+                    let mut tags = args
+                        .iter()
+                        .map(|arg| self.expression_language(arg, chunk, row));
+                    match tags.next() {
+                        Some(first) if !first.is_empty() && tags.all(|tag| tag == first) => first,
+                        _ => String::new(),
+                    }
+                }
+                _ => String::new(),
+            },
+            _ => String::new(),
+        }
+    }
+
     /// Evaluates SPARQL function calls.
     fn eval_function_call(
         &self,
@@ -4229,20 +4306,10 @@ impl RdfExpressionPredicate {
 
             // LANG - language tag of a literal
             "LANG" => {
-                // Look up the companion language-tag column for the variable.
-                // The triple scan emits a hidden __lang_<var> column alongside
-                // each object variable.
-                if let Some(FilterExpression::Variable(var_name)) = args.first() {
-                    let lang_col_name = format!("__lang_{var_name}");
-                    if let Some(&col_idx) = self.variable_columns.get(&lang_col_name)
-                        && let Some(col) = chunk.column(col_idx)
-                        && let Some(Value::String(tag)) = col.get_value(row)
-                    {
-                        return Some(Value::String(tag));
-                    }
-                }
-                // No language tag found: return empty string per SPARQL spec
-                Some(Value::String(String::new().into()))
+                // The tag of the literal the argument evaluates to; "" when it
+                // has none (SPARQL 1.1, 17.4.2.7).
+                let tag = self.expression_language(args.first()?, chunk, row);
+                Some(Value::String(tag.into()))
             }
 
             // LANGMATCHES - BCP47 language range matching (Section 17.4.2.9)
@@ -4288,6 +4355,15 @@ impl RdfExpressionPredicate {
                     }
                 }
                 let val = self.eval_expr(args.first()?, chunk, row)?;
+                // A language-tagged literal is an rdf:langString (SPARQL 1.1,
+                // 17.4.2.8).
+                if matches!(val, Value::String(_))
+                    && !self.expression_language(&args[0], chunk, row).is_empty()
+                {
+                    return Some(Value::String(
+                        "http://www.w3.org/1999/02/22-rdf-syntax-ns#langString".into(),
+                    ));
+                }
                 let dt = match &val {
                     Value::String(_) => "http://www.w3.org/2001/XMLSchema#string",
                     Value::Int64(_) => "http://www.w3.org/2001/XMLSchema#integer",
@@ -5468,10 +5544,13 @@ mod tests {
         });
 
         let (_op, columns, types) = planner.plan_operator(&bind).unwrap();
-        assert_eq!(columns.last(), Some(&"label".to_string()));
+        // The BIND variable, then its hidden language-tag companion
+        let n = columns.len();
+        assert_eq!(columns[n - 2], "label");
+        assert_eq!(columns[n - 1], "__lang_label");
         // The input columns keep their types (the object, name, is Any), and
         // the BIND column is Any
-        let last_idx = types.len() - 1;
+        let last_idx = n - 2;
         assert_eq!(
             types[last_idx],
             LogicalType::Any,

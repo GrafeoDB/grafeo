@@ -3880,9 +3880,10 @@ impl RdfExpressionPredicate {
                     return None;
                 }
                 let val = self.eval_expr(&args[0], chunk, row)?;
+                // A numeric literal reads as a number of its type; a plain or
+                // ill-typed literal stays text and is not numeric ("1").
                 let is_numeric =
-                    matches!(val, Value::Int64(_) | Value::Float64(_) | Value::Decimal(_))
-                        || matches!(&val, Value::String(s) if s.parse::<f64>().is_ok());
+                    matches!(val, Value::Int64(_) | Value::Float64(_) | Value::Decimal(_));
                 Some(Value::Bool(is_numeric))
             }
 
@@ -4295,7 +4296,9 @@ impl RdfExpressionPredicate {
                     Value::Bool(_) => "http://www.w3.org/2001/XMLSchema#boolean",
                     Value::Date(_) => "http://www.w3.org/2001/XMLSchema#date",
                     Value::Time(_) => "http://www.w3.org/2001/XMLSchema#time",
-                    Value::Timestamp(_) => "http://www.w3.org/2001/XMLSchema#dateTime",
+                    Value::Timestamp(_) | Value::ZonedDatetime(_) => {
+                        "http://www.w3.org/2001/XMLSchema#dateTime"
+                    }
                     Value::Duration(_) => "http://www.w3.org/2001/XMLSchema#duration",
                     _ => return None,
                 };
@@ -4436,7 +4439,8 @@ impl RdfExpressionPredicate {
 }
 
 /// The XPath cast of `value` to the XSD type `name` (in capitals): `DECIMAL`,
-/// `DOUBLE`, `FLOAT`, `INTEGER` (and `INT`, `LONG`), `STRING` or `BOOLEAN`.
+/// `DOUBLE`, `FLOAT`, `INTEGER` (and `INT`, `LONG`), `STRING`, `BOOLEAN`,
+/// `DATE`, `TIME` or `DATETIME`.
 /// A number casts to a number (a double by its shortest text to a decimal, a
 /// decimal or a double to an integer by truncation); a string casts as the
 /// lexical form of the type. `None` for another type, a value that does not
@@ -4488,8 +4492,53 @@ fn xsd_cast(name: &str, value: &Value) -> Option<Value> {
             },
             _ => None,
         },
+        // A date from its text or from a dateTime (its local date).
+        "DATE" => match value {
+            Value::Date(d) => Some(Value::Date(*d)),
+            Value::String(s) => grafeo_common::types::Date::parse(s.trim()).map(Value::Date),
+            Value::Timestamp(_) | Value::ZonedDatetime(_) => {
+                parse_datetime_date(&value_to_string(value)).map(Value::Date)
+            }
+            _ => None,
+        },
+        // A time from its text or from a dateTime (its local time).
+        "TIME" => match value {
+            Value::Time(t) => Some(Value::Time(*t)),
+            Value::String(s) => grafeo_common::types::Time::parse(s.trim()).map(Value::Time),
+            Value::Timestamp(_) | Value::ZonedDatetime(_) => {
+                parse_datetime_time(&value_to_string(value)).map(Value::Time)
+            }
+            _ => None,
+        },
+        // A dateTime from its text (zoned when it has an offset) or from a
+        // date (its midnight).
+        "DATETIME" => match value {
+            Value::Timestamp(_) | Value::ZonedDatetime(_) => Some(value.clone()),
+            Value::String(s) => parse_xsd_datetime(s.trim()),
+            Value::Date(d) => grafeo_common::types::Time::parse("00:00:00").map(|midnight| {
+                Value::Timestamp(grafeo_common::types::Timestamp::from_date_time(
+                    *d, midnight,
+                ))
+            }),
+            _ => None,
+        },
         _ => None,
     }
+}
+
+/// The value of an `xsd:dateTime` lexical form: a zoned datetime when it has
+/// an offset, otherwise a timestamp of its date and time. `None` when it is no
+/// dateTime (a date alone has no `T`).
+fn parse_xsd_datetime(text: &str) -> Option<Value> {
+    if let Some(zoned) = grafeo_common::types::ZonedDatetime::parse(text) {
+        return Some(Value::ZonedDatetime(zoned));
+    }
+    let pos = text.find('T')?;
+    let date = grafeo_common::types::Date::parse(&text[..pos])?;
+    let time = grafeo_common::types::Time::parse(&text[pos + 1..])?;
+    Some(Value::Timestamp(
+        grafeo_common::types::Timestamp::from_date_time(date, time),
+    ))
 }
 
 /// Parses the date component from a dateTime or date string.

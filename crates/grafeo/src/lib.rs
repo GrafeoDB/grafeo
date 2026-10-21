@@ -92,8 +92,16 @@ pub use grafeo_engine::config::EncryptionConfig;
 pub use grafeo_engine::config::StorageFormat;
 
 // Re-export time travel: the retention setting `Config` takes, and the view and
-// points in time `GrafeoDB::as_of` works with
-pub use grafeo_engine::{AsOfView, HistoryRetention, TimePoint};
+// points in time `GrafeoDB::as_of` works with (the engine builds those with its
+// LPG store, which these profiles enable)
+pub use grafeo_engine::HistoryRetention;
+#[cfg(any(
+    feature = "lpg",
+    feature = "rdf",
+    feature = "edge",
+    feature = "embedded"
+))]
+pub use grafeo_engine::{AsOfView, TimePoint};
 
 // Re-export what `GrafeoDB::create_text_index_with` takes
 #[cfg(feature = "text-index")]

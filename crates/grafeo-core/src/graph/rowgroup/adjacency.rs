@@ -163,6 +163,12 @@ impl Adjacency {
         self.removed.extend(sorted);
     }
 
+    /// Whether the delta is empty and no edge waits to be dropped: a merge
+    /// would change nothing.
+    pub(super) fn is_merged(&self) -> bool {
+        self.delta_len == 0 && self.removed.is_empty()
+    }
+
     /// Merges the delta into the sorted lists and drops the removed edges.
     pub(super) fn merge(&mut self) {
         let rows = self

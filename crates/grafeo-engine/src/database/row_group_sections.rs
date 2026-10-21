@@ -91,6 +91,19 @@ pub(super) fn load_row_group_sections(
     Ok(history)
 }
 
+/// Makes `image`, the active image of the database file `root` and its named
+/// graphs were just loaded from, the image their chunks are in: the next
+/// checkpoint into that file writes only what changed since (#430).
+#[cfg(feature = "grafeo-file")]
+pub(super) fn follow_image(root: &RowGroupStore, image: grafeo_common::storage::ImageId) {
+    root.set_checkpoint_baseline(image);
+    for name in root.graph_names() {
+        if let Some(graph) = root.graph(&name) {
+            graph.set_checkpoint_baseline(image);
+        }
+    }
+}
+
 /// Gives the history a load read (`history`, the image of the file's
 /// `TIME_INDEX` section) to `transaction_manager`, before a replay records
 /// its groups: a file without one retains nothing before the epoch `root`

@@ -231,7 +231,7 @@ Objects can be a plain string (treated as IRI), or a structured literal with `va
 
 ## Compact Store
 
-`compact()` drops the old versions no open transaction can see any more and returns what it did: `{ checkpointed, versions_collected, duration_ms }` (a database in memory, as every WASM database is, writes no checkpoint). Since 0.6.0 it no longer builds a separate columnar store. See the [Compact Store guide](../../user-guide/compact-store.md).
+`compact()` drops the old versions no open transaction can see any more, compresses the property values held decoded in memory and returns what it did: `{ checkpointed, versions_collected, rows_compressed, duration_ms }` (a database in memory, as every WASM database is, writes no checkpoint). Since 0.6.0 it no longer builds a separate columnar store. See the [Compact Store guide](../../user-guide/compact-store.md).
 
 ```javascript
 const report = db.compact();

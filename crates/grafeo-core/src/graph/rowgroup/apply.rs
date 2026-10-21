@@ -30,6 +30,7 @@ use grafeo_common::change::{
 };
 use grafeo_common::types::{ArcStr, EdgeId, EpochId, NodeId, PropertyKey, TransactionId, Value};
 
+use super::checkpoint::Marks;
 use super::column::Columns;
 use super::versions::VECTOR_ROWS;
 use super::{
@@ -298,6 +299,9 @@ impl Inner {
         let (group, row) = locate(raw);
         let group = self.nodes.entry(group).or_default();
         group.versions.set_created(row, mode.stamp);
+        // Stamped at once, readers see it now: the next checkpoint writes
+        // it (a transaction's write is marked when `stamp` commits it).
+        group.marks.rows |= mode.stamped();
         group.set_labels(row, &label_ids);
         for (key, value) in values {
             group.columns.set(key, row, value);
@@ -337,24 +341,28 @@ impl Inner {
         let (group, row) = locate(raw);
         let group = self.edges.entry(group).or_default();
         group.versions.set_created(row, mode.stamp);
+        group.marks.rows |= mode.stamped();
         group.set_ends(row, src.as_u64(), dst.as_u64(), type_id);
         for (key, value) in values {
             group.columns.set(key, row, value);
         }
         for (node, other, outgoing) in self.kept_ends(src.as_u64(), dst.as_u64()) {
             let (group, row) = locate(node);
-            self.nodes
+            let group = self
+                .nodes
                 .get_mut(&group)
-                .ok_or(ApplyError::Missing(Entity::Node(NodeId::new(node))))?
-                .adjacency_mut(outgoing)
-                .push(
-                    row,
-                    Adjacent {
-                        edge_type: type_id,
-                        other,
-                        edge: raw,
-                    },
-                );
+                .ok_or(ApplyError::Missing(Entity::Node(NodeId::new(node))))?;
+            group.adjacency_mut(outgoing).push(
+                row,
+                Adjacent {
+                    edge_type: type_id,
+                    other,
+                    edge: raw,
+                },
+            );
+            if mode.stamped() {
+                group.marks.mark_adjacency(outgoing);
+            }
         }
         if mode.stamped() {
             self.counts.edges += 1;
@@ -389,6 +397,7 @@ impl Inner {
             .node_mut(raw)
             .ok_or(ApplyError::Missing(Entity::Node(id)))?;
         group.versions.set_deleted(row, mode.stamp);
+        group.marks.rows |= mode.stamped();
         if mode.stamped() {
             self.counts.nodes -= 1;
             for label in labels {
@@ -426,6 +435,7 @@ impl Inner {
         if mode.stamped() {
             self.counts.edges -= 1;
             self.counts.edge_type(type_id, -1);
+            self.mark_op(&DataOp::DeleteEdge { id });
         }
         Ok(mode.applied(
             || Before::Edge(Box::new(image.expect("the image of an edge it read"))),
@@ -489,16 +499,22 @@ impl ChangeTarget for RowGroupStore {
             // Listed also when the op failed: one that failed halfway may
             // have stamped its vector, and a vector listed with nothing in
             // it leaves the list at the next collect.
-            if !matches!(applied, Ok(Applied::Unchanged))
-                && let Some((table, raw)) = mode.lists(op)
-            {
-                if inner.list(table, raw) {
-                    self.note_listed();
+            if !matches!(applied, Ok(Applied::Unchanged)) {
+                if let Some((table, raw)) = mode.lists(op) {
+                    if inner.list(table, raw) {
+                        self.note_listed();
+                    }
+                    // Stamped at once: what it kept or stamped waits for a
+                    // reader before its epoch alone.
+                    if mode.stamped() {
+                        self.note_settled(1);
+                    }
                 }
-                // Stamped at once: what it kept or stamped waits for a
-                // reader before its epoch alone.
-                if mode.stamped() {
-                    self.note_settled(1);
+                // Stamped at once, readers see it now: the writes mark what
+                // they change for the next checkpoint as they apply it; one
+                // that failed halfway marks all its op names.
+                if mode.stamped() && applied.is_err() {
+                    inner.mark_op(op);
                 }
             }
             applied?
@@ -533,14 +549,17 @@ impl ChangeTarget for RowGroupStore {
             let mut settled = 0;
             let mut stamped = Ok(());
             for change in entries {
+                // Marked also when the stamp fails: what it stamped is seen.
                 match change {
                     Change::Data { op, before, .. } => {
                         settled += 1;
                         stamped = inner.stamp_op(op, before, pending, at);
+                        inner.mark_op(op);
                     }
                     Change::Bulk(range) => {
                         settled += bulk_vectors(range);
                         inner.stamp_bulk(range, pending, at);
+                        inner.mark_bulk(range);
                     }
                 }
                 if stamped.is_err() {
@@ -580,22 +599,25 @@ impl ChangeTarget for RowGroupStore {
 
 impl Inner {
     /// The columns, the row and the creator's stamp of a node or an edge
-    /// the store holds.
-    fn columns_mut(&mut self, entity: Entity) -> Result<(&mut Columns, usize, u64), ApplyError> {
+    /// the store holds, with its row group's checkpoint marks.
+    fn columns_mut(
+        &mut self,
+        entity: Entity,
+    ) -> Result<(&mut Columns, usize, u64, &mut Marks), ApplyError> {
         match entity {
             Entity::Node(id) => {
                 let (group, row) = self
                     .node_mut(id.as_u64())
                     .ok_or(ApplyError::Missing(entity))?;
                 let created = group.version(row).created;
-                Ok((&mut group.columns, row, created))
+                Ok((&mut group.columns, row, created, &mut group.marks))
             }
             Entity::Edge(id) => {
                 let (group, row) = self
                     .edge_mut(id.as_u64())
                     .ok_or(ApplyError::Missing(entity))?;
                 let created = group.version(row).created;
-                Ok((&mut group.columns, row, created))
+                Ok((&mut group.columns, row, created, &mut group.marks))
             }
         }
     }
@@ -633,7 +655,10 @@ impl Inner {
         };
         // A node's indexes need the value the write replaces.
         let indexed = matches!(entity, Entity::Node(_)) && !self.indexes.is_empty();
-        let (columns, row, created) = self.columns_mut(entity)?;
+        let (columns, row, created, marks) = self.columns_mut(entity)?;
+        if mode.stamped() {
+            marks.keys.mark(key, row);
+        }
         let old = if mode.images || value.is_none() || indexed {
             columns.get(key, row)
         } else {
@@ -708,6 +733,7 @@ impl Inner {
         };
         group.labels.entry(label_id).or_default().put(row, add);
         if mode.stamped() {
+            group.marks.labels.mark(label_id, row);
             self.counts.label(label_id, if add { 1 } else { -1 });
         }
         if !self.indexes.is_empty() {
@@ -729,7 +755,7 @@ impl Inner {
         let key = self.keys.get_id(key.as_str()).ok_or_else(|| {
             ApplyError::Refused(format!("property key {key} is not in the dictionary"))
         })?;
-        let (columns, row, created) = self
+        let (columns, row, created, _) = self
             .columns_mut(entity)
             .map_err(|_| not_pending(entity, "value"))?;
         let kept = columns.stamp(key, row, pending, at);
@@ -1016,7 +1042,7 @@ impl Inner {
             ApplyError::Refused(format!("property key {key} is not in the dictionary"))
         })?;
         let indexed = matches!(entity, Entity::Node(_)) && !self.indexes.is_empty();
-        let (columns, row, created) = self.columns_mut(entity)?;
+        let (columns, row, created, _) = self.columns_mut(entity)?;
         // The value undone, which the indexes may lose.
         let undone = if indexed {
             columns.get(key_id, row)

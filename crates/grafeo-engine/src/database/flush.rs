@@ -3,8 +3,15 @@
 //! Periodic checkpoints, `wal_checkpoint()`, `close()` and the async snapshot
 //! all write every section. A checkpoint writes a complete new image that
 //! holds only the sections it was given, so leaving an unchanged section out
-//! would drop it from the file. Writing only what changed needs an image that
-//! keeps the other sections (incremental checkpoints, #430).
+//! would drop it from the file. Within the LPG section the image shares the
+//! chunks that did not change with the image before it (incremental
+//! checkpoints, #430): only the changed ones are written.
+//!
+//! A checkpoint holds commits off only while it takes its snapshot (H3): the
+//! epoch E, a read pinned at it and what changed since the last image, and
+//! while it writes the sections without versions (the catalog, the RDF
+//! sections, the time index). Commits go on while it writes the LPG section,
+//! which holds the committed state at E.
 
 use grafeo_common::storage::Section;
 use grafeo_common::utils::error::Result;
@@ -15,6 +22,8 @@ use grafeo_storage::file::{CheckpointHeader, GrafeoFileManager};
 #[cfg(all(feature = "wal", feature = "grafeo-file"))]
 use std::sync::atomic::{AtomicU64, Ordering};
 
+#[cfg(feature = "grafeo-file")]
+use super::sections::CheckpointImage;
 use super::sections::CheckpointSources;
 #[cfg(feature = "grafeo-file")]
 use crate::transaction::CommitsHeld;
@@ -55,18 +64,22 @@ pub(super) struct FlushResult {
 /// This is the single write path for all persistence operations. Commits are
 /// held off (see
 /// [`TransactionManager::hold_commits`](crate::transaction::TransactionManager))
-/// from before the sections are built until the image is written: the image
-/// holds every commit whole or not at all, never one that did not complete,
-/// and its header's epoch and counts are those of its sections. With a WAL,
-/// the order of the steps is what makes a crash at any point safe (#417):
+/// while the checkpoint takes its snapshot
+/// ([`CheckpointSources::snapshot`]), starts a new WAL segment and writes the
+/// sections without versions: no commit is between its epoch and its
+/// completion, so the snapshot's epoch E holds every commit whole or not at
+/// all, never one that did not complete, and the header's epoch and counts
+/// are E's. Commits then go on while the LPG section is written, read at E
+/// (a read pinned at E keeps what it reads). With a WAL, the order of the
+/// steps is what makes a crash at any point safe (#417):
 ///
 /// 1. start a new WAL segment: every group logged so far is in the sealed,
 ///    synced segments before its first log position, the checkpoint LSN,
-/// 2. serialize the sections and write them as a new image (the snapshot then
-///    contains all those groups), whose database header records the
-///    checkpoint LSN; the file manager syncs the image, then switches the
-///    database header to it, and from then on a reopen replays the WAL from
-///    that LSN,
+///    and is at or before E; every group logged later is after E,
+/// 2. write the sections as a new image (it holds all those groups and none
+///    after them), whose database header records the checkpoint LSN; the
+///    file manager syncs the image, then switches the database header to
+///    it, and from then on a reopen replays the WAL from that LSN onto it,
 /// 3. only then delete the segments before it, except those an incremental
 ///    backup still needs.
 ///
@@ -106,17 +119,18 @@ pub(super) fn flush_covering(
     // delete WAL files this one relies on.
     let _checkpoint = fm.checkpoint_guard();
     let commits = sources.transaction_manager.hold_commits()?;
-    let sections = sources.sections(&commits);
-    let section_refs: Vec<&dyn Section> = sections.iter().map(AsRef::as_ref).collect();
-    let context = sources.context();
+    let image = sources.snapshot(&commits)?;
+    let section_refs: Vec<&dyn Section> = image.sections.iter().map(AsRef::as_ref).collect();
+    let held = image.held;
 
     #[cfg(feature = "testing-statement-injection")]
     grafeo_common::testing::commit_hook::run_during_checkpoint();
 
     write_sections(
         fm,
-        &section_refs,
-        &context,
+        (&section_refs, held),
+        &image.context,
+        Some(&image),
         #[cfg(feature = "wal")]
         sources
             .wal
@@ -127,15 +141,19 @@ pub(super) fn flush_covering(
     )
 }
 
-/// Steps 1 to 3 of [`flush`] for `sections`: the caller holds the file's
-/// checkpoint guard, and `commits` until the image is written, when this
-/// releases them. `log` is the WAL, with the count of its records the
-/// checkpoint covers, which this sets.
+/// Steps 1 to 3 of [`flush`] for `sections`, the sections of `image` when
+/// there is one: the caller holds the file's checkpoint guard, and `commits`
+/// until the first `held` sections are written (after the new WAL segment
+/// is started), when this releases them. `log` is the WAL, with the count
+/// of its records the checkpoint covers, which this sets. Once the image is
+/// active, `image`'s graphs follow it (their next checkpoint writes what
+/// changed since); after a failure their next one writes every chunk.
 #[cfg(feature = "grafeo-file")]
 fn write_sections(
     fm: &GrafeoFileManager,
-    sections: &[&dyn Section],
+    (sections, held): (&[&dyn Section], usize),
     context: &FlushContext,
+    image: Option<&CheckpointImage>,
     #[cfg(feature = "wal")] log: Option<(&grafeo_storage::wal::Wal, &AtomicU64)>,
     covered_lsn: Option<u64>,
     commits: CommitsHeld<'_>,
@@ -168,15 +186,36 @@ fn write_sections(
 
     maybe_crash("flush:after_rotate");
 
-    // Step 2: serialize each section into the new image.
-    fm.write_checkpoint(sections, &context.checkpoint_header(checkpoint_lsn))?;
+    // Step 2: write each section into the new image. Once the sections
+    // without versions are written, commits go on while the LPG section is
+    // written as of the snapshot (the log is cut at it).
+    let release = move || {
+        drop(commits);
+        maybe_crash("flush:after_snapshot");
+    };
+    match fm.write_checkpoint_releasing(
+        sections,
+        held,
+        release,
+        &context.checkpoint_header(checkpoint_lsn),
+    ) {
+        Ok(_) => {
+            if let Some(image) = image {
+                image.written_as(fm.active_image());
+            }
+        }
+        Err(error) => {
+            if let Some(image) = image {
+                image.failed();
+            }
+            return Err(error);
+        }
+    }
     let sections_written = sections.len();
 
     for section in sections {
         section.mark_clean();
     }
-    // The image is written: commits may go on while the WAL is marked.
-    drop(commits);
 
     maybe_crash("flush:after_write");
 
@@ -301,10 +340,11 @@ mod tests {
         let manager = crate::transaction::TransactionManager::new();
         let _checkpoint = fm.checkpoint_guard();
         let commits = manager.hold_commits().unwrap();
+        let sections = (sections, sections.len());
         #[cfg(feature = "wal")]
-        let result = write_sections(fm, sections, context, None, None, commits);
+        let result = write_sections(fm, sections, context, None, None, None, commits);
         #[cfg(not(feature = "wal"))]
-        let result = write_sections(fm, sections, context, None, commits);
+        let result = write_sections(fm, sections, context, None, None, commits);
         result.unwrap().sections_written
     }
 

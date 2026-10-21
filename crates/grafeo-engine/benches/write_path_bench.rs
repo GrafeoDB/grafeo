@@ -738,11 +738,110 @@ fn bench_read_horizon(c: &mut Criterion) {
     group.finish();
 }
 
+// ============================================================================
+// Checkpoints
+// ============================================================================
+
+/// People of the checkpoint cases: two row groups of the node table.
+const CHECKPOINT_PEOPLE: usize = 100_000;
+/// Statements per iteration of the cases that write while checkpoints run.
+const CHECKPOINT_WRITES: usize = 1_000;
+
+/// A file database with `count` people (and the name index), checkpointed.
+fn checkpointed_people(count: usize) -> Fixture {
+    let (fixture, _) = Fixture::with_people(Storage::File, count);
+    fixture.db.wal_checkpoint().expect("checkpoint");
+    fixture
+}
+
+/// Checkpoints of a file database: the first one, which writes every chunk;
+/// one after a single value set, which writes only what changed; and query
+/// writes while checkpoints run back to back on another thread, against the
+/// same writes with none running (a checkpoint that held writers off for its
+/// whole image would show here).
+fn bench_checkpoints(c: &mut Criterion) {
+    let people = scaled(CHECKPOINT_PEOPLE);
+    let writes = scaled(CHECKPOINT_WRITES);
+    let mut group = slow_group(c, "checkpoint");
+
+    group.bench_function(format!("first/{people}"), |b| {
+        per_iteration(
+            b,
+            || Fixture::with_people(Storage::File, people).0,
+            |fixture| fixture.db.wal_checkpoint().expect("checkpoint"),
+        );
+    });
+
+    group.bench_function(format!("after_one_value_set/{people}"), |b| {
+        let fixture = checkpointed_people(people);
+        let mut round = 0;
+        b.iter(|| {
+            round += 1;
+            gql(
+                &fixture.session,
+                GQL_SET,
+                params(&[
+                    ("n", Value::from(name(people - 1))),
+                    ("a", Value::Int64(age(round))),
+                ]),
+            );
+            fixture.db.wal_checkpoint().expect("checkpoint");
+        });
+    });
+
+    for running in [false, true] {
+        let tag = if running {
+            "while_checkpointing"
+        } else {
+            "idle"
+        };
+        group.bench_function(format!("gql_set_{tag}/{people}"), |b| {
+            let dir = tempfile::tempdir().expect("temporary directory");
+            let db = std::sync::Arc::new(
+                GrafeoDB::open(dir.path().join("bench.grafeo")).expect("open file database"),
+            );
+            load_people(&db, people);
+            db.create_property_index("name").expect("name index");
+            db.wal_checkpoint().expect("checkpoint");
+            let session = db.session();
+            let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let checkpointer = running.then(|| {
+                let (db, stop) = (std::sync::Arc::clone(&db), std::sync::Arc::clone(&stop));
+                std::thread::spawn(move || {
+                    while !stop.load(std::sync::atomic::Ordering::Acquire) {
+                        db.wal_checkpoint().expect("checkpoint");
+                    }
+                })
+            });
+            let mut round = 0;
+            b.iter(|| {
+                for index in 0..writes {
+                    round += 1;
+                    gql(
+                        &session,
+                        GQL_SET,
+                        params(&[
+                            ("n", Value::from(name(index * 97 % people))),
+                            ("a", Value::Int64(age(round))),
+                        ]),
+                    );
+                }
+            });
+            stop.store(true, std::sync::atomic::Ordering::Release);
+            if let Some(checkpointer) = checkpointer {
+                checkpointer.join().expect("the checkpointer");
+            }
+        });
+    }
+    group.finish();
+}
+
 /// The benchmark groups, in a private module so the generated function needs
 /// no doc comment.
 mod groups {
     use super::{
-        bench_batch_calls, bench_query_writes, bench_read_horizon, bench_reads, bench_rollback,
+        bench_batch_calls, bench_checkpoints, bench_query_writes, bench_read_horizon, bench_reads,
+        bench_rollback,
     };
 
     criterion::criterion_group!(
@@ -751,7 +850,8 @@ mod groups {
         bench_batch_calls,
         bench_rollback,
         bench_reads,
-        bench_read_horizon
+        bench_read_horizon,
+        bench_checkpoints
     );
 }
 

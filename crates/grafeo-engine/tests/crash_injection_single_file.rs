@@ -48,15 +48,17 @@ fn sidecar_wal_path(path: &std::path::Path) -> std::path::PathBuf {
 
 /// The crash points of a checkpoint with the WAL enabled, in the order
 /// `wal_checkpoint()` and `close()` reach them: the flush starts a new WAL
-/// segment (created, its header written, the directory synced), the file
-/// manager writes the new image (its chunks, a sync, the header, the trim),
-/// then the flush removes the segment the image covers.
-const CHECKPOINT_POINTS: [&str; 13] = [
+/// segment (created, its header written, the directory synced), takes its
+/// snapshot and lets commits go on, the file manager writes the new image
+/// (its chunks, a sync, the header, the trim), then the flush removes the
+/// segment the image covers.
+const CHECKPOINT_POINTS: [&str; 14] = [
     "flush:before_serialize",
     "wal:after_segment_create",
     "wal:after_segment_header",
     "wal:before_dir_sync",
     "flush:after_rotate",
+    "flush:after_snapshot",
     "checkpoint:after_chunks",
     "checkpoint:after_data_sync",
     "checkpoint:after_header",
@@ -70,7 +72,7 @@ const CHECKPOINT_POINTS: [&str; 13] = [
 /// The crash points of `close()` with the WAL enabled (in `NoSync` mode, so
 /// no background flusher syncs first): the sync of the WAL and its sync
 /// marker, the checkpoint's, then the removal of the sidecar WAL.
-const CLOSE_POINTS: [&str; 17] = [
+const CLOSE_POINTS: [&str; 18] = [
     "wal:before_sync",
     "wal:after_sync",
     "wal:after_frame",
@@ -87,6 +89,7 @@ const CLOSE_POINTS: [&str; 17] = [
     CHECKPOINT_POINTS[10],
     CHECKPOINT_POINTS[11],
     CHECKPOINT_POINTS[12],
+    CHECKPOINT_POINTS[13],
     "close:before_remove_sidecar_wal",
 ];
 
@@ -568,9 +571,10 @@ fn wal_disabled_crash_during_checkpoint_recovers() {
 
 /// The crash points of `close()` with the WAL disabled: the checkpoint's
 /// without the WAL mark, then the removal of the (absent) sidecar WAL.
-const WAL_DISABLED_CLOSE_POINTS: [&str; 8] = [
+const WAL_DISABLED_CLOSE_POINTS: [&str; 9] = [
     "flush:before_serialize",
     "flush:after_rotate",
+    "flush:after_snapshot",
     "checkpoint:after_chunks",
     "checkpoint:after_data_sync",
     "checkpoint:after_header",
@@ -581,7 +585,7 @@ const WAL_DISABLED_CLOSE_POINTS: [&str; 8] = [
 
 /// The first point of `WAL_DISABLED_CLOSE_POINTS` (1-based) at which the new
 /// image's database header is written: `checkpoint:after_header`.
-const NEW_HEADER_WRITTEN: u64 = 5;
+const NEW_HEADER_WRITTEN: u64 = 6;
 
 const CHILD_POINT_VAR: &str = "GRAFEO_CRASH_SINGLE_FILE_POINT";
 const CHILD_PATH_VAR: &str = "GRAFEO_CRASH_SINGLE_FILE_PATH";

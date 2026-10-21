@@ -56,8 +56,10 @@ mod adjacency;
 mod adjacency_chunk;
 mod apply;
 mod bitset;
+mod checkpoint;
 mod collect;
 mod column;
+mod compress;
 mod diagnostics;
 mod epochs;
 mod graphs;
@@ -81,7 +83,10 @@ use parking_lot::RwLock;
 
 use self::adjacency::{Adjacency, Adjacent};
 use self::bitset::Bitset;
+pub use self::checkpoint::CheckpointSnapshot;
+use self::checkpoint::Marks;
 use self::column::Columns;
+pub use self::compress::CompressReport;
 pub use self::diagnostics::RowGroupMemory;
 #[cfg(any(feature = "text-index", feature = "vector-index"))]
 pub use self::index::IndexSearch;
@@ -210,6 +215,8 @@ struct NodeGroup {
     incoming: Adjacency,
     /// The vectors the store lists, a bit each (`collect`).
     listed: u32,
+    /// What changed since the store's baseline image (`checkpoint`).
+    marks: Marks,
 }
 
 impl NodeGroup {
@@ -298,6 +305,8 @@ struct EdgeGroup {
     columns: Columns,
     /// The vectors the store lists, a bit each (`collect`).
     listed: u32,
+    /// What changed since the store's baseline image (`checkpoint`).
+    marks: Marks,
 }
 
 impl EdgeGroup {
@@ -376,6 +385,10 @@ struct Inner {
     listed: collect::Listed,
     /// Whether the nodes' incoming edges are kept.
     incoming_edges: IncomingEdges,
+    /// The image of a database file the store's chunks were last written to
+    /// or read from, which the marks of its row groups are relative to;
+    /// `None`: the next checkpoint writes every chunk (`checkpoint`).
+    baseline: Option<grafeo_common::storage::ImageId>,
 }
 
 impl Inner {

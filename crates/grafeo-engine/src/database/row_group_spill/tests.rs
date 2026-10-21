@@ -615,11 +615,12 @@ mod file {
 
 /// The crash points of a checkpoint without a WAL, as the row-group
 /// sections' crash test lists them; the new header is on disk from the
-/// fifth on.
+/// sixth on.
 #[cfg(all(feature = "grafeo-file", feature = "testing-crash-injection"))]
-const CHECKPOINT_POINTS: [&str; 7] = [
+const CHECKPOINT_POINTS: [&str; 8] = [
     "flush:before_serialize",
     "flush:after_rotate",
+    "flush:after_snapshot",
     "checkpoint:after_chunks",
     "checkpoint:after_data_sync",
     "checkpoint:after_header",
@@ -695,7 +696,7 @@ fn a_crash_while_a_column_is_spilled_reopens_from_the_last_checkpoint() {
             files_in(&cache(&path)).is_empty(),
             "point {point} ({name}): the open removes what the crash left"
         );
-        let header_written = point >= 5;
+        let header_written = point >= 6;
         assert_eq!(
             reopened.fm.active_header().iteration,
             first_iteration + u64::from(header_written),

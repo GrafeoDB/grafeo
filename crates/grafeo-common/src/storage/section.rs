@@ -34,7 +34,7 @@ use crate::memory::buffer::SpillError;
 use crate::storage::page_fetcher::PageFetcher;
 use crate::utils::error::{Error, Result};
 
-// ── Section Type ────────────────────────────────────────────────────
+// â”€â”€ Section Type â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 /// Identifies a section type in the container directory.
 ///
@@ -152,7 +152,7 @@ impl SectionType {
     }
 }
 
-// ── Section Flags ───────────────────────────────────────────────────
+// â”€â”€ Section Flags â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 /// Flags for a section entry in the container directory.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -234,7 +234,7 @@ impl SectionType {
     }
 }
 
-// ── Section Directory Entry ─────────────────────────────────────────
+// â”€â”€ Section Directory Entry â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 /// A single entry in the container's section directory.
 ///
@@ -271,7 +271,7 @@ impl SectionDirectoryEntry {
     pub const SIZE: usize = 32;
 }
 
-// ── Streaming Chunks ────────────────────────────────────────────────
+// â”€â”€ Streaming Chunks â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 /// What a chunk holds within its section.
 ///
@@ -537,6 +537,18 @@ impl ChunkMeta {
     }
 }
 
+/// Which image of a database file: the file's database id and the
+/// iteration of the database header that names the image. A checkpoint's
+/// new image gets the next iteration, so no two images of one file share
+/// an id.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct ImageId {
+    /// The database id of the file's header.
+    pub database_id: u128,
+    /// The iteration of the database header that names the image.
+    pub iteration: u64,
+}
+
 /// Receives the chunks of a section as it streams out.
 pub trait SectionSink {
     /// Appends one chunk.
@@ -545,6 +557,38 @@ pub trait SectionSink {
     ///
     /// Returns an error if the chunk cannot be stored.
     fn write_chunk(&mut self, meta: ChunkMeta, bytes: &[u8]) -> Result<()>;
+
+    /// The image a checkpoint follows, with its chunks of the section being
+    /// written: the active image of the file the sink writes into. `None`
+    /// when there is none to point at: a new file, a copy, a sink in
+    /// memory, or an image without the section.
+    ///
+    /// A section may put any of these chunks into the new image with
+    /// [`reuse_chunk`](Self::reuse_chunk) instead of writing its bytes again,
+    /// so a checkpoint writes only what changed since that image (#430). The
+    /// section decides what is unchanged: the chunks hold what they held
+    /// when that image was written.
+    fn previous(&self) -> Option<(ImageId, &dyn SectionSource)> {
+        None
+    }
+
+    /// Appends chunk `index` of [`previous`](Self::previous) as it is: the
+    /// new image's directory points at the pages the previous image stores
+    /// it in, and no byte is written. Its identity
+    /// ([`ChunkMeta::identity`]) counts against the section's as a written
+    /// chunk's does.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Internal`] when the sink has no previous image (the
+    /// default), `index` is out of range or the chunk is of another section
+    /// version than the one being written, and the error of a repeated
+    /// identity.
+    fn reuse_chunk(&mut self, index: usize) -> Result<()> {
+        Err(Error::Internal(format!(
+            "cannot reuse chunk {index}: this sink has no previous image"
+        )))
+    }
 }
 
 /// Serves the chunks of a section as it streams in.
@@ -678,7 +722,7 @@ pub fn read_raw(section: &mut dyn Section, source: &dyn SectionSource) -> Result
     }
 }
 
-// ── Section Trait ───────────────────────────────────────────────────
+// â”€â”€ Section Trait â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 /// A section of the `.grafeo` container.
 ///
@@ -797,7 +841,7 @@ pub trait Section: Send + Sync {
     }
 }
 
-// ── Tier Override ───────────────────────────────────────────────────
+// â”€â”€ Tier Override â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 /// Controls whether a section stays in RAM, on disk, or is auto-managed.
 ///

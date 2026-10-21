@@ -2952,7 +2952,8 @@ impl PyGrafeoDB {
     ///
     /// Returns:
     ///     dict: What it did: ``checkpointed`` (bool), ``versions_collected``
-    ///     (int) and ``duration_ms`` (int).
+    ///     (int), ``rows_compressed`` (int: the nodes and edges whose
+    ///     property values it compressed) and ``duration_ms`` (int).
     ///
     /// Raises:
     ///     GrafeoError: If the checkpoint fails, or after ``close()``.
@@ -2970,6 +2971,7 @@ impl PyGrafeoDB {
         let dict = pyo3::types::PyDict::new(py);
         dict.set_item("checkpointed", report.checkpointed)?;
         dict.set_item("versions_collected", report.versions_collected)?;
+        dict.set_item("rows_compressed", report.rows_compressed)?;
         dict.set_item("duration_ms", report.duration_ms)?;
         Ok(dict.into())
     }

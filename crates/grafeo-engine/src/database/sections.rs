@@ -16,8 +16,12 @@ use crate::transaction::CommitsHeld;
 
 #[cfg(feature = "lpg")]
 use super::catalog_section::{CatalogSection, CatalogStore, GraphIndexes};
+#[cfg(all(feature = "lpg", feature = "grafeo-file"))]
+use grafeo_core::graph::rowgroup::CheckpointSnapshot;
 #[cfg(feature = "lpg")]
 use grafeo_core::graph::rowgroup::RowGroupStore;
+#[cfg(feature = "lpg")]
+use grafeo_core::graph::rowgroup::section::RowGroupStoreSection;
 
 /// Everything a checkpoint writes: the database's complete state.
 ///
@@ -103,9 +107,8 @@ impl CheckpointSources {
                 Arc::clone(root),
                 move || transaction_manager.current_epoch().as_u64(),
             )));
-            let section =
-                grafeo_core::graph::rowgroup::section::RowGroupStoreSection::new(Arc::clone(root))
-                    .at(grafeo_common::types::EpochId::new(self.epoch()));
+            let section = RowGroupStoreSection::new(Arc::clone(root))
+                .at(grafeo_common::types::EpochId::new(self.epoch()));
             let section = if self.transaction_manager.history_image().is_some() {
                 section.with_history_from(self.transaction_manager.history_floor())
             } else {
@@ -139,9 +142,240 @@ impl CheckpointSources {
 
         sections
     }
+
+    /// Takes what a checkpoint writes, while the caller holds commits off
+    /// (`commits`), so that the checkpoint can let commits go on while it
+    /// writes the LPG section (H3): the image holds every commit up to the
+    /// checkpoint's epoch E whole and nothing after it.
+    ///
+    /// - The LPG section is written from a [`CheckpointSnapshot`] of the root
+    ///   and its named graphs at E, taken now: each graph is read at E a file
+    ///   row group at a time, with the marks of what changed since its
+    ///   baseline image, so the checkpoint writes only that. A read pinned at
+    ///   E (at the history floor for a database that keeps history) keeps
+    ///   every version it reads until the image is written. It comes last in
+    ///   the image ([`CheckpointImage::held`]).
+    /// - The other sections (the catalog, the RDF sections and the time
+    ///   index) have no versions to be read at E later: the checkpoint writes
+    ///   them first, while it still holds commits off. Each reuses the chunks
+    ///   of the image before that it holds unchanged.
+    /// - The header values are E's.
+    ///
+    /// # Errors
+    ///
+    /// The error of pinning the read.
+    #[cfg(feature = "grafeo-file")]
+    pub fn snapshot(
+        &self,
+        commits: &CommitsHeld<'_>,
+    ) -> grafeo_common::utils::error::Result<CheckpointImage> {
+        let epoch = grafeo_common::types::EpochId::new(self.epoch());
+        let history_from = self
+            .transaction_manager
+            .history_image()
+            .is_some()
+            .then(|| self.transaction_manager.history_floor());
+        let pin = self
+            .transaction_manager
+            .pin_read_at(history_from.unwrap_or(epoch))?;
+        let mut held: Vec<Box<dyn Section>> = Vec::new();
+        let mut after: Vec<Box<dyn Section>> = Vec::new();
+        #[cfg(feature = "lpg")]
+        let lpg = self.store.as_ref().map(|root| {
+            let snapshot = Arc::new(CheckpointSnapshot::take(root, epoch, history_from));
+            (Arc::clone(root), snapshot)
+        });
+        for section in self.sections(commits) {
+            #[cfg(feature = "lpg")]
+            if section.section_type() == SectionType::LpgStore
+                && let Some((root, snapshot)) = &lpg
+            {
+                after.push(Box::new(RowGroupStoreSection::from_snapshot(
+                    Arc::clone(root),
+                    Arc::clone(snapshot),
+                )));
+                continue;
+            }
+            held.push(Box::new(ReuseIdentical(section)));
+        }
+        let held_count = held.len();
+        held.extend(after);
+        Ok(CheckpointImage {
+            sections: held,
+            held: held_count,
+            context: self.context(),
+            #[cfg(feature = "lpg")]
+            lpg: lpg.map(|(_, snapshot)| snapshot),
+            _pin: pin,
+        })
+    }
 }
 
-/// What loading leaves for [`GrafeoDB::finish_load`](super::GrafeoDB) to do
+/// What a checkpoint took while it held commits off (see
+/// [`CheckpointSources::snapshot`]): its sections, the header values, the
+/// LPG snapshot, and the read pinned while the image is written.
+#[cfg(feature = "grafeo-file")]
+pub(super) struct CheckpointImage {
+    /// The sections in the order a checkpoint writes them.
+    pub sections: Vec<Box<dyn Section>>,
+    /// How many of the first sections are written while commits are held
+    /// off: all but the LPG section, which comes last.
+    pub held: usize,
+    /// The header values at the checkpoint's epoch.
+    pub context: super::flush::FlushContext,
+    /// The LPG section's snapshot, `None` without the root store.
+    #[cfg(feature = "lpg")]
+    pub lpg: Option<Arc<CheckpointSnapshot>>,
+    _pin: crate::transaction::ReadPin,
+}
+
+#[cfg(feature = "grafeo-file")]
+impl CheckpointImage {
+    /// The image is written and active as `image`: each graph's marks are
+    /// relative to it from now on.
+    pub fn written_as(&self, image: grafeo_common::storage::ImageId) {
+        #[cfg(feature = "lpg")]
+        if let Some(snapshot) = &self.lpg {
+            snapshot.written_as(image);
+        }
+        #[cfg(not(feature = "lpg"))]
+        let _ = image;
+    }
+
+    /// The image was not written: the next checkpoint writes every chunk.
+    pub fn failed(&self) {
+        #[cfg(feature = "lpg")]
+        if let Some(snapshot) = &self.lpg {
+            snapshot.failed();
+        }
+    }
+}
+
+/// A section that reuses each chunk of the image the checkpoint follows that
+/// it would write again as it is: the same description and the same bytes
+/// (a catalog or an RDF store that did not change is not written again).
+#[cfg(feature = "grafeo-file")]
+struct ReuseIdentical(Box<dyn Section>);
+
+#[cfg(feature = "grafeo-file")]
+impl Section for ReuseIdentical {
+    fn section_type(&self) -> grafeo_common::storage::SectionType {
+        self.0.section_type()
+    }
+
+    fn version(&self) -> u8 {
+        self.0.version()
+    }
+
+    fn serialize(&self) -> grafeo_common::utils::error::Result<Vec<u8>> {
+        self.0.serialize()
+    }
+
+    fn deserialize(&mut self, data: &[u8]) -> grafeo_common::utils::error::Result<()> {
+        self.0.deserialize(data)
+    }
+
+    fn write_to(
+        &self,
+        sink: &mut dyn grafeo_common::storage::SectionSink,
+    ) -> grafeo_common::utils::error::Result<()> {
+        self.0.write_to(&mut ReusingSink {
+            sink,
+            version: self.0.version(),
+            held: None,
+        })
+    }
+
+    fn read_from(
+        &mut self,
+        source: &dyn grafeo_common::storage::SectionSource,
+    ) -> grafeo_common::utils::error::Result<()> {
+        self.0.read_from(source)
+    }
+
+    fn is_dirty(&self) -> bool {
+        self.0.is_dirty()
+    }
+
+    fn mark_clean(&self) {
+        self.0.mark_clean();
+    }
+
+    fn memory_usage(&self) -> usize {
+        self.0.memory_usage()
+    }
+}
+
+/// The sink of [`ReuseIdentical`]: a chunk the followed image holds with the
+/// same description and bytes is reused, every other written.
+#[cfg(feature = "grafeo-file")]
+struct ReusingSink<'s> {
+    sink: &'s mut dyn grafeo_common::storage::SectionSink,
+    /// The section's version: chunks of another are never reused.
+    version: u8,
+    /// The followed image's chunks of the section by identity, built at the
+    /// first chunk.
+    held: Option<grafeo_common::utils::hash::FxHashMap<(u8, u8, u32, u32, u64), usize>>,
+}
+
+#[cfg(feature = "grafeo-file")]
+impl ReusingSink<'_> {
+    /// The followed image's chunk that is `meta` with `bytes`, if any. Only a
+    /// chunk stored in about as many bytes is fetched to compare (an
+    /// encrypted one takes its nonce and tag more).
+    fn same(&mut self, meta: grafeo_common::storage::ChunkMeta, bytes: &[u8]) -> Option<usize> {
+        let (_, previous) = self.sink.previous()?;
+        if previous.section_version() != self.version {
+            return None;
+        }
+        let held = self.held.get_or_insert_with(|| {
+            previous
+                .chunks()
+                .iter()
+                .enumerate()
+                .map(|(index, meta)| (meta.identity(), index))
+                .collect()
+        });
+        let index = *held.get(&meta.identity())?;
+        let length = bytes.len() as u64;
+        let stored = previous.stored_length(index).ok()?;
+        let same = previous.chunks()[index] == meta
+            && (length..=length + 64).contains(&stored)
+            && previous
+                .fetch(index)
+                .is_ok_and(|held| held.as_ref() == bytes);
+        same.then_some(index)
+    }
+}
+
+#[cfg(feature = "grafeo-file")]
+impl grafeo_common::storage::SectionSink for ReusingSink<'_> {
+    fn write_chunk(
+        &mut self,
+        meta: grafeo_common::storage::ChunkMeta,
+        bytes: &[u8],
+    ) -> grafeo_common::utils::error::Result<()> {
+        match self.same(meta, bytes) {
+            Some(index) => self.sink.reuse_chunk(index),
+            None => self.sink.write_chunk(meta, bytes),
+        }
+    }
+
+    fn previous(
+        &self,
+    ) -> Option<(
+        grafeo_common::storage::ImageId,
+        &dyn grafeo_common::storage::SectionSource,
+    )> {
+        self.sink.previous()
+    }
+
+    fn reuse_chunk(&mut self, index: usize) -> grafeo_common::utils::error::Result<()> {
+        self.sink.reuse_chunk(index)
+    }
+}
+
+// What loading leaves for [`GrafeoDB::finish_load`](super::GrafeoDB) to do
 /// once the database is built.
 #[cfg(feature = "lpg")]
 #[derive(Default)]

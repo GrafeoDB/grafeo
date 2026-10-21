@@ -529,8 +529,8 @@ fn image_layout(path: &Path, what: &str) -> BTreeMap<String, Placement> {
     let stats = manager.image_stats().unwrap();
     let root = manager.active_header().root;
     // The manager's shared lock keeps writers out while this handle reads.
-    let mut file = File::open(path).unwrap();
-    let reader = ImageReader::open(&mut file, root, None)
+    let file = File::open(path).unwrap();
+    let reader = ImageReader::open(&file, root, None)
         .unwrap_or_else(|error| panic!("{what}: the directory reads: {error}"));
 
     let mut layout: BTreeMap<String, Placement> = BTreeMap::new();

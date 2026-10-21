@@ -1,17 +1,21 @@
 //! Checkpoints never capture part of a commit, or part of a change of an
-//! open transaction.
+//! open transaction, and hold commits off only while they take their
+//! snapshot.
 //!
-//! A checkpoint holds commits off while it builds and writes its image: it
-//! waits for a commit in progress (between its epoch and its completion) to
-//! complete, and no commit, transaction start or write outside a transaction
-//! runs until the image is written. It also freezes the store: the writes of
-//! open transactions and their rollbacks wait too, so the image is read from
-//! a store and change logs that do not move. These tests start a checkpoint
-//! from inside a commit, and commits, writes and rollbacks from inside a
-//! checkpoint, with the `testing-statement-injection` hooks, and check what
-//! the image holds. Work that should wait gets 300 ms to finish in the
-//! middle; the child-process tests exit without `close()`, so a reopen reads
-//! the image and what is left of the WAL.
+//! A checkpoint holds commits off while it takes its snapshot (its epoch,
+//! what changed since the last image, the sections without versions) and
+//! starts a new WAL segment: it waits for a commit in progress (between its
+//! epoch and its completion) to complete, and no commit, transaction start or
+//! write outside a transaction runs meanwhile. It also freezes the store for
+//! that time: the writes of open transactions and their rollbacks wait too.
+//! Then commits go on while it writes its image, which holds the committed
+//! state at the snapshot's epoch and nothing after it (H3). These tests start
+//! a checkpoint from inside a commit, and commits, writes and rollbacks from
+//! inside a checkpoint's snapshot and from inside its image write, with the
+//! `testing-statement-injection` hooks, and check what the image holds. Work
+//! that should wait gets 300 ms to finish in the middle; the child-process
+//! tests exit without `close()`, so a reopen reads the image and what is
+//! left of the WAL.
 //!
 //! ```bash
 //! cargo test -p grafeo-engine --all-features --test checkpoint_during_commit
@@ -34,6 +38,7 @@ use grafeo_common::testing::child_process;
 use grafeo_common::testing::chunk_caps::with_chunk_caps;
 use grafeo_common::testing::commit_hook::{
     after_next_commit_epoch, after_next_commit_stamped, during_next_checkpoint,
+    during_next_checkpoint_write,
 };
 use grafeo_common::types::Value;
 use grafeo_engine::{GrafeoDB, Session};
@@ -224,6 +229,90 @@ fn commits_wait_for_a_checkpoint_and_stay_out_of_its_image() {
         db.node_count(),
         3,
         "Vincent is written after the checkpoint"
+    );
+    db.close().unwrap();
+}
+
+/// While a checkpoint writes its image, after its snapshot: the commit of a
+/// transaction that wrote before it, a direct write outside a transaction
+/// and a new transaction's commit, each from another thread, finish without
+/// waiting for the image, and the image holds the state at the snapshot
+/// alone: Alix. A copy of the file without its WAL opens with her only; the
+/// database itself, reopened, has every commit.
+#[test]
+fn commits_go_on_while_a_checkpoint_writes_its_image() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("prague.grafeo");
+    database_with_alix(&path);
+    let db = Arc::new(GrafeoDB::open(&path).unwrap());
+
+    let (go, commit_now) = mpsc::channel::<()>();
+    let (ready, began) = mpsc::channel();
+    let writer = Arc::clone(&db);
+    let transaction = std::thread::spawn(move || {
+        let mut session = writer.session();
+        session.begin_transaction().unwrap();
+        session.execute("INSERT (:Person {name: 'Gus'})").unwrap();
+        ready.send(()).unwrap();
+        commit_now.recv().unwrap();
+        session.commit().map_err(|e| e.to_string())
+    });
+    began.recv().unwrap();
+
+    let (direct, fresh) = (Arc::clone(&db), Arc::clone(&db));
+    let (sender, started) = mpsc::channel();
+    during_next_checkpoint_write(move || {
+        go.send(()).unwrap();
+        let works = [
+            Started::spawn(move || transaction.join().unwrap()),
+            Started::spawn(move || {
+                direct
+                    .create_node_with_props(&["Person"], [("name", Value::from("Vincent"))])
+                    .map(drop)
+                    .map_err(|e| e.to_string())
+            }),
+            Started::spawn(move || {
+                let mut session = fresh.session();
+                session.begin_transaction().map_err(|e| e.to_string())?;
+                session
+                    .execute("INSERT (:Person {name: 'Jules'})")
+                    .map_err(|e| e.to_string())?;
+                session.commit().map_err(|e| e.to_string())
+            }),
+        ];
+        let finished: Vec<bool> = works.iter().map(Started::finishes_briefly).collect();
+        sender.send((works, finished)).unwrap();
+    });
+    db.wal_checkpoint().unwrap();
+    let (works, finished) = started.recv().expect("the checkpoint ran the hook");
+    assert_eq!(finished, [true, true, true], "nothing waits for the image");
+    for work in works {
+        work.join().expect("the write succeeds");
+    }
+    let header = db.file_manager().unwrap().active_header();
+    assert_eq!(header.node_count, 1, "the image holds Alix only");
+    assert!(image_holds(&db, "Alix"));
+    for name in ["Gus", "Vincent", "Jules"] {
+        assert!(!image_holds(&db, name), "{name} is not in the image");
+    }
+
+    let copy = dir.path().join("copy.grafeo");
+    db.file_manager().unwrap().copy_to(&copy).unwrap();
+    let image = GrafeoDB::open(&copy).unwrap();
+    assert_eq!(
+        people(&image),
+        [Value::from("Alix")],
+        "the image alone is the state at the snapshot"
+    );
+    image.close().unwrap();
+
+    let db = Arc::into_inner(db).unwrap();
+    db.close().unwrap();
+    let db = GrafeoDB::open(&path).unwrap();
+    assert_eq!(
+        people(&db),
+        ["Alix", "Gus", "Jules", "Vincent"].map(Value::from),
+        "the commits during the image write are in the WAL after it"
     );
     db.close().unwrap();
 }

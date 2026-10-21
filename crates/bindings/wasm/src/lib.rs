@@ -1363,7 +1363,7 @@ impl Database {
     /// Compacts the database: drops the old versions no open transaction can
     /// see any more (a database in memory, as every WASM database is, writes
     /// no checkpoint), and returns what it did:
-    /// `{checkpointed, versions_collected, duration_ms}`. `compact()` no
+    /// `{checkpointed, versions_collected, rows_compressed, duration_ms}`. `compact()` no
     /// longer builds a separate columnar store.
     ///
     /// # Errors

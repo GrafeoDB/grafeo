@@ -13,7 +13,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use fs2::FileExt;
 use grafeo_common::grafeo_warn;
-use grafeo_common::storage::{ImageSource, Section};
+use grafeo_common::storage::{ImageId, ImageSource, Section};
 use grafeo_common::testing::child_process;
 use grafeo_common::testing::crash::{maybe_crash, maybe_fail};
 use grafeo_common::utils::error::{Error, Result};
@@ -27,7 +27,7 @@ use super::v3::header::{
     DATA_START_PAGE, DbHeaderV3, FORMAT_REVISION, FileHeaderV3, PAGE_SIZE, active_header,
     check_format_revision, new_database_id, slot_offset,
 };
-use super::v3::{CheckpointWriter, ChunkCipher, ImageReader};
+use super::v3::{CheckpointStats, CheckpointWriter, ChunkCipher, ImageReader};
 
 /// Size of a page (and of each header) in bytes, as a `usize`.
 const PAGE_BYTES: usize = 4096;
@@ -140,6 +140,8 @@ pub struct GrafeoFileManager {
     read_only: bool,
     /// Held for a whole checkpoint, see [`checkpoint_guard`](Self::checkpoint_guard).
     checkpoint_lock: Mutex<()>,
+    /// What the last checkpoint of this manager wrote and reused.
+    last_checkpoint: Mutex<Option<CheckpointStats>>,
     /// Encrypts and decrypts the images (`None` for a plain file).
     cipher: Option<ChunkCipher>,
 }
@@ -219,7 +221,7 @@ impl GrafeoFileManager {
             ..FileHeaderV3::new(cipher.is_some())
         };
         let (root, runs) =
-            CheckpointWriter::new(&mut file, PageAllocator::from_used([])?, cipher.as_ref())
+            CheckpointWriter::new(&file, PageAllocator::from_used([])?, cipher.as_ref())
                 .finish()?;
         let header = DbHeaderV3 {
             format_revision: FORMAT_REVISION,
@@ -247,6 +249,7 @@ impl GrafeoFileManager {
             }),
             read_only: false,
             checkpoint_lock: Mutex::new(()),
+            last_checkpoint: Mutex::new(None),
             cipher,
         })
     }
@@ -344,6 +347,7 @@ impl GrafeoFileManager {
             active: Mutex::new(active),
             read_only,
             checkpoint_lock: Mutex::new(()),
+            last_checkpoint: Mutex::new(None),
             cipher,
         })
     }
@@ -365,7 +369,8 @@ impl GrafeoFileManager {
         self.checkpoint_lock.lock()
     }
 
-    /// Writes `sections` as a new image and makes it the active one.
+    /// Writes `sections` as a new image and makes it the active one, and
+    /// returns what it wrote and what it took over from the active image.
     ///
     /// Copy-on-write: the chunks and the directory go into pages the active
     /// image does not use, and the file is synced; then the next database
@@ -375,6 +380,14 @@ impl GrafeoFileManager {
     /// page of the new image. Until the header is on disk the active image is
     /// untouched, so a crash at any point opens either the old or the new
     /// image.
+    ///
+    /// Each section is offered the active image's chunks of it
+    /// ([`SectionSink::previous`](grafeo_common::storage::SectionSink::previous),
+    /// with the image's [`active_image`](Self::active_image) id): a chunk it
+    /// reuses is not written again, the new directory points at its pages,
+    /// which the new image then shares with the active one (incremental
+    /// checkpoints, #430). An active image whose directory cannot be read
+    /// offers nothing, and the sections write every chunk.
     ///
     /// # Errors
     ///
@@ -394,7 +407,27 @@ impl GrafeoFileManager {
         &self,
         sections: &[&dyn Section],
         header: &CheckpointHeader,
-    ) -> Result<()> {
+    ) -> Result<CheckpointStats> {
+        self.write_checkpoint_releasing(sections, sections.len(), || {}, header)
+    }
+
+    /// Writes `sections` as [`write_checkpoint`](Self::write_checkpoint)
+    /// does, and calls `release` once the first `held` of them are written,
+    /// before the others: a caller that holds writers off while it writes
+    /// the sections that have no versions lets them go on there, and writes
+    /// the rest as of the snapshot it took. `release` is not called when a
+    /// section before it fails (it is dropped).
+    ///
+    /// # Errors
+    ///
+    /// As [`write_checkpoint`](Self::write_checkpoint).
+    pub fn write_checkpoint_releasing(
+        &self,
+        sections: &[&dyn Section],
+        held: usize,
+        release: impl FnOnce(),
+        header: &CheckpointHeader,
+    ) -> Result<CheckpointStats> {
         if self.read_only {
             return Err(Error::Internal(
                 "cannot write a checkpoint: the database is open in read-only mode".to_string(),
@@ -402,13 +435,14 @@ impl GrafeoFileManager {
         }
 
         let mut file = self.file.lock();
-        let (iteration, revision, slot, spared) = {
+        let (iteration, revision, slot, spared, active_root) = {
             let active = self.active.lock();
             (
                 active.header.iteration,
                 active.header.format_revision,
                 active.slot,
                 active.runs.clone(),
+                active.header.root,
             )
         };
         let next_iteration = iteration.checked_add(1).ok_or_else(|| {
@@ -417,16 +451,42 @@ impl GrafeoFileManager {
             ))
         })?;
 
-        let mut writer = CheckpointWriter::new(
-            &mut file,
-            PageAllocator::from_used(spared)?,
-            self.cipher.as_ref(),
-        );
-        for section in sections {
-            writer.begin_section(section.section_type(), section.version())?;
-            section.write_to(&mut writer)?;
-        }
-        let (root, runs) = writer.finish()?;
+        let (root, runs, stats) = {
+            let file: &File = &file;
+            // The active image's pages are among `spared`, so a chunk the
+            // sections reuse is never written over.
+            let active = ImageReader::open(file, active_root, self.cipher.as_ref()).ok();
+            let mut writer = CheckpointWriter::new(
+                file,
+                PageAllocator::from_used(spared)?,
+                self.cipher.as_ref(),
+            );
+            if let Some(active) = &active {
+                writer = writer.following(
+                    ImageId {
+                        database_id: self.file_header.database_id,
+                        iteration,
+                    },
+                    active,
+                );
+            }
+            let mut release = Some(release);
+            for (number, section) in sections.iter().enumerate() {
+                if number == held
+                    && let Some(release) = release.take()
+                {
+                    release();
+                }
+                writer.begin_section(section.section_type(), section.version())?;
+                section.write_to(&mut writer)?;
+            }
+            if let Some(release) = release.take() {
+                release();
+            }
+            let stats = writer.stats();
+            let (root, runs) = writer.finish()?;
+            (root, runs, stats)
+        };
         maybe_crash("checkpoint:after_chunks");
         maybe_fail("checkpoint:after_chunks")?;
         file.sync_all()?;
@@ -435,7 +495,21 @@ impl GrafeoFileManager {
 
         // From the header write on, a reopen may find the new image active:
         // a later checkpoint of this manager must spare its pages as well.
-        self.active.lock().runs.extend(runs.iter().copied());
+        // The chunks it reused are spared already, with the very runs.
+        {
+            let mut active = self.active.lock();
+            let spared: FxHashSet<(u64, u64)> = active
+                .runs
+                .iter()
+                .map(|run| (run.first, run.count))
+                .collect();
+            let added: Vec<PageRun> = runs
+                .iter()
+                .filter(|run| !spared.contains(&(run.first, run.count)))
+                .copied()
+                .collect();
+            active.runs.extend(added);
+        }
         let next_slot = 1 - slot;
         let next = DbHeaderV3 {
             // A file keeps its revision: an upgrade is an explicit step.
@@ -466,7 +540,29 @@ impl GrafeoFileManager {
             slot: next_slot,
             runs,
         };
-        Ok(())
+        *self.last_checkpoint.lock() = Some(stats);
+        Ok(stats)
+    }
+
+    /// What the last checkpoint this manager completed wrote and took over
+    /// from the image before it, `None` before the first.
+    #[must_use]
+    pub fn last_checkpoint_stats(&self) -> Option<CheckpointStats> {
+        *self.last_checkpoint.lock()
+    }
+
+    /// The id of the active image: this file's database id and the
+    /// iteration of the active database header. A checkpoint passes it to
+    /// the sections it writes with the image's chunks
+    /// ([`write_checkpoint`](Self::write_checkpoint)), and a section that
+    /// remembers which image its data was last written to or read from
+    /// compares it.
+    #[must_use]
+    pub fn active_image(&self) -> ImageId {
+        ImageId {
+            database_id: self.file_header.database_id,
+            iteration: self.active.lock().header.iteration,
+        }
     }
 
     /// Runs `read` on the active image under the file lock.
@@ -517,9 +613,9 @@ impl GrafeoFileManager {
     /// Damage found in the image, by the reader or by `read`, names this
     /// file.
     fn with_active_reader<T>(&self, read: impl FnOnce(&ImageReader<'_>) -> Result<T>) -> Result<T> {
-        let mut file = self.file.lock();
+        let file = self.file.lock();
         let root = self.active.lock().header.root;
-        let reader = ImageReader::open(&mut file, root, self.cipher.as_ref())
+        let reader = ImageReader::open(&file, root, self.cipher.as_ref())
             .map_err(|error| error.in_file(&self.path))?;
         read(&reader).map_err(|error| error.in_file(&self.path))
     }
@@ -1087,7 +1183,9 @@ mod tests {
 
     fn checkpoint(manager: &GrafeoFileManager, sections: &[Fixed], epoch: u64) -> Result<()> {
         let sections: Vec<&dyn Section> = sections.iter().map(|s| s as &dyn Section).collect();
-        manager.write_checkpoint(&sections, &header(epoch))
+        manager
+            .write_checkpoint(&sections, &header(epoch))
+            .map(drop)
     }
 
     /// The bytes of a section of the active image stored as one raw chunk,
@@ -1124,10 +1222,8 @@ mod tests {
     ) -> Vec<PageRun> {
         let copy = dir.path().join("runs.bin");
         fs::write(&copy, bytes).unwrap();
-        let mut file = File::open(&copy).unwrap();
-        ImageReader::open(&mut file, root, None)
-            .unwrap()
-            .used_runs()
+        let file = File::open(&copy).unwrap();
+        ImageReader::open(&file, root, None).unwrap().used_runs()
     }
 
     fn slot_bytes(bytes: &[u8], slot: u8) -> &[u8] {
@@ -1680,14 +1776,11 @@ mod tests {
         let prefix = read_prefix(&mut file, DATA_START_PAGE * PAGE_SIZE).unwrap();
         let (active_slot, active) = active_slot_of(&prefix);
         assert_eq!((active_slot, active.iteration), (0, 0));
-        let active_runs = ImageReader::open(&mut file, active.root, None)
+        let active_runs = ImageReader::open(&file, active.root, None)
             .unwrap()
             .used_runs();
-        let mut writer = CheckpointWriter::new(
-            &mut file,
-            PageAllocator::from_used(active_runs).unwrap(),
-            None,
-        );
+        let mut writer =
+            CheckpointWriter::new(&file, PageAllocator::from_used(active_runs).unwrap(), None);
         writer.begin_section(SectionType::Catalog, 1).unwrap();
         writer.write_chunk(ChunkMeta::raw(), b"Alix").unwrap();
         for (section_type, kind, flags, bytes) in foreign {
@@ -1703,7 +1796,7 @@ mod tests {
         };
         write_page(&mut file, slot_offset(1), &next.encode()).unwrap();
         file.sync_all().unwrap();
-        ImageReader::open(&mut file, root, None)
+        ImageReader::open(&file, root, None)
             .unwrap()
             .skipped()
             .to_vec()
@@ -2829,5 +2922,426 @@ mod tests {
             read(&copy, SectionType::Catalog),
             Some(b"read-only copy".to_vec())
         );
+    }
+
+    /// A section of column chunks that reuses those of the image it
+    /// follows whose column is in `reuse` (and that image holds), and writes
+    /// the others: `(column, bytes)` each.
+    struct Reusing {
+        version: u8,
+        chunks: Vec<(u32, &'static [u8])>,
+        reuse: Vec<u32>,
+    }
+
+    impl Section for Reusing {
+        fn section_type(&self) -> SectionType {
+            SectionType::LpgStore
+        }
+
+        fn version(&self) -> u8 {
+            self.version
+        }
+
+        fn serialize(&self) -> Result<Vec<u8>> {
+            Ok(Vec::new())
+        }
+
+        fn deserialize(&mut self, _data: &[u8]) -> Result<()> {
+            Ok(())
+        }
+
+        fn write_to(&self, sink: &mut dyn SectionSink) -> Result<()> {
+            let previous: Vec<ChunkMeta> = sink
+                .previous()
+                .map(|(_, source)| source.chunks().to_vec())
+                .unwrap_or_default();
+            for (column, bytes) in &self.chunks {
+                let meta = ChunkMeta::column(0, *column, 0, 1, 0);
+                match previous.iter().position(|old| *old == meta) {
+                    Some(index) if self.reuse.contains(column) => sink.reuse_chunk(index)?,
+                    _ => sink.write_chunk(meta, bytes)?,
+                }
+            }
+            Ok(())
+        }
+
+        fn read_from(&mut self, _source: &dyn SectionSource) -> Result<()> {
+            Ok(())
+        }
+
+        fn is_dirty(&self) -> bool {
+            true
+        }
+
+        fn mark_clean(&self) {}
+
+        fn memory_usage(&self) -> usize {
+            0
+        }
+    }
+
+    /// A section that reuses chunk 7 of the image it follows.
+    struct OutOfRange;
+
+    impl Section for OutOfRange {
+        fn section_type(&self) -> SectionType {
+            SectionType::LpgStore
+        }
+
+        fn version(&self) -> u8 {
+            3
+        }
+
+        fn serialize(&self) -> Result<Vec<u8>> {
+            Ok(Vec::new())
+        }
+
+        fn deserialize(&mut self, _data: &[u8]) -> Result<()> {
+            Ok(())
+        }
+
+        fn write_to(&self, sink: &mut dyn SectionSink) -> Result<()> {
+            sink.reuse_chunk(7)
+        }
+
+        fn read_from(&mut self, _source: &dyn SectionSource) -> Result<()> {
+            Ok(())
+        }
+
+        fn is_dirty(&self) -> bool {
+            true
+        }
+
+        fn mark_clean(&self) {}
+
+        fn memory_usage(&self) -> usize {
+            0
+        }
+    }
+
+    /// The column, bytes and offset of each chunk of the LPG section of the
+    /// active image.
+    fn stored_chunks(manager: &GrafeoFileManager) -> Vec<(u32, Vec<u8>, u64)> {
+        manager
+            .with_active_reader(|reader| {
+                let section = reader.section(SectionType::LpgStore).unwrap();
+                Ok((0..section.chunks().len())
+                    .map(|index| {
+                        (
+                            section.chunks()[index].column_id,
+                            section.fetch(index).unwrap().to_vec(),
+                            section.entry(index).unwrap().offset,
+                        )
+                    })
+                    .collect())
+            })
+            .unwrap()
+    }
+
+    fn write(manager: &GrafeoFileManager, section: &Reusing) -> Result<CheckpointStats> {
+        manager.write_checkpoint(&[section as &dyn Section], &header(3))
+    }
+
+    /// A checkpoint that reuses chunks of the active image points at their
+    /// pages: they are not written again, the image reads them, a reopen
+    /// reads them, and the pages stay in use as long as an image uses them.
+    #[test]
+    fn a_reused_chunk_keeps_its_pages_and_reads_back() {
+        let dir = test_dir();
+        let path = dir.path().join("reuse.grafeo");
+        let manager = GrafeoFileManager::create(&path, None).unwrap();
+        let first = write(
+            &manager,
+            &Reusing {
+                version: 4,
+                chunks: vec![(1, b"Alix"), (2, b"Gus")],
+                reuse: vec![1, 2],
+            },
+        )
+        .unwrap();
+        assert_eq!((first.chunks_written, first.chunks_reused), (2, 0));
+        let before = stored_chunks(&manager);
+        let image = manager.active_image();
+
+        let second = write(
+            &manager,
+            &Reusing {
+                version: 4,
+                chunks: vec![(1, b"Alix"), (2, b"Vincent")],
+                reuse: vec![1],
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            (second.chunks_written, second.chunks_reused),
+            (1, 1),
+            "Gus's chunk is replaced, Alix's reused"
+        );
+        assert_eq!(second.bytes_reused, before[0].1.len() as u64);
+        assert_eq!(
+            manager.active_image(),
+            ImageId {
+                iteration: image.iteration + 1,
+                ..image
+            }
+        );
+        let after = stored_chunks(&manager);
+        assert_eq!(after[0], before[0], "the same bytes at the same offset");
+        assert_eq!(after[1].1, b"Vincent");
+        assert_eq!(manager.last_checkpoint_stats(), Some(second));
+
+        // Every chunk reused: nothing written, and the file keeps its size.
+        let size = manager.file_size().unwrap();
+        let third = write(
+            &manager,
+            &Reusing {
+                version: 4,
+                chunks: vec![(1, b"Alix"), (2, b"Vincent")],
+                reuse: vec![1, 2],
+            },
+        )
+        .unwrap();
+        assert_eq!((third.chunks_written, third.chunks_reused), (0, 2));
+        assert!(
+            manager.file_size().unwrap() <= size + PAGE_SIZE,
+            "a new directory block at most"
+        );
+        assert_eq!(stored_chunks(&manager), after);
+        drop(manager);
+
+        let reopened = GrafeoFileManager::open(&path, None).unwrap();
+        assert_eq!(stored_chunks(&reopened), after, "the reopen reads them");
+    }
+
+    /// A chunk can be reused only from a section of the same version, and
+    /// only one the image holds; a refused checkpoint leaves the image.
+    #[test]
+    fn a_reuse_across_versions_or_out_of_range_is_refused() {
+        let dir = test_dir();
+        let manager = GrafeoFileManager::create(dir.path().join("refused.grafeo"), None).unwrap();
+        write(
+            &manager,
+            &Reusing {
+                version: 3,
+                chunks: vec![(1, b"Mia")],
+                reuse: vec![],
+            },
+        )
+        .unwrap();
+        let before = stored_chunks(&manager);
+        let error = write(
+            &manager,
+            &Reusing {
+                version: 4,
+                chunks: vec![(1, b"Mia")],
+                reuse: vec![1],
+            },
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("version 3"), "{error}");
+        assert_eq!(stored_chunks(&manager), before);
+
+        let error = manager
+            .write_checkpoint(&[&OutOfRange], &header(4))
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("no chunk 7"), "{error}");
+        assert_eq!(stored_chunks(&manager), before);
+    }
+
+    /// An encrypted chunk reused at its offset still decrypts: its
+    /// associated data names its section and place, not its offset.
+    #[cfg(feature = "encryption")]
+    #[test]
+    fn a_reused_encrypted_chunk_decrypts_after_a_reopen() {
+        let dir = test_dir();
+        let path = dir.path().join("encrypted-reuse.grafeo");
+        let manager = GrafeoFileManager::create(&path, key(7)).unwrap();
+        for reuse in [vec![], vec![1]] {
+            write(
+                &manager,
+                &Reusing {
+                    version: 4,
+                    chunks: vec![(1, b"Butch"), (2, b"Hans")],
+                    reuse,
+                },
+            )
+            .unwrap();
+        }
+        assert_eq!(manager.last_checkpoint_stats().unwrap().chunks_reused, 1);
+        drop(manager);
+        let reopened = GrafeoFileManager::open(&path, key(7)).unwrap();
+        let chunks = stored_chunks(&reopened);
+        assert_eq!(chunks[0].1, b"Butch");
+        assert_eq!(chunks[1].1, b"Hans");
+    }
+
+    /// A checkpoint that reused chunks and failed once its header was
+    /// written leaves pages both images use: the next checkpoint spares them
+    /// once, writes, and both the file it leaves and the one the failure
+    /// left open.
+    #[cfg(feature = "testing-crash-injection")]
+    #[test]
+    fn a_failed_checkpoint_that_reused_chunks_leaves_the_next_one_working() {
+        use grafeo_common::testing::crash::with_failure_at;
+
+        let dir = test_dir();
+        let path = dir.path().join("failed-reuse.grafeo");
+        let manager = GrafeoFileManager::create(&path, None).unwrap();
+        write(
+            &manager,
+            &Reusing {
+                version: 4,
+                chunks: vec![(1, b"Alix"), (2, b"Gus")],
+                reuse: vec![],
+            },
+        )
+        .unwrap();
+        let failed = Reusing {
+            version: 4,
+            chunks: vec![(1, b"Alix"), (2, b"Vincent")],
+            reuse: vec![1],
+        };
+        // The third failure point of a checkpoint: after its header.
+        let error = with_failure_at(3, || write(&manager, &failed))
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("checkpoint:after_header"), "{error}");
+        let left = dir.path().join("left.grafeo");
+        manager.copy_to(&left).unwrap();
+        let next = write(
+            &manager,
+            &Reusing {
+                version: 4,
+                chunks: vec![(1, b"Alix"), (2, b"Mia")],
+                reuse: vec![1],
+            },
+        )
+        .unwrap();
+        assert_eq!((next.chunks_written, next.chunks_reused), (1, 1));
+        drop(manager);
+        let reopened = GrafeoFileManager::open(&path, None).unwrap();
+        let chunks = stored_chunks(&reopened);
+        assert_eq!(
+            (chunks[0].1.as_slice(), chunks[1].1.as_slice()),
+            (&b"Alix"[..], &b"Mia"[..])
+        );
+        let failure = GrafeoFileManager::open(&left, None).unwrap();
+        let chunks = stored_chunks(&failure);
+        assert_eq!(
+            (chunks[0].1.as_slice(), chunks[1].1.as_slice()),
+            (&b"Alix"[..], &b"Vincent"[..]),
+            "the header the failure wrote names a whole image"
+        );
+    }
+
+    /// A section of chunks of `size` bytes each, reusing those the image it
+    /// follows holds: (column, fill byte) per chunk.
+    struct Sized {
+        size: usize,
+        chunks: Vec<(u32, u8)>,
+    }
+
+    impl Section for Sized {
+        fn section_type(&self) -> SectionType {
+            SectionType::LpgStore
+        }
+
+        fn version(&self) -> u8 {
+            4
+        }
+
+        fn serialize(&self) -> Result<Vec<u8>> {
+            Ok(Vec::new())
+        }
+
+        fn deserialize(&mut self, _data: &[u8]) -> Result<()> {
+            Ok(())
+        }
+
+        fn write_to(&self, sink: &mut dyn SectionSink) -> Result<()> {
+            let previous: Vec<ChunkMeta> = sink
+                .previous()
+                .map(|(_, source)| source.chunks().to_vec())
+                .unwrap_or_default();
+            for (column, fill) in &self.chunks {
+                let meta = ChunkMeta::column(0, *column, 0, 1, *fill);
+                match previous.iter().position(|old| *old == meta) {
+                    Some(index) => sink.reuse_chunk(index)?,
+                    None => sink.write_chunk(meta, &vec![*fill; self.size])?,
+                }
+            }
+            Ok(())
+        }
+
+        fn read_from(&mut self, _source: &dyn SectionSource) -> Result<()> {
+            Ok(())
+        }
+
+        fn is_dirty(&self) -> bool {
+            true
+        }
+
+        fn mark_clean(&self) {}
+
+        fn memory_usage(&self) -> usize {
+            0
+        }
+    }
+
+    /// Once at least half of the pages an image spans are free, a checkpoint
+    /// moves the chunks it reuses into free pages before them, and the file
+    /// shrinks; the moved chunks read back, also after a reopen. With less
+    /// free, reused chunks stay where they are.
+    #[test]
+    fn reused_chunks_move_down_once_half_of_the_file_is_free() {
+        let dir = test_dir();
+        let path = dir.path().join("shrink.grafeo");
+        let manager = GrafeoFileManager::create(&path, None).unwrap();
+        let checkpoint = |section: &Sized| {
+            manager
+                .write_checkpoint(&[section as &dyn Section], &header(3))
+                .unwrap()
+        };
+        // Ten chunks of three pages each.
+        let many: Vec<(u32, u8)> = (0..10).map(|column| (column, 1)).collect();
+        checkpoint(&Sized {
+            size: 3 * 4096,
+            chunks: many,
+        });
+        let large = manager.file_size().unwrap();
+        // One chunk of the ten stays, written anew past the image.
+        let kept = Sized {
+            size: 3 * 4096,
+            chunks: vec![(42, 7)],
+        };
+        let first = checkpoint(&kept);
+        assert_eq!(first.chunks_written, 1);
+        assert!(
+            manager.file_size().unwrap() >= large,
+            "written past the image"
+        );
+        // Nothing changed: the chunk is reused, and moves into the free pages
+        // near the start, so the file is cut after it.
+        let second = checkpoint(&kept);
+        assert_eq!(
+            (
+                second.chunks_reused,
+                second.chunks_moved,
+                second.chunks_written
+            ),
+            (1, 1, 0)
+        );
+        let small = manager.file_size().unwrap();
+        assert!(small * 3 < large, "the file shrank from {large} to {small}");
+        // Now dense: reused chunks stay.
+        let third = checkpoint(&kept);
+        assert_eq!((third.chunks_reused, third.chunks_moved), (1, 0));
+        drop(manager);
+        let reopened = GrafeoFileManager::open(&path, None).unwrap();
+        let chunks = stored_chunks(&reopened);
+        assert_eq!(chunks.len(), 1);
+        assert_eq!(chunks[0].1, vec![7u8; 3 * 4096]);
     }
 }

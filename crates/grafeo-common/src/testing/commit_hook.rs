@@ -6,7 +6,10 @@
 //! its events are reported ([`after_next_commit_stamped`]), once its events
 //! are reported but before the commit is complete
 //! ([`after_next_commit_logged`]), inside a checkpoint while it holds
-//! commits off, before it writes its image ([`during_next_checkpoint`]), or
+//! commits off, before it writes its image ([`during_next_checkpoint`]),
+//! inside a checkpoint once it let commits go on again and wrote its first
+//! row group's chunks, while it writes the rest
+//! ([`during_next_checkpoint_write`]), or
 //! inside a change outside any commit (a schema statement, a graph command, an
 //! RDF update, a direct write, a direct graph or index call, an import or an
 //! RDF batch insert) once it holds commits off and before it changes anything
@@ -33,6 +36,7 @@ mod inner {
         static AFTER_STAMPED: RefCell<Option<Hook>> = const { RefCell::new(None) };
         static AFTER_LOGGED: RefCell<Option<Hook>> = const { RefCell::new(None) };
         static DURING_CHECKPOINT: RefCell<Option<Hook>> = const { RefCell::new(None) };
+        static DURING_CHECKPOINT_WRITE: RefCell<Option<Hook>> = const { RefCell::new(None) };
         static DURING_HELD_CHANGE: RefCell<Option<Hook>> = const { RefCell::new(None) };
     }
 
@@ -78,6 +82,23 @@ mod inner {
     /// while it holds commits off and before it writes its image.
     pub fn during_next_checkpoint(hook: impl FnOnce() + 'static) {
         DURING_CHECKPOINT.with(|slot| *slot.borrow_mut() = Some(Box::new(hook)));
+    }
+
+    /// Arms `hook` to run once, inside the next checkpoint on this thread,
+    /// once it let commits go on again (its snapshot is taken) and wrote the
+    /// chunks of its first row group, before it writes the others.
+    pub fn during_next_checkpoint_write(hook: impl FnOnce() + 'static) {
+        DURING_CHECKPOINT_WRITE.with(|slot| *slot.borrow_mut() = Some(Box::new(hook)));
+    }
+
+    /// Runs the [`during_next_checkpoint_write`] hook armed on this thread,
+    /// if any. Called by the LPG section's writer after it handed a row
+    /// group's chunks to the file, holding no lock of the store.
+    #[inline]
+    pub fn run_during_checkpoint_write() {
+        if let Some(hook) = DURING_CHECKPOINT_WRITE.with(|slot| slot.borrow_mut().take()) {
+            hook();
+        }
     }
 
     /// Runs the [`after_next_commit_epoch`] hook armed on this thread, if
@@ -193,6 +214,13 @@ mod inner {
 
     /// No-op when injection is disabled.
     pub fn during_next_held_change(_hook: impl FnOnce() + 'static) {}
+
+    /// No-op when injection is disabled.
+    pub fn during_next_checkpoint_write(_hook: impl FnOnce() + 'static) {}
+
+    /// No-op when injection is disabled.
+    #[inline]
+    pub fn run_during_checkpoint_write() {}
 
     /// No-op when injection is disabled.
     #[inline]

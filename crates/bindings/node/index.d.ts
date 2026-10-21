@@ -310,7 +310,8 @@ export declare class GrafeoDB {
   /**
    * Compacts the database: writes a checkpoint of a persistent database
    * and drops the old versions no open transaction can see any more.
-   * Returns what it did: `{checkpointed, versions_collected, duration_ms}`.
+   * Returns what it did: `{checkpointed, versions_collected, rows_compressed,
+   * duration_ms}`.
    * The database keeps one store (`compact()` no longer builds a separate
    * columnar one), and every write after it is logged as before. Throws if
    * the checkpoint fails, or after `close()`.

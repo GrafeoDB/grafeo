@@ -601,21 +601,38 @@ impl Column {
                 "a spill file does not hold the chunks written to it".to_string(),
             ));
         }
-        let mut cold = Vec::with_capacity(chunks.places.len());
-        for place in chunks.places {
-            let bytes = mapped.slice(place.range);
+        self.install_chunks(chunks.places, mapped, Home::Spilled)
+    }
+
+    /// Makes the column cold, its chunks `chunks` (from
+    /// [`plan_spill`](Self::plan_spill), with no write since) kept on the
+    /// heap: compression on request (`compress`).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Internal`], changing nothing, when a chunk gets no
+    /// point view.
+    fn install_in_memory(&mut self, chunks: SpillChunks) -> Result<()> {
+        let SpillChunks { bytes, places, .. } = chunks;
+        self.install_chunks(places, &Bytes::from(bytes), Home::Memory)
+    }
+
+    /// Makes the column cold, the chunk of each of `places` read from its
+    /// range of `bytes`, which are kept at `home`.
+    fn install_chunks(&mut self, places: Vec<ChunkPlace>, bytes: &Bytes, home: Home) -> Result<()> {
+        let mut cold = Vec::with_capacity(places.len());
+        for place in places {
+            let bytes = bytes.slice(place.range);
             // The bytes are those the encoder wrote or the load checked.
             let point = PointView::from_validated(&bytes, place.codec, place.row_count)?
-                .ok_or_else(|| {
-                    Error::Internal("a spilled chunk without a point view".to_string())
-                })?;
+                .ok_or_else(|| Error::Internal("a cold chunk without a point view".to_string()))?;
             cold.push(ColdChunk {
                 first_row: place.first_row,
                 row_count: place.row_count,
                 codec: place.codec,
                 bytes,
                 point: Some(point),
-                home: Home::Spilled,
+                home,
             });
         }
         *self.cold.get_mut() = cold;
@@ -698,6 +715,45 @@ impl Column {
     }
 }
 
+/// What a compression of a row group's columns encodes (see
+/// [`Columns::plan_compress`]).
+pub(super) struct CompressPlan {
+    /// The hot columns to make cold, each with its chunks.
+    columns: Vec<(u32, SpillChunks)>,
+    kept_with_chains: usize,
+    kept_unsupported: usize,
+}
+
+impl CompressPlan {
+    /// Whether it encodes no column.
+    pub(super) fn is_empty(&self) -> bool {
+        self.columns.is_empty()
+    }
+
+    /// The columns it leaves hot, as a [`Compressed`] that encoded none.
+    pub(super) fn counts(&self) -> Compressed {
+        Compressed {
+            kept_with_chains: self.kept_with_chains,
+            kept_unsupported: self.kept_unsupported,
+            ..Compressed::default()
+        }
+    }
+}
+
+/// What a compression did to a row group's columns.
+#[derive(Debug, Default)]
+pub(super) struct Compressed {
+    /// The columns made cold.
+    pub(super) columns: usize,
+    /// The columns left hot for their update chains.
+    pub(super) kept_with_chains: usize,
+    /// The columns left hot for a chunk without a point view.
+    pub(super) kept_unsupported: usize,
+    /// The heap bytes the columns made cold held, less what their chunks
+    /// hold.
+    pub(super) freed_bytes: usize,
+}
+
 /// The columns of a row group, by property key id.
 #[derive(Debug, Default)]
 pub(super) struct Columns {
@@ -705,6 +761,56 @@ pub(super) struct Columns {
 }
 
 impl Columns {
+    /// What a compression of the hot columns encodes: each hot column with
+    /// values, no update chains and only kinds with a point view, a vector
+    /// of rows a chunk (as a spill encodes it). Cold columns stay as they
+    /// are.
+    ///
+    /// # Errors
+    ///
+    /// Returns the encoder's error for a value the format cannot hold.
+    pub(super) fn plan_compress(&self) -> Result<CompressPlan> {
+        let mut plan = CompressPlan {
+            columns: Vec::new(),
+            kept_with_chains: 0,
+            kept_unsupported: 0,
+        };
+        for (key, column) in &self.by_key {
+            if column.is_cold() {
+                continue;
+            }
+            match column.plan_spill()? {
+                SpillPlan::Nothing => {}
+                SpillPlan::Chained => plan.kept_with_chains += 1,
+                SpillPlan::Unsupported => plan.kept_unsupported += 1,
+                SpillPlan::Write(chunks) => plan.columns.push((*key, chunks)),
+            }
+        }
+        Ok(plan)
+    }
+
+    /// Makes the columns of `plan` (planned with no write since) cold, their
+    /// chunks on the heap.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Internal`] when a planned column is gone or a chunk
+    /// gets no point view; the columns before it stay cold.
+    pub(super) fn install_compressed(&mut self, plan: CompressPlan) -> Result<Compressed> {
+        let mut done = plan.counts();
+        for (key, chunks) in plan.columns {
+            let column = self
+                .by_key
+                .get_mut(&key)
+                .ok_or_else(|| Error::Internal("a compressed column is gone".to_string()))?;
+            let resident = chunks.resident;
+            column.install_in_memory(chunks)?;
+            done.columns += 1;
+            done.freed_bytes += resident.saturating_sub(column.cold_bytes());
+        }
+        Ok(done)
+    }
+
     /// The value of key `key` at `row`.
     pub(super) fn get(&self, key: u32, row: usize) -> Option<Value> {
         self.by_key.get(&key)?.get(row)

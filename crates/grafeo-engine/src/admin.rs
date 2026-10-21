@@ -363,6 +363,10 @@ pub struct CompactReport {
     /// The old versions dropped, in every graph: versions no open transaction
     /// can see any more.
     pub versions_collected: u64,
+    /// The nodes and edges of the row groups whose property values were
+    /// compressed, in every graph (a report from before 0.6.0 reads as 0).
+    #[serde(default)]
+    pub rows_compressed: u64,
     /// How long `compact()` took, in milliseconds.
     pub duration_ms: u64,
 }
@@ -653,15 +657,22 @@ mod tests {
         let report = CompactReport {
             checkpointed: true,
             versions_collected: 19,
+            rows_compressed: 3,
             duration_ms: 88,
         };
         let json = serde_json::to_string(&report).unwrap();
         assert_eq!(
-            json, r#"{"checkpointed":true,"versions_collected":19,"duration_ms":88}"#,
+            json,
+            r#"{"checkpointed":true,"versions_collected":19,"rows_compressed":3,"duration_ms":88}"#,
             "the field names the bindings and server clients read"
         );
         let parsed: CompactReport = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed, report);
+        let older: CompactReport = serde_json::from_str(
+            r#"{"checkpointed":false,"versions_collected":2,"duration_ms":1}"#,
+        )
+        .unwrap();
+        assert_eq!(older.rows_compressed, 0, "a report without the field");
     }
 
     #[test]

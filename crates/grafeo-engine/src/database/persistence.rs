@@ -751,7 +751,7 @@ impl super::GrafeoDB {
         // A new database: its WAL starts at log position 0.
         let written = fm.write_checkpoint(&section_refs, &sources.context().checkpoint_header(0));
         drop(commits);
-        let written = written.and_then(|()| fm.close());
+        let written = written.and_then(|_| fm.close());
         if written.is_err() {
             drop(fm);
             // Best effort: the error that matters is the one returned.
@@ -1042,6 +1042,11 @@ impl super::GrafeoDB {
                 grafeo_common::utils::error::TransactionError::ReadOnly,
             ));
         }
+        // A checkpoint reads the stores while it writes its image, with
+        // commits going on: a restore replaces them whole, so it waits for
+        // one in progress, and the next one waits for it.
+        #[cfg(feature = "grafeo-file")]
+        let _checkpoint = self.file_manager.as_ref().map(|fm| fm.checkpoint_guard());
         self.transaction_manager.check_no_incomplete_commit()?;
         self.transaction_manager.check_open()?;
         // Validates the snapshot and refuses data this build cannot read

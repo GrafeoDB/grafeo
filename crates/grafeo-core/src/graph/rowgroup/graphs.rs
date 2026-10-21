@@ -35,7 +35,7 @@ use crate::graph::apply::ApplyError;
 pub(super) struct Graphs {
     /// The named graphs by name, in a hash map as `LpgStore`'s: its seed is
     /// its own, so the names list in no promised order.
-    named: RwLock<FxHashMap<String, Arc<RowGroupStore>>>,
+    pub(super) named: RwLock<FxHashMap<String, Arc<RowGroupStore>>>,
     /// This graph's id in the file: 0 for the default graph, the id it was
     /// created with for a named graph. Atomic only so a load can give a
     /// graph an earlier step of the same open created the id the file holds.

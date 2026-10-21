@@ -810,6 +810,10 @@ impl GrafeoDB {
                         &rdf_store,
                     )
                 })?;
+                // The graphs hold the active image's chunks: the next
+                // checkpoint writes only what changes from here on (the
+                // replay below included).
+                row_group_sections::follow_image(&store, fm.active_image());
                 Self::continue_from_checkpoint(&fm, &store);
                 row_group_sections::restore_row_group_history(
                     &store,
@@ -1253,8 +1257,18 @@ impl GrafeoDB {
     /// Compacts the database: writes a checkpoint of a persistent database
     /// (as [`wal_checkpoint()`](Self::wal_checkpoint) does), drops the old
     /// versions no open transaction can see any more, in every graph (as
-    /// [`gc()`](Self::gc) does), and reports what it did. An in-memory or
-    /// read-only database writes no checkpoint.
+    /// [`gc()`](Self::gc) does), then compresses the property values every
+    /// graph holds decoded in memory, in a persistent database and in memory
+    /// alike, and reports what it did. An in-memory or read-only database
+    /// writes no checkpoint.
+    ///
+    /// Compression encodes each row group's property columns the way a
+    /// database file holds them, kept in memory and read without decoding;
+    /// a column goes back to its decoded form when it is written, until the
+    /// next `compact()`. A column whose old values an open transaction may
+    /// still read stays decoded, as do text and mixed-type columns (they
+    /// cannot be read without decoding them whole). Every read returns what
+    /// it returned before, at every view.
     ///
     /// The database keeps its one store throughout: writes after `compact()`
     /// go through the same path, and to the WAL, as before it, and open
@@ -1265,7 +1279,9 @@ impl GrafeoDB {
     /// The errors of [`wal_checkpoint()`](Self::wal_checkpoint): a failed
     /// checkpoint, a commit that did not complete, and the database-closed
     /// error after `close()` of a persistent database. No version is dropped
-    /// when the checkpoint fails.
+    /// and nothing is compressed when the checkpoint fails. A value the
+    /// encoder cannot hold fails the compression; the row groups compressed
+    /// before it stay so.
     pub fn compact(&mut self) -> Result<crate::admin::CompactReport> {
         let started = grafeo_common::clock::Instant::now();
         #[cfg(feature = "lpg")]
@@ -1274,9 +1290,17 @@ impl GrafeoDB {
         #[cfg(not(feature = "lpg"))]
         let checkpointed = false;
         let versions_collected = u64::try_from(self.collect_garbage()).unwrap_or(u64::MAX);
+        #[cfg(feature = "lpg")]
+        let rows_compressed = match self.root_store() {
+            Some(store) => store.compress()?.rows,
+            None => 0,
+        };
+        #[cfg(not(feature = "lpg"))]
+        let rows_compressed = 0;
         Ok(crate::admin::CompactReport {
             checkpointed,
             versions_collected,
+            rows_compressed: u64::try_from(rows_compressed).unwrap_or(u64::MAX),
             duration_ms: u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
         })
     }

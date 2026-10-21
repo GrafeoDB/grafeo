@@ -704,17 +704,17 @@ These sections hold more, in proportion to their data:
 | Section | Writing | Reading |
 |---------|---------|---------|
 | `CATALOG` | A sorted copy of every entry, and the record being written | The record being read (at most 120 bytes per payload byte plus 1 MiB, see [Catalog Records](#catalog-records)), and the named constraints, index definitions and index names until the last record |
-| `LPG_STORE` | The sorted ids of the table being written (8 bytes per node or edge) and, without `temporal`, of each of its property columns (8 bytes per value) | |
+| `LPG_STORE` | The ids of the rows of one of the store's row groups being written (16 bytes per node or edge, at most 1 MiB) | |
 | `RDF_STORE` | A reference to every triple, sorted (8 bytes per triple) | |
 | `VECTOR_STORE` | A reference to every node of an in-memory topology, sorted by id (16 bytes per node) | |
 | `TEXT_INDEX` | References to the terms (16 bytes per term), a copy of the document lengths (16 bytes per document) and, for a posting list not held in node order, a sorted copy of it (16 bytes per posting) | Each document's length and the part of it the term frequencies read so far leave uncovered (16 bytes per document) |
 | `RDF_RING` | The packed term dictionary, built whole before it is written | Each of the six streams in one buffer, which becomes that part of the ring |
 
-**Locks.** A checkpoint holds a vector or text index's read lock while it
-writes that index's stream. Changes to that index (a node's vector or text
-inserted, updated or removed) wait until the stream is written, and so do
-searches of the index that arrive after a waiting change, as its locks are
-fair.
+**Locks.** A checkpoint holds commits off while it takes its snapshot and
+writes the catalog, the RDF sections and the time index. It then holds a
+graph store's read lock while it gathers the values of one file row group,
+never while it encodes them or writes to the file: a write to that store
+waits for one row group's values to be read at most.
 
 ### Encryption
 
@@ -735,17 +735,25 @@ header and the database headers are not encrypted. See
 
 ## Checkpoint Flow
 
-Every checkpoint writes the whole database as a new image:
+Every checkpoint writes a complete new image, which shares the chunks that did
+not change with the active image:
 
 ```text
 Checkpoint:
-  1. (Engine) Start a new WAL segment at the end of the log: every commit so
+  1. (Engine) Hold commits off and take the snapshot: the epoch E of the last
+     commit, a read pinned at E (at the start of the history window for a
+     database that keeps history), and what changed in each row group since
+     the active image
+  2. (Engine) Start a new WAL segment at the end of the log: every commit so
      far is in the segments before its first log position, the checkpoint
-     LSN
-  2. (Engine) Hand every section to the container; commits wait until the
-     image is written
+     LSN, and is at or before E
   3. Stream each section's chunks, one section at a time, into free pages as
-     the section writes them (CRC-32, encrypted if enabled)
+     the section writes them (CRC-32, encrypted if enabled): first the
+     sections without versions (the catalog, the RDF sections, the time
+     index) while commits are still held off, then, with commits going on,
+     the `LPG_STORE` section as of E; a chunk the active image holds
+     unchanged is not written: the new directory entry points at its pages
+     (see below)
   4. Write the directory blocks into free pages
   5. fsync
   6. Write the new database header (iteration + 1, the new root, the
@@ -757,13 +765,50 @@ Checkpoint:
      checkpoint LSN the active header records
 ```
 
+**Commits during a checkpoint:** commits wait for steps 1 and 2 and for the
+sections without versions. While the `LPG_STORE` section is written, they go
+on: it is written as a reader at E sees the store, a file row group at a
+time, its values gathered under the store's read lock and encoded and written
+once the lock is released, and the pinned read keeps every version it reads.
+So the image holds the committed state at E exactly, and the commits after E
+are in the WAL after the checkpoint LSN.
+
+**Incremental checkpoints:** a write marks what it changes in its row group as
+it takes effect (at its commit, or at once for a write outside a transaction):
+rows created or deleted, the property keys and labels it changed (per vector
+of 2,048 rows), the nodes' outgoing and incoming adjacency. The snapshot takes
+the marks, and per file row group of the `LPG_STORE` section the checkpoint:
+
+- reuses every chunk of a row group without marks, its row count from the
+  active image's metadata;
+- for a row group whose rows did not change (and with no history kept), writes
+  the changed columns again within the chunk boundaries of the active image,
+  the chunks of the vectors that changed, and the adjacency of a direction
+  that changed, reusing every other chunk;
+- writes any other row group anew.
+
+The sections encoded in step 1 reuse every chunk the active image holds with
+the same description and bytes, so a catalog that did not change is not
+written again. Chunks are reused only from the image a store's data was last
+written to or read from: a store loaded from another file, a copy, or one
+whose last checkpoint failed writes every chunk at its next checkpoint, the
+same path with nothing to reuse. A reused chunk keeps its directory entry
+(offset, length, CRC, codec): its associated data names its section and
+place, not its offset, so an encrypted chunk decrypts in the new image too.
+
 **Free space:** the pages free for a checkpoint are derived from the pages the
 active image uses, which an open reads from its directory: every page from
 page 3 up to the end of the last used page that the active image does not use.
 No free list is stored. Allocation is first fit and appends at the end of the
 file when no gap is large enough, so a checkpoint reuses the pages of the image
 before the active one. While a checkpoint runs, the file can hold the active
-image and the new one.
+image and the new one; the chunks they share take their pages once, and become
+free only when no image uses them any more. A reused chunk stays where it is,
+unless at least half of the pages the active image spans are free: then each
+chunk the checkpoint reuses that fits a free run before it is copied there as
+stored (its CRC, and for an encrypted file its nonce and tag, stay valid), so
+the image packs toward the start of the file and the file shrinks after its
+data did.
 
 **Crash safety:** steps 3 to 5 write only pages the active image does not use,
 so a crash before the new header is on disk opens the previous image, intact. A

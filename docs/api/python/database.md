@@ -1202,7 +1202,7 @@ test_db = file_db.to_memory()  # safe copy for experiments, indexes included
 
 ### compact()
 
-Compacts the database: writes a checkpoint of a persistent database (an in-memory or read-only one writes none), drops the old versions no open transaction can see any more, and returns what it did as a dict: `checkpointed`, `versions_collected` and `duration_ms`. Since 0.6.0 the database keeps one store: `compact()` no longer builds a separate columnar one (see [Compact Store](../../user-guide/compact-store.md)). Raises if the checkpoint fails, or after `close()`.
+Compacts the database: writes a checkpoint of a persistent database (an in-memory or read-only one writes none), drops the old versions no open transaction can see any more, compresses the property values held decoded in memory, and returns what it did as a dict: `checkpointed`, `versions_collected`, `rows_compressed` and `duration_ms`. Since 0.6.0 the database keeps one store: `compact()` no longer builds a separate columnar one (see [Compact Store](../../user-guide/compact-store.md)). Raises if the checkpoint fails, or after `close()`.
 
 ```python
 def compact(self) -> dict
@@ -1213,7 +1213,7 @@ db = grafeo.GrafeoDB()
 db.execute("INSERT (:Person {name: 'Alix', age: 30})")
 db.execute("INSERT (:Person {name: 'Gus', age: 25})")
 
-report = db.compact()  # {'checkpointed': False, 'versions_collected': 0, 'duration_ms': 0}
+report = db.compact()  # {'checkpointed': False, 'versions_collected': 0, 'rows_compressed': 2, 'duration_ms': 0}
 
 result = db.execute("MATCH (p:Person) RETURN p.name")
 db.execute("INSERT (:Person {name: 'Vincent'})")

@@ -1169,9 +1169,10 @@ mod crash_during_close {
 
     /// The crash points of `close()` with the WAL turned off, in order (the
     /// `WAL_DISABLED_CLOSE_POINTS` of `crash_injection_single_file.rs`).
-    const CLOSE_POINTS: [&str; 8] = [
+    const CLOSE_POINTS: [&str; 9] = [
         "flush:before_serialize",
         "flush:after_rotate",
+        "flush:after_snapshot",
         "checkpoint:after_chunks",
         "checkpoint:after_data_sync",
         "checkpoint:after_header",
@@ -1182,7 +1183,7 @@ mod crash_during_close {
 
     /// The first of [`CLOSE_POINTS`] (1-based) at which the new image's database
     /// header is on disk: `checkpoint:after_header`.
-    const HEADER_WRITTEN: u64 = 5;
+    const HEADER_WRITTEN: u64 = 6;
 
     const CHILD_POINT_VAR: &str = "GRAFEO_CHUNKED_CRASH_POINT";
     const CHILD_PATH_VAR: &str = "GRAFEO_CHUNKED_CRASH_PATH";
@@ -1385,12 +1386,12 @@ mod moved_chunks {
         let (slot, header) = active_header(slots).unwrap().expect("a database");
         let copy = path.with_extension("copy");
         std::fs::copy(path, &copy).unwrap();
-        let mut file = std::fs::OpenOptions::new()
+        let file = std::fs::OpenOptions::new()
             .read(true)
             .write(true)
             .open(&copy)
             .unwrap();
-        let reader = ImageReader::open(&mut file, header.root, cipher).unwrap();
+        let reader = ImageReader::open(&file, header.root, cipher).unwrap();
         let (entries, runs) = (reader.entries().to_vec(), reader.directory_runs().to_vec());
         (slot, header, entries, runs)
     }
@@ -1598,9 +1599,9 @@ mod moved_chunks {
             .expect("a node property chunk");
         // Fetches the LPG chunk `meta` describes through the active directory.
         let fetch = |meta: ChunkMeta| {
-            let mut file = std::fs::File::open(&path).unwrap();
+            let file = std::fs::File::open(&path).unwrap();
             let root = active_image(&path, Some(&cipher)).1.root;
-            let reader = ImageReader::open(&mut file, root, Some(&cipher)).unwrap();
+            let reader = ImageReader::open(&file, root, Some(&cipher)).unwrap();
             let section = reader.section(SectionType::LpgStore).unwrap();
             let index = section
                 .chunks()

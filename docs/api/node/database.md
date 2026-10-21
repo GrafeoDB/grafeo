@@ -676,10 +676,10 @@ version(): string
 
 ### compact()
 
-Compacts the database: writes a checkpoint of a persistent database (an in-memory or read-only one writes none), drops the old versions no open transaction can see any more, and returns what it did: `{ checkpointed, versions_collected, duration_ms }`. Since 0.6.0 the database keeps one store: `compact()` no longer builds a separate columnar one (see [Compact Store](../../user-guide/compact-store.md)). Throws if the checkpoint fails, or after `close()`.
+Compacts the database: writes a checkpoint of a persistent database (an in-memory or read-only one writes none), drops the old versions no open transaction can see any more, compresses the property values held decoded in memory, and returns what it did: `{ checkpointed, versions_collected, rows_compressed, duration_ms }`. Since 0.6.0 the database keeps one store: `compact()` no longer builds a separate columnar one (see [Compact Store](../../user-guide/compact-store.md)). Throws if the checkpoint fails, or after `close()`.
 
 ```typescript
-compact(): { checkpointed: boolean, versions_collected: number, duration_ms: number }
+compact(): { checkpointed: boolean, versions_collected: number, rows_compressed: number, duration_ms: number }
 ```
 
 ```typescript

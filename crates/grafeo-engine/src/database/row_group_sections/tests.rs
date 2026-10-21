@@ -729,11 +729,12 @@ mod file {
 
 /// The crash points of a checkpoint without a WAL, in the order the flush
 /// and the file manager reach them; the new header is on disk from the
-/// fifth on.
+/// sixth on.
 #[cfg(all(feature = "grafeo-file", feature = "testing-crash-injection"))]
-const CHECKPOINT_POINTS: [&str; 7] = [
+const CHECKPOINT_POINTS: [&str; 8] = [
     "flush:before_serialize",
     "flush:after_rotate",
+    "flush:after_snapshot",
     "checkpoint:after_chunks",
     "checkpoint:after_data_sync",
     "checkpoint:after_header",
@@ -834,7 +835,7 @@ fn crash_during_the_next_checkpoint(config: impl Fn(&std::path::Path) -> Config)
                 "point {point} ({name}): the backward edges it was created with"
             );
         }
-        let header_written = point >= 5;
+        let header_written = point >= 6;
         let (expected, iteration) = if header_written {
             (&second, first_iteration + 1)
         } else {

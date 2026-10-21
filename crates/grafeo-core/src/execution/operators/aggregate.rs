@@ -624,6 +624,44 @@ impl AggregateState {
         }
     }
 
+    /// The result of the aggregate `expr` this state computed, as
+    /// [`finalize`](Self::finalize) gives it, except that SPARQL's `SUM` and
+    /// `AVG` of a group without values are `0` (SPARQL 1.1, 18.5.1.3 and
+    /// 18.5.1.4), where GQL and Cypher give null.
+    ///
+    /// # Errors
+    ///
+    /// As [`finalize`](Self::finalize).
+    pub fn finalize_for(&self, expr: &AggregateExpr) -> Result<Value, OperatorError> {
+        if expr.rdf_literals
+            && matches!(
+                expr.function,
+                AggregateFunction::Sum | AggregateFunction::Avg
+            )
+            && self.value_count() == Some(0)
+        {
+            return Ok(Value::Int64(0));
+        }
+        self.finalize()
+    }
+
+    /// How many values a sum or average state has taken in; `None` for the
+    /// other aggregates.
+    fn value_count(&self) -> Option<i64> {
+        match self {
+            AggregateState::SumInt(_, count)
+            | AggregateState::SumIntDistinct(_, count, _)
+            | AggregateState::SumFloat(_, _, count)
+            | AggregateState::SumFloatDistinct(_, _, count, _)
+            | AggregateState::SumDecimal(_, count)
+            | AggregateState::Avg(_, count)
+            | AggregateState::AvgDecimal(_, count)
+            | AggregateState::AvgDistinct(_, count, _) => Some(*count),
+            AggregateState::Distinct { inner, .. } => inner.value_count(),
+            _ => None,
+        }
+    }
+
     /// Finalizes the state and returns the result value.
     ///
     /// # Errors
@@ -1055,7 +1093,7 @@ impl Operator for HashAggregateOperator {
             let mut builder = DataChunkBuilder::with_capacity(&self.output_schema, 1);
 
             for agg in &self.aggregates {
-                let value = AggregateState::for_expr(agg).finalize()?;
+                let value = AggregateState::for_expr(agg).finalize_for(agg)?;
                 if let Some(col) = builder.column_mut(self.group_columns.len()) {
                     col.push_value(value);
                 }
@@ -1082,10 +1120,10 @@ impl Operator for HashAggregateOperator {
             }
 
             // Output aggregate results
-            for (i, state) in group.states.iter().enumerate() {
+            for (i, (state, expr)) in group.states.iter().zip(&self.aggregates).enumerate() {
                 let col_idx = self.group_columns.len() + i;
                 if let Some(col) = builder.column_mut(col_idx) {
-                    col.push_value(state.finalize()?);
+                    col.push_value(state.finalize_for(expr)?);
                 }
             }
 
@@ -1215,9 +1253,9 @@ impl Operator for SimpleAggregateOperator {
         // Output single result row
         let mut builder = DataChunkBuilder::with_capacity(&self.output_schema, 1);
 
-        for (i, state) in self.states.iter().enumerate() {
+        for (i, (state, expr)) in self.states.iter().zip(&self.aggregates).enumerate() {
             if let Some(col) = builder.column_mut(i) {
-                col.push_value(state.finalize()?);
+                col.push_value(state.finalize_for(expr)?);
             }
         }
         builder.advance_row();
@@ -2318,6 +2356,55 @@ mod tests {
                 (Value::List(vec![Value::Int64(3)].into()), Value::Int64(2)),
             ]
         );
+    }
+
+    /// The `[sum, avg]` of `values`, through the aggregate states and
+    /// `finalize_for`, also with DISTINCT.
+    fn sum_and_avg(values: &[Option<Value>], rdf_literals: bool, distinct: bool) -> [Value; 2] {
+        [AggregateExpr::sum(0), AggregateExpr::avg(0)].map(|mut expr| {
+            expr.rdf_literals = rdf_literals;
+            expr.distinct = distinct;
+            let mut state = AggregateState::for_expr(&expr);
+            for value in values {
+                state.update(value.clone());
+            }
+            state.finalize_for(&expr).unwrap()
+        })
+    }
+
+    /// SPARQL's SUM and AVG of no values are 0 (SPARQL 1.1, 18.5.1.3 and
+    /// 18.5.1.4), also when the only operands are unbound; GQL and Cypher give
+    /// null. With values, both finish as before.
+    #[test]
+    fn sum_and_avg_of_no_values() {
+        for distinct in [false, true] {
+            let zero = Value::Int64(0);
+            assert_eq!(
+                sum_and_avg(&[], true, distinct),
+                [zero.clone(), zero.clone()]
+            );
+            assert_eq!(
+                sum_and_avg(&[None, None], true, distinct),
+                [zero.clone(), zero]
+            );
+            assert_eq!(
+                sum_and_avg(&[], false, distinct),
+                [Value::Null, Value::Null]
+            );
+            assert_eq!(
+                sum_and_avg(&[None], false, distinct),
+                [Value::Null, Value::Null]
+            );
+            let [sum, avg] = sum_and_avg(
+                &[Some(Value::Int64(1)), Some(Value::Int64(2))],
+                true,
+                distinct,
+            );
+            assert_eq!(sum, Value::Int64(3));
+            assert_eq!(avg, Value::Decimal(Decimal::parse("1.5").unwrap()));
+            let [sum, _] = sum_and_avg(&[Some(Value::Float64(0.5))], true, distinct);
+            assert_eq!(sum, Value::Float64(0.5));
+        }
     }
 
     /// The `[min, max]` of `values`, through the aggregate states.

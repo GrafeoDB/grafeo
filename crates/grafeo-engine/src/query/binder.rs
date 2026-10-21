@@ -51,19 +51,17 @@ fn holds_a_value(info: &VariableInfo) -> bool {
         )
 }
 
-/// Creates an "undefined variable" error with a suggestion if a similar variable exists.
+/// Creates an "undefined variable" error (an invalid reference, GQLSTATUS
+/// 42002) with a suggestion if a similar variable exists.
 fn undefined_variable_error(variable: &str, context: &BindingContext, suffix: &str) -> Error {
     let candidates: Vec<String> = context.variable_names();
     let candidates_ref: Vec<&str> = candidates.iter().map(|s| s.as_str()).collect();
 
-    if let Some(suggestion) = find_similar(variable, &candidates_ref) {
-        binding_error_with_hint(
-            format!("Undefined variable '{variable}'{suffix}"),
-            format_suggestion(suggestion),
-        )
-    } else {
-        binding_error(format!("Undefined variable '{variable}'{suffix}"))
-    }
+    let error = QueryError::invalid_reference(format!("Undefined variable '{variable}'{suffix}"));
+    Error::Query(match find_similar(variable, &candidates_ref) {
+        Some(suggestion) => error.with_hint(format_suggestion(suggestion)),
+        None => error,
+    })
 }
 
 /// The parts of a subquery body joined by `UNION` (under the `DISTINCT` of

@@ -1186,10 +1186,9 @@ fn resolve_count_param(
 
     if let CountExpr::Parameter(name) = count {
         let value = params.get(name.as_str()).ok_or_else(|| {
-            Error::Query(QueryError::new(
-                QueryErrorKind::Semantic,
-                format!("Missing parameter for SKIP/LIMIT: ${name}"),
-            ))
+            Error::Query(QueryError::invalid_reference(format!(
+                "Missing parameter for SKIP/LIMIT: ${name}"
+            )))
         })?;
         let n = match value {
             // reason: guard ensures *i >= 0
@@ -1197,13 +1196,13 @@ fn resolve_count_param(
             Value::Int64(i) if *i >= 0 => *i as usize,
             Value::Int64(i) => {
                 return Err(Error::Query(QueryError::new(
-                    QueryErrorKind::Semantic,
+                    QueryErrorKind::NegativeLimit,
                     format!("SKIP/LIMIT parameter ${name} must be non-negative, got {i}"),
                 )));
             }
             other => {
                 return Err(Error::Query(QueryError::new(
-                    QueryErrorKind::Semantic,
+                    QueryErrorKind::InvalidValueType,
                     format!("SKIP/LIMIT parameter ${name} must be an integer, got {other:?}"),
                 )));
             }
@@ -1223,7 +1222,7 @@ fn substitute_in_expression(expr: &mut LogicalExpression, params: &QueryParams) 
                 *expr = LogicalExpression::Literal(value.clone());
             } else {
                 return Err(Error::Query(grafeo_common::utils::error::QueryError::new(
-                    grafeo_common::utils::error::QueryErrorKind::Semantic,
+                    grafeo_common::utils::error::QueryErrorKind::InvalidReference,
                     format!("Missing parameter: ${name}"),
                 )));
             }

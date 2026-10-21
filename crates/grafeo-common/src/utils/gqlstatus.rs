@@ -205,12 +205,17 @@ impl From<&super::error::Error> for GqlStatus {
         match err {
             Error::Query(q) => match q.kind {
                 QueryErrorKind::Lexer | QueryErrorKind::Syntax => GqlStatus::SYNTAX_INVALID,
-                QueryErrorKind::Semantic => GqlStatus::SYNTAX_INVALID_REFERENCE,
+                // ISO/IEC 39075 §4: a violated syntax rule without a
+                // condition of its own is 42000.
+                QueryErrorKind::Semantic => GqlStatus::SYNTAX_ERROR,
+                QueryErrorKind::InvalidReference => GqlStatus::SYNTAX_INVALID_REFERENCE,
                 QueryErrorKind::Optimization => GqlStatus::SYNTAX_ERROR,
                 QueryErrorKind::Execution => GqlStatus::DATA_EXCEPTION,
                 QueryErrorKind::Timeout => GqlStatus::DATA_EXCEPTION,
                 QueryErrorKind::NumericOutOfRange => GqlStatus::DATA_NUMERIC_OUT_OF_RANGE,
                 QueryErrorKind::DivisionByZero => GqlStatus::DATA_DIVISION_BY_ZERO,
+                QueryErrorKind::NegativeLimit => GqlStatus::DATA_NEGATIVE_LIMIT,
+                QueryErrorKind::InvalidValueType => GqlStatus::DATA_INVALID_VALUE_TYPE,
                 // GQL defines no class for a feature an implementation lacks.
                 QueryErrorKind::Unsupported => GqlStatus::SYNTAX_ERROR,
             },
@@ -399,12 +404,6 @@ mod tests {
         let syntax_err = Error::Query(QueryError::new(QueryErrorKind::Syntax, "bad syntax"));
         assert_eq!(GqlStatus::from(&syntax_err), GqlStatus::SYNTAX_INVALID);
 
-        let semantic_err = Error::Query(QueryError::new(QueryErrorKind::Semantic, "unknown label"));
-        assert_eq!(
-            GqlStatus::from(&semantic_err),
-            GqlStatus::SYNTAX_INVALID_REFERENCE
-        );
-
         let tx_err = Error::Transaction(TransactionError::ReadOnly);
         assert_eq!(GqlStatus::from(&tx_err), GqlStatus::INVALID_TX_READ_ONLY);
 
@@ -419,6 +418,70 @@ mod tests {
             GqlStatus::from(&type_err),
             GqlStatus::DATA_INVALID_VALUE_TYPE
         );
+    }
+
+    /// Each kind of query error has one GQLSTATUS, decided here: a name
+    /// that resolves to nothing is 42002 (invalid reference), any other
+    /// violated rule beyond the grammar 42000 (ISO/IEC 39075 §4), a feature
+    /// Grafeo lacks 42000, and the data exceptions their own subclass.
+    #[test]
+    fn every_query_error_kind_has_its_gqlstatus() {
+        use super::super::error::{Error, ErrorCode, QueryError, QueryErrorKind};
+
+        for (kind, status, code) in [
+            (QueryErrorKind::Lexer, "42001", ErrorCode::QuerySyntax),
+            (QueryErrorKind::Syntax, "42001", ErrorCode::QuerySyntax),
+            (QueryErrorKind::Semantic, "42000", ErrorCode::QuerySemantic),
+            (
+                QueryErrorKind::InvalidReference,
+                "42002",
+                ErrorCode::QuerySemantic,
+            ),
+            (
+                QueryErrorKind::Optimization,
+                "42000",
+                ErrorCode::QueryOptimization,
+            ),
+            (
+                QueryErrorKind::Unsupported,
+                "42000",
+                ErrorCode::QueryUnsupported,
+            ),
+            (
+                QueryErrorKind::Execution,
+                "22000",
+                ErrorCode::QueryExecution,
+            ),
+            (QueryErrorKind::Timeout, "22000", ErrorCode::QueryTimeout),
+            (
+                QueryErrorKind::NumericOutOfRange,
+                "22003",
+                ErrorCode::QueryExecution,
+            ),
+            (
+                QueryErrorKind::DivisionByZero,
+                "22012",
+                ErrorCode::QueryExecution,
+            ),
+            (
+                QueryErrorKind::NegativeLimit,
+                "22G02",
+                ErrorCode::QueryExecution,
+            ),
+            (
+                QueryErrorKind::InvalidValueType,
+                "22G03",
+                ErrorCode::QueryExecution,
+            ),
+        ] {
+            let error = QueryError::new(kind, "message");
+            assert_eq!(error.error_code(), code, "{kind:?}");
+            assert_eq!(
+                GqlStatus::from(&Error::Query(error)).as_str(),
+                status,
+                "{kind:?}"
+            );
+        }
     }
 
     /// A computation that leaves its type's range or divides by zero is a

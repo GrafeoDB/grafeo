@@ -56,11 +56,11 @@ pub fn translate(query: &str) -> Result<LogicalPlan> {
     match translate_full(query)? {
         GqlTranslationResult::Plan(plan) => Ok(plan),
         GqlTranslationResult::SessionCommand(_) => Err(Error::Query(QueryError::new(
-            QueryErrorKind::Semantic,
+            QueryErrorKind::Unsupported,
             "Session commands cannot be executed as queries",
         ))),
         GqlTranslationResult::SchemaCommand(_) => Err(Error::Query(QueryError::new(
-            QueryErrorKind::Semantic,
+            QueryErrorKind::Unsupported,
             "Schema DDL commands cannot be executed as queries",
         ))),
     }
@@ -369,18 +369,16 @@ impl GqlTranslator {
             ast::Statement::DataModification(dm) => {
                 self.translate_data_modification(dm, LogicalOperator::Empty)
             }
-            ast::Statement::Schema(_) => Err(Error::Query(QueryError::new(
-                QueryErrorKind::Semantic,
-                "Schema DDL commands are handled before query planning",
-            ))),
+            ast::Statement::Schema(_) => Err(Error::Internal(
+                "Schema DDL commands are handled before query planning".to_string(),
+            )),
             ast::Statement::Call(call) => self.translate_call(call),
             ast::Statement::CompositeQuery { left, op, right } => {
                 self.translate_composite_query(left, *op, right)
             }
-            ast::Statement::SessionCommand(_) => Err(Error::Query(QueryError::new(
-                QueryErrorKind::Semantic,
-                "Session commands cannot be executed as queries",
-            ))),
+            ast::Statement::SessionCommand(_) => Err(Error::Internal(
+                "Session commands cannot be executed as queries".to_string(),
+            )),
             ast::Statement::Explain(inner) | ast::Statement::Profile(inner) => {
                 self.translate_statement(inner)
             }
@@ -1891,7 +1889,7 @@ impl GqlTranslator {
         let what = if any { "an ANY" } else { "a shortest" };
         let ast::Pattern::Path(path) = pattern else {
             return Err(Error::Query(QueryError::new(
-                QueryErrorKind::Semantic,
+                QueryErrorKind::Unsupported,
                 format!(
                     "{what} path search over a parenthesized, alternated or node-only path \
                      pattern is not supported: it runs over one edge pattern between two nodes"
@@ -1910,7 +1908,7 @@ impl GqlTranslator {
             // between the edge patterns ignored
             _ => {
                 return Err(Error::Query(QueryError::new(
-                    QueryErrorKind::Semantic,
+                    QueryErrorKind::Unsupported,
                     format!("{what} path search over more than one edge pattern is not supported"),
                 )));
             }

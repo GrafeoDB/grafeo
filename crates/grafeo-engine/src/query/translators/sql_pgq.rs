@@ -1171,15 +1171,15 @@ impl SqlPgqTranslator {
                 Ok(LogicalExpression::Map(entries))
             }
             ast::Expression::ExistsSubquery { .. } => Err(Error::Query(QueryError::new(
-                QueryErrorKind::Semantic,
+                QueryErrorKind::Unsupported,
                 "EXISTS subquery not supported in SQL/PGQ",
             ))),
             ast::Expression::CountSubquery { .. } => Err(Error::Query(QueryError::new(
-                QueryErrorKind::Semantic,
+                QueryErrorKind::Unsupported,
                 "COUNT subquery not supported in SQL/PGQ",
             ))),
             ast::Expression::ValueSubquery { .. } => Err(Error::Query(QueryError::new(
-                QueryErrorKind::Semantic,
+                QueryErrorKind::Unsupported,
                 "VALUE subquery not supported in SQL/PGQ",
             ))),
             ast::Expression::IndexAccess { base, index } => {
@@ -1215,7 +1215,7 @@ impl SqlPgqTranslator {
             | ast::Expression::ListComprehension { .. }
             | ast::Expression::ListPredicate { .. }
             | ast::Expression::Reduce { .. } => Err(Error::Query(QueryError::new(
-                QueryErrorKind::Semantic,
+                QueryErrorKind::Unsupported,
                 "This expression type is not supported in SQL/PGQ",
             ))),
         }
@@ -1407,10 +1407,9 @@ impl SqlPgqTranslator {
             LogicalOperator::Expand(expand) => Ok(expand.to_variable.clone()),
             LogicalOperator::Filter(filter) => Self::get_last_variable(&filter.input),
             LogicalOperator::Project(project) => Self::get_last_variable(&project.input),
-            _ => Err(Error::Query(QueryError::new(
-                QueryErrorKind::Semantic,
-                "Cannot get variable from operator",
-            ))),
+            _ => Err(Error::Internal(
+                "Cannot get variable from operator".to_string(),
+            )),
         }
     }
 }

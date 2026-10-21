@@ -164,8 +164,8 @@ mod tests {
     }
 
     /// The GQLSTATUS of the last error: the status of a database error
-    /// (22012, 22003, 42001), 22000 for one the binding raises itself (a null
-    /// pointer), and none once the error is cleared (#639).
+    /// (22012, 22003, 42001, 42002, 42000), 22000 for one the binding raises
+    /// itself (a null pointer), and none once the error is cleared (#639).
     #[test]
     fn the_last_error_carries_its_gql_status() {
         use std::ffi::{CStr, CString};
@@ -197,6 +197,8 @@ mod tests {
                 "numeric value out of range",
             ),
             ("MATCH (n RETURN n", "42001", "GRAFEO-Q001"),
+            ("MATCH (n) RETURN m", "42002", "Undefined variable 'm'"),
+            ("RETURN abs(1, 2) AS v", "42000", "takes 1 argument, got 2"),
         ] {
             let query_text = CString::new(query).unwrap();
             assert!(grafeo_execute(db, query_text.as_ptr()).is_null(), "{query}");

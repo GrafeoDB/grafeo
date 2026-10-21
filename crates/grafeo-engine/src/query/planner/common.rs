@@ -511,6 +511,7 @@ pub(crate) fn expression_to_string(expr: &LogicalExpression) -> String {
             match op {
                 UnaryOp::Not => format!("NOT {inner}"),
                 UnaryOp::Neg => format!("-{inner}"),
+                UnaryOp::Pos => format!("+{inner}"),
                 UnaryOp::IsNull => format!("{inner} IS NULL"),
                 UnaryOp::IsNotNull => format!("{inner} IS NOT NULL"),
             }

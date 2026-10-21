@@ -981,20 +981,20 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_unary_expression(&mut self) -> Result<Expression> {
-        match self.current.kind {
-            TokenKind::Minus => {
-                self.advance();
-                self.enter_nesting()?;
-                let operand = self.parse_unary_expression();
-                self.exit_nesting();
-                let operand = operand?;
-                Ok(Expression::Unary {
-                    op: UnaryOp::Neg,
-                    operand: Box::new(operand),
-                })
-            }
-            _ => self.parse_primary_expression(),
-        }
+        // SQL's `<sign>`: `-x` negates a number, `+x` is the number itself.
+        let op = match self.current.kind {
+            TokenKind::Minus => UnaryOp::Neg,
+            TokenKind::Plus => UnaryOp::Pos,
+            _ => return self.parse_primary_expression(),
+        };
+        self.advance();
+        self.enter_nesting()?;
+        let operand = self.parse_unary_expression();
+        self.exit_nesting();
+        Ok(Expression::Unary {
+            op,
+            operand: Box::new(operand?),
+        })
     }
 
     fn parse_primary_expression(&mut self) -> Result<Expression> {

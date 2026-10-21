@@ -29,10 +29,6 @@ impl GqlTranslator {
             }
             ast::Expression::Unary { op, operand } => {
                 let operand = self.translate_expression(operand)?;
-                // Unary positive is identity: just return the operand
-                if *op == ast::UnaryOp::Pos {
-                    return Ok(operand);
-                }
                 let op = self.translate_unary_op(*op);
                 Ok(LogicalExpression::Unary {
                     op,
@@ -352,8 +348,7 @@ impl GqlTranslator {
         match op {
             ast::UnaryOp::Not => UnaryOp::Not,
             ast::UnaryOp::Neg => UnaryOp::Neg,
-            // Pos is handled as a no-op at the call site; this arm is unreachable.
-            ast::UnaryOp::Pos => UnaryOp::Not,
+            ast::UnaryOp::Pos => UnaryOp::Pos,
             ast::UnaryOp::IsNull => UnaryOp::IsNull,
             ast::UnaryOp::IsNotNull => UnaryOp::IsNotNull,
         }

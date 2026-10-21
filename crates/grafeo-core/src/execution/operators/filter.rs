@@ -651,6 +651,9 @@ pub enum UnaryFilterOp {
     IsNotNull,
     /// Numeric negation.
     Neg,
+    /// Unary plus: a number as it is; anything else, as for negation, is
+    /// null.
+    Pos,
 }
 
 /// What reading one property of a node or edge found.
@@ -4142,6 +4145,10 @@ impl ExpressionPredicate {
                 },
                 Value::Float64(f) => Some(Value::Float64(-f)),
                 Value::Decimal(d) => Some(Value::Decimal(d.neg())),
+                _ => None,
+            },
+            UnaryFilterOp::Pos => match val? {
+                number @ (Value::Int64(_) | Value::Float64(_) | Value::Decimal(_)) => Some(number),
                 _ => None,
             },
         }

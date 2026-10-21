@@ -1513,6 +1513,10 @@ impl super::Planner {
                         Value::Float64(f) => Some(Value::Float64(-f)),
                         _ => None,
                     },
+                    UnaryOp::Pos => match value {
+                        Value::Int64(_) | Value::Float64(_) | Value::Decimal(_) => Some(value),
+                        _ => None,
+                    },
                     UnaryOp::Not => match value {
                         Value::Bool(b) => Some(Value::Bool(!b)),
                         _ => None,

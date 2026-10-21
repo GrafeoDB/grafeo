@@ -1823,4 +1823,12 @@ for case_id, query, languages in [
 ]:
     case(case_id, query, languages, "empty")
 
+# CN: unary plus is the number under it and, like unary minus, null for anything else (CN1:
+#     numbers; CN2: a string and a boolean, which it passed through unchanged)
+for case_id, query in [
+    ("CN1", "RETURN +3 AS a, -(+3) AS b, +(-3) AS c, +2.5e0 AS d"),
+    ("CN2", "RETURN +'Alix' AS a, +true AS b, -'Alix' AS c"),
+]:
+    case(case_id, query, BOTH, "empty")
+
 # fmt: on

@@ -1,0 +1,98 @@
+# Rosetta: unary plus
+#
+# `+x` is the number x, in GQL, Cypher and SQL/PGQ, as SQL's <sign> and ISO
+# GQL's numeric value expression define it. Like `-x`, it reads numbers only:
+# anything else under it is null, as under unary minus. SQL/PGQ did not parse
+# `+x`, and GQL and Cypher passed any value through it unchanged.
+
+meta:
+  model: lpg
+  section: rosetta
+  title: Unary plus
+  dataset: empty
+  requires: [cypher, sql-pgq]
+
+tests:
+
+  - name: a_number_under_plus_is_the_number
+    setup:
+      - "INSERT (:P {age: 30})"
+    variants:
+      gql: "MATCH (n:P) RETURN +n.age AS a, -(+n.age) AS b, +(-n.age) AS c"
+      cypher: "MATCH (n:P) RETURN +n.age AS a, -(+n.age) AS b, +(-n.age) AS c"
+      sql-pgq: "SELECT * FROM GRAPH_TABLE (MATCH (n:P) COLUMNS (+n.age AS a, -(+n.age) AS b, +(-n.age) AS c))"
+    expect:
+      rows:
+        - [30, -30, -30]
+
+  - name: a_float_under_plus_stays_a_float
+    setup:
+      - "INSERT (:P {w: 2.5e0})"
+    variants:
+      gql: "MATCH (n:P) RETURN +n.w / 2 AS h"
+      cypher: "MATCH (n:P) RETURN +n.w / 2 AS h"
+      sql-pgq: "SELECT * FROM GRAPH_TABLE (MATCH (n:P) COLUMNS (+n.w / 2 AS h))"
+    expect:
+      rows:
+        - [1.25]
+
+  - name: plus_in_a_filter
+    setup:
+      - "INSERT (:P {age: 30}), (:P {age: 2})"
+    variants:
+      gql: "MATCH (n:P) WHERE +n.age > 3 RETURN n.age AS a"
+      cypher: "MATCH (n:P) WHERE +n.age > 3 RETURN n.age AS a"
+      sql-pgq: "SELECT * FROM GRAPH_TABLE (MATCH (n:P) WHERE +n.age > 3 COLUMNS (n.age AS a))"
+    expect:
+      rows:
+        - [30]
+
+  - name: plus_of_a_string_is_null_as_minus_is
+    setup:
+      - "INSERT (:P {name: 'Alix'})"
+    variants:
+      gql: "MATCH (n:P) RETURN +n.name AS a, -n.name AS b"
+      cypher: "MATCH (n:P) RETURN +n.name AS a, -n.name AS b"
+      sql-pgq: "SELECT * FROM GRAPH_TABLE (MATCH (n:P) COLUMNS (+n.name AS a, -n.name AS b))"
+    expect:
+      rows:
+        - [null, null]
+
+  - name: plus_of_a_boolean_literal_is_null
+    variants:
+      gql: "RETURN +true AS a, +'x' AS b"
+      cypher: "RETURN +true AS a, +'x' AS b"
+    expect:
+      rows:
+        - [null, null]
+
+  - name: plus_of_null_is_null
+    variants:
+      gql: "RETURN +null AS a"
+      cypher: "RETURN +null AS a"
+    expect:
+      rows:
+        - [null]
+
+  - name: plus_around_an_aggregate
+    setup:
+      - "INSERT (:P {age: 30}), (:P {age: 2})"
+    variants:
+      gql: "MATCH (n:P) RETURN +count(n) AS c, +sum(n.age) AS s"
+      cypher: "MATCH (n:P) RETURN +count(n) AS c, +sum(n.age) AS s"
+    expect:
+      rows:
+        - [2, 32]
+
+  - name: plus_in_an_order_by
+    setup:
+      - "INSERT (:P {age: 30}), (:P {age: 2}), (:P {age: 19})"
+    variants:
+      gql: "MATCH (n:P) RETURN n.age AS a ORDER BY +n.age DESC"
+      cypher: "MATCH (n:P) RETURN n.age AS a ORDER BY +n.age DESC"
+    expect:
+      ordered: true
+      rows:
+        - [30]
+        - [19]
+        - [2]

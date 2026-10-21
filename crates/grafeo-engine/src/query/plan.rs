@@ -3419,6 +3419,8 @@ pub enum UnaryOp {
     Not,
     /// Numeric negation.
     Neg,
+    /// Unary plus: a number as it is, as negation reads numbers.
+    Pos,
     /// IS NULL check.
     IsNull,
     /// IS NOT NULL check.

@@ -537,9 +537,6 @@ impl GqlTranslator {
             }
             ast::Expression::Unary { op, operand } => {
                 let sub = self.extract_wrapped_aggregates(operand, agg_counter, aggregates_out)?;
-                if *op == ast::UnaryOp::Pos {
-                    return Ok(sub);
-                }
                 let unary_op = self.translate_unary_op(*op);
                 Ok(LogicalExpression::Unary {
                     op: unary_op,

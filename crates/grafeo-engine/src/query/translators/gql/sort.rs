@@ -150,9 +150,6 @@ impl GqlTranslator {
             ast::Expression::Unary { op, operand } => {
                 let operand =
                     self.translate_projected_sort_key(operand, columns, clause, as_planned)?;
-                if *op == ast::UnaryOp::Pos {
-                    return Ok(operand);
-                }
                 Ok(LogicalExpression::Unary {
                     op: self.translate_unary_op(*op),
                     operand: Box::new(operand),

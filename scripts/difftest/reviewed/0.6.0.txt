@@ -601,3 +601,5 @@ CM3|gql e527573b6a An underscore between two digits is a separator, in every rad
 CM4|cypher 904fecd430 The error starts with its code, GRAFEO-Q001 (#588); openCypher has no digit separators, so the message is unchanged.
 CM5|cypher e52ba6d736 A float literal past the float range is a syntax error, as openCypher refuses it; it was infinity.
 CM5|gql ab08f300db A float literal past the FLOAT64 range is a data exception (22003), as ISO GQL defines it; it was infinity.
+CN2|cypher a0a093dc7e Unary plus reads numbers only, as unary minus does: a string or a boolean under it is null; it passed them through unchanged.
+CN2|gql a0a093dc7e Unary plus reads numbers only, as unary minus does: a string or a boolean under it is null; it passed them through unchanged.

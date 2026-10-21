@@ -2366,10 +2366,6 @@ impl CypherTranslator {
             }
             ast::Expression::Unary { op, operand } => {
                 let sub = self.extract_wrapped_aggregates(operand, agg_counter, aggregates_out)?;
-                // Unary positive is identity: just return the operand
-                if *op == ast::UnaryOp::Pos {
-                    return Ok(sub);
-                }
                 let unary_op = self.translate_unary_op(*op)?;
                 Ok(LogicalExpression::Unary {
                     op: unary_op,
@@ -2696,9 +2692,6 @@ impl CypherTranslator {
             ast::Expression::Unary { op, operand } => {
                 let operand =
                     self.translate_projected_sort_key(operand, columns, scope, as_planned)?;
-                if *op == ast::UnaryOp::Pos {
-                    return Ok(operand);
-                }
                 Ok(LogicalExpression::Unary {
                     op: self.translate_unary_op(*op)?,
                     operand: Box::new(operand),
@@ -3123,10 +3116,6 @@ impl CypherTranslator {
             }
             ast::Expression::Unary { op, operand } => {
                 let operand_expr = self.translate_expression(operand)?;
-                // Unary positive is identity: just return the operand
-                if *op == ast::UnaryOp::Pos {
-                    return Ok(operand_expr);
-                }
                 let unary_op = self.translate_unary_op(*op)?;
 
                 Ok(LogicalExpression::Unary {
@@ -3390,12 +3379,7 @@ impl CypherTranslator {
         Ok(match op {
             ast::UnaryOp::Not => UnaryOp::Not,
             ast::UnaryOp::Neg => UnaryOp::Neg,
-            ast::UnaryOp::Pos => {
-                return Err(Error::Query(QueryError::new(
-                    QueryErrorKind::Unsupported,
-                    "Unary positive not yet supported",
-                )));
-            }
+            ast::UnaryOp::Pos => UnaryOp::Pos,
             ast::UnaryOp::IsNull => UnaryOp::IsNull,
             ast::UnaryOp::IsNotNull => UnaryOp::IsNotNull,
         })

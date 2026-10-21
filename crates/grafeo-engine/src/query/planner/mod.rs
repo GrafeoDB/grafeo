@@ -100,6 +100,7 @@ pub fn convert_unary_op(op: UnaryOp) -> Result<UnaryFilterOp> {
         UnaryOp::IsNull => Ok(UnaryFilterOp::IsNull),
         UnaryOp::IsNotNull => Ok(UnaryFilterOp::IsNotNull),
         UnaryOp::Neg => Ok(UnaryFilterOp::Neg),
+        UnaryOp::Pos => Ok(UnaryFilterOp::Pos),
     }
 }
 

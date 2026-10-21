@@ -237,7 +237,7 @@ impl TransactionChanges {
     }
 
     /// Whether the transaction changed nothing (that is still recorded).
-    #[cfg(any(feature = "wal", feature = "cdc"))]
+    #[cfg(feature = "wal")]
     pub(crate) fn is_empty(&self) -> bool {
         self.state.lock().set.is_empty()
     }

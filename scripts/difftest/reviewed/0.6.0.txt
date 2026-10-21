@@ -556,8 +556,8 @@ CF3|cypher 062dcc1245 properties reads the node startNode(r) yields; it returned
 CF3|gql 062dcc1245 properties reads the node startNode(r) yields; it returned null.
 CF4|cypher cb62d95ce2 properties of a map is the map (openCypher); it returned null.
 CF4|gql cb62d95ce2 properties of a map is the map (openCypher); it returned null.
-CF5|cypher a3daef970e date, time and datetime read a zoned datetime: its local date, its local time of day with the offset (Python drops a time's offset) and its instant; they returned null.
-CF5|gql a3daef970e date, time and datetime read a zoned datetime: its local date, its local time of day with the offset (Python drops a time's offset) and its instant; they returned null.
+CF5|cypher f31b54ca7c date, time and datetime read a zoned datetime: its local date, its local time of day with its offset (an aware datetime.time in Python) and its instant; they returned null.
+CF5|gql f31b54ca7c date, time and datetime read a zoned datetime: its local date, its local time of day with its offset (an aware datetime.time in Python) and its instant; they returned null.
 CF6|gql fcd746ade6 A label added to a node converts its values to the types of the label's node type, as a write does; an integer of a FLOAT64 property failed with expects Float64.
 CF7|cypher d465c9b19b A label added to a node converts its values to the types of the label's node type, as a write does; an integer of a FLOAT64 property failed with expects Float64.
 CG1|cypher 2c0519a916 After a WITH that neither aggregates nor is DISTINCT, ORDER BY reads the WITH's input as well (openCypher); GQL failed with Undefined variable, and 0.5.44's Cypher too.

@@ -17,9 +17,9 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use pyo3::prelude::*;
-use pyo3::types::{PyBytes, PyDateTime, PyDict, PyFloat, PyList};
+use pyo3::types::{PyByteArray, PyBytes, PyDate, PyDateTime, PyDict, PyFloat, PyList, PyTime};
 
-use grafeo_common::types::{Decimal, PropertyKey, Timestamp, Value};
+use grafeo_common::types::{Date, Decimal, PropertyKey, Time, Timestamp, Value};
 
 use crate::error::{PyGrafeoError, PyGrafeoResult};
 
@@ -162,6 +162,15 @@ impl PyValue {
             return Ok(Value::String(v.into()));
         }
 
+        // Bytes before sequences: `bytes` and `bytearray` are sequences of
+        // ints, so the list case below would read them as a list.
+        if obj.is_instance_of::<PyBytes>() || obj.is_instance_of::<PyByteArray>() {
+            let bytes: Vec<u8> = obj
+                .extract()
+                .map_err(|e| PyGrafeoError::Type(format!("Cannot read bytes: {}", e)))?;
+            return Ok(Value::Bytes(bytes.into()));
+        }
+
         if let Ok(v) = obj.extract::<Vec<Bound<'_, PyAny>>>() {
             // Only convert to Vector when ALL elements are Python floats (not ints
             // coerced to float). This prevents [1, 2, 3] from being stored as an
@@ -197,13 +206,6 @@ impl PyValue {
         }
 
         // Handle bytes
-        if obj.is_instance_of::<PyBytes>() {
-            let bytes: &Bound<'_, PyBytes> = obj
-                .cast()
-                .map_err(|e| PyGrafeoError::Type(format!("Cannot cast to bytes: {}", e)))?;
-            let byte_slice: &[u8] = bytes.as_bytes();
-            return Ok(Value::Bytes(byte_slice.into()));
-        }
 
         // Handle datetime. Naive datetimes are UTC, the same convention used
         // when timestamps are returned, so values round-trip on any machine.
@@ -218,6 +220,17 @@ impl PyValue {
                 )));
             }
             return Ok(Value::Timestamp(Timestamp::from_micros(micros)));
+        }
+
+        // A date, and a time of day: aware, it keeps its UTC offset, as a
+        // time read from a query comes back.
+        if obj.is_instance_of::<PyDate>() {
+            return date_value(obj)
+                .map_err(|e| PyGrafeoError::Type(format!("Failed to convert date: {}", e)));
+        }
+        if obj.is_instance_of::<PyTime>() {
+            return time_value(obj)
+                .map_err(|e| PyGrafeoError::Type(format!("Failed to convert time: {}", e)));
         }
 
         let type_name = obj
@@ -295,8 +308,21 @@ impl PyValue {
                     .getattr("time")
                     .expect("datetime.time should exist");
                 let micros = t.nanosecond() / 1000;
+                // A time with a UTC offset is an aware `datetime.time`.
+                let tzinfo = match t.offset_seconds() {
+                    Some(seconds) => datetime_mod
+                        .getattr("timedelta")
+                        .and_then(|class| class.call1((0, seconds)))
+                        .and_then(|delta| {
+                            datetime_mod
+                                .getattr("timezone")
+                                .and_then(|class| class.call1((delta,)))
+                        })
+                        .map_or_else(|_| py.None(), |tz| tz.unbind()),
+                    None => py.None(),
+                };
                 time_class
-                    .call1((t.hour(), t.minute(), t.second(), micros))
+                    .call1((t.hour(), t.minute(), t.second(), micros, tzinfo))
                     .map_or_else(|_| py.None(), |dt| dt.unbind().into_any())
             }
             Value::Duration(d) => {
@@ -458,6 +484,37 @@ fn timedelta_micros(delta: &Bound<'_, PyAny>) -> PyResult<i64> {
     let seconds: i64 = delta.getattr("seconds")?.extract()?;
     let micros: i64 = delta.getattr("microseconds")?.extract()?;
     Ok(days * MICROS_PER_DAY + seconds * MICROS_PER_SECOND + micros)
+}
+
+/// The `Date` of a Python `datetime.date` (not a `datetime`).
+fn date_value(obj: &Bound<'_, PyAny>) -> PyResult<Value> {
+    let year: i32 = obj.getattr("year")?.extract()?;
+    let month: u32 = obj.getattr("month")?.extract()?;
+    let day: u32 = obj.getattr("day")?.extract()?;
+    Date::from_ymd(year, month, day)
+        .map(Value::Date)
+        .ok_or_else(|| pyo3::exceptions::PyValueError::new_err(format!("{obj} is out of range")))
+}
+
+/// The `Time` of a Python `datetime.time`: an aware one keeps its UTC
+/// offset, as `Value::Time` holds it.
+fn time_value(obj: &Bound<'_, PyAny>) -> PyResult<Value> {
+    let field = |name: &str| -> PyResult<u32> { obj.getattr(name)?.extract() };
+    let out_of_range = || pyo3::exceptions::PyValueError::new_err(format!("{obj} is out of range"));
+    let time = Time::from_hms_nano(
+        field("hour")?,
+        field("minute")?,
+        field("second")?,
+        field("microsecond")? * 1000,
+    )
+    .ok_or_else(out_of_range)?;
+    let offset = obj.call_method0("utcoffset")?;
+    if offset.is_none() {
+        return Ok(Value::Time(time));
+    }
+    let seconds = i32::try_from(timedelta_micros(&offset)? / MICROS_PER_SECOND)
+        .map_err(|_| out_of_range())?;
+    Ok(Value::Time(time.with_offset(seconds)))
 }
 
 /// A naive UTC datetime for microseconds since the Unix epoch.

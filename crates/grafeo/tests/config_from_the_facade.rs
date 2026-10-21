@@ -11,6 +11,31 @@ use std::time::Duration;
 use grafeo::{Config, DurabilityMode, StorageFormat};
 
 #[test]
+fn history_retention_comes_from_the_facade() {
+    use grafeo::HistoryRetention;
+
+    let config = Config::in_memory().with_history_retention(HistoryRetention::Forever);
+    assert_eq!(config.history_retention(), HistoryRetention::Forever);
+}
+
+#[cfg(any(
+    feature = "lpg",
+    feature = "embedded",
+    feature = "edge",
+    feature = "triple-store",
+    feature = "sparql"
+))]
+#[test]
+fn a_time_travel_view_comes_from_the_facade() {
+    use grafeo::{AsOfView, GrafeoDB, TimePoint};
+
+    let db = GrafeoDB::new_in_memory();
+    let epoch = db.current_epoch();
+    let view: AsOfView = db.as_of(TimePoint::Epoch(epoch)).unwrap();
+    assert_eq!(view.epoch(), epoch);
+}
+
+#[test]
 fn storage_format_and_durability_come_from_the_facade() {
     let config = Config::persistent("amsterdam.grafeo")
         .with_storage_format(StorageFormat::Auto)

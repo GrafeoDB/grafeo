@@ -179,9 +179,8 @@ fn execute_query_with_params(
 ) -> Result<grafeo_engine::database::QueryResult> {
     let result = match lang {
         QueryLanguage::Gql => session.execute_with_params(query, params),
-        // Cypher with params falls back to GQL execute_with_params
         #[cfg(feature = "cypher")]
-        QueryLanguage::Cypher => session.execute_with_params(query, params),
+        QueryLanguage::Cypher => session.execute_cypher_with_params(query, params),
         #[cfg(not(feature = "cypher"))]
         QueryLanguage::Cypher => {
             anyhow::bail!("Cypher support not enabled (compile with --features cypher)")

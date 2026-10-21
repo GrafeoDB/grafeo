@@ -227,6 +227,45 @@ mod tests {
         );
     }
 
+    /// `--lang cypher` with parameters runs the statement as Cypher: it ran
+    /// as GQL, through the GQL call with parameters.
+    #[cfg(feature = "cypher")]
+    #[test]
+    fn a_cypher_query_with_parameters_runs_as_cypher() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("people.grafeo");
+        let db = grafeo_engine::GrafeoDB::open(&path).unwrap();
+        db.execute("INSERT (:Person {name: 'Alix'})").unwrap();
+        db.close().unwrap();
+        drop(db);
+
+        let query = |query: &str| {
+            super::query::run(super::query::QueryRunOptions {
+                path: &path,
+                query: Some(query.to_string()),
+                file: None,
+                stdin: false,
+                params: &["name=Gus".to_string()],
+                lang: crate::QueryLanguage::Cypher,
+                format: crate::OutputFormat::Json,
+                quiet: true,
+                timing: false,
+                max_width: None,
+            })
+        };
+        query("CREATE (:Person {name: $name})").unwrap();
+        let error = query("MATCH (n {name: $name}) RETURN n.name AS").unwrap_err();
+        assert!(format!("{error:#}").contains("[Cypher]"), "{error:#}");
+        let db = grafeo_engine::GrafeoDB::open_read_only(&path).unwrap();
+        let names = db
+            .execute("MATCH (n:Person) RETURN n.name AS name ORDER BY name")
+            .unwrap();
+        assert_eq!(
+            format!("{:?}", names.rows()),
+            "[[String(\"Alix\")], [String(\"Gus\")]]"
+        );
+    }
+
     /// A statement that does not parse fails without touching the files.
     #[test]
     fn a_query_that_does_not_parse_leaves_the_files() {

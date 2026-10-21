@@ -24,7 +24,8 @@
 //! reader needs stays bounded: past the versions a reader still needs, a
 //! store holds what at most `COLLECT_BOUND` such writes and entries left, a
 //! kept value or label set each and the stamps of at most one vector each
-//! (up to 32 KiB, for a vector whose rows two creators and a deleter met).
+//! (up to about 32 KiB, for a vector whose rows two creators and more than
+//! 32 deletes met).
 
 use std::collections::BTreeMap;
 use std::sync::atomic::Ordering;

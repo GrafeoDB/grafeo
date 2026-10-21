@@ -422,8 +422,9 @@ fn a_vector_filled_by_one_transaction_holds_one_constant_stamp() {
     tx.delete_node(jules).unwrap();
     let deletes = store.version_bytes() - before;
     assert!(
-        (ARRAY..2 * ARRAY).contains(&deletes),
-        "the first delete allocates the vector's delete stamps: {deletes} bytes"
+        (VECTOR_ROWS / 8..VECTOR_ROWS / 8 + 1_024).contains(&deletes),
+        "the first delete allocates the vector's delete stamps, a bit per row \
+         and a short list: {deletes} bytes"
     );
     let own = tx.view();
     assert!(!own.nodes.contains_key(&jules.as_u64()) && own.nodes.contains_key(&mia.as_u64()));

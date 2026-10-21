@@ -110,6 +110,7 @@ Changes since 0.6.0-beta.1.
 ### Result changes
 
 - **Float `=` and `<>` are exact** (IEEE 754), in GQL, Cypher and SPARQL: two floats were equal when they differed by less than `f64::EPSILON`, so `0.1e0 + 0.2e0 = 0.3e0` (Cypher `0.1 + 0.2 = 0.3`) was true; it is now false, as ISO GQL and openCypher define it. `-0.0` equals `0.0` and NaN equals nothing, itself included, as before; grouping and `DISTINCT` still keep NaN together. An integer equals only a float of exactly its value (`9007199254740993` no longer equals `9007199254740992.0e0`), and so does the integer text of a string. A filter, a property index, an `IN` list, `id()` and a join on the property find the same rows. Use decimals for exact fractions (`0.1 + 0.2 = 0.3` in GQL).
+- **`<`, `<=`, `>` and `>=` compare an integer with a float exactly**, in GQL, Cypher and SPARQL, as ORDER BY and `=` do: the integer was converted to a float, so `9007199254740993 > 9007199254740992.0e0` was false. A filter, a property index range and a zone map now agree for such values, and a comparison of NaN with a number is false, where `NaN <= 1` was true.
 
 ## [0.6.0-beta.1] - 2026-10-11
 

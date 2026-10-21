@@ -43,16 +43,14 @@ fn compare_for_range(a: &Value, b: &Value) -> Option<CmpOrdering> {
     match (a, b) {
         (Value::Int64(a), Value::Int64(b)) => Some(a.cmp(b)),
         (Value::Float64(a), Value::Float64(b)) => a.partial_cmp(b),
-        #[expect(
-            clippy::cast_precision_loss,
-            reason = "a range check compares an integer with a float as a float, as a filter does"
-        )]
-        (Value::Int64(a), Value::Float64(b)) => (*a as f64).partial_cmp(b),
-        #[expect(
-            clippy::cast_precision_loss,
-            reason = "a range check compares an integer with a float as a float, as a filter does"
-        )]
-        (Value::Float64(a), Value::Int64(b)) => a.partial_cmp(&(*b as f64)),
+        // An integer and a float compare exactly, as a filter does.
+        (Value::Int64(a), Value::Float64(b)) => {
+            crate::execution::operators::value_utils::partial_cmp_int_float(*a, *b)
+        }
+        (Value::Float64(a), Value::Int64(b)) => {
+            crate::execution::operators::value_utils::partial_cmp_int_float(*b, *a)
+                .map(CmpOrdering::reverse)
+        }
         (Value::String(a), Value::String(b)) => Some(a.cmp(b)),
         (Value::Bool(a), Value::Bool(b)) => Some(a.cmp(b)),
         (Value::Timestamp(a), Value::Timestamp(b)) => Some(a.cmp(b)),

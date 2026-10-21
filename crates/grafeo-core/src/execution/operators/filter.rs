@@ -149,6 +149,19 @@ impl Predicate for ComparisonPredicate {
     }
 }
 
+/// Whether `op` holds for two operands in the order `order`.
+#[cfg(test)]
+fn compare_holds(op: CompareOp, order: std::cmp::Ordering) -> bool {
+    match op {
+        CompareOp::Eq => order.is_eq(),
+        CompareOp::Ne => order.is_ne(),
+        CompareOp::Lt => order.is_lt(),
+        CompareOp::Le => order.is_le(),
+        CompareOp::Gt => order.is_gt(),
+        CompareOp::Ge => order.is_ge(),
+    }
+}
+
 #[cfg(test)]
 impl ComparisonPredicate {
     /// Whether row `row` of `chunk` passes the comparison.
@@ -187,27 +200,18 @@ impl ComparisonPredicate {
                 CompareOp::Ge => a >= b,
             },
             // Cross-type Int64/Float64 coercion
+            // An integer and a float compare exactly; NaN only differs.
             (Value::Int64(int), Value::Float64(b)) => {
-                let a = *int as f64;
-                match self.op {
-                    CompareOp::Eq => super::value_utils::int_equals_float(*int, *b),
-                    CompareOp::Ne => !super::value_utils::int_equals_float(*int, *b),
-                    CompareOp::Lt => a < *b,
-                    CompareOp::Le => a <= *b,
-                    CompareOp::Gt => a > *b,
-                    CompareOp::Ge => a >= *b,
-                }
+                super::value_utils::partial_cmp_int_float(*int, *b)
+                    .map_or(self.op == CompareOp::Ne, |order| {
+                        compare_holds(self.op, order)
+                    })
             }
             (Value::Float64(a), Value::Int64(int)) => {
-                let b = *int as f64;
-                match self.op {
-                    CompareOp::Eq => super::value_utils::int_equals_float(*int, *a),
-                    CompareOp::Ne => !super::value_utils::int_equals_float(*int, *a),
-                    CompareOp::Lt => *a < b,
-                    CompareOp::Le => *a <= b,
-                    CompareOp::Gt => *a > b,
-                    CompareOp::Ge => *a >= b,
-                }
+                super::value_utils::partial_cmp_int_float(*int, *a)
+                    .map_or(self.op == CompareOp::Ne, |order| {
+                        compare_holds(self.op, order.reverse())
+                    })
             }
             (Value::Bool(a), Value::Bool(b)) => match self.op {
                 CompareOp::Eq => a == b,
@@ -1758,6 +1762,13 @@ impl ExpressionPredicate {
                 } else {
                     Some(Value::Bool(!Self::values_equal(left, right)))
                 }
+            }
+            // NaN is neither less nor greater than a number (IEEE): the
+            // comparison is false, not unknown.
+            BinaryFilterOp::Lt | BinaryFilterOp::Le | BinaryFilterOp::Gt | BinaryFilterOp::Ge
+                if Self::nan_against_a_number(left, right) =>
+            {
+                Some(Value::Bool(false))
             }
             BinaryFilterOp::Lt => self.compare_values(left, right).map(|c| Value::Bool(c < 0)),
             BinaryFilterOp::Le => self
@@ -4136,6 +4147,18 @@ impl ExpressionPredicate {
         }
     }
 
+    /// Whether one operand is a NaN float and the other a number.
+    fn nan_against_a_number(left: &Value, right: &Value) -> bool {
+        let nan = |value: &Value| matches!(value, Value::Float64(f) if f.is_nan());
+        let number = |value: &Value| {
+            matches!(
+                value,
+                Value::Int64(_) | Value::Float64(_) | Value::Decimal(_)
+            )
+        };
+        (nan(left) && number(right)) || (nan(right) && number(left))
+    }
+
     /// Structural equality for DISTINCT, GROUP BY, and list/map comparison.
     ///
     /// Treats NULL == NULL as `true` (grouping semantics). For SQL/GQL
@@ -4282,35 +4305,29 @@ impl ExpressionPredicate {
                 super::value_utils::compare_with_decimal(left, right).map(|o| o as i32)
             }
             (Value::Int64(a), Value::Int64(b)) => Some(a.cmp(b) as i32),
-            (Value::Float64(a), Value::Float64(b)) => {
-                if a < b {
-                    Some(-1)
-                } else if a > b {
-                    Some(1)
-                } else {
-                    Some(0)
-                }
-            }
+            // NaN is neither less nor greater than anything (IEEE).
+            (Value::Float64(a), Value::Float64(b)) => a.partial_cmp(b).map(|o| o as i32),
             (Value::String(a), Value::String(b)) => Some(a.cmp(b) as i32),
-            (Value::Int64(a), Value::Float64(b)) => (*a as f64).partial_cmp(b).map(|o| o as i32),
-            (Value::Float64(a), Value::Int64(b)) => a.partial_cmp(&(*b as f64)).map(|o| o as i32),
+            // An integer and a float compare exactly, as ORDER BY and = do.
+            (Value::Int64(a), Value::Float64(b)) => {
+                super::value_utils::partial_cmp_int_float(*a, *b).map(|o| o as i32)
+            }
+            (Value::Float64(a), Value::Int64(b)) => {
+                super::value_utils::partial_cmp_int_float(*b, *a).map(|o| o.reverse() as i32)
+            }
             // RDF stores numeric literals as strings; allow cross-type comparison
-            (Value::String(s), Value::Int64(i)) => s
-                .parse::<f64>()
-                .ok()
-                .and_then(|n| n.partial_cmp(&(*i as f64)).map(|o| o as i32)),
-            (Value::Int64(i), Value::String(s)) => s
-                .parse::<f64>()
-                .ok()
-                .and_then(|n| (*i as f64).partial_cmp(&n).map(|o| o as i32)),
-            (Value::String(s), Value::Float64(f)) => s
-                .parse::<f64>()
-                .ok()
-                .and_then(|n| n.partial_cmp(f).map(|o| o as i32)),
-            (Value::Float64(f), Value::String(s)) => s
-                .parse::<f64>()
-                .ok()
-                .and_then(|n| f.partial_cmp(&n).map(|o| o as i32)),
+            (Value::String(s), Value::Int64(i)) => {
+                super::value_utils::partial_cmp_text_int(s, *i).map(|o| o as i32)
+            }
+            (Value::Int64(i), Value::String(s)) => {
+                super::value_utils::partial_cmp_text_int(s, *i).map(|o| o.reverse() as i32)
+            }
+            (Value::String(s), Value::Float64(f)) => {
+                super::value_utils::partial_cmp_text_float(s, *f).map(|o| o as i32)
+            }
+            (Value::Float64(f), Value::String(s)) => {
+                super::value_utils::partial_cmp_text_float(s, *f).map(|o| o.reverse() as i32)
+            }
             // Temporal comparisons
             (Value::Timestamp(a), Value::Timestamp(b)) => Some(a.cmp(b) as i32),
             (Value::Date(a), Value::Date(b)) => Some(a.cmp(b) as i32),

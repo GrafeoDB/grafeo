@@ -590,3 +590,7 @@ CK2|gql d04b66d83c A label in backticks in SET is the label inside them; it was 
 CK4|gql d55a61715a A doubled backtick inside a backticked name is one backtick; the key kept both backticks and the quotes.
 CK5|gql 40275f3876 In a GQL string literal a doubled quote is the quote (ISO GQL 21.2); it was a syntax error.
 CK6|gql 588bb3cb19 In a double-quoted GQL string literal a doubled double quote is the quote (ISO GQL 21.2); it was a syntax error.
+CL1|gql 4c62bf5377 An integer above 2^53 compares exactly with a float; it was converted to the float, so 2^53 + 1 > 2^53 was false.
+CL2|gql 18908d5658 A float compares exactly with an integer above 2^53; 2^53 < 2^53 + 1 was false.
+CL3|gql 4c61684e6f A filter on an integer above 2^53 against a float bound keeps the integer that passes it exactly; it was dropped.
+CL4|gql 8de3da8e40 A comparison of NaN with a number is false (IEEE); it was null, and NaN <= NaN was true.

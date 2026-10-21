@@ -2745,8 +2745,14 @@ fn compare_values(a: &Value, b: &Value) -> Option<Ordering> {
         (Value::Float64(a), Value::Float64(b)) => a.partial_cmp(b),
         (Value::String(a), Value::String(b)) => Some(a.cmp(b)),
         (Value::Bool(a), Value::Bool(b)) => Some(a.cmp(b)),
-        (Value::Int64(a), Value::Float64(b)) => (*a as f64).partial_cmp(b),
-        (Value::Float64(a), Value::Int64(b)) => a.partial_cmp(&(*b as f64)),
+        // An integer and a float compare exactly, as a filter does.
+        (Value::Int64(a), Value::Float64(b)) => {
+            crate::execution::operators::value_utils::partial_cmp_int_float(*a, *b)
+        }
+        (Value::Float64(a), Value::Int64(b)) => {
+            crate::execution::operators::value_utils::partial_cmp_int_float(*b, *a)
+                .map(Ordering::reverse)
+        }
         (Value::Timestamp(a), Value::Timestamp(b)) => Some(a.cmp(b)),
         (Value::Date(a), Value::Date(b)) => Some(a.cmp(b)),
         (Value::Time(a), Value::Time(b)) => Some(a.cmp(b)),

@@ -1797,4 +1797,15 @@ for case_id, query in [
 ]:
     case(case_id, query, GQL, "quoted")
 
+# CL: <, <=, > and >= compare an integer with a float exactly, as ORDER BY and = do: an integer
+#     above 2^53 against its nearest float (CL1, CL2), a filter over stored values (CL3), NaN
+#     is neither less nor greater than a number (CL4)
+for case_id, query in [
+    ("CL1", "RETURN 9007199254740993 > 9007199254740992.0e0 AS gt, 9007199254740993 <= 9007199254740992.0e0 AS le"),
+    ("CL2", "RETURN 9007199254740992.0e0 < 9007199254740993 AS lt, 9007199254740992 >= 9007199254740992.0e0 AS ge"),
+    ("CL3", "UNWIND [9007199254740992, 9007199254740993, 9007199254740994] AS v WITH v WHERE v > 9007199254740992.0e0 RETURN v ORDER BY v"),
+    ("CL4", "RETURN NaN < 1 AS lt, NaN > 1 AS gt, 1 >= NaN AS ge, NaN <= NaN AS le"),
+]:
+    case(case_id, query, GQL, "empty")
+
 # fmt: on

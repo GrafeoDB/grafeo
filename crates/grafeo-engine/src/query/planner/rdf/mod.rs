@@ -5130,24 +5130,25 @@ where
                 l.cmp(r)
             }
         }
-        (Value::Int64(l), Value::Float64(r)) => (*l as f64).partial_cmp(r)?,
-        (Value::Float64(l), Value::Int64(r)) => l.partial_cmp(&(*r as f64))?,
+        // An integer and a double compare exactly, as ORDER BY and = do.
+        (Value::Int64(l), Value::Float64(r)) => {
+            grafeo_core::execution::operators::value_utils::partial_cmp_int_float(*l, *r)?
+        }
+        (Value::Float64(l), Value::Int64(r)) => {
+            grafeo_core::execution::operators::value_utils::partial_cmp_int_float(*r, *l)?.reverse()
+        }
         // RDF values are often stored as strings - try numeric conversion
         (Value::String(s), Value::Int64(r)) => {
-            let l_num = s.parse::<f64>().ok()?;
-            l_num.partial_cmp(&(*r as f64))?
+            grafeo_core::execution::operators::value_utils::partial_cmp_text_int(s, *r)?
         }
         (Value::String(s), Value::Float64(r)) => {
-            let l_num = s.parse::<f64>().ok()?;
-            l_num.partial_cmp(r)?
+            grafeo_core::execution::operators::value_utils::partial_cmp_text_float(s, *r)?
         }
         (Value::Int64(l), Value::String(s)) => {
-            let r_num = s.parse::<f64>().ok()?;
-            (*l as f64).partial_cmp(&r_num)?
+            grafeo_core::execution::operators::value_utils::partial_cmp_text_int(s, *l)?.reverse()
         }
         (Value::Float64(l), Value::String(s)) => {
-            let r_num = s.parse::<f64>().ok()?;
-            l.partial_cmp(&r_num)?
+            grafeo_core::execution::operators::value_utils::partial_cmp_text_float(s, *l)?.reverse()
         }
         _ => return None,
     };

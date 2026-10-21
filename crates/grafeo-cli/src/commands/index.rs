@@ -19,7 +19,7 @@ struct IndexOutput {
 pub fn run(cmd: IndexCommands, format: OutputFormat, quiet: bool) -> Result<()> {
     match cmd {
         IndexCommands::List { path } => {
-            let db = super::open_existing(&path)?;
+            let db = super::open_existing_read_only(&path)?;
             let indexes = db.list_indexes();
 
             let fmt: Format = format.into();
@@ -74,7 +74,7 @@ pub fn run(cmd: IndexCommands, format: OutputFormat, quiet: bool) -> Result<()> 
             }
         }
         IndexCommands::Stats { path } => {
-            let db = super::open_existing(&path)?;
+            let db = super::open_existing_read_only(&path)?;
             let stats = db.detailed_stats();
 
             let fmt: Format = format.into();

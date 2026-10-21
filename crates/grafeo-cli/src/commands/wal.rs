@@ -22,7 +22,7 @@ struct WalStatusOutput {
 pub fn run(cmd: WalCommands, format: OutputFormat, quiet: bool) -> Result<()> {
     match cmd {
         WalCommands::Status { path } => {
-            let db = super::open_existing(&path)?;
+            let db = super::open_existing_read_only(&path)?;
             let status = db.wal_status();
 
             let output = WalStatusOutput {

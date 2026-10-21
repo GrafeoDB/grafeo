@@ -101,6 +101,7 @@ Changes since 0.6.0-beta.1.
 - **With DISTINCT, ORDER BY reads only what the clause returns**, in GQL and Cypher, as openCypher and SQL define it: `RETURN DISTINCT p.city AS city ORDER BY p.age` returned duplicates (the sort key joined the distinct row) and is now an error that names the variable.
 - **GQL: a name in backticks in `SET` and `REMOVE` is the name inside them**: ``SET n.`two words` = 2`` and ``SET n:`Odd Label` `` stored the key and the label with their backticks, so ``REMOVE n.`odd key` `` left the real key in place. A doubled backtick inside a name is one backtick (```n.`a``b` ``` is the key ``a`b``), also in `INSERT`, `MATCH` and `RETURN`.
 - **GQL: a doubled quote inside a string is the quote**, as ISO GQL defines it: `'O''Brien'` and `"say ""hi"""` were syntax errors. Backslash escapes work as before.
+- **CLI: the commands that only read open the database read-only**: `info`, `stats`, `schema`, `validate`, `data dump`, `index list`, `index stats` and `wal status` opened it read-write, so they rewrote the whole file when they closed, and `grafeo info` on a 0.5.x database migrated it to 0.6, a one-way change. They now leave the file as it was.
 
 ### Result changes
 

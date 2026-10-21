@@ -436,6 +436,11 @@ impl PyGrafeoDB {
     /// wal_salvage=True opens a database whose WAL has damage before its end
     /// (which an open refuses) with the commits before the damage; what it
     /// does not replay is kept in `<path>.wal.damaged`. For this open only.
+    ///
+    /// history_retention keeps the database's history for time-travel reads
+    /// (`as_of`, `execute_as_of`): "off" (the default for a new database),
+    /// "forever", or a timedelta, how far back it reaches. A database file
+    /// stores it; None keeps the stored one.
     #[new]
     #[pyo3(signature = (
         path=None,
@@ -443,7 +448,8 @@ impl PyGrafeoDB {
         cdc=false,
         section_tiers=None,
         shuffle_unordered=false,
-        wal_salvage=false
+        wal_salvage=false,
+        history_retention=None
     ))]
     fn new(
         path: Option<String>,
@@ -451,6 +457,7 @@ impl PyGrafeoDB {
         section_tiers: Option<HashMap<String, String>>,
         shuffle_unordered: bool,
         wal_salvage: bool,
+        history_retention: Option<&Bound<'_, PyAny>>,
         py: Python<'_>,
     ) -> PyResult<Self> {
         let mut config = if let Some(p) = path {
@@ -464,6 +471,10 @@ impl PyGrafeoDB {
         config = config.with_shuffle_unordered(shuffle_unordered);
         if wal_salvage {
             config = config.with_wal_salvage();
+        }
+        if let Some(retention) = history_retention {
+            config =
+                config.with_history_retention(crate::time_travel::history_retention(retention)?);
         }
         if let Some(tiers) = section_tiers {
             for (section_name, tier_name) in tiers {
@@ -619,6 +630,61 @@ impl PyGrafeoDB {
             )?;
             Ok(crate::direct::query_result(result))
         })
+    }
+
+    /// A read-only view of the database as it was at `point`: an `int`
+    /// (an epoch), a timezone-aware `datetime` (the state the last commit at
+    /// or before it left) or a `timedelta` (that long ago). It keeps the
+    /// history it reads while open; use it in a `with` block.
+    ///
+    /// Raises GrafeoError for a point before the history the database keeps
+    /// (see `history_retention`), ValueError for a naive `datetime`.
+    ///
+    /// Example:
+    ///     with db.as_of(datetime.timedelta(minutes=5)) as then:
+    ///         then.execute("MATCH (p:Person) RETURN count(p)")
+    fn as_of(
+        &self,
+        point: &Bound<'_, PyAny>,
+        py: Python<'_>,
+    ) -> PyResult<crate::time_travel::PyAsOfView> {
+        let point = crate::time_travel::time_point(point)?;
+        let view = self.released(py, |db| Ok(db.as_of(point)?))?;
+        Ok(crate::time_travel::PyAsOfView::new(
+            Arc::clone(&self.inner),
+            view,
+        ))
+    }
+
+    /// Runs a GQL query as the database was at `point` (as `as_of` reads
+    /// it: an epoch, an aware `datetime` or a `timedelta` ago).
+    ///
+    /// Example:
+    ///     db.execute_as_of("MATCH (n:Server) RETURN n.status", datetime.timedelta(hours=1))
+    #[pyo3(signature = (query, point, params=None))]
+    fn execute_as_of(
+        &self,
+        query: &str,
+        point: &Bound<'_, PyAny>,
+        params: Option<&Bound<'_, pyo3::types::PyDict>>,
+        py: Python<'_>,
+    ) -> PyResult<PyQueryResult> {
+        let point = crate::time_travel::time_point(point)?;
+        let params = crate::direct::params(params)?;
+        self.released(py, |db| {
+            let epoch = db.epoch_as_of(point)?;
+            let result = db
+                .session()
+                .execute_at_epoch_with_params(query, epoch, params)?;
+            Ok(crate::direct::query_result(result))
+        })
+    }
+
+    /// The epoch a read as of `point` reads at (see `as_of`): the epoch
+    /// itself, or the last one committed at or before a time.
+    fn epoch_as_of(&self, point: &Bound<'_, PyAny>, py: Python<'_>) -> PyResult<u64> {
+        let point = crate::time_travel::time_point(point)?;
+        self.released(py, |db| Ok(db.epoch_as_of(point)?.as_u64()))
     }
 
     /// Execute a query and return a query builder.

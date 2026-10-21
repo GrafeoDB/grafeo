@@ -46,14 +46,14 @@ fn whole_id(value: f64) -> Option<u64> {
 }
 
 /// Validate a JavaScript number as a node ID (see [`whole_id`]).
-fn validate_node_id(id: f64) -> Result<NodeId> {
+pub(crate) fn validate_node_id(id: f64) -> Result<NodeId> {
     whole_id(id)
         .map(NodeId)
         .ok_or_else(|| NodeGrafeoError::InvalidArgument(format!("Invalid node ID: {id}")).into())
 }
 
 /// Validate a JavaScript number as an edge ID (see [`whole_id`]).
-fn validate_edge_id(id: f64) -> Result<EdgeId> {
+pub(crate) fn validate_edge_id(id: f64) -> Result<EdgeId> {
     whole_id(id)
         .map(EdgeId)
         .ok_or_else(|| NodeGrafeoError::InvalidArgument(format!("Invalid edge ID: {id}")).into())
@@ -170,6 +170,12 @@ pub struct CreateOptions {
     /// it does not replay is kept in `<path>.wal.damaged`. For this open
     /// only.
     pub wal_salvage: Option<bool>,
+    /// Keep the database's history for time-travel reads (`asOf`,
+    /// `executeAsOf`): `'off'` (the default for a new database),
+    /// `'forever'`, or a number of milliseconds, how far back it reaches. A
+    /// database file stores it; leave it out to keep the stored one.
+    #[napi(ts_type = "'off' | 'forever' | number")]
+    pub history_retention: Option<Either<String, f64>>,
 }
 
 #[napi]
@@ -191,11 +197,15 @@ impl JsGrafeoDB {
             .and_then(|options| options.shuffle_unordered)
             .unwrap_or(false);
         let mut config = config.with_shuffle_unordered(shuffle_unordered);
-        if options
-            .and_then(|options| options.wal_salvage)
-            .unwrap_or(false)
-        {
+        let (wal_salvage, history_retention) = options.map_or((None, None), |options| {
+            (options.wal_salvage, options.history_retention)
+        });
+        if wal_salvage.unwrap_or(false) {
             config = config.with_wal_salvage();
+        }
+        if let Some(retention) = history_retention {
+            config =
+                config.with_history_retention(crate::time_travel::history_retention(retention)?);
         }
         let db = GrafeoDB::with_config(config).map_err(NodeGrafeoError::from)?;
         Ok(Self {
@@ -244,6 +254,75 @@ impl JsGrafeoDB {
         .map_err(|e| napi::Error::from_reason(e.to_string()))??;
 
         Ok(js_result(result))
+    }
+
+    /// The epoch of the last commit, as a `bigint`: a point for `asOf`.
+    #[napi(js_name = "currentEpoch")]
+    pub fn current_epoch(&self) -> BigInt {
+        crate::time_travel::epoch_bigint(self.inner.read().current_epoch())
+    }
+
+    /// A read-only view of the database as it was at `point`: a `bigint`
+    /// (an epoch), a `Date` (the state the last commit at or before it
+    /// left) or `{ ago: milliseconds }`. A `number` is a `TypeError`. It
+    /// keeps the history it reads while open: `close()` it when done.
+    ///
+    /// Throws for a point before the history the database keeps (see
+    /// `historyRetention`).
+    #[napi(
+        js_name = "asOf",
+        ts_args_type = "point: bigint | Date | { ago: number }",
+        ts_return_type = "AsOfView"
+    )]
+    pub fn as_of(&self, env: Env, point: Unknown<'_>) -> Result<crate::time_travel::JsAsOfView> {
+        let point = crate::time_travel::time_point(env, point)?;
+        let view = self
+            .inner
+            .read()
+            .as_of(point)
+            .map_err(NodeGrafeoError::from)?;
+        Ok(crate::time_travel::JsAsOfView::new(
+            Arc::clone(&self.inner),
+            view,
+        ))
+    }
+
+    /// Runs a GQL query as the database was at `point` (as `asOf` reads
+    /// it). Returns a Promise<QueryResult>.
+    #[napi(
+        js_name = "executeAsOf",
+        ts_args_type = "query: string, point: bigint | Date | { ago: number }, params?: Record<string, unknown> | undefined | null",
+        ts_return_type = "Promise<QueryResult>"
+    )]
+    pub fn execute_as_of(
+        &self,
+        env: Env,
+        query: String,
+        point: Unknown<'_>,
+        params: Option<serde_json::Value>,
+    ) -> Result<AsyncTask<crate::time_travel::ExecuteAsOf>> {
+        let point = crate::time_travel::time_point(env, point)?;
+        Ok(AsyncTask::new(crate::time_travel::ExecuteAsOf {
+            db: Arc::clone(&self.inner),
+            query,
+            point,
+            params,
+        }))
+    }
+
+    /// The epoch a read as of `point` reads at (see `asOf`), as a `bigint`.
+    #[napi(
+        js_name = "epochAsOf",
+        ts_args_type = "point: bigint | Date | { ago: number }"
+    )]
+    pub fn epoch_as_of(&self, env: Env, point: Unknown<'_>) -> Result<BigInt> {
+        let point = crate::time_travel::time_point(env, point)?;
+        let epoch = self
+            .inner
+            .read()
+            .epoch_as_of(point)
+            .map_err(NodeGrafeoError::from)?;
+        Ok(crate::time_travel::epoch_bigint(epoch))
     }
 
     /// Execute a GQL query. Returns a Promise<QueryResult>.
@@ -1639,7 +1718,7 @@ fn object_properties(
 }
 
 /// A query result for JavaScript: rows, entities, metrics and counters.
-fn js_result(mut result: EngineQueryResult) -> QueryResult {
+pub(crate) fn js_result(mut result: EngineQueryResult) -> QueryResult {
     let (nodes, edges) = entities(&result);
     let columns = std::mem::take(&mut result.columns);
     let exec_time = result.execution_time_ms;
@@ -1659,13 +1738,13 @@ fn js_result(mut result: EngineQueryResult) -> QueryResult {
 }
 
 /// A node of the engine as a JavaScript node.
-fn js_node(id: NodeId, node: grafeo_core::graph::lpg::Node) -> JsNode {
+pub(crate) fn js_node(id: NodeId, node: grafeo_core::graph::lpg::Node) -> JsNode {
     let labels: Vec<String> = node.labels.iter().map(|s| s.to_string()).collect();
     JsNode::new(id, labels, node.properties.into_iter().collect())
 }
 
 /// An edge of the engine as a JavaScript edge.
-fn js_edge(id: EdgeId, edge: grafeo_core::graph::lpg::Edge) -> JsEdge {
+pub(crate) fn js_edge(id: EdgeId, edge: grafeo_core::graph::lpg::Edge) -> JsEdge {
     JsEdge::new(
         id,
         edge.edge_type.to_string(),

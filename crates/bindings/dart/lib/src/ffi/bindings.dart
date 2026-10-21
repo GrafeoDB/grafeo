@@ -777,6 +777,56 @@ final class GrafeoBindings {
           Pointer<Void>, int, int)>('grafeo_changes_between');
 
   // ===========================================================================
+  // Time travel (a point is a kind, GRAFEO_POINT_*, and a value)
+  // ===========================================================================
+
+  /// Open a database with a history retention; a null path opens one in
+  /// memory. Returns null on error.
+  late final grafeoOpenWithHistory = library.lookupFunction<
+      Pointer<Void> Function(Pointer<Utf8>, Int32, Uint64),
+      Pointer<Void> Function(
+          Pointer<Utf8>, int, int)>('grafeo_open_with_history');
+
+  /// The epoch of the last commit.
+  late final grafeoCurrentEpoch = library.lookupFunction<
+      Uint64 Function(Pointer<Void>),
+      int Function(Pointer<Void>)>('grafeo_current_epoch');
+
+  /// The epoch a point names, into the out pointer.
+  late final grafeoEpochAsOf = library.lookupFunction<
+      Int32 Function(Pointer<Void>, Int32, Int64, Pointer<Uint64>),
+      int Function(
+          Pointer<Void>, int, int, Pointer<Uint64>)>('grafeo_epoch_as_of');
+
+  /// One query at a point; the params JSON may be null. Null on error.
+  late final grafeoExecuteAsOf = library.lookupFunction<
+      Pointer<Void> Function(
+          Pointer<Void>, Pointer<Utf8>, Pointer<Utf8>, Int32, Int64),
+      Pointer<Void> Function(Pointer<Void>, Pointer<Utf8>, Pointer<Utf8>, int,
+          int)>('grafeo_execute_as_of');
+
+  /// A read-only view at a point, null on error. Free with grafeoFreeAsOf.
+  late final grafeoAsOf = library.lookupFunction<
+      Pointer<Void> Function(Pointer<Void>, Int32, Int64),
+      Pointer<Void> Function(Pointer<Void>, int, int)>('grafeo_as_of');
+
+  /// The epoch a view reads at.
+  late final grafeoAsOfEpoch = library.lookupFunction<
+      Uint64 Function(Pointer<Void>),
+      int Function(Pointer<Void>)>('grafeo_as_of_epoch');
+
+  /// A query through a view; the params JSON may be null. Null on error.
+  late final grafeoAsOfExecute = library.lookupFunction<
+      Pointer<Void> Function(Pointer<Void>, Pointer<Utf8>, Pointer<Utf8>),
+      Pointer<Void> Function(
+          Pointer<Void>, Pointer<Utf8>, Pointer<Utf8>)>('grafeo_as_of_execute');
+
+  /// Free a view.
+  late final grafeoFreeAsOf = library.lookupFunction<
+      Void Function(Pointer<Void>),
+      void Function(Pointer<Void>)>('grafeo_free_as_of');
+
+  // ===========================================================================
   // Graph handles (the grafeo_graph_* calls work as their database counterparts)
   // ===========================================================================
 

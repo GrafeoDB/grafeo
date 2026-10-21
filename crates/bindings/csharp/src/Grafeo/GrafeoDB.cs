@@ -65,6 +65,32 @@ public sealed class GrafeoDB : IGrafeoDB, IDisposable, IAsyncDisposable
         return new GrafeoDB(handle);
     }
 
+    /// <summary>
+    /// Create a new in-memory database that keeps <paramref name="history"/> for time-travel reads.
+    /// </summary>
+    public static GrafeoDB Memory(HistoryRetention history) => OpenWithHistory(null, history);
+
+    /// <summary>
+    /// Open or create a persistent database at <paramref name="path"/> that keeps
+    /// <paramref name="history"/> for time-travel reads. The file stores the setting.
+    /// </summary>
+    public static GrafeoDB Open(string path, HistoryRetention history)
+    {
+        ArgumentException.ThrowIfNullOrEmpty(path);
+        return OpenWithHistory(path, history);
+    }
+
+    private static GrafeoDB OpenWithHistory(string? path, HistoryRetention history)
+    {
+        var ptr = NativeMethods.grafeo_open_with_history(path, history.Kind, history.DurationMs);
+        if (ptr == nint.Zero)
+            throw GrafeoException.FromLastError();
+
+        var handle = new DatabaseHandle();
+        Marshal.InitHandle(handle, ptr);
+        return new GrafeoDB(handle);
+    }
+
     /// <inheritdoc/>
     public void Dispose()
     {
@@ -666,6 +692,56 @@ public sealed class GrafeoDB : IGrafeoDB, IDisposable, IAsyncDisposable
         ThrowIfDisposed();
         var ptr = NativeMethods.grafeo_current_schema(Handle);
         return ptr == nint.Zero ? null : Marshal.PtrToStringUTF8(ptr);
+    }
+
+    // =========================================================================
+    // Time travel
+    // =========================================================================
+
+    /// <summary>The epoch of the last commit.</summary>
+    public ulong CurrentEpoch
+    {
+        get
+        {
+            ThrowIfDisposed();
+            return NativeMethods.grafeo_current_epoch(Handle);
+        }
+    }
+
+    /// <summary>The epoch <paramref name="point"/> names: the last commit at or before it.</summary>
+    /// <exception cref="GrafeoException">The point is before the history the database keeps.</exception>
+    public ulong EpochAsOf(TimePoint point)
+    {
+        ThrowIfDisposed();
+        GrafeoException.ThrowIfFailed(
+            NativeMethods.grafeo_epoch_as_of(Handle, point.Kind, point.Value, out var epoch));
+        return epoch;
+    }
+
+    /// <summary>
+    /// A read-only view of the database as it was at <paramref name="point"/>. It keeps the
+    /// history of its epoch until disposed.
+    /// </summary>
+    /// <exception cref="GrafeoException">The point is before the history the database keeps.</exception>
+    public AsOfView AsOf(TimePoint point)
+    {
+        ThrowIfDisposed();
+        var ptr = NativeMethods.grafeo_as_of(Handle, point.Kind, point.Value);
+        if (ptr == nint.Zero)
+            throw GrafeoException.FromLastError();
+        return new AsOfView(ptr);
+    }
+
+    /// <summary>Execute one GQL query as the database was at <paramref name="point"/>; a write throws.</summary>
+    public QueryResult ExecuteAsOf(
+        string query, TimePoint point, Dictionary<string, object?>? parameters = null)
+    {
+        ThrowIfDisposed();
+        var paramsJson = parameters is not null ? ValueConverter.EncodeParams(parameters) : null;
+        var resultPtr = NativeMethods.grafeo_execute_as_of(Handle, query, paramsJson, point.Kind, point.Value);
+        if (resultPtr == nint.Zero)
+            throw GrafeoException.FromLastError(GrafeoStatus.Query);
+        return BuildResult(resultPtr);
     }
 
     // =========================================================================

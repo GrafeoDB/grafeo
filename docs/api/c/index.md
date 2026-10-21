@@ -546,6 +546,42 @@ grafeo_free_result(r);
 grafeo_free_graph(trips);
 ```
 
+## Time Travel
+
+Reads of the database as it was at an earlier epoch or time. A point is a kind and a value: `GRAFEO_POINT_EPOCH`
+with an epoch, `GRAFEO_POINT_TIME` with milliseconds since 1970 (UTC), or `GRAFEO_POINT_AGO` with milliseconds before
+now. An unknown kind or a negative epoch or duration fails, as does a point before the history the database keeps
+("not retained"). `grafeo_open_with_history` sets how much history it keeps: `GRAFEO_HISTORY_OFF`,
+`GRAFEO_HISTORY_FOREVER` or `GRAFEO_HISTORY_DURATION` with `duration_ms`; a NULL path opens an in-memory database,
+and a database file stores the setting. A view keeps the history it reads until `grafeo_free_as_of`; a query that
+writes through it fails. `params_json` may be NULL.
+
+```c
+GrafeoDatabase* grafeo_open_with_history(const char* path, int32_t history_kind, uint64_t duration_ms);
+uint64_t        grafeo_current_epoch(GrafeoDatabase* db);
+GrafeoStatus    grafeo_epoch_as_of(GrafeoDatabase* db, int32_t point_kind, int64_t point_value, uint64_t* epoch_out);
+GrafeoResult*   grafeo_execute_as_of(GrafeoDatabase* db, const char* query, const char* params_json, int32_t point_kind, int64_t point_value);
+GrafeoAsOf*     grafeo_as_of(GrafeoDatabase* db, int32_t point_kind, int64_t point_value);
+uint64_t        grafeo_as_of_epoch(const GrafeoAsOf* view);
+GrafeoResult*   grafeo_as_of_execute(const GrafeoAsOf* view, const char* query, const char* params_json);
+void            grafeo_free_as_of(GrafeoAsOf* view);
+```
+
+```c
+GrafeoDatabase* db = grafeo_open_with_history(NULL, GRAFEO_HISTORY_FOREVER, 0);
+grafeo_free_result(grafeo_execute(db, "INSERT (:Person {name: 'Alix'})"));
+uint64_t then = grafeo_current_epoch(db);
+grafeo_free_result(grafeo_execute(db, "INSERT (:Person {name: 'Gus'})"));
+
+GrafeoAsOf* view = grafeo_as_of(db, GRAFEO_POINT_EPOCH, (int64_t)then);
+GrafeoResult* r = grafeo_as_of_execute(view, "MATCH (p:Person) RETURN count(p)", NULL);  /* 1 */
+grafeo_free_result(r);
+grafeo_free_as_of(view);
+
+/* One query as the database was five minutes ago. */
+r = grafeo_execute_as_of(db, "MATCH (p:Person) RETURN count(p)", NULL, GRAFEO_POINT_AGO, 5 * 60 * 1000);
+```
+
 ## CDC (Change Data Capture)
 
 Requires the `cdc` feature.

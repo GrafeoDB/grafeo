@@ -24,13 +24,16 @@ const db = GrafeoDB.open('./my_graph.db');
 
 // For tests: rows of queries without ORDER BY in random order
 const db = GrafeoDB.create(undefined, { shuffleUnordered: true });
+
+// Keep a week of history for time-travel reads
+const db = GrafeoDB.create('./my_graph.db', { historyRetention: 7 * 24 * 3600 * 1000 });
 ```
 
 ### Parameters
 
 | Method | Parameters | Description |
 |--------|-----------|-------------|
-| `create(path?, options?)` | `path: string \| undefined`, `options: { shuffleUnordered?: boolean }` | Create a database (in-memory if no path). `shuffleUnordered` returns the rows of every query without `ORDER BY` in random order, to find code that relies on an order that is unspecified |
+| `create(path?, options?)` | `path: string \| undefined`, `options: { shuffleUnordered?: boolean, historyRetention?: 'off' \| 'forever' \| number }` | Create a database (in-memory if no path). `shuffleUnordered` returns the rows of every query without `ORDER BY` in random order, to find code that relies on an order that is unspecified. `historyRetention` sets how much history the database keeps for [time-travel reads](#time-travel): `'off'` (the default), `'forever'` or a number of milliseconds; a database file stores it |
 | `open(path)` | `path: string` | Open an existing database |
 
 ## Query Methods
@@ -286,6 +289,41 @@ const trips = db.graph('trips');
 const prague = trips.createNode(['City'], { name: 'Prague' });
 const result = await trips.execute('MATCH (c:City) RETURN c.name');
 ```
+
+## Time Travel
+
+A point in time is a `bigint` (an epoch), a `Date` (the last commit at or before it) or `{ ago: milliseconds }`. A
+plain `number` throws a `TypeError`: it could be either an epoch or a time. A point before the history the database
+keeps throws ("not retained").
+
+### asOf()
+
+A read-only view of the database at a point in time. It keeps the history of its epoch until `close()`.
+
+```typescript
+asOf(point: bigint | Date | { ago: number }): AsOfView
+```
+
+An `AsOfView` has `epoch` (a `bigint`), `execute(query, params?)` (a `Promise<QueryResult>`), `getNode(id)`,
+`getEdge(id)`, `getNodeProperty(id, key)` and `close()`. A query that writes through it is rejected.
+
+```typescript
+const view = db.asOf({ ago: 5 * 60 * 1000 });
+const result = await view.execute('MATCH (p:Person) RETURN count(p) AS n');
+view.close();
+```
+
+### executeAsOf()
+
+Run one GQL query at a point in time, without keeping a view.
+
+```typescript
+executeAsOf(query: string, point: bigint | Date | { ago: number }, params?: object): Promise<QueryResult>
+```
+
+### epochAsOf() / currentEpoch()
+
+`epochAsOf(point)` is the epoch a point reads at, `currentEpoch()` the epoch of the last commit, both as a `bigint`.
 
 ## Vector Search
 

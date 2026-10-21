@@ -511,6 +511,36 @@ internal static partial class NativeMethods
     internal static partial nint grafeo_changes_between(nint db, ulong startEpoch, ulong endEpoch);
 
     // =========================================================================
+    // Time travel (a point is a kind, GRAFEO_POINT_*, and a value)
+    // =========================================================================
+
+    /// <summary>Open a database with a history retention; a null path opens one in memory. Returns null on error.</summary>
+    [LibraryImport(LibName, StringMarshalling = StringMarshalling.Utf8)]
+    internal static partial nint grafeo_open_with_history(string? path, int historyKind, ulong durationMs);
+
+    [LibraryImport(LibName)]
+    internal static partial ulong grafeo_current_epoch(nint db);
+
+    [LibraryImport(LibName)]
+    internal static partial int grafeo_epoch_as_of(nint db, int pointKind, long pointValue, out ulong epochOut);
+
+    [LibraryImport(LibName, StringMarshalling = StringMarshalling.Utf8)]
+    internal static partial nint grafeo_execute_as_of(nint db, string query, string? paramsJson, int pointKind, long pointValue);
+
+    /// <summary>A read-only view at a point, or null on error. Free with grafeo_free_as_of.</summary>
+    [LibraryImport(LibName)]
+    internal static partial nint grafeo_as_of(nint db, int pointKind, long pointValue);
+
+    [LibraryImport(LibName)]
+    internal static partial ulong grafeo_as_of_epoch(nint view);
+
+    [LibraryImport(LibName, StringMarshalling = StringMarshalling.Utf8)]
+    internal static partial nint grafeo_as_of_execute(nint view, string query, string? paramsJson);
+
+    [LibraryImport(LibName)]
+    internal static partial void grafeo_free_as_of(nint view);
+
+    // =========================================================================
     // Graph handles (the grafeo_graph_* calls work as their database counterparts)
     // =========================================================================
 

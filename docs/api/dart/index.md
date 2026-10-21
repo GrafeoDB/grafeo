@@ -724,6 +724,26 @@ final result = trips.execute('MATCH (c:City) RETURN c.name');
 trips.close();
 ```
 
+### Time Travel
+
+Reads of the database as it was at an earlier epoch or time. The `historyRetention` option of `GrafeoDB.memory` and
+`GrafeoDB.open` sets how much history it keeps: `HistoryRetention.off` (the default), `HistoryRetention.forever` or
+`HistoryRetention.duration(Duration)`; a database file stores the setting. A point is a `TimePoint`:
+`TimePoint.epoch(int)`, `TimePoint.at(DateTime)` (the last commit at or before it; a local and a UTC `DateTime` name
+one instant) or `TimePoint.ago(Duration)`. A point before the history the database keeps throws ("not retained").
+A view keeps the history of its epoch until `close()`.
+
+```dart
+final db = GrafeoDB.memory(
+    historyRetention: HistoryRetention.duration(const Duration(days: 7)));
+final then = db.currentEpoch;
+final view = db.asOf(TimePoint.ago(const Duration(minutes: 5)));
+final result = view.execute('MATCH (p:Person) RETURN count(p) AS n');
+view.close();
+db.executeAsOf('MATCH (p:Person) RETURN count(p) AS n', TimePoint.epoch(then));
+db.epochAsOf(TimePoint.at(DateTime.utc(2026, 3, 1, 11)));
+```
+
 ### Change History
 
 With `db.cdcEnabled = true`, every committed change is recorded as a

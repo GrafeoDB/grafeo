@@ -7,6 +7,9 @@
 LIBRARY "grafeo_c.dll"
 EXPORTS
 grafeo_add_node_label
+grafeo_as_of
+grafeo_as_of_epoch
+grafeo_as_of_execute
 grafeo_backup_full
 grafeo_backup_incremental
 grafeo_batch_create_edges
@@ -27,6 +30,7 @@ grafeo_create_node
 grafeo_create_projection
 grafeo_create_property_index
 grafeo_create_vector_index
+grafeo_current_epoch
 grafeo_current_schema
 grafeo_delete_edge
 grafeo_delete_node
@@ -41,7 +45,9 @@ grafeo_edge_properties_json
 grafeo_edge_source_id
 grafeo_edge_target_id
 grafeo_edge_type
+grafeo_epoch_as_of
 grafeo_execute
+grafeo_execute_as_of
 grafeo_execute_cypher
 grafeo_execute_cypher_with_params
 grafeo_execute_graphql
@@ -55,6 +61,7 @@ grafeo_execute_sql
 grafeo_execute_sql_with_params
 grafeo_execute_with_params
 grafeo_find_nodes_by_property
+grafeo_free_as_of
 grafeo_free_database
 grafeo_free_edge
 grafeo_free_graph
@@ -107,6 +114,7 @@ grafeo_open
 grafeo_open_memory
 grafeo_open_read_only
 grafeo_open_single_file
+grafeo_open_with_history
 grafeo_rebuild_vector_index
 grafeo_remove_edge_property
 grafeo_remove_node_label

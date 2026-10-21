@@ -238,6 +238,27 @@ long prague = trips.CreateNode(["City"], new Dictionary<string, object?> { ["nam
 var result = trips.Execute("MATCH (c:City) RETURN c.name");
 ```
 
+### Time Travel
+
+Reads of the database as it was at an earlier epoch or time. `GrafeoDB.Memory(HistoryRetention)` and
+`GrafeoDB.Open(path, HistoryRetention)` set how much history it keeps: `HistoryRetention.Off` (the default),
+`HistoryRetention.Forever` or `HistoryRetention.For(TimeSpan)`; a database file stores the setting. A point is a
+`TimePoint`: `TimePoint.Epoch(ulong)`, `TimePoint.At(DateTimeOffset)` (the last commit at or before it) or
+`TimePoint.Ago(TimeSpan)`. A point before the history the database keeps throws `GrafeoException` ("not retained").
+
+| Member | Returns | Description |
+|--------|---------|-------------|
+| `CurrentEpoch` | `ulong` | The epoch of the last commit |
+| `EpochAsOf(TimePoint point)` | `ulong` | The epoch a point reads at |
+| `AsOf(TimePoint point)` | `AsOfView` | A read-only view at a point: `Epoch`, `Execute`, `ExecuteWithParams`; it keeps the history of its epoch until disposed |
+| `ExecuteAsOf(string query, TimePoint point, Dictionary<string, object?>? parameters = null)` | `QueryResult` | One query at a point |
+
+```csharp
+using var db = GrafeoDB.Memory(HistoryRetention.For(TimeSpan.FromDays(7)));
+using var view = db.AsOf(TimePoint.Ago(TimeSpan.FromMinutes(5)));
+var result = view.Execute("MATCH (p:Person) RETURN count(p) AS n");
+```
+
 ### Change History
 
 With `db.CdcEnabled = true`, every committed change is recorded as a `ChangeEvent` (kind, epoch, properties before and after, labels, the endpoints of an edge, and `DeletedWith` on an edge a detach delete removed).

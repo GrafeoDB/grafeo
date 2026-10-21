@@ -69,6 +69,7 @@ typedef struct GrafeoGraph       GrafeoGraph;
 typedef struct GrafeoNode        GrafeoNode;
 typedef struct GrafeoEdge        GrafeoEdge;
 typedef struct GrafeoStream      GrafeoStream;
+typedef struct GrafeoAsOf       GrafeoAsOf;
 
 /* ---- Error handling ------------------------------------------------------ */
 
@@ -289,6 +290,27 @@ GrafeoStatus  grafeo_graph_batch_create_nodes_with_props(GrafeoGraph* graph, con
 GrafeoStatus  grafeo_graph_batch_create_edges(GrafeoGraph* graph, const char* edges_json, uint64_t** out_ids, size_t* out_count);
 GrafeoStatus  grafeo_graph_upsert_nodes(GrafeoGraph* graph, const char* labels_json, const char* rows_json, const char* options_json, char** out_json);
 GrafeoStatus  grafeo_graph_upsert_edges(GrafeoGraph* graph, const char* edge_type, const char* rows_json, const char* options_json, char** out_json);
+
+/* ---- Time travel: reads of the database as it was at an earlier epoch or time ----
+ * A point is a kind and a value: GRAFEO_POINT_EPOCH with an epoch, GRAFEO_POINT_TIME with milliseconds since 1970
+ * (UTC), GRAFEO_POINT_AGO with milliseconds before now. A point before the history the database keeps fails ("not
+ * retained"); grafeo_open_with_history sets how much it keeps (GRAFEO_HISTORY_DURATION: duration_ms before now; a
+ * NULL path opens an in-memory database; a database file stores the setting). A view keeps the history it reads
+ * until grafeo_free_as_of; a query that writes through it is refused. */
+#define GRAFEO_POINT_EPOCH 0
+#define GRAFEO_POINT_TIME  1
+#define GRAFEO_POINT_AGO   2
+#define GRAFEO_HISTORY_OFF      0
+#define GRAFEO_HISTORY_FOREVER  1
+#define GRAFEO_HISTORY_DURATION 2
+GrafeoDatabase* grafeo_open_with_history(const char* path, int32_t history_kind, uint64_t duration_ms);
+uint64_t        grafeo_current_epoch(GrafeoDatabase* db);
+GrafeoStatus    grafeo_epoch_as_of(GrafeoDatabase* db, int32_t point_kind, int64_t point_value, uint64_t* epoch_out);
+GrafeoResult*   grafeo_execute_as_of(GrafeoDatabase* db, const char* query, const char* params_json, int32_t point_kind, int64_t point_value);
+GrafeoAsOf*     grafeo_as_of(GrafeoDatabase* db, int32_t point_kind, int64_t point_value);
+uint64_t        grafeo_as_of_epoch(const GrafeoAsOf* view);
+GrafeoResult*   grafeo_as_of_execute(const GrafeoAsOf* view, const char* query, const char* params_json);
+void            grafeo_free_as_of(GrafeoAsOf* view);
 
 /* ---- Change data capture (requires cdc; JSON arrays of events, NULL on error, free with grafeo_free_string) ----
  * Each event: entity_id, entity_type ("node"/"edge"), graph, kind ("create"/"update"/"delete"), epoch, timestamp,

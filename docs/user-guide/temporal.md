@@ -116,15 +116,27 @@ every commit within that window. Retention is a setting of the database, stored 
 | `HistoryRetention::Duration(d)` | every committed state of the last `d` |
 | `HistoryRetention::Forever` | every committed state |
 
-```rust
-use std::time::Duration;
-use grafeo::{Config, GrafeoDB, HistoryRetention};
+=== "Python"
 
-let db = GrafeoDB::with_config(
-    Config::persistent("travels.grafeo")
-        .with_history_retention(HistoryRetention::Duration(Duration::from_secs(7 * 24 * 3600))),
-)?;
-```
+    ```python
+    import datetime
+    import grafeo
+
+    # "off", "forever" or a timedelta
+    db = grafeo.GrafeoDB("travels.grafeo", history_retention=datetime.timedelta(days=7))
+    ```
+
+=== "Rust"
+
+    ```rust
+    use std::time::Duration;
+    use grafeo::{Config, GrafeoDB, HistoryRetention};
+
+    let db = GrafeoDB::with_config(
+        Config::persistent("travels.grafeo")
+            .with_history_retention(HistoryRetention::Duration(Duration::from_secs(7 * 24 * 3600))),
+    )?;
+    ```
 
 ### How It Works
 
@@ -179,20 +191,46 @@ The simplest way to query a past state: pass an epoch number alongside the query
 itself. The view holds its epoch while it lives, so its reads stay the same. A point in time is an epoch, a time, a
 GQL `ZONED DATETIME` value, or a duration ago. The names follow SQL:2011's `FOR SYSTEM_TIME AS OF`.
 
-```rust
-use std::time::Duration;
-use grafeo::TimePoint;
+=== "Python"
 
-// The database as it was five minutes ago.
-let view = db.as_of(TimePoint::ago(Duration::from_secs(300)))?;
-let people = view.execute("MATCH (p:Person) RETURN p.name")?;
+    ```python
+    import datetime
 
-// One query at an epoch or a time, without keeping a view.
-let then = db.execute_as_of("MATCH (p:Person) RETURN count(p)", then_epoch)?;
+    # The database as it was five minutes ago; the view is released at the end of the block.
+    with db.as_of(datetime.timedelta(minutes=5)) as view:
+        people = view.execute("MATCH (p:Person) RETURN p.name")
 
-// The epoch a point in time reads at.
-let epoch = db.epoch_as_of(TimePoint::ago(Duration::from_secs(300)))?;
-```
+    # One query at an epoch or a time, without keeping a view.
+    then = db.execute_as_of("MATCH (p:Person) RETURN count(p)", then_epoch)
+    noon = datetime.datetime(2026, 3, 1, 12, 0, tzinfo=datetime.timezone(datetime.timedelta(hours=1)))
+    at_noon = db.execute_as_of("MATCH (p:Person) RETURN count(p)", noon)
+
+    # The epoch a point in time reads at.
+    epoch = db.epoch_as_of(datetime.timedelta(minutes=5))
+    ```
+
+=== "Rust"
+
+    ```rust
+    use std::time::Duration;
+    use grafeo::TimePoint;
+
+    // The database as it was five minutes ago.
+    let view = db.as_of(TimePoint::ago(Duration::from_secs(300)))?;
+    let people = view.execute("MATCH (p:Person) RETURN p.name")?;
+
+    // One query at an epoch or a time, without keeping a view.
+    let then = db.execute_as_of("MATCH (p:Person) RETURN count(p)", then_epoch)?;
+
+    // The epoch a point in time reads at.
+    let epoch = db.epoch_as_of(TimePoint::ago(Duration::from_secs(300)))?;
+    ```
+
+In Python a point is an `int` (an epoch), a timezone-aware `datetime` (a time) or a `timedelta` (that long ago); a
+naive `datetime` is a `ValueError`, as it names no instant. In Node.js it is a `bigint` (an epoch), a `Date` or
+`{ ago: milliseconds }`; a plain `number` is a `TypeError`, since it could be either an epoch or a time. The C API
+takes a point as a kind and a value (`GRAFEO_POINT_EPOCH`, `GRAFEO_POINT_TIME`, `GRAFEO_POINT_AGO`), and C#, Go and
+Dart wrap it in a `TimePoint` type.
 
 A write through a view fails: a view of the past is read-only.
 
@@ -203,7 +241,7 @@ For multiple queries against the same historical snapshot, set a viewing epoch o
 === "Python"
 
     ```python
-    # Not yet exposed in the Python binding; use execute_at_epoch instead
+    # Not exposed in the Python binding; a view from db.as_of(epoch) runs several queries at one epoch
     ```
 
 === "Rust"

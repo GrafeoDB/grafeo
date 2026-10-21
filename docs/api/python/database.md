@@ -18,7 +18,8 @@ GrafeoDB(
     *,
     cdc: bool = False,
     shuffle_unordered: bool = False,
-    wal_salvage: bool = False
+    wal_salvage: bool = False,
+    history_retention: Optional[Union[str, timedelta]] = None
 )
 ```
 
@@ -30,6 +31,7 @@ GrafeoDB(
 | `cdc` | `bool` | `False` | Enable change data capture (keyword-only). When `True`, mutations are tracked and queryable via `node_history()` / `edge_history()`. |
 | `shuffle_unordered` | `bool` | `False` | Return the rows of every query without `ORDER BY` in random order (keyword-only). For tests: without `ORDER BY` the row order is unspecified, and this finds code that relies on it. |
 | `wal_salvage` | `bool` | `False` | Open a database whose write-ahead log has damage before its end with the commits before the damage (keyword-only). Without it the open fails with `GRAFEO-S002`, naming the file and offset. What is not replayed is kept in `<path>.wal.damaged`. For this open only. |
+| `history_retention` | `str` or `timedelta` | `None` | How much history the database keeps for time-travel reads ([`as_of()`](#as_of), keyword-only): `"off"` (the default for a new database), `"forever"`, or a `timedelta`, how far back it reaches. A database file stores the setting; `None` keeps the stored one. |
 
 ### Examples
 
@@ -180,6 +182,42 @@ def execute_at_epoch(self, query: str, epoch: int, params: Optional[Dict] = None
 
 ```python
 result = db.execute_at_epoch("MATCH (n:Server) RETURN n.status", epoch=5)
+```
+
+### as_of()
+
+A read-only view of the database at a point in time: an `int` (an epoch), a timezone-aware `datetime` (the last
+commit at or before it) or a `timedelta` (that long ago). A naive `datetime` raises `ValueError`, another type
+`TypeError`; a point before the history the database keeps raises `GrafeoError` ("not retained"). The view keeps the
+history of its epoch until it is closed: use it in a `with` block or call `close()`.
+
+```python
+def as_of(self, point: Union[int, datetime, timedelta]) -> AsOfView
+```
+
+```python
+with db.as_of(timedelta(minutes=5)) as view:
+    print(view.epoch, view.execute("MATCH (p:Person) RETURN count(p)").scalar())
+```
+
+An `AsOfView` has `epoch`, `execute(query, params=None)`, `get_node(id)`, `get_edge(id)`,
+`get_node_property(id, key)` and `close()`. A query that writes through it raises `GrafeoError`.
+
+### execute_as_of()
+
+Execute one GQL query at a point in time (as for [`as_of()`](#as_of)), without keeping a view.
+
+```python
+def execute_as_of(self, query: str, point: Union[int, datetime, timedelta], params: Optional[Dict] = None) -> QueryResult
+```
+
+### epoch_as_of()
+
+The epoch a point in time reads at: the epoch itself (the current one for a later one), or the last commit at or
+before a time.
+
+```python
+def epoch_as_of(self, point: Union[int, datetime, timedelta]) -> int
 ```
 
 ## Node Operations

@@ -153,6 +153,24 @@ prague, err := trips.CreateNode([]string{"City"}, map[string]any{"name": "Prague
 result, err := trips.Execute("MATCH (c:City) RETURN c.name")
 ```
 
+## Time Travel
+
+Reads of the database as it was at an earlier epoch or time. `OpenInMemoryWithHistory(history)` and
+`OpenWithHistory(path, history)` set how much history it keeps: `HistoryOff` (the default), `HistoryForever` or
+`HistoryFor(time.Duration)`; a database file stores the setting. A point is a `TimePoint`: `AtEpoch(uint64)`,
+`AtTime(time.Time)` (the last commit at or before it) or `Ago(time.Duration)`. A point before the history the
+database keeps fails ("not retained"). A view keeps the history of its epoch until `Close`.
+
+```go
+db, err := grafeo.OpenInMemoryWithHistory(grafeo.HistoryFor(7 * 24 * time.Hour))
+then := db.CurrentEpoch()
+view, err := db.AsOf(grafeo.Ago(5 * time.Minute))
+defer view.Close()
+result, err := view.Execute("MATCH (p:Person) RETURN count(p) AS n")
+result, err = db.ExecuteAsOf("MATCH (p:Person) RETURN count(p) AS n", grafeo.AtEpoch(then), nil)
+epoch, err := db.EpochAsOf(grafeo.AtTime(time.Now().Add(-time.Hour)))
+```
+
 ## Change History
 
 With change data capture on (`db.SetCDCEnabled(true)`), every committed change is recorded as a `ChangeEvent` (kind, epoch, properties before and after, labels, the endpoints of an edge, and `DeletedWith` on an edge a detach delete removed).

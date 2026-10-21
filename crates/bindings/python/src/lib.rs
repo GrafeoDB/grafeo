@@ -50,6 +50,7 @@ mod graph_handle;
 mod quantization;
 mod query;
 mod stream;
+mod time_travel;
 mod types;
 
 #[cfg(feature = "algos")]
@@ -174,6 +175,7 @@ fn grafeo(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyEdge>()?;
     m.add_class::<PyQueryResult>()?;
     m.add_class::<PyResultStream>()?;
+    m.add_class::<time_travel::PyAsOfView>()?;
     m.add_class::<AsyncQueryResult>()?;
     m.add_class::<AsyncQueryResultIter>()?;
     m.add_class::<PyValue>()?;

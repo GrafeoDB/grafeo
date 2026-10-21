@@ -17,6 +17,7 @@ import 'graph.dart';
 import 'native.dart' hide upsertEdges, upsertNodes;
 import 'native.dart' as native show upsertEdges, upsertNodes;
 import 'stream.dart';
+import 'time_travel.dart';
 import 'transaction.dart';
 import 'types.dart';
 import 'value.dart';
@@ -47,19 +48,29 @@ class GrafeoDB implements Finalizable {
   // Lifecycle
   // ===========================================================================
 
-  /// Create a new in-memory database.
-  static GrafeoDB memory({String? libraryPath}) {
+  /// Create a new in-memory database, keeping [historyRetention] for
+  /// time-travel reads (none by default).
+  static GrafeoDB memory(
+      {String? libraryPath, HistoryRetention? historyRetention}) {
     final lib = loadNativeLibrary(libraryPath);
     final bindings = GrafeoBindings(lib);
+    if (historyRetention != null) {
+      return _openWithHistory(bindings, null, historyRetention);
+    }
     final ptr = bindings.grafeoOpenMemory();
     if (ptr == nullptr) throwLastError(bindings);
     return GrafeoDB._(ptr, bindings);
   }
 
-  /// Open a persistent database at [path].
-  static GrafeoDB open(String path, {String? libraryPath}) {
+  /// Open a persistent database at [path]. A [historyRetention] sets how much
+  /// history it keeps for time-travel reads; the file stores the setting.
+  static GrafeoDB open(String path,
+      {String? libraryPath, HistoryRetention? historyRetention}) {
     final lib = loadNativeLibrary(libraryPath);
     final bindings = GrafeoBindings(lib);
+    if (historyRetention != null) {
+      return _openWithHistory(bindings, path, historyRetention);
+    }
     final pathPtr = path.toNativeUtf8(allocator: malloc);
     try {
       final ptr = bindings.grafeoOpen(pathPtr);
@@ -69,6 +80,15 @@ class GrafeoDB implements Finalizable {
       malloc.free(pathPtr);
     }
   }
+
+  static GrafeoDB _openWithHistory(
+          GrafeoBindings bindings, String? path, HistoryRetention history) =>
+      withNativeStrings([path], (p) {
+        final ptr = bindings.grafeoOpenWithHistory(
+            p[0], history.kind, history.durationMs);
+        if (ptr == nullptr) throwLastError(bindings);
+        return GrafeoDB._(ptr, bindings);
+      });
 
   /// Open or create a persistent database at [path] (a single file).
   ///
@@ -754,6 +774,55 @@ class GrafeoDB implements Finalizable {
         },
         (edgeType, rows, options, json) => _bindings.grafeoUpsertEdges(
             _handle, edgeType, rows, options, json));
+  }
+
+  // ===========================================================================
+  // Time travel
+  // ===========================================================================
+
+  /// The epoch of the last commit.
+  int get currentEpoch {
+    _checkOpen();
+    return _bindings.grafeoCurrentEpoch(_handle);
+  }
+
+  /// The epoch [point] names: the last commit at or before it. Throws for a
+  /// point before the history the database keeps.
+  int epochAsOf(TimePoint point) {
+    _checkOpen();
+    final out = malloc<Uint64>();
+    try {
+      final status =
+          _bindings.grafeoEpochAsOf(_handle, point.kind, point.value, out);
+      if (status != GrafeoStatus.ok.code) throwStatus(_bindings, status);
+      return out.value;
+    } finally {
+      malloc.free(out);
+    }
+  }
+
+  /// A read-only view of the database as it was at [point]. It keeps the
+  /// history of its epoch until closed. Throws for a point before the history
+  /// the database keeps.
+  AsOfView asOf(TimePoint point) {
+    _checkOpen();
+    final ptr = _bindings.grafeoAsOf(_handle, point.kind, point.value);
+    if (ptr == nullptr) throwLastError(_bindings);
+    return AsOfView(ptr, _bindings);
+  }
+
+  /// Execute one GQL query, with optional [params], as the database was at
+  /// [point]; a query that writes throws.
+  QueryResult executeAsOf(String query, TimePoint point,
+      {Map<String, dynamic>? params}) {
+    _checkOpen();
+    return withNativeStrings(
+        [query, params == null ? null : encodeParams(params)], (p) {
+      final resultPtr = _bindings.grafeoExecuteAsOf(
+          _handle, p[0], p[1], point.kind, point.value);
+      if (resultPtr == nullptr) throwLastError(_bindings);
+      return buildResult(_bindings, resultPtr);
+    });
   }
 
   // ===========================================================================

@@ -1,0 +1,51 @@
+# Unicode normalization: IS NORMALIZED and normalize()
+#
+# ISO/IEC 39075 normalized predicate and normalize function: `s IS [form]
+# NORMALIZED` tells whether s is in a normal form (NFC by default), and
+# normalize(s) puts s in NFC. The decomposed 'e' + U+0301 is not NFC, its NFC
+# is U+00E9. The skipped cases are a bug: value-kinds/normalize-is-a-no-op.md.
+
+meta:
+  language: gql
+  model: lpg
+  section: "20.25"
+  title: Unicode normalization
+  dataset: empty
+
+tests:
+
+  - name: a_decomposed_string_is_nfd_and_not_nfc
+    query: |
+      RETURN 'e\u0301' IS NFD NORMALIZED AS nfd, 'e\u0301' IS NORMALIZED AS nfc, 'e\u0301' IS NOT NORMALIZED AS not_nfc
+    expect:
+      rows:
+        - [true, false, true]
+
+  - name: a_composed_string_is_nfc
+    query: |
+      RETURN '\u00e9' IS NORMALIZED AS nfc, '\u00e9' IS NFC NORMALIZED AS explicit
+    expect:
+      rows:
+        - [true, true]
+
+  - name: ascii_is_in_every_normal_form
+    query: "RETURN 'Alix' IS NFC NORMALIZED AS c, 'Alix' IS NFD NORMALIZED AS d, 'Alix' IS NFKC NORMALIZED AS kc, 'Alix' IS NFKD NORMALIZED AS kd"
+    expect:
+      rows:
+        - [true, true, true, true]
+
+  - name: normalize_composes_to_nfc
+    skip: "value-kinds/normalize-is-a-no-op.md: normalize() returns its input unchanged"
+    query: |
+      RETURN normalize('e\u0301') = '\u00e9' AS same, char_length(normalize('e\u0301')) AS n
+    expect:
+      rows:
+        - [true, 1]
+
+  - name: normalize_gives_a_normalized_string
+    skip: "value-kinds/normalize-is-a-no-op.md: normalize() returns its input unchanged"
+    query: |
+      RETURN normalize('e\u0301') IS NORMALIZED AS r
+    expect:
+      rows:
+        - [true]

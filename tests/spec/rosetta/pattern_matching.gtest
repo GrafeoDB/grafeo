@@ -34,8 +34,20 @@ tests:
       rows:
         - [7]
 
+  # An aggregate in COLUMNS is an error (0.6.0-beta.1); the SELECT counts
+  # the rows GRAPH_TABLE gives instead.
   - name: count_actors_sql_pgq
-    skip: "SQL/PGQ aggregate in COLUMNS not supported"
+    variants:
+      sql-pgq: |
+        SELECT COUNT(*) AS cnt FROM GRAPH_TABLE (
+          MATCH (a:Actor)
+          COLUMNS (a.name AS name)
+        )
+    expect:
+      rows:
+        - [7]
+
+  - name: count_actors_in_sql_pgq_columns_is_an_error
     variants:
       sql-pgq: |
         SELECT cnt FROM GRAPH_TABLE (
@@ -43,8 +55,8 @@ tests:
           COLUMNS (count(a) AS cnt)
         )
     expect:
-      rows:
-        - [7]
+      error: "Aggregate function 'count' cannot be used here"
+      gql_status: "42000"
 
   # ---------------------------------------------------------------------------
   # Node match with property filter

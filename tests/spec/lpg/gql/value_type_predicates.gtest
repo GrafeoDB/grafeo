@@ -1,0 +1,74 @@
+# Value type predicates: IS TYPED and IS NOT TYPED
+#
+# ISO/IEC 39075 value type predicate: `x IS TYPED t` is true when the value of
+# x is of type t, and IS NOT TYPED is its negation. A node is of type NODE, an
+# edge of EDGE, and every value of ANY. The skipped cases are bugs:
+# value-kinds/is-typed-node-edge-any-and-type-names.md.
+
+meta:
+  language: gql
+  model: lpg
+  section: "19.7"
+  title: Value type predicates
+  dataset: social_network
+
+tests:
+
+  - name: scalar_values_are_of_their_types
+    query: "RETURN 3 IS TYPED INT64 AS i, 'x' IS TYPED STRING AS s, 1.5e0 IS TYPED FLOAT64 AS f, true IS TYPED BOOLEAN AS b, [1] IS TYPED LIST AS l"
+    expect:
+      rows:
+        - [true, true, true, true, true]
+
+  - name: a_value_of_another_type
+    query: "RETURN 3 IS TYPED STRING AS s, 'x' IS TYPED INT64 AS i, [1] IS TYPED BOOLEAN AS b"
+    expect:
+      rows:
+        - [false, false, false]
+
+  - name: is_not_typed_is_the_negation
+    query: "RETURN 3 IS NOT TYPED STRING AS s, 3 IS NOT TYPED INT64 AS i"
+    expect:
+      rows:
+        - [true, false]
+
+  - name: a_property_value_is_of_its_type
+    query: "MATCH (p:Person {name: 'Alix'}) RETURN p.age IS TYPED INT64 AS age, p.name IS TYPED STRING AS name"
+    expect:
+      rows:
+        - [true, true]
+
+  - name: a_node_is_of_type_node
+    skip: "value-kinds/is-typed-node-edge-any-and-type-names.md: IS TYPED NODE is false for a node"
+    query: "MATCH (p:Person {name: 'Alix'}) RETURN p IS TYPED NODE AS r"
+    expect:
+      rows:
+        - [true]
+
+  - name: an_edge_is_of_type_edge
+    skip: "value-kinds/is-typed-node-edge-any-and-type-names.md: IS TYPED EDGE is false for an edge"
+    query: "MATCH (:Person {name: 'Alix'})-[k:KNOWS]->() RETURN k IS TYPED EDGE AS r"
+    expect:
+      rows:
+        - [true]
+
+  - name: every_value_is_of_type_any
+    skip: "value-kinds/is-typed-node-edge-any-and-type-names.md: IS TYPED ANY is false"
+    query: "RETURN 3 IS TYPED ANY AS i, 'x' IS TYPED ANY AS s"
+    expect:
+      rows:
+        - [true, true]
+
+  - name: a_two_word_type
+    skip: "value-kinds/is-typed-node-edge-any-and-type-names.md: ZONED DATETIME after IS TYPED is a syntax error"
+    query: "RETURN zoned_datetime('2024-03-15T10:00:00Z') IS TYPED ZONED DATETIME AS r"
+    expect:
+      rows:
+        - [true]
+
+  - name: a_nested_list_type
+    skip: "value-kinds/is-typed-node-edge-any-and-type-names.md: LIST<LIST<INT64>> after IS TYPED is a syntax error"
+    query: "RETURN [[1]] IS TYPED LIST<LIST<INT64>> AS r"
+    expect:
+      rows:
+        - [true]

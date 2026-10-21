@@ -1,0 +1,38 @@
+# TRIM with a trim specification
+#
+# ISO/IEC 39075 trim function: TRIM([LEADING | TRAILING | BOTH] [c] FROM s)
+# removes c (a space when left out) from the start, the end or both ends of
+# s; TRIM(s) trims spaces from both ends.
+
+meta:
+  language: gql
+  model: lpg
+  section: "20.25"
+  title: TRIM with a trim specification
+  dataset: empty
+
+tests:
+
+  - name: leading_trailing_and_both
+    query: "RETURN TRIM(LEADING 'x' FROM 'xxAlixx') AS leading, TRIM(TRAILING 'x' FROM 'xxAlixx') AS trailing, TRIM(BOTH 'x' FROM 'xxAlixx') AS both"
+    expect:
+      rows:
+        - [Alixx, xxAli, Ali]
+
+  - name: a_space_by_default
+    query: "RETURN TRIM(BOTH FROM '  Gus  ') AS both, TRIM(LEADING FROM '  Gus  ') AS leading, TRIM('  Gus  ') AS plain"
+    expect:
+      rows:
+        - [Gus, "Gus  ", Gus]
+
+  - name: nothing_to_trim
+    query: "RETURN TRIM(BOTH 'x' FROM 'Mia') AS r, TRIM(BOTH 'x' FROM 'xxx') AS all_gone"
+    expect:
+      rows:
+        - [Mia, ""]
+
+  - name: a_null_string_gives_null
+    query: "RETURN TRIM(BOTH 'x' FROM null) AS r"
+    expect:
+      rows:
+        - [null]

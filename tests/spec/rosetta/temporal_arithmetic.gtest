@@ -1,0 +1,119 @@
+# Rosetta: datetime and duration arithmetic
+#
+# ISO/IEC 39075 datetime value expressions: a datetime plus or minus a
+# duration is a datetime of the same type (a zoned one keeps its offset), and
+# a datetime minus a datetime is the duration between them. A duration times
+# or divided by a number scales it; a division by zero is 22012. The skipped
+# cases are bugs: value-kinds/zoned-datetime-arithmetic.md,
+# value-kinds/cypher-datetime-drops-the-offset.md and
+# value-kinds/duration-times-decimal-and-by-zero.md.
+
+meta:
+  model: lpg
+  section: rosetta
+  title: Datetime and duration arithmetic
+  dataset: empty
+  requires: [cypher]
+
+tests:
+
+  # ---------------------------------------------------------------------------
+  # Local datetimes and dates
+  # ---------------------------------------------------------------------------
+
+  - name: a_local_datetime_plus_a_duration
+    query: "RETURN datetime('2024-03-15T10:00:00') + DURATION 'PT1H' = datetime('2024-03-15T11:00:00') AS r"
+    expect:
+      rows:
+        - [true]
+
+  - name: a_local_datetime_minus_a_local_datetime_is_a_duration
+    query: "RETURN datetime('2024-03-15T12:00:00') - datetime('2024-03-15T10:00:00') = DURATION 'PT2H' AS r"
+    expect:
+      rows:
+        - [true]
+
+  - name: a_date_minus_a_date_is_a_duration_in_days
+    query: "RETURN date('2024-03-15') - date('2024-03-10') = DURATION 'P5D' AS r"
+    expect:
+      rows:
+        - [true]
+
+  # ---------------------------------------------------------------------------
+  # Zoned datetimes
+  # ---------------------------------------------------------------------------
+
+  - name: a_zoned_datetime_plus_a_duration_keeps_its_offset
+    skip: "value-kinds/zoned-datetime-arithmetic.md: a zoned datetime plus a duration is null"
+    query: "RETURN zoned_datetime('2024-03-15T10:00:00+01:00') + DURATION 'PT1H' = zoned_datetime('2024-03-15T11:00:00+01:00') AS same, toString(zoned_datetime('2024-03-15T10:00:00+01:00') + DURATION 'PT1H') AS text"
+    expect:
+      rows:
+        - [true, "2024-03-15T11:00:00+01:00"]
+
+  - name: a_cypher_datetime_keeps_its_offset
+    skip: "value-kinds/cypher-datetime-drops-the-offset.md: datetime() with an offset is converted to UTC"
+    variants:
+      cypher: "WITH datetime('2024-03-15T10:00:00+01:00') AS d RETURN d.hour AS hour, d.offset AS offset"
+    expect:
+      rows:
+        - [10, "+01:00"]
+
+  - name: a_cypher_datetime_plus_a_duration_keeps_its_offset
+    skip: "value-kinds/cypher-datetime-drops-the-offset.md: datetime() with an offset is converted to UTC"
+    variants:
+      cypher: "WITH datetime('2024-03-15T10:00:00+01:00') + duration('PT1H') AS d RETURN d.hour AS hour, d.offset AS offset"
+    expect:
+      rows:
+        - [11, "+01:00"]
+
+  - name: a_zoned_datetime_minus_a_duration
+    skip: "value-kinds/zoned-datetime-arithmetic.md: a zoned datetime minus a duration is null"
+    query: "RETURN ZONED DATETIME '2024-03-15T10:00:00+01:00' - DURATION 'PT1H' = ZONED DATETIME '2024-03-15T09:00:00+01:00' AS r"
+    expect:
+      rows:
+        - [true]
+
+  - name: a_zoned_datetime_minus_a_zoned_datetime_is_a_duration
+    skip: "value-kinds/zoned-datetime-arithmetic.md: the difference of two zoned datetimes is null"
+    query: "RETURN zoned_datetime('2024-03-15T12:00:00+01:00') - zoned_datetime('2024-03-15T10:00:00Z') = DURATION 'PT1H' AS r"
+    expect:
+      rows:
+        - [true]
+
+  # ---------------------------------------------------------------------------
+  # Scaling durations
+  # ---------------------------------------------------------------------------
+
+  - name: a_duration_times_an_integer
+    variants:
+      gql: "RETURN DURATION 'P1D' * 2 = DURATION 'P2D' AS r"
+      cypher: "RETURN duration('P1D') * 2 = duration('P2D') AS r"
+    expect:
+      rows:
+        - [true]
+
+  - name: a_duration_divided_by_an_integer
+    variants:
+      gql: "RETURN DURATION 'P2D' / 2 = DURATION 'P1D' AS r"
+      cypher: "RETURN duration('P2D') / 2 = duration('P1D') AS r"
+    expect:
+      rows:
+        - [true]
+
+  - name: a_duration_times_a_decimal
+    skip: "value-kinds/duration-times-decimal-and-by-zero.md: a duration times a decimal is null"
+    variants:
+      gql: "RETURN DURATION 'P1D' * 1.5 = DURATION 'P1DT12H' AS r"
+      cypher: "RETURN duration('P1D') * 1.5 = duration('P1DT12H') AS r"
+    expect:
+      rows:
+        - [true]
+
+  - name: a_duration_divided_by_zero
+    skip: "value-kinds/duration-times-decimal-and-by-zero.md: a duration divided by zero is null"
+    variants:
+      gql: "RETURN DURATION 'P1D' / 0 AS r"
+      cypher: "RETURN duration('P1D') / 0 AS r"
+    expect:
+      error: "division by zero"
+      gql_status: "22012"

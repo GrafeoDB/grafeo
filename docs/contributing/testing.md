@@ -76,12 +76,13 @@ Crate names here match the workspace member paths used by `cargo test -p <name>`
 ```rust
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use grafeo_core::graph::rowgroup::RowGroupStore;
+    use grafeo_core::graph::{GraphStore, GraphStoreMut};
 
     #[test]
     fn test_node_creation() {
-        let store = LpgStore::new();
-        let id = store.create_node(&["Person"], Default::default());
+        let store = RowGroupStore::new();
+        let id = store.create_node(&["Person"]);
         assert!(store.get_node(id).is_some());
     }
 }

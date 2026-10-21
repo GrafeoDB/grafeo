@@ -343,12 +343,11 @@ fn a_rollback_leaves_the_text_index_as_committed() {
 /// anything.
 #[test]
 fn a_rollback_names_the_external_store_that_keeps_its_writes() {
-    // An external store without undo: `LpgStore` as a user's own store
-    // (the engine holds the row-group store; H2e replaces this one).
-    use grafeo_core::graph::GraphStoreMut;
-    use grafeo_core::graph::lpg::LpgStore;
+    // An external store without undo: a user's own store, which writes in
+    // place and keeps no versions (see `in_place`).
+    use grafeo_core::graph::{GraphStore, GraphStoreMut};
 
-    let store = Arc::new(LpgStore::new().unwrap());
+    let store = Arc::new(in_place::InPlace::default());
     let db = GrafeoDB::with_store(
         Arc::clone(&store) as Arc<dyn GraphStoreMut>,
         grafeo_engine::Config::in_memory(),
@@ -399,6 +398,223 @@ fn a_rollback_names_the_external_store_that_keeps_its_writes() {
     session.rollback().unwrap();
     let error = session.execute(partial).unwrap_err().to_string();
     assert!(error.contains("not all undone"), "{error}");
+}
+
+/// A user's own store as a database built on an external store meets it:
+/// every write in place, at once, and every read of now, whatever epoch or
+/// transaction it names (a store without versions). It keeps its rows in
+/// a row-group store, through that store's immediate writes and reads.
+mod in_place {
+    use std::sync::Arc;
+
+    use arcstr::ArcStr;
+    use grafeo_common::types::{
+        EdgeId, EpochId, NodeId, PropertyKey, ReadView, TransactionId, Value,
+    };
+    use grafeo_common::utils::error::Result;
+    use grafeo_common::utils::hash::FxHashMap;
+    use grafeo_core::graph::lpg::{CompareOp, Edge, Node};
+    use grafeo_core::graph::rowgroup::RowGroupStore;
+    use grafeo_core::graph::{Direction, GraphStore, GraphStoreMut, GraphStoreSearch};
+    use grafeo_core::statistics::Statistics;
+    use smallvec::SmallVec;
+
+    #[derive(Default)]
+    pub struct InPlace {
+        rows: RowGroupStore,
+    }
+
+    impl GraphStore for InPlace {
+        fn get_node(&self, id: NodeId) -> Option<Node> {
+            self.rows.get_node(id)
+        }
+        fn get_edge(&self, id: EdgeId) -> Option<Edge> {
+            self.rows.get_edge(id)
+        }
+        fn get_node_versioned(&self, id: NodeId, _: EpochId, _: TransactionId) -> Option<Node> {
+            self.rows.get_node(id)
+        }
+        fn get_edge_versioned(&self, id: EdgeId, _: EpochId, _: TransactionId) -> Option<Edge> {
+            self.rows.get_edge(id)
+        }
+        fn get_node_at_epoch(&self, id: NodeId, _: EpochId) -> Option<Node> {
+            self.rows.get_node(id)
+        }
+        fn get_edge_at_epoch(&self, id: EdgeId, _: EpochId) -> Option<Edge> {
+            self.rows.get_edge(id)
+        }
+        fn get_node_property(&self, id: NodeId, key: &PropertyKey) -> Option<Value> {
+            self.rows.get_node_property(id, key)
+        }
+        fn get_edge_property(&self, id: EdgeId, key: &PropertyKey) -> Option<Value> {
+            self.rows.get_edge_property(id, key)
+        }
+        fn get_node_property_batch(&self, ids: &[NodeId], key: &PropertyKey) -> Vec<Option<Value>> {
+            self.rows.get_node_property_batch(ids, key)
+        }
+        fn try_get_node_property_batch(
+            &self,
+            ids: &[NodeId],
+            key: &PropertyKey,
+        ) -> Result<Vec<Option<Value>>> {
+            self.rows.try_get_node_property_batch(ids, key)
+        }
+        fn get_nodes_properties_batch(&self, ids: &[NodeId]) -> Vec<FxHashMap<PropertyKey, Value>> {
+            self.rows.get_nodes_properties_batch(ids)
+        }
+        fn get_nodes_properties_selective_batch(
+            &self,
+            ids: &[NodeId],
+            keys: &[PropertyKey],
+        ) -> Vec<FxHashMap<PropertyKey, Value>> {
+            self.rows.get_nodes_properties_selective_batch(ids, keys)
+        }
+        fn get_edges_properties_selective_batch(
+            &self,
+            ids: &[EdgeId],
+            keys: &[PropertyKey],
+        ) -> Vec<FxHashMap<PropertyKey, Value>> {
+            self.rows.get_edges_properties_selective_batch(ids, keys)
+        }
+        fn neighbors(&self, node: NodeId, direction: Direction) -> Vec<NodeId> {
+            self.rows.neighbors(node, direction)
+        }
+        fn edges_from(&self, node: NodeId, direction: Direction) -> Vec<(NodeId, EdgeId)> {
+            self.rows.edges_from(node, direction)
+        }
+        fn out_degree(&self, node: NodeId) -> usize {
+            self.rows.out_degree(node)
+        }
+        fn in_degree(&self, node: NodeId) -> usize {
+            self.rows.in_degree(node)
+        }
+        fn has_backward_adjacency(&self) -> bool {
+            self.rows.has_backward_adjacency()
+        }
+        fn node_ids(&self) -> Vec<NodeId> {
+            self.rows.node_ids()
+        }
+        fn nodes_by_label(&self, label: &str) -> Vec<NodeId> {
+            self.rows.nodes_by_label(label)
+        }
+        fn node_count(&self) -> usize {
+            self.rows.node_count()
+        }
+        fn edge_count(&self) -> usize {
+            self.rows.edge_count()
+        }
+        fn edge_type(&self, id: EdgeId) -> Option<ArcStr> {
+            self.rows.edge_type(id)
+        }
+        fn find_nodes_by_property(&self, property: &str, value: &Value) -> Vec<NodeId> {
+            self.rows.find_nodes_by_property(property, value)
+        }
+        fn find_nodes_by_properties(&self, conditions: &[(&str, Value)]) -> Vec<NodeId> {
+            self.rows.find_nodes_by_properties(conditions)
+        }
+        fn find_nodes_in_range(
+            &self,
+            property: &str,
+            min: Option<&Value>,
+            max: Option<&Value>,
+            min_inclusive: bool,
+            max_inclusive: bool,
+        ) -> Vec<NodeId> {
+            self.rows
+                .find_nodes_in_range(property, min, max, min_inclusive, max_inclusive)
+        }
+        fn node_property_might_match(
+            &self,
+            property: &PropertyKey,
+            op: CompareOp,
+            value: &Value,
+        ) -> bool {
+            self.rows.node_property_might_match(property, op, value)
+        }
+        fn edge_property_might_match(
+            &self,
+            property: &PropertyKey,
+            op: CompareOp,
+            value: &Value,
+        ) -> bool {
+            self.rows.edge_property_might_match(property, op, value)
+        }
+        fn statistics(&self) -> Arc<Statistics> {
+            self.rows.statistics()
+        }
+        fn estimate_label_cardinality(&self, label: &str) -> f64 {
+            self.rows.estimate_label_cardinality(label)
+        }
+        fn estimate_avg_degree(&self, edge_type: &str, outgoing: bool) -> f64 {
+            self.rows.estimate_avg_degree(edge_type, outgoing)
+        }
+        fn current_epoch(&self) -> EpochId {
+            self.rows.current_epoch()
+        }
+        fn node_labels_at(&self, id: NodeId, _: ReadView) -> Option<SmallVec<[ArcStr; 2]>> {
+            self.rows.get_node(id).map(|node| node.labels)
+        }
+    }
+
+    impl GraphStoreSearch for InPlace {}
+
+    impl GraphStoreMut for InPlace {
+        fn create_node(&self, labels: &[&str]) -> NodeId {
+            self.rows.create_node(labels)
+        }
+        fn create_node_versioned(&self, labels: &[&str], _: EpochId, _: TransactionId) -> NodeId {
+            self.rows.create_node(labels)
+        }
+        fn create_edge(&self, src: NodeId, dst: NodeId, edge_type: &str) -> EdgeId {
+            self.rows.create_edge(src, dst, edge_type)
+        }
+        fn create_edge_versioned(
+            &self,
+            src: NodeId,
+            dst: NodeId,
+            edge_type: &str,
+            _: EpochId,
+            _: TransactionId,
+        ) -> Result<EdgeId> {
+            Ok(self.rows.create_edge(src, dst, edge_type))
+        }
+        fn batch_create_edges(&self, edges: &[(NodeId, NodeId, &str)]) -> Vec<EdgeId> {
+            self.rows.batch_create_edges(edges)
+        }
+        fn delete_node(&self, id: NodeId) -> bool {
+            self.rows.delete_node(id)
+        }
+        fn delete_node_versioned(&self, id: NodeId, _: EpochId, _: TransactionId) -> Result<bool> {
+            Ok(self.rows.delete_node(id))
+        }
+        fn delete_node_edges(&self, node_id: NodeId) {
+            self.rows.delete_node_edges(node_id);
+        }
+        fn delete_edge(&self, id: EdgeId) -> bool {
+            self.rows.delete_edge(id)
+        }
+        fn delete_edge_versioned(&self, id: EdgeId, _: EpochId, _: TransactionId) -> bool {
+            self.rows.delete_edge(id)
+        }
+        fn set_node_property(&self, id: NodeId, key: &str, value: Value) {
+            self.rows.set_node_property(id, key, value);
+        }
+        fn set_edge_property(&self, id: EdgeId, key: &str, value: Value) {
+            self.rows.set_edge_property(id, key, value);
+        }
+        fn remove_node_property(&self, id: NodeId, key: &str) -> Result<Option<Value>> {
+            self.rows.remove_node_property(id, key)
+        }
+        fn remove_edge_property(&self, id: EdgeId, key: &str) -> Result<Option<Value>> {
+            self.rows.remove_edge_property(id, key)
+        }
+        fn add_label(&self, node_id: NodeId, label: &str) -> bool {
+            self.rows.add_label(node_id, label)
+        }
+        fn remove_label(&self, node_id: NodeId, label: &str) -> bool {
+            self.rows.remove_label(node_id, label)
+        }
+    }
 }
 
 /// Direct calls that returned survive a crash (the process exits without

@@ -176,11 +176,11 @@ impl Operator for ScanOperator {
 mod tests {
     use super::*;
     use crate::graph::GraphStoreMut;
-    use crate::graph::lpg::LpgStore;
+    use crate::graph::rowgroup::RowGroupStore;
 
     #[test]
     fn test_scan_by_label() {
-        let store: Arc<dyn GraphStoreMut> = Arc::new(LpgStore::new().unwrap());
+        let store: Arc<dyn GraphStoreMut> = Arc::new(RowGroupStore::new());
 
         store.create_node(&["Person"]);
         store.create_node(&["Person"]);
@@ -201,7 +201,7 @@ mod tests {
     /// with both labels once, a node with neither not at all.
     #[test]
     fn a_scan_of_several_labels_returns_each_node_once() {
-        let store: Arc<dyn GraphStoreMut> = Arc::new(LpgStore::new().unwrap());
+        let store: Arc<dyn GraphStoreMut> = Arc::new(RowGroupStore::new());
         let director = store.create_node(&["Director"]);
         store.create_node(&["City"]);
         let both = store.create_node(&["Person", "Director"]);
@@ -226,7 +226,7 @@ mod tests {
 
     #[test]
     fn test_scan_reset() {
-        let store: Arc<dyn GraphStoreMut> = Arc::new(LpgStore::new().unwrap());
+        let store: Arc<dyn GraphStoreMut> = Arc::new(RowGroupStore::new());
         store.create_node(&["Person"]);
 
         let mut scan =
@@ -246,7 +246,7 @@ mod tests {
 
     #[test]
     fn test_full_scan() {
-        let store: Arc<dyn GraphStoreMut> = Arc::new(LpgStore::new().unwrap());
+        let store: Arc<dyn GraphStoreMut> = Arc::new(RowGroupStore::new());
 
         // Create nodes with different labels
         store.create_node(&["Person"]);
@@ -267,38 +267,43 @@ mod tests {
 
     #[test]
     fn test_scan_with_mvcc_context() {
-        let store: Arc<dyn GraphStoreMut> = Arc::new(LpgStore::new().unwrap());
+        let store: Arc<dyn GraphStoreMut> = Arc::new(RowGroupStore::new());
 
-        // Create nodes at epoch 1 (using SYSTEM tx so they get real epochs,
-        // not PENDING; this test is about epoch-based time-travel scanning).
-        let epoch1 = EpochId::new(1);
-        store.create_node_versioned(&["Person"], epoch1, TransactionId::SYSTEM);
-        store.create_node_versioned(&["Person"], epoch1, TransactionId::SYSTEM);
+        // Two nodes, then a third: each create commits at its own epoch.
+        store.create_node(&["Person"]);
+        store.create_node(&["Person"]);
+        let early = store.current_epoch();
+        store.create_node(&["Person"]);
+        let late = store.current_epoch();
 
-        // Create a node at epoch 5
-        let epoch5 = EpochId::new(5);
-        store.create_node_versioned(&["Person"], epoch5, TransactionId::SYSTEM);
-
-        // Scan at epoch 3 should see only the first 2 nodes (created at epoch 1)
+        // A scan at the earlier epoch sees the first two nodes.
         let mut scan =
             ScanOperator::with_label(store.clone() as Arc<dyn GraphStoreSearch>, "Person")
-                .with_transaction_context(EpochId::new(3), None);
+                .with_transaction_context(early, None);
 
         let chunk = scan.next().unwrap().unwrap();
-        assert_eq!(chunk.row_count(), 2, "Should see 2 nodes at epoch 3");
+        assert_eq!(
+            chunk.row_count(),
+            2,
+            "Should see 2 nodes at the earlier epoch"
+        );
 
-        // Scan at epoch 5 should see all 3 nodes
+        // A scan at the later epoch sees all three.
         let mut scan_all =
             ScanOperator::with_label(store.clone() as Arc<dyn GraphStoreSearch>, "Person")
-                .with_transaction_context(EpochId::new(5), None);
+                .with_transaction_context(late, None);
 
         let chunk_all = scan_all.next().unwrap().unwrap();
-        assert_eq!(chunk_all.row_count(), 3, "Should see 3 nodes at epoch 5");
+        assert_eq!(
+            chunk_all.row_count(),
+            3,
+            "Should see 3 nodes at the later epoch"
+        );
     }
 
     #[test]
     fn test_scan_into_any() {
-        let store: Arc<dyn GraphStoreMut> = Arc::new(LpgStore::new().unwrap());
+        let store: Arc<dyn GraphStoreMut> = Arc::new(RowGroupStore::new());
         let op = ScanOperator::with_label(store.clone() as Arc<dyn GraphStoreSearch>, "Person");
         let any = Box::new(op).into_any();
         assert!(any.downcast::<ScanOperator>().is_ok());

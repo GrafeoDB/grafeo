@@ -1,23 +1,18 @@
 //! Rows loaded under the ids they were written with, outside any
 //! transaction: what the readers of the formats of earlier releases write
-//! into a store (the LPG sections of 0.5.x and of 0.6.0-beta, version 3; the
-//! compacted base of a 0.5.x file; the snapshots; the data records of the WAL
-//! of the first log format), and the copies of graph data.
+//! into a store (the LPG sections of 0.5.x and of 0.6.0-beta.1, version 3;
+//! the compacted base of a 0.5.x file; the snapshots; the data records of the
+//! WAL of the first log format), and the copies of graph data.
 //!
-//! A reader writes through [`LoadTarget`], which both stores implement, so
-//! one reader fills `LpgStore` (the engine's store until 0.6.0 switched to
-//! the row-group store, #412 H2d) and the row-group store, which takes every row
-//! through its change target's replay writer at its current epoch: no
-//! reader reads `LpgStore` to fill the row-group store. A load runs while
-//! nothing else reads or writes the store, so it builds no before-image and
-//! keeps nothing for other readers.
+//! A reader writes through [`LoadTarget`], which the row-group store
+//! implements: it takes every row through its change target's replay writer
+//! at its current epoch. A load runs while nothing else reads or writes the
+//! store, so it builds no before-image and keeps nothing for other readers.
 //!
 //! Versions: a reader passes each property's current value
 //! ([`LoadTarget::load_value`]) and the older versions a file or snapshot
-//! keeps ([`LoadTarget::load_old_value`]). `LpgStore` keeps those with the
-//! `temporal` feature, at their epochs; the row-group store keeps the
-//! current value only, as `LpgStore` without `temporal` does (its retained
-//! history comes with time travel, H2c).
+//! keeps ([`LoadTarget::load_old_value`]). The row-group store keeps the
+//! current value only: the history of a loaded file starts at its epoch.
 
 use std::sync::Arc;
 
@@ -58,8 +53,7 @@ pub trait LoadTarget: GraphStore + Send + Sync + Sized {
     /// Creates edge `id` from `src` to `dst` of type `edge_type`, with no
     /// values; returns whether the store holds it now. An edge whose end
     /// the store does not hold (only a damaged file or log holds one) is
-    /// kept by `LpgStore`, which shows it to no query, and left out by the
-    /// row-group store (`false`), whose caller says so.
+    /// left out (`false`), and the caller says so.
     ///
     /// # Errors
     ///
@@ -90,7 +84,7 @@ pub trait LoadTarget: GraphStore + Send + Sync + Sized {
     ///
     /// # Errors
     ///
-    /// When the value cannot be read (a spilled one of `LpgStore`).
+    /// When the value cannot be read.
     fn load_remove_value(&self, entity: Entity, key: &str) -> Result<()>;
 
     /// Deletes `entity`; returns whether the store held it.
@@ -126,8 +120,7 @@ pub trait LoadTarget: GraphStore + Send + Sync + Sized {
     fn load_next_ids(&self, node: u64, edge: u64);
 
     /// The epoch the section or snapshot was written at, once its rows are
-    /// in: the store continues at it (`LpgStore` only with `temporal`, which
-    /// keeps the epochs of the versions it loaded).
+    /// in: the store continues at it.
     fn load_section_epoch(&self, epoch: EpochId);
 
     /// Restores the named graphs `graphs` (`(id, name)`) with their ids, and
@@ -202,6 +195,60 @@ pub(crate) mod testing {
             }
         }
         (nodes, edges)
+    }
+
+    /// The bytes of `tests/fixtures/lpg-v3/<name>`: LPG sections the
+    /// writers of earlier releases wrote, which no build writes any more
+    /// (see the README there).
+    pub(crate) fn fixture_bytes(name: &str) -> Vec<u8> {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/lpg-v3")
+            .join(name);
+        std::fs::read(&path).unwrap_or_else(|error| panic!("{}: {error}", path.display()))
+    }
+
+    /// The LPG section of version 3 in the fixture `name` (a `.chunks`
+    /// file: `LPG3`, a chunk count `u32`, then per chunk its kind,
+    /// namespace and codec bytes, graph `u32`, column `u32`, first row
+    /// `u64`, row count `u32`, length `u32` and bytes, little-endian), as a
+    /// memory image.
+    pub(crate) fn version_3_fixture(name: &str) -> grafeo_common::storage::MemoryImage {
+        use grafeo_common::storage::{
+            ChunkKind, ChunkMeta, ChunkNamespace, MemoryImage, SectionSink, SectionType,
+        };
+
+        let bytes = fixture_bytes(name);
+        assert_eq!(&bytes[..4], b"LPG3", "{name}: not a chunk dump");
+        let mut pos = 4;
+        let mut take = |count: usize| {
+            let slice = &bytes[pos..pos + count];
+            pos += count;
+            slice
+        };
+        let u32_at = |slice: &[u8]| u32::from_le_bytes(slice.try_into().unwrap());
+        let chunks = u32_at(take(4));
+        let mut image = MemoryImage::new();
+        image.begin_section(SectionType::LpgStore, 3).unwrap();
+        for _ in 0..chunks {
+            let head = take(3);
+            let (kind, namespace, codec) = (head[0], head[1], head[2]);
+            let graph_id = u32_at(take(4));
+            let column_id = u32_at(take(4));
+            let row_start = u64::from_le_bytes(take(8).try_into().unwrap());
+            let row_count = u32_at(take(4));
+            let length = usize::try_from(u32_at(take(4))).unwrap();
+            let meta = ChunkMeta {
+                kind: ChunkKind::from_byte(kind).expect("a chunk kind"),
+                namespace: ChunkNamespace::from_byte(namespace).expect("a namespace"),
+                codec,
+                graph_id,
+                column_id,
+                row_start,
+                row_count,
+            };
+            image.write_chunk(meta, take(length)).unwrap();
+        }
+        image
     }
 
     /// Asserts `a` and `b` hold the same nodes, labels, edges and values,

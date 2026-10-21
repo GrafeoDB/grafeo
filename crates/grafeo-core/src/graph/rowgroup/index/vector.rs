@@ -389,23 +389,9 @@ impl RowGroupStore {
         let inner = self.inner.read();
         let entry = inner.indexes.vector.get(&search_key(label, property))?;
         let read = Read::view(view);
-        #[cfg(feature = "parallel")]
-        {
-            use rayon::prelude::*;
-            Some(
-                queries
-                    .par_iter()
-                    .map(|query| inner.indexed_nearest(entry, query, search, read))
-                    .collect(),
-            )
-        }
-        #[cfg(not(feature = "parallel"))]
-        Some(
-            queries
-                .iter()
-                .map(|query| inner.indexed_nearest(entry, query, search, read))
-                .collect(),
-        )
+        Some(crate::index::vector::batch::map(queries, |query| {
+            inner.indexed_nearest(entry, query, search, read)
+        }))
     }
 
     /// Node `id`'s vector of `property` as `view` sees it (any label), for

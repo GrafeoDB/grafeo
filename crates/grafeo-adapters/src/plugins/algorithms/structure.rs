@@ -10,7 +10,9 @@ use grafeo_common::utils::hash::{FxHashMap, FxHashSet};
 use grafeo_core::graph::Direction;
 use grafeo_core::graph::GraphStore;
 #[cfg(all(test, feature = "lpg"))]
-use grafeo_core::graph::lpg::LpgStore;
+use grafeo_core::graph::GraphStoreMut as _;
+#[cfg(all(test, feature = "lpg"))]
+use grafeo_core::graph::rowgroup::RowGroupStore;
 
 use super::super::{AlgorithmResult, ParameterDef, ParameterType, Parameters};
 use super::traits::{GraphAlgorithm, impl_algorithm, visible_edges_from};
@@ -893,9 +895,9 @@ impl GraphAlgorithm for KTrussAlgorithm {
 mod tests {
     use super::*;
 
-    fn create_simple_path() -> LpgStore {
+    fn create_simple_path() -> RowGroupStore {
         // Path: 0 - 1 - 2 - 3 (all are articulation points except endpoints)
-        let store = LpgStore::new().unwrap();
+        let store = RowGroupStore::new();
 
         let n0 = store.create_node(&["Node"]);
         let n1 = store.create_node(&["Node"]);
@@ -912,12 +914,12 @@ mod tests {
         store
     }
 
-    fn create_diamond() -> LpgStore {
+    fn create_diamond() -> RowGroupStore {
         // Diamond: 0 - 1 - 3
         //          |   |
         //          +---2
         // No articulation points in a diamond
-        let store = LpgStore::new().unwrap();
+        let store = RowGroupStore::new();
 
         let n0 = store.create_node(&["Node"]);
         let n1 = store.create_node(&["Node"]);
@@ -937,13 +939,13 @@ mod tests {
         store
     }
 
-    fn create_tree() -> LpgStore {
+    fn create_tree() -> RowGroupStore {
         // Tree:     0
         //          / \
         //         1   2
         //        /
         //       3
-        let store = LpgStore::new().unwrap();
+        let store = RowGroupStore::new();
 
         let n0 = store.create_node(&["Node"]);
         let n1 = store.create_node(&["Node"]);
@@ -993,7 +995,7 @@ mod tests {
 
     #[test]
     fn test_articulation_points_empty() {
-        let store = LpgStore::new().unwrap();
+        let store = RowGroupStore::new();
         let ap = articulation_points(&store);
         assert!(ap.is_empty());
     }
@@ -1018,7 +1020,7 @@ mod tests {
 
     #[test]
     fn test_bridges_empty() {
-        let store = LpgStore::new().unwrap();
+        let store = RowGroupStore::new();
         let br = bridges(&store);
         assert!(br.is_empty(), "{br:?}");
     }
@@ -1036,7 +1038,7 @@ mod tests {
 
     #[test]
     fn test_kcore_triangle() {
-        let store = LpgStore::new().unwrap();
+        let store = RowGroupStore::new();
         let n0 = store.create_node(&["Node"]);
         let n1 = store.create_node(&["Node"]);
         let n2 = store.create_node(&["Node"]);
@@ -1057,7 +1059,7 @@ mod tests {
 
     #[test]
     fn test_kcore_empty() {
-        let store = LpgStore::new().unwrap();
+        let store = RowGroupStore::new();
         let result = kcore_decomposition(&store);
 
         assert!(result.core_numbers.is_empty());
@@ -1066,7 +1068,7 @@ mod tests {
 
     #[test]
     fn test_kcore_isolated() {
-        let store = LpgStore::new().unwrap();
+        let store = RowGroupStore::new();
         store.create_node(&["Node"]);
         store.create_node(&["Node"]);
 
@@ -1106,8 +1108,8 @@ mod tests {
     }
 
     /// Builds a store with `n` nodes and one directed edge per pair in `edges`.
-    fn store_from_edges(n: usize, edges: &[(usize, usize)]) -> (LpgStore, Vec<NodeId>) {
-        let store = LpgStore::new().unwrap();
+    fn store_from_edges(n: usize, edges: &[(usize, usize)]) -> (RowGroupStore, Vec<NodeId>) {
+        let store = RowGroupStore::new();
         let nodes: Vec<NodeId> = (0..n).map(|_| store.create_node(&["Node"])).collect();
         for &(u, v) in edges {
             store.create_edge(nodes[u], nodes[v], "EDGE");
@@ -1233,8 +1235,8 @@ mod tests {
 
     // ---- K-Truss tests ----
 
-    fn create_complete(n: usize) -> LpgStore {
-        let store = LpgStore::new().unwrap();
+    fn create_complete(n: usize) -> RowGroupStore {
+        let store = RowGroupStore::new();
         let nodes: Vec<NodeId> = (0..n).map(|_| store.create_node(&["Node"])).collect();
         for i in 0..n {
             for j in (i + 1)..n {
@@ -1247,7 +1249,7 @@ mod tests {
 
     #[test]
     fn test_ktruss_empty_graph() {
-        let store = LpgStore::new().unwrap();
+        let store = RowGroupStore::new();
         let result = ktruss_decomposition(&store);
         assert!(result.truss_numbers.is_empty());
         assert_eq!(result.max_truss, 0);
@@ -1266,7 +1268,7 @@ mod tests {
 
     #[test]
     fn test_ktruss_triangle() {
-        let store = LpgStore::new().unwrap();
+        let store = RowGroupStore::new();
         let n0 = store.create_node(&["Node"]);
         let n1 = store.create_node(&["Node"]);
         let n2 = store.create_node(&["Node"]);
@@ -1401,7 +1403,7 @@ mod tests {
     #[test]
     fn test_kcore_valid_execution() {
         // Alix, Gus, and Vincent form a triangle
-        let store = LpgStore::new().unwrap();
+        let store = RowGroupStore::new();
         let alix = store.create_node(&["Person"]);
         let gus = store.create_node(&["Person"]);
         let vincent = store.create_node(&["Person"]);
@@ -1445,7 +1447,7 @@ mod tests {
     #[test]
     fn test_ktruss_valid_execution() {
         // Triangle between Alix, Gus, Vincent: 3-truss
-        let store = LpgStore::new().unwrap();
+        let store = RowGroupStore::new();
         let alix = store.create_node(&["Person"]);
         let gus = store.create_node(&["Person"]);
         let vincent = store.create_node(&["Person"]);
@@ -1538,7 +1540,7 @@ mod tests {
 
     /// The bridges of `store` by definition: the simple undirected edges whose
     /// removal disconnects their two ends, in node-id order.
-    fn bridges_by_definition(store: &LpgStore) -> Vec<(NodeId, NodeId)> {
+    fn bridges_by_definition(store: &RowGroupStore) -> Vec<(NodeId, NodeId)> {
         let mut edges: std::collections::BTreeSet<(NodeId, NodeId)> =
             std::collections::BTreeSet::new();
         for node in store.node_ids() {
@@ -1590,7 +1592,7 @@ mod tests {
             state % bound
         };
         for round in 0..19 {
-            let store = LpgStore::new().unwrap();
+            let store = RowGroupStore::new();
             let nodes: Vec<NodeId> = (0..40).map(|_| store.create_node(&["Node"])).collect();
             for _ in 0..(30 + round * 2) {
                 let a = nodes[usize::try_from(next(40)).unwrap()];
@@ -1613,11 +1615,10 @@ mod tests {
     /// node's neighbours at every step took O(degree squared) there.
     #[test]
     fn bridges_of_a_high_degree_star_take_milliseconds() {
-        let store = LpgStore::new().unwrap();
+        let store = RowGroupStore::new();
         let hub = store.create_node(&["Node"]);
         for leaf in 0..50_000 {
-            // With `tiered-storage` (on under the workspace's --all-features),
-            // the records of one epoch must fit its arena chunk.
+            // A new epoch per 1,000 nodes, as the test was first written.
             if leaf % 1_000 == 0 {
                 store.new_epoch();
             }
@@ -1637,7 +1638,7 @@ mod tests {
 
     /// A triangle 0-1-2 with a self-loop on 0, every edge doubled in both
     /// directions, and node 3 whose only edge is a self-loop.
-    fn triangle_with_loops_and_parallel_edges() -> (LpgStore, Vec<NodeId>) {
+    fn triangle_with_loops_and_parallel_edges() -> (RowGroupStore, Vec<NodeId>) {
         store_from_edges(
             4,
             &[
@@ -1748,7 +1749,7 @@ mod tests {
     /// The articulation points of `store` by definition: the nodes whose
     /// removal leaves more components among the other nodes, in node-id
     /// order.
-    fn articulation_points_by_definition(store: &LpgStore) -> Vec<NodeId> {
+    fn articulation_points_by_definition(store: &RowGroupStore) -> Vec<NodeId> {
         let nodes = store.node_ids();
         let components_without = |removed: Option<NodeId>| {
             let mut seen: FxHashSet<NodeId> = removed.into_iter().collect();
@@ -1762,6 +1763,7 @@ mod tests {
                 while let Some(u) = stack.pop() {
                     let around = store
                         .edges_from(u, Direction::Outgoing)
+                        .into_iter()
                         .chain(store.edges_from(u, Direction::Incoming));
                     for (v, _) in around {
                         if seen.insert(v) {
@@ -1794,7 +1796,7 @@ mod tests {
             state % bound
         };
         for round in 0..19 {
-            let store = LpgStore::new().unwrap();
+            let store = RowGroupStore::new();
             let nodes: Vec<NodeId> = (0..30).map(|_| store.create_node(&["Node"])).collect();
             for _ in 0..(20 + round * 2) {
                 let a = nodes[usize::try_from(next(30)).unwrap()];
@@ -1820,11 +1822,10 @@ mod tests {
     #[test]
     #[ignore = "timing bench: run with --ignored in release mode, CI machine speed varies too much"]
     fn articulation_points_of_a_high_degree_star_take_milliseconds() {
-        let store = LpgStore::new().unwrap();
+        let store = RowGroupStore::new();
         let hub = store.create_node(&["Node"]);
         for leaf in 0..50_000 {
-            // With `tiered-storage` (on under the workspace's --all-features),
-            // the records of one epoch must fit its arena chunk.
+            // A new epoch per 1,000 nodes, as the test was first written.
             if leaf % 1_000 == 0 {
                 store.new_epoch();
             }

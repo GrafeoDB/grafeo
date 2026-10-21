@@ -18,7 +18,6 @@ use super::{
     reserve_node, same,
 };
 use crate::graph::apply::Writer;
-use crate::graph::lpg::LpgStore;
 use crate::graph::rowgroup::RowGroupStore;
 
 /// A store with a property index.
@@ -45,7 +44,6 @@ macro_rules! indexed {
     };
 }
 
-indexed!(LpgStore);
 indexed!(RowGroupStore);
 
 /// Instantiates the cases `$case` of the module at path `$cases` for a
@@ -450,32 +448,6 @@ pub(crate) fn each_graph_keeps_its_own_indexes<S: Indexed + Registry>(
         &Some(set(&[berlin])),
         "the graph's index holds the graph's node alone",
     )
-}
-
-/// `LpgStore` writes values and labels in place (#412): its indexes hold
-/// the values of now, which every reader then finds.
-const IN_PLACE: &str = "#412: values and labels are written in place, and its indexes with them";
-
-/// `LpgStore`'s index cases.
-mod lpg {
-    use super::{IN_PLACE, KnownGap, LpgStore};
-
-    fn lpg_store() -> LpgStore {
-        LpgStore::new().expect("a new store")
-    }
-
-    const GAPS: &[KnownGap] = &[
-        KnownGap {
-            case: "an_indexed_lookup_answers_at_its_view",
-            reason: IN_PLACE,
-        },
-        KnownGap {
-            case: "maybe_equal_finds_every_spelling_at_a_view",
-            reason: IN_PLACE,
-        },
-    ];
-
-    index_suite!(LpgStore, lpg_store, GAPS);
 }
 
 /// The row-group store's index cases: it answers every one at its view.

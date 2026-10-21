@@ -15,13 +15,14 @@ use grafeo_adapters::plugins::algorithms::{
     StronglyConnectedComponentsAlgorithm,
 };
 use grafeo_common::types::{NodeId, Value};
-use grafeo_core::graph::lpg::LpgStore;
+use grafeo_core::graph::rowgroup::RowGroupStore;
+use grafeo_core::graph::{GraphStore as _, GraphStoreMut as _};
 
 /// A seeded graph shaped like a code base: a repository holds modules, modules
 /// hold files, files hold functions, and functions call each other, mostly
 /// within their module, sometimes across, with a few shared utility hubs.
 /// About `modules * 220` nodes, one connected component.
-fn code_graph(modules: usize) -> LpgStore {
+fn code_graph(modules: usize) -> RowGroupStore {
     let mut state: u64 = 0x9E37_79B9_7F4A_7C15;
     let mut next = |bound: usize| {
         state ^= state << 13;
@@ -29,13 +30,13 @@ fn code_graph(modules: usize) -> LpgStore {
         state ^= state << 17;
         usize::try_from(state % u64::try_from(bound).unwrap()).unwrap()
     };
-    let store = LpgStore::new().unwrap();
+    let store = RowGroupStore::new();
     let repo = store.create_node(&["Repository"]);
     let mut functions_by_module: Vec<Vec<NodeId>> = Vec::new();
     for _ in 0..modules {
-        // One epoch per module: with `tiered-storage` (on under the workspace's
-        // --all-features), the records of one epoch must fit its arena chunk.
-        // Ids, and so every result, do not depend on the epochs.
+        // One epoch per module, as the graph was first built for `LpgStore`
+        // (whose `tiered-storage` arena held one epoch per chunk). Ids, and
+        // so every result, do not depend on the epochs.
         store.new_epoch();
         let module = store.create_node(&["Module"]);
         store.create_edge(repo, module, "CONTAINS");
@@ -104,7 +105,11 @@ fn rows_digest(rows: &[Vec<Value>]) -> u64 {
     fnv1a(&bytes)
 }
 
-fn run(algorithm: &dyn GraphAlgorithm, store: &LpgStore, params: &Parameters) -> Vec<Vec<Value>> {
+fn run(
+    algorithm: &dyn GraphAlgorithm,
+    store: &RowGroupStore,
+    params: &Parameters,
+) -> Vec<Vec<Value>> {
     algorithm.execute(store, params).unwrap().rows
 }
 
@@ -218,14 +223,19 @@ const GOLDEN: &[(&str, u64)] = &[
     ("bridges", 0x7ef97eaf8d068b04),
     ("degree_centrality", 0x235f9a3dc80c2d3b),
     ("connected_components", 0xaa211db929fb3293),
-    ("strongly_connected_components", 0xcfb40e420e8cba43),
+    // 0.6.0: on the row-group store, which lists a node's edges by edge
+    // type and other node (LpgStore listed them in creation order): the
+    // components are numbered in that visit order.
+    ("strongly_connected_components", 0x5d383a0bde7f8f5f),
     ("label_propagation", 0x7466bf931f2950f6),
     // 0.6.0: clustering and k-truss read the simple graph, the self-loops of
     // recursive functions left out.
     ("clustering_coefficient", 0x2e12f21fc91f0237),
     ("clustering_coefficient_sequential", 0x2e12f21fc91f0237),
     ("ktruss", 0xa60d0757ba8bd32a),
-    ("betweenness_centrality", 0x42bccf91788a07a2),
+    // 0.6.0: the same edge order sums the shortest-path shares in another
+    // order (the last bits of some scores).
+    ("betweenness_centrality", 0xdc8c2d83222ad65d),
     ("closeness_centrality", 0x6474cd4c532e5eac),
 ];
 

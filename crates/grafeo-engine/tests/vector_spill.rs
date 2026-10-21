@@ -6,8 +6,8 @@
 //!
 //! Run with: cargo test -p grafeo-engine --features "embedded,async-storage" --test vector_spill
 
-// When temporal feature is active, tests are cfg'd out and imports become unused.
-#![allow(unused_imports, dead_code)]
+// The spill needs the vector index and memory-mapped files.
+#![cfg(all(feature = "vector-index", feature = "mmap"))]
 
 use grafeo_common::storage::{SectionMemoryConfig, SectionType, TierOverride};
 use grafeo_common::types::Value;

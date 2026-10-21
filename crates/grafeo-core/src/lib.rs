@@ -28,8 +28,8 @@ pub mod testing;
 
 // Re-export the types you'll use most often
 pub use codec::{DictionaryBuilder, DictionaryEncoding};
-#[cfg(feature = "lpg")]
-pub use graph::lpg::LpgStore;
 pub use graph::lpg::{Edge, Node};
+#[cfg(feature = "lpg")]
+pub use graph::rowgroup::RowGroupStore;
 pub use index::adjacency::ChunkedAdjacency;
 pub use statistics::{ColumnStatistics, Histogram, LabelStatistics, Statistics};

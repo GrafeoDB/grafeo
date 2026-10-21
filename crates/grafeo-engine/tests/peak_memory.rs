@@ -47,9 +47,7 @@
 //!
 //! The tests build their databases in batches of 1,000 entities ([`BATCH`]),
 //! one commit each: what a checkpoint and an open hold does not depend on
-//! how many commits built the database, and a commit per entity runs out of
-//! memory on Windows in a build with grafeo-core's `tiered-storage` (see
-//! [`BATCH`]).
+//! how many commits built the database (see [`BATCH`]).
 //!
 //! ```bash
 //! cargo test -p grafeo-engine --all-features --test peak_memory -- --nocapture
@@ -418,13 +416,10 @@ fn assert_flat(
 const PEOPLE: [&str; 5] = ["Alix", "Gus", "Vincent", "Mia", "Jules"];
 const CITIES: [&str; 4] = ["Amsterdam", "Berlin", "Paris", "Prague"];
 
-/// The entities a test adds per commit. In a build with grafeo-core's
-/// `tiered-storage` (which `--all-features` on the workspace turns on),
-/// every commit's epoch gets an arena with a first chunk of 1 MiB that lives
-/// as long as the database (#433). Windows commits that memory: built with a
-/// direct call per entity, a database of 20,000 entities held 20 GiB, and
-/// the tests ran out of memory on CI. In batches of 1,000 they hold 20 MiB of
-/// arenas.
+/// The entities a test adds per commit. The batches date from grafeo-core's
+/// `tiered-storage` store (gone since 0.6.0), which gave every commit's epoch
+/// an arena of 1 MiB for the life of the database (#433); they stay, as what
+/// a checkpoint and an open hold does not depend on the commits.
 const BATCH: usize = 1_000;
 
 /// Hands `items` to `add` in batches of [`BATCH`].
@@ -463,11 +458,9 @@ fn next(state: &mut u64) -> u64 {
 const LITERAL: usize = 2_048;
 
 /// 1,000 people against 10,000, with biographies of [`BIO`] bytes: 4 and 40
-/// MiB of them. Fewer entities than the other tests: in a build with
-/// grafeo-core's `tiered-storage` (which `--all-features` on the workspace
-/// turns on), an open puts every node and edge record into the arena of one
-/// epoch, which uses only its first chunk of 1 MiB (#433), and 10,000
-/// people take about 800 KB of records.
+/// MiB of them. Fewer entities than the other tests, a bound from
+/// grafeo-core's `tiered-storage` store (gone since 0.6.0), whose open put
+/// every record into one arena chunk of 1 MiB (#433).
 const PEOPLE_SCALE: Scale = Scale {
     smaller: 1_000,
     ..SCALE
@@ -546,9 +539,7 @@ fn checkpoint_and_open_memory_does_not_grow_with_the_lpg_store() {
 /// 13 MiB of biographies, 13 chunks of the byte cap). The larger database
 /// holds about 2 GiB and the test writes about 1 GiB, so it is ignored in
 /// normal runs; in a release build it takes a minute and a half. Run it
-/// before a release, with the shipped features (not with grafeo-core's
-/// `tiered-storage`, whose arena cannot open that many people yet, see
-/// [`PEOPLE_SCALE`]):
+/// before a release, with the shipped features:
 ///
 /// ```bash
 /// cargo test --release -p grafeo-engine --features full,arrow-export \

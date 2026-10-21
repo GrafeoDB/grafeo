@@ -25,11 +25,6 @@ pub(crate) struct NameDictionary {
 }
 
 impl NameDictionary {
-    /// An empty dictionary: the first name gets id 0.
-    pub(crate) fn new() -> Self {
-        Self::default()
-    }
-
     /// The id of `name`, `None` when it has none.
     pub(crate) fn get_id(&self, name: &str) -> Option<u32> {
         self.by_name.get(name).copied()
@@ -85,7 +80,7 @@ impl NameDictionary {
     /// Forgets `name`: its id becomes a gap, which is never given out again
     /// (a later use of the name gets a new id). Returns the id it had, `None`
     /// when it had none. Only a load uses it, for a name no node or edge has
-    /// (see `LpgStore::drop_unused_label`).
+    /// (see `LoadTarget::load_forget_label`).
     pub(crate) fn remove(&mut self, name: &str) -> Option<u32> {
         let id = self.by_name.remove(name)?;
         if let Some(slot) = self.by_id.get_mut(id as usize) {
@@ -150,7 +145,7 @@ mod tests {
 
     #[test]
     fn a_name_gets_the_next_id_once_and_keeps_it() {
-        let mut dictionary = NameDictionary::new();
+        let mut dictionary = NameDictionary::default();
         assert_eq!(dictionary.get_or_create("Person"), 0);
         assert_eq!(dictionary.get_or_create("City"), 1);
         assert_eq!(
@@ -177,7 +172,7 @@ mod tests {
     /// name gets the id after the highest.
     #[test]
     fn restored_ids_keep_their_gaps() {
-        let mut dictionary = NameDictionary::new();
+        let mut dictionary = NameDictionary::default();
         dictionary.insert_at(5, "Prague").unwrap();
         dictionary.insert_at(0, "Amsterdam").unwrap();
         dictionary.insert_at(9, "Berlin").unwrap();
@@ -203,7 +198,7 @@ mod tests {
 
     #[test]
     fn a_reserved_next_id_is_never_given_out_below() {
-        let mut dictionary = NameDictionary::new();
+        let mut dictionary = NameDictionary::default();
         dictionary.insert_at(1, "KNOWS").unwrap();
         dictionary.reserve_below(19);
         assert_eq!(dictionary.next_id(), 19);
@@ -216,7 +211,7 @@ mod tests {
     /// out again, and the name, used again, gets a new id.
     #[test]
     fn a_removed_name_leaves_a_gap_that_is_never_given_out() {
-        let mut dictionary = NameDictionary::new();
+        let mut dictionary = NameDictionary::default();
         dictionary.get_or_create("Graph");
         dictionary.get_or_create("Graph|Repository");
         dictionary.get_or_create("Repository");
@@ -241,7 +236,7 @@ mod tests {
 
     #[test]
     fn a_taken_id_or_name_is_refused() {
-        let mut dictionary = NameDictionary::new();
+        let mut dictionary = NameDictionary::default();
         dictionary.insert_at(3, "name").unwrap();
         let error = dictionary.insert_at(3, "age").unwrap_err();
         assert!(error.contains("id 3 already names \"name\""), "{error}");

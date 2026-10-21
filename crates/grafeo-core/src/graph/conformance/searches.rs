@@ -12,17 +12,7 @@ use grafeo_common::types::{NodeId, ReadView, Value};
 
 use super::{Store, Tx, apply_all, labels, next_epoch, properties, reserve_node};
 use crate::graph::apply::Writer;
-use crate::graph::lpg::LpgStore;
 use crate::graph::rowgroup::RowGroupStore;
-
-/// Why `LpgStore` fails the search cases: a node created with its values
-/// through the change target is not added to its text and vector indexes,
-/// and an open transaction's values and labels are written in place, the
-/// indexes' with them (#412).
-const NOT_AT_CREATE: &str = concat!(
-    "a node created through the change target is not added to the text and vector indexes, ",
-    "and values and labels are written in place (#412)"
-);
 
 /// A document with `body` and `embedding`.
 fn doc(id: NodeId, body: &str, embedding: [f32; 3]) -> DataOp {
@@ -112,23 +102,9 @@ impl<'s, S: Store> Writes<'s, S> {
     }
 }
 
-/// Instantiates the cases of a search module for both stores, `LpgStore`
-/// with its gaps.
+/// Instantiates the cases of a search module for the row-group store.
 macro_rules! search_suites {
-    ($lpg_gaps:expr; $($case:ident),* $(,)?) => {
-        /// `LpgStore`'s cases.
-        mod lpg {
-            use super::super::LpgStore;
-
-            fn lpg_store() -> LpgStore {
-                LpgStore::new().expect("a new store")
-            }
-
-            $crate::graph::conformance::indexes::index_cases!(
-                LpgStore, lpg_store, $lpg_gaps, super; $($case),*
-            );
-        }
-
+    ($($case:ident),* $(,)?) => {
         /// The row-group store's cases: it answers every one at its view.
         mod rowgroup {
             use super::super::RowGroupStore;
@@ -148,10 +124,9 @@ mod text {
     use grafeo_common::types::{NodeId, PropertyKey, ReadView, Value};
     use parking_lot::RwLock;
 
-    use super::NOT_AT_CREATE;
-    use super::{LpgStore, RowGroupStore, Writes, docs};
+    use super::{RowGroupStore, Writes, docs};
     use crate::graph::conformance::indexes::set;
-    use crate::graph::conformance::{KnownGap, Outcome, Store, ensure, people, same};
+    use crate::graph::conformance::{Outcome, Store, ensure, people, same};
     use crate::index::text::{BM25Config, InvertedIndex};
 
     /// A store that holds text indexes for the engine.
@@ -183,7 +158,6 @@ mod text {
         };
     }
 
-    text_indexed!(LpgStore);
     text_indexed!(RowGroupStore);
 
     /// An empty text index.
@@ -356,18 +330,7 @@ mod text {
         )
     }
 
-    const LPG_GAPS: &[KnownGap] = &[
-        KnownGap {
-            case: "a_text_search_answers_at_its_view",
-            reason: NOT_AT_CREATE,
-        },
-        KnownGap {
-            case: "a_text_index_added_during_a_transaction_answers_at_its_view",
-            reason: NOT_AT_CREATE,
-        },
-    ];
-
-    search_suites!(super::LPG_GAPS;
+    search_suites!(
         a_text_search_answers_at_its_view,
         a_text_index_added_during_a_transaction_answers_at_its_view,
         a_text_index_is_added_listed_and_removed,
@@ -380,9 +343,8 @@ mod vector {
 
     use grafeo_common::types::{NodeId, PropertyKey, ReadView, Value};
 
-    use super::NOT_AT_CREATE;
-    use super::{LpgStore, RowGroupStore, Writes, docs};
-    use crate::graph::conformance::{KnownGap, Outcome, Store, ensure, people, same};
+    use super::{RowGroupStore, Writes, docs};
+    use crate::graph::conformance::{Outcome, Store, ensure, people, same};
     use crate::index::vector::{
         DistanceMetric, HnswConfig, HnswIndex, VectorAccessor, VectorIndexKind,
     };
@@ -416,7 +378,6 @@ mod vector {
         };
     }
 
-    vector_indexed!(LpgStore);
     vector_indexed!(RowGroupStore);
 
     /// An empty HNSW index of 3 dimensions by Euclidean distance.
@@ -606,18 +567,7 @@ mod vector {
         )
     }
 
-    const LPG_GAPS: &[KnownGap] = &[
-        KnownGap {
-            case: "a_vector_search_answers_at_its_view",
-            reason: NOT_AT_CREATE,
-        },
-        KnownGap {
-            case: "a_vector_index_added_during_a_transaction_answers_at_its_view",
-            reason: NOT_AT_CREATE,
-        },
-    ];
-
-    search_suites!(super::LPG_GAPS;
+    search_suites!(
         a_vector_search_answers_at_its_view,
         a_vector_index_added_during_a_transaction_answers_at_its_view,
         a_vector_index_is_added_listed_and_removed,

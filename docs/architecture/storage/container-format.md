@@ -234,7 +234,7 @@ which the section's 0.5.x reader reads.
 | 0 | `Raw` | A section's bytes, whole | Every section of a 0.5.x file |
 | 1 | `Meta` | The section's metadata: a layout byte, the caps it was written with, and its graphs, columns or streams | Every section, once |
 | 2 | `Column` | The values of one column over a range of rows | `LPG_STORE` and `RDF_STORE` |
-| 3 | `History` | The older versions of one property column's values over a range of rows | `LPG_STORE`, in builds with the `temporal` feature |
+| 3 | `History` | The older versions of one property column's values over a range of rows | `LPG_STORE`: a database that keeps history; in version 3, a 0.6.0-beta.1 build with the `temporal` feature |
 | 4 | `Stream` | A piece of a byte stream | The [stream sections](#stream-sections), `CATALOG` included |
 
 A raw or metadata chunk has every other field of its directory entry set to 0.
@@ -348,8 +348,9 @@ cut), and each is from the shortest to the longest length. `Float32Vector` and
 `Values` chunks have none. A reader refuses a zone map other than the one the
 values give, so it can be trusted. See [Zone Maps](zone-maps.md).
 
-**Epochs.** In a build with the `temporal` feature, each property value
-carries the epoch it was set at, in its `Column` chunk's epochs. A chunk whose
+**Epochs.** In a section of version 3 written by a build with the `temporal`
+feature, each property value carries the epoch it was set at, in its `Column`
+chunk's epochs. A chunk whose
 epochs are all 0 carries none, and a reader refuses epochs that are all 0. The
 fixed columns and the `History` chunks never carry epochs: a history value
 holds the epochs of its versions itself.
@@ -402,6 +403,9 @@ bytes.
 
 #### `LPG_STORE` (version 3)
 
+Version 3 is the layout 0.6.0-beta.1 wrote. This release reads it to migrate
+such a file into the layout it writes, version 4, and no longer writes it.
+
 Per graph in id order, the section holds its node table and then its edge
 table, and it ends with its metadata chunk. Graph 0 is the default graph; a
 named graph gets the next graph id when it is created. A row is a node or edge
@@ -431,14 +435,15 @@ edge columns 1, 2 and 3 come as three chunks of one range in a row. Only the
 nodes and edges visible at the checkpoint are written, with their properties.
 A property whose value is null does not exist and is not written.
 
-With the `temporal` feature, a `Column` chunk of a property holds its current
-values with their epochs, and its older versions go to a `History` chunk
+A build with the `temporal` feature wrote, in a `Column` chunk of a property,
+its current values with their epochs, and its older versions in a `History` chunk
 written right before it: a history value is a list of `[epoch, value]` lists,
 with `Int64` epochs, ascending. A property removed last (its latest version
 null) has no current value: its history holds every version. A `History`
 chunk and the `Column` chunk after it cover the same rows, and either can come
-alone. Versions of transactions that did not commit are not written. A build
-without `temporal` checks the `History` chunks and does not apply them.
+alone. Versions of transactions that did not commit are not written. This
+release checks the `History` chunks and does not apply them: the history of a
+migrated file starts at its epoch.
 
 The metadata chunk, little-endian:
 
@@ -446,7 +451,7 @@ The metadata chunk, little-endian:
 |-------|----------|
 | layout | `u8`, `1` |
 | `max_rows`, `max_bytes` | `u32` each: the caps |
-| epoch | `u64`: the store's epoch with `temporal`, 0 without |
+| epoch | `u64`: the store's epoch when a build with `temporal` wrote it, 0 otherwise |
 | next graph id | `u32`: above every graph id given out |
 | graphs | A count `u32`, then per graph (the default graph first, then the named graphs by id, ascending) its id `u32`, its name (a length `u32` and UTF-8, empty for the default graph), next node id `u64`, next edge id `u64`, and its labels, edge types and property keys |
 | a dictionary | Its next id `u32` (above every id given out), a count `u32`, then per name its id `u32` and the name (as above), ids ascending |

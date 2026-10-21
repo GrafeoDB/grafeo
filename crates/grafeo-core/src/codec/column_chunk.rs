@@ -71,7 +71,11 @@ use grafeo_common::utils::error::{Error, Result};
 use super::limits::{checked_u16, checked_u32};
 use super::{BitPackedInts, BitVector, DictionaryBuilder, DictionaryEncoding};
 
+// Point views read one row of an encoded chunk: only the row-group store
+// (the `lpg` feature) reads them.
+#[cfg(feature = "lpg")]
 mod point;
+#[cfg(feature = "lpg")]
 pub(crate) use point::PointView;
 
 /// The most bytes of each bound of a [`StringZoneMap`]: longer strings are

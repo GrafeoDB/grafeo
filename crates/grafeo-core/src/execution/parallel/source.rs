@@ -625,16 +625,20 @@ use grafeo_common::types::NodeId;
 /// # Example
 ///
 /// ```rust
+/// # // The row-group store is built with the `lpg` feature.
+/// # #[cfg(feature = "lpg")]
+/// # {
 /// use grafeo_core::execution::parallel::{ParallelNodeScanSource, ParallelSource};
-/// use grafeo_core::graph::lpg::LpgStore;
+/// use grafeo_core::graph::rowgroup::RowGroupStore;
 /// use std::sync::Arc;
 ///
-/// let store = Arc::new(LpgStore::new().unwrap());
+/// let store = Arc::new(RowGroupStore::new());
 /// // ... populate store ...
 ///
 /// // Scan all Person nodes in parallel
 /// let source = ParallelNodeScanSource::with_label(store, "Person");
 /// let morsels = source.generate_morsels(4096, 0);
+/// # }
 /// ```
 pub struct ParallelNodeScanSource {
     /// The store to scan from.
@@ -786,7 +790,7 @@ impl Source for PartitionedNodeScanSource {
 mod tests {
     use super::*;
     use crate::graph::GraphStoreMut;
-    use crate::graph::lpg::LpgStore;
+    use crate::graph::rowgroup::RowGroupStore;
 
     #[test]
     fn test_parallel_vector_source() {
@@ -965,7 +969,7 @@ mod tests {
 
     #[test]
     fn test_parallel_node_scan_source() {
-        let store: Arc<dyn GraphStoreMut> = Arc::new(LpgStore::new().unwrap());
+        let store: Arc<dyn GraphStoreMut> = Arc::new(RowGroupStore::new());
 
         // Add some nodes with labels
         for i in 0..100 {
@@ -998,7 +1002,7 @@ mod tests {
 
     #[test]
     fn test_parallel_node_scan_partition() {
-        let store: Arc<dyn GraphStoreMut> = Arc::new(LpgStore::new().unwrap());
+        let store: Arc<dyn GraphStoreMut> = Arc::new(RowGroupStore::new());
 
         // Add 100 nodes
         for _ in 0..100 {
@@ -1021,7 +1025,7 @@ mod tests {
 
     #[test]
     fn test_parallel_node_scan_morsels() {
-        let store: Arc<dyn GraphStoreMut> = Arc::new(LpgStore::new().unwrap());
+        let store: Arc<dyn GraphStoreMut> = Arc::new(RowGroupStore::new());
 
         // Add 1000 nodes
         for _ in 0..1000 {

@@ -6,13 +6,17 @@
 use std::collections::{BTreeMap, VecDeque};
 use std::sync::OnceLock;
 
+#[cfg(all(test, feature = "lpg"))]
+use grafeo_common::types::PropertyKey;
 use grafeo_common::types::{EdgeId, NodeId, Value};
 use grafeo_common::utils::error::Error;
 use grafeo_common::utils::hash::FxHashMap;
 use grafeo_core::graph::Direction;
 use grafeo_core::graph::GraphStore;
 #[cfg(all(test, feature = "lpg"))]
-use grafeo_core::graph::lpg::LpgStore;
+use grafeo_core::graph::GraphStoreMut as _;
+#[cfg(all(test, feature = "lpg"))]
+use grafeo_core::graph::rowgroup::RowGroupStore;
 
 use super::super::{AlgorithmResult, ParameterDef, ParameterType};
 use super::traits::{impl_algorithm, node_id_from_param, visible_edges_from};
@@ -590,7 +594,7 @@ impl_algorithm! {
 mod tests {
     use super::*;
 
-    fn create_simple_flow_graph() -> LpgStore {
+    fn create_simple_flow_graph() -> RowGroupStore {
         // Simple flow network:
         //   0 --[5]--> 1 --[3]--> 3
         //   |          |
@@ -598,28 +602,53 @@ mod tests {
         //   |          |
         //   v          v
         //   2 --[4]--> 3
-        let store = LpgStore::new().unwrap();
+        let store = RowGroupStore::new();
 
         let n0 = store.create_node(&["Node"]); // Source
         let n1 = store.create_node(&["Node"]);
         let n2 = store.create_node(&["Node"]);
         let n3 = store.create_node(&["Node"]); // Sink
 
-        store.create_edge_with_props(n0, n1, "EDGE", [("capacity", Value::Float64(5.0))]);
-        store.create_edge_with_props(n0, n2, "EDGE", [("capacity", Value::Float64(3.0))]);
-        store.create_edge_with_props(n1, n3, "EDGE", [("capacity", Value::Float64(3.0))]);
-        store.create_edge_with_props(n1, n2, "EDGE", [("capacity", Value::Float64(2.0))]);
-        store.create_edge_with_props(n2, n3, "EDGE", [("capacity", Value::Float64(4.0))]);
+        store.create_edge_with_props(
+            n0,
+            n1,
+            "EDGE",
+            &[(PropertyKey::new("capacity"), Value::Float64(5.0))],
+        );
+        store.create_edge_with_props(
+            n0,
+            n2,
+            "EDGE",
+            &[(PropertyKey::new("capacity"), Value::Float64(3.0))],
+        );
+        store.create_edge_with_props(
+            n1,
+            n3,
+            "EDGE",
+            &[(PropertyKey::new("capacity"), Value::Float64(3.0))],
+        );
+        store.create_edge_with_props(
+            n1,
+            n2,
+            "EDGE",
+            &[(PropertyKey::new("capacity"), Value::Float64(2.0))],
+        );
+        store.create_edge_with_props(
+            n2,
+            n3,
+            "EDGE",
+            &[(PropertyKey::new("capacity"), Value::Float64(4.0))],
+        );
 
         store
     }
 
-    fn create_cost_flow_graph() -> LpgStore {
+    fn create_cost_flow_graph() -> RowGroupStore {
         // Flow network with costs:
         //   0 --[cap:3,cost:1]--> 1 --[cap:2,cost:2]--> 2
         //   |                                           ^
         //   +--[cap:2,cost:5]---------------------------+
-        let store = LpgStore::new().unwrap();
+        let store = RowGroupStore::new();
 
         let n0 = store.create_node(&["Node"]);
         let n1 = store.create_node(&["Node"]);
@@ -629,27 +658,27 @@ mod tests {
             n0,
             n1,
             "EDGE",
-            [
-                ("capacity", Value::Float64(3.0)),
-                ("cost", Value::Float64(1.0)),
+            &[
+                (PropertyKey::new("capacity"), Value::Float64(3.0)),
+                (PropertyKey::new("cost"), Value::Float64(1.0)),
             ],
         );
         store.create_edge_with_props(
             n1,
             n2,
             "EDGE",
-            [
-                ("capacity", Value::Float64(2.0)),
-                ("cost", Value::Float64(2.0)),
+            &[
+                (PropertyKey::new("capacity"), Value::Float64(2.0)),
+                (PropertyKey::new("cost"), Value::Float64(2.0)),
             ],
         );
         store.create_edge_with_props(
             n0,
             n2,
             "EDGE",
-            [
-                ("capacity", Value::Float64(2.0)),
-                ("cost", Value::Float64(5.0)),
+            &[
+                (PropertyKey::new("capacity"), Value::Float64(2.0)),
+                (PropertyKey::new("cost"), Value::Float64(5.0)),
             ],
         );
 
@@ -683,7 +712,7 @@ mod tests {
 
     #[test]
     fn test_max_flow_no_path() {
-        let store = LpgStore::new().unwrap();
+        let store = RowGroupStore::new();
         let n0 = store.create_node(&["Node"]);
         let _n1 = store.create_node(&["Node"]); // Disconnected
 
@@ -694,7 +723,7 @@ mod tests {
 
     #[test]
     fn test_max_flow_invalid_nodes() {
-        let store = LpgStore::new().unwrap();
+        let store = RowGroupStore::new();
         store.create_node(&["Node"]);
 
         let result = max_flow(&store, NodeId::new(999), NodeId::new(0), None);
@@ -745,7 +774,7 @@ mod tests {
 
     #[test]
     fn test_min_cost_flow_no_path() {
-        let store = LpgStore::new().unwrap();
+        let store = RowGroupStore::new();
         let n0 = store.create_node(&["Node"]);
         let _n1 = store.create_node(&["Node"]);
 
@@ -757,7 +786,7 @@ mod tests {
     #[test]
     fn test_max_flow_default_capacity() {
         // Without capacity property, all edges have capacity 1.0
-        let store = LpgStore::new().unwrap();
+        let store = RowGroupStore::new();
         let n0 = store.create_node(&["Node"]);
         let n1 = store.create_node(&["Node"]);
         let n2 = store.create_node(&["Node"]);
@@ -790,12 +819,17 @@ mod tests {
 
     #[test]
     fn test_max_flow_int_capacity() {
-        let store = LpgStore::new().unwrap();
+        let store = RowGroupStore::new();
         let n0 = store.create_node(&["Node"]);
         let n1 = store.create_node(&["Node"]);
 
         // Use Int64 capacity values instead of Float64
-        store.create_edge_with_props(n0, n1, "EDGE", [("capacity", Value::Int64(5))]);
+        store.create_edge_with_props(
+            n0,
+            n1,
+            "EDGE",
+            &[(PropertyKey::new("capacity"), Value::Int64(5))],
+        );
 
         let result = max_flow(&store, n0, n1, Some("capacity")).unwrap();
         assert!((result.max_flow - 5.0).abs() < f64::EPSILON);
@@ -803,17 +837,37 @@ mod tests {
 
     #[test]
     fn test_max_flow_parallel_paths() {
-        let store = LpgStore::new().unwrap();
+        let store = RowGroupStore::new();
         let s = store.create_node(&["Node"]);
         let a = store.create_node(&["Node"]);
         let b = store.create_node(&["Node"]);
         let t = store.create_node(&["Node"]);
 
         // Two independent paths: s->a->t and s->b->t
-        store.create_edge_with_props(s, a, "EDGE", [("capacity", Value::Float64(3.0))]);
-        store.create_edge_with_props(a, t, "EDGE", [("capacity", Value::Float64(3.0))]);
-        store.create_edge_with_props(s, b, "EDGE", [("capacity", Value::Float64(2.0))]);
-        store.create_edge_with_props(b, t, "EDGE", [("capacity", Value::Float64(2.0))]);
+        store.create_edge_with_props(
+            s,
+            a,
+            "EDGE",
+            &[(PropertyKey::new("capacity"), Value::Float64(3.0))],
+        );
+        store.create_edge_with_props(
+            a,
+            t,
+            "EDGE",
+            &[(PropertyKey::new("capacity"), Value::Float64(3.0))],
+        );
+        store.create_edge_with_props(
+            s,
+            b,
+            "EDGE",
+            &[(PropertyKey::new("capacity"), Value::Float64(2.0))],
+        );
+        store.create_edge_with_props(
+            b,
+            t,
+            "EDGE",
+            &[(PropertyKey::new("capacity"), Value::Float64(2.0))],
+        );
 
         let result = max_flow(&store, s, t, Some("capacity")).unwrap();
         assert!((result.max_flow - 5.0).abs() < f64::EPSILON);
@@ -821,14 +875,24 @@ mod tests {
 
     #[test]
     fn test_max_flow_bottleneck() {
-        let store = LpgStore::new().unwrap();
+        let store = RowGroupStore::new();
         let s = store.create_node(&["Node"]);
         let mid = store.create_node(&["Node"]);
         let t = store.create_node(&["Node"]);
 
         // s -> mid has high capacity, mid -> t has low = bottleneck
-        store.create_edge_with_props(s, mid, "EDGE", [("capacity", Value::Float64(100.0))]);
-        store.create_edge_with_props(mid, t, "EDGE", [("capacity", Value::Float64(1.0))]);
+        store.create_edge_with_props(
+            s,
+            mid,
+            "EDGE",
+            &[(PropertyKey::new("capacity"), Value::Float64(100.0))],
+        );
+        store.create_edge_with_props(
+            mid,
+            t,
+            "EDGE",
+            &[(PropertyKey::new("capacity"), Value::Float64(1.0))],
+        );
 
         let result = max_flow(&store, s, t, Some("capacity")).unwrap();
         assert!((result.max_flow - 1.0).abs() < f64::EPSILON);
@@ -851,7 +915,7 @@ mod tests {
 
     #[test]
     fn test_min_cost_flow_invalid_nodes() {
-        let store = LpgStore::new().unwrap();
+        let store = RowGroupStore::new();
         store.create_node(&["Node"]);
         let result = min_cost_max_flow(&store, NodeId::new(999), NodeId::new(0), None, None);
         assert!(result.is_none());
@@ -878,8 +942,8 @@ mod tests {
     /// A source feeding a hub that fans out over 19 paths of capacity 1 to
     /// the sink; `hub_capacity` of them can carry flow. Returns the store,
     /// the source and the sink.
-    fn fan_out(hub_capacity: f64) -> (LpgStore, NodeId, NodeId) {
-        let store = LpgStore::new().unwrap();
+    fn fan_out(hub_capacity: f64) -> (RowGroupStore, NodeId, NodeId) {
+        let store = RowGroupStore::new();
         let source = store.create_node(&["Node"]);
         let hub = store.create_node(&["Node"]);
         let middles: Vec<NodeId> = (0..19).map(|_| store.create_node(&["Node"])).collect();
@@ -889,9 +953,9 @@ mod tests {
                 from,
                 to,
                 "EDGE",
-                [
-                    ("capacity", Value::Float64(capacity)),
-                    ("cost", Value::Float64(3.0)),
+                &[
+                    (PropertyKey::new("capacity"), Value::Float64(capacity)),
+                    (PropertyKey::new("cost"), Value::Float64(3.0)),
                 ],
             );
         };

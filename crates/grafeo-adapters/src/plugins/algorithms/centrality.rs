@@ -12,7 +12,9 @@ use grafeo_common::utils::hash::{FxHashMap, FxHashSet};
 use grafeo_core::graph::Direction;
 use grafeo_core::graph::GraphStore;
 #[cfg(all(test, feature = "lpg"))]
-use grafeo_core::graph::lpg::LpgStore;
+use grafeo_core::graph::GraphStoreMut as _;
+#[cfg(all(test, feature = "lpg"))]
+use grafeo_core::graph::rowgroup::RowGroupStore;
 
 use super::super::{AlgorithmResult, ParameterDef, ParameterType, Parameters};
 use super::traits::{GraphAlgorithm, NodeValueResultBuilder, impl_algorithm, visible_edges_from};
@@ -722,8 +724,8 @@ impl GraphAlgorithm for DegreeCentralityAlgorithm {
 mod tests {
     use super::*;
 
-    fn create_test_graph() -> LpgStore {
-        let store = LpgStore::new().unwrap();
+    fn create_test_graph() -> RowGroupStore {
+        let store = RowGroupStore::new();
 
         // Create a simple graph:
         //   0 -> 1 -> 2
@@ -745,11 +747,11 @@ mod tests {
         store
     }
 
-    fn create_pagerank_graph() -> LpgStore {
+    fn create_pagerank_graph() -> RowGroupStore {
         // Simple graph for PageRank testing
         // A -> B -> C
         // A -> C
-        let store = LpgStore::new().unwrap();
+        let store = RowGroupStore::new();
 
         let a = store.create_node(&["Node"]);
         let b = store.create_node(&["Node"]);
@@ -806,7 +808,7 @@ mod tests {
     #[test]
     fn test_pagerank_dangling() {
         // Graph with dangling node (no outgoing edges)
-        let store = LpgStore::new().unwrap();
+        let store = RowGroupStore::new();
         let a = store.create_node(&["Node"]);
         let b = store.create_node(&["Node"]);
         store.create_edge(a, b, "EDGE");
@@ -821,7 +823,7 @@ mod tests {
 
     #[test]
     fn test_pagerank_empty() {
-        let store = LpgStore::new().unwrap();
+        let store = RowGroupStore::new();
         let scores = pagerank(&store, 0.85, 100, 1e-6, true);
         assert!(scores.is_empty());
     }
@@ -883,7 +885,7 @@ mod tests {
     #[test]
     fn test_closeness_disconnected() {
         // Graph with isolated node
-        let store = LpgStore::new().unwrap();
+        let store = RowGroupStore::new();
         let a = store.create_node(&["Node"]);
         let _b = store.create_node(&["Node"]); // Isolated
 
@@ -895,7 +897,7 @@ mod tests {
 
     #[test]
     fn test_single_node() {
-        let store = LpgStore::new().unwrap();
+        let store = RowGroupStore::new();
         store.create_node(&["Node"]);
 
         let degree = degree_centrality(&store);
@@ -1029,7 +1031,7 @@ mod tests {
     #[test]
     fn test_betweenness_small_graph() {
         // Test n <= 2 edge case
-        let store = LpgStore::new().unwrap();
+        let store = RowGroupStore::new();
         let a = store.create_node(&["Node"]);
         let b = store.create_node(&["Node"]);
         store.create_edge(a, b, "EDGE");
@@ -1046,7 +1048,7 @@ mod tests {
 
     #[test]
     fn test_closeness_empty_graph() {
-        let store = LpgStore::new().unwrap();
+        let store = RowGroupStore::new();
         let scores = closeness_centrality(&store, false);
         assert!(scores.is_empty());
 
@@ -1056,7 +1058,7 @@ mod tests {
 
     #[test]
     fn test_closeness_single_node() {
-        let store = LpgStore::new().unwrap();
+        let store = RowGroupStore::new();
         let a = store.create_node(&["Node"]);
 
         let scores = closeness_centrality(&store, false);
@@ -1070,7 +1072,7 @@ mod tests {
 
     #[test]
     fn test_degree_empty_graph() {
-        let store = LpgStore::new().unwrap();
+        let store = RowGroupStore::new();
         let result = degree_centrality(&store);
         assert!(result.total_degree.is_empty());
 
@@ -1130,7 +1132,7 @@ mod tests {
     fn test_betweenness_linear_graph() {
         // Linear graph: A -> B -> C -> D
         // B and C should have highest betweenness
-        let store = LpgStore::new().unwrap();
+        let store = RowGroupStore::new();
         let a = store.create_node(&["Node"]);
         let b = store.create_node(&["Node"]);
         let c = store.create_node(&["Node"]);
@@ -1154,7 +1156,7 @@ mod tests {
 
     #[test]
     fn test_degree_centrality_with_self_loop() {
-        let store = LpgStore::new().unwrap();
+        let store = RowGroupStore::new();
         let n0 = store.create_node(&["Node"]);
         let n1 = store.create_node(&["Node"]);
         store.create_edge(n0, n0, "SELF"); // self-loop
@@ -1168,8 +1170,8 @@ mod tests {
     }
 
     /// Builds a store with `n` nodes and one directed edge per pair in `edges`.
-    fn store_from_edges(n: usize, edges: &[(usize, usize)]) -> (LpgStore, Vec<NodeId>) {
-        let store = LpgStore::new().unwrap();
+    fn store_from_edges(n: usize, edges: &[(usize, usize)]) -> (RowGroupStore, Vec<NodeId>) {
+        let store = RowGroupStore::new();
         let nodes: Vec<NodeId> = (0..n).map(|_| store.create_node(&["Node"])).collect();
         for &(u, v) in edges {
             store.create_edge(nodes[u], nodes[v], "EDGE");

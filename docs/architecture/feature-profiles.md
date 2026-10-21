@@ -83,7 +83,7 @@ analytics = ["algos", "vector-index", "text-index", "hybrid-search", "jsonl-impo
 ai = ["vector-index", "text-index", "hybrid-search", "cdc"]
 ```
 
-Structured memory for LLMs, agents and RAG pipelines: vector and text retrieval plus change feeds. Point-in-time queries (`temporal`) are an opt-in atom today.
+Structured memory for LLMs, agents and RAG pipelines: vector and text retrieval plus change feeds. Point-in-time queries need no feature: a database keeps its history for the retention window it is configured with (`Config::with_history_retention`).
 
 > **Note:** `embed` (in-process ONNX embedding generation, about 17 MB) is deliberately not part of this profile. Most AI memory use cases bring embeddings through an API. Opt in explicitly with `features = ["ai", "embed"]`.
 
@@ -238,7 +238,7 @@ The individual feature flags (Layer 2) that profiles are composed from. "(standa
 
 | Atom | Profile | Description | Status |
 | --- | --- | --- | --- |
-| `temporal` | (standalone) | Append-only versioned properties, point-in-time queries | Implemented |
+| `temporal` | (standalone) | Deprecated since 0.6.0, enables nothing: history is a per-database setting (`Config::with_history_retention`); removed in 0.7.0 | Deprecated |
 | `cdc` | AI | Change data capture with history API | Implemented |
 
 ### Import and Export
@@ -254,7 +254,7 @@ The individual feature flags (Layer 2) that profiles are composed from. "(standa
 | Atom | Profile | Description | Status |
 | --- | --- | --- | --- |
 | `parallel` | (standalone); in `embedded` | Multi-core batch vector search and graph algorithms (rayon); a query runs on one thread | Implemented |
-| `tiered-storage` | (standalone) | Hot/cold version storage with epochs | Implemented |
+| `tiered-storage` | (standalone) | Deprecated since 0.6.0, enables nothing (the store it shaped is gone); removed in 0.7.0 | Deprecated |
 
 ### Operations
 

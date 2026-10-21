@@ -2,7 +2,7 @@
 //!
 //! The persistence layer (WAL, `.grafeo` container, async backends) has
 //! moved to the `grafeo-storage` crate. This module retains only the
-//! in-memory backend which bridges `grafeo-core::LpgStore` to the
+//! in-memory backend which bridges `grafeo-core::RowGroupStore` to the
 //! storage interface.
 
 #[cfg(feature = "lpg")]

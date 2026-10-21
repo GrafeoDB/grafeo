@@ -1259,7 +1259,7 @@ def get_node_property_history(self, id: int, key: str) -> List[Tuple[int, Any]]
 ### get_all_node_property_history()
 
 Returns version history for all properties: dict mapping property names to lists of
-(epoch, value) tuples. Requires the `temporal` feature.
+(epoch, value) tuples, within the history the database keeps.
 
 ```python
 def get_all_node_property_history(self, id: int) -> Dict[str, List[Tuple[int, Any]]]

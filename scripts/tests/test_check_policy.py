@@ -203,7 +203,7 @@ def test_d5_lets_the_stores_implement_the_store_traits(repo: Path) -> None:
         "crates/grafeo-core/src/graph/rowgroup/read.rs",
         "impl GraphStore for RowGroupStore {}\n"
         "impl crate::graph::traits::GraphStoreSearch for RowGroupStore {}\n"
-        "impl GraphStoreMut for super::lpg::LpgStore {}\n"
+        "impl GraphStoreMut for super::rowgroup::RowGroupStore {}\n"
         "impl GraphStore for RowGroupStoreWrapper {}\n"
         "impl<S: GraphStore> GraphStore for Logged<S> {}\n",
     )

@@ -750,11 +750,12 @@ impl Operator for LazyFactorizedChainOperator {
 mod tests {
     use super::*;
     use crate::execution::operators::ScanOperator;
-    use crate::graph::lpg::LpgStore;
+    use crate::graph::GraphStoreMut as _;
+    use crate::graph::rowgroup::RowGroupStore;
 
     #[test]
     fn test_factorized_expand_basic() {
-        let store = Arc::new(LpgStore::new().unwrap());
+        let store = Arc::new(RowGroupStore::new());
 
         // Create nodes
         let alix = store.create_node(&["Person"]);
@@ -795,7 +796,7 @@ mod tests {
 
     #[test]
     fn test_factorized_vs_flat_equivalence() {
-        let store = Arc::new(LpgStore::new().unwrap());
+        let store = Arc::new(RowGroupStore::new());
 
         let alix = store.create_node(&["Person"]);
         let gus = store.create_node(&["Person"]);
@@ -830,7 +831,7 @@ mod tests {
 
     #[test]
     fn test_factorized_expand_no_edges() {
-        let store = Arc::new(LpgStore::new().unwrap());
+        let store = Arc::new(RowGroupStore::new());
 
         // Create nodes with no edges
         store.create_node(&["Person"]);
@@ -851,7 +852,7 @@ mod tests {
 
     #[test]
     fn test_factorized_chain_two_hop() {
-        let store = Arc::new(LpgStore::new().unwrap());
+        let store = Arc::new(RowGroupStore::new());
 
         // Create a 2-hop graph: a -> b1, b2 -> c1, c2, c3, c4
         let a = store.create_node(&["Person"]);
@@ -907,7 +908,7 @@ mod tests {
 
     #[test]
     fn test_factorized_expand_multi_edge_type_filter() {
-        let store = Arc::new(LpgStore::new().unwrap());
+        let store = Arc::new(RowGroupStore::new());
 
         let alix = store.create_node(&["Person"]);
         let gus = store.create_node(&["Person"]);
@@ -939,7 +940,7 @@ mod tests {
 
     #[test]
     fn test_factorized_memory_savings() {
-        let store = Arc::new(LpgStore::new().unwrap());
+        let store = Arc::new(RowGroupStore::new());
 
         // Create a star graph: center connected to 10 leaves
         let center = store.create_node(&["Center"]);
@@ -976,7 +977,7 @@ mod tests {
 
     #[test]
     fn test_factorized_expand_into_any() {
-        let store = Arc::new(LpgStore::new().unwrap());
+        let store = Arc::new(RowGroupStore::new());
         let scan = Box::new(ScanOperator::with_label(store.clone(), "Person"));
         let op = FactorizedExpandOperator::new(store.clone(), scan, 0, Direction::Outgoing, vec![]);
         let any = Box::new(op).into_any();
@@ -987,7 +988,7 @@ mod tests {
     /// once per outer row: Alix knows Gus, who lives in Berlin, both times.
     #[test]
     fn lazy_chain_runs_again_after_a_reset() {
-        let store = Arc::new(LpgStore::new().unwrap());
+        let store = Arc::new(RowGroupStore::new());
         let alix = store.create_node(&["Person"]);
         let gus = store.create_node(&["Person"]);
         let berlin = store.create_node(&["City"]);
@@ -1020,7 +1021,7 @@ mod tests {
 
     #[test]
     fn test_lazy_factorized_chain_into_any() {
-        let store = Arc::new(LpgStore::new().unwrap());
+        let store = Arc::new(RowGroupStore::new());
         let scan = Box::new(ScanOperator::with_label(store.clone(), "Person"));
         let op = LazyFactorizedChainOperator::new(store.clone(), scan, vec![]);
         let any = Box::new(op).into_any();

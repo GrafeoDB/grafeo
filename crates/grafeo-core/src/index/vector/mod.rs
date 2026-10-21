@@ -87,6 +87,8 @@ pub mod storage;
 pub mod zone_map;
 
 #[cfg(feature = "vector-index")]
+pub(crate) mod batch;
+#[cfg(feature = "vector-index")]
 mod config;
 #[cfg(feature = "vector-index")]
 mod hnsw;
@@ -685,75 +687,6 @@ fn nearest(mut results: Vec<(NodeId, f32)>, k: usize) -> Vec<(NodeId, f32)> {
         results.truncate(k);
     }
     results.sort_unstable_by(order);
-    results
-}
-
-/// The vectors in property `property` of the nodes of `store` with `label`
-/// (of every node without one), for a scan.
-#[cfg(feature = "vector-index")]
-fn scanned_vectors(
-    store: &dyn crate::graph::GraphStore,
-    label: Option<&str>,
-    property: &str,
-) -> Vec<(NodeId, std::sync::Arc<[f32]>)> {
-    let node_ids = match label {
-        Some(label) => store.nodes_by_label(label),
-        None => store.node_ids(),
-    };
-    let key = grafeo_common::types::PropertyKey::new(property);
-    // Keeps the `Arc<[f32]>` of each `Value::Vector`: the scan only needs
-    // `&[f32]`, and the store holds the vector behind an Arc already.
-    node_ids
-        .into_iter()
-        .filter_map(|id| match store.get_node_property(id, &key) {
-            Some(grafeo_common::types::Value::Vector(vector)) => Some((id, vector)),
-            _ => None,
-        })
-        .collect()
-}
-
-/// The `k` nodes of `store` nearest to `query` by `metric`, nearest first,
-/// found by scanning the vectors in property `property` of the nodes with
-/// `label` (of every node without one): the search of a store without an
-/// index of that metric.
-#[cfg(feature = "vector-index")]
-pub(crate) fn scan_nearest(
-    store: &dyn crate::graph::GraphStore,
-    label: Option<&str>,
-    property: &str,
-    query: &[f32],
-    k: usize,
-    metric: DistanceMetric,
-) -> Vec<(NodeId, f64)> {
-    let vectors = scanned_vectors(store, label, property);
-    let candidates = vectors.iter().map(|(id, vector)| (*id, vector.as_ref()));
-    brute_force_knn(candidates, query, k, metric)
-        .into_iter()
-        .map(|(id, distance)| (id, f64::from(distance)))
-        .collect()
-}
-
-/// The nodes of `store` within `threshold` of `query` by `metric`, nearest
-/// first, found by scanning as [`scan_nearest`] does (an HNSW index has no
-/// threshold search).
-#[cfg(feature = "vector-index")]
-pub(crate) fn scan_within(
-    store: &dyn crate::graph::GraphStore,
-    label: Option<&str>,
-    property: &str,
-    query: &[f32],
-    threshold: f64,
-    metric: DistanceMetric,
-) -> Vec<(NodeId, f64)> {
-    let mut results: Vec<(NodeId, f64)> = scanned_vectors(store, label, property)
-        .into_iter()
-        .filter(|(_, vector)| vector.len() == query.len())
-        .filter_map(|(id, vector)| {
-            let distance = f64::from(compute_distance(query, &vector, metric));
-            (distance <= threshold).then_some((id, distance))
-        })
-        .collect();
-    results.sort_by(crate::index::ranking::by_ascending_distance);
     results
 }
 

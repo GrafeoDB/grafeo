@@ -13,7 +13,9 @@ use grafeo_common::utils::hash::{FxHashMap, FxHashSet};
 use grafeo_core::graph::Direction;
 use grafeo_core::graph::GraphStore;
 #[cfg(all(test, feature = "lpg"))]
-use grafeo_core::graph::lpg::LpgStore;
+use grafeo_core::graph::GraphStoreMut as _;
+#[cfg(all(test, feature = "lpg"))]
+use grafeo_core::graph::rowgroup::RowGroupStore;
 #[cfg(feature = "parallel")]
 use rayon::prelude::*;
 
@@ -718,9 +720,9 @@ impl ParallelGraphAlgorithm for ClusteringCoefficientAlgorithm {
 mod tests {
     use super::*;
 
-    fn create_triangle_graph() -> LpgStore {
+    fn create_triangle_graph() -> RowGroupStore {
         // Simple triangle: 0 - 1 - 2 - 0
-        let store = LpgStore::new().unwrap();
+        let store = RowGroupStore::new();
         let n0 = store.create_node(&["Node"]);
         let n1 = store.create_node(&["Node"]);
         let n2 = store.create_node(&["Node"]);
@@ -736,10 +738,10 @@ mod tests {
         store
     }
 
-    fn create_star_graph() -> LpgStore {
+    fn create_star_graph() -> RowGroupStore {
         // Star: center (0) connected to leaves (1, 2, 3, 4)
         // No triangles because leaves don't connect to each other
-        let store = LpgStore::new().unwrap();
+        let store = RowGroupStore::new();
         let center = store.create_node(&["Center"]);
 
         for _ in 0..4 {
@@ -751,9 +753,9 @@ mod tests {
         store
     }
 
-    fn create_complete_graph(n: usize) -> LpgStore {
+    fn create_complete_graph(n: usize) -> RowGroupStore {
         // K_n: complete graph with n nodes (all pairs connected)
-        let store = LpgStore::new().unwrap();
+        let store = RowGroupStore::new();
         let nodes: Vec<NodeId> = (0..n).map(|_| store.create_node(&["Node"])).collect();
 
         for i in 0..n {
@@ -766,9 +768,9 @@ mod tests {
         store
     }
 
-    fn create_path_graph() -> LpgStore {
+    fn create_path_graph() -> RowGroupStore {
         // Path: 0 - 1 - 2 - 3
-        let store = LpgStore::new().unwrap();
+        let store = RowGroupStore::new();
         let n0 = store.create_node(&["Node"]);
         let n1 = store.create_node(&["Node"]);
         let n2 = store.create_node(&["Node"]);
@@ -853,7 +855,7 @@ mod tests {
 
     #[test]
     fn test_empty_graph() {
-        let store = LpgStore::new().unwrap();
+        let store = RowGroupStore::new();
         let result = clustering_coefficient(&store);
 
         assert!(result.coefficients.is_empty());
@@ -864,7 +866,7 @@ mod tests {
 
     #[test]
     fn test_single_node() {
-        let store = LpgStore::new().unwrap();
+        let store = RowGroupStore::new();
         let n0 = store.create_node(&["Node"]);
 
         let result = clustering_coefficient(&store);
@@ -876,7 +878,7 @@ mod tests {
 
     #[test]
     fn test_two_connected_nodes() {
-        let store = LpgStore::new().unwrap();
+        let store = RowGroupStore::new();
         let n0 = store.create_node(&["Node"]);
         let n1 = store.create_node(&["Node"]);
         store.create_edge(n0, n1, "EDGE");
@@ -1053,7 +1055,7 @@ mod tests {
     #[cfg(feature = "parallel")]
     #[test]
     fn test_total_triangles_parallel_empty_graph() {
-        let store = LpgStore::new().unwrap();
+        let store = RowGroupStore::new();
         let count = total_triangles_parallel(&store, 1);
         assert_eq!(count, 0);
     }
@@ -1088,7 +1090,7 @@ mod tests {
         //   0---1
         //    \ /
         //     3
-        let store = LpgStore::new().unwrap();
+        let store = RowGroupStore::new();
         let n0 = store.create_node(&["Node"]);
         let n1 = store.create_node(&["Node"]);
         let n2 = store.create_node(&["Node"]);
@@ -1200,8 +1202,8 @@ mod tests {
     }
 
     /// A store with `n` nodes and one directed edge per pair in `edges`.
-    fn store_from_edges(n: usize, edges: &[(usize, usize)]) -> (LpgStore, Vec<NodeId>) {
-        let store = LpgStore::new().unwrap();
+    fn store_from_edges(n: usize, edges: &[(usize, usize)]) -> (RowGroupStore, Vec<NodeId>) {
+        let store = RowGroupStore::new();
         let nodes: Vec<NodeId> = (0..n).map(|_| store.create_node(&["Node"])).collect();
         for &(u, v) in edges {
             store.create_edge(nodes[u], nodes[v], "EDGE");

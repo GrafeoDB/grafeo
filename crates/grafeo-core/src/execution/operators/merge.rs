@@ -960,7 +960,7 @@ mod tests {
     use super::*;
     use crate::execution::operators::ConstraintValidator;
     use crate::graph::GraphStoreMut;
-    use crate::graph::lpg::LpgStore;
+    use crate::graph::rowgroup::RowGroupStore;
     use grafeo_common::types::TransactionId;
 
     fn const_props(props: Vec<(&str, Value)>) -> Vec<(String, PropertySource)> {
@@ -972,7 +972,7 @@ mod tests {
 
     #[test]
     fn test_merge_creates_new_node() {
-        let store: Arc<dyn GraphStoreMut> = Arc::new(LpgStore::new().unwrap());
+        let store: Arc<dyn GraphStoreMut> = Arc::new(RowGroupStore::new());
 
         // MERGE should create a new node since none exists
         let mut merge = MergeOperator::new(
@@ -1009,7 +1009,7 @@ mod tests {
 
     #[test]
     fn test_merge_matches_existing_node() {
-        let store: Arc<dyn GraphStoreMut> = Arc::new(LpgStore::new().unwrap());
+        let store: Arc<dyn GraphStoreMut> = Arc::new(RowGroupStore::new());
 
         // Create an existing node
         store.create_node_with_props(
@@ -1045,7 +1045,7 @@ mod tests {
 
     #[test]
     fn test_merge_with_on_create() {
-        let store: Arc<dyn GraphStoreMut> = Arc::new(LpgStore::new().unwrap());
+        let store: Arc<dyn GraphStoreMut> = Arc::new(RowGroupStore::new());
 
         // MERGE with ON CREATE SET
         let mut merge = MergeOperator::new(
@@ -1082,7 +1082,7 @@ mod tests {
 
     #[test]
     fn test_merge_with_on_match() {
-        let store: Arc<dyn GraphStoreMut> = Arc::new(LpgStore::new().unwrap());
+        let store: Arc<dyn GraphStoreMut> = Arc::new(RowGroupStore::new());
 
         // Create an existing node
         let node_id = store.create_node_with_props(
@@ -1120,7 +1120,7 @@ mod tests {
 
     #[test]
     fn test_merge_uses_property_index() {
-        let lpg_store = Arc::new(LpgStore::new().unwrap());
+        let lpg_store = Arc::new(RowGroupStore::new());
         lpg_store.create_property_index("name");
         assert!(lpg_store.has_property_index("name"));
 
@@ -1177,7 +1177,7 @@ mod tests {
 
     #[test]
     fn test_merge_creates_via_index_miss() {
-        let lpg_store = Arc::new(LpgStore::new().unwrap());
+        let lpg_store = Arc::new(RowGroupStore::new());
         lpg_store.create_property_index("name");
 
         let store: Arc<dyn GraphStoreMut> = lpg_store;
@@ -1233,10 +1233,10 @@ mod tests {
     #[test]
     fn test_merge_on_match_resolves_expression_against_merged_node() {
         use super::super::filter::FilterExpression;
-        use crate::graph::lpg::LpgStore;
+        use crate::graph::rowgroup::RowGroupStore;
         use std::collections::HashMap;
 
-        let lpg = Arc::new(LpgStore::new().unwrap());
+        let lpg = Arc::new(RowGroupStore::new());
         let store: Arc<dyn GraphStoreMut> = Arc::clone(&lpg) as Arc<dyn GraphStoreMut>;
         let search: Arc<dyn GraphStoreSearch> = Arc::clone(&lpg) as Arc<dyn GraphStoreSearch>;
 
@@ -1302,10 +1302,10 @@ mod tests {
         // ON CREATE coalesce(n.x, 99) must see the freshly-created node and
         // fall back to 99 because `x` is not yet set on it.
         use super::super::filter::FilterExpression;
-        use crate::graph::lpg::LpgStore;
+        use crate::graph::rowgroup::RowGroupStore;
         use std::collections::HashMap;
 
-        let lpg = Arc::new(LpgStore::new().unwrap());
+        let lpg = Arc::new(RowGroupStore::new());
         let store: Arc<dyn GraphStoreMut> = Arc::clone(&lpg) as Arc<dyn GraphStoreMut>;
         let search: Arc<dyn GraphStoreSearch> = Arc::clone(&lpg) as Arc<dyn GraphStoreSearch>;
 
@@ -1502,10 +1502,10 @@ mod tests {
         // properties only, falsely rejecting an ON CREATE property that
         // satisfies a NOT NULL requirement. With the fix, completeness is
         // checked once both phases have produced their properties.
-        use crate::graph::lpg::LpgStore;
+        use crate::graph::rowgroup::RowGroupStore;
         use std::collections::HashMap;
 
-        let lpg = Arc::new(LpgStore::new().unwrap());
+        let lpg = Arc::new(RowGroupStore::new());
         let store: Arc<dyn GraphStoreMut> = Arc::clone(&lpg) as Arc<dyn GraphStoreMut>;
         let search: Arc<dyn GraphStoreSearch> = Arc::clone(&lpg) as Arc<dyn GraphStoreSearch>;
 
@@ -1561,10 +1561,10 @@ mod tests {
         // properties because the empty list passed to `create_node` hid
         // them. The fix runs `check_unique_node_property` for ON CREATE
         // values in phase two.
-        use crate::graph::lpg::LpgStore;
+        use crate::graph::rowgroup::RowGroupStore;
         use std::collections::HashMap;
 
-        let lpg = Arc::new(LpgStore::new().unwrap());
+        let lpg = Arc::new(RowGroupStore::new());
         let store: Arc<dyn GraphStoreMut> = Arc::clone(&lpg) as Arc<dyn GraphStoreMut>;
         let search: Arc<dyn GraphStoreSearch> = Arc::clone(&lpg) as Arc<dyn GraphStoreSearch>;
 
@@ -1612,10 +1612,10 @@ mod tests {
         // Edge-equivalent of the node completeness regression.
         use super::super::filter::FilterExpression;
         use crate::execution::chunk::DataChunkBuilder;
-        use crate::graph::lpg::LpgStore;
+        use crate::graph::rowgroup::RowGroupStore;
         use std::collections::HashMap;
 
-        let lpg = Arc::new(LpgStore::new().unwrap());
+        let lpg = Arc::new(RowGroupStore::new());
         let store: Arc<dyn GraphStoreMut> = Arc::clone(&lpg) as Arc<dyn GraphStoreMut>;
         let search: Arc<dyn GraphStoreSearch> = Arc::clone(&lpg) as Arc<dyn GraphStoreSearch>;
 
@@ -1719,10 +1719,10 @@ mod tests {
         // the same UNWIND could not see the node the operator had just
         // created and produced a duplicate per row.
         use crate::execution::chunk::DataChunkBuilder;
-        use crate::graph::lpg::LpgStore;
+        use crate::graph::rowgroup::RowGroupStore;
         use grafeo_common::types::EpochId;
 
-        let lpg = Arc::new(LpgStore::new().unwrap());
+        let lpg = Arc::new(RowGroupStore::new());
         let store: Arc<dyn GraphStoreMut> = Arc::clone(&lpg) as Arc<dyn GraphStoreMut>;
 
         // Build an input chunk emulating `UNWIND [1, 1, 1] AS i`.
@@ -1748,8 +1748,9 @@ mod tests {
             }
         }
 
-        // Use a non-SYSTEM transaction so versioned creates land at PENDING.
-        let tx = TransactionId::new(1);
+        // A transaction of its own (not the system one): its creates are
+        // pending until it commits.
+        let tx = TransactionId::new(19);
         let mut merge = MergeOperator::new(
             GraphWriter::new(Arc::clone(&store))
                 .with_transaction_context(EpochId::INITIAL, Some(tx)),
@@ -1786,7 +1787,7 @@ mod tests {
 
     #[test]
     fn test_merge_into_any() {
-        let store: Arc<dyn GraphStoreMut> = Arc::new(LpgStore::new().unwrap());
+        let store: Arc<dyn GraphStoreMut> = Arc::new(RowGroupStore::new());
         let op = MergeOperator::new(
             Arc::clone(&store),
             None,
@@ -1811,7 +1812,7 @@ mod tests {
     /// fewest; of labels with as many nodes, the first written (#457).
     #[test]
     fn merge_reads_the_label_with_the_fewest_nodes() {
-        let store: Arc<dyn GraphStoreMut> = Arc::new(LpgStore::new().unwrap());
+        let store: Arc<dyn GraphStoreMut> = Arc::new(RowGroupStore::new());
         for i in 0..19 {
             if i < 3 {
                 store.create_node(&["Graph", "Repository"]);

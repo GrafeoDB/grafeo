@@ -6,13 +6,17 @@
 use std::collections::BinaryHeap;
 use std::sync::OnceLock;
 
+#[cfg(all(test, feature = "lpg"))]
+use grafeo_common::types::PropertyKey;
 use grafeo_common::types::{NodeId, Value};
 use grafeo_common::utils::error::{Error, Result};
 use grafeo_common::utils::hash::FxHashMap;
 use grafeo_core::graph::Direction;
 use grafeo_core::graph::GraphStore;
 #[cfg(all(test, feature = "lpg"))]
-use grafeo_core::graph::lpg::LpgStore;
+use grafeo_core::graph::GraphStoreMut as _;
+#[cfg(all(test, feature = "lpg"))]
+use grafeo_core::graph::rowgroup::RowGroupStore;
 
 use super::super::{AlgorithmResult, ParameterDef, ParameterType, Parameters};
 use super::traits::{
@@ -898,8 +902,8 @@ impl_algorithm! {
 mod tests {
     use super::*;
 
-    fn create_weighted_graph() -> LpgStore {
-        let store = LpgStore::new().unwrap();
+    fn create_weighted_graph() -> RowGroupStore {
+        let store = RowGroupStore::new();
 
         // Create a weighted graph:
         //   0 --2--> 1 --3--> 2
@@ -917,11 +921,36 @@ mod tests {
         let n4 = store.create_node(&["Node"]);
 
         // Create edges with weights
-        store.create_edge_with_props(n0, n1, "EDGE", [("weight", Value::Float64(2.0))]);
-        store.create_edge_with_props(n1, n2, "EDGE", [("weight", Value::Float64(3.0))]);
-        store.create_edge_with_props(n0, n3, "EDGE", [("weight", Value::Float64(4.0))]);
-        store.create_edge_with_props(n3, n1, "EDGE", [("weight", Value::Float64(1.0))]);
-        store.create_edge_with_props(n2, n4, "EDGE", [("weight", Value::Float64(1.0))]);
+        store.create_edge_with_props(
+            n0,
+            n1,
+            "EDGE",
+            &[(PropertyKey::new("weight"), Value::Float64(2.0))],
+        );
+        store.create_edge_with_props(
+            n1,
+            n2,
+            "EDGE",
+            &[(PropertyKey::new("weight"), Value::Float64(3.0))],
+        );
+        store.create_edge_with_props(
+            n0,
+            n3,
+            "EDGE",
+            &[(PropertyKey::new("weight"), Value::Float64(4.0))],
+        );
+        store.create_edge_with_props(
+            n3,
+            n1,
+            "EDGE",
+            &[(PropertyKey::new("weight"), Value::Float64(1.0))],
+        );
+        store.create_edge_with_props(
+            n2,
+            n4,
+            "EDGE",
+            &[(PropertyKey::new("weight"), Value::Float64(1.0))],
+        );
 
         store
     }
@@ -966,7 +995,7 @@ mod tests {
 
     #[test]
     fn test_dijkstra_unreachable() {
-        let store = LpgStore::new().unwrap();
+        let store = RowGroupStore::new();
         let n0 = store.create_node(&["Node"]);
         let _n1 = store.create_node(&["Node"]); // Disconnected
 
@@ -990,13 +1019,23 @@ mod tests {
         //   0 --10--> 1 --(-5)--> 2
         //
         // Shortest: 0 -> 1 -> 2 = 10 + (-5) = 5
-        let store = LpgStore::new().unwrap();
+        let store = RowGroupStore::new();
         let n0 = store.create_node(&["Node"]);
         let n1 = store.create_node(&["Node"]);
         let n2 = store.create_node(&["Node"]);
 
-        store.create_edge_with_props(n0, n1, "EDGE", [("weight", Value::Float64(10.0))]);
-        store.create_edge_with_props(n1, n2, "EDGE", [("weight", Value::Float64(-5.0))]);
+        store.create_edge_with_props(
+            n0,
+            n1,
+            "EDGE",
+            &[(PropertyKey::new("weight"), Value::Float64(10.0))],
+        );
+        store.create_edge_with_props(
+            n1,
+            n2,
+            "EDGE",
+            &[(PropertyKey::new("weight"), Value::Float64(-5.0))],
+        );
 
         let result = bellman_ford(&store, n0, Some("weight"));
 
@@ -1019,16 +1058,36 @@ mod tests {
         //
         // Direct: 0->1->3 = 8
         // Via negative: 0->2->3 = 3+(-4) = -1  (shorter!)
-        let store = LpgStore::new().unwrap();
+        let store = RowGroupStore::new();
         let n0 = store.create_node(&["Node"]);
         let n1 = store.create_node(&["Node"]);
         let n2 = store.create_node(&["Node"]);
         let n3 = store.create_node(&["Node"]);
 
-        store.create_edge_with_props(n0, n1, "EDGE", [("weight", Value::Float64(6.0))]);
-        store.create_edge_with_props(n1, n3, "EDGE", [("weight", Value::Float64(2.0))]);
-        store.create_edge_with_props(n0, n2, "EDGE", [("weight", Value::Float64(3.0))]);
-        store.create_edge_with_props(n2, n3, "EDGE", [("weight", Value::Float64(-4.0))]);
+        store.create_edge_with_props(
+            n0,
+            n1,
+            "EDGE",
+            &[(PropertyKey::new("weight"), Value::Float64(6.0))],
+        );
+        store.create_edge_with_props(
+            n1,
+            n3,
+            "EDGE",
+            &[(PropertyKey::new("weight"), Value::Float64(2.0))],
+        );
+        store.create_edge_with_props(
+            n0,
+            n2,
+            "EDGE",
+            &[(PropertyKey::new("weight"), Value::Float64(3.0))],
+        );
+        store.create_edge_with_props(
+            n2,
+            n3,
+            "EDGE",
+            &[(PropertyKey::new("weight"), Value::Float64(-4.0))],
+        );
 
         let result = bellman_ford(&store, n0, Some("weight"));
 
@@ -1047,14 +1106,29 @@ mod tests {
         //            +--(-3)--+
         //
         // Cycle: 1 -> 2 -> 1 with total weight 1 + (-3) = -2 (negative!)
-        let store = LpgStore::new().unwrap();
+        let store = RowGroupStore::new();
         let n0 = store.create_node(&["Node"]);
         let n1 = store.create_node(&["Node"]);
         let n2 = store.create_node(&["Node"]);
 
-        store.create_edge_with_props(n0, n1, "EDGE", [("weight", Value::Float64(1.0))]);
-        store.create_edge_with_props(n1, n2, "EDGE", [("weight", Value::Float64(1.0))]);
-        store.create_edge_with_props(n2, n1, "EDGE", [("weight", Value::Float64(-3.0))]);
+        store.create_edge_with_props(
+            n0,
+            n1,
+            "EDGE",
+            &[(PropertyKey::new("weight"), Value::Float64(1.0))],
+        );
+        store.create_edge_with_props(
+            n1,
+            n2,
+            "EDGE",
+            &[(PropertyKey::new("weight"), Value::Float64(1.0))],
+        );
+        store.create_edge_with_props(
+            n2,
+            n1,
+            "EDGE",
+            &[(PropertyKey::new("weight"), Value::Float64(-3.0))],
+        );
 
         let result = bellman_ford(&store, n0, Some("weight"));
 
@@ -1114,14 +1188,14 @@ mod tests {
 
     #[test]
     fn test_dijkstra_nonexistent_source() {
-        let store = LpgStore::new().unwrap();
+        let store = RowGroupStore::new();
         let result = dijkstra(&store, NodeId::new(999), None);
         assert!(result.distances.is_empty());
     }
 
     #[test]
     fn test_unweighted_defaults() {
-        let store = LpgStore::new().unwrap();
+        let store = RowGroupStore::new();
         let n0 = store.create_node(&["Node"]);
         let n1 = store.create_node(&["Node"]);
         let n2 = store.create_node(&["Node"]);
@@ -1136,15 +1210,25 @@ mod tests {
 
     #[test]
     fn test_sssp_with_named_nodes() {
-        let store = LpgStore::new().unwrap();
+        let store = RowGroupStore::new();
         let n0 = store.create_node(&["Node"]);
         let n1 = store.create_node(&["Node"]);
         let n2 = store.create_node(&["Node"]);
         store.set_node_property(n0, "name", Value::from("alix"));
         store.set_node_property(n1, "name", Value::from("gus"));
         store.set_node_property(n2, "name", Value::from("harm"));
-        store.create_edge_with_props(n0, n1, "KNOWS", [("weight", Value::Float64(1.0))]);
-        store.create_edge_with_props(n1, n2, "KNOWS", [("weight", Value::Float64(2.0))]);
+        store.create_edge_with_props(
+            n0,
+            n1,
+            "KNOWS",
+            &[(PropertyKey::new("weight"), Value::Float64(1.0))],
+        );
+        store.create_edge_with_props(
+            n1,
+            n2,
+            "KNOWS",
+            &[(PropertyKey::new("weight"), Value::Float64(2.0))],
+        );
 
         let mut params = Parameters::new();
         params.set_string("source", "alix");
@@ -1157,7 +1241,7 @@ mod tests {
 
     #[test]
     fn test_sssp_with_numeric_source() {
-        let store = LpgStore::new().unwrap();
+        let store = RowGroupStore::new();
         let n0 = store.create_node(&["Node"]);
         let n1 = store.create_node(&["Node"]);
         store.create_edge(n0, n1, "EDGE");
@@ -1171,7 +1255,7 @@ mod tests {
 
     #[test]
     fn test_sssp_nonexistent_name() {
-        let store = LpgStore::new().unwrap();
+        let store = RowGroupStore::new();
         let _n0 = store.create_node(&["Node"]);
 
         let mut params = Parameters::new();

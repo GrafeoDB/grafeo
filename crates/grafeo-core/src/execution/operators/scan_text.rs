@@ -215,15 +215,16 @@ impl Operator for TextScanOperator {
 #[cfg(all(test, feature = "text-index", feature = "lpg"))]
 mod tests {
     use super::*;
-    use crate::graph::lpg::LpgStore;
+    use crate::graph::GraphStoreMut as _;
+    use crate::graph::rowgroup::RowGroupStore;
     use crate::graph::traits::GraphStoreSearch;
     use crate::index::text::{BM25Config, InvertedIndex};
     use grafeo_common::types::Value;
     use parking_lot::RwLock;
     use std::sync::Arc;
 
-    fn make_store() -> Arc<LpgStore> {
-        let store = Arc::new(LpgStore::new().expect("arena allocation"));
+    fn make_store() -> Arc<RowGroupStore> {
+        let store = Arc::new(RowGroupStore::new());
 
         // Create nodes
         let n1 = store.create_node(&["Doc"]);

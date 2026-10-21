@@ -10,7 +10,9 @@ use grafeo_common::utils::hash::{FxHashMap, FxHashSet};
 use grafeo_core::graph::Direction;
 use grafeo_core::graph::GraphStore;
 #[cfg(all(test, feature = "lpg"))]
-use grafeo_core::graph::lpg::LpgStore;
+use grafeo_core::graph::GraphStoreMut as _;
+#[cfg(all(test, feature = "lpg"))]
+use grafeo_core::graph::rowgroup::RowGroupStore;
 
 use super::super::{AlgorithmResult, ParameterDef, ParameterType};
 use super::traits::{ComponentResultBuilder, impl_algorithm, visible_edges_from};
@@ -1085,12 +1087,12 @@ impl_algorithm! {
 mod tests {
     use super::*;
 
-    fn create_two_cliques_graph() -> LpgStore {
+    fn create_two_cliques_graph() -> RowGroupStore {
         // Two cliques connected by one edge
         // Clique 1: 0-1-2-3 (fully connected)
         // Clique 2: 4-5-6-7 (fully connected)
         // Bridge: 3-4
-        let store = LpgStore::new().unwrap();
+        let store = RowGroupStore::new();
 
         let nodes: Vec<NodeId> = (0..8).map(|_| store.create_node(&["Node"])).collect();
 
@@ -1117,8 +1119,8 @@ mod tests {
         store
     }
 
-    fn create_simple_graph() -> LpgStore {
-        let store = LpgStore::new().unwrap();
+    fn create_simple_graph() -> RowGroupStore {
+        let store = RowGroupStore::new();
 
         // Simple chain: 0 -> 1 -> 2
         let n0 = store.create_node(&["Node"]);
@@ -1158,14 +1160,14 @@ mod tests {
 
     #[test]
     fn test_label_propagation_empty() {
-        let store = LpgStore::new().unwrap();
+        let store = RowGroupStore::new();
         let communities = label_propagation(&store, 100);
         assert!(communities.is_empty());
     }
 
     #[test]
     fn test_label_propagation_single_node() {
-        let store = LpgStore::new().unwrap();
+        let store = RowGroupStore::new();
         store.create_node(&["Node"]);
 
         let communities = label_propagation(&store, 100);
@@ -1198,7 +1200,7 @@ mod tests {
 
     #[test]
     fn test_louvain_empty() {
-        let store = LpgStore::new().unwrap();
+        let store = RowGroupStore::new();
         let result = louvain(&store, 1.0);
 
         assert!(result.communities.is_empty());
@@ -1208,7 +1210,7 @@ mod tests {
 
     #[test]
     fn test_louvain_isolated_nodes() {
-        let store = LpgStore::new().unwrap();
+        let store = RowGroupStore::new();
         store.create_node(&["Node"]);
         store.create_node(&["Node"]);
         store.create_node(&["Node"]);
@@ -1249,8 +1251,8 @@ mod tests {
 
     /// The graph from a downstream report: 30 nodes with edges `i -> i + 1`,
     /// `i -> i + 3` and `i -> i * 7 % 30`, where many moves tie.
-    fn create_tied_moves_graph() -> LpgStore {
-        let store = LpgStore::new().unwrap();
+    fn create_tied_moves_graph() -> RowGroupStore {
+        let store = RowGroupStore::new();
         let nodes: Vec<NodeId> = (0..30).map(|_| store.create_node(&["N"])).collect();
         for i in 0..30 {
             for j in [i + 1, i + 3, i * 7 % 30] {
@@ -1264,8 +1266,8 @@ mod tests {
 
     /// Two K4 cliques whose members interleave in id order (even and odd
     /// positions), joined by one bridge between the last two nodes.
-    fn create_interleaved_cliques_graph() -> (LpgStore, Vec<NodeId>) {
-        let store = LpgStore::new().unwrap();
+    fn create_interleaved_cliques_graph() -> (RowGroupStore, Vec<NodeId>) {
+        let store = RowGroupStore::new();
         let nodes: Vec<NodeId> = (0..8).map(|_| store.create_node(&["Node"])).collect();
         for clique in [[0, 2, 4, 6], [1, 3, 5, 7]] {
             for (position, &a) in clique.iter().enumerate() {
@@ -1337,8 +1339,8 @@ mod tests {
     }
 
     /// Builds a store with `n` nodes and one directed edge per pair in `edges`.
-    fn store_from_edges(n: usize, edges: &[(usize, usize)]) -> (LpgStore, Vec<NodeId>) {
-        let store = LpgStore::new().unwrap();
+    fn store_from_edges(n: usize, edges: &[(usize, usize)]) -> (RowGroupStore, Vec<NodeId>) {
+        let store = RowGroupStore::new();
         let nodes: Vec<NodeId> = (0..n).map(|_| store.create_node(&["Node"])).collect();
         for &(u, v) in edges {
             store.create_edge(nodes[u], nodes[v], "EDGE");
@@ -1698,7 +1700,7 @@ mod tests {
 
     #[test]
     fn test_sbp_empty_graph() {
-        let store = LpgStore::new().unwrap();
+        let store = RowGroupStore::new();
         let result = stochastic_block_partition(&store, None, 100);
         assert!(result.partition.is_empty());
         assert_eq!(result.num_blocks, 0);
@@ -1706,7 +1708,7 @@ mod tests {
 
     #[test]
     fn test_sbp_single_node() {
-        let store = LpgStore::new().unwrap();
+        let store = RowGroupStore::new();
         store.create_node(&["Node"]);
         let result = stochastic_block_partition(&store, None, 100);
         assert_eq!(result.partition.len(), 1);
@@ -1801,7 +1803,7 @@ mod tests {
 
     #[test]
     fn test_sbp_isolated_nodes() {
-        let store = LpgStore::new().unwrap();
+        let store = RowGroupStore::new();
         store.create_node(&["Node"]);
         store.create_node(&["Node"]);
         store.create_node(&["Node"]);
@@ -1814,7 +1816,7 @@ mod tests {
 
     #[test]
     fn test_sbp_incremental() {
-        let store = LpgStore::new().unwrap();
+        let store = RowGroupStore::new();
 
         // Phase 1: Two connected nodes.
         let n0 = store.create_node(&["Node"]);

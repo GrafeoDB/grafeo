@@ -1304,13 +1304,13 @@ mod tests {
     use crate::execution::DataChunk;
     use crate::execution::chunk::DataChunkBuilder;
     use crate::graph::GraphStoreMut;
-    use crate::graph::lpg::LpgStore;
+    use crate::graph::rowgroup::RowGroupStore;
     use grafeo_common::types::{EpochId, TransactionId};
 
     // ── Helpers ────────────────────────────────────────────────────
 
     fn create_test_store() -> Arc<dyn GraphStoreMut> {
-        Arc::new(LpgStore::new().unwrap())
+        Arc::new(RowGroupStore::new())
     }
 
     struct MockInput {

@@ -22,7 +22,7 @@ CYPHER = ("cypher",)
 BOTH = ("gql", "cypher")
 # SQL/PGQ, for its own cases (`parity` compares GQL and Cypher only)
 SQL = ("sql",)
-LANGUAGES = frozenset(BOTH)
+LANGUAGES = frozenset(BOTH + SQL)
 
 
 @dataclass(frozen=True)
@@ -278,6 +278,8 @@ WRITE_FIXTURES = {
     "merges": {"CC"},
     "leads": {"CF"},
     "quoted": {"CK"},
+    # CP1 runs after BB and its insert is refused, so BB reads the fixture as built
+    "typed": {"BB", "CP"},
 }
 
 FIXTURES = {

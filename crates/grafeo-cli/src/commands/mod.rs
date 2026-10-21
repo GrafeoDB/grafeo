@@ -142,6 +142,22 @@ mod tests {
                 true,
             ),
         );
+        // `grafeo query` with a statement that does not write.
+        let mut reading = vec![
+            (crate::QueryLanguage::Gql, "MATCH (n) RETURN count(n) AS c"),
+            (
+                crate::QueryLanguage::Gql,
+                "EXPLAIN INSERT (:Person {name: 'Mia'})",
+            ),
+        ];
+        #[cfg(feature = "cypher")]
+        reading.push((
+            crate::QueryLanguage::Cypher,
+            "MATCH (n) RETURN count(n) AS c",
+        ));
+        for (lang, query) in reading {
+            run(&format!("query {query}"), run_query(path, lang, query));
+        }
         for format in ["json", "gexf", "graphml"] {
             run(
                 &format!("data dump --export-format {format}"),
@@ -156,6 +172,78 @@ mod tests {
                 ),
             );
         }
+    }
+
+    /// `grafeo query` of `query` in `lang` on the database at `path`, quietly.
+    fn run_query(
+        path: &std::path::Path,
+        lang: crate::QueryLanguage,
+        query: &str,
+    ) -> anyhow::Result<()> {
+        super::query::run(super::query::QueryRunOptions {
+            path,
+            query: Some(query.to_string()),
+            file: None,
+            stdin: false,
+            params: &[],
+            lang,
+            format: crate::OutputFormat::Json,
+            quiet: true,
+            timing: false,
+            max_width: None,
+        })
+    }
+
+    /// `grafeo query` opens the database read-write for a statement that
+    /// writes, and its changes stay.
+    #[test]
+    fn a_writing_query_writes() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("people.grafeo");
+        let db = grafeo_engine::GrafeoDB::open(&path).unwrap();
+        db.execute("INSERT (:Person {name: 'Alix'})").unwrap();
+        db.close().unwrap();
+        drop(db);
+
+        run_query(
+            &path,
+            crate::QueryLanguage::Gql,
+            "INSERT (:Person {name: 'Gus'})",
+        )
+        .unwrap();
+        run_query(
+            &path,
+            crate::QueryLanguage::Gql,
+            "MATCH (n:Person {name: 'Alix'}) SET n.city = 'Amsterdam'",
+        )
+        .unwrap();
+        let db = grafeo_engine::GrafeoDB::open_read_only(&path).unwrap();
+        let result = db
+            .execute("MATCH (n:Person) RETURN n.name AS name, n.city AS city ORDER BY name")
+            .unwrap();
+        assert_eq!(
+            format!("{:?}", result.rows()),
+            "[[String(\"Alix\"), String(\"Amsterdam\")], [String(\"Gus\"), Null]]"
+        );
+    }
+
+    /// A statement that does not parse fails without touching the files.
+    #[test]
+    fn a_query_that_does_not_parse_leaves_the_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("people.grafeo");
+        let db = grafeo_engine::GrafeoDB::open(&path).unwrap();
+        db.execute("INSERT (:Person {name: 'Alix'})").unwrap();
+        db.close().unwrap();
+        drop(db);
+
+        let before = snapshot(dir.path());
+        let error = run_query(&path, crate::QueryLanguage::Gql, "MATCH (n RETURN n").unwrap_err();
+        assert!(
+            format!("{error:#}").contains("Query execution failed"),
+            "{error:#}"
+        );
+        assert_eq!(snapshot(dir.path()), before);
     }
 
     /// The commands that only read leave a database file byte for byte as it

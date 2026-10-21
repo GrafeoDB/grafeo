@@ -144,6 +144,15 @@ impl AggregateState {
         match state {
             AggregateState::Min(min) if expr.rdf_literals => AggregateState::MinOfRdfLiterals(min),
             AggregateState::Max(max) if expr.rdf_literals => AggregateState::MaxOfRdfLiterals(max),
+            // SPARQL's AVG divides by XPath's rules: the average of integers
+            // and decimals is a decimal (a double operand makes it a double).
+            AggregateState::Avg(..) if expr.rdf_literals => {
+                AggregateState::AvgDecimal(Some(Decimal::from_i64(0)), 0)
+            }
+            AggregateState::AvgDistinct(..) if expr.rdf_literals => AggregateState::Distinct {
+                seen: HashSet::new(),
+                inner: Box::new(AggregateState::AvgDecimal(Some(Decimal::from_i64(0)), 0)),
+            },
             state => state,
         }
     }

@@ -6,6 +6,7 @@ package grafeo
 */
 import "C"
 import (
+	"encoding/json"
 	"math"
 	"runtime"
 	"time"
@@ -161,7 +162,7 @@ func (v *AsOfView) Execute(query string) (*QueryResult, error) {
 // view's epoch.
 func (v *AsOfView) ExecuteParams(query string, params map[string]any) (*QueryResult, error) {
 	if v.handle == nil {
-		return nil, &Error{Message: "the AsOfView is closed: open another with Database.AsOf"}
+		return nil, errViewClosed
 	}
 	cQuery := C.CString(query)
 	defer C.free(unsafe.Pointer(cQuery))
@@ -172,6 +173,58 @@ func (v *AsOfView) ExecuteParams(query string, params map[string]any) (*QueryRes
 	defer freeC(cParams)
 	return viewResult(func() *C.GrafeoResult { return C.grafeo_as_of_execute(v.handle, cQuery, cParams) })
 }
+
+// GetNode returns the node as it was at the view's epoch; an error when it did not exist
+// then, as Database.GetNode.
+func (v *AsOfView) GetNode(id uint64) (*Node, error) {
+	if v.handle == nil {
+		return nil, errViewClosed
+	}
+	var cNode *C.GrafeoNode
+	if err := lockAndCheckStatus(func() C.GrafeoStatus {
+		return C.grafeo_as_of_get_node(v.handle, C.uint64_t(id), &cNode)
+	}); err != nil {
+		return nil, err
+	}
+	return nodeFromC(cNode), nil
+}
+
+// GetEdge returns the edge as it was at the view's epoch; an error when it did not exist
+// then, as Database.GetEdge.
+func (v *AsOfView) GetEdge(id uint64) (*Edge, error) {
+	if v.handle == nil {
+		return nil, errViewClosed
+	}
+	var cEdge *C.GrafeoEdge
+	if err := lockAndCheckStatus(func() C.GrafeoStatus {
+		return C.grafeo_as_of_get_edge(v.handle, C.uint64_t(id), &cEdge)
+	}); err != nil {
+		return nil, err
+	}
+	return edgeFromC(cEdge), nil
+}
+
+// GetNodeProperty returns a node's value of key as it was at the view's epoch: nil when the
+// node or the property did not exist then.
+func (v *AsOfView) GetNodeProperty(id uint64, key string) (any, error) {
+	if v.handle == nil {
+		return nil, errViewClosed
+	}
+	cKey := C.CString(key)
+	defer C.free(unsafe.Pointer(cKey))
+	ptr := C.grafeo_as_of_get_node_property(v.handle, C.uint64_t(id), cKey)
+	if ptr == nil {
+		return nil, nil
+	}
+	defer C.grafeo_free_string(ptr)
+	var value any
+	if err := json.Unmarshal([]byte(C.GoString(ptr)), &value); err != nil {
+		return nil, err
+	}
+	return value, nil
+}
+
+var errViewClosed = &Error{Message: "the AsOfView is closed: open another with Database.AsOf"}
 
 // optionalJSON is params as a C JSON string, or nil for nil params.
 func optionalJSON(params map[string]any) (*C.char, error) {

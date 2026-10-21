@@ -1630,6 +1630,7 @@ dependencies = [
  "smallvec",
  "thiserror",
  "tracing",
+ "web-time",
  "zeroize",
 ]
 

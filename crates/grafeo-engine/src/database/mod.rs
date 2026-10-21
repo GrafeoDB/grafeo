@@ -1267,7 +1267,7 @@ impl GrafeoDB {
     /// error after `close()` of a persistent database. No version is dropped
     /// when the checkpoint fails.
     pub fn compact(&mut self) -> Result<crate::admin::CompactReport> {
-        let started = std::time::Instant::now();
+        let started = grafeo_common::clock::Instant::now();
         #[cfg(feature = "lpg")]
         let checkpointed = self.checkpoint_now()?;
         // A build without the LPG model has no checkpoint of its own to write.
@@ -3607,8 +3607,6 @@ pub struct QueryResult {
     pub(crate) rows: Vec<Vec<grafeo_common::types::Value>>,
     /// The time of the whole call, in milliseconds: parsing, planning,
     /// execution and, for a statement outside a transaction, its commit.
-    /// `None` on wasm32, where the engine has no clock (the WASM binding
-    /// times its calls itself).
     pub execution_time_ms: Option<f64>,
     /// The rows the statement read from storage, before any filter: the
     /// nodes its scans, label scans, index lookups and range scans read, the

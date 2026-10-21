@@ -250,7 +250,7 @@ Reads of the database as it was at an earlier epoch or time. `GrafeoDB.Memory(Hi
 |--------|---------|-------------|
 | `CurrentEpoch` | `ulong` | The epoch of the last commit |
 | `EpochAsOf(TimePoint point)` | `ulong` | The epoch a point reads at |
-| `AsOf(TimePoint point)` | `AsOfView` | A read-only view at a point: `Epoch`, `Execute`, `ExecuteWithParams`; it keeps the history of its epoch until disposed |
+| `AsOf(TimePoint point)` | `AsOfView` | A read-only view at a point: `Epoch`, `Execute`, `ExecuteWithParams`, `GetNode`, `GetEdge` and `GetNodeProperty` (null when the entity or property did not exist then); it keeps the history of its epoch until disposed |
 | `ExecuteAsOf(string query, TimePoint point, Dictionary<string, object?>? parameters = null)` | `QueryResult` | One query at a point |
 
 ```csharp

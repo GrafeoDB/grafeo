@@ -554,7 +554,9 @@ now. An unknown kind or a negative epoch or duration fails, as does a point befo
 ("not retained"). `grafeo_open_with_history` sets how much history it keeps: `GRAFEO_HISTORY_OFF`,
 `GRAFEO_HISTORY_FOREVER` or `GRAFEO_HISTORY_DURATION` with `duration_ms`; a NULL path opens an in-memory database,
 and a database file stores the setting. A view keeps the history it reads until `grafeo_free_as_of`; a query that
-writes through it fails. `params_json` may be NULL.
+writes through it fails. `params_json` may be NULL. `grafeo_as_of_get_node` and `grafeo_as_of_get_edge` give a node
+or edge as it was (`GRAFEO_ERROR_DATABASE` when it did not exist then), and `grafeo_as_of_get_node_property` a value as
+JSON (NULL when there was none; free with `grafeo_free_string`).
 
 ```c
 GrafeoDatabase* grafeo_open_with_history(const char* path, int32_t history_kind, uint64_t duration_ms);
@@ -564,6 +566,9 @@ GrafeoResult*   grafeo_execute_as_of(GrafeoDatabase* db, const char* query, cons
 GrafeoAsOf*     grafeo_as_of(GrafeoDatabase* db, int32_t point_kind, int64_t point_value);
 uint64_t        grafeo_as_of_epoch(const GrafeoAsOf* view);
 GrafeoResult*   grafeo_as_of_execute(const GrafeoAsOf* view, const char* query, const char* params_json);
+GrafeoStatus    grafeo_as_of_get_node(const GrafeoAsOf* view, uint64_t id, GrafeoNode** out);
+GrafeoStatus    grafeo_as_of_get_edge(const GrafeoAsOf* view, uint64_t id, GrafeoEdge** out);
+char*           grafeo_as_of_get_node_property(const GrafeoAsOf* view, uint64_t id, const char* key);
 void            grafeo_free_as_of(GrafeoAsOf* view);
 ```
 

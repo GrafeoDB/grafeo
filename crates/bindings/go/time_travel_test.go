@@ -3,6 +3,7 @@ package grafeo
 import (
 	"fmt"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -60,6 +61,50 @@ func TestAsOfAnEpochReadsTheStateThen(t *testing.T) {
 	}
 	if _, err := view.Execute("INSERT (:Person {name: 'Mia'})"); err == nil {
 		t.Error("a write through the view succeeded")
+	}
+}
+
+func TestTheViewReadsNodesEdgesAndPropertiesAsTheyWere(t *testing.T) {
+	db := mustOpenWithHistory(t)
+	ids, err := db.Execute("MATCH (a:Person {name: 'Alix'}) INSERT (a)-[k:KNOWS {since: 2020}]->(:Person {name: 'Gus'}) RETURN id(a) AS a, id(k) AS k")
+	if err != nil {
+		t.Fatal(err)
+	}
+	alix, _ := strconv.ParseUint(fmt.Sprint(ids.Rows[0]["a"]), 10, 64)
+	knows, _ := strconv.ParseUint(fmt.Sprint(ids.Rows[0]["k"]), 10, 64)
+	then := AtEpoch(db.CurrentEpoch())
+	for _, query := range []string{"MATCH (p:Person {name: 'Alix'}) SET p.name = 'Alix B.'", "MATCH ()-[k:KNOWS]->() DELETE k"} {
+		if _, err := db.Execute(query); err != nil {
+			t.Fatal(err)
+		}
+	}
+	view, err := db.AsOf(then)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer view.Close()
+	if node, err := view.GetNode(alix); err != nil || node.Properties["name"] != "Alix" {
+		t.Errorf("GetNode: %v %v", node, err)
+	}
+	if name, err := view.GetNodeProperty(alix, "name"); err != nil || name != "Alix" {
+		t.Errorf("GetNodeProperty: %v %v", name, err)
+	}
+	if city, err := view.GetNodeProperty(alix, "city"); err != nil || city != nil {
+		t.Errorf("a missing property: %v %v", city, err)
+	}
+	if _, err := view.GetNode(alix + 1000); err == nil {
+		t.Error("a node that did not exist was found")
+	}
+	if edge, err := view.GetEdge(knows); err != nil || edge.Properties["since"] != float64(2020) {
+		t.Errorf("GetEdge: %v %v", edge, err)
+	}
+	now, err := db.AsOf(Ago(0))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer now.Close()
+	if _, err := now.GetEdge(knows); err == nil {
+		t.Error("a deleted edge was found now")
 	}
 }
 

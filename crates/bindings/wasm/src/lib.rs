@@ -20,6 +20,7 @@
 #[cfg(feature = "direct-api")]
 mod graph_handle;
 mod signed_snapshot;
+mod time_travel;
 mod types;
 mod utils;
 #[cfg(feature = "direct-api")]
@@ -27,6 +28,7 @@ mod writes;
 
 #[cfg(feature = "direct-api")]
 pub use graph_handle::GraphHandle;
+pub use time_travel::AsOfView;
 
 use std::cell::{Cell, Ref, RefCell};
 use std::collections::HashMap;
@@ -76,17 +78,46 @@ pub struct Database {
     closed: Rc<Cell<bool>>,
 }
 
-#[wasm_bindgen]
 impl Database {
-    /// Creates a new in-memory database.
+    /// Creates a new in-memory database, as `new Database()` does.
     ///
     /// # Errors
     ///
     /// Returns `JsError` if the database fails to initialise.
-    #[wasm_bindgen(constructor)]
     pub fn new() -> Result<Database, JsValue> {
+        Self::create(None)
+    }
+}
+
+#[wasm_bindgen]
+impl Database {
+    /// Creates a new in-memory database. `options.historyRetention` sets
+    /// how much history it keeps for time-travel reads (`asOf`): `'off'`
+    /// (the default), `'forever'` or a number of milliseconds.
+    ///
+    /// ```js
+    /// const db = new Database({ historyRetention: 60 * 60 * 1000 });
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// Returns `JsError` for another `historyRetention`, or if the database
+    /// fails to initialise.
+    #[wasm_bindgen(constructor)]
+    pub fn create(options: Option<js_sys::Object>) -> Result<Database, JsValue> {
         utils::set_panic_hook();
-        Ok(Database::from_engine(GrafeoDB::new_in_memory()))
+        let retention = match &options {
+            Some(options) => time_travel::history_retention(options)?,
+            None => None,
+        };
+        let db = match retention {
+            Some(retention) => GrafeoDB::with_config(
+                grafeo_engine::Config::in_memory().with_history_retention(retention),
+            )
+            .map_err(database_error)?,
+            None => GrafeoDB::new_in_memory(),
+        };
+        Ok(Database::from_engine(db))
     }
 
     /// Begins a new transaction.
@@ -192,15 +223,13 @@ impl Database {
     /// Runs a GQL query, routing through the active transaction session when
     /// one exists so uncommitted writes remain visible to the caller.
     fn run_query(&self, query: &str) -> Result<grafeo_engine::database::QueryResult, JsValue> {
-        timed(|| {
-            let tx_slot = self.tx.borrow();
-            if let Some(session) = tx_slot.as_ref() {
-                session.execute(query).map_err(database_error)
-            } else {
-                drop(tx_slot);
-                self.db().execute(query).map_err(database_error)
-            }
-        })
+        let tx_slot = self.tx.borrow();
+        if let Some(session) = tx_slot.as_ref() {
+            session.execute(query).map_err(database_error)
+        } else {
+            drop(tx_slot);
+            self.db().execute(query).map_err(database_error)
+        }
     }
 
     /// Runs a query with an explicit language, routing through the active
@@ -211,19 +240,17 @@ impl Database {
         language: &str,
         params: Option<HashMap<String, Value>>,
     ) -> Result<grafeo_engine::database::QueryResult, JsValue> {
-        timed(|| {
-            let tx_slot = self.tx.borrow();
-            if let Some(session) = tx_slot.as_ref() {
-                session
-                    .execute_language(query, language, params)
-                    .map_err(database_error)
-            } else {
-                drop(tx_slot);
-                self.db()
-                    .execute_language(query, language, params)
-                    .map_err(database_error)
-            }
-        })
+        let tx_slot = self.tx.borrow();
+        if let Some(session) = tx_slot.as_ref() {
+            session
+                .execute_language(query, language, params)
+                .map_err(database_error)
+        } else {
+            drop(tx_slot);
+            self.db()
+                .execute_language(query, language, params)
+                .map_err(database_error)
+        }
     }
 
     /// Executes a GQL query and returns results as an array of objects.
@@ -1596,23 +1623,6 @@ impl Database {
             serde_wasm_bindgen::from_value(js_val).map_err(|e| js_error(&e.to_string()))?;
         json_params_to_map(Some(&json_val)).map_err(|e| js_error(&e))
     }
-}
-
-/// Runs a query and gives its result the time the call took, when the engine
-/// has none: on wasm32 the engine has no clock, so the browser's (`Date.now()`,
-/// whole milliseconds) measures the whole call here.
-pub(crate) fn timed(
-    run: impl FnOnce() -> Result<grafeo_engine::database::QueryResult, JsValue>,
-) -> Result<grafeo_engine::database::QueryResult, JsValue> {
-    #[cfg(target_arch = "wasm32")]
-    let start = js_sys::Date::now();
-    #[allow(unused_mut, reason = "only wasm32 builds set the time")]
-    let mut result = run()?;
-    #[cfg(target_arch = "wasm32")]
-    if result.execution_time_ms.is_none() {
-        result.execution_time_ms = Some(js_sys::Date::now() - start);
-    }
-    Ok(result)
 }
 
 /// A `PROFILE` operator as `{operator, detail, rows, calls, selfTimeMs, timeMs, children}`.

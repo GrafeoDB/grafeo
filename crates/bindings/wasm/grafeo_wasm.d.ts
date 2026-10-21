@@ -34,6 +34,33 @@ export interface UpsertSummary {
   skippedRows: number[];
 }
 
+/** The options of `new Database(options)`. */
+export interface DatabaseOptions {
+  /** `'off'` (the default), `'forever'` or how far back the history reaches, in milliseconds. */
+  historyRetention?: 'off' | 'forever' | number;
+}
+
+/**
+ * A point in time: a `bigint` is an epoch, a `Date` a time, `{ ago }` that many milliseconds
+ * before now. A plain `number` throws a `TypeError`: it could be either an epoch or a time.
+ */
+export type TimePoint = bigint | Date | { ago: number };
+
+/**
+ * A read-only view of the database as it was at an earlier epoch, from `db.asOf(point)`. A query
+ * that writes throws; `close()` releases the history it keeps, and later calls throw.
+ */
+export class AsOfView {
+  private constructor();
+  /** The epoch the view reads at. */
+  readonly epoch: bigint;
+  execute(query: string): Record<string, unknown>[];
+  executeWithParams(query: string, params: Record<string, unknown>): Record<string, unknown>[];
+  executeRaw(query: string): RawResult;
+  close(): void;
+  free(): void;
+}
+
 /**
  * A handle on one named graph, from `db.graph(name)`. Each call runs on its own, so a call
  * throws while the database has a transaction open, once the graph is dropped, and after close.
@@ -73,8 +100,26 @@ export class GraphHandle {
  * the higher-level `@grafeo-db/web` package.
  */
 export class Database {
-  /** Creates a new in-memory database. */
-  constructor();
+  /**
+   * Creates a new in-memory database. `historyRetention` sets how much history it keeps for
+   * time-travel reads (`asOf`): `'off'` (the default), `'forever'` or a number of milliseconds.
+   */
+  constructor(options?: DatabaseOptions | null);
+
+  /** The epoch of the last commit. */
+  currentEpoch(): bigint;
+
+  /**
+   * The epoch a point in time reads at: the epoch itself (the current one for a later one), or
+   * the last commit at or before a time. Throws for a point before the history the database keeps.
+   */
+  epochAsOf(point: TimePoint): bigint;
+
+  /** A read-only view of the database at a point in time; it keeps its history until `close()`. */
+  asOf(point: TimePoint): AsOfView;
+
+  /** Runs one GQL query at a point in time; rows as objects, as `execute`. */
+  executeAsOf(query: string, point: TimePoint, params?: Record<string, unknown> | null): Record<string, unknown>[];
 
   /**
    * Executes a GQL query and returns results as an array of objects.

@@ -3,12 +3,7 @@
 //! This module consolidates all RDF functionality from the session layer.
 //! The entire module is gated behind `#[cfg(feature = "triple-store")]` in the parent.
 
-use std::sync::Arc;
-#[cfg(feature = "lpg")]
-use std::sync::atomic::AtomicUsize;
-#[cfg(not(target_arch = "wasm32"))]
-use std::time::Instant;
-
+use grafeo_common::clock::Instant;
 use grafeo_common::types::Value;
 use grafeo_common::utils::error::Result;
 #[cfg(feature = "lpg")]
@@ -17,6 +12,9 @@ use grafeo_core::graph::rdf::RdfStore;
 use grafeo_core::graph::rowgroup::RowGroupStore;
 #[cfg(feature = "lpg")]
 use grafeo_core::graph::{GraphStoreMut, GraphStoreSearch};
+use std::sync::Arc;
+#[cfg(feature = "lpg")]
+use std::sync::atomic::AtomicUsize;
 
 use crate::database::QueryResult;
 
@@ -28,7 +26,7 @@ impl Session {
     /// Plans native RDF paths with the session's pending writes and resource limits.
     fn make_rdf_planner(
         &self,
-        deadline: Option<std::time::Instant>,
+        deadline: Option<Instant>,
     ) -> crate::query::planner::rdf::RdfPlanner {
         let budget = self.plan_options.path_search_budget;
         #[cfg(feature = "spill")]
@@ -243,7 +241,6 @@ impl Session {
         optimized_plan: &crate::query::plan::LogicalPlan,
         language: &'static str,
     ) -> Result<QueryResult> {
-        #[cfg(not(target_arch = "wasm32"))]
         let start_time = Instant::now();
 
         // A write needs a writable session: a writing role, and no read-only
@@ -275,10 +272,7 @@ impl Session {
                     .make_executor(physical_plan.columns.clone())
                     .with_deadline(deadline);
                 let _result = executor.execute(physical_plan.operator.as_mut())?;
-                #[cfg(not(target_arch = "wasm32"))]
                 let total_time_ms = start_time.elapsed().as_secs_f64() * 1000.0;
-                #[cfg(target_arch = "wasm32")]
-                let total_time_ms = 0.0;
                 let profile_tree = crate::query::profile::build_profile_tree(
                     &optimized_plan.root,
                     &mut entries.into_iter(),
@@ -298,10 +292,7 @@ impl Session {
 
         #[cfg(feature = "metrics")]
         {
-            #[cfg(not(target_arch = "wasm32"))]
-            let elapsed_ms = Some(start_time.elapsed().as_secs_f64() * 1000.0);
-            #[cfg(target_arch = "wasm32")]
-            let elapsed_ms = None;
+            let elapsed_ms = start_time.elapsed().as_secs_f64() * 1000.0;
             self.record_query_metrics(language, elapsed_ms, &result);
         }
         #[cfg(not(feature = "metrics"))]

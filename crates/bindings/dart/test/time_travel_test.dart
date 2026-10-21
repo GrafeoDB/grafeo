@@ -34,6 +34,29 @@ void main() {
         throwsA(isA<GrafeoException>()));
   });
 
+  test('a view reads nodes, edges and properties as they were', () {
+    final ids = db.execute("MATCH (a:Person {name: 'Alix'}) "
+        "INSERT (a)-[k:KNOWS {since: 2020}]->(:Person {name: 'Gus'}) "
+        'RETURN id(a) AS a, id(k) AS k');
+    final alix = ids.rows[0]['a'] as int;
+    final knows = ids.rows[0]['k'] as int;
+    final then = TimePoint.epoch(db.currentEpoch);
+    db.execute("MATCH (p:Person {name: 'Alix'}) SET p.name = 'Alix B.'");
+    db.execute('MATCH ()-[k:KNOWS]->() DELETE k');
+
+    final view = db.asOf(then);
+    addTearDown(view.close);
+    expect(view.getNode(alix)!.properties['name'], equals('Alix'));
+    expect(view.getNodeProperty(alix, 'name'), equals('Alix'));
+    expect(view.getNodeProperty(alix, 'city'), isNull);
+    expect(view.getNode(alix + 1000), isNull);
+    expect(view.getEdge(knows)!.properties['since'], equals(2020));
+    final now = db.asOf(TimePoint.ago(Duration.zero));
+    addTearDown(now.close);
+    expect(now.getEdge(knows), isNull);
+    expect(now.getNodeProperty(alix, 'name'), equals('Alix B.'));
+  });
+
   test('executeAsOf and a view take params', () {
     final then = TimePoint.epoch(db.currentEpoch);
     db.execute("INSERT (:Person {name: 'Gus'})");

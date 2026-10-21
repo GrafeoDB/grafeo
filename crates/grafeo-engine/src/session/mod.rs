@@ -17,8 +17,9 @@ use std::sync::Arc;
 use std::sync::atomic::AtomicUsize;
 #[cfg(feature = "lpg")]
 use std::sync::atomic::Ordering;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
+use grafeo_common::clock::Instant;
 #[cfg(feature = "lpg")]
 use grafeo_common::grafeo_debug_span;
 use grafeo_common::grafeo_info_span;
@@ -3033,8 +3034,7 @@ impl Session {
             query_len = query.len(),
         );
 
-        #[cfg(not(target_arch = "wasm32"))]
-        let start_time = std::time::Instant::now();
+        let start_time = Instant::now();
 
         // Only walk the operator tree when it matters: non-admin identities
         // need permission checks, read-only transactions need mutation
@@ -3167,15 +3167,7 @@ impl Session {
                     .with_read_counter(planner.read_counter());
                 let _result = executor.execute(physical_plan.operator.as_mut())?;
 
-                let total_time_ms;
-                #[cfg(not(target_arch = "wasm32"))]
-                {
-                    total_time_ms = start_time.elapsed().as_secs_f64() * 1000.0;
-                }
-                #[cfg(target_arch = "wasm32")]
-                {
-                    total_time_ms = 0.0;
-                }
+                let total_time_ms = start_time.elapsed().as_secs_f64() * 1000.0;
 
                 let profile_tree = crate::query::profile::build_profile_tree(
                     &optimized_plan.root,
@@ -3237,9 +3229,7 @@ impl Session {
                 executor.execute_pipeline(source, push_ops)?
             };
 
-            // Add execution metrics (the executor set `rows_scanned`). On
-            // wasm32 the engine has no clock, and the binding times the call.
-            #[cfg(not(target_arch = "wasm32"))]
+            // Add execution metrics (the executor set `rows_scanned`).
             let result = QueryResult {
                 execution_time_ms: Some(start_time.elapsed().as_secs_f64() * 1000.0),
                 ..result
@@ -3251,10 +3241,7 @@ impl Session {
         // Record metrics for this query execution.
         #[cfg(feature = "metrics")]
         {
-            #[cfg(not(target_arch = "wasm32"))]
-            let elapsed_ms = Some(start_time.elapsed().as_secs_f64() * 1000.0);
-            #[cfg(target_arch = "wasm32")]
-            let elapsed_ms = None;
+            let elapsed_ms = start_time.elapsed().as_secs_f64() * 1000.0;
             self.record_query_metrics("gql", elapsed_ms, &result);
         }
 
@@ -3590,8 +3577,7 @@ impl Session {
             translators::cypher,
         };
 
-        #[cfg(not(target_arch = "wasm32"))]
-        let start_time = std::time::Instant::now();
+        let start_time = Instant::now();
 
         // A statement without parameters whose optimized plan is cached
         // skips the parse and translation (see execute_gql).
@@ -3709,15 +3695,7 @@ impl Session {
                     .with_read_counter(planner.read_counter());
                 let _result = executor.execute(physical_plan.operator.as_mut())?;
 
-                let total_time_ms;
-                #[cfg(not(target_arch = "wasm32"))]
-                {
-                    total_time_ms = start_time.elapsed().as_secs_f64() * 1000.0;
-                }
-                #[cfg(target_arch = "wasm32")]
-                {
-                    total_time_ms = 0.0;
-                }
+                let total_time_ms = start_time.elapsed().as_secs_f64() * 1000.0;
 
                 let profile_tree = crate::query::profile::build_profile_tree(
                     &optimized_plan.root,
@@ -3751,10 +3729,7 @@ impl Session {
 
         #[cfg(feature = "metrics")]
         {
-            #[cfg(not(target_arch = "wasm32"))]
-            let elapsed_ms = Some(start_time.elapsed().as_secs_f64() * 1000.0);
-            #[cfg(target_arch = "wasm32")]
-            let elapsed_ms = None;
+            let elapsed_ms = start_time.elapsed().as_secs_f64() * 1000.0;
             self.record_query_metrics("cypher", elapsed_ms, &result);
         }
 
@@ -3797,7 +3772,7 @@ impl Session {
             translators::gremlin,
         };
 
-        #[cfg(all(feature = "metrics", not(target_arch = "wasm32")))]
+        #[cfg(feature = "metrics")]
         let start_time = Instant::now();
 
         // Parse and translate the query to a logical plan
@@ -3839,10 +3814,7 @@ impl Session {
 
         #[cfg(feature = "metrics")]
         {
-            #[cfg(not(target_arch = "wasm32"))]
-            let elapsed_ms = Some(start_time.elapsed().as_secs_f64() * 1000.0);
-            #[cfg(target_arch = "wasm32")]
-            let elapsed_ms = None;
+            let elapsed_ms = start_time.elapsed().as_secs_f64() * 1000.0;
             self.record_query_metrics("gremlin", elapsed_ms, &result);
         }
 
@@ -3875,7 +3847,7 @@ impl Session {
             translators::gremlin,
         };
 
-        #[cfg(all(feature = "metrics", not(target_arch = "wasm32")))]
+        #[cfg(feature = "metrics")]
         let start_time = Instant::now();
 
         // Parse and translate the query to a logical plan
@@ -3912,10 +3884,7 @@ impl Session {
 
         #[cfg(feature = "metrics")]
         {
-            #[cfg(not(target_arch = "wasm32"))]
-            let elapsed_ms = Some(start_time.elapsed().as_secs_f64() * 1000.0);
-            #[cfg(target_arch = "wasm32")]
-            let elapsed_ms = None;
+            let elapsed_ms = start_time.elapsed().as_secs_f64() * 1000.0;
             self.record_query_metrics("gremlin", elapsed_ms, &result);
         }
 
@@ -3958,7 +3927,7 @@ impl Session {
             translators::graphql,
         };
 
-        #[cfg(all(feature = "metrics", not(target_arch = "wasm32")))]
+        #[cfg(feature = "metrics")]
         let start_time = Instant::now();
 
         let mut logical_plan = graphql::translate(query)?;
@@ -3993,10 +3962,7 @@ impl Session {
 
         #[cfg(feature = "metrics")]
         {
-            #[cfg(not(target_arch = "wasm32"))]
-            let elapsed_ms = Some(start_time.elapsed().as_secs_f64() * 1000.0);
-            #[cfg(target_arch = "wasm32")]
-            let elapsed_ms = None;
+            let elapsed_ms = start_time.elapsed().as_secs_f64() * 1000.0;
             self.record_query_metrics("graphql", elapsed_ms, &result);
         }
 
@@ -4029,7 +3995,7 @@ impl Session {
             translators::graphql,
         };
 
-        #[cfg(all(feature = "metrics", not(target_arch = "wasm32")))]
+        #[cfg(feature = "metrics")]
         let start_time = Instant::now();
 
         // Parse and translate the query to a logical plan
@@ -4072,10 +4038,7 @@ impl Session {
 
         #[cfg(feature = "metrics")]
         {
-            #[cfg(not(target_arch = "wasm32"))]
-            let elapsed_ms = Some(start_time.elapsed().as_secs_f64() * 1000.0);
-            #[cfg(target_arch = "wasm32")]
-            let elapsed_ms = None;
+            let elapsed_ms = start_time.elapsed().as_secs_f64() * 1000.0;
             self.record_query_metrics("graphql", elapsed_ms, &result);
         }
 
@@ -4124,7 +4087,7 @@ impl Session {
             processor::QueryLanguage, translators::sql_pgq,
         };
 
-        #[cfg(all(feature = "metrics", not(target_arch = "wasm32")))]
+        #[cfg(feature = "metrics")]
         let start_time = Instant::now();
 
         // A statement without parameters whose optimized plan is cached
@@ -4216,10 +4179,7 @@ impl Session {
 
         #[cfg(feature = "metrics")]
         {
-            #[cfg(not(target_arch = "wasm32"))]
-            let elapsed_ms = Some(start_time.elapsed().as_secs_f64() * 1000.0);
-            #[cfg(target_arch = "wasm32")]
-            let elapsed_ms = None;
+            let elapsed_ms = start_time.elapsed().as_secs_f64() * 1000.0;
             self.record_query_metrics("sql", elapsed_ms, &result);
         }
 
@@ -4413,10 +4373,7 @@ impl Session {
         #[cfg(feature = "metrics")]
         {
             crate::metrics::record_metric!(self.metrics, tx_active, inc);
-            #[cfg(not(target_arch = "wasm32"))]
-            {
-                *self.tx_start_time.lock() = Some(Instant::now());
-            }
+            *self.tx_start_time.lock() = Some(Instant::now());
         }
 
         Ok(())
@@ -4487,7 +4444,6 @@ impl Session {
                 {
                     crate::metrics::record_metric!(self.metrics, tx_active, dec);
                     crate::metrics::record_metric!(self.metrics, tx_conflicts, inc);
-                    #[cfg(not(target_arch = "wasm32"))]
                     if let Some(start) = self.tx_start_time.lock().take() {
                         let duration_ms = start.elapsed().as_secs_f64() * 1000.0;
                         crate::metrics::record_metric!(
@@ -4615,8 +4571,8 @@ impl Session {
         let after =
             crate::database::collect::AfterWrite::next(&self.commit_counter, self.gc_interval);
         if after.collect {
-            #[cfg(all(feature = "metrics", not(target_arch = "wasm32")))]
-            let gc_start = std::time::Instant::now();
+            #[cfg(feature = "metrics")]
+            let gc_start = Instant::now();
 
             let root = self.root_store();
             let written_stores: Vec<Arc<RowGroupStore>> = written
@@ -4631,15 +4587,8 @@ impl Session {
             #[cfg(feature = "metrics")]
             if after.periodic {
                 crate::metrics::record_metric!(self.metrics, gc_runs, inc);
-                #[cfg(not(target_arch = "wasm32"))]
-                {
-                    let gc_duration_ms = gc_start.elapsed().as_secs_f64() * 1000.0;
-                    crate::metrics::record_metric!(
-                        self.metrics,
-                        gc_duration,
-                        observe gc_duration_ms
-                    );
-                }
+                let gc_duration_ms = gc_start.elapsed().as_secs_f64() * 1000.0;
+                crate::metrics::record_metric!(self.metrics, gc_duration, observe gc_duration_ms);
             }
         }
 
@@ -4647,7 +4596,6 @@ impl Session {
         {
             crate::metrics::record_metric!(self.metrics, tx_active, dec);
             crate::metrics::record_metric!(self.metrics, tx_committed, inc);
-            #[cfg(not(target_arch = "wasm32"))]
             if let Some(start) = self.tx_start_time.lock().take() {
                 let duration_ms = start.elapsed().as_secs_f64() * 1000.0;
                 crate::metrics::record_metric!(self.metrics, tx_duration, observe duration_ms);
@@ -4716,7 +4664,6 @@ impl Session {
         if result.is_ok() {
             crate::metrics::record_metric!(self.metrics, tx_active, dec);
             crate::metrics::record_metric!(self.metrics, tx_rolled_back, inc);
-            #[cfg(not(target_arch = "wasm32"))]
             if let Some(start) = self.tx_start_time.lock().take() {
                 let duration_ms = start.elapsed().as_secs_f64() * 1000.0;
                 crate::metrics::record_metric!(self.metrics, tx_duration, observe duration_ms);
@@ -5040,14 +4987,10 @@ impl Session {
 
     /// Runs one statement and gives its result the time of the whole call
     /// (#461): parsing, planning, execution and, for a statement outside a
-    /// transaction, its commit. On wasm32 the engine has no clock, and the
-    /// binding times the call.
+    /// transaction, its commit.
     fn timed(&self, run: impl FnOnce() -> Result<QueryResult>) -> Result<QueryResult> {
-        #[cfg(not(target_arch = "wasm32"))]
         let start = Instant::now();
-        #[allow(unused_mut, reason = "only builds with a clock set the time")]
         let mut result = run();
-        #[cfg(not(target_arch = "wasm32"))]
         if let Ok(result) = &mut result {
             result.execution_time_ms = Some(start.elapsed().as_secs_f64() * 1000.0);
         }
@@ -5406,15 +5349,7 @@ impl Session {
     /// Computes the wall-clock deadline for query execution.
     #[must_use]
     fn query_deadline(&self) -> Option<Instant> {
-        #[cfg(not(target_arch = "wasm32"))]
-        {
-            self.query_timeout.map(|d| Instant::now() + d)
-        }
-        #[cfg(target_arch = "wasm32")]
-        {
-            let _ = &self.query_timeout;
-            None
-        }
+        self.query_timeout.map(|d| Instant::now() + d)
     }
 
     /// Creates an executor with deadline and timeout duration configured.
@@ -5456,13 +5391,12 @@ impl Session {
     /// Records query metrics for any language.
     ///
     /// Called after query execution to update counters, latency histogram,
-    /// and per-language tracking. `elapsed_ms` should be `None` on WASM
-    /// where `Instant` is unavailable.
+    /// and per-language tracking.
     #[cfg(feature = "metrics")]
     fn record_query_metrics(
         &self,
         language: &str,
-        elapsed_ms: Option<f64>,
+        elapsed_ms: f64,
         result: &Result<crate::database::QueryResult>,
     ) {
         use crate::metrics::record_metric;
@@ -5471,9 +5405,7 @@ impl Session {
         if let Some(ref reg) = self.metrics {
             reg.query_count_by_language.increment(language);
         }
-        if let Some(ms) = elapsed_ms {
-            record_metric!(self.metrics, query_latency, observe ms);
-        }
+        record_metric!(self.metrics, query_latency, observe elapsed_ms);
         match result {
             Ok(r) => {
                 let returned = r.rows.len() as u64;

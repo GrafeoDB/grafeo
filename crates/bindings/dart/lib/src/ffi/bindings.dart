@@ -821,6 +821,25 @@ final class GrafeoBindings {
       Pointer<Void> Function(
           Pointer<Void>, Pointer<Utf8>, Pointer<Utf8>)>('grafeo_as_of_execute');
 
+  /// The node as it was at a view's epoch, into the out pointer.
+  late final grafeoAsOfGetNode = library.lookupFunction<
+      Int32 Function(Pointer<Void>, Uint64, Pointer<Pointer<Void>>),
+      int Function(
+          Pointer<Void>, int, Pointer<Pointer<Void>>)>('grafeo_as_of_get_node');
+
+  /// The edge as it was at a view's epoch, into the out pointer.
+  late final grafeoAsOfGetEdge = library.lookupFunction<
+      Int32 Function(Pointer<Void>, Uint64, Pointer<Pointer<Void>>),
+      int Function(
+          Pointer<Void>, int, Pointer<Pointer<Void>>)>('grafeo_as_of_get_edge');
+
+  /// A node's property value at a view's epoch as JSON, null when there was
+  /// none. Free with grafeoFreeString.
+  late final grafeoAsOfGetNodeProperty = library.lookupFunction<
+      Pointer<Utf8> Function(Pointer<Void>, Uint64, Pointer<Utf8>),
+      Pointer<Utf8> Function(Pointer<Void>, int,
+          Pointer<Utf8>)>('grafeo_as_of_get_node_property');
+
   /// Free a view.
   late final grafeoFreeAsOf = library.lookupFunction<
       Void Function(Pointer<Void>),

@@ -32,8 +32,6 @@ use parking_lot::Mutex;
 use std::collections::HashMap;
 use std::hash::Hash;
 use std::sync::atomic::{AtomicU64, Ordering};
-#[cfg(not(target_arch = "wasm32"))]
-use std::time::Instant;
 
 use crate::query::plan::LogicalPlan;
 use crate::query::processor::QueryLanguage;
@@ -101,9 +99,6 @@ struct CacheEntry<T> {
     value: T,
     /// Number of times this entry was accessed.
     access_count: u64,
-    /// Last access time (not available on WASM).
-    #[cfg(not(target_arch = "wasm32"))]
-    last_accessed: Instant,
 }
 
 impl<T: Clone> CacheEntry<T> {
@@ -111,17 +106,11 @@ impl<T: Clone> CacheEntry<T> {
         Self {
             value,
             access_count: 0,
-            #[cfg(not(target_arch = "wasm32"))]
-            last_accessed: Instant::now(),
         }
     }
 
     fn access(&mut self) -> T {
         self.access_count += 1;
-        #[cfg(not(target_arch = "wasm32"))]
-        {
-            self.last_accessed = Instant::now();
-        }
         self.value.clone()
     }
 }

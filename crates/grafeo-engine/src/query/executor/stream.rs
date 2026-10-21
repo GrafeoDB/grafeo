@@ -17,15 +17,12 @@
 //! embedded callers that want first-row latency or bounded memory; use
 //! `Session::execute` when you want a fully materialized result.
 
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::time::Instant;
-
+use grafeo_common::clock::Instant;
 use grafeo_common::types::{LogicalType, Value};
-use grafeo_common::utils::error::Result;
-#[cfg(not(target_arch = "wasm32"))]
-use grafeo_common::utils::error::{Error, QueryError};
+use grafeo_common::utils::error::{Error, QueryError, Result};
 use grafeo_core::execution::DataChunk;
 use grafeo_core::execution::operators::Operator;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use crate::database::QueryResult;
 use crate::transaction::ReadPin;
@@ -382,14 +379,11 @@ impl Iterator for OwnedRowIterator {
 // ---------------------------------------------------------------------------
 
 fn check_deadline(deadline: Option<Instant>) -> Result<()> {
-    #[cfg(not(target_arch = "wasm32"))]
     if let Some(d) = deadline
         && Instant::now() >= d
     {
         return Err(Error::Query(QueryError::timeout()));
     }
-    #[cfg(target_arch = "wasm32")]
-    let _ = deadline;
     Ok(())
 }
 

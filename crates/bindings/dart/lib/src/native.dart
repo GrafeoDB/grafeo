@@ -62,10 +62,20 @@ QueryResult buildResult(GrafeoBindings bindings, Pointer<Void> resultPtr) {
 Node takeNode(
   GrafeoBindings bindings,
   int Function(Pointer<Pointer<Void>> out) call,
-) {
+) =>
+    takeNodeOrNull(bindings, call, missing: false)!;
+
+/// [takeNode], with null for a node that does not exist (a
+/// [GrafeoStatus.database] status) when [missing] is true.
+Node? takeNodeOrNull(
+  GrafeoBindings bindings,
+  int Function(Pointer<Pointer<Void>> out) call, {
+  bool missing = true,
+}) {
   final out = malloc<Pointer<Void>>();
   try {
     final status = call(out);
+    if (missing && status == GrafeoStatus.database.code) return null;
     if (status != GrafeoStatus.ok.code) throwStatus(bindings, status);
     final node = out.value;
     try {
@@ -86,10 +96,20 @@ Node takeNode(
 Edge takeEdge(
   GrafeoBindings bindings,
   int Function(Pointer<Pointer<Void>> out) call,
-) {
+) =>
+    takeEdgeOrNull(bindings, call, missing: false)!;
+
+/// [takeEdge], with null for an edge that does not exist (a
+/// [GrafeoStatus.database] status) when [missing] is true.
+Edge? takeEdgeOrNull(
+  GrafeoBindings bindings,
+  int Function(Pointer<Pointer<Void>> out) call, {
+  bool missing = true,
+}) {
   final out = malloc<Pointer<Void>>();
   try {
     final status = call(out);
+    if (missing && status == GrafeoStatus.database.code) return null;
     if (status != GrafeoStatus.ok.code) throwStatus(bindings, status);
     final edge = out.value;
     try {

@@ -731,7 +731,8 @@ Reads of the database as it was at an earlier epoch or time. The `historyRetenti
 `HistoryRetention.duration(Duration)`; a database file stores the setting. A point is a `TimePoint`:
 `TimePoint.epoch(int)`, `TimePoint.at(DateTime)` (the last commit at or before it; a local and a UTC `DateTime` name
 one instant) or `TimePoint.ago(Duration)`. A point before the history the database keeps throws ("not retained").
-A view keeps the history of its epoch until `close()`.
+A view keeps the history of its epoch until `close()`; besides `execute` it has `getNode`, `getEdge` and
+`getNodeProperty`, which give null when the entity or the property did not exist then.
 
 ```dart
 final db = GrafeoDB.memory(

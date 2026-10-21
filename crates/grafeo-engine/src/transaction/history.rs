@@ -41,11 +41,7 @@ pub(crate) type Clock = Arc<dyn Fn() -> u64 + Send + Sync>;
 
 /// Milliseconds since the Unix epoch, 0 for a clock set before it.
 fn wall_clock() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |since| {
-            u64::try_from(since.as_millis()).unwrap_or(u64::MAX)
-        })
+    grafeo_common::clock::unix_millis()
 }
 
 /// What a checkpoint writes of the history, and a load gives back: the

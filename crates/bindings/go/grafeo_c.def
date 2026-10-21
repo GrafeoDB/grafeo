@@ -10,6 +10,9 @@ grafeo_add_node_label
 grafeo_as_of
 grafeo_as_of_epoch
 grafeo_as_of_execute
+grafeo_as_of_get_edge
+grafeo_as_of_get_node
+grafeo_as_of_get_node_property
 grafeo_backup_full
 grafeo_backup_incremental
 grafeo_batch_create_edges

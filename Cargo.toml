@@ -42,6 +42,8 @@ anyhow = "1.0"
 
 # Concurrency & synchronization
 parking_lot = "0.12"
+# The host's clock on wasm32, where std::time panics (grafeo_common::clock)
+web-time = "1.1.0"
 crossbeam = "0.8"
 rayon = "1"
 

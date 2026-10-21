@@ -143,6 +143,9 @@ List<String> parseStringArray(String json) {
   return decoded.whereType<String>().toList();
 }
 
+/// Decode one parsed JSON value with temporal decoding.
+dynamic decodeValue(Object? decoded) => _decodeValue(decoded);
+
 dynamic _decodeValue(dynamic value) {
   return switch (value) {
     null => null,

@@ -159,7 +159,9 @@ Reads of the database as it was at an earlier epoch or time. `OpenInMemoryWithHi
 `OpenWithHistory(path, history)` set how much history it keeps: `HistoryOff` (the default), `HistoryForever` or
 `HistoryFor(time.Duration)`; a database file stores the setting. A point is a `TimePoint`: `AtEpoch(uint64)`,
 `AtTime(time.Time)` (the last commit at or before it) or `Ago(time.Duration)`. A point before the history the
-database keeps fails ("not retained"). A view keeps the history of its epoch until `Close`.
+database keeps fails ("not retained"). A view keeps the history of its epoch until `Close`; besides `Execute` and
+`ExecuteParams` it has `GetNode`, `GetEdge` (an error when the entity did not exist then) and `GetNodeProperty` (nil
+when there was none).
 
 ```go
 db, err := grafeo.OpenInMemoryWithHistory(grafeo.HistoryFor(7 * 24 * time.Hour))

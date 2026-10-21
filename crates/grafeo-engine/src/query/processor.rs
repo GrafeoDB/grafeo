@@ -348,8 +348,7 @@ impl QueryProcessor {
         language: QueryLanguage,
         params: Option<&QueryParams>,
     ) -> Result<QueryResult> {
-        #[cfg(not(target_arch = "wasm32"))]
-        let start_time = std::time::Instant::now();
+        let start_time = grafeo_common::clock::Instant::now();
 
         // 1. Parse and translate to logical plan
         let mut logical_plan = self.translate_lpg(query, language)?;
@@ -441,9 +440,7 @@ impl QueryProcessor {
             .with_read_counter(planner.read_counter());
         let result = executor.execute(physical_plan.operator.as_mut())?;
 
-        // Add execution metrics (the executor set `rows_scanned`). On wasm32
-        // the engine has no clock, and the binding times the call.
-        #[cfg(not(target_arch = "wasm32"))]
+        // Add execution metrics (the executor set `rows_scanned`).
         let result = QueryResult {
             execution_time_ms: Some(start_time.elapsed().as_secs_f64() * 1000.0),
             ..result
@@ -643,16 +640,10 @@ impl QueryProcessor {
             if optimized_plan.profile {
                 let (mut physical_plan, entries) = planner.plan_profiled(&optimized_plan)?;
 
-                // The clock is not there on wasm32 (`Instant::now` panics):
-                // the time is 0 there, as in a session's PROFILE.
-                #[cfg(not(target_arch = "wasm32"))]
-                let start = std::time::Instant::now();
+                let start = grafeo_common::clock::Instant::now();
                 let executor = Executor::with_columns(physical_plan.columns.clone());
                 let _result = executor.execute(physical_plan.operator.as_mut())?;
-                #[cfg(not(target_arch = "wasm32"))]
                 let elapsed_ms = start.elapsed().as_secs_f64() * 1000.0;
-                #[cfg(target_arch = "wasm32")]
-                let elapsed_ms = 0.0;
 
                 let tree = crate::query::profile::build_profile_tree(
                     &optimized_plan.root,

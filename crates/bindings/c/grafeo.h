@@ -296,7 +296,9 @@ GrafeoStatus  grafeo_graph_upsert_edges(GrafeoGraph* graph, const char* edge_typ
  * (UTC), GRAFEO_POINT_AGO with milliseconds before now. A point before the history the database keeps fails ("not
  * retained"); grafeo_open_with_history sets how much it keeps (GRAFEO_HISTORY_DURATION: duration_ms before now; a
  * NULL path opens an in-memory database; a database file stores the setting). A view keeps the history it reads
- * until grafeo_free_as_of; a query that writes through it is refused. */
+ * until grafeo_free_as_of; a query that writes through it is refused. grafeo_as_of_get_node and _get_edge give
+ * the node or edge as it was (GRAFEO_ERROR_DATABASE when it did not exist then), and _get_node_property a value as
+ * JSON (NULL when there was none; free with grafeo_free_string). */
 #define GRAFEO_POINT_EPOCH 0
 #define GRAFEO_POINT_TIME  1
 #define GRAFEO_POINT_AGO   2
@@ -310,6 +312,9 @@ GrafeoResult*   grafeo_execute_as_of(GrafeoDatabase* db, const char* query, cons
 GrafeoAsOf*     grafeo_as_of(GrafeoDatabase* db, int32_t point_kind, int64_t point_value);
 uint64_t        grafeo_as_of_epoch(const GrafeoAsOf* view);
 GrafeoResult*   grafeo_as_of_execute(const GrafeoAsOf* view, const char* query, const char* params_json);
+GrafeoStatus    grafeo_as_of_get_node(const GrafeoAsOf* view, uint64_t id, GrafeoNode** out);
+GrafeoStatus    grafeo_as_of_get_edge(const GrafeoAsOf* view, uint64_t id, GrafeoEdge** out);
+char*           grafeo_as_of_get_node_property(const GrafeoAsOf* view, uint64_t id, const char* key);
 void            grafeo_free_as_of(GrafeoAsOf* view);
 
 /* ---- Change data capture (requires cdc; JSON arrays of events, NULL on error, free with grafeo_free_string) ----

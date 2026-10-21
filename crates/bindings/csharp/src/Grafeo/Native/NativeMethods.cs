@@ -538,6 +538,16 @@ internal static partial class NativeMethods
     internal static partial nint grafeo_as_of_execute(nint view, string query, string? paramsJson);
 
     [LibraryImport(LibName)]
+    internal static partial int grafeo_as_of_get_node(nint view, ulong id, out nint nodeOut);
+
+    [LibraryImport(LibName)]
+    internal static partial int grafeo_as_of_get_edge(nint view, ulong id, out nint edgeOut);
+
+    /// <summary>A property value as JSON, or null when there was none. Free with grafeo_free_string.</summary>
+    [LibraryImport(LibName, StringMarshalling = StringMarshalling.Utf8)]
+    internal static partial nint grafeo_as_of_get_node_property(nint view, ulong id, string key);
+
+    [LibraryImport(LibName)]
     internal static partial void grafeo_free_as_of(nint view);
 
     // =========================================================================

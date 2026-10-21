@@ -36,6 +36,27 @@ public sealed class TimeTravelTests : IDisposable
     }
 
     [Fact]
+    public void TheViewReadsNodesEdgesAndPropertiesAsTheyWere()
+    {
+        var ids = _db.Execute(
+            "MATCH (a:Person {name: 'Alix'}) INSERT (a)-[k:KNOWS {since: 2020}]->(:Person {name: 'Gus'}) RETURN id(a) AS a, id(k) AS k");
+        var (alix, knows) = ((long)ids.Rows[0]["a"]!, (long)ids.Rows[0]["k"]!);
+        var then = TimePoint.Epoch(_db.CurrentEpoch);
+        _db.Execute("MATCH (p:Person {name: 'Alix'}) SET p.name = 'Alix B.'");
+        _db.Execute("MATCH ()-[k:KNOWS]->() DELETE k");
+
+        using var view = _db.AsOf(then);
+        Assert.Equal("Alix", view.GetNode(alix)!.Properties["name"]);
+        Assert.Equal("Alix", view.GetNodeProperty(alix, "name"));
+        Assert.Null(view.GetNodeProperty(alix, "city"));
+        Assert.Null(view.GetNode(alix + 1000));
+        Assert.Equal(2020L, view.GetEdge(knows)!.Properties["since"]);
+        using var now = _db.AsOf(TimePoint.Ago(TimeSpan.Zero));
+        Assert.Null(now.GetEdge(knows));
+        Assert.Equal("Alix B.", now.GetNodeProperty(alix, "name"));
+    }
+
+    [Fact]
     public void ExecuteAsOfTakesParameters()
     {
         var then = TimePoint.Epoch(_db.CurrentEpoch);

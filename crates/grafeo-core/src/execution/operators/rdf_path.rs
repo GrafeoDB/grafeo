@@ -34,8 +34,9 @@ mod physical {
     use std::collections::VecDeque;
     use std::mem::size_of;
     use std::sync::Arc;
-    use std::time::{Duration, Instant};
+    use std::time::Duration;
 
+    use grafeo_common::clock::Instant;
     use grafeo_common::types::{LogicalType, TransactionId};
     use grafeo_common::utils::hash::FxHashSet;
 

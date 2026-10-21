@@ -19,6 +19,7 @@
 #![deny(unsafe_code)]
 
 pub mod change;
+pub mod clock;
 pub mod collections;
 pub mod fmt;
 pub mod memory;

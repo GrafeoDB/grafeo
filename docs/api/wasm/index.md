@@ -30,7 +30,11 @@ console.log(results); // [{name: "Alix", age: 30}, {name: "Gus", age: 25}]
 
 ```javascript
 const db = new Database();   // in-memory (all WASM databases are in-memory)
+const kept = new Database({ historyRetention: 60 * 60 * 1000 });  // keeps an hour of history
 ```
+
+`historyRetention` is `'off'` (the default), `'forever'` or a number of milliseconds: how much history the
+database keeps for [time-travel reads](#time-travel).
 
 ## Query Methods
 
@@ -52,6 +56,23 @@ db.executeRawWithLanguageAndParams(query, language, params);  // raw result, lan
 
 A raw result's `counters` tell what a write changed: `nodesCreated`, `nodesDeleted`, `edgesCreated`,
 `edgesDeleted`, `propertiesSet`, `labelsAdded` and `labelsRemoved` (all zero for a read).
+
+## Time Travel
+
+A point in time is a `bigint` (an epoch), a `Date` (the last commit at or before it) or `{ ago: milliseconds }`. A
+plain `number` throws a `TypeError`: it could be either an epoch or a time. A point before the history the database
+keeps throws ("not retained").
+
+```javascript
+const then = db.currentEpoch();                           // a bigint
+const view = db.asOf({ ago: 5 * 60 * 1000 });            // read-only, as five minutes ago
+view.execute("MATCH (p:Person) RETURN count(p) AS n");   // also executeWithParams and executeRaw
+view.close();                                             // releases the history it keeps
+db.executeAsOf("MATCH (p:Person) RETURN p.name", then);  // one query, optional params
+db.epochAsOf(new Date("2026-03-01T12:00:00+01:00"));     // the epoch a point reads at
+```
+
+A query that writes through a view throws.
 
 ## Properties
 

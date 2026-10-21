@@ -10,9 +10,10 @@ pub mod stream;
 pub mod user_procedure;
 
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use crate::database::QueryResult;
+use grafeo_common::clock::Instant;
 use grafeo_common::grafeo_debug_span;
 use grafeo_common::types::{LogicalType, Value};
 use grafeo_common::utils::error::{Error, QueryError, Result};
@@ -118,7 +119,6 @@ impl Executor {
 
     /// Checks whether the deadline has been exceeded.
     fn check_deadline(&self) -> Result<()> {
-        #[cfg(not(target_arch = "wasm32"))]
         if let Some(deadline) = self.deadline
             && Instant::now() >= deadline
         {

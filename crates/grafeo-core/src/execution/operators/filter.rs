@@ -3262,8 +3262,8 @@ impl ExpressionPredicate {
                 use std::hash::{Hash, Hasher};
                 let mut hasher = std::collections::hash_map::DefaultHasher::new();
                 row.hash(&mut hasher);
-                std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
+                grafeo_common::clock::SystemTime::now()
+                    .duration_since(grafeo_common::clock::UNIX_EPOCH)
                     .ok()?
                     .as_nanos()
                     .hash(&mut hasher);

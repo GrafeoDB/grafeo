@@ -50,12 +50,7 @@ impl Timestamp {
     /// Returns the current time as a timestamp.
     #[must_use]
     pub fn now() -> Self {
-        let duration = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or(StdDuration::ZERO);
-        // reason: current wall-clock micros since epoch fit i64 for ~292,000 years
-        #[allow(clippy::cast_possible_truncation)]
-        Self::from_micros(duration.as_micros() as i64)
+        Self::from_micros(crate::clock::unix_micros())
     }
 
     /// Returns the timestamp as microseconds since the Unix epoch.

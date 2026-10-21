@@ -43,6 +43,10 @@ zeroize = { workspace = true, optional = true }
 sha2 = { workspace = true, optional = true }
 rand = { workspace = true, optional = true }
 
+# The host's clock on wasm32, where std::time::SystemTime::now() panics
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+web-time.workspace = true
+
 [features]
 default = []
 tiered-storage = []  # Deprecated since 0.6.0: enables nothing (LpgStore, its only user, is gone); removed in 0.7.0

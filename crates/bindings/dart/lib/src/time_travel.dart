@@ -1,7 +1,10 @@
 /// Time travel: reads of the database as it was at an earlier epoch or time.
 library;
 
+import 'dart:convert';
 import 'dart:ffi';
+
+import 'package:ffi/ffi.dart';
 
 import 'error.dart';
 import 'ffi/bindings.dart';
@@ -77,7 +80,8 @@ final class HistoryRetention {
 }
 
 /// A read-only view of the database as it was at an earlier epoch, from
-/// [GrafeoDB.asOf]. Its queries see the committed state of [epoch]; a query
+/// [GrafeoDB.asOf]. Its queries and reads see the committed state of [epoch];
+/// a query
 /// that writes throws. It keeps the history of its epoch until [close]d, with
 /// the [NativeFinalizer] as a safety net.
 class AsOfView implements Finalizable {
@@ -125,5 +129,27 @@ class AsOfView implements Finalizable {
         final resultPtr = _bindings.grafeoAsOfExecute(_open, p[0], p[1]);
         if (resultPtr == nullptr) throwLastError(_bindings);
         return buildResult(_bindings, resultPtr);
+      });
+
+  /// The node [id] as it was at the view's epoch, or null when it did not
+  /// exist then.
+  Node? getNode(int id) => takeNodeOrNull(
+      _bindings, (out) => _bindings.grafeoAsOfGetNode(_open, id, out));
+
+  /// The edge [id] as it was at the view's epoch, or null when it did not
+  /// exist then.
+  Edge? getEdge(int id) => takeEdgeOrNull(
+      _bindings, (out) => _bindings.grafeoAsOfGetEdge(_open, id, out));
+
+  /// Node [id]'s value of [key] as it was at the view's epoch, or null when
+  /// the node or the property did not exist then.
+  dynamic getNodeProperty(int id, String key) => withNativeStrings([key], (p) {
+        final json = _bindings.grafeoAsOfGetNodeProperty(_open, id, p[0]);
+        if (json == nullptr) return null;
+        try {
+          return decodeValue(jsonDecode(json.toDartString()));
+        } finally {
+          _bindings.grafeoFreeString(json.cast());
+        }
       });
 }

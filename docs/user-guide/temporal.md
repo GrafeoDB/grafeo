@@ -227,7 +227,7 @@ GQL `ZONED DATETIME` value, or a duration ago. The names follow SQL:2011's `FOR 
     ```
 
 In Python a point is an `int` (an epoch), a timezone-aware `datetime` (a time) or a `timedelta` (that long ago); a
-naive `datetime` is a `ValueError`, as it names no instant. In Node.js it is a `bigint` (an epoch), a `Date` or
+naive `datetime` is a `ValueError`, as it names no instant. In Node.js and WASM it is a `bigint` (an epoch), a `Date` or
 `{ ago: milliseconds }`; a plain `number` is a `TypeError`, since it could be either an epoch or a time. The C API
 takes a point as a kind and a value (`GRAFEO_POINT_EPOCH`, `GRAFEO_POINT_TIME`, `GRAFEO_POINT_AGO`), and C#, Go and
 Dart wrap it in a `TimePoint` type.

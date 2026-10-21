@@ -1,6 +1,7 @@
 // Time travel: reads of the database as it was at an earlier epoch or time.
 
 using System.Runtime.InteropServices;
+using System.Text.Json;
 
 using Grafeo.Native;
 
@@ -78,7 +79,7 @@ public readonly record struct HistoryRetention
 
 /// <summary>
 /// A read-only view of the database as it was at an earlier epoch, from <see cref="GrafeoDB.AsOf"/>.
-/// Its queries see the committed state of <see cref="Epoch"/>; a query that writes throws. It keeps
+/// Its queries and reads see the committed state of <see cref="Epoch"/>; a query that writes throws. It keeps
 /// the history of its epoch until disposed.
 /// </summary>
 public sealed class AsOfView : IDisposable
@@ -120,6 +121,56 @@ public sealed class AsOfView : IDisposable
     /// <summary>Execute a GQL query with parameters as the database was at the view's epoch.</summary>
     public QueryResult ExecuteWithParams(string query, Dictionary<string, object?> parameters) =>
         Result(NativeMethods.grafeo_as_of_execute(Handle, query, ValueConverter.EncodeParams(parameters)));
+
+    /// <summary>The node as it was at the view's epoch, or null when it did not exist then.</summary>
+    public Node? GetNode(long id)
+    {
+        if (NativeMethods.grafeo_as_of_get_node(Handle, (ulong)id, out var nodePtr) != (int)GrafeoStatus.Ok)
+            return null;
+        try
+        {
+            return GrafeoDB.ReadNode(nodePtr);
+        }
+        finally
+        {
+            NativeMethods.grafeo_free_node(nodePtr);
+        }
+    }
+
+    /// <summary>The edge as it was at the view's epoch, or null when it did not exist then.</summary>
+    public Edge? GetEdge(long id)
+    {
+        if (NativeMethods.grafeo_as_of_get_edge(Handle, (ulong)id, out var edgePtr) != (int)GrafeoStatus.Ok)
+            return null;
+        try
+        {
+            return GrafeoDB.ReadEdge(edgePtr);
+        }
+        finally
+        {
+            NativeMethods.grafeo_free_edge(edgePtr);
+        }
+    }
+
+    /// <summary>
+    /// A node's value of <paramref name="key"/> as it was at the view's epoch, or null when the node
+    /// or the property did not exist then.
+    /// </summary>
+    public object? GetNodeProperty(long id, string key)
+    {
+        var ptr = NativeMethods.grafeo_as_of_get_node_property(Handle, (ulong)id, key);
+        if (ptr == nint.Zero)
+            return null;
+        try
+        {
+            using var json = JsonDocument.Parse(Marshal.PtrToStringUTF8(ptr)!);
+            return ValueConverter.FromJsonElement(json.RootElement);
+        }
+        finally
+        {
+            NativeMethods.grafeo_free_string(ptr);
+        }
+    }
 
     private static QueryResult Result(nint resultPtr)
     {

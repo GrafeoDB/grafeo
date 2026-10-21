@@ -115,7 +115,7 @@ pub struct RdfPlanner {
     /// One traversal's maximum resident memory, narrowed by the caller's budget.
     path_search_budget: usize,
     /// The same execution deadline used by the caller's executor.
-    deadline: Option<std::time::Instant>,
+    deadline: Option<grafeo_common::clock::Instant>,
     /// Counts the triples the plan's scans read: the statement's
     /// `rows_scanned`.
     read_counter: Arc<grafeo_core::execution::operators::ReadCounter>,
@@ -172,7 +172,7 @@ impl RdfPlanner {
 
     /// Sets the deadline checked inside native property-path lookups.
     #[must_use]
-    pub fn with_deadline(mut self, deadline: Option<std::time::Instant>) -> Self {
+    pub fn with_deadline(mut self, deadline: Option<grafeo_common::clock::Instant>) -> Self {
         self.deadline = deadline;
         self
     }
@@ -4450,8 +4450,8 @@ impl RdfExpressionPredicate {
                 use std::sync::atomic::{AtomicU64, Ordering};
                 static UUID_COUNTER: AtomicU64 = AtomicU64::new(0);
                 let id = UUID_COUNTER.fetch_add(1, Ordering::Relaxed);
-                let ts = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
+                let ts = grafeo_common::clock::SystemTime::now()
+                    .duration_since(grafeo_common::clock::UNIX_EPOCH)
                     .map_or(0, |d| d.as_nanos());
                 Some(Value::String(format!("urn:uuid:{ts:032x}-{id:04x}").into()))
             }
@@ -4461,8 +4461,8 @@ impl RdfExpressionPredicate {
                 use std::sync::atomic::{AtomicU64, Ordering};
                 static STRUUID_COUNTER: AtomicU64 = AtomicU64::new(0);
                 let id = STRUUID_COUNTER.fetch_add(1, Ordering::Relaxed);
-                let ts = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
+                let ts = grafeo_common::clock::SystemTime::now()
+                    .duration_since(grafeo_common::clock::UNIX_EPOCH)
                     .map_or(0, |d| d.as_nanos());
                 Some(Value::String(format!("{ts:032x}-{id:04x}").into()))
             }
@@ -4492,8 +4492,8 @@ impl RdfExpressionPredicate {
                 state.hash(&mut hasher);
                 // reason: truncation is intentional for hash seed entropy
                 #[allow(clippy::cast_possible_truncation)]
-                std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
+                grafeo_common::clock::SystemTime::now()
+                    .duration_since(grafeo_common::clock::UNIX_EPOCH)
                     .map_or(0u64, |d| d.as_nanos() as u64)
                     .hash(&mut hasher);
                 let bits = hasher.finish();

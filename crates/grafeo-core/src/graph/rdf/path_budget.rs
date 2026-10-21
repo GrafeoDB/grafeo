@@ -3,8 +3,9 @@
 use std::collections::VecDeque;
 use std::hash::Hash;
 use std::mem::{align_of, size_of};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
+use grafeo_common::clock::Instant;
 use grafeo_common::utils::hash::{FxHashMap, FxHashSet};
 use parking_lot::{RwLock, RwLockReadGuard};
 

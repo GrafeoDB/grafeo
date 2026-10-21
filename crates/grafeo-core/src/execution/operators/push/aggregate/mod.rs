@@ -87,8 +87,12 @@ impl GroupedOutput {
                 chunk.try_push_owned_value(column, value)?;
             }
             for (index, acc) in state.accumulators.into_iter().enumerate() {
+                let expr = self
+                    .rdf_aggregates
+                    .iter()
+                    .find_map(|(column, expr)| (*column == index).then_some(expr));
                 let value =
-                    acc.finalize_accounted(chunk.owner_mut().expect("owned output chunk"))?;
+                    acc.finalize_accounted(chunk.owner_mut().expect("owned output chunk"), expr)?;
                 chunk.try_push_owned_value(self.group_columns + index, value)?;
             }
         }
@@ -138,27 +142,28 @@ fn group_state_admitted(
             owner.try_grow(expr.separator.as_ref().map_or(1, String::len))?;
         }
         if expr.distinct
-            && matches!(
-                expr.function,
-                AggregateFunction::StdDev
-                    | AggregateFunction::StdDevPop
-                    | AggregateFunction::Variance
-                    | AggregateFunction::VariancePop
-                    | AggregateFunction::PercentileDisc
-                    | AggregateFunction::PercentileCont
-                    | AggregateFunction::CovarSamp
-                    | AggregateFunction::CovarPop
-                    | AggregateFunction::Corr
-                    | AggregateFunction::RegrSlope
-                    | AggregateFunction::RegrIntercept
-                    | AggregateFunction::RegrR2
-                    | AggregateFunction::RegrCount
-                    | AggregateFunction::RegrSxx
-                    | AggregateFunction::RegrSyy
-                    | AggregateFunction::RegrSxy
-                    | AggregateFunction::RegrAvgx
-                    | AggregateFunction::RegrAvgy
-            )
+            && ((expr.rdf_literals && expr.function == AggregateFunction::Avg)
+                || matches!(
+                    expr.function,
+                    AggregateFunction::StdDev
+                        | AggregateFunction::StdDevPop
+                        | AggregateFunction::Variance
+                        | AggregateFunction::VariancePop
+                        | AggregateFunction::PercentileDisc
+                        | AggregateFunction::PercentileCont
+                        | AggregateFunction::CovarSamp
+                        | AggregateFunction::CovarPop
+                        | AggregateFunction::Corr
+                        | AggregateFunction::RegrSlope
+                        | AggregateFunction::RegrIntercept
+                        | AggregateFunction::RegrR2
+                        | AggregateFunction::RegrCount
+                        | AggregateFunction::RegrSxx
+                        | AggregateFunction::RegrSyy
+                        | AggregateFunction::RegrSxy
+                        | AggregateFunction::RegrAvgx
+                        | AggregateFunction::RegrAvgy
+                ))
         {
             owner.try_grow(std::mem::size_of::<AggregateState>())?;
         }
@@ -820,6 +825,33 @@ impl SpillableAggregatePushOperator {
             schema_owner.try_grow(heap)?;
             types.push(ty.clone());
         }
+        // Retain expression semantics only where language-specific finalization
+        // needs them. LPG output adds no expression allocation.
+        let rdf_count = self
+            .aggregates
+            .iter()
+            .filter(|expr| expr.rdf_literals)
+            .count();
+        schema_owner.try_grow(checked_grouped_bytes(
+            rdf_count,
+            std::mem::size_of::<(usize, AggregateExpr)>(),
+        )?)?;
+        let mut rdf_aggregates = Vec::new();
+        rdf_aggregates
+            .try_reserve_exact(rdf_count)
+            .map_err(|_| grouped_memory_limit())?;
+        for (index, expr) in self.aggregates.iter().enumerate() {
+            if expr.rdf_literals {
+                let strings = expr
+                    .alias
+                    .as_ref()
+                    .map_or(0, String::len)
+                    .checked_add(expr.separator.as_ref().map_or(0, String::len))
+                    .ok_or_else(grouped_memory_limit)?;
+                schema_owner.try_grow(strings)?;
+                rdf_aggregates.push((index, expr.clone()));
+            }
+        }
         let cursor = partitioned.into_owned_drain()?;
         self.unregister_consumer();
         if let Some(state) = &self.spill_state {
@@ -830,6 +862,7 @@ impl SpillableAggregatePushOperator {
             cursor,
             types,
             group_columns: self.group_by.len(),
+            rdf_aggregates,
             schema_owner,
         }))
     }
@@ -2528,6 +2561,55 @@ mod tests {
         let spill = Arc::new(SpillManager::new(directory.path()).unwrap());
         let context = OperatorMemoryContext::new(Arc::clone(&manager), spill);
         (directory, manager, context)
+    }
+
+    #[test]
+    #[cfg(feature = "spill")]
+    fn rdf_distinct_average_admits_its_initial_inner_state() {
+        use crate::execution::chunk::DataChunkBuilder;
+        use grafeo_common::memory::buffer::MemoryRegion;
+        use grafeo_common::types::LogicalType;
+
+        let budget = 1024 * 1024;
+        let (_directory, manager, context) = accounted_aggregate_fixture(budget);
+        let spill = Arc::clone(context.spill_manager());
+        let mut builder =
+            DataChunkBuilder::with_capacity(&[LogicalType::Int64, LogicalType::Any], 1);
+        builder.column_mut(0).unwrap().push_int64(7);
+        builder.column_mut(1).unwrap().push_value(Value::Null);
+        builder.advance_row();
+        let input = builder.finish();
+        let mut aggregate = SpillableAggregatePushOperator::with_memory_context(
+            vec![0],
+            vec![AggregateExpr::avg(1).with_distinct()],
+            context.clone(),
+        );
+        aggregate
+            .push(input.clone(), &mut CollectorSink::new())
+            .unwrap();
+        let unboxed_bytes = manager.allocated();
+        drop(aggregate);
+        assert_eq!(manager.allocated(), 0);
+
+        let held = manager
+            .try_allocate(budget - unboxed_bytes, MemoryRegion::ExecutionBuffers)
+            .unwrap();
+        let mut expr = AggregateExpr::avg(1).with_distinct();
+        expr.rdf_literals = true;
+        let mut aggregate =
+            SpillableAggregatePushOperator::with_memory_context(vec![0], vec![expr], context);
+        let mut sink = CollectorSink::new();
+        assert!(matches!(
+            aggregate.push(input, &mut sink),
+            Err(OperatorError::LimitExceeded(_))
+        ));
+        drop(aggregate);
+        assert!(sink.into_chunks().is_empty());
+        assert_eq!(manager.allocated(), held.size());
+        drop(held);
+        assert_eq!(manager.allocated(), 0);
+        assert_eq!(manager.stats().consumer_count, 0);
+        assert_eq!(spill.active_file_count(), 0);
     }
 
     #[test]

@@ -949,6 +949,7 @@ pub(crate) struct GroupedOutput {
     pub(crate) cursor: crate::execution::spill::OwnedPartitionDrainCursor<AdmittedGroupState>,
     pub(crate) types: Vec<LogicalType>,
     pub(crate) group_columns: usize,
+    pub(crate) rdf_aggregates: Vec<(usize, AggregateExpr)>,
     // The schema is destroyed before the reservation that owns it.
     pub(crate) schema_owner: crate::execution::memory::GroupedMemoryOwner,
 }
@@ -1542,6 +1543,55 @@ mod tests {
 
         fn into_any(self: Box<Self>) -> Box<dyn std::any::Any + Send> {
             self
+        }
+    }
+
+    #[test]
+    #[cfg(feature = "spill")]
+    fn accounted_pull_preserves_rdf_empty_value_sum_and_average() {
+        for rdf_literals in [false, true] {
+            let (_directory, manager, spill, context) = accounted_pull_fixture();
+            let mut builder =
+                DataChunkBuilder::with_capacity(&[LogicalType::Int64, LogicalType::Any], 1);
+            builder.column_mut(0).unwrap().push_int64(7);
+            builder.column_mut(1).unwrap().push_value(Value::Null);
+            builder.advance_row();
+            let mut expressions = vec![
+                AggregateExpr::sum(1),
+                AggregateExpr::avg(1),
+                AggregateExpr::sum(1).with_distinct(),
+                AggregateExpr::avg(1).with_distinct(),
+            ];
+            for expr in &mut expressions {
+                expr.rdf_literals = rdf_literals;
+            }
+            let mut aggregate = HashAggregateOperator::new(
+                Box::new(MockOperator::new(vec![builder.finish()])),
+                vec![0],
+                expressions,
+                vec![LogicalType::Any; 5],
+            )
+            .with_memory_context(context, None);
+            let chunk = aggregate.next().unwrap().unwrap();
+            assert_eq!(chunk.len(), 1);
+            assert_eq!(chunk.column(0).unwrap().get_value(0), Some(Value::Int64(7)));
+            let expected = if rdf_literals {
+                Value::Int64(0)
+            } else {
+                Value::Null
+            };
+            for column in 1..5 {
+                assert_eq!(
+                    chunk.column(column).unwrap().get_value(0),
+                    Some(expected.clone())
+                );
+            }
+            assert!(manager.allocated() > 0);
+            drop(chunk);
+            drop(aggregate);
+            assert_eq!(manager.allocated(), 0);
+            assert_eq!(manager.stats().consumer_count, 0);
+            assert_eq!(spill.active_file_count(), 0);
         }
     }
 

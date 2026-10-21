@@ -2,8 +2,8 @@
 
 use super::super::accumulator::DECIMAL_SCRATCH_BYTES;
 use super::{
-    AggregateState, HashableValue, OperatorError, Value, compare_values, compare_values_total,
-    value_to_f64,
+    AggregateExpr, AggregateState, HashableValue, OperatorError, Value, compare_values,
+    compare_values_total, value_to_f64,
 };
 use crate::execution::memory::{
     GroupedMemoryOwner, checked_grouped_bytes, grouped_hash_table_bytes, grouped_memory_limit,
@@ -280,9 +280,10 @@ impl AggregateState {
     pub(crate) fn finalize_accounted(
         &self,
         owner: &mut GroupedMemoryOwner,
+        expr: Option<&AggregateExpr>,
     ) -> Result<Value, OperatorError> {
         if let AggregateState::Distinct { inner, .. } = self {
-            return inner.finalize_accounted(owner);
+            return inner.finalize_accounted(owner, expr);
         }
         let original = owner.size();
         let mut admission = Admission {
@@ -338,7 +339,10 @@ impl AggregateState {
         if additional != 0 {
             admission.owner.try_grow(additional)?;
         }
-        let result = self.finalize()?;
+        let result = match expr {
+            Some(expr) => self.finalize_for(expr)?,
+            None => self.finalize()?,
+        };
         admission.retained = add(original, retained)?;
         Ok(result)
     }
@@ -643,7 +647,7 @@ mod tests {
     fn accounted_finalize_denies_collect_output_before_allocating() {
         let state = AggregateState::Collect(vec![Value::Int64(1), Value::Int64(2)]);
         let mut memory = owner(0);
-        assert!(state.finalize_accounted(&mut memory).is_err());
+        assert!(state.finalize_accounted(&mut memory, None).is_err());
         assert_eq!(memory.size(), 0);
         assert!(matches!(state, AggregateState::Collect(ref values) if values.len() == 2));
     }
@@ -894,7 +898,7 @@ mod tests {
             }
             let manager = memory.manager().clone();
             let mut output = GroupedMemoryOwner::try_new(manager.clone(), 0).unwrap();
-            let result = state.finalize_accounted(&mut output).unwrap();
+            let result = state.finalize_accounted(&mut output, None).unwrap();
             assert_eq!(result, legacy.finalize().unwrap(), "variant {variant}");
             match variant {
                 0 => assert_eq!(result, Value::Int64(68)),
@@ -1125,7 +1129,7 @@ mod tests {
         ] {
             assert_eq!(
                 state
-                    .finalize_accounted(&mut output)
+                    .finalize_accounted(&mut output, None)
                     .unwrap_err()
                     .to_string(),
                 state.finalize().unwrap_err().to_string()

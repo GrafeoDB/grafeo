@@ -1,0 +1,26 @@
+# SQL/PGQ CREATE PROPERTY GRAPH column types (#610)
+#
+# The DDL takes DECIMAL, NUMERIC (with precision and scale), DATE and TIME
+# columns next to BIGINT and VARCHAR. Only parsing is checked: the statement
+# does not create a graph yet (inbox sql-pgq/create-property-graph-is-a-stub.md).
+
+meta:
+  language: sql-pgq
+  model: lpg
+  section: "SQL:2023 PGQ"
+  title: CREATE PROPERTY GRAPH column types
+  dataset: empty
+  requires: [sql-pgq]
+
+tests:
+
+  - name: decimal_numeric_date_and_time_columns_parse
+    query: "CREATE PROPERTY GRAPH Shop NODE TABLES (Item (id BIGINT PRIMARY KEY, price DECIMAL(6, 2), weight NUMERIC(8), made DATE, opens TIME, name VARCHAR))"
+    expect:
+      rows:
+        - ["Property graph 'Shop' created (1 node tables, 0 edge tables)"]
+
+  - name: a_decimal_column_with_too_many_digits_is_a_syntax_error
+    query: "CREATE PROPERTY GRAPH Shop NODE TABLES (Item (id BIGINT PRIMARY KEY, price DECIMAL(39, 2)))"
+    expect:
+      gql_status: "42001"

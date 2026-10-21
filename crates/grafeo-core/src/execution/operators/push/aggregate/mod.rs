@@ -480,30 +480,45 @@ impl SpillableAggregatePushOperator {
             .as_mut()
             .expect("memory-aware aggregate retains its schema owner")
             .split(0)?;
-        scratch.try_grow(checked_grouped_bytes(
-            self.group_by.len(),
-            std::mem::size_of::<Value>(),
-        )?)?;
-        let mut key = Vec::new();
-        key.try_reserve_exact(self.group_by.len())
-            .map_err(|_| grouped_memory_limit())?;
-        for &column in &self.group_by {
+        // One grouping column needs no heap for key slots. Payload copies
+        // still use scratch admission, and both key buffers drop before it.
+        let mut single_key = [Value::Null];
+        let mut wide_key = Vec::new();
+        let key = if let [column] = self.group_by.as_slice() {
             let value = chunk
-                .column(column)
+                .column(*column)
                 .and_then(|v| v.get_value(row))
                 .unwrap_or(Value::Null);
-            key.push(crate::execution::spill::value_representative_admitted(
-                &value,
-                &mut scratch,
-            )?);
-        }
+            single_key[0] =
+                crate::execution::spill::value_representative_admitted(&value, &mut scratch)?;
+            single_key.as_slice()
+        } else {
+            scratch.try_grow(checked_grouped_bytes(
+                self.group_by.len(),
+                std::mem::size_of::<Value>(),
+            )?)?;
+            wide_key
+                .try_reserve_exact(self.group_by.len())
+                .map_err(|_| grouped_memory_limit())?;
+            for &column in &self.group_by {
+                let value = chunk
+                    .column(column)
+                    .and_then(|v| v.get_value(row))
+                    .unwrap_or(Value::Null);
+                wide_key.push(crate::execution::spill::value_representative_admitted(
+                    &value,
+                    &mut scratch,
+                )?);
+            }
+            wide_key.as_slice()
+        };
         let columns = &self.group_by;
         let aggregates = &self.aggregates;
         self.partitioned_groups
             .as_mut()
             .expect("admitted partition initialized")
             .with_value_accounted(
-                &key,
+                key,
                 |owner| group_state_admitted(chunk, row, columns, aggregates, owner),
                 |state, owner| {
                     for (acc, expr) in state.accumulators.iter_mut().zip(aggregates) {
@@ -2513,6 +2528,58 @@ mod tests {
         let spill = Arc::new(SpillManager::new(directory.path()).unwrap());
         let context = OperatorMemoryContext::new(Arc::clone(&manager), spill);
         (directory, manager, context)
+    }
+
+    #[test]
+    #[cfg(feature = "spill")]
+    fn resident_scalar_group_updates_at_the_hard_limit() {
+        use grafeo_common::memory::buffer::MemoryRegion;
+
+        let budget = 1024 * 1024;
+        let (_directory, manager, context) = accounted_aggregate_fixture(budget);
+        let spill = Arc::clone(context.spill_manager());
+        let mut aggregate = SpillableAggregatePushOperator::with_memory_context(
+            vec![0],
+            vec![AggregateExpr::sum(1), AggregateExpr::count(1)],
+            context,
+        );
+        let mut sink = CollectorSink::new();
+        aggregate
+            .push(create_two_column_chunk(&[7], &[10]), &mut sink)
+            .unwrap();
+        let repeated = create_two_column_chunk(&[7], &[20]);
+        let held = manager
+            .try_allocate(budget - manager.allocated(), MemoryRegion::ExecutionBuffers)
+            .unwrap();
+
+        aggregate.push(repeated, &mut sink).unwrap();
+        assert_eq!(manager.allocated(), budget);
+        assert_eq!(
+            aggregate.partitioned_groups.as_ref().unwrap().total_size(),
+            1
+        );
+        assert_eq!(spill.active_file_count(), 0);
+
+        drop(held);
+        aggregate.finalize(&mut sink).unwrap();
+        drop(aggregate);
+        let chunks = sink.into_chunks();
+        assert_eq!(chunks.iter().map(DataChunk::len).sum::<usize>(), 1);
+        assert_eq!(
+            (0..3)
+                .map(|column| chunks[0].column(column).unwrap().get_value(0))
+                .collect::<Vec<_>>(),
+            vec![
+                Some(Value::Int64(7)),
+                Some(Value::Int64(30)),
+                Some(Value::Int64(2)),
+            ]
+        );
+        drop(chunks);
+        assert_eq!(manager.allocated(), 0);
+        assert_eq!(manager.stats().consumer_count, 0);
+        assert_eq!(spill.active_file_count(), 0);
+        assert_eq!(spill.spilled_bytes(), 0);
     }
 
     #[test]

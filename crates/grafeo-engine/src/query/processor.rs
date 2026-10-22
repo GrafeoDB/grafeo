@@ -768,11 +768,35 @@ fn annotate_hints(
         }
         return;
     }
+    if let LogicalOperator::Merge(merge) = op {
+        merge.index_hint = merge_index_hint(merge, store);
+    }
     let taken = std::mem::replace(op, LogicalOperator::Empty);
     *op = taken.map_children(|mut child| {
         annotate_hints(&mut child, store, writes, after_a_write);
         child
     });
+}
+
+/// The property whose index `merge` looks its node up through: the first of
+/// its match properties with a property index and a value that is not a
+/// null literal, as the merge operator picks it (a null value matches no
+/// index entry, so a row with one scans the label).
+fn merge_index_hint(
+    merge: &crate::query::plan::MergeOp,
+    store: &dyn grafeo_core::graph::GraphStore,
+) -> Option<String> {
+    use crate::query::plan::LogicalExpression;
+    use grafeo_common::types::Value;
+
+    merge
+        .match_properties
+        .iter()
+        .find(|(key, value)| {
+            !matches!(value, LogicalExpression::Literal(Value::Null))
+                && store.has_property_index(key)
+        })
+        .map(|(key, _)| key.clone())
 }
 
 /// The seek the planner makes of a filter over `scan`: an ID, or an indexed

@@ -163,3 +163,27 @@ tests:
     expect:
       rows:
         - [A1]
+
+  # #347: an ORDER BY on text_score with a LIMIT keeps the values of the
+  # rows it returns, and the best match comes first.
+  - name: order_by_text_score_limit_keeps_values
+    setup:
+      - "INSERT (:Article {title: 'A2', body: 'attention mechanisms'})"
+      - "INSERT (:Article {title: 'A1', body: 'rust database internals'})"
+      - "CREATE INDEX article_body FOR (n:Article) ON (n.body) USING TEXT"
+    query: "MATCH (s:Article) RETURN s.title AS t, text_score(s.body, 'database') > 0.0 AS hit ORDER BY text_score(s.body, 'database') DESC LIMIT 1"
+    expect:
+      rows:
+        - [A1, true]
+
+  - name: order_by_text_score_ranks_every_row
+    setup:
+      - "INSERT (:Article {title: 'A2', body: 'attention mechanisms'})"
+      - "INSERT (:Article {title: 'A1', body: 'rust database internals'})"
+      - "CREATE INDEX article_body FOR (n:Article) ON (n.body) USING TEXT"
+    query: "MATCH (s:Article) RETURN s.title AS t, text_score(s.body, 'database') > 0.0 AS hit ORDER BY text_score(s.body, 'database') DESC"
+    expect:
+      ordered: true
+      rows:
+        - [A1, true]
+        - [A2, false]

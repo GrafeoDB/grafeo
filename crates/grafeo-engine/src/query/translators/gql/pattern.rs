@@ -60,6 +60,7 @@ impl GqlTranslator {
             self.merge_assignments(merge_clause.on_match.as_deref(), "ON MATCH", &variable)?;
 
         Ok(LogicalOperator::Merge(MergeOp {
+            index_hint: None,
             variable,
             labels,
             match_properties,

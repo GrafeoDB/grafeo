@@ -448,6 +448,7 @@ mod tests {
         });
         assert!(reads_after_the_write(&limited));
         let merged = LogicalOperator::Merge(MergeOp {
+            index_hint: None,
             variable: "t".to_string(),
             labels: vec!["P".to_string()],
             match_properties: Vec::new(),

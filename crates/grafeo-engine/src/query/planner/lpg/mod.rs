@@ -3368,6 +3368,7 @@ mod tests {
 
         // MERGE (n:Person)
         let logical = LogicalPlan::new(LogicalOperator::Merge(MergeOp {
+            index_hint: None,
             variable: "n".to_string(),
             labels: vec!["Person".to_string()],
             match_properties: vec![],

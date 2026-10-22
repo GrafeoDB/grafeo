@@ -620,6 +620,27 @@ describe('QueryResult metadata', () => {
     db.close()
   })
 
+  // A returned edge names its stored endpoints (#268), also when the pattern
+  // reads it from its target.
+  it('returns edges with their source, target and properties', async () => {
+    const db = GrafeoDB.create()
+    await db.execute("INSERT (:Person {name: 'Alix'})-[:KNOWS {since: 2020}]->(:Person {name: 'Gus'})")
+    const ids = Object.fromEntries(
+      (await db.execute('MATCH (p:Person) RETURN p.name AS name, id(p) AS id'))
+        .toArray()
+        .map((row) => [row.name, Number(row.id)])
+    )
+    for (const query of ['MATCH (a)-[r:KNOWS]->(b) RETURN a, r, b', 'MATCH (b)<-[r:KNOWS]-(a) RETURN a, r, b']) {
+      const edges = (await db.executeCypher(query)).edges()
+      expect(edges.length, query).toBe(1)
+      expect(edges[0].edgeType, query).toBe('KNOWS')
+      expect(Number(edges[0].sourceId), query).toBe(ids.Alix)
+      expect(Number(edges[0].targetId), query).toBe(ids.Gus)
+      expect(edges[0].get('since'), query).toBe(2020)
+    }
+    db.close()
+  })
+
   it('should return empty nodes/edges for scalar queries', async () => {
     const db = GrafeoDB.create()
     await db.execute("INSERT (:Person {name: 'Alix'})")

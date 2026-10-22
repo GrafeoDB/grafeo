@@ -1574,10 +1574,26 @@ class TestMultiMatchCreateEdge:
         db.execute(
             "MATCH (a:Person {name: 'Alix'}), (b:Person {name: 'Gus'}) INSERT (a)-[:KNOWS]->(b)"
         )
-        nodes = list(db.execute("MATCH (n:Person) RETURN count(n) AS cnt"))
+        # Every node, not only :Person ones: a phantom node has no label.
+        nodes = list(db.execute("MATCH (n) RETURN count(n) AS cnt"))
         edges = list(db.execute("MATCH ()-[r:KNOWS]->() RETURN count(r) AS cnt"))
         assert nodes[0]["cnt"] == 2, "Should still have 2 nodes"
         assert edges[0]["cnt"] == 1, "Should have 1 edge"
+
+    def test_two_match_clauses_then_create_in_cypher(self, db):
+        """The user's form (#181): two MATCH clauses, then a CREATE."""
+        db.execute_cypher("CREATE (:A {id: '1'})")
+        db.execute_cypher("CREATE (:A {id: '2'})")
+        db.execute_cypher("MATCH (a:A {id: '1'}) MATCH (b:A {id: '2'}) CREATE (a)-[:REL]->(b)")
+        counts = list(
+            db.execute_cypher(
+                "MATCH (n) RETURN count(n) AS nodes, "
+                "count(CASE WHEN size(labels(n)) = 0 THEN 1 END) AS unlabeled"
+            )
+        )
+        assert counts == [{"nodes": 2, "unlabeled": 0}]
+        edges = list(db.execute_cypher("MATCH (a)-[:REL]->(b) RETURN a.id AS a, b.id AS b"))
+        assert edges == [{"a": "1", "b": "2"}]
 
     def test_match_create_multiple_edges(self, db):
         db.execute("INSERT (:Person {name: 'Alix'})")
@@ -1709,3 +1725,22 @@ class TestAggregationWithFunctions:
             db.execute("MATCH ()-[r]->() RETURN type(r) AS t, count(r) AS cnt ORDER BY t")
         )
         assert len(result) == 2
+
+
+class TestOrderByLimitReturnsTheNode:
+    """`RETURN n ORDER BY n.title LIMIT 50` returns the node, not its id (#335)."""
+
+    def test_order_by_limit_returns_node(self, db):
+        db.execute("INSERT (:Article {title: 'A2', body: 'attention mechanisms'})")
+        db.execute("INSERT (:Article {title: 'A1', body: 'rust database internals'})")
+        for query in (
+            "MATCH (n:Article) RETURN n ORDER BY n.title LIMIT 50",
+            "MATCH (n:Article) RETURN n ORDER BY n.title LIMIT 1",
+        ):
+            rows = list(db.execute(query))
+            assert rows[0]["n"]["title"] == "A1", query
+            assert rows[0]["n"]["_labels"] == ["Article"], query
+            (first, *_) = db.execute(query).nodes()
+            assert first.properties()["title"] == "A1", query
+        rows = list(db.execute_cypher("MATCH (n:Article) RETURN n ORDER BY n.title LIMIT 50"))
+        assert [row["n"]["title"] for row in rows] == ["A1", "A2"]

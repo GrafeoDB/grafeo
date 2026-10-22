@@ -655,6 +655,89 @@ fn test_match_create_edge_no_phantom_nodes() {
     assert_eq!(edges.rows()[0][0], Value::Int64(1));
 }
 
+/// The nodes, the unlabeled nodes and the REL edges of `session`'s graph.
+#[cfg(feature = "cypher")]
+fn nodes_unlabeled_edges(session: &grafeo_engine::session::Session) -> Vec<Value> {
+    let counts = session
+        .execute_cypher(
+            "MATCH (n) RETURN count(n) AS nodes, \
+             count(CASE WHEN size(labels(n)) = 0 THEN 1 END) AS unlabeled",
+        )
+        .unwrap();
+    let edges = session
+        .execute_cypher("MATCH (:A {id: '1'})-[r:REL]->(:A {id: '2'}) RETURN count(r) AS edges")
+        .unwrap();
+    vec![
+        counts.rows()[0][0].clone(),
+        counts.rows()[0][1].clone(),
+        edges.rows()[0][0].clone(),
+    ]
+}
+
+/// The user's form of #181, two MATCH clauses then a CREATE: inside a
+/// transaction it links the matched nodes and creates no node, a commit
+/// keeps exactly that, and a rollback leaves nothing.
+#[test]
+#[cfg(feature = "cypher")]
+fn match_match_create_in_a_transaction_creates_no_node() {
+    const LINK: &str = "MATCH (a:A {id: '1'}) MATCH (b:A {id: '2'}) CREATE (a)-[:REL]->(b)";
+
+    let db = GrafeoDB::new_in_memory();
+    let mut session = db.session();
+    session
+        .execute_cypher("CREATE (:A {id: '1'}), (:A {id: '2'})")
+        .unwrap();
+
+    session.begin_transaction().unwrap();
+    session.execute_cypher(LINK).unwrap();
+    assert_eq!(
+        nodes_unlabeled_edges(&session),
+        [Value::Int64(2), Value::Int64(0), Value::Int64(1)],
+        "inside the transaction"
+    );
+    session.rollback().unwrap();
+    assert_eq!(
+        nodes_unlabeled_edges(&session),
+        [Value::Int64(2), Value::Int64(0), Value::Int64(0)],
+        "after the rollback"
+    );
+
+    session.begin_transaction().unwrap();
+    session.execute_cypher(LINK).unwrap();
+    session.commit().unwrap();
+    assert_eq!(
+        nodes_unlabeled_edges(&db.session()),
+        [Value::Int64(2), Value::Int64(0), Value::Int64(1)],
+        "after the commit"
+    );
+}
+
+/// The user's form of #181 on a persistent database: the reopen has the two
+/// nodes and the edge, and no other node.
+#[test]
+#[cfg(all(feature = "cypher", feature = "wal", feature = "grafeo-file"))]
+fn match_match_create_survives_a_reopen() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("phantoms.grafeo");
+    let db = GrafeoDB::open(&path).unwrap();
+    let session = db.session();
+    session
+        .execute_cypher("CREATE (:A {id: '1'}), (:A {id: '2'})")
+        .unwrap();
+    session
+        .execute_cypher("MATCH (a:A {id: '1'}) MATCH (b:A {id: '2'}) CREATE (a)-[:REL]->(b)")
+        .unwrap();
+    drop(session);
+    db.close().unwrap();
+
+    let db = GrafeoDB::open(&path).unwrap();
+    assert_eq!(
+        nodes_unlabeled_edges(&db.session()),
+        [Value::Int64(2), Value::Int64(0), Value::Int64(1)]
+    );
+    db.close().unwrap();
+}
+
 // ============================================================================
 // OPTIONAL MATCH: covers plan_left_join
 // ============================================================================

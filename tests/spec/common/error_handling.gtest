@@ -65,12 +65,12 @@ tests:
       error: ""
 
   - name: negate_string
-    skip: "negate string behavior"
     setup:
       - "INSERT (:N {name: 'hello'})"
     query: "MATCH (n:N) RETURN -n.name AS result"
     expect:
-      error: ""
+      error: "unary - takes a number or a duration"
+      gql_status: "22G03"
 
   # ---------------------------------------------------------------------------
   # Delete with dependencies

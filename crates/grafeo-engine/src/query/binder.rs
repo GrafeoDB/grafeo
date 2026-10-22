@@ -2466,6 +2466,7 @@ mod tests {
             }],
             distinct: false,
             input: Box::new(LogicalOperator::Merge(MergeOp {
+                index_hint: None,
                 variable: "m".to_string(),
                 labels: vec!["Person".to_string()],
                 match_properties: vec![(
@@ -2500,6 +2501,7 @@ mod tests {
         use crate::query::plan::MergeOp;
 
         let plan = LogicalPlan::new(LogicalOperator::Merge(MergeOp {
+            index_hint: None,
             variable: "m".to_string(),
             labels: vec![],
             match_properties: vec![],
@@ -2534,6 +2536,7 @@ mod tests {
         use crate::query::plan::MergeOp;
 
         let plan = LogicalPlan::new(LogicalOperator::Merge(MergeOp {
+            index_hint: None,
             variable: "n".to_string(),
             labels: vec!["Item".to_string()],
             match_properties: vec![(
@@ -2564,6 +2567,7 @@ mod tests {
         use crate::query::plan::MergeOp;
 
         let plan = LogicalPlan::new(LogicalOperator::Merge(MergeOp {
+            index_hint: None,
             variable: "n".to_string(),
             labels: vec!["Item".to_string()],
             match_properties: vec![(
@@ -2597,6 +2601,7 @@ mod tests {
         use crate::query::plan::MergeOp;
 
         let plan = LogicalPlan::new(LogicalOperator::Merge(MergeOp {
+            index_hint: None,
             variable: "n".to_string(),
             labels: vec!["Item".to_string()],
             match_properties: vec![(

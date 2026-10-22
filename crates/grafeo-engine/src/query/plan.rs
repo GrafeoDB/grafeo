@@ -1388,7 +1388,11 @@ impl LogicalOperator {
                 op.input.fmt_tree(out, depth + 1);
             }
             Self::Merge(op) => {
-                let _ = writeln!(out, "{indent}Merge ({var}){after}", var = op.variable);
+                let hint = op
+                    .index_hint
+                    .as_ref()
+                    .map_or(String::new(), |property| format!(" [index: {property}]"));
+                let _ = writeln!(out, "{indent}Merge ({var}){hint}{after}", var = op.variable);
                 op.input.fmt_tree(out, depth + 1);
             }
             Self::MergeRelationship(op) => {
@@ -2573,6 +2577,11 @@ pub struct MergeOp {
     pub on_create_labels: Vec<String>,
     /// Labels to add on MATCH (`ON MATCH SET n:Label`).
     pub on_match_labels: Vec<String>,
+    /// The property whose index the merge looks its node up through, for
+    /// `EXPLAIN` (`Merge (n) [index: name]`): set when `EXPLAIN` annotates the
+    /// plan with the store's indexes, `None` before or when it scans the
+    /// label.
+    pub index_hint: Option<String>,
     /// Input operator.
     pub input: Box<LogicalOperator>,
 }
@@ -4677,6 +4686,7 @@ mod tests {
         assert_eq!(sp.display_label(), "a -> b");
 
         let merge = LogicalOperator::Merge(MergeOp {
+            index_hint: None,
             variable: "django".into(),
             labels: vec![],
             match_properties: vec![],
@@ -5182,6 +5192,7 @@ mod tests {
     #[test]
     fn explain_tree_mutations() {
         let merge = LogicalOperator::Merge(MergeOp {
+            index_hint: None,
             variable: "vincent".into(),
             labels: vec!["Person".into()],
             match_properties: vec![],

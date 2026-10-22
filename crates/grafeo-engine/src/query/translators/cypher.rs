@@ -1737,6 +1737,7 @@ impl CypherTranslator {
             self.merge_actions(merge_clause.on_match.as_ref(), "ON MATCH", &variable, true)?;
 
         Ok(LogicalOperator::Merge(MergeOp {
+            index_hint: None,
             variable,
             labels,
             match_properties,

@@ -451,7 +451,10 @@ def doc_above(lines: list[str], index: int) -> list[str]:
         if stripped.startswith("///"):
             docs.append(stripped)
         elif stripped.startswith(("#[", "#!")) or (
-            stripped
+            # Below the docs only: a line of an attribute that spans several. Above them,
+            # such a line is the item before (a struct field ends with a comma).
+            not docs
+            and stripped
             and not stripped.endswith((";", "{", "}"))
             and not stripped.startswith("//")
         ):

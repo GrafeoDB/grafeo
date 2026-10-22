@@ -702,6 +702,24 @@ def test_t6_the_table_and_the_markers_agree(tmp_path: Path) -> None:
     assert stability_tree(tmp_path) == []
 
 
+def test_t6_a_field_after_an_experimental_field_keeps_its_own_docs(
+    tmp_path: Path,
+) -> None:
+    write(
+        tmp_path,
+        "crates/grafeo-engine/src/result.rs",
+        "/// A result.\npub struct Result {\n"
+        "    /// Its profile.\n    ///\n    /// # Stability: Experimental\n"
+        "    pub profile: Option<u8>,\n"
+        "    /// What it holds.\n    pub kind: u8,\n"
+        "    #[serde(default)]\n    /// Tagged.\n    ///\n    /// # Stability: Experimental\n"
+        "    #[allow(\n        clippy::all,\n    )]\n    pub tagged: u8,\n}\n",
+    )
+    items, _ = check_policy.rust_items(tmp_path, ["crates/grafeo-engine/src/result.rs"])
+    marked = {item.name: item.experimental for item in items if item.kind == "field"}
+    assert marked == {"profile": True, "kind": False, "tagged": True}
+
+
 def test_t6_a_table_entry_needs_its_marker(tmp_path: Path) -> None:
     unmarked = SESSION.replace(
         "/// A stream of rows.\n///\n/// # Stability: Experimental\n///\n/// New.\n",

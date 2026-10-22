@@ -317,7 +317,6 @@ fn a_named_graph_modify_restores_in_its_graph() {
 /// restart, and the CLI on every command) holds the commits since the full
 /// backup, and the restore to its epoch has them.
 #[test]
-#[ignore = "an incremental backup after close() finds no cursor: close() removes the sidecar WAL with the backup cursor"]
 fn an_incremental_backup_works_after_a_close() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("db.grafeo");

@@ -1407,6 +1407,30 @@ impl GrafeoDB {
         Ok(())
     }
 
+    /// Whether a backup chain needs the sidecar WAL of `fm` after `close()`:
+    /// it holds a backup cursor, so the segments from the cursor's log
+    /// position on (a checkpoint keeps them) are the next incremental
+    /// backup's. A cursor that cannot be read keeps the WAL too: removing it
+    /// would end the chain.
+    #[cfg(all(feature = "wal", feature = "grafeo-file"))]
+    fn backup_chain_needs_wal(fm: &GrafeoFileManager) -> bool {
+        match backup::read_backup_cursor(&fm.sidecar_wal_path()) {
+            Ok(cursor) => cursor.is_some(),
+            Err(error) => {
+                grafeo_common::grafeo_warn!(
+                    "keeping the WAL at close: cannot read the backup cursor: {error}"
+                );
+                true
+            }
+        }
+    }
+
+    /// Without the `wal` feature there are no backups.
+    #[cfg(all(feature = "grafeo-file", not(feature = "wal")))]
+    fn backup_chain_needs_wal(_fm: &GrafeoFileManager) -> bool {
+        false
+    }
+
     /// How to scan the sidecar WAL of `fm`: from the log position its
     /// checkpoint recorded, with a key per segment for an encrypted database.
     #[cfg(feature = "wal")]
@@ -2800,7 +2824,12 @@ impl GrafeoDB {
                     use grafeo_common::testing::crash::maybe_crash;
                     maybe_crash("close:before_remove_sidecar_wal");
                 }
-                fm.remove_sidecar_wal()?;
+                // A backup chain reads the segments after its cursor: the
+                // checkpoint kept them, and they stay, with the cursor, for
+                // the next incremental backup after a reopen.
+                if !Self::backup_chain_needs_wal(fm) {
+                    fm.remove_sidecar_wal()?;
+                }
             } else {
                 grafeo_common::grafeo_warn!(
                     "keeping sidecar WAL for recovery: checkpoint wrote 0 sections but WAL has records"

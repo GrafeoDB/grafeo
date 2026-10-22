@@ -154,7 +154,6 @@ fn full_backups_restore_to_their_epochs() {
 /// full`, each in its own process, extends the chain, and the restore to
 /// its epoch has every person.
 #[test]
-#[ignore = "an incremental backup after close() finds no cursor: close() removes the sidecar WAL with the backup cursor"]
 fn an_incremental_backup_extends_the_chain() {
     let dir = tempfile::tempdir().unwrap();
     let db = dir.path().join("people.grafeo");

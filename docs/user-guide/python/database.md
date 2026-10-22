@@ -251,7 +251,7 @@ db.backup_incremental("/backups")
 grafeo.GrafeoDB.restore_to_epoch("/backups", epoch=100, output_path="./restored.grafeo")
 ```
 
-An incremental backup needs a full backup in its directory, and continues from the last backup there.
+An incremental backup needs a full backup in its directory, and continues from the last backup there. The chain survives restarts: once a backup has been taken, `close()` keeps the write-ahead log written since the last backup (in `<file>.wal/`), and the next incremental backup after a reopen takes it.
 
 ## Persistence
 

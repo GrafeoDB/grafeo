@@ -37,6 +37,8 @@ my_graph.db         # The database: its state as of the last checkpoint
 my_graph.db.wal/    # Write-ahead log, while the database is open
 ```
 
+Once a backup has been taken, `close()` keeps the part of the write-ahead log written since the last backup, with the backup's position in it, so the next incremental backup after a restart has it (see [Backups](../python/database.md#backup-and-restore)). A database that never takes a backup removes its write-ahead log at `close()`.
+
 In Rust the write-ahead log needs the `wal` feature, which the `lpg` profile and the `storage` group include and the default features do not. Without it, `GrafeoDB::open` works the same, but commits reach the file only at a checkpoint (`close()`, dropping the database, or `wal_checkpoint()`), and a process that crashes loses the commits since. The Python, Node.js, C, Go, C# and Dart packages include it.
 
 A path with a trailing separator (`./data/`) names the same database as `./data`, and `path()` (`db.path` in Python) returns the path as you gave it.

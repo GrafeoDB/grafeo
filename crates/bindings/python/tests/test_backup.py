@@ -39,6 +39,33 @@ def test_full_and_incremental_backups_restore_to_each_epoch(tmp_path):
     restored.close()
 
 
+def test_an_incremental_backup_works_across_a_close(tmp_path):
+    """The chain survives restarts: close() keeps the WAL the next incremental reads."""
+    path = str(tmp_path / "prague.grafeo")
+    backups = str(tmp_path / "backups")
+    db = grafeo.GrafeoDB(path)
+    db.execute("INSERT (:Person {name: 'Alix'})")
+    db.backup_full(backups)
+    full_epoch = db.current_epoch()
+    db.close()
+
+    db = grafeo.GrafeoDB(path)
+    db.execute("INSERT (:Person {name: 'Gus'})")
+    db.close()
+
+    db = grafeo.GrafeoDB(path)
+    db.backup_incremental(backups)
+    latest = db.current_epoch()
+    db.close()
+
+    for epoch, expected in ((full_epoch, ["Alix"]), (latest, ["Alix", "Gus"])):
+        restored_path = str(tmp_path / f"restored-{epoch}.grafeo")
+        grafeo.GrafeoDB.restore_to_epoch(backups, epoch, restored_path)
+        restored = grafeo.GrafeoDB(restored_path)
+        assert people(restored) == expected
+        restored.close()
+
+
 WRITERS = 3
 # Commits each writer makes before the backup starts, and at least in all.
 BEFORE_THE_BACKUP = 5

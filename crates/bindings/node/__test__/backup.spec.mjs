@@ -50,6 +50,35 @@ describe('backups', () => {
     restored.close()
   })
 
+  it('an incremental backup works across a close', async () => {
+    // The chain survives restarts: close() keeps the WAL the next incremental reads.
+    const dir = mkdtempSync(join(tmpdir(), 'grafeo-backup-'))
+    const path = join(dir, 'prague.grafeo')
+    const backups = join(dir, 'backups')
+    let db = GrafeoDB.create(path)
+    await db.execute("INSERT (:Person {name: 'Alix'})")
+    db.backupFull(backups)
+    const fullEpoch = db.currentEpoch()
+    db.close()
+
+    db = GrafeoDB.open(path)
+    await db.execute("INSERT (:Person {name: 'Gus'})")
+    db.close()
+
+    db = GrafeoDB.open(path)
+    db.backupIncremental(backups)
+    const latest = db.currentEpoch()
+    db.close()
+
+    for (const [epoch, expected] of [[fullEpoch, ['Alix']], [latest, ['Alix', 'Gus']]]) {
+      const at = join(dir, `restored-${epoch}.grafeo`)
+      GrafeoDB.restoreToEpoch(backups, Number(epoch), at)
+      const restored = GrafeoDB.open(at)
+      expect(await people(restored)).toEqual(expected)
+      restored.close()
+    }
+  })
+
   it('a full backup during concurrent writes holds whole statements', async () => {
     // Writes run on the thread pool while the backup runs on this thread: the
     // image holds every statement whole (a Person and a City each), the ones

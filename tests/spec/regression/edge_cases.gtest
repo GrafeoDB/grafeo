@@ -474,9 +474,10 @@ tests:
   - name: insert_negative_float
     setup:
       - "INSERT (:Location {lat: -33.8688, lon: 151.2093})"
-    query: MATCH (l:Location) RETURN l.lat, l.lon
+    query: MATCH (l:Location) RETURN l.lat, l.lon, l.lat < 0 AS south
     expect:
-      count: 1
+      rows:
+        - [-33.8688, 151.2093, true]
 
   - name: filter_on_negative_value
     setup:

@@ -121,17 +121,15 @@ impl Data {
     }
 
     /// The heap bytes the values hold besides the column's own vectors: the
-    /// components of vectors and the bytes of strings.
+    /// bytes of strings, and of every value of another kind that holds any
+    /// (vectors, bytes, lists, maps, paths, counters), as
+    /// [`Value::estimated_size_bytes`] counts them. A value several rows
+    /// share is counted for each.
     fn payload_bytes(&self) -> usize {
-        let payload = |value: &Value| match value {
-            Value::Vector(vector) => std::mem::size_of_val::<[f32]>(vector),
-            Value::String(string) => string.len(),
-            _ => 0,
-        };
         match self {
             Self::Int64(_) | Self::Float64(_) | Self::Bool(_) => 0,
             Self::String(values) => values.iter().map(|value| value.len()).sum(),
-            Self::Values(values) => values.iter().map(payload).sum(),
+            Self::Values(values) => values.iter().map(Value::estimated_size_bytes).sum(),
         }
     }
 
@@ -284,8 +282,10 @@ impl Hot {
         self.get(row)
     }
 
+    /// The heap bytes of its presence bits, its values and what they hold
+    /// (the update chains are counted with the versions).
     fn heap_bytes(&self) -> usize {
-        self.present.heap_bytes() + self.data.heap_bytes()
+        self.present.heap_bytes() + self.data.heap_bytes() + self.data.payload_bytes()
     }
 
     /// The decoded values of `chunks`.
@@ -535,7 +535,7 @@ impl Column {
         if hot.present.is_empty() {
             return Ok(SpillPlan::Nothing);
         }
-        let mut chunks = SpillChunks::new(hot.heap_bytes() + hot.data.payload_bytes());
+        let mut chunks = SpillChunks::new(hot.heap_bytes());
         let rows = u32::try_from(SPILL_CHUNK_ROWS).expect("a vector of rows fits a chunk");
         let mut window: Vec<(u32, Value)> = Vec::new();
         let mut first_row = 0;
@@ -1040,7 +1040,9 @@ impl Columns {
         self.by_key
             .values()
             .filter_map(Column::updates)
-            .map(|updates| updates.heap_bytes(|_| 0))
+            .map(|updates| {
+                updates.heap_bytes(|kept| kept.as_ref().map_or(0, Value::estimated_size_bytes))
+            })
             .sum()
     }
 

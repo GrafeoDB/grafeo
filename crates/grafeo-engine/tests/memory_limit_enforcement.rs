@@ -175,7 +175,6 @@ fn a_persistent_database_spills_vectors_at_its_limit() {
 /// `memory_usage()` counts the values a database holds: a limit on tracked
 /// memory bounds nothing if 15 MB of embeddings are tracked as a few.
 #[test]
-#[ignore = "memory_usage() does not count vector property values yet"]
 fn memory_usage_counts_vector_values() {
     let db = GrafeoDB::new_in_memory();
     let before = db.memory_usage().total_bytes;

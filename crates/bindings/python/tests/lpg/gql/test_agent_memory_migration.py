@@ -308,7 +308,7 @@ class TestBulkImport:
     def test_gql_loop_import(self):
         """Import 500 entities via execute() loop in a transaction."""
         db = GrafeoDB()
-        start = time.time()
+        start = time.perf_counter()
 
         with db.begin_transaction() as tx:
             for i in range(500):
@@ -317,7 +317,7 @@ class TestBulkImport:
                     f"INSERT (:{label} {{name: 'entity_{i}', confidence: {0.5 + i * 0.001}}})"
                 )
 
-        elapsed = time.time() - start
+        elapsed = time.perf_counter() - start
         info = db.info()
         assert info["node_count"] == 500
         print(f"\nGQL loop import: 500 entities in {elapsed:.3f}s ({500 / elapsed:.0f} ops/sec)")
@@ -325,7 +325,7 @@ class TestBulkImport:
     def test_api_import(self):
         """Import 500 entities via create_node() API."""
         db = GrafeoDB()
-        start = time.time()
+        start = time.perf_counter()
 
         for i in range(500):
             label = ENTITY_LABELS[i % len(ENTITY_LABELS)]
@@ -334,7 +334,7 @@ class TestBulkImport:
                 {"name": f"entity_{i}", "confidence": 0.5 + i * 0.001},
             )
 
-        elapsed = time.time() - start
+        elapsed = time.perf_counter() - start
         info = db.info()
         assert info["node_count"] == 500
         print(f"\nAPI import: 500 entities in {elapsed:.3f}s ({500 / elapsed:.0f} ops/sec)")

@@ -158,8 +158,10 @@ else
     # column encoders, which an in-memory browser database needs to give memory
     # back) brought it to 906 KB: the limit is 940 KB from then on, to be
     # re-measured after the store contract trims the read and write traits.
+    # After it (927 KB, with exact JSON integers and RDF terms still to come)
+    # the limit is 1 MB: the browser bundle stays under it.
     WARN_THRESHOLD=829440    # 810 KB
-    FAIL_THRESHOLD=962560    # 940 KB
+    FAIL_THRESHOLD=1048576   # 1 MB
     LABEL="browser profile"
 fi
 

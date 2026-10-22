@@ -113,6 +113,7 @@ pub use grafeo_engine::session;
 
 // Re-export query results
 pub use grafeo_engine::database::QueryResult;
+pub use grafeo_engine::database::ResultKind;
 
 // Re-export MemoryUsage, ProjectionSpec at top level for convenience
 pub use grafeo_engine::MemoryUsage;

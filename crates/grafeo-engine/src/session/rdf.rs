@@ -286,7 +286,9 @@ impl Session {
                 .make_executor(physical_plan.columns.clone())
                 .with_deadline(deadline)
                 .with_read_counter(planner.read_counter());
-            executor.execute(physical_plan.operator.as_mut())
+            executor
+                .execute(physical_plan.operator.as_mut())
+                .map(|result| result.with_kind(optimized_plan.result_kind))
         });
 
         #[cfg(feature = "metrics")]

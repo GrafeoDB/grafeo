@@ -3636,6 +3636,21 @@ impl crate::admin::AdminService for GrafeoDB {
 pub use crate::query::profile::{OperatorProfile, QueryProfile};
 pub use grafeo_core::execution::operators::WriteCounters;
 
+/// What a [`QueryResult`] holds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[non_exhaustive]
+pub enum ResultKind {
+    /// Rows of values: SPARQL SELECT and updates, and every other query
+    /// language.
+    #[default]
+    Rows,
+    /// One boolean (SPARQL ASK): one row with one `boolean` column.
+    Boolean,
+    /// An RDF graph (SPARQL CONSTRUCT and DESCRIBE): `subject`, `predicate`
+    /// and `object` columns, one row per triple.
+    Graph,
+}
+
 /// The result of running a query.
 ///
 /// Contains rows and columns, like a table. Use [`iter()`](Self::iter) to
@@ -3699,6 +3714,8 @@ pub struct QueryResult {
     /// New in 0.6.0: the operators and their fields may still change, with a
     /// CHANGELOG entry. See <https://grafeo.dev/stability/>.
     pub profile: Option<QueryProfile>,
+    /// What the result holds: rows, a SPARQL ASK boolean, or a SPARQL graph.
+    pub kind: ResultKind,
 }
 
 impl QueryResult {
@@ -3751,6 +3768,7 @@ impl QueryResult {
             gql_status: grafeo_common::utils::GqlStatus::SUCCESS,
             counters: Default::default(),
             profile: None,
+            kind: ResultKind::Rows,
         }
     }
 
@@ -3768,6 +3786,7 @@ impl QueryResult {
             gql_status: grafeo_common::utils::GqlStatus::SUCCESS_OMITTED_RESULT,
             counters: Default::default(),
             profile: None,
+            kind: ResultKind::Rows,
         }
     }
 
@@ -3790,6 +3809,7 @@ impl QueryResult {
             gql_status,
             counters: Default::default(),
             profile: None,
+            kind: ResultKind::Rows,
         })
     }
 
@@ -3814,6 +3834,7 @@ impl QueryResult {
             gql_status,
             counters: Default::default(),
             profile: None,
+            kind: ResultKind::Rows,
         })
     }
 
@@ -3839,12 +3860,20 @@ impl QueryResult {
             gql_status,
             counters: Default::default(),
             profile: None,
+            kind: ResultKind::Rows,
         })
     }
 
     /// Appends a row to this result.
     pub fn push_row(&mut self, row: Vec<grafeo_common::types::Value>) {
         self.rows.push(row);
+    }
+
+    /// Returns the result marked as holding `kind`.
+    #[must_use]
+    pub fn with_kind(mut self, kind: ResultKind) -> Self {
+        self.kind = kind;
+        self
     }
 
     /// Sets the execution metrics on this result.

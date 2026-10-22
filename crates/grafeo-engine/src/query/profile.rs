@@ -214,6 +214,7 @@ pub fn profile_result(root: &ProfileNode, total_time_ms: f64) -> QueryResult {
             root: OperatorProfile::of(root),
             total_time_ms,
         }),
+        kind: crate::database::ResultKind::Rows,
     }
 }
 

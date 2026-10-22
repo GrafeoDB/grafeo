@@ -93,6 +93,9 @@ pub struct LogicalPlan {
     /// The graph the statement names for itself (SQL/PGQ `GRAPH_TABLE (g
     /// ...)`), which it reads in place of the session's current graph.
     pub graph: Option<String>,
+    /// What executing the plan returns (set by the SPARQL translator for ASK,
+    /// CONSTRUCT and DESCRIBE).
+    pub result_kind: crate::database::ResultKind,
 }
 
 impl LogicalPlan {
@@ -104,6 +107,7 @@ impl LogicalPlan {
             profile: false,
             default_params: HashMap::new(),
             graph: None,
+            result_kind: crate::database::ResultKind::Rows,
         }
     }
 
@@ -115,7 +119,15 @@ impl LogicalPlan {
             profile: false,
             default_params: HashMap::new(),
             graph: None,
+            result_kind: crate::database::ResultKind::Rows,
         }
+    }
+
+    /// Returns the plan marked as returning `kind`.
+    #[must_use]
+    pub fn with_result_kind(mut self, kind: crate::database::ResultKind) -> Self {
+        self.result_kind = kind;
+        self
     }
 
     /// Creates a PROFILE plan that executes and returns per-operator metrics.
@@ -126,6 +138,7 @@ impl LogicalPlan {
             profile: true,
             default_params: HashMap::new(),
             graph: None,
+            result_kind: crate::database::ResultKind::Rows,
         }
     }
 }

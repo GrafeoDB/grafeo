@@ -16,6 +16,8 @@ mod id;
 mod logical_type;
 mod property_map;
 mod property_type;
+pub mod rdf;
+mod rdf_order;
 mod read_view;
 mod temporal_comparison;
 mod temporal_component;
@@ -34,6 +36,7 @@ pub use id::{EdgeId, EdgeTypeId, EpochId, IndexId, LabelId, NodeId, PropertyKeyI
 pub use logical_type::LogicalType;
 pub use property_map::PropertyMap;
 pub use property_type::{PropertyDataType, PropertyTypeTooDeep, exact_float};
+pub use rdf_order::sparql_order;
 pub use read_view::ReadView;
 pub use temporal_comparison::TemporalComparison;
 pub use time::Time;

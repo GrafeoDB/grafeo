@@ -310,6 +310,7 @@ impl Optimizer {
             profile: plan.profile,
             default_params: plan.default_params,
             graph: plan.graph,
+            result_kind: plan.result_kind,
         })
     }
 

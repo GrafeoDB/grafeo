@@ -7,9 +7,11 @@
 use std::cmp::Ordering;
 use std::collections::{HashMap, VecDeque};
 use std::hash::{Hash, Hasher};
+use std::sync::Arc;
 
 use arcstr::ArcStr;
-use grafeo_common::types::{HashableValue, LogicalType, TemporalComparison, Value};
+use grafeo_common::types::rdf::Term;
+use grafeo_common::types::{Decimal, HashableValue, LogicalType, TemporalComparison, Value};
 
 use super::{Operator, OperatorError, OperatorResult};
 use crate::execution::chunk::{ColumnTypes, DataChunkBuilder, copied_column_types};
@@ -51,6 +53,10 @@ pub enum HashKey {
     Bytes(Vec<u8>),
     /// Composite key for multi-column joins.
     Composite(Vec<HashKey>),
+    /// Decimal key, by value: `1.50` and `1.5` are one key.
+    Decimal(Decimal),
+    /// RDF term key, by term identity (SPARQL `sameTerm`).
+    Term(Arc<Term>),
 }
 
 impl Ord for HashKey {
@@ -72,6 +78,13 @@ impl Ord for HashKey {
             (HashKey::Bytes(_), _) => Ordering::Less,
             (_, HashKey::Bytes(_)) => Ordering::Greater,
             (HashKey::Composite(a), HashKey::Composite(b)) => a.cmp(b),
+            (HashKey::Composite(_), _) => Ordering::Less,
+            (_, HashKey::Composite(_)) => Ordering::Greater,
+            (HashKey::Decimal(a), HashKey::Decimal(b)) => a.cmp(b),
+            (HashKey::Decimal(_), _) => Ordering::Less,
+            (_, HashKey::Decimal(_)) => Ordering::Greater,
+            // Equal only for the same term, as `Eq`
+            (HashKey::Term(a), HashKey::Term(b)) => grafeo_common::types::sparql_order(a, b),
         }
     }
 }
@@ -155,6 +168,9 @@ impl HashKey {
                 let n: i64 = neg.values().copied().map(|v| v as i64).sum();
                 HashKey::Int64(p - n)
             }
+            Value::Decimal(decimal) => HashKey::Decimal(*decimal),
+            // Term identity: two terms join only when they are the same term.
+            Value::RdfTerm(term) => HashKey::Term(Arc::clone(term)),
             _ => HashKey::Null,
         }
     }
@@ -1892,6 +1908,48 @@ mod tests {
 
         results.sort_unstable();
         assert_eq!(results, vec![1, 3]);
+    }
+
+    #[test]
+    fn test_hash_key_from_rdf_term() {
+        let key = |term: Term| HashKey::from_value(&Value::RdfTerm(Arc::new(term)));
+        assert_eq!(
+            key(Term::lang_literal("Fruit", "en")),
+            key(Term::lang_literal("Fruit", "en"))
+        );
+        assert_ne!(
+            key(Term::lang_literal("Fruit", "en")),
+            key(Term::lang_literal("Fruit", "fr"))
+        );
+        assert_ne!(key(Term::lang_literal("Fruit", "en")), HashKey::Null);
+        assert_ne!(
+            key(Term::iri("http://example.org/a")),
+            HashKey::from_value(&Value::String("<http://example.org/a>".into()))
+        );
+        assert_ne!(
+            key(Term::literal("1")),
+            key(Term::typed_literal(
+                "1",
+                grafeo_common::types::rdf::Literal::XSD_INTEGER
+            ))
+        );
+        assert_eq!(
+            key(Term::iri("http://example.org/a")).cmp(&key(Term::iri("http://example.org/b"))),
+            Ordering::Less
+        );
+    }
+
+    /// A decimal key is its value, apart from integers and floats: `1.50`
+    /// meets `1.5`, not `2.5`, and no decimal is a NULL key (which an inner
+    /// join skips and an outer join matches with every NULL).
+    #[test]
+    fn test_hash_key_from_decimal() {
+        let key = |text: &str| HashKey::from_value(&Value::Decimal(Decimal::parse(text).unwrap()));
+        assert_eq!(key("1.50"), key("1.5"));
+        assert_ne!(key("1.5"), key("2.5"));
+        assert_ne!(key("1.5"), HashKey::Null);
+        assert_ne!(key("3"), HashKey::from_value(&Value::Int64(3)));
+        assert_eq!(key("1.5").cmp(&key("2.5")), Ordering::Less);
     }
 
     #[test]

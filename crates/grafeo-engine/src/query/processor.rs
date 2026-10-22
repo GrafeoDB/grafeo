@@ -653,7 +653,9 @@ impl QueryProcessor {
 
             let mut physical_plan = planner.plan(&optimized_plan)?;
             let executor = Executor::with_columns(physical_plan.columns.clone());
-            executor.execute(physical_plan.operator.as_mut())
+            executor
+                .execute(physical_plan.operator.as_mut())
+                .map(|result| result.with_kind(optimized_plan.result_kind))
         };
         if optimized_plan.root.has_mutations() {
             crate::transaction::update_privately(rdf_store, &self.transaction_manager, |writer| {
@@ -861,6 +863,7 @@ pub(crate) fn explain_result(plan: &LogicalPlan) -> QueryResult {
         gql_status: grafeo_common::utils::GqlStatus::SUCCESS,
         counters: Default::default(),
         profile: None,
+        kind: crate::database::ResultKind::Rows,
     }
 }
 
@@ -886,6 +889,7 @@ pub(crate) fn physical_explain_result(
         gql_status: grafeo_common::utils::GqlStatus::SUCCESS,
         counters: Default::default(),
         profile: None,
+        kind: crate::database::ResultKind::Rows,
     }
 }
 

@@ -5,6 +5,7 @@
 use super::common::{
     collect_expression_variables, wrap_distinct, wrap_filter, wrap_limit, wrap_skip, wrap_sort,
 };
+use crate::database::ResultKind;
 use crate::query::plan::Callee;
 use crate::query::plan::{
     AddGraphOp, AggregateExpr, AggregateFunction, AggregateOp, AntiJoinOp, BinaryOp, BindOp,
@@ -367,7 +368,8 @@ impl SparqlTranslator {
             }],
             input: Box::new(counted),
             pass_through_input: false,
-        })))
+        }))
+        .with_result_kind(ResultKind::Boolean))
     }
 
     fn translate_construct(&mut self, construct: &ast::ConstructQuery) -> Result<LogicalPlan> {
@@ -416,7 +418,8 @@ impl SparqlTranslator {
         Ok(LogicalPlan::new(LogicalOperator::Construct(ConstructOp {
             templates,
             input: Box::new(plan),
-        })))
+        }))
+        .with_result_kind(ResultKind::Graph))
     }
 
     fn translate_describe(&mut self, describe: &ast::DescribeQuery) -> Result<LogicalPlan> {

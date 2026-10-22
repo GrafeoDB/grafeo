@@ -4785,7 +4785,6 @@ fn term_to_string(term: &Term) -> String {
         Term::Iri(iri) => iri.as_str().to_string(),
         Term::BlankNode(bnode) => format!("_:{}", bnode.id()),
         Term::Literal(lit) => lit.value().to_string(),
-        _ => String::new(),
     }
 }
 

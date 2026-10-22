@@ -98,7 +98,8 @@ pub fn compare_values(a: &Value, b: &Value) -> Option<Ordering> {
 /// temporal values in time order; durations by months, then days, then
 /// nanoseconds; lists and paths element by element, a prefix first; maps by
 /// size, then their keys, then their values; vectors and bytes element by
-/// element; counters by their value.
+/// element; counters by their value; RDF terms in SPARQL order (see
+/// [`sparql_order`](grafeo_common::types::sparql_order)).
 #[must_use]
 pub fn compare_values_total(a: &Value, b: &Value) -> Ordering {
     let by_type = type_rank(a).cmp(&type_rank(b));
@@ -154,6 +155,7 @@ pub fn compare_values_total(a: &Value, b: &Value) -> Ordering {
         (Value::GCounter(_) | Value::OnCounter { .. }, _) => {
             counter_value(a).cmp(&counter_value(b))
         }
+        (Value::RdfTerm(a), Value::RdfTerm(b)) => grafeo_common::types::sparql_order(a, b),
         // Values of the same rank not matched above are equal: nulls, and
         // values of a type added later.
         _ => Ordering::Equal,
@@ -179,6 +181,9 @@ fn type_rank(value: &Value) -> u8 {
         Value::GCounter(_) | Value::OnCounter { .. } => 13,
         Value::Int64(_) | Value::Float64(_) | Value::Decimal(_) => 15,
         Value::Null => 16,
+        // RDF terms: SPARQL results order them among themselves; next to other
+        // types they take the place openCypher leaves for types it does not define.
+        Value::RdfTerm(_) => 14,
         // A type added later goes before the numbers: openCypher keeps types
         // it does not define out from after them.
         _ => 14,
@@ -853,6 +858,30 @@ mod tests {
                 NullOrder::NullsLast
             ),
             Ordering::Less
+        );
+    }
+
+    #[test]
+    fn rdf_terms_sort_in_sparql_order() {
+        use grafeo_common::types::rdf::{Literal, Term};
+        let rdf = |term: Term| Value::RdfTerm(Arc::new(term));
+        let mut values = vec![
+            rdf(Term::typed_literal("10", Literal::XSD_INTEGER)),
+            rdf(Term::literal("Apple")),
+            rdf(Term::iri("http://example.org/a")),
+            rdf(Term::typed_literal("9", Literal::XSD_INTEGER)),
+            rdf(Term::blank("b0")),
+        ];
+        values.sort_by(compare_values_total);
+        assert_eq!(
+            values,
+            vec![
+                rdf(Term::blank("b0")),
+                rdf(Term::iri("http://example.org/a")),
+                rdf(Term::typed_literal("9", Literal::XSD_INTEGER)),
+                rdf(Term::typed_literal("10", Literal::XSD_INTEGER)),
+                rdf(Term::literal("Apple")),
+            ]
         );
     }
 }

@@ -30,6 +30,7 @@ Changes since 0.6.0-beta.1.
 - **Salvaging a damaged WAL at an open**: `Config::with_wal_salvage()`, Python `GrafeoDB(path, wal_salvage=True)`, Node.js `GrafeoDB.create(path, { walSalvage: true })` (see Fixed).
 - **C library release assets with every feature** ([#636](https://github.com/GrafeoDB/grafeo/issues/636)): each release has `grafeo-c-<tag>-<target>-default` and `grafeo-c-<tag>-<target>-all` archives per platform, with the library, `grafeo.h` and a `FEATURES.txt`; `all` has every profile of the C binding (`lpg`, `rdf`, `analytics`, `ai`), so the Cypher, Gremlin, SQL/PGQ, SPARQL and GraphQL calls in `grafeo.h` are exported. The `grafeo-<tag>-<target>` archives now hold `grafeo.h` too, and `checksums.txt` lists every archive.
 - **`PROFILE` results hold the operator tree as data** ([#461](https://github.com/GrafeoDB/grafeo/issues/461)): next to the text cell, `QueryResult::profile` (Rust), `result.profile` (Python, Node.js) and `profile` in the WASM `executeRaw*` results give each operator with the rows it produced, its calls and its own and total time, as a tree (experimental). The WASM `executeRaw*` results now report `executionTimeMs` too, measured by the browser's clock.
+- **Results say what they hold** ([#464](https://github.com/GrafeoDB/grafeo/issues/464)): `QueryResult::kind` (re-exported as `grafeo::ResultKind`) is `Rows` for SPARQL SELECT and updates and every other language, `Boolean` for SPARQL ASK and `Graph` for CONSTRUCT.
 
 ### Changed
 

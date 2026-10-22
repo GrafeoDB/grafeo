@@ -8,6 +8,7 @@
 
 use arcstr::ArcStr;
 use grafeo_common::types::Value;
+use grafeo_common::types::rdf::Term;
 use std::collections::BTreeMap;
 use std::io::{Read, Write};
 use std::sync::Arc;
@@ -31,6 +32,12 @@ const TAG_ZONED_DATETIME: u8 = 14;
 const TAG_GCOUNTER: u8 = 15;
 const TAG_PNCOUNTER: u8 = 16;
 const TAG_DECIMAL: u8 = 17;
+const TAG_RDF_TERM: u8 = 18;
+
+/// The kind byte after [`TAG_RDF_TERM`], as in the storage codec.
+const RDF_IRI: u8 = 0;
+const RDF_BLANK_NODE: u8 = 1;
+const RDF_LITERAL: u8 = 2;
 
 /// Serializes a Value to bytes.
 ///
@@ -184,6 +191,36 @@ pub fn serialize_value<W: Write + ?Sized>(value: &Value, w: &mut W) -> std::io::
             w.write_all(&[TAG_DECIMAL, d.scale()])?;
             w.write_all(&d.mantissa().to_le_bytes())?;
             Ok(2 + 16)
+        }
+        // Tag, kind, the IRI, blank node label or lexical form, and for a
+        // literal a language flag and the tag or datatype IRI.
+        Value::RdfTerm(term) => {
+            let written = match term.as_ref() {
+                Term::Iri(iri) => {
+                    w.write_all(&[TAG_RDF_TERM, RDF_IRI])?;
+                    write_spill_str(w, iri.as_str())?
+                }
+                Term::BlankNode(node) => {
+                    w.write_all(&[TAG_RDF_TERM, RDF_BLANK_NODE])?;
+                    write_spill_str(w, node.id())?
+                }
+                Term::Literal(literal) => {
+                    w.write_all(&[TAG_RDF_TERM, RDF_LITERAL])?;
+                    let lexical = write_spill_str(w, literal.value())?;
+                    let tail = match literal.language() {
+                        Some(language) => {
+                            w.write_all(&[1])?;
+                            write_spill_str(w, language)?
+                        }
+                        None => {
+                            w.write_all(&[0])?;
+                            write_spill_str(w, literal.datatype())?
+                        }
+                    };
+                    lexical + 1 + tail
+                }
+            };
+            Ok(2 + written)
         }
         // `Value` is `#[non_exhaustive]`: a kind added without a tag here
         // fails the spill instead of coming back as null.
@@ -438,11 +475,62 @@ pub fn deserialize_value<R: Read + ?Sized>(r: &mut R) -> std::io::Result<Value> 
                 .map(Value::Decimal)
                 .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))
         }
+        TAG_RDF_TERM => {
+            let mut kind = [0u8; 1];
+            r.read_exact(&mut kind)?;
+            let term = match kind[0] {
+                RDF_IRI => Term::iri(read_spill_str(r)?),
+                RDF_BLANK_NODE => Term::blank(read_spill_str(r)?),
+                RDF_LITERAL => {
+                    let lexical = read_spill_str(r)?;
+                    let mut flag = [0u8; 1];
+                    r.read_exact(&mut flag)?;
+                    match flag[0] {
+                        0 => Term::typed_literal(lexical, read_spill_str(r)?),
+                        1 => Term::lang_literal(lexical, read_spill_str(r)?),
+                        other => {
+                            return Err(std::io::Error::new(
+                                std::io::ErrorKind::InvalidData,
+                                format!("RDF language flag is {other}, expected 0 or 1"),
+                            ));
+                        }
+                    }
+                }
+                other => {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        format!("Unknown RDF term kind: {other}"),
+                    ));
+                }
+            };
+            Ok(Value::RdfTerm(Arc::new(term)))
+        }
         _ => Err(std::io::Error::new(
             std::io::ErrorKind::InvalidData,
             format!("Unknown value tag: {}", tag[0]),
         )),
     }
+}
+
+/// Writes a string as its byte length (u64, little endian) and its bytes;
+/// returns the bytes written.
+fn write_spill_str<W: Write + ?Sized>(w: &mut W, text: &str) -> std::io::Result<usize> {
+    let bytes = text.as_bytes();
+    w.write_all(&(bytes.len() as u64).to_le_bytes())?;
+    w.write_all(bytes)?;
+    Ok(8 + bytes.len())
+}
+
+/// Reads a string [`write_spill_str`] wrote.
+fn read_spill_str<R: Read + ?Sized>(r: &mut R) -> std::io::Result<String> {
+    let mut len_buf = [0u8; 8];
+    r.read_exact(&mut len_buf)?;
+    let len = usize::try_from(u64::from_le_bytes(len_buf))
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()))?;
+    let mut buf = vec![0u8; len];
+    r.read_exact(&mut buf)?;
+    String::from_utf8(buf)
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()))
 }
 
 /// Serializes a row (slice of Values) to bytes.
@@ -560,12 +648,29 @@ mod tests {
                 neg: counter(&[("Jules", 3)]),
             },
             Value::Decimal(Decimal::parse("1.50").unwrap()),
+            Value::RdfTerm(Arc::new(Term::lang_literal("Kraków", "pl"))),
         ] {
             assert_eq!(
                 format!("{:?}", roundtrip_value(value.clone())),
                 format!("{value:?}")
             );
         }
+    }
+
+    /// Every term of the fixtures spills and comes back as the same term,
+    /// with the byte count `serialize_value` reports.
+    #[test]
+    fn test_serialize_rdf_term_roundtrip() {
+        for term in grafeo_common::types::rdf::testing::unusual_terms() {
+            let value = Value::RdfTerm(Arc::new(term));
+            let mut bytes = Vec::new();
+            let written = serialize_value(&value, &mut bytes).unwrap();
+            assert_eq!(written, bytes.len(), "{value}");
+            let mut cursor = Cursor::new(bytes);
+            assert_eq!(deserialize_value(&mut cursor).unwrap(), value);
+        }
+        let bad_flag = [TAG_RDF_TERM, RDF_LITERAL, 0, 0, 0, 0, 0, 0, 0, 0, 7];
+        assert!(deserialize_value(&mut Cursor::new(bad_flag)).is_err());
     }
 
     /// A spilled decimal comes back with its value and its scale.

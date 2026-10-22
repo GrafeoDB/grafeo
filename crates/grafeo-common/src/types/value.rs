@@ -13,6 +13,7 @@ use std::fmt;
 use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 
+use super::rdf::Term;
 use super::{Date, Duration, Time, Timestamp, ZonedDatetime};
 
 /// An interned property name - cheap to clone and compare.
@@ -178,6 +179,10 @@ pub enum Value {
     /// with (`1.50`). The last variant: serde encodes the variant index, so
     /// adding it here keeps the encodings of the others.
     Decimal(Decimal),
+    /// An RDF term (an IRI, a blank node, or a literal with its datatype or
+    /// language tag), as SPARQL results carry it. Equal and hashed by term
+    /// identity (SPARQL `sameTerm`). After `Decimal`, for the same reason.
+    RdfTerm(Arc<Term>),
 }
 
 impl Value {
@@ -473,6 +478,7 @@ impl Value {
             Value::GCounter(_) => "GCOUNTER",
             Value::OnCounter { .. } => "PNCOUNTER",
             Value::Decimal(_) => "DECIMAL",
+            Value::RdfTerm(_) => "RDF_TERM",
         }
     }
 
@@ -537,6 +543,18 @@ impl Value {
                 let n: usize = neg.keys().map(|k| k.len() + size_of::<u64>()).sum();
                 p + n
             }
+            Value::RdfTerm(term) => {
+                size_of::<Term>()
+                    + match term.as_ref() {
+                        Term::Iri(iri) => iri.as_str().len(),
+                        Term::BlankNode(node) => node.id().len(),
+                        Term::Literal(literal) => {
+                            literal.value().len()
+                                + literal.datatype().len()
+                                + literal.language().map_or(0, str::len)
+                        }
+                    }
+            }
         }
     }
 }
@@ -549,6 +567,7 @@ impl fmt::Debug for Value {
             Value::Int64(i) => write!(f, "Int64({i})"),
             Value::Float64(fl) => write!(f, "Float64({fl})"),
             Value::Decimal(d) => write!(f, "Decimal({d})"),
+            Value::RdfTerm(term) => write!(f, "RdfTerm({})", term.to_ntriples()),
             Value::String(s) => write!(f, "String({s:?})"),
             Value::Bytes(b) => write!(f, "Bytes([{}; {} bytes])", b.first().unwrap_or(&0), b.len()),
             Value::Timestamp(t) => write!(f, "Timestamp({t:?})"),
@@ -592,6 +611,7 @@ impl fmt::Display for Value {
             Value::Int64(i) => write!(f, "{i}"),
             Value::Float64(fl) => write!(f, "{fl}"),
             Value::Decimal(d) => write!(f, "{d}"),
+            Value::RdfTerm(term) => f.write_str(&term.to_ntriples()),
             Value::String(s) => write!(f, "{s:?}"),
             Value::Bytes(b) => write!(f, "<bytes: {} bytes>", b.len()),
             Value::Timestamp(t) => write!(f, "{t}"),
@@ -942,7 +962,7 @@ impl TryFrom<&Value> for OrderableValue {
     /// Attempts to create an `OrderableValue` from a `Value`.
     ///
     /// Returns `Err(())` for types that don't have a natural ordering
-    /// (`Null`, `Bytes`, `List`, `Map`, `Vector`).
+    /// (`Null`, `Bytes`, `List`, `Map`, `Vector`, `RdfTerm`).
     fn try_from(value: &Value) -> Result<Self, Self::Error> {
         match value {
             Value::Int64(i) => Ok(Self::Int64(*i)),
@@ -962,7 +982,8 @@ impl TryFrom<&Value> for OrderableValue {
             | Value::Path { .. }
             | Value::GCounter(_)
             | Value::OnCounter { .. }
-            | Value::Decimal(_) => Err(()),
+            | Value::Decimal(_)
+            | Value::RdfTerm(_) => Err(()),
         }
     }
 }
@@ -1121,6 +1142,7 @@ fn hash_value<H: Hasher>(value: &Value, state: &mut H) {
         Value::Int64(i) => i.hash(state),
         Value::Float64(f) => f.to_bits().hash(state),
         Value::Decimal(d) => d.hash(state),
+        Value::RdfTerm(term) => term.hash(state),
         Value::String(s) => s.hash(state),
         Value::Bytes(b) => b.hash(state),
         Value::Timestamp(t) => t.hash(state),
@@ -1252,6 +1274,7 @@ impl From<HashableValue> for Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::types::rdf::{Literal, Term};
 
     #[test]
     fn test_value_type_checks() {
@@ -2271,5 +2294,61 @@ mod tests {
             displayed.contains("10:30:00"),
             "Display should contain the time"
         );
+    }
+
+    fn rdf(term: Term) -> Value {
+        Value::RdfTerm(Arc::new(term))
+    }
+
+    #[test]
+    fn an_rdf_term_is_a_value_of_its_own() {
+        let label = rdf(Term::lang_literal("Fruit", "en"));
+        assert_eq!(label.type_name(), "RDF_TERM");
+        assert_eq!(label.to_string(), "\"Fruit\"@en");
+        assert_eq!(format!("{label:?}"), "RdfTerm(\"Fruit\"@en)");
+        assert_eq!(
+            rdf(Term::iri("http://example.org/a")).to_string(),
+            "<http://example.org/a>"
+        );
+        assert_eq!(rdf(Term::blank("b0")).to_string(), "_:b0");
+        assert!(label.estimated_size_bytes() >= "Fruit".len() + "en".len());
+        assert!(OrderableValue::try_from(&label).is_err());
+    }
+
+    #[test]
+    fn rdf_terms_are_equal_only_when_they_are_the_same_term() {
+        use std::collections::hash_map::DefaultHasher;
+        let hash = |value: &Value| {
+            let mut hasher = DefaultHasher::new();
+            HashableValue(value.clone()).hash(&mut hasher);
+            hasher.finish()
+        };
+        let english = rdf(Term::lang_literal("Fruit", "en"));
+        let french = rdf(Term::lang_literal("Fruit", "fr"));
+        assert_eq!(english, rdf(Term::lang_literal("Fruit", "en")));
+        assert_eq!(
+            hash(&english),
+            hash(&rdf(Term::lang_literal("Fruit", "en")))
+        );
+        assert_ne!(english, french);
+        assert_ne!(hash(&english), hash(&french));
+        assert_ne!(english, Value::String("Fruit".into()));
+        assert_ne!(
+            rdf(Term::iri("http://example.org/Fruit")),
+            Value::String("http://example.org/Fruit".into())
+        );
+        assert_ne!(
+            rdf(Term::literal("1")),
+            rdf(Term::typed_literal("1", Literal::XSD_INTEGER))
+        );
+    }
+
+    #[test]
+    fn an_rdf_term_serializes_and_back() {
+        for term in crate::types::rdf::testing::unusual_terms() {
+            let value = rdf(term);
+            let bytes = value.serialize().unwrap();
+            assert_eq!(Value::deserialize(&bytes).unwrap(), value);
+        }
     }
 }

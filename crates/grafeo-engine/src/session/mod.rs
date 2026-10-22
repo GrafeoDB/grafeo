@@ -1806,6 +1806,7 @@ impl Session {
             gql_status: grafeo_common::utils::GqlStatus::SUCCESS,
             counters: Default::default(),
             profile: None,
+            kind: crate::database::ResultKind::Rows,
         }
     }
 

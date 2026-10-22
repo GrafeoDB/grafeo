@@ -1587,6 +1587,28 @@ mod tests {
         assert_eq!(format!("{:?}", back.values[1].1), "Decimal(1.50)");
     }
 
+    /// RDF terms (a SPARQL result stored as a property) go into a `Values`
+    /// chunk, without a zone map, and come back as the same terms: kind,
+    /// text, language tag and datatype.
+    #[test]
+    fn rdf_terms_round_trip_through_a_values_chunk() {
+        use grafeo_common::types::rdf::{Term, testing::unusual_terms};
+        let terms: Vec<Value> = unusual_terms()
+            .into_iter()
+            .chain([Term::typed_literal(
+                "2026-01-15",
+                "http://www.w3.org/2001/XMLSchema#date",
+            )])
+            .map(|term| Value::RdfTerm(Arc::new(term)))
+            .collect();
+        let row_count = u32::try_from(terms.len()).unwrap();
+        let values = dense(terms);
+        let (codec, _, back) = round_trip(row_count, &values, None);
+        assert_eq!(codec, ChunkCodec::Values);
+        assert_eq!(back.zone_map, None);
+        assert_eq!(back.values, values);
+    }
+
     /// A decimal body with a scale past 38, or a zone map other than its
     /// values' bounds, is refused.
     #[test]

@@ -382,6 +382,7 @@ zoned datetimes with their offsets, counters with every replica.
 | 15 | GCounter | Count `u32`, then per entry its replica (length `u32` and UTF-8) and its `u64` count, sorted by replica |
 | 16 | OnCounter | The positive entries, then the negative entries, each as in 15 |
 | 17 | Decimal | Scale `u8` (0 to 38), then the mantissa as a 16-byte little-endian `i128` (at most 38 digits); the value is the mantissa divided by 10 to the scale |
+| 18 | RdfTerm | Kind `u8` (0 IRI, 1 blank node, 2 literal), then the IRI, the blank node label or the literal's lexical form as in 4; a literal then has `u8` has a language tag (0 or 1) and its language tag or datatype IRI as in 4 |
 
 A reader checks every length and count against the bytes left before it
 allocates, and refuses an unknown tag, a field the kind does not accept (such

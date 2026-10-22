@@ -25,6 +25,8 @@
 //! | 14 | Path | node count u32, values, edge count u32, values |
 //! | 15 | GCounter | count u32, (replica as length u32 and UTF-8, u64) per entry, sorted by replica |
 //! | 16 | OnCounter | the positive entries, then the negative entries, each as in 15 |
+//! | 17 | Decimal | u8 scale, i128 mantissa |
+//! | 18 | RdfTerm | u8 kind (0 IRI, 1 blank node, 2 literal), the IRI, blank node label or lexical form as in 4; a literal then has u8 has a language tag (0 or 1) and the tag or datatype IRI as in 4 |
 //!
 //! The decoder checks every length and count against the bytes left before
 //! it allocates, and refuses an unknown tag, a field the type does not accept,
@@ -41,6 +43,7 @@ use std::sync::Arc;
 
 use arcstr::ArcStr;
 
+use crate::types::rdf::Term;
 use crate::types::{Date, Decimal, Duration, PropertyKey, Time, Timestamp, Value, ZonedDatetime};
 use crate::utils::error::{Error, Result};
 
@@ -75,6 +78,12 @@ const TAG_PATH: u8 = 14;
 const TAG_GCOUNTER: u8 = 15;
 const TAG_ON_COUNTER: u8 = 16;
 const TAG_DECIMAL: u8 = 17;
+const TAG_RDF_TERM: u8 = 18;
+
+/// The kind byte after [`TAG_RDF_TERM`].
+const RDF_IRI: u8 = 0;
+const RDF_BLANK_NODE: u8 = 1;
+const RDF_LITERAL: u8 = 2;
 
 /// The fewest bytes a map entry takes: a key length and a value tag.
 const MIN_MAP_ENTRY_BYTES: usize = 5;
@@ -194,6 +203,33 @@ fn encode_nested(value: &Value, out: &mut Vec<u8>, depth: usize) -> Result<()> {
             out.push(decimal.scale());
             out.extend_from_slice(&decimal.mantissa().to_le_bytes());
         }
+        Value::RdfTerm(term) => {
+            out.push(TAG_RDF_TERM);
+            match term.as_ref() {
+                Term::Iri(iri) => {
+                    out.push(RDF_IRI);
+                    put_str(iri.as_str(), "RDF IRI", out)?;
+                }
+                Term::BlankNode(node) => {
+                    out.push(RDF_BLANK_NODE);
+                    put_str(node.id(), "RDF blank node", out)?;
+                }
+                Term::Literal(literal) => {
+                    out.push(RDF_LITERAL);
+                    put_str(literal.value(), "RDF literal", out)?;
+                    match literal.language() {
+                        Some(language) => {
+                            out.push(1);
+                            put_str(language, "RDF language tag", out)?;
+                        }
+                        None => {
+                            out.push(0);
+                            put_str(literal.datatype(), "RDF datatype", out)?;
+                        }
+                    }
+                }
+            }
+        }
     }
     Ok(())
 }
@@ -312,6 +348,20 @@ pub fn encoded_len(value: &Value) -> usize {
         Value::GCounter(counts) => counter_len(counts),
         Value::OnCounter { pos, neg } => counter_len(pos).saturating_add(counter_len(neg)),
         Value::Decimal(_) => 1 + 16,
+        Value::RdfTerm(term) => {
+            1 + match term.as_ref() {
+                Term::Iri(iri) => 4usize.saturating_add(iri.as_str().len()),
+                Term::BlankNode(node) => 4usize.saturating_add(node.id().len()),
+                Term::Literal(literal) => saturating_total(
+                    4 + 1 + 4,
+                    [
+                        literal.value().len(),
+                        literal.language().unwrap_or(literal.datatype()).len(),
+                    ]
+                    .into_iter(),
+                ),
+            }
+        }
     };
     fields.saturating_add(1)
 }
@@ -574,6 +624,27 @@ impl<'a> Decoder<'a> {
                         format_args!("decimal {mantissa} at scale {scale} has more than 38 digits"),
                     )
                 })?)
+            }
+            TAG_RDF_TERM => {
+                let term = match self.read_u8("RDF term kind")? {
+                    RDF_IRI => Term::iri(self.read_str("RDF IRI")?),
+                    RDF_BLANK_NODE => Term::blank(self.read_str("RDF blank node")?),
+                    RDF_LITERAL => {
+                        let value = self.read_str("RDF literal")?;
+                        if self.read_flag("RDF language flag")? {
+                            Term::lang_literal(value, self.read_str("RDF language tag")?)
+                        } else {
+                            Term::typed_literal(value, self.read_str("RDF datatype")?)
+                        }
+                    }
+                    kind => {
+                        return Err(Self::error(
+                            at,
+                            format_args!("unknown RDF term kind {kind}"),
+                        ));
+                    }
+                };
+                Value::RdfTerm(Arc::new(term))
             }
             other => return Err(Self::error(at, format_args!("unknown value tag {other}"))),
         };
@@ -951,6 +1022,57 @@ mod tests {
                 "scale {scale}, mantissa {mantissa}"
             );
         }
+    }
+
+    #[test]
+    fn every_unusual_rdf_term_round_trips() {
+        for term in crate::types::rdf::testing::unusual_terms() {
+            let value = Value::RdfTerm(Arc::new(term));
+            let mut bytes = Vec::new();
+            encode_value(&value, &mut bytes).unwrap();
+            assert_eq!(bytes.len(), encoded_len(&value), "{value}");
+            let mut pos = 0;
+            assert_eq!(decode_value(&bytes, &mut pos).unwrap(), value, "{value}");
+            assert_eq!(pos, bytes.len(), "{value}");
+            for cut in 0..bytes.len() {
+                assert!(
+                    decode_value(&bytes[..cut], &mut 0).is_err(),
+                    "{value} cut at {cut}"
+                );
+            }
+        }
+    }
+
+    /// An RDF term's layout: tag, kind, the string, and for a literal the
+    /// language flag and the tag or datatype.
+    #[test]
+    fn the_rdf_term_layout_is_fixed() {
+        let encoded_term = |term: Term| encoded(&Value::RdfTerm(Arc::new(term)));
+        assert_eq!(
+            encoded_term(Term::iri("ab")),
+            [18, 0, 2, 0, 0, 0, b'a', b'b']
+        );
+        assert_eq!(encoded_term(Term::blank("b")), [18, 1, 1, 0, 0, 0, b'b']);
+        assert_eq!(
+            encoded_term(Term::lang_literal("x", "fr")),
+            [18, 2, 1, 0, 0, 0, b'x', 1, 2, 0, 0, 0, b'f', b'r']
+        );
+        assert_eq!(
+            encoded_term(Term::typed_literal("x", "t")),
+            [18, 2, 1, 0, 0, 0, b'x', 0, 1, 0, 0, 0, b't']
+        );
+    }
+
+    #[test]
+    fn an_unknown_rdf_term_kind_is_refused() {
+        let error = decode_value(&[18, 9, 0, 0, 0, 0], &mut 0)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("unknown RDF term kind 9"), "{error}");
+        let error = decode_value(&[18, 2, 1, 0, 0, 0, b'x', 7, 0, 0, 0, 0], &mut 0)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("RDF language flag"), "{error}");
     }
 
     #[test]

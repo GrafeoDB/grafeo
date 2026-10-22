@@ -53,6 +53,7 @@ crc32fast.workspace = true
 
 [dev-dependencies]
 criterion.workspace = true
+grafeo-common = { workspace = true, features = ["testing-rdf-terms"] }
 serde_json = "1"
 tempfile.workspace = true
 

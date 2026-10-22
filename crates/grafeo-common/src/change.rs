@@ -1083,6 +1083,7 @@ fn payload_address(value: &Value) -> Option<usize> {
         Value::Vector(items) => Some(items.as_ptr().addr()),
         Value::Map(map) => Some(Arc::as_ptr(map).addr()),
         Value::GCounter(counts) => Some(Arc::as_ptr(counts).addr()),
+        Value::RdfTerm(term) => Some(Arc::as_ptr(term).addr()),
         Value::Path { .. }
         | Value::OnCounter { .. }
         | Value::Null

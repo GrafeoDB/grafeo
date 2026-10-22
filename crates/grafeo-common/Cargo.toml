@@ -54,6 +54,8 @@ temporal = []  # Deprecated since 0.6.0: enables nothing (LpgStore, its only use
 tracing = ["dep:tracing"]
 testing-crash-injection = []
 testing-statement-injection = []
+# RDF term fixtures (`types::rdf::testing`) for the tests of crates that depend on this one.
+testing-rdf-terms = []
 encryption = ["dep:aes-gcm", "dep:hkdf", "dep:argon2", "dep:zeroize", "dep:sha2", "dep:rand"]
 
 [dev-dependencies]

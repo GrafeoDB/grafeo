@@ -6,14 +6,14 @@
 //! - Literals (data values)
 //! - Variables (for query patterns, not stored)
 
-use grafeo_common::storage::log_record::TermRecord;
+use crate::storage::log_record::TermRecord;
 use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::sync::Arc;
 
-/// An RDF term.
+/// An RDF term: the three kinds of RDF 1.1, matched exhaustively, so a
+/// new kind (an RDF 1.2 triple term) is handled everywhere a term is.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[non_exhaustive]
 pub enum Term {
     /// An IRI (Internationalized Resource Identifier).
     Iri(Iri),
@@ -111,8 +111,8 @@ impl Term {
     /// node as `_:` and its label, a numeric literal as its number (see
     /// [`Literal::numeric_value`]) and any other literal as its lexical form.
     #[must_use]
-    pub fn query_value(&self) -> grafeo_common::types::Value {
-        use grafeo_common::types::Value;
+    pub fn query_value(&self) -> crate::types::Value {
+        use crate::types::Value;
         match self {
             Term::Iri(iri) => Value::from(iri.as_str()),
             Term::BlankNode(node) => Value::from(format!("_:{}", node.id())),
@@ -542,8 +542,8 @@ impl Literal {
     /// `xsd:float` as a `Float64`. `None` for another datatype, and for a
     /// lexical form that is not one of the type (`"abc"^^xsd:integer`).
     #[must_use]
-    pub fn numeric_value(&self) -> Option<grafeo_common::types::Value> {
-        use grafeo_common::types::{Decimal, Value};
+    pub fn numeric_value(&self) -> Option<crate::types::Value> {
+        use crate::types::{Decimal, Value};
         let name = self
             .datatype
             .strip_prefix("http://www.w3.org/2001/XMLSchema#")?;
@@ -622,51 +622,59 @@ impl From<&TermRecord> for Term {
     }
 }
 
-/// `~` stands for a backslash in the N-Triples strings of these tests.
-#[cfg(test)]
-pub(crate) fn escaped(text: &str) -> String {
-    text.replace('~', "\\")
-}
+/// Term fixtures shared by the tests of this crate and of grafeo-core.
+#[cfg(any(test, feature = "testing-rdf-terms"))]
+#[doc(hidden)]
+pub mod testing {
+    use super::{Literal, Term};
 
-/// Terms whose N-Triples strings hold non-ASCII text, every character
-/// `Display` escapes, and whitespace that belongs to the term.
-#[cfg(test)]
-pub(crate) fn unusual_terms() -> Vec<Term> {
-    vec![
-        Term::literal("Kraków"),
-        Term::literal("Ámsterdam"),
-        Term::literal("🚲 naar Amsterdam"),
-        Term::literal("阿姆斯特丹"),
-        Term::lang_literal("アムステルダム", "ja"),
-        Term::lang_literal("Praha", "cs"),
-        Term::lang_literal("Berlin", "de-DE"),
-        Term::lang_literal(" Paris ", "fr "),
-        Term::lang_literal("", ""),
-        Term::typed_literal("1030", Literal::XSD_INTEGER),
-        Term::typed_literal("Kraków", "http://example.org/types/miasto"),
-        Term::typed_literal("Gus", "http://example.org/a>b"),
-        Term::literal("Gus \"de bus\"\nAmsterdam\r\t\\"),
-        Term::literal("\x08\x0c'"),
-        Term::literal(escaped("~u00F3 stays six characters")),
-        Term::literal(""),
-        Term::literal("  Mia  "),
-        Term::blank("b0"),
-        Term::blank("b0 "),
-        Term::blank(" Vincent"),
-        Term::blank("jules@paris"),
-        Term::blank("Kraków"),
-        Term::blank(""),
-        Term::iri("http://example.org/Kraków"),
-        Term::iri("http://example.org/a b"),
-        Term::iri("http://example.org/<a>"),
-        Term::iri(""),
-    ]
+    /// `~` stands for a backslash in the N-Triples strings of these tests.
+    #[must_use]
+    pub fn escaped(text: &str) -> String {
+        text.replace('~', "\\")
+    }
+
+    /// Terms whose N-Triples strings hold non-ASCII text, every character
+    /// `Display` escapes, and whitespace that belongs to the term.
+    #[must_use]
+    pub fn unusual_terms() -> Vec<Term> {
+        vec![
+            Term::literal("Kraków"),
+            Term::literal("Ámsterdam"),
+            Term::literal("🚲 naar Amsterdam"),
+            Term::literal("阿姆斯特丹"),
+            Term::lang_literal("アムステルダム", "ja"),
+            Term::lang_literal("Praha", "cs"),
+            Term::lang_literal("Berlin", "de-DE"),
+            Term::lang_literal(" Paris ", "fr "),
+            Term::lang_literal("", ""),
+            Term::typed_literal("1030", Literal::XSD_INTEGER),
+            Term::typed_literal("Kraków", "http://example.org/types/miasto"),
+            Term::typed_literal("Gus", "http://example.org/a>b"),
+            Term::literal("Gus \"de bus\"\nAmsterdam\r\t\\"),
+            Term::literal("\x08\x0c'"),
+            Term::literal(escaped("~u00F3 stays six characters")),
+            Term::literal(""),
+            Term::literal("  Mia  "),
+            Term::blank("b0"),
+            Term::blank("b0 "),
+            Term::blank(" Vincent"),
+            Term::blank("jules@paris"),
+            Term::blank("Kraków"),
+            Term::blank(""),
+            Term::iri("http://example.org/Kraków"),
+            Term::iri("http://example.org/a b"),
+            Term::iri("http://example.org/<a>"),
+            Term::iri(""),
+        ]
+    }
 }
 
 #[cfg(test)]
 mod tests {
+    use super::testing::{escaped, unusual_terms};
     use super::*;
-    use grafeo_common::types::{Decimal, Value};
+    use crate::types::{Decimal, Value};
 
     #[test]
     fn numeric_literals_read_as_numbers_of_their_type() {

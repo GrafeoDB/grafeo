@@ -720,6 +720,21 @@ def test_t6_a_field_after_an_experimental_field_keeps_its_own_docs(
     assert marked == {"profile": True, "kind": False, "tagged": True}
 
 
+def test_t6_an_undocumented_field_after_an_experimental_field_is_stable(
+    tmp_path: Path,
+) -> None:
+    write(
+        tmp_path,
+        "crates/grafeo-engine/src/result.rs",
+        "/// A result.\npub struct Result {\n"
+        "    /// Its profile.\n    ///\n    /// # Stability: Experimental\n"
+        "    pub profile: Option<u8>,\n    pub kind: u8,\n}\n",
+    )
+    items, _ = check_policy.rust_items(tmp_path, ["crates/grafeo-engine/src/result.rs"])
+    marked = {item.name: item.experimental for item in items if item.kind == "field"}
+    assert marked == {"profile": True, "kind": False}
+
+
 def test_t6_a_table_entry_needs_its_marker(tmp_path: Path) -> None:
     unmarked = SESSION.replace(
         "/// A stream of rows.\n///\n/// # Stability: Experimental\n///\n/// New.\n",

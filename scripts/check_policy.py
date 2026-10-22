@@ -450,6 +450,9 @@ def doc_above(lines: list[str], index: int) -> list[str]:
         stripped = lines[at].strip()
         if stripped.startswith("///"):
             docs.append(stripped)
+        elif ITEM.match(lines[at]):
+            # The item before: an undocumented item has no docs of its own.
+            break
         elif stripped.startswith(("#[", "#!")) or (
             # Below the docs only: a line of an attribute that spans several. Above them,
             # such a line is the item before (a struct field ends with a comma).

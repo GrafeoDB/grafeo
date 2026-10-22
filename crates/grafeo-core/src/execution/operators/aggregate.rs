@@ -10,7 +10,7 @@
 use indexmap::IndexMap;
 use std::collections::HashSet;
 
-use grafeo_common::types::{Decimal, LogicalType, Value};
+use grafeo_common::types::{Decimal, Duration, LogicalType, Value};
 
 use super::accumulator::{AggregateExpr, AggregateFunction, HashableValue, RowKey};
 use super::{Operator, OperatorError, OperatorResult};
@@ -107,6 +107,20 @@ pub enum AggregateState {
         /// The state of the aggregate itself; never another `Distinct`.
         inner: Box<AggregateState>,
     },
+    /// Sum of durations (`None` once a component overflows, which fails at
+    /// [`finalize`](Self::finalize)), count of values added.
+    SumDuration(Option<Duration>, i64),
+    /// Average of durations: their sum (`None` once it overflows) and count.
+    AvgDuration(Option<Duration>, i64),
+    /// A SUM or AVG that met an operand it does not take (a string, a
+    /// boolean, numbers mixed with durations): [`finalize`](Self::finalize)
+    /// fails with this message as a type error (22G03), as openCypher makes
+    /// it.
+    InvalidOperand(String),
+    /// SPARQL's SUM and AVG (see [`AggregateExpr::rdf_literals`]): a literal
+    /// held as text that reads as a number is that number, and any other
+    /// value that is neither a number nor a duration is skipped.
+    ReadsNumericText(Box<AggregateState>),
 }
 
 /// The decimal of a float sum that holds a whole number exactly (a sum of
@@ -117,6 +131,19 @@ fn exact_sum(sum: i128) -> Option<Decimal> {
 }
 
 /// The error of a decimal sum past 38 digits.
+fn duration_sum_out_of_range() -> OperatorError {
+    OperatorError::numeric_out_of_range("sum of durations past the duration range")
+}
+
+/// `a + b`, component by component, `None` when one overflows.
+fn checked_duration_sum(a: Duration, b: Duration) -> Option<Duration> {
+    Some(Duration::new(
+        a.months().checked_add(b.months())?,
+        a.days().checked_add(b.days())?,
+        a.nanos().checked_add(b.nanos())?,
+    ))
+}
+
 fn decimal_sum_out_of_range() -> OperatorError {
     OperatorError::numeric_out_of_range("sum of more than 38 digits")
 }
@@ -146,13 +173,27 @@ impl AggregateState {
             AggregateState::Max(max) if expr.rdf_literals => AggregateState::MaxOfRdfLiterals(max),
             // SPARQL's AVG divides by XPath's rules: the average of integers
             // and decimals is a decimal (a double operand makes it a double).
-            AggregateState::Avg(..) if expr.rdf_literals => {
-                AggregateState::AvgDecimal(Some(Decimal::from_i64(0)), 0)
+            AggregateState::Avg(..) if expr.rdf_literals => AggregateState::ReadsNumericText(
+                Box::new(AggregateState::AvgDecimal(Some(Decimal::from_i64(0)), 0)),
+            ),
+            AggregateState::AvgDistinct(..) if expr.rdf_literals => {
+                AggregateState::ReadsNumericText(Box::new(AggregateState::Distinct {
+                    seen: HashSet::new(),
+                    inner: Box::new(AggregateState::AvgDecimal(Some(Decimal::from_i64(0)), 0)),
+                }))
             }
-            AggregateState::AvgDistinct(..) if expr.rdf_literals => AggregateState::Distinct {
-                seen: HashSet::new(),
-                inner: Box::new(AggregateState::AvgDecimal(Some(Decimal::from_i64(0)), 0)),
-            },
+            AggregateState::AvgDecimal(..) if expr.rdf_literals => {
+                AggregateState::ReadsNumericText(Box::new(state))
+            }
+            state
+                if expr.rdf_literals
+                    && matches!(
+                        expr.function,
+                        AggregateFunction::Sum | AggregateFunction::Avg
+                    ) =>
+            {
+                AggregateState::ReadsNumericText(Box::new(state))
+            }
             state => state,
         }
     }
@@ -289,6 +330,12 @@ impl AggregateState {
     /// was: aggregates skip nulls, also as the first operand of a group.
     pub fn update(&mut self, value: Option<Value>) {
         if matches!(value, Some(Value::Null)) {
+            return;
+        }
+        if let Some(operand) = &value
+            && let Some(next) = self.after_a_non_numeric_operand(operand)
+        {
+            *self = next;
             return;
         }
         match self {
@@ -573,6 +620,87 @@ impl AggregateState {
                 }
                 None => inner.update(None),
             },
+            AggregateState::SumDuration(total, count)
+            | AggregateState::AvgDuration(total, count) => {
+                if let Some(Value::Duration(d)) = value {
+                    *total = total.and_then(|t| checked_duration_sum(t, d));
+                    *count += 1;
+                }
+            }
+            AggregateState::InvalidOperand(_) => {}
+            AggregateState::ReadsNumericText(inner) => match value {
+                Some(Value::String(ref text)) => {
+                    if let Some(number) = value_to_f64(&Value::String(text.clone())) {
+                        inner.update(Some(Value::Float64(number)));
+                    }
+                }
+                Some(
+                    Value::Int64(_) | Value::Float64(_) | Value::Decimal(_) | Value::Duration(_),
+                ) => inner.update(value),
+                Some(_) => {}
+                None => inner.update(None),
+            },
+        }
+    }
+
+    /// The state a SUM or AVG moves to on an operand that is not a number:
+    /// a sum or average of durations on the first operand, a duration, and
+    /// [`InvalidOperand`](Self::InvalidOperand) on any other value, and on
+    /// a number among durations or a duration among numbers. `None` for a
+    /// number (and a duration among durations), which the state takes, and
+    /// for the other aggregates.
+    fn after_a_non_numeric_operand(&self, operand: &Value) -> Option<AggregateState> {
+        let (function, count, seen, durations) = match self {
+            AggregateState::SumInt(_, count) | AggregateState::SumFloat(_, _, count) => {
+                ("sum", *count, None, false)
+            }
+            AggregateState::SumDecimal(_, count) => ("sum", *count, None, false),
+            AggregateState::SumIntDistinct(_, count, seen)
+            | AggregateState::SumFloatDistinct(_, _, count, seen) => {
+                ("sum", *count, Some(seen), false)
+            }
+            AggregateState::Avg(_, count) | AggregateState::AvgDecimal(_, count) => {
+                ("avg", *count, None, false)
+            }
+            AggregateState::AvgDistinct(_, count, seen) => ("avg", *count, Some(seen), false),
+            AggregateState::SumDuration(_, count) => ("sum", *count, None, true),
+            AggregateState::AvgDuration(_, count) => ("avg", *count, None, true),
+            _ => return None,
+        };
+        let number = matches!(
+            operand,
+            Value::Int64(_) | Value::Float64(_) | Value::Decimal(_)
+        );
+        match operand {
+            _ if number && !durations => None,
+            Value::Duration(_) if durations => None,
+            Value::Duration(d) if count == 0 => {
+                let first = if function == "sum" {
+                    AggregateState::SumDuration(Some(*d), 1)
+                } else {
+                    AggregateState::AvgDuration(Some(*d), 1)
+                };
+                Some(match seen {
+                    Some(seen) => {
+                        let mut seen = seen.clone();
+                        seen.insert(HashableValue::from(operand));
+                        AggregateState::Distinct {
+                            seen,
+                            inner: Box::new(first),
+                        }
+                    }
+                    None => first,
+                })
+            }
+            _ if number || matches!(operand, Value::Duration(_)) => {
+                Some(AggregateState::InvalidOperand(format!(
+                    "{function} takes numbers or durations, not both: got {operand}"
+                )))
+            }
+            other => Some(AggregateState::InvalidOperand(format!(
+                "{function} takes numbers or durations, got a {} value: {other}",
+                other.type_name()
+            ))),
         }
     }
 
@@ -657,7 +785,12 @@ impl AggregateState {
             | AggregateState::Avg(_, count)
             | AggregateState::AvgDecimal(_, count)
             | AggregateState::AvgDistinct(_, count, _) => Some(*count),
-            AggregateState::Distinct { inner, .. } => inner.value_count(),
+            AggregateState::SumDuration(_, count) | AggregateState::AvgDuration(_, count) => {
+                Some(*count)
+            }
+            AggregateState::Distinct { inner, .. } | AggregateState::ReadsNumericText(inner) => {
+                inner.value_count()
+            }
             _ => None,
         }
     }
@@ -700,6 +833,22 @@ impl AggregateState {
                 }
             }
             AggregateState::SumDecimal(_, 0) | AggregateState::AvgDecimal(_, 0) => Value::Null,
+            AggregateState::SumDuration(_, 0) | AggregateState::AvgDuration(_, 0) => Value::Null,
+            AggregateState::SumDuration(total, _) => {
+                Value::Duration(total.ok_or_else(duration_sum_out_of_range)?)
+            }
+            // The average of durations: their sum divided by the count, each
+            // component's fraction carried down (see `Duration::checked_div_decimal`).
+            AggregateState::AvgDuration(total, count) => Value::Duration(
+                total
+                    .ok_or_else(duration_sum_out_of_range)?
+                    .checked_div_decimal(&Decimal::from_i64(*count))
+                    .map_err(|_| duration_sum_out_of_range())?,
+            ),
+            AggregateState::InvalidOperand(message) => {
+                return Err(OperatorError::invalid_value_type(message.clone()));
+            }
+            AggregateState::ReadsNumericText(inner) => return inner.finalize(),
             AggregateState::SumDecimal(total, _) => {
                 Value::Decimal(total.ok_or_else(decimal_sum_out_of_range)?)
             }
@@ -1451,32 +1600,35 @@ mod tests {
 
     #[test]
     fn test_sum_with_string_values() {
-        // Test SUM with string values (like RDF stores numeric literals)
-        let mut builder = DataChunkBuilder::new(&[LogicalType::String]);
-        builder.column_mut(0).unwrap().push_string("30");
-        builder.advance_row();
-        builder.column_mut(0).unwrap().push_string("25");
-        builder.advance_row();
-        builder.column_mut(0).unwrap().push_string("35");
-        builder.advance_row();
-        let chunk = builder.finish();
+        let strings = || {
+            let mut builder = DataChunkBuilder::new(&[LogicalType::String]);
+            for text in ["30", "25", "35"] {
+                builder.column_mut(0).unwrap().push_string(text);
+                builder.advance_row();
+            }
+            builder.finish()
+        };
 
-        let mock = MockOperator::new(vec![chunk]);
+        // GQL and Cypher: a string is no number, so SUM fails (22G03)
         let mut agg = SimpleAggregateOperator::new(
-            Box::new(mock),
+            Box::new(MockOperator::new(vec![strings()])),
             vec![AggregateExpr::sum(0)],
             vec![LogicalType::Float64],
         );
+        let error = agg.next().unwrap_err().to_string();
+        assert!(error.contains("sum takes numbers or durations"), "{error}");
 
+        // SPARQL reads RDF literals held as text that read as numbers
+        let mut sparql_sum = AggregateExpr::sum(0);
+        sparql_sum.rdf_literals = true;
+        let mut agg = SimpleAggregateOperator::new(
+            Box::new(MockOperator::new(vec![strings()])),
+            vec![sparql_sum],
+            vec![LogicalType::Float64],
+        );
         let result = agg.next().unwrap().unwrap();
         assert_eq!(result.row_count(), 1);
-        // Should parse strings and sum: 30 + 25 + 35 = 90
-        let sum_val = result.column(0).unwrap().get_float64(0).unwrap();
-        assert!(
-            (sum_val - 90.0).abs() < 0.001,
-            "Expected 90.0, got {}",
-            sum_val
-        );
+        assert_eq!(result.column(0).unwrap().get_float64(0), Some(90.0));
     }
 
     #[test]

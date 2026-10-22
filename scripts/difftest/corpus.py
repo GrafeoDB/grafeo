@@ -1919,4 +1919,16 @@ for case_id, query, languages, fixture in [
 ]:
     case(case_id, query, languages, fixture)
 
+# CV: SUM and AVG take numbers or durations: a string among the operands (CV1, a stored one CV2),
+#     a numeric string (CV3) and numbers mixed with durations (CV4) are 22G03, where they were
+#     skipped or summed as numbers; durations sum and average (CV5), where that was 0
+for case_id, query, languages, fixture in [
+    ("CV1", "UNWIND [1, 'Alix', 2] AS x RETURN sum(x) AS s", BOTH, "empty"),
+    ("CV2", "MATCH (p:Person) RETURN sum(p.name) AS s", BOTH, "social"),
+    ("CV3", "UNWIND ['5', '7'] AS x RETURN sum(x) AS s, avg(x) AS a", BOTH, "empty"),
+    ("CV4", "UNWIND [duration('P1D'), 3] AS x RETURN sum(x) AS s", BOTH, "empty"),
+    ("CV5", "UNWIND [duration('P1D'), duration('PT12H')] AS d RETURN toString(sum(d)) AS s, toString(avg(d)) AS a", BOTH, "empty"),
+]:
+    case(case_id, query, languages, fixture)
+
 # fmt: on

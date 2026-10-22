@@ -644,3 +644,13 @@ CU4|cypher 32f5c87566 Unary minus negates a duration; it was null.
 CU4|gql 32f5c87566 Unary minus negates a duration; it was null.
 CU5|cypher 08c2adc46b The negation of the smallest integer is out of range (22003); it was null.
 CU5|gql 08c2adc46b The negation of the smallest integer is out of range (22003); it was null.
+CV1|cypher 688f96eae6 SUM of a string among numbers is a type error (22G03), as openCypher defines it; the string was skipped.
+CV1|gql 688f96eae6 SUM of a string among numbers is a type error (22G03), as openCypher defines it; the string was skipped.
+CV2|cypher 688f96eae6 SUM of stored strings is a type error (22G03); it was null.
+CV2|gql 688f96eae6 SUM of stored strings is a type error (22G03); it was null.
+CV3|cypher cd47817ee5 SUM and AVG of numeric strings are a type error (22G03); the strings were summed as numbers.
+CV3|gql cd47817ee5 SUM and AVG of numeric strings are a type error (22G03); the strings were summed as numbers.
+CV4|cypher c285fc1e54 SUM of numbers mixed with durations is a type error (22G03); the duration was skipped.
+CV4|gql c285fc1e54 SUM of numbers mixed with durations is a type error (22G03); the duration was skipped.
+CV5|cypher 69333180aa SUM and AVG of durations add them and divide the sum, as openCypher defines them; both were null.
+CV5|gql 69333180aa SUM and AVG of durations add them and divide the sum, as openCypher defines them; both were null.

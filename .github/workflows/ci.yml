@@ -782,7 +782,7 @@ jobs:
         shell: bash
         run: |
           uv pip install --system dist/*.whl
-          uv pip install --system pytest pytest-asyncio networkx numpy scipy solvor
+          uv pip install --system pytest pytest-asyncio networkx numpy scipy solvor pandas pyarrow polars
 
       - name: Run Python tests
         env:

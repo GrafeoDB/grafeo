@@ -3115,7 +3115,7 @@ impl PyGrafeoDB {
     /// Example:
     /// ```python
     /// df = db.nodes_to_pandas()
-    /// print(df[df["labels"].apply(lambda l: "Person" in l)])
+    /// print(df[df["_labels"].apply(lambda l: "Person" in l)])
     /// ```
     #[cfg(feature = "arrow-export")]
     #[pyo3(signature = ())]

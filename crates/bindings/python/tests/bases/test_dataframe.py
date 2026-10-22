@@ -366,3 +366,138 @@ class TestDataFrameErrors:
         """to_polars() raises ModuleNotFoundError when polars isn't installed."""
         result = populated_db.execute("MATCH (n:Person) RETURN n.name")
         assert hasattr(result, "to_polars")
+
+
+# --- Properties named like the structural columns (#254, #272) ---
+
+
+@pytest.fixture
+def structural_names_db():
+    """Alix and Gus with properties named like the structural columns, and a
+    KNOWS edge between them with such properties too."""
+    db = grafeo.GrafeoDB()
+    db.execute(
+        "INSERT (:Person {name: 'Alix', id: 7, source: 'crm', _source: 'import', "
+        "_created: 2020, _id: 'x'})"
+    )
+    db.execute("INSERT (:Person {name: 'Gus', _id: 0})")
+    db.execute(
+        "MATCH (a {name: 'Alix'}), (g {name: 'Gus'}) "
+        "INSERT (a)-[:KNOWS {source: 'jdt', id: 3, target: 'Gus', type: 'friend', "
+        "_note: 'met in Paris', _id: 'y', _source: 'manual', _target: 'z', _type: 't'}]->(g)"
+    )
+    return db
+
+
+def node_rows(rows):
+    """The node rows by name, with `_id` and `_labels` as the export gives them."""
+    return {row["name"]: row for row in rows}
+
+
+class TestStructuralNames:
+    """A property named like a structural column (`id`, `source`, `target`,
+    `type`) is a column of its own with its values, and so is a property whose
+    name starts with `_` but is no structural column. The structural columns
+    (`_id` and `_labels` of a node; `_id`, `_type`, `_source` and `_target` of
+    an edge) always hold the identity: a property with one of those names is
+    not in the export, and never replaces it."""
+
+    def check_nodes(self, rows):
+        nodes = node_rows(rows)
+        alix, gus = nodes["Alix"], nodes["Gus"]
+        assert (alix["_id"], gus["_id"]) == (0, 1)
+        assert alix["_labels"] == ["Person"]
+        assert (alix["id"], alix["source"]) == (7, "crm")
+        assert (alix["_source"], alix["_created"]) == ("import", 2020)
+
+    def check_edges(self, rows):
+        (edge,) = rows
+        assert (edge["_id"], edge["_type"], edge["_source"], edge["_target"]) == (0, "KNOWS", 0, 1)
+        assert (edge["source"], edge["id"], edge["target"], edge["type"]) == (
+            "jdt",
+            3,
+            "Gus",
+            "friend",
+        )
+        assert edge["_note"] == "met in Paris"
+
+    def test_nodes_to_arrow(self, structural_names_db):
+        pytest.importorskip("pyarrow")
+        table = structural_names_db.nodes_to_arrow()
+        assert str(table.schema.field("_id").type) == "uint64"
+        self.check_nodes(table.to_pylist())
+
+    def test_edges_to_arrow(self, structural_names_db):
+        pytest.importorskip("pyarrow")
+        table = structural_names_db.edges_to_arrow()
+        for column in ("_id", "_source", "_target"):
+            assert str(table.schema.field(column).type) == "uint64", column
+        self.check_edges(table.to_pylist())
+
+    def test_nodes_to_polars(self, structural_names_db):
+        pytest.importorskip("polars")
+        self.check_nodes(structural_names_db.nodes_to_polars().to_dicts())
+
+    def test_edges_to_polars(self, structural_names_db):
+        pytest.importorskip("polars")
+        self.check_edges(structural_names_db.edges_to_polars().to_dicts())
+
+    @pytest.mark.skipif(not HAS_PANDAS, reason="pandas not installed")
+    def test_nodes_df(self, structural_names_db, dataframe_path):
+        rows = structural_names_db.nodes_df().to_dict("records")
+        nodes = node_rows(rows)
+        alix = nodes["Alix"]
+        assert (alix["_id"], nodes["Gus"]["_id"]) == (0, 1), dataframe_path
+        assert (alix["id"], alix["source"], alix["_source"]) == (7, "crm", "import"), dataframe_path
+        assert alix["_created"] == 2020, dataframe_path
+
+    @pytest.mark.skipif(not HAS_PANDAS, reason="pandas not installed")
+    def test_edges_df(self, structural_names_db, dataframe_path):
+        rows = structural_names_db.edges_df().to_dict("records")
+        self.check_edges(rows)
+
+    def test_query_results(self, structural_names_db):
+        """A returned node or edge has its own id, and keeps the properties
+        that start with `_` but are no structural column."""
+        result = structural_names_db.execute("MATCH (p:Person) RETURN p ORDER BY p.name")
+        nodes = {node.properties()["name"]: node for node in result.nodes()}
+        assert sorted(nodes) == ["Alix", "Gus"]
+        assert (nodes["Alix"].id, nodes["Gus"].id) == (0, 1)
+        assert nodes["Alix"].properties()["_created"] == 2020
+        assert nodes["Alix"].properties()["_source"] == "import"
+        result = structural_names_db.execute("MATCH ()-[e:KNOWS]->() RETURN e")
+        (edge,) = result.edges()
+        assert (edge.id, edge.source_id, edge.target_id) == (0, 0, 1)
+        assert edge.properties()["source"] == "jdt"
+        assert edge.properties()["_note"] == "met in Paris"
+
+    def test_collected_nodes(self, structural_names_db):
+        result = structural_names_db.execute(
+            "MATCH (p:Person) WITH p ORDER BY p.name RETURN collect(p) AS people"
+        )
+        (row,) = list(result)
+        assert [(node["_id"], node["name"]) for node in row["people"]] == [(0, "Alix"), (1, "Gus")]
+        assert sorted(node.id for node in result.nodes()) == [0, 1]
+
+    @pytest.mark.skipif(not HAS_PANDAS, reason="pandas not installed")
+    def test_to_pandas_of_property_columns(self, structural_names_db):
+        result = structural_names_db.execute(
+            "MATCH ()-[e:KNOWS]->() RETURN e.source AS source, e.id AS id, e._source AS _source"
+        )
+        assert result.to_pandas().to_dict("records") == [
+            {"source": "jdt", "id": 3, "_source": "manual"}
+        ]
+
+    @pytest.mark.skipif(not HAS_POLARS, reason="polars not installed")
+    def test_to_polars_of_property_columns(self, structural_names_db):
+        result = structural_names_db.execute(
+            "MATCH (p:Person {name: 'Alix'}) RETURN p.id AS id, p.source AS source, p._id AS _id"
+        )
+        assert result.to_polars().to_dicts() == [{"id": 7, "source": "crm", "_id": "x"}]
+
+    def test_to_arrow_of_property_columns(self, structural_names_db):
+        pytest.importorskip("pyarrow")
+        result = structural_names_db.execute(
+            "MATCH (p:Person {name: 'Gus'}) RETURN p._id AS _id, p.name AS name"
+        )
+        assert result.to_arrow().to_pylist() == [{"_id": 0, "name": "Gus"}]

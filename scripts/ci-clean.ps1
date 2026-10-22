@@ -110,7 +110,7 @@ try {
             if ($LASTEXITCODE -ne 0) { throw "Failed to install wheel" }
 
             Write-Host "  Installing test dependencies..." -ForegroundColor Gray
-            uv pip install pytest pytest-asyncio networkx numpy scipy solvor --python $pythonCmd
+            uv pip install pytest pytest-asyncio networkx numpy scipy solvor pandas pyarrow polars --python $pythonCmd
             if ($LASTEXITCODE -ne 0) { throw "Failed to install dependencies" }
 
             Write-Host "  Running tests..." -ForegroundColor Gray

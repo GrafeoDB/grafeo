@@ -835,10 +835,16 @@ impl ProjectOperator {
 
 /// Converts a [`Node`] to a `Value::Map` with metadata and properties.
 ///
-/// The map contains `_id` (integer), `_labels` (list of strings), and
-/// all node properties at the top level.
+/// The map contains all node properties at the top level, `_id` (integer)
+/// and `_labels` (list of strings): those two always hold the node's id and
+/// labels, also when a property has the name (#254), which the map then
+/// leaves out.
 fn node_to_map(node: &Node) -> Value {
-    let mut map = BTreeMap::new();
+    let mut map: BTreeMap<PropertyKey, Value> = node
+        .properties
+        .iter()
+        .map(|(key, value)| (key.clone(), value.clone()))
+        .collect();
     // reason: entity IDs stored as i64, standard encoding
     #[allow(clippy::cast_possible_wrap)]
     let node_id_i64 = node.id.as_u64() as i64;
@@ -849,18 +855,20 @@ fn node_to_map(node: &Node) -> Value {
         .map(|l| Value::String(l.clone()))
         .collect();
     map.insert(PropertyKey::new("_labels"), Value::List(labels.into()));
-    for (key, value) in &node.properties {
-        map.insert(key.clone(), value.clone());
-    }
     Value::Map(Arc::new(map))
 }
 
 /// Converts an [`Edge`] to a `Value::Map` with metadata and properties.
 ///
-/// The map contains `_id`, `_type`, `_source`, `_target`, and all edge
-/// properties at the top level.
+/// The map contains all edge properties at the top level, `_id`, `_type`,
+/// `_source` and `_target`: those always hold the edge's identity, also when
+/// a property has the name (#254), which the map then leaves out.
 fn edge_to_map(edge: &Edge) -> Value {
-    let mut map = BTreeMap::new();
+    let mut map: BTreeMap<PropertyKey, Value> = edge
+        .properties
+        .iter()
+        .map(|(key, value)| (key.clone(), value.clone()))
+        .collect();
     // reason: entity IDs stored as i64, standard encoding
     #[allow(clippy::cast_possible_wrap)]
     let edge_id_i64 = edge.id.as_u64() as i64;
@@ -877,9 +885,6 @@ fn edge_to_map(edge: &Edge) -> Value {
     );
     map.insert(PropertyKey::new("_source"), Value::Int64(src_id_i64));
     map.insert(PropertyKey::new("_target"), Value::Int64(dst_id_i64));
-    for (key, value) in &edge.properties {
-        map.insert(key.clone(), value.clone());
-    }
     Value::Map(Arc::new(map))
 }
 
@@ -1363,5 +1368,63 @@ mod tests {
         // Verify child is still functional
         let mut child = child;
         assert!(child.next().unwrap().is_none());
+    }
+
+    /// A property named like a structural key never replaces the node's or
+    /// edge's identity in its map (#254); other properties, those that start
+    /// with `_` too, keep their values.
+    #[test]
+    fn entity_maps_keep_their_identity() {
+        let map = |value: Value| match value {
+            Value::Map(map) => map,
+            other => panic!("{other:?}"),
+        };
+        let mut node = crate::graph::lpg::Node::new(NodeId::new(3));
+        node.add_label("Person");
+        node.set_property("_id", Value::from("x"));
+        node.set_property("_labels", Value::from("y"));
+        node.set_property("_created", Value::Int64(2020));
+        node.set_property("id", Value::Int64(7));
+        let node = map(node_to_map(&node));
+        assert_eq!(node.get(&PropertyKey::new("_id")), Some(&Value::Int64(3)));
+        assert_eq!(
+            node.get(&PropertyKey::new("_labels")),
+            Some(&Value::List(vec![Value::from("Person")].into()))
+        );
+        assert_eq!(
+            node.get(&PropertyKey::new("_created")),
+            Some(&Value::Int64(2020))
+        );
+        assert_eq!(node.get(&PropertyKey::new("id")), Some(&Value::Int64(7)));
+
+        let mut edge =
+            crate::graph::lpg::Edge::new(EdgeId::new(5), NodeId::new(3), NodeId::new(4), "KNOWS");
+        for key in ["_id", "_type", "_source", "_target"] {
+            edge.set_property(key, Value::from("user"));
+        }
+        edge.set_property("source", Value::from("jdt"));
+        edge.set_property("_note", Value::from("met in Paris"));
+        let edge = map(edge_to_map(&edge));
+        assert_eq!(edge.get(&PropertyKey::new("_id")), Some(&Value::Int64(5)));
+        assert_eq!(
+            edge.get(&PropertyKey::new("_type")),
+            Some(&Value::from("KNOWS"))
+        );
+        assert_eq!(
+            edge.get(&PropertyKey::new("_source")),
+            Some(&Value::Int64(3))
+        );
+        assert_eq!(
+            edge.get(&PropertyKey::new("_target")),
+            Some(&Value::Int64(4))
+        );
+        assert_eq!(
+            edge.get(&PropertyKey::new("source")),
+            Some(&Value::from("jdt"))
+        );
+        assert_eq!(
+            edge.get(&PropertyKey::new("_note")),
+            Some(&Value::from("met in Paris"))
+        );
     }
 }

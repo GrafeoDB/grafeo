@@ -365,6 +365,27 @@ fn dump_jsonl(path: &std::path::Path, out: &std::path::Path, quiet: bool) -> Res
     Ok(())
 }
 
+/// The structural columns of the Arrow dump's nodes, before their properties.
+#[cfg(feature = "arrow-export")]
+const NODE_COLUMNS: &[&str] = &["_id", "_labels"];
+
+/// The structural columns of the Arrow dump's edges, before their properties.
+#[cfg(feature = "arrow-export")]
+const EDGE_COLUMNS: &[&str] = &["_id", "_source", "_target", "_type"];
+
+/// The property columns of the Arrow dump, sorted: every key in `keys` but
+/// the `structural` columns, which a property of the same name would repeat
+/// (#254; the engine's Arrow export leaves them out the same way).
+#[cfg(feature = "arrow-export")]
+fn property_columns<'a>(
+    keys: impl Iterator<Item = &'a grafeo_common::types::PropertyKey>,
+    structural: &[&str],
+) -> std::collections::BTreeSet<grafeo_common::types::PropertyKey> {
+    keys.filter(|key| !structural.contains(&key.as_str()))
+        .cloned()
+        .collect()
+}
+
 #[cfg(feature = "arrow-export")]
 fn dump_arrow(path: &std::path::Path, out: &std::path::Path, quiet: bool) -> Result<()> {
     use grafeo_common::LogicalType;
@@ -374,15 +395,16 @@ fn dump_arrow(path: &std::path::Path, out: &std::path::Path, quiet: bool) -> Res
 
     // Build nodes RecordBatch
     let nodes: Vec<_> = db.iter_nodes().collect();
-    let mut property_keys = std::collections::BTreeSet::new();
-    for node in &nodes {
-        for (key, _) in node.properties.iter() {
-            property_keys.insert(key.clone());
-        }
-    }
+    let property_keys = property_columns(
+        nodes
+            .iter()
+            .flat_map(|node| node.properties.iter().map(|(key, _)| key)),
+        NODE_COLUMNS,
+    );
 
-    let node_columns: Vec<String> = std::iter::once("_id".to_string())
-        .chain(std::iter::once("_labels".to_string()))
+    let node_columns: Vec<String> = NODE_COLUMNS
+        .iter()
+        .map(|s| (*s).to_string())
         .chain(property_keys.iter().map(|k| k.as_str().to_string()))
         .collect();
 
@@ -409,14 +431,14 @@ fn dump_arrow(path: &std::path::Path, out: &std::path::Path, quiet: bool) -> Res
 
     // Build edges RecordBatch
     let edges: Vec<_> = db.iter_edges().collect();
-    let mut edge_prop_keys = std::collections::BTreeSet::new();
-    for edge in &edges {
-        for (key, _) in edge.properties.iter() {
-            edge_prop_keys.insert(key.clone());
-        }
-    }
+    let edge_prop_keys = property_columns(
+        edges
+            .iter()
+            .flat_map(|edge| edge.properties.iter().map(|(key, _)| key)),
+        EDGE_COLUMNS,
+    );
 
-    let edge_columns: Vec<String> = ["_id", "_source", "_target", "_type"]
+    let edge_columns: Vec<String> = EDGE_COLUMNS
         .iter()
         .map(|s| (*s).to_string())
         .chain(edge_prop_keys.iter().map(|k| k.as_str().to_string()))
@@ -564,6 +586,27 @@ mod tests {
     use super::*;
     use grafeo_common::types::Value;
     use tempfile::TempDir;
+
+    /// A property named like a structural column is no column of its own
+    /// (it would repeat `_id`, #254); one that merely starts with `_` is.
+    #[cfg(feature = "arrow-export")]
+    #[test]
+    fn arrow_property_columns_leave_out_the_structural_names() {
+        use grafeo_common::types::PropertyKey;
+
+        let keys: Vec<PropertyKey> = ["_id", "name", "_labels", "_created", "_source", "id"]
+            .into_iter()
+            .map(PropertyKey::new)
+            .collect();
+        let names = |structural| -> Vec<String> {
+            property_columns(keys.iter(), structural)
+                .iter()
+                .map(|key| key.as_str().to_string())
+                .collect()
+        };
+        assert_eq!(names(NODE_COLUMNS), ["_created", "_source", "id", "name"]);
+        assert_eq!(names(EDGE_COLUMNS), ["_created", "_labels", "id", "name"]);
+    }
 
     fn create_test_db(dir: &std::path::Path) -> grafeo_engine::GrafeoDB {
         let db = grafeo_engine::GrafeoDB::open(dir).expect("create db");

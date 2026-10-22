@@ -267,7 +267,7 @@ internal static class ValueConverter
                         var labels = map.TryGetValue("_labels", out var labelsObj) && labelsObj is List<object?> labelList
                             ? labelList.OfType<string>().ToList()
                             : new List<string>();
-                        var props = ExtractProperties(map);
+                        var props = ExtractProperties(map, NodeKeys);
                         nodes.Add(new Node(id, labels, props));
                     }
                     else if (map.ContainsKey("_type"))
@@ -277,7 +277,7 @@ internal static class ValueConverter
                         var edgeType = map.TryGetValue("_type", out var typeObj) && typeObj is string t ? t : "";
                         var sourceId = map.TryGetValue("_source", out var srcObj) && srcObj is long src ? src : 0;
                         var targetId = map.TryGetValue("_target", out var tgtObj) && tgtObj is long tgt ? tgt : 0;
-                        var props = ExtractProperties(map);
+                        var props = ExtractProperties(map, EdgeKeys);
                         edges.Add(new Edge(id, edgeType, sourceId, targetId, props));
                     }
                 }
@@ -287,14 +287,23 @@ internal static class ValueConverter
         return (nodes, edges);
     }
 
-    /// <summary>Extract user properties, stripping internal _-prefixed keys.</summary>
+    /// <summary>The structural keys of a node map: its id and labels.</summary>
+    private static readonly string[] NodeKeys = ["_id", "_labels"];
+
+    /// <summary>The structural keys of an edge map: its id, type and ends.</summary>
+    private static readonly string[] EdgeKeys = ["_id", "_type", "_source", "_target"];
+
+    /// <summary>
+    /// Extract user properties: every key but the <paramref name="structural"/> ones, also a
+    /// property whose name starts with <c>_</c> (#254).
+    /// </summary>
     private static IReadOnlyDictionary<string, object?> ExtractProperties(
-        Dictionary<string, object?> map)
+        Dictionary<string, object?> map, string[] structural)
     {
         var props = new Dictionary<string, object?>();
         foreach (var (key, value) in map)
         {
-            if (!key.StartsWith('_'))
+            if (!structural.Contains(key))
                 props[key] = value;
         }
         return props;

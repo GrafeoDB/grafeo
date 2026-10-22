@@ -596,6 +596,30 @@ describe('QueryResult metadata', () => {
     db.close()
   })
 
+  // A property named like a structural key never replaces the identity, and
+  // a property whose name starts with `_` is kept (#254).
+  it('keeps the identity of nodes with properties named like structural keys', async () => {
+    const db = GrafeoDB.create()
+    await db.execute(
+      "INSERT (:Person {name: 'Alix', _id: 'x', _created: 2020})-[:KNOWS {_note: 'Paris'}]->(:Person {name: 'Gus', _id: 0})"
+    )
+    const ids = Object.fromEntries(
+      (await db.execute('MATCH (p:Person) RETURN p.name AS name, id(p) AS id'))
+        .toArray()
+        .map((row) => [row.name, Number(row.id)])
+    )
+    const nodes = (await db.execute('MATCH (p:Person) RETURN p')).nodes()
+    const byName = Object.fromEntries(nodes.map((n) => [n.get('name'), n]))
+    expect(Object.keys(byName).sort()).toEqual(['Alix', 'Gus'])
+    expect(Number(byName.Alix.id)).toBe(ids.Alix)
+    expect(Number(byName.Gus.id)).toBe(ids.Gus)
+    expect(byName.Alix.get('_created')).toBe(2020)
+    const edges = (await db.execute('MATCH ()-[e:KNOWS]->() RETURN e')).edges()
+    expect(edges.length).toBe(1)
+    expect(edges[0].get('_note')).toBe('Paris')
+    db.close()
+  })
+
   it('should return empty nodes/edges for scalar queries', async () => {
     const db = GrafeoDB.create()
     await db.execute("INSERT (:Person {name: 'Alix'})")

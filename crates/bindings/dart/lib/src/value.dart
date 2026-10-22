@@ -108,14 +108,20 @@ List<String> extractColumns(List<Map<String, dynamic>> rows) {
         if (!nodeIds.add(id)) continue;
         final labels =
             (value['_labels'] as List?)?.whereType<String>().toList() ?? [];
-        nodes.add(Node(id, labels, _extractProperties(value)));
+        nodes.add(Node(id, labels, _extractProperties(value, _nodeKeys)));
       } else if (value.containsKey('_type')) {
         if (!edgeIds.add(id)) continue;
         final edgeType = value['_type'] as String? ?? '';
         final sourceId = value['_source'] as int? ?? 0;
         final targetId = value['_target'] as int? ?? 0;
         edges.add(
-          Edge(id, edgeType, sourceId, targetId, _extractProperties(value)),
+          Edge(
+            id,
+            edgeType,
+            sourceId,
+            targetId,
+            _extractProperties(value, _edgeKeys),
+          ),
         );
       }
     }
@@ -193,10 +199,20 @@ dynamic _decodeMap(Map m) {
   };
 }
 
-/// Strip internal _-prefixed keys from a row map, keeping only user properties.
-Map<String, dynamic> _extractProperties(Map<String, dynamic> map) {
+/// The structural keys of a node map: its id and labels.
+const _nodeKeys = {'_id', '_labels'};
+
+/// The structural keys of an edge map: its id, type and ends.
+const _edgeKeys = {'_id', '_type', '_source', '_target'};
+
+/// The user properties of a node or edge map: every key but its [structural]
+/// ones, also a property whose name starts with `_` (#254).
+Map<String, dynamic> _extractProperties(
+  Map<String, dynamic> map,
+  Set<String> structural,
+) {
   return {
     for (final entry in map.entries)
-      if (!entry.key.startsWith('_')) entry.key: entry.value,
+      if (!structural.contains(entry.key)) entry.key: entry.value,
   };
 }

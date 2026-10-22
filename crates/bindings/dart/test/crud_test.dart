@@ -117,5 +117,31 @@ void main() {
       expect(result.edges, hasLength(1));
       expect(result.edges.first.type, equals('KNOWS'));
     });
+
+    // A property named like a structural key never replaces the identity, and
+    // a property whose name starts with `_` is kept (#254).
+    test('properties named like the structural keys keep the identity', () {
+      db.execute(
+          "INSERT (:Person {name: 'Alix', _id: 'x', _created: 2020})-[:KNOWS {_note: 'Paris', _source: 'manual'}]->(:Person {name: 'Gus', _id: 0})");
+      final ids = {
+        for (final row in db
+            .execute('MATCH (p:Person) RETURN p.name AS name, id(p) AS id')
+            .rows)
+          row['name']: row['id'],
+      };
+      final result = db.execute('MATCH (p:Person) RETURN p');
+      final nodes = {for (final n in result.nodes) n.properties['name']: n};
+      expect(nodes.keys, unorderedEquals(['Alix', 'Gus']));
+      expect(nodes['Alix']!.id, equals(ids['Alix']));
+      expect(nodes['Gus']!.id, equals(ids['Gus']));
+      expect(nodes['Alix']!.properties['_created'], equals(2020));
+      expect(nodes['Alix']!.properties.containsKey('_id'), isFalse);
+
+      final edges = db.execute('MATCH ()-[e:KNOWS]->() RETURN e').edges;
+      expect(edges, hasLength(1));
+      expect(edges.first.sourceId, equals(ids['Alix']));
+      expect(edges.first.targetId, equals(ids['Gus']));
+      expect(edges.first.properties['_note'], equals('Paris'));
+    });
   });
 }

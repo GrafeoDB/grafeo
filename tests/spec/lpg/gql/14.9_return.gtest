@@ -80,3 +80,35 @@ tests:
     expect:
       rows:
         - [Alix]
+
+  # A RETURN ends its statement: a clause after it is an error naming the clause, never
+  # a part of the statement dropped (#380); NEXT passes its rows on to the next statement.
+  - name: a_return_after_return_is_rejected
+    query: "RETURN 1 AS a RETURN 2 AS b"
+    expect:
+      error: "unexpected 'RETURN' after the end of the statement"
+      gql_status: "42001"
+
+  - name: a_match_after_return_is_rejected
+    query: "MATCH (n:Person {name: 'Alix'}) RETURN n.name MATCH (m) RETURN m"
+    expect:
+      error: "unexpected 'MATCH' after the end of the statement"
+      gql_status: "42001"
+
+  - name: an_insert_after_return_is_rejected
+    query: "RETURN 1 AS a INSERT (:Person {name: 'Gus'})"
+    expect:
+      error: "unexpected 'INSERT' after the end of the statement"
+      gql_status: "42001"
+
+  - name: a_return_after_order_by_and_limit_is_rejected
+    query: "MATCH (n:Person) RETURN n.name ORDER BY n.name LIMIT 1 RETURN 1"
+    expect:
+      error: "unexpected 'RETURN' after the end of the statement"
+      gql_status: "42001"
+
+  - name: next_passes_the_rows_of_a_return_on
+    query: "RETURN 1 AS x NEXT RETURN x + 1 AS y"
+    expect:
+      rows:
+        - [2]

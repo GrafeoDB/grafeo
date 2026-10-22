@@ -223,6 +223,7 @@ impl<'a> Parser<'a> {
         let mut clauses = Vec::new();
 
         loop {
+            self.reject_clause_after_return(&clauses)?;
             match self.current.kind {
                 TokenKind::Match => {
                     clauses.push(Clause::Match(self.parse_match_clause()?));
@@ -295,6 +296,44 @@ impl<'a> Parser<'a> {
             clauses,
             span: None,
         }))
+    }
+
+    /// Fails when the current token starts a clause other than `ORDER BY`,
+    /// `SKIP` or `LIMIT` after a `RETURN` in `clauses`: in openCypher a
+    /// `RETURN` ends its query part (a `WITH` passes rows on), and a clause
+    /// after it would otherwise replace it.
+    fn reject_clause_after_return(&self, clauses: &[Clause]) -> Result<()> {
+        if !clauses
+            .iter()
+            .any(|clause| matches!(clause, Clause::Return(_)))
+        {
+            return Ok(());
+        }
+        let starts_clause = matches!(
+            self.current.kind,
+            TokenKind::Match
+                | TokenKind::Optional
+                | TokenKind::Where
+                | TokenKind::With
+                | TokenKind::Return
+                | TokenKind::Unwind
+                | TokenKind::Create
+                | TokenKind::Merge
+                | TokenKind::Delete
+                | TokenKind::Detach
+                | TokenKind::Set
+                | TokenKind::Remove
+                | TokenKind::Call
+        ) || (self.can_be_identifier()
+            && self.get_identifier_text().eq_ignore_ascii_case("FOREACH"))
+            || self.is_contextual("LOAD");
+        if !starts_clause {
+            return Ok(());
+        }
+        Err(self.error(&format!(
+            "{} after RETURN: RETURN must be the last clause of a query (pass rows on with WITH)",
+            self.current.text.to_uppercase()
+        )))
     }
 
     /// Parses `CALL [(scope)] { subquery [UNION [ALL] subquery]* }` or a
@@ -485,6 +524,7 @@ impl<'a> Parser<'a> {
     fn parse_subquery_body(&mut self) -> Result<Query> {
         let mut clauses = Vec::new();
         while self.current.kind != TokenKind::RBrace && self.current.kind != TokenKind::Eof {
+            self.reject_clause_after_return(&clauses)?;
             match self.current.kind {
                 TokenKind::Match => {
                     clauses.push(Clause::Match(self.parse_match_clause()?));
@@ -4161,6 +4201,44 @@ mod tests {
         assert!(err.contains("Expected end of query"), "{err}");
         let err = parse_error_message("SHOW INDEXES garbage");
         assert!(err.contains("Expected end of query"), "{err}");
+    }
+
+    /// A RETURN ends its query part: a clause after it is an error that names
+    /// the clause, where it replaced the RETURN; ORDER BY, SKIP and LIMIT
+    /// belong to it, and UNION and WITH go on as before.
+    #[test]
+    fn a_clause_after_return_is_rejected() {
+        for (query, clause) in [
+            ("RETURN 1 AS a RETURN 2 AS b", "RETURN"),
+            ("MATCH (n) RETURN n RETURN 1", "RETURN"),
+            ("MATCH (n) RETURN n.name MATCH (m) RETURN m", "MATCH"),
+            ("MATCH (n) RETURN n OPTIONAL MATCH (m) RETURN m", "OPTIONAL"),
+            ("RETURN 1 AS x WITH x RETURN x", "WITH"),
+            ("RETURN 1 UNWIND [1] AS x RETURN x", "UNWIND"),
+            ("RETURN 1 CREATE (:Person)", "CREATE"),
+            ("RETURN 1 MERGE (:Person)", "MERGE"),
+            ("MATCH (n) RETURN n DETACH DELETE n", "DETACH"),
+            ("MATCH (n) RETURN n SET n.x = 1", "SET"),
+            ("MATCH (n) RETURN n REMOVE n.x", "REMOVE"),
+            ("MATCH (n) RETURN n WHERE n.x = 1", "WHERE"),
+            ("MATCH (n) RETURN n ORDER BY n.x LIMIT 1 RETURN 1", "RETURN"),
+            ("RETURN 1 CALL db.labels()", "CALL"),
+            ("RETURN 1 FOREACH (x IN [1] | CREATE (:Person))", "FOREACH"),
+            ("CALL { RETURN 1 AS a RETURN 2 AS b } RETURN b", "RETURN"),
+        ] {
+            let err = parse_error_message(query);
+            assert!(
+                err.contains(&format!(
+                    "{clause} after RETURN: RETURN must be the last clause"
+                )),
+                "{query}: {err}"
+            );
+        }
+        parse_ok("UNWIND [3, 1, 2] AS x RETURN x ORDER BY x SKIP 1 LIMIT 1");
+        parse_ok("RETURN 1 AS x UNION RETURN 2 AS x");
+        parse_ok("RETURN 1 AS x;");
+        parse_ok("MATCH (n) WITH n RETURN n");
+        parse_ok("CALL { RETURN 1 AS a } RETURN a");
     }
 
     #[test]

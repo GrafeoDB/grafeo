@@ -1982,4 +1982,14 @@ for case_id, query in [
 ]:
     case(case_id, query, GQL, "graphs")
 
+# DA: Cypher: a clause after RETURN is an error that names it (DA1 to DA3; the earlier RETURN was
+#     dropped and the rest ran), while ORDER BY, SKIP and LIMIT after RETURN belong to it (DA4)
+for case_id, query in [
+    ("DA1", "RETURN 1 AS a RETURN 2 AS b"),
+    ("DA2", "UNWIND [1, 2] AS x RETURN x MATCH (n) RETURN n"),
+    ("DA3", "RETURN 1 AS x WITH x RETURN x"),
+]:
+    case(case_id, query, CYPHER, "empty")
+ordered("DA4", "UNWIND [3, 1, 2, 5] AS x RETURN x ORDER BY x SKIP 1 LIMIT 2", CYPHER, "empty")
+
 # fmt: on

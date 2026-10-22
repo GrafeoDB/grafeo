@@ -57,6 +57,62 @@ tests:
 
   - name: a_clause_after_return_is_rejected
     query: "RETURN 1 AS a RETURN 2 AS b"
-    skip: "a clause after RETURN is accepted: the earlier RETURN is dropped and the last one answers"
     expect:
-      error: "RETURN"
+      error: "RETURN after RETURN: RETURN must be the last clause of a query"
+      gql_status: "42001"
+
+  - name: a_match_after_return_is_rejected
+    setup:
+      - "CREATE (:Person {name: 'Alix'})"
+    query: "MATCH (n:Person) RETURN n.name MATCH (m) RETURN m"
+    expect:
+      error: "MATCH after RETURN"
+      gql_status: "42001"
+
+  - name: a_create_after_return_is_rejected
+    query: "RETURN 1 AS a CREATE (:Person {name: 'Alix'})"
+    expect:
+      error: "CREATE after RETURN"
+      gql_status: "42001"
+
+  - name: a_with_after_return_is_rejected
+    query: "RETURN 1 AS x WITH x RETURN x"
+    expect:
+      error: "WITH after RETURN"
+      gql_status: "42001"
+
+  - name: a_where_after_return_is_rejected
+    setup:
+      - "CREATE (:Person {name: 'Alix'})"
+    query: "MATCH (n:Person) RETURN n.name WHERE n.name = 'Alix'"
+    expect:
+      error: "WHERE after RETURN"
+      gql_status: "42001"
+
+  - name: a_clause_after_return_in_a_subquery_is_rejected
+    query: "CALL { RETURN 1 AS a RETURN 2 AS b } RETURN b"
+    expect:
+      error: "RETURN after RETURN"
+      gql_status: "42001"
+
+  - name: order_by_skip_and_limit_after_return_belong_to_it
+    query: "UNWIND [3, 1, 2, 5] AS x RETURN x ORDER BY x SKIP 1 LIMIT 2"
+    expect:
+      ordered: true
+      rows:
+        - [2]
+        - [3]
+
+  - name: union_after_return_starts_the_next_query
+    query: "RETURN 1 AS x UNION ALL RETURN 2 AS x"
+    expect:
+      rows:
+        - [1]
+        - [2]
+
+  - name: with_passes_rows_on_to_a_later_return
+    query: "UNWIND [1, 2] AS x WITH x * 10 AS y RETURN y"
+    expect:
+      rows:
+        - [10]
+        - [20]

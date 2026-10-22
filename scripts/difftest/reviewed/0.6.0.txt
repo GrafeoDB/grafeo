@@ -665,3 +665,6 @@ CY5|gql 8ffe23c0d3 USE CURRENT_GRAPH reads the session's graph; it was a syntax 
 CY6|gql e5fb251992 SELECT ... FROM g reads graph g; the graph name was left unused and the session's graph read.
 CY7|gql 3ddd997a75 USE of a graph that does not exist is 42002, Graph 'g' does not exist; it was a syntax error.
 CY8|gql c27bd4ce58 Parts of one statement on different graphs are not supported yet, with an error that says so; it was a syntax error.
+DA1|cypher 5931a31f88 A clause after RETURN is a syntax error that names it; the earlier RETURN was dropped and the last one answered.
+DA2|cypher 54fd389148 A clause after RETURN is a syntax error that names it; the earlier RETURN was dropped and the MATCH after it ran.
+DA3|cypher 8766abf286 A clause after RETURN is a syntax error that names it, WITH too; the earlier RETURN was dropped.

@@ -23,7 +23,9 @@ use std::sync::Arc;
 use grafeo_common::change::{
     Before, Change, DataOp, EdgeImage, Entity, Labels, NodeImage, PendingVersion, Properties,
 };
-use grafeo_common::types::{ArcStr, EdgeId, EpochId, NodeId, PropertyKey, TransactionId, Value};
+use grafeo_common::types::{
+    ArcStr, EdgeId, EpochId, NodeId, PropertyKey, ReadView, TransactionId, Value,
+};
 
 use super::Direction;
 use super::lpg::{Edge, Node};
@@ -395,7 +397,7 @@ impl ExternalTarget {
         writer: Writer,
     ) -> Result<(DataOp, Applied), ApplyError> {
         for end in [src, dst] {
-            if self.node(end, writer).is_none() {
+            if self.node(end, writer)?.is_none() {
                 return Err(ApplyError::Missing(Entity::Node(end)));
             }
         }
@@ -439,34 +441,41 @@ impl ExternalTarget {
         Ok((op, Self::done(writer, Before::Absent)))
     }
 
-    /// Node `id` as `writer` sees it.
-    fn node(&self, id: NodeId, writer: Writer) -> Option<Node> {
+    /// The view `writer` reads at: a transaction at its snapshot, its own
+    /// writes included; replay and an immediate write at their epoch.
+    fn view(writer: Writer) -> ReadView {
         match writer {
             Writer::Transaction {
                 id: transaction,
                 snapshot,
-            } => self.store.get_node_versioned(id, snapshot, transaction),
-            Writer::Replay { .. } | Writer::Immediate { .. } => self.store.get_node(id),
+            } => ReadView::transaction(transaction, snapshot),
+            Writer::Replay { epoch } | Writer::Immediate { epoch, .. } => {
+                ReadView::committed(epoch)
+            }
         }
     }
 
-    /// Edge `id` as `writer` sees it.
-    fn edge(&self, id: EdgeId, writer: Writer) -> Option<Edge> {
-        match writer {
-            Writer::Transaction {
-                id: transaction,
-                snapshot,
-            } => self.store.get_edge_versioned(id, snapshot, transaction),
-            Writer::Replay { .. } | Writer::Immediate { .. } => self.store.get_edge(id),
-        }
+    /// Node `id` as `writer` sees it; a read the store cannot do refuses
+    /// the write.
+    fn node(&self, id: NodeId, writer: Writer) -> Result<Option<Node>, ApplyError> {
+        self.store
+            .node(id, Self::view(writer))
+            .map_err(|error| ApplyError::Refused(error.to_string()))
+    }
+
+    /// Edge `id` as `writer` sees it (see [`node`](Self::node)).
+    fn edge(&self, id: EdgeId, writer: Writer) -> Result<Option<Edge>, ApplyError> {
+        self.store
+            .edge(id, Self::view(writer))
+            .map_err(|error| ApplyError::Refused(error.to_string()))
     }
 
     /// Whether `writer` sees an edge of node `id`, either way.
-    fn sees_an_edge_of(&self, id: NodeId, writer: Writer) -> bool {
+    fn sees_an_edge_of(&self, id: NodeId, writer: Writer) -> Result<bool, ApplyError> {
         self.store
-            .edges_from(id, Direction::Both)
-            .into_iter()
-            .any(|(_, edge)| self.edge(edge, writer).is_some())
+            .degree(id, Direction::Both, Self::view(writer))
+            .map(|degree| degree > 0)
+            .map_err(|error| ApplyError::Refused(error.to_string()))
     }
 
     /// The applied result of a write that replaced `before`.
@@ -491,10 +500,10 @@ impl ExternalTarget {
     }
 
     fn delete_node(&self, id: NodeId, writer: Writer) -> Result<Applied, ApplyError> {
-        let Some(node) = self.node(id, writer) else {
+        let Some(node) = self.node(id, writer)? else {
             return writer.unseen(Entity::Node(id));
         };
-        if self.sees_an_edge_of(id, writer) {
+        if self.sees_an_edge_of(id, writer)? {
             return Err(ApplyError::HasEdges(id));
         }
         let image = NodeImage {
@@ -518,7 +527,7 @@ impl ExternalTarget {
     }
 
     fn delete_edge(&self, id: EdgeId, writer: Writer) -> Result<Applied, ApplyError> {
-        let Some(edge) = self.edge(id, writer) else {
+        let Some(edge) = self.edge(id, writer)? else {
             return writer.unseen(Entity::Edge(id));
         };
         let image = EdgeImage {
@@ -548,7 +557,7 @@ impl ExternalTarget {
         value: &Value,
         writer: Writer,
     ) -> Result<Applied, ApplyError> {
-        let Some(node) = self.node(id, writer) else {
+        let Some(node) = self.node(id, writer)? else {
             return writer.unseen(Entity::Node(id));
         };
         let old = node.properties.get(key).cloned();
@@ -573,7 +582,7 @@ impl ExternalTarget {
         key: &PropertyKey,
         writer: Writer,
     ) -> Result<Applied, ApplyError> {
-        let Some(node) = self.node(id, writer) else {
+        let Some(node) = self.node(id, writer)? else {
             return writer.unseen(Entity::Node(id));
         };
         if node.properties.get(key).is_none() {
@@ -603,7 +612,7 @@ impl ExternalTarget {
         value: &Value,
         writer: Writer,
     ) -> Result<Applied, ApplyError> {
-        let Some(edge) = self.edge(id, writer) else {
+        let Some(edge) = self.edge(id, writer)? else {
             return writer.unseen(Entity::Edge(id));
         };
         let old = edge.properties.get(key).cloned();
@@ -632,7 +641,7 @@ impl ExternalTarget {
         key: &PropertyKey,
         writer: Writer,
     ) -> Result<Applied, ApplyError> {
-        let Some(edge) = self.edge(id, writer) else {
+        let Some(edge) = self.edge(id, writer)? else {
             return writer.unseen(Entity::Edge(id));
         };
         if edge.properties.get(key).is_none() {
@@ -662,7 +671,7 @@ impl ExternalTarget {
         add: bool,
         writer: Writer,
     ) -> Result<Applied, ApplyError> {
-        let Some(node) = self.node(id, writer) else {
+        let Some(node) = self.node(id, writer)? else {
             return writer.unseen(Entity::Node(id));
         };
         if node.has_label(label) == add {
@@ -810,7 +819,7 @@ fn sorted<'p>(properties: impl Iterator<Item = (&'p PropertyKey, &'p Value)>) ->
     properties
 }
 
-#[cfg(all(test, feature = "lpg"))]
+#[cfg(test)]
 mod tests {
     use grafeo_common::change::Labels;
     use grafeo_common::types::ArcStr;
@@ -955,6 +964,11 @@ mod tests {
             Err(ApplyError::Refused(_))
         ));
         assert_eq!(store.next_node_id(), nodes, "nothing was created");
-        assert!(store.get_node(NodeId::new(nodes)).is_none());
+        assert!(
+            store
+                .node(NodeId::new(nodes), ReadView::latest())
+                .unwrap()
+                .is_none()
+        );
     }
 }

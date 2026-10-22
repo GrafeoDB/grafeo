@@ -24,29 +24,26 @@
 
 pub mod apply;
 /// The conformance suite of the stores behind the change set.
-#[cfg(all(test, feature = "lpg"))]
+#[cfg(test)]
 mod conformance;
 // Rows loaded under their ids: the readers of earlier formats and the
 // copies of graph data write into either store through it.
-#[cfg(feature = "lpg")]
 pub mod load;
 pub mod lpg;
 pub mod projection;
 pub mod property_filter;
 /// The row-group store (workstream H), the store the engine holds its
 /// graphs in.
-#[cfg(feature = "lpg")]
 pub mod rowgroup;
 pub mod traits;
 
-#[cfg(feature = "lpg")]
 pub mod compact;
 
 #[cfg(feature = "triple-store")]
 pub mod rdf;
 
 pub use projection::{GraphProjection, ProjectionSpec};
-pub use traits::{GraphStore, GraphStoreMut, GraphStoreSearch, NullGraphStore};
+pub use traits::{GraphStore, GraphStoreMut, Labels, NullGraphStore, list_self_loops_once};
 
 /// Controls which edges to follow during traversal.
 ///

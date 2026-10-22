@@ -406,8 +406,7 @@ impl InvertedIndex {
     /// a document. For the text of a document the index holds, it is the
     /// score a search gives the document. A store scores this way the text a
     /// reader sees where it differs from the one the index holds (the
-    /// row-group store, with the `lpg` feature).
-    #[cfg(feature = "lpg")]
+    /// row-group store).
     pub(crate) fn score_text(&self, text: &str, query: &str) -> Option<f64> {
         let query_tokens = self.tokenizer.tokenize(query);
         let tokens = self.tokenizer.tokenize(text);

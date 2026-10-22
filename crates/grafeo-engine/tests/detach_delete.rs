@@ -8,7 +8,7 @@
 //! cargo test -p grafeo-engine --all-features --test detach_delete
 //! ```
 
-#![cfg(all(feature = "lpg", feature = "gql"))]
+#![cfg(feature = "gql")]
 
 use grafeo_common::types::{NodeId, Value};
 use grafeo_engine::GrafeoDB;
@@ -59,7 +59,7 @@ fn detach_delete_node_removes_the_node_with_its_edges() {
 
     assert!(db.detach_delete_node(gus).unwrap());
     assert_eq!(knows(&db), [pair("Alix", "Vincent")]);
-    assert_eq!((db.node_count(), db.edge_count()), (2, 1));
+    assert_eq!((db.node_count().unwrap(), db.edge_count().unwrap()), (2, 1));
     assert!(!db.detach_delete_node(gus).unwrap(), "gone already");
 }
 
@@ -79,7 +79,7 @@ fn a_detach_delete_node_rolls_back_with_its_edges() {
             pair("Vincent", "Gus")
         ]
     );
-    assert_eq!((db.node_count(), db.edge_count()), (3, 3));
+    assert_eq!((db.node_count().unwrap(), db.edge_count().unwrap()), (3, 3));
 }
 
 #[test]
@@ -241,6 +241,6 @@ mod replay {
 
         let db = GrafeoDB::open(&path).unwrap();
         assert_eq!(knows(&db), [pair("Alix", "Vincent")]);
-        assert_eq!((db.node_count(), db.edge_count()), (2, 1));
+        assert_eq!((db.node_count().unwrap(), db.edge_count().unwrap()), (2, 1));
     }
 }

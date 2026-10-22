@@ -34,11 +34,11 @@ func TestCreateAndReopen(t *testing.T) {
 	); err != nil {
 		t.Fatal(err)
 	}
-	if db.NodeCount() != 2 {
-		t.Errorf("expected 2 nodes, got %d", db.NodeCount())
+	if mustCount(t, db.NodeCount) != 2 {
+		t.Errorf("expected 2 nodes, got %d", mustCount(t, db.NodeCount))
 	}
-	if db.EdgeCount() != 1 {
-		t.Errorf("expected 1 edge, got %d", db.EdgeCount())
+	if mustCount(t, db.EdgeCount) != 1 {
+		t.Errorf("expected 1 edge, got %d", mustCount(t, db.EdgeCount))
 	}
 	if err := db.Close(); err != nil {
 		t.Fatal(err)
@@ -51,11 +51,11 @@ func TestCreateAndReopen(t *testing.T) {
 	}
 	defer db2.Close()
 
-	if db2.NodeCount() != 2 {
-		t.Errorf("expected 2 nodes after reopen, got %d", db2.NodeCount())
+	if mustCount(t, db2.NodeCount) != 2 {
+		t.Errorf("expected 2 nodes after reopen, got %d", mustCount(t, db2.NodeCount))
 	}
-	if db2.EdgeCount() != 1 {
-		t.Errorf("expected 1 edge after reopen, got %d", db2.EdgeCount())
+	if mustCount(t, db2.EdgeCount) != 1 {
+		t.Errorf("expected 1 edge after reopen, got %d", mustCount(t, db2.EdgeCount))
 	}
 
 	result, err := db2.Execute("MATCH (p:Person) RETURN p.name ORDER BY p.name")
@@ -91,8 +91,8 @@ func TestSaveInMemoryToFile(t *testing.T) {
 	}
 	defer db2.Close()
 
-	if db2.NodeCount() != 2 {
-		t.Errorf("expected 2 nodes, got %d", db2.NodeCount())
+	if mustCount(t, db2.NodeCount) != 2 {
+		t.Errorf("expected 2 nodes, got %d", mustCount(t, db2.NodeCount))
 	}
 
 	result, err := db2.Execute("MATCH (c:City) RETURN c.name ORDER BY c.name")
@@ -120,8 +120,8 @@ func TestMultipleReopenCycles(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if db.NodeCount() != 1 {
-		t.Errorf("cycle 2: expected 1 node, got %d", db.NodeCount())
+	if mustCount(t, db.NodeCount) != 1 {
+		t.Errorf("cycle 2: expected 1 node, got %d", mustCount(t, db.NodeCount))
 	}
 	db.Execute("INSERT (:Person {name: 'Gus'})")
 	db.Close()
@@ -131,8 +131,8 @@ func TestMultipleReopenCycles(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if db.NodeCount() != 2 {
-		t.Errorf("cycle 3: expected 2 nodes, got %d", db.NodeCount())
+	if mustCount(t, db.NodeCount) != 2 {
+		t.Errorf("cycle 3: expected 2 nodes, got %d", mustCount(t, db.NodeCount))
 	}
 	db.Execute("INSERT (:Person {name: 'Vincent'})")
 	db.Close()
@@ -144,8 +144,8 @@ func TestMultipleReopenCycles(t *testing.T) {
 	}
 	defer db.Close()
 
-	if db.NodeCount() != 3 {
-		t.Errorf("final: expected 3 nodes, got %d", db.NodeCount())
+	if mustCount(t, db.NodeCount) != 3 {
+		t.Errorf("final: expected 3 nodes, got %d", mustCount(t, db.NodeCount))
 	}
 	result, err := db.Execute("MATCH (p:Person) RETURN p.name")
 	if err != nil {
@@ -189,8 +189,8 @@ func TestDetachDeleteNode(t *testing.T) {
 	if err != nil || !deleted {
 		t.Fatalf("expected the detach delete to succeed, got %v, %v", deleted, err)
 	}
-	if db.NodeCount() != 2 || db.EdgeCount() != 0 {
-		t.Errorf("expected 2 nodes and no edges, got %d and %d", db.NodeCount(), db.EdgeCount())
+	if mustCount(t, db.NodeCount) != 2 || mustCount(t, db.EdgeCount) != 0 {
+		t.Errorf("expected 2 nodes and no edges, got %d and %d", mustCount(t, db.NodeCount), mustCount(t, db.EdgeCount))
 	}
 }
 
@@ -264,8 +264,8 @@ func TestCheckpointAndContinuedWrites(t *testing.T) {
 	}
 	defer db2.Close()
 
-	if db2.NodeCount() != 2 {
-		t.Errorf("expected 2 nodes after checkpoint+close, got %d", db2.NodeCount())
+	if mustCount(t, db2.NodeCount) != 2 {
+		t.Errorf("expected 2 nodes after checkpoint+close, got %d", mustCount(t, db2.NodeCount))
 	}
 }
 

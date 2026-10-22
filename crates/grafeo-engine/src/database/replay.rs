@@ -214,6 +214,7 @@ fn apply_standalone<S: RootStore>(op: &StandaloneOp, targets: &mut Targets<'_, S
 
 #[cfg(test)]
 mod tests {
+    use grafeo_common::types::ReadView;
     use std::sync::Arc;
 
     use grafeo_common::change::{
@@ -312,8 +313,12 @@ mod tests {
 
     fn name_and_city(store: &RowGroupStore, id: u64) -> (Option<Value>, Option<Value>) {
         (
-            store.get_node_property(NodeId::new(id), &PropertyKey::new("name")),
-            store.get_node_property(NodeId::new(id), &PropertyKey::new("city")),
+            store
+                .node_property(NodeId::new(id), "name", ReadView::latest())
+                .unwrap(),
+            store
+                .node_property(NodeId::new(id), "city", ReadView::latest())
+                .unwrap(),
         )
     }
 

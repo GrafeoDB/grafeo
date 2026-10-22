@@ -11,12 +11,7 @@
 //! cargo test -p grafeo-engine --all-features --test backup_contents
 //! ```
 
-#![cfg(all(
-    feature = "wal",
-    feature = "grafeo-file",
-    feature = "lpg",
-    feature = "gql"
-))]
+#![cfg(all(feature = "wal", feature = "grafeo-file", feature = "gql"))]
 
 use std::path::Path;
 
@@ -176,6 +171,7 @@ fn a_restore_keeps_property_vector_and_text_indexes() {
         assert!(plan.contains("[index: title]"), "{what}: {plan}");
         let title = |id: grafeo_common::types::NodeId| {
             db.get_node(id)
+                .unwrap()
                 .and_then(|node| node.get_property("title").cloned())
                 .unwrap()
         };

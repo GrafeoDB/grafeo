@@ -6,7 +6,7 @@ use std::sync::Arc;
 use grafeo_common::types::{EdgeId, NodeId, PropertyKey, Value};
 use grafeo_common::utils::error::Result;
 use grafeo_core::graph::lpg::{Edge, Node};
-use grafeo_core::graph::{Direction, GraphStoreSearch};
+use grafeo_core::graph::{Direction, GraphStore};
 
 use super::direct::{BatchEdge, DirectCalls, DirectTarget, missing_graph};
 use super::{GrafeoDB, QueryResult};
@@ -102,7 +102,7 @@ impl GraphHandle<'_> {
     /// # Errors
     ///
     /// Returns an error if the graph no longer exists.
-    pub fn graph_store(&self) -> Result<Arc<dyn GraphStoreSearch>> {
+    pub fn graph_store(&self) -> Result<Arc<dyn GraphStore>> {
         self.db.read_store(DirectTarget::Named {
             schema: self.schema.as_deref(),
             name: &self.name,

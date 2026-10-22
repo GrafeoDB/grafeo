@@ -195,20 +195,20 @@ impl JsAsOfView {
     #[napi(js_name = "getNode")]
     pub fn get_node(&self, id: f64) -> Result<Option<JsNode>> {
         let node_id = crate::database::validate_node_id(id)?;
-        self.with_view(|view| {
-            view.get_node(node_id)
-                .map(|node| crate::database::js_node(node_id, node))
-        })
+        let node = self
+            .with_view(|view| view.get_node(node_id))?
+            .map_err(NodeGrafeoError::from)?;
+        Ok(node.map(|node| crate::database::js_node(node_id, node)))
     }
 
     /// The edge as it was at the view's epoch, or null.
     #[napi(js_name = "getEdge")]
     pub fn get_edge(&self, id: f64) -> Result<Option<JsEdge>> {
         let edge_id = crate::database::validate_edge_id(id)?;
-        self.with_view(|view| {
-            view.get_edge(edge_id)
-                .map(|edge| crate::database::js_edge(edge_id, edge))
-        })
+        let edge = self
+            .with_view(|view| view.get_edge(edge_id))?
+            .map_err(NodeGrafeoError::from)?;
+        Ok(edge.map(|edge| crate::database::js_edge(edge_id, edge)))
     }
 
     /// A node's value of `key` as it was at the view's epoch, or null.
@@ -217,6 +217,7 @@ impl JsAsOfView {
         let node_id = crate::database::validate_node_id(id)?;
         let value = self
             .with_view(|view| view.get_node_property(node_id, &key))?
+            .map_err(NodeGrafeoError::from)?
             .unwrap_or(grafeo_common::types::Value::Null);
         let raw = crate::types::value_to_napi(env.raw(), &value)?;
         // SAFETY: `raw` is a value `value_to_napi` just made in this call's

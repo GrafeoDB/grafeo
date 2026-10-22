@@ -721,7 +721,7 @@ impl SetFields {
         self.0 |= field.0;
     }
 
-    #[cfg(all(feature = "grafeo-file", feature = "lpg"))]
+    #[cfg(feature = "grafeo-file")]
     fn contains(self, field: Self) -> bool {
         self.0 & field.0 == field.0
     }
@@ -1490,7 +1490,7 @@ impl Config {
 
     /// Whether a builder set `field` (see [`SetFields`]): what a database
     /// file stores yields to it.
-    #[cfg(all(feature = "grafeo-file", feature = "lpg"))]
+    #[cfg(feature = "grafeo-file")]
     #[must_use]
     pub(crate) fn was_set(&self, field: SetFields) -> bool {
         self.set.contains(field)

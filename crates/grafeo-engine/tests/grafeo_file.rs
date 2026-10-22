@@ -5,7 +5,7 @@
 use grafeo_common::types::{Decimal, Value};
 use grafeo_engine::{Config, GrafeoDB};
 
-#[cfg(all(feature = "wal", feature = "lpg"))]
+#[cfg(feature = "wal")]
 #[path = "common/unlistable.rs"]
 mod unlistable;
 
@@ -39,8 +39,8 @@ fn create_new_grafeo_file() {
     let path = dir.path().join("test.grafeo");
 
     let db = GrafeoDB::with_config(Config::persistent(&path)).unwrap();
-    assert_eq!(db.node_count(), 0);
-    assert_eq!(db.edge_count(), 0);
+    assert_eq!(db.node_count().unwrap(), 0);
+    assert_eq!(db.edge_count().unwrap(), 0);
 
     // File should exist
     assert!(path.exists());
@@ -70,8 +70,8 @@ fn insert_close_reopen_persists_data() {
                  INSERT (a)-[:KNOWS]->(b)",
             )
             .unwrap();
-        assert_eq!(db.node_count(), 2);
-        assert_eq!(db.edge_count(), 1);
+        assert_eq!(db.node_count().unwrap(), 2);
+        assert_eq!(db.edge_count().unwrap(), 1);
         db.close().unwrap();
     }
 
@@ -84,8 +84,8 @@ fn insert_close_reopen_persists_data() {
     // Reopen and verify
     {
         let db = GrafeoDB::with_config(Config::persistent(&path)).unwrap();
-        assert_eq!(db.node_count(), 2);
-        assert_eq!(db.edge_count(), 1);
+        assert_eq!(db.node_count().unwrap(), 2);
+        assert_eq!(db.edge_count().unwrap(), 1);
 
         // Verify data is queryable
         let session = db.session();
@@ -109,14 +109,14 @@ fn save_as_grafeo_file_from_in_memory() {
         .execute("INSERT (:City {name: 'Amsterdam'})")
         .unwrap();
     session.execute("INSERT (:City {name: 'Berlin'})").unwrap();
-    assert_eq!(db.node_count(), 2);
+    assert_eq!(db.node_count().unwrap(), 2);
 
     // Save as .grafeo file
     db.save(&path).unwrap();
 
     // Open the file and verify
     let db2 = GrafeoDB::with_config(Config::persistent(&path)).unwrap();
-    assert_eq!(db2.node_count(), 2);
+    assert_eq!(db2.node_count().unwrap(), 2);
 
     let session2 = db2.session();
     let result = session2
@@ -176,7 +176,7 @@ fn multiple_checkpoints_alternate_headers() {
 
     // Reopen and verify both nodes are there
     let db2 = GrafeoDB::with_config(Config::persistent(&path)).unwrap();
-    assert_eq!(db2.node_count(), 2);
+    assert_eq!(db2.node_count().unwrap(), 2);
     db2.close().unwrap();
 }
 
@@ -201,7 +201,7 @@ fn auto_detect_uses_a_single_file_for_a_path_without_the_extension() {
 
     assert!(path.is_file(), "the database is a file, not a directory");
     let db = GrafeoDB::with_config(Config::persistent(&path)).unwrap();
-    assert_eq!(db.node_count(), 1, "the reopened file holds Butch");
+    assert_eq!(db.node_count().unwrap(), 1, "the reopened file holds Butch");
     db.close().unwrap();
 }
 
@@ -211,7 +211,7 @@ fn info_reports_persistence() {
     let path = dir.path().join("info.grafeo");
 
     let db = GrafeoDB::with_config(Config::persistent(&path)).unwrap();
-    let info = db.info();
+    let info = db.info().unwrap();
     assert!(info.is_persistent);
     assert!(info.path.is_some());
     db.close().unwrap();
@@ -269,8 +269,8 @@ fn checkpoint_merges_incremental_writes() {
 
     // Reopen and verify final state
     let db2 = GrafeoDB::with_config(Config::persistent(&path)).unwrap();
-    assert_eq!(db2.node_count(), 4);
-    assert_eq!(db2.edge_count(), 1);
+    assert_eq!(db2.node_count().unwrap(), 4);
+    assert_eq!(db2.edge_count().unwrap(), 1);
 
     let session2 = db2.session();
     let result = session2
@@ -310,7 +310,7 @@ fn writes_after_checkpoint_survive_reopen() {
 
     // Reopen: all 3 cities should be present
     let db2 = GrafeoDB::with_config(Config::persistent(&path)).unwrap();
-    assert_eq!(db2.node_count(), 3);
+    assert_eq!(db2.node_count().unwrap(), 3);
 
     let session2 = db2.session();
     let result = session2
@@ -339,8 +339,8 @@ fn empty_database_roundtrip() {
     }
     {
         let db = GrafeoDB::with_config(Config::persistent(&path)).unwrap();
-        assert_eq!(db.node_count(), 0);
-        assert_eq!(db.edge_count(), 0);
+        assert_eq!(db.node_count().unwrap(), 0);
+        assert_eq!(db.edge_count().unwrap(), 0);
         db.close().unwrap();
     }
 }
@@ -362,7 +362,7 @@ fn multiple_reopen_cycles() {
     // Cycle 2: add more data
     {
         let db = GrafeoDB::with_config(Config::persistent(&path)).unwrap();
-        assert_eq!(db.node_count(), 1);
+        assert_eq!(db.node_count().unwrap(), 1);
         db.session()
             .execute("INSERT (:Person {name: 'Gus'})")
             .unwrap();
@@ -372,7 +372,7 @@ fn multiple_reopen_cycles() {
     // Cycle 3: add more data
     {
         let db = GrafeoDB::with_config(Config::persistent(&path)).unwrap();
-        assert_eq!(db.node_count(), 2);
+        assert_eq!(db.node_count().unwrap(), 2);
         db.session()
             .execute("INSERT (:Person {name: 'Vincent'})")
             .unwrap();
@@ -382,7 +382,7 @@ fn multiple_reopen_cycles() {
     // Cycle 4: verify all data present
     {
         let db = GrafeoDB::with_config(Config::persistent(&path)).unwrap();
-        assert_eq!(db.node_count(), 3);
+        assert_eq!(db.node_count().unwrap(), 3);
         let session = db.session();
         let result = session
             .execute("MATCH (p:Person) RETURN p.name ORDER BY p.name")
@@ -480,7 +480,7 @@ fn open_nonexistent_creates_new() {
     assert!(!path.exists());
     let db = GrafeoDB::with_config(Config::persistent(&path)).unwrap();
     assert!(path.exists());
-    assert_eq!(db.node_count(), 0);
+    assert_eq!(db.node_count().unwrap(), 0);
     db.close().unwrap();
 }
 
@@ -639,7 +639,7 @@ fn checkpoint_idempotent() {
     assert_eq!(iter3, iter2 + 1);
 
     // Data is still consistent
-    assert_eq!(db.node_count(), 1);
+    assert_eq!(db.node_count().unwrap(), 1);
 
     db.close().unwrap();
 }
@@ -660,13 +660,13 @@ fn concurrent_sessions_before_close() {
         s2.execute("INSERT (:Person {name: 'Gus'})").unwrap();
         s1.execute("INSERT (:Person {name: 'Vincent'})").unwrap();
 
-        assert_eq!(db.node_count(), 3);
+        assert_eq!(db.node_count().unwrap(), 3);
         db.close().unwrap();
     }
 
     {
         let db = GrafeoDB::with_config(Config::persistent(&path)).unwrap();
-        assert_eq!(db.node_count(), 3);
+        assert_eq!(db.node_count().unwrap(), 3);
         db.close().unwrap();
     }
 }
@@ -793,7 +793,7 @@ fn validate_reports_clean_state() {
         )
         .unwrap();
 
-    let validation = db.validate();
+    let validation = db.validate().unwrap();
     assert!(validation.errors.is_empty(), "should have no errors");
     db.close().unwrap();
 }
@@ -803,7 +803,7 @@ fn validate_reports_clean_state() {
 // =========================================================================
 
 /// The total size of the files under `dir`, recursively (0 when it is missing).
-#[cfg(all(feature = "wal", feature = "lpg"))]
+#[cfg(feature = "wal")]
 fn size_under(dir: &std::path::Path) -> u64 {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return 0;
@@ -823,7 +823,7 @@ fn size_under(dir: &std::path::Path) -> u64 {
 /// A sidecar WAL that exists but cannot be listed fails the open, naming it,
 /// instead of opening the file without the commits only the WAL holds. Listed
 /// again, the same open replays them.
-#[cfg(all(feature = "wal", feature = "lpg"))]
+#[cfg(feature = "wal")]
 #[test]
 fn a_sidecar_wal_that_cannot_be_listed_fails_the_open() {
     use grafeo_common::types::{NodeId, TransactionId};
@@ -857,7 +857,7 @@ fn a_sidecar_wal_that_cannot_be_listed_fails_the_open() {
         let Some(_denied) = unlistable::Unlistable::deny(&sidecar) else {
             return;
         };
-        GrafeoDB::with_config(Config::persistent(&path)).map(|db| db.node_count())
+        GrafeoDB::with_config(Config::persistent(&path)).and_then(|db| db.node_count())
     };
     let error = match opened {
         Ok(nodes) => panic!("the open replayed a sidecar WAL it cannot list ({nodes} nodes)"),
@@ -875,7 +875,7 @@ fn a_sidecar_wal_that_cannot_be_listed_fails_the_open() {
 
     let db = GrafeoDB::with_config(Config::persistent(&path)).unwrap();
     assert_eq!(
-        db.node_count(),
+        db.node_count().unwrap(),
         1,
         "listed again, the WAL replays its commit"
     );
@@ -884,7 +884,7 @@ fn a_sidecar_wal_that_cannot_be_listed_fails_the_open() {
 
 /// The WAL of a database file is its sidecar `<path>.wal/`, and its disk usage
 /// is the file plus that sidecar WAL.
-#[cfg(all(feature = "wal", feature = "lpg"))]
+#[cfg(feature = "wal")]
 #[test]
 fn wal_status_and_disk_usage_count_the_file_and_its_sidecar_wal() {
     let dir = tempfile::TempDir::new().unwrap();
@@ -900,6 +900,7 @@ fn wal_status_and_disk_usage_count_the_file_and_its_sidecar_wal() {
     );
     let disk = db
         .detailed_stats()
+        .unwrap()
         .disk_bytes
         .expect("a persistent database reports its disk usage");
     let file = std::fs::metadata(&path).unwrap().len();
@@ -942,7 +943,7 @@ fn detailed_stats_with_grafeo_file() {
             .unwrap();
     }
 
-    let stats = db.detailed_stats();
+    let stats = db.detailed_stats().unwrap();
     assert_eq!(stats.node_count, 10);
     assert_eq!(stats.edge_count, 0);
 
@@ -970,7 +971,7 @@ fn second_open_of_same_file_is_rejected() {
 
     // After close, open should succeed
     let db2 = GrafeoDB::open(&path).unwrap();
-    assert_eq!(db2.node_count(), 1);
+    assert_eq!(db2.node_count().unwrap(), 1);
     db2.close().unwrap();
 }
 
@@ -1222,7 +1223,7 @@ fn schema_with_data_across_multiple_cycles() {
         assert!(types.contains(&"Person".to_string()), "Person missing");
         assert!(types.contains(&"City".to_string()), "City missing");
 
-        assert_eq!(db.node_count(), 2);
+        assert_eq!(db.node_count().unwrap(), 2);
         db.close().unwrap();
     }
 }
@@ -1253,7 +1254,7 @@ fn wal_disabled_single_file_persists_on_close() {
         session
             .execute("INSERT (:City {name: 'Amsterdam'})")
             .unwrap();
-        assert_eq!(db.node_count(), 2);
+        assert_eq!(db.node_count().unwrap(), 2);
 
         // No sidecar WAL should exist: WAL is disabled
         assert!(
@@ -1279,7 +1280,7 @@ fn wal_disabled_single_file_persists_on_close() {
             .without_wal();
         let db = GrafeoDB::with_config(config).unwrap();
         assert_eq!(
-            db.node_count(),
+            db.node_count().unwrap(),
             2,
             "data must survive close-reopen with WAL disabled"
         );
@@ -1327,7 +1328,7 @@ fn drop_persists_data_and_removes_sidecar_wal() {
     {
         let db = GrafeoDB::with_config(Config::persistent(&path)).unwrap();
         assert_eq!(
-            db.node_count(),
+            db.node_count().unwrap(),
             2,
             "both nodes must survive implicit close via drop"
         );
@@ -1363,8 +1364,8 @@ fn two_concurrent_read_only_opens() {
     let ro1 = GrafeoDB::open_read_only(&path).unwrap();
     let ro2 = GrafeoDB::open_read_only(&path).unwrap();
 
-    assert_eq!(ro1.node_count(), 1);
-    assert_eq!(ro2.node_count(), 1);
+    assert_eq!(ro1.node_count().unwrap(), 1);
+    assert_eq!(ro2.node_count().unwrap(), 1);
 
     let r1 = ro1
         .session()
@@ -1410,7 +1411,7 @@ fn read_only_blocked_while_writer_holds_lock() {
 
     // After writer releases, read-only must succeed
     let ro = GrafeoDB::open_read_only(&path).unwrap();
-    assert_eq!(ro.node_count(), 1);
+    assert_eq!(ro.node_count().unwrap(), 1);
     ro.close().unwrap();
 }
 
@@ -1453,7 +1454,7 @@ fn wal_data_after_checkpoint_survives_drop() {
     // Reopen: both nodes must be present (first from snapshot, second from WAL)
     {
         let db = GrafeoDB::open(&path).unwrap();
-        assert_eq!(db.node_count(), 2);
+        assert_eq!(db.node_count().unwrap(), 2);
         let result = db
             .session()
             .execute("MATCH (p:Person) RETURN p.name ORDER BY p.name")
@@ -1468,7 +1469,7 @@ fn wal_data_after_checkpoint_survives_drop() {
 /// Regression: wal_checkpoint() on a read-only database should be a no-op,
 /// not an error. Read-only databases have no WAL and the on-disk file is
 /// already a valid snapshot.
-#[cfg(all(feature = "wal", feature = "lpg"))]
+#[cfg(feature = "wal")]
 #[test]
 fn wal_checkpoint_on_read_only_is_no_op() {
     let dir = tempfile::tempdir().unwrap();
@@ -1485,12 +1486,12 @@ fn wal_checkpoint_on_read_only_is_no_op() {
     // Should succeed (no-op), not fail with "read-only mode" error.
     db.wal_checkpoint()
         .expect("wal_checkpoint on read-only should be a no-op");
-    assert_eq!(db.node_count(), 1);
+    assert_eq!(db.node_count().unwrap(), 1);
 }
 
 /// Regression: save() from a read-only database should succeed.
 /// save() creates a NEW file at the target path, reading from self.
-#[cfg(all(feature = "wal", feature = "lpg"))]
+#[cfg(feature = "wal")]
 #[test]
 fn save_from_read_only_database() {
     let dir = tempfile::tempdir().unwrap();
@@ -1510,13 +1511,13 @@ fn save_from_read_only_database() {
         .expect("save from read-only should succeed");
 
     let restored = GrafeoDB::open(&dest_path).unwrap();
-    assert_eq!(restored.node_count(), 2);
+    assert_eq!(restored.node_count().unwrap(), 2);
     restored.close().unwrap();
 }
 
 /// Every file and directory under `root` (spill directories left out), with
 /// the bytes of each file, sorted.
-#[cfg(all(feature = "wal", feature = "lpg"))]
+#[cfg(feature = "wal")]
 fn contents_under(root: &std::path::Path) -> Vec<(std::path::PathBuf, Option<Vec<u8>>)> {
     let mut found = Vec::new();
     let mut pending = vec![root.to_path_buf()];
@@ -1543,7 +1544,7 @@ fn contents_under(root: &std::path::Path) -> Vec<(std::path::PathBuf, Option<Vec
 /// file (with or without an extension), an empty directory, or a 0.5.x WAL
 /// directory (where 0.5.x saved into the database already there). Each fails
 /// with an error naming the path and leaves it as it was.
-#[cfg(all(feature = "wal", feature = "lpg"))]
+#[cfg(feature = "wal")]
 #[test]
 fn save_fails_at_an_existing_path_and_changes_nothing() {
     let dir = tempfile::tempdir().unwrap();
@@ -1578,13 +1579,17 @@ fn save_fails_at_an_existing_path_and_changes_nothing() {
         "the refused saves changed nothing"
     );
     let gus = GrafeoDB::open_read_only(&file).unwrap();
-    assert_eq!(gus.node_count(), 1, "the existing database is as it was");
+    assert_eq!(
+        gus.node_count().unwrap(),
+        1,
+        "the existing database is as it was"
+    );
     gus.close().unwrap();
 }
 
 /// `save("copy/")` names the file `copy`, as an open of `copy/` does: the
 /// path is normalized, and the side files go next to it.
-#[cfg(all(feature = "wal", feature = "lpg"))]
+#[cfg(feature = "wal")]
 #[test]
 fn save_to_a_path_with_a_trailing_separator_writes_the_file_it_names() {
     let dir = tempfile::tempdir().unwrap();
@@ -1600,7 +1605,11 @@ fn save_to_a_path_with_a_trailing_separator_writes_the_file_it_names() {
     let copy = dir.path().join("copy");
     assert!(copy.is_file(), "the copy is the file {}", copy.display());
     let db = GrafeoDB::open(&with_separator).unwrap();
-    assert_eq!(db.node_count(), 1, "the copy opens by the same spelling");
+    assert_eq!(
+        db.node_count().unwrap(),
+        1,
+        "the copy opens by the same spelling"
+    );
     db.close().unwrap();
 }
 
@@ -1611,7 +1620,6 @@ fn save_to_a_path_with_a_trailing_separator_writes_the_file_it_names() {
 /// Regression test: deletes of nodes written before `compact()` survive a
 /// close and reopen. A compacted store once kept them in memory only, and
 /// the deleted nodes reappeared on reopen.
-#[cfg(feature = "lpg")]
 #[test]
 fn deleted_base_nodes_stay_deleted_across_reopen() {
     let dir = tempfile::TempDir::new().unwrap();
@@ -1664,7 +1672,6 @@ fn deleted_base_nodes_stay_deleted_across_reopen() {
 }
 
 /// Companion test for edge deletion after `compact()`.
-#[cfg(feature = "lpg")]
 #[test]
 fn deleted_base_edges_stay_deleted_across_reopen() {
     let dir = tempfile::TempDir::new().unwrap();
@@ -1767,7 +1774,7 @@ fn a_new_database_is_never_created_next_to_a_sidecar_wal_with_files() {
     let error = match GrafeoDB::with_config(Config::persistent(&path)) {
         Ok(db) => panic!(
             "a database was created next to the leftover WAL, holding {} nodes",
-            db.node_count()
+            db.node_count().unwrap()
         ),
         Err(error) => error.to_string(),
     };
@@ -1782,7 +1789,7 @@ fn a_new_database_is_never_created_next_to_a_sidecar_wal_with_files() {
     std::fs::remove_dir_all(&wal).unwrap();
     std::fs::create_dir(&wal).unwrap();
     let db = GrafeoDB::with_config(Config::persistent(&path)).unwrap();
-    assert_eq!(db.node_count(), 0, "a new, empty database");
+    assert_eq!(db.node_count().unwrap(), 0, "a new, empty database");
     db.close().unwrap();
 }
 
@@ -1790,7 +1797,7 @@ fn a_new_database_is_never_created_next_to_a_sidecar_wal_with_files() {
 /// lock (it works while a reader holds the file), no checkpoint and no WAL
 /// removal when the copy closes. The files stay byte for byte as they were,
 /// also after writes to the in-memory copy and its `close()`.
-#[cfg(all(feature = "wal", feature = "lpg"))]
+#[cfg(feature = "wal")]
 #[test]
 fn open_in_memory_changes_nothing_on_disk() {
     let dir = tempfile::tempdir().unwrap();
@@ -1806,7 +1813,7 @@ fn open_in_memory_changes_nothing_on_disk() {
     let copy = GrafeoDB::open_in_memory(&path)
         .unwrap_or_else(|error| panic!("open_in_memory while a reader holds the file: {error}"));
     copy.execute("INSERT (:Person {name: 'Gus'})").unwrap();
-    assert_eq!(copy.node_count(), 2, "the copy takes writes");
+    assert_eq!(copy.node_count().unwrap(), 2, "the copy takes writes");
     copy.close().unwrap();
     drop(copy);
     reader.close().unwrap();

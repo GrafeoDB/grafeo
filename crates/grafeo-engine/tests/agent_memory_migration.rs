@@ -197,7 +197,7 @@ fn test_incremental_growth_with_persistence() {
     // Final reopen: verify everything survived
     let db = GrafeoDB::open(&path).unwrap();
     assert_eq!(
-        db.node_count(),
+        db.node_count().unwrap(),
         total_nodes,
         "all {total_nodes} nodes should survive close/reopen cycles"
     );
@@ -448,7 +448,7 @@ fn test_concurrent_vector_search_during_writes() {
         "at least some reads should succeed during concurrent writes"
     );
 
-    assert_eq!(db.node_count(), 700, "500 initial + 200 written");
+    assert_eq!(db.node_count().unwrap(), 700, "500 initial + 200 written");
 }
 
 #[test]
@@ -473,7 +473,7 @@ fn test_multi_process_file_lock_rejected() {
 
     // After close, open should succeed
     let db2 = GrafeoDB::open(&path).unwrap();
-    assert_eq!(db2.node_count(), 1);
+    assert_eq!(db2.node_count().unwrap(), 1);
     db2.close().unwrap();
 }
 
@@ -503,15 +503,22 @@ fn test_close_reopen_preserves_data() {
             db.create_edge(node_ids[i], node_ids[i + 1], edge_type)
                 .unwrap();
         }
-        assert_eq!(db.node_count(), 100);
+        assert_eq!(db.node_count().unwrap(), 100);
         db.close().unwrap();
     }
 
     // Reopen, verify
     {
         let db = GrafeoDB::open(&path).unwrap();
-        assert_eq!(db.node_count(), 100, "nodes should survive close/reopen");
-        assert!(db.edge_count() >= 50, "edges should survive close/reopen");
+        assert_eq!(
+            db.node_count().unwrap(),
+            100,
+            "nodes should survive close/reopen"
+        );
+        assert!(
+            db.edge_count().unwrap() >= 50,
+            "edges should survive close/reopen"
+        );
         db.close().unwrap();
     }
 }
@@ -769,7 +776,11 @@ fn bench_vector_index_rebuild_5k() {
     let db = GrafeoDB::open(&path).unwrap();
     let reopen_time = reopen_start.elapsed();
 
-    assert_eq!(db.node_count(), num_nodes, "all nodes survived reopen");
+    assert_eq!(
+        db.node_count().unwrap(),
+        num_nodes,
+        "all nodes survived reopen"
+    );
 
     // The single-file format (snapshot v4) persists index metadata and
     // rebuilds the index from data on load. Measure if search works immediately.
@@ -1033,8 +1044,8 @@ fn test_bulk_import_single_transaction() {
     );
     eprintln!("Total: {total_time:.2?}");
 
-    assert_eq!(db.node_count(), num_nodes, "all nodes present");
-    assert_eq!(db.edge_count(), edge_count, "all edges present");
+    assert_eq!(db.node_count().unwrap(), num_nodes, "all nodes present");
+    assert_eq!(db.edge_count().unwrap(), edge_count, "all edges present");
 }
 
 #[test]

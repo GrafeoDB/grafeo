@@ -6,6 +6,7 @@
 //! This planner follows the same push-based, vectorized execution model as
 //! the LPG planner for consistent performance characteristics.
 
+use grafeo_common::types::ReadView;
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -19,7 +20,7 @@ use grafeo_core::execution::operators::{
     OperatorError, Predicate, ProjectExpr, ProjectOperator, SimpleAggregateOperator,
     SingleRowOperator, SortOperator, UnaryFilterOp,
 };
-use grafeo_core::graph::GraphStoreSearch;
+use grafeo_core::graph::GraphStore;
 use grafeo_core::graph::rdf::{Literal, RdfStore, Term, Triple, TriplePattern};
 
 use crate::query::plan::{
@@ -688,7 +689,10 @@ impl RdfPlanner {
                 input_op,
                 projections,
                 output_types,
-                Arc::new(grafeo_core::graph::NullGraphStore) as Arc<dyn GraphStoreSearch>,
+                Arc::new(grafeo_core::graph::NullGraphStore) as Arc<dyn GraphStore>,
+                // The SPARQL expressions read the row's values: the null store
+                // is never read, at any view.
+                ReadView::latest(),
             ));
         }
 
@@ -938,7 +942,10 @@ impl RdfPlanner {
                 input_op,
                 projections,
                 output_types,
-                Arc::new(grafeo_core::graph::NullGraphStore) as Arc<dyn GraphStoreSearch>,
+                Arc::new(grafeo_core::graph::NullGraphStore) as Arc<dyn GraphStore>,
+                // The SPARQL expressions read the row's values: the null store
+                // is never read, at any view.
+                ReadView::latest(),
             ));
         }
 

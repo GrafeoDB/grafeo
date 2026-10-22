@@ -130,20 +130,29 @@ impl AsOfView {
     }
 
     /// The node as it was at the view's epoch.
-    #[must_use]
-    pub fn get_node(&self, id: NodeId) -> Option<Node> {
+    ///
+    /// # Errors
+    ///
+    /// The error of a read the store cannot do.
+    pub fn get_node(&self, id: NodeId) -> Result<Option<Node>> {
         self.session.get_node(id)
     }
 
     /// The edge as it was at the view's epoch.
-    #[must_use]
-    pub fn get_edge(&self, id: EdgeId) -> Option<Edge> {
+    ///
+    /// # Errors
+    ///
+    /// The error of a read the store cannot do.
+    pub fn get_edge(&self, id: EdgeId) -> Result<Option<Edge>> {
         self.session.get_edge(id)
     }
 
     /// A node's value of `key` as it was at the view's epoch.
-    #[must_use]
-    pub fn get_node_property(&self, id: NodeId, key: &str) -> Option<Value> {
+    ///
+    /// # Errors
+    ///
+    /// The error of a read the store cannot do.
+    pub fn get_node_property(&self, id: NodeId, key: &str) -> Result<Option<Value>> {
         self.session.get_node_property(id, key)
     }
 }

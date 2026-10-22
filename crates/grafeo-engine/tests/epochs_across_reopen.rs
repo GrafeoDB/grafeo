@@ -18,7 +18,7 @@
 //! cargo test -p grafeo-engine --all-features --test epochs_across_reopen
 //! ```
 
-#![cfg(all(feature = "wal", feature = "grafeo-file", feature = "lpg"))]
+#![cfg(all(feature = "wal", feature = "grafeo-file"))]
 
 use std::path::{Path, PathBuf};
 

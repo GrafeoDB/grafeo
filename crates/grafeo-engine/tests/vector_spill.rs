@@ -46,7 +46,7 @@ fn indexed_items(db: &GrafeoDB) -> Vec<grafeo_common::types::NodeId> {
 }
 
 fn embedding(db: &GrafeoDB, id: grafeo_common::types::NodeId) -> Option<Vec<f32>> {
-    match db.get_node(id)?.get_property("embedding")? {
+    match db.get_node(id).unwrap()?.get_property("embedding")? {
         Value::Vector(v) => Some(v.to_vec()),
         _ => None,
     }

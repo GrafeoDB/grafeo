@@ -153,7 +153,7 @@ mod tests {
         db.async_write_snapshot()
             .await
             .expect("async_write_snapshot on read-only should be a no-op");
-        assert_eq!(db.node_count(), 1);
+        assert_eq!(db.node_count().unwrap(), 1);
     }
 
     /// The snapshot itself must reach the file: the roundtrip test below

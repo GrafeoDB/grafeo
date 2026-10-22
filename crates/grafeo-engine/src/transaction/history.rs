@@ -294,7 +294,6 @@ impl History {
     /// Takes in what a load read: the floor, and the commit times, before
     /// any replayed commit is recorded. The times are kept while history is
     /// on (an open that turned it off drops them).
-    #[cfg(any(test, feature = "lpg"))]
     pub(crate) fn restore(&self, image: HistoryImage) {
         self.floor.fetch_max(image.floor, Ordering::AcqRel);
         if !self.is_on() {

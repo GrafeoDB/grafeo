@@ -1,10 +1,9 @@
 //! Node scan planning, and the choice of the label a node scan reads.
 
 use super::{
-    Arc, BinaryOp, EagerOperator, EpochId, ExpressionPredicate, FilterExpression, FilterOp,
-    FilterOperator, GraphStoreSearch, HashMap, LogicalExpression, LogicalOperator, LogicalType,
-    NestedLoopJoinOperator, NodeScanOp, Operator, PhysicalJoinType, Result, ScanOperator,
-    TransactionId, Value,
+    Arc, BinaryOp, EagerOperator, ExpressionPredicate, FilterExpression, FilterOp, FilterOperator,
+    GraphStore, HashMap, LogicalExpression, LogicalOperator, LogicalType, NestedLoopJoinOperator,
+    NodeScanOp, Operator, PhysicalJoinType, Result, ScanOperator, Value,
 };
 use crate::query::plan::{BuiltinFunction, Callee, ListPredicateKind};
 
@@ -33,7 +32,7 @@ use crate::query::plan::{BuiltinFunction, Callee, ListPredicateKind};
 /// the filter does.
 pub(crate) fn with_smallest_scan_label(
     filter: &FilterOp,
-    store: &dyn GraphStoreSearch,
+    store: &dyn GraphStore,
 ) -> Option<FilterOp> {
     let mut predicates = vec![&filter.predicate];
     let mut below = filter.input.as_ref();
@@ -50,13 +49,14 @@ pub(crate) fn with_smallest_scan_label(
     }
     let first = *checks.first()?;
     let scan_label = scan.label.as_deref().unwrap_or(first);
+    let statistics = store.statistics();
     let mut smallest = scan_label;
-    let mut fewest = store.nodes_by_label_count(scan_label);
+    let mut fewest = label_estimate(&statistics, scan_label);
     for label in checks {
         if fewest == 0 {
             break;
         }
-        let count = store.nodes_by_label_count(label);
+        let count = label_estimate(&statistics, label);
         if count < fewest {
             smallest = label;
             fewest = count;
@@ -93,33 +93,6 @@ pub(crate) fn with_smallest_scan_label(
     Some(reordered)
 }
 
-/// Whether a query that reads at `viewing_epoch`, in `transaction_id`, may
-/// scan another of a pattern's labels than the one written
-/// ([`with_smallest_scan_label`]). The same rule decides whether a query may
-/// look values up in a property index.
-///
-/// Always when the store answers its label scans and lookups exactly at a
-/// view (`answers_at_view`, see
-/// [`GraphStore::answers_at_view`](grafeo_core::graph::GraphStore::answers_at_view)):
-/// they find what a scan with the per-row checks finds, in a transaction and
-/// at a past epoch alike. Otherwise as before the store answered at a view:
-/// in a transaction, whose per-row reads read the newest values and labels
-/// as the store's indexes hold them, and at the current epoch, but not at a
-/// past epoch outside a transaction (`current_epoch` is the transaction
-/// manager's, `None` without one), where a label scan or an index finds the
-/// labels and values of now while the check per row reads those of the
-/// epoch.
-pub(crate) fn may_choose_scan_label(
-    viewing_epoch: EpochId,
-    transaction_id: Option<TransactionId>,
-    current_epoch: Option<EpochId>,
-    answers_at_view: bool,
-) -> bool {
-    answers_at_view
-        || transaction_id.is_some()
-        || current_epoch.is_none_or(|current| viewing_epoch >= current)
-}
-
 /// The labels of the `OR` of labels that `predicate` requires of the node a
 /// scan of every node reads (`n:Tag OR n:Topic`, `'Tag' IN labels(n) OR ...`,
 /// `any(l IN labels(n) WHERE l IN ['Tag', 'Topic'])`), when the scan may read
@@ -131,14 +104,15 @@ pub(crate) fn may_choose_scan_label(
 pub(crate) fn label_union(
     predicate: &LogicalExpression,
     scan: &NodeScanOp,
-    store: &dyn GraphStoreSearch,
+    store: &dyn GraphStore,
 ) -> Option<Vec<String>> {
     if scan.label.is_some() || scan.input.is_some() {
         return None;
     }
     let mut conjuncts = Vec::new();
     and_conjuncts(predicate, &mut conjuncts);
-    let mut best: Option<(usize, Vec<&str>)> = None;
+    let statistics = store.statistics();
+    let mut best: Option<(u64, Vec<&str>)> = None;
     for conjunct in conjuncts {
         let Some(found) = any_label(conjunct, &scan.variable) else {
             continue;
@@ -152,17 +126,26 @@ pub(crate) fn label_union(
         if labels.len() < 2 {
             continue;
         }
-        let nodes: usize = labels
+        let nodes: u64 = labels
             .iter()
-            .map(|label| store.nodes_by_label_count(label))
+            .map(|label| label_estimate(&statistics, label))
             .sum();
         if best.as_ref().is_none_or(|(fewest, _)| nodes < *fewest) {
             best = Some((nodes, labels));
         }
     }
     let (nodes, labels) = best?;
-    (nodes.saturating_mul(2) <= store.node_count())
+    (nodes.saturating_mul(2) <= statistics.total_nodes)
         .then(|| labels.into_iter().map(str::to_string).collect())
+}
+
+/// How many nodes have `label` by the store's statistics: none for a label
+/// they do not list. Plans choose by it; the reads at a view answer the
+/// same whichever label a plan scans.
+fn label_estimate(statistics: &grafeo_core::statistics::Statistics, label: &str) -> u64 {
+    statistics
+        .get_label(label)
+        .map_or(0, |label| label.node_count)
 }
 
 /// The conjuncts of an `AND` chain.
@@ -357,7 +340,7 @@ pub(super) fn search_index_covers(
     predicate: &LogicalExpression,
     variable: &str,
     labels: [&str; 2],
-    store: &dyn GraphStoreSearch,
+    store: &dyn GraphStore,
 ) -> bool {
     let covered = |property: &str| {
         labels.iter().any(|label| {
@@ -402,30 +385,10 @@ fn reads_property(
 
 impl super::Planner {
     /// The copy of `filter` whose node scan reads the label with the fewest
-    /// nodes (see [`with_smallest_scan_label`]), when this query may choose
-    /// (see [`may_choose_scan_label`]).
+    /// nodes (see [`with_smallest_scan_label`]): a scan of any of the
+    /// pattern's labels finds the same nodes at the query's view.
     pub(super) fn scan_smallest_label(&self, filter: &FilterOp) -> Option<FilterOp> {
-        if !self.reads_the_current_store() {
-            return None;
-        }
         with_smallest_scan_label(filter, self.store.as_ref())
-    }
-
-    /// Whether this query reads the store as it is now (see
-    /// [`may_choose_scan_label`]): label counts and property indexes describe
-    /// that state, so a read of a past epoch outside a transaction uses
-    /// neither.
-    pub(super) fn reads_the_current_store(&self) -> bool {
-        let current_epoch = self
-            .transaction_manager
-            .as_ref()
-            .map(|manager| manager.current_epoch());
-        may_choose_scan_label(
-            self.viewing_epoch,
-            self.transaction_id,
-            current_epoch,
-            self.store.answers_at_view(),
-        )
     }
 
     /// Plans a node scan operator.
@@ -434,17 +397,20 @@ impl super::Planner {
         scan: &NodeScanOp,
     ) -> Result<(Box<dyn Operator>, Vec<String>)> {
         let scan_op = if let Some(label) = &scan.label {
-            ScanOperator::with_label(Arc::clone(&self.store) as Arc<dyn GraphStoreSearch>, label)
+            ScanOperator::with_label(
+                Arc::clone(&self.store) as Arc<dyn GraphStore>,
+                label,
+                self.read_view(),
+            )
         } else {
-            ScanOperator::new(Arc::clone(&self.store) as Arc<dyn GraphStoreSearch>)
+            ScanOperator::new(
+                Arc::clone(&self.store) as Arc<dyn GraphStore>,
+                self.read_view(),
+            )
         };
 
-        // Apply MVCC context if available
-        let scan_operator: Box<dyn Operator> = Box::new(
-            scan_op
-                .with_transaction_context(self.viewing_epoch, self.transaction_id)
-                .with_read_counter(self.read_counter()),
-        );
+        let scan_operator: Box<dyn Operator> =
+            Box::new(scan_op.with_read_counter(self.read_counter()));
 
         // If there's an input, chain operators with a nested loop join (cross join)
         if let Some(input) = &scan.input {
@@ -481,9 +447,9 @@ impl super::Planner {
                     let predicate = ExpressionPredicate::new(
                         filter_expr,
                         variable_columns,
-                        Arc::clone(&self.store) as Arc<dyn GraphStoreSearch>,
-                    )
-                    .with_transaction_context(self.viewing_epoch, self.transaction_id);
+                        Arc::clone(&self.store) as Arc<dyn GraphStore>,
+                        self.read_view(),
+                    );
                     let filtered = Box::new(FilterOperator::new(input_op, Box::new(predicate)));
                     return Ok((filtered, input_columns));
                 }
@@ -528,28 +494,6 @@ mod tests {
     use grafeo_common::types::{EpochId, TransactionId};
     use grafeo_core::graph::GraphStoreMut as _;
     use grafeo_core::graph::rowgroup::RowGroupStore;
-
-    /// A read at a past epoch outside a transaction may use label scans and
-    /// indexes only on a store that answers them at a view; a transaction
-    /// and a read of now may on any store.
-    #[test]
-    fn a_past_epoch_read_chooses_labels_only_on_a_store_that_answers_at_a_view() {
-        let (past, now) = (EpochId::new(3), Some(EpochId::new(19)));
-        assert!(!may_choose_scan_label(past, None, now, false));
-        assert!(may_choose_scan_label(past, None, now, true));
-        assert!(may_choose_scan_label(
-            past,
-            Some(TransactionId::new(7)),
-            now,
-            false
-        ));
-        assert!(may_choose_scan_label(EpochId::new(19), None, now, false));
-        assert!(may_choose_scan_label(past, None, None, false));
-        assert!(
-            grafeo_core::graph::GraphStore::answers_at_view(&RowGroupStore::new()),
-            "the row-group store answers at a view"
-        );
-    }
 
     /// 19 `Big` nodes, three of them also `Small`, and three `Same` nodes.
     fn store() -> Arc<RowGroupStore> {
@@ -748,7 +692,7 @@ mod tests {
         let written = filter(has_label("n", "Small"), scan("Big"));
         let planner = |epoch: u64, transaction: Option<TransactionId>| {
             super::super::Planner::with_context(
-                Arc::clone(&store) as Arc<dyn GraphStoreSearch>,
+                Arc::clone(&store) as Arc<dyn GraphStore>,
                 None,
                 Arc::clone(&manager),
                 transaction,

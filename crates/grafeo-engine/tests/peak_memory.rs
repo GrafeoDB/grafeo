@@ -53,7 +53,7 @@
 //! cargo test -p grafeo-engine --all-features --test peak_memory -- --nocapture
 //! ```
 
-#![cfg(all(feature = "lpg", feature = "grafeo-file", feature = "wal"))]
+#![cfg(all(feature = "grafeo-file", feature = "wal"))]
 #![expect(
     unsafe_code,
     reason = "GlobalAlloc is an unsafe trait; this only forwards to System"
@@ -509,11 +509,16 @@ fn add_people(db: &GrafeoDB, people: usize, bio: usize) {
 
 /// Checks that the people [`add_people`] added came back.
 fn check_people(db: &GrafeoDB, people: usize, bio: usize) {
-    assert_eq!(db.node_count(), people, "every person came back");
-    assert_eq!(db.edge_count(), people - 1, "every KNOWS edge came back");
+    assert_eq!(db.node_count().unwrap(), people, "every person came back");
+    assert_eq!(
+        db.edge_count().unwrap(),
+        people - 1,
+        "every KNOWS edge came back"
+    );
     let last = NodeId::new(u64::try_from(people - 1).unwrap());
     assert_eq!(
         db.get_node(last)
+            .unwrap()
             .and_then(|node| node.get_property("bio").cloned()),
         Some(Value::from(text_of(people - 1, bio))),
         "the last biography came back"
@@ -645,7 +650,11 @@ fn checkpoint_and_open_memory_does_not_grow_with_a_text_index() {
             db.create_text_index("Doc", "body").unwrap();
         },
         &|db, documents| {
-            assert_eq!(db.node_count(), documents, "every document came back");
+            assert_eq!(
+                db.node_count().unwrap(),
+                documents,
+                "every document came back"
+            );
             let found = db
                 .text_search("Doc", "body", "amsterdam88", 3, None)
                 .unwrap();

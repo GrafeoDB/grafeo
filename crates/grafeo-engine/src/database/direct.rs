@@ -42,7 +42,9 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use grafeo_common::change::{
     Before, ChangeSet, DataModel, DataOp, GraphRef, GraphSlot, PendingVersion,
 };
-use grafeo_common::types::{ArcStr, EdgeId, EpochId, NodeId, PropertyKey, TransactionId, Value};
+use grafeo_common::types::{
+    ArcStr, EdgeId, EpochId, NodeId, PropertyKey, ReadView, TransactionId, Value,
+};
 use grafeo_common::utils::error::{Error, QueryError, QueryErrorKind, Result};
 use grafeo_core::execution::operators::{
     ChangeRecorder, GraphWriter, NewEdge, OperatorError, Recording, WriteClaim, WriteClaims,
@@ -51,7 +53,7 @@ use grafeo_core::execution::operators::{
 use grafeo_core::graph::apply::{ChangeTarget, Writer};
 use grafeo_core::graph::lpg::{Edge, Node};
 use grafeo_core::graph::rowgroup::RowGroupStore;
-use grafeo_core::graph::{Direction, GraphStoreMut, GraphStoreSearch};
+use grafeo_core::graph::{Direction, GraphStore, GraphStoreMut};
 
 use super::GrafeoDB;
 use crate::catalog::CatalogConstraintValidator;
@@ -288,7 +290,7 @@ impl GrafeoDB {
     /// # Errors
     ///
     /// Returns an error if `target` names a graph that does not exist.
-    pub(crate) fn read_store(&self, target: DirectTarget<'_>) -> Result<Arc<dyn GraphStoreSearch>> {
+    pub(crate) fn read_store(&self, target: DirectTarget<'_>) -> Result<Arc<dyn GraphStore>> {
         Ok(match self.direct_store(target)? {
             Some((store, Some(_))) => store,
             _ => self.graph_store(),
@@ -488,7 +490,7 @@ impl GrafeoDB {
             .and_then(|key| key.split_once('/'))
             .map(|(schema, _)| schema);
         let mut validator = CatalogConstraintValidator::new(Arc::clone(&self.catalog))
-            .with_store(Arc::clone(store) as Arc<dyn GraphStoreSearch>)
+            .with_store(Arc::clone(store) as Arc<dyn GraphStore>)
             .with_max_property_size(self.config.max_property_size())
             .with_transaction_context(context.0, context.1)
             .with_schema(schema)
@@ -496,9 +498,12 @@ impl GrafeoDB {
         if let Some(graph) = graph {
             validator = validator.with_graph_name(graph);
         }
-        GraphWriter::new(Arc::clone(store) as Arc<dyn GraphStoreMut>)
-            .with_validator(Arc::new(validator))
-            .with_recording(recording)
+        GraphWriter::new(
+            Arc::clone(store) as Arc<dyn GraphStoreMut>,
+            ReadView::new(context.0, context.1),
+        )
+        .with_validator(Arc::new(validator))
+        .with_recording(recording)
     }
 
     /// Whether a commit of the direct API reads what its writes did after
@@ -744,7 +749,7 @@ impl DirectCalls<'_> {
     }
 
     /// The store of the graph, for reads (see [`GrafeoDB::read_store`]).
-    fn store(&self) -> Result<Arc<dyn GraphStoreSearch>> {
+    fn store(&self) -> Result<Arc<dyn GraphStore>> {
         self.db.read_store(self.target)
     }
 
@@ -782,7 +787,7 @@ impl DirectCalls<'_> {
             // The direct API reports a missing node as `false`; a query that
             // writes to one fails (see `GraphWriter`).
             |writer| {
-                if writer.has_node(id) {
+                if writer.has_node(id)? {
                     writer.remove_node_property(id, key)
                 } else {
                     Ok(false)
@@ -793,7 +798,7 @@ impl DirectCalls<'_> {
 
     pub(crate) fn remove_edge_property(&self, id: EdgeId, key: &str) -> Result<bool> {
         self.write(|writer| {
-            if writer.has_edge(id) {
+            if writer.has_edge(id)? {
                 writer.remove_edge_property(id, key)
             } else {
                 Ok(false)
@@ -843,13 +848,13 @@ impl DirectCalls<'_> {
     }
 
     pub(crate) fn get_node(&self, id: NodeId) -> Result<Option<Node>> {
-        let epoch = self.db.read_epoch();
-        Ok(self.store()?.get_node_at_epoch(id, epoch))
+        let view = ReadView::committed(self.db.read_epoch());
+        self.store()?.node(id, view)
     }
 
     pub(crate) fn get_edge(&self, id: EdgeId) -> Result<Option<Edge>> {
-        let epoch = self.db.read_epoch();
-        Ok(self.store()?.get_edge_at_epoch(id, epoch))
+        let view = ReadView::committed(self.db.read_epoch());
+        self.store()?.edge(id, view)
     }
 
     pub(crate) fn get_node_edges(
@@ -858,59 +863,24 @@ impl DirectCalls<'_> {
         direction: Direction,
         edge_types: &[&str],
     ) -> Result<Vec<(NodeId, EdgeId)>> {
-        let epoch = self.db.read_epoch();
-        let store = self.store()?;
-        let node_visible = store.is_node_visible_at_epoch(node, epoch);
-        Ok(node_edges(
-            &*store,
-            node,
-            direction,
-            edge_types,
-            node_visible,
-            |edge| store.is_edge_visible_at_epoch(edge, epoch),
-            |edge| store.edge_type(edge),
-        ))
+        let view = ReadView::committed(self.db.read_epoch());
+        node_edges(&*self.store()?, node, direction, edge_types, view)
     }
 }
 
-/// The edges of `node` in `direction` that `edge_visible` lets through, as
-/// `(neighbor, edge)` pairs, only those whose `edge_type` is one of
-/// `edge_types` unless it is empty; none when the node is not visible.
-/// `Direction::Both` lists a self-loop once. The reader's `edge_type` must see
-/// what `edge_visible` lets through (a transaction's own edges included).
+/// The edges of `node` in `direction` that `view` sees, as `(neighbor,
+/// edge)` pairs, only those whose type is one of `edge_types` (as stored)
+/// unless it is empty; none when the view does not see the node.
+/// `Direction::Both` lists a self-loop once (see [`GraphStore::edges`]).
 pub(crate) fn node_edges(
-    store: &dyn GraphStoreSearch,
+    store: &dyn GraphStore,
     node: NodeId,
     direction: Direction,
     edge_types: &[&str],
-    node_visible: bool,
-    edge_visible: impl Fn(EdgeId) -> bool,
-    edge_type: impl Fn(EdgeId) -> Option<ArcStr>,
-) -> Vec<(NodeId, EdgeId)> {
-    if !node_visible {
-        return Vec::new();
-    }
-    let mut edges = match direction {
-        Direction::Both => {
-            let mut edges = store.edges_from(node, Direction::Outgoing);
-            // A self-loop is in both lists; keep its outgoing entry.
-            edges.extend(
-                store
-                    .edges_from(node, Direction::Incoming)
-                    .into_iter()
-                    .filter(|&(neighbor, _)| neighbor != node),
-            );
-            edges
-        }
-        _ => store.edges_from(node, direction),
-    };
-    edges.retain(|&(_, edge)| {
-        edge_visible(edge)
-            && (edge_types.is_empty()
-                || edge_type(edge)
-                    .is_some_and(|edge_type| edge_types.contains(&edge_type.as_str())))
-    });
-    edges
+    view: ReadView,
+) -> Result<Vec<(NodeId, EdgeId)>> {
+    let types: Vec<ArcStr> = edge_types.iter().map(|name| ArcStr::from(*name)).collect();
+    store.edges(node, direction, &types, view)
 }
 
 // === The writes of the direct API, shared with `Session` ===
@@ -924,7 +894,7 @@ pub(crate) fn create_edge(
     properties: Vec<(String, Value)>,
 ) -> std::result::Result<EdgeId, OperatorError> {
     for endpoint in [src, dst] {
-        if !writer.has_node(endpoint) {
+        if !writer.has_node(endpoint)? {
             return Err(missing_node(endpoint));
         }
     }
@@ -938,7 +908,7 @@ pub(crate) fn set_node_property(
     key: &str,
     value: Value,
 ) -> std::result::Result<(), OperatorError> {
-    if !writer.has_node(id) {
+    if !writer.has_node(id)? {
         return Err(missing_node(id));
     }
     writer.set_node_properties(id, &[(key.to_string(), value)], false)
@@ -951,7 +921,7 @@ pub(crate) fn set_edge_property(
     key: &str,
     value: Value,
 ) -> std::result::Result<(), OperatorError> {
-    if !writer.has_edge(id) {
+    if !writer.has_edge(id)? {
         return Err(OperatorError::from(Error::EdgeNotFound(id)));
     }
     writer.set_edge_properties(id, &[(key.to_string(), value)], false)
@@ -963,7 +933,7 @@ pub(crate) fn add_node_label(
     id: NodeId,
     label: &str,
 ) -> std::result::Result<bool, OperatorError> {
-    if !writer.has_node(id) {
+    if !writer.has_node(id)? {
         return Ok(false);
     }
     Ok(writer.add_labels(id, &[label.to_string()])? == 1)
@@ -975,7 +945,7 @@ pub(crate) fn remove_node_label(
     id: NodeId,
     label: &str,
 ) -> std::result::Result<bool, OperatorError> {
-    if !writer.has_node(id) {
+    if !writer.has_node(id)? {
         return Ok(false);
     }
     Ok(writer.remove_labels(id, &[label.to_string()])? == 1)
@@ -1137,10 +1107,10 @@ mod tests {
             .unwrap();
 
         assert!(
-            db.get_node(batch).is_none(),
+            db.get_node(batch).unwrap().is_none(),
             "the batch's node is discarded"
         );
-        assert!(db.get_node(single).is_some());
+        assert!(db.get_node(single).unwrap().is_some());
         let events: Vec<EntityId> = db
             .changes_between(EpochId::new(0), db.current_epoch())
             .unwrap()

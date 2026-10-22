@@ -205,12 +205,10 @@ mod changes;
 mod history;
 mod manager;
 mod mvcc;
-#[cfg(feature = "lpg")]
 mod prepared;
 #[cfg(feature = "triple-store")]
 mod rdf;
 
-#[cfg(feature = "lpg")]
 pub(crate) use changes::{BuiltIndex, StandaloneChange};
 pub(crate) use changes::{
     StreamingChanges, TransactionChanges, UndoFailure, is_kept_by_external_store,
@@ -227,7 +225,6 @@ pub use manager::{
 };
 #[doc(hidden)]
 pub use mvcc::{VersionChain, VersionInfo};
-#[cfg(feature = "lpg")]
 pub use prepared::{CommitInfo, PreparedCommit};
 #[cfg(all(feature = "triple-store", feature = "cdc"))]
 pub(crate) use rdf::ntriples_terms;

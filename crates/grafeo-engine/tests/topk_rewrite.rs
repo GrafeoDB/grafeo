@@ -14,8 +14,6 @@
 //! both run with timings); silent fall-through under non-PROFILE mode is
 //! the regression class caught by the §2.9 e2e benchmark in `benches/topk_e2e.rs`.
 
-#![cfg(feature = "lpg")]
-
 use grafeo_common::types::{PropertyKey, Value};
 use grafeo_engine::GrafeoDB;
 

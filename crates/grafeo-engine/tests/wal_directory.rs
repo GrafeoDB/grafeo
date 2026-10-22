@@ -15,12 +15,7 @@
 //!
 //! The named-graph epoch test needs `temporal` (CI runs every feature).
 
-#![cfg(all(
-    feature = "lpg",
-    feature = "gql",
-    feature = "wal",
-    feature = "grafeo-file"
-))]
+#![cfg(all(feature = "gql", feature = "wal", feature = "grafeo-file"))]
 
 use std::path::{Path, PathBuf};
 
@@ -287,7 +282,9 @@ fn named_graph_view(
         .map(|row| row[0].clone())
         .collect();
     db.set_current_graph(Some("trips")).unwrap();
-    let history = db.get_node_property_history(NodeId::new(1), "name");
+    let history = db
+        .get_node_property_history(NodeId::new(1), "name")
+        .unwrap();
     db.set_current_graph(None).unwrap();
     (db.current_epoch(), cities, history)
 }
@@ -400,6 +397,7 @@ fn a_0_5_directory_read_in_place_reports_its_size() {
     let db = GrafeoDB::open_read_only(&path).unwrap();
     assert_eq!(
         db.detailed_stats()
+            .unwrap()
             .disk_bytes
             .map(|bytes| u64::try_from(bytes).unwrap()),
         Some(expected),
@@ -442,11 +440,15 @@ fn second_batch_crud_does_not_deadlock() {
         db.set_node_property(id, "index", Value::Int64(i)).unwrap();
     }
 
-    assert_eq!(db.node_count(), 20);
+    assert_eq!(db.node_count().unwrap(), 20);
     db.close().expect("close");
 
     // Verify data survives reopen
     let db = GrafeoDB::with_config(Config::persistent(&path)).expect("reopen");
-    assert_eq!(db.node_count(), 20, "all nodes should survive reopen");
+    assert_eq!(
+        db.node_count().unwrap(),
+        20,
+        "all nodes should survive reopen"
+    );
     db.close().expect("close");
 }

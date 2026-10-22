@@ -14,6 +14,7 @@
 mod check_eval;
 
 use check_eval::CheckExpression;
+use grafeo_common::types::ReadView;
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -2359,7 +2360,7 @@ pub struct CatalogConstraintValidator {
     closed_type: Option<ClosedGraphType>,
     /// Optional graph store for UNIQUE constraint enforcement via index lookup
     /// and the dimensions of vector indexes.
-    store: Option<Arc<dyn grafeo_core::graph::GraphStoreSearch>>,
+    store: Option<Arc<dyn grafeo_core::graph::GraphStore>>,
     /// Optional maximum property value size in bytes.
     max_property_size: Option<usize>,
     /// The writing transaction: its uncommitted writes count for UNIQUE.
@@ -2501,34 +2502,34 @@ impl CatalogConstraintValidator {
     /// same transaction.
     fn nodes_with_value(
         &self,
-        store: &dyn grafeo_core::graph::GraphStoreSearch,
+        store: &dyn grafeo_core::graph::GraphStore,
         label: &str,
         key: &str,
         value: &Value,
-    ) -> Vec<grafeo_core::graph::lpg::Node> {
+    ) -> Result<Vec<grafeo_core::graph::lpg::Node>, OperatorError> {
+        // A writer without a transaction writes at once: it checks against
+        // every commit so far.
         let view = self
             .transaction
-            .map(|(epoch, id)| grafeo_common::types::ReadView::transaction(id, epoch));
-        let candidates = match (view, store.has_property_index(key)) {
-            (Some(view), true) => store.find_nodes_by_property_at(key, value, view),
-            (Some(view), false) => store.nodes_by_label_at(label, view),
-            (None, true) => store.find_nodes_by_property(key, value),
-            (None, false) => store.nodes_by_label(label),
+            .map_or_else(ReadView::latest, |(epoch, id)| {
+                ReadView::transaction(id, epoch)
+            });
+        let candidates = if store.has_property_index(key) {
+            store.find_nodes_by_property(key, value, view)?
+        } else {
+            store.nodes_by_label(label, view)?
         };
         let key = grafeo_common::types::PropertyKey::from(key);
-        candidates
-            .into_iter()
-            .filter_map(|id| match self.transaction {
-                Some((epoch, transaction_id)) => {
-                    store.get_node_versioned(id, epoch, transaction_id)
-                }
-                None => store.get_node(id),
-            })
-            .filter(|node| {
-                node.labels.iter().any(|l| l.as_str() == label)
-                    && node.properties.get(&key) == Some(value)
-            })
-            .collect()
+        let mut found = Vec::new();
+        for id in candidates {
+            if let Some(node) = store.node(id, view)?
+                && node.labels.iter().any(|l| l.as_str() == label)
+                && node.properties.get(&key) == Some(value)
+            {
+                found.push(node);
+            }
+        }
+        Ok(found)
     }
 
     /// Checks writes to the graph with storage key `name` (`schema/graph` in
@@ -2542,7 +2543,7 @@ impl CatalogConstraintValidator {
 
     /// Attaches a graph store for UNIQUE constraint enforcement and vector
     /// index dimensions.
-    pub fn with_store(mut self, store: Arc<dyn grafeo_core::graph::GraphStoreSearch>) -> Self {
+    pub fn with_store(mut self, store: Arc<dyn grafeo_core::graph::GraphStore>) -> Self {
         self.store = Some(store);
         self
     }
@@ -2717,7 +2718,7 @@ impl ConstraintValidator for CatalogConstraintValidator {
                     };
                     if is_unique && let Some(ref store) = self.store {
                         if !self
-                            .nodes_with_value(store.as_ref(), label, key, value)
+                            .nodes_with_value(store.as_ref(), label, key, value)?
                             .is_empty()
                         {
                             return Err(OperatorError::schema_violation(format!(
@@ -2771,7 +2772,7 @@ impl ConstraintValidator for CatalogConstraintValidator {
                     continue;
                 };
                 let duplicate = self
-                    .nodes_with_value(store.as_ref(), label, &keys[0], values[0])
+                    .nodes_with_value(store.as_ref(), label, &keys[0], values[0])?
                     .into_iter()
                     .filter(|other| Some(other.id) != node)
                     .any(|other| {

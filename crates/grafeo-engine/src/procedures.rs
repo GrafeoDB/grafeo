@@ -30,8 +30,7 @@ use grafeo_adapters::plugins::algorithms::{
 use grafeo_adapters::plugins::{AlgorithmResult, ParameterDef, ParameterType, Parameters};
 use grafeo_common::types::{ReadView, Value};
 use grafeo_common::utils::error::{Error, QueryError, QueryErrorKind, Result};
-use grafeo_core::graph::GraphStoreSearch;
-#[cfg(feature = "lpg")]
+use grafeo_core::graph::GraphStore;
 use grafeo_core::graph::rowgroup::RowGroupStore;
 use hashbrown::HashMap;
 
@@ -74,57 +73,45 @@ pub trait Procedure: Send + Sync {
 pub struct ProcedureContext<'a> {
     /// Read-only graph store, sufficient for graph algorithms and catalog
     /// introspection (labels, edge types, property keys).
-    pub store: &'a dyn GraphStoreSearch,
+    pub store: &'a dyn GraphStore,
 
     /// Concrete LPG store reference when available, used by search procedures
     /// to reach vector and text indexes. `None` when the active backend is
     /// not an LPG store (e.g., pure RDF) or in contexts that do not need it.
-    #[cfg(feature = "lpg")]
     pub lpg_store: Option<&'a RowGroupStore>,
 
-    /// The view the calling query reads at, when it has one: the search
-    /// procedures return only the nodes it sees.
-    pub view: Option<ReadView>,
+    /// The view the calling query reads at, pinned for the call: every
+    /// procedure reads the graph as it sees it, an algorithm from start to
+    /// end, and the search procedures return only the nodes it sees (a
+    /// search index holds what open transactions wrote too, #412, which the
+    /// store rechecks at the view).
+    pub view: ReadView,
 }
 
 impl<'a> ProcedureContext<'a> {
-    /// Creates a context with only a graph store available.
+    /// Creates a context with only a graph store available, read at `view`.
     #[must_use]
-    pub fn new(store: &'a dyn GraphStoreSearch) -> Self {
+    pub fn new(store: &'a dyn GraphStore, view: ReadView) -> Self {
         Self {
             store,
-            #[cfg(feature = "lpg")]
             lpg_store: None,
-            view: None,
+            view,
         }
     }
 
-    /// Creates a context with a graph store and LPG store available.
-    #[cfg(feature = "lpg")]
+    /// Creates a context with a graph store and LPG store available, read
+    /// at `view`.
     #[must_use]
-    pub fn with_lpg_store(store: &'a dyn GraphStoreSearch, lpg_store: &'a RowGroupStore) -> Self {
+    pub fn with_lpg_store(
+        store: &'a dyn GraphStore,
+        lpg_store: &'a RowGroupStore,
+        view: ReadView,
+    ) -> Self {
         Self {
             store,
             lpg_store: Some(lpg_store),
-            view: None,
+            view,
         }
-    }
-
-    /// Reads at `view` (see [`view`](Self::view)).
-    #[must_use]
-    pub fn with_view(mut self, view: Option<ReadView>) -> Self {
-        self.view = view;
-        self
-    }
-
-    /// The view a search procedure reads `lpg` at: the calling query's, or
-    /// a committed reader at the store's epoch without one. The store's
-    /// searches answer at it (a search index holds what open transactions
-    /// wrote too, #412, which the store rechecks at the view).
-    #[cfg(all(feature = "lpg", any(feature = "vector-index", feature = "text-index")))]
-    fn search_view(&self, lpg: &RowGroupStore) -> ReadView {
-        self.view
-            .unwrap_or_else(|| ReadView::committed(lpg.current_epoch()))
     }
 }
 
@@ -166,7 +153,7 @@ impl Procedure for GraphAlgorithmProcedure {
     }
 
     fn execute(&self, ctx: &ProcedureContext<'_>, params: &Parameters) -> Result<AlgorithmResult> {
-        self.inner.execute(ctx.store, params)
+        self.inner.execute(ctx.store, ctx.view, params)
     }
 }
 
@@ -196,7 +183,7 @@ impl Procedure for LabelsProcedure {
 
     fn execute(&self, ctx: &ProcedureContext<'_>, _params: &Parameters) -> Result<AlgorithmResult> {
         let mut result = AlgorithmResult::new(vec!["label".into()]);
-        for label in ctx.store.all_labels() {
+        for label in ctx.store.all_labels()? {
             result.rows.push(vec![Value::String(label.into())]);
         }
         Ok(result)
@@ -225,7 +212,7 @@ impl Procedure for RelationshipTypesProcedure {
 
     fn execute(&self, ctx: &ProcedureContext<'_>, _params: &Parameters) -> Result<AlgorithmResult> {
         let mut result = AlgorithmResult::new(vec!["relationshipType".into()]);
-        for t in ctx.store.all_edge_types() {
+        for t in ctx.store.all_edge_types()? {
             result.rows.push(vec![Value::String(t.into())]);
         }
         Ok(result)
@@ -254,7 +241,7 @@ impl Procedure for PropertyKeysProcedure {
 
     fn execute(&self, ctx: &ProcedureContext<'_>, _params: &Parameters) -> Result<AlgorithmResult> {
         let mut result = AlgorithmResult::new(vec!["propertyKey".into()]);
-        for key in ctx.store.all_property_keys() {
+        for key in ctx.store.all_property_keys()? {
             result.rows.push(vec![Value::String(key.into())]);
         }
         Ok(result)
@@ -265,7 +252,7 @@ impl Procedure for PropertyKeysProcedure {
 // Vector / text search procedures
 // ---------------------------------------------------------------------------
 
-#[cfg(all(feature = "lpg", feature = "vector-index"))]
+#[cfg(feature = "vector-index")]
 fn require_lpg_store<'a>(ctx: &ProcedureContext<'a>, proc_name: &str) -> Result<&'a RowGroupStore> {
     ctx.lpg_store.ok_or_else(|| {
         grafeo_common::utils::error::Error::Query(
@@ -276,7 +263,7 @@ fn require_lpg_store<'a>(ctx: &ProcedureContext<'a>, proc_name: &str) -> Result<
     })
 }
 
-#[cfg(all(feature = "lpg", feature = "vector-index"))]
+#[cfg(feature = "vector-index")]
 fn coerce_params_to_vector(params: &Parameters, key: &str) -> Result<Vec<f32>> {
     if let Some(list) = params.get_list(key) {
         let mut out = Vec::with_capacity(list.len());
@@ -299,7 +286,7 @@ fn coerce_params_to_vector(params: &Parameters, key: &str) -> Result<Vec<f32>> {
 
 /// Converts a `k` parameter (signed, user-supplied) to an unsigned limit.
 /// Negative values clamp to 0 so they can't silently flip via cast.
-#[cfg(all(feature = "lpg", any(feature = "vector-index", feature = "text-index")))]
+#[cfg(any(feature = "vector-index", feature = "text-index"))]
 fn k_limit(params: &Parameters, default: i64) -> usize {
     usize::try_from(params.get_int("k").unwrap_or(default).max(0)).unwrap_or(0)
 }
@@ -307,19 +294,19 @@ fn k_limit(params: &Parameters, default: i64) -> usize {
 /// Converts a NodeId into a `Value::Int64`.
 /// Using `cast_signed` keeps the bit pattern; ids above `i64::MAX` would
 /// become negative, but the ID space is bounded well below that in practice.
-#[cfg(all(feature = "lpg", any(feature = "vector-index", feature = "text-index")))]
+#[cfg(any(feature = "vector-index", feature = "text-index"))]
 fn node_id_to_value(node_id: grafeo_common::types::NodeId) -> Value {
     Value::Int64(node_id.as_u64().cast_signed())
 }
 
 /// `grafeo.search.vector(label, property, query, k)`:
 /// k-nearest-neighbors via the HNSW index.
-#[cfg(all(feature = "lpg", feature = "vector-index"))]
+#[cfg(feature = "vector-index")]
 struct SearchVectorProcedure {
     parameters: Vec<ParameterDef>,
 }
 
-#[cfg(all(feature = "lpg", feature = "vector-index"))]
+#[cfg(feature = "vector-index")]
 impl SearchVectorProcedure {
     fn new() -> Self {
         use grafeo_adapters::plugins::ParameterType;
@@ -358,7 +345,7 @@ impl SearchVectorProcedure {
     }
 }
 
-#[cfg(all(feature = "lpg", feature = "vector-index"))]
+#[cfg(feature = "vector-index")]
 impl Procedure for SearchVectorProcedure {
     fn name(&self) -> &str {
         "search.vector"
@@ -396,8 +383,7 @@ impl Procedure for SearchVectorProcedure {
                 "there is no vector index on :{label}({property}); create one first"
             ))
         };
-        let config =
-            GraphStoreSearch::vector_index_config(lpg, label, property).ok_or_else(missing)?;
+        let config = GraphStore::vector_index_config(lpg, label, property).ok_or_else(missing)?;
         grafeo_core::index::vector::check_query_vector(&query, config.dimensions, label, property)?;
 
         let search = grafeo_core::graph::rowgroup::IndexSearch {
@@ -406,7 +392,7 @@ impl Procedure for SearchVectorProcedure {
             allowed: None,
         };
         let results = lpg
-            .vector_index_search_at(label, property, &query, search, ctx.search_view(lpg))
+            .vector_index_search_at(label, property, &query, search, ctx.view)
             .ok_or_else(missing)?;
 
         let mut result = AlgorithmResult::new(vec!["node_id".into(), "distance".into()]);
@@ -422,12 +408,12 @@ impl Procedure for SearchVectorProcedure {
 
 /// `grafeo.search.mmr(label, property, query, k, fetch_k, lambda)`:
 /// Maximal-Marginal-Relevance re-ranking of HNSW candidates for diverse top-k.
-#[cfg(all(feature = "lpg", feature = "vector-index"))]
+#[cfg(feature = "vector-index")]
 struct SearchMmrProcedure {
     parameters: Vec<ParameterDef>,
 }
 
-#[cfg(all(feature = "lpg", feature = "vector-index"))]
+#[cfg(feature = "vector-index")]
 impl SearchMmrProcedure {
     fn new() -> Self {
         use grafeo_adapters::plugins::ParameterType;
@@ -480,7 +466,7 @@ impl SearchMmrProcedure {
     }
 }
 
-#[cfg(all(feature = "lpg", feature = "vector-index"))]
+#[cfg(feature = "vector-index")]
 impl Procedure for SearchMmrProcedure {
     fn name(&self) -> &str {
         "search.mmr"
@@ -530,11 +516,10 @@ impl Procedure for SearchMmrProcedure {
                 "there is no vector index on :{label}({property}); create one first"
             ))
         };
-        let config =
-            GraphStoreSearch::vector_index_config(lpg, label, property).ok_or_else(missing)?;
+        let config = GraphStore::vector_index_config(lpg, label, property).ok_or_else(missing)?;
         grafeo_core::index::vector::check_query_vector(&query, config.dimensions, label, property)?;
 
-        let view = ctx.search_view(lpg);
+        let view = ctx.view;
         let search = grafeo_core::graph::rowgroup::IndexSearch {
             k: fetch_k,
             ef: None,
@@ -575,12 +560,12 @@ impl Procedure for SearchMmrProcedure {
 
 /// `grafeo.search.text(label, property, query, k)`:
 /// BM25 full-text search over the inverted index.
-#[cfg(all(feature = "lpg", feature = "text-index"))]
+#[cfg(feature = "text-index")]
 struct SearchTextProcedure {
     parameters: Vec<ParameterDef>,
 }
 
-#[cfg(all(feature = "lpg", feature = "text-index"))]
+#[cfg(feature = "text-index")]
 impl SearchTextProcedure {
     fn new() -> Self {
         use grafeo_adapters::plugins::ParameterType;
@@ -619,7 +604,7 @@ impl SearchTextProcedure {
     }
 }
 
-#[cfg(all(feature = "lpg", feature = "text-index"))]
+#[cfg(feature = "text-index")]
 impl Procedure for SearchTextProcedure {
     fn name(&self) -> &str {
         "search.text"
@@ -668,7 +653,7 @@ impl Procedure for SearchTextProcedure {
             allowed: None,
         };
         let results = lpg
-            .text_index_search_at(label, property, query, search, ctx.search_view(lpg))
+            .text_index_search_at(label, property, query, search, ctx.view)
             .ok_or_else(|| {
                 grafeo_common::utils::error::Error::InvalidValue(format!(
                     "there is no text index on :{label}({property}); create one first"
@@ -756,12 +741,12 @@ impl BuiltinProcedures {
         register(Arc::new(PropertyKeysProcedure));
 
         // Search procedures (feature-gated).
-        #[cfg(all(feature = "lpg", feature = "vector-index"))]
+        #[cfg(feature = "vector-index")]
         {
             register(Arc::new(SearchVectorProcedure::new()));
             register(Arc::new(SearchMmrProcedure::new()));
         }
-        #[cfg(all(feature = "lpg", feature = "text-index"))]
+        #[cfg(feature = "text-index")]
         {
             register(Arc::new(SearchTextProcedure::new()));
         }
@@ -1048,7 +1033,7 @@ pub fn procedures_result(registry: &BuiltinProcedures) -> AlgorithmResult {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use grafeo_core::graph::{GraphStore as _, GraphStoreMut as _};
+    use grafeo_core::graph::GraphStoreMut as _;
 
     #[test]
     fn test_registry_has_all_algorithms() {
@@ -1344,6 +1329,7 @@ mod tests {
         fn execute(
             &self,
             _store: &dyn grafeo_core::graph::GraphStore,
+            _view: grafeo_common::types::ReadView,
             _params: &Parameters,
         ) -> Result<AlgorithmResult> {
             Ok(AlgorithmResult::new(vec!["node_id".into(), "value".into()]))
@@ -1521,7 +1507,7 @@ mod tests {
     // Feature-gated helpers (search procedures).
     // ---------------------------------------------------------------
 
-    #[cfg(all(feature = "lpg", feature = "vector-index"))]
+    #[cfg(feature = "vector-index")]
     #[test]
     fn coerce_params_to_vector_accepts_mixed_int_and_float() {
         let mut params = Parameters::new();
@@ -1533,7 +1519,7 @@ mod tests {
         assert_eq!(out, vec![0.5_f32, 1.0_f32, -0.25_f32]);
     }
 
-    #[cfg(all(feature = "lpg", feature = "vector-index"))]
+    #[cfg(feature = "vector-index")]
     #[test]
     fn coerce_params_to_vector_errors_when_missing() {
         let params = Parameters::new();
@@ -1545,7 +1531,7 @@ mod tests {
         );
     }
 
-    #[cfg(all(feature = "lpg", feature = "vector-index"))]
+    #[cfg(feature = "vector-index")]
     #[test]
     fn coerce_params_to_vector_errors_on_non_numeric_element() {
         let mut params = Parameters::new();
@@ -1565,7 +1551,7 @@ mod tests {
     /// vector with a NaN or an infinite value (a query literal cannot hold
     /// one, so the procedures are called directly), naming the value, as an
     /// invalid value.
-    #[cfg(all(feature = "lpg", feature = "vector-index"))]
+    #[cfg(feature = "vector-index")]
     #[test]
     fn search_procedures_refuse_nan_and_infinite_query_values() {
         use grafeo_common::utils::error::ErrorCode;
@@ -1584,13 +1570,14 @@ mod tests {
         );
         // The index takes the vectors the store already holds when they are
         // set again.
-        for node in store.nodes_by_label("Doc") {
+        for node in store.nodes_by_label("Doc", ReadView::latest()).unwrap() {
             let vector = store
-                .get_node_property(node, &grafeo_common::types::PropertyKey::new("emb"))
+                .node_property(node, "emb", ReadView::latest())
+                .unwrap()
                 .expect("vector");
             store.set_node_property(node, "emb", vector);
         }
-        let ctx = ProcedureContext::with_lpg_store(&store, &store);
+        let ctx = ProcedureContext::with_lpg_store(&store, &store, ReadView::latest());
         let procedures: [Box<dyn Procedure>; 2] = [
             Box::new(SearchVectorProcedure::new()),
             Box::new(SearchMmrProcedure::new()),
@@ -1640,14 +1627,14 @@ mod tests {
         }
     }
 
-    #[cfg(all(feature = "lpg", any(feature = "vector-index", feature = "text-index")))]
+    #[cfg(any(feature = "vector-index", feature = "text-index"))]
     #[test]
     fn k_limit_returns_default_when_missing() {
         let params = Parameters::new();
         assert_eq!(k_limit(&params, 7), 7);
     }
 
-    #[cfg(all(feature = "lpg", any(feature = "vector-index", feature = "text-index")))]
+    #[cfg(any(feature = "vector-index", feature = "text-index"))]
     #[test]
     fn k_limit_clamps_negative_to_zero() {
         // A negative `k` must clamp to 0 (not flip to a huge usize via
@@ -1658,7 +1645,7 @@ mod tests {
         assert_eq!(k_limit(&params, 10), 0);
     }
 
-    #[cfg(all(feature = "lpg", any(feature = "vector-index", feature = "text-index")))]
+    #[cfg(any(feature = "vector-index", feature = "text-index"))]
     #[test]
     fn k_limit_passes_through_positive_value() {
         let mut params = Parameters::new();

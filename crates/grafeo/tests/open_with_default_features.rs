@@ -49,13 +49,13 @@ fn open_keeps_what_it_wrote_across_a_reopen() {
     drop(db);
 
     let db = GrafeoDB::open(&path).unwrap();
-    assert_eq!(db.node_count(), 1);
+    assert_eq!(db.node_count().unwrap(), 1);
     assert_eq!(people(&db), [Value::from("Alix")]);
     db.execute("INSERT (:Person {name: 'Gus'})").unwrap();
     db.close().unwrap();
 
     let db = GrafeoDB::open_read_only(&path).unwrap();
-    assert_eq!(db.node_count(), 2);
+    assert_eq!(db.node_count().unwrap(), 2);
     assert_eq!(people(&db), [Value::from("Alix"), Value::from("Gus")]);
     drop(db);
     std::fs::remove_dir_all(&dir).unwrap();

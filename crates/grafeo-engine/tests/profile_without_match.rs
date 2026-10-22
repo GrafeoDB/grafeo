@@ -12,7 +12,7 @@
 //! cargo test -p grafeo-engine --all-features --test profile_without_match
 //! ```
 
-#![cfg(all(feature = "lpg", feature = "gql", feature = "cypher"))]
+#![cfg(all(feature = "gql", feature = "cypher"))]
 
 use std::panic::{AssertUnwindSafe, catch_unwind};
 

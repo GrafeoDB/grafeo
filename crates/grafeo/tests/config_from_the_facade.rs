@@ -18,13 +18,6 @@ fn history_retention_comes_from_the_facade() {
     assert_eq!(config.history_retention(), HistoryRetention::Forever);
 }
 
-#[cfg(any(
-    feature = "lpg",
-    feature = "embedded",
-    feature = "edge",
-    feature = "triple-store",
-    feature = "sparql"
-))]
 #[test]
 fn a_time_travel_view_comes_from_the_facade() {
     use grafeo::{AsOfView, GrafeoDB, TimePoint};
@@ -117,7 +110,7 @@ fn an_encrypted_database_is_configured_through_the_facade() {
     );
 
     let db = GrafeoDB::with_config(Config::persistent(&path).with_encryption(key())).unwrap();
-    assert_eq!(db.node_count(), 1, "the key opens the database");
+    assert_eq!(db.node_count().unwrap(), 1, "the key opens the database");
     db.close().unwrap();
     drop(db);
     let _ = std::fs::remove_dir_all(&dir);
@@ -164,7 +157,11 @@ fn a_passphrase_key_is_derived_through_the_facade() {
         Config::persistent(&path).with_encryption(key("Mia and Vincent dance")),
     )
     .unwrap();
-    assert_eq!(db.node_count(), 1, "the passphrase opens the database");
+    assert_eq!(
+        db.node_count().unwrap(),
+        1,
+        "the passphrase opens the database"
+    );
     db.close().unwrap();
     drop(db);
     let _ = std::fs::remove_dir_all(&dir);

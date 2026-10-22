@@ -17,10 +17,9 @@
 //! ## Usage
 //!
 //! ```no_run
-//! # // The row-group store is built with the `lpg` feature.
-//! # #[cfg(feature = "lpg")]
 //! # {
 //! use grafeo_adapters::plugins::algorithms::{bfs, connected_components, dijkstra};
+//! use grafeo_common::types::ReadView;
 //! use grafeo_core::graph::GraphStoreMut;
 //! use grafeo_core::graph::rowgroup::RowGroupStore;
 //!
@@ -29,14 +28,18 @@
 //! let n1 = store.create_node(&["Node"]);
 //! store.create_edge(n0, n1, "CONNECTS");
 //!
+//! // Every algorithm reads the graph as one view sees it: here a committed
+//! // reader at the store's epoch (the database pins its views).
+//! let view = ReadView::committed(store.current_epoch());
+//!
 //! // Run BFS from the first node
-//! let visited = bfs(&store, n0);
+//! let visited = bfs(&store, view, n0).unwrap();
 //!
 //! // Find connected components
-//! let components = connected_components(&store);
+//! let components = connected_components(&store, view).unwrap();
 //!
 //! // Run Dijkstra's shortest path
-//! let result = dijkstra(&store, n0, Some("weight"));
+//! let result = dijkstra(&store, view, n0, Some("weight")).unwrap();
 //! # }
 //! ```
 
@@ -56,7 +59,8 @@ mod traversal;
 
 // Core traits
 pub use traits::{
-    Control, DistanceMap, GraphAlgorithm, MinScored, ParallelGraphAlgorithm, TraversalEvent,
+    Control, DistanceMap, GraphAlgorithm, GraphView, MinScored, ParallelGraphAlgorithm,
+    TraversalEvent,
 };
 
 // Traversal algorithms

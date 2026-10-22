@@ -15,12 +15,7 @@
 //!     --test migration_without_wal
 //! ```
 
-#![cfg(all(
-    feature = "lpg",
-    feature = "gql",
-    feature = "grafeo-file",
-    not(feature = "wal")
-))]
+#![cfg(all(feature = "gql", feature = "grafeo-file", not(feature = "wal")))]
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};

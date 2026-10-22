@@ -13,7 +13,7 @@
 //! cargo test -p grafeo-engine --all-features --release --test delete_without_backward_edges
 //! ```
 
-#![cfg(all(feature = "lpg", feature = "gql"))]
+#![cfg(feature = "gql")]
 
 use grafeo_common::types::Value;
 use grafeo_engine::{Config, Direction, GrafeoDB};
@@ -82,11 +82,20 @@ fn detach_delete_takes_the_incoming_edges_and_leaves_none_dangling() {
         db.delete_node(gus).is_err(),
         "the direct API refuses the delete of a node with an incoming edge"
     );
-    assert_eq!(db.get_node_edges(gus, Direction::Incoming, &[]).len(), 1);
+    assert_eq!(
+        db.get_node_edges(gus, Direction::Incoming, &[])
+            .unwrap()
+            .len(),
+        1
+    );
 
     db.execute("MATCH (g:Person {name: 'Gus'}) DETACH DELETE g")
         .unwrap();
     assert_eq!(count(&db, "MATCH (p:Person) RETURN count(p)"), 1);
-    assert_eq!(db.edge_count(), 0, "the incoming edge went with Gus");
+    assert_eq!(
+        db.edge_count().unwrap(),
+        0,
+        "the incoming edge went with Gus"
+    );
     assert_eq!(count(&db, "MATCH ()-[r]->() RETURN count(r)"), 0);
 }

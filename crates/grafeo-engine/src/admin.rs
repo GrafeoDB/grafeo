@@ -380,16 +380,32 @@ pub struct CompactReport {
 /// Implemented by [`GrafeoDB`](crate::GrafeoDB).
 pub trait AdminService {
     /// Returns high-level database information (counts, mode, persistence).
-    fn info(&self) -> DatabaseInfo;
+    ///
+    /// # Errors
+    ///
+    /// The error of a read the store cannot do.
+    fn info(&self) -> grafeo_common::utils::error::Result<DatabaseInfo>;
 
     /// Returns detailed database statistics (memory, disk, indexes).
-    fn detailed_stats(&self) -> DatabaseStats;
+    ///
+    /// # Errors
+    ///
+    /// The error of a read the store cannot do.
+    fn detailed_stats(&self) -> grafeo_common::utils::error::Result<DatabaseStats>;
 
     /// Returns schema information (labels, edge types, property keys).
-    fn schema(&self) -> SchemaInfo;
+    ///
+    /// # Errors
+    ///
+    /// The error of a read the store cannot do.
+    fn schema(&self) -> grafeo_common::utils::error::Result<SchemaInfo>;
 
     /// Validates database integrity, returning errors and warnings.
-    fn validate(&self) -> ValidationResult;
+    ///
+    /// # Errors
+    ///
+    /// The error of a read the store cannot do.
+    fn validate(&self) -> grafeo_common::utils::error::Result<ValidationResult>;
 
     /// Returns WAL (Write-Ahead Log) status.
     fn wal_status(&self) -> WalStatus;

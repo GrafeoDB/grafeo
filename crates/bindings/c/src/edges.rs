@@ -131,10 +131,14 @@ pub extern "C" fn grafeo_get_node_edges(
         Err(status) => return status,
     };
     let edge_types: Vec<&str> = edge_types.iter().map(String::as_str).collect();
-    let edges = db
+    let edges = match db
         .inner
         .read()
-        .get_node_edges(NodeId::new(node_id), direction, &edge_types);
+        .get_node_edges(NodeId::new(node_id), direction, &edge_types)
+    {
+        Ok(edges) => edges,
+        Err(err) => return crate::error::set_error(&err),
+    };
     write_edges(&edges, out_neighbors, out_edges, out_count)
 }
 

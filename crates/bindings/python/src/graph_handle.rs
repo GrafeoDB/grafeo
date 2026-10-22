@@ -471,7 +471,7 @@ impl PyGraphHandle {
         let value = PyValue::from_py(value)?;
         self.session_released(py, |session| {
             Ok(session
-                .find_nodes_by_property(property, &value)
+                .find_nodes_by_property(property, &value)?
                 .into_iter()
                 .map(|id| id.as_u64())
                 .collect())

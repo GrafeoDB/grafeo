@@ -161,17 +161,23 @@ pub(super) fn restore_row_group_indexes(root: &Arc<RowGroupStore>, graphs: Vec<G
         }
         #[cfg(feature = "text-index")]
         for def in &graph.text {
-            let index = super::index::text_index_from_data(
+            match super::index::text_index_from_data(
                 &*target,
                 &def.label,
                 &def.property,
                 &def.options,
-            );
-            target.add_text_index(
-                &def.label,
-                &def.property,
-                Arc::new(parking_lot::RwLock::new(index)),
-            );
+            ) {
+                Ok(index) => target.add_text_index(
+                    &def.label,
+                    &def.property,
+                    Arc::new(parking_lot::RwLock::new(index)),
+                ),
+                Err(err) => grafeo_common::grafeo_warn!(
+                    "text index :{}({}) not rebuilt: {err}",
+                    def.label,
+                    def.property
+                ),
+            }
         }
     }
 }

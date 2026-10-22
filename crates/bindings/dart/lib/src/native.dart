@@ -58,26 +58,18 @@ QueryResult buildResult(GrafeoBindings bindings, Pointer<Void> resultPtr) {
   }
 }
 
-/// Reads a node the library handed out into [out] by [call], then frees it.
-Node takeNode(
-  GrafeoBindings bindings,
-  int Function(Pointer<Pointer<Void>> out) call,
-) =>
-    takeNodeOrNull(bindings, call, missing: false)!;
-
-/// [takeNode], with null for a node that does not exist (a
-/// [GrafeoStatus.database] status) when [missing] is true.
+/// Reads a node the library handed out into [out] by [call], then frees it:
+/// null when the node does not exist, a throw for a status (a failure).
 Node? takeNodeOrNull(
   GrafeoBindings bindings,
-  int Function(Pointer<Pointer<Void>> out) call, {
-  bool missing = true,
-}) {
+  int Function(Pointer<Pointer<Void>> out) call,
+) {
   final out = malloc<Pointer<Void>>();
   try {
     final status = call(out);
-    if (missing && status == GrafeoStatus.database.code) return null;
     if (status != GrafeoStatus.ok.code) throwStatus(bindings, status);
     final node = out.value;
+    if (node == nullptr) return null;
     try {
       return Node(
         bindings.grafeoNodeId(node),
@@ -92,26 +84,18 @@ Node? takeNodeOrNull(
   }
 }
 
-/// Reads an edge the library handed out into [out] by [call], then frees it.
-Edge takeEdge(
-  GrafeoBindings bindings,
-  int Function(Pointer<Pointer<Void>> out) call,
-) =>
-    takeEdgeOrNull(bindings, call, missing: false)!;
-
-/// [takeEdge], with null for an edge that does not exist (a
-/// [GrafeoStatus.database] status) when [missing] is true.
+/// Reads an edge the library handed out into [out] by [call], then frees it:
+/// null when the edge does not exist, a throw for a status (a failure).
 Edge? takeEdgeOrNull(
   GrafeoBindings bindings,
-  int Function(Pointer<Pointer<Void>> out) call, {
-  bool missing = true,
-}) {
+  int Function(Pointer<Pointer<Void>> out) call,
+) {
   final out = malloc<Pointer<Void>>();
   try {
     final status = call(out);
-    if (missing && status == GrafeoStatus.database.code) return null;
     if (status != GrafeoStatus.ok.code) throwStatus(bindings, status);
     final edge = out.value;
+    if (edge == nullptr) return null;
     try {
       return Edge(
         bindings.grafeoEdgeId(edge),

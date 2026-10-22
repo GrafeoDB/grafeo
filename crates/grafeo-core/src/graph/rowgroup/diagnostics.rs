@@ -391,27 +391,6 @@ impl RowGroupStore {
         self.next_edge_id.load(Ordering::Acquire)
     }
 
-    /// The edges a committed reader at `epoch` sees, counted under one lock
-    /// from the rows the row groups hold: what a scan of every id below
-    /// [`next_edge_id`](Self::next_edge_id) with `is_edge_visible_at_epoch`
-    /// counts. At the store's own epoch it is `edge_count`.
-    #[must_use]
-    pub fn edge_count_at_epoch(&self, epoch: EpochId) -> usize {
-        let read = Read::at(epoch);
-        self.inner
-            .read()
-            .edges
-            .values()
-            .map(|group| {
-                group
-                    .versions
-                    .rows()
-                    .filter(|(_, version)| version.visible(read))
-                    .count()
-            })
-            .sum()
-    }
-
     /// Every node a committed reader at the store's current epoch sees, in
     /// id order, with its labels and values, as `LpgStore`'s `all_nodes`:
     /// the ids are taken at once, each node is read as the iterator is
@@ -453,6 +432,7 @@ impl RowGroupStore {
 #[cfg(test)]
 mod tests {
     use grafeo_common::storage::{ChunkCaps, ImageSource, MemoryImage, SectionType};
+    use grafeo_common::types::ReadView;
     use grafeo_common::types::{EdgeId, EpochId, NodeId, Value};
 
     use crate::graph::conformance::{Store, Tx, people};
@@ -614,19 +594,30 @@ mod tests {
 
         let scan = |epoch: EpochId| {
             (0..store.next_edge_id())
-                .filter(|&id| store.is_edge_visible_at_epoch(EdgeId::new(id), epoch))
+                .filter(|&id| {
+                    store
+                        .is_edge_visible(EdgeId::new(id), ReadView::committed(epoch))
+                        .unwrap()
+                })
                 .count()
         };
         let epochs = [EpochId::new(0), loaded, added, deleted];
         let counted: Vec<usize> = epochs
             .iter()
-            .map(|&epoch| store.edge_count_at_epoch(epoch))
+            .map(|&epoch| store.edge_count(ReadView::committed(epoch)).unwrap())
             .collect();
         assert_eq!(counted, [0, 2, 3, 2]);
         for epoch in epochs {
-            assert_eq!(store.edge_count_at_epoch(epoch), scan(epoch), "{epoch:?}");
+            assert_eq!(
+                store.edge_count(ReadView::committed(epoch)).unwrap(),
+                scan(epoch),
+                "{epoch:?}"
+            );
         }
-        assert_eq!(store.edge_count_at_epoch(deleted), store.edge_count());
+        assert_eq!(
+            store.edge_count(ReadView::committed(deleted)).unwrap(),
+            store.edge_count(ReadView::latest()).unwrap()
+        );
         assert_eq!(
             store.next_edge_id(),
             4,
@@ -638,7 +629,7 @@ mod tests {
         // stamped: the roll back lets the collect take the delete out.
         open.roll_back().unwrap();
         assert_eq!(store.collect(deleted), 1, "the edge from Gus to Mia");
-        assert_eq!(store.edge_count_at_epoch(deleted), 2);
+        assert_eq!(store.edge_count(ReadView::committed(deleted)).unwrap(), 2);
         assert_eq!(scan(deleted), 2);
     }
 
@@ -845,7 +836,15 @@ mod tests {
         assert_eq!(loaded.memory().incoming_bytes, 0, "the file's are dropped");
         assert_eq!(loaded.memory().graphs, 2);
         assert_eq!(
-            loaded.graph("trips").unwrap().in_degree(NodeId::new(1)),
+            loaded
+                .graph("trips")
+                .unwrap()
+                .degree(
+                    NodeId::new(1),
+                    crate::graph::Direction::Incoming,
+                    ReadView::latest()
+                )
+                .unwrap(),
             1,
             "Paris has its edge from Vincent, found in the edge table"
         );
@@ -878,7 +877,10 @@ mod tests {
         );
         assert_eq!(data.property_column_count, 4 + 2);
         assert_eq!(
-            (root.node_count(), root.edge_count()),
+            (
+                root.node_count(ReadView::latest()).unwrap(),
+                root.edge_count(ReadView::latest()).unwrap()
+            ),
             (3, 2),
             "the counts are the root's alone"
         );
@@ -909,7 +911,7 @@ mod tests {
         assert_eq!(loaded.cold_columns(), 6);
         assert!(trips.memory().node_cold_bytes > 0);
 
-        assert!(trips.get_node(vincent).is_some());
+        assert!(trips.node(vincent, ReadView::latest()).unwrap().is_some());
         let decoded = trips.memory();
         assert_eq!(decoded.cold_columns, 1, "the edges' since stays encoded");
         assert_eq!(decoded.node_cold_bytes, 0);

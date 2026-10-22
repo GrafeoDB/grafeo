@@ -125,8 +125,10 @@ public sealed class ParityTests : IDisposable
         var berlin = trips.CreateNode(["City"], Row(("name", "Berlin")));
         var route = trips.CreateEdge(prague, berlin, "ROUTE", Row(("km", 350)));
         trips.SetNodeProperty(prague, "country", "CZ");
-        Assert.Equal("CZ", trips.GetNode(prague).Properties["country"]);
-        Assert.Equal(350L, trips.GetEdge(route).Properties["km"]);
+        Assert.Equal("CZ", trips.GetNode(prague)!.Properties["country"]);
+        Assert.Equal(350L, trips.GetEdge(route)!.Properties["km"]);
+        Assert.Null(trips.GetNode(999999));
+        Assert.Null(trips.GetEdge(999999));
         Assert.True(trips.AddNodeLabel(prague, "Capital"));
         Assert.False(trips.AddNodeLabel(prague, "Capital"));
 
@@ -142,8 +144,11 @@ public sealed class ParityTests : IDisposable
         Assert.ThrowsAny<GrafeoException>(() => trips.DeleteNode(prague));
         Assert.True(trips.DetachDeleteNode(prague));
         Assert.False(trips.DetachDeleteNode(prague));
+        Assert.Null(trips.GetNode(prague));
 
         _db.Execute("DROP GRAPH trips");
+        // A read of a dropped graph throws: a failure, not a null.
+        Assert.ThrowsAny<GrafeoException>(() => trips.GetNode(berlin));
         Assert.ThrowsAny<GrafeoException>(() => trips.Execute("RETURN 1"));
         Assert.ThrowsAny<GrafeoException>(() => trips.CreateNode(["City"]));
     }

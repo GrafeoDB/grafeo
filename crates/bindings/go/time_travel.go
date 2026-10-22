@@ -174,7 +174,7 @@ func (v *AsOfView) ExecuteParams(query string, params map[string]any) (*QueryRes
 	return viewResult(func() *C.GrafeoResult { return C.grafeo_as_of_execute(v.handle, cQuery, cParams) })
 }
 
-// GetNode returns the node as it was at the view's epoch; an error when it did not exist
+// GetNode returns the node as it was at the view's epoch; ErrNotFound when it did not exist
 // then, as Database.GetNode.
 func (v *AsOfView) GetNode(id uint64) (*Node, error) {
 	if v.handle == nil {
@@ -186,10 +186,13 @@ func (v *AsOfView) GetNode(id uint64) (*Node, error) {
 	}); err != nil {
 		return nil, err
 	}
+	if cNode == nil {
+		return nil, notFound("node", id)
+	}
 	return nodeFromC(cNode), nil
 }
 
-// GetEdge returns the edge as it was at the view's epoch; an error when it did not exist
+// GetEdge returns the edge as it was at the view's epoch; ErrNotFound when it did not exist
 // then, as Database.GetEdge.
 func (v *AsOfView) GetEdge(id uint64) (*Edge, error) {
 	if v.handle == nil {
@@ -200,6 +203,9 @@ func (v *AsOfView) GetEdge(id uint64) (*Edge, error) {
 		return C.grafeo_as_of_get_edge(v.handle, C.uint64_t(id), &cEdge)
 	}); err != nil {
 		return nil, err
+	}
+	if cEdge == nil {
+		return nil, notFound("edge", id)
 	}
 	return edgeFromC(cEdge), nil
 }
@@ -212,7 +218,12 @@ func (v *AsOfView) GetNodeProperty(id uint64, key string) (any, error) {
 	}
 	cKey := C.CString(key)
 	defer C.free(unsafe.Pointer(cKey))
-	ptr := C.grafeo_as_of_get_node_property(v.handle, C.uint64_t(id), cKey)
+	var ptr *C.char
+	if err := lockAndCheckStatus(func() C.GrafeoStatus {
+		return C.grafeo_as_of_get_node_property(v.handle, C.uint64_t(id), cKey, &ptr)
+	}); err != nil {
+		return nil, err
+	}
 	if ptr == nil {
 		return nil, nil
 	}

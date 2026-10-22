@@ -419,14 +419,28 @@ func (db *Database) MmrSearch(label, property string, query []float32, k int, fe
 	return results, nil
 }
 
-// NodeCount returns the number of nodes in the database.
-func (db *Database) NodeCount() int {
-	return int(C.grafeo_node_count(db.handle))
+// NodeCount returns the number of nodes in the database, or the error of a
+// read the store cannot do.
+func (db *Database) NodeCount() (int, error) {
+	var count C.size_t
+	if err := lockAndCheckStatus(func() C.GrafeoStatus {
+		return C.grafeo_node_count(db.handle, &count)
+	}); err != nil {
+		return 0, err
+	}
+	return int(count), nil
 }
 
-// EdgeCount returns the number of edges in the database.
-func (db *Database) EdgeCount() int {
-	return int(C.grafeo_edge_count(db.handle))
+// EdgeCount returns the number of edges in the database, or the error of a
+// read the store cannot do.
+func (db *Database) EdgeCount() (int, error) {
+	var count C.size_t
+	if err := lockAndCheckStatus(func() C.GrafeoStatus {
+		return C.grafeo_edge_count(db.handle, &count)
+	}); err != nil {
+		return 0, err
+	}
+	return int(count), nil
 }
 
 // Version returns the Grafeo library version.

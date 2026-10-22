@@ -23,7 +23,6 @@
 
 #![cfg(all(
     feature = "testing-statement-injection",
-    feature = "lpg",
     feature = "gql",
     feature = "wal",
     feature = "grafeo-file"
@@ -226,7 +225,7 @@ fn commits_wait_for_a_checkpoint_and_stay_out_of_its_image() {
     written.expect("the direct write succeeds after the checkpoint");
     assert_eq!(header.node_count, 2, "the image holds Alix and Gus only");
     assert_eq!(
-        db.node_count(),
+        db.node_count().unwrap(),
         3,
         "Vincent is written after the checkpoint"
     );

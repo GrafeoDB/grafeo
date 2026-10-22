@@ -13,7 +13,7 @@
 //! cargo test -p grafeo-engine --all-features --test temporal_components
 //! ```
 
-#![cfg(all(feature = "lpg", feature = "gql", feature = "cypher"))]
+#![cfg(all(feature = "gql", feature = "cypher"))]
 
 use grafeo_common::types::{Timestamp, Value};
 use grafeo_engine::{GrafeoDB, Session};

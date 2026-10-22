@@ -124,7 +124,7 @@ int32_t      grafeo_remove_node_property(db, id, key);
 int32_t      grafeo_remove_edge_property(db, id, key);
 int32_t      grafeo_add_node_label(db, id, label);
 int32_t      grafeo_remove_node_label(db, id, label);
-char*        grafeo_get_node_labels(db, id);  /* free with grafeo_free_string */
+GrafeoStatus grafeo_get_node_labels(db, id, &json);  /* json: free with grafeo_free_string; NULL when absent */
 ```
 
 ### Transactions

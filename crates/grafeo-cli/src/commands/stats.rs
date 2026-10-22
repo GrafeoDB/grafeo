@@ -24,7 +24,7 @@ struct StatsOutput {
 /// Run the stats command.
 pub fn run(path: &Path, format: OutputFormat) -> Result<()> {
     let db = super::open_existing_read_only(path)?;
-    let stats = db.detailed_stats();
+    let stats = db.detailed_stats()?;
 
     let output = StatsOutput {
         node_count: stats.node_count,

@@ -201,7 +201,6 @@ fn a_procedure_argument_of_the_wrong_type_is_an_invalid_value_type() {
 
 /// DDL in a read-only transaction is refused as read-only, in GQL and in
 /// Cypher (which used to report a semantic error).
-#[cfg(feature = "lpg")]
 #[test]
 fn ddl_in_a_read_only_transaction_is_read_only() {
     let db = people();

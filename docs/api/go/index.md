@@ -57,8 +57,8 @@ db, err := grafeo.Open("./path")                // persistent (a single file)
 db, err := grafeo.OpenSingleFile("./data.grafeo") // deprecated: same as Open, removed in 0.7.0
 defer db.Close()
 
-db.NodeCount()   // number of nodes
-db.EdgeCount()   // number of edges
+nodes, err := db.NodeCount() // number of nodes
+edges, err := db.EdgeCount() // number of edges
 ```
 
 ## Decimals

@@ -125,7 +125,8 @@ public sealed class AsOfView : IDisposable
     /// <summary>The node as it was at the view's epoch, or null when it did not exist then.</summary>
     public Node? GetNode(long id)
     {
-        if (NativeMethods.grafeo_as_of_get_node(Handle, (ulong)id, out var nodePtr) != (int)GrafeoStatus.Ok)
+        GrafeoException.ThrowIfFailed(NativeMethods.grafeo_as_of_get_node(Handle, (ulong)id, out var nodePtr));
+        if (nodePtr == nint.Zero)
             return null;
         try
         {
@@ -140,7 +141,8 @@ public sealed class AsOfView : IDisposable
     /// <summary>The edge as it was at the view's epoch, or null when it did not exist then.</summary>
     public Edge? GetEdge(long id)
     {
-        if (NativeMethods.grafeo_as_of_get_edge(Handle, (ulong)id, out var edgePtr) != (int)GrafeoStatus.Ok)
+        GrafeoException.ThrowIfFailed(NativeMethods.grafeo_as_of_get_edge(Handle, (ulong)id, out var edgePtr));
+        if (edgePtr == nint.Zero)
             return null;
         try
         {
@@ -158,7 +160,8 @@ public sealed class AsOfView : IDisposable
     /// </summary>
     public object? GetNodeProperty(long id, string key)
     {
-        var ptr = NativeMethods.grafeo_as_of_get_node_property(Handle, (ulong)id, key);
+        GrafeoException.ThrowIfFailed(
+            NativeMethods.grafeo_as_of_get_node_property(Handle, (ulong)id, key, out var ptr));
         if (ptr == nint.Zero)
             return null;
         try

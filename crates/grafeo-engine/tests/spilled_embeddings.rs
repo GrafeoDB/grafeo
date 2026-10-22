@@ -124,7 +124,7 @@ fn return_embedding_reads_spilled_values() {
     let dir = tempfile::tempdir().unwrap();
     let (db, ids) = spilled(&dir.path().join("amsterdam.grafeo"));
     assert_eq!(embeddings(&db), all_three());
-    let node = db.get_node(ids[1]).unwrap();
+    let node = db.get_node(ids[1]).unwrap().unwrap();
     assert_eq!(
         node.get_property("embedding"),
         Some(&Value::Vector(embedding_of(1).into()))
@@ -249,7 +249,7 @@ fn removals_while_spilled_stay_removed() {
     drop(db);
     let db = GrafeoDB::open(&path).unwrap();
     assert_eq!(embeddings(&db), vec![None, Some(embedding_of(2))]);
-    assert!(db.get_node(ids[0]).is_none());
+    assert!(db.get_node(ids[0]).unwrap().is_none());
 }
 
 /// Search on a spilled index answers as it did in memory, and reads an

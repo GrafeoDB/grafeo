@@ -3,7 +3,7 @@
 //! a bug in Grafeo), and a message that names no Rust method, as the
 //! bindings spell their methods otherwise.
 
-#![cfg(all(feature = "lpg", feature = "gql"))]
+#![cfg(feature = "gql")]
 
 use grafeo_common::utils::error::{Error, ErrorCode};
 use grafeo_engine::GrafeoDB;

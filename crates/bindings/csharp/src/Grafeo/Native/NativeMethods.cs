@@ -403,13 +403,13 @@ internal static partial class NativeMethods
     // Admin
     // =========================================================================
 
-    /// <summary>Get the number of nodes.</summary>
+    /// <summary>Get the number of nodes into <paramref name="count"/>; a status.</summary>
     [LibraryImport(LibName)]
-    internal static partial nuint grafeo_node_count(nint db);
+    internal static partial int grafeo_node_count(nint db, out nuint count);
 
-    /// <summary>Get the number of edges.</summary>
+    /// <summary>Get the number of edges into <paramref name="count"/>; a status.</summary>
     [LibraryImport(LibName)]
-    internal static partial nuint grafeo_edge_count(nint db);
+    internal static partial int grafeo_edge_count(nint db, out nuint count);
 
     /// <summary>Get database info as JSON. Caller must free with grafeo_free_string.</summary>
     [LibraryImport(LibName)]
@@ -543,9 +543,9 @@ internal static partial class NativeMethods
     [LibraryImport(LibName)]
     internal static partial int grafeo_as_of_get_edge(nint view, ulong id, out nint edgeOut);
 
-    /// <summary>A property value as JSON, or null when there was none. Free with grafeo_free_string.</summary>
+    /// <summary>A property value as JSON into <paramref name="json"/>, zero when there was none; a status. Free with grafeo_free_string.</summary>
     [LibraryImport(LibName, StringMarshalling = StringMarshalling.Utf8)]
-    internal static partial nint grafeo_as_of_get_node_property(nint view, ulong id, string key);
+    internal static partial int grafeo_as_of_get_node_property(nint view, ulong id, string key, out nint json);
 
     [LibraryImport(LibName)]
     internal static partial void grafeo_free_as_of(nint view);

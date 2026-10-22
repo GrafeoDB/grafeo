@@ -224,7 +224,7 @@ fn a_read_only_database_refuses_exactly_the_writing_statements() {
             );
         }
     }
-    assert_eq!(db.node_count(), 2);
+    assert_eq!(db.node_count().unwrap(), 2);
 }
 
 /// A read-only transaction refuses the same statements: it runs `EXPLAIN` of
@@ -238,5 +238,5 @@ fn a_read_only_transaction_explains_a_write_and_refuses_it() {
     assert!(explained.is_ok(), "{:?}", explained.err());
     assert!(session.execute("INSERT (:Person {name: 'Alix'})").is_err());
     session.execute("ROLLBACK").unwrap();
-    assert_eq!(db.node_count(), 0);
+    assert_eq!(db.node_count().unwrap(), 0);
 }

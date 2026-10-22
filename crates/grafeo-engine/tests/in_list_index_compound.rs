@@ -6,7 +6,7 @@
 //! cargo test -p grafeo-engine --all-features --test in_list_index_compound
 //! ```
 
-#![cfg(all(feature = "lpg", feature = "gql"))]
+#![cfg(feature = "gql")]
 
 use std::collections::HashMap;
 

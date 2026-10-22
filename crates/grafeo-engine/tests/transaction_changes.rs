@@ -80,7 +80,7 @@ fn rollback_restores_counts_and_statistics() {
     session.rollback().unwrap();
 
     assert_eq!(statistics(&db), before);
-    assert_eq!((db.node_count(), db.edge_count()), (2, 1));
+    assert_eq!((db.node_count().unwrap(), db.edge_count().unwrap()), (2, 1));
     assert_eq!(names(&db), ["Alix", "Gus"]);
     assert_eq!(
         int(&db, "MATCH (:Person)-[k:KNOWS]->(:Person) RETURN count(k)"),
@@ -89,6 +89,7 @@ fn rollback_restores_counts_and_statistics() {
     assert_eq!(int(&db, "MATCH (n:Admin) RETURN count(n)"), 0);
     assert!(
         db.find_nodes_by_property("name", &Value::from("Vincent"))
+            .unwrap()
             .is_empty(),
         "expected no nodes"
     );
@@ -144,7 +145,7 @@ fn a_transaction_can_delete_what_it_created() {
     session.commit().unwrap();
 
     assert_eq!(names(&db), ["Jules"]);
-    assert_eq!((db.node_count(), db.edge_count()), (1, 0));
+    assert_eq!((db.node_count().unwrap(), db.edge_count().unwrap()), (1, 0));
 }
 
 #[test]

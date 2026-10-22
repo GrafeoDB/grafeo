@@ -12,9 +12,9 @@ use grafeo_common::utils::error::Result;
 use grafeo_common::utils::hash::{FxHashMap, FxHashSet};
 use grafeo_core::graph::Direction;
 use grafeo_core::graph::GraphStore;
-#[cfg(all(test, feature = "lpg"))]
+#[cfg(test)]
 use grafeo_core::graph::GraphStoreMut as _;
-#[cfg(all(test, feature = "lpg"))]
+#[cfg(test)]
 use grafeo_core::graph::rowgroup::RowGroupStore;
 #[cfg(feature = "parallel")]
 use rayon::prelude::*;
@@ -22,7 +22,7 @@ use rayon::prelude::*;
 use super::super::{AlgorithmResult, ParameterDef, ParameterType, Parameters};
 #[cfg(feature = "parallel")]
 use super::traits::ParallelGraphAlgorithm;
-use super::traits::{GraphAlgorithm, visible_edges_from};
+use super::traits::{GraphAlgorithm, int_value};
 
 // ============================================================================
 // Result Types
@@ -49,7 +49,9 @@ pub struct ClusteringCoefficientResult {
 /// ignored, each neighbour is in the set once however many edges join the
 /// two, and self-loops are left out (a node is not its own neighbour, and a
 /// self-loop closes no triangle).
-fn build_undirected_neighbors(store: &dyn GraphStore) -> FxHashMap<NodeId, FxHashSet<NodeId>> {
+fn build_undirected_neighbors(
+    store: &super::traits::GraphView<'_>,
+) -> FxHashMap<NodeId, FxHashSet<NodeId>> {
     let nodes = store.node_ids();
     let mut neighbors: FxHashMap<NodeId, FxHashSet<NodeId>> = nodes
         .iter()
@@ -58,7 +60,7 @@ fn build_undirected_neighbors(store: &dyn GraphStore) -> FxHashMap<NodeId, FxHas
 
     // Every edge is an outgoing edge of its source: add it both ways.
     for &node in &nodes {
-        for (neighbor, _) in visible_edges_from(store, node, Direction::Outgoing) {
+        for (neighbor, _) in store.edges(node, Direction::Outgoing) {
             if neighbor == node || !neighbors.contains_key(&neighbor) {
                 continue;
             }
@@ -121,7 +123,21 @@ fn count_node_triangles(
 /// # Complexity
 ///
 /// O(V * d^2) where d is the average degree
-pub fn triangle_count(store: &dyn GraphStore) -> FxHashMap<NodeId, u64> {
+///
+/// # Errors
+///
+/// The error of a read of the store that fails.
+pub fn triangle_count(
+    store: &dyn GraphStore,
+    view: grafeo_common::types::ReadView,
+) -> grafeo_common::utils::error::Result<FxHashMap<NodeId, u64>> {
+    let graph = super::traits::GraphView::new(store, view);
+    let found = triangle_count_on(&graph);
+    graph.finish(found)
+}
+
+/// [`triangle_count`] on the graph a [`GraphView`](super::traits::GraphView) reads.
+pub(crate) fn triangle_count_on(store: &super::traits::GraphView<'_>) -> FxHashMap<NodeId, u64> {
     let neighbors = build_undirected_neighbors(store);
     let mut counts: FxHashMap<NodeId, u64> = FxHashMap::default();
 
@@ -153,7 +169,23 @@ pub fn triangle_count(store: &dyn GraphStore) -> FxHashMap<NodeId, u64> {
 /// # Complexity
 ///
 /// O(V * d^2) where d is the average degree
-pub fn local_clustering_coefficient(store: &dyn GraphStore) -> FxHashMap<NodeId, f64> {
+///
+/// # Errors
+///
+/// The error of a read of the store that fails.
+pub fn local_clustering_coefficient(
+    store: &dyn GraphStore,
+    view: grafeo_common::types::ReadView,
+) -> grafeo_common::utils::error::Result<FxHashMap<NodeId, f64>> {
+    let graph = super::traits::GraphView::new(store, view);
+    let found = local_clustering_coefficient_on(&graph);
+    graph.finish(found)
+}
+
+/// [`local_clustering_coefficient`] on the graph a [`GraphView`](super::traits::GraphView) reads.
+pub(crate) fn local_clustering_coefficient_on(
+    store: &super::traits::GraphView<'_>,
+) -> FxHashMap<NodeId, f64> {
     let neighbors = build_undirected_neighbors(store);
     let mut coefficients: FxHashMap<NodeId, f64> = FxHashMap::default();
 
@@ -190,8 +222,22 @@ pub fn local_clustering_coefficient(store: &dyn GraphStore) -> FxHashMap<NodeId,
 /// # Complexity
 ///
 /// O(V * d^2) where d is the average degree
-pub fn global_clustering_coefficient(store: &dyn GraphStore) -> f64 {
-    let local = local_clustering_coefficient(store);
+///
+/// # Errors
+///
+/// The error of a read of the store that fails.
+pub fn global_clustering_coefficient(
+    store: &dyn GraphStore,
+    view: grafeo_common::types::ReadView,
+) -> grafeo_common::utils::error::Result<f64> {
+    let graph = super::traits::GraphView::new(store, view);
+    let found = global_clustering_coefficient_on(&graph);
+    graph.finish(found)
+}
+
+/// [`global_clustering_coefficient`] on the graph a [`GraphView`](super::traits::GraphView) reads.
+pub(crate) fn global_clustering_coefficient_on(store: &super::traits::GraphView<'_>) -> f64 {
+    let local = local_clustering_coefficient_on(store);
 
     if local.is_empty() {
         return 0.0;
@@ -237,7 +283,21 @@ fn sum_in_node_order(coefficients: &FxHashMap<NodeId, f64>) -> f64 {
 /// # Complexity
 ///
 /// O(m * sqrt(m)) where m is the number of edges
-pub fn total_triangles(store: &dyn GraphStore) -> u64 {
+///
+/// # Errors
+///
+/// The error of a read of the store that fails.
+pub fn total_triangles(
+    store: &dyn GraphStore,
+    view: grafeo_common::types::ReadView,
+) -> grafeo_common::utils::error::Result<u64> {
+    let graph = super::traits::GraphView::new(store, view);
+    let found = total_triangles_on(&graph);
+    graph.finish(found)
+}
+
+/// [`total_triangles`] on the graph a [`GraphView`](super::traits::GraphView) reads.
+pub(crate) fn total_triangles_on(store: &super::traits::GraphView<'_>) -> u64 {
     let (oriented_adj, edge_list) = build_oriented_adjacency(store);
     let mut total = 0u64;
     for &(_u, v) in &edge_list {
@@ -251,7 +311,9 @@ pub fn total_triangles(store: &dyn GraphStore) -> u64 {
 /// Skips the FxHashSet intermediary — collects undirected neighbors as sorted
 /// Vec<usize> per node, computes degrees, then orients edges from low-degree
 /// to high-degree. Returns (oriented_adj, edge_list) for triangle counting.
-fn build_oriented_adjacency(store: &dyn GraphStore) -> (Vec<Vec<usize>>, Vec<(usize, usize)>) {
+fn build_oriented_adjacency(
+    store: &super::traits::GraphView<'_>,
+) -> (Vec<Vec<usize>>, Vec<(usize, usize)>) {
     let node_list = store.node_ids();
     let n = node_list.len();
     if n == 0 {
@@ -266,7 +328,7 @@ fn build_oriented_adjacency(store: &dyn GraphStore) -> (Vec<Vec<usize>>, Vec<(us
     // Collect both outgoing and incoming, deduplicate via sort+dedup.
     let mut adj: Vec<Vec<usize>> = vec![Vec::new(); n];
     for (u, &node_u) in node_list.iter().enumerate() {
-        for (neighbor, _) in visible_edges_from(store, node_u, Direction::Outgoing) {
+        for (neighbor, _) in store.edges(node_u, Direction::Outgoing) {
             if let Some(&v) = node_to_idx.get(&neighbor)
                 && v != u
             {
@@ -319,7 +381,23 @@ fn build_oriented_adjacency(store: &dyn GraphStore) -> (Vec<Vec<usize>>, Vec<(us
 /// # Complexity
 ///
 /// O(V * d^2) where d is the average degree
-pub fn clustering_coefficient(store: &dyn GraphStore) -> ClusteringCoefficientResult {
+///
+/// # Errors
+///
+/// The error of a read of the store that fails.
+pub fn clustering_coefficient(
+    store: &dyn GraphStore,
+    view: grafeo_common::types::ReadView,
+) -> grafeo_common::utils::error::Result<ClusteringCoefficientResult> {
+    let graph = super::traits::GraphView::new(store, view);
+    let found = clustering_coefficient_on(&graph);
+    graph.finish(found)
+}
+
+/// [`clustering_coefficient`] on the graph a [`GraphView`](super::traits::GraphView) reads.
+pub(crate) fn clustering_coefficient_on(
+    store: &super::traits::GraphView<'_>,
+) -> ClusteringCoefficientResult {
     let neighbors = build_undirected_neighbors(store);
     let n = neighbors.len();
 
@@ -381,9 +459,25 @@ pub fn clustering_coefficient(store: &dyn GraphStore) -> ClusteringCoefficientRe
 /// # Complexity
 ///
 /// O(V * d^2 / threads) where d is the average degree
+///
+/// # Errors
+///
+/// The error of a read of the store that fails.
 #[cfg(feature = "parallel")]
 pub fn clustering_coefficient_parallel(
     store: &dyn GraphStore,
+    view: grafeo_common::types::ReadView,
+    parallel_threshold: usize,
+) -> grafeo_common::utils::error::Result<ClusteringCoefficientResult> {
+    let graph = super::traits::GraphView::new(store, view);
+    let found = clustering_coefficient_parallel_on(&graph, parallel_threshold);
+    graph.finish(found)
+}
+
+/// [`clustering_coefficient_parallel`] on the graph a [`GraphView`](super::traits::GraphView) reads.
+#[cfg(feature = "parallel")]
+pub(crate) fn clustering_coefficient_parallel_on(
+    store: &super::traits::GraphView<'_>,
     parallel_threshold: usize,
 ) -> ClusteringCoefficientResult {
     let neighbors = build_undirected_neighbors(store);
@@ -391,7 +485,7 @@ pub fn clustering_coefficient_parallel(
 
     if n < parallel_threshold {
         // Fall back to sequential for small graphs
-        return clustering_coefficient(store);
+        return clustering_coefficient_on(store);
     }
 
     // Use Arc for shared neighbor data across threads
@@ -474,11 +568,30 @@ pub fn clustering_coefficient_parallel(
 /// # Complexity
 ///
 /// O(m * sqrt(m) / threads) where m is the number of edges
+///
+/// # Errors
+///
+/// The error of a read of the store that fails.
 #[cfg(feature = "parallel")]
-pub fn total_triangles_parallel(store: &dyn GraphStore, parallel_threshold: usize) -> u64 {
+pub fn total_triangles_parallel(
+    store: &dyn GraphStore,
+    view: grafeo_common::types::ReadView,
+    parallel_threshold: usize,
+) -> grafeo_common::utils::error::Result<u64> {
+    let graph = super::traits::GraphView::new(store, view);
+    let found = total_triangles_parallel_on(&graph, parallel_threshold);
+    graph.finish(found)
+}
+
+/// [`total_triangles_parallel`] on the graph a [`GraphView`](super::traits::GraphView) reads.
+#[cfg(feature = "parallel")]
+pub(crate) fn total_triangles_parallel_on(
+    store: &super::traits::GraphView<'_>,
+    parallel_threshold: usize,
+) -> u64 {
     let nodes = store.node_ids();
     if nodes.len() < parallel_threshold {
-        return total_triangles(store);
+        return total_triangles_on(store);
     }
 
     let (oriented_adj, edge_list) = build_oriented_adjacency(store);
@@ -566,31 +679,39 @@ impl GraphAlgorithm for TotalTrianglesAlgorithm {
         total_triangles_params()
     }
 
-    fn execute(&self, store: &dyn GraphStore, params: &Parameters) -> Result<AlgorithmResult> {
-        #[cfg(feature = "parallel")]
-        let count = {
-            let parallel = params.get_bool("parallel").unwrap_or(true);
-            let threshold =
-                usize::try_from(params.get_int("parallel_threshold").unwrap_or(50)).unwrap_or(50);
+    fn execute(
+        &self,
+        store: &dyn GraphStore,
+        view: grafeo_common::types::ReadView,
+        params: &Parameters,
+    ) -> Result<AlgorithmResult> {
+        let graph = super::traits::GraphView::new(store, view);
+        let store = &graph;
+        let found = super::traits::evaluated(|| {
+            #[cfg(feature = "parallel")]
+            let count = {
+                let parallel = params.get_bool("parallel").unwrap_or(true);
+                let threshold = usize::try_from(params.get_int("parallel_threshold").unwrap_or(50))
+                    .unwrap_or(50);
 
-            if parallel {
-                total_triangles_parallel(store, threshold)
-            } else {
-                total_triangles(store)
-            }
-        };
+                if parallel {
+                    total_triangles_parallel_on(store, threshold)
+                } else {
+                    total_triangles_on(store)
+                }
+            };
 
-        #[cfg(not(feature = "parallel"))]
-        let count = {
-            let _ = params;
-            total_triangles(store)
-        };
+            #[cfg(not(feature = "parallel"))]
+            let count = {
+                let _ = params;
+                total_triangles_on(store)
+            };
 
-        let mut output = AlgorithmResult::new(vec!["total_triangles".to_string()]);
-        // reason: Triangle count is bounded by graph size, well within i64::MAX
-        #[allow(clippy::cast_possible_wrap)]
-        output.add_row(vec![Value::Int64(count as i64)]);
-        Ok(output)
+            let mut output = AlgorithmResult::new(vec!["total_triangles".to_string()]);
+            output.add_row(vec![int_value(count)?]);
+            Ok(output)
+        });
+        graph.finish(found)?
     }
 }
 
@@ -634,45 +755,53 @@ impl GraphAlgorithm for ClusteringCoefficientAlgorithm {
         clustering_params()
     }
 
-    fn execute(&self, store: &dyn GraphStore, params: &Parameters) -> Result<AlgorithmResult> {
-        #[cfg(feature = "parallel")]
-        let result = {
-            let parallel = params.get_bool("parallel").unwrap_or(true);
-            let threshold =
-                usize::try_from(params.get_int("parallel_threshold").unwrap_or(50)).unwrap_or(50);
+    fn execute(
+        &self,
+        store: &dyn GraphStore,
+        view: grafeo_common::types::ReadView,
+        params: &Parameters,
+    ) -> Result<AlgorithmResult> {
+        let graph = super::traits::GraphView::new(store, view);
+        let store = &graph;
+        let found = super::traits::evaluated(|| {
+            #[cfg(feature = "parallel")]
+            let result = {
+                let parallel = params.get_bool("parallel").unwrap_or(true);
+                let threshold = usize::try_from(params.get_int("parallel_threshold").unwrap_or(50))
+                    .unwrap_or(50);
 
-            if parallel {
-                clustering_coefficient_parallel(store, threshold)
-            } else {
-                clustering_coefficient(store)
-            }
-        };
+                if parallel {
+                    clustering_coefficient_parallel_on(store, threshold)
+                } else {
+                    clustering_coefficient_on(store)
+                }
+            };
 
-        #[cfg(not(feature = "parallel"))]
-        let result = {
-            let _ = params; // suppress unused warning
-            clustering_coefficient(store)
-        };
+            #[cfg(not(feature = "parallel"))]
+            let result = {
+                let _ = params; // suppress unused warning
+                clustering_coefficient_on(store)
+            };
 
-        let mut output = AlgorithmResult::new(vec![
-            "node_id".to_string(),
-            "clustering_coefficient".to_string(),
-            "triangle_count".to_string(),
-        ]);
-
-        for (node, coefficient) in result.coefficients {
-            let triangles = *result.triangle_counts.get(&node).unwrap_or(&0);
-            // reason: Node IDs and triangle counts are bounded by graph size, well within i64::MAX
-            #[allow(clippy::cast_possible_wrap)]
-            output.add_row(vec![
-                Value::Int64(node.0 as i64),
-                Value::Float64(coefficient),
-                Value::Int64(triangles as i64),
+            let mut output = AlgorithmResult::new(vec![
+                "node_id".to_string(),
+                "clustering_coefficient".to_string(),
+                "triangle_count".to_string(),
             ]);
-        }
 
-        output.sort_by_id_columns(1);
-        Ok(output)
+            for (node, coefficient) in result.coefficients {
+                let triangles = *result.triangle_counts.get(&node).unwrap_or(&0);
+                output.add_row(vec![
+                    int_value(node.0)?,
+                    Value::Float64(coefficient),
+                    int_value(triangles)?,
+                ]);
+            }
+
+            output.sort_by_id_columns(1);
+            Ok(output)
+        });
+        graph.finish(found)?
     }
 }
 
@@ -685,10 +814,11 @@ impl ParallelGraphAlgorithm for ClusteringCoefficientAlgorithm {
     fn execute_parallel(
         &self,
         store: &dyn GraphStore,
+        view: grafeo_common::types::ReadView,
         _params: &Parameters,
         _num_threads: usize,
     ) -> Result<AlgorithmResult> {
-        let result = clustering_coefficient_parallel(store, self.parallel_threshold());
+        let result = clustering_coefficient_parallel(store, view, self.parallel_threshold())?;
 
         let mut output = AlgorithmResult::new(vec![
             "node_id".to_string(),
@@ -716,9 +846,10 @@ impl ParallelGraphAlgorithm for ClusteringCoefficientAlgorithm {
 // Tests
 // ============================================================================
 
-#[cfg(all(test, feature = "lpg"))]
+#[cfg(test)]
 mod tests {
     use super::*;
+    use grafeo_common::types::ReadView;
 
     fn create_triangle_graph() -> RowGroupStore {
         // Simple triangle: 0 - 1 - 2 - 0
@@ -789,7 +920,7 @@ mod tests {
     #[test]
     fn test_triangle_graph_clustering() {
         let store = create_triangle_graph();
-        let result = clustering_coefficient(&store);
+        let result = clustering_coefficient(&store, ReadView::latest()).unwrap();
 
         // All nodes in a triangle have coefficient 1.0
         for (_, coeff) in &result.coefficients {
@@ -814,7 +945,7 @@ mod tests {
     #[test]
     fn test_star_graph_clustering() {
         let store = create_star_graph();
-        let result = clustering_coefficient(&store);
+        let result = clustering_coefficient(&store, ReadView::latest()).unwrap();
 
         // All coefficients should be 0 (no triangles in a star)
         for (_, coeff) in &result.coefficients {
@@ -828,7 +959,7 @@ mod tests {
     #[test]
     fn test_complete_graph_clustering() {
         let store = create_complete_graph(5);
-        let result = clustering_coefficient(&store);
+        let result = clustering_coefficient(&store, ReadView::latest()).unwrap();
 
         // In a complete graph, all coefficients are 1.0
         for (_, coeff) in &result.coefficients {
@@ -842,7 +973,7 @@ mod tests {
     #[test]
     fn test_path_graph_clustering() {
         let store = create_path_graph();
-        let result = clustering_coefficient(&store);
+        let result = clustering_coefficient(&store, ReadView::latest()).unwrap();
 
         // Path has no triangles
         assert_eq!(result.total_triangles, 0);
@@ -856,7 +987,7 @@ mod tests {
     #[test]
     fn test_empty_graph() {
         let store = RowGroupStore::new();
-        let result = clustering_coefficient(&store);
+        let result = clustering_coefficient(&store, ReadView::latest()).unwrap();
 
         assert!(result.coefficients.is_empty());
         assert!(result.triangle_counts.is_empty());
@@ -869,7 +1000,7 @@ mod tests {
         let store = RowGroupStore::new();
         let n0 = store.create_node(&["Node"]);
 
-        let result = clustering_coefficient(&store);
+        let result = clustering_coefficient(&store, ReadView::latest()).unwrap();
 
         assert_eq!(result.coefficients.len(), 1);
         assert_eq!(*result.coefficients.get(&n0).unwrap(), 0.0);
@@ -884,7 +1015,7 @@ mod tests {
         store.create_edge(n0, n1, "EDGE");
         store.create_edge(n1, n0, "EDGE");
 
-        let result = clustering_coefficient(&store);
+        let result = clustering_coefficient(&store, ReadView::latest()).unwrap();
 
         // Both nodes have degree 1, so coefficient is 0
         assert_eq!(*result.coefficients.get(&n0).unwrap(), 0.0);
@@ -895,7 +1026,7 @@ mod tests {
     #[test]
     fn test_triangle_count_function() {
         let store = create_triangle_graph();
-        let counts = triangle_count(&store);
+        let counts = triangle_count(&store, ReadView::latest()).unwrap();
 
         // Each node in a triangle has 1 triangle
         for (_, count) in counts {
@@ -906,7 +1037,7 @@ mod tests {
     #[test]
     fn test_local_clustering_coefficient_function() {
         let store = create_complete_graph(4);
-        let coefficients = local_clustering_coefficient(&store);
+        let coefficients = local_clustering_coefficient(&store, ReadView::latest()).unwrap();
 
         // K_4: all nodes have coefficient 1.0
         for (_, coeff) in coefficients {
@@ -917,14 +1048,14 @@ mod tests {
     #[test]
     fn test_global_clustering_coefficient_function() {
         let store = create_triangle_graph();
-        let global = global_clustering_coefficient(&store);
+        let global = global_clustering_coefficient(&store, ReadView::latest()).unwrap();
         assert!((global - 1.0).abs() < 1e-10);
     }
 
     #[test]
     fn test_total_triangles_function() {
         let store = create_complete_graph(4);
-        let total = total_triangles(&store);
+        let total = total_triangles(&store, ReadView::latest()).unwrap();
         // K_4 has C(4,3) = 4 triangles
         assert_eq!(total, 4);
     }
@@ -934,8 +1065,8 @@ mod tests {
     fn test_parallel_matches_sequential() {
         let store = create_complete_graph(20);
 
-        let sequential = clustering_coefficient(&store);
-        let parallel = clustering_coefficient_parallel(&store, 1); // Force parallel
+        let sequential = clustering_coefficient(&store, ReadView::latest()).unwrap();
+        let parallel = clustering_coefficient_parallel(&store, ReadView::latest(), 1).unwrap(); // Force parallel
 
         // Results should match
         for (node, seq_coeff) in &sequential.coefficients {
@@ -959,7 +1090,7 @@ mod tests {
         let store = create_triangle_graph();
 
         // With threshold higher than node count, should use sequential
-        let result = clustering_coefficient_parallel(&store, 100);
+        let result = clustering_coefficient_parallel(&store, ReadView::latest(), 100).unwrap();
 
         assert_eq!(result.coefficients.len(), 3);
         assert_eq!(result.total_triangles, 1);
@@ -978,7 +1109,7 @@ mod tests {
         assert_eq!(algo.parameters().len(), 2);
 
         let params = Parameters::new();
-        let result = algo.execute(&store, &params).unwrap();
+        let result = algo.execute(&store, ReadView::latest(), &params).unwrap();
 
         assert_eq!(result.columns.len(), 3);
         assert_eq!(result.row_count(), 3);
@@ -992,7 +1123,7 @@ mod tests {
         let mut params = Parameters::new();
         params.set_bool("parallel", false);
 
-        let result = algo.execute(&store, &params).unwrap();
+        let result = algo.execute(&store, ReadView::latest(), &params).unwrap();
         assert_eq!(result.row_count(), 3);
     }
 
@@ -1005,7 +1136,9 @@ mod tests {
         assert_eq!(algo.parallel_threshold(), 50);
 
         let params = Parameters::new();
-        let result = algo.execute_parallel(&store, &params, 4).unwrap();
+        let result = algo
+            .execute_parallel(&store, ReadView::latest(), &params, 4)
+            .unwrap();
 
         assert_eq!(result.row_count(), 10);
     }
@@ -1015,8 +1148,8 @@ mod tests {
     fn test_total_triangles_parallel_matches_sequential() {
         let store = create_complete_graph(20);
 
-        let sequential = total_triangles(&store);
-        let parallel = total_triangles_parallel(&store, 1); // Force parallel
+        let sequential = total_triangles(&store, ReadView::latest()).unwrap();
+        let parallel = total_triangles_parallel(&store, ReadView::latest(), 1).unwrap(); // Force parallel
 
         assert_eq!(
             sequential, parallel,
@@ -1032,7 +1165,7 @@ mod tests {
     #[test]
     fn test_total_triangles_parallel_triangle_graph() {
         let store = create_triangle_graph();
-        let count = total_triangles_parallel(&store, 1);
+        let count = total_triangles_parallel(&store, ReadView::latest(), 1).unwrap();
         assert_eq!(count, 1);
     }
 
@@ -1040,7 +1173,7 @@ mod tests {
     #[test]
     fn test_total_triangles_parallel_star_graph() {
         let store = create_star_graph();
-        let count = total_triangles_parallel(&store, 1);
+        let count = total_triangles_parallel(&store, ReadView::latest(), 1).unwrap();
         assert_eq!(count, 0);
     }
 
@@ -1048,7 +1181,7 @@ mod tests {
     #[test]
     fn test_total_triangles_parallel_path_graph() {
         let store = create_path_graph();
-        let count = total_triangles_parallel(&store, 1);
+        let count = total_triangles_parallel(&store, ReadView::latest(), 1).unwrap();
         assert_eq!(count, 0);
     }
 
@@ -1056,7 +1189,7 @@ mod tests {
     #[test]
     fn test_total_triangles_parallel_empty_graph() {
         let store = RowGroupStore::new();
-        let count = total_triangles_parallel(&store, 1);
+        let count = total_triangles_parallel(&store, ReadView::latest(), 1).unwrap();
         assert_eq!(count, 0);
     }
 
@@ -1065,7 +1198,7 @@ mod tests {
     fn test_total_triangles_parallel_threshold_fallback() {
         let store = create_triangle_graph();
         // Threshold higher than node count: should use sequential path
-        let count = total_triangles_parallel(&store, 100);
+        let count = total_triangles_parallel(&store, ReadView::latest(), 100).unwrap();
         assert_eq!(count, 1);
     }
 
@@ -1076,7 +1209,7 @@ mod tests {
 
         assert_eq!(algo.name(), "total_triangles");
         let params = Parameters::new();
-        let result = algo.execute(&store, &params).unwrap();
+        let result = algo.execute(&store, ReadView::latest(), &params).unwrap();
         assert_eq!(result.row_count(), 1);
         // K_5 has 10 triangles
         assert_eq!(result.rows[0][0], Value::Int64(10));
@@ -1110,7 +1243,7 @@ mod tests {
         store.create_edge(n3, n0, "EDGE");
         store.create_edge(n0, n3, "EDGE");
 
-        let result = clustering_coefficient(&store);
+        let result = clustering_coefficient(&store, ReadView::latest()).unwrap();
 
         // 2 unique triangles
         assert_eq!(result.total_triangles, 2);
@@ -1156,11 +1289,11 @@ mod tests {
         let adapter = RdfGraphStoreAdapter::new(&rdf);
 
         // K_4 on RDF adapter
-        let rdf_triangles = total_triangles(&adapter);
+        let rdf_triangles = total_triangles(&adapter, ReadView::latest()).unwrap();
 
         // K_4 on LPG
         let lpg = create_complete_graph(4);
-        let lpg_triangles = total_triangles(&lpg);
+        let lpg_triangles = total_triangles(&lpg, ReadView::latest()).unwrap();
 
         assert_eq!(
             rdf_triangles, lpg_triangles,
@@ -1188,7 +1321,7 @@ mod tests {
         }
 
         let adapter = RdfGraphStoreAdapter::new(&rdf);
-        let rdf_result = clustering_coefficient(&adapter);
+        let rdf_result = clustering_coefficient(&adapter, ReadView::latest()).unwrap();
 
         // All coefficients should be 1.0 (triangle)
         for (_, coeff) in &rdf_result.coefficients {
@@ -1217,13 +1350,19 @@ mod tests {
         // self-loop: no triangle, coefficient 0 (a loop counted as a
         // neighbour made 2 "triangles" out of 3 pairs).
         let (store, n) = store_from_edges(3, &[(0, 1), (0, 2), (0, 0)]);
-        let result = clustering_coefficient(&store);
+        let result = clustering_coefficient(&store, ReadView::latest()).unwrap();
         assert_eq!(result.triangle_counts[&n[0]], 0);
         assert_eq!(result.coefficients[&n[0]], 0.0);
         assert_eq!(result.total_triangles, 0);
-        assert_eq!(total_triangles(&store), 0);
-        assert_eq!(triangle_count(&store)[&n[0]], 0);
-        assert_eq!(local_clustering_coefficient(&store)[&n[0]], 0.0);
+        assert_eq!(total_triangles(&store, ReadView::latest()).unwrap(), 0);
+        assert_eq!(
+            triangle_count(&store, ReadView::latest()).unwrap()[&n[0]],
+            0
+        );
+        assert_eq!(
+            local_clustering_coefficient(&store, ReadView::latest()).unwrap()[&n[0]],
+            0.0
+        );
     }
 
     #[test]
@@ -1244,14 +1383,14 @@ mod tests {
                 (0, 2),
             ],
         );
-        let result = clustering_coefficient(&store);
+        let result = clustering_coefficient(&store, ReadView::latest()).unwrap();
         for node in &n {
             assert_eq!(result.triangle_counts[node], 1, "{node:?}");
             assert_eq!(result.coefficients[node], 1.0, "{node:?}");
         }
         assert_eq!(result.total_triangles, 1);
         assert_eq!(result.global_coefficient, 1.0);
-        assert_eq!(total_triangles(&store), 1);
+        assert_eq!(total_triangles(&store, ReadView::latest()).unwrap(), 1);
     }
 
     /// Local clustering coefficients by definition on the simple undirected
@@ -1299,11 +1438,15 @@ mod tests {
             let edges: Vec<(usize, usize)> = (0..edge_count).map(|_| (next(n), next(n))).collect();
             let (store, nodes) = store_from_edges(n, &edges);
             let (coefficients, triangles) = reference_coefficients(n, &edges);
-            let result = clustering_coefficient(&store);
+            let result = clustering_coefficient(&store, ReadView::latest()).unwrap();
             let actual: Vec<f64> = nodes.iter().map(|node| result.coefficients[node]).collect();
             assert_eq!(actual, coefficients, "case {case}: {edges:?}");
             assert_eq!(result.total_triangles, triangles, "case {case}: {edges:?}");
-            assert_eq!(total_triangles(&store), triangles, "case {case}: {edges:?}");
+            assert_eq!(
+                total_triangles(&store, ReadView::latest()).unwrap(),
+                triangles,
+                "case {case}: {edges:?}"
+            );
         }
     }
 }

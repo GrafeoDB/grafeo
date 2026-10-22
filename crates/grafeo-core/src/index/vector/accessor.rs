@@ -22,7 +22,7 @@
 
 use std::sync::Arc;
 
-use grafeo_common::types::{NodeId, PropertyKey, Value};
+use grafeo_common::types::{NodeId, PropertyKey, ReadView, Value};
 
 use crate::graph::GraphStore;
 
@@ -54,32 +54,75 @@ pub trait VectorAccessor: Send + Sync {
 /// This is the primary accessor used by the engine when performing vector
 /// operations. It reads directly from the property store, avoiding any
 /// duplication.
+///
+/// A vector index reads through [`VectorAccessor`], which has no error
+/// channel: a read the store cannot do is kept, the vector counts as absent
+/// for the index, and [`check`](Self::check) returns the error after the
+/// index operation, which the caller fails with.
 pub struct PropertyVectorAccessor<'a> {
     store: &'a dyn GraphStore,
     property: PropertyKey,
+    view: ReadView,
+    failure: parking_lot::Mutex<Option<grafeo_common::utils::error::Error>>,
 }
 
 impl<'a> PropertyVectorAccessor<'a> {
-    /// Creates a new accessor for the given store and property key.
+    /// Creates an accessor of the vectors in `property` as `view` sees the
+    /// nodes.
     #[must_use]
-    pub fn new(store: &'a dyn GraphStore, property: impl Into<PropertyKey>) -> Self {
+    pub fn new(
+        store: &'a dyn GraphStore,
+        property: impl Into<PropertyKey>,
+        view: ReadView,
+    ) -> Self {
         Self {
             store,
             property: property.into(),
+            view,
+            failure: parking_lot::Mutex::new(None),
         }
+    }
+
+    /// The first read the store could not do since the last check: an index
+    /// operation through this accessor saw that vector as absent, so its
+    /// answer does not count.
+    ///
+    /// # Errors
+    ///
+    /// The store's error of that read.
+    pub fn check(&self) -> grafeo_common::utils::error::Result<()> {
+        self.failure.lock().take().map_or(Ok(()), Err)
+    }
+
+    /// The answer of `read`, or `otherwise` after keeping its error for
+    /// [`check`](Self::check).
+    fn seen<T>(&self, read: grafeo_common::utils::error::Result<T>, otherwise: T) -> T {
+        read.unwrap_or_else(|error| {
+            self.failure.lock().get_or_insert(error);
+            otherwise
+        })
     }
 }
 
 impl VectorAccessor for PropertyVectorAccessor<'_> {
     fn get_vector(&self, id: NodeId) -> Option<Arc<[f32]>> {
-        match self.store.get_node_property(id, &self.property) {
+        let value = self.seen(
+            self.store
+                .node_property(id, self.property.as_str(), self.view),
+            None,
+        );
+        match value {
             Some(Value::Vector(v)) => Some(v),
             _ => None,
         }
     }
 
     fn with_vector(&self, id: NodeId, f: &mut dyn FnMut(&[f32])) -> bool {
-        self.store.with_node_vector(id, &self.property, f)
+        self.seen(
+            self.store
+                .with_node_vector(id, self.property.as_str(), self.view, f),
+            false,
+        )
     }
 }
 
@@ -119,7 +162,7 @@ where
     }
 }
 
-#[cfg(all(test, feature = "lpg"))]
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::graph::GraphStoreMut as _;
@@ -148,7 +191,7 @@ mod tests {
         let vec_data: Arc<[f32]> = vec![1.0, 2.0, 3.0].into();
         store.set_node_property(id, "embedding", Value::Vector(vec_data.clone()));
 
-        let accessor = PropertyVectorAccessor::new(&store, "embedding");
+        let accessor = PropertyVectorAccessor::new(&store, "embedding", ReadView::latest());
         let result = accessor.get_vector(id);
         assert!(result.is_some());
         assert_eq!(result.unwrap().as_ref(), vec_data.as_ref());
@@ -158,12 +201,12 @@ mod tests {
 
         // Wrong property type
         store.set_node_property(id, "name", Value::from("hello"));
-        let name_accessor = PropertyVectorAccessor::new(&store, "name");
+        let name_accessor = PropertyVectorAccessor::new(&store, "name", ReadView::latest());
         assert!(name_accessor.get_vector(id).is_none());
     }
 }
 
-#[cfg(all(test, feature = "lpg"))]
+#[cfg(test)]
 mod borrowed_read_tests {
     use super::*;
     use crate::graph::GraphStoreMut as _;
@@ -176,8 +219,11 @@ mod borrowed_read_tests {
         let vec_data: Arc<[f32]> = vec![0.7, 0.8, 0.9].into();
         store.set_node_property(jules_id, "embedding", Value::Vector(vec_data.clone()));
 
-        let accessor =
-            VectorAccessorKind::Property(PropertyVectorAccessor::new(&store, "embedding"));
+        let accessor = VectorAccessorKind::Property(PropertyVectorAccessor::new(
+            &store,
+            "embedding",
+            ReadView::latest(),
+        ));
         let result = accessor.get_vector(jules_id);
         assert!(result.is_some());
         assert_eq!(result.unwrap().as_ref(), vec_data.as_ref());
@@ -193,8 +239,11 @@ mod borrowed_read_tests {
         let butch = store.create_node(&["Person"]);
         store.set_node_property(mia, "embedding", Value::Vector(vec![3.0, 19.0].into()));
         store.set_node_property(butch, "embedding", Value::from("not a vector"));
-        let accessor =
-            VectorAccessorKind::Property(PropertyVectorAccessor::new(&store, "embedding"));
+        let accessor = VectorAccessorKind::Property(PropertyVectorAccessor::new(
+            &store,
+            "embedding",
+            ReadView::latest(),
+        ));
 
         let mut seen = Vec::new();
         assert!(accessor.with_vector(mia, &mut |v| seen.extend_from_slice(v)));

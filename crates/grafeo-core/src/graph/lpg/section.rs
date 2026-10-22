@@ -84,6 +84,7 @@ pub(crate) fn load_blocks<S: LoadTarget>(store: &S, data: &[u8]) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
+    use grafeo_common::types::ReadView;
     use std::sync::Arc;
 
     use grafeo_common::storage::{ImageSource, MemoryImage, Section, SectionType};
@@ -178,7 +179,13 @@ mod tests {
     fn an_empty_0_5_section_loads_nothing() {
         let bytes = block::write_blocks(&[], &[], &[], 0).unwrap();
         let root = migrate(&bytes).unwrap();
-        assert_eq!((root.node_count(), root.edge_count()), (0, 0));
+        assert_eq!(
+            (
+                root.node_count(ReadView::latest()).unwrap(),
+                root.edge_count(ReadView::latest()).unwrap()
+            ),
+            (0, 0)
+        );
         assert_eq!(root.graph_count(), 0);
     }
 }

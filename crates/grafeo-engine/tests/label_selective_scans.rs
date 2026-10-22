@@ -8,7 +8,7 @@
 //! cargo test -p grafeo-engine --all-features --test label_selective_scans
 //! ```
 
-#![cfg(all(feature = "lpg", feature = "gql", feature = "cypher"))]
+#![cfg(all(feature = "gql", feature = "cypher"))]
 
 use std::collections::HashMap;
 

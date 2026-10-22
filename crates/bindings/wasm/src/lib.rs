@@ -327,7 +327,8 @@ impl Database {
         let edges = match self.tx.borrow().as_ref() {
             Some(session) => session.get_node_edges(node, direction, &edge_types),
             None => self.db().get_node_edges(node, direction, &edge_types),
-        };
+        }
+        .map_err(database_error)?;
         let array = Array::new_with_length(edges.len() as u32);
         for (i, (neighbor, edge)) in edges.iter().enumerate() {
             let pair = Array::new_with_length(2);
@@ -339,15 +340,23 @@ impl Database {
     }
 
     /// Returns the number of nodes in the database.
+    ///
+    /// # Errors
+    ///
+    /// Throws the error of a read the store cannot do.
     #[wasm_bindgen(js_name = "nodeCount")]
-    pub fn node_count(&self) -> usize {
-        self.db().node_count()
+    pub fn node_count(&self) -> Result<usize, JsValue> {
+        self.db().node_count().map_err(database_error)
     }
 
     /// Returns the number of edges in the database.
+    ///
+    /// # Errors
+    ///
+    /// Throws the error of a read the store cannot do.
     #[wasm_bindgen(js_name = "edgeCount")]
-    pub fn edge_count(&self) -> usize {
-        self.db().edge_count()
+    pub fn edge_count(&self) -> Result<usize, JsValue> {
+        self.db().edge_count().map_err(database_error)
     }
 
     /// Clears all cached query plans.
@@ -508,9 +517,10 @@ impl Database {
     ///
     /// # Errors
     ///
-    /// Returns `JsError` if the schema info cannot be serialised to a JS value.
+    /// Returns `JsError` if the schema info cannot be serialised to a JS value,
+    /// and the error of a read the store cannot do.
     pub fn schema(&self) -> Result<JsValue, JsValue> {
-        let info = self.db().schema();
+        let info = self.db().schema().map_err(database_error)?;
         serde_wasm_bindgen::to_value(&info).map_err(|e| js_error(&e.to_string()))
     }
 
@@ -1361,9 +1371,10 @@ impl Database {
     ///
     /// # Errors
     ///
-    /// Returns `JsError` if the info data cannot be serialised to a JS value.
+    /// Returns `JsError` if the info data cannot be serialised to a JS value,
+    /// and the error of a read the store cannot do.
     pub fn info(&self) -> Result<JsValue, JsValue> {
-        let info = self.db().info();
+        let info = self.db().info().map_err(database_error)?;
         serde_wasm_bindgen::to_value(&info).map_err(|e| js_error(&e.to_string()))
     }
 
@@ -2437,7 +2448,7 @@ mod tests {
             db.create_node_with_props(&label_refs, props).unwrap();
         }
 
-        assert_eq!(db.node_count(), 2);
+        assert_eq!(db.node_count().unwrap(), 2);
         let session = db.session();
         let result = session
             .execute("MATCH (p:Person) RETURN p.name ORDER BY p.name")
@@ -2477,7 +2488,7 @@ mod tests {
             db.create_edge_with_props(src, dst, "KNOWS", props).unwrap();
         }
 
-        assert_eq!(db.edge_count(), 1);
+        assert_eq!(db.edge_count().unwrap(), 1);
     }
 
     #[test]
@@ -2497,7 +2508,7 @@ mod tests {
             db.create_node_with_props(&["Person"], props).unwrap();
         }
 
-        assert_eq!(db.node_count(), 1);
+        assert_eq!(db.node_count().unwrap(), 1);
         let session = db.session();
         let result = session
             .execute("MATCH (p:Person) RETURN p.nickname")
@@ -2524,7 +2535,7 @@ mod tests {
             db.create_node_with_props(&["Item"], props).unwrap();
         }
 
-        assert_eq!(db.node_count(), 500);
+        assert_eq!(db.node_count().unwrap(), 500);
     }
 
     // === Engine-level LPG batch tests ===
@@ -2573,8 +2584,8 @@ mod tests {
             .unwrap();
         }
 
-        assert_eq!(db.node_count(), 3);
-        assert_eq!(db.edge_count(), 2);
+        assert_eq!(db.node_count().unwrap(), 3);
+        assert_eq!(db.edge_count().unwrap(), 2);
 
         // Verify data via query
         let session = db.session();
@@ -2590,7 +2601,7 @@ mod tests {
         let input: LpgImport = serde_json::from_value(json!({ "nodes": [] })).unwrap();
         assert!(input.nodes.is_empty());
         assert!(input.edges.is_empty());
-        assert_eq!(db.node_count(), 0);
+        assert_eq!(db.node_count().unwrap(), 0);
     }
 
     #[test]
@@ -2599,7 +2610,7 @@ mod tests {
         let node_spec: LpgNodeSpec = serde_json::from_value(json!({ "labels": ["Tag"] })).unwrap();
         let labels: Vec<&str> = node_spec.labels.iter().map(String::as_str).collect();
         db.create_node(&labels).unwrap();
-        assert_eq!(db.node_count(), 1);
+        assert_eq!(db.node_count().unwrap(), 1);
     }
 
     #[test]
@@ -2607,7 +2618,7 @@ mod tests {
         let db = GrafeoDB::new_in_memory();
         let id = db.create_node(&["Node"]).unwrap();
         db.create_edge(id, id, "SELF_REF").unwrap();
-        assert_eq!(db.edge_count(), 1);
+        assert_eq!(db.edge_count().unwrap(), 1);
 
         let session = db.session();
         let result = session
@@ -2635,7 +2646,7 @@ mod tests {
         db.create_edge(alix, gus, "WORKS_WITH").unwrap();
         db.create_edge(gus, alix, "KNOWS").unwrap();
 
-        assert_eq!(db.edge_count(), 3);
+        assert_eq!(db.edge_count().unwrap(), 3);
     }
 
     #[test]
@@ -2664,7 +2675,7 @@ mod tests {
             db.create_node_with_props(&labels, props).unwrap();
         }
 
-        assert_eq!(db.node_count(), 500);
+        assert_eq!(db.node_count().unwrap(), 500);
     }
 
     #[test]

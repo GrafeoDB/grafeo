@@ -6,20 +6,15 @@
 use grafeo_common::clock::Instant;
 use grafeo_common::types::Value;
 use grafeo_common::utils::error::Result;
-#[cfg(feature = "lpg")]
 use grafeo_core::graph::rdf::RdfStore;
-#[cfg(feature = "lpg")]
 use grafeo_core::graph::rowgroup::RowGroupStore;
-#[cfg(feature = "lpg")]
-use grafeo_core::graph::{GraphStoreMut, GraphStoreSearch};
+use grafeo_core::graph::{GraphStore, GraphStoreMut};
 use std::sync::Arc;
-#[cfg(feature = "lpg")]
 use std::sync::atomic::AtomicUsize;
 
 use crate::database::QueryResult;
 
 use super::Session;
-#[cfg(feature = "lpg")]
 use super::SessionConfig;
 
 impl Session {
@@ -42,13 +37,12 @@ impl Session {
     }
 
     /// Creates a session that reads and writes `store` and `rdf_store`.
-    #[cfg(feature = "lpg")]
     pub(crate) fn with_rdf_store(
         store: Arc<RowGroupStore>,
         rdf_store: Arc<RdfStore>,
         cfg: SessionConfig,
     ) -> Self {
-        let graph_store = Arc::clone(&store) as Arc<dyn GraphStoreSearch>;
+        let graph_store = Arc::clone(&store) as Arc<dyn GraphStore>;
         let graph_store_mut = Some(Arc::clone(&store) as Arc<dyn GraphStoreMut>);
         Self {
             store,

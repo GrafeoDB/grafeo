@@ -22,13 +22,12 @@ use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
 use grafeo_common::change::{DataOp, Entity};
-use grafeo_common::types::{ArcStr, EdgeId, EpochId, NodeId, PropertyKey, Value};
+use grafeo_common::types::{ArcStr, EdgeId, EpochId, NodeId, PropertyKey, ReadView, Value};
 use grafeo_common::utils::error::{Error, Result};
 
 use super::RowGroupStore;
 use crate::graph::apply::{ApplyError, ChangeTarget, Writer};
 use crate::graph::load::{LoadTarget, LoadedNames};
-use crate::graph::traits::GraphStore;
 
 /// The crate's error for a load the store refused.
 fn refused(error: &ApplyError) -> Error {
@@ -134,6 +133,10 @@ impl RowGroupStore {
 }
 
 impl LoadTarget for RowGroupStore {
+    fn load_view(&self) -> ReadView {
+        ReadView::committed(self.current_epoch())
+    }
+
     fn load_node(&self, id: NodeId, labels: &[&str]) -> Result<()> {
         self.replay(&DataOp::CreateNode {
             id,
@@ -186,9 +189,12 @@ impl LoadTarget for RowGroupStore {
 
     fn load_remove_value(&self, entity: Entity, key: &str) -> Result<()> {
         let property = PropertyKey::new(key);
-        let has = match entity {
-            Entity::Node(id) => self.get_node_property(id, &property).is_some(),
-            Entity::Edge(id) => self.get_edge_property(id, &property).is_some(),
+        let has = {
+            let (now, inner) = (self.now(), self.inner.read());
+            match entity {
+                Entity::Node(id) => inner.node_value_at(id.as_u64(), key, now).is_some(),
+                Entity::Edge(id) => inner.edge_value_at(id.as_u64(), key, now).is_some(),
+            }
         };
         if !has {
             return Ok(());
@@ -308,6 +314,7 @@ impl LoadTarget for RowGroupStore {
 
 #[cfg(test)]
 mod tests {
+    use grafeo_common::types::ReadView;
     use std::sync::Arc;
 
     use grafeo_common::change::Entity;
@@ -387,7 +394,7 @@ mod tests {
         assert_eq!(trips.graph_id(), beta.graph("trips").unwrap().graph_id());
         assert_eq!(root.next_graph_id(), beta.next_graph_id());
         assert_eq!(
-            root.get_node_property(alix, &PropertyKey::new("age")),
+            root.node_property(alix, "age", ReadView::latest()).unwrap(),
             Some(Value::Int64(88)),
             "Alix's current age, not the older version"
         );
@@ -435,11 +442,20 @@ mod tests {
         let dangling = EdgeId::new(beta.next_edge_id());
         let root = migrate(&version_3_fixture("beta_dangling_edge.chunks"));
         assert_migrated(&beta, alix, &root);
-        assert!(root.get_edge(dangling).is_none());
-        assert_eq!(root.edge_count(), beta.edge_count());
+        assert!(root.edge(dangling, ReadView::latest()).unwrap().is_none());
         assert_eq!(
-            root.edges_from(alix, crate::graph::Direction::Outgoing)
-                .len(),
+            root.edge_count(ReadView::latest()).unwrap(),
+            beta.edge_count(ReadView::latest()).unwrap()
+        );
+        assert_eq!(
+            root.edges(
+                alix,
+                crate::graph::Direction::Outgoing,
+                &[],
+                ReadView::latest()
+            )
+            .unwrap()
+            .len(),
             1,
             "Alix knows Gus"
         );
@@ -459,7 +475,12 @@ mod tests {
                 .unwrap();
         let root = migrate(&image);
         assert_migrated(&beta, alix, &root);
-        let highest = beta.node_ids().into_iter().max().unwrap();
+        let highest = beta
+            .node_ids(ReadView::latest())
+            .unwrap()
+            .into_iter()
+            .max()
+            .unwrap();
         assert!(
             root.next_node_id() > highest.as_u64(),
             "no loaded id is given again"
@@ -513,10 +534,12 @@ mod tests {
         assert!(store.stamped_vectors() > 0, "replay stamps what it loads");
         store.load_finish();
         assert_eq!(store.stamped_vectors(), 0);
-        assert_eq!(store.node_count(), 2);
-        assert_eq!(store.edge_count(), 1);
+        assert_eq!(store.node_count(ReadView::latest()).unwrap(), 2);
+        assert_eq!(store.edge_count(ReadView::latest()).unwrap(), 1);
         assert_eq!(
-            store.get_node_property(NodeId::new(3), &PropertyKey::new("name")),
+            store
+                .node_property(NodeId::new(3), "name", ReadView::latest())
+                .unwrap(),
             Some(Value::from("Alix"))
         );
         assert_eq!(store.current_epoch(), EpochId::new(19));
@@ -534,12 +557,12 @@ mod tests {
         store
             .load_value(Entity::Node(gus), "age", Value::Int64(26), None)
             .unwrap();
-        assert_eq!(store.node_count(), 0);
+        assert_eq!(store.node_count(ReadView::latest()).unwrap(), 0);
         store.load_node(gus, &[]).unwrap();
         store.load_remove_value(Entity::Node(gus), "age").unwrap();
         assert!(!store.load_delete(Entity::Node(NodeId::new(2))).unwrap());
         assert!(store.load_delete(Entity::Node(gus)).unwrap());
-        assert_eq!(store.node_count(), 0);
+        assert_eq!(store.node_count(ReadView::latest()).unwrap(), 0);
     }
 
     /// Labels are added and taken away once; a name no node has is
@@ -555,8 +578,11 @@ mod tests {
         assert!(store.load_label(mia, "Person", true).unwrap());
         assert!(!store.load_label(mia, "Person", true).unwrap());
         assert!(store.load_forget_label("Employee|Person"));
-        assert_eq!(store.all_labels(), vec!["Person".to_string()]);
-        assert_eq!(store.nodes_by_label("Person"), vec![mia]);
+        assert_eq!(store.all_labels().unwrap(), vec!["Person".to_string()]);
+        assert_eq!(
+            store.nodes_by_label("Person", ReadView::latest()).unwrap(),
+            vec![mia]
+        );
     }
 
     /// A clear takes every row and index out, keeps the names' ids and the
@@ -578,7 +604,13 @@ mod tests {
             .unwrap();
         store.create_property_index("name");
         store.clear();
-        assert_eq!((store.node_count(), store.next_node_id()), (0, 0));
+        assert_eq!(
+            (
+                store.node_count(ReadView::latest()).unwrap(),
+                store.next_node_id()
+            ),
+            (0, 0)
+        );
         assert_eq!(store.property_index_keys(), Vec::<String>::new());
         assert_eq!(store.current_epoch(), EpochId::new(19));
         store.load_node(NodeId::new(0), &["City"]).unwrap();
@@ -587,7 +619,10 @@ mod tests {
             Some(1),
             "a name keeps its id"
         );
-        assert_eq!(store.nodes_by_label("Person"), Vec::<NodeId>::new());
+        assert_eq!(
+            store.nodes_by_label("Person", ReadView::latest()).unwrap(),
+            Vec::<NodeId>::new()
+        );
     }
 
     /// Values an older build spilled fill only the nodes of the label that
@@ -617,13 +652,26 @@ mod tests {
                 .unwrap(),
             1
         );
-        assert_eq!(store.get_node_property(alix, &key), Some(spilled(alix).1));
         assert_eq!(
-            store.get_node_property(gus, &key),
+            store
+                .node_property(alix, key.as_str(), ReadView::latest())
+                .unwrap(),
+            Some(spilled(alix).1)
+        );
+        assert_eq!(
+            store
+                .node_property(gus, key.as_str(), ReadView::latest())
+                .unwrap(),
             Some(later),
             "written later"
         );
-        assert_eq!(store.get_node_property(mia, &key), None, "not an Item");
+        assert_eq!(
+            store
+                .node_property(mia, key.as_str(), ReadView::latest())
+                .unwrap(),
+            None,
+            "not an Item"
+        );
         assert_eq!(
             store
                 .fill_missing_node_values("Item", &key, values)

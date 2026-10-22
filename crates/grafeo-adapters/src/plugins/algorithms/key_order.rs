@@ -10,7 +10,7 @@
 
 use std::fmt;
 
-use grafeo_common::types::{NodeId, PropertyKey, Value};
+use grafeo_common::types::{NodeId, PropertyKey, ReadView, Value};
 use grafeo_common::utils::error::Error;
 use grafeo_core::execution::operators::value_utils::compare_values_total;
 use grafeo_core::graph::GraphStore;
@@ -80,7 +80,7 @@ impl std::error::Error for KeyOrderError {
     }
 }
 
-/// The nodes of `store` in the order of their `key` value, each with that
+/// The nodes `view` sees in `store`, in the order of their `key` value, each with that
 /// value. Values compare in the total order `ORDER BY` uses, so values of
 /// different types are allowed (they order by type).
 ///
@@ -96,16 +96,18 @@ impl std::error::Error for KeyOrderError {
 /// O(V log V) value comparisons, after one batch read of the key.
 pub fn order_by_key(
     store: &dyn GraphStore,
+    view: ReadView,
     key: &str,
 ) -> Result<Vec<(NodeId, Value)>, KeyOrderError> {
-    let mut nodes = store.node_ids();
+    let read = |source| KeyOrderError::Read {
+        key: key.to_string(),
+        source: Box::new(source),
+    };
+    let mut nodes = store.node_ids(view).map_err(read)?;
     nodes.sort_unstable();
     let values = store
-        .try_get_node_property_batch(&nodes, &PropertyKey::new(key))
-        .map_err(|source| KeyOrderError::Read {
-            key: key.to_string(),
-            source: Box::new(source),
-        })?;
+        .node_property_batch(&nodes, &PropertyKey::new(key), view)
+        .map_err(read)?;
     let mut keyed = Vec::with_capacity(nodes.len());
     for (node, value) in nodes.into_iter().zip(values) {
         match value {
@@ -135,7 +137,7 @@ pub fn order_by_key(
     Ok(keyed)
 }
 
-#[cfg(all(test, feature = "lpg"))]
+#[cfg(test)]
 mod tests {
     use super::*;
     use grafeo_core::graph::GraphStoreMut as _;
@@ -161,7 +163,7 @@ mod tests {
             Some(Value::from("Alix")),
             Some(Value::from("Vincent")),
         ]);
-        let order: Vec<NodeId> = order_by_key(&store, "key")
+        let order: Vec<NodeId> = order_by_key(&store, ReadView::latest(), "key")
             .unwrap()
             .into_iter()
             .map(|(node, _)| node)
@@ -173,7 +175,7 @@ mod tests {
     #[test]
     fn mixed_types_order_as_order_by_does() {
         let (store, ids) = store_with(&[Some(Value::from("Alix")), Some(Value::Int64(3))]);
-        let order: Vec<NodeId> = order_by_key(&store, "key")
+        let order: Vec<NodeId> = order_by_key(&store, ReadView::latest(), "key")
             .unwrap()
             .into_iter()
             .map(|(node, _)| node)
@@ -185,7 +187,7 @@ mod tests {
     fn a_node_without_the_key_is_an_error() {
         for missing in [None, Some(Value::Null)] {
             let (store, ids) = store_with(&[Some(Value::from("Alix")), missing]);
-            let error = order_by_key(&store, "key").unwrap_err();
+            let error = order_by_key(&store, ReadView::latest(), "key").unwrap_err();
             assert!(
                 matches!(&error, KeyOrderError::Missing { node, key } if *node == ids[1] && key == "key"),
                 "{error:?}"
@@ -202,7 +204,7 @@ mod tests {
             Some(Value::Int64(19)),
             Some(Value::Float64(3.0)),
         ]);
-        let error = order_by_key(&store, "key").unwrap_err();
+        let error = order_by_key(&store, ReadView::latest(), "key").unwrap_err();
         assert!(
             matches!(
                 &error,

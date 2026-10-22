@@ -35,22 +35,27 @@ grafeo-engine = "0.6"
 ### Extension Code
 
 ```rust
+use grafeo_common::types::ReadView;
+use grafeo_common::utils::error::Result;
 use grafeo_engine::GrafeoDB;
 
 /// Custom graph analysis function
-pub fn analyze_connectivity(db: &GrafeoDB) -> ConnectivityReport {
-    // Access the underlying graph store (read-only)
+pub fn analyze_connectivity(db: &GrafeoDB) -> Result<ConnectivityReport> {
+    // Access the underlying graph store (read-only), as a committed reader
+    // at the current epoch sees it. Every read can fail (an external store's
+    // own error), so it returns a Result.
     let store = db.graph_store();
+    let view = ReadView::committed(db.current_epoch());
 
-    let node_count = store.node_count();
-    let edge_count = store.edge_count();
+    let node_count = store.node_count(view)?;
+    let edge_count = store.edge_count(view)?;
     let avg_degree = (edge_count as f64 * 2.0) / node_count as f64;
 
-    ConnectivityReport {
+    Ok(ConnectivityReport {
         nodes: node_count,
         edges: edge_count,
         average_degree: avg_degree,
-    }
+    })
 }
 
 pub struct ConnectivityReport {
@@ -65,22 +70,27 @@ pub struct ConnectivityReport {
 ### Graph Store
 
 ```rust
+use grafeo_common::types::ReadView;
+use grafeo_common::utils::error::Result;
 use grafeo_core::graph::{Direction, GraphStore};
 
-fn process_graph(store: &dyn GraphStore) {
-    for id in store.node_ids() {
-        let Some(node) = store.get_node(id) else { continue };
+/// Every read names who reads (`view`): the nodes and edges that reader sees.
+fn process_graph(store: &dyn GraphStore, view: ReadView) -> Result<()> {
+    for id in store.node_ids(view)? {
+        let Some(node) = store.node(id, view)? else { continue };
         println!("Node: {:?}", node.id);
         for label in &node.labels {
             println!("  Label: {label}");
         }
-        // Its outgoing edges
-        for (target, edge) in store.edges_from(id, Direction::Outgoing) {
-            if let Some(edge_type) = store.edge_type(edge) {
+        // Its outgoing edges of any type (`&[]`): those the view sees, whose
+        // other end it sees
+        for (target, edge) in store.edges(id, Direction::Outgoing, &[], view)? {
+            if let Some(edge_type) = store.edge_type(edge, view)? {
                 println!("Edge: {:?} -[{edge_type}]-> {:?}", node.id, target);
             }
         }
     }
+    Ok(())
 }
 ```
 

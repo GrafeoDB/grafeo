@@ -31,7 +31,6 @@
 #[cfg(all(
     feature = "wal",
     feature = "grafeo-file",
-    feature = "lpg",
     feature = "gql",
     feature = "testing-crash-injection"
 ))]

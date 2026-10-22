@@ -5,22 +5,17 @@
 use std::sync::Arc;
 
 use grafeo_common::storage::Section;
-#[cfg(all(feature = "lpg", feature = "ring-index"))]
+#[cfg(feature = "ring-index")]
 use grafeo_common::storage::{ChunkMeta, SectionSource};
-#[cfg(feature = "lpg")]
 use grafeo_common::storage::{ImageSource, SectionType};
-#[cfg(feature = "lpg")]
 use grafeo_common::utils::error::Result;
 
 use crate::transaction::CommitsHeld;
 
-#[cfg(feature = "lpg")]
 use super::catalog_section::{CatalogSection, CatalogStore, GraphIndexes};
-#[cfg(all(feature = "lpg", feature = "grafeo-file"))]
+#[cfg(feature = "grafeo-file")]
 use grafeo_core::graph::rowgroup::CheckpointSnapshot;
-#[cfg(feature = "lpg")]
 use grafeo_core::graph::rowgroup::RowGroupStore;
-#[cfg(feature = "lpg")]
 use grafeo_core::graph::rowgroup::section::RowGroupStoreSection;
 
 /// Everything a checkpoint writes: the database's complete state.
@@ -32,9 +27,7 @@ use grafeo_core::graph::rowgroup::section::RowGroupStoreSection;
 #[derive(Clone)]
 pub(super) struct CheckpointSources {
     /// The root store with its named graphs, `None` with an external store.
-    #[cfg(feature = "lpg")]
     pub store: Option<Arc<RowGroupStore>>,
-    #[cfg(feature = "lpg")]
     pub catalog: Arc<crate::catalog::Catalog>,
     pub transaction_manager: Arc<crate::transaction::TransactionManager>,
     #[cfg(feature = "triple-store")]
@@ -57,10 +50,8 @@ impl CheckpointSources {
     /// its epoch), so the file never names an epoch below one the database
     /// published. Taken while commits are held, both are the epoch of the
     /// last complete commit.
-    #[cfg(any(feature = "lpg", feature = "grafeo-file"))]
     pub fn epoch(&self) -> u64 {
         let published = self.transaction_manager.current_epoch();
-        #[cfg(feature = "lpg")]
         if let Some(store) = &self.store {
             return store.current_epoch().max(published).as_u64();
         }
@@ -68,12 +59,20 @@ impl CheckpointSources {
     }
 
     /// The default graph's committed nodes and edges, for the header.
-    #[cfg(all(feature = "lpg", feature = "grafeo-file"))]
+    #[cfg(feature = "grafeo-file")]
     pub(super) fn counts(&self) -> Option<(usize, usize)> {
+        use grafeo_common::types::ReadView;
         use grafeo_core::graph::GraphStore;
-        self.store
-            .as_ref()
-            .map(|store| (store.node_count(), store.edge_count()))
+        // The header counts what a reader after every commit sees (the
+        // caller holds commits off); the row-group store's reads do not
+        // fail.
+        let view = ReadView::latest();
+        self.store.as_ref().map(|store| {
+            (
+                store.node_count(view).unwrap_or(0),
+                store.edge_count(view).unwrap_or(0),
+            )
+        })
     }
 
     /// Builds every section of the database. The caller holds commits off
@@ -99,7 +98,6 @@ impl CheckpointSources {
         let _ = commits;
         let mut sections: Vec<Box<dyn Section>> = Vec::new();
 
-        #[cfg(feature = "lpg")]
         if let Some(root) = &self.store {
             let transaction_manager = Arc::clone(&self.transaction_manager);
             sections.push(Box::new(CatalogSection::new(
@@ -197,13 +195,6 @@ impl CheckpointSources {
     fn snapshot_with(
         &self,
         commits: &CommitsHeld<'_>,
-        #[cfg_attr(
-            not(feature = "lpg"),
-            expect(
-                unused_variables,
-                reason = "only the LPG section has marks for a copy to leave alone"
-            )
-        )]
         copy: bool,
     ) -> grafeo_common::utils::error::Result<CheckpointImage> {
         let epoch = grafeo_common::types::EpochId::new(self.epoch());
@@ -217,7 +208,6 @@ impl CheckpointSources {
             .pin_read_at(history_from.unwrap_or(epoch))?;
         let mut held: Vec<Box<dyn Section>> = Vec::new();
         let mut after: Vec<Box<dyn Section>> = Vec::new();
-        #[cfg(feature = "lpg")]
         let lpg = self.store.as_ref().map(|root| {
             let snapshot = Arc::new(if copy {
                 CheckpointSnapshot::take_copy(root, epoch, history_from)
@@ -227,7 +217,6 @@ impl CheckpointSources {
             (Arc::clone(root), snapshot)
         });
         for section in self.sections(commits) {
-            #[cfg(feature = "lpg")]
             if section.section_type() == SectionType::LpgStore
                 && let Some((root, snapshot)) = &lpg
             {
@@ -245,7 +234,6 @@ impl CheckpointSources {
             sections: held,
             held: held_count,
             context: self.context(),
-            #[cfg(feature = "lpg")]
             lpg: lpg.map(|(_, snapshot)| snapshot),
             _pin: pin,
         })
@@ -265,7 +253,6 @@ pub(super) struct CheckpointImage {
     /// The header values at the checkpoint's epoch.
     pub context: super::flush::FlushContext,
     /// The LPG section's snapshot, `None` without the root store.
-    #[cfg(feature = "lpg")]
     pub lpg: Option<Arc<CheckpointSnapshot>>,
     _pin: crate::transaction::ReadPin,
 }
@@ -275,17 +262,13 @@ impl CheckpointImage {
     /// The image is written and active as `image`: each graph's marks are
     /// relative to it from now on.
     pub fn written_as(&self, image: grafeo_common::storage::ImageId) {
-        #[cfg(feature = "lpg")]
         if let Some(snapshot) = &self.lpg {
             snapshot.written_as(image);
         }
-        #[cfg(not(feature = "lpg"))]
-        let _ = image;
     }
 
     /// The image was not written: the next checkpoint writes every chunk.
     pub fn failed(&self) {
-        #[cfg(feature = "lpg")]
         if let Some(snapshot) = &self.lpg {
             snapshot.failed();
         }
@@ -418,7 +401,6 @@ impl grafeo_common::storage::SectionSink for ReusingSink<'_> {
 
 // What loading leaves for [`GrafeoDB::finish_load`](super::GrafeoDB) to do
 /// once the database is built.
-#[cfg(feature = "lpg")]
 #[derive(Default)]
 pub(crate) struct LoadedSections {
     /// Vector and text indexes the WAL replay put, built from the data once
@@ -429,12 +411,11 @@ pub(crate) struct LoadedSections {
     history: Option<crate::transaction::HistoryImage>,
 }
 
-#[cfg(feature = "lpg")]
 impl LoadedSections {
     /// The vector and text indexes left to build once the database is
     /// built: WAL replay adds those its records put, and removes those its
     /// records drop (or whose graph they drop).
-    #[cfg(feature = "wal")]
+    #[cfg(any(feature = "wal", feature = "grafeo-file"))]
     pub(super) fn unbuilt_mut(&mut self) -> &mut Vec<GraphIndexes> {
         &mut self.unbuilt
     }
@@ -464,7 +445,6 @@ impl LoadedSections {
 /// An import or restore of a snapshot refuses the triples and the index
 /// definitions it holds the same way, before it changes anything (a
 /// snapshot holds a compacted database as plain nodes and edges).
-#[cfg(feature = "lpg")]
 pub(super) struct FeatureData {
     /// What the data is, as the error names it.
     what: &'static str,
@@ -477,7 +457,6 @@ pub(super) struct FeatureData {
 }
 
 /// Where the image of a database file holds the data of a [`FeatureData`].
-#[cfg(feature = "lpg")]
 enum HeldIn {
     /// Sections of these types.
     Sections(&'static [SectionType]),
@@ -492,7 +471,6 @@ enum HeldIn {
 
 /// RDF triples, and the Ring index over them. A WAL holds them as records
 /// and a 0.5.x container v1 file in its snapshot.
-#[cfg(feature = "lpg")]
 pub(super) const RDF_TRIPLES: FeatureData = FeatureData {
     what: "RDF triples",
     feature: "triple-store",
@@ -502,7 +480,6 @@ pub(super) const RDF_TRIPLES: FeatureData = FeatureData {
 
 /// Vector indexes: a build without the feature cannot build them, and its
 /// checkpoint writes the catalog without their definitions.
-#[cfg(feature = "lpg")]
 pub(super) const VECTOR_INDEXES: FeatureData = FeatureData {
     what: "vector indexes",
     feature: "vector-index",
@@ -511,7 +488,6 @@ pub(super) const VECTOR_INDEXES: FeatureData = FeatureData {
 };
 
 /// Text indexes, as [`VECTOR_INDEXES`].
-#[cfg(feature = "lpg")]
 pub(super) const TEXT_INDEXES: FeatureData = FeatureData {
     what: "text indexes",
     feature: "text-index",
@@ -520,10 +496,8 @@ pub(super) const TEXT_INDEXES: FeatureData = FeatureData {
 };
 
 /// Every kind of data a build reads only with a feature.
-#[cfg(feature = "lpg")]
 const FEATURE_DATA: [&FeatureData; 3] = [&RDF_TRIPLES, &VECTOR_INDEXES, &TEXT_INDEXES];
 
-#[cfg(feature = "lpg")]
 impl FeatureData {
     /// Whether this build has the feature that reads this data.
     pub(super) const fn in_build(&self) -> bool {
@@ -575,7 +549,6 @@ impl FeatureData {
 /// An index on `property` of the nodes with `label`, as a refusal names it:
 /// `:Document(embedding)`, with ` in graph trips` for one of a named graph
 /// (`graph`).
-#[cfg(feature = "lpg")]
 fn index_on(graph: Option<&str>, label: &str, property: &str) -> String {
     match graph {
         None => format!(":{label}({property})"),
@@ -585,7 +558,6 @@ fn index_on(graph: Option<&str>, label: &str, property: &str) -> String {
 
 /// The error that refuses `path` (a database file, or its WAL) for the data
 /// in `found` this build cannot read, each with where `path` holds it.
-#[cfg(feature = "lpg")]
 pub(super) fn refusal(
     path: &std::path::Path,
     found: &[(&FeatureData, String)],
@@ -597,7 +569,6 @@ pub(super) fn refusal(
 /// WAL by its path, or `the snapshot`) for the data in `found` this build
 /// cannot read, each with where `subject` holds it, and tells to `action` it
 /// (`open`, `import`, `restore`) with a build that has the features.
-#[cfg(feature = "lpg")]
 pub(super) fn refusal_of(
     subject: &str,
     action: &str,
@@ -633,7 +604,6 @@ pub(super) fn refusal_of(
 ///
 /// Returns an error naming the database, what it holds and where, and the
 /// features, in that case.
-#[cfg(feature = "lpg")]
 fn refuse_unreadable(
     image: &dyn ImageSource,
     indexes: &[GraphIndexes],
@@ -685,7 +655,6 @@ fn refuse_unreadable(
 ///
 /// Returns an error if a section cannot be read or decoded, or if the image
 /// of `file` holds data this build cannot read.
-#[cfg(feature = "lpg")]
 pub(super) fn load_sections(
     image: &dyn ImageSource,
     file: Option<&std::path::Path>,
@@ -714,7 +683,6 @@ pub(super) fn load_sections(
 /// # Errors
 ///
 /// The section's errors, and the refusal.
-#[cfg(feature = "lpg")]
 pub(super) fn read_catalog<S: CatalogStore>(
     image: &dyn ImageSource,
     file: Option<&std::path::Path>,
@@ -745,7 +713,7 @@ pub(super) fn read_catalog<S: CatalogStore>(
 ///
 /// The errors of the triples' section, and of a ring section whose chunks
 /// cannot be read.
-#[cfg(all(feature = "lpg", feature = "triple-store"))]
+#[cfg(feature = "triple-store")]
 pub(super) fn load_triples(
     image: &dyn ImageSource,
     rdf_store: &Arc<grafeo_core::graph::rdf::RdfStore>,
@@ -780,7 +748,7 @@ pub(super) fn load_triples(
 ///
 /// Returns an error if a section cannot be read or is not the 0.5.x layout,
 /// or if the base cannot be folded.
-#[cfg(all(feature = "lpg", feature = "grafeo-file"))]
+#[cfg(feature = "grafeo-file")]
 pub(super) fn fold_compacted_base<S: grafeo_core::graph::load::LoadTarget>(
     image: &dyn ImageSource,
     store: &S,
@@ -810,7 +778,7 @@ pub(super) fn fold_compacted_base<S: grafeo_core::graph::load::LoadTarget>(
 /// # Errors
 ///
 /// Returns the error of a chunk that cannot be fetched.
-#[cfg(all(feature = "lpg", feature = "ring-index"))]
+#[cfg(feature = "ring-index")]
 fn read_mirror(
     section: &mut dyn Section,
     source: &dyn SectionSource,
@@ -828,13 +796,13 @@ fn read_mirror(
 
 /// Serves the chunks of a section and remembers whether fetching one failed,
 /// so an unreadable section can be told apart from one that does not decode.
-#[cfg(all(feature = "lpg", feature = "ring-index"))]
+#[cfg(feature = "ring-index")]
 struct FetchWatch<'a> {
     source: &'a dyn SectionSource,
     failed: std::cell::Cell<bool>,
 }
 
-#[cfg(all(feature = "lpg", feature = "ring-index"))]
+#[cfg(feature = "ring-index")]
 impl SectionSource for FetchWatch<'_> {
     fn chunks(&self) -> &[ChunkMeta] {
         self.source.chunks()
@@ -857,7 +825,6 @@ impl SectionSource for FetchWatch<'_> {
     }
 }
 
-#[cfg(feature = "lpg")]
 impl super::GrafeoDB {
     /// Finishes a load once the database is built: builds the indexes the
     /// sections did not hold from all the data.
@@ -935,6 +902,7 @@ mod tests {
     use grafeo_common::storage::{
         ChunkKind, ChunkMeta, MemoryImage, SectionSink, SectionSource, ServedOnce,
     };
+    use grafeo_common::types::ReadView;
     use grafeo_core::graph::{GraphStore as _, GraphStoreMut as _};
 
     /// The sections of a 0.5.x file reach their `deserialize` through raw
@@ -1538,9 +1506,14 @@ mod tests {
         );
         let values = |label: &str, key: &str| {
             let mut values: Vec<String> = store
-                .nodes_by_label(label)
+                .nodes_by_label(label, ReadView::latest())
+                .unwrap()
                 .into_iter()
-                .filter_map(|id| store.get_node_property(id, &PropertyKey::from(key)))
+                .filter_map(|id| {
+                    store
+                        .node_property(id, PropertyKey::from(key).as_str(), ReadView::latest())
+                        .unwrap()
+                })
                 .filter_map(|value| value.as_str().map(str::to_string))
                 .collect();
             values.sort();
@@ -1554,34 +1527,57 @@ mod tests {
         );
 
         let alix = store
-            .nodes_by_label("Person")
+            .nodes_by_label("Person", ReadView::latest())
+            .unwrap()
             .into_iter()
             .find(|&id| {
-                store.get_node_property(id, &PropertyKey::from("name")) == Some(Value::from("Alix"))
+                store.node_property(id, "name", ReadView::latest()).unwrap()
+                    == Some(Value::from("Alix"))
             })
             .unwrap();
         assert_eq!(
-            store.get_node_property(alix, &PropertyKey::from("age")),
+            store
+                .node_property(alix, "age", ReadView::latest())
+                .unwrap(),
             Some(Value::Int64(31)),
             "the overlay's copy of Alix wins"
         );
         let knows: Vec<_> = store
-            .edges_from(alix, grafeo_core::graph::Direction::Outgoing)
+            .edges(
+                alix,
+                grafeo_core::graph::Direction::Outgoing,
+                &[],
+                ReadView::latest(),
+            )
+            .unwrap()
             .into_iter()
-            .filter(|&(_, edge)| store.edge_type(edge).as_deref() == Some("KNOWS"))
+            .filter(|&(_, edge)| {
+                store
+                    .edge_type(edge, ReadView::latest())
+                    .unwrap()
+                    .as_deref()
+                    == Some("KNOWS")
+            })
             .collect();
         assert_eq!(knows.len(), 1);
         assert_eq!(
-            store.get_edge_property(knows[0].1, &PropertyKey::from("since")),
+            store
+                .edge_property(knows[0].1, "since", ReadView::latest())
+                .unwrap(),
             Some(Value::Int64(2019)),
             "a base edge keeps its properties"
         );
         assert_eq!(
-            store.edge_count(),
+            store.edge_count(ReadView::latest()).unwrap(),
             3,
             "knows and lives in from the base, the museum's from the overlay"
         );
-        let highest = store.node_ids().into_iter().max().unwrap();
+        let highest = store
+            .node_ids(ReadView::latest())
+            .unwrap()
+            .into_iter()
+            .max()
+            .unwrap();
         assert!(
             store.create_node(&["City"]) > highest,
             "new ids stay clear of the base's and the overlay's"
@@ -1919,11 +1915,16 @@ mod tests {
     /// it were written), and its data in chunks of their own.
     #[test]
     fn no_production_section_writes_a_raw_chunk() {
-        let mut expected = vec![SectionType::Catalog, SectionType::LpgStore];
-        #[cfg(all(feature = "sparql", feature = "triple-store"))]
-        expected.push(SectionType::RdfStore);
-        #[cfg(all(feature = "sparql", feature = "ring-index"))]
-        expected.push(SectionType::RdfRing);
+        let expected: Vec<SectionType> = [
+            Some(SectionType::Catalog),
+            Some(SectionType::LpgStore),
+            cfg!(all(feature = "sparql", feature = "triple-store"))
+                .then_some(SectionType::RdfStore),
+            cfg!(all(feature = "sparql", feature = "ring-index")).then_some(SectionType::RdfRing),
+        ]
+        .into_iter()
+        .flatten()
+        .collect();
         let db = database_with_every_section();
         let commits = db.transaction_manager.hold_commits().unwrap();
         let sections = db.checkpoint_sources().sections(&commits);

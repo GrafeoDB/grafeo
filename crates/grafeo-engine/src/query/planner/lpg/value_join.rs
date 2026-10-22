@@ -13,7 +13,7 @@ use grafeo_core::execution::operators::{
     ExpressionPredicate, FilterOperator, HashJoinOperator, JoinType as PhysicalJoinType, Operator,
     ProjectExpr, ProjectOperator, ScanOperator,
 };
-use grafeo_core::graph::GraphStoreSearch;
+use grafeo_core::graph::GraphStore;
 
 use super::seek::{CheckedScan, checked_scan, split_conjuncts, value_variables};
 use super::{Arc, HashMap, Result};
@@ -221,12 +221,11 @@ impl super::Planner {
             "the input of a value join binds the scanned node"
         );
 
-        let store = Arc::clone(&self.store) as Arc<dyn GraphStoreSearch>;
+        let store = Arc::clone(&self.store) as Arc<dyn GraphStore>;
         let scan_op = match &scan.label {
-            Some(label) => ScanOperator::with_label(Arc::clone(&store), label),
-            None => ScanOperator::new(Arc::clone(&store)),
+            Some(label) => ScanOperator::with_label(Arc::clone(&store), label, self.read_view()),
+            None => ScanOperator::new(Arc::clone(&store), self.read_view()),
         }
-        .with_transaction_context(self.viewing_epoch, self.transaction_id)
         .with_read_counter(self.read_counter());
         let scan_columns = vec![scan.variable.clone()];
         let mut build: Box<dyn Operator> = Box::new(scan_op);
@@ -293,9 +292,9 @@ impl super::Planner {
                 input,
                 projections,
                 types,
-                Arc::clone(&self.store) as Arc<dyn GraphStoreSearch>,
+                Arc::clone(&self.store) as Arc<dyn GraphStore>,
+                self.read_view(),
             )
-            .with_transaction_context(self.viewing_epoch, self.transaction_id)
             .with_session_context(self.session_context.clone()),
         ))
     }
@@ -309,9 +308,9 @@ impl super::Planner {
         Ok(ExpressionPredicate::new(
             self.convert_expression(&predicate)?,
             variable_columns(columns),
-            Arc::clone(&self.store) as Arc<dyn GraphStoreSearch>,
+            Arc::clone(&self.store) as Arc<dyn GraphStore>,
+            self.read_view(),
         )
-        .with_transaction_context(self.viewing_epoch, self.transaction_id)
         .with_session_context(self.session_context.clone()))
     }
 }

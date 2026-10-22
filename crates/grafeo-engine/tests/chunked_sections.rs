@@ -13,13 +13,9 @@
 //! cargo test -p grafeo-engine --all-features --test chunked_sections
 //! ```
 
-#![cfg(all(
-    feature = "lpg",
-    feature = "gql",
-    feature = "grafeo-file",
-    feature = "wal"
-))]
+#![cfg(all(feature = "gql", feature = "grafeo-file", feature = "wal"))]
 
+use grafeo_common::types::ReadView;
 use std::collections::{BTreeMap, HashMap};
 use std::fmt::Write as _;
 use std::sync::Arc;
@@ -77,8 +73,8 @@ fn dump(db: &GrafeoDB) -> Vec<String> {
 
 fn dump_graph(lines: &mut Vec<String>, title: &str, store: &RowGroupStore) {
     lines.push(title.to_string());
-    for id in store.all_node_ids() {
-        let Some(node) = store.get_node(id) else {
+    for id in store.node_ids(ReadView::latest()).unwrap() {
+        let Some(node) = store.node(id, ReadView::latest()).unwrap() else {
             continue;
         };
         let mut labels: Vec<&str> = node.labels.iter().map(|label| label.as_str()).collect();
@@ -87,7 +83,7 @@ fn dump_graph(lines: &mut Vec<String>, title: &str, store: &RowGroupStore) {
         push_properties(lines, node.properties.iter());
     }
     for raw in 0..store.next_edge_id() {
-        let Some(edge) = store.get_edge(EdgeId::new(raw)) else {
+        let Some(edge) = store.edge(EdgeId::new(raw), ReadView::latest()).unwrap() else {
             continue;
         };
         lines.push(format!(
@@ -377,7 +373,7 @@ fn repeated_checkpoints_of_a_multi_chunk_image_reuse_space() {
         db.close().unwrap();
     });
     let db = GrafeoDB::open_read_only(&path).unwrap();
-    assert_eq!(db.node_count(), 600);
+    assert_eq!(db.node_count().unwrap(), 600);
 }
 
 /// An empty database and one whose only content is an empty named graph are
@@ -399,7 +395,7 @@ fn an_empty_database_and_an_empty_named_graph_survive_a_reopen() {
     });
 
     let db = GrafeoDB::open(&empty).unwrap();
-    assert_eq!((db.node_count(), db.edge_count()), (0, 0));
+    assert_eq!((db.node_count().unwrap(), db.edge_count().unwrap()), (0, 0));
     assert_eq!(db.list_graphs(), Vec::<String>::new());
     db.close().unwrap();
 
@@ -471,7 +467,7 @@ fn sub_millisecond_timestamps_and_counters_survive_a_reopen() {
     };
 
     let db = GrafeoDB::open(&path).unwrap();
-    let node = db.get_node(alix).expect("Alix is back");
+    let node = db.get_node(alix).unwrap().expect("Alix is back");
     for (key, value) in &values {
         let back = node.properties.get(&PropertyKey::new(*key));
         assert_eq!(
@@ -1246,7 +1242,7 @@ mod crash_during_close {
             let expected = if point < HEADER_WRITTEN { 300 } else { 600 };
             let db = GrafeoDB::with_config(wal_disabled_config(&path)).unwrap();
             assert_eq!(
-                db.node_count(),
+                db.node_count().unwrap(),
                 expected,
                 "{name}: the image the reopen finds"
             );
@@ -1265,7 +1261,11 @@ mod crash_during_close {
             }
             db.close().unwrap();
             let db = GrafeoDB::with_config(wal_disabled_config(&path)).unwrap();
-            assert_eq!(db.node_count(), expected, "{name}: after the checkpoint");
+            assert_eq!(
+                db.node_count().unwrap(),
+                expected,
+                "{name}: after the checkpoint"
+            );
             db.close().unwrap();
         }
     }
@@ -1542,7 +1542,7 @@ mod moved_chunks {
         let header = active_image(&path, Some(&cipher)).1;
         let db = GrafeoDB::with_config(with_key(Config::read_only(&path), &chain)).unwrap();
         assert_eq!(
-            db.node_count(),
+            db.node_count().unwrap(),
             30,
             "the rewritten directory reads as before"
         );

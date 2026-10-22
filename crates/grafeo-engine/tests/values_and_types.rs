@@ -415,7 +415,11 @@ fn the_direct_api_stores_an_integer_in_a_float64_property_as_a_float() {
         .create_edge_with_props(alix, product, "buys", [("price", Value::Int64(88))])
         .unwrap();
     assert_eq!(
-        db.get_edge(buys).unwrap().get_property("price").cloned(),
+        db.get_edge(buys)
+            .unwrap()
+            .unwrap()
+            .get_property("price")
+            .cloned(),
         Some(Value::Float64(88.0)),
         "create_edge_with_props"
     );

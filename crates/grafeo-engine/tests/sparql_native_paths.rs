@@ -626,7 +626,6 @@ fn explain_accepts_native_path_without_returning_query_rows() {
     assert!(matches!(&result.rows()[0][0], Value::String(plan) if !plan.is_empty()));
 }
 
-#[cfg(feature = "lpg")]
 #[test]
 fn processor_profile_reports_native_path_cardinality() {
     use grafeo_engine::query::{QueryLanguage, QueryProcessor};

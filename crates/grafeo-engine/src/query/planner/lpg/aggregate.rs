@@ -3,7 +3,7 @@
 use super::{
     AggregateOp, Arc, Direction, EntityValue, Error, ExpandDirection, ExpandStep,
     ExpressionPredicate, FactorizedAggregate, FactorizedAggregateOperator, FilterExpression,
-    FilterOperator, GraphStoreSearch, HashAggregateOperator, HashMap, LazyFactorizedChainOperator,
+    FilterOperator, GraphStore, HashAggregateOperator, HashMap, LazyFactorizedChainOperator,
     LogicalAggregateFunction, LogicalExpression, LogicalType, Operator, PhysicalAggregateExpr,
     ProjectExpr, ProjectOperator, Result, SimpleAggregateOperator, convert_aggregate_function,
     expression_to_string, resolved_column_name,
@@ -228,9 +228,9 @@ impl super::Planner {
                     input_op,
                     projections,
                     output_types,
-                    Arc::clone(&self.store) as Arc<dyn GraphStoreSearch>,
+                    Arc::clone(&self.store) as Arc<dyn GraphStore>,
+                    self.read_view(),
                 )
-                .with_transaction_context(self.viewing_epoch, self.transaction_id)
                 .with_session_context(self.session_context.clone()),
             );
         }
@@ -385,9 +385,9 @@ impl super::Planner {
             let predicate = ExpressionPredicate::new(
                 filter_expr,
                 having_var_columns,
-                Arc::clone(&self.store) as Arc<dyn GraphStoreSearch>,
+                Arc::clone(&self.store) as Arc<dyn GraphStore>,
+                self.read_view(),
             )
-            .with_transaction_context(self.viewing_epoch, self.transaction_id)
             .with_session_context(self.session_context.clone());
             operator = Box::new(FilterOperator::new(operator, Box::new(predicate)));
         }
@@ -470,7 +470,7 @@ impl super::Planner {
             steps.push(ExpandStep {
                 source_column,
                 direction,
-                edge_types: expand.edge_types.clone(),
+                edge_types: self.stored_edge_types(&expand.edge_types)?,
             });
 
             let edge_col_name = self.register_edge_column(&expand.edge_variable);
@@ -481,18 +481,13 @@ impl super::Planner {
         }
 
         // Create the lazy factorized chain operator
-        let mut lazy_op = LazyFactorizedChainOperator::new(
-            Arc::clone(&self.store) as Arc<dyn GraphStoreSearch>,
+        let lazy_op = LazyFactorizedChainOperator::new(
+            Arc::clone(&self.store) as Arc<dyn GraphStore>,
             base_op,
             steps,
+            self.read_view(),
         )
         .with_read_counter(self.read_counter());
-
-        if let Some(transaction_id) = self.transaction_id {
-            lazy_op = lazy_op.with_transaction_context(self.viewing_epoch, Some(transaction_id));
-        } else {
-            lazy_op = lazy_op.with_transaction_context(self.viewing_epoch, None);
-        }
 
         // Convert logical aggregates to factorized aggregates
         let factorized_aggs: Vec<FactorizedAggregate> = agg
@@ -578,7 +573,7 @@ mod tests {
     };
     use crate::transaction::TransactionManager;
     use grafeo_core::graph::rowgroup::RowGroupStore;
-    use grafeo_core::graph::{GraphStoreMut, GraphStoreSearch};
+    use grafeo_core::graph::{GraphStore, GraphStoreMut};
     use std::sync::Arc;
 
     /// A one-hop expand from `from` to `to` along `edge_type` over `input`.
@@ -623,7 +618,7 @@ mod tests {
             )
             .unwrap();
         let planner = Planner::with_context(
-            Arc::clone(&store) as Arc<dyn GraphStoreSearch>,
+            Arc::clone(&store) as Arc<dyn GraphStore>,
             Some(Arc::clone(&store) as Arc<dyn GraphStoreMut>),
             Arc::clone(&transaction_manager),
             Some(transaction_id),

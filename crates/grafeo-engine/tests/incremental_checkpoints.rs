@@ -12,12 +12,7 @@
 //! cargo test -p grafeo-engine --all-features --test incremental_checkpoints
 //! ```
 
-#![cfg(all(
-    feature = "lpg",
-    feature = "gql",
-    feature = "wal",
-    feature = "grafeo-file"
-))]
+#![cfg(all(feature = "gql", feature = "wal", feature = "grafeo-file"))]
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};

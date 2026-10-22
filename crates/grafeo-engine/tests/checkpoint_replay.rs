@@ -112,7 +112,7 @@ mod tests {
             // Reopen (replaying the WAL), check the edges and crash again.
             "reopen" => {
                 assert_eq!(edge_rows(&db), (Value::Int64(3), Value::Int64(3)));
-                assert_eq!(db.edge_count(), 3);
+                assert_eq!(db.edge_count().unwrap(), 3);
             }
             // Crash at injection point N inside the first checkpoint
             // (`first:N`) or inside a second one after more writes (`second:N`).
@@ -171,8 +171,8 @@ mod tests {
             knows.rows().to_vec(),
             vec![vec![Value::from("Alix"), Value::from("Gus")]]
         );
-        assert_eq!(db.edge_count(), 1);
-        assert_eq!(db.node_count(), 3);
+        assert_eq!(db.edge_count().unwrap(), 1);
+        assert_eq!(db.node_count().unwrap(), 3);
     }
 
     /// Every file under `dir` with its bytes.
@@ -206,7 +206,7 @@ mod tests {
         let db = GrafeoDB::open_read_only(&path).unwrap();
         assert_eq!(knows(&db), [[Value::from("Alix"), Value::from("Gus")]]);
         assert_eq!(edge_rows(&db), (Value::Int64(1), Value::Int64(1)));
-        assert_eq!((db.node_count(), db.edge_count()), (3, 1));
+        assert_eq!((db.node_count().unwrap(), db.edge_count().unwrap()), (3, 1));
         db.close().unwrap();
         drop(db);
         assert!(
@@ -216,7 +216,7 @@ mod tests {
 
         let db = open(&path);
         assert_eq!(knows(&db), [[Value::from("Alix"), Value::from("Gus")]]);
-        assert_eq!((db.node_count(), db.edge_count()), (3, 1));
+        assert_eq!((db.node_count().unwrap(), db.edge_count().unwrap()), (3, 1));
     }
 
     /// The issue's sequence in a named graph, then two more crashes after a
@@ -274,7 +274,7 @@ mod tests {
 
         let db = open(&path);
         assert_eq!(edge_rows(&db), (Value::Int64(0), Value::Int64(0)));
-        assert_eq!((db.node_count(), db.edge_count()), (2, 0));
+        assert_eq!((db.node_count().unwrap(), db.edge_count().unwrap()), (2, 0));
         assert_eq!(
             db.session()
                 .execute("MATCH (p:Person) RETURN p.name ORDER BY p.name")
@@ -301,8 +301,8 @@ mod tests {
 
         let db = open(&path);
         assert_eq!(edge_rows(&db), (Value::Int64(3), Value::Int64(3)));
-        assert_eq!(db.edge_count(), 3);
-        assert_eq!(db.node_count(), 6);
+        assert_eq!(db.edge_count().unwrap(), 3);
+        assert_eq!(db.node_count().unwrap(), 6);
         drop(db);
 
         // The full backup restores to its two edges.
@@ -343,7 +343,7 @@ mod tests {
                 "{phase} checkpoint, crash point {point}"
             );
             assert_eq!(
-                db.edge_count(),
+                db.edge_count().unwrap(),
                 expected.len(),
                 "{phase} checkpoint, crash point {point}"
             );
@@ -417,7 +417,11 @@ mod tests {
             vec![vec![Value::from("Alix"), Value::from("Gus")]],
             "{what}"
         );
-        assert_eq!(db.edge_count(), 2, "{what}: KNOWS and LIKES, once each");
+        assert_eq!(
+            db.edge_count().unwrap(),
+            2,
+            "{what}: KNOWS and LIKES, once each"
+        );
     }
 
     /// Copies the files of the directory `from` into a new directory `to`,
@@ -808,8 +812,8 @@ mod tests {
         }
 
         let db = open(&path);
-        assert_eq!(db.node_count(), 2);
-        assert_eq!(db.edge_count(), 1);
+        assert_eq!(db.node_count().unwrap(), 2);
+        assert_eq!(db.edge_count().unwrap(), 1);
         assert_eq!(edge_rows(&db), (Value::Int64(1), Value::Int64(1)));
         let knows_rows = db
             .session()

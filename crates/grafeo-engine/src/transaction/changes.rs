@@ -37,7 +37,6 @@ use std::ops::Range;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-#[cfg(feature = "lpg")]
 use grafeo_common::change::StandaloneOp;
 use grafeo_common::change::{
     Before, BulkRange, Change, ChangeMark, ChangeSet, DataModel, DataOp, Entity, GraphRef,
@@ -540,7 +539,6 @@ impl TransactionChanges {
 
     /// Whether the transaction has an entry in the labeled property graph
     /// with storage key `key` (`None` for the default graph).
-    #[cfg(any(feature = "lpg", feature = "vector-index", feature = "text-index"))]
     pub(crate) fn writes_graph(&self, key: Option<&str>) -> bool {
         self.writes_where(|graph| graph == key)
     }
@@ -1062,7 +1060,6 @@ impl Drop for StreamingChanges<'_> {
 /// op, through the function replay applies its records with (validate, log,
 /// apply). It takes effect at once, also inside a transaction, whose
 /// rollback keeps it.
-#[cfg(feature = "lpg")]
 #[derive(Default)]
 pub(crate) struct StandaloneChange {
     /// The ops, in the order they apply, each with the index a statement
@@ -1070,7 +1067,6 @@ pub(crate) struct StandaloneChange {
     ops: Vec<(StandaloneOp, Option<BuiltIndex>)>,
 }
 
-#[cfg(feature = "lpg")]
 impl StandaloneChange {
     /// A change of nothing yet.
     pub(crate) fn new() -> Self {
@@ -1110,7 +1106,6 @@ impl StandaloneChange {
 /// An index a statement built from the data while it checked its change,
 /// installed when the op that puts its record applies. Replay builds the
 /// index from the data again.
-#[cfg(feature = "lpg")]
 pub(crate) enum BuiltIndex {
     /// A vector index.
     #[cfg(feature = "vector-index")]

@@ -12,12 +12,7 @@
 //! cargo test -p grafeo-engine --all-features --test migration
 //! ```
 
-#![cfg(all(
-    feature = "lpg",
-    feature = "gql",
-    feature = "wal",
-    feature = "grafeo-file"
-))]
+#![cfg(all(feature = "gql", feature = "wal", feature = "grafeo-file"))]
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -1471,7 +1466,7 @@ fn race_child() {
     loop {
         match GrafeoDB::open(&path) {
             Ok(db) => {
-                println!("nodes={}", db.node_count());
+                println!("nodes={}", db.node_count().unwrap());
                 db.close().unwrap();
                 drop(db);
                 std::process::exit(OPENED_AND_CLOSED);
@@ -1509,7 +1504,7 @@ fn a_create_never_races_a_migration_between_its_renames() {
         let path = dir.path().join("db.grafeo");
         copy_fixture(&path);
         let db = GrafeoDB::open_read_only(&path).unwrap();
-        let nodes = db.node_count();
+        let nodes = db.node_count().unwrap();
         db.close().unwrap();
         nodes
     };
@@ -1638,7 +1633,7 @@ fn read_child() {
     };
     match opened {
         Ok(db) => {
-            println!("nodes={}", db.node_count());
+            println!("nodes={}", db.node_count().unwrap());
             drop(db);
             std::process::exit(OPENED_AND_CLOSED);
         }
@@ -1852,7 +1847,10 @@ fn a_read_write_open_of_a_kept_copy_is_refused() {
 
         let db = GrafeoDB::open_read_only(&kept)
             .unwrap_or_else(|error| panic!("{kind}: a read-only open reads it: {error}"));
-        assert!(db.node_count() > 0, "{kind}: the kept data is there");
+        assert!(
+            db.node_count().unwrap() > 0,
+            "{kind}: the kept data is there"
+        );
         db.close().unwrap();
     }
 }
@@ -2439,7 +2437,7 @@ fn a_directory_path_with_a_trailing_separator_migrates_as_the_directory() {
         // The path as given no longer exists once `<p>` is a file (`<p>/` is
         // not a directory): disk usage goes by the database's files.
         let file_bytes = usize::try_from(std::fs::metadata(&path).unwrap().len()).unwrap();
-        let disk_bytes = db.detailed_stats().disk_bytes;
+        let disk_bytes = db.detailed_stats().unwrap().disk_bytes;
         assert!(
             disk_bytes.is_some_and(|bytes| bytes >= file_bytes),
             "{separator}: disk usage {disk_bytes:?} counts the migrated file ({file_bytes} bytes)"
@@ -2484,7 +2482,7 @@ fn current_directory_child() {
         Err(error) => println!("read-write={error}"),
     }
     match GrafeoDB::open_read_only(".") {
-        Ok(db) => println!("read-only={}", db.node_count()),
+        Ok(db) => println!("read-only={}", db.node_count().unwrap()),
         Err(error) => println!("read-only={error}"),
     }
 }
@@ -2499,7 +2497,7 @@ fn current_directory_child() {
 fn a_directory_that_is_the_current_directory_is_read_but_not_migrated() {
     let expected_nodes = {
         let db = GrafeoDB::open_read_only(directory()).unwrap();
-        let nodes = db.node_count();
+        let nodes = db.node_count().unwrap();
         db.close().unwrap();
         nodes
     };
@@ -2666,7 +2664,7 @@ fn a_migration_logs_the_counts_before_and_after() {
         let path = dir.path().join("db.grafeo");
         copy_fixture(&path);
         let db = GrafeoDB::open_read_only(&path).unwrap();
-        let nodes = db.node_count();
+        let nodes = db.node_count().unwrap();
         db.close().unwrap();
         nodes
     };

@@ -12,9 +12,9 @@ use pyo3::prelude::*;
 use pyo3::types::PyDict;
 
 use grafeo_adapters::plugins::algorithms::{self, KeyOrderError};
-use grafeo_common::types::{NodeId, Value};
+use grafeo_common::types::{NodeId, ReadView, Value};
 use grafeo_common::utils::error::{Error, QueryError, QueryErrorKind};
-use grafeo_core::graph::GraphStoreSearch;
+use grafeo_core::graph::GraphStore;
 use grafeo_engine::database::GrafeoDB;
 
 use crate::error::PyGrafeoError;
@@ -41,13 +41,14 @@ fn key_error(message: String) -> PyGrafeoError {
 /// and two with equal values. A value that cannot be read raises the read's
 /// error.
 fn ordered_by_key(
-    store: &dyn GraphStoreSearch,
+    store: &dyn GraphStore,
+    view: ReadView,
     key: Option<&str>,
 ) -> Result<Option<Vec<(NodeId, Value)>>, PyGrafeoError> {
     let Some(key) = key else {
         return Ok(None);
     };
-    algorithms::order_by_key(store, key)
+    algorithms::order_by_key(store, view, key)
         .map(Some)
         .map_err(|error| match &error {
             KeyOrderError::Read { source, .. } => PyGrafeoError::Database {
@@ -212,7 +213,7 @@ impl PyAlgorithms {
         &self,
         db: &GrafeoDB,
         projection: Option<&str>,
-    ) -> Result<Arc<dyn GraphStoreSearch>, PyGrafeoError> {
+    ) -> Result<Arc<dyn GraphStore>, PyGrafeoError> {
         if let Some(name) = projection {
             return db.projection(name).ok_or_else(|| {
                 PyGrafeoError::from(Error::Query(QueryError::new(
@@ -231,38 +232,43 @@ impl PyAlgorithms {
     }
 
     /// Runs `compute` on the store the algorithm reads (see
-    /// [`store_for`](Self::store_for)) with the GIL released.
-    fn compute<T: Send>(
+    /// [`store_for`](Self::store_for)) with the GIL released, as a committed
+    /// reader at the current epoch sees it; a read the store cannot do
+    /// raises its error.
+    fn compute<T: Send, E: Into<PyGrafeoError>>(
         &self,
         py: Python<'_>,
         projection: Option<&str>,
-        compute: impl FnOnce(&dyn GraphStoreSearch) -> T + Send,
+        compute: impl FnOnce(&dyn GraphStore, ReadView) -> Result<T, E> + Send,
     ) -> PyResult<T> {
         without_gil(py, || {
             let db = self.db.read();
             let store = self.store_for(&db, projection)?;
-            Ok(compute(&*store))
+            let view = ReadView::committed(db.current_epoch());
+            compute(&*store, view).map_err(Into::into)
         })
     }
 
     /// Like [`compute`](Self::compute), in the node order of `key=` (see
     /// [`ordered_by_key`]): `compute` gets the ordered nodes, read with the
     /// algorithm, and the order comes back with its keys as Python objects.
-    fn compute_keyed<T: Send>(
+    fn compute_keyed<T: Send, E: Into<PyGrafeoError>>(
         &self,
         py: Python<'_>,
         projection: Option<&str>,
         key: Option<&str>,
-        compute: impl FnOnce(&dyn GraphStoreSearch, Option<&[NodeId]>) -> T + Send,
+        compute: impl FnOnce(&dyn GraphStore, ReadView, Option<&[NodeId]>) -> Result<T, E> + Send,
     ) -> PyResult<(T, Option<KeyOrder>)> {
         let (result, ordered) = without_gil(py, || {
             let db = self.db.read();
             let store = self.store_for(&db, projection)?;
-            let ordered = ordered_by_key(&*store, key)?;
+            let view = ReadView::committed(db.current_epoch());
+            let ordered = ordered_by_key(&*store, view, key)?;
             let nodes: Option<Vec<NodeId>> = ordered
                 .as_ref()
                 .map(|ordered| ordered.iter().map(|(node, _)| *node).collect());
-            Ok((compute(&*store, nodes.as_deref()), ordered))
+            let result = compute(&*store, view, nodes.as_deref()).map_err(Into::into)?;
+            Ok::<_, PyGrafeoError>((result, ordered))
         })?;
         Ok((result, key_order(py, key, ordered)?))
     }
@@ -283,8 +289,8 @@ impl PyAlgorithms {
     ///     List of node IDs in BFS order
     #[pyo3(signature = (start, *, projection=None))]
     fn bfs(&self, start: u64, projection: Option<&str>, py: Python<'_>) -> PyResult<Vec<u64>> {
-        let result = self.compute(py, projection, |store| {
-            algorithms::bfs(store, NodeId::new(start))
+        let result = self.compute(py, projection, |store, view| {
+            algorithms::bfs(store, view, NodeId::new(start))
         })?;
         Ok(result.into_iter().map(|n| n.0).collect())
     }
@@ -303,8 +309,8 @@ impl PyAlgorithms {
         projection: Option<&str>,
         py: Python<'_>,
     ) -> PyResult<Vec<Vec<u64>>> {
-        let layers = self.compute(py, projection, |store| {
-            algorithms::bfs_layers(store, NodeId::new(start))
+        let layers = self.compute(py, projection, |store, view| {
+            algorithms::bfs_layers(store, view, NodeId::new(start))
         })?;
         Ok(layers
             .into_iter()
@@ -321,8 +327,8 @@ impl PyAlgorithms {
     ///     List of node IDs in post-order (finished order)
     #[pyo3(signature = (start, *, projection=None))]
     fn dfs(&self, start: u64, projection: Option<&str>, py: Python<'_>) -> PyResult<Vec<u64>> {
-        let result = self.compute(py, projection, |store| {
-            algorithms::dfs(store, NodeId::new(start))
+        let result = self.compute(py, projection, |store, view| {
+            algorithms::dfs(store, view, NodeId::new(start))
         })?;
         Ok(result.into_iter().map(|n| n.0).collect())
     }
@@ -333,7 +339,9 @@ impl PyAlgorithms {
     ///     List of all node IDs in DFS post-order
     #[pyo3(signature = (*, projection=None))]
     fn dfs_all(&self, projection: Option<&str>, py: Python<'_>) -> PyResult<Vec<u64>> {
-        let result = self.compute(py, projection, |store| algorithms::dfs_all(store))?;
+        let result = self.compute(py, projection, |store, view| {
+            algorithms::dfs_all(store, view)
+        })?;
         Ok(result.into_iter().map(|n| n.0).collect())
     }
 
@@ -358,8 +366,8 @@ impl PyAlgorithms {
         key: Option<&str>,
         py: Python<'_>,
     ) -> PyResult<Py<PyAny>> {
-        let (result, order) = self.compute_keyed(py, projection, key, |store, _| {
-            algorithms::connected_components(store)
+        let (result, order) = self.compute_keyed(py, projection, key, |store, view, _| {
+            algorithms::connected_components(store, view)
         })?;
         node_dict(py, result, order.as_ref())
     }
@@ -371,8 +379,8 @@ impl PyAlgorithms {
         projection: Option<&str>,
         py: Python<'_>,
     ) -> PyResult<usize> {
-        self.compute(py, projection, |store| {
-            algorithms::connected_component_count(store)
+        self.compute(py, projection, |store, view| {
+            algorithms::connected_component_count(store, view)
         })
     }
 
@@ -387,8 +395,8 @@ impl PyAlgorithms {
         projection: Option<&str>,
         py: Python<'_>,
     ) -> PyResult<Vec<Vec<u64>>> {
-        let result = self.compute(py, projection, |store| {
-            algorithms::strongly_connected_components(store)
+        let result = self.compute(py, projection, |store, view| {
+            algorithms::strongly_connected_components(store, view)
         })?;
 
         // Group nodes by component ID, each component in node-id order (the
@@ -417,14 +425,18 @@ impl PyAlgorithms {
         projection: Option<&str>,
         py: Python<'_>,
     ) -> PyResult<Option<Vec<u64>>> {
-        let result = self.compute(py, projection, |store| algorithms::topological_sort(store))?;
+        let result = self.compute(py, projection, |store, view| {
+            algorithms::topological_sort(store, view)
+        })?;
         Ok(result.map(|v| v.into_iter().map(|n| n.0).collect()))
     }
 
     /// Check if the graph is a DAG.
     #[pyo3(signature = (*, projection=None))]
     fn is_dag(&self, projection: Option<&str>, py: Python<'_>) -> PyResult<bool> {
-        self.compute(py, projection, |store| algorithms::is_dag(store))
+        self.compute(py, projection, |store, view| {
+            algorithms::is_dag(store, view)
+        })
     }
 
     // ==========================================================================
@@ -451,9 +463,10 @@ impl PyAlgorithms {
         py: Python<'_>,
     ) -> PyResult<Py<PyAny>> {
         if let Some(target_id) = target {
-            let path = self.compute(py, projection, |store| {
+            let path = self.compute(py, projection, |store, view| {
                 algorithms::dijkstra_path(
                     store,
+                    view,
                     NodeId::new(source),
                     NodeId::new(target_id),
                     weight,
@@ -467,8 +480,8 @@ impl PyAlgorithms {
                 None => Ok(py.None()),
             }
         } else {
-            let result = self.compute(py, projection, |store| {
-                algorithms::dijkstra(store, NodeId::new(source), weight)
+            let result = self.compute(py, projection, |store, view| {
+                algorithms::dijkstra(store, view, NodeId::new(source), weight)
             })?;
             let distances: BTreeMap<u64, f64> = result
                 .distances
@@ -498,12 +511,13 @@ impl PyAlgorithms {
         projection: Option<&str>,
         py: Python<'_>,
     ) -> PyResult<Py<PyAny>> {
-        let distances = self.compute(py, projection, |store| {
+        let distances = self.compute(py, projection, |store, view| {
             // Resolve source: try integer parse first, then name property lookup
             let source_id = if let Ok(id) = source.parse::<u64>() {
                 NodeId::new(id)
             } else {
-                let candidates = store.find_nodes_by_property("name", &Value::from(source));
+                let candidates =
+                    store.find_nodes_by_property("name", &Value::from(source), view)?;
                 match candidates.len() {
                     0 => {
                         return Err(PyGrafeoError::InvalidArgument(format!(
@@ -519,29 +533,19 @@ impl PyAlgorithms {
                 }
             };
 
-            let result = algorithms::dijkstra(store, source_id, weight_attr);
+            let result = algorithms::dijkstra(store, view, source_id, weight_attr)?;
 
             // Map node IDs to names (falling back to string ID)
-            let distances: BTreeMap<String, f64> = result
-                .distances
-                .into_iter()
-                .map(|(node, dist)| {
-                    let name = store
-                        .get_node(node)
-                        .and_then(|n| n.get_property("name").cloned())
-                        .and_then(|v| {
-                            if let Value::String(s) = v {
-                                Some(s.to_string())
-                            } else {
-                                None
-                            }
-                        })
-                        .unwrap_or_else(|| node.0.to_string());
-                    (name, dist)
-                })
-                .collect();
-            Ok(distances)
-        })??;
+            let mut distances: BTreeMap<String, f64> = BTreeMap::new();
+            for (node, dist) in result.distances {
+                let name = match store.node_property(node, "name", view)? {
+                    Some(Value::String(name)) => name.to_string(),
+                    _ => node.0.to_string(),
+                };
+                distances.insert(name, dist);
+            }
+            Ok::<_, PyGrafeoError>(distances)
+        })?;
 
         Ok(distances.into_pyobject(py)?.into_any().unbind())
     }
@@ -581,9 +585,10 @@ impl PyAlgorithms {
 
         let heuristic_fn = |n: NodeId| -> f64 { h_map.get(&n.0).copied().unwrap_or(0.0) };
 
-        let path = self.compute(py, projection, |store| {
+        let path = self.compute(py, projection, |store, view| {
             algorithms::astar(
                 store,
+                view,
                 NodeId::new(source),
                 NodeId::new(target),
                 weight,
@@ -615,8 +620,8 @@ impl PyAlgorithms {
         projection: Option<&str>,
         py: Python<'_>,
     ) -> PyResult<Py<PyAny>> {
-        let result = self.compute(py, projection, |store| {
-            algorithms::bellman_ford(store, NodeId::new(source), weight)
+        let result = self.compute(py, projection, |store, view| {
+            algorithms::bellman_ford(store, view, NodeId::new(source), weight)
         })?;
 
         let distances: BTreeMap<u64, f64> = result
@@ -652,8 +657,8 @@ impl PyAlgorithms {
         projection: Option<&str>,
         py: Python<'_>,
     ) -> PyResult<Py<PyAny>> {
-        let result = self.compute(py, projection, |store| {
-            algorithms::floyd_warshall(store, weight)
+        let result = self.compute(py, projection, |store, view| {
+            algorithms::floyd_warshall(store, view, weight)
         })?;
 
         let dict = PyDict::new(py);
@@ -694,13 +699,13 @@ impl PyAlgorithms {
         py: Python<'_>,
     ) -> PyResult<Py<PyAny>> {
         if normalized {
-            let (result, order) = self.compute_keyed(py, projection, key, |store, _| {
-                algorithms::degree_centrality_normalized(store)
+            let (result, order) = self.compute_keyed(py, projection, key, |store, view, _| {
+                algorithms::degree_centrality_normalized(store, view)
             })?;
             node_dict(py, result, order.as_ref())
         } else {
-            let (result, order) = self.compute_keyed(py, projection, key, |store, _| {
-                algorithms::degree_centrality(store)
+            let (result, order) = self.compute_keyed(py, projection, key, |store, view, _| {
+                algorithms::degree_centrality(store, view)
             })?;
             let mut degrees = Vec::with_capacity(result.total_degree.len());
             for (&node, &total) in &result.total_degree {
@@ -750,18 +755,24 @@ impl PyAlgorithms {
         // argument.
         Python::attach(|py| {
             let (result, order) =
-                self.compute_keyed(py, projection, key, |store, nodes| match nodes {
+                self.compute_keyed(py, projection, key, |store, view, nodes| match nodes {
                     Some(nodes) => algorithms::pagerank_in_order(
                         store,
+                        view,
                         nodes,
                         damping,
                         max_iterations,
                         tolerance,
                         directed,
                     ),
-                    None => {
-                        algorithms::pagerank(store, damping, max_iterations, tolerance, directed)
-                    }
+                    None => algorithms::pagerank(
+                        store,
+                        view,
+                        damping,
+                        max_iterations,
+                        tolerance,
+                        directed,
+                    ),
                 })?;
             node_dict(py, result, order.as_ref())
         })
@@ -787,8 +798,8 @@ impl PyAlgorithms {
         key: Option<&str>,
         py: Python<'_>,
     ) -> PyResult<Py<PyAny>> {
-        let (result, order) = self.compute_keyed(py, projection, key, |store, _| {
-            algorithms::betweenness_centrality(store, normalized)
+        let (result, order) = self.compute_keyed(py, projection, key, |store, view, _| {
+            algorithms::betweenness_centrality(store, view, normalized)
         })?;
         node_dict(py, result, order.as_ref())
     }
@@ -813,8 +824,8 @@ impl PyAlgorithms {
         key: Option<&str>,
         py: Python<'_>,
     ) -> PyResult<Py<PyAny>> {
-        let (result, order) = self.compute_keyed(py, projection, key, |store, _| {
-            algorithms::closeness_centrality(store, wf_improved)
+        let (result, order) = self.compute_keyed(py, projection, key, |store, view, _| {
+            algorithms::closeness_centrality(store, view, wf_improved)
         })?;
         node_dict(py, result, order.as_ref())
     }
@@ -846,9 +857,11 @@ impl PyAlgorithms {
         py: Python<'_>,
     ) -> PyResult<Py<PyAny>> {
         let (result, order) =
-            self.compute_keyed(py, projection, key, |store, nodes| match nodes {
-                Some(nodes) => algorithms::label_propagation_in_order(store, nodes, max_iterations),
-                None => algorithms::label_propagation(store, max_iterations),
+            self.compute_keyed(py, projection, key, |store, view, nodes| match nodes {
+                Some(nodes) => {
+                    algorithms::label_propagation_in_order(store, view, nodes, max_iterations)
+                }
+                None => algorithms::label_propagation(store, view, max_iterations),
             })?;
         node_dict(py, result, order.as_ref())
     }
@@ -877,9 +890,9 @@ impl PyAlgorithms {
         py: Python<'_>,
     ) -> PyResult<Py<PyAny>> {
         let (result, order) =
-            self.compute_keyed(py, projection, key, |store, nodes| match nodes {
-                Some(nodes) => algorithms::louvain_in_order(store, nodes, resolution),
-                None => algorithms::louvain(store, resolution),
+            self.compute_keyed(py, projection, key, |store, view, nodes| match nodes {
+                Some(nodes) => algorithms::louvain_in_order(store, view, nodes, resolution),
+                None => algorithms::louvain(store, view, resolution),
             })?;
 
         let dict = PyDict::new(py);
@@ -911,7 +924,9 @@ impl PyAlgorithms {
         projection: Option<&str>,
         py: Python<'_>,
     ) -> PyResult<Py<PyAny>> {
-        let result = self.compute(py, projection, |store| algorithms::kruskal(store, weight))?;
+        let result = self.compute(py, projection, |store, view| {
+            algorithms::kruskal(store, view, weight)
+        })?;
 
         let edges: Vec<(u64, u64, f64)> = result
             .edges
@@ -943,8 +958,8 @@ impl PyAlgorithms {
         py: Python<'_>,
     ) -> PyResult<Py<PyAny>> {
         let start_node = start.map(NodeId::new);
-        let result = self.compute(py, projection, |store| {
-            algorithms::prim(store, weight, start_node)
+        let result = self.compute(py, projection, |store, view| {
+            algorithms::prim(store, view, weight, start_node)
         })?;
 
         let edges: Vec<(u64, u64, f64)> = result
@@ -982,8 +997,14 @@ impl PyAlgorithms {
         projection: Option<&str>,
         py: Python<'_>,
     ) -> PyResult<Py<PyAny>> {
-        let result = self.compute(py, projection, |store| {
-            algorithms::max_flow(store, NodeId::new(source), NodeId::new(sink), capacity)
+        let result = self.compute(py, projection, |store, view| {
+            algorithms::max_flow(
+                store,
+                view,
+                NodeId::new(source),
+                NodeId::new(sink),
+                capacity,
+            )
         })?;
         match result {
             Some(result) => {
@@ -1025,9 +1046,10 @@ impl PyAlgorithms {
         projection: Option<&str>,
         py: Python<'_>,
     ) -> PyResult<Py<PyAny>> {
-        let result = self.compute(py, projection, |store| {
+        let result = self.compute(py, projection, |store, view| {
             algorithms::min_cost_max_flow(
                 store,
+                view,
                 NodeId::new(source),
                 NodeId::new(sink),
                 capacity,
@@ -1083,11 +1105,11 @@ impl PyAlgorithms {
         key: Option<&str>,
         py: Python<'_>,
     ) -> PyResult<Py<PyAny>> {
-        let (result, order) = self.compute_keyed(py, projection, key, |store, _| {
+        let (result, order) = self.compute_keyed(py, projection, key, |store, view, _| {
             if parallel {
-                algorithms::clustering_coefficient_parallel(store, 50)
+                algorithms::clustering_coefficient_parallel(store, view, 50)
             } else {
-                algorithms::clustering_coefficient(store)
+                algorithms::clustering_coefficient(store, view)
             }
         })?;
 
@@ -1123,8 +1145,8 @@ impl PyAlgorithms {
         key: Option<&str>,
         py: Python<'_>,
     ) -> PyResult<Py<PyAny>> {
-        let (result, order) = self.compute_keyed(py, projection, key, |store, _| {
-            algorithms::triangle_count(store)
+        let (result, order) = self.compute_keyed(py, projection, key, |store, view, _| {
+            algorithms::triangle_count(store, view)
         })?;
         node_dict(py, result, order.as_ref())
     }
@@ -1137,7 +1159,9 @@ impl PyAlgorithms {
     ///     Total unique triangle count
     #[pyo3(signature = (*, projection=None))]
     fn total_triangles(&self, projection: Option<&str>, py: Python<'_>) -> PyResult<u64> {
-        self.compute(py, projection, |store| algorithms::total_triangles(store))
+        self.compute(py, projection, |store, view| {
+            algorithms::total_triangles(store, view)
+        })
     }
 
     /// Compute the global (average) clustering coefficient.
@@ -1150,8 +1174,8 @@ impl PyAlgorithms {
         projection: Option<&str>,
         py: Python<'_>,
     ) -> PyResult<f64> {
-        self.compute(py, projection, |store| {
-            algorithms::global_clustering_coefficient(store)
+        self.compute(py, projection, |store, view| {
+            algorithms::global_clustering_coefficient(store, view)
         })
     }
 
@@ -1173,8 +1197,8 @@ impl PyAlgorithms {
         key: Option<&str>,
         py: Python<'_>,
     ) -> PyResult<Py<PyAny>> {
-        let (result, order) = self.compute_keyed(py, projection, key, |store, _| {
-            algorithms::local_clustering_coefficient(store)
+        let (result, order) = self.compute_keyed(py, projection, key, |store, view, _| {
+            algorithms::local_clustering_coefficient(store, view)
         })?;
         node_dict(py, result, order.as_ref())
     }
@@ -1201,8 +1225,8 @@ impl PyAlgorithms {
         key: Option<&str>,
         py: Python<'_>,
     ) -> PyResult<Py<PyAny>> {
-        let (result, order) = self.compute_keyed(py, projection, key, |store, _| {
-            algorithms::articulation_points(store)
+        let (result, order) = self.compute_keyed(py, projection, key, |store, view, _| {
+            algorithms::articulation_points(store, view)
         })?;
         node_list(py, result, order.as_ref())
     }
@@ -1213,7 +1237,9 @@ impl PyAlgorithms {
     ///     List of (source, target) tuples representing bridges
     #[pyo3(signature = (*, projection=None))]
     fn bridges(&self, projection: Option<&str>, py: Python<'_>) -> PyResult<Vec<(u64, u64)>> {
-        let result = self.compute(py, projection, |store| algorithms::bridges(store))?;
+        let result = self.compute(py, projection, |store, view| {
+            algorithms::bridges(store, view)
+        })?;
         Ok(result.into_iter().map(|(s, t)| (s.0, t.0)).collect())
     }
 
@@ -1242,8 +1268,8 @@ impl PyAlgorithms {
         key: Option<&str>,
         py: Python<'_>,
     ) -> PyResult<Py<PyAny>> {
-        let (result, order) = self.compute_keyed(py, projection, key, |store, _| {
-            algorithms::kcore_decomposition(store)
+        let (result, order) = self.compute_keyed(py, projection, key, |store, view, _| {
+            algorithms::kcore_decomposition(store, view)
         })?;
 
         if let Some(k_val) = k {

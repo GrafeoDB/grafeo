@@ -9,12 +9,7 @@
 //! cargo test -p grafeo-engine --all-features --test procedure_call_in_a_query
 //! ```
 
-#![cfg(all(
-    feature = "lpg",
-    feature = "gql",
-    feature = "cypher",
-    feature = "algos"
-))]
+#![cfg(all(feature = "gql", feature = "cypher", feature = "algos"))]
 
 use grafeo_common::types::Value;
 use grafeo_common::utils::error::{Error, QueryErrorKind};

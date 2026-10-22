@@ -15,7 +15,6 @@
 // Miri cannot interpret the AES-NI intrinsics aes-gcm uses.
 #![cfg(all(
     feature = "encryption",
-    feature = "lpg",
     feature = "gql",
     feature = "wal",
     feature = "grafeo-file",
@@ -210,6 +209,7 @@ fn an_encrypted_database_keeps_its_data_across_a_reopen() {
     );
     assert_eq!(
         db.find_nodes_by_property("city", &Value::from("Berlin"))
+            .unwrap()
             .len(),
         1,
         "the index finds Gus"

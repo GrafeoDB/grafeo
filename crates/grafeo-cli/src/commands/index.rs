@@ -71,7 +71,7 @@ pub fn run(cmd: IndexCommands, format: OutputFormat, quiet: bool) -> Result<()> 
         }
         IndexCommands::Stats { path } => {
             let db = super::open_existing_read_only(&path)?;
-            let stats = db.detailed_stats();
+            let stats = db.detailed_stats()?;
 
             let fmt: Format = format.into();
             let items = vec![

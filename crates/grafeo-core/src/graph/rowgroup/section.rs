@@ -3202,7 +3202,8 @@ mod tests {
     use grafeo_common::storage::{
         ChunkCaps, ChunkKind, ChunkMeta, ChunkNamespace, SectionSink, SectionSource,
     };
-    use grafeo_common::types::{EdgeId, NodeId, Value};
+    use grafeo_common::types::ReadView;
+    use grafeo_common::types::{ArcStr, EdgeId, NodeId, Value};
     use grafeo_common::utils::error::{Error, Result};
 
     use super::{
@@ -3303,13 +3304,13 @@ mod tests {
             "{what}: the counts"
         );
         assert_eq!(
-            loaded.all_labels(),
-            store.all_labels(),
+            loaded.all_labels().unwrap(),
+            store.all_labels().unwrap(),
             "{what}: the labels"
         );
         assert_eq!(
-            loaded.all_edge_types(),
-            store.all_edge_types(),
+            loaded.all_edge_types().unwrap(),
+            store.all_edge_types().unwrap(),
             "{what}: the edge types"
         );
         assert_eq!(
@@ -3684,7 +3685,10 @@ mod tests {
         assert_eq!((&found.nodes, &found.edges), (&then.nodes, &then.edges));
         assert_eq!(loaded.current_epoch(), earlier, "the section's epoch");
         assert_eq!(
-            (loaded.node_count(), loaded.edge_count()),
+            (
+                loaded.node_count(ReadView::latest()).unwrap(),
+                loaded.edge_count(ReadView::latest()).unwrap()
+            ),
             (then.nodes.len(), then.edges.len())
         );
     }
@@ -3726,11 +3730,12 @@ mod tests {
             .unwrap();
         assert_eq!(root.current_epoch(), earlier);
         assert_eq!(
-            root.node_property_at(alix, "age", ReadView::committed(earlier)),
+            root.node_property(alix, "age", ReadView::committed(earlier))
+                .unwrap(),
             Some(Value::Int64(19)),
             "Alix's age before the later commit"
         );
-        assert_eq!(root.node_count(), 4);
+        assert_eq!(root.node_count(ReadView::latest()).unwrap(), 4);
 
         // A 0.5.x blob is migrated (see `load`); bytes that are none are
         // refused as damage, and load nothing.
@@ -3741,7 +3746,7 @@ mod tests {
             .read_from(&*legacy.section_source(SectionType::LpgStore).unwrap())
             .unwrap_err();
         assert!(matches!(error, Error::Corruption(_)), "{error}");
-        assert_eq!(empty.node_count(), 0);
+        assert_eq!(empty.node_count(ReadView::latest()).unwrap(), 0);
         assert!(section.serialize().is_err(), "no blob form");
     }
 
@@ -3784,10 +3789,22 @@ mod tests {
         assert_eq!(pieces, numbered, "numbered from 0");
         let loaded = read(&chunks);
         assert_same(&loaded, &store, "pieces");
-        assert_eq!(loaded.edges_from(hub, Direction::Incoming).len(), 480);
         assert_eq!(
             loaded
-                .edges_of_type(hub, Direction::Incoming, "KNOWS")
+                .edges(hub, Direction::Incoming, &[], ReadView::latest())
+                .unwrap()
+                .len(),
+            480
+        );
+        assert_eq!(
+            loaded
+                .edges(
+                    hub,
+                    Direction::Incoming,
+                    &[ArcStr::from("KNOWS")],
+                    ReadView::latest()
+                )
+                .unwrap()
                 .len(),
             240
         );
@@ -3827,9 +3844,27 @@ mod tests {
         let loaded = read(&write(&store, ChunkCaps::DEFAULT));
         // The nodes' name, age and city, and the edges' since.
         assert_eq!(loaded.cold_columns(), 4, "nothing is decoded by the load");
-        assert_eq!((loaded.node_count(), loaded.edge_count()), (4, 2));
-        assert_eq!(loaded.nodes_by_label("Person").len(), 4);
-        assert_eq!(loaded.edges_from(gus, Direction::Outgoing).len(), 1);
+        assert_eq!(
+            (
+                loaded.node_count(ReadView::latest()).unwrap(),
+                loaded.edge_count(ReadView::latest()).unwrap()
+            ),
+            (4, 2)
+        );
+        assert_eq!(
+            loaded
+                .nodes_by_label("Person", ReadView::latest())
+                .unwrap()
+                .len(),
+            4
+        );
+        assert_eq!(
+            loaded
+                .edges(gus, Direction::Outgoing, &[], ReadView::latest())
+                .unwrap()
+                .len(),
+            1
+        );
         assert_eq!(
             loaded.cold_columns(),
             4,
@@ -3838,7 +3873,9 @@ mod tests {
         let cold_bytes = loaded.heap_bytes();
 
         assert_eq!(
-            loaded.get_node_property(gus, &PropertyKey::new("age")),
+            loaded
+                .node_property(gus, "age", ReadView::latest())
+                .unwrap(),
             Some(Value::Int64(3))
         );
         assert_eq!(loaded.cold_columns(), 4, "a scalar read stays encoded");
@@ -3846,7 +3883,9 @@ mod tests {
 
         let name = PropertyKey::new("name");
         assert_eq!(
-            loaded.get_node_property(mia, &name),
+            loaded
+                .node_property(mia, name.as_str(), ReadView::latest())
+                .unwrap(),
             Some(Value::from("Mia"))
         );
         assert_eq!(
@@ -3873,14 +3912,25 @@ mod tests {
             .unwrap();
         assert_eq!(loaded.cold_columns(), 2);
         let age = PropertyKey::new("age");
-        assert_eq!(loaded.get_node_property(alix, &age), Some(Value::Int64(88)));
-        assert_eq!(loaded.get_node_property(gus, &age), Some(Value::Int64(3)));
+        assert_eq!(
+            loaded
+                .node_property(alix, age.as_str(), ReadView::latest())
+                .unwrap(),
+            Some(Value::Int64(88))
+        );
+        assert_eq!(
+            loaded
+                .node_property(gus, age.as_str(), ReadView::latest())
+                .unwrap(),
+            Some(Value::Int64(3))
+        );
 
         // Whole entities use the same scalar path; the city string decodes.
-        assert!(loaded.get_node(alix).is_some());
+        assert!(loaded.node(alix, ReadView::latest()).unwrap().is_some());
         assert!(
             loaded
-                .get_edge(grafeo_common::types::EdgeId::new(0))
+                .edge(grafeo_common::types::EdgeId::new(0), ReadView::latest())
+                .unwrap()
                 .is_some()
         );
         assert_eq!(
@@ -3904,8 +3954,12 @@ mod tests {
         let (store, [alix, gus, ..]) = four_people();
         let age = PropertyKey::new("age");
         let (alix_age, gus_age) = (
-            store.get_node_property(alix, &age),
-            store.get_node_property(gus, &age),
+            store
+                .node_property(alix, age.as_str(), ReadView::latest())
+                .unwrap(),
+            store
+                .node_property(gus, age.as_str(), ReadView::latest())
+                .unwrap(),
         );
         assert!(alix_age.is_some());
         let loaded = read(&write(&store, ChunkCaps::DEFAULT));
@@ -3921,27 +3975,27 @@ mod tests {
         );
         let own = ReadView::transaction(tx.id, tx.snapshot);
         assert_eq!(
-            loaded.node_property_at(alix, "age", own),
+            loaded.node_property(alix, "age", own).unwrap(),
             Some(Value::Int64(88))
         );
-        assert_eq!(loaded.node_property_at(alix, "age", before), alix_age);
-        assert_eq!(loaded.node_property_at(gus, "age", before), gus_age);
+        assert_eq!(loaded.node_property(alix, "age", before).unwrap(), alix_age);
+        assert_eq!(loaded.node_property(gus, "age", before).unwrap(), gus_age);
 
         let epoch = tx.commit().unwrap();
         let after = ReadView::committed(epoch);
-        assert_eq!(loaded.node_property_at(alix, "age", before), alix_age);
+        assert_eq!(loaded.node_property(alix, "age", before).unwrap(), alix_age);
         assert_eq!(
-            loaded.node_property_at(alix, "age", after),
+            loaded.node_property(alix, "age", after).unwrap(),
             Some(Value::Int64(88))
         );
         assert_eq!(loaded.update_nodes(), 1);
         loaded.collect(epoch);
         assert_eq!(loaded.update_nodes(), 0);
         assert_eq!(
-            loaded.node_property_at(alix, "age", after),
+            loaded.node_property(alix, "age", after).unwrap(),
             Some(Value::Int64(88))
         );
-        assert_eq!(loaded.node_property_at(gus, "age", after), gus_age);
+        assert_eq!(loaded.node_property(gus, "age", after).unwrap(), gus_age);
     }
 
     /// A bitmap chunk of `rows` (ids) in `namespace`, column `column`.
@@ -3995,9 +4049,25 @@ mod tests {
         found.consistent("after the delete chunks").unwrap();
         assert!(!found.nodes.contains_key(&vincent.as_u64()) && found.nodes.len() == 3);
         assert_eq!(found.edges.keys().copied().collect::<Vec<_>>(), [1]);
-        assert_eq!(loaded.edges_from(alix, Direction::Outgoing), Vec::new());
-        assert_eq!(loaded.edges_from(gus, Direction::Incoming), Vec::new());
-        assert_eq!((loaded.node_count(), loaded.edge_count()), (3, 1));
+        assert_eq!(
+            loaded
+                .edges(alix, Direction::Outgoing, &[], ReadView::latest())
+                .unwrap(),
+            Vec::new()
+        );
+        assert_eq!(
+            loaded
+                .edges(gus, Direction::Incoming, &[], ReadView::latest())
+                .unwrap(),
+            Vec::new()
+        );
+        assert_eq!(
+            (
+                loaded.node_count(ReadView::latest()).unwrap(),
+                loaded.edge_count(ReadView::latest()).unwrap()
+            ),
+            (3, 1)
+        );
         assert_eq!(
             loaded.version_bytes(),
             flat,

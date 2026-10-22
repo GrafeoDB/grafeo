@@ -85,11 +85,13 @@ public sealed class GrafeoGraph : IDisposable
             Handle, (ulong)sourceId, (ulong)targetId, edgeType, propsJson));
     }
 
-    /// <summary>Get a node by ID.</summary>
-    /// <exception cref="GrafeoException">The node does not exist, or the graph was dropped.</exception>
-    public Node GetNode(long id)
+    /// <summary>Get a node by ID, or null when it does not exist.</summary>
+    /// <exception cref="GrafeoException">The graph was dropped, or the read failed.</exception>
+    public Node? GetNode(long id)
     {
         GrafeoException.ThrowIfFailed(NativeMethods.grafeo_graph_get_node(Handle, (ulong)id, out var nodePtr));
+        if (nodePtr == nint.Zero)
+            return null;
         try
         {
             return GrafeoDB.ReadNode(nodePtr);
@@ -100,11 +102,13 @@ public sealed class GrafeoGraph : IDisposable
         }
     }
 
-    /// <summary>Get an edge by ID.</summary>
-    /// <exception cref="GrafeoException">The edge does not exist, or the graph was dropped.</exception>
-    public Edge GetEdge(long id)
+    /// <summary>Get an edge by ID, or null when it does not exist.</summary>
+    /// <exception cref="GrafeoException">The graph was dropped, or the read failed.</exception>
+    public Edge? GetEdge(long id)
     {
         GrafeoException.ThrowIfFailed(NativeMethods.grafeo_graph_get_edge(Handle, (ulong)id, out var edgePtr));
+        if (edgePtr == nint.Zero)
+            return null;
         try
         {
             return GrafeoDB.ReadEdge(edgePtr);

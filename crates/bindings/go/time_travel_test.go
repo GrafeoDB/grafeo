@@ -1,6 +1,7 @@
 package grafeo
 
 import (
+	"errors"
 	"fmt"
 	"path/filepath"
 	"strconv"
@@ -92,8 +93,8 @@ func TestTheViewReadsNodesEdgesAndPropertiesAsTheyWere(t *testing.T) {
 	if city, err := view.GetNodeProperty(alix, "city"); err != nil || city != nil {
 		t.Errorf("a missing property: %v %v", city, err)
 	}
-	if _, err := view.GetNode(alix + 1000); err == nil {
-		t.Error("a node that did not exist was found")
+	if _, err := view.GetNode(alix + 1000); !errors.Is(err, ErrNotFound) {
+		t.Errorf("a node that did not exist: %v, want ErrNotFound", err)
 	}
 	if edge, err := view.GetEdge(knows); err != nil || edge.Properties["since"] != float64(2020) {
 		t.Errorf("GetEdge: %v %v", edge, err)
@@ -103,8 +104,8 @@ func TestTheViewReadsNodesEdgesAndPropertiesAsTheyWere(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer now.Close()
-	if _, err := now.GetEdge(knows); err == nil {
-		t.Error("a deleted edge was found now")
+	if _, err := now.GetEdge(knows); !errors.Is(err, ErrNotFound) {
+		t.Errorf("a deleted edge now: %v, want ErrNotFound", err)
 	}
 }
 

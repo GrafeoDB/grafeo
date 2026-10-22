@@ -5,8 +5,6 @@
 //! in-memory backend which bridges `grafeo-core::RowGroupStore` to the
 //! storage interface.
 
-#[cfg(feature = "lpg")]
 pub mod memory;
 
-#[cfg(feature = "lpg")]
 pub use memory::MemoryBackend;

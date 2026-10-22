@@ -48,9 +48,16 @@ const PEOPLE: u64 = 10_000;
 const COLLECT_EVERY: u32 = 1_024;
 
 /// A store the cases run on.
-trait Store: GraphStoreMut + ChangeTarget {}
+trait Store: GraphStoreMut + ChangeTarget {
+    /// The latest epoch the store committed at.
+    fn epoch(&self) -> EpochId;
+}
 
-impl<T: GraphStoreMut + ChangeTarget> Store for T {}
+impl Store for RowGroupStore {
+    fn epoch(&self) -> EpochId {
+        self.current_epoch()
+    }
+}
 
 /// A store with a property index.
 trait Indexed: Store {
@@ -65,7 +72,7 @@ impl Indexed for RowGroupStore {
 
 /// The epoch after the store's current one.
 fn next_epoch(store: &dyn Store) -> EpochId {
-    EpochId::new(store.current_epoch().as_u64() + 1)
+    EpochId::new(store.epoch().as_u64() + 1)
 }
 
 /// Applies `op` as an immediate write at the next epoch.
@@ -250,7 +257,7 @@ fn cases<S: Indexed + 'static>(
             let id = TransactionId::new(transaction);
             let writer = Writer::Transaction {
                 id,
-                snapshot: store.current_epoch(),
+                snapshot: store.epoch(),
             };
             let op = DataOp::SetNodeProperty {
                 id: ids[row],
@@ -289,7 +296,7 @@ fn cases<S: Indexed + 'static>(
             let id = TransactionId::new(transaction);
             let writer = Writer::Transaction {
                 id,
-                snapshot: store.current_epoch(),
+                snapshot: store.epoch(),
             };
             let op = DataOp::SetNodeProperty {
                 id: ids[row],
@@ -323,24 +330,36 @@ fn cases<S: Indexed + 'static>(
     let names: Vec<Value> = (0..ids.len())
         .map(|row| Value::from(format!("Alix {row}")))
         .collect();
-    let view = ReadView::transaction(TransactionId::new(7), store.current_epoch());
+    let view = ReadView::transaction(TransactionId::new(7), store.epoch());
     let mut row = 0_usize;
     group.bench_function("index_lookup", |b| {
         b.iter(|| {
             row = (row + 1) % names.len();
-            black_box(store.find_nodes_by_property("name", &names[row]))
+            black_box(
+                store
+                    .find_nodes_by_property("name", &names[row], ReadView::latest())
+                    .unwrap(),
+            )
         });
     });
     group.bench_function("index_lookup_at_view", |b| {
         b.iter(|| {
             row = (row + 1) % names.len();
-            black_box(store.find_nodes_by_property_at("name", &names[row], view))
+            black_box(
+                store
+                    .find_nodes_by_property("name", &names[row], view)
+                    .unwrap(),
+            )
         });
     });
     group.bench_function("index_maybe_equal_at_view", |b| {
         b.iter(|| {
             row = (row + 1) % names.len();
-            black_box(store.find_nodes_maybe_equal_at("name", &names[row], view))
+            black_box(
+                store
+                    .find_nodes_maybe_equal("name", &names[row], view)
+                    .unwrap(),
+            )
         });
     });
 
@@ -379,60 +398,97 @@ fn cases<S: Indexed + 'static>(
     group.bench_function("read_node_property", |b| {
         b.iter(|| {
             row = (row + 1) % ids.len();
-            black_box(store.get_node_property(ids[row], &age))
+            black_box(
+                store
+                    .node_property(ids[row], age.as_str(), ReadView::latest())
+                    .unwrap(),
+            )
         });
     });
     group.bench_function("read_node_at_snapshot", |b| {
-        let epoch = store.current_epoch();
+        let epoch = store.epoch();
         b.iter(|| {
             row = (row + 1) % ids.len();
-            black_box(store.get_node_versioned(ids[row], epoch, TransactionId::new(7)))
+            black_box(
+                store
+                    .node(
+                        ids[row],
+                        ReadView::transaction(TransactionId::new(7), epoch),
+                    )
+                    .unwrap(),
+            )
         });
     });
     group.bench_function("expand_outgoing", |b| {
         b.iter(|| {
             row = (row + 1) % ids.len();
-            black_box(store.edges_from(ids[row], Direction::Outgoing))
+            black_box(
+                store
+                    .edges(ids[row], Direction::Outgoing, &[], ReadView::latest())
+                    .unwrap(),
+            )
         });
     });
     group.bench_function("label_scan_10k", |b| {
-        b.iter(|| black_box(store.nodes_by_label("Person").len()));
+        b.iter(|| {
+            black_box(
+                store
+                    .nodes_by_label("Person", ReadView::latest())
+                    .unwrap()
+                    .len(),
+            )
+        });
     });
 
     // Reads at a transaction's view, and the reads of now with the
     // visibility checks the engine made before the reads at a view.
-    let view = ReadView::transaction(TransactionId::new(7), store.current_epoch());
+    let view = ReadView::transaction(TransactionId::new(7), store.epoch());
     group.bench_function("read_node_property_at_view", |b| {
         b.iter(|| {
             row = (row + 1) % ids.len();
-            black_box(store.node_property_at(ids[row], "age", view))
+            black_box(store.node_property(ids[row], "age", view).unwrap())
         });
     });
     group.bench_function("expand_outgoing_at_view", |b| {
         b.iter(|| {
             row = (row + 1) % ids.len();
-            black_box(store.edges_from_at(ids[row], Direction::Outgoing, view))
+            black_box(
+                store
+                    .edges(ids[row], Direction::Outgoing, &[], view)
+                    .unwrap(),
+            )
         });
     });
     group.bench_function("expand_outgoing_then_filter", |b| {
         b.iter(|| {
             row = (row + 1) % ids.len();
-            let mut edges = store.edges_from(ids[row], Direction::Outgoing);
+            let mut edges = store
+                .edges(ids[row], Direction::Outgoing, &[], ReadView::latest())
+                .unwrap();
             edges.retain(|&(_, edge)| {
-                store.is_edge_visible_versioned(edge, view.epoch, TransactionId::new(7))
+                store
+                    .is_edge_visible(
+                        edge,
+                        ReadView::transaction(TransactionId::new(7), view.epoch),
+                    )
+                    .unwrap()
             });
             black_box(edges)
         });
     });
     group.bench_function("label_scan_10k_at_view", |b| {
-        b.iter(|| black_box(store.nodes_by_label_at("Person", view).len()));
+        b.iter(|| black_box(store.nodes_by_label("Person", view).unwrap().len()));
     });
     group.bench_function("label_scan_10k_then_filter", |b| {
         b.iter(|| {
-            let ids = store.nodes_by_label("Person");
+            let ids = store.nodes_by_label("Person", ReadView::latest()).unwrap();
             black_box(
                 store
-                    .filter_visible_node_ids_versioned(&ids, view.epoch, TransactionId::new(7))
+                    .filter_visible_node_ids(
+                        &ids,
+                        ReadView::transaction(TransactionId::new(7), view.epoch),
+                    )
+                    .unwrap()
                     .len(),
             )
         });
@@ -443,10 +499,10 @@ fn cases<S: Indexed + 'static>(
     // the old values for older readers, each read walks what it kept.
     let store = make();
     let ids = people(&store);
-    let committed = ReadView::committed(store.current_epoch());
+    let committed = ReadView::committed(store.epoch());
     let writer = Writer::Transaction {
         id: TransactionId::new(7),
-        snapshot: store.current_epoch(),
+        snapshot: store.epoch(),
     };
     for (row, id) in ids.iter().enumerate() {
         for op in [
@@ -466,18 +522,18 @@ fn cases<S: Indexed + 'static>(
     group.bench_function("read_node_property_at_view_with_open_writes", |b| {
         b.iter(|| {
             row = (row + 1) % ids.len();
-            black_box(store.node_property_at(ids[row], "age", committed))
+            black_box(store.node_property(ids[row], "age", committed).unwrap())
         });
     });
     group.bench_function("label_scan_10k_at_view_with_open_writes", |b| {
-        b.iter(|| black_box(store.nodes_by_label_at("Person", committed).len()));
+        b.iter(|| black_box(store.nodes_by_label("Person", committed).unwrap().len()));
     });
     group.finish();
 }
 
 fn bench_rowgroup_store(c: &mut Criterion) {
     cases(c, "rowgroup", RowGroupStore::new, |store| {
-        store.collect_after_write(store.current_epoch());
+        store.collect_after_write(store.epoch());
     });
 }
 
@@ -508,23 +564,35 @@ fn bench_rowgroup_backward_edges(c: &mut Criterion) {
 
         let store = RowGroupStore::with_backward_edges(backward_edges);
         let ids = people(&store);
-        store.collect(store.current_epoch());
+        store.collect(store.epoch());
         group.bench_function("expand_outgoing", |b| {
             b.iter(|| {
                 row = (row + 1) % ids.len();
-                black_box(store.edges_from(ids[row], Direction::Outgoing))
+                black_box(
+                    store
+                        .edges(ids[row], Direction::Outgoing, &[], ReadView::latest())
+                        .unwrap(),
+                )
             });
         });
         group.bench_function("expand_incoming", |b| {
             b.iter(|| {
                 row = (row + 1) % ids.len();
-                black_box(store.edges_from(ids[row], Direction::Incoming))
+                black_box(
+                    store
+                        .edges(ids[row], Direction::Incoming, &[], ReadView::latest())
+                        .unwrap(),
+                )
             });
         });
         group.bench_function("in_degree", |b| {
             b.iter(|| {
                 row = (row + 1) % ids.len();
-                black_box(store.in_degree(ids[row]))
+                black_box(
+                    store
+                        .degree(ids[row], Direction::Incoming, ReadView::latest())
+                        .unwrap(),
+                )
             });
         });
         group.finish();
@@ -591,7 +659,7 @@ fn cold_property_section() -> (MemorySection, NodeId) {
             store: &store,
         }],
         1,
-        store.current_epoch(),
+        store.epoch(),
         ChunkCaps::DEFAULT,
         &mut section,
     )
@@ -618,7 +686,15 @@ fn bench_rowgroup_cold_reads(c: &mut Criterion) {
             || load_property_section(&section),
             |store| {
                 assert_eq!(
-                    black_box(store.get_node_property(black_box(last), black_box(&key))),
+                    black_box(
+                        store
+                            .node_property(
+                                black_box(last),
+                                black_box(&key).as_str(),
+                                ReadView::latest()
+                            )
+                            .unwrap()
+                    ),
                     expected,
                 );
                 // Returning the store keeps its destruction outside timing.
@@ -635,7 +711,14 @@ fn bench_rowgroup_cold_reads(c: &mut Criterion) {
     group.bench_function("hot_point_read_65536", |b| {
         b.iter(|| {
             assert_eq!(
-                black_box(hot.get_node_property(black_box(last), black_box(&key))),
+                black_box(
+                    hot.node_property(
+                        black_box(last),
+                        black_box(&key).as_str(),
+                        ReadView::latest()
+                    )
+                    .unwrap()
+                ),
                 expected,
             );
         });

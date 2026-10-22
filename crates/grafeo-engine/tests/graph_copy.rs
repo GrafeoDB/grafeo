@@ -8,7 +8,7 @@
 //! cargo test -p grafeo-engine --all-features --test graph_copy
 //! ```
 
-#![cfg(all(feature = "lpg", feature = "gql"))]
+#![cfg(feature = "gql")]
 #![allow(
     missing_docs,
     reason = "a test crate has no public API: each test documents itself"

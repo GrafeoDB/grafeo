@@ -15,7 +15,6 @@
 //! ```
 
 #![cfg(all(
-    feature = "lpg",
     feature = "gql",
     feature = "wal",
     feature = "grafeo-file",
@@ -162,7 +161,7 @@ fn nearest_to_alix(db: &GrafeoDB) -> String {
     let hits = db
         .vector_search("Item", "embedding", &[3.0, 19.0, 88.0], 1, None, None)
         .unwrap();
-    let node = db.get_node(hits[0].0).unwrap();
+    let node = db.get_node(hits[0].0).unwrap().unwrap();
     match node.get_property("name") {
         Some(Value::String(name)) => name.to_string(),
         other => panic!("name: {other:?}"),
@@ -567,7 +566,9 @@ fn folding_in_adds_no_change_event_and_no_epoch() {
 
     assert_eq!(folding.current_epoch(), plain.current_epoch());
     for name in ["Alix", "Gus", "Jules"] {
-        let ids = folding.find_nodes_by_property("name", &Value::from(name));
+        let ids = folding
+            .find_nodes_by_property("name", &Value::from(name))
+            .unwrap();
         assert_eq!(ids.len(), 1, "{name}");
         assert_eq!(
             format!("{:?}", folding.history(ids[0]).unwrap()),
@@ -903,7 +904,7 @@ fn search_names(db: &GrafeoDB, query: &[f32], k: usize) -> Vec<String> {
         .unwrap()
         .into_iter()
         .map(
-            |(id, _)| match db.get_node(id).unwrap().get_property("name") {
+            |(id, _)| match db.get_node(id).unwrap().unwrap().get_property("name") {
                 Some(Value::String(name)) => name.to_string(),
                 other => panic!("name: {other:?}"),
             },

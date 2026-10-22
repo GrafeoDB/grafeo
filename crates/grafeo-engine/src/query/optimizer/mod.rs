@@ -129,11 +129,14 @@ impl Optimizer {
     /// (per-label row counts, edge type fanout and degrees, graph totals,
     /// which the store keeps current at each commit), the properties with a
     /// property index, and whether the store keeps backward adjacency.
+    /// The names are planning input, not an answer: a store that cannot list
+    /// them leaves the plan without index hints.
     #[must_use]
     pub fn from_graph_store(store: &dyn grafeo_core::graph::GraphStore) -> Self {
         let stats = store.statistics();
         let indexed_properties = store
             .all_property_keys()
+            .unwrap_or_default()
             .into_iter()
             .filter(|key| store.has_property_index(key))
             .collect();
@@ -1578,9 +1581,9 @@ impl Optimizer {
     ///
     /// The expand is a single hop without a named path (a path, or the list
     /// of a quantified edge, would come out reversed). Its source is a scan
-    /// without a label: a label scan finds the nodes that have the label
-    /// now, while a check would read the labels of a past epoch (see
-    /// `may_choose_scan_label`). The checks move above the turned expand,
+    /// without a label (a label scan answers at the query's view too, so a
+    /// labelled source could turn as well; the rule predates that). The
+    /// checks move above the turned expand,
     /// so they read only the source and the scan's input, and may move (see
     /// [`movable_variables`]). The scan's input, whose rows the turned plan
     /// scans the target for, binds none of the expand's variables and does
@@ -4266,7 +4269,6 @@ mod tests {
         /// A row-group store built without backward edges (10b) tells the
         /// planner so: an optimizer from it plans as one without incoming
         /// edges, and from one with them as one with them.
-        #[cfg(feature = "lpg")]
         #[test]
         fn a_row_group_store_without_backward_edges_plans_without_them() {
             use grafeo_core::graph::rowgroup::RowGroupStore;

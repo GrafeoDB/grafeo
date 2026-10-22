@@ -2,6 +2,7 @@
 //! hold and when they go, the consumers the buffer manager asks, and a
 //! database that checkpoints, crashes and reopens with spill files present.
 
+use grafeo_common::types::ReadView;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -62,7 +63,8 @@ impl Database {
                 WriteTarget::Store(Arc::clone(&store) as Arc<dyn ChangeTarget>),
             )
             .unwrap();
-        let writer = GraphWriter::new(store as Arc<dyn GraphStoreMut>).with_recording(recording);
+        let writer = GraphWriter::new(store as Arc<dyn GraphStoreMut>, ReadView::latest())
+            .with_recording(recording);
         Open {
             transaction,
             changes,
@@ -150,7 +152,9 @@ fn items(database: &Database, graph: Option<&str>, count: u16) -> Vec<NodeId> {
 fn assert_embeddings(store: &RowGroupStore, ids: &[NodeId], what: &str) {
     for (rank, id) in (0u16..).zip(ids) {
         assert_eq!(
-            store.get_node_property(*id, &embedding()),
+            store
+                .node_property(*id, embedding().as_str(), ReadView::latest())
+                .unwrap(),
             Some(embedding_of(rank)),
             "{what}: item {rank}"
         );
@@ -284,7 +288,8 @@ fn the_registered_consumers_report_the_store_and_its_indexes() {
                 "Item",
                 "name",
                 &grafeo_core::index::text::TextIndexOptions::new(),
-            ),
+            )
+            .unwrap(),
         )),
     );
     let manager = BufferManager::with_budget(1 << 30);
@@ -318,13 +323,14 @@ fn the_registered_consumers_report_the_store_and_its_indexes() {
 
 #[cfg(feature = "vector-index")]
 mod consumers {
+    use grafeo_common::types::ReadView;
     use std::path::PathBuf;
     use std::sync::Arc;
 
     use grafeo_common::memory::StorageTier;
     use grafeo_common::memory::buffer::{BufferManager, MemoryConsumer, MemoryRegion};
     use grafeo_common::types::PropertyKey;
-    use grafeo_core::graph::GraphStoreSearch;
+    use grafeo_core::graph::GraphStore;
     use grafeo_core::index::vector::{DistanceMetric, HnswConfig, HnswIndex, VectorIndexKind};
 
     use super::super::{ColumnSpillFiles, RowGroupVectorConsumer, register_row_group_consumers};
@@ -360,7 +366,9 @@ mod consumers {
                 &[150.25, 1.0],
                 3,
                 DistanceMetric::Euclidean,
+                ReadView::latest(),
             )
+            .unwrap()
             .into_iter()
             .map(|(id, distance)| (id.as_u64(), distance))
             .collect()
@@ -479,6 +487,7 @@ mod consumers {
 
 #[cfg(feature = "grafeo-file")]
 mod file {
+    use grafeo_common::types::ReadView;
     use std::path::{Path, PathBuf};
 
     use grafeo_common::types::{EpochId, NodeId, PropertyKey, Value};
@@ -565,7 +574,10 @@ mod file {
     /// The embedding of `id`, as the reopened database reads it.
     pub(super) fn embedding_at(database: &Database, id: NodeId) -> Option<Value> {
         use grafeo_core::graph::GraphStore;
-        database.root.get_node_property(id, &embedding())
+        database
+            .root
+            .node_property(id, embedding().as_str(), ReadView::latest())
+            .unwrap()
     }
 
     /// A checkpoint of a spilled column writes its values (the section
@@ -711,7 +723,8 @@ fn a_crash_while_a_column_is_spilled_reopens_from_the_last_checkpoint() {
             reopened
                 .database
                 .root
-                .get_node_property(mia, &PropertyKey::new("name")),
+                .node_property(mia, "name", ReadView::latest())
+                .unwrap(),
             header_written.then(|| Value::from("Mia")),
             "point {point} ({name}): the write after the spill"
         );

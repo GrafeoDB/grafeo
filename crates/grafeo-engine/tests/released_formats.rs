@@ -400,7 +400,10 @@ fn a_0_5_database_opened_read_only_is_not_locked_once_loaded() {
             );
             file.unlock().unwrap();
         }
-        assert!(db.node_count() > 0, "{name}: the database holds the data");
+        assert!(
+            db.node_count().unwrap() > 0,
+            "{name}: the database holds the data"
+        );
         db.close().unwrap();
     });
 }
@@ -428,7 +431,10 @@ fn a_read_write_open_migrates_a_0_5_database_and_keeps_the_old_one() {
         let original_wal = with_suffix(&original, ".wal");
 
         let db = GrafeoDB::open(&path).unwrap_or_else(|error| panic!("{name}: {error}"));
-        assert!(db.node_count() > 0, "{name}: the database holds the data");
+        assert!(
+            db.node_count().unwrap() > 0,
+            "{name}: the database holds the data"
+        );
         db.close().unwrap();
         drop(db);
 

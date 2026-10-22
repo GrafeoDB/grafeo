@@ -1,5 +1,6 @@
 //! Persistence, snapshots, and data export for GrafeoDB.
 
+use grafeo_common::types::ReadView;
 #[cfg(any(feature = "wal", feature = "grafeo-file"))]
 use std::path::Path;
 
@@ -1104,11 +1105,13 @@ impl super::GrafeoDB {
         use grafeo_core::graph::GraphStore;
 
         let pin = self.transaction_manager.pin_read();
-        let epoch = self.read_epoch();
+        let view = ReadView::committed(self.read_epoch());
         let store = self.lpg_store();
-        store.all_node_ids().into_iter().filter_map(move |id| {
+        // The database's own row-group store: its reads do not fail.
+        let ids = store.node_ids(view).unwrap_or_default();
+        ids.into_iter().filter_map(move |id| {
             let _pinned = &pin;
-            store.get_node_at_epoch(id, epoch)
+            store.node(id, view).ok().flatten()
         })
     }
 
@@ -1125,10 +1128,16 @@ impl super::GrafeoDB {
         let pin = self.transaction_manager.pin_read();
         let epoch = self.read_epoch();
         let store = self.lpg_store();
-        // The store numbers its edges densely.
+        // The store numbers its edges densely, and its reads do not fail.
         (0..store.next_edge_id()).filter_map(move |id| {
             let _pinned = &pin;
-            store.get_edge_at_epoch(grafeo_common::types::EdgeId::new(id), epoch)
+            store
+                .edge(
+                    grafeo_common::types::EdgeId::new(id),
+                    ReadView::committed(epoch),
+                )
+                .ok()
+                .flatten()
         })
     }
 }
@@ -1386,6 +1395,7 @@ pub(super) mod row_groups {
 
 #[cfg(test)]
 mod tests {
+    use grafeo_common::types::ReadView;
     use grafeo_common::types::{EdgeId, NodeId, Value};
     use grafeo_core::graph::GraphStore as _;
 
@@ -1409,12 +1419,12 @@ mod tests {
         session
             .execute("INSERT (:Person {name: 'Vincent'})")
             .unwrap();
-        assert_eq!(db.lpg_store().node_count(), 3);
+        assert_eq!(db.lpg_store().node_count(ReadView::latest()).unwrap(), 3);
 
         // Restore original
         db.restore_snapshot(&snapshot).unwrap();
 
-        assert_eq!(db.lpg_store().node_count(), 2);
+        assert_eq!(db.lpg_store().node_count(ReadView::latest()).unwrap(), 2);
         let result = session.execute("MATCH (n:Person) RETURN n.name").unwrap();
         assert_eq!(result.rows.len(), 2);
     }
@@ -1431,7 +1441,7 @@ mod tests {
         assert!(result.is_err());
 
         // DB should be unchanged
-        assert_eq!(db.lpg_store().node_count(), 1);
+        assert_eq!(db.lpg_store().node_count(ReadView::latest()).unwrap(), 1);
     }
 
     #[test]
@@ -1443,10 +1453,10 @@ mod tests {
 
         let session = db.session();
         session.execute("INSERT (:Person {name: 'Alix'})").unwrap();
-        assert_eq!(db.lpg_store().node_count(), 1);
+        assert_eq!(db.lpg_store().node_count(ReadView::latest()).unwrap(), 1);
 
         db.restore_snapshot(&empty_snapshot).unwrap();
-        assert_eq!(db.lpg_store().node_count(), 0);
+        assert_eq!(db.lpg_store().node_count(ReadView::latest()).unwrap(), 0);
     }
 
     #[test]
@@ -1463,7 +1473,7 @@ mod tests {
             .unwrap();
 
         let snapshot = db.export_snapshot().unwrap();
-        assert_eq!(db.lpg_store().edge_count(), 1);
+        assert_eq!(db.lpg_store().edge_count(ReadView::latest()).unwrap(), 1);
 
         // Modify: add more data
         session
@@ -1472,8 +1482,8 @@ mod tests {
 
         // Restore
         db.restore_snapshot(&snapshot).unwrap();
-        assert_eq!(db.lpg_store().node_count(), 2);
-        assert_eq!(db.lpg_store().edge_count(), 1);
+        assert_eq!(db.lpg_store().node_count(ReadView::latest()).unwrap(), 2);
+        assert_eq!(db.lpg_store().edge_count(ReadView::latest()).unwrap(), 1);
     }
 
     #[test]
@@ -1539,7 +1549,7 @@ mod tests {
         let imported = GrafeoDB::import_snapshot(&db.export_snapshot().unwrap()).unwrap();
         for (what, copy) in [("to_memory", &copy), ("export_snapshot", &imported)] {
             let store = copy.lpg_store();
-            let ids = store.all_node_ids();
+            let ids = store.node_ids(ReadView::latest()).unwrap();
             assert_eq!(ids.len(), 1, "{what}: Alix");
             let mut history = store.node_property_history(ids[0]);
             history.sort_by(|(a, _), (b, _)| a.cmp(b));
@@ -1571,8 +1581,8 @@ mod tests {
     fn test_to_memory_empty() {
         let db = GrafeoDB::new_in_memory();
         let copy = db.to_memory().unwrap();
-        assert_eq!(copy.lpg_store().node_count(), 0);
-        assert_eq!(copy.lpg_store().edge_count(), 0);
+        assert_eq!(copy.lpg_store().node_count(ReadView::latest()).unwrap(), 0);
+        assert_eq!(copy.lpg_store().edge_count(ReadView::latest()).unwrap(), 0);
     }
 
     #[test]
@@ -1587,7 +1597,7 @@ mod tests {
             .unwrap();
 
         let copy = db.to_memory().unwrap();
-        assert_eq!(copy.lpg_store().node_count(), 2);
+        assert_eq!(copy.lpg_store().node_count(ReadView::latest()).unwrap(), 2);
 
         let s2 = copy.session();
         let result = s2
@@ -1610,8 +1620,8 @@ mod tests {
             .unwrap();
 
         let copy = db.to_memory().unwrap();
-        assert_eq!(copy.lpg_store().node_count(), 2);
-        assert_eq!(copy.lpg_store().edge_count(), 1);
+        assert_eq!(copy.lpg_store().node_count(ReadView::latest()).unwrap(), 2);
+        assert_eq!(copy.lpg_store().edge_count(ReadView::latest()).unwrap(), 1);
 
         let s2 = copy.session();
         let result = s2.execute("MATCH ()-[e:KNOWS]->() RETURN e.since").unwrap();
@@ -1628,8 +1638,8 @@ mod tests {
 
         // Mutating original should not affect copy
         session.execute("INSERT (:Person {name: 'Gus'})").unwrap();
-        assert_eq!(db.lpg_store().node_count(), 2);
-        assert_eq!(copy.lpg_store().node_count(), 1);
+        assert_eq!(db.lpg_store().node_count(ReadView::latest()).unwrap(), 2);
+        assert_eq!(copy.lpg_store().node_count(ReadView::latest()).unwrap(), 1);
     }
 
     // --- iter_nodes() / iter_edges() ---
@@ -1714,7 +1724,7 @@ mod tests {
         assert!(err.contains("unsupported snapshot version"), "got: {err}");
 
         // DB unchanged
-        assert_eq!(db.lpg_store().node_count(), 1);
+        assert_eq!(db.lpg_store().node_count(ReadView::latest()).unwrap(), 1);
     }
 
     /// A snapshot holding a value nested deeper than a database can store is
@@ -1772,7 +1782,7 @@ mod tests {
             let error = db.restore_snapshot(bytes).unwrap_err().to_string();
             assert!(error.contains(words), "{words}: {error}");
             assert_eq!(
-                db.lpg_store().node_count(),
+                db.lpg_store().node_count(ReadView::latest()).unwrap(),
                 1,
                 "a refused restore changes nothing"
             );
@@ -1822,7 +1832,7 @@ mod tests {
                 .unwrap_err(),
             "an INSERT parameter",
         );
-        assert_eq!(db.node_count(), 1, "nothing was written");
+        assert_eq!(db.node_count().unwrap(), 1, "nothing was written");
 
         db.set_node_property(alix, "trips", nested(MAX_PROPERTY_VALUE_DEPTH))
             .unwrap();
@@ -1855,7 +1865,7 @@ mod tests {
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
         assert!(err.contains("duplicate node ID"), "got: {err}");
-        assert_eq!(db.lpg_store().node_count(), 1);
+        assert_eq!(db.lpg_store().node_count(ReadView::latest()).unwrap(), 1);
     }
 
     #[test]
@@ -1971,7 +1981,9 @@ mod tests {
         assert!(db2.has_property_index("email"));
 
         // Verify the index actually works for O(1) lookups
-        let found = db2.find_nodes_by_property("email", &Value::String("alix@example.com".into()));
+        let found = db2
+            .find_nodes_by_property("email", &Value::String("alix@example.com".into()))
+            .unwrap();
         assert_eq!(found.len(), 1);
     }
 
@@ -2102,7 +2114,7 @@ mod tests {
 
         db.write_image(&path).unwrap();
         let written = GrafeoDB::open(&path).unwrap();
-        assert_eq!(written.node_count(), 1);
+        assert_eq!(written.node_count().unwrap(), 1);
         written.close().unwrap();
     }
 }

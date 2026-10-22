@@ -25,9 +25,9 @@ use grafeo_common::utils::error::Error;
 ))]
 use grafeo_common::utils::error::Result;
 #[cfg(any(feature = "vector-index", feature = "text-index"))]
-use grafeo_core::graph::rowgroup::{IndexSearch, RowGroupStore};
+use grafeo_core::graph::GraphStore;
 #[cfg(any(feature = "vector-index", feature = "text-index"))]
-use grafeo_core::graph::{GraphStore, GraphStoreSearch};
+use grafeo_core::graph::rowgroup::{IndexSearch, RowGroupStore};
 #[cfg(feature = "vector-index")]
 use grafeo_core::index::vector::check_query_vector;
 
@@ -63,12 +63,14 @@ impl super::GrafeoDB {
         label: &str,
         filters: Option<&std::collections::HashMap<String, Value>>,
         view: ReadView,
-    ) -> Option<std::collections::HashSet<NodeId>> {
-        let filters = filters.filter(|f| !f.is_empty())?;
+    ) -> Result<Option<std::collections::HashSet<NodeId>>> {
+        let Some(filters) = filters.filter(|f| !f.is_empty()) else {
+            return Ok(None);
+        };
 
         // Start with all nodes for this label
         let mut allowlist: std::collections::HashSet<NodeId> =
-            store.nodes_by_label_at(label, view).into_iter().collect();
+            store.nodes_by_label(label, view)?.into_iter().collect();
 
         for (key, filter_value) in filters {
             // Check if this is an operator filter (Map with $-prefixed keys)
@@ -77,15 +79,19 @@ impl super::GrafeoDB {
             if is_operator_filter {
                 // Operator filter: scan only the current allowlist (not all nodes).
                 // This is much faster when a prior filter has already narrowed the set.
-                allowlist.retain(|&node_id| {
-                    store.node_property_at(node_id, key, view).is_some_and(|v| {
+                let mut kept = std::collections::HashSet::with_capacity(allowlist.len());
+                for node_id in allowlist {
+                    if store.node_property(node_id, key, view)?.is_some_and(|v| {
                         grafeo_core::graph::property_filter::matches_filter(&v, filter_value)
-                    })
-                });
+                    }) {
+                        kept.insert(node_id);
+                    }
+                }
+                allowlist = kept;
             } else {
                 // Equality filter: use indexed lookup when available
                 let matching: std::collections::HashSet<NodeId> = store
-                    .find_nodes_by_property_at(key, filter_value, view)
+                    .find_nodes_by_property(key, filter_value, view)?
                     .into_iter()
                     .collect();
                 allowlist = allowlist.intersection(&matching).copied().collect();
@@ -93,11 +99,11 @@ impl super::GrafeoDB {
 
             // Short-circuit: empty intersection means no results possible
             if allowlist.is_empty() {
-                return Some(allowlist);
+                return Ok(Some(allowlist));
             }
         }
 
-        Some(allowlist)
+        Ok(Some(allowlist))
     }
 
     /// Searches for the k nearest neighbors of a query vector.
@@ -145,7 +151,7 @@ impl super::GrafeoDB {
         check_query_vector(query, config.dimensions, label, property)?;
 
         let (_pin, view) = self.search_view();
-        let allowlist = Self::compute_filter_allowlist(&store, label, filters, view);
+        let allowlist = Self::compute_filter_allowlist(&store, label, filters, view)?;
         let search = IndexSearch {
             k,
             ef,
@@ -194,7 +200,7 @@ impl super::GrafeoDB {
         }
 
         let (_pin, view) = self.search_view();
-        let allowlist = Self::compute_filter_allowlist(&store, label, filters, view);
+        let allowlist = Self::compute_filter_allowlist(&store, label, filters, view)?;
         let search = IndexSearch {
             k,
             ef,
@@ -259,7 +265,7 @@ impl super::GrafeoDB {
 
         // Step 1: Fetch candidates from HNSW (with optional filter)
         let (_pin, view) = self.search_view();
-        let allowlist = Self::compute_filter_allowlist(&store, label, filters, view);
+        let allowlist = Self::compute_filter_allowlist(&store, label, filters, view)?;
         let search = IndexSearch {
             k: fetch_k,
             ef,
@@ -324,7 +330,7 @@ impl super::GrafeoDB {
     ) -> Result<Vec<(NodeId, f64)>> {
         let store = self.lpg_store();
         let (_pin, view) = self.search_view();
-        let allowlist = Self::compute_filter_allowlist(&store, label, filters, view);
+        let allowlist = Self::compute_filter_allowlist(&store, label, filters, view)?;
         let search = IndexSearch {
             k,
             ef: None,
@@ -409,7 +415,7 @@ impl super::GrafeoDB {
         // Both searches keep only the nodes that match the filters, before
         // fusion: filtering the fused results would return fewer than k.
         let (_pin, view) = self.search_view();
-        let allowlist = Self::compute_filter_allowlist(&store, label, filters, view);
+        let allowlist = Self::compute_filter_allowlist(&store, label, filters, view)?;
         if allowlist.as_ref().is_some_and(|allowed| allowed.is_empty()) {
             return Ok(Vec::new());
         }

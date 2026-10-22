@@ -71,7 +71,12 @@ mod tests {
 
         let written = dir.path().join("db/");
         let db = open_existing(&written).unwrap_or_else(|error| panic!("{error:#}"));
-        assert_eq!(db.node_count(), 1, "the database at {}", written.display());
+        assert_eq!(
+            db.node_count().unwrap(),
+            1,
+            "the database at {}",
+            written.display()
+        );
         db.close().unwrap();
     }
 

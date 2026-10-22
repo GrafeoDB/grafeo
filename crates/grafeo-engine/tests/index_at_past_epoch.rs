@@ -8,7 +8,7 @@
 //! cargo test -p grafeo-engine --all-features --test index_at_past_epoch
 //! ```
 
-#![cfg(all(feature = "lpg", feature = "gql"))]
+#![cfg(feature = "gql")]
 
 use grafeo_common::types::{EpochId, Value};
 use grafeo_engine::{GrafeoDB, Session};

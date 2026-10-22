@@ -7,8 +7,6 @@
 //! cargo test -p grafeo-engine --test home_graph
 //! ```
 
-#![cfg(feature = "lpg")]
-
 use grafeo_common::types::Value;
 use grafeo_engine::{GrafeoDB, Session};
 

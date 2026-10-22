@@ -11,7 +11,7 @@
 //! cargo test -p grafeo-engine --all-features --test correlated_label_seek
 //! ```
 
-#![cfg(all(feature = "lpg", feature = "gql", feature = "cypher"))]
+#![cfg(all(feature = "gql", feature = "cypher"))]
 
 use std::collections::HashMap;
 

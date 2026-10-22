@@ -290,6 +290,6 @@ fn test_set_vector_without_index_is_noop() {
         .unwrap();
 
     // Node should exist with the property
-    let node = db.get_node(n1);
+    let node = db.get_node(n1).unwrap();
     assert!(node.is_some());
 }

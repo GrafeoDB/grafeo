@@ -184,6 +184,12 @@ fn set_code(err: &PyErr, py: Python<'_>, code: ErrorCode, gql_status: GqlStatus)
     let _ = inst.setattr("is_retryable", code.is_retryable());
 }
 
+/// The answer of a read of the database, or its error raised as a
+/// `GrafeoError` (a read that fails is never an absent answer).
+pub(crate) fn raised<T>(read: grafeo_common::utils::error::Result<T>) -> PyResult<T> {
+    read.map_err(|error| PyGrafeoError::from(error).into())
+}
+
 impl From<grafeo_common::utils::error::Error> for PyGrafeoError {
     fn from(err: grafeo_common::utils::error::Error) -> Self {
         use grafeo_bindings_common::error::{ErrorCategory, classify_error};

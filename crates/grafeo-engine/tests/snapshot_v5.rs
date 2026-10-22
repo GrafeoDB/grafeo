@@ -8,12 +8,7 @@
 //! cargo test -p grafeo-engine --all-features --test snapshot_v5
 //! ```
 
-#![cfg(all(
-    feature = "lpg",
-    feature = "gql",
-    feature = "vector-index",
-    feature = "text-index"
-))]
+#![cfg(all(feature = "gql", feature = "vector-index", feature = "text-index"))]
 #![allow(
     missing_docs,
     reason = "a test crate has no public API: each test documents itself"
@@ -194,7 +189,7 @@ fn a_snapshot_leaves_the_stored_configuration_out() {
     imported.save(&copy).unwrap();
     let reopened = GrafeoDB::open(&copy).unwrap();
     assert_eq!(reopened.config().memory_limit(), None);
-    assert_eq!(reopened.node_count(), 1);
+    assert_eq!(reopened.node_count().unwrap(), 1);
 }
 
 /// A version 4 snapshot still restores.
@@ -203,5 +198,5 @@ fn a_v4_snapshot_still_restores() {
     let bytes = include_bytes!("fixtures/snapshot_v4.bin");
     let db = with_schema();
     db.restore_snapshot(bytes).unwrap();
-    assert_eq!((db.node_count(), db.edge_count()), (3, 2));
+    assert_eq!((db.node_count().unwrap(), db.edge_count().unwrap()), (3, 2));
 }

@@ -71,8 +71,8 @@ tokio.workspace = true
 proptest.workspace = true
 
 [features]
-default = ["lpg", "gql", "parallel", "wal", "grafeo-file", "spill", "mmap", "regex"]
-lpg = ["grafeo-core/lpg"]  # Enable LPG (labeled property graph) model
+default = ["gql", "parallel", "wal", "grafeo-file", "spill", "mmap", "regex"]
+lpg = []  # Deprecated: the LPG store is always built, so this enables nothing. Removed in 0.7.0.
 regex = ["dep:regex", "grafeo-core/regex"]
 regex-lite = ["dep:regex-lite", "grafeo-core/regex-lite"]
 gql = ["grafeo-adapters/gql"]
@@ -81,7 +81,7 @@ sparql = ["grafeo-adapters/sparql"]
 gremlin = ["grafeo-adapters/gremlin"]
 graphql = ["grafeo-adapters/graphql"]
 sql-pgq = ["grafeo-adapters/sql-pgq"]  # SQL/PGQ (SQL:2023 GRAPH_TABLE)
-triple-store = ["lpg", "grafeo-core/triple-store", "grafeo-adapters/triple-store", "md5", "sha1", "sha2", "regex"]  # RDF triple store model and planner; with the LPG store, which sessions, persistence and recovery need (#544)
+triple-store = ["grafeo-core/triple-store", "grafeo-adapters/triple-store", "md5", "sha1", "sha2", "regex"]  # RDF triple store model and planner
 ring-index = ["grafeo-core/ring-index", "triple-store"]  # Ring Index for compact RDF (3x memory reduction)
 shacl = ["grafeo-core/shacl", "sparql"]  # SHACL validation (core constraints + SPARQL dispatch)
 rdf = ["triple-store"]  # Deprecated: use triple-store
@@ -101,10 +101,10 @@ ai = ["vector-index", "text-index", "hybrid-search", "cdc"]  # All AI/RAG featur
 storage = ["wal", "grafeo-file", "spill", "mmap"]  # Persistent storage (WAL, single-file, disk spill, mmap)
 
 # Named profiles (ecosystem-aligned)
-embedded = ["lpg", "gql", "ai", "algos", "parallel", "regex", "jsonl-import", "grafeo-file", "arrow-export"]  # Python libs, MCP, in-process
-browser = ["lpg", "gql", "regex-lite"]  # WASM / grafeo-web
+embedded = ["gql", "ai", "algos", "parallel", "regex", "jsonl-import", "grafeo-file", "arrow-export"]  # Python libs, MCP, in-process
+browser = ["gql", "regex-lite"]  # WASM / grafeo-web
 server = ["full", "async-storage", "metrics", "tracing"]  # grafeo-server
-full = ["lpg", "languages", "ai", "triple-store", "parallel", "algos", "storage", "jsonl-import", "parquet-import"]
+full = ["languages", "ai", "triple-store", "parallel", "algos", "storage", "jsonl-import", "parquet-import"]
 
 # Data import
 jsonl-import = ["grafeo-core/jsonl-import"]  # JSON Lines file import

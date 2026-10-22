@@ -17,6 +17,7 @@
 //! whether wiring it in pays off. Run it with
 //! `cargo bench -p grafeo-core --bench morsel_pipeline`.
 
+use grafeo_common::types::ReadView;
 use std::collections::BTreeMap;
 use std::hint::black_box;
 use std::sync::Arc;
@@ -34,9 +35,9 @@ use grafeo_core::execution::{
     ChunkCollector, CloneableOperatorFactory, DataChunk, ParallelPipeline, ParallelPipelineConfig,
     Pipeline, PushOperator, Sink, ValueVector,
 };
-use grafeo_core::graph::GraphStoreSearch;
+use grafeo_core::graph::GraphStore;
+use grafeo_core::graph::GraphStoreMut as _;
 use grafeo_core::graph::rowgroup::RowGroupStore;
-use grafeo_core::graph::{GraphStore as _, GraphStoreMut as _};
 
 const CITIES: [&str; 5] = ["Amsterdam", "Berlin", "Paris", "Prague", "Barcelona"];
 const SIZES: [usize; 2] = [100_000, 1_000_000];
@@ -135,11 +136,19 @@ impl PushOperator for FetchProperties {
                 .collect(),
         };
         let mut ages = ValueVector::with_capacity(LogicalType::Int64, ids.len());
-        for age in self.store.get_node_property_batch(&ids, &self.age) {
+        for age in self
+            .store
+            .node_property_batch(&ids, &self.age, ReadView::latest())
+            .unwrap()
+        {
             ages.push_value(age.unwrap_or(Value::Null));
         }
         let mut cities = ValueVector::with_capacity(LogicalType::String, ids.len());
-        for city in self.store.get_node_property_batch(&ids, &self.city) {
+        for city in self
+            .store
+            .node_property_batch(&ids, &self.city, ReadView::latest())
+            .unwrap()
+        {
             cities.push_value(city.unwrap_or(Value::Null));
         }
         let mut nodes = ValueVector::with_capacity(LogicalType::Node, ids.len());
@@ -182,7 +191,12 @@ fn group_by_city() -> Box<dyn PushOperator> {
 }
 
 fn person_scan(store: &Arc<RowGroupStore>) -> ParallelNodeScanSource {
-    ParallelNodeScanSource::with_label(Arc::clone(store) as Arc<dyn GraphStoreSearch>, "Person")
+    ParallelNodeScanSource::with_label(
+        Arc::clone(store) as Arc<dyn GraphStore>,
+        "Person",
+        ReadView::latest(),
+    )
+    .unwrap()
 }
 
 fn run_single(store: &Arc<RowGroupStore>, workload: Workload) -> Vec<DataChunk> {

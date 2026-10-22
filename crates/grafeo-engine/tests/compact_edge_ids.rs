@@ -5,7 +5,7 @@
 //! cargo test -p grafeo-engine --features "lpg gql" --test compact_edge_ids
 //! ```
 
-#![cfg(all(feature = "lpg", feature = "gql"))]
+#![cfg(feature = "gql")]
 
 use grafeo_common::types::{EdgeId, NodeId, PropertyKey, Value};
 use grafeo_engine::GrafeoDB;
@@ -28,7 +28,7 @@ fn knows(db: &GrafeoDB, from: NodeId, to: NodeId, w: i64) -> EdgeId {
 
 /// The endpoints and `w` of the edge `id` names.
 fn edge(db: &GrafeoDB, id: EdgeId) -> (NodeId, NodeId, Option<Value>) {
-    let edge = db.get_edge(id).unwrap();
+    let edge = db.get_edge(id).unwrap().unwrap();
     let w = edge.properties.get(&PropertyKey::new("w")).cloned();
     (edge.src, edge.dst, w)
 }

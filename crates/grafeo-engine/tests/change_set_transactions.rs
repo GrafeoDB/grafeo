@@ -8,8 +8,9 @@
 //! cargo test -p grafeo-engine --all-features --test change_set_transactions
 //! ```
 
-#![cfg(all(feature = "lpg", feature = "gql"))]
+#![cfg(feature = "gql")]
 
+use grafeo_common::types::ReadView;
 use std::sync::Arc;
 
 use grafeo_common::types::{NodeId, Value};
@@ -148,6 +149,7 @@ fn a_direct_call_conflicts_with_an_open_transaction_that_wrote_first() {
     session.commit().unwrap();
     let city = |id: NodeId| {
         db.get_node(id)
+            .unwrap()
             .and_then(|node| node.properties.get(&"city".into()).cloned())
     };
     assert_eq!(city(alix), Some(Value::from("Amsterdam")));
@@ -345,6 +347,7 @@ fn a_rollback_leaves_the_text_index_as_committed() {
 fn a_rollback_names_the_external_store_that_keeps_its_writes() {
     // An external store without undo: a user's own store, which writes in
     // place and keeps no versions (see `in_place`).
+    use grafeo_common::types::ReadView;
     use grafeo_core::graph::{GraphStore, GraphStoreMut};
 
     let store = Arc::new(in_place::InPlace::default());
@@ -377,7 +380,11 @@ fn a_rollback_names_the_external_store_that_keeps_its_writes() {
     let error = session.rollback().unwrap_err();
     assert!(kept(&error), "{error}");
     assert!(!session.in_transaction(), "the transaction is aborted");
-    assert_eq!(store.all_node_ids().len(), 1, "the store keeps the write");
+    assert_eq!(
+        store.node_ids(ReadView::latest()).unwrap().len(),
+        1,
+        "the store keeps the write"
+    );
 
     // Not poisoned: another transaction commits.
     session.begin_transaction().unwrap();
@@ -415,102 +422,115 @@ mod in_place {
     use grafeo_common::utils::hash::FxHashMap;
     use grafeo_core::graph::lpg::{CompareOp, Edge, Node};
     use grafeo_core::graph::rowgroup::RowGroupStore;
-    use grafeo_core::graph::{Direction, GraphStore, GraphStoreMut, GraphStoreSearch};
+    use grafeo_core::graph::{Direction, GraphStore, GraphStoreMut, Labels};
     use grafeo_core::statistics::Statistics;
-    use smallvec::SmallVec;
 
     #[derive(Default)]
     pub struct InPlace {
         rows: RowGroupStore,
     }
 
+    /// Every read is of now, whatever view it names: the store keeps no
+    /// versions.
+    const NOW: ReadView = ReadView::latest();
+
     impl GraphStore for InPlace {
-        fn get_node(&self, id: NodeId) -> Option<Node> {
-            self.rows.get_node(id)
+        fn node(&self, id: NodeId, _: ReadView) -> Result<Option<Node>> {
+            self.rows.node(id, NOW)
         }
-        fn get_edge(&self, id: EdgeId) -> Option<Edge> {
-            self.rows.get_edge(id)
+        fn edge(&self, id: EdgeId, _: ReadView) -> Result<Option<Edge>> {
+            self.rows.edge(id, NOW)
         }
-        fn get_node_versioned(&self, id: NodeId, _: EpochId, _: TransactionId) -> Option<Node> {
-            self.rows.get_node(id)
+        fn node_property(&self, id: NodeId, key: &str, _: ReadView) -> Result<Option<Value>> {
+            self.rows.node_property(id, key, NOW)
         }
-        fn get_edge_versioned(&self, id: EdgeId, _: EpochId, _: TransactionId) -> Option<Edge> {
-            self.rows.get_edge(id)
+        fn edge_property(&self, id: EdgeId, key: &str, _: ReadView) -> Result<Option<Value>> {
+            self.rows.edge_property(id, key, NOW)
         }
-        fn get_node_at_epoch(&self, id: NodeId, _: EpochId) -> Option<Node> {
-            self.rows.get_node(id)
+        fn node_labels(&self, id: NodeId, _: ReadView) -> Result<Option<Labels>> {
+            self.rows.node_labels(id, NOW)
         }
-        fn get_edge_at_epoch(&self, id: EdgeId, _: EpochId) -> Option<Edge> {
-            self.rows.get_edge(id)
+        fn edge_type(&self, id: EdgeId, _: ReadView) -> Result<Option<ArcStr>> {
+            self.rows.edge_type(id, NOW)
         }
-        fn get_node_property(&self, id: NodeId, key: &PropertyKey) -> Option<Value> {
-            self.rows.get_node_property(id, key)
-        }
-        fn get_edge_property(&self, id: EdgeId, key: &PropertyKey) -> Option<Value> {
-            self.rows.get_edge_property(id, key)
-        }
-        fn get_node_property_batch(&self, ids: &[NodeId], key: &PropertyKey) -> Vec<Option<Value>> {
-            self.rows.get_node_property_batch(ids, key)
-        }
-        fn try_get_node_property_batch(
+        fn node_property_batch(
             &self,
             ids: &[NodeId],
             key: &PropertyKey,
+            _: ReadView,
         ) -> Result<Vec<Option<Value>>> {
-            self.rows.try_get_node_property_batch(ids, key)
+            self.rows.node_property_batch(ids, key, NOW)
         }
-        fn get_nodes_properties_batch(&self, ids: &[NodeId]) -> Vec<FxHashMap<PropertyKey, Value>> {
-            self.rows.get_nodes_properties_batch(ids)
+        fn node_properties_batch(
+            &self,
+            ids: &[NodeId],
+            _: ReadView,
+        ) -> Result<Vec<FxHashMap<PropertyKey, Value>>> {
+            self.rows.node_properties_batch(ids, NOW)
         }
-        fn get_nodes_properties_selective_batch(
+        fn node_properties_selective_batch(
             &self,
             ids: &[NodeId],
             keys: &[PropertyKey],
-        ) -> Vec<FxHashMap<PropertyKey, Value>> {
-            self.rows.get_nodes_properties_selective_batch(ids, keys)
+            _: ReadView,
+        ) -> Result<Vec<FxHashMap<PropertyKey, Value>>> {
+            self.rows.node_properties_selective_batch(ids, keys, NOW)
         }
-        fn get_edges_properties_selective_batch(
+        fn edge_properties_selective_batch(
             &self,
             ids: &[EdgeId],
             keys: &[PropertyKey],
-        ) -> Vec<FxHashMap<PropertyKey, Value>> {
-            self.rows.get_edges_properties_selective_batch(ids, keys)
+            _: ReadView,
+        ) -> Result<Vec<FxHashMap<PropertyKey, Value>>> {
+            self.rows.edge_properties_selective_batch(ids, keys, NOW)
         }
-        fn neighbors(&self, node: NodeId, direction: Direction) -> Vec<NodeId> {
-            self.rows.neighbors(node, direction)
-        }
-        fn edges_from(&self, node: NodeId, direction: Direction) -> Vec<(NodeId, EdgeId)> {
-            self.rows.edges_from(node, direction)
-        }
-        fn out_degree(&self, node: NodeId) -> usize {
-            self.rows.out_degree(node)
-        }
-        fn in_degree(&self, node: NodeId) -> usize {
-            self.rows.in_degree(node)
+        fn edges(
+            &self,
+            node: NodeId,
+            direction: Direction,
+            types: &[ArcStr],
+            _: ReadView,
+        ) -> Result<Vec<(NodeId, EdgeId)>> {
+            self.rows.edges(node, direction, types, NOW)
         }
         fn has_backward_adjacency(&self) -> bool {
             self.rows.has_backward_adjacency()
         }
-        fn node_ids(&self) -> Vec<NodeId> {
-            self.rows.node_ids()
+        fn node_ids(&self, _: ReadView) -> Result<Vec<NodeId>> {
+            self.rows.node_ids(NOW)
         }
-        fn nodes_by_label(&self, label: &str) -> Vec<NodeId> {
-            self.rows.nodes_by_label(label)
+        fn nodes_by_label(&self, label: &str, _: ReadView) -> Result<Vec<NodeId>> {
+            self.rows.nodes_by_label(label, NOW)
         }
-        fn node_count(&self) -> usize {
-            self.rows.node_count()
+        fn node_count(&self, _: ReadView) -> Result<usize> {
+            self.rows.node_count(NOW)
         }
-        fn edge_count(&self) -> usize {
-            self.rows.edge_count()
+        fn edge_count(&self, _: ReadView) -> Result<usize> {
+            self.rows.edge_count(NOW)
         }
-        fn edge_type(&self, id: EdgeId) -> Option<ArcStr> {
-            self.rows.edge_type(id)
+        fn all_labels(&self) -> Result<Vec<String>> {
+            self.rows.all_labels()
         }
-        fn find_nodes_by_property(&self, property: &str, value: &Value) -> Vec<NodeId> {
-            self.rows.find_nodes_by_property(property, value)
+        fn all_edge_types(&self) -> Result<Vec<String>> {
+            self.rows.all_edge_types()
         }
-        fn find_nodes_by_properties(&self, conditions: &[(&str, Value)]) -> Vec<NodeId> {
-            self.rows.find_nodes_by_properties(conditions)
+        fn all_property_keys(&self) -> Result<Vec<String>> {
+            self.rows.all_property_keys()
+        }
+        fn find_nodes_by_property(
+            &self,
+            property: &str,
+            value: &Value,
+            _: ReadView,
+        ) -> Result<Vec<NodeId>> {
+            self.rows.find_nodes_by_property(property, value, NOW)
+        }
+        fn find_nodes_by_properties(
+            &self,
+            conditions: &[(&str, Value)],
+            _: ReadView,
+        ) -> Result<Vec<NodeId>> {
+            self.rows.find_nodes_by_properties(conditions, NOW)
         }
         fn find_nodes_in_range(
             &self,
@@ -519,9 +539,10 @@ mod in_place {
             max: Option<&Value>,
             min_inclusive: bool,
             max_inclusive: bool,
-        ) -> Vec<NodeId> {
+            _: ReadView,
+        ) -> Result<Vec<NodeId>> {
             self.rows
-                .find_nodes_in_range(property, min, max, min_inclusive, max_inclusive)
+                .find_nodes_in_range(property, min, max, min_inclusive, max_inclusive, NOW)
         }
         fn node_property_might_match(
             &self,
@@ -542,21 +563,10 @@ mod in_place {
         fn statistics(&self) -> Arc<Statistics> {
             self.rows.statistics()
         }
-        fn estimate_label_cardinality(&self, label: &str) -> f64 {
-            self.rows.estimate_label_cardinality(label)
-        }
-        fn estimate_avg_degree(&self, edge_type: &str, outgoing: bool) -> f64 {
-            self.rows.estimate_avg_degree(edge_type, outgoing)
-        }
-        fn current_epoch(&self) -> EpochId {
-            self.rows.current_epoch()
-        }
-        fn node_labels_at(&self, id: NodeId, _: ReadView) -> Option<SmallVec<[ArcStr; 2]>> {
-            self.rows.get_node(id).map(|node| node.labels)
+        fn committed_epoch(&self) -> EpochId {
+            self.rows.committed_epoch()
         }
     }
-
-    impl GraphStoreSearch for InPlace {}
 
     impl GraphStoreMut for InPlace {
         fn create_node(&self, labels: &[&str]) -> NodeId {
@@ -774,16 +784,16 @@ fn query_processors_in_transactions_claim_what_they_write() {
         .unwrap_err();
     assert!(is_conflict(&error), "{error}");
     assert_eq!(
-        store.node_property_at(
-            alix,
-            "city",
-            grafeo_common::types::ReadView::new(epoch, Some(first))
-        ),
+        store
+            .node_property(alix, "city", ReadView::new(epoch, Some(first)))
+            .unwrap(),
         Some(Value::from("Berlin")),
         "the refused write changed nothing of the first's"
     );
     assert_eq!(
-        store.get_node_property(alix, &"city".into()),
+        store
+            .node_property(alix, "city", ReadView::latest())
+            .unwrap(),
         None,
         "and neither is committed"
     );

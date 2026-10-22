@@ -3,11 +3,11 @@
 
 use std::sync::Arc;
 
-use grafeo_common::types::{EpochId, LogicalType, NodeId, ReadView, TransactionId, Value};
+use grafeo_common::types::{LogicalType, NodeId, ReadView, Value};
 
 use super::{ExpressionPredicate, Operator, OperatorError, OperatorResult, ReadCounter};
 use crate::execution::DataChunk;
-use crate::graph::GraphStoreSearch;
+use crate::graph::GraphStore;
 
 /// What a seek key selects nodes by.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -35,15 +35,15 @@ pub enum SeekKey {
 /// [`GraphStore::find_nodes_maybe_equal`](crate::graph::GraphStore::find_nodes_maybe_equal));
 /// a store that cannot look a key up that way gives every node.
 pub struct NodeSeekOperator {
-    store: Arc<dyn GraphStoreSearch>,
+    store: Arc<dyn GraphStore>,
     input: Box<dyn Operator>,
     key: SeekKey,
     /// Evaluates the key for an input row.
     key_expression: ExpressionPredicate,
     list: bool,
     label: Option<String>,
-    viewing_epoch: Option<EpochId>,
-    transaction_id: Option<TransactionId>,
+    /// Who reads: the seek finds the nodes this view sees.
+    view: ReadView,
     chunk_capacity: usize,
     /// The input chunk being joined, its next row, and the row whose
     /// matches are being emitted.
@@ -58,14 +58,15 @@ pub struct NodeSeekOperator {
 
 impl NodeSeekOperator {
     /// Creates a seek of `key` (evaluated by `key_expression` over the input
-    /// rows) for nodes with `label`.
+    /// rows) for nodes with `label` that `view` sees.
     #[must_use]
     pub fn new(
-        store: Arc<dyn GraphStoreSearch>,
+        store: Arc<dyn GraphStore>,
         input: Box<dyn Operator>,
         key: SeekKey,
         key_expression: ExpressionPredicate,
         label: Option<String>,
+        view: ReadView,
     ) -> Self {
         Self {
             store,
@@ -74,8 +75,7 @@ impl NodeSeekOperator {
             key_expression,
             list: false,
             label,
-            viewing_epoch: None,
-            transaction_id: None,
+            view,
             chunk_capacity: 2048,
             current_input: None,
             next_row: 0,
@@ -90,18 +90,6 @@ impl NodeSeekOperator {
     #[must_use]
     pub fn with_list_key(mut self) -> Self {
         self.list = true;
-        self
-    }
-
-    /// Sets the transaction context for MVCC visibility.
-    #[must_use]
-    pub fn with_transaction_context(
-        mut self,
-        epoch: EpochId,
-        transaction_id: Option<TransactionId>,
-    ) -> Self {
-        self.viewing_epoch = Some(epoch);
-        self.transaction_id = transaction_id;
         self
     }
 
@@ -132,15 +120,14 @@ impl NodeSeekOperator {
             match &self.key {
                 SeekKey::Id => found.extend(node_ids(key)),
                 SeekKey::Property(property) => {
-                    let found_nodes = match self.view() {
-                        Some(view) => self.store.find_nodes_maybe_equal_at(property, key, view),
-                        None => self.store.find_nodes_maybe_equal(property, key),
-                    };
-                    match found_nodes {
+                    match self
+                        .store
+                        .find_nodes_maybe_equal(property, key, self.view)?
+                    {
                         Some(nodes) => found.extend(nodes),
                         // The store cannot look the key up: every node is a
                         // candidate, as for the scan the seek replaces.
-                        None => found.extend(self.store.all_node_ids()),
+                        None => found.extend(self.store.node_ids(self.view)?),
                     }
                 }
             }
@@ -148,29 +135,22 @@ impl NodeSeekOperator {
         super::read_counter::count(self.reads.as_deref(), found.len());
         found.sort_unstable();
         found.dedup();
-        found.retain(|&id| self.visible_with_label(id));
-        Ok(found)
-    }
-
-    /// The view the seek reads at, when it has a transaction context.
-    fn view(&self) -> Option<ReadView> {
-        self.viewing_epoch
-            .map(|epoch| ReadView::new(epoch, self.transaction_id))
+        let mut seen = Vec::with_capacity(found.len());
+        for id in found {
+            if self.visible_with_label(id)? {
+                seen.push(id);
+            }
+        }
+        Ok(seen)
     }
 
     /// Whether the query sees node `id` with the scan's label: a label check
     /// at the view, without building the node.
-    fn visible_with_label(&self, id: NodeId) -> bool {
-        match (self.view(), self.label.as_deref()) {
-            (Some(view), Some(label)) => {
-                self.store.node_has_label_at(id, label, view) == Some(true)
-            }
-            (Some(view), None) => self.store.is_node_visible_at(id, view),
-            (None, label) => self
-                .store
-                .get_node(id)
-                .is_some_and(|node| label.is_none_or(|label| node.has_label(label))),
-        }
+    fn visible_with_label(&self, id: NodeId) -> Result<bool, OperatorError> {
+        Ok(match self.label.as_deref() {
+            Some(label) => self.store.node_has_label(id, label, self.view)? == Some(true),
+            None => self.store.is_node_visible(id, self.view)?,
+        })
     }
 
     /// Joins rows of `chunk`, from `next_row` on, with their matches until
@@ -296,7 +276,7 @@ fn exact_integer(f: f64) -> Option<i64> {
     Some(f as i64)
 }
 
-#[cfg(all(test, feature = "lpg"))]
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::execution::operators::{FilterExpression, SingleRowOperator};
@@ -310,11 +290,12 @@ mod tests {
         value: Value,
         label: Option<&str>,
     ) -> Vec<NodeId> {
-        let dyn_store: Arc<dyn GraphStoreSearch> = Arc::clone(store) as Arc<dyn GraphStoreSearch>;
+        let dyn_store: Arc<dyn GraphStore> = Arc::clone(store) as Arc<dyn GraphStore>;
         let key_expression = ExpressionPredicate::new(
             FilterExpression::Literal(value),
             HashMap::new(),
             Arc::clone(&dyn_store),
+            ReadView::latest(),
         );
         let mut op = NodeSeekOperator::new(
             dyn_store,
@@ -322,6 +303,7 @@ mod tests {
             key,
             key_expression,
             label.map(ToString::to_string),
+            ReadView::latest(),
         );
         let mut found = Vec::new();
         while let Some(chunk) = op.next().unwrap() {

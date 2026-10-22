@@ -12,7 +12,7 @@
 //! cargo test -p grafeo-engine --all-features --test indexes_after_reopen
 //! ```
 
-#![cfg(all(feature = "lpg", feature = "gql", feature = "grafeo-file"))]
+#![cfg(all(feature = "gql", feature = "grafeo-file"))]
 
 #[cfg(feature = "wal")]
 mod common;

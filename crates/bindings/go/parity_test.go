@@ -33,14 +33,14 @@ func TestBatchCreateNodesAndEdges(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(edgeIDs) != 2 || db.EdgeCount() != 2 {
-		t.Fatalf("expected 2 edges, got %v and %d", edgeIDs, db.EdgeCount())
+	if len(edgeIDs) != 2 || mustCount(t, db.EdgeCount) != 2 {
+		t.Fatalf("expected 2 edges, got %v and %d", edgeIDs, mustCount(t, db.EdgeCount))
 	}
 	if _, err := db.BatchCreateEdges([]BatchEdge{{Src: ids[0], Dst: 88888, Type: "KNOWS"}}); err == nil {
 		t.Error("expected an edge to a missing node to fail the batch")
 	}
-	if db.EdgeCount() != 2 {
-		t.Errorf("the failed batch wrote %d edges", db.EdgeCount()-2)
+	if mustCount(t, db.EdgeCount) != 2 {
+		t.Errorf("the failed batch wrote %d edges", mustCount(t, db.EdgeCount)-2)
 	}
 }
 
@@ -136,7 +136,7 @@ func TestUpserts(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if edges.Created != 1 || db.EdgeCount() != 1 {
+	if edges.Created != 1 || mustCount(t, db.EdgeCount) != 1 {
 		t.Errorf("unexpected edge summary %+v", edges)
 	}
 }
@@ -179,8 +179,8 @@ func TestGraphHandle(t *testing.T) {
 	if len(result.Rows) != 1 || result.Rows[0]["d"] != "Berlin" {
 		t.Errorf("unexpected rows %+v", result.Rows)
 	}
-	if db.NodeCount() != 0 {
-		t.Errorf("the default graph has %d nodes", db.NodeCount())
+	if mustCount(t, db.NodeCount) != 0 {
+		t.Errorf("the default graph has %d nodes", mustCount(t, db.NodeCount))
 	}
 	summary, err := g.UpsertNodes([]string{"City"}, []map[string]any{{"name": "Prague", "country": "CZ"}}, &UpsertNodesOptions{Key: "name"})
 	if err != nil || summary.Updated != 1 {
@@ -195,5 +195,9 @@ func TestGraphHandle(t *testing.T) {
 	}
 	if _, err := g.Execute("RETURN 1"); err == nil {
 		t.Error("expected a dropped graph to fail")
+	}
+	// A read of a dropped graph fails, and the failure is not ErrNotFound.
+	if _, err := g.GetNode(berlin.ID); err == nil || errors.Is(err, ErrNotFound) {
+		t.Errorf("a read of a dropped graph: %v, want a failure other than ErrNotFound", err)
 	}
 }

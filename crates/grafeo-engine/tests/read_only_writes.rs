@@ -32,7 +32,7 @@ fn state(db: &GrafeoDB) -> (usize, Vec<Vec<Value>>) {
         .session()
         .execute("MATCH (p:Person) RETURN p.name, p.w ORDER BY p.name")
         .unwrap();
-    (db.node_count(), people.rows().to_vec())
+    (db.node_count().unwrap(), people.rows().to_vec())
 }
 
 fn seeded_state() -> (usize, Vec<Vec<Value>>) {
@@ -60,7 +60,7 @@ fn read_only_transaction(db: &GrafeoDB) -> Session {
 fn ends_and_writes_again(db: &GrafeoDB, session: &Session) {
     session.execute("ROLLBACK").unwrap();
     session.execute("INSERT (:Person {name: 'Gus'})").unwrap();
-    assert_eq!(db.node_count(), 2);
+    assert_eq!(db.node_count().unwrap(), 2);
 }
 
 #[cfg(feature = "cypher")]
@@ -251,10 +251,7 @@ fn a_read_only_database_rejects_direct_writes() {
 }
 
 /// A read-only database at a new path, holding nothing.
-#[cfg(all(
-    feature = "grafeo-file",
-    any(feature = "lpg", feature = "triple-store")
-))]
+#[cfg(feature = "grafeo-file")]
 fn empty_read_only_database(dir: &std::path::Path) -> GrafeoDB {
     let path = dir.join("empty.grafeo");
     GrafeoDB::with_config(grafeo_engine::Config::persistent(&path))
@@ -265,10 +262,7 @@ fn empty_read_only_database(dir: &std::path::Path) -> GrafeoDB {
 }
 
 /// Checks that `result` failed with the typed read-only error.
-#[cfg(all(
-    feature = "grafeo-file",
-    any(feature = "lpg", feature = "triple-store")
-))]
+#[cfg(feature = "grafeo-file")]
 #[track_caller]
 fn assert_read_only_error<T: std::fmt::Debug>(what: &str, result: Result<T>) {
     use grafeo_common::utils::error::{Error, TransactionError};
@@ -309,7 +303,7 @@ fn a_read_only_database_refuses_an_rdf_batch_insert_without_pulling_its_triples(
 /// A read-only database refuses an import before it opens its file or parses
 /// its data: a missing file, or malformed data, still gets the read-only
 /// error.
-#[cfg(all(feature = "grafeo-file", feature = "lpg"))]
+#[cfg(feature = "grafeo-file")]
 #[test]
 fn a_read_only_database_refuses_imports_before_reading_their_input() {
     let dir = tempfile::tempdir().unwrap();
@@ -334,7 +328,7 @@ fn a_read_only_database_refuses_imports_before_reading_their_input() {
         "import_tsv_rdf of a missing file",
         db.import_tsv_rdf(&missing, "http://ex.org/knows", "http://ex.org/"),
     );
-    assert_eq!(db.node_count(), 0, "nothing was imported");
+    assert_eq!(db.node_count().unwrap(), 0, "nothing was imported");
 }
 
 /// `GrafeoDB::execute_sparql` respects a read-only database, as the session

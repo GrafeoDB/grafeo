@@ -11,13 +11,13 @@ use grafeo_common::utils::error::Result;
 use grafeo_common::utils::hash::{FxHashMap, FxHashSet};
 use grafeo_core::graph::Direction;
 use grafeo_core::graph::GraphStore;
-#[cfg(all(test, feature = "lpg"))]
+#[cfg(test)]
 use grafeo_core::graph::GraphStoreMut as _;
-#[cfg(all(test, feature = "lpg"))]
+#[cfg(test)]
 use grafeo_core::graph::rowgroup::RowGroupStore;
 
 use super::super::{AlgorithmResult, ParameterDef, ParameterType, Parameters};
-use super::traits::{GraphAlgorithm, NodeValueResultBuilder, impl_algorithm, visible_edges_from};
+use super::traits::{GraphAlgorithm, NodeValueResultBuilder, impl_algorithm, int_value};
 
 // ============================================================================
 // Degree Centrality
@@ -50,7 +50,21 @@ pub struct DegreeCentralityResult {
 /// # Complexity
 ///
 /// O(V + E)
-pub fn degree_centrality(store: &dyn GraphStore) -> DegreeCentralityResult {
+///
+/// # Errors
+///
+/// The error of a read of the store that fails.
+pub fn degree_centrality(
+    store: &dyn GraphStore,
+    view: grafeo_common::types::ReadView,
+) -> grafeo_common::utils::error::Result<DegreeCentralityResult> {
+    let graph = super::traits::GraphView::new(store, view);
+    let found = degree_centrality_on(&graph);
+    graph.finish(found)
+}
+
+/// [`degree_centrality`] on the graph a [`GraphView`](super::traits::GraphView) reads.
+pub(crate) fn degree_centrality_on(store: &super::traits::GraphView<'_>) -> DegreeCentralityResult {
     let mut in_degree: FxHashMap<NodeId, usize> = FxHashMap::default();
     let mut out_degree: FxHashMap<NodeId, usize> = FxHashMap::default();
 
@@ -64,7 +78,7 @@ pub fn degree_centrality(store: &dyn GraphStore) -> DegreeCentralityResult {
 
     // Count degrees
     for &node in &nodes {
-        let out_edges = visible_edges_from(store, node, Direction::Outgoing);
+        let out_edges = store.edges(node, Direction::Outgoing);
         out_degree.insert(node, out_edges.len());
 
         // For incoming edges, we count edges targeting this node
@@ -93,8 +107,24 @@ pub fn degree_centrality(store: &dyn GraphStore) -> DegreeCentralityResult {
 /// Computes normalized degree centrality.
 ///
 /// Normalizes by dividing by (n-1) where n is the node count.
-pub fn degree_centrality_normalized(store: &dyn GraphStore) -> FxHashMap<NodeId, f64> {
-    let result = degree_centrality(store);
+///
+/// # Errors
+///
+/// The error of a read of the store that fails.
+pub fn degree_centrality_normalized(
+    store: &dyn GraphStore,
+    view: grafeo_common::types::ReadView,
+) -> grafeo_common::utils::error::Result<FxHashMap<NodeId, f64>> {
+    let graph = super::traits::GraphView::new(store, view);
+    let found = degree_centrality_normalized_on(&graph);
+    graph.finish(found)
+}
+
+/// [`degree_centrality_normalized`] on the graph a [`GraphView`](super::traits::GraphView) reads.
+pub(crate) fn degree_centrality_normalized_on(
+    store: &super::traits::GraphView<'_>,
+) -> FxHashMap<NodeId, f64> {
+    let result = degree_centrality_on(store);
     let n = result.total_degree.len();
 
     if n <= 1 {
@@ -140,14 +170,32 @@ pub fn degree_centrality_normalized(store: &dyn GraphStore) -> FxHashMap<NodeId,
 /// # Complexity
 ///
 /// O(iterations × (V + E))
+///
+/// # Errors
+///
+/// The error of a read of the store that fails.
 pub fn pagerank(
     store: &dyn GraphStore,
+    view: grafeo_common::types::ReadView,
+    damping: f64,
+    max_iterations: usize,
+    tolerance: f64,
+    directed: bool,
+) -> grafeo_common::utils::error::Result<FxHashMap<NodeId, f64>> {
+    let graph = super::traits::GraphView::new(store, view);
+    let found = pagerank_on(&graph, damping, max_iterations, tolerance, directed);
+    graph.finish(found)
+}
+
+/// [`pagerank`] on the graph a [`GraphView`](super::traits::GraphView) reads.
+pub(crate) fn pagerank_on(
+    store: &super::traits::GraphView<'_>,
     damping: f64,
     max_iterations: usize,
     tolerance: f64,
     directed: bool,
 ) -> FxHashMap<NodeId, f64> {
-    pagerank_in_order(
+    pagerank_in_order_on(
         store,
         &store.node_ids(),
         damping,
@@ -167,8 +215,27 @@ pub fn pagerank(
 /// `nodes` is not followed.
 ///
 /// [`order_by_key`]: super::order_by_key
+///
+/// # Errors
+///
+/// The error of a read of the store that fails.
 pub fn pagerank_in_order(
     store: &dyn GraphStore,
+    view: grafeo_common::types::ReadView,
+    nodes: &[NodeId],
+    damping: f64,
+    max_iterations: usize,
+    tolerance: f64,
+    directed: bool,
+) -> grafeo_common::utils::error::Result<FxHashMap<NodeId, f64>> {
+    let graph = super::traits::GraphView::new(store, view);
+    let found = pagerank_in_order_on(&graph, nodes, damping, max_iterations, tolerance, directed);
+    graph.finish(found)
+}
+
+/// [`pagerank_in_order`] on the graph a [`GraphView`](super::traits::GraphView) reads.
+pub(crate) fn pagerank_in_order_on(
+    store: &super::traits::GraphView<'_>,
     nodes: &[NodeId],
     damping: f64,
     max_iterations: usize,
@@ -190,7 +257,7 @@ pub fn pagerank_in_order(
     // The nodes each node passes its score to.
     let mut out_edges: Vec<Vec<usize>> = vec![Vec::new(); n];
     for (idx, &node) in nodes.iter().enumerate() {
-        for (neighbor, _) in visible_edges_from(store, node, Direction::Outgoing) {
+        for (neighbor, _) in store.edges(node, Direction::Outgoing) {
             let Some(&j) = node_to_idx.get(&neighbor) else {
                 continue;
             };
@@ -271,12 +338,16 @@ pub fn pagerank_in_order(
 /// order, read once for the algorithms that walk them from every node. A node
 /// committed after `nodes` was read is left out, so a walk never reaches a
 /// node outside them.
-fn out_neighbors(store: &dyn GraphStore, nodes: &[NodeId]) -> FxHashMap<NodeId, Vec<NodeId>> {
+fn out_neighbors(
+    store: &super::traits::GraphView<'_>,
+    nodes: &[NodeId],
+) -> FxHashMap<NodeId, Vec<NodeId>> {
     let members: FxHashSet<NodeId> = nodes.iter().copied().collect();
     nodes
         .iter()
         .map(|&node| {
-            let neighbors = visible_edges_from(store, node, Direction::Outgoing)
+            let neighbors = store
+                .edges(node, Direction::Outgoing)
                 .into_iter()
                 .map(|(neighbor, _)| neighbor)
                 .filter(|neighbor| members.contains(neighbor))
@@ -311,7 +382,25 @@ fn out_neighbors(store: &dyn GraphStore, nodes: &[NodeId]) -> FxHashMap<NodeId, 
 /// # Complexity
 ///
 /// O(V × E) for unweighted graphs
-pub fn betweenness_centrality(store: &dyn GraphStore, normalized: bool) -> FxHashMap<NodeId, f64> {
+///
+/// # Errors
+///
+/// The error of a read of the store that fails.
+pub fn betweenness_centrality(
+    store: &dyn GraphStore,
+    view: grafeo_common::types::ReadView,
+    normalized: bool,
+) -> grafeo_common::utils::error::Result<FxHashMap<NodeId, f64>> {
+    let graph = super::traits::GraphView::new(store, view);
+    let found = betweenness_centrality_on(&graph, normalized);
+    graph.finish(found)
+}
+
+/// [`betweenness_centrality`] on the graph a [`GraphView`](super::traits::GraphView) reads.
+pub(crate) fn betweenness_centrality_on(
+    store: &super::traits::GraphView<'_>,
+    normalized: bool,
+) -> FxHashMap<NodeId, f64> {
     let nodes = store.node_ids();
     let n = nodes.len();
 
@@ -433,7 +522,25 @@ pub fn betweenness_centrality(store: &dyn GraphStore, normalized: bool) -> FxHas
 /// # Complexity
 ///
 /// O(V × (V + E))
-pub fn closeness_centrality(store: &dyn GraphStore, wf_improved: bool) -> FxHashMap<NodeId, f64> {
+///
+/// # Errors
+///
+/// The error of a read of the store that fails.
+pub fn closeness_centrality(
+    store: &dyn GraphStore,
+    view: grafeo_common::types::ReadView,
+    wf_improved: bool,
+) -> grafeo_common::utils::error::Result<FxHashMap<NodeId, f64>> {
+    let graph = super::traits::GraphView::new(store, view);
+    let found = closeness_centrality_on(&graph, wf_improved);
+    graph.finish(found)
+}
+
+/// [`closeness_centrality`] on the graph a [`GraphView`](super::traits::GraphView) reads.
+pub(crate) fn closeness_centrality_on(
+    store: &super::traits::GraphView<'_>,
+    wf_improved: bool,
+) -> FxHashMap<NodeId, f64> {
     let nodes = store.node_ids();
     let n = nodes.len();
 
@@ -549,7 +656,7 @@ impl_algorithm! {
         let tolerance = params.get_float("tolerance").unwrap_or(1e-6);
         let directed = params.get_bool("directed").unwrap_or(true);
 
-        let scores = pagerank(store, damping, max_iter, tolerance, directed);
+        let scores = pagerank_on(store, damping, max_iter, tolerance, directed);
 
         let mut builder = NodeValueResultBuilder::with_capacity("pagerank", scores.len());
         for (node, score) in scores {
@@ -588,7 +695,7 @@ impl_algorithm! {
     execute(store, params) {
         let normalized = params.get_bool("normalized").unwrap_or(true);
 
-        let scores = betweenness_centrality(store, normalized);
+        let scores = betweenness_centrality_on(store, normalized);
 
         let mut builder = NodeValueResultBuilder::with_capacity("betweenness", scores.len());
         for (node, score) in scores {
@@ -628,7 +735,7 @@ impl_algorithm! {
     execute(store, params) {
         let wf_improved = params.get_bool("wf_improved").unwrap_or(false);
 
-        let scores = closeness_centrality(store, wf_improved);
+        let scores = closeness_centrality_on(store, wf_improved);
 
         let mut builder = NodeValueResultBuilder::with_capacity("closeness", scores.len());
         for (node, score) in scores {
@@ -672,47 +779,55 @@ impl GraphAlgorithm for DegreeCentralityAlgorithm {
         degree_params()
     }
 
-    fn execute(&self, store: &dyn GraphStore, params: &Parameters) -> Result<AlgorithmResult> {
-        let normalized = params.get_bool("normalized").unwrap_or(false);
+    fn execute(
+        &self,
+        store: &dyn GraphStore,
+        view: grafeo_common::types::ReadView,
+        params: &Parameters,
+    ) -> Result<AlgorithmResult> {
+        let graph = super::traits::GraphView::new(store, view);
+        let store = &graph;
+        let found = super::traits::evaluated(|| {
+            let normalized = params.get_bool("normalized").unwrap_or(false);
 
-        if normalized {
-            let scores = degree_centrality_normalized(store);
+            if normalized {
+                let scores = degree_centrality_normalized_on(store);
 
-            let mut builder =
-                NodeValueResultBuilder::with_capacity("degree_centrality", scores.len());
-            for (node, score) in scores {
-                builder.push(node, Value::Float64(score));
-            }
-            let mut result = builder.build();
-            result.sort_by_id_columns(1);
-            Ok(result)
-        } else {
-            let result = degree_centrality(store);
+                let mut builder =
+                    NodeValueResultBuilder::with_capacity("degree_centrality", scores.len());
+                for (node, score) in scores {
+                    builder.push(node, Value::Float64(score));
+                }
+                let mut result = builder.build();
+                result.sort_by_id_columns(1);
+                Ok(result)
+            } else {
+                let result = degree_centrality_on(store);
 
-            let mut output = AlgorithmResult::new(vec![
-                "node_id".to_string(),
-                "in_degree".to_string(),
-                "out_degree".to_string(),
-                "total_degree".to_string(),
-            ]);
-
-            for (&node, &total) in &result.total_degree {
-                let in_d = *result.in_degree.get(&node).unwrap_or(&0);
-                let out_d = *result.out_degree.get(&node).unwrap_or(&0);
-
-                // reason: Node IDs and degree counts are well within i64::MAX
-                #[allow(clippy::cast_possible_wrap)]
-                output.add_row(vec![
-                    Value::Int64(node.0 as i64),
-                    Value::Int64(in_d as i64),
-                    Value::Int64(out_d as i64),
-                    Value::Int64(total as i64),
+                let mut output = AlgorithmResult::new(vec![
+                    "node_id".to_string(),
+                    "in_degree".to_string(),
+                    "out_degree".to_string(),
+                    "total_degree".to_string(),
                 ]);
-            }
 
-            output.sort_by_id_columns(1);
-            Ok(output)
-        }
+                for (&node, &total) in &result.total_degree {
+                    let in_d = *result.in_degree.get(&node).unwrap_or(&0);
+                    let out_d = *result.out_degree.get(&node).unwrap_or(&0);
+
+                    output.add_row(vec![
+                        int_value(node.0)?,
+                        int_value(in_d)?,
+                        int_value(out_d)?,
+                        int_value(total)?,
+                    ]);
+                }
+
+                output.sort_by_id_columns(1);
+                Ok(output)
+            }
+        });
+        graph.finish(found)?
     }
 }
 
@@ -720,9 +835,10 @@ impl GraphAlgorithm for DegreeCentralityAlgorithm {
 // Tests
 // ============================================================================
 
-#[cfg(all(test, feature = "lpg"))]
+#[cfg(test)]
 mod tests {
     use super::*;
+    use grafeo_common::types::ReadView;
 
     fn create_test_graph() -> RowGroupStore {
         let store = RowGroupStore::new();
@@ -767,7 +883,7 @@ mod tests {
     #[test]
     fn test_degree_centrality() {
         let store = create_test_graph();
-        let result = degree_centrality(&store);
+        let result = degree_centrality(&store, ReadView::latest()).unwrap();
 
         // Node 0 has 2 outgoing edges
         assert_eq!(*result.out_degree.get(&NodeId::new(0)).unwrap(), 2);
@@ -780,7 +896,7 @@ mod tests {
     #[test]
     fn test_degree_centrality_normalized() {
         let store = create_test_graph();
-        let result = degree_centrality_normalized(&store);
+        let result = degree_centrality_normalized(&store, ReadView::latest()).unwrap();
 
         // All normalized values should be between 0 and 1
         for (_, &score) in &result {
@@ -791,7 +907,7 @@ mod tests {
     #[test]
     fn test_pagerank_basic() {
         let store = create_pagerank_graph();
-        let scores = pagerank(&store, 0.85, 100, 1e-6, true);
+        let scores = pagerank(&store, ReadView::latest(), 0.85, 100, 1e-6, true).unwrap();
 
         assert_eq!(scores.len(), 3);
 
@@ -814,7 +930,7 @@ mod tests {
         store.create_edge(a, b, "EDGE");
         // b is dangling
 
-        let scores = pagerank(&store, 0.85, 100, 1e-6, true);
+        let scores = pagerank(&store, ReadView::latest(), 0.85, 100, 1e-6, true).unwrap();
         assert_eq!(scores.len(), 2);
 
         // Dangling node should still have positive PageRank
@@ -824,14 +940,14 @@ mod tests {
     #[test]
     fn test_pagerank_empty() {
         let store = RowGroupStore::new();
-        let scores = pagerank(&store, 0.85, 100, 1e-6, true);
+        let scores = pagerank(&store, ReadView::latest(), 0.85, 100, 1e-6, true).unwrap();
         assert!(scores.is_empty());
     }
 
     #[test]
     fn test_betweenness_centrality() {
         let store = create_test_graph();
-        let scores = betweenness_centrality(&store, false);
+        let scores = betweenness_centrality(&store, ReadView::latest(), false).unwrap();
 
         assert_eq!(scores.len(), 5);
 
@@ -844,7 +960,7 @@ mod tests {
     #[test]
     fn test_betweenness_centrality_normalized() {
         let store = create_test_graph();
-        let scores = betweenness_centrality(&store, true);
+        let scores = betweenness_centrality(&store, ReadView::latest(), true).unwrap();
 
         // Normalized scores should be between 0 and 1
         for (_, &score) in &scores {
@@ -855,7 +971,7 @@ mod tests {
     #[test]
     fn test_closeness_centrality() {
         let store = create_test_graph();
-        let scores = closeness_centrality(&store, false);
+        let scores = closeness_centrality(&store, ReadView::latest(), false).unwrap();
 
         assert_eq!(scores.len(), 5);
 
@@ -871,8 +987,8 @@ mod tests {
     #[test]
     fn test_closeness_wf_improved() {
         let store = create_test_graph();
-        let scores_standard = closeness_centrality(&store, false);
-        let scores_wf = closeness_centrality(&store, true);
+        let scores_standard = closeness_centrality(&store, ReadView::latest(), false).unwrap();
+        let scores_wf = closeness_centrality(&store, ReadView::latest(), true).unwrap();
 
         // WF improved scores may differ but should still be valid
         for (node, &wf_score) in &scores_wf {
@@ -889,7 +1005,7 @@ mod tests {
         let a = store.create_node(&["Node"]);
         let _b = store.create_node(&["Node"]); // Isolated
 
-        let scores = closeness_centrality(&store, false);
+        let scores = closeness_centrality(&store, ReadView::latest(), false).unwrap();
 
         // Isolated node has 0 closeness
         assert_eq!(*scores.get(&a).unwrap(), 0.0);
@@ -900,16 +1016,16 @@ mod tests {
         let store = RowGroupStore::new();
         store.create_node(&["Node"]);
 
-        let degree = degree_centrality(&store);
+        let degree = degree_centrality(&store, ReadView::latest()).unwrap();
         assert_eq!(degree.total_degree.len(), 1);
 
-        let pr = pagerank(&store, 0.85, 100, 1e-6, true);
+        let pr = pagerank(&store, ReadView::latest(), 0.85, 100, 1e-6, true).unwrap();
         assert_eq!(pr.len(), 1);
 
-        let bc = betweenness_centrality(&store, false);
+        let bc = betweenness_centrality(&store, ReadView::latest(), false).unwrap();
         assert_eq!(bc.len(), 1);
 
-        let cc = closeness_centrality(&store, false);
+        let cc = closeness_centrality(&store, ReadView::latest(), false).unwrap();
         assert_eq!(cc.len(), 1);
     }
 
@@ -936,7 +1052,7 @@ mod tests {
 
         // Test execute with default params
         let params = Parameters::new();
-        let result = algo.execute(&store, &params).unwrap();
+        let result = algo.execute(&store, ReadView::latest(), &params).unwrap();
         assert_eq!(result.columns.len(), 2); // node_id, pagerank
         assert_eq!(result.row_count(), 3);
 
@@ -945,7 +1061,7 @@ mod tests {
         params.set_float("damping", 0.9);
         params.set_int("max_iterations", 50);
         params.set_float("tolerance", 1e-4);
-        let result = algo.execute(&store, &params).unwrap();
+        let result = algo.execute(&store, ReadView::latest(), &params).unwrap();
         assert_eq!(result.row_count(), 3);
     }
 
@@ -964,14 +1080,14 @@ mod tests {
 
         // Test execute with default params (normalized=true)
         let params = Parameters::new();
-        let result = algo.execute(&store, &params).unwrap();
+        let result = algo.execute(&store, ReadView::latest(), &params).unwrap();
         assert_eq!(result.columns.len(), 2); // node_id, betweenness
         assert_eq!(result.row_count(), 5);
 
         // Test execute with normalized=false
         let mut params = Parameters::new();
         params.set_bool("normalized", false);
-        let result = algo.execute(&store, &params).unwrap();
+        let result = algo.execute(&store, ReadView::latest(), &params).unwrap();
         assert_eq!(result.row_count(), 5);
     }
 
@@ -990,14 +1106,14 @@ mod tests {
 
         // Test execute with default params (wf_improved=false)
         let params = Parameters::new();
-        let result = algo.execute(&store, &params).unwrap();
+        let result = algo.execute(&store, ReadView::latest(), &params).unwrap();
         assert_eq!(result.columns.len(), 2); // node_id, closeness
         assert_eq!(result.row_count(), 5);
 
         // Test execute with wf_improved=true
         let mut params = Parameters::new();
         params.set_bool("wf_improved", true);
-        let result = algo.execute(&store, &params).unwrap();
+        let result = algo.execute(&store, ReadView::latest(), &params).unwrap();
         assert_eq!(result.row_count(), 5);
     }
 
@@ -1016,14 +1132,14 @@ mod tests {
 
         // Test execute with default params (normalized=false) - returns 4 columns
         let params = Parameters::new();
-        let result = algo.execute(&store, &params).unwrap();
+        let result = algo.execute(&store, ReadView::latest(), &params).unwrap();
         assert_eq!(result.columns.len(), 4); // node_id, in_degree, out_degree, total_degree
         assert_eq!(result.row_count(), 5);
 
         // Test execute with normalized=true - returns 2 columns
         let mut params = Parameters::new();
         params.set_bool("normalized", true);
-        let result = algo.execute(&store, &params).unwrap();
+        let result = algo.execute(&store, ReadView::latest(), &params).unwrap();
         assert_eq!(result.columns.len(), 2); // node_id, degree_centrality
         assert_eq!(result.row_count(), 5);
     }
@@ -1036,23 +1152,23 @@ mod tests {
         let b = store.create_node(&["Node"]);
         store.create_edge(a, b, "EDGE");
 
-        let scores = betweenness_centrality(&store, false);
+        let scores = betweenness_centrality(&store, ReadView::latest(), false).unwrap();
         assert_eq!(scores.len(), 2);
         // With only 2 nodes, betweenness is 0 for both
         assert_eq!(*scores.get(&a).unwrap(), 0.0);
         assert_eq!(*scores.get(&b).unwrap(), 0.0);
 
-        let scores_norm = betweenness_centrality(&store, true);
+        let scores_norm = betweenness_centrality(&store, ReadView::latest(), true).unwrap();
         assert_eq!(scores_norm.len(), 2);
     }
 
     #[test]
     fn test_closeness_empty_graph() {
         let store = RowGroupStore::new();
-        let scores = closeness_centrality(&store, false);
+        let scores = closeness_centrality(&store, ReadView::latest(), false).unwrap();
         assert!(scores.is_empty());
 
-        let scores_wf = closeness_centrality(&store, true);
+        let scores_wf = closeness_centrality(&store, ReadView::latest(), true).unwrap();
         assert!(scores_wf.is_empty());
     }
 
@@ -1061,11 +1177,11 @@ mod tests {
         let store = RowGroupStore::new();
         let a = store.create_node(&["Node"]);
 
-        let scores = closeness_centrality(&store, false);
+        let scores = closeness_centrality(&store, ReadView::latest(), false).unwrap();
         assert_eq!(scores.len(), 1);
         assert_eq!(*scores.get(&a).unwrap(), 0.0);
 
-        let scores_wf = closeness_centrality(&store, true);
+        let scores_wf = closeness_centrality(&store, ReadView::latest(), true).unwrap();
         assert_eq!(scores_wf.len(), 1);
         assert_eq!(*scores_wf.get(&a).unwrap(), 0.0);
     }
@@ -1073,10 +1189,10 @@ mod tests {
     #[test]
     fn test_degree_empty_graph() {
         let store = RowGroupStore::new();
-        let result = degree_centrality(&store);
+        let result = degree_centrality(&store, ReadView::latest()).unwrap();
         assert!(result.total_degree.is_empty());
 
-        let normalized = degree_centrality_normalized(&store);
+        let normalized = degree_centrality_normalized(&store, ReadView::latest()).unwrap();
         assert!(normalized.is_empty());
     }
 
@@ -1084,8 +1200,8 @@ mod tests {
     fn test_pagerank_convergence() {
         // Test that PageRank converges with tight tolerance
         let store = create_pagerank_graph();
-        let scores_tight = pagerank(&store, 0.85, 1000, 1e-10, true);
-        let scores_loose = pagerank(&store, 0.85, 1000, 1e-2, true);
+        let scores_tight = pagerank(&store, ReadView::latest(), 0.85, 1000, 1e-10, true).unwrap();
+        let scores_loose = pagerank(&store, ReadView::latest(), 0.85, 1000, 1e-2, true).unwrap();
 
         // Both should produce valid results
         assert_eq!(scores_tight.len(), 3);
@@ -1101,8 +1217,8 @@ mod tests {
     fn test_pagerank_low_damping() {
         // Test with low damping (more teleportation)
         let store = create_pagerank_graph();
-        let scores_low = pagerank(&store, 0.5, 100, 1e-6, true);
-        let scores_high = pagerank(&store, 0.99, 100, 1e-6, true);
+        let scores_low = pagerank(&store, ReadView::latest(), 0.5, 100, 1e-6, true).unwrap();
+        let scores_high = pagerank(&store, ReadView::latest(), 0.99, 100, 1e-6, true).unwrap();
 
         // Both should be valid
         assert_eq!(scores_low.len(), 3);
@@ -1142,7 +1258,7 @@ mod tests {
         store.create_edge(b, c, "EDGE");
         store.create_edge(c, d, "EDGE");
 
-        let scores = betweenness_centrality(&store, false);
+        let scores = betweenness_centrality(&store, ReadView::latest(), false).unwrap();
 
         // Middle nodes should have higher betweenness than endpoints
         let bc_b = *scores.get(&b).unwrap();
@@ -1162,7 +1278,7 @@ mod tests {
         store.create_edge(n0, n0, "SELF"); // self-loop
         store.create_edge(n0, n1, "EDGE");
 
-        let result = degree_centrality(&store);
+        let result = degree_centrality(&store, ReadView::latest()).unwrap();
         // Self-loop counts as both out and in for n0
         assert_eq!(*result.out_degree.get(&n0).unwrap(), 2); // self + n1
         assert_eq!(*result.in_degree.get(&n0).unwrap(), 1); // self
@@ -1184,7 +1300,7 @@ mod tests {
         // The path d - a - b - c, created as a -> b, b -> c, a -> d (a = 0, b = 1,
         // c = 2, d = 3): the inner nodes rank first and equal, the ends last.
         let (store, nodes) = store_from_edges(4, &[(0, 1), (1, 2), (0, 3)]);
-        let scores = pagerank(&store, 0.85, 100, 1e-12, false);
+        let scores = pagerank(&store, ReadView::latest(), 0.85, 100, 1e-12, false).unwrap();
         assert!((scores[&nodes[0]] - scores[&nodes[1]]).abs() < 1e-12);
         assert!((scores[&nodes[2]] - scores[&nodes[3]]).abs() < 1e-12);
         assert!(scores[&nodes[0]] > scores[&nodes[2]]);
@@ -1196,8 +1312,8 @@ mod tests {
         // Parallel edges in either direction and a self-loop change nothing.
         let (once, a) = store_from_edges(3, &[(0, 1), (1, 2)]);
         let (many, b) = store_from_edges(3, &[(0, 1), (1, 0), (0, 1), (1, 2), (2, 2)]);
-        let x = pagerank(&once, 0.85, 100, 1e-12, false);
-        let y = pagerank(&many, 0.85, 100, 1e-12, false);
+        let x = pagerank(&once, ReadView::latest(), 0.85, 100, 1e-12, false).unwrap();
+        let y = pagerank(&many, ReadView::latest(), 0.85, 100, 1e-12, false).unwrap();
         for i in 0..3 {
             assert_eq!(x[&a[i]].to_bits(), y[&b[i]].to_bits(), "node {i}");
         }
@@ -1206,7 +1322,7 @@ mod tests {
     #[test]
     fn test_undirected_pagerank_with_isolated_nodes_sums_to_one() {
         let (store, nodes) = store_from_edges(4, &[(0, 1)]);
-        let scores = pagerank(&store, 0.85, 100, 1e-12, false);
+        let scores = pagerank(&store, ReadView::latest(), 0.85, 100, 1e-12, false).unwrap();
         assert!((scores.values().sum::<f64>() - 1.0).abs() < 1e-9);
         assert_eq!(scores[&nodes[2]].to_bits(), scores[&nodes[3]].to_bits());
         assert!(scores[&nodes[0]] > scores[&nodes[2]]);
@@ -1216,9 +1332,9 @@ mod tests {
     fn test_directed_pagerank_keeps_direction_and_parallel_edges() {
         // a -> b twice, b -> c: c collects the most, and the doubled edge counts twice.
         let (store, nodes) = store_from_edges(3, &[(0, 1), (0, 1), (1, 2)]);
-        let directed = pagerank(&store, 0.85, 100, 1e-12, true);
+        let directed = pagerank(&store, ReadView::latest(), 0.85, 100, 1e-12, true).unwrap();
         assert!(directed[&nodes[2]] > directed[&nodes[0]]);
-        let undirected = pagerank(&store, 0.85, 100, 1e-12, false);
+        let undirected = pagerank(&store, ReadView::latest(), 0.85, 100, 1e-12, false).unwrap();
         assert!((undirected[&nodes[0]] - undirected[&nodes[2]]).abs() < 1e-12);
     }
 
@@ -1229,8 +1345,10 @@ mod tests {
         let (store, _) = store_from_edges(4, &[(0, 1), (1, 2), (0, 3)]);
         let mut params = Parameters::new();
         params.set_bool("directed", false);
-        let result = PageRankAlgorithm.execute(&store, &params).unwrap();
-        let expected = pagerank(&store, 0.85, 100, 1e-6, false);
+        let result = PageRankAlgorithm
+            .execute(&store, ReadView::latest(), &params)
+            .unwrap();
+        let expected = pagerank(&store, ReadView::latest(), 0.85, 100, 1e-6, false).unwrap();
         assert_eq!(result.rows.len(), 4);
         for row in &result.rows {
             let (Value::Int64(id), Value::Float64(score)) = (&row[0], &row[1]) else {

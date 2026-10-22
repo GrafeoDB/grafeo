@@ -54,9 +54,7 @@ pub use auth::{Grant, Identity, Role, StatementKind};
 pub use catalog::{Catalog, CatalogError, IndexDefinition, IndexType};
 pub use config::{AccessMode, Config, ConfigError, DurabilityMode, GraphModel, HistoryRetention};
 pub use database::GrafeoDB;
-#[cfg(feature = "lpg")]
 pub use database::GraphHandle;
-#[cfg(feature = "lpg")]
 pub use database::{AsOfView, TimePoint};
 pub use grafeo_core::graph::{Direction, GraphStore, GraphStoreMut, ProjectionSpec};
 /// The options `GrafeoDB::create_text_index_with` takes.
@@ -65,8 +63,7 @@ pub use grafeo_core::index::text::{TextIndexOptions, TokenizerKind};
 pub use memory_usage::MemoryUsage;
 #[cfg(feature = "metrics")]
 pub use metrics::{MetricsRegistry, MetricsSnapshot};
-#[cfg(all(feature = "gql", feature = "lpg"))]
+#[cfg(feature = "gql")]
 pub use query::executor::stream::{OwnedResultStream, OwnedRowIterator, ResultStream, RowIterator};
 pub use session::Session;
-#[cfg(feature = "lpg")]
 pub use transaction::{CommitInfo, PreparedCommit};

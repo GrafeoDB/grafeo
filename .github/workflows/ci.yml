@@ -354,7 +354,7 @@ jobs:
   # --all-features too: encryption at rest with only the features it needs,
   # the migration of 0.5.x files in a build without `wal` (the default
   # `embedded` profile of the Node.js, C, Go, C# and Dart bindings), the
-  # refusal of 0.5.x files in a build without `lpg`, the migration of files
+  # migration of files
   # compacted by 0.5.x in a build without the old `compact-store` feature (the
   # `grafeo` crate, the CLI), the refusal of files with data a build cannot
   # read: triples without `triple-store` (in the file, its WAL or a 0.5.x WAL directory, so also with
@@ -394,14 +394,14 @@ jobs:
             ${{ runner.os }}-cargo-registry-
 
       - name: Test encryption at rest, triples in a WAL without triple-store, epochs across a reopen
-        run: cargo nextest run -p grafeo-engine --no-default-features --features lpg,gql,wal,grafeo-file,encryption --test encryption_at_rest --test rdf_file_without_triple_store --test epochs_across_reopen
+        run: cargo nextest run -p grafeo-engine --no-default-features --features gql,wal,grafeo-file,encryption --test encryption_at_rest --test rdf_file_without_triple_store --test epochs_across_reopen
         env:
           RUSTC_WRAPPER: sccache
           SCCACHE_GHA_ENABLED: "true"
           CARGO_PROFILE_DEV_DEBUG: line-tables-only
 
       - name: Test migration and close without the wal feature, files and snapshots with data this build cannot read, functions without their features
-        run: cargo nextest run -p grafeo-engine --no-default-features --features lpg,gql,grafeo-file --test migration_without_wal --test writes_after_close --test compacted_file_in_every_build --test rdf_file_without_triple_store --test search_indexes_without_their_features --test snapshot_without_its_features --test functions_without_their_features
+        run: cargo nextest run -p grafeo-engine --no-default-features --features gql,grafeo-file --test migration_without_wal --test writes_after_close --test compacted_file_in_every_build --test rdf_file_without_triple_store --test search_indexes_without_their_features --test snapshot_without_its_features --test functions_without_their_features
         env:
           RUSTC_WRAPPER: sccache
           SCCACHE_GHA_ENABLED: "true"
@@ -416,15 +416,7 @@ jobs:
           SCCACHE_GHA_ENABLED: "true"
           CARGO_PROFILE_DEV_DEBUG: line-tables-only
 
-      - name: Test 0.5.x files without the lpg feature
-        run: cargo nextest run -p grafeo-engine --no-default-features --features gql,grafeo-file,wal --test legacy_without_lpg
-        env:
-          RUSTC_WRAPPER: sccache
-          SCCACHE_GHA_ENABLED: "true"
-          CARGO_PROFILE_DEV_DEBUG: line-tables-only
-
-      # The engine features of the feature matrix's `rdf` profile, which name
-      # no `lpg`: `triple-store` brings it (#544).
+      # The engine features of the feature matrix's `rdf` profile (#544).
       - name: Test RDF persistence with the rdf engine features
         run: cargo nextest run -p grafeo-engine --no-default-features --features gql,sparql,graphql,triple-store,shacl,wal,grafeo-file,spill,mmap,regex,testing-crash-injection --test rdf_persistence
         env:
@@ -574,8 +566,8 @@ jobs:
             engine_features: "--features lpg,graphql"
           # LPG persona: Graph App Developer (LPG model + all LPG query languages)
           - profile: lpg
-            features: "--features lpg,gql,cypher,gremlin,sql-pgq,spill,mmap,regex"
-            engine_features: "--features lpg,gql,cypher,gremlin,sql-pgq,wal,grafeo-file,spill,mmap,regex"
+            features: "--features gql,cypher,gremlin,sql-pgq,spill,mmap,regex"
+            engine_features: "--features gql,cypher,gremlin,sql-pgq,wal,grafeo-file,spill,mmap,regex"
           # RDF persona: Knowledge Engineer (RDF model + SPARQL/GraphQL + SHACL)
           - profile: rdf
             features: "--features gql,sparql,graphql,triple-store,spill,mmap,regex"
@@ -592,15 +584,15 @@ jobs:
             engine_features: "--features vector-index,text-index,hybrid-search,cdc"
           # Edge persona: Frontend/Edge Developer (minimal WASM-friendly)
           - profile: edge
-            features: "--features lpg,gql,regex-lite"
-            engine_features: "--features lpg,gql,regex-lite"
+            features: "--features gql,regex-lite"
+            engine_features: "--features gql,regex-lite"
           # Enterprise persona: Platform Operator (observability + async I/O)
           - profile: enterprise
             features: "--features tracing"
             engine_features: "--features metrics,tracing,async-storage"
           # Full: all features combined (`full` is a deprecated alias, removed in 0.7.0 per #468; use persona combos)
           - profile: full
-            features: "--features lpg,languages,triple-store,algos,parallel,vector-index,text-index,hybrid-search,spill,mmap,regex,jsonl-import,parquet-import"
+            features: "--features languages,triple-store,algos,parallel,vector-index,text-index,hybrid-search,spill,mmap,regex,jsonl-import,parquet-import"
             engine_features: "--features full"
     steps:
       - uses: actions/checkout@v7

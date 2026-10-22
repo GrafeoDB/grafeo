@@ -54,7 +54,7 @@ As defined in the `grafeo` facade crate:
 ### LPG
 
 ```toml
-lpg = ["grafeo-engine/lpg", "gql", "cypher", "gremlin", "sql-pgq", "storage", "regex"]
+lpg = ["gql", "cypher", "gremlin", "sql-pgq", "storage", "regex"]
 ```
 
 All labeled property graph query languages plus persistence. The default choice for application developers working with nodes, edges, labels and properties.
@@ -62,10 +62,10 @@ All labeled property graph query languages plus persistence. The default choice 
 ### RDF
 
 ```toml
-rdf = ["triple-store", "grafeo-engine/lpg", "gql", "sparql", "graphql", "storage", "regex", "shacl"]
+rdf = ["triple-store", "gql", "sparql", "graphql", "storage", "regex", "shacl"]
 ```
 
-RDF triple store with SPARQL, GraphQL, SHACL validation and persistence, for knowledge engineers working with ontologies and linked data. The triple store comes with the LPG store, which sessions, persistence and recovery need: the engine's `triple-store` feature enables `lpg`, so every database build with the triple store has it ([#544](https://github.com/GrafeoDB/grafeo/issues/544); such a build lost its triples on reopen). Add the `ring-index` atom for compact RDF indexing (it pulls in `succinct-indexes`).
+RDF triple store with SPARQL, GraphQL, SHACL validation and persistence, for knowledge engineers working with ontologies and linked data. Every build has the LPG store, which sessions, persistence and recovery need ([#544](https://github.com/GrafeoDB/grafeo/issues/544): a build with the triple store but without it lost its triples on reopen). Add the `ring-index` atom for compact RDF indexing (it pulls in `succinct-indexes`).
 
 > **Note:** in the lower-level crates (`grafeo-core`, `grafeo-adapters`, `grafeo-engine`), `rdf` is a deprecated alias for the `triple-store` atom only. The profile above applies to the facade and binding crates.
 
@@ -90,7 +90,7 @@ Structured memory for LLMs, agents and RAG pipelines: vector and text retrieval 
 ### Edge
 
 ```toml
-edge = ["grafeo-engine/lpg", "gql", "regex-lite"]
+edge = ["gql", "regex-lite"]
 ```
 
 Minimal profile for browsers, mobile and other constrained environments, with the smallest possible binary.
@@ -217,7 +217,7 @@ The individual feature flags (Layer 2) that profiles are composed from. "(standa
 
 | Atom | Profile | Description | Status |
 | --- | --- | --- | --- |
-| `triple-store` | RDF | RDF triple store with 6-way indexing; enables `lpg` | Implemented |
+| `triple-store` | RDF | RDF triple store with 6-way indexing | Implemented |
 | `shacl` | RDF | SHACL validation (core and SPARQL-based constraints) | Implemented |
 | `ring-index` | (standalone) | Space-efficient RDF index (pulls in succinct-indexes) | Implemented |
 | `succinct-indexes` | (pulled in by ring-index) | Rank/select bitvectors, Elias-Fano, wavelet trees | Implemented |

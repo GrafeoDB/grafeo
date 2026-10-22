@@ -7,14 +7,14 @@
 
 use std::sync::Arc;
 
-use grafeo_common::types::{EdgeId, EpochId, LogicalType, NodeId, TransactionId, Value};
+use grafeo_common::types::{EdgeId, LogicalType, NodeId, ReadView, Value};
 
 use super::accumulator::AggregateFunction;
 use super::aggregate::AggregateState;
-use super::{Operator, OperatorResult};
+use super::{Operator, OperatorError, OperatorResult};
 use crate::execution::DataChunk;
 use crate::execution::vector::ValueVector;
-use crate::graph::traits::GraphStoreSearch;
+use crate::graph::traits::GraphStore;
 
 /// Whether the horizontal aggregate operates on edges or nodes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -30,8 +30,8 @@ pub enum EntityKind {
 ///
 /// For each input row:
 /// 1. Reads a `Value::List` from `list_column_idx` (entity IDs from a path)
-/// 2. For each entity ID, looks up `property` on the entity as the
-///    transaction sees it (see [`with_transaction_context`](Self::with_transaction_context))
+/// 2. For each entity ID, looks up `property` on the entity as the query's
+///    view sees it
 /// 3. Feeds property values through an `AggregateState`
 /// 4. Finalizes and appends the result as a new column, in the type the
 ///    aggregate gives (an integer sum stays an integer)
@@ -53,25 +53,28 @@ pub struct HorizontalAggregateOperator {
     /// Property name to access on each entity.
     property: String,
     /// Graph store for property lookups.
-    store: Arc<dyn GraphStoreSearch>,
+    store: Arc<dyn GraphStore>,
     /// Number of input columns (to know where to append the result).
     input_column_count: usize,
-    /// The epoch the query reads at.
-    viewing_epoch: Option<EpochId>,
-    /// The transaction the query runs in, whose own writes it sees.
-    transaction_id: Option<TransactionId>,
+    /// Who reads: each entity is read as this view sees it.
+    view: ReadView,
 }
 
 impl HorizontalAggregateOperator {
-    /// Creates a new horizontal aggregate operator.
+    /// Creates a horizontal aggregate that reads the entities at `view`.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the aggregate's parts and the view it reads at; the options are builders"
+    )]
     pub fn new(
         child: Box<dyn Operator>,
         list_column_idx: usize,
         entity_kind: EntityKind,
         function: AggregateFunction,
         property: String,
-        store: Arc<dyn GraphStoreSearch>,
+        store: Arc<dyn GraphStore>,
         input_column_count: usize,
+        view: ReadView,
     ) -> Self {
         Self {
             child,
@@ -84,8 +87,7 @@ impl HorizontalAggregateOperator {
             property,
             store,
             input_column_count,
-            viewing_epoch: None,
-            transaction_id: None,
+            view,
         }
     }
 
@@ -104,50 +106,23 @@ impl HorizontalAggregateOperator {
         self
     }
 
-    /// Reads the entities as `transaction_id` sees them at `viewing_epoch`:
-    /// its own uncommitted writes included.
-    #[must_use]
-    pub fn with_transaction_context(
-        mut self,
-        viewing_epoch: EpochId,
-        transaction_id: Option<TransactionId>,
-    ) -> Self {
-        self.viewing_epoch = Some(viewing_epoch);
-        self.transaction_id = transaction_id;
-        self
-    }
-
     /// The value of the property of the entity `entity_value` (an id), as
-    /// the query's transaction sees the entity.
-    fn get_property_value(&self, entity_value: &Value) -> Option<Value> {
+    /// the query's view sees the entity.
+    fn get_property_value(&self, entity_value: &Value) -> Result<Option<Value>, OperatorError> {
         let Value::Int64(raw) = entity_value else {
-            return None;
+            return Ok(None);
         };
-        let id = u64::try_from(*raw).ok()?;
-        match self.entity_kind {
-            EntityKind::Edge => {
-                let id = EdgeId(id);
-                let edge = match (self.viewing_epoch, self.transaction_id) {
-                    (Some(epoch), Some(transaction)) => {
-                        self.store.get_edge_versioned(id, epoch, transaction)
-                    }
-                    (Some(epoch), None) => self.store.get_edge_at_epoch(id, epoch),
-                    (None, _) => self.store.get_edge(id),
-                }?;
-                edge.get_property(&self.property).cloned()
-            }
-            EntityKind::Node => {
-                let id = NodeId(id);
-                let node = match (self.viewing_epoch, self.transaction_id) {
-                    (Some(epoch), Some(transaction)) => {
-                        self.store.get_node_versioned(id, epoch, transaction)
-                    }
-                    (Some(epoch), None) => self.store.get_node_at_epoch(id, epoch),
-                    (None, _) => self.store.get_node(id),
-                }?;
-                node.get_property(&self.property).cloned()
-            }
-        }
+        let Ok(id) = u64::try_from(*raw) else {
+            return Ok(None);
+        };
+        Ok(match self.entity_kind {
+            EntityKind::Edge => self
+                .store
+                .edge_property(EdgeId(id), &self.property, self.view)?,
+            EntityKind::Node => self
+                .store
+                .node_property(NodeId(id), &self.property, self.view)?,
+        })
     }
 }
 
@@ -196,7 +171,7 @@ impl Operator for HorizontalAggregateOperator {
                     self.separator.as_deref(),
                 );
                 for entity_val in list.iter() {
-                    let prop_val = self.get_property_value(entity_val);
+                    let prop_val = self.get_property_value(entity_val)?;
                     if prop_val.is_some() && !matches!(prop_val, Some(Value::Null)) {
                         state.update(prop_val);
                     }
@@ -226,13 +201,14 @@ impl Operator for HorizontalAggregateOperator {
     }
 }
 
-#[cfg(all(test, feature = "lpg"))]
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::execution::chunk::DataChunkBuilder;
     use crate::graph::GraphStoreMut as _;
     use crate::graph::rowgroup::RowGroupStore;
     use grafeo_common::types::PropertyKey;
+    use grafeo_common::types::TransactionId;
 
     struct MockOperator {
         chunks: Vec<DataChunk>,
@@ -274,7 +250,7 @@ mod tests {
 
     // reason: test IDs are small sequential counters
     #[allow(clippy::cast_possible_wrap)]
-    fn setup_store_with_edges() -> (Arc<dyn GraphStoreSearch>, Vec<Value>) {
+    fn setup_store_with_edges() -> (Arc<dyn GraphStore>, Vec<Value>) {
         let store = RowGroupStore::new();
         let n1 = store.create_node(&[]);
         let n2 = store.create_node(&[]);
@@ -297,7 +273,7 @@ mod tests {
 
     // reason: test IDs are small sequential counters
     #[allow(clippy::cast_possible_wrap)]
-    fn setup_store_with_nodes() -> (Arc<dyn GraphStoreSearch>, Vec<Value>) {
+    fn setup_store_with_nodes() -> (Arc<dyn GraphStore>, Vec<Value>) {
         let store = RowGroupStore::new();
         // Use Float64 properties since the result column is Float64-typed
         // (Int64 values from SumInt finalize would be silently dropped by the Float64 column)
@@ -356,7 +332,7 @@ mod tests {
                 Value::Int64(i64::try_from(edge.as_u64()).unwrap())
             })
             .collect();
-        let store: Arc<dyn GraphStoreSearch> = Arc::new(store);
+        let store: Arc<dyn GraphStore> = Arc::new(store);
         for (function, want) in [
             (AggregateFunction::Sum, Value::Int64(110)),
             (AggregateFunction::Max, Value::Int64(88)),
@@ -370,6 +346,7 @@ mod tests {
                 "w".to_string(),
                 Arc::clone(&store),
                 1,
+                ReadView::latest(),
             );
             let result = op.next().unwrap().unwrap();
             assert_eq!(
@@ -402,6 +379,7 @@ mod tests {
             "w".to_string(),
             Arc::new(store),
             1,
+            ReadView::latest(),
         )
         .with_aggregate_options(true, None, None);
         let result = op.next().unwrap().unwrap();
@@ -425,7 +403,7 @@ mod tests {
             .unwrap();
         store.set_edge_property_versioned(edge, "w", Value::Int64(88), transaction);
         let ids = vec![Value::Int64(i64::try_from(edge.as_u64()).unwrap())];
-        let store: Arc<dyn GraphStoreSearch> = Arc::new(store);
+        let store: Arc<dyn GraphStore> = Arc::new(store);
 
         let read = |context: Option<TransactionId>| {
             let mut op = HorizontalAggregateOperator::new(
@@ -436,8 +414,8 @@ mod tests {
                 "w".to_string(),
                 Arc::clone(&store),
                 1,
-            )
-            .with_transaction_context(epoch, context);
+                ReadView::new(epoch, context),
+            );
             let result = op.next().unwrap().unwrap();
             result.column(1).unwrap().get_value(0)
         };
@@ -472,6 +450,7 @@ mod tests {
             "weight".to_string(),
             store,
             2,
+            ReadView::latest(),
         );
 
         let result = op.next().unwrap().unwrap();
@@ -508,8 +487,9 @@ mod tests {
             AggregateFunction::Sum,
             "weight".to_string(),
             store,
-            2, // input_column_count
-        );
+            2,
+            ReadView::latest(),
+        ); // input_column_count
 
         let result = op.next().unwrap().unwrap();
         assert_eq!(result.row_count(), 1);
@@ -542,6 +522,7 @@ mod tests {
             "pop".to_string(),
             store,
             1,
+            ReadView::latest(),
         );
 
         let result = op.next().unwrap().unwrap();
@@ -572,6 +553,7 @@ mod tests {
             "weight".to_string(),
             store,
             1,
+            ReadView::latest(),
         );
 
         let result = op.next().unwrap().unwrap();
@@ -602,6 +584,7 @@ mod tests {
             "weight".to_string(),
             Arc::clone(&store),
             1,
+            ReadView::latest(),
         );
 
         let result = op.next().unwrap().unwrap();
@@ -626,6 +609,7 @@ mod tests {
             "weight".to_string(),
             store,
             1,
+            ReadView::latest(),
         );
 
         let result = op.next().unwrap().unwrap();
@@ -635,7 +619,7 @@ mod tests {
 
     #[test]
     fn test_horizontal_empty_list_returns_null() {
-        let store: Arc<dyn GraphStoreSearch> = Arc::new(RowGroupStore::new());
+        let store: Arc<dyn GraphStore> = Arc::new(RowGroupStore::new());
 
         let mut builder = DataChunkBuilder::new(&[LogicalType::Any]);
         builder
@@ -654,6 +638,7 @@ mod tests {
             "weight".to_string(),
             store,
             1,
+            ReadView::latest(),
         );
 
         let result = op.next().unwrap().unwrap();
@@ -668,7 +653,7 @@ mod tests {
 
     #[test]
     fn test_horizontal_non_list_column_returns_null() {
-        let store: Arc<dyn GraphStoreSearch> = Arc::new(RowGroupStore::new());
+        let store: Arc<dyn GraphStore> = Arc::new(RowGroupStore::new());
 
         // Put a non-list value in the list column
         let mut builder = DataChunkBuilder::new(&[LogicalType::Int64]);
@@ -685,6 +670,7 @@ mod tests {
             "weight".to_string(),
             store,
             1,
+            ReadView::latest(),
         );
 
         let result = op.next().unwrap().unwrap();
@@ -729,6 +715,7 @@ mod tests {
             "weight".to_string(),
             store,
             2,
+            ReadView::latest(),
         );
 
         let result = op.next().unwrap().unwrap();
@@ -770,6 +757,7 @@ mod tests {
             "weight".to_string(),
             store,
             1,
+            ReadView::latest(),
         );
 
         // First chunk
@@ -790,7 +778,7 @@ mod tests {
 
     #[test]
     fn test_horizontal_name() {
-        let store: Arc<dyn GraphStoreSearch> = Arc::new(RowGroupStore::new());
+        let store: Arc<dyn GraphStore> = Arc::new(RowGroupStore::new());
         let mock = MockOperator::new(vec![]);
         let op = HorizontalAggregateOperator::new(
             Box::new(mock),
@@ -800,13 +788,14 @@ mod tests {
             "weight".to_string(),
             store,
             1,
+            ReadView::latest(),
         );
         assert_eq!(op.name(), "HorizontalAggregate");
     }
 
     #[test]
     fn test_horizontal_child_returns_none() {
-        let store: Arc<dyn GraphStoreSearch> = Arc::new(RowGroupStore::new());
+        let store: Arc<dyn GraphStore> = Arc::new(RowGroupStore::new());
         let mock = MockOperator::new(vec![]); // No chunks
         let mut op = HorizontalAggregateOperator::new(
             Box::new(mock),
@@ -816,6 +805,7 @@ mod tests {
             "weight".to_string(),
             store,
             1,
+            ReadView::latest(),
         );
 
         assert!(op.next().unwrap().is_none());
@@ -823,7 +813,7 @@ mod tests {
 
     #[test]
     fn test_horizontal_aggregate_into_any() {
-        let store: Arc<dyn GraphStoreSearch> = Arc::new(RowGroupStore::new());
+        let store: Arc<dyn GraphStore> = Arc::new(RowGroupStore::new());
         let mock = MockOperator::new(vec![]);
         let op = HorizontalAggregateOperator::new(
             Box::new(mock),
@@ -833,6 +823,7 @@ mod tests {
             "name".to_string(),
             store,
             1,
+            ReadView::latest(),
         );
         let any = Box::new(op).into_any();
         assert!(any.downcast::<HorizontalAggregateOperator>().is_ok());

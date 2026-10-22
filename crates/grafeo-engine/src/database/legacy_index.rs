@@ -169,16 +169,17 @@ fn vector_index_kind<G: grafeo_core::graph::GraphStore + ?Sized>(
     graph: &G,
     wal: &std::path::Path,
 ) -> Result<Option<(IndexKindRecord, Option<IndexNameKindRecord>)>> {
-    use grafeo_common::types::{PropertyKey, Value};
+    use grafeo_common::types::{ReadView, Value};
 
-    let key = PropertyKey::new(index.property.as_str());
-    let dimensions = graph
-        .nodes_by_label(&index.label)
-        .into_iter()
-        .find_map(|node| match graph.get_node_property(node, &key) {
-            Some(Value::Vector(vector)) => Some(vector.len()),
-            _ => None,
-        });
+    // An index build at the open: every write the replay applied.
+    let view = ReadView::latest();
+    let mut dimensions = None;
+    for node in graph.nodes_by_label(&index.label, view)? {
+        if let Some(Value::Vector(vector)) = graph.node_property(node, &index.property, view)? {
+            dimensions = Some(vector.len());
+            break;
+        }
+    }
     let Some(dimensions) = dimensions else {
         grafeo_common::grafeo_warn!(
             "the vector index '{}' on :{}({}) of the WAL {} has no vector to take its \

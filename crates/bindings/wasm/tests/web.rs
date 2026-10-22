@@ -19,8 +19,8 @@ fn to_js<T: serde::Serialize>(
 #[wasm_bindgen_test]
 fn test_database_creation() {
     let db = Database::new().expect("should create in-memory database");
-    assert_eq!(db.node_count(), 0);
-    assert_eq!(db.edge_count(), 0);
+    assert_eq!(db.node_count().unwrap(), 0);
+    assert_eq!(db.edge_count().unwrap(), 0);
 }
 
 /// A decimal parameter `{ "$decimal": "0.10" }` comes back from arithmetic as
@@ -49,7 +49,7 @@ fn test_insert_and_query() {
 
     db.execute("CREATE (:Person {name: 'Alix', age: 30})")
         .expect("create node");
-    assert_eq!(db.node_count(), 1);
+    assert_eq!(db.node_count().unwrap(), 1);
 
     let result = db
         .execute("MATCH (n:Person) RETURN n.name, n.age")
@@ -102,7 +102,7 @@ fn test_snapshot_roundtrip() {
 
     db.execute("CREATE (:Person {name: 'Alix'})")
         .expect("create");
-    assert_eq!(db.node_count(), 1);
+    assert_eq!(db.node_count().unwrap(), 1);
 
     // Export snapshot
     let snapshot = db.export_snapshot().expect("export");
@@ -110,7 +110,7 @@ fn test_snapshot_roundtrip() {
 
     // Import into new database
     let restored = Database::import_snapshot(&snapshot).expect("import");
-    assert_eq!(restored.node_count(), 1);
+    assert_eq!(restored.node_count().unwrap(), 1);
 }
 
 #[wasm_bindgen_test]
@@ -162,8 +162,8 @@ fn test_import_lpg_basic() {
     let (nodes, edges) = lpg_result_counts(&result);
     assert_eq!(nodes, 2);
     assert_eq!(edges, 1);
-    assert_eq!(db.node_count(), 2);
-    assert_eq!(db.edge_count(), 1);
+    assert_eq!(db.node_count().unwrap(), 2);
+    assert_eq!(db.edge_count().unwrap(), 1);
 }
 
 #[wasm_bindgen_test]
@@ -183,7 +183,7 @@ fn test_import_lpg_nodes_only() {
     let (nodes, edges) = lpg_result_counts(&result);
     assert_eq!(nodes, 3);
     assert_eq!(edges, 0);
-    assert_eq!(db.node_count(), 3);
+    assert_eq!(db.node_count().unwrap(), 3);
 }
 
 #[wasm_bindgen_test]
@@ -236,7 +236,7 @@ fn test_import_lpg_multiple_labels() {
     let result = db.import_lpg(data).expect("import");
     let (nodes, _) = lpg_result_counts(&result);
     assert_eq!(nodes, 1);
-    assert_eq!(db.node_count(), 1);
+    assert_eq!(db.node_count().unwrap(), 1);
 }
 
 #[wasm_bindgen_test]
@@ -275,7 +275,7 @@ fn test_import_lpg_multiple_edges_same_pair() {
     let result = db.import_lpg(data).expect("import");
     let (_, edges) = lpg_result_counts(&result);
     assert_eq!(edges, 3);
-    assert_eq!(db.edge_count(), 3);
+    assert_eq!(db.edge_count().unwrap(), 3);
 }
 
 #[wasm_bindgen_test]
@@ -395,7 +395,7 @@ fn test_import_lpg_incremental() {
     }))
     .unwrap();
     db.import_lpg(data1).expect("import 1");
-    assert_eq!(db.node_count(), 1);
+    assert_eq!(db.node_count().unwrap(), 1);
 
     // Second batch
     let data2 = to_js(&serde_json::json!({
@@ -405,7 +405,7 @@ fn test_import_lpg_incremental() {
     }))
     .unwrap();
     db.import_lpg(data2).expect("import 2");
-    assert_eq!(db.node_count(), 2);
+    assert_eq!(db.node_count().unwrap(), 2);
 }
 
 #[wasm_bindgen_test]
@@ -429,8 +429,8 @@ fn test_import_lpg_snapshot_roundtrip() {
     let snapshot = db.export_snapshot().expect("export");
     let restored = Database::import_snapshot(&snapshot).expect("restore");
 
-    assert_eq!(restored.node_count(), 2);
-    assert_eq!(restored.edge_count(), 1);
+    assert_eq!(restored.node_count().unwrap(), 2);
+    assert_eq!(restored.edge_count().unwrap(), 1);
 }
 
 // ==========================================================================
@@ -445,14 +445,14 @@ fn test_begin_commit_transaction_persists_writes() {
 
     db.execute("CREATE (:T {x: 1})").expect("insert in tx");
     assert_eq!(
-        db.node_count(),
+        db.node_count().unwrap(),
         0,
         "commit not yet called: count should be 0"
     );
 
     db.commit_transaction().expect("commit");
     assert!(!db.is_transaction_active());
-    assert_eq!(db.node_count(), 1, "writes visible after commit");
+    assert_eq!(db.node_count().unwrap(), 1, "writes visible after commit");
 }
 
 #[wasm_bindgen_test]
@@ -463,7 +463,7 @@ fn test_rollback_transaction_discards_writes() {
 
     db.rollback_transaction().expect("rollback");
     assert!(!db.is_transaction_active());
-    assert_eq!(db.node_count(), 0, "rollback discards writes");
+    assert_eq!(db.node_count().unwrap(), 0, "rollback discards writes");
 }
 
 #[wasm_bindgen_test]
@@ -555,7 +555,7 @@ fn test_signed_snapshot_roundtrip() {
     assert_eq!(&signed[..4], b"GSN1");
 
     let restored = Database::import_snapshot_signed(&signed, key).expect("restore");
-    assert_eq!(restored.node_count(), 2);
+    assert_eq!(restored.node_count().unwrap(), 2);
 }
 
 #[wasm_bindgen_test]
@@ -626,7 +626,7 @@ fn test_very_large_statements_run_or_fail_with_the_limit_and_the_module_keeps_wo
     );
     db.execute(&insert)
         .expect("an INSERT of 10,000 patterns runs");
-    assert_eq!(db.node_count(), 10_000);
+    assert_eq!(db.node_count().unwrap(), 10_000);
     let or_chain = format!(
         "MATCH (n:Person) WHERE {} RETURN n.v",
         (0..10_000)
@@ -861,7 +861,7 @@ fn test_batch_create_nodes_and_edges() {
         { "src": ids[0], "dst": 88888, "type": "KNOWS" }
     ])));
     assert!(missing.is_err());
-    assert_eq!(db.edge_count(), 2);
+    assert_eq!(db.edge_count().unwrap(), 2);
     let fractional = db.batch_create_edges(js(serde_json::json!([
         { "src": 0.5, "dst": 1, "type": "KNOWS" }
     ])));
@@ -888,7 +888,7 @@ fn test_batches_refuse_an_open_transaction_and_upserts_join_it() {
         .unwrap();
     assert_eq!(json(&summary)["created"], 1);
     db.rollback_transaction().unwrap();
-    assert_eq!(db.node_count(), 0);
+    assert_eq!(db.node_count().unwrap(), 0);
 }
 
 #[cfg(feature = "direct-api")]
@@ -914,7 +914,7 @@ fn test_upserts_create_update_and_skip() {
         )
         .unwrap();
     assert_eq!(json(&updated)["updated"], 1);
-    assert_eq!(db.node_count(), 2);
+    assert_eq!(db.node_count().unwrap(), 2);
 
     let edges = db
         .upsert_edges(
@@ -930,7 +930,7 @@ fn test_upserts_create_update_and_skip() {
         .unwrap();
     assert_eq!(json(&edges)["created"], 1);
     assert_eq!(json(&edges)["skippedRows"], serde_json::json!([1]));
-    assert_eq!(db.edge_count(), 1);
+    assert_eq!(db.edge_count().unwrap(), 1);
 }
 
 #[wasm_bindgen_test]
@@ -972,7 +972,7 @@ fn test_graph_handle_works_in_its_graph() {
         json(&rows),
         serde_json::json!([{ "d": "Berlin", "km": 350 }])
     );
-    assert_eq!(db.node_count(), 0);
+    assert_eq!(db.node_count().unwrap(), 0);
 
     let ids = trips
         .batch_create_nodes_with_props(

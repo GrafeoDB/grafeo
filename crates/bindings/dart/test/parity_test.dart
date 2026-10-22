@@ -21,14 +21,14 @@ void main() {
       {'name': 'Gus'},
     ]);
     expect(ids, hasLength(2));
-    expect(db.getNode(ids[1]).properties['name'], equals('Gus'));
-    expect(db.getNode(ids[0]).labels.toSet(), equals({'Person', 'Employee'}));
+    expect(db.getNode(ids[1])!.properties['name'], equals('Gus'));
+    expect(db.getNode(ids[0])!.labels.toSet(), equals({'Person', 'Employee'}));
 
     final edgeIds = db.batchCreateEdges([
       BatchEdge(ids[0], ids[1], 'KNOWS', {'since': 2020}),
       BatchEdge(ids[1], ids[0], 'KNOWS'),
     ]);
-    final edge = db.getEdge(edgeIds[0]);
+    final edge = db.getEdge(edgeIds[0])!;
     expect([edge.sourceId, edge.targetId, edge.properties['since']],
         equals([ids[0], ids[1], 2020]));
 
@@ -65,7 +65,7 @@ void main() {
     db.createVectorIndex('Doc', 'e', 2, 'cosine');
 
     String topic(VectorResult hit) =>
-        db.getNode(hit.nodeId).properties['topic'] as String;
+        db.getNode(hit.nodeId)!.properties['topic'] as String;
     final results = db.batchVectorSearch(
         'Doc',
         'e',
@@ -172,8 +172,8 @@ void main() {
     final berlin = trips.createNode(['City'], {'name': 'Berlin'});
     final route = trips.createEdge(prague, berlin, 'ROUTE', {'km': 350});
     trips.setNodeProperty(prague, 'country', 'CZ');
-    expect(trips.getNode(prague).properties['country'], equals('CZ'));
-    expect(trips.getEdge(route).properties['km'], equals(350));
+    expect(trips.getNode(prague)!.properties['country'], equals('CZ'));
+    expect(trips.getEdge(route)!.properties['km'], equals(350));
     expect(trips.addNodeLabel(prague, 'Capital'), isTrue);
     expect(trips.addNodeLabel(prague, 'Capital'), isFalse);
 
@@ -202,7 +202,10 @@ void main() {
     expect(trips.detachDeleteNode(prague), isTrue);
     expect(trips.detachDeleteNode(prague), isFalse);
 
+    expect(trips.getNode(424242), isNull, reason: 'absent, not a failure');
     db.execute('DROP GRAPH trips');
+    // A read of a dropped graph throws: a failure, not a null.
+    expect(() => trips.getNode(berlin), throwsA(isA<GrafeoException>()));
     expect(() => trips.execute('RETURN 1'), throwsA(isA<GrafeoException>()));
     expect(
         () => trips.createNode(['City'], {}), throwsA(isA<GrafeoException>()));

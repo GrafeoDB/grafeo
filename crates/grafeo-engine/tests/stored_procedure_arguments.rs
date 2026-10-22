@@ -8,7 +8,7 @@
 //! cargo test -p grafeo-engine --all-features --test stored_procedure_arguments
 //! ```
 
-#![cfg(all(feature = "lpg", feature = "gql"))]
+#![cfg(feature = "gql")]
 
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;

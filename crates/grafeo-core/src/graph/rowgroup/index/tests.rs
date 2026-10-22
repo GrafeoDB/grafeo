@@ -9,7 +9,9 @@ use crate::graph::traits::GraphStore;
 
 /// The nodes `view` finds with `city`, through the index.
 fn in_city(store: &RowGroupStore, city: &str, view: ReadView) -> Vec<NodeId> {
-    store.find_nodes_by_property_at("city", &Value::from(city), view)
+    store
+        .find_nodes_by_property("city", &Value::from(city), view)
+        .unwrap()
 }
 
 /// The nodes the index holds for `city` in any version.
@@ -88,11 +90,15 @@ fn a_deleted_nodes_entries_stay_until_collect() {
     let deleted = tx.commit().unwrap();
     let mia = Value::from("Mia");
     assert_eq!(
-        store.find_nodes_by_property_at("name", &mia, ReadView::committed(before)),
+        store
+            .find_nodes_by_property("name", &mia, ReadView::committed(before))
+            .unwrap(),
         [people.mia]
     );
     assert_eq!(
-        store.find_nodes_by_property_at("name", &mia, ReadView::committed(deleted)),
+        store
+            .find_nodes_by_property("name", &mia, ReadView::committed(deleted))
+            .unwrap(),
         []
     );
     store.collect(deleted);
@@ -121,7 +127,9 @@ fn an_index_made_during_a_transaction_holds_both_versions() {
     assert_eq!(in_city(&store, "Paris", own), [people.alix]);
     assert_eq!(in_city(&store, "Amsterdam", own), []);
     assert_eq!(
-        store.find_nodes_by_property("city", &Value::from("Paris")),
+        store
+            .find_nodes_by_property("city", &Value::from("Paris"), ReadView::latest())
+            .unwrap(),
         Vec::<NodeId>::new(),
         "the lookup without a view reads at the store's epoch"
     );
@@ -142,12 +150,12 @@ fn an_index_made_during_a_transaction_holds_both_versions() {
 mod text {
     use std::sync::Arc;
 
-    use grafeo_common::types::{PropertyKey, ReadView, Value};
+    use grafeo_common::types::{ReadView, Value};
     use parking_lot::RwLock;
 
     use crate::graph::conformance::{Tx, people};
     use crate::graph::rowgroup::RowGroupStore;
-    use crate::graph::traits::{GraphStore, GraphStoreSearch};
+    use crate::graph::traits::GraphStore;
     use crate::index::text::{BM25Config, InvertedIndex};
 
     /// The index holds each document's newest text, a deleted one until
@@ -180,7 +188,8 @@ mod text {
         let committed = tx.commit().unwrap();
         let found = |query: &str, view: ReadView| -> Vec<u64> {
             let mut ids: Vec<u64> = store
-                .text_search_at("Person", "bio", query, 10, view)
+                .text_search("Person", "bio", query, 10, view)
+                .unwrap()
                 .into_iter()
                 .map(|(id, _)| id.as_u64())
                 .collect();
@@ -205,14 +214,17 @@ mod text {
         store.collect(committed);
         assert_eq!(index.read().len(), 2, "Mia's is collected");
         let mut rebuilt = InvertedIndex::new(BM25Config::default());
-        for id in store.node_ids() {
-            if let Some(Value::String(text)) = store.get_node_property(id, &PropertyKey::new("bio"))
+        for id in store.node_ids(ReadView::latest()).unwrap() {
+            if let Some(Value::String(text)) =
+                store.node_property(id, "bio", ReadView::latest()).unwrap()
             {
                 rebuilt.insert(id, &text);
             }
         }
         assert_eq!(
-            store.text_search("Person", "bio", "storage graph", 10),
+            store
+                .text_search("Person", "bio", "storage graph", 10, ReadView::latest())
+                .unwrap(),
             rebuilt.search("storage graph", 10)
         );
     }
@@ -226,7 +238,7 @@ mod vector {
 
     use crate::graph::conformance::{Tx, people};
     use crate::graph::rowgroup::RowGroupStore;
-    use crate::graph::traits::GraphStoreSearch;
+    use crate::graph::traits::GraphStore;
     use crate::index::vector::{DistanceMetric, HnswConfig, HnswIndex, VectorIndexKind};
 
     fn vector(values: &[f32]) -> Value {
@@ -260,7 +272,7 @@ mod vector {
         let deleted = tx.commit().unwrap();
         let nearest = |view: ReadView| -> Vec<u64> {
             store
-                .vector_search_at(
+                .vector_search(
                     Some("Person"),
                     "embedding",
                     &[1.0, 0.0],
@@ -268,6 +280,7 @@ mod vector {
                     DistanceMetric::Euclidean,
                     view,
                 )
+                .unwrap()
                 .into_iter()
                 .map(|(id, _)| id.as_u64())
                 .collect()

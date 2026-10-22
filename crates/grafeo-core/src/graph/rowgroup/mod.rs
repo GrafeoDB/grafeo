@@ -725,11 +725,6 @@ impl RowGroupStore {
     fn now(&self) -> Read {
         Read::At(self.epoch.load(Ordering::Acquire))
     }
-
-    /// The view of a committed reader at the store's current epoch.
-    fn now_view(&self) -> ReadView {
-        ReadView::committed(EpochId::new(self.epoch.load(Ordering::Acquire)))
-    }
 }
 
 #[cfg(test)]

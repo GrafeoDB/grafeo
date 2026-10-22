@@ -5,7 +5,7 @@
 //! of that type. It reported success and created nothing. `DROP PROPERTY
 //! GRAPH` takes them away again, and `GRAPH_TABLE (g ...)` reads the graph g.
 
-#![cfg(all(feature = "sql-pgq", feature = "gql", feature = "lpg"))]
+#![cfg(all(feature = "sql-pgq", feature = "gql"))]
 
 use grafeo_common::utils::GqlStatus;
 use grafeo_engine::{GrafeoDB, Session};

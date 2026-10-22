@@ -9,7 +9,7 @@
 //! cargo test -p grafeo-engine --all-features --test element_and_temporal_functions
 //! ```
 
-#![cfg(all(feature = "lpg", feature = "gql", feature = "cypher"))]
+#![cfg(all(feature = "gql", feature = "cypher"))]
 
 use std::collections::BTreeMap;
 use std::sync::Arc;

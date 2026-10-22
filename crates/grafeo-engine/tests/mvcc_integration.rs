@@ -4,6 +4,7 @@
 //! These tests verify snapshot isolation, write-write conflict detection,
 //! rollback behavior, and version chain garbage collection.
 
+use grafeo_common::types::ReadView;
 use std::sync::Arc;
 
 use grafeo_common::change::{ChangeSet, DataModel, DataOp, GraphRef};
@@ -118,10 +119,15 @@ fn test_snapshot_isolation_reads_see_consistent_data() {
     tx_manager.commit(new_tx).unwrap();
 
     // T1 should not see the new node (created after T1's snapshot)
-    let all_nodes = store.node_ids();
+    let all_nodes = store.node_ids(ReadView::latest()).unwrap();
     let visible_at_epoch1: Vec<_> = all_nodes
         .iter()
-        .filter(|id| store.get_node_versioned(**id, epoch1, tx1).is_some())
+        .filter(|id| {
+            store
+                .node(**id, ReadView::transaction(tx1, epoch1))
+                .unwrap()
+                .is_some()
+        })
         .collect();
 
     // Should see initial 2 nodes, not the new one
@@ -145,7 +151,9 @@ fn test_transaction_sees_own_writes() {
     let node_id = store.create_node_versioned(&["TestNode"], epoch, tx1);
 
     // Transaction should see its own node
-    let visible = store.get_node_versioned(node_id, epoch, tx1);
+    let visible = store
+        .node(node_id, ReadView::transaction(tx1, epoch))
+        .unwrap();
     assert!(
         visible.is_some(),
         "Transaction should see its own uncommitted writes"
@@ -174,7 +182,9 @@ fn test_committed_writes_visible_to_new_transactions() {
     let epoch2 = tx_manager.current_epoch();
 
     // T2 should see T1's committed node
-    let visible = store.get_node_versioned(node_id, epoch2, tx2);
+    let visible = store
+        .node(node_id, ReadView::transaction(tx2, epoch2))
+        .unwrap();
     assert!(
         visible.is_some(),
         "New transaction should see committed writes"
@@ -192,7 +202,7 @@ fn test_write_write_conflict_detection() {
     let store = create_test_store();
     let tx_manager = Arc::new(TransactionManager::new());
 
-    let node_id = store.node_ids()[0]; // Get first node
+    let node_id = store.node_ids(ReadView::latest()).unwrap()[0]; // Get first node
 
     // T1 records a write (succeeds)
     let tx1 = tx_manager.begin();
@@ -221,7 +231,7 @@ fn test_committed_transaction_conflict_at_commit() {
     let store = create_test_store();
     let tx_manager = Arc::new(TransactionManager::new());
 
-    let node_id = store.node_ids()[0];
+    let node_id = store.node_ids(ReadView::latest()).unwrap()[0];
 
     // Both transactions start (T2 records its start_epoch)
     let tx1 = tx_manager.begin();
@@ -254,7 +264,7 @@ fn test_post_commit_write_succeeds() {
     let store = create_test_store();
     let tx_manager = Arc::new(TransactionManager::new());
 
-    let node_id = store.node_ids()[0];
+    let node_id = store.node_ids(ReadView::latest()).unwrap()[0];
 
     // T1 writes and commits
     let tx1 = tx_manager.begin();
@@ -278,7 +288,7 @@ fn test_non_overlapping_writes_succeed() {
     let store = create_test_store();
     let tx_manager = Arc::new(TransactionManager::new());
 
-    let nodes = store.node_ids();
+    let nodes = store.node_ids(ReadView::latest()).unwrap();
     assert!(nodes.len() >= 2, "Need at least 2 nodes for this test");
 
     // T1 writes to node 0
@@ -321,7 +331,9 @@ fn test_rollback_makes_writes_invisible() {
     // New transaction should not see the aborted node
     let tx2 = tx_manager.begin();
     let epoch2 = tx_manager.current_epoch();
-    let visible = store.get_node_versioned(node_id, epoch2, tx2);
+    let visible = store
+        .node(node_id, ReadView::transaction(tx2, epoch2))
+        .unwrap();
 
     assert!(
         visible.is_none(),
@@ -335,7 +347,7 @@ fn test_abort_releases_write_locks() {
     let store = create_test_store();
     let tx_manager = Arc::new(TransactionManager::new());
 
-    let node_id = store.node_ids()[0];
+    let node_id = store.node_ids(ReadView::latest()).unwrap()[0];
 
     // T1 records a write
     let tx1 = tx_manager.begin();

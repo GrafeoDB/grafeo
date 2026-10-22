@@ -18,7 +18,7 @@
 //! cargo test -p grafeo-engine --all-features --test serializable_isolation -- --include-ignored
 //! ```
 
-#![cfg(all(feature = "lpg", feature = "gql"))]
+#![cfg(feature = "gql")]
 
 use std::sync::Barrier;
 

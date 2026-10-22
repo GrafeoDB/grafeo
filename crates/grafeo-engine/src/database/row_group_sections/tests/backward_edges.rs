@@ -28,15 +28,38 @@ fn a_detach_delete_finds_the_incoming_edges_without_backward_edges() {
     let trips = database.store(Some("trips"));
     assert!(!database.root.has_backward_adjacency());
     assert!(!trips.has_backward_adjacency(), "trips follows the root");
-    let knows = database.root.edges_from(gus, Direction::Outgoing)[0].1;
+    let knows = database
+        .root
+        .edges(gus, Direction::Outgoing, &[], ReadView::latest())
+        .unwrap()[0]
+        .1;
     assert_eq!(
-        database.root.edges_from(alix, Direction::Incoming),
+        database
+            .root
+            .edges(alix, Direction::Incoming, &[], ReadView::latest())
+            .unwrap(),
         vec![(gus, knows)]
     );
-    assert_eq!(database.root.in_degree(alix), 1);
+    assert_eq!(
+        database
+            .root
+            .degree(
+                alix,
+                grafeo_core::graph::Direction::Incoming,
+                ReadView::latest()
+            )
+            .unwrap(),
+        1
+    );
     assert_eq!(
         trips
-            .edges_from(travellers.paris, Direction::Incoming)
+            .edges(
+                travellers.paris,
+                Direction::Incoming,
+                &[],
+                ReadView::latest()
+            )
+            .unwrap()
             .len(),
         1,
         "Vincent's visit to Paris"
@@ -53,12 +76,22 @@ fn a_detach_delete_finds_the_incoming_edges_without_backward_edges() {
     let epoch = database.commit(open);
     let now = ReadView::committed(epoch);
     assert_eq!(
-        database.root.edges_from_at(gus, Direction::Both, now),
+        database.root.edges(gus, Direction::Both, &[], now).unwrap(),
         Vec::new()
     );
-    assert_eq!(database.root.out_degree(gus), 0);
-    assert!(!database.root.is_node_visible_at(alix, now));
-    assert!(!database.root.is_edge_visible_at(knows, now));
+    assert_eq!(
+        database
+            .root
+            .degree(
+                gus,
+                grafeo_core::graph::Direction::Outgoing,
+                ReadView::latest()
+            )
+            .unwrap(),
+        0
+    );
+    assert!(!database.root.is_node_visible(alix, now).unwrap());
+    assert!(!database.root.is_edge_visible(knows, now).unwrap());
 
     let expected = images(&database);
     let (image, _) = database.image();
@@ -70,12 +103,21 @@ fn a_detach_delete_finds_the_incoming_edges_without_backward_edges() {
     assert_eq!(
         loaded
             .store(Some("trips"))
-            .edges_from(travellers.paris, Direction::Incoming)
+            .edges(
+                travellers.paris,
+                Direction::Incoming,
+                &[],
+                ReadView::latest()
+            )
+            .unwrap()
             .len(),
         1
     );
     assert_eq!(
-        loaded.root.edges_from(gus, Direction::Both),
+        loaded
+            .root
+            .edges(gus, Direction::Both, &[], ReadView::latest())
+            .unwrap(),
         Vec::new(),
         "collected at the load"
     );
@@ -84,6 +126,7 @@ fn a_detach_delete_finds_the_incoming_edges_without_backward_edges() {
 #[cfg(feature = "grafeo-file")]
 mod file {
     use grafeo_common::storage::{ChunkNamespace, SectionType};
+    use grafeo_common::types::ReadView;
     use grafeo_core::graph::{Direction, GraphStore};
 
     use super::super::file::FileDatabase;
@@ -141,14 +184,30 @@ mod file {
             assert!(!trips.keeps_backward_edges(), "{open}");
             assert_eq!(root.memory().incoming_bytes, 0, "{open}");
             assert_eq!(
-                root.edges_from(travellers.alix, Direction::Incoming)
-                    .into_iter()
-                    .map(|(other, _)| other)
-                    .collect::<Vec<_>>(),
+                root.edges(
+                    travellers.alix,
+                    Direction::Incoming,
+                    &[],
+                    ReadView::latest()
+                )
+                .unwrap()
+                .into_iter()
+                .map(|(other, _)| other)
+                .collect::<Vec<_>>(),
                 vec![travellers.gus],
                 "{open}: Gus knows Alix"
             );
-            assert_eq!(trips.in_degree(travellers.paris), 1, "{open}");
+            assert_eq!(
+                trips
+                    .degree(
+                        travellers.paris,
+                        grafeo_core::graph::Direction::Incoming,
+                        ReadView::latest()
+                    )
+                    .unwrap(),
+                1,
+                "{open}"
+            );
             opened.close();
         }
 

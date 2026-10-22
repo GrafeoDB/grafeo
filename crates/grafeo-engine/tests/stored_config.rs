@@ -10,12 +10,7 @@
 //! cargo test -p grafeo-engine --all-features --test stored_config
 //! ```
 
-#![cfg(all(
-    feature = "lpg",
-    feature = "gql",
-    feature = "wal",
-    feature = "grafeo-file"
-))]
+#![cfg(all(feature = "gql", feature = "wal", feature = "grafeo-file"))]
 #![allow(
     missing_docs,
     reason = "a test crate has no public API: each test documents itself"

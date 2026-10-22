@@ -165,7 +165,7 @@ func (g *Graph) CreateEdge(sourceID, targetID uint64, edgeType string, propertie
 	return &Edge{ID: id, SourceID: sourceID, TargetID: targetID, Type: edgeType, Properties: properties}, nil
 }
 
-// GetNode returns a node of the graph.
+// GetNode returns a node of the graph: ErrNotFound when it does not exist.
 func (g *Graph) GetNode(id uint64) (*Node, error) {
 	var cNode *C.GrafeoNode
 	if err := lockAndCheckStatus(func() C.GrafeoStatus {
@@ -173,16 +173,22 @@ func (g *Graph) GetNode(id uint64) (*Node, error) {
 	}); err != nil {
 		return nil, err
 	}
+	if cNode == nil {
+		return nil, notFound("node", id)
+	}
 	return nodeFromC(cNode), nil
 }
 
-// GetEdge returns an edge of the graph.
+// GetEdge returns an edge of the graph: ErrNotFound when it does not exist.
 func (g *Graph) GetEdge(id uint64) (*Edge, error) {
 	var cEdge *C.GrafeoEdge
 	if err := lockAndCheckStatus(func() C.GrafeoStatus {
 		return C.grafeo_graph_get_edge(g.handle, C.uint64_t(id), &cEdge)
 	}); err != nil {
 		return nil, err
+	}
+	if cEdge == nil {
+		return nil, notFound("edge", id)
 	}
 	return edgeFromC(cEdge), nil
 }

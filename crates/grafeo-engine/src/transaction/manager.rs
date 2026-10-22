@@ -1773,7 +1773,6 @@ impl TransactionManager {
     /// Takes in what a load found of the history: the image of a file's
     /// `TIME_INDEX` section, or, for a file without one, the epoch of its
     /// checkpoint, before which nothing is retained.
-    #[cfg(any(test, feature = "lpg"))]
     pub(crate) fn restore_history_or_floor(
         &self,
         image: Option<HistoryImage>,

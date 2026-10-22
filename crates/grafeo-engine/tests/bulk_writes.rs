@@ -10,7 +10,7 @@
 //! cargo test -p grafeo-engine --all-features --test bulk_writes
 //! ```
 
-#![cfg(all(feature = "lpg", feature = "gql"))]
+#![cfg(feature = "gql")]
 
 use std::collections::HashMap;
 
@@ -63,7 +63,7 @@ fn a_failing_row_undoes_the_whole_batch() {
     let gus = db.create_node(&["Person"]).unwrap();
     // The epochs after the creates above.
     let start = EpochId::new(db.current_epoch().as_u64() + 1);
-    let (nodes, edges) = (db.node_count(), db.edge_count());
+    let (nodes, edges) = (db.node_count().unwrap(), db.edge_count().unwrap());
 
     let mut bad = person("Vincent");
     bad.insert(PropertyKey::new("trips"), too_deep());
@@ -80,7 +80,10 @@ fn a_failing_row_undoes_the_whole_batch() {
         .batch_create_nodes_with_props("City", vec![person("Paris"), bad])
         .unwrap_err();
 
-    assert_eq!((db.node_count(), db.edge_count()), (nodes, edges));
+    assert_eq!(
+        (db.node_count().unwrap(), db.edge_count().unwrap()),
+        (nodes, edges)
+    );
     assert_eq!(column(&db, "MATCH (p:Person) RETURN count(p)"), ["2"]);
     assert_eq!(column(&db, "MATCH ()-[r]->() RETURN count(r)"), ["0"]);
     assert_eq!(
@@ -124,7 +127,7 @@ fn a_batchs_ids_are_never_handed_out_again_after_a_rollback() {
         ])
         .unwrap();
     session.rollback().unwrap();
-    assert!(nodes.iter().all(|id| db.get_node(*id).is_none()));
+    assert!(nodes.iter().all(|id| db.get_node(*id).unwrap().is_none()));
 
     let mut later_nodes = db
         .batch_create_nodes_with_props("Person", vec![person("Vincent"), person("Butch")])
@@ -360,7 +363,7 @@ mod crash {
         );
         // Writes go on after the replay, the batch's ids unused.
         let vincent = db.create_node(&["Person"]).unwrap();
-        assert!(db.get_node(vincent).is_some());
+        assert!(db.get_node(vincent).unwrap().is_some());
         db.close().unwrap();
     }
 

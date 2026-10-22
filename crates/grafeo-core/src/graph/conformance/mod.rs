@@ -32,11 +32,11 @@ use grafeo_common::utils::hash::FxHashMap;
 use crate::graph::Direction;
 use crate::graph::apply::{Applied, ApplyError, ChangeTarget, Writer};
 use crate::graph::rowgroup::RowGroupStore;
-use crate::graph::traits::GraphRead;
+use crate::graph::traits::GraphStore;
 
 /// A store the suite can run: written through the change target, read
 /// through the read trait.
-pub(crate) trait Store: GraphRead + ChangeTarget {
+pub(crate) trait Store: GraphStore + ChangeTarget {
     /// The latest epoch the store committed at: a case's next commit lands
     /// after it, and a committed reader at it sees every commit so far.
     fn epoch(&self) -> EpochId;

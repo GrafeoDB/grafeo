@@ -53,7 +53,7 @@ struct PredicateOutput {
 /// Run the schema command.
 pub fn run(path: &Path, format: OutputFormat) -> Result<()> {
     let db = super::open_existing_read_only(path)?;
-    let schema = db.schema();
+    let schema = db.schema()?;
 
     let fmt: Format = format.into();
 

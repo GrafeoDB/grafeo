@@ -13,7 +13,7 @@
 //! cargo test -p grafeo-engine --all-features --test self_loops_and_generated_names
 //! ```
 
-#![cfg(all(feature = "lpg", feature = "gql", feature = "cypher"))]
+#![cfg(all(feature = "gql", feature = "cypher"))]
 
 use grafeo_common::types::Value;
 use grafeo_engine::GrafeoDB;

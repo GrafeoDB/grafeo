@@ -26,7 +26,7 @@
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-#[cfg(all(feature = "lpg", feature = "vector-index", feature = "wal"))]
+#[cfg(all(feature = "vector-index", feature = "wal"))]
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -42,7 +42,7 @@ pub(crate) struct SpillDirectory {
     /// around `cache/`.
     remove_empty_parent: bool,
     /// Set by `close()`: nothing more is written here (see the module docs).
-    #[cfg(all(feature = "lpg", feature = "vector-index", feature = "wal"))]
+    #[cfg(all(feature = "vector-index", feature = "wal"))]
     closed: AtomicBool,
 }
 
@@ -51,20 +51,20 @@ impl SpillDirectory {
         Self {
             path,
             remove_empty_parent,
-            #[cfg(all(feature = "lpg", feature = "vector-index", feature = "wal"))]
+            #[cfg(all(feature = "vector-index", feature = "wal"))]
             closed: AtomicBool::new(false),
         }
     }
 
     /// A directory at `path` that no other directory removes (tests).
-    #[cfg(all(test, feature = "lpg", feature = "vector-index", feature = "wal"))]
+    #[cfg(all(test, feature = "vector-index", feature = "wal"))]
     pub(crate) fn at(path: PathBuf) -> Self {
         Self::new(path, false)
     }
 }
 
 // What the vector cache uses (a build without it only removes directories).
-#[cfg(all(feature = "lpg", feature = "vector-index", feature = "wal"))]
+#[cfg(all(feature = "vector-index", feature = "wal"))]
 impl SpillDirectory {
     /// The directory's path.
     pub(crate) fn path(&self) -> &Path {
@@ -117,7 +117,7 @@ pub(crate) struct SpillLayout {
     /// Held by the database while it is the database's own (read-only).
     pub(crate) root_guard: Option<Arc<SpillDirectory>>,
     /// Where vector columns spill to.
-    #[cfg(all(feature = "lpg", feature = "vector-index", feature = "wal"))]
+    #[cfg(all(feature = "vector-index", feature = "wal"))]
     pub(crate) vector_cache: Option<Arc<SpillDirectory>>,
     /// A cache a previous read-write open left behind, removed at open.
     pub(crate) stale_cache: Option<PathBuf>,
@@ -156,7 +156,7 @@ impl SpillLayout {
             return Self {
                 root: Some(spill_path.to_path_buf()),
                 root_guard: None,
-                #[cfg(all(feature = "lpg", feature = "vector-index", feature = "wal"))]
+                #[cfg(all(feature = "vector-index", feature = "wal"))]
                 vector_cache: Some(Arc::new(SpillDirectory::new(
                     spill_path.join(unique_name(&name, "")),
                     false,
@@ -176,7 +176,7 @@ impl SpillLayout {
             // Nothing in this build spills: no directory.
             if !cfg!(any(
                 feature = "spill",
-                all(feature = "lpg", feature = "vector-index", feature = "wal")
+                all(feature = "vector-index", feature = "wal")
             )) {
                 return Self::none();
             }
@@ -197,7 +197,7 @@ impl SpillLayout {
             return Self {
                 root: Some(own.path.clone()),
                 root_guard: Some(Arc::clone(&own)),
-                #[cfg(all(feature = "lpg", feature = "vector-index", feature = "wal"))]
+                #[cfg(all(feature = "vector-index", feature = "wal"))]
                 vector_cache: Some(Arc::clone(&own)),
                 stale_cache: None,
             };
@@ -206,7 +206,7 @@ impl SpillLayout {
         Self {
             root: Some(derived),
             root_guard: None,
-            #[cfg(all(feature = "lpg", feature = "vector-index", feature = "wal"))]
+            #[cfg(all(feature = "vector-index", feature = "wal"))]
             vector_cache: Some(Arc::new(SpillDirectory::new(cache.clone(), true))),
             stale_cache: Some(cache),
         }
@@ -216,7 +216,7 @@ impl SpillLayout {
         Self {
             root: None,
             root_guard: None,
-            #[cfg(all(feature = "lpg", feature = "vector-index", feature = "wal"))]
+            #[cfg(all(feature = "vector-index", feature = "wal"))]
             vector_cache: None,
             stale_cache: None,
         }
@@ -329,7 +329,7 @@ pub(crate) fn random_u64() -> u64 {
 }
 
 #[cfg(test)]
-#[cfg(all(feature = "lpg", feature = "vector-index", feature = "wal"))]
+#[cfg(all(feature = "vector-index", feature = "wal"))]
 mod tests {
     use super::*;
 

@@ -17,26 +17,20 @@
 //! - `persistence` - Save, load, snapshots, iteration
 //! - `admin` - Stats, introspection, diagnostics, CDC
 
-#[cfg(feature = "lpg")]
 mod admin;
 #[cfg(feature = "arrow-export")]
 pub mod arrow;
-#[cfg(all(feature = "async-storage", feature = "lpg"))]
+#[cfg(feature = "async-storage")]
 mod async_ops;
 #[cfg(all(feature = "wal", feature = "grafeo-file"))]
 pub mod backup;
-#[cfg(feature = "lpg")]
 pub(crate) mod catalog_records;
-#[cfg(feature = "lpg")]
 pub(crate) mod catalog_section;
-#[cfg(all(feature = "grafeo-file", feature = "lpg"))]
+#[cfg(feature = "grafeo-file")]
 mod checkpoint_timer;
 // What runs after each immediate call and commit: the version collect.
-#[cfg(feature = "lpg")]
 pub(crate) mod collect;
-#[cfg(feature = "lpg")]
 mod crud;
-#[cfg(feature = "lpg")]
 pub(crate) mod direct;
 #[cfg(feature = "embed")]
 mod embed;
@@ -44,64 +38,51 @@ mod embed;
 pub(crate) mod encryption;
 #[cfg(feature = "grafeo-file")]
 pub(crate) mod flush;
-#[cfg(feature = "lpg")]
 mod graph_handle;
-#[cfg(all(feature = "grafeo-file", feature = "lpg"))]
+#[cfg(feature = "grafeo-file")]
 mod stored_config;
-#[cfg(feature = "lpg")]
 pub use direct::BatchEdge;
-#[cfg(feature = "lpg")]
 pub use graph_handle::GraphHandle;
-#[cfg(all(feature = "lpg", feature = "gql"))]
+#[cfg(feature = "gql")]
 pub use upsert::{EdgeUpsertOptions, UpsertSummary};
-#[cfg(feature = "lpg")]
 mod import;
-#[cfg(feature = "lpg")]
 pub(crate) mod index;
-#[cfg(all(feature = "wal", feature = "lpg"))]
+#[cfg(feature = "wal")]
 mod legacy_index;
-#[cfg(all(feature = "lpg", feature = "grafeo-file", feature = "vector-index"))]
+#[cfg(all(feature = "grafeo-file", feature = "vector-index"))]
 mod legacy_spill;
 #[cfg(feature = "grafeo-file")]
 mod migration;
-#[cfg(feature = "lpg")]
 mod persistence;
-#[cfg(all(test, feature = "lpg", feature = "gql"))]
+#[cfg(all(test, feature = "gql"))]
 mod processor_claims_tests;
 mod query;
 #[cfg(feature = "triple-store")]
 mod rdf_ops;
-#[cfg(all(feature = "wal", feature = "lpg"))]
+#[cfg(feature = "wal")]
 mod schema_replay;
-#[cfg(feature = "lpg")]
 mod search;
 pub(crate) mod section_consumer;
 mod sections;
 // The history's time index in the file (H2c).
 mod time_index_section;
 // Time travel: reads at an earlier epoch or time (H2c).
-#[cfg(feature = "lpg")]
 mod time_travel;
-#[cfg(feature = "lpg")]
 pub use time_travel::{AsOfView, TimePoint};
 // Checkpoint and load of the row-group store.
-#[cfg(feature = "lpg")]
 mod row_group_sections;
 // Column spill of the row-group store and its memory consumers.
-#[cfg(feature = "lpg")]
 mod row_group_spill;
 // Replay of the WAL v2 groups at open.
-#[cfg(all(feature = "wal", feature = "lpg"))]
+#[cfg(feature = "wal")]
 mod replay;
-#[cfg(feature = "lpg")]
 pub(crate) mod root_store;
 // The commit's WAL v2 group, written from its change set. Built for tests
 // only until the commit path writes it (the switch from the v1 records).
 mod spill_directory;
-#[cfg(feature = "lpg")]
 pub(crate) mod standalone;
 
-#[cfg(all(feature = "lpg", feature = "gql"))]
+#[cfg(feature = "gql")]
 mod upsert;
 
 // The commit's WAL group, written from its change set.
@@ -120,9 +101,8 @@ use grafeo_common::memory::buffer::{BufferManager, BufferManagerConfig};
 use grafeo_common::utils::error::{Error, QueryError, QueryErrorKind, Result};
 #[cfg(feature = "triple-store")]
 use grafeo_core::graph::rdf::RdfStore;
-#[cfg(feature = "lpg")]
 use grafeo_core::graph::rowgroup::RowGroupStore;
-use grafeo_core::graph::{GraphStoreMut, GraphStoreSearch};
+use grafeo_core::graph::{GraphStore, GraphStoreMut};
 #[cfg(feature = "grafeo-file")]
 use grafeo_storage::file::GrafeoFileManager;
 #[cfg(feature = "grafeo-file")]
@@ -131,7 +111,7 @@ use grafeo_storage::file::detect::{OnDisk, detect};
 use grafeo_storage::file::v3::header::new_database_id;
 #[cfg(feature = "wal")]
 use grafeo_storage::wal::DurabilityMode as WalDurabilityMode;
-#[cfg(all(feature = "wal", feature = "lpg"))]
+#[cfg(feature = "wal")]
 use grafeo_storage::wal::{WalRecord, WalRecovery};
 
 use crate::catalog::Catalog;
@@ -167,7 +147,6 @@ pub struct GrafeoDB {
     pub(super) config: Config,
     /// The underlying graph store (None when using an external store). Read
     /// it through `root_store` or `lpg_store`.
-    #[cfg(feature = "lpg")]
     pub(super) store: Option<Arc<RowGroupStore>>,
     /// Schema and metadata catalog shared across sessions.
     pub(super) catalog: Arc<Catalog>,
@@ -206,15 +185,15 @@ pub struct GrafeoDB {
     pub(super) file_manager: Option<Arc<GrafeoFileManager>>,
     /// The automatic checkpointer (when a trigger is set). Wrapped in Mutex
     /// because `close()` takes `&self` but needs to stop it.
-    #[cfg(all(feature = "grafeo-file", feature = "lpg"))]
+    #[cfg(feature = "grafeo-file")]
     checkpoint_timer: parking_lot::Mutex<Option<checkpoint_timer::CheckpointTimer>>,
     /// The automatic checkpoint triggers in force (see
     /// [`set_checkpoint_triggers`](Self::set_checkpoint_triggers)).
-    #[cfg(all(feature = "grafeo-file", feature = "lpg"))]
+    #[cfg(feature = "grafeo-file")]
     checkpoint_triggers: parking_lot::Mutex<crate::admin::CheckpointTriggers>,
     /// What the automatic checkpoints met (see
     /// [`checkpoint_status`](Self::checkpoint_status)).
-    #[cfg(all(feature = "grafeo-file", feature = "lpg"))]
+    #[cfg(feature = "grafeo-file")]
     checkpoint_failures: Arc<checkpoint_timer::Failures>,
     /// Syncs the WAL in the background under `DurabilityMode::Adaptive`.
     /// Wrapped in Mutex because `close()` takes `&self` but stops it.
@@ -224,12 +203,12 @@ pub struct GrafeoDB {
     /// directory), removed with the database once nothing spills into it.
     _spill_root: Option<Arc<spill_directory::SpillDirectory>>,
     /// Where spilled vector columns write their cache files.
-    #[cfg(all(feature = "lpg", feature = "vector-index", feature = "wal"))]
+    #[cfg(all(feature = "vector-index", feature = "wal"))]
     vector_cache: Option<Arc<spill_directory::SpillDirectory>>,
     /// External read-only graph store (when using with_store() or with_read_store()).
     /// When set, sessions route queries through this store instead of the built-in
     /// row-group store.
-    pub(super) external_read_store: Option<Arc<dyn GraphStoreSearch>>,
+    pub(super) external_read_store: Option<Arc<dyn GraphStore>>,
     /// External writable graph store (when using with_store()).
     /// None for read-only databases created via with_read_store().
     pub(super) external_write_store: Option<Arc<dyn GraphStoreMut>>,
@@ -252,7 +231,6 @@ pub struct GrafeoDB {
     read_only: bool,
     /// The recorder of the direct calls that commit at once (while no
     /// transaction is open), made on the first one.
-    #[cfg(feature = "lpg")]
     immediate_writes: std::sync::OnceLock<Arc<direct::ImmediateRecorder>>,
     /// Named graph projections (virtual subgraphs), shared with sessions.
     projections:
@@ -267,7 +245,6 @@ impl GrafeoDB {
     /// Panics if the database was created with [`with_store()`](Self::with_store) or
     /// [`with_read_store()`](Self::with_read_store), which use an external store
     /// instead of the built-in LPG store.
-    #[cfg(feature = "lpg")]
     fn lpg_store(&self) -> Arc<RowGroupStore> {
         self.root_store().expect(
             "no built-in RowGroupStore: this GrafeoDB was created with an external store \
@@ -276,7 +253,6 @@ impl GrafeoDB {
     }
 
     /// The built-in LPG store, or `None` with an external store.
-    #[cfg(feature = "lpg")]
     fn root_store(&self) -> Option<Arc<RowGroupStore>> {
         self.store.clone()
     }
@@ -460,7 +436,7 @@ impl GrafeoDB {
         // every setting the open does not set itself (#551), before anything
         // is built: the memory limit sizes the buffer manager, the backward
         // edges shape the store.
-        #[cfg(all(feature = "grafeo-file", feature = "lpg"))]
+        #[cfg(feature = "grafeo-file")]
         let config = match database_path.as_deref() {
             Some(path) if path.is_file() && matches!(detect(path)?, OnDisk::Current) => {
                 match stored_config::read(path, &encryption::DatabaseKeys::from_config(&config))? {
@@ -481,7 +457,6 @@ impl GrafeoDB {
 
         // The root store, with the backward edges the configuration (the
         // file's stored one applied) asks for (10b).
-        #[cfg(feature = "lpg")]
         let store = row_group_sections::row_group_root(&config);
         #[cfg(feature = "triple-store")]
         let rdf_store = Arc::new(RdfStore::new());
@@ -491,7 +466,6 @@ impl GrafeoDB {
         // keeps what replay replaces while the database keeps history; a
         // load sets it again from the history the file holds.
         transaction_manager.open_history(config.history_retention());
-        #[cfg(feature = "lpg")]
         store.set_keeps_history(transaction_manager.history_image().is_some());
 
         let is_read_only = config.access_mode() == crate::config::AccessMode::ReadOnly;
@@ -505,13 +479,13 @@ impl GrafeoDB {
             is_read_only,
         );
         // Where an older build may have spilled embeddings (#594).
-        #[cfg(all(feature = "lpg", feature = "grafeo-file", feature = "vector-index"))]
+        #[cfg(all(feature = "grafeo-file", feature = "vector-index"))]
         let legacy_spill_directories =
             legacy_spill::directories(database_path.as_deref(), config.spill_path());
         // Whether this open reads a 0.5.x database in place: only then are old
         // spill files in a configured spill path its own, and every vector
         // index is rebuilt (see `legacy_spill`).
-        #[cfg(all(feature = "lpg", feature = "grafeo-file", feature = "vector-index"))]
+        #[cfg(all(feature = "grafeo-file", feature = "vector-index"))]
         let mut reads_a_0_5_database = false;
 
         // Create buffer manager with configured limits
@@ -547,15 +521,13 @@ impl GrafeoDB {
 
         // What loading a v2 section file leaves for the built database: the
         // indexes to build.
-        #[cfg(all(feature = "grafeo-file", feature = "lpg"))]
+        #[cfg(feature = "grafeo-file")]
         let mut loaded_sections = sections::LoadedSections::default();
 
         // Where the WAL continues: the end of the replayed log, or the
         // checkpoint's log position when the log ends below it.
-        #[cfg(all(feature = "wal", feature = "lpg"))]
+        #[cfg(feature = "wal")]
         let mut wal_start_lsn: u64 = 0;
-        #[cfg(all(feature = "wal", not(feature = "lpg")))]
-        let wal_start_lsn: u64 = 0;
         // A sidecar WAL this open replays but does not continue: one in the
         // first log format (0.5.x and 0.6.0-beta.1 wrote it), whose files the
         // segments of this release cannot share a directory with, or any
@@ -563,16 +535,16 @@ impl GrafeoDB {
         // handle would trim it). The open writes the replayed commits to the
         // file and removes it before it returns (`Some(true)` when it held
         // commits).
-        #[cfg(all(feature = "wal", feature = "lpg"))]
+        #[cfg(feature = "wal")]
         let mut retire_sidecar_wal: Option<bool> = None;
         // Whether that WAL holds damage a salvaging open stopped at: it is
         // then moved aside instead of removed.
-        #[cfg(all(feature = "wal", feature = "lpg"))]
+        #[cfg(feature = "wal")]
         let mut set_aside_sidecar_wal = false;
 
         // Whether this open creates the database file, which then stores the
         // configuration (see `stored_config`).
-        #[cfg(all(feature = "grafeo-file", feature = "lpg"))]
+        #[cfg(feature = "grafeo-file")]
         let mut creates_the_file = false;
 
         // The migration lock while a read-write open creates a database at a
@@ -600,12 +572,6 @@ impl GrafeoDB {
                 on_disk @ (OnDisk::LegacyFile | OnDisk::WalDirectory) => {
                     // The 0.5.x reader loads into the LPG store: a build
                     // without it would open an empty database.
-                    #[cfg(not(feature = "lpg"))]
-                    {
-                        let _ = on_disk;
-                        return Err(legacy_database_needs_lpg(db_path));
-                    }
-                    #[cfg(feature = "lpg")]
                     {
                         // It is never encrypted, and only a read-write open
                         // migrates it into an encrypted file.
@@ -662,7 +628,6 @@ impl GrafeoDB {
                     // show the database without them.
                     #[cfg(not(feature = "wal"))]
                     Self::refuse_unreplayable_sidecar_wal(db_path)?;
-                    #[cfg(feature = "lpg")]
                     {
                         // Refused when it holds data this build cannot
                         // read: it would show the database without it.
@@ -690,7 +655,7 @@ impl GrafeoDB {
                     // read-write open, which seals it, or with `wal_enabled`
                     // off removes it with the WAL). The shared lock keeps writers
                     // out, so the WAL does not change while it is read.
-                    #[cfg(all(feature = "wal", feature = "lpg"))]
+                    #[cfg(feature = "wal")]
                     if fm.has_sidecar_wal() {
                         if Self::holds_first_format_wal(&fm.sidecar_wal_path())? {
                             let recovered = WalRecovery::with_cipher(
@@ -741,8 +706,6 @@ impl GrafeoDB {
             // and the path would look new. A decision that creates a database
             // at a missing path is taken holding the migration lock, which a
             // migration holds while the file is missing between its renames.
-            // Builds without `lpg` follow the same protocol: they finish a
-            // cut-off migration (that only renames), and refuse to migrate.
             #[allow(
                 deprecated,
                 reason = "the crate names its own deprecated variant, until 0.7.0 removes it"
@@ -762,7 +725,6 @@ impl GrafeoDB {
                         return Err(wal_directories_are_no_longer_created(db_path));
                     }
                     Self::refuse_leftover_sidecar_wal(db_path)?;
-                    #[cfg(feature = "lpg")]
                     {
                         creates_the_file = true;
                     }
@@ -776,7 +738,6 @@ impl GrafeoDB {
                 // A 0.5.x database (a file, or a WAL directory) is migrated
                 // to a single file in the 0.6 format at the same path
                 // (encrypted when a key is configured), then opened.
-                #[cfg(feature = "lpg")]
                 OnDisk::LegacyFile | OnDisk::WalDirectory => {
                     // Taken only for a path that was missing: the migration
                     // takes the lock itself.
@@ -788,10 +749,6 @@ impl GrafeoDB {
                 }
                 // The migration reads the old database into the LPG store,
                 // so a build without it cannot migrate.
-                #[cfg(not(feature = "lpg"))]
-                OnDisk::LegacyFile | OnDisk::WalDirectory => {
-                    return Err(legacy_database_needs_lpg(db_path));
-                }
                 // For any other file the manager says what is wrong.
                 OnDisk::Current | OnDisk::Unknown if db_path.is_file() => {
                     let fm = GrafeoFileManager::open_with_cipher_for(db_path, |id| {
@@ -807,7 +764,6 @@ impl GrafeoDB {
                 _ => return Err(not_a_database(db_path)),
             };
 
-            #[cfg(feature = "lpg")]
             {
                 // Refused when it holds data this build cannot read: the
                 // next checkpoint would write the file without it.
@@ -838,7 +794,7 @@ impl GrafeoDB {
             // `wal_enabled` says (it decides only whether new commits are
             // logged), and reach the file at the next checkpoint, before
             // `close()` removes the WAL.
-            #[cfg(all(feature = "wal", feature = "lpg"))]
+            #[cfg(feature = "wal")]
             if fm.has_sidecar_wal() {
                 if Self::holds_first_format_wal(&fm.sidecar_wal_path())? {
                     let recovery = WalRecovery::with_cipher(
@@ -907,10 +863,7 @@ impl GrafeoDB {
         // highest epoch the file, its WAL or any graph reached, collected at
         // the collect horizon; the history goes on from here: a read at a
         // time from now on finds its epoch.
-        #[cfg(feature = "lpg")]
         Self::continue_epochs(&store, &transaction_manager);
-        #[cfg(not(feature = "lpg"))]
-        transaction_manager.anchor_history();
 
         #[cfg(feature = "cdc")]
         let cdc_enabled_val = config.cdc_enabled();
@@ -919,7 +872,6 @@ impl GrafeoDB {
 
         let mut db = Self {
             config,
-            #[cfg(feature = "lpg")]
             store: Some(store),
             catalog,
             #[cfg(feature = "triple-store")]
@@ -939,18 +891,18 @@ impl GrafeoDB {
             embedding_models: RwLock::new(hashbrown::HashMap::new()),
             #[cfg(feature = "grafeo-file")]
             file_manager,
-            #[cfg(all(feature = "grafeo-file", feature = "lpg"))]
+            #[cfg(feature = "grafeo-file")]
             checkpoint_timer: parking_lot::Mutex::new(None),
-            #[cfg(all(feature = "grafeo-file", feature = "lpg"))]
+            #[cfg(feature = "grafeo-file")]
             checkpoint_triggers: parking_lot::Mutex::new(crate::admin::CheckpointTriggers::none()),
-            #[cfg(all(feature = "grafeo-file", feature = "lpg"))]
+            #[cfg(feature = "grafeo-file")]
             checkpoint_failures: Arc::default(),
             #[cfg(feature = "wal")]
             wal_records_at_checkpoint: Arc::new(AtomicU64::new(0)),
             #[cfg(feature = "wal")]
             wal_flusher: parking_lot::Mutex::new(wal_flusher),
             _spill_root: spill_layout.root_guard.clone(),
-            #[cfg(all(feature = "lpg", feature = "vector-index", feature = "wal"))]
+            #[cfg(all(feature = "vector-index", feature = "wal"))]
             vector_cache: spill_layout.vector_cache.clone(),
             external_read_store: None,
             external_write_store: None,
@@ -961,7 +913,6 @@ impl GrafeoDB {
             current_time_zone: RwLock::new(None),
             read_only: is_read_only,
             projections: Arc::new(RwLock::new(std::collections::HashMap::new())),
-            #[cfg(feature = "lpg")]
             immediate_writes: std::sync::OnceLock::new(),
         };
 
@@ -970,7 +921,7 @@ impl GrafeoDB {
 
         // The indexes the sections did not hold are built from all the data,
         // now that WAL recovery is done.
-        #[cfg(all(feature = "grafeo-file", feature = "lpg"))]
+        #[cfg(feature = "grafeo-file")]
         db.finish_load(loaded_sections);
 
         // With `wal_enabled` off, no WAL of this handle marks or trims the
@@ -982,7 +933,7 @@ impl GrafeoDB {
         // ends where the file's checkpoint starts it (a WAL of the first
         // format replays again, harmlessly, as its replay skips what the
         // file holds).
-        #[cfg(all(feature = "wal", feature = "lpg"))]
+        #[cfg(feature = "wal")]
         if let (Some(held_records), Some(fm)) = (retire_sidecar_wal, db.file_manager.clone()) {
             if held_records {
                 flush::flush_covering(&fm, &db.checkpoint_sources(), Some(wal_start_lsn))?;
@@ -1008,7 +959,6 @@ impl GrafeoDB {
             && db.config.wal_enabled()
             && let Some(fm) = db.file_manager.clone()
         {
-            #[cfg(feature = "lpg")]
             if retire_sidecar_wal.is_some() {
                 wal_start_lsn = fm.active_header().checkpoint_lsn;
             }
@@ -1026,7 +976,7 @@ impl GrafeoDB {
         // database read in place gets every vector index rebuilt: one that
         // reloaded its spilled embeddings before it closed left no old file,
         // and an index that missed the embeddings set while spilled.
-        #[cfg(all(feature = "lpg", feature = "grafeo-file", feature = "vector-index"))]
+        #[cfg(all(feature = "grafeo-file", feature = "vector-index"))]
         db.fold_in_legacy_spill(
             &legacy_spill_directories
                 .into_iter()
@@ -1036,7 +986,7 @@ impl GrafeoDB {
         )?;
 
         // Start the automatic checkpointer if a trigger is configured.
-        #[cfg(all(feature = "grafeo-file", feature = "lpg"))]
+        #[cfg(feature = "grafeo-file")]
         {
             *db.checkpoint_triggers.lock() = db.config.checkpoint_triggers();
             db.start_checkpoint_timer();
@@ -1058,7 +1008,7 @@ impl GrafeoDB {
         // A new database file stores its configuration, written at once so
         // the next open reads it from the image (it reads the record before
         // it replays the WAL).
-        #[cfg(all(feature = "grafeo-file", feature = "lpg"))]
+        #[cfg(feature = "grafeo-file")]
         if creates_the_file
             && let (Some(fm), Some(path)) = (db.file_manager.clone(), database_path.as_deref())
         {
@@ -1103,7 +1053,7 @@ impl GrafeoDB {
 
         // Commits continue from the epoch the store is at.
         let transaction_manager = Arc::new(TransactionManager::new());
-        transaction_manager.sync_epoch(store.current_epoch());
+        transaction_manager.sync_epoch(store.committed_epoch());
 
         let buffer_config = BufferManagerConfig {
             budget: config.memory_limit().unwrap_or_else(|| {
@@ -1124,7 +1074,6 @@ impl GrafeoDB {
 
         Ok(Self {
             config,
-            #[cfg(feature = "lpg")]
             store: None,
             catalog: Arc::new(Catalog::new()),
             #[cfg(feature = "triple-store")]
@@ -1144,20 +1093,20 @@ impl GrafeoDB {
             embedding_models: RwLock::new(hashbrown::HashMap::new()),
             #[cfg(feature = "grafeo-file")]
             file_manager: None,
-            #[cfg(all(feature = "grafeo-file", feature = "lpg"))]
+            #[cfg(feature = "grafeo-file")]
             checkpoint_timer: parking_lot::Mutex::new(None),
-            #[cfg(all(feature = "grafeo-file", feature = "lpg"))]
+            #[cfg(feature = "grafeo-file")]
             checkpoint_triggers: parking_lot::Mutex::new(crate::admin::CheckpointTriggers::none()),
-            #[cfg(all(feature = "grafeo-file", feature = "lpg"))]
+            #[cfg(feature = "grafeo-file")]
             checkpoint_failures: Arc::default(),
             #[cfg(feature = "wal")]
             wal_records_at_checkpoint: Arc::new(AtomicU64::new(0)),
             #[cfg(feature = "wal")]
             wal_flusher: parking_lot::Mutex::new(None),
             _spill_root: None,
-            #[cfg(all(feature = "lpg", feature = "vector-index", feature = "wal"))]
+            #[cfg(all(feature = "vector-index", feature = "wal"))]
             vector_cache: None,
-            external_read_store: Some(Arc::clone(&store) as Arc<dyn GraphStoreSearch>),
+            external_read_store: Some(Arc::clone(&store) as Arc<dyn GraphStore>),
             external_write_store: Some(store),
             #[cfg(feature = "metrics")]
             metrics: Some(Arc::new(crate::metrics::MetricsRegistry::new())),
@@ -1166,7 +1115,6 @@ impl GrafeoDB {
             current_time_zone: RwLock::new(None),
             read_only: false,
             projections: Arc::new(RwLock::new(std::collections::HashMap::new())),
-            #[cfg(feature = "lpg")]
             immediate_writes: std::sync::OnceLock::new(),
         })
     }
@@ -1181,9 +1129,9 @@ impl GrafeoDB {
     /// ```no_run
     /// use std::sync::Arc;
     /// use grafeo_engine::{GrafeoDB, Config};
-    /// use grafeo_core::graph::GraphStoreSearch;
+    /// use grafeo_core::graph::GraphStore;
     ///
-    /// fn example(store: Arc<dyn GraphStoreSearch>) -> grafeo_common::utils::error::Result<()> {
+    /// fn example(store: Arc<dyn GraphStore>) -> grafeo_common::utils::error::Result<()> {
     ///     let db = GrafeoDB::with_read_store(store, Config::in_memory())?;
     ///     let result = db.execute("MATCH (n) RETURN count(n)")?;
     ///     Ok(())
@@ -1195,12 +1143,12 @@ impl GrafeoDB {
     /// Returns an error if config validation fails.
     ///
     /// [`GraphStore`]: grafeo_core::graph::GraphStore
-    pub fn with_read_store(store: Arc<dyn GraphStoreSearch>, config: Config) -> Result<Self> {
+    pub fn with_read_store(store: Arc<dyn GraphStore>, config: Config) -> Result<Self> {
         config.validate().map_err(config_error)?;
 
         // Commits continue from the epoch the store is at.
         let transaction_manager = Arc::new(TransactionManager::new());
-        transaction_manager.sync_epoch(store.current_epoch());
+        transaction_manager.sync_epoch(store.committed_epoch());
 
         let buffer_config = BufferManagerConfig {
             budget: config.memory_limit().unwrap_or_else(|| {
@@ -1221,7 +1169,6 @@ impl GrafeoDB {
 
         Ok(Self {
             config,
-            #[cfg(feature = "lpg")]
             store: None,
             catalog: Arc::new(Catalog::new()),
             #[cfg(feature = "triple-store")]
@@ -1241,18 +1188,18 @@ impl GrafeoDB {
             embedding_models: RwLock::new(hashbrown::HashMap::new()),
             #[cfg(feature = "grafeo-file")]
             file_manager: None,
-            #[cfg(all(feature = "grafeo-file", feature = "lpg"))]
+            #[cfg(feature = "grafeo-file")]
             checkpoint_timer: parking_lot::Mutex::new(None),
-            #[cfg(all(feature = "grafeo-file", feature = "lpg"))]
+            #[cfg(feature = "grafeo-file")]
             checkpoint_triggers: parking_lot::Mutex::new(crate::admin::CheckpointTriggers::none()),
-            #[cfg(all(feature = "grafeo-file", feature = "lpg"))]
+            #[cfg(feature = "grafeo-file")]
             checkpoint_failures: Arc::default(),
             #[cfg(feature = "wal")]
             wal_records_at_checkpoint: Arc::new(AtomicU64::new(0)),
             #[cfg(feature = "wal")]
             wal_flusher: parking_lot::Mutex::new(None),
             _spill_root: None,
-            #[cfg(all(feature = "lpg", feature = "vector-index", feature = "wal"))]
+            #[cfg(all(feature = "vector-index", feature = "wal"))]
             vector_cache: None,
             external_read_store: Some(store),
             external_write_store: None,
@@ -1263,7 +1210,6 @@ impl GrafeoDB {
             current_time_zone: RwLock::new(None),
             read_only: true,
             projections: Arc::new(RwLock::new(std::collections::HashMap::new())),
-            #[cfg(feature = "lpg")]
             immediate_writes: std::sync::OnceLock::new(),
         })
     }
@@ -1298,19 +1244,12 @@ impl GrafeoDB {
     /// before it stay so.
     pub fn compact(&mut self) -> Result<crate::admin::CompactReport> {
         let started = grafeo_common::clock::Instant::now();
-        #[cfg(feature = "lpg")]
         let checkpointed = self.checkpoint_now()?;
-        // A build without the LPG model has no checkpoint of its own to write.
-        #[cfg(not(feature = "lpg"))]
-        let checkpointed = false;
         let versions_collected = u64::try_from(self.collect_garbage()).unwrap_or(u64::MAX);
-        #[cfg(feature = "lpg")]
         let rows_compressed = match self.root_store() {
             Some(store) => store.compress()?.rows,
             None => 0,
         };
-        #[cfg(not(feature = "lpg"))]
-        let rows_compressed = 0;
         Ok(crate::admin::CompactReport {
             checkpointed,
             versions_collected,
@@ -1341,7 +1280,6 @@ impl GrafeoDB {
     /// ahead of the root store). Reads then see every loaded and replayed
     /// version, a checkpoint records that epoch, and new commits continue
     /// above it.
-    #[cfg(feature = "lpg")]
     fn continue_epochs(store: &RowGroupStore, transaction_manager: &TransactionManager) {
         row_group_sections::continue_row_group_epochs(store, transaction_manager);
     }
@@ -1349,7 +1287,7 @@ impl GrafeoDB {
     /// Raises the root store to the epoch of the file's last checkpoint, which
     /// its database header holds, before the commits its WAL logs after it
     /// are replayed.
-    #[cfg(all(feature = "lpg", feature = "grafeo-file"))]
+    #[cfg(feature = "grafeo-file")]
     fn continue_from_checkpoint(fm: &GrafeoFileManager, store: &RowGroupStore) {
         store.sync_epoch(grafeo_common::types::EpochId::new(fm.active_header().epoch));
     }
@@ -1509,7 +1447,7 @@ impl GrafeoDB {
     /// standalone change, and at data this build cannot read (an RDF record
     /// without the `triple-store` feature, a vector or text index without
     /// its feature): it would be lost (see [`sections::FeatureData`]).
-    #[cfg(all(feature = "wal", feature = "lpg"))]
+    #[cfg(feature = "wal")]
     fn apply_wal_records<S: root_store::RootStore>(
         wal: &std::path::Path,
         store: &Arc<S>,
@@ -1572,7 +1510,7 @@ impl GrafeoDB {
                 // or edge that exists would duplicate its label and adjacency
                 // entries and counters, so those are skipped (#417).
                 WalRecord::CreateNode { id, labels } => {
-                    if target_store.get_node(*id).is_none() {
+                    if target_store.node(*id, target_store.load_view())?.is_none() {
                         let label_refs: Vec<&str> = labels.iter().map(|s| s.as_str()).collect();
                         target_store.load_node(*id, &label_refs)?;
                     }
@@ -1586,7 +1524,7 @@ impl GrafeoDB {
                     dst,
                     edge_type,
                 } => {
-                    if target_store.get_edge(*id).is_none()
+                    if target_store.edge(*id, target_store.load_view())?.is_none()
                         && !target_store.load_edge(*id, *src, *dst, edge_type)?
                     {
                         grafeo_common::grafeo_warn!(
@@ -1845,7 +1783,7 @@ impl GrafeoDB {
     /// cannot be replayed (an RDF record in a build without the
     /// `triple-store` feature); in a build without the `wal` feature, always
     /// (it cannot replay a WAL).
-    #[cfg(all(feature = "grafeo-file", feature = "lpg"))]
+    #[cfg(feature = "grafeo-file")]
     fn load_legacy_directory<S: root_store::RootStore>(
         path: &std::path::Path,
         store: &Arc<S>,
@@ -1896,7 +1834,7 @@ impl GrafeoDB {
     ///
     /// Returns an error saying so in that case, or if `path` cannot be
     /// inspected.
-    #[cfg(all(feature = "wal", feature = "lpg"))]
+    #[cfg(feature = "wal")]
     fn refuse_migrated_while_read(path: &std::path::Path, expected: OnDisk) -> Result<()> {
         if detect(path)? == expected {
             return Ok(());
@@ -1922,7 +1860,7 @@ impl GrafeoDB {
     /// recovered, or the file or its WAL holds data this build cannot read
     /// (see [`sections::FeatureData`]); in a build without the `wal`
     /// feature, also if the sidecar WAL holds files.
-    #[cfg(all(feature = "grafeo-file", feature = "lpg"))]
+    #[cfg(feature = "grafeo-file")]
     fn load_legacy_file<S: root_store::RootStore>(
         path: &std::path::Path,
         store: &Arc<S>,
@@ -2004,7 +1942,7 @@ impl GrafeoDB {
 
     /// Applies the snapshot blob of the 0.5.x container v1 file `path` to
     /// restore the store and catalog.
-    #[cfg(all(feature = "grafeo-file", feature = "lpg"))]
+    #[cfg(feature = "grafeo-file")]
     fn apply_snapshot_data<S: root_store::RootStore>(
         path: &std::path::Path,
         store: &Arc<S>,
@@ -2170,7 +2108,6 @@ impl GrafeoDB {
             gc_interval: self.config.gc_interval(),
             read_only: self.read_only || force_read_only,
             identity: identity.clone(),
-            #[cfg(feature = "lpg")]
             projections: Arc::clone(&self.projections),
         };
 
@@ -2183,17 +2120,13 @@ impl GrafeoDB {
             .expect("arena allocation for external store session");
         }
 
-        #[cfg(all(feature = "lpg", feature = "triple-store"))]
+        #[cfg(feature = "triple-store")]
         let mut session =
             Session::with_rdf_store(self.lpg_store(), Arc::clone(&self.rdf_store), session_cfg());
-        #[cfg(all(feature = "lpg", not(feature = "triple-store")))]
+        #[cfg(not(feature = "triple-store"))]
         let mut session = Session::with_store(self.lpg_store(), session_cfg());
-        #[cfg(not(feature = "lpg"))]
-        let mut session =
-            Session::with_external_store(self.graph_store(), self.graph_store_mut(), session_cfg())
-                .expect("session creation for non-lpg build");
 
-        #[cfg(all(feature = "wal", feature = "lpg"))]
+        #[cfg(feature = "wal")]
         if let Some(ref wal) = self.wal {
             session.set_wal(Arc::clone(wal));
         }
@@ -2257,7 +2190,6 @@ impl GrafeoDB {
     ///
     /// Returns an error if the named graph does not exist.
     pub fn set_current_graph(&self, name: Option<&str>) -> Result<()> {
-        #[cfg(feature = "lpg")]
         if let Some(name) = name
             && !name.eq_ignore_ascii_case("default")
             && let Some(store) = self.root_store()
@@ -2380,7 +2312,6 @@ impl GrafeoDB {
     ///
     /// Panics if the database uses an external store
     /// ([`with_store`](Self::with_store), [`with_read_store`](Self::with_read_store)).
-    #[cfg(feature = "lpg")]
     #[must_use]
     pub fn store(&self) -> Arc<RowGroupStore> {
         self.lpg_store()
@@ -2402,7 +2333,6 @@ impl GrafeoDB {
     /// [`with_read_store`](Self::with_read_store)), which has no named graphs;
     /// the database-closed error after `close()` of a persistent database,
     /// and the incomplete-commit error after a commit that did not complete.
-    #[cfg(feature = "lpg")]
     pub fn create_graph(&self, name: &str) -> Result<bool> {
         if self.root_store().is_none() {
             return Err(grafeo_common::utils::error::Error::Query(
@@ -2442,7 +2372,6 @@ impl GrafeoDB {
     /// graph (drop it once that transaction commits or rolls back); the
     /// database-closed error after `close()` of a persistent database, and
     /// the incomplete-commit error after a commit that did not complete.
-    #[cfg(feature = "lpg")]
     pub fn drop_graph(&self, name: &str) -> Result<bool> {
         if self.root_store().is_none() {
             return Ok(false);
@@ -2469,7 +2398,6 @@ impl GrafeoDB {
     }
 
     /// Returns all named graph names (none on an external store).
-    #[cfg(feature = "lpg")]
     #[must_use]
     pub fn list_graphs(&self) -> Vec<String> {
         self.root_store()
@@ -2536,13 +2464,13 @@ impl GrafeoDB {
         self.projections.read().keys().cloned().collect()
     }
 
-    /// Returns a named projection as a [`GraphStoreSearch`] trait object.
+    /// Returns a named projection as a [`GraphStore`] trait object.
     #[must_use]
-    pub fn projection(&self, name: &str) -> Option<Arc<dyn GraphStoreSearch>> {
+    pub fn projection(&self, name: &str) -> Option<Arc<dyn GraphStore>> {
         self.projections
             .read()
             .get(name)
-            .map(|p| Arc::clone(p) as Arc<dyn GraphStoreSearch>)
+            .map(|p| Arc::clone(p) as Arc<dyn GraphStore>)
     }
 
     /// The store of the graph [`set_current_graph`](Self::set_current_graph) and
@@ -2553,36 +2481,23 @@ impl GrafeoDB {
     /// # Errors
     ///
     /// Returns an error if the selected graph no longer exists.
-    pub fn selected_graph_store(&self) -> Result<Arc<dyn GraphStoreSearch>> {
-        #[cfg(feature = "lpg")]
-        {
-            self.read_store(direct::DirectTarget::Current)
-        }
-        // Without the LPG model there are no named graphs to select.
-        #[cfg(not(feature = "lpg"))]
-        {
-            Ok(self.graph_store())
-        }
+    pub fn selected_graph_store(&self) -> Result<Arc<dyn GraphStore>> {
+        self.read_store(direct::DirectTarget::Current)
     }
 
     /// Returns the graph store as a trait object.
     ///
     /// Returns a read-only trait object for the active graph store.
     ///
-    /// This provides the [`GraphStoreSearch`] interface (graph-structure reads
+    /// This provides the [`GraphStore`] interface (graph-structure reads
     /// plus text/vector search capabilities) for code that only needs read
     /// operations. For write access, use [`graph_store_mut()`](Self::graph_store_mut).
     #[must_use]
-    pub fn graph_store(&self) -> Arc<dyn GraphStoreSearch> {
+    pub fn graph_store(&self) -> Arc<dyn GraphStore> {
         if let Some(ref ext_read) = self.external_read_store {
             Arc::clone(ext_read)
         } else {
-            #[cfg(feature = "lpg")]
-            {
-                self.lpg_store() as Arc<dyn GraphStoreSearch>
-            }
-            #[cfg(not(feature = "lpg"))]
-            unreachable!("no graph store available: enable the `lpg` feature or use with_store()")
+            self.lpg_store() as Arc<dyn GraphStore>
         }
     }
 
@@ -2595,14 +2510,7 @@ impl GrafeoDB {
         if self.external_read_store.is_some() {
             self.external_write_store.as_ref().map(Arc::clone)
         } else {
-            #[cfg(feature = "lpg")]
-            {
-                Some(self.lpg_store() as Arc<dyn GraphStoreMut>)
-            }
-            #[cfg(not(feature = "lpg"))]
-            {
-                None
-            }
+            Some(self.lpg_store() as Arc<dyn GraphStoreMut>)
         }
     }
 
@@ -2619,7 +2527,6 @@ impl GrafeoDB {
 
     /// What [`gc()`](Self::gc) does; returns how many versions it dropped.
     fn collect_garbage(&self) -> usize {
-        #[cfg(feature = "lpg")]
         let versions = self.root_store().map_or(0, |store| {
             let min_epoch = self.transaction_manager.collect_horizon();
             let named: usize = store
@@ -2630,16 +2537,13 @@ impl GrafeoDB {
                 .sum();
             store.gc_versions(min_epoch) + named
         });
-        #[cfg(not(feature = "lpg"))]
-        let versions = 0;
-        #[cfg(all(feature = "lpg", feature = "cdc"))]
+        #[cfg(feature = "cdc")]
         let current_epoch = self.transaction_manager.current_epoch();
         self.transaction_manager.gc();
 
         // Prune CDC events based on retention config (epoch + count limits)
         #[cfg(feature = "cdc")]
         if self.cdc_enabled.load(std::sync::atomic::Ordering::Relaxed) {
-            #[cfg(feature = "lpg")]
             self.cdc_log.apply_retention(current_epoch);
         }
         versions
@@ -2728,7 +2632,7 @@ impl GrafeoDB {
         // A closed handle still reads its spilled columns, but spills no
         // more: once the lock is released, `<file>.spill/cache/` belongs to
         // the next read-write open (#594).
-        #[cfg(all(feature = "lpg", feature = "vector-index", feature = "wal"))]
+        #[cfg(all(feature = "vector-index", feature = "wal"))]
         if let Some(ref cache) = self.vector_cache {
             cache.close_for_writes();
         }
@@ -2747,7 +2651,7 @@ impl GrafeoDB {
 
         // Stop the periodic checkpoint timer first, before any early return,
         // so it does not race with the closed file manager.
-        #[cfg(all(feature = "grafeo-file", feature = "lpg"))]
+        #[cfg(feature = "grafeo-file")]
         if let Some(mut timer) = self.checkpoint_timer.lock().take() {
             timer.stop();
         }
@@ -2859,7 +2763,6 @@ impl GrafeoDB {
     ///
     /// Returns [`TransactionError::DatabaseClosed`](grafeo_common::utils::error::TransactionError::DatabaseClosed)
     /// once `close()` of a database with a path has run.
-    #[cfg(any(feature = "lpg", feature = "triple-store"))]
     pub(crate) fn hold_open(&self) -> Result<parking_lot::RwLockReadGuard<'_, bool>> {
         let open = self.is_open.read();
         if !*open && self.config.path().is_some() {
@@ -2883,7 +2786,6 @@ impl GrafeoDB {
     /// The database-closed error after `close()` of a persistent database
     /// (read-only or not), the read-only error on a read-only database, and
     /// the incomplete-commit error after a commit that did not complete.
-    #[cfg(any(feature = "lpg", feature = "triple-store"))]
     fn check_import_allowed(&self) -> Result<()> {
         // A read-only `close()` sets no closed state for `check_open`: the
         // open state refuses a closed handle of either kind.
@@ -2916,7 +2818,6 @@ impl GrafeoDB {
     /// `close()` has started, and after a commit that did not complete (the
     /// change would be stamped at an epoch that is never published, and no
     /// checkpoint runs any more).
-    #[cfg(any(feature = "lpg", feature = "triple-store"))]
     fn hold_commits_for_import(&self) -> Result<crate::transaction::CommitsHeld<'_>> {
         self.check_import_allowed()?;
         // Checks the incomplete-commit and closed states again, under the
@@ -2931,7 +2832,6 @@ impl GrafeoDB {
     /// The changes of an import or an RDF batch insert that holds commits
     /// off (`held`), written to the WAL as it goes (see
     /// [`StreamingChanges`](crate::transaction::StreamingChanges)).
-    #[cfg(any(feature = "lpg", feature = "triple-store"))]
     ///
     /// `advances_epoch`: whether it commits at the next epoch (an import of
     /// rows) or at the published one (an RDF batch insert, whose triples have
@@ -2978,7 +2878,6 @@ impl GrafeoDB {
     ///
     /// The database-closed error after `close()` of a persistent database,
     /// and the incomplete-commit error after a commit that did not complete.
-    #[cfg(feature = "lpg")]
     pub(crate) fn hold_for_standalone(
         &self,
         writes_too: bool,
@@ -2992,7 +2891,6 @@ impl GrafeoDB {
     /// # Errors
     ///
     /// As [`standalone::commit`].
-    #[cfg(feature = "lpg")]
     pub(crate) fn commit_standalone(
         &self,
         change: crate::transaction::StandaloneChange,
@@ -3017,7 +2915,6 @@ impl GrafeoDB {
         // The root store's section (its heap, every named graph's), its
         // vector indexes, whose embedding columns spill into the open's
         // vector cache, and its text indexes.
-        #[cfg(feature = "lpg")]
         if let Some(store) = self.store.as_ref() {
             row_group_spill::register_row_group_consumers(
                 &self.buffer_manager,
@@ -3175,9 +3072,7 @@ impl GrafeoDB {
     /// [`sections::CheckpointSources`]).
     fn checkpoint_sources(&self) -> sections::CheckpointSources {
         sections::CheckpointSources {
-            #[cfg(feature = "lpg")]
             store: self.store.clone(),
-            #[cfg(feature = "lpg")]
             catalog: Arc::clone(&self.catalog),
             transaction_manager: Arc::clone(&self.transaction_manager),
             #[cfg(feature = "triple-store")]
@@ -3191,7 +3086,7 @@ impl GrafeoDB {
 
     /// Starts the automatic checkpointer when a trigger is set, replacing a
     /// running one.
-    #[cfg(all(feature = "grafeo-file", feature = "lpg"))]
+    #[cfg(feature = "grafeo-file")]
     fn start_checkpoint_timer(&self) {
         // A closed database has released its file.
         if *self.is_open.read() {
@@ -3201,7 +3096,7 @@ impl GrafeoDB {
 
     /// [`start_checkpoint_timer`](Self::start_checkpoint_timer) for a
     /// caller that holds the database open.
-    #[cfg(all(feature = "grafeo-file", feature = "lpg"))]
+    #[cfg(feature = "grafeo-file")]
     fn restart_checkpoint_timer(&self) {
         self.stop_checkpoint_timer();
         let triggers = *self.checkpoint_triggers.lock();
@@ -3239,7 +3134,7 @@ impl GrafeoDB {
     }
 
     /// Stops the periodic checkpoint timer, if one is running.
-    #[cfg(all(feature = "grafeo-file", feature = "lpg"))]
+    #[cfg(feature = "grafeo-file")]
     fn stop_checkpoint_timer(&self) {
         let running = self.checkpoint_timer.lock().take();
         if let Some(mut timer) = running {
@@ -3283,7 +3178,7 @@ impl GrafeoDB {
     /// backward edges to another value than the database was created with,
     /// the database-closed error after `close()`, and the errors of the
     /// checkpoint.
-    #[cfg(all(feature = "grafeo-file", feature = "lpg"))]
+    #[cfg(feature = "grafeo-file")]
     pub fn set_stored_config(&self, changes: &Config) -> Result<()> {
         let _open = self.hold_open()?;
         let unsupported =
@@ -3347,7 +3242,7 @@ impl GrafeoDB {
     ///
     /// Returns an error if the database has no file manager or I/O fails,
     /// and the database-closed error after `close()`.
-    #[cfg(all(feature = "wal", feature = "grafeo-file", feature = "lpg"))]
+    #[cfg(all(feature = "wal", feature = "grafeo-file"))]
     pub fn backup_full(&self, backup_dir: &std::path::Path) -> Result<backup::BackupSegment> {
         let _open = self.hold_open()?;
         let fm = self.file_manager.as_ref().ok_or_else(|| {
@@ -3377,7 +3272,7 @@ impl GrafeoDB {
     ///
     /// Returns an error if no full backup exists, or if the WAL has no new
     /// records, and the database-closed error after `close()`.
-    #[cfg(all(feature = "wal", feature = "grafeo-file", feature = "lpg"))]
+    #[cfg(all(feature = "wal", feature = "grafeo-file"))]
     pub fn backup_incremental(
         &self,
         backup_dir: &std::path::Path,
@@ -3559,19 +3454,6 @@ fn resolve_through_longest_existing_prefix(
     resolved
 }
 
-/// The error of a build without the `lpg` feature for a database written by
-/// 0.5.x (a file or a WAL directory): it can neither read it (the 0.5.x
-/// reader loads into the LPG store) nor migrate it.
-#[cfg(all(feature = "grafeo-file", not(feature = "lpg")))]
-fn legacy_database_needs_lpg(path: &std::path::Path) -> Error {
-    Error::InvalidValue(format!(
-        "{} was written by Grafeo 0.5.x, and this build cannot read or migrate it (it lacks \
-         the `lpg` feature): open it read-write once with a build that has the `lpg` feature, \
-         which migrates it to the 0.6 file format",
-        path.display()
-    ))
-}
-
 /// The error of an open with the deprecated `StorageFormat::WalDirectory` at
 /// a path where nothing exists: WAL directories are no longer created.
 #[cfg(feature = "grafeo-file")]
@@ -3616,21 +3498,20 @@ impl Drop for GrafeoDB {
     }
 }
 
-#[cfg(feature = "lpg")]
 impl crate::admin::AdminService for GrafeoDB {
-    fn info(&self) -> crate::admin::DatabaseInfo {
+    fn info(&self) -> Result<crate::admin::DatabaseInfo> {
         self.info()
     }
 
-    fn detailed_stats(&self) -> crate::admin::DatabaseStats {
+    fn detailed_stats(&self) -> Result<crate::admin::DatabaseStats> {
         self.detailed_stats()
     }
 
-    fn schema(&self) -> crate::admin::SchemaInfo {
+    fn schema(&self) -> Result<crate::admin::SchemaInfo> {
         self.schema()
     }
 
-    fn validate(&self) -> crate::admin::ValidationResult {
+    fn validate(&self) -> Result<crate::admin::ValidationResult> {
         self.validate()
     }
 
@@ -4045,13 +3926,13 @@ impl FromValue for bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use grafeo_common::types::ReadView;
 
     /// The 0.5.x loader passes the vector and text sections of a 0.5.44 file
     /// on: their indexes come back from them, before anything is built from
     /// the data.
     #[cfg(all(
         feature = "grafeo-file",
-        feature = "lpg",
         feature = "vector-index",
         feature = "text-index"
     ))]
@@ -4127,7 +4008,7 @@ mod tests {
 
     /// `compact()` reports what it did: an in-memory database writes no
     /// checkpoint, a persistent one does; a read-only one writes none.
-    #[cfg(all(feature = "grafeo-file", feature = "lpg"))]
+    #[cfg(feature = "grafeo-file")]
     #[test]
     fn compact_reports_whether_it_checkpointed() {
         let mut memory = GrafeoDB::new_in_memory();
@@ -4154,7 +4035,6 @@ mod tests {
     /// `compact()` drops the old versions of every graph, the named ones
     /// too, and a second `compact()` finds none left. Only builds that keep
     /// property history hold old versions.
-    #[cfg(feature = "lpg")]
     #[test]
     fn compact_collects_old_versions_in_every_graph() {
         use grafeo_common::types::Value;
@@ -4196,7 +4076,11 @@ mod tests {
             "nothing is left to collect"
         );
         assert_eq!(
-            db.get_node(alix).unwrap().properties.get(&"age".into()),
+            db.get_node(alix)
+                .unwrap()
+                .unwrap()
+                .properties
+                .get(&"age".into()),
             Some(&Value::Int64(32)),
             "the current value stays"
         );
@@ -4214,7 +4098,7 @@ mod tests {
 
     /// `compact()` of a database opened read-only changes nothing, and no
     /// checkpoint timer may run against its file.
-    #[cfg(all(feature = "grafeo-file", feature = "lpg"))]
+    #[cfg(feature = "grafeo-file")]
     #[test]
     fn compacting_a_read_only_database_starts_no_checkpoint_timer() {
         let dir = tempfile::tempdir().unwrap();
@@ -4234,7 +4118,7 @@ mod tests {
 
     /// `compact()` after `close()` fails and starts no checkpoint timer: its
     /// checkpoints would write a file the database no longer holds.
-    #[cfg(all(feature = "wal", feature = "lpg"))]
+    #[cfg(feature = "wal")]
     #[test]
     fn compacting_a_closed_database_starts_no_checkpoint_timer() {
         let dir = tempfile::tempdir().unwrap();
@@ -4263,8 +4147,8 @@ mod tests {
     #[test]
     fn test_create_in_memory_database() {
         let db = GrafeoDB::new_in_memory();
-        assert_eq!(db.node_count(), 0);
-        assert_eq!(db.edge_count(), 0);
+        assert_eq!(db.node_count().unwrap(), 0);
+        assert_eq!(db.edge_count().unwrap(), 0);
     }
 
     #[test]
@@ -4314,14 +4198,14 @@ mod tests {
         {
             let db = GrafeoDB::open(&db_path).unwrap();
 
-            assert_eq!(db.node_count(), 2);
-            assert_eq!(db.edge_count(), 1);
+            assert_eq!(db.node_count().unwrap(), 2);
+            assert_eq!(db.edge_count().unwrap(), 1);
 
             // Verify nodes exist
-            let node0 = db.get_node(grafeo_common::types::NodeId::new(0));
+            let node0 = db.get_node(grafeo_common::types::NodeId::new(0)).unwrap();
             assert!(node0.is_some());
 
-            let node1 = db.get_node(grafeo_common::types::NodeId::new(1));
+            let node1 = db.get_node(grafeo_common::types::NodeId::new(1)).unwrap();
             assert!(node1.is_some());
         }
     }
@@ -4371,7 +4255,7 @@ mod tests {
                 }
                 // Session 2: Add more data
                 "2" => {
-                    assert_eq!(db.node_count(), 1); // Previous data recovered
+                    assert_eq!(db.node_count().unwrap(), 1); // Previous data recovered
                     let gus = db.create_node(&["Person"]).unwrap();
                     db.set_node_property(gus, "name", Value::from("Gus"))
                         .unwrap();
@@ -4402,13 +4286,19 @@ mod tests {
         // Session 3: Verify all data
         {
             let db = GrafeoDB::open(&db_path).unwrap();
-            assert_eq!(db.node_count(), 2);
+            assert_eq!(db.node_count().unwrap(), 2);
 
             // Verify properties were recovered correctly
-            let node0 = db.get_node(grafeo_common::types::NodeId::new(0)).unwrap();
+            let node0 = db
+                .get_node(grafeo_common::types::NodeId::new(0))
+                .unwrap()
+                .unwrap();
             assert!(node0.labels.iter().any(|l| l.as_str() == "Person"));
 
-            let node1 = db.get_node(grafeo_common::types::NodeId::new(1)).unwrap();
+            let node1 = db
+                .get_node(grafeo_common::types::NodeId::new(1))
+                .unwrap()
+                .unwrap();
             assert!(node1.labels.iter().any(|l| l.as_str() == "Person"));
         }
     }
@@ -4454,14 +4344,14 @@ mod tests {
             // Should have 2 nodes (a and c), b was deleted
             // Note: node_count includes deleted nodes in some implementations
             // What matters is that the non-deleted nodes are accessible
-            let node_a = db.get_node(grafeo_common::types::NodeId::new(0));
+            let node_a = db.get_node(grafeo_common::types::NodeId::new(0)).unwrap();
             assert!(node_a.is_some());
 
-            let node_c = db.get_node(grafeo_common::types::NodeId::new(2));
+            let node_c = db.get_node(grafeo_common::types::NodeId::new(2)).unwrap();
             assert!(node_c.is_some());
 
             // Middle node should be deleted
-            let node_b = db.get_node(grafeo_common::types::NodeId::new(1));
+            let node_b = db.get_node(grafeo_common::types::NodeId::new(1)).unwrap();
             assert!(node_b.is_none());
         }
     }
@@ -4517,7 +4407,7 @@ mod tests {
 
         let db = GrafeoDB::with_config(config).unwrap();
         assert_eq!(db.config().memory_limit(), Some(64 * 1024 * 1024));
-        assert_eq!(db.node_count(), 0);
+        assert_eq!(db.node_count().unwrap(), 0);
     }
 
     #[cfg(feature = "metrics")]
@@ -5032,7 +4922,7 @@ mod tests {
         db.create_node(&["Person"]).unwrap();
         db.gc();
         // Verify no panic, node still accessible
-        assert_eq!(db.node_count(), 1);
+        assert_eq!(db.node_count().unwrap(), 1);
     }
 
     // =========================================================================
@@ -5143,7 +5033,7 @@ mod tests {
         let db = GrafeoDB::new_in_memory();
         db.create_node(&["Person"]).unwrap();
         let store = db.graph_store();
-        assert_eq!(store.node_count(), 1);
+        assert_eq!(store.node_count(ReadView::latest()).unwrap(), 1);
     }
 
     #[test]
@@ -5159,7 +5049,7 @@ mod tests {
         let store = Arc::new(RowGroupStore::new());
         store.create_node(&["Person"]);
 
-        let read_store = Arc::clone(&store) as Arc<dyn GraphStoreSearch>;
+        let read_store = Arc::clone(&store) as Arc<dyn GraphStore>;
         let db = GrafeoDB::with_read_store(read_store, Config::in_memory()).unwrap();
 
         assert!(db.is_read_only());
@@ -5167,7 +5057,7 @@ mod tests {
 
         // Read queries should work
         let gs = db.graph_store();
-        assert_eq!(gs.node_count(), 1);
+        assert_eq!(gs.node_count(ReadView::latest()).unwrap(), 1);
     }
 
     #[test]
@@ -5185,7 +5075,7 @@ mod tests {
 
         assert!(!db.is_read_only());
         assert!(db.graph_store_mut().is_some());
-        assert_eq!(db.graph_store().node_count(), 1);
+        assert_eq!(db.graph_store().node_count(ReadView::latest()).unwrap(), 1);
     }
 
     // =========================================================================
@@ -5331,7 +5221,7 @@ mod tests {
         use grafeo_core::graph::rowgroup::RowGroupStore;
 
         let store = Arc::new(RowGroupStore::new());
-        let read_store = Arc::clone(&store) as Arc<dyn GraphStoreSearch>;
+        let read_store = Arc::clone(&store) as Arc<dyn GraphStore>;
         let db = GrafeoDB::with_read_store(read_store, Config::in_memory()).unwrap();
 
         // drop_graph with external store (no built-in store) returns false

@@ -31,7 +31,7 @@ use smallvec::SmallVec;
 use std::cmp::Ordering as CmpOrdering;
 use std::sync::Arc;
 
-/// The labels of a node, as [`GraphRead::node_labels`] returns them.
+/// The labels of a node, as [`GraphStore::node_labels`] returns them.
 pub type Labels = grafeo_common::change::Labels;
 
 /// The reads of one graph, each at an explicit [`ReadView`].
@@ -59,9 +59,9 @@ pub type Labels = grafeo_common::change::Labels;
 /// # Object safety
 ///
 /// The trait is object-safe: the engine holds a store as
-/// `Arc<dyn GraphRead>`. Reads return `Vec`s rather than iterators for
+/// `Arc<dyn GraphStore>`. Reads return `Vec`s rather than iterators for
 /// that reason.
-pub trait GraphRead: Send + Sync {
+pub trait GraphStore: Send + Sync {
     // --- Point reads ---
 
     /// Node `id` as `view` sees it: `None` when the view does not see it.
@@ -551,6 +551,11 @@ pub trait GraphRead: Send + Sync {
     /// clone): estimates, not answers.
     fn statistics(&self) -> Arc<Statistics>;
 
+    /// The latest epoch the store holds commits of. A database that adopts
+    /// the store continues its epochs from it; the engine reads at the views
+    /// of its own transactions, never at this epoch.
+    fn committed_epoch(&self) -> EpochId;
+
     // --- History ---
 
     /// The versions of node `id` the store keeps, newest first: each with
@@ -723,7 +728,7 @@ fn unsupported(what: &str) -> grafeo_common::utils::error::Error {
 /// The distance from `query` of each vector in `property` of the nodes
 /// `view` sees (with `label`), one with another length left out.
 #[cfg(feature = "vector-index")]
-fn measured_vectors<S: GraphRead + ?Sized>(
+fn measured_vectors<S: GraphStore + ?Sized>(
     store: &S,
     label: Option<&str>,
     property: &str,
@@ -754,9 +759,9 @@ fn measured_vectors<S: GraphRead + ?Sized>(
 
 /// Keeps one entry for each self-loop of `node` among `edges`, its edges in
 /// both directions: a self-loop is in both adjacency lists of its node, and
-/// [`GraphRead::edges`] lists it once, as an undirected pattern matches it
+/// [`GraphStore::edges`] lists it once, as an undirected pattern matches it
 /// once (openCypher TCK Match3, cases 11 and 12). A store implementing
-/// [`GraphRead::edges`] calls it on what it lists for `Both`.
+/// [`GraphStore::edges`] calls it on what it lists for `Both`.
 pub fn list_self_loops_once(node: NodeId, edges: &mut Vec<(NodeId, EdgeId)>) {
     let mut loops: SmallVec<[EdgeId; 2]> = SmallVec::new();
     edges.retain(|&(other, edge)| {
@@ -817,959 +822,12 @@ pub(crate) fn value_in_range(
     above && below
 }
 
-/// Read-only graph operations used by the query engine.
-///
-/// This trait captures the minimal surface that scan, expand, filter,
-/// project, and shortest-path operators need. Implementations may serve
-/// data from memory, disk, or a hybrid of both.
-///
-/// # Object safety
-///
-/// This trait is object-safe: you can use `Arc<dyn GraphStoreSearch>` for dynamic
-/// dispatch. Traversal methods return `Vec` instead of `impl Iterator` to
-/// enable this.
-pub trait GraphStore: Send + Sync {
-    // --- Point lookups ---
-
-    /// Returns a node by ID (latest visible version at current epoch).
-    fn get_node(&self, id: NodeId) -> Option<Node>;
-
-    /// Returns an edge by ID (latest visible version at current epoch).
-    fn get_edge(&self, id: EdgeId) -> Option<Edge>;
-
-    /// Returns a node visible to a specific transaction.
-    fn get_node_versioned(
-        &self,
-        id: NodeId,
-        epoch: EpochId,
-        transaction_id: TransactionId,
-    ) -> Option<Node>;
-
-    /// Returns an edge visible to a specific transaction.
-    fn get_edge_versioned(
-        &self,
-        id: EdgeId,
-        epoch: EpochId,
-        transaction_id: TransactionId,
-    ) -> Option<Edge>;
-
-    /// Returns a node using pure epoch-based visibility (no transaction context).
-    ///
-    /// The node is visible if `created_epoch <= epoch` and not deleted at or
-    /// before `epoch`. Used for time-travel queries where transaction ownership
-    /// must not bypass the epoch check.
-    fn get_node_at_epoch(&self, id: NodeId, epoch: EpochId) -> Option<Node>;
-
-    /// Returns an edge using pure epoch-based visibility (no transaction context).
-    fn get_edge_at_epoch(&self, id: EdgeId, epoch: EpochId) -> Option<Edge>;
-
-    // --- Property access (fast path, avoids loading full entity) ---
-
-    /// Gets a single property from a node without loading all properties.
-    fn get_node_property(&self, id: NodeId, key: &PropertyKey) -> Option<Value>;
-
-    /// Calls `f` with the vector in a node's property and returns whether
-    /// there was one. Vector search reads every distance through this, so a
-    /// store should lend the vector without copying it; the default reads it
-    /// through [`get_node_property`](Self::get_node_property).
-    fn with_node_vector(&self, id: NodeId, key: &PropertyKey, f: &mut dyn FnMut(&[f32])) -> bool {
-        match self.get_node_property(id, key) {
-            Some(Value::Vector(vector)) => {
-                f(&vector);
-                true
-            }
-            _ => false,
-        }
-    }
-
-    /// Gets a single property from an edge without loading all properties.
-    fn get_edge_property(&self, id: EdgeId, key: &PropertyKey) -> Option<Value>;
-
-    /// Gets a property for multiple nodes in a single batch operation.
-    fn get_node_property_batch(&self, ids: &[NodeId], key: &PropertyKey) -> Vec<Option<Value>>;
-
-    /// The value of property `key` of node `id` as
-    /// [`get_node_versioned`](Self::get_node_versioned) sees the node: `None`
-    /// when the node is not visible or has no such property. A query reads
-    /// every `n.prop` through this; the default builds the node, a store
-    /// that can read one value of a visible node overrides it.
-    fn node_property_versioned(
-        &self,
-        id: NodeId,
-        key: &str,
-        epoch: EpochId,
-        transaction_id: TransactionId,
-    ) -> Option<Value> {
-        self.get_node_versioned(id, epoch, transaction_id)?
-            .get_property(key)
-            .cloned()
-    }
-
-    /// The value of property `key` of node `id` as
-    /// [`get_node_at_epoch`](Self::get_node_at_epoch) sees the node (see
-    /// [`node_property_versioned`](Self::node_property_versioned)).
-    fn node_property_at_epoch(&self, id: NodeId, key: &str, epoch: EpochId) -> Option<Value> {
-        self.get_node_at_epoch(id, epoch)?
-            .get_property(key)
-            .cloned()
-    }
-
-    /// The value of property `key` of edge `id` as
-    /// [`get_edge_versioned`](Self::get_edge_versioned) sees the edge (see
-    /// [`node_property_versioned`](Self::node_property_versioned)).
-    fn edge_property_versioned(
-        &self,
-        id: EdgeId,
-        key: &str,
-        epoch: EpochId,
-        transaction_id: TransactionId,
-    ) -> Option<Value> {
-        self.get_edge_versioned(id, epoch, transaction_id)?
-            .get_property(key)
-            .cloned()
-    }
-
-    /// The value of property `key` of edge `id` as
-    /// [`get_edge_at_epoch`](Self::get_edge_at_epoch) sees the edge (see
-    /// [`node_property_versioned`](Self::node_property_versioned)).
-    fn edge_property_at_epoch(&self, id: EdgeId, key: &str, epoch: EpochId) -> Option<Value> {
-        self.get_edge_at_epoch(id, epoch)?
-            .get_property(key)
-            .cloned()
-    }
-
-    /// [`get_node_property_batch`](Self::get_node_property_batch) for the
-    /// readers that must tell a value that cannot be read from no value (the
-    /// key of an algorithm's `key=`): a spilled value that cannot be read is
-    /// an error, where the batch read reads it as absent. A store with
-    /// nothing to read from a file returns its batch read; a store that
-    /// wraps another forwards to the inner store's fallible read.
-    ///
-    /// # Errors
-    ///
-    /// Returns the error of reading a spilled value.
-    fn try_get_node_property_batch(
-        &self,
-        ids: &[NodeId],
-        key: &PropertyKey,
-    ) -> Result<Vec<Option<Value>>>;
-
-    /// Gets all properties for multiple nodes in a single batch operation.
-    fn get_nodes_properties_batch(&self, ids: &[NodeId]) -> Vec<FxHashMap<PropertyKey, Value>>;
-
-    /// Gets selected properties for multiple nodes (projection pushdown).
-    fn get_nodes_properties_selective_batch(
-        &self,
-        ids: &[NodeId],
-        keys: &[PropertyKey],
-    ) -> Vec<FxHashMap<PropertyKey, Value>>;
-
-    /// Gets selected properties for multiple edges (projection pushdown).
-    fn get_edges_properties_selective_batch(
-        &self,
-        ids: &[EdgeId],
-        keys: &[PropertyKey],
-    ) -> Vec<FxHashMap<PropertyKey, Value>>;
-
-    // --- Traversal ---
-
-    /// Returns neighbor node IDs in the specified direction.
-    ///
-    /// Returns `Vec` instead of an iterator for object safety. The underlying
-    /// `ChunkedAdjacency` already produces a `Vec` internally.
-    fn neighbors(&self, node: NodeId, direction: Direction) -> Vec<NodeId>;
-
-    /// Returns (target_node, edge_id) pairs for edges from a node.
-    fn edges_from(&self, node: NodeId, direction: Direction) -> Vec<(NodeId, EdgeId)>;
-
-    /// Returns the out-degree of a node (number of outgoing edges).
-    fn out_degree(&self, node: NodeId) -> usize;
-
-    /// Returns the in-degree of a node (number of incoming edges).
-    fn in_degree(&self, node: NodeId) -> usize;
-
-    /// Whether backward adjacency is available for incoming edge queries.
-    fn has_backward_adjacency(&self) -> bool;
-
-    // --- Scans ---
-
-    /// Returns all non-deleted node IDs, sorted by ID.
-    fn node_ids(&self) -> Vec<NodeId>;
-
-    /// Returns all node IDs including uncommitted/PENDING versions.
-    ///
-    /// Unlike `node_ids()` which pre-filters by current epoch, this method
-    /// returns every node that has a version chain entry. Used by scan operators
-    /// that perform their own MVCC visibility filtering (e.g. with transaction context).
-    fn all_node_ids(&self) -> Vec<NodeId> {
-        // Default: fall back to node_ids() for stores without MVCC
-        self.node_ids()
-    }
-
-    /// Returns node IDs with a specific label.
-    fn nodes_by_label(&self, label: &str) -> Vec<NodeId>;
-
-    /// Returns the IDs of the nodes with at least one of `labels`, in ID
-    /// order and each once, as [`nodes_by_label`](Self::nodes_by_label)
-    /// finds them.
-    ///
-    /// The default merges the label lists; a store that keeps labels as
-    /// bitmaps can answer it with their union.
-    fn nodes_with_any_label(&self, labels: &[&str]) -> Vec<NodeId> {
-        let mut ids: Vec<NodeId> = labels
-            .iter()
-            .flat_map(|label| self.nodes_by_label(label))
-            .collect();
-        ids.sort_unstable();
-        ids.dedup();
-        ids
-    }
-
-    /// Returns the number of non-deleted nodes with a specific label.
-    ///
-    /// Default falls back to `self.nodes_by_label(label).len()`; stores that
-    /// maintain a per-label index should override for an O(1) count without
-    /// allocating the full ID list.
-    fn nodes_by_label_count(&self, label: &str) -> usize {
-        self.nodes_by_label(label).len()
-    }
-
-    /// Returns the number of nodes visible at `epoch` that have `label` then:
-    /// what a query counts, without the nodes of a transaction that has not
-    /// committed (the label index holds those too).
-    ///
-    /// The default builds each node of the label index at `epoch`; stores
-    /// override it with a visibility check and a label read, without building
-    /// nodes and their properties.
-    fn nodes_by_label_count_at_epoch(&self, label: &str, epoch: EpochId) -> usize {
-        self.nodes_by_label(label)
-            .into_iter()
-            .filter(|&id| {
-                self.get_node_at_epoch(id, epoch)
-                    .is_some_and(|node| node.has_label(label))
-            })
-            .count()
-    }
-
-    /// Returns the total number of non-deleted nodes.
-    fn node_count(&self) -> usize;
-
-    /// Returns the total number of non-deleted edges.
-    fn edge_count(&self) -> usize;
-
-    // --- Entity metadata ---
-
-    /// Returns the type string of an edge.
-    fn edge_type(&self, id: EdgeId) -> Option<ArcStr>;
-
-    /// Returns the type string of an edge visible to a specific transaction,
-    /// including the edges it created and has not committed yet.
-    ///
-    /// The default reads the whole edge with
-    /// [`get_edge_versioned`](Self::get_edge_versioned); stores override it
-    /// with a cheaper lookup. It must not fall back to
-    /// [`edge_type`](Self::edge_type), which reads the committed state and
-    /// misses the transaction's own edges.
-    fn edge_type_versioned(
-        &self,
-        id: EdgeId,
-        epoch: EpochId,
-        transaction_id: TransactionId,
-    ) -> Option<ArcStr> {
-        self.get_edge_versioned(id, epoch, transaction_id)
-            .map(|edge| edge.edge_type)
-    }
-
-    // --- Index introspection ---
-
-    /// Returns `true` if a property index exists for the given property.
-    ///
-    /// The default returns `false`, which is correct for stores without indexes.
-    fn has_property_index(&self, _property: &str) -> bool {
-        false
-    }
-
-    // --- Filtered search ---
-
-    /// Finds all nodes with a specific property value. Uses indexes when available.
-    fn find_nodes_by_property(&self, property: &str, value: &Value) -> Vec<NodeId>;
-
-    /// Finds nodes matching multiple property equality conditions.
-    fn find_nodes_by_properties(&self, conditions: &[(&str, Value)]) -> Vec<NodeId>;
-
-    /// The nodes whose `property` may be equal to `value` under `=` (the
-    /// filter's equality, see
-    /// [`HashKey::for_equality`](crate::execution::operators::HashKey::for_equality)),
-    /// found through the property's index: every node `=` finds equal, and
-    /// maybe others, for a filter to decide.
-    ///
-    /// The default returns `None`, as does a store without an index on
-    /// `property`: the caller then scans.
-    fn find_nodes_maybe_equal(&self, _property: &str, _value: &Value) -> Option<Vec<NodeId>> {
-        None
-    }
-
-    /// Finds nodes whose property value falls within a range.
-    fn find_nodes_in_range(
-        &self,
-        property: &str,
-        min: Option<&Value>,
-        max: Option<&Value>,
-        min_inclusive: bool,
-        max_inclusive: bool,
-    ) -> Vec<NodeId>;
-
-    // --- Zone maps (skip pruning) ---
-
-    /// Returns `true` if a node property predicate might match any nodes.
-    /// Uses zone maps for early filtering.
-    fn node_property_might_match(
-        &self,
-        property: &PropertyKey,
-        op: CompareOp,
-        value: &Value,
-    ) -> bool;
-
-    /// Returns `true` if an edge property predicate might match any edges.
-    fn edge_property_might_match(
-        &self,
-        property: &PropertyKey,
-        op: CompareOp,
-        value: &Value,
-    ) -> bool;
-
-    // --- Statistics (for cost-based optimizer) ---
-
-    /// Returns the current statistics snapshot (cheap Arc clone).
-    fn statistics(&self) -> Arc<Statistics>;
-
-    /// Estimates cardinality for a label scan.
-    fn estimate_label_cardinality(&self, label: &str) -> f64;
-
-    /// Estimates average degree for an edge type.
-    fn estimate_avg_degree(&self, edge_type: &str, outgoing: bool) -> f64;
-
-    // --- Epoch ---
-
-    /// Returns the current MVCC epoch.
-    fn current_epoch(&self) -> EpochId;
-
-    // --- Schema introspection ---
-
-    /// Returns all label names in the database.
-    fn all_labels(&self) -> Vec<String> {
-        Vec::new()
-    }
-
-    /// Returns all edge type names in the database.
-    fn all_edge_types(&self) -> Vec<String> {
-        Vec::new()
-    }
-
-    /// Returns all property key names used in the database.
-    fn all_property_keys(&self) -> Vec<String> {
-        Vec::new()
-    }
-
-    // --- Visibility checks (fast path, avoids building full entities) ---
-
-    /// Checks if a node is visible at the given epoch without building the full Node.
-    ///
-    /// More efficient than `get_node_at_epoch(...).is_some()` because it skips
-    /// label and property loading. Override in concrete stores for optimal
-    /// performance.
-    fn is_node_visible_at_epoch(&self, id: NodeId, epoch: EpochId) -> bool {
-        self.get_node_at_epoch(id, epoch).is_some()
-    }
-
-    /// Checks if a node is visible to a specific transaction without building
-    /// the full Node.
-    fn is_node_visible_versioned(
-        &self,
-        id: NodeId,
-        epoch: EpochId,
-        transaction_id: TransactionId,
-    ) -> bool {
-        self.get_node_versioned(id, epoch, transaction_id).is_some()
-    }
-
-    /// Checks if an edge is visible at the given epoch without building the full Edge.
-    ///
-    /// More efficient than `get_edge_at_epoch(...).is_some()` because it skips
-    /// type name resolution and property loading. Override in concrete stores
-    /// for optimal performance.
-    fn is_edge_visible_at_epoch(&self, id: EdgeId, epoch: EpochId) -> bool {
-        self.get_edge_at_epoch(id, epoch).is_some()
-    }
-
-    /// Checks if an edge is visible to a specific transaction without building
-    /// the full Edge.
-    fn is_edge_visible_versioned(
-        &self,
-        id: EdgeId,
-        epoch: EpochId,
-        transaction_id: TransactionId,
-    ) -> bool {
-        self.get_edge_versioned(id, epoch, transaction_id).is_some()
-    }
-
-    /// Filters node IDs to only those visible at the given epoch (batch).
-    ///
-    /// More efficient than per-node calls because implementations can hold
-    /// a single lock for the entire batch.
-    fn filter_visible_node_ids(&self, ids: &[NodeId], epoch: EpochId) -> Vec<NodeId> {
-        ids.iter()
-            .copied()
-            .filter(|id| self.is_node_visible_at_epoch(*id, epoch))
-            .collect()
-    }
-
-    /// Filters node IDs to only those visible to a transaction (batch).
-    fn filter_visible_node_ids_versioned(
-        &self,
-        ids: &[NodeId],
-        epoch: EpochId,
-        transaction_id: TransactionId,
-    ) -> Vec<NodeId> {
-        ids.iter()
-            .copied()
-            .filter(|id| self.is_node_visible_versioned(*id, epoch, transaction_id))
-            .collect()
-    }
-
-    // --- Reads at a view (#412) ---
-    //
-    // Each read below answers as of a `ReadView`: a transaction at its
-    // snapshot, its own writes included, or a committed reader at an epoch.
-    // The defaults keep the answer of the same read without a view and drop
-    // what the view does not see (existence only), so every store keeps
-    // working as it did; a store that versions values and labels answers
-    // exactly and says so with `answers_at_view`.
-
-    /// Whether this store's lookups and label scans at a view answer what a
-    /// scan of every node finds at that view, read through the store's own
-    /// per-row reads at the view. The planner then lets a transaction or a
-    /// read at a past epoch use them in place of a scan. Index entries may
-    /// be a superset of what any one view sees, as long as the lookup
-    /// rechecks each candidate at the view.
-    ///
-    /// The default is `false`: the default lookups give the answer of now,
-    /// filtered by existence at the view.
-    fn answers_at_view(&self) -> bool {
-        false
-    }
-
-    /// Whether `view` sees node `id`.
-    fn is_node_visible_at(&self, id: NodeId, view: ReadView) -> bool {
-        match view.transaction {
-            Some(transaction_id) => self.is_node_visible_versioned(id, view.epoch, transaction_id),
-            None => self.is_node_visible_at_epoch(id, view.epoch),
-        }
-    }
-
-    /// Whether `view` sees edge `id`.
-    fn is_edge_visible_at(&self, id: EdgeId, view: ReadView) -> bool {
-        match view.transaction {
-            Some(transaction_id) => self.is_edge_visible_versioned(id, view.epoch, transaction_id),
-            None => self.is_edge_visible_at_epoch(id, view.epoch),
-        }
-    }
-
-    /// The nodes of `ids` that `view` sees, in their order.
-    fn filter_visible_node_ids_at(&self, ids: &[NodeId], view: ReadView) -> Vec<NodeId> {
-        match view.transaction {
-            Some(transaction_id) => {
-                self.filter_visible_node_ids_versioned(ids, view.epoch, transaction_id)
-            }
-            None => self.filter_visible_node_ids(ids, view.epoch),
-        }
-    }
-
-    /// Node `id` as `view` sees it.
-    fn get_node_at(&self, id: NodeId, view: ReadView) -> Option<Node> {
-        match view.transaction {
-            Some(transaction_id) => self.get_node_versioned(id, view.epoch, transaction_id),
-            None => self.get_node_at_epoch(id, view.epoch),
-        }
-    }
-
-    /// Edge `id` as `view` sees it.
-    fn get_edge_at(&self, id: EdgeId, view: ReadView) -> Option<Edge> {
-        match view.transaction {
-            Some(transaction_id) => self.get_edge_versioned(id, view.epoch, transaction_id),
-            None => self.get_edge_at_epoch(id, view.epoch),
-        }
-    }
-
-    /// The value of property `key` of node `id` as `view` sees the node:
-    /// `None` when the view does not see it or it has no such property.
-    fn node_property_at(&self, id: NodeId, key: &str, view: ReadView) -> Option<Value> {
-        match view.transaction {
-            Some(transaction_id) => {
-                self.node_property_versioned(id, key, view.epoch, transaction_id)
-            }
-            None => self.node_property_at_epoch(id, key, view.epoch),
-        }
-    }
-
-    /// The value of property `key` of edge `id` as `view` sees the edge
-    /// (see [`node_property_at`](Self::node_property_at)).
-    fn edge_property_at(&self, id: EdgeId, key: &str, view: ReadView) -> Option<Value> {
-        match view.transaction {
-            Some(transaction_id) => {
-                self.edge_property_versioned(id, key, view.epoch, transaction_id)
-            }
-            None => self.edge_property_at_epoch(id, key, view.epoch),
-        }
-    }
-
-    /// The labels of node `id` as `view` sees the node, `None` when the view
-    /// does not see it. The default builds the node.
-    fn node_labels_at(&self, id: NodeId, view: ReadView) -> Option<SmallVec<[ArcStr; 2]>> {
-        self.get_node_at(id, view).map(|node| node.labels)
-    }
-
-    /// Whether node `id` has `label` as `view` sees the node, `None` when
-    /// the view does not see it: a label check.
-    fn node_has_label_at(&self, id: NodeId, label: &str, view: ReadView) -> Option<bool> {
-        self.node_labels_at(id, view)
-            .map(|labels| labels.iter().any(|name| name.as_str() == label))
-    }
-
-    /// [`get_node_property_batch`](Self::get_node_property_batch) as `view`
-    /// sees the nodes: `None` for a node it does not see.
-    fn get_node_property_batch_at(
-        &self,
-        ids: &[NodeId],
-        key: &PropertyKey,
-        view: ReadView,
-    ) -> Vec<Option<Value>> {
-        let mut values = self.get_node_property_batch(ids, key);
-        for (value, id) in values.iter_mut().zip(ids) {
-            if value.is_some() && !self.is_node_visible_at(*id, view) {
-                *value = None;
-            }
-        }
-        values
-    }
-
-    /// [`get_nodes_properties_batch`](Self::get_nodes_properties_batch) as
-    /// `view` sees the nodes: no values for a node it does not see.
-    fn get_nodes_properties_batch_at(
-        &self,
-        ids: &[NodeId],
-        view: ReadView,
-    ) -> Vec<FxHashMap<PropertyKey, Value>> {
-        let mut values = self.get_nodes_properties_batch(ids);
-        for (map, id) in values.iter_mut().zip(ids) {
-            if !map.is_empty() && !self.is_node_visible_at(*id, view) {
-                map.clear();
-            }
-        }
-        values
-    }
-
-    /// [`get_nodes_properties_selective_batch`](Self::get_nodes_properties_selective_batch)
-    /// as `view` sees the nodes: no values for a node it does not see.
-    fn get_nodes_properties_selective_batch_at(
-        &self,
-        ids: &[NodeId],
-        keys: &[PropertyKey],
-        view: ReadView,
-    ) -> Vec<FxHashMap<PropertyKey, Value>> {
-        let mut values = self.get_nodes_properties_selective_batch(ids, keys);
-        for (map, id) in values.iter_mut().zip(ids) {
-            if !map.is_empty() && !self.is_node_visible_at(*id, view) {
-                map.clear();
-            }
-        }
-        values
-    }
-
-    /// [`get_edges_properties_selective_batch`](Self::get_edges_properties_selective_batch)
-    /// as `view` sees the edges: no values for an edge it does not see.
-    fn get_edges_properties_selective_batch_at(
-        &self,
-        ids: &[EdgeId],
-        keys: &[PropertyKey],
-        view: ReadView,
-    ) -> Vec<FxHashMap<PropertyKey, Value>> {
-        let mut values = self.get_edges_properties_selective_batch(ids, keys);
-        for (map, id) in values.iter_mut().zip(ids) {
-            if !map.is_empty() && !self.is_edge_visible_at(*id, view) {
-                map.clear();
-            }
-        }
-        values
-    }
-
-    /// The edges of `node` in `direction` that `view` sees, as (other node,
-    /// edge), in the order of [`edges_from`](Self::edges_from).
-    fn edges_from_at(
-        &self,
-        node: NodeId,
-        direction: Direction,
-        view: ReadView,
-    ) -> Vec<(NodeId, EdgeId)> {
-        let mut edges = self.edges_from(node, direction);
-        edges.retain(|&(_, edge)| self.is_edge_visible_at(edge, view));
-        edges
-    }
-
-    /// The nodes at the other end of the edges of
-    /// [`edges_from_at`](Self::edges_from_at).
-    fn neighbors_at(&self, node: NodeId, direction: Direction, view: ReadView) -> Vec<NodeId> {
-        self.edges_from_at(node, direction, view)
-            .into_iter()
-            .map(|(other, _)| other)
-            .collect()
-    }
-
-    /// The nodes with `label` that `view` sees, in ID order.
-    fn nodes_by_label_at(&self, label: &str, view: ReadView) -> Vec<NodeId> {
-        self.filter_visible_node_ids_at(&self.nodes_by_label(label), view)
-    }
-
-    /// The nodes with at least one of `labels` that `view` sees, each once
-    /// and in ID order (see [`nodes_with_any_label`](Self::nodes_with_any_label)).
-    fn nodes_with_any_label_at(&self, labels: &[&str], view: ReadView) -> Vec<NodeId> {
-        self.filter_visible_node_ids_at(&self.nodes_with_any_label(labels), view)
-    }
-
-    /// The nodes `view` sees whose `property` equals `value`
-    /// (see [`find_nodes_by_property`](Self::find_nodes_by_property)).
-    fn find_nodes_by_property_at(
-        &self,
-        property: &str,
-        value: &Value,
-        view: ReadView,
-    ) -> Vec<NodeId> {
-        self.filter_visible_node_ids_at(&self.find_nodes_by_property(property, value), view)
-    }
-
-    /// The nodes `view` sees that meet every equality of `conditions`
-    /// (see [`find_nodes_by_properties`](Self::find_nodes_by_properties)).
-    fn find_nodes_by_properties_at(
-        &self,
-        conditions: &[(&str, Value)],
-        view: ReadView,
-    ) -> Vec<NodeId> {
-        self.filter_visible_node_ids_at(&self.find_nodes_by_properties(conditions), view)
-    }
-
-    /// [`find_nodes_maybe_equal`](Self::find_nodes_maybe_equal) for `view`:
-    /// every node the view sees that `=` finds equal, maybe others the view
-    /// sees, for a filter to decide; `None` without an index on `property`.
-    fn find_nodes_maybe_equal_at(
-        &self,
-        property: &str,
-        value: &Value,
-        view: ReadView,
-    ) -> Option<Vec<NodeId>> {
-        self.find_nodes_maybe_equal(property, value)
-            .map(|found| self.filter_visible_node_ids_at(&found, view))
-    }
-
-    /// The nodes `view` sees whose `property` lies within the bounds (see
-    /// [`find_nodes_in_range`](Self::find_nodes_in_range)).
-    fn find_nodes_in_range_at(
-        &self,
-        property: &str,
-        min: Option<&Value>,
-        max: Option<&Value>,
-        min_inclusive: bool,
-        max_inclusive: bool,
-        view: ReadView,
-    ) -> Vec<NodeId> {
-        self.filter_visible_node_ids_at(
-            &self.find_nodes_in_range(property, min, max, min_inclusive, max_inclusive),
-            view,
-        )
-    }
-
-    // --- History ---
-
-    /// Returns all versions of a node with their creation/deletion epochs, newest first.
-    ///
-    /// Each entry is `(created_epoch, deleted_epoch, Node)`. Properties and labels
-    /// reflect the current state (they are not versioned per-epoch).
-    ///
-    /// Default returns empty (not all backends track version history).
-    fn get_node_history(&self, _id: NodeId) -> Vec<(EpochId, Option<EpochId>, Node)> {
-        Vec::new()
-    }
-
-    /// Returns all versions of an edge with their creation/deletion epochs, newest first.
-    ///
-    /// Each entry is `(created_epoch, deleted_epoch, Edge)`. Properties reflect
-    /// the current state (they are not versioned per-epoch).
-    ///
-    /// Default returns empty (not all backends track version history).
-    fn get_edge_history(&self, _id: EdgeId) -> Vec<(EpochId, Option<EpochId>, Edge)> {
-        Vec::new()
-    }
-}
-
-/// Index-backed search capabilities that an LPG store may optionally provide.
-///
-/// Keeps the base [`GraphStore`] scoped to graph-structure operations. Stores
-/// that back text or vector indexes implement these methods with real search
-/// logic; stores that don't (columnar bases, projections, RDF adapters) accept
-/// the no-op defaults and the executor falls through to per-row evaluation.
-///
-/// # Symmetric text and vector APIs
-///
-/// `text_search` and `vector_search` are peer operations returning owned
-/// `Vec<(NodeId, f64)>`. The planner decides strategy based on `has_*_index`
-/// and `vector_index_config` introspection; the store executes the chosen
-/// plan, falling back to brute-force internally when the request is valid
-/// but no matching index exists.
-pub trait GraphStoreSearch: GraphStore {
-    // --- Range scan (lazy) ---
-
-    /// Returns a lazy iterator over node ids whose property value falls
-    /// within `[min, max]` (with the given inclusivity).
-    ///
-    /// The default implementation eagerly materializes via
-    /// [`find_nodes_in_range`](GraphStore::find_nodes_in_range) and chains
-    /// `.into_iter()`. Stores with per-block zone maps (e.g. `CompactStore`)
-    /// override this with a true lazy iterator that prunes blocks via
-    /// zone-map skip checks before decoding any row, enabling Phase 4
-    /// iterator bounds to deliver real work-skip on selective queries.
-    fn find_nodes_in_range_iter<'a>(
-        &'a self,
-        property: &'a str,
-        min: Option<&'a Value>,
-        max: Option<&'a Value>,
-        min_inclusive: bool,
-        max_inclusive: bool,
-    ) -> Box<dyn Iterator<Item = NodeId> + 'a> {
-        Box::new(
-            self.find_nodes_in_range(property, min, max, min_inclusive, max_inclusive)
-                .into_iter(),
-        )
-    }
-
-    /// [`find_nodes_in_range_iter`](Self::find_nodes_in_range_iter) for
-    /// `view`: the nodes it sees whose value lies within the bounds. The
-    /// default materializes
-    /// [`find_nodes_in_range_at`](GraphStore::find_nodes_in_range_at), as
-    /// the read without a view does; a store with a lazy range scan
-    /// overrides both.
-    fn find_nodes_in_range_iter_at<'a>(
-        &'a self,
-        property: &'a str,
-        min: Option<&'a Value>,
-        max: Option<&'a Value>,
-        min_inclusive: bool,
-        max_inclusive: bool,
-        view: ReadView,
-    ) -> Box<dyn Iterator<Item = NodeId> + 'a> {
-        Box::new(
-            self.find_nodes_in_range_at(property, min, max, min_inclusive, max_inclusive, view)
-                .into_iter(),
-        )
-    }
-
-    // --- Text search (BM25) ---
-
-    /// Returns true if a BM25 text index exists for the given label and property.
-    #[cfg(feature = "text-index")]
-    #[must_use]
-    fn has_text_index(&self, _label: &str, _property: &str) -> bool {
-        false
-    }
-
-    /// Scores a single document against a text query for per-row filter evaluation.
-    ///
-    /// Returns `None` when no text index exists for the (label, property) pair.
-    /// The planner calls this when pushdown is unavailable, for example when
-    /// the text predicate follows a traversal instead of a bare label scan.
-    #[cfg(feature = "text-index")]
-    fn score_text(
-        &self,
-        _node_id: NodeId,
-        _label: &str,
-        _property: &str,
-        _query: &str,
-    ) -> Option<f64> {
-        None
-    }
-
-    /// [`score_text`](Self::score_text) for `view`: the score of the node's
-    /// text as the view sees it. The default scores the text of now.
-    #[cfg(feature = "text-index")]
-    fn score_text_at(
-        &self,
-        node_id: NodeId,
-        label: &str,
-        property: &str,
-        query: &str,
-        _view: ReadView,
-    ) -> Option<f64> {
-        self.score_text(node_id, label, property, query)
-    }
-
-    /// Returns the top-`k` documents by BM25 score for a text query.
-    ///
-    /// Results are sorted by score descending. Returns an empty vec when no
-    /// text index exists, so the caller can fall back to a slower path.
-    #[cfg(feature = "text-index")]
-    fn text_search(
-        &self,
-        _label: &str,
-        _property: &str,
-        _query: &str,
-        _k: usize,
-    ) -> Vec<(NodeId, f64)> {
-        Vec::new()
-    }
-
-    /// Returns every document whose BM25 score meets or exceeds a threshold.
-    #[cfg(feature = "text-index")]
-    fn text_search_with_threshold(
-        &self,
-        _label: &str,
-        _property: &str,
-        _query: &str,
-        _threshold: f64,
-    ) -> Vec<(NodeId, f64)> {
-        Vec::new()
-    }
-
-    /// [`text_search`](Self::text_search) for `view`: the documents it sees.
-    /// The default drops the results of now that the view does not see, so
-    /// it may return fewer than `k`.
-    #[cfg(feature = "text-index")]
-    fn text_search_at(
-        &self,
-        label: &str,
-        property: &str,
-        query: &str,
-        k: usize,
-        view: ReadView,
-    ) -> Vec<(NodeId, f64)> {
-        let mut found = self.text_search(label, property, query, k);
-        found.retain(|&(id, _)| self.is_node_visible_at(id, view));
-        found
-    }
-
-    /// [`text_search_with_threshold`](Self::text_search_with_threshold) for
-    /// `view`: the documents it sees.
-    #[cfg(feature = "text-index")]
-    fn text_search_with_threshold_at(
-        &self,
-        label: &str,
-        property: &str,
-        query: &str,
-        threshold: f64,
-        view: ReadView,
-    ) -> Vec<(NodeId, f64)> {
-        let mut found = self.text_search_with_threshold(label, property, query, threshold);
-        found.retain(|&(id, _)| self.is_node_visible_at(id, view));
-        found
-    }
-
-    // --- Vector search (HNSW or brute force) ---
-
-    /// Returns true if a vector index exists for the given label and property.
-    #[cfg(feature = "vector-index")]
-    #[must_use]
-    fn has_vector_index(&self, _label: &str, _property: &str) -> bool {
-        false
-    }
-
-    /// Returns the distance metric of the vector index at (label, property), if any.
-    ///
-    /// The planner uses this to decide between an HNSW-accelerated plan and a
-    /// brute-force fallback: an index whose metric does not match the query's
-    /// requested metric cannot serve the query directly, so the planner either
-    /// routes to brute force or skips pushdown entirely.
-    #[cfg(feature = "vector-index")]
-    fn vector_index_config(
-        &self,
-        _label: &str,
-        _property: &str,
-    ) -> Option<crate::index::vector::HnswConfig> {
-        None
-    }
-
-    /// Returns the top-`k` nearest neighbors for a vector similarity search.
-    ///
-    /// `label` is optional: `None` searches every node that has the named
-    /// property. The store uses HNSW when an index exists for (label, property)
-    /// whose metric matches `metric`; otherwise it falls back to brute force.
-    ///
-    /// Results are sorted by distance ascending (nearest first). Returns an
-    /// empty vec when neither an index nor any indexable property is found.
-    #[cfg(feature = "vector-index")]
-    fn vector_search(
-        &self,
-        _label: Option<&str>,
-        _property: &str,
-        _query: &[f32],
-        _k: usize,
-        _metric: DistanceMetric,
-    ) -> Vec<(NodeId, f64)> {
-        Vec::new()
-    }
-
-    /// Returns every node whose distance to the query vector is at or below a threshold.
-    #[cfg(feature = "vector-index")]
-    fn vector_search_with_threshold(
-        &self,
-        _label: Option<&str>,
-        _property: &str,
-        _query: &[f32],
-        _threshold: f64,
-        _metric: DistanceMetric,
-    ) -> Vec<(NodeId, f64)> {
-        Vec::new()
-    }
-
-    /// [`vector_search`](Self::vector_search) for `view`: the nodes it sees.
-    /// The default drops the results of now that the view does not see, so
-    /// it may return fewer than `k`.
-    #[cfg(feature = "vector-index")]
-    fn vector_search_at(
-        &self,
-        label: Option<&str>,
-        property: &str,
-        query: &[f32],
-        k: usize,
-        metric: DistanceMetric,
-        view: ReadView,
-    ) -> Vec<(NodeId, f64)> {
-        let mut found = self.vector_search(label, property, query, k, metric);
-        found.retain(|&(id, _)| self.is_node_visible_at(id, view));
-        found
-    }
-
-    /// [`vector_search_with_threshold`](Self::vector_search_with_threshold)
-    /// for `view`: the nodes it sees.
-    #[cfg(feature = "vector-index")]
-    fn vector_search_with_threshold_at(
-        &self,
-        label: Option<&str>,
-        property: &str,
-        query: &[f32],
-        threshold: f64,
-        metric: DistanceMetric,
-        view: ReadView,
-    ) -> Vec<(NodeId, f64)> {
-        let mut found =
-            self.vector_search_with_threshold(label, property, query, threshold, metric);
-        found.retain(|&(id, _)| self.is_node_visible_at(id, view));
-        found
-    }
-}
-
 /// Write operations for graph mutation.
 ///
 /// Separated from [`GraphStore`] so read-only wrappers (snapshots, read
 /// replicas) can implement only `GraphStore`. Any mutable store is also
 /// readable via the supertrait bound.
-pub trait GraphStoreMut: GraphStoreSearch {
+pub trait GraphStoreMut: GraphStore {
     // --- Node creation ---
 
     /// Creates a new node with the given labels.
@@ -2022,126 +1080,9 @@ pub trait GraphStoreMut: GraphStoreSearch {
 pub struct NullGraphStore;
 
 impl GraphStore for NullGraphStore {
-    fn get_node(&self, _: NodeId) -> Option<Node> {
-        None
+    fn committed_epoch(&self) -> EpochId {
+        EpochId::INITIAL
     }
-    fn get_edge(&self, _: EdgeId) -> Option<Edge> {
-        None
-    }
-    fn get_node_versioned(&self, _: NodeId, _: EpochId, _: TransactionId) -> Option<Node> {
-        None
-    }
-    fn get_edge_versioned(&self, _: EdgeId, _: EpochId, _: TransactionId) -> Option<Edge> {
-        None
-    }
-    fn get_node_at_epoch(&self, _: NodeId, _: EpochId) -> Option<Node> {
-        None
-    }
-    fn get_edge_at_epoch(&self, _: EdgeId, _: EpochId) -> Option<Edge> {
-        None
-    }
-    fn get_node_property(&self, _: NodeId, _: &PropertyKey) -> Option<Value> {
-        None
-    }
-    fn get_edge_property(&self, _: EdgeId, _: &PropertyKey) -> Option<Value> {
-        None
-    }
-    fn get_node_property_batch(&self, ids: &[NodeId], _: &PropertyKey) -> Vec<Option<Value>> {
-        vec![None; ids.len()]
-    }
-    fn try_get_node_property_batch(
-        &self,
-        ids: &[NodeId],
-        _: &PropertyKey,
-    ) -> Result<Vec<Option<Value>>> {
-        Ok(vec![None; ids.len()])
-    }
-    fn get_nodes_properties_batch(&self, ids: &[NodeId]) -> Vec<FxHashMap<PropertyKey, Value>> {
-        vec![FxHashMap::default(); ids.len()]
-    }
-    fn get_nodes_properties_selective_batch(
-        &self,
-        ids: &[NodeId],
-        _: &[PropertyKey],
-    ) -> Vec<FxHashMap<PropertyKey, Value>> {
-        vec![FxHashMap::default(); ids.len()]
-    }
-    fn get_edges_properties_selective_batch(
-        &self,
-        ids: &[EdgeId],
-        _: &[PropertyKey],
-    ) -> Vec<FxHashMap<PropertyKey, Value>> {
-        vec![FxHashMap::default(); ids.len()]
-    }
-    fn neighbors(&self, _: NodeId, _: Direction) -> Vec<NodeId> {
-        Vec::new()
-    }
-    fn edges_from(&self, _: NodeId, _: Direction) -> Vec<(NodeId, EdgeId)> {
-        Vec::new()
-    }
-    fn out_degree(&self, _: NodeId) -> usize {
-        0
-    }
-    fn in_degree(&self, _: NodeId) -> usize {
-        0
-    }
-    fn has_backward_adjacency(&self) -> bool {
-        false
-    }
-    fn node_ids(&self) -> Vec<NodeId> {
-        Vec::new()
-    }
-    fn nodes_by_label(&self, _: &str) -> Vec<NodeId> {
-        Vec::new()
-    }
-    fn node_count(&self) -> usize {
-        0
-    }
-    fn edge_count(&self) -> usize {
-        0
-    }
-    fn edge_type(&self, _: EdgeId) -> Option<ArcStr> {
-        None
-    }
-    fn find_nodes_by_property(&self, _: &str, _: &Value) -> Vec<NodeId> {
-        Vec::new()
-    }
-    fn find_nodes_by_properties(&self, _: &[(&str, Value)]) -> Vec<NodeId> {
-        Vec::new()
-    }
-    fn find_nodes_in_range(
-        &self,
-        _: &str,
-        _: Option<&Value>,
-        _: Option<&Value>,
-        _: bool,
-        _: bool,
-    ) -> Vec<NodeId> {
-        Vec::new()
-    }
-    fn node_property_might_match(&self, _: &PropertyKey, _: CompareOp, _: &Value) -> bool {
-        false
-    }
-    fn edge_property_might_match(&self, _: &PropertyKey, _: CompareOp, _: &Value) -> bool {
-        false
-    }
-    fn statistics(&self) -> Arc<Statistics> {
-        Arc::new(Statistics::default())
-    }
-    fn estimate_label_cardinality(&self, _: &str) -> f64 {
-        0.0
-    }
-    fn estimate_avg_degree(&self, _: &str, _: bool) -> f64 {
-        0.0
-    }
-    fn current_epoch(&self) -> EpochId {
-        EpochId(0)
-    }
-}
-
-impl GraphStoreSearch for NullGraphStore {}
-
-impl GraphRead for NullGraphStore {
     fn node(&self, _: NodeId, _: ReadView) -> Result<Option<Node>> {
         Ok(None)
     }
@@ -2191,35 +1132,35 @@ mod tests {
         let store = NullGraphStore;
         let (node, edge) = (NodeId(1), EdgeId(1));
         let key = PropertyKey::from("name");
-        assert!(GraphRead::node(&store, node, NOW).unwrap().is_none());
-        assert!(GraphRead::edge(&store, edge, NOW).unwrap().is_none());
-        assert!(!GraphRead::is_node_visible(&store, node, NOW).unwrap());
-        assert!(!GraphRead::is_edge_visible(&store, edge, NOW).unwrap());
+        assert!(GraphStore::node(&store, node, NOW).unwrap().is_none());
+        assert!(GraphStore::edge(&store, edge, NOW).unwrap().is_none());
+        assert!(!GraphStore::is_node_visible(&store, node, NOW).unwrap());
+        assert!(!GraphStore::is_edge_visible(&store, edge, NOW).unwrap());
         assert_eq!(
-            GraphRead::node_property_batch(&store, &[node, NodeId(2)], &key, NOW).unwrap(),
+            GraphStore::node_property_batch(&store, &[node, NodeId(2)], &key, NOW).unwrap(),
             vec![None, None]
         );
-        let edges = GraphRead::edges(&store, node, Direction::Both, &[], NOW).unwrap();
+        let edges = GraphStore::edges(&store, node, Direction::Both, &[], NOW).unwrap();
         assert!(edges.is_empty(), "{edges:?}");
         assert_eq!(
-            GraphRead::degree(&store, node, Direction::Outgoing, NOW).unwrap(),
+            GraphStore::degree(&store, node, Direction::Outgoing, NOW).unwrap(),
             0
         );
-        assert!(!GraphRead::has_backward_adjacency(&store));
-        let ids = GraphRead::node_ids(&store, NOW).unwrap();
+        assert!(!GraphStore::has_backward_adjacency(&store));
+        let ids = GraphStore::node_ids(&store, NOW).unwrap();
         assert!(ids.is_empty(), "{ids:?}");
-        assert_eq!(GraphRead::node_count(&store, NOW).unwrap(), 0);
-        assert_eq!(GraphRead::edge_count(&store, NOW).unwrap(), 0);
+        assert_eq!(GraphStore::node_count(&store, NOW).unwrap(), 0);
+        assert_eq!(GraphStore::edge_count(&store, NOW).unwrap(), 0);
         for names in [
-            GraphRead::all_labels(&store).unwrap(),
-            GraphRead::all_edge_types(&store).unwrap(),
-            GraphRead::all_property_keys(&store).unwrap(),
+            GraphStore::all_labels(&store).unwrap(),
+            GraphStore::all_edge_types(&store).unwrap(),
+            GraphStore::all_property_keys(&store).unwrap(),
         ] {
             assert!(names.is_empty(), "{names:?}");
         }
-        assert!(!GraphRead::has_property_index(&store, "name"));
+        assert!(!GraphStore::has_property_index(&store, "name"));
         assert_eq!(
-            GraphRead::find_nodes_maybe_equal(&store, "name", &Value::from("Gus"), NOW).unwrap(),
+            GraphStore::find_nodes_maybe_equal(&store, "name", &Value::from("Gus"), NOW).unwrap(),
             None
         );
     }
@@ -2228,9 +1169,9 @@ mod tests {
     #[test]
     fn a_store_without_history_reports_it_unsupported() {
         let store = NullGraphStore;
-        let error = GraphRead::node_history(&store, NodeId(1)).unwrap_err();
+        let error = GraphStore::node_history(&store, NodeId(1)).unwrap_err();
         assert!(error.to_string().contains("node history"), "{error}");
-        assert!(GraphRead::edge_history(&store, EdgeId(1)).is_err());
+        assert!(GraphStore::edge_history(&store, EdgeId(1)).is_err());
     }
 
     /// A store that implements only the required reads, over fixed nodes
@@ -2273,7 +1214,7 @@ mod tests {
         }
     }
 
-    impl GraphRead for Required {
+    impl GraphStore for Required {
         fn node(&self, id: NodeId, _: ReadView) -> Result<Option<Node>> {
             Ok(self.nodes.iter().find(|node| node.id == id).cloned())
         }
@@ -2321,6 +1262,9 @@ mod tests {
         }
         fn statistics(&self) -> Arc<Statistics> {
             Arc::new(Statistics::default())
+        }
+        fn committed_epoch(&self) -> EpochId {
+            EpochId::INITIAL
         }
     }
 
@@ -2514,144 +1458,53 @@ mod tests {
     }
 
     impl GraphStore for TestMutStore {
-        fn get_node(&self, id: NodeId) -> Option<Node> {
-            self.find_node(id)
+        fn node(&self, id: NodeId, _: ReadView) -> Result<Option<Node>> {
+            Ok(self.find_node(id))
         }
-        fn get_edge(&self, id: EdgeId) -> Option<Edge> {
-            self.find_edge(id)
+        fn edge(&self, id: EdgeId, _: ReadView) -> Result<Option<Edge>> {
+            Ok(self.find_edge(id))
         }
-        fn get_node_versioned(&self, id: NodeId, _: EpochId, _: TransactionId) -> Option<Node> {
-            self.find_node(id)
-        }
-        fn get_edge_versioned(&self, id: EdgeId, _: EpochId, _: TransactionId) -> Option<Edge> {
-            self.find_edge(id)
-        }
-        fn get_node_at_epoch(&self, id: NodeId, _: EpochId) -> Option<Node> {
-            self.find_node(id)
-        }
-        fn get_edge_at_epoch(&self, id: EdgeId, _: EpochId) -> Option<Edge> {
-            self.find_edge(id)
-        }
-        fn get_node_property(&self, id: NodeId, key: &PropertyKey) -> Option<Value> {
-            self.find_node(id)
-                .and_then(|n| n.properties.get(key).cloned())
-        }
-        fn get_edge_property(&self, id: EdgeId, key: &PropertyKey) -> Option<Value> {
-            self.find_edge(id)
-                .and_then(|e| e.properties.get(key).cloned())
-        }
-        fn get_node_property_batch(&self, ids: &[NodeId], key: &PropertyKey) -> Vec<Option<Value>> {
-            ids.iter()
-                .map(|id| self.get_node_property(*id, key))
-                .collect()
-        }
-        fn try_get_node_property_batch(
+        fn edges(
             &self,
-            ids: &[NodeId],
-            key: &PropertyKey,
-        ) -> Result<Vec<Option<Value>>> {
-            Ok(self.get_node_property_batch(ids, key))
-        }
-        fn get_nodes_properties_batch(&self, ids: &[NodeId]) -> Vec<FxHashMap<PropertyKey, Value>> {
-            ids.iter()
-                .map(|id| {
-                    let mut map = FxHashMap::default();
-                    if let Some(n) = self.find_node(*id) {
-                        for (k, v) in n.properties.iter() {
-                            map.insert(k.clone(), v.clone());
-                        }
-                    }
-                    map
-                })
-                .collect()
-        }
-        fn get_nodes_properties_selective_batch(
-            &self,
-            ids: &[NodeId],
-            _: &[PropertyKey],
-        ) -> Vec<FxHashMap<PropertyKey, Value>> {
-            vec![FxHashMap::default(); ids.len()]
-        }
-        fn get_edges_properties_selective_batch(
-            &self,
-            ids: &[EdgeId],
-            _: &[PropertyKey],
-        ) -> Vec<FxHashMap<PropertyKey, Value>> {
-            vec![FxHashMap::default(); ids.len()]
-        }
-        fn neighbors(&self, _: NodeId, _: Direction) -> Vec<NodeId> {
-            Vec::new()
-        }
-        fn edges_from(&self, _: NodeId, _: Direction) -> Vec<(NodeId, EdgeId)> {
-            Vec::new()
-        }
-        fn out_degree(&self, _: NodeId) -> usize {
-            0
-        }
-        fn in_degree(&self, _: NodeId) -> usize {
-            0
+            _: NodeId,
+            _: Direction,
+            _: &[ArcStr],
+            _: ReadView,
+        ) -> Result<Vec<(NodeId, EdgeId)>> {
+            Ok(Vec::new())
         }
         fn has_backward_adjacency(&self) -> bool {
             false
         }
-        fn node_ids(&self) -> Vec<NodeId> {
-            self.inner
+        fn node_ids(&self, _: ReadView) -> Result<Vec<NodeId>> {
+            Ok(self
+                .inner
                 .lock()
                 .unwrap()
                 .nodes
                 .iter()
                 .map(|n| n.id)
-                .collect()
+                .collect())
         }
-        fn nodes_by_label(&self, _: &str) -> Vec<NodeId> {
-            Vec::new()
+        fn edge_count(&self, _: ReadView) -> Result<usize> {
+            Ok(self.inner.lock().unwrap().edges.len())
         }
-        fn node_count(&self) -> usize {
-            self.inner.lock().unwrap().nodes.len()
+        fn all_labels(&self) -> Result<Vec<String>> {
+            Ok(Vec::new())
         }
-        fn edge_count(&self) -> usize {
-            self.inner.lock().unwrap().edges.len()
+        fn all_edge_types(&self) -> Result<Vec<String>> {
+            Ok(Vec::new())
         }
-        fn edge_type(&self, id: EdgeId) -> Option<ArcStr> {
-            self.find_edge(id).map(|e| e.edge_type)
-        }
-        fn find_nodes_by_property(&self, _: &str, _: &Value) -> Vec<NodeId> {
-            Vec::new()
-        }
-        fn find_nodes_by_properties(&self, _: &[(&str, Value)]) -> Vec<NodeId> {
-            Vec::new()
-        }
-        fn find_nodes_in_range(
-            &self,
-            _: &str,
-            _: Option<&Value>,
-            _: Option<&Value>,
-            _: bool,
-            _: bool,
-        ) -> Vec<NodeId> {
-            Vec::new()
-        }
-        fn node_property_might_match(&self, _: &PropertyKey, _: CompareOp, _: &Value) -> bool {
-            true
-        }
-        fn edge_property_might_match(&self, _: &PropertyKey, _: CompareOp, _: &Value) -> bool {
-            true
+        fn all_property_keys(&self) -> Result<Vec<String>> {
+            Ok(Vec::new())
         }
         fn statistics(&self) -> Arc<Statistics> {
             Arc::new(Statistics::default())
         }
-        fn estimate_label_cardinality(&self, _: &str) -> f64 {
-            0.0
-        }
-        fn estimate_avg_degree(&self, _: &str, _: bool) -> f64 {
-            0.0
-        }
-        fn current_epoch(&self) -> EpochId {
-            EpochId(0)
+        fn committed_epoch(&self) -> EpochId {
+            EpochId::INITIAL
         }
     }
-
-    impl GraphStoreSearch for TestMutStore {}
 
     impl GraphStoreMut for TestMutStore {
         fn create_node(&self, labels: &[&str]) -> NodeId {
@@ -2782,7 +1635,7 @@ mod tests {
             .set_node_property_versioned(id, "name", Value::from("Vincent"), txn)
             .unwrap();
         assert_eq!(
-            store.get_node_property(id, &key),
+            store.node_property(id, key.as_str(), NOW).unwrap(),
             Some(Value::from("Vincent"))
         );
 
@@ -2794,7 +1647,7 @@ mod tests {
         let since = PropertyKey::from("since");
         store.set_edge_property_versioned(edge_id, "since", Value::Int64(1994), txn);
         assert_eq!(
-            store.get_edge_property(edge_id, &since),
+            store.edge_property(edge_id, since.as_str(), NOW).unwrap(),
             Some(Value::Int64(1994))
         );
     }
@@ -2810,11 +1663,7 @@ mod tests {
             .remove_node_property_versioned(node_id, "city", txn)
             .unwrap();
         assert_eq!(removed, Some(Value::from("Amsterdam")));
-        assert!(
-            store
-                .get_node_property(node_id, &PropertyKey::from("city"))
-                .is_none()
-        );
+        assert!(store.node_property(node_id, "city", NOW).unwrap().is_none());
 
         let missing = store
             .remove_node_property_versioned(node_id, "absent", txn)
@@ -2864,7 +1713,7 @@ mod tests {
         ];
 
         let id = store.create_node_with_props(&["Person"], &props);
-        let node = store.get_node(id).expect("node should exist");
+        let node = store.node(id, NOW).unwrap().expect("node should exist");
         assert!(node.has_label("Person"));
         assert_eq!(
             node.properties.get(&PropertyKey::from("name")),
@@ -2877,7 +1726,10 @@ mod tests {
 
         // Empty properties slice still produces a valid node.
         let bare = store.create_node_with_props(&["Person"], &[]);
-        let bare_node = store.get_node(bare).expect("bare node should exist");
+        let bare_node = store
+            .node(bare, NOW)
+            .unwrap()
+            .expect("bare node should exist");
         assert!(bare_node.properties.is_empty());
     }
 
@@ -2898,7 +1750,10 @@ mod tests {
         ];
 
         let edge_id = store.create_edge_with_props(src, dst, "LIVES_IN", &props);
-        let edge = store.get_edge(edge_id).expect("edge should exist");
+        let edge = store
+            .edge(edge_id, NOW)
+            .unwrap()
+            .expect("edge should exist");
         assert_eq!(edge.src, src);
         assert_eq!(edge.dst, dst);
         assert_eq!(edge.edge_type.as_str(), "LIVES_IN");
@@ -2914,7 +1769,8 @@ mod tests {
         // Confirm the edge type is also reachable through the read trait.
         assert_eq!(
             store
-                .edge_type(edge_id)
+                .edge_type(edge_id, NOW)
+                .unwrap()
                 .as_ref()
                 .map(arcstr::ArcStr::as_str),
             Some("LIVES_IN")
@@ -2922,18 +1778,21 @@ mod tests {
 
         // With no properties, default still produces an edge.
         let bare = store.create_edge_with_props(src, dst, "VISITED", &[]);
-        let bare_edge = store.get_edge(bare).expect("bare edge should exist");
+        let bare_edge = store
+            .edge(bare, NOW)
+            .unwrap()
+            .expect("bare edge should exist");
         assert!(bare_edge.properties.is_empty());
     }
 
     #[test]
     fn test_mut_store_object_safe_dyn_dispatch() {
         // Exercise the object-safe contract: GraphStore methods through `dyn`.
-        let store: Arc<dyn GraphStoreSearch> = Arc::new(TestMutStore::new());
-        assert_eq!(store.node_count(), 0);
-        assert_eq!(store.edge_count(), 0);
-        assert!(store.node_ids().is_empty(), "{:?}", store.node_ids());
-        assert!(store.get_node(NodeId(1)).is_none());
-        assert_eq!(store.current_epoch(), EpochId(0));
+        let store: Arc<dyn GraphStore> = Arc::new(TestMutStore::new());
+        assert_eq!(store.node_count(NOW).unwrap(), 0);
+        assert_eq!(store.edge_count(NOW).unwrap(), 0);
+        let ids = store.node_ids(NOW).unwrap();
+        assert!(ids.is_empty(), "{ids:?}");
+        assert!(store.node(NodeId(1), NOW).unwrap().is_none());
     }
 }

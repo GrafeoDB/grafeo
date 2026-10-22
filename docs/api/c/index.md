@@ -234,6 +234,9 @@ int32_t grafeo_detach_delete_node(GrafeoDatabase* db, uint64_t id);
 
 ### Get Node
 
+A read returns a status only for a failure: `GRAFEO_OK` with `*out` NULL when the node does not exist, so check the
+pointer after `GRAFEO_OK`. `grafeo_get_edge` and the graph and as-of forms do the same.
+
 ```c
 GrafeoStatus grafeo_get_node(GrafeoDatabase* db, uint64_t id, GrafeoNode** out);
 ```
@@ -254,7 +257,8 @@ GrafeoStatus grafeo_set_node_property(GrafeoDatabase* db, uint64_t id, const cha
 int32_t      grafeo_remove_node_property(GrafeoDatabase* db, uint64_t id, const char* key);
 int32_t      grafeo_add_node_label(GrafeoDatabase* db, uint64_t id, const char* label);
 int32_t      grafeo_remove_node_label(GrafeoDatabase* db, uint64_t id, const char* label);
-char*        grafeo_get_node_labels(GrafeoDatabase* db, uint64_t id);  /* free with grafeo_free_string */
+/* *out_json: a JSON array to free with grafeo_free_string, NULL when the node does not exist */
+GrafeoStatus grafeo_get_node_labels(GrafeoDatabase* db, uint64_t id, char** out_json);
 ```
 
 ## Edge CRUD
@@ -555,8 +559,9 @@ now. An unknown kind or a negative epoch or duration fails, as does a point befo
 `GRAFEO_HISTORY_FOREVER` or `GRAFEO_HISTORY_DURATION` with `duration_ms`; a NULL path opens an in-memory database,
 and a database file stores the setting. A view keeps the history it reads until `grafeo_free_as_of`; a query that
 writes through it fails. `params_json` may be NULL. `grafeo_as_of_get_node` and `grafeo_as_of_get_edge` give a node
-or edge as it was (`GRAFEO_ERROR_DATABASE` when it did not exist then), and `grafeo_as_of_get_node_property` a value as
-JSON (NULL when there was none; free with `grafeo_free_string`).
+or edge as it was (`GRAFEO_OK` with a NULL node or edge when it did not exist then), and
+`grafeo_as_of_get_node_property` a value as JSON (`GRAFEO_OK` with NULL when there was none; free with
+`grafeo_free_string`).
 
 ```c
 GrafeoDatabase* grafeo_open_with_history(const char* path, int32_t history_kind, uint64_t duration_ms);
@@ -568,7 +573,7 @@ uint64_t        grafeo_as_of_epoch(const GrafeoAsOf* view);
 GrafeoResult*   grafeo_as_of_execute(const GrafeoAsOf* view, const char* query, const char* params_json);
 GrafeoStatus    grafeo_as_of_get_node(const GrafeoAsOf* view, uint64_t id, GrafeoNode** out);
 GrafeoStatus    grafeo_as_of_get_edge(const GrafeoAsOf* view, uint64_t id, GrafeoEdge** out);
-char*           grafeo_as_of_get_node_property(const GrafeoAsOf* view, uint64_t id, const char* key);
+GrafeoStatus    grafeo_as_of_get_node_property(const GrafeoAsOf* view, uint64_t id, const char* key, char** out_json);
 void            grafeo_free_as_of(GrafeoAsOf* view);
 ```
 
@@ -606,9 +611,11 @@ Each event is an object with `entity_id`, `entity_type` (`"node"` or `"edge"`), 
 
 ## Statistics
 
+A count writes to `out_count` and returns `GRAFEO_OK`, or the error status of a read the store cannot do.
+
 ```c
-size_t grafeo_node_count(GrafeoDatabase* db);
-size_t grafeo_edge_count(GrafeoDatabase* db);
+GrafeoStatus grafeo_node_count(GrafeoDatabase* db, size_t* out_count);
+GrafeoStatus grafeo_edge_count(GrafeoDatabase* db, size_t* out_count);
 ```
 
 ## Admin

@@ -10,7 +10,7 @@
 //! cargo test -p grafeo-engine --all-features --test aggregate_computed_columns
 //! ```
 
-#![cfg(all(feature = "lpg", feature = "gql"))]
+#![cfg(feature = "gql")]
 
 use grafeo_common::types::{PropertyKey, Value};
 use grafeo_engine::GrafeoDB;

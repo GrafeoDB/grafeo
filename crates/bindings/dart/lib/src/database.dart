@@ -348,16 +348,32 @@ class GrafeoDB implements Finalizable {
   // Statistics and info
   // ===========================================================================
 
-  /// Get the number of nodes in the database (O(1), synchronous).
+  /// Get the number of nodes in the database (O(1), synchronous); throws
+  /// when the read fails.
   int get nodeCount {
     _checkOpen();
-    return _bindings.grafeoNodeCount(_handle);
+    final out = malloc<IntPtr>();
+    try {
+      final status = _bindings.grafeoNodeCount(_handle, out);
+      if (status != GrafeoStatus.ok.code) throwStatus(_bindings, status);
+      return out.value;
+    } finally {
+      malloc.free(out);
+    }
   }
 
-  /// Get the number of edges in the database (O(1), synchronous).
+  /// Get the number of edges in the database (O(1), synchronous); throws
+  /// when the read fails.
   int get edgeCount {
     _checkOpen();
-    return _bindings.grafeoEdgeCount(_handle);
+    final out = malloc<IntPtr>();
+    try {
+      final status = _bindings.grafeoEdgeCount(_handle, out);
+      if (status != GrafeoStatus.ok.code) throwStatus(_bindings, status);
+      return out.value;
+    } finally {
+      malloc.free(out);
+    }
   }
 
   /// Get database info as a parsed JSON map.
@@ -407,9 +423,9 @@ class GrafeoDB implements Finalizable {
   /// Return the currently active schema name, or `null` if none is set.
   String? currentSchema() {
     _checkOpen();
+    final ptr = _bindings.grafeoCurrentSchema(_handle);
     // The C layer owns this string (valid until its next schema call), so it
     // is copied here and never freed.
-    final ptr = _bindings.grafeoCurrentSchema(_handle);
     return ptr == nullptr ? null : ptr.toDartString();
   }
 
@@ -457,44 +473,33 @@ class GrafeoDB implements Finalizable {
     }
   }
 
-  /// Get a node by [id]. Returns a [Node] or throws on error.
-  Node getNode(int id) {
+  /// Get a node by [id], or null when it does not exist; throws when the
+  /// read fails.
+  Node? getNode(int id) {
     _checkOpen();
-    final outPtr = malloc<Pointer<Void>>();
-    try {
-      final status = _bindings.grafeoGetNode(_handle, id, outPtr);
-      if (status != GrafeoStatus.ok.code) throwStatus(_bindings, status);
-      final nodePtr = outPtr.value;
-      try {
-        final nodeId = _bindings.grafeoNodeId(nodePtr);
-        final labelsJson =
-            _bindings.grafeoNodeLabelsJson(nodePtr).toDartString();
-        final propsJson =
-            _bindings.grafeoNodePropertiesJson(nodePtr).toDartString();
-        return Node(
-          nodeId,
-          parseStringArray(labelsJson),
-          parseObject(propsJson),
-        );
-      } finally {
-        _bindings.grafeoFreeNode(nodePtr);
-      }
-    } finally {
-      malloc.free(outPtr);
-    }
+    return takeNodeOrNull(
+        _bindings, (out) => _bindings.grafeoGetNode(_handle, id, out));
   }
 
-  /// Return the labels of node [id] without fetching the full node.
+  /// Return the labels of node [id] without fetching the full node, or null
+  /// when it does not exist; throws when the read fails.
   ///
   /// More efficient than [getNode] when only labels are needed.
-  List<String> getNodeLabels(int id) {
+  List<String>? getNodeLabels(int id) {
     _checkOpen();
-    final ptr = _bindings.grafeoGetNodeLabels(_handle, id);
-    if (ptr == nullptr) throwLastError(_bindings);
+    final out = malloc<Pointer<Utf8>>();
     try {
-      return parseStringArray(ptr.toDartString());
+      final status = _bindings.grafeoGetNodeLabels(_handle, id, out);
+      if (status != GrafeoStatus.ok.code) throwStatus(_bindings, status);
+      final ptr = out.value;
+      if (ptr == nullptr) return null;
+      try {
+        return parseStringArray(ptr.toDartString());
+      } finally {
+        _bindings.grafeoFreeString(ptr);
+      }
     } finally {
-      _bindings.grafeoFreeString(ptr);
+      malloc.free(out);
     }
   }
 
@@ -603,34 +608,12 @@ class GrafeoDB implements Finalizable {
     }
   }
 
-  /// Get an edge by [id]. Returns an [Edge] or throws on error.
-  Edge getEdge(int id) {
+  /// Get an edge by [id], or null when it does not exist; throws when the
+  /// read fails.
+  Edge? getEdge(int id) {
     _checkOpen();
-    final outPtr = malloc<Pointer<Void>>();
-    try {
-      final status = _bindings.grafeoGetEdge(_handle, id, outPtr);
-      if (status != GrafeoStatus.ok.code) throwStatus(_bindings, status);
-      final edgePtr = outPtr.value;
-      try {
-        final edgeId = _bindings.grafeoEdgeId(edgePtr);
-        final sourceId = _bindings.grafeoEdgeSourceId(edgePtr);
-        final targetId = _bindings.grafeoEdgeTargetId(edgePtr);
-        final edgeType = _bindings.grafeoEdgeType(edgePtr).toDartString();
-        final propsJson =
-            _bindings.grafeoEdgePropertiesJson(edgePtr).toDartString();
-        return Edge(
-          edgeId,
-          edgeType,
-          sourceId,
-          targetId,
-          parseObject(propsJson),
-        );
-      } finally {
-        _bindings.grafeoFreeEdge(edgePtr);
-      }
-    } finally {
-      malloc.free(outPtr);
-    }
+    return takeEdgeOrNull(
+        _bindings, (out) => _bindings.grafeoGetEdge(_handle, id, out));
   }
 
   /// The committed edges of node [id] in [direction], without a query: only

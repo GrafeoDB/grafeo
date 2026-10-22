@@ -138,7 +138,9 @@ fn assert_embeddings(store: &RowGroupStore, ids: &[NodeId], what: &str) {
     for id in ids {
         let expected = (id.as_u64() % 7 != 3).then(|| embedding_of(id.as_u64()));
         assert_eq!(
-            store.get_node_property(*id, &embedding()),
+            store
+                .node_property(*id, embedding().as_str(), ReadView::latest())
+                .unwrap(),
             expected,
             "{what}: node {id:?}"
         );
@@ -221,7 +223,9 @@ fn a_column_without_point_views_stays_in_memory() {
         .unwrap();
     assert_eq!(ranks.spilled_groups, 2, "integers have point views");
     assert_eq!(
-        store.get_node_property(NodeId::new(4_099), &PropertyKey::new("rank")),
+        store
+            .node_property(NodeId::new(4_099), "rank", ReadView::latest())
+            .unwrap(),
         Some(Value::Int64(4_099))
     );
 }
@@ -244,7 +248,9 @@ fn a_write_thaws_its_row_group_and_a_reload_the_rest() {
     assert_eq!(store.memory().spilled_columns, 1);
     let written = tx.commit().unwrap();
     assert_eq!(
-        store.get_node_property(jules, &embedding()),
+        store
+            .node_property(jules, embedding().as_str(), ReadView::latest())
+            .unwrap(),
         Some(vector(&[3.0, 19.0]))
     );
     store.collect(written);
@@ -303,7 +309,9 @@ fn a_column_with_update_chains_stays_in_memory_until_collect() {
     assert_eq!(report.spilled_groups, 1, "{report:?}");
     assert_eq!(store.memory().spilled_columns, 2);
     assert_eq!(
-        store.get_node_property(mia, &embedding()),
+        store
+            .node_property(mia, embedding().as_str(), ReadView::latest())
+            .unwrap(),
         Some(vector(&[88.0, 0.5]))
     );
 }
@@ -460,7 +468,7 @@ mod search {
 
     use super::{Files, embedding, items, spill};
     use crate::graph::rowgroup::RowGroupStore;
-    use crate::graph::traits::GraphStoreSearch;
+    use crate::graph::traits::GraphStore;
     use crate::index::vector::{DistanceMetric, HnswConfig, HnswIndex, VectorIndexKind};
 
     /// Vector search over a spilled embedding column, through the index and
@@ -482,30 +490,36 @@ mod search {
         let searches = |store: &RowGroupStore| {
             let view = ReadView::committed(store.current_epoch());
             (
-                store.vector_search_at(
-                    Some("Item"),
-                    "embedding",
-                    &query,
-                    5,
-                    DistanceMetric::Euclidean,
-                    view,
-                ),
-                store.vector_search_at(
-                    None,
-                    "embedding",
-                    &query,
-                    5,
-                    DistanceMetric::Euclidean,
-                    view,
-                ),
-                store.vector_search_with_threshold_at(
-                    Some("Item"),
-                    "embedding",
-                    &query,
-                    2.5,
-                    DistanceMetric::Euclidean,
-                    view,
-                ),
+                store
+                    .vector_search(
+                        Some("Item"),
+                        "embedding",
+                        &query,
+                        5,
+                        DistanceMetric::Euclidean,
+                        view,
+                    )
+                    .unwrap(),
+                store
+                    .vector_search(
+                        None,
+                        "embedding",
+                        &query,
+                        5,
+                        DistanceMetric::Euclidean,
+                        view,
+                    )
+                    .unwrap(),
+                store
+                    .vector_search_with_threshold(
+                        Some("Item"),
+                        "embedding",
+                        &query,
+                        2.5,
+                        DistanceMetric::Euclidean,
+                        view,
+                    )
+                    .unwrap(),
             )
         };
         let before = searches(&store);
@@ -561,7 +575,11 @@ fn a_spilled_column_keeps_its_value_for_readers_before_a_write() {
         },
     )
     .unwrap();
-    let at = |at| store.node_property_at(first, "embedding", ReadView::committed(at));
+    let at = |at| {
+        store
+            .node_property(first, "embedding", ReadView::committed(at))
+            .unwrap()
+    };
     assert_eq!(
         at(spilled_at),
         Some(embedding_of(first.as_u64())),

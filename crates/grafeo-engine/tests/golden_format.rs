@@ -60,7 +60,7 @@ fn v4_bytes() -> &'static [u8] {
 fn a_v4_snapshot_still_imports() {
     assert_eq!(v4_bytes()[0], 4);
     let db = GrafeoDB::import_snapshot(v4_bytes()).unwrap();
-    assert_eq!((db.node_count(), db.edge_count()), (3, 2));
+    assert_eq!((db.node_count().unwrap(), db.edge_count().unwrap()), (3, 2));
     let names = db
         .execute("MATCH (p:Person) RETURN p.name ORDER BY p.name")
         .unwrap()
@@ -109,13 +109,13 @@ fn golden_import_succeeds() {
 #[test]
 fn golden_node_count() {
     let db = GrafeoDB::import_snapshot(golden_bytes()).unwrap();
-    assert_eq!(db.node_count(), 3);
+    assert_eq!(db.node_count().unwrap(), 3);
 }
 
 #[test]
 fn golden_edge_count() {
     let db = GrafeoDB::import_snapshot(golden_bytes()).unwrap();
-    assert_eq!(db.edge_count(), 2);
+    assert_eq!(db.edge_count().unwrap(), 2);
 }
 
 #[test]
@@ -214,8 +214,8 @@ fn golden_round_trip_preserves_data() {
     let re_exported = db1.export_snapshot().unwrap();
     let db2 = GrafeoDB::import_snapshot(&re_exported).unwrap();
 
-    assert_eq!(db2.node_count(), 3);
-    assert_eq!(db2.edge_count(), 2);
+    assert_eq!(db2.node_count().unwrap(), 3);
+    assert_eq!(db2.edge_count().unwrap(), 2);
 
     let session = db2.session();
 

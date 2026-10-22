@@ -10,7 +10,7 @@
 //! cargo test -p grafeo-engine --all-features --test delete_of_an_unbound_variable
 //! ```
 
-#![cfg(all(feature = "lpg", feature = "gql", feature = "cypher"))]
+#![cfg(all(feature = "gql", feature = "cypher"))]
 
 use std::collections::HashMap;
 

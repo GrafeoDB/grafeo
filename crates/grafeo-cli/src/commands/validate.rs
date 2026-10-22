@@ -52,7 +52,7 @@ struct WarningOutput {
 /// Run the validate command.
 pub fn run(path: &Path, format: OutputFormat) -> Result<()> {
     let db = super::open_existing_read_only(path)?;
-    let result = db.validate();
+    let result = db.validate()?;
 
     let output = ValidationOutput {
         valid: result.errors.is_empty(),

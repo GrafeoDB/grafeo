@@ -55,13 +55,11 @@ impl TimeIndexSection {
     }
 
     /// An empty section to read into.
-    #[cfg(any(test, feature = "lpg"))]
     pub(crate) fn empty() -> Self {
         Self::new(HistoryImage::default())
     }
 
     /// What it read.
-    #[cfg(any(test, feature = "lpg"))]
     pub(crate) fn into_image(self) -> HistoryImage {
         self.image
     }
@@ -192,7 +190,6 @@ impl Section for TimeIndexSection {
 ///
 /// The section's errors: a version or layout of another release, or bytes
 /// no writer writes.
-#[cfg(any(test, feature = "lpg"))]
 pub(crate) fn read_history(
     image: &dyn grafeo_common::storage::ImageSource,
 ) -> Result<Option<HistoryImage>> {

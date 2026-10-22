@@ -173,11 +173,11 @@ impl DirectTarget for Session {
     }
 
     fn node(&self, id: NodeId) -> grafeo_common::utils::error::Result<Option<Node>> {
-        Ok(self.get_node(id))
+        self.get_node(id)
     }
 
     fn edge(&self, id: EdgeId) -> grafeo_common::utils::error::Result<Option<Edge>> {
-        Ok(self.get_edge(id))
+        self.get_edge(id)
     }
 
     fn upsert_nodes(
@@ -220,11 +220,11 @@ impl DirectTarget for GrafeoDB {
     }
 
     fn node(&self, id: NodeId) -> grafeo_common::utils::error::Result<Option<Node>> {
-        Ok(self.get_node(id))
+        self.get_node(id)
     }
 
     fn edge(&self, id: EdgeId) -> grafeo_common::utils::error::Result<Option<Edge>> {
-        Ok(self.get_edge(id))
+        self.get_edge(id)
     }
 
     fn upsert_nodes(

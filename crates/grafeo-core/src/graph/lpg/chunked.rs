@@ -1240,6 +1240,7 @@ fn history_versions(value: Value) -> std::result::Result<Vec<(u64, Value)>, Stri
 
 #[cfg(test)]
 mod tests {
+    use grafeo_common::types::ReadView;
     use std::sync::Arc;
 
     use bytes::Bytes;
@@ -1315,9 +1316,16 @@ mod tests {
     }
 
     fn assert_same_store(a: &RowGroupStore, b: &RowGroupStore, graph: &str) {
-        assert_eq!(a.node_ids(), b.node_ids(), "{graph}: node ids");
-        for id in a.node_ids() {
-            let (x, y) = (a.get_node(id).unwrap(), b.get_node(id).unwrap());
+        assert_eq!(
+            a.node_ids(ReadView::latest()).unwrap(),
+            b.node_ids(ReadView::latest()).unwrap(),
+            "{graph}: node ids"
+        );
+        for id in a.node_ids(ReadView::latest()).unwrap() {
+            let (x, y) = (
+                a.node(id, ReadView::latest()).unwrap().unwrap(),
+                b.node(id, ReadView::latest()).unwrap().unwrap(),
+            );
             assert_eq!(
                 sorted_labels(&x),
                 sorted_labels(&y),
@@ -1526,8 +1534,20 @@ mod tests {
             names(&[(0, "City"), (1, "Museum"), (2, "Person")])
         );
         assert_eq!(edge_types.0, names(&[(0, "FERRY"), (1, "KNOWS")]));
-        assert_eq!((root.node_count(), root.edge_count()), (2, 1));
-        assert_eq!((trips.node_count(), trips.edge_count()), (2, 1));
+        assert_eq!(
+            (
+                root.node_count(ReadView::latest()).unwrap(),
+                root.edge_count(ReadView::latest()).unwrap()
+            ),
+            (2, 1)
+        );
+        assert_eq!(
+            (
+                trips.node_count(ReadView::latest()).unwrap(),
+                trips.edge_count(ReadView::latest()).unwrap()
+            ),
+            (2, 1)
+        );
         assert_eq!(
             root.next_node_id(),
             3,
@@ -1549,7 +1569,13 @@ mod tests {
         ids.sort();
         assert_eq!(ids, [(1, "trips".to_string()), (3, "archive".to_string())]);
         assert_eq!(root.next_graph_id(), 4);
-        assert_eq!(root.graph("trips").unwrap().node_count(), 1);
+        assert_eq!(
+            root.graph("trips")
+                .unwrap()
+                .node_count(ReadView::latest())
+                .unwrap(),
+            1
+        );
         root.create_graph("travel").unwrap();
         assert_eq!(root.graph("travel").unwrap().graph_id(), 4);
     }
@@ -1567,8 +1593,14 @@ mod tests {
         assert_same_graph(&expected, &load_fixture("sparse_caps_4.chunks"));
 
         let far = load_fixture("far_ids_caps_4.chunks");
-        assert_eq!(far.node_ids(), [NodeId::new(1_000)]);
-        assert_eq!(far.nodes_by_label("City"), [NodeId::new(1_000)]);
+        assert_eq!(
+            far.node_ids(ReadView::latest()).unwrap(),
+            [NodeId::new(1_000)]
+        );
+        assert_eq!(
+            far.nodes_by_label("City", ReadView::latest()).unwrap(),
+            [NodeId::new(1_000)]
+        );
         assert_eq!(far.next_node_id(), 1_001);
     }
 
@@ -1576,7 +1608,7 @@ mod tests {
     #[test]
     fn retired_ids_stay_retired() {
         let root = load_fixture("retired_ids.chunks");
-        assert_eq!(root.node_count(), 3);
+        assert_eq!(root.node_count(ReadView::latest()).unwrap(), 3);
         assert_eq!(
             root.create_node(&["Jules"]),
             NodeId::new(5),
@@ -1600,18 +1632,26 @@ mod tests {
             let root = load_fixture(name);
             let (alix, gus) = (NodeId::new(0), NodeId::new(1));
             assert_eq!(
-                root.get_node_property(alix, &city),
+                root.node_property(alix, city.as_str(), ReadView::latest())
+                    .unwrap(),
                 Some(Value::from("Paris")),
                 "{name}"
             );
             assert_eq!(
-                root.get_node_property(alix, &PropertyKey::new("deep")),
+                root.node_property(alix, "deep", ReadView::latest())
+                    .unwrap(),
                 Some(Value::Int64(19)),
                 "{name}"
             );
-            assert_eq!(root.get_node_property(gus, &city), None, "{name}: removed");
             assert_eq!(
-                root.get_edge_property(EdgeId::new(0), &PropertyKey::new("since")),
+                root.node_property(gus, city.as_str(), ReadView::latest())
+                    .unwrap(),
+                None,
+                "{name}: removed"
+            );
+            assert_eq!(
+                root.edge_property(EdgeId::new(0), "since", ReadView::latest())
+                    .unwrap(),
                 Some(Value::Int64(19)),
                 "{name}"
             );

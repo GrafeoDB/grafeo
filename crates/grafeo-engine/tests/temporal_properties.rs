@@ -5,8 +5,6 @@
 //! epoch asked for, not just the current ones, in every build (the
 //! `temporal` feature is a no-op since 0.6.0).
 
-#![cfg(feature = "lpg")]
-
 use grafeo_common::types::Value;
 use grafeo_engine::GrafeoDB;
 
@@ -201,7 +199,9 @@ fn test_temporal_node_history_distinct_properties() {
     session.commit().unwrap();
 
     // get_node_history should return versions with distinct property snapshots
-    let history = db.get_node_history(grafeo_common::types::NodeId::new(0));
+    let history = db
+        .get_node_history(grafeo_common::types::NodeId::new(0))
+        .unwrap();
     assert!(!history.is_empty(), "node should have history");
 }
 

@@ -768,7 +768,7 @@ mod tests {
         let ages_at = |view: ReadView| -> Vec<Option<Value>> {
             people
                 .iter()
-                .map(|id| store.node_property_at(*id, "age", view))
+                .map(|id| store.node_property(*id, "age", view).unwrap())
                 .collect()
         };
         let seen = ages_at(ReadView::committed(pinned));

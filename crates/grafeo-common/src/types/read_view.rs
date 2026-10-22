@@ -61,6 +61,16 @@ impl ReadView {
             transaction: None,
         }
     }
+
+    /// A committed reader after every commit a store holds: what a write's
+    /// conflict checks read (an edge committed after a transaction's
+    /// snapshot still keeps its node from a delete). A query never reads at
+    /// it: its view is pinned, and this one is not.
+    #[inline]
+    #[must_use]
+    pub const fn latest() -> Self {
+        Self::committed(EpochId::LATEST)
+    }
 }
 
 #[cfg(test)]
@@ -75,5 +85,13 @@ mod tests {
             ReadView::transaction(TransactionId::new(88), epoch)
         );
         assert_eq!(ReadView::new(epoch, None), ReadView::committed(epoch));
+    }
+
+    #[test]
+    fn the_latest_reader_reads_after_every_epoch_and_is_committed() {
+        let latest = ReadView::latest();
+        assert_eq!(latest.transaction, None);
+        assert!(latest.epoch > EpochId::new(u64::from(u32::MAX)));
+        assert!(latest.epoch < EpochId::PENDING);
     }
 }

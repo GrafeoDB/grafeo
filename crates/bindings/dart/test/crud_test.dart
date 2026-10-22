@@ -17,7 +17,7 @@ void main() {
       final id = db.createNode(['Person'], {'name': 'Alix', 'age': 30});
       expect(id, greaterThanOrEqualTo(0));
 
-      final node = db.getNode(id);
+      final node = db.getNode(id)!;
       expect(node.id, equals(id));
       expect(node.labels, contains('Person'));
       expect(node.properties['name'], equals('Alix'));
@@ -33,15 +33,24 @@ void main() {
       expect(db.nodeCount, equals(0));
     });
 
+    test('an absent node or edge reads as null', () {
+      final id = db.createNode(['Person'], {'name': 'Mia'});
+      db.deleteNode(id);
+      expect(db.getNode(id), isNull);
+      expect(db.getNodeLabels(id), isNull);
+      expect(db.getNode(4242), isNull);
+      expect(db.getEdge(4242), isNull);
+    });
+
     test('set and remove node property', () {
       final id = db.createNode(['Person'], {'name': 'Vincent'});
 
       db.setNodeProperty(id, 'role', 'hitman');
-      var node = db.getNode(id);
+      var node = db.getNode(id)!;
       expect(node.properties['role'], equals('hitman'));
 
       db.removeNodeProperty(id, 'role');
-      node = db.getNode(id);
+      node = db.getNode(id)!;
       expect(node.properties.containsKey('role'), isFalse);
     });
 
@@ -49,11 +58,11 @@ void main() {
       final id = db.createNode(['Person'], {'name': 'Butch'});
 
       db.addNodeLabel(id, 'Boxer');
-      var node = db.getNode(id);
+      var node = db.getNode(id)!;
       expect(node.labels, containsAll(['Person', 'Boxer']));
 
       db.removeNodeLabel(id, 'Boxer');
-      node = db.getNode(id);
+      node = db.getNode(id)!;
       expect(node.labels, contains('Person'));
       expect(node.labels, isNot(contains('Boxer')));
     });
@@ -68,7 +77,7 @@ void main() {
       expect(edgeId, greaterThanOrEqualTo(0));
       expect(db.edgeCount, equals(1));
 
-      final edge = db.getEdge(edgeId);
+      final edge = db.getEdge(edgeId)!;
       expect(edge.id, equals(edgeId));
       expect(edge.type, equals('KNOWS'));
       expect(edge.sourceId, equals(alixId));
@@ -93,11 +102,11 @@ void main() {
       final edgeId = db.createEdge(a, b, 'CONFRONTS', {});
 
       db.setEdgeProperty(edgeId, 'intensity', 'high');
-      var edge = db.getEdge(edgeId);
+      var edge = db.getEdge(edgeId)!;
       expect(edge.properties['intensity'], equals('high'));
 
       db.removeEdgeProperty(edgeId, 'intensity');
-      edge = db.getEdge(edgeId);
+      edge = db.getEdge(edgeId)!;
       expect(edge.properties.containsKey('intensity'), isFalse);
     });
   });

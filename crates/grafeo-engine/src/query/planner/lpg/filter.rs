@@ -40,10 +40,9 @@ use super::subquery::reads_outer_values;
 use grafeo_common::types::{NodeId, TemporalComparison};
 
 use super::{
-    Arc, BinaryOp, EmptyOperator, Error, ExpressionPredicate, FilterOp, FilterOperator,
-    GraphStoreSearch, HashJoinOperator, HashMap, LogicalExpression, LogicalOperator,
-    NodeListOperator, NodeScanOp, Operator, PhysicalJoinType, RangeBounds, RangeScanOperator,
-    Result, UnaryOp, Value,
+    Arc, BinaryOp, EmptyOperator, Error, ExpressionPredicate, FilterOp, FilterOperator, GraphStore,
+    HashJoinOperator, HashMap, LogicalExpression, LogicalOperator, NodeListOperator, NodeScanOp,
+    Operator, PhysicalJoinType, RangeBounds, RangeScanOperator, Result, UnaryOp, Value,
 };
 use crate::query::plan::PushdownHint;
 #[cfg(feature = "vector-index")]
@@ -53,12 +52,12 @@ impl super::Planner {
     /// Whether node `id` is visible to this query and, when `label` is given,
     /// carries it. An index lookup checks its few results this way, instead of
     /// collecting every node with the label.
-    fn visible_with_label(&self, id: NodeId, label: Option<&str>) -> bool {
+    fn visible_with_label(&self, id: NodeId, label: Option<&str>) -> Result<bool> {
         let view = self.read_view();
-        match label {
-            Some(label) => self.store.node_has_label_at(id, label, view) == Some(true),
-            None => self.store.is_node_visible_at(id, view),
-        }
+        Ok(match label {
+            Some(label) => self.store.node_has_label(id, label, view)? == Some(true),
+            None => self.store.is_node_visible(id, view)?,
+        })
     }
 
     /// Plans a filter operator.
@@ -195,9 +194,9 @@ impl super::Planner {
         let predicate = ExpressionPredicate::new(
             filter_expr,
             variable_columns,
-            Arc::clone(&self.store) as Arc<dyn GraphStoreSearch>,
+            Arc::clone(&self.store) as Arc<dyn GraphStore>,
+            self.read_view(),
         )
-        .with_transaction_context(self.viewing_epoch, self.transaction_id)
         .with_session_context(self.session_context.clone());
 
         // Create the filter operator
@@ -319,9 +318,9 @@ impl super::Planner {
         let predicate = ExpressionPredicate::new(
             self.convert_expression(&predicate)?,
             variable_columns,
-            Arc::clone(&self.store) as Arc<dyn GraphStoreSearch>,
+            Arc::clone(&self.store) as Arc<dyn GraphStore>,
+            self.read_view(),
         )
-        .with_transaction_context(self.viewing_epoch, self.transaction_id)
         .with_session_context(self.session_context.clone());
         Ok((
             Box::new(FilterOperator::new(input, Box::new(predicate))),
@@ -761,16 +760,16 @@ impl super::Planner {
         let conditions = Self::extract_equality_conditions(&filter.predicate, &scan_variable);
 
         // The nodes an index finds may be equal to a condition's value under
-        // `=` (#535), the smallest set of any indexed condition (an index that
-        // holds the values the query reads, see `reads_the_current_store`).
-        // Without one the scan and the filter run as planned.
+        // `=` (#535), the smallest set of any indexed condition, looked up at
+        // the query's view. Without one the scan and the filter run as
+        // planned.
         let mut candidates: Option<Vec<NodeId>> = None;
-        if self.reads_the_current_store() {
+        {
             for (property, value) in &conditions {
                 if !self.store.has_property_index(property) {
                     continue;
                 }
-                let Some(found) = self.find_maybe_equal(property, value) else {
+                let Some(found) = self.find_maybe_equal(property, value)? else {
                     continue;
                 };
                 // Every lookup reads, also one whose set is not the smallest.
@@ -783,14 +782,20 @@ impl super::Planner {
                 }
             }
         }
-        let Some(mut matching_nodes) = candidates else {
+        let Some(matching_nodes) = candidates else {
             return Ok(None);
         };
 
         // MVCC visibility: filter out nodes not visible at the current epoch/tx
         // (rolled-back or uncommitted nodes could leak through otherwise), and
         // nodes without the scan's label.
-        matching_nodes.retain(|&id| self.visible_with_label(id, scan_label.as_deref()));
+        let mut seen = Vec::with_capacity(matching_nodes.len());
+        for id in matching_nodes {
+            if self.visible_with_label(id, scan_label.as_deref())? {
+                seen.push(id);
+            }
+        }
+        let matching_nodes = seen;
 
         let columns = vec![scan_variable];
 
@@ -806,9 +811,8 @@ impl super::Planner {
     /// Plans a filter whose predicate requires one of several labels of the
     /// node a scan of every node reads (see
     /// [`label_union`](super::scan::label_union)) as a scan of the nodes of
-    /// those labels, each once and in ID order, below the whole predicate.
-    /// Only for a query that reads the store as it is now: the label index
-    /// holds the labels of now (see `reads_the_current_store`).
+    /// those labels, each once and in ID order, below the whole predicate,
+    /// as the query's view sees the labels.
     fn try_plan_filter_with_label_union(
         &self,
         filter: &FilterOp,
@@ -816,9 +820,6 @@ impl super::Planner {
         let LogicalOperator::NodeScan(scan) = filter.input.as_ref() else {
             return Ok(None);
         };
-        if !self.reads_the_current_store() {
-            return Ok(None);
-        }
         let Some(labels) = super::scan::label_union(&filter.predicate, scan, self.store.as_ref())
         else {
             return Ok(None);
@@ -826,10 +827,10 @@ impl super::Planner {
         let labels_read = labels.join("|");
         let scan_op: Box<dyn Operator> = Box::new(
             super::ScanOperator::with_any_label(
-                Arc::clone(&self.store) as Arc<dyn GraphStoreSearch>,
+                Arc::clone(&self.store) as Arc<dyn GraphStore>,
                 labels,
+                self.read_view(),
             )
-            .with_transaction_context(self.viewing_epoch, self.transaction_id)
             .with_read_counter(self.read_counter()),
         );
         // PROFILE names the labels the scan reads.
@@ -848,9 +849,9 @@ impl super::Planner {
         let predicate = ExpressionPredicate::new(
             self.convert_expression(&filter.predicate)?,
             variable_columns,
-            Arc::clone(&self.store) as Arc<dyn GraphStoreSearch>,
+            Arc::clone(&self.store) as Arc<dyn GraphStore>,
+            self.read_view(),
         )
-        .with_transaction_context(self.viewing_epoch, self.transaction_id)
         .with_session_context(self.session_context.clone());
         Ok(Some((
             Box::new(FilterOperator::new(scan_op, Box::new(predicate))),
@@ -876,9 +877,9 @@ impl super::Planner {
         let predicate = ExpressionPredicate::new(
             filter_expr,
             variable_columns,
-            Arc::clone(&self.store) as Arc<dyn GraphStoreSearch>,
+            Arc::clone(&self.store) as Arc<dyn GraphStore>,
+            self.read_view(),
         )
-        .with_transaction_context(self.viewing_epoch, self.transaction_id)
         .with_session_context(self.session_context.clone());
         Ok(Box::new(
             NodeListOperator::new(nodes, 2048).with_predicate(Box::new(predicate)),
@@ -904,9 +905,6 @@ impl super::Planner {
             _ => return Ok(None),
         };
 
-        if !self.reads_the_current_store() {
-            return Ok(None);
-        }
         let Some((property, values)) = indexed_in_list(&filter.predicate, &scan_variable, |p| {
             self.store.has_property_index(p)
         }) else {
@@ -928,7 +926,7 @@ impl super::Planner {
         let mut seen: GrafeoSet<_> = GrafeoSet::default();
         let mut matching_nodes = Vec::new();
         for value in &values {
-            let Some(found) = self.find_maybe_equal(property, value) else {
+            let Some(found) = self.find_maybe_equal(property, value)? else {
                 return Ok(None);
             };
             self.read_counter().add(found.len());
@@ -940,7 +938,13 @@ impl super::Planner {
         }
 
         // MVCC visibility and the label constraint, as in the equality fast path.
-        matching_nodes.retain(|&id| self.visible_with_label(id, scan_label.as_deref()));
+        let mut seen = Vec::with_capacity(matching_nodes.len());
+        for id in matching_nodes {
+            if self.visible_with_label(id, scan_label.as_deref())? {
+                seen.push(id);
+            }
+        }
+        let matching_nodes = seen;
 
         // Absorbed-scan PROFILE entry: see `record_absorbed_scan_entry`.
         self.record_absorbed_scan_entry("NodeScan", &filter.input);
@@ -1073,11 +1077,9 @@ impl super::Planner {
         filter: &FilterOp,
     ) -> Result<Option<(Box<dyn Operator>, Vec<String>)>> {
         // Only optimize if input is a simple NodeScan (not nested). The range
-        // lookup reads the values of now (see `reads_the_current_store`).
+        // lookup reads the values at the query's view.
         let (scan_variable, scan_label) = match filter.input.as_ref() {
-            LogicalOperator::NodeScan(scan)
-                if scan.input.is_none() && self.reads_the_current_store() =>
-            {
+            LogicalOperator::NodeScan(scan) if scan.input.is_none() => {
                 (scan.variable.clone(), scan.label.clone())
             }
             _ => return Ok(None),
@@ -1138,18 +1140,23 @@ impl super::Planner {
     /// under the query's temporal comparison (see [`equality_probes`]), each
     /// once and ascending; `None` without an index on `property`, or when no
     /// set of lookups covers them.
-    fn find_maybe_equal(&self, property: &str, value: &Value) -> Option<Vec<NodeId>> {
+    fn find_maybe_equal(&self, property: &str, value: &Value) -> Result<Option<Vec<NodeId>>> {
+        let Some(probes) = equality_probes(value, self.session_context.temporal_comparison) else {
+            return Ok(None);
+        };
         let mut found = Vec::new();
-        for probe in equality_probes(value, self.session_context.temporal_comparison)? {
-            found.extend(self.store.find_nodes_maybe_equal_at(
-                property,
-                &probe,
-                self.read_view(),
-            )?);
+        for probe in probes {
+            let Some(ids) =
+                self.store
+                    .find_nodes_maybe_equal(property, &probe, self.read_view())?
+            else {
+                return Ok(None);
+            };
+            found.extend(ids);
         }
         found.sort_unstable();
         found.dedup();
-        Some(found)
+        Ok(Some(found))
     }
 
     /// Whether the store's range lookups and zone maps order `value` against
@@ -1171,7 +1178,7 @@ impl super::Planner {
     /// Plans a range filter using [`RangeScanOperator`].
     ///
     /// Phase 4d emits a dedicated range-scan operator that consumes
-    /// [`GraphStoreSearch::find_nodes_in_range_iter_at`] at the query's
+    /// [`GraphStore::find_nodes_in_range_iter_at`] at the query's
     /// view: the store returns the nodes the view sees. The operator absorbs
     /// the label post-filter that the eager `NodeListOperator` path used to
     /// apply manually.
@@ -1196,8 +1203,8 @@ impl super::Planner {
             bounds.min_inclusive,
             bounds.max_inclusive,
             2048,
+            self.read_view(),
         )
-        .with_view(self.read_view())
         .with_read_counter(self.read_counter());
 
         if let Some(label) = scan_label {
@@ -1370,8 +1377,8 @@ fn in_list_values(list: &LogicalExpression) -> Option<Vec<Value>> {
 }
 
 /// The hint `EXPLAIN` shows for the path [`plan_filter`][pf] takes for a
-/// filter over `scan` after the seek, with the indexes of `store`; `current`
-/// as in `reads_the_current_store`. These paths read a scan without input,
+/// filter over `scan` after the seek, with the indexes of `store`. These
+/// paths read a scan without input,
 /// in the order the planner tries them: the index lookup of equalities with
 /// constants, the index lookup of an `IN` list of constants, also a conjunct
 /// of an `AND` chain (no hint for a list without a value that is not NULL: it
@@ -1385,8 +1392,7 @@ fn in_list_values(list: &LogicalExpression) -> Option<Vec<Value>> {
 pub(crate) fn scan_hint(
     predicate: &LogicalExpression,
     scan: &NodeScanOp,
-    store: &dyn GraphStoreSearch,
-    current: bool,
+    store: &dyn GraphStore,
 ) -> Option<PushdownHint> {
     let has_index = |property: &str| store.has_property_index(property);
     if scan.input.is_some() {
@@ -1394,12 +1400,12 @@ pub(crate) fn scan_hint(
     }
     let variable = scan.variable.as_str();
     let conditions = super::Planner::extract_equality_conditions(predicate, variable);
-    if current && let Some((property, _)) = conditions.iter().find(|(p, _)| has_index(p)) {
+    if let Some((property, _)) = conditions.iter().find(|(p, _)| has_index(p)) {
         return Some(PushdownHint::IndexLookup {
             property: property.clone(),
         });
     }
-    if current && let Some((property, values)) = indexed_in_list(predicate, variable, has_index) {
+    if let Some((property, values)) = indexed_in_list(predicate, variable, has_index) {
         return (!values.is_empty()).then(|| PushdownHint::IndexLookup {
             property: property.clone(),
         });
@@ -1407,19 +1413,17 @@ pub(crate) fn scan_hint(
     if !conditions.is_empty() && scan.label.is_some() {
         return Some(PushdownHint::LabelFirst);
     }
-    if current {
-        let between = super::Planner::extract_between_predicate(predicate)
-            .map(|(read, property, ..)| (read, property));
-        let range = || {
-            super::Planner::extract_range_predicate(predicate)
-                .map(|(read, property, ..)| (read, property))
-        };
-        if let Some((_, property)) = between
-            .filter(|(read, _)| read == variable)
-            .or_else(|| range().filter(|(read, _)| read == variable))
-        {
-            return Some(PushdownHint::RangeScan { property });
-        }
+    let between = super::Planner::extract_between_predicate(predicate)
+        .map(|(read, property, ..)| (read, property));
+    let range = || {
+        super::Planner::extract_range_predicate(predicate)
+            .map(|(read, property, ..)| (read, property))
+    };
+    if let Some((_, property)) = between
+        .filter(|(read, _)| read == variable)
+        .or_else(|| range().filter(|(read, _)| read == variable))
+    {
+        return Some(PushdownHint::RangeScan { property });
     }
     // A vector or text index on the label that covers a property the filter
     // reads can take it (see `filter_hybrid.rs`), and the search runs instead
@@ -1430,7 +1434,7 @@ pub(crate) fn scan_hint(
     {
         return None;
     }
-    if current && let Some(labels) = super::scan::label_union(predicate, scan, store) {
+    if let Some(labels) = super::scan::label_union(predicate, scan, store) {
         return Some(PushdownHint::LabelUnion { labels });
     }
     scan.label.as_ref().map(|_| PushdownHint::LabelFirst)
@@ -1590,9 +1594,9 @@ impl super::Planner {
             let predicate = ExpressionPredicate::new(
                 filter_expr,
                 variable_columns,
-                Arc::clone(&self.store) as Arc<dyn GraphStoreSearch>,
+                Arc::clone(&self.store) as Arc<dyn GraphStore>,
+                self.read_view(),
             )
-            .with_transaction_context(self.viewing_epoch, self.transaction_id)
             .with_session_context(self.session_context.clone());
             let filter_op = Box::new(FilterOperator::new(scan_op, Box::new(predicate)));
             Ok(Some((filter_op, scan_columns)))

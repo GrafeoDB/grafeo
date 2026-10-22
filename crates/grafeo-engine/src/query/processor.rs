@@ -14,9 +14,8 @@ use grafeo_common::types::{EpochId, TransactionId, Value};
 use grafeo_common::utils::error::{Error, Result};
 use grafeo_core::execution::operators::{Recording, WriteTarget};
 use grafeo_core::graph::apply::{ChangeTarget, ExternalTarget};
-#[cfg(feature = "lpg")]
 use grafeo_core::graph::rowgroup::RowGroupStore;
-use grafeo_core::graph::{GraphStoreMut, GraphStoreSearch};
+use grafeo_core::graph::{GraphStore, GraphStoreMut};
 
 use crate::catalog::Catalog;
 use crate::database::QueryResult;
@@ -103,10 +102,9 @@ pub type QueryParams = HashMap<String, Value>;
 /// ```
 pub struct QueryProcessor {
     /// LPG store for property graph queries.
-    #[cfg(feature = "lpg")]
     lpg_store: Arc<RowGroupStore>,
     /// Graph store trait object for pluggable storage backends (read path).
-    graph_store: Arc<dyn GraphStoreSearch>,
+    graph_store: Arc<dyn GraphStore>,
     /// Writable graph store (None when read-only).
     write_store: Option<Arc<dyn GraphStoreMut>>,
     /// The write store as a transaction's writes change it and record their
@@ -137,11 +135,10 @@ impl QueryProcessor {
     /// outside a transaction reads every write the store committed before
     /// it, the store's direct writes (`create_node` and the like, each at an
     /// epoch of its own) included.
-    #[cfg(feature = "lpg")]
     #[must_use]
     pub fn for_lpg(store: Arc<RowGroupStore>) -> Self {
         let optimizer = Optimizer::from_graph_store(&*store);
-        let graph_store = Arc::clone(&store) as Arc<dyn GraphStoreSearch>;
+        let graph_store = Arc::clone(&store) as Arc<dyn GraphStore>;
         let write_store = Some(Arc::clone(&store) as Arc<dyn GraphStoreMut>);
         let write_target = Some(WriteTarget::Store(
             Arc::clone(&store) as Arc<dyn ChangeTarget>
@@ -163,14 +160,13 @@ impl QueryProcessor {
     }
 
     /// Creates a new query processor with a transaction manager.
-    #[cfg(feature = "lpg")]
     #[must_use]
     pub fn for_lpg_with_transaction(
         store: Arc<RowGroupStore>,
         transaction_manager: Arc<TransactionManager>,
     ) -> Self {
         let optimizer = Optimizer::from_graph_store(&*store);
-        let graph_store = Arc::clone(&store) as Arc<dyn GraphStoreSearch>;
+        let graph_store = Arc::clone(&store) as Arc<dyn GraphStore>;
         let write_store = Some(Arc::clone(&store) as Arc<dyn GraphStoreMut>);
         let write_target = Some(WriteTarget::Store(
             Arc::clone(&store) as Arc<dyn ChangeTarget>
@@ -201,12 +197,11 @@ impl QueryProcessor {
         transaction_manager: Arc<TransactionManager>,
     ) -> Result<Self> {
         let optimizer = Optimizer::from_graph_store(&*store);
-        let read_store = Arc::clone(&store) as Arc<dyn GraphStoreSearch>;
+        let read_store = Arc::clone(&store) as Arc<dyn GraphStore>;
         let write_target = Some(WriteTarget::External(Arc::new(ExternalTarget::new(
             Arc::clone(&store),
         ))));
         Ok(Self {
-            #[cfg(feature = "lpg")]
             lpg_store: Arc::new(RowGroupStore::new()),
             graph_store: read_store,
             write_store: Some(store),
@@ -228,7 +223,7 @@ impl QueryProcessor {
     ///
     /// Returns an error if the internal arena allocation fails (out of memory).
     pub fn for_stores_with_transaction(
-        read_store: Arc<dyn GraphStoreSearch>,
+        read_store: Arc<dyn GraphStore>,
         write_store: Option<Arc<dyn GraphStoreMut>>,
         transaction_manager: Arc<TransactionManager>,
     ) -> Result<Self> {
@@ -237,7 +232,6 @@ impl QueryProcessor {
             .as_ref()
             .map(|store| WriteTarget::External(Arc::new(ExternalTarget::new(Arc::clone(store)))));
         Ok(Self {
-            #[cfg(feature = "lpg")]
             lpg_store: Arc::new(RowGroupStore::new()),
             graph_store: read_store,
             write_store,
@@ -380,7 +374,6 @@ impl QueryProcessor {
         // A processor with its own transaction manager reads what the
         // store's direct writes stamped (each at an epoch of its own) outside
         // a transaction: its manager follows the store's epoch.
-        #[cfg(feature = "lpg")]
         if self.follows_store_epoch && self.transaction_context.is_none() {
             self.transaction_manager
                 .sync_epoch(self.lpg_store.current_epoch());
@@ -389,17 +382,7 @@ impl QueryProcessor {
         // 4a. EXPLAIN: annotate pushdown hints and return the plan tree
         if optimized_plan.explain {
             let mut plan = optimized_plan;
-            let (epoch, transaction_id) = match self.transaction_context {
-                Some((epoch, transaction_id)) => (epoch, Some(transaction_id)),
-                None => (self.transaction_manager.current_epoch(), None),
-            };
-            let choose_labels = crate::query::planner::lpg::scan::may_choose_scan_label(
-                epoch,
-                transaction_id,
-                Some(self.transaction_manager.current_epoch()),
-                self.graph_store.answers_at_view(),
-            );
-            annotate_pushdown_hints(&mut plan.root, self.graph_store.as_ref(), choose_labels);
+            annotate_pushdown_hints(&mut plan.root, self.graph_store.as_ref());
             return Ok(explain_result(&plan));
         }
 
@@ -512,7 +495,6 @@ impl QueryProcessor {
     }
 
     /// Returns a reference to the LPG store.
-    #[cfg(feature = "lpg")]
     #[must_use]
     pub fn lpg_store(&self) -> &Arc<RowGroupStore> {
         &self.lpg_store
@@ -546,14 +528,13 @@ impl QueryProcessor {
 #[cfg(feature = "triple-store")]
 impl QueryProcessor {
     /// Creates a new query processor with both LPG and RDF stores.
-    #[cfg(feature = "lpg")]
     #[must_use]
     pub fn with_rdf(
         lpg_store: Arc<RowGroupStore>,
         rdf_store: Arc<grafeo_core::graph::rdf::RdfStore>,
     ) -> Self {
         let optimizer = Optimizer::from_graph_store(&*lpg_store);
-        let graph_store = Arc::clone(&lpg_store) as Arc<dyn GraphStoreSearch>;
+        let graph_store = Arc::clone(&lpg_store) as Arc<dyn GraphStore>;
         let write_store = Some(Arc::clone(&lpg_store) as Arc<dyn GraphStoreMut>);
         let write_target = Some(WriteTarget::Store(
             Arc::clone(&lpg_store) as Arc<dyn ChangeTarget>
@@ -692,23 +673,19 @@ impl QueryProcessor {
 /// Walks the whole plan tree looking for `Filter -> NodeScan` patterns and
 /// names the path the planner takes for each (see `plan_filter`): a seek, a
 /// hash join on values, an index lookup, a range scan or a label-first scan
-/// (see [`scan_hint`](crate::query::planner::lpg::filter::scan_hint)). With
-/// `current`, a read of the store as it is now (see
-/// [`may_choose_scan_label`](crate::query::planner::lpg::scan::may_choose_scan_label)),
-/// a node scan below filters that require more of its labels shows the label
+/// (see [`scan_hint`](crate::query::planner::lpg::filter::scan_hint)). A
+/// node scan below filters that require more of its labels shows the label
 /// the planner scans, below any operator, as the planner chooses it for every
 /// filter it plans (see
 /// [`with_smallest_scan_label`](crate::query::planner::lpg::scan::with_smallest_scan_label)).
-/// Without it, the planner uses no property index, and the plan shows none.
 /// `op` is the statement's root: a statement that writes plans no hash join
 /// on values.
 pub(crate) fn annotate_pushdown_hints(
     op: &mut LogicalOperator,
-    store: &dyn grafeo_core::graph::GraphStoreSearch,
-    current: bool,
+    store: &dyn grafeo_core::graph::GraphStore,
 ) {
     let writes = op.has_mutations();
-    annotate_hints(op, store, current, writes, false);
+    annotate_hints(op, store, writes, false);
 }
 
 /// [`annotate_pushdown_hints`] below the root of a statement that `writes`,
@@ -719,8 +696,7 @@ pub(crate) fn annotate_pushdown_hints(
 /// where the planner looks nothing up while planning.
 fn annotate_hints(
     op: &mut LogicalOperator,
-    store: &dyn grafeo_core::graph::GraphStoreSearch,
-    current: bool,
+    store: &dyn grafeo_core::graph::GraphStore,
     writes: bool,
     after_a_write: bool,
 ) {
@@ -732,32 +708,31 @@ fn annotate_hints(
         LogicalOperator::Join(crate::query::plan::JoinOp { left, right, .. })
         | LogicalOperator::LeftJoin(crate::query::plan::LeftJoinOp { left, right, .. }) => {
             let later = after_a_write || right_side_runs_after_a_write(left);
-            annotate_hints(left, store, current, writes, after_a_write);
-            annotate_hints(right, store, current, writes, later);
+            annotate_hints(left, store, writes, after_a_write);
+            annotate_hints(right, store, writes, later);
             return;
         }
         LogicalOperator::Apply(apply) => {
             let later = after_a_write || subquery_runs_after_a_write(apply);
-            annotate_hints(&mut apply.input, store, current, writes, after_a_write);
-            annotate_hints(&mut apply.subplan, store, current, writes, later);
+            annotate_hints(&mut apply.input, store, writes, after_a_write);
+            annotate_hints(&mut apply.subplan, store, writes, later);
             return;
         }
         _ => {}
     }
     if let LogicalOperator::Filter(filter) = op {
         // The label the planner scans, chosen at the top of a chain of filters
-        if current
-            && let Some(reordered) =
-                crate::query::planner::lpg::scan::with_smallest_scan_label(filter, store)
+        if let Some(reordered) =
+            crate::query::planner::lpg::scan::with_smallest_scan_label(filter, store)
         {
             *filter = reordered;
         }
         // Recurse into children first
-        annotate_hints(&mut filter.input, store, current, writes, after_a_write);
+        annotate_hints(&mut filter.input, store, writes, after_a_write);
 
         // A seek or a hash join replaces the scan below the filter
         let replaced = crate::query::planner::lpg::seek::checked_scan(filter).and_then(|below| {
-            seek_hint(&filter.predicate, below.scan, store, current, after_a_write)
+            seek_hint(&filter.predicate, below.scan, store, after_a_write)
                 .or_else(|| value_join_hint(filter, writes))
         });
         if let Some(hint) = replaced {
@@ -770,31 +745,26 @@ fn annotate_hints(
                 below = check.input.as_mut();
             }
         } else if let LogicalOperator::NodeScan(scan) = filter.input.as_ref() {
-            filter.pushdown_hint = crate::query::planner::lpg::filter::scan_hint(
-                &filter.predicate,
-                scan,
-                store,
-                current,
-            );
+            filter.pushdown_hint =
+                crate::query::planner::lpg::filter::scan_hint(&filter.predicate, scan, store);
         }
         return;
     }
     let taken = std::mem::replace(op, LogicalOperator::Empty);
     *op = taken.map_children(|mut child| {
-        annotate_hints(&mut child, store, current, writes, after_a_write);
+        annotate_hints(&mut child, store, writes, after_a_write);
         child
     });
 }
 
 /// The seek the planner makes of a filter over `scan`: an ID, or an indexed
-/// property per input row (only with `current`), or once for a filter that
+/// property per input row, or once for a filter that
 /// runs `after_a_write` of the statement. None after a write in the scan's
 /// input, which the scan reads whole first.
 fn seek_hint(
     predicate: &LogicalExpression,
     scan: &crate::query::plan::NodeScanOp,
     store: &dyn grafeo_core::graph::GraphStore,
-    current: bool,
     after_a_write: bool,
 ) -> Option<crate::query::plan::PushdownHint> {
     use crate::query::plan::PushdownHint;
@@ -810,7 +780,7 @@ fn seek_hint(
     let seek = crate::query::planner::lpg::seek::choose_seek(
         predicate,
         scan,
-        |p| current && store.has_property_index(p),
+        |p| store.has_property_index(p),
         after_a_write,
     )?;
     Some(match seek.key {
@@ -1329,6 +1299,7 @@ fn substitute_in_expression(expr: &mut LogicalExpression, params: &QueryParams) 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use grafeo_common::types::ReadView;
     use grafeo_common::types::{NodeId, PropertyKey};
     use grafeo_core::graph::{GraphStore, GraphStoreMut};
 
@@ -1359,7 +1330,13 @@ mod tests {
     fn test_processor_creation() {
         let store = Arc::new(RowGroupStore::new());
         let processor = QueryProcessor::for_lpg(store);
-        assert_eq!(processor.lpg_store().node_count(), 0);
+        assert_eq!(
+            processor
+                .lpg_store()
+                .node_count(ReadView::latest())
+                .unwrap(),
+            0
+        );
     }
 
     #[cfg(feature = "gql")]

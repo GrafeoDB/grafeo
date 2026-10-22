@@ -16,7 +16,7 @@
 //! cargo test -p grafeo-engine --all-features --test unique_constraint_claims
 //! ```
 
-#![cfg(all(feature = "lpg", feature = "gql"))]
+#![cfg(feature = "gql")]
 
 use std::collections::HashMap;
 use std::sync::Barrier;

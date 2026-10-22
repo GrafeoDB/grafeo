@@ -383,7 +383,7 @@ fn test_node_history_single_version() {
         .create_node_with_props(&["Person"], [("name", Value::String("Alix".into()))])
         .unwrap();
 
-    let history = db.get_node_history(id);
+    let history = db.get_node_history(id).unwrap();
     assert_eq!(history.len(), 1);
 
     let (created_epoch, deleted_epoch, node) = &history[0];
@@ -399,7 +399,7 @@ fn test_node_history_deleted() {
     let id = db.create_node(&["Person"]).unwrap();
     db.delete_node(id).unwrap();
 
-    let history = db.get_node_history(id);
+    let history = db.get_node_history(id).unwrap();
     // Version chain should still exist with a deleted marker
     assert!(!history.is_empty());
     let (_, deleted_epoch, _) = &history[0];
@@ -411,7 +411,7 @@ fn test_node_history_nonexistent() {
     let db = setup_db();
     use grafeo_common::types::NodeId;
 
-    let history = db.get_node_history(NodeId::new(9999));
+    let history = db.get_node_history(NodeId::new(9999)).unwrap();
     assert!(history.is_empty());
 }
 
@@ -423,7 +423,7 @@ fn test_edge_history_single_version() {
     let dst = db.create_node(&["Person"]).unwrap();
     let edge_id = db.create_edge(src, dst, "KNOWS").unwrap();
 
-    let history = db.get_edge_history(edge_id);
+    let history = db.get_edge_history(edge_id).unwrap();
     assert_eq!(history.len(), 1);
 
     let (created_epoch, deleted_epoch, edge) = &history[0];

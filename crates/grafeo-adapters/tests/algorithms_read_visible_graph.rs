@@ -7,7 +7,7 @@
 //! Every algorithm must give, on a store with such leftovers, exactly what it
 //! gives on the same graph without them.
 
-#![cfg(all(feature = "lpg", feature = "algos"))]
+#![cfg(feature = "algos")]
 
 use grafeo_adapters::plugins::Parameters;
 use grafeo_adapters::plugins::algorithms::{
@@ -20,6 +20,7 @@ use grafeo_adapters::plugins::algorithms::{
     StronglyConnectedComponentsAlgorithm, SubgraphIsomorphismAlgorithm, TopologicalSortAlgorithm,
     TotalTrianglesAlgorithm,
 };
+use grafeo_common::types::ReadView;
 use grafeo_common::types::{NodeId, TransactionId, Value};
 use grafeo_core::graph::rowgroup::RowGroupStore;
 use grafeo_core::graph::{GraphStore as _, GraphStoreMut as _};
@@ -81,7 +82,7 @@ fn people_with_leftovers() -> RowGroupStore {
             .unwrap();
     }
     assert_eq!(
-        store.node_ids(),
+        store.node_ids(ReadView::latest()).unwrap(),
         (0..5).map(NodeId::new).collect::<Vec<_>>(),
         "only the five people are visible"
     );
@@ -244,9 +245,11 @@ fn every_algorithm_reads_only_the_visible_graph() {
     let dirty = people_with_leftovers();
     let mut differ = Vec::new();
     for (name, algorithm, params) in algorithms_under_test() {
-        let expected = algorithm.execute(&clean, &params).unwrap();
+        let expected = algorithm
+            .execute(&clean, ReadView::latest(), &params)
+            .unwrap();
         let actual = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            algorithm.execute(&dirty, &params)
+            algorithm.execute(&dirty, ReadView::latest(), &params)
         }));
         match actual {
             Ok(Ok(actual)) => {
@@ -273,7 +276,7 @@ fn every_algorithm_reads_only_the_visible_graph() {
 fn traversals_skip_a_deleted_node_and_uncommitted_edges() {
     let dirty = people_with_leftovers();
     let alix = NodeId::new(ALIX);
-    let layers = algorithms::bfs_layers(&dirty, alix);
+    let layers = algorithms::bfs_layers(&dirty, ReadView::latest(), alix).unwrap();
     assert_eq!(
         layers,
         vec![
@@ -284,9 +287,16 @@ fn traversals_skip_a_deleted_node_and_uncommitted_edges() {
         ],
         "Mia is three hops away, Butch and Django are not reachable"
     );
-    assert_eq!(algorithms::dfs(&dirty, alix).len(), 5);
     assert_eq!(
-        algorithms::topological_sort(&dirty).map(|order| order.len()),
+        algorithms::dfs(&dirty, ReadView::latest(), alix)
+            .unwrap()
+            .len(),
+        5
+    );
+    assert_eq!(
+        algorithms::topological_sort(&dirty, ReadView::latest())
+            .unwrap()
+            .map(|order| order.len()),
         Some(5),
         "the cycles through Butch and the uncommitted edge are not in the graph"
     );

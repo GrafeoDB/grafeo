@@ -23,7 +23,7 @@
 //! cargo test -p grafeo-engine --all-features --test search_indexes_without_their_features
 //! ```
 
-#![cfg(all(feature = "lpg", feature = "gql", feature = "grafeo-file", not(miri)))]
+#![cfg(all(feature = "gql", feature = "grafeo-file", not(miri)))]
 
 #[cfg(not(all(feature = "vector-index", feature = "text-index")))]
 #[path = "common/legacy_file.rs"]

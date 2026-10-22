@@ -6,7 +6,7 @@
 //! cargo test -p grafeo-engine --all-features --test builtin_function_calls
 //! ```
 
-#![cfg(all(feature = "lpg", feature = "gql", feature = "cypher"))]
+#![cfg(all(feature = "gql", feature = "cypher"))]
 
 use grafeo_engine::GrafeoDB;
 

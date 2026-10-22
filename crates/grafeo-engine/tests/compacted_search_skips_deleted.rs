@@ -14,7 +14,6 @@
 //! ```
 
 #![cfg(all(
-    feature = "lpg",
     feature = "gql",
     feature = "text-index",
     feature = "vector-index",
@@ -95,6 +94,7 @@ fn compacted_then_indexed() -> GrafeoDB {
 fn name_of(db: &GrafeoDB, id: NodeId) -> String {
     match db
         .get_node(id)
+        .unwrap()
         .and_then(|node| node.get_property("name").cloned())
     {
         Some(Value::String(name)) => name.to_string(),
@@ -393,8 +393,13 @@ fn searches_of_indexes_made_after_compact_skip_deleted_compacted_nodes() {
     for (label, name) in [("Person", "Gus"), ("Note", "Amsterdam")] {
         let id = db
             .find_nodes_by_property("name", &Value::from(name))
+            .unwrap()
             .into_iter()
-            .find(|&id| db.get_node(id).is_some_and(|node| node.has_label(label)))
+            .find(|&id| {
+                db.get_node(id)
+                    .unwrap()
+                    .is_some_and(|node| node.has_label(label))
+            })
             .unwrap_or_else(|| panic!("no :{label} named {name}"));
         assert!(db.delete_node(id).unwrap(), "{name} is deleted");
     }

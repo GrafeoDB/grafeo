@@ -2,7 +2,7 @@
 
 use std::collections::BTreeMap;
 
-use grafeo_common::types::{EpochId, NodeId, ReadView, Value};
+use grafeo_common::types::{ArcStr, EpochId, NodeId, ReadView, Value};
 
 use super::{
     KnownGap, LABELS, Reader, Rng, Tx, apply_all, committed, conformance_suite, counts, counts_of,
@@ -332,7 +332,8 @@ fn collect_between_transactions_keeps_the_committed_image() {
                 "{what}: every vector collapsed"
             );
             let listed: Vec<u64> = collected
-                .all_node_ids()
+                .node_ids(ReadView::latest())
+                .unwrap()
                 .into_iter()
                 .map(|id| id.as_u64())
                 .collect();
@@ -394,11 +395,29 @@ fn a_vector_filled_by_one_transaction_holds_one_constant_stamp() {
         bulk < 2_048,
         "three more vectors, a constant each: {bulk} bytes"
     );
-    assert_eq!(store.node_count(), 5 * VECTOR_ROWS);
-    assert_eq!(store.nodes_by_label_count("City"), 3 * VECTOR_ROWS);
-    assert_eq!(store.nodes_by_label_count("Traveller"), 1);
-    assert_eq!(store.nodes_by_label_count("Person"), 2 * VECTOR_ROWS);
-    assert_eq!(store.edge_count(), VECTOR_ROWS);
+    assert_eq!(
+        store.node_count(ReadView::latest()).unwrap(),
+        5 * VECTOR_ROWS
+    );
+    assert_eq!(
+        store
+            .nodes_by_label_count("City", ReadView::latest())
+            .unwrap(),
+        3 * VECTOR_ROWS
+    );
+    assert_eq!(
+        store
+            .nodes_by_label_count("Traveller", ReadView::latest())
+            .unwrap(),
+        1
+    );
+    assert_eq!(
+        store
+            .nodes_by_label_count("Person", ReadView::latest())
+            .unwrap(),
+        2 * VECTOR_ROWS
+    );
+    assert_eq!(store.edge_count(ReadView::latest()).unwrap(), VECTOR_ROWS);
 
     // Jules opens a new vector; Mia, of another transaction, joins it.
     let mut tx = Tx::begin(&store, 12);
@@ -435,7 +454,10 @@ fn a_vector_filled_by_one_transaction_holds_one_constant_stamp() {
     tx.commit().unwrap();
     assert_eq!(store.collect(store.current_epoch()), 1);
     assert_eq!(store.stamped_vectors(), 0);
-    assert_eq!(store.node_count(), 5 * VECTOR_ROWS + 1);
+    assert_eq!(
+        store.node_count(ReadView::latest()).unwrap(),
+        5 * VECTOR_ROWS + 1
+    );
 }
 
 /// A transaction's first write of a value, or of a node's labels, creates
@@ -524,11 +546,13 @@ fn a_transactions_next_write_of_a_value_replaces_its_version() {
         )
         .unwrap();
     assert_eq!(
-        store.node_property_at(
-            people.gus,
-            "age",
-            ReadView::committed(EpochId::new(epoch.as_u64() - 1))
-        ),
+        store
+            .node_property(
+                people.gus,
+                "age",
+                ReadView::committed(EpochId::new(epoch.as_u64() - 1))
+            )
+            .unwrap(),
         Some(Value::Int64(3)),
         "an older reader keeps Gus's age"
     );
@@ -587,24 +611,34 @@ fn a_pending_transactions_versions_stay_through_collect() {
     );
 
     let epoch = tx.commit().unwrap();
-    let listed = |store: &RowGroupStore| -> Vec<NodeId> { store.all_node_ids() };
+    let listed =
+        |store: &RowGroupStore| -> Vec<NodeId> { store.node_ids(ReadView::latest()).unwrap() };
+    let earlier = ReadView::committed(EpochId::new(epoch.as_u64() - 1));
     assert!(
-        listed(&store).contains(&people.mia),
+        store.node_ids(earlier).unwrap().contains(&people.mia),
         "before the collect a deleted row stays for earlier readers"
     );
     assert_eq!(store.collect(epoch), 2, "Mia and her edge");
     assert_eq!(store.stamped_vectors(), 0);
     assert_eq!(listed(&store), [people.alix, people.gus, jules]);
     assert_eq!(
-        store.edges_from(people.gus, Direction::Outgoing),
+        store
+            .edges(people.gus, Direction::Outgoing, &[], ReadView::latest())
+            .unwrap(),
         Vec::new(),
         "the deleted edge left its source's adjacency"
     );
     assert_eq!(
-        store.edges_from(people.gus, Direction::Incoming),
+        store
+            .edges(people.gus, Direction::Incoming, &[], ReadView::latest())
+            .unwrap(),
         [(people.alix, people.alix_gus)]
     );
-    assert!(!store.is_edge_visible_at_epoch(people.gus_mia, EpochId::new(0)));
+    assert!(
+        !store
+            .is_edge_visible(people.gus_mia, ReadView::committed(EpochId::new(0)))
+            .unwrap()
+    );
     let now = committed(&store);
     now.consistent("after the collect").unwrap();
     assert_eq!(
@@ -680,7 +714,7 @@ fn a_reader_at_the_horizon_sees_the_same_after_collect() {
         2,
         "the vectors written after the horizon"
     );
-    let listed = store.all_node_ids();
+    let listed = store.node_ids(ReadView::latest()).unwrap();
     assert_eq!(listed.len(), VECTOR_ROWS - 10 + 1);
     assert!(people[..10].iter().all(|node| !listed.contains(node)));
     assert!(
@@ -694,9 +728,16 @@ fn a_reader_at_the_horizon_sees_the_same_after_collect() {
     assert_eq!(store.collect(deleted), 1, "the edge");
     assert_eq!(store.stamped_vectors(), 0);
     assert_eq!(data(&committed(&store)), data(&before[2]));
-    assert_eq!(store.edges_from(jules, Direction::Outgoing), Vec::new());
     assert_eq!(
-        store.edges_from(people[100], Direction::Incoming),
+        store
+            .edges(jules, Direction::Outgoing, &[], ReadView::latest())
+            .unwrap(),
+        Vec::new()
+    );
+    assert_eq!(
+        store
+            .edges(people[100], Direction::Incoming, &[], ReadView::latest())
+            .unwrap(),
         Vec::new()
     );
 }
@@ -755,7 +796,9 @@ fn adjacency_past_its_merges_agrees_with_the_edges() {
     assert_eq!(counts(&store, &["Person"]), counts_of(&now, &["Person"]));
     for node in &nodes {
         for direction in [Direction::Outgoing, Direction::Incoming] {
-            let listed: Vec<(NodeId, EdgeId)> = store.edges_from(*node, direction);
+            let listed: Vec<(NodeId, EdgeId)> = store
+                .edges(*node, direction, &[], ReadView::latest())
+                .unwrap();
             assert!(
                 listed
                     .iter()
@@ -764,13 +807,25 @@ fn adjacency_past_its_merges_agrees_with_the_edges() {
             );
             for edge_type in TYPES {
                 let typed: BTreeSet<u64> = store
-                    .edges_of_type(*node, direction, edge_type)
+                    .edges(
+                        *node,
+                        direction,
+                        &[ArcStr::from(edge_type)],
+                        ReadView::latest(),
+                    )
+                    .unwrap()
                     .into_iter()
                     .map(|(_, edge)| edge.as_u64())
                     .collect();
                 let filtered: BTreeSet<u64> = listed
                     .iter()
-                    .filter(|(_, edge)| store.edge_type(*edge).as_deref() == Some(edge_type))
+                    .filter(|(_, edge)| {
+                        store
+                            .edge_type(*edge, ReadView::latest())
+                            .unwrap()
+                            .as_deref()
+                            == Some(edge_type)
+                    })
                     .map(|(_, edge)| edge.as_u64())
                     .collect();
                 assert_eq!(typed, filtered, "node {node:?}, {direction:?}, {edge_type}");
@@ -798,38 +853,53 @@ fn incoming_reads(store: &RowGroupStore, nodes: &[NodeId], views: &[ReadView]) -
     for node in nodes {
         for direction in [Direction::Incoming, Direction::Both] {
             let mut neighbors: Vec<u64> = store
-                .neighbors(*node, direction)
+                .neighbors(*node, direction, ReadView::latest())
+                .unwrap()
                 .into_iter()
                 .map(|id| id.as_u64())
                 .collect();
             neighbors.sort_unstable();
             reads.push(format!(
                 "{node:?} {direction:?}: {:?} neighbors {neighbors:?}",
-                set(store.edges_from(*node, direction))
+                set(store
+                    .edges(*node, direction, &[], ReadView::latest())
+                    .unwrap())
             ));
             for edge_type in ["KNOWS", "LIVES_IN", "NONE_SUCH"] {
                 reads.push(format!(
                     "{node:?} {direction:?} {edge_type}: {:?}",
-                    set(store.edges_of_type(*node, direction, edge_type))
+                    set(store
+                        .edges(
+                            *node,
+                            direction,
+                            &[ArcStr::from(edge_type)],
+                            ReadView::latest()
+                        )
+                        .unwrap())
                 ));
             }
             for view in views {
                 let mut neighbors: Vec<u64> = store
-                    .neighbors_at(*node, direction, *view)
+                    .neighbors(*node, direction, *view)
+                    .unwrap()
                     .into_iter()
                     .map(|id| id.as_u64())
                     .collect();
                 neighbors.sort_unstable();
                 reads.push(format!(
                     "{node:?} {direction:?} at {view:?}: {:?} neighbors {neighbors:?}",
-                    set(store.edges_from_at(*node, direction, *view))
+                    set(store.edges(*node, direction, &[], *view).unwrap())
                 ));
             }
         }
         reads.push(format!(
             "{node:?} degrees: in {} out {}",
-            store.in_degree(*node),
-            store.out_degree(*node)
+            store
+                .degree(*node, crate::graph::Direction::Incoming, ReadView::latest())
+                .unwrap(),
+            store
+                .degree(*node, crate::graph::Direction::Outgoing, ReadView::latest())
+                .unwrap()
         ));
     }
     reads
@@ -921,17 +991,22 @@ fn incoming_reads_agree_with_and_without_backward_edges() {
     assert_eq!(incoming_reads(&scanned, &nodes, &views), before);
     let listed: usize = nodes
         .iter()
-        .map(|node| kept.edges_from(*node, Direction::Incoming).len())
+        .map(|node| {
+            kept.edges(*node, Direction::Incoming, &[], ReadView::latest())
+                .unwrap()
+                .len()
+        })
         .sum();
     assert_eq!(
         listed,
-        300 + 20,
-        "every edge not collected, the open ones too"
+        300 - 300_usize.div_ceil(7),
+        "every committed edge not deleted, none of the open ones"
     );
     let own: usize = nodes
         .iter()
         .map(|node| {
-            kept.edges_from_at(*node, Direction::Incoming, views[2])
+            kept.edges(*node, Direction::Incoming, &[], views[2])
+                .unwrap()
                 .len()
         })
         .sum();
@@ -978,23 +1053,59 @@ fn a_detach_delete_finds_the_incoming_edges_without_backward_edges() {
         !GraphStoreMut::delete_node(&store, people.mia),
         "Gus's edge points to Mia"
     );
-    assert_eq!(store.in_degree(people.mia), 1);
-    store.delete_node_edges(people.mia);
-    assert!(!store.is_edge_visible_at_epoch(people.gus_mia, store.current_epoch()));
-    assert_eq!(store.in_degree(people.mia), 0);
-    assert_eq!(store.out_degree(people.gus), 0);
-    assert!(GraphStoreMut::delete_node(&store, people.mia));
     assert_eq!(
-        store.edges_from(people.gus, Direction::Both).len(),
-        2,
-        "Alix's edge to Gus, and the deleted one to Mia until a collect"
+        store
+            .degree(
+                people.mia,
+                crate::graph::Direction::Incoming,
+                ReadView::latest()
+            )
+            .unwrap(),
+        1
+    );
+    store.delete_node_edges(people.mia);
+    assert!(
+        !store
+            .is_edge_visible(people.gus_mia, ReadView::committed(store.current_epoch()))
+            .unwrap()
     );
     assert_eq!(
-        store.edges_from_at(
-            people.gus,
-            Direction::Both,
-            ReadView::committed(store.current_epoch())
-        ),
+        store
+            .degree(
+                people.mia,
+                crate::graph::Direction::Incoming,
+                ReadView::latest()
+            )
+            .unwrap(),
+        0
+    );
+    assert_eq!(
+        store
+            .degree(
+                people.gus,
+                crate::graph::Direction::Outgoing,
+                ReadView::latest()
+            )
+            .unwrap(),
+        0
+    );
+    assert!(GraphStoreMut::delete_node(&store, people.mia));
+    assert_eq!(
+        store
+            .edges(people.gus, Direction::Both, &[], ReadView::latest())
+            .unwrap(),
+        vec![(people.alix, people.alix_gus)],
+        "Alix's edge to Gus: a reader lists no deleted edge"
+    );
+    assert_eq!(
+        store
+            .edges(
+                people.gus,
+                Direction::Both,
+                &[],
+                ReadView::committed(store.current_epoch())
+            )
+            .unwrap(),
         vec![(people.alix, people.alix_gus)]
     );
 }

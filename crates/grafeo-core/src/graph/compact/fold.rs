@@ -88,7 +88,8 @@ fn fold_into<S: LoadTarget>(
     deleted_nodes: &[NodeId],
     deleted_edges: &[EdgeId],
 ) -> Result<Folded> {
-    if !base.preserves_ids() && (store.node_count() > 0 || store.edge_count() > 0) {
+    let view = store.load_view();
+    if !base.preserves_ids() && (store.node_count(view)? > 0 || store.edge_count(view)? > 0) {
         return Err(Error::corruption(
             "the compacted base does not keep the ids of its nodes and edges, and the data \
              written after it would mix with them",
@@ -99,7 +100,7 @@ fn fold_into<S: LoadTarget>(
     let mut folded = Folded::default();
 
     // The nodes the store holds: the overlay's, then the folded ones.
-    let mut live: FxHashSet<NodeId> = store.node_ids().into_iter().collect();
+    let mut live: FxHashSet<NodeId> = store.node_ids(view)?.into_iter().collect();
     let base_nodes = base.node_ids();
     // The joined names the copies held, which the overlay's load added to
     // the store's labels.
@@ -135,7 +136,7 @@ fn fold_into<S: LoadTarget>(
     // base's nodes (also of those the overlay copied or deleted).
     for &source in &base_nodes {
         for id in base.outgoing_edges(source) {
-            if deleted_edges.contains(&id) || store.edge_type(id).is_some() {
+            if deleted_edges.contains(&id) || store.is_edge_visible(id, view)? {
                 continue;
             }
             let Some(edge) = base.get_edge(id) else {
@@ -181,7 +182,7 @@ fn split_joined_labels<S: LoadTarget>(
     if labels.len() < 2 {
         return Ok(false);
     }
-    let Some(copy) = store.get_node(id) else {
+    let Some(copy) = store.node(id, store.load_view())? else {
         return Ok(false);
     };
     let mut joined = false;
@@ -204,6 +205,7 @@ fn split_joined_labels<S: LoadTarget>(
 
 #[cfg(test)]
 mod tests {
+    use grafeo_common::types::ReadView;
     use std::sync::Arc;
 
     use grafeo_common::storage::section::SectionType;
@@ -269,9 +271,16 @@ mod tests {
     fn names(store: &RowGroupStore, label: &str) -> Vec<String> {
         let key = PropertyKey::new("name");
         let mut names: Vec<String> = store
-            .nodes_by_label(label)
+            .nodes_by_label(label, ReadView::latest())
+            .unwrap()
             .into_iter()
-            .filter_map(|id| text(store.get_node_property(id, &key)))
+            .filter_map(|id| {
+                text(
+                    store
+                        .node_property(id, key.as_str(), ReadView::latest())
+                        .unwrap(),
+                )
+            })
             .collect();
         names.sort();
         names
@@ -280,9 +289,18 @@ mod tests {
     fn node_named(store: &RowGroupStore, label: &str, name: &str) -> NodeId {
         let key = PropertyKey::new("name");
         store
-            .nodes_by_label(label)
+            .nodes_by_label(label, ReadView::latest())
+            .unwrap()
             .into_iter()
-            .find(|&id| text(store.get_node_property(id, &key)).as_deref() == Some(name))
+            .find(|&id| {
+                text(
+                    store
+                        .node_property(id, key.as_str(), ReadView::latest())
+                        .unwrap(),
+                )
+                .as_deref()
+                    == Some(name)
+            })
             .unwrap_or_else(|| panic!("no {label} named {name}"))
     }
 
@@ -318,18 +336,23 @@ mod tests {
 
         let alix = node_named(&store, "Person", "Alix");
         assert_eq!(
-            store.get_node_property(alix, &PropertyKey::new("age")),
+            store
+                .node_property(alix, "age", ReadView::latest())
+                .unwrap(),
             Some(Value::Int64(31)),
             "the overlay's copy of Alix wins over the base"
         );
         assert_eq!(
-            store.get_node_property(alix, &PropertyKey::new("score")),
+            store
+                .node_property(alix, "score", ReadView::latest())
+                .unwrap(),
             None
         );
 
         let gus = node_named(&store, "Person", "Gus");
         let mut labels: Vec<String> = store
-            .get_node(gus)
+            .node(gus, ReadView::latest())
+            .unwrap()
             .unwrap()
             .labels
             .iter()
@@ -340,7 +363,13 @@ mod tests {
 
         let amsterdam = node_named(&store, "City", "Amsterdam");
         let mut alix_goes_to: Vec<NodeId> = store
-            .edges_from(alix, crate::graph::Direction::Outgoing)
+            .edges(
+                alix,
+                crate::graph::Direction::Outgoing,
+                &[],
+                ReadView::latest(),
+            )
+            .unwrap()
             .into_iter()
             .map(|(target, _)| target)
             .collect();
@@ -394,7 +423,8 @@ mod tests {
     /// The labels of the node `id`, sorted.
     fn labels_of(store: &RowGroupStore, id: NodeId) -> Vec<String> {
         let mut labels: Vec<String> = store
-            .get_node(id)
+            .node(id, ReadView::latest())
+            .unwrap()
             .unwrap_or_else(|| panic!("no node {}", id.0))
             .labels
             .iter()
@@ -437,16 +467,24 @@ mod tests {
         assert_eq!(folded.relabeled, 1, "the copy of Gus");
         assert_eq!(folded.nodes, 6, "every other base node");
         assert_eq!(
-            store.get_node_property(gus, &PropertyKey::new("age")),
+            store.node_property(gus, "age", ReadView::latest()).unwrap(),
             Some(Value::Int64(26)),
             "the copy stays the current version"
         );
         assert_eq!(names(&store, "Employee"), ["Gus"]);
         assert_eq!(names(&store, "Manager"), ["Gus"]);
         assert_eq!(names(&store, "Person"), ["Alix", "Gus", "Vincent"]);
-        assert_eq!(store.nodes_by_label_count("Person"), 3);
+        assert_eq!(
+            store
+                .nodes_by_label_count("Person", ReadView::latest())
+                .unwrap(),
+            3
+        );
         assert!(
-            store.nodes_by_label("Employee|Person").is_empty(),
+            store
+                .nodes_by_label("Employee|Person", ReadView::latest())
+                .unwrap()
+                .is_empty(),
             "no node keeps the joined name"
         );
         assert_eq!(
@@ -458,7 +496,7 @@ mod tests {
 
     /// The store's labels, sorted.
     fn sorted_labels(store: &RowGroupStore) -> Vec<String> {
-        let mut labels = store.all_labels();
+        let mut labels = store.all_labels().unwrap();
         labels.sort();
         labels
     }
@@ -477,7 +515,12 @@ mod tests {
         let folded = fold_base_into(&store);
         assert_eq!(labels_of(&store, gus), ["Employee", "Person"]);
         assert_eq!(labels_of(&store, jules), ["Employee|Person"]);
-        assert_eq!(store.nodes_by_label("Employee|Person"), [jules]);
+        assert_eq!(
+            store
+                .nodes_by_label("Employee|Person", ReadView::latest())
+                .unwrap(),
+            [jules]
+        );
         assert!(
             sorted_labels(&store).contains(&"Employee|Person".to_string()),
             "Jules has it"
@@ -550,13 +593,16 @@ mod tests {
         assert_eq!(names(&store, "City"), ["Amsterdam", "Berlin"]);
         let alix = node_named(&store, "Person", "Alix");
         assert_eq!(
-            store.get_node_property(alix, &PropertyKey::new("age")),
+            store
+                .node_property(alix, "age", ReadView::latest())
+                .unwrap(),
             Some(Value::Int64(31)),
             "the overlay's copy of Alix wins over the base"
         );
         let gus = node_named(&store, "Person", "Gus");
         let mut labels: Vec<String> = store
-            .get_node(gus)
+            .node(gus, ReadView::latest())
+            .unwrap()
             .unwrap()
             .labels
             .iter()
@@ -564,7 +610,11 @@ mod tests {
             .collect();
         labels.sort();
         assert_eq!(labels, ["Employee", "Person"]);
-        assert_eq!(store.edge_count(), 3, "the base's two and the museum's");
+        assert_eq!(
+            store.edge_count(ReadView::latest()).unwrap(),
+            3,
+            "the base's two and the museum's"
+        );
     }
 
     /// The fixture's base with its flags byte cleared: it then names its

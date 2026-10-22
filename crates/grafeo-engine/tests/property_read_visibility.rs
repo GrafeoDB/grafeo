@@ -9,7 +9,7 @@
 //! cargo test -p grafeo-engine --features full --test property_read_visibility
 //! ```
 
-#![cfg(all(feature = "lpg", feature = "gql"))]
+#![cfg(feature = "gql")]
 
 use grafeo_common::types::Value;
 use grafeo_engine::{GrafeoDB, Session};

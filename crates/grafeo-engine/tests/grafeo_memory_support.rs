@@ -47,7 +47,7 @@ mod batch_create_with_props {
         assert_eq!(ids.len(), 2);
 
         // Verify properties
-        let node = db.get_node(ids[0]).unwrap();
+        let node = db.get_node(ids[0]).unwrap().unwrap();
         assert_eq!(
             node.properties.get(&PropertyKey::new("text")),
             Some(&Value::String("hello".into()))
@@ -85,7 +85,7 @@ mod batch_create_with_props {
         assert_eq!(ids.len(), 2);
 
         // Verify vector property
-        let node = db.get_node(ids[0]).unwrap();
+        let node = db.get_node(ids[0]).unwrap().unwrap();
         match node.properties.get(&PropertyKey::new("embedding")) {
             Some(Value::Vector(v)) => assert_eq!(v.len(), 3),
             other => panic!("Expected Vector, got {:?}", other),
@@ -126,8 +126,8 @@ mod batch_create_with_props {
             .unwrap();
         assert_eq!(ids.len(), 2);
 
-        let n1 = db.get_node(ids[0]).unwrap();
-        let n2 = db.get_node(ids[1]).unwrap();
+        let n1 = db.get_node(ids[0]).unwrap().unwrap();
+        let n2 = db.get_node(ids[1]).unwrap().unwrap();
         assert_eq!(n1.properties.len(), 2);
         assert_eq!(n2.properties.len(), 5);
     }
@@ -381,7 +381,7 @@ mod temporal_versioning {
         s.execute("MATCH (p:Person {name: 'Alicia'}) SET p.name = 'Ali'")
             .unwrap();
 
-        let history = db.get_node_property_history(NodeId(0), "name");
+        let history = db.get_node_property_history(NodeId(0), "name").unwrap();
         assert_eq!(
             history.len(),
             3,
@@ -402,7 +402,7 @@ mod temporal_versioning {
         s.execute("MATCH (p:Person {name: 'Alix'}) SET p.age = 31")
             .unwrap();
 
-        let all_history = db.get_all_node_property_history(NodeId(0));
+        let all_history = db.get_all_node_property_history(NodeId(0)).unwrap();
         // Should have entries for 'name' (1 version) and 'age' (2 versions)
         let name_hist: Vec<_> = all_history
             .iter()
@@ -443,7 +443,7 @@ mod temporal_versioning {
     #[test]
     fn property_history_empty_for_nonexistent() {
         let db = history_db();
-        let history = db.get_node_property_history(NodeId(999), "name");
+        let history = db.get_node_property_history(NodeId(999), "name").unwrap();
         assert!(history.is_empty(), "{history:?}");
     }
 
@@ -456,7 +456,7 @@ mod temporal_versioning {
         s.execute("MATCH (c:Counter) SET c.val = 1").unwrap();
         s.execute("MATCH (c:Counter) SET c.val = 2").unwrap();
 
-        let history = db.get_node_property_history(NodeId(0), "val");
+        let history = db.get_node_property_history(NodeId(0), "val").unwrap();
         let epochs: Vec<u64> = history.iter().map(|(e, _)| e.as_u64()).collect();
         assert_eq!(epochs, {
             let mut sorted = epochs.clone();

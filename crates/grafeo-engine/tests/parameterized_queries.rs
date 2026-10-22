@@ -3,7 +3,7 @@
 //! conflicts per graph, EXPLAIN and PROFILE (#460), and a cached plan never
 //! keeps one call's values.
 
-#![cfg(all(feature = "lpg", feature = "gql"))]
+#![cfg(feature = "gql")]
 
 use std::collections::HashMap;
 

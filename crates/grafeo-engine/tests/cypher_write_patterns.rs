@@ -7,7 +7,7 @@
 //! cargo test -p grafeo-engine --all-features --test cypher_write_patterns
 //! ```
 
-#![cfg(all(feature = "lpg", feature = "gql", feature = "cypher"))]
+#![cfg(all(feature = "gql", feature = "cypher"))]
 
 use grafeo_common::types::Value;
 use grafeo_engine::GrafeoDB;

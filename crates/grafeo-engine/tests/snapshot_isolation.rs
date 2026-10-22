@@ -43,7 +43,7 @@
 //! cargo test -p grafeo-engine --features full --test snapshot_isolation
 //! ```
 
-#![cfg(all(feature = "lpg", feature = "gql"))]
+#![cfg(feature = "gql")]
 
 use std::collections::{HashMap, HashSet};
 use std::fmt::Write as _;
@@ -638,17 +638,17 @@ fn prefix(scenario: &str, change: Change, lang: Lang, reader: &str, index: Index
 
 fn node(graph: &Graph, reader: Reader<'_>, node: NodeId) -> Option<grafeo_core::Node> {
     match reader {
-        Reader::Session(session) => session.get_node(node),
+        Reader::Session(session) => session.get_node(node).unwrap(),
         Reader::At(_, epoch) => graph.db.get_node_at_epoch(node, epoch).unwrap(),
-        Reader::Database => graph.db.get_node(node),
+        Reader::Database => graph.db.get_node(node).unwrap(),
     }
 }
 
 fn edge(graph: &Graph, reader: Reader<'_>, edge: EdgeId) -> Option<grafeo_core::Edge> {
     match reader {
-        Reader::Session(session) => session.get_edge(edge),
+        Reader::Session(session) => session.get_edge(edge).unwrap(),
         Reader::At(_, epoch) => graph.db.get_edge_at_epoch(edge, epoch).unwrap(),
-        Reader::Database => graph.db.get_edge(edge),
+        Reader::Database => graph.db.get_edge(edge).unwrap(),
     }
 }
 
@@ -699,9 +699,9 @@ fn edge_value(of: EdgeId, key: &'static str) -> Read {
 fn node_edges(of: NodeId, direction: Direction) -> Read {
     api(move |graph, reader| {
         let edges = match reader {
-            Reader::Session(session) => session.get_node_edges(of, direction, &[]),
+            Reader::Session(session) => session.get_node_edges(of, direction, &[]).unwrap(),
             Reader::At(..) => return None,
-            Reader::Database => graph.db.get_node_edges(of, direction, &[]),
+            Reader::Database => graph.db.get_node_edges(of, direction, &[]).unwrap(),
         };
         Some(
             edges
@@ -716,9 +716,14 @@ fn node_edges(of: NodeId, direction: Direction) -> Read {
 fn nodes_of_age(age: i64) -> Read {
     api(move |graph, reader| {
         let found = match reader {
-            Reader::Session(session) => session.find_nodes_by_property("age", &Value::Int64(age)),
+            Reader::Session(session) => session
+                .find_nodes_by_property("age", &Value::Int64(age))
+                .unwrap(),
             Reader::At(..) => return None,
-            Reader::Database => graph.db.find_nodes_by_property("age", &Value::Int64(age)),
+            Reader::Database => graph
+                .db
+                .find_nodes_by_property("age", &Value::Int64(age))
+                .unwrap(),
         };
         Some(nodes(&found))
     })
@@ -1015,6 +1020,7 @@ fn label_paths(graph: &Graph) -> Vec<Path> {
             database_read(move |db| {
                 let labels: Vec<Value> = db
                     .get_node_labels(alix)
+                    .unwrap()
                     .unwrap_or_default()
                     .into_iter()
                     .map(Value::from)
@@ -1111,13 +1117,13 @@ fn node_delete_paths(graph: &Graph, index: Index) -> Vec<Path> {
         ),
         path(
             "node_count",
-            database_read(|db| ints(&[i64::try_from(db.node_count()).unwrap()])),
+            database_read(|db| ints(&[i64::try_from(db.node_count().unwrap()).unwrap()])),
             ints(&[2]),
             ints(&[1]),
         ),
         path(
             "edge_count",
-            database_read(|db| ints(&[i64::try_from(db.edge_count()).unwrap()])),
+            database_read(|db| ints(&[i64::try_from(db.edge_count().unwrap()).unwrap()])),
             ints(&[1]),
             ints(&[0]),
         ),
@@ -1231,7 +1237,7 @@ fn edge_delete_paths(graph: &Graph) -> Vec<Path> {
         ),
         path(
             "edge_count",
-            database_read(|db| ints(&[i64::try_from(db.edge_count()).unwrap()])),
+            database_read(|db| ints(&[i64::try_from(db.edge_count().unwrap()).unwrap()])),
             ints(&[1]),
             ints(&[0]),
         ),
@@ -1694,7 +1700,7 @@ fn counter(index: Index) -> (Arc<GrafeoDB>, NodeId) {
 
 fn read_counter(session: &Session, lang: Lang, node: NodeId) -> i64 {
     let value = match lang {
-        Lang::Api => session.get_node_property(node, "n"),
+        Lang::Api => session.get_node_property(node, "n").unwrap(),
         lang => execute(
             session,
             lang,

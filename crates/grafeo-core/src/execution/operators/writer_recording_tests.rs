@@ -2,6 +2,7 @@
 //! target, each one that changed something recorded once in the
 //! transaction's change set, after the claim of what it writes.
 
+use grafeo_common::types::ReadView;
 use std::ops::Range;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -130,7 +131,8 @@ impl Recorder {
         format!(
             "{:?}",
             self.store
-                .get_node_versioned(id, snapshot, tx)
+                .node(id, ReadView::transaction(tx, snapshot))
+                .unwrap()
                 .map(|node| describe_node(&node))
         )
     }
@@ -143,7 +145,8 @@ impl Recorder {
         format!(
             "{:?}",
             self.store
-                .get_edge_versioned(id, snapshot, tx)
+                .edge(id, ReadView::transaction(tx, snapshot))
+                .unwrap()
                 .map(|edge| describe_edge(&edge))
         )
     }
@@ -229,7 +232,11 @@ fn writer_through(
     target: WriteTarget,
     recorder: &Arc<Recorder>,
 ) -> GraphWriter {
-    GraphWriter::new(Arc::clone(store) as Arc<dyn GraphStoreMut>).with_recording(Recording {
+    GraphWriter::new(
+        Arc::clone(store) as Arc<dyn GraphStoreMut>,
+        ReadView::latest(),
+    )
+    .with_recording(Recording {
         target,
         recorder: Arc::clone(recorder) as Arc<dyn ChangeRecorder>,
     })
@@ -271,12 +278,12 @@ fn describe_edge(edge: &Edge) -> (u64, u64, String, Vec<(String, Value)>) {
 fn dump(store: &RowGroupStore, reader: &GraphWriter) -> Vec<String> {
     let mut lines = Vec::new();
     for raw in 0..store.next_node_id() {
-        if let Some(node) = reader.node(NodeId::new(raw)) {
+        if let Some(node) = reader.node(NodeId::new(raw)).unwrap() {
             lines.push(format!("node {raw} {:?}", describe_node(&node)));
         }
     }
     for raw in 0..store.next_edge_id() {
-        if let Some(edge) = reader.edge(EdgeId::new(raw)) {
+        if let Some(edge) = reader.edge(EdgeId::new(raw)).unwrap() {
             lines.push(format!("edge {raw} {:?}", describe_edge(&edge)));
         }
     }
@@ -353,7 +360,10 @@ fn every_writer_method_records_exactly_what_it_applied() {
                 .unwrap_or_else(|error| panic!("{name}: replay of {op:?}: {error}"));
             assert_eq!(applied, Applied::Committed, "{name}");
         }
-        let reader = GraphWriter::new(Arc::clone(&replayed) as Arc<dyn GraphStoreMut>);
+        let reader = GraphWriter::new(
+            Arc::clone(&replayed) as Arc<dyn GraphStoreMut>,
+            ReadView::latest(),
+        );
         assert_eq!(
             dump(&replayed, &reader),
             after,
@@ -701,13 +711,16 @@ fn an_external_target_creates_at_the_ids_the_store_gives() {
         ]
     );
     assert_eq!(
-        writer.node(mia).map(|node| describe_node(&node)),
+        writer.node(mia).unwrap().map(|node| describe_node(&node)),
         Some((
             vec!["Person".to_string()],
             vec![("name".to_string(), Value::from("Mia"))]
         ))
     );
-    assert!(store.get_node(mia).is_none(), "others do not see it yet");
+    assert!(
+        store.node(mia, ReadView::latest()).unwrap().is_none(),
+        "others do not see it yet"
+    );
 
     // An endpoint the writer does not see: nothing is created.
     let edges = store.next_edge_id();

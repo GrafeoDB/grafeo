@@ -57,8 +57,8 @@ serde_json = "1"
 tempfile.workspace = true
 
 [features]
-default = ["lpg", "parallel", "spill", "mmap", "regex"]
-lpg = []  # Enable LPG (labeled property graph) model
+default = ["parallel", "spill", "mmap", "regex"]
+lpg = []  # Deprecated: the LPG store is always built, so this enables nothing. Removed in 0.7.0.
 parallel = ["rayon", "crossbeam"]  # Morsel-driven parallelism (rayon, crossbeam work-stealing)
 spill = []                         # Disk spilling for out-of-core execution (sync only, async in grafeo-engine)
 mmap = []                          # File-backed vector storage (MmapStorage)
@@ -99,7 +99,6 @@ harness = false
 [[bench]]
 name = "store_apply"
 harness = false
-required-features = ["lpg"]
 
 [[bench]]
 name = "morsel_pipeline"

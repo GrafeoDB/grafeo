@@ -37,9 +37,9 @@ fn chain_graph() -> GrafeoDB {
     session.create_edge(na, nc, "SHORTCUT").unwrap();
 
     // Verify setup data
-    assert_eq!(db.node_count(), 5, "chain_graph: expected 5 nodes");
+    assert_eq!(db.node_count().unwrap(), 5, "chain_graph: expected 5 nodes");
     assert_eq!(
-        db.edge_count(),
+        db.edge_count().unwrap(),
         5,
         "chain_graph: expected 5 edges (4 LINK + 1 SHORTCUT)"
     );

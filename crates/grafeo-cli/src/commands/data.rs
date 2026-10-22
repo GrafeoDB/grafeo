@@ -699,7 +699,7 @@ mod tests {
 
         // Verify loaded data
         let loaded = grafeo_engine::GrafeoDB::open(&target_path).unwrap();
-        let info = loaded.info();
+        let info = loaded.info().unwrap();
         assert_eq!(info.node_count, 2);
         assert_eq!(info.edge_count, 1);
     }
@@ -818,7 +818,7 @@ mod tests {
         .expect("should handle empty lines");
 
         let db = grafeo_engine::GrafeoDB::open(&db_path).unwrap();
-        assert_eq!(db.info().node_count, 1);
+        assert_eq!(db.info().unwrap().node_count, 1);
     }
 
     #[test]
@@ -947,7 +947,7 @@ mod tests {
         .expect("load into existing db should succeed");
 
         let db = grafeo_engine::GrafeoDB::open(&db_path).unwrap();
-        assert_eq!(db.info().node_count, 2);
+        assert_eq!(db.info().unwrap().node_count, 2);
     }
 
     #[test]
@@ -1153,7 +1153,7 @@ mod tests {
         .expect("load node without labels should succeed");
 
         let db = grafeo_engine::GrafeoDB::open(&db_path).unwrap();
-        assert_eq!(db.info().node_count, 1);
+        assert_eq!(db.info().unwrap().node_count, 1);
     }
 
     #[test]
@@ -1177,7 +1177,7 @@ mod tests {
         .expect("load node without properties should succeed");
 
         let db = grafeo_engine::GrafeoDB::open(&db_path).unwrap();
-        assert_eq!(db.info().node_count, 1);
+        assert_eq!(db.info().unwrap().node_count, 1);
     }
 
     #[test]
@@ -1273,7 +1273,7 @@ mod tests {
         .expect("whitespace-only lines should be skipped");
 
         let db = grafeo_engine::GrafeoDB::open(&db_path).unwrap();
-        assert_eq!(db.info().node_count, 1);
+        assert_eq!(db.info().unwrap().node_count, 1);
     }
 
     #[test]
@@ -1627,7 +1627,7 @@ this is not json\n";
         .expect("load node with empty labels should succeed");
 
         let db = grafeo_engine::GrafeoDB::open(&db_path).unwrap();
-        assert_eq!(db.info().node_count, 1);
+        assert_eq!(db.info().unwrap().node_count, 1);
     }
 
     #[test]
@@ -2545,7 +2545,11 @@ this is not json\n";
         let error = write_file(&db, &file, &checked).expect_err("the edge is gone");
 
         assert!(error.to_string().contains("changed"), "{error}");
-        assert_eq!(db.node_count(), 0, "the nodes it wrote rolled back");
+        assert_eq!(
+            db.node_count().unwrap(),
+            0,
+            "the nodes it wrote rolled back"
+        );
     }
 
     // --- Memory -----------------------------------------------------------------

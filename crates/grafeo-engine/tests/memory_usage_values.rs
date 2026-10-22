@@ -12,7 +12,7 @@
 //! cargo test -p grafeo-engine --all-features --test memory_usage_values
 //! ```
 
-#![cfg(all(feature = "lpg", feature = "gql"))]
+#![cfg(feature = "gql")]
 
 use std::collections::BTreeMap;
 use std::sync::Arc;

@@ -148,12 +148,12 @@ mod tests {
 
     /// Gus's age and whether he is a `Traveller`, at `view`.
     fn gus_at(store: &RowGroupStore, gus: NodeId, view: ReadView) -> (Option<Value>, bool) {
-        let traveller = store.get_node_at(gus, view).is_some_and(|node| {
+        let traveller = store.node(gus, view).unwrap().is_some_and(|node| {
             node.labels
                 .iter()
                 .any(|label| label.as_str() == "Traveller")
         });
-        (store.node_property_at(gus, "age", view), traveller)
+        (store.node_property(gus, "age", view).unwrap(), traveller)
     }
 
     /// An immediate write keeps what it replaces, whatever readers there

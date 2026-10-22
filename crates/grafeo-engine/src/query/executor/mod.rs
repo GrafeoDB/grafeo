@@ -4,7 +4,7 @@
 
 #[cfg(feature = "algos")]
 pub mod procedure_call;
-#[cfg(all(feature = "gql", feature = "lpg"))]
+#[cfg(feature = "gql")]
 pub mod stream;
 #[cfg(all(feature = "algos", feature = "gql"))]
 pub mod user_procedure;

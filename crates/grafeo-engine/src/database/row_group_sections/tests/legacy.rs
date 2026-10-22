@@ -6,6 +6,7 @@
 //! copy holds what a reader at its epoch sees; embeddings a 0.5.x build
 //! spilled come back.
 
+use grafeo_common::types::ReadView;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
@@ -312,7 +313,10 @@ fn assert_migrates(dir: &Path, path: &Path, read: fn(&Path) -> Result<Database>,
         return;
     };
     assert_same_database(&db, &database, what);
-    assert!(db.node_count() > 0, "{what}: the fixture holds data");
+    assert!(
+        db.node_count().unwrap() > 0,
+        "{what}: the fixture holds data"
+    );
 
     let (image, _) = database.image();
     let reopened = Database::load(&image, None).unwrap();
@@ -396,9 +400,15 @@ fn embeddings_a_0_5_build_spilled_fold_into_row_groups() {
     let key = PropertyKey::new("embedding");
     let embeddings: Vec<Option<Value>> = database
         .root
-        .nodes_by_label("Item")
+        .nodes_by_label("Item", ReadView::latest())
+        .unwrap()
         .into_iter()
-        .map(|id| database.root.get_node_property(id, &key))
+        .map(|id| {
+            database
+                .root
+                .node_property(id, key.as_str(), ReadView::latest())
+                .unwrap()
+        })
         .collect();
     assert_eq!(embeddings.len(), 3, "Alix, Gus and Jules; Vincent is gone");
     assert!(embeddings.iter().all(Option::is_some));
@@ -549,7 +559,10 @@ fn a_graph_copy_holds_the_committed_state() {
     database.commit(open.trips);
     let bio = PropertyKey::new("bio");
     assert_eq!(
-        database.root.get_node_property(travellers.alix, &bio),
+        database
+            .root
+            .node_property(travellers.alix, bio.as_str(), ReadView::latest())
+            .unwrap(),
         Some(Value::from("Alix moved to Berlin"))
     );
     assert_eq!(
@@ -557,7 +570,8 @@ fn a_graph_copy_holds_the_committed_state() {
             .root
             .graph("copy")
             .unwrap()
-            .get_node_property(travellers.alix, &bio),
+            .node_property(travellers.alix, bio.as_str(), ReadView::latest())
+            .unwrap(),
         Some(Value::from("Alix lives in Amsterdam"))
     );
 }

@@ -12,7 +12,7 @@ use parking_lot::RwLock;
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
 
-use grafeo_common::types::NodeId;
+use grafeo_common::types::{NodeId, ReadView};
 use grafeo_engine::database::GrafeoDB;
 
 use crate::error::PyGrafeoError;
@@ -47,13 +47,19 @@ impl PySolvORAdapter {
         Self { db }
     }
 
-    /// Runs `compute` on the database with the GIL released.
-    fn compute<T: Send>(
+    /// Runs `compute` on the database with the GIL released, as a committed
+    /// reader at the current epoch sees it; a read the store cannot do raises
+    /// its error.
+    fn compute<T: Send, E: Into<PyGrafeoError>>(
         &self,
         py: Python<'_>,
-        compute: impl FnOnce(&GrafeoDB) -> T + Send,
+        compute: impl FnOnce(&GrafeoDB, ReadView) -> Result<T, E> + Send,
     ) -> PyResult<T> {
-        without_gil(py, || Ok(compute(&self.db.read())))
+        without_gil(py, || {
+            let db = self.db.read();
+            let view = ReadView::committed(db.current_epoch());
+            compute(&db, view).map_err(Into::into)
+        })
     }
 }
 
@@ -93,17 +99,19 @@ impl PySolvORAdapter {
             .into());
         }
 
-        let result = self.compute(py, |db| {
+        let result = self.compute(py, |db, view| {
             let store = db.store();
             match method {
                 "dijkstra" => Ok(algorithms::dijkstra_path(
                     &*store,
+                    view,
                     NodeId::new(source),
                     NodeId::new(target),
                     weight,
-                )),
+                )?),
                 "bellman_ford" => {
-                    let bf_result = algorithms::bellman_ford(&*store, NodeId::new(source), weight);
+                    let bf_result =
+                        algorithms::bellman_ford(&*store, view, NodeId::new(source), weight)?;
                     if bf_result.has_negative_cycle {
                         return Err(PyGrafeoError::InvalidArgument(
                             "Graph contains negative cycle".into(),
@@ -121,13 +129,14 @@ impl PySolvORAdapter {
                 // A* with zero heuristic (same as Dijkstra)
                 _ => Ok(algorithms::astar(
                     &*store,
+                    view,
                     NodeId::new(source),
                     NodeId::new(target),
                     weight,
                     |_| 0.0,
-                )),
+                )?),
             }
-        })??;
+        })?;
 
         match result {
             Some((dist, path)) => {
@@ -155,7 +164,9 @@ impl PySolvORAdapter {
     ) -> PyResult<Py<PyAny>> {
         use grafeo_adapters::plugins::algorithms;
 
-        let result = self.compute(py, |db| algorithms::floyd_warshall(&*db.store(), weight))?;
+        let result = self.compute(py, |db, view| {
+            algorithms::floyd_warshall(&*db.store(), view, weight)
+        })?;
 
         let dict = PyDict::new(py);
         let nodes = result.nodes();
@@ -197,9 +208,10 @@ impl PySolvORAdapter {
     ) -> PyResult<Py<PyAny>> {
         use grafeo_adapters::plugins::algorithms;
 
-        let result = self.compute(py, |db| {
+        let result = self.compute(py, |db, view| {
             algorithms::max_flow(
                 &*db.store(),
+                view,
                 NodeId::new(source),
                 NodeId::new(sink),
                 capacity,
@@ -247,9 +259,10 @@ impl PySolvORAdapter {
     ) -> PyResult<Py<PyAny>> {
         use grafeo_adapters::plugins::algorithms;
 
-        let result = self.compute(py, |db| {
+        let result = self.compute(py, |db, view| {
             algorithms::min_cost_max_flow(
                 &*db.store(),
+                view,
                 NodeId::new(source),
                 NodeId::new(sink),
                 capacity,
@@ -310,12 +323,12 @@ impl PySolvORAdapter {
                 .into());
             }
         };
-        let result = self.compute(py, |db| {
+        let result = self.compute(py, |db, view| {
             let store = db.store();
             if prim {
-                algorithms::prim(&*store, weight, None)
+                algorithms::prim(&*store, view, weight, None)
             } else {
-                algorithms::kruskal(&*store, weight)
+                algorithms::kruskal(&*store, view, weight)
             }
         })?;
 
@@ -343,7 +356,9 @@ impl PySolvORAdapter {
     fn connected_components(&self, py: Python<'_>) -> PyResult<BTreeMap<u64, u64>> {
         use grafeo_adapters::plugins::algorithms;
 
-        let result = self.compute(py, |db| algorithms::connected_components(&*db.store()))?;
+        let result = self.compute(py, |db, view| {
+            algorithms::connected_components(&*db.store(), view)
+        })?;
         Ok(result.into_iter().map(|(n, c)| (n.0, c)).collect())
     }
 
@@ -354,8 +369,8 @@ impl PySolvORAdapter {
     fn strongly_connected_components(&self, py: Python<'_>) -> PyResult<BTreeMap<u64, u64>> {
         use grafeo_adapters::plugins::algorithms;
 
-        let result = self.compute(py, |db| {
-            algorithms::strongly_connected_components(&*db.store())
+        let result = self.compute(py, |db, view| {
+            algorithms::strongly_connected_components(&*db.store(), view)
         })?;
         Ok(result.into_iter().map(|(n, c)| (n.0, c)).collect())
     }
@@ -367,7 +382,9 @@ impl PySolvORAdapter {
     fn topological_sort(&self, py: Python<'_>) -> PyResult<Option<Vec<u64>>> {
         use grafeo_adapters::plugins::algorithms;
 
-        let result = self.compute(py, |db| algorithms::topological_sort(&*db.store()))?;
+        let result = self.compute(py, |db, view| {
+            algorithms::topological_sort(&*db.store(), view)
+        })?;
         Ok(result.map(|v| v.into_iter().map(|n| n.0).collect()))
     }
 
@@ -397,8 +414,8 @@ impl PySolvORAdapter {
     ) -> PyResult<BTreeMap<u64, f64>> {
         use grafeo_adapters::plugins::algorithms;
 
-        let result = self.compute(py, |db| {
-            algorithms::pagerank(&*db.store(), damping, max_iter, tol, directed)
+        let result = self.compute(py, |db, view| {
+            algorithms::pagerank(&*db.store(), view, damping, max_iter, tol, directed)
         })?;
         Ok(result.into_iter().map(|(n, s)| (n.0, s)).collect())
     }
@@ -418,8 +435,8 @@ impl PySolvORAdapter {
     ) -> PyResult<BTreeMap<u64, f64>> {
         use grafeo_adapters::plugins::algorithms;
 
-        let result = self.compute(py, |db| {
-            algorithms::betweenness_centrality(&*db.store(), normalized)
+        let result = self.compute(py, |db, view| {
+            algorithms::betweenness_centrality(&*db.store(), view, normalized)
         })?;
         Ok(result.into_iter().map(|(n, s)| (n.0, s)).collect())
     }
@@ -439,7 +456,9 @@ impl PySolvORAdapter {
     fn louvain(&self, resolution: f64, py: Python<'_>) -> PyResult<Py<PyAny>> {
         use grafeo_adapters::plugins::algorithms;
 
-        let result = self.compute(py, |db| algorithms::louvain(&*db.store(), resolution))?;
+        let result = self.compute(py, |db, view| {
+            algorithms::louvain(&*db.store(), view, resolution)
+        })?;
 
         let communities: BTreeMap<u64, u64> = result
             .communities
@@ -466,7 +485,9 @@ impl PySolvORAdapter {
     fn articulation_points(&self, py: Python<'_>) -> PyResult<Vec<u64>> {
         use grafeo_adapters::plugins::algorithms;
 
-        let result = self.compute(py, |db| algorithms::articulation_points(&*db.store()))?;
+        let result = self.compute(py, |db, view| {
+            algorithms::articulation_points(&*db.store(), view)
+        })?;
         Ok(result.into_iter().map(|n| n.0).collect())
     }
 
@@ -477,7 +498,7 @@ impl PySolvORAdapter {
     fn bridges(&self, py: Python<'_>) -> PyResult<Vec<(u64, u64)>> {
         use grafeo_adapters::plugins::algorithms;
 
-        let result = self.compute(py, |db| algorithms::bridges(&*db.store()))?;
+        let result = self.compute(py, |db, view| algorithms::bridges(&*db.store(), view))?;
         Ok(result.into_iter().map(|(s, t)| (s.0, t.0)).collect())
     }
 
@@ -488,12 +509,12 @@ impl PySolvORAdapter {
     fn graph_stats(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         use grafeo_adapters::plugins::algorithms;
 
-        let (n, e, components) = self.compute(py, |db| {
-            (
-                db.node_count(),
-                db.edge_count(),
-                algorithms::connected_component_count(&*db.store()),
-            )
+        let (n, e, components) = self.compute(py, |db, view| {
+            Ok::<_, PyGrafeoError>((
+                db.node_count()?,
+                db.edge_count()?,
+                algorithms::connected_component_count(&*db.store(), view)?,
+            ))
         })?;
         let density = if n > 1 {
             (e as f64) / ((n * (n - 1)) as f64)
@@ -510,12 +531,12 @@ impl PySolvORAdapter {
         Ok(dict.into_any().unbind())
     }
 
-    fn __repr__(&self) -> String {
+    fn __repr__(&self) -> PyResult<String> {
         let db = self.db.read();
-        format!(
+        Ok(format!(
             "SolvORAdapter(nodes={}, edges={})",
-            db.node_count(),
-            db.edge_count()
-        )
+            db.node_count().map_err(PyGrafeoError::from)?,
+            db.edge_count().map_err(PyGrafeoError::from)?
+        ))
     }
 }

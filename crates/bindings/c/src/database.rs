@@ -872,8 +872,9 @@ pub extern "C" fn grafeo_create_node(
     )
 }
 
-/// Get a node by ID. Writes into `out`. Returns `Ok` or an error status.
-/// On success, `out` must be freed with `grafeo_free_node`.
+/// Get a node by ID. Writes into `out`: the node, to free with
+/// `grafeo_free_node`, or NULL when it does not exist. Returns `Ok`, or an
+/// error status for a failure (a read the store cannot do).
 #[unsafe(no_mangle)]
 pub extern "C" fn grafeo_get_node(
     db: *mut GrafeoDatabase,
@@ -886,14 +887,16 @@ pub extern "C" fn grafeo_get_node(
         return GrafeoStatus::ErrorNullPointer;
     }
     let guard = db.inner.read();
-    node_out(guard.get_node(NodeId::new(id)), id, out)
+    match guard.get_node(NodeId::new(id)) {
+        Ok(node) => node_out(node, out),
+        Err(err) => set_error(&err),
+    }
 }
 
-/// Hands `node` to the caller through `out` (checked not null), or reports
-/// node `id` as not found.
+/// Hands `node` to the caller through `out` (checked not null): NULL with
+/// `Ok` when the node does not exist (a status is only for a failure).
 pub(crate) fn node_out(
     node: Option<grafeo_core::graph::lpg::Node>,
-    id: u64,
     out: *mut *mut GrafeoNode,
 ) -> GrafeoStatus {
     match node {
@@ -917,10 +920,9 @@ pub(crate) fn node_out(
             GrafeoStatus::Ok
         }
         None => {
-            set_last_error(&format!("Node not found: {id}"));
             // SAFETY: We checked out is not null above.
             unsafe { *out = std::ptr::null_mut() };
-            GrafeoStatus::ErrorDatabase
+            GrafeoStatus::Ok
         }
     }
 }
@@ -1043,22 +1045,33 @@ pub extern "C" fn grafeo_remove_node_label(
     )
 }
 
-/// Get labels for a node as a JSON array string.
-/// Returns null if node not found. Caller must free with `grafeo_free_string`.
+/// Writes to `out_json` the labels of node `id` as a JSON array string, to
+/// free with `grafeo_free_string`, or NULL when the node does not exist.
+/// Returns `Ok`, or the error status of a read the store cannot do (with
+/// `out_json` NULL).
 #[unsafe(no_mangle)]
-pub extern "C" fn grafeo_get_node_labels(db: *mut GrafeoDatabase, id: u64) -> *mut c_char {
-    if db.is_null() {
-        set_last_error("Null database pointer");
-        return std::ptr::null_mut();
+pub extern "C" fn grafeo_get_node_labels(
+    db: *mut GrafeoDatabase,
+    id: u64,
+    out_json: *mut *mut c_char,
+) -> GrafeoStatus {
+    let db = db_ref!(db);
+    if out_json.is_null() {
+        set_last_error("Null output pointer");
+        return GrafeoStatus::ErrorNullPointer;
     }
-    // SAFETY: Caller guarantees valid pointer.
-    let db = unsafe { &*db };
+    // SAFETY: checked not null above.
+    unsafe { *out_json = std::ptr::null_mut() };
     match db.inner.read().get_node_labels(NodeId::new(id)) {
-        Some(labels) => {
+        Ok(Some(labels)) => {
             let json = serde_json::to_string(&labels).unwrap_or_default();
-            CString::new(json).map_or(std::ptr::null_mut(), CString::into_raw)
+            let raw = CString::new(json).map_or(std::ptr::null_mut(), CString::into_raw);
+            // SAFETY: checked not null above.
+            unsafe { *out_json = raw };
+            GrafeoStatus::Ok
         }
-        None => std::ptr::null_mut(),
+        Ok(None) => GrafeoStatus::Ok,
+        Err(err) => set_error(&err),
     }
 }
 
@@ -1138,8 +1151,9 @@ pub extern "C" fn grafeo_create_edge(
     )
 }
 
-/// Get an edge by ID. Writes into `out`. Returns `Ok` or error status.
-/// On success, `out` must be freed with `grafeo_free_edge`.
+/// Get an edge by ID. Writes into `out`: the edge, to free with
+/// `grafeo_free_edge`, or NULL when it does not exist. Returns `Ok`, or an
+/// error status for a failure (a read the store cannot do).
 #[unsafe(no_mangle)]
 pub extern "C" fn grafeo_get_edge(
     db: *mut GrafeoDatabase,
@@ -1152,14 +1166,16 @@ pub extern "C" fn grafeo_get_edge(
         return GrafeoStatus::ErrorNullPointer;
     }
     let guard = db.inner.read();
-    edge_out(guard.get_edge(EdgeId(id)), id, out)
+    match guard.get_edge(EdgeId(id)) {
+        Ok(edge) => edge_out(edge, out),
+        Err(err) => set_error(&err),
+    }
 }
 
-/// Hands `edge` to the caller through `out` (checked not null), or reports
-/// edge `id` as not found.
+/// Hands `edge` to the caller through `out` (checked not null): NULL with
+/// `Ok` when the edge does not exist (a status is only for a failure).
 pub(crate) fn edge_out(
     edge: Option<grafeo_core::graph::lpg::Edge>,
-    id: u64,
     out: *mut *mut GrafeoEdge,
 ) -> GrafeoStatus {
     match edge {
@@ -1179,10 +1195,9 @@ pub(crate) fn edge_out(
             GrafeoStatus::Ok
         }
         None => {
-            set_last_error(&format!("Edge not found: {id}"));
             // SAFETY: We checked out is not null above.
             unsafe { *out = std::ptr::null_mut() };
-            GrafeoStatus::ErrorDatabase
+            GrafeoStatus::Ok
         }
     }
 }
@@ -1396,7 +1411,10 @@ pub extern "C" fn grafeo_find_nodes_by_property(
         set_last_error("Invalid JSON value");
         return GrafeoStatus::ErrorSerialization;
     };
-    let ids = db.inner.read().find_nodes_by_property(prop_str, &value);
+    let ids = match db.inner.read().find_nodes_by_property(prop_str, &value) {
+        Ok(ids) => ids,
+        Err(err) => return set_error(&err),
+    };
     let count = ids.len();
     let mut raw_ids: Vec<u64> = ids.iter().map(|id| id.as_u64()).collect();
     raw_ids.shrink_to_fit();
@@ -1780,24 +1798,46 @@ pub extern "C" fn grafeo_free_vector_results(ids: *mut u64, distances: *mut f32,
 // Statistics
 // =========================================================================
 
-/// Get the number of nodes.
-#[unsafe(no_mangle)]
-pub extern "C" fn grafeo_node_count(db: *mut GrafeoDatabase) -> usize {
-    if db.is_null() {
-        return 0;
+/// Writes `count` to `out_count` (checked not null) and returns `Ok`, or
+/// the error status of the read that failed.
+fn count_out(
+    count: grafeo_common::utils::error::Result<usize>,
+    out_count: *mut usize,
+) -> GrafeoStatus {
+    if out_count.is_null() {
+        set_last_error("Null output pointer");
+        return GrafeoStatus::ErrorNullPointer;
     }
-    // SAFETY: Caller guarantees valid pointer.
-    unsafe { &*db }.inner.read().node_count()
+    match count {
+        Ok(count) => {
+            // SAFETY: checked not null above.
+            unsafe { *out_count = count };
+            GrafeoStatus::Ok
+        }
+        Err(err) => set_error(&err),
+    }
 }
 
-/// Get the number of edges.
+/// Writes the number of nodes to `out_count`. Returns `Ok`, or the error
+/// status of a read the store cannot do.
 #[unsafe(no_mangle)]
-pub extern "C" fn grafeo_edge_count(db: *mut GrafeoDatabase) -> usize {
-    if db.is_null() {
-        return 0;
-    }
-    // SAFETY: Caller guarantees valid pointer.
-    unsafe { &*db }.inner.read().edge_count()
+pub extern "C" fn grafeo_node_count(
+    db: *mut GrafeoDatabase,
+    out_count: *mut usize,
+) -> GrafeoStatus {
+    let db = db_ref!(db);
+    count_out(db.inner.read().node_count(), out_count)
+}
+
+/// Writes the number of edges to `out_count`. Returns `Ok`, or the error
+/// status of a read the store cannot do.
+#[unsafe(no_mangle)]
+pub extern "C" fn grafeo_edge_count(
+    db: *mut GrafeoDatabase,
+    out_count: *mut usize,
+) -> GrafeoStatus {
+    let db = db_ref!(db);
+    count_out(db.inner.read().edge_count(), out_count)
 }
 
 // =========================================================================
@@ -2068,6 +2108,8 @@ pub extern "C" fn grafeo_clear_plan_cache(db: *mut GrafeoDatabase) -> GrafeoStat
 }
 
 /// Get database info as a JSON string. Caller must free with `grafeo_free_string`.
+/// NULL on error (a read the store cannot do), with the error in
+/// `grafeo_last_error`.
 #[unsafe(no_mangle)]
 pub extern "C" fn grafeo_info(db: *mut GrafeoDatabase) -> *mut c_char {
     if db.is_null() {
@@ -2076,7 +2118,13 @@ pub extern "C" fn grafeo_info(db: *mut GrafeoDatabase) -> *mut c_char {
     }
     // SAFETY: Caller guarantees valid pointer.
     let db = unsafe { &*db };
-    let info = db.inner.read().info();
+    let info = match db.inner.read().info() {
+        Ok(info) => info,
+        Err(err) => {
+            set_error(&err);
+            return std::ptr::null_mut();
+        }
+    };
     let json = serde_json::json!({
         "node_count": info.node_count,
         "edge_count": info.edge_count,
@@ -2392,6 +2440,17 @@ pub extern "C" fn grafeo_free_string(s: *mut c_char) {
 // Tests
 // =========================================================================
 
+/// The count `count` writes for `db`, for tests (asserting it succeeds).
+#[cfg(test)]
+pub(crate) fn counted(
+    count: extern "C" fn(*mut GrafeoDatabase, *mut usize) -> GrafeoStatus,
+    db: *mut GrafeoDatabase,
+) -> usize {
+    let mut found = 0;
+    assert_eq!(count(db, &raw mut found), GrafeoStatus::Ok);
+    found
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2500,7 +2559,11 @@ mod tests {
         let insert_gus = CString::new("INSERT (:Person {name: 'Gus'})").unwrap();
         let result = grafeo_execute(db, insert_gus.as_ptr());
         assert!(result.is_null(), "a write after grafeo_compact still fails");
-        assert_eq!(grafeo_node_count(db), 1, "Alix alone");
+        assert_eq!(
+            crate::database::counted(grafeo_node_count, db),
+            1,
+            "Alix alone"
+        );
         grafeo_close(db);
         grafeo_free_database(db);
         let _ = std::fs::remove_dir_all(&dir);
@@ -2595,8 +2658,8 @@ mod tests {
     fn test_open_memory_and_close() {
         let db = grafeo_open_memory();
         assert!(!db.is_null());
-        assert_eq!(grafeo_node_count(db), 0);
-        assert_eq!(grafeo_edge_count(db), 0);
+        assert_eq!(crate::database::counted(grafeo_node_count, db), 0);
+        assert_eq!(crate::database::counted(grafeo_edge_count, db), 0);
         let status = grafeo_close(db);
         assert_eq!(status, GrafeoStatus::Ok);
         grafeo_free_database(db);
@@ -2609,7 +2672,7 @@ mod tests {
         let props = CString::new(r#"{"name":"Alix","age":30}"#).unwrap();
         let id = grafeo_create_node(db, labels.as_ptr(), props.as_ptr());
         assert_ne!(id, u64::MAX);
-        assert_eq!(grafeo_node_count(db), 1);
+        assert_eq!(crate::database::counted(grafeo_node_count, db), 1);
 
         let mut node_ptr: *mut GrafeoNode = std::ptr::null_mut();
         let status = grafeo_get_node(db, id, &raw mut node_ptr);
@@ -2625,6 +2688,36 @@ mod tests {
         grafeo_free_database(db);
     }
 
+    /// An absent node or edge is no failure: `Ok` with NULL, and the labels
+    /// of an absent node are NULL with `Ok`.
+    #[test]
+    fn an_absent_node_or_edge_is_ok_with_null() {
+        let db = grafeo_open_memory();
+        let mut node_ptr: *mut GrafeoNode = std::ptr::null_mut();
+        assert_eq!(
+            grafeo_get_node(db, 4242, &raw mut node_ptr),
+            GrafeoStatus::Ok
+        );
+        assert!(node_ptr.is_null());
+        let mut edge_ptr: *mut GrafeoEdge = std::ptr::null_mut();
+        assert_eq!(
+            grafeo_get_edge(db, 4242, &raw mut edge_ptr),
+            GrafeoStatus::Ok
+        );
+        assert!(edge_ptr.is_null());
+        let mut labels = std::ptr::null_mut();
+        assert_eq!(
+            grafeo_get_node_labels(db, 4242, &raw mut labels),
+            GrafeoStatus::Ok
+        );
+        assert!(labels.is_null());
+        let mut count = 7;
+        assert_eq!(grafeo_node_count(db, &raw mut count), GrafeoStatus::Ok);
+        assert_eq!(count, 0);
+        grafeo_close(db);
+        grafeo_free_database(db);
+    }
+
     #[test]
     fn test_create_edge_and_get() {
         let db = grafeo_open_memory();
@@ -2636,7 +2729,7 @@ mod tests {
         let edge_type = CString::new("KNOWS").unwrap();
         let edge_id = grafeo_create_edge(db, id_a, id_b, edge_type.as_ptr(), std::ptr::null());
         assert_ne!(edge_id, u64::MAX);
-        assert_eq!(grafeo_edge_count(db), 1);
+        assert_eq!(crate::database::counted(grafeo_edge_count, db), 1);
 
         let mut edge_ptr: *mut GrafeoEdge = std::ptr::null_mut();
         let status = grafeo_get_edge(db, edge_id, &raw mut edge_ptr);
@@ -2704,7 +2797,13 @@ mod tests {
         assert_eq!(text(grafeo_result_nodes_json(result)), "[]");
         assert_eq!(text(grafeo_result_edges_json(result)), "[]");
         grafeo_free_result(result);
-        assert_eq!((grafeo_node_count(db), grafeo_edge_count(db)), (2, 1));
+        assert_eq!(
+            (
+                crate::database::counted(grafeo_node_count, db),
+                crate::database::counted(grafeo_edge_count, db)
+            ),
+            (2, 1)
+        );
         grafeo_close(db);
         grafeo_free_database(db);
     }
@@ -2717,8 +2816,16 @@ mod tests {
         let err = crate::error::grafeo_last_error();
         assert!(!err.is_null());
 
-        assert_eq!(grafeo_node_count(std::ptr::null_mut()), 0);
-        assert_eq!(grafeo_edge_count(std::ptr::null_mut()), 0);
+        let mut count = 7;
+        assert_eq!(
+            grafeo_node_count(std::ptr::null_mut(), &raw mut count),
+            GrafeoStatus::ErrorNullPointer
+        );
+        assert_eq!(
+            grafeo_edge_count(std::ptr::null_mut(), &raw mut count),
+            GrafeoStatus::ErrorNullPointer
+        );
+        assert_eq!(count, 7, "nothing written");
         assert_eq!(grafeo_delete_node(std::ptr::null_mut(), 0), -1);
         assert_eq!(grafeo_delete_edge(std::ptr::null_mut(), 0), -1);
     }
@@ -2740,7 +2847,7 @@ mod tests {
         grafeo_free_transaction(tx);
 
         // Verify committed data is visible.
-        assert_eq!(grafeo_node_count(db), 1);
+        assert_eq!(crate::database::counted(grafeo_node_count, db), 1);
 
         grafeo_close(db);
         grafeo_free_database(db);
@@ -2753,7 +2860,7 @@ mod tests {
         // Create a baseline node.
         let labels = CString::new(r#"["Base"]"#).unwrap();
         grafeo_create_node(db, labels.as_ptr(), std::ptr::null());
-        assert_eq!(grafeo_node_count(db), 1);
+        assert_eq!(crate::database::counted(grafeo_node_count, db), 1);
 
         let tx = grafeo_begin_transaction(db);
         let query = CString::new("CREATE (:Rolled {val: 2})").unwrap();
@@ -2767,7 +2874,7 @@ mod tests {
         grafeo_free_transaction(tx);
 
         // Rolled-back node should not be visible.
-        assert_eq!(grafeo_node_count(db), 1);
+        assert_eq!(crate::database::counted(grafeo_node_count, db), 1);
 
         grafeo_close(db);
         grafeo_free_database(db);
@@ -2843,18 +2950,18 @@ mod tests {
         let edge_type = CString::new("R").unwrap();
         let eid = grafeo_create_edge(db, id_a, id_b, edge_type.as_ptr(), std::ptr::null());
 
-        assert_eq!(grafeo_node_count(db), 2);
-        assert_eq!(grafeo_edge_count(db), 1);
+        assert_eq!(crate::database::counted(grafeo_node_count, db), 2);
+        assert_eq!(crate::database::counted(grafeo_edge_count, db), 1);
 
         // Delete edge
         assert_eq!(grafeo_delete_edge(db, eid), 1);
-        assert_eq!(grafeo_edge_count(db), 0);
+        assert_eq!(crate::database::counted(grafeo_edge_count, db), 0);
         // Second delete returns 0
         assert_eq!(grafeo_delete_edge(db, eid), 0);
 
         // Delete node
         assert_eq!(grafeo_delete_node(db, id_a), 1);
-        assert_eq!(grafeo_node_count(db), 1);
+        assert_eq!(crate::database::counted(grafeo_node_count, db), 1);
         assert_eq!(grafeo_delete_node(db, id_a), 0);
 
         grafeo_close(db);
@@ -2876,7 +2983,11 @@ mod tests {
         assert_eq!(grafeo_add_node_label(db, id, label.as_ptr()), 0);
 
         // Get labels
-        let labels_json = grafeo_get_node_labels(db, id);
+        let mut labels_json = std::ptr::null_mut();
+        assert_eq!(
+            grafeo_get_node_labels(db, id, &raw mut labels_json),
+            GrafeoStatus::Ok
+        );
         assert!(!labels_json.is_null());
         // SAFETY: We just verified the pointer is not null.
         let labels_str = unsafe { std::ffi::CStr::from_ptr(labels_json) }

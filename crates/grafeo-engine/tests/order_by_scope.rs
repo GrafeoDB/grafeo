@@ -13,7 +13,7 @@
 //! cargo test -p grafeo-engine --all-features --test order_by_scope
 //! ```
 
-#![cfg(all(feature = "lpg", feature = "gql", feature = "cypher"))]
+#![cfg(all(feature = "gql", feature = "cypher"))]
 
 use grafeo_common::types::Value;
 use grafeo_common::utils::error::{Error, QueryErrorKind};

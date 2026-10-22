@@ -79,8 +79,16 @@ fn social_network() -> GrafeoDB {
     session.create_edge(dave, techcorp, "WORKS_AT").unwrap();
 
     // Verify setup: 4 Person + 1 Company = 5 nodes, 3 KNOWS + 3 WORKS_AT = 6 edges
-    assert_eq!(db.node_count(), 5, "social_network: expected 5 nodes");
-    assert_eq!(db.edge_count(), 6, "social_network: expected 6 edges");
+    assert_eq!(
+        db.node_count().unwrap(),
+        5,
+        "social_network: expected 5 nodes"
+    );
+    assert_eq!(
+        db.edge_count().unwrap(),
+        6,
+        "social_network: expected 6 edges"
+    );
 
     db
 }

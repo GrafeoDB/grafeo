@@ -7,11 +7,11 @@ use super::project::{
 use super::{Operator, OperatorError, OperatorResult};
 use crate::execution::{ChunkZoneHints, DataChunk, SelectionVector, ValueVector};
 use crate::graph::Direction;
-use crate::graph::GraphStoreSearch;
+use crate::graph::GraphStore;
 use crate::graph::lpg::{Edge, Node};
 use grafeo_common::types::{
-    Decimal, DecimalError, EdgeId, EpochId, HashableValue, LogicalType, NodeId, PropertyDataType,
-    PropertyKey, PropertyMap, ReadView, TemporalComparison, TransactionId, Value, ValueType,
+    Decimal, DecimalError, EdgeId, HashableValue, LogicalType, NodeId, PropertyDataType,
+    PropertyKey, PropertyMap, ReadView, TemporalComparison, Value, ValueType,
 };
 #[cfg(feature = "regex")]
 use regex::Regex;
@@ -172,7 +172,7 @@ pub trait Predicate: Send + Sync {
 }
 
 /// A comparison operator.
-#[cfg(all(test, feature = "lpg"))]
+#[cfg(test)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum CompareOp {
     /// Equal.
@@ -190,7 +190,7 @@ pub(crate) enum CompareOp {
 }
 
 /// A simple comparison predicate.
-#[cfg(all(test, feature = "lpg"))]
+#[cfg(test)]
 pub(crate) struct ComparisonPredicate {
     /// Column index to compare.
     column: usize,
@@ -200,7 +200,7 @@ pub(crate) struct ComparisonPredicate {
     value: Value,
 }
 
-#[cfg(all(test, feature = "lpg"))]
+#[cfg(test)]
 impl ComparisonPredicate {
     /// Creates a new comparison predicate.
     pub(crate) fn new(column: usize, op: CompareOp, value: Value) -> Self {
@@ -208,7 +208,7 @@ impl ComparisonPredicate {
     }
 }
 
-#[cfg(all(test, feature = "lpg"))]
+#[cfg(test)]
 impl Predicate for ComparisonPredicate {
     fn evaluate(&self, chunk: &DataChunk, row: usize) -> Result<bool, OperatorError> {
         Ok(self.matches(chunk, row))
@@ -220,7 +220,7 @@ impl Predicate for ComparisonPredicate {
 }
 
 /// Whether `op` holds for two operands in the order `order`.
-#[cfg(all(test, feature = "lpg"))]
+#[cfg(test)]
 fn compare_holds(op: CompareOp, order: std::cmp::Ordering) -> bool {
     match op {
         CompareOp::Eq => order.is_eq(),
@@ -232,7 +232,7 @@ fn compare_holds(op: CompareOp, order: std::cmp::Ordering) -> bool {
     }
 }
 
-#[cfg(all(test, feature = "lpg"))]
+#[cfg(test)]
 impl ComparisonPredicate {
     /// Whether row `row` of `chunk` passes the comparison.
     fn matches(&self, chunk: &DataChunk, row: usize) -> bool {
@@ -319,11 +319,9 @@ pub struct ExpressionPredicate {
     /// Map from variable name to column index.
     variable_columns: HashMap<String, usize>,
     /// The graph store for property lookups.
-    store: Arc<dyn GraphStoreSearch>,
-    /// Transaction ID for MVCC-aware lookups.
-    transaction_id: Option<TransactionId>,
-    /// Viewing epoch for MVCC-aware lookups.
-    viewing_epoch: Option<EpochId>,
+    store: Arc<dyn GraphStore>,
+    /// Who reads: every lookup answers as this view sees the graph.
+    view: ReadView,
     /// Session context for introspection functions (info, schema, current_schema, etc.).
     session_context: SessionContext,
     /// Compiled patterns of `=~` and `LIKE` (see [`PatternCache`]).
@@ -460,17 +458,20 @@ impl PatternCache {
 
 /// A lazily-computed, cloneable value.
 ///
-/// The factory runs at most once (via `OnceLock`). Cloning is cheap because
-/// both the lock and the factory are behind `Arc`.
+/// The factory runs until it succeeds once (via `OnceLock`): a value is
+/// kept, an error is returned and the next access tries again. Cloning is
+/// cheap because both the lock and the factory are behind `Arc`.
 #[derive(Clone)]
 pub struct LazyValue {
     cell: Arc<std::sync::OnceLock<Value>>,
-    factory: Arc<dyn Fn() -> Value + Send + Sync>,
+    factory: Arc<dyn Fn() -> grafeo_common::utils::error::Result<Value> + Send + Sync>,
 }
 
 impl LazyValue {
     /// Creates a new lazy value with the given factory.
-    pub fn new(factory: impl Fn() -> Value + Send + Sync + 'static) -> Self {
+    pub fn new(
+        factory: impl Fn() -> grafeo_common::utils::error::Result<Value> + Send + Sync + 'static,
+    ) -> Self {
         Self {
             cell: Arc::new(std::sync::OnceLock::new()),
             factory: Arc::new(factory),
@@ -478,8 +479,16 @@ impl LazyValue {
     }
 
     /// Returns the value, computing it on first access.
-    pub fn get(&self) -> &Value {
-        self.cell.get_or_init(|| (self.factory)())
+    ///
+    /// # Errors
+    ///
+    /// The factory's error (a read of the store that failed).
+    pub fn get(&self) -> grafeo_common::utils::error::Result<&Value> {
+        if let Some(value) = self.cell.get() {
+            return Ok(value);
+        }
+        let value = (self.factory)()?;
+        Ok(self.cell.get_or_init(|| value))
     }
 }
 
@@ -494,7 +503,7 @@ impl std::fmt::Debug for LazyValue {
 
 impl Default for LazyValue {
     fn default() -> Self {
-        Self::new(|| Value::Null)
+        Self::new(|| Ok(Value::Null))
     }
 }
 
@@ -773,40 +782,36 @@ enum PropertyRead {
     NotVisible,
 }
 
-impl PropertyRead {
-    fn of(value: Option<&Value>) -> Self {
-        value.map_or(Self::Absent, |value| Self::Value(value.clone()))
-    }
-}
-
 impl ExpressionPredicate {
-    /// Creates a new expression predicate.
+    /// Creates an expression predicate whose lookups read the store at
+    /// `view`.
     pub fn new(
         expression: FilterExpression,
         variable_columns: HashMap<String, usize>,
-        store: Arc<dyn GraphStoreSearch>,
+        store: Arc<dyn GraphStore>,
+        view: ReadView,
     ) -> Self {
         Self {
             expression,
             variable_columns,
             store,
-            transaction_id: None,
-            viewing_epoch: None,
+            view,
             session_context: SessionContext::default(),
             patterns: Arc::default(),
             errors: Arc::default(),
         }
     }
 
-    /// Sets the transaction context for MVCC-aware property lookups.
-    pub fn with_transaction_context(
-        mut self,
-        epoch: EpochId,
-        transaction_id: Option<TransactionId>,
-    ) -> Self {
-        self.viewing_epoch = Some(epoch);
-        self.transaction_id = transaction_id;
-        self
+    /// The answer of a read of the store, or `otherwise` after recording
+    /// the read's error, which fails the query (see [`ErrorSlot`]).
+    fn seen<T>(&self, read: grafeo_common::utils::error::Result<T>, otherwise: T) -> T {
+        match read {
+            Ok(found) => found,
+            Err(error) => {
+                self.errors.record(OperatorError::from(error));
+                otherwise
+            }
+        }
     }
 
     /// Sets the session context for introspection functions.
@@ -818,25 +823,12 @@ impl ExpressionPredicate {
     /// The value of `property` of node `id` as [`resolve_node`](Self::resolve_node)
     /// sees the node, read without building it.
     fn resolve_node_property(&self, id: NodeId, property: &str) -> PropertyRead {
-        let found = |value: Option<Value>, visible: &dyn Fn() -> bool| match value {
+        match self.seen(self.store.node_property(id, property, self.view), None) {
             Some(value) => PropertyRead::Value(value),
-            None if visible() => PropertyRead::Absent,
+            None if self.seen(self.store.is_node_visible(id, self.view), false) => {
+                PropertyRead::Absent
+            }
             None => PropertyRead::NotVisible,
-        };
-        match (self.viewing_epoch, self.transaction_id) {
-            (Some(ep), Some(tx)) => found(
-                self.store.node_property_versioned(id, property, ep, tx),
-                &|| self.store.is_node_visible_versioned(id, ep, tx),
-            ),
-            (Some(ep), None) => found(self.store.node_property_at_epoch(id, property, ep), &|| {
-                self.store.is_node_visible_at_epoch(id, ep)
-            }),
-            (None, _) => self
-                .store
-                .get_node(id)
-                .map_or(PropertyRead::NotVisible, |node| {
-                    PropertyRead::of(node.get_property(property))
-                }),
         }
     }
 
@@ -847,61 +839,30 @@ impl ExpressionPredicate {
         id: grafeo_common::types::EdgeId,
         property: &str,
     ) -> PropertyRead {
-        let found = |value: Option<Value>, visible: &dyn Fn() -> bool| match value {
+        match self.seen(self.store.edge_property(id, property, self.view), None) {
             Some(value) => PropertyRead::Value(value),
-            None if visible() => PropertyRead::Absent,
+            None if self.seen(self.store.is_edge_visible(id, self.view), false) => {
+                PropertyRead::Absent
+            }
             None => PropertyRead::NotVisible,
-        };
-        match (self.viewing_epoch, self.transaction_id) {
-            (Some(ep), Some(tx)) => found(
-                self.store.edge_property_versioned(id, property, ep, tx),
-                &|| self.store.is_edge_visible_versioned(id, ep, tx),
-            ),
-            (Some(ep), None) => found(self.store.edge_property_at_epoch(id, property, ep), &|| {
-                self.store.is_edge_visible_at_epoch(id, ep)
-            }),
-            (None, _) => self
-                .store
-                .get_edge(id)
-                .map_or(PropertyRead::NotVisible, |edge| {
-                    PropertyRead::of(edge.get_property(property))
-                }),
         }
-    }
-
-    /// The view this predicate reads at, when it has a transaction context.
-    fn view(&self) -> Option<ReadView> {
-        self.viewing_epoch
-            .map(|epoch| ReadView::new(epoch, self.transaction_id))
     }
 
     /// The labels of node `id` as this query sees the node, read without
     /// building it.
     fn resolve_labels(&self, id: NodeId) -> Option<smallvec::SmallVec<[arcstr::ArcStr; 2]>> {
-        match self.view() {
-            Some(view) => self.store.node_labels_at(id, view),
-            None => self.store.get_node(id).map(|node| node.labels),
-        }
+        self.seen(self.store.node_labels(id, self.view), None)
     }
 
     /// Whether node `id` has `label` as this query sees the node: a label
     /// check, `None` for a node the query does not see.
     fn resolve_has_label(&self, id: NodeId, label: &str) -> Option<bool> {
-        match self.view() {
-            Some(view) => self.store.node_has_label_at(id, label, view),
-            None => self.store.get_node(id).map(|node| node.has_label(label)),
-        }
+        self.seen(self.store.node_has_label(id, label, self.view), None)
     }
 
-    /// Resolves a node using transaction-aware access when available.
+    /// Node `node_id` as this query sees it.
     fn resolve_node(&self, node_id: NodeId) -> Option<Node> {
-        if let (Some(ep), Some(tx)) = (self.viewing_epoch, self.transaction_id) {
-            self.store.get_node_versioned(node_id, ep, tx)
-        } else if let Some(ep) = self.viewing_epoch {
-            self.store.get_node_at_epoch(node_id, ep)
-        } else {
-            self.store.get_node(node_id)
-        }
+        self.seen(self.store.node(node_id, self.view), None)
     }
 
     /// Returns true if an edge (and its other endpoint) matches the type and label filters.
@@ -917,40 +878,25 @@ impl ExpressionPredicate {
         self.edge_type_matches(edge_id, edge_types) && self.has_labels(other_node_id, end_labels)
     }
 
-    /// Whether the edge has one of `edge_types` (any type when empty). The
-    /// type is read as this query sees the edge, so a transaction finds the
-    /// type of an edge it created.
+    /// Whether the edge has one of `edge_types` (any type when empty), as
+    /// stored: the planner resolved the pattern's names to the stored ones.
+    /// The type is read as this query sees the edge, so a transaction finds
+    /// the type of an edge it created.
     fn edge_type_matches(&self, edge_id: EdgeId, edge_types: &[String]) -> bool {
         if edge_types.is_empty() {
             return true;
         }
-        let actual = if let (Some(ep), Some(tx)) = (self.viewing_epoch, self.transaction_id) {
-            self.store.edge_type_versioned(edge_id, ep, tx)
-        } else {
-            self.store.edge_type(edge_id)
-        };
-        actual.is_some_and(|actual| {
-            edge_types
-                .iter()
-                .any(|t| actual.as_str().eq_ignore_ascii_case(t.as_str()))
-        })
+        self.seen(self.store.edge_type(edge_id, self.view), None)
+            .is_some_and(|actual| edge_types.iter().any(|t| actual.as_str() == t.as_str()))
     }
 
     /// The edges of `node` in `direction` that this query sees, with the
-    /// node at their other end: not one created after the viewing epoch, by
-    /// another transaction that has not committed, or deleted by this one
-    /// (the checks the expand operators make).
+    /// node at their other end (see [`GraphStore::edges`]).
     fn visible_edges_from(&self, node: NodeId, direction: Direction) -> Vec<(NodeId, EdgeId)> {
-        let mut edges = match self.view() {
-            Some(view) => {
-                let mut edges = self.store.edges_from_at(node, direction, view);
-                edges.retain(|&(other, _)| self.store.is_node_visible_at(other, view));
-                edges
-            }
-            None => self.store.edges_from(node, direction),
-        };
-        super::expand::take_self_loops_once(node, direction, &mut edges);
-        edges
+        self.seen(
+            self.store.edges(node, direction, &[], self.view),
+            Vec::new(),
+        )
     }
 
     /// Whether the node has every label of `labels` (any node when `None`).
@@ -987,13 +933,8 @@ impl ExpressionPredicate {
 
     /// The nodes this query sees, its transaction's own included.
     fn visible_nodes(&self) -> impl Iterator<Item = NodeId> + '_ {
-        match self.view() {
-            Some(view) => self
-                .store
-                .filter_visible_node_ids_at(&self.store.all_node_ids(), view),
-            None => self.store.node_ids(),
-        }
-        .into_iter()
+        self.seen(self.store.node_ids(self.view), Vec::new())
+            .into_iter()
     }
 
     /// How many matches a fast-path `EXISTS` or `COUNT` pattern has for the
@@ -1221,15 +1162,9 @@ impl ExpressionPredicate {
         })
     }
 
-    /// Resolves an edge using transaction-aware access when available.
+    /// Edge `edge_id` as this query sees it.
     fn resolve_edge(&self, edge_id: grafeo_common::types::EdgeId) -> Option<Edge> {
-        if let (Some(ep), Some(tx)) = (self.viewing_epoch, self.transaction_id) {
-            self.store.get_edge_versioned(edge_id, ep, tx)
-        } else if let Some(ep) = self.viewing_epoch {
-            self.store.get_edge_at_epoch(edge_id, ep)
-        } else {
-            self.store.get_edge(edge_id)
-        }
+        self.seen(self.store.edge(edge_id, self.view), None)
     }
 
     /// The node `expr` yields at `row`: the node of a node variable, or a
@@ -4170,11 +4105,12 @@ impl ExpressionPredicate {
 
                 // Get the node's labels and try each for a text index match
                 let labels = self.resolve_labels(node_id)?;
-                let score = labels.iter().find_map(|label| match self.view() {
-                    Some(view) => self
-                        .store
-                        .score_text_at(node_id, label, property, query_str, view),
-                    None => self.store.score_text(node_id, label, property, query_str),
+                let score = labels.iter().find_map(|label| {
+                    self.seen(
+                        self.store
+                            .score_text(node_id, label, property, query_str, self.view),
+                        None,
+                    )
                 })?;
 
                 if function == BuiltinFunction::TextMatch {
@@ -4237,9 +4173,13 @@ impl ExpressionPredicate {
                 ))
             }
             // Grafeo extension: info() returns database metadata as a map
-            BuiltinFunction::Info => Some(self.session_context.db_info.get().clone()),
+            BuiltinFunction::Info => {
+                Some(self.seen(self.session_context.db_info.get().cloned(), Value::Null))
+            }
             // Grafeo extension: schema() returns schema metadata as a map
-            BuiltinFunction::Schema => Some(self.session_context.schema_info.get().clone()),
+            BuiltinFunction::Schema => {
+                Some(self.seen(self.session_context.schema_info.get().cloned(), Value::Null))
+            }
             BuiltinFunction::Nullif => {
                 // NULLIF(expr1, expr2) - returns NULL if expr1 = expr2, else expr1
                 if args.len() != 2 {
@@ -4651,8 +4591,7 @@ impl ItemScope {
                 expression: FilterExpression::Literal(Value::Null),
                 variable_columns,
                 store: Arc::clone(&outer.store),
-                transaction_id: outer.transaction_id,
-                viewing_epoch: outer.viewing_epoch,
+                view: outer.view,
                 session_context: outer.session_context.clone(),
                 patterns: Arc::clone(&outer.patterns),
                 errors: Arc::clone(&outer.errors),
@@ -4813,7 +4752,7 @@ fn value_to_string(val: &Value) -> Option<String> {
     }
 }
 
-#[cfg(all(test, feature = "lpg"))]
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::execution::chunk::DataChunkBuilder;
@@ -4878,7 +4817,7 @@ mod tests {
         use crate::graph::rowgroup::RowGroupStore;
 
         // Create a store and expression predicate to test regex
-        let store: Arc<dyn GraphStoreSearch> = Arc::new(RowGroupStore::new());
+        let store: Arc<dyn GraphStore> = Arc::new(RowGroupStore::new());
         let variable_columns = HashMap::new();
 
         // Create predicate to test "Smith" =~ ".*Smith$" (should match)
@@ -4892,6 +4831,7 @@ mod tests {
             },
             variable_columns.clone(),
             Arc::clone(&store),
+            ReadView::latest(),
         );
 
         // Create a minimal chunk for evaluation
@@ -4910,6 +4850,7 @@ mod tests {
             },
             variable_columns,
             store,
+            ReadView::latest(),
         );
 
         // Should not match
@@ -4920,7 +4861,7 @@ mod tests {
     fn test_pow_operator() {
         use crate::graph::rowgroup::RowGroupStore;
 
-        let store: Arc<dyn GraphStoreSearch> = Arc::new(RowGroupStore::new());
+        let store: Arc<dyn GraphStore> = Arc::new(RowGroupStore::new());
         let variable_columns = HashMap::new();
 
         // Create a minimal chunk for evaluation
@@ -4940,6 +4881,7 @@ mod tests {
             },
             variable_columns.clone(),
             Arc::clone(&store),
+            ReadView::latest(),
         );
 
         // 2^3 should equal 8.0
@@ -4958,6 +4900,7 @@ mod tests {
             },
             variable_columns,
             store,
+            ReadView::latest(),
         );
 
         assert!(predicate_float.evaluate(&chunk, 0).unwrap());
@@ -4967,7 +4910,7 @@ mod tests {
     fn test_map_expression() {
         use crate::graph::rowgroup::RowGroupStore;
 
-        let store: Arc<dyn GraphStoreSearch> = Arc::new(RowGroupStore::new());
+        let store: Arc<dyn GraphStore> = Arc::new(RowGroupStore::new());
         let variable_columns = HashMap::new();
 
         // Create a minimal chunk for evaluation
@@ -4988,6 +4931,7 @@ mod tests {
             ]),
             variable_columns,
             store,
+            ReadView::latest(),
         );
 
         // Evaluate the map expression
@@ -5009,7 +4953,7 @@ mod tests {
     fn test_index_access_list() {
         use crate::graph::rowgroup::RowGroupStore;
 
-        let store: Arc<dyn GraphStoreSearch> = Arc::new(RowGroupStore::new());
+        let store: Arc<dyn GraphStore> = Arc::new(RowGroupStore::new());
         let variable_columns = HashMap::new();
 
         // Create a minimal chunk for evaluation
@@ -5032,6 +4976,7 @@ mod tests {
             },
             variable_columns.clone(),
             Arc::clone(&store),
+            ReadView::latest(),
         );
 
         assert!(predicate.evaluate(&chunk, 0).unwrap());
@@ -5052,6 +4997,7 @@ mod tests {
             },
             variable_columns,
             store,
+            ReadView::latest(),
         );
 
         assert!(predicate_neg.evaluate(&chunk, 0).unwrap());
@@ -5061,7 +5007,7 @@ mod tests {
     fn test_slice_access() {
         use crate::graph::rowgroup::RowGroupStore;
 
-        let store: Arc<dyn GraphStoreSearch> = Arc::new(RowGroupStore::new());
+        let store: Arc<dyn GraphStore> = Arc::new(RowGroupStore::new());
         let variable_columns = HashMap::new();
 
         // Create a minimal chunk for evaluation
@@ -5083,6 +5029,7 @@ mod tests {
             },
             variable_columns,
             store,
+            ReadView::latest(),
         );
 
         let result = predicate.eval(&chunk, 0);
@@ -5272,8 +5219,7 @@ mod tests {
 
     #[test]
     fn test_unary_operators() {
-        let store: Arc<dyn GraphStoreSearch> =
-            Arc::new(crate::graph::rowgroup::RowGroupStore::new());
+        let store: Arc<dyn GraphStore> = Arc::new(crate::graph::rowgroup::RowGroupStore::new());
         let variable_columns = HashMap::new();
         let builder = DataChunkBuilder::new(&[LogicalType::Int64]);
         let chunk = builder.finish();
@@ -5286,6 +5232,7 @@ mod tests {
             },
             variable_columns.clone(),
             Arc::clone(&store),
+            ReadView::latest(),
         );
         assert!(pred_not.evaluate(&chunk, 0).unwrap());
 
@@ -5297,6 +5244,7 @@ mod tests {
             },
             variable_columns.clone(),
             Arc::clone(&store),
+            ReadView::latest(),
         );
         assert!(pred_is_null.evaluate(&chunk, 0).unwrap());
 
@@ -5308,6 +5256,7 @@ mod tests {
             },
             variable_columns.clone(),
             Arc::clone(&store),
+            ReadView::latest(),
         );
         assert!(pred_is_not_null.evaluate(&chunk, 0).unwrap());
 
@@ -5323,14 +5272,14 @@ mod tests {
             },
             variable_columns,
             store,
+            ReadView::latest(),
         );
         assert!(pred_neg.evaluate(&chunk, 0).unwrap());
     }
 
     #[test]
     fn test_arithmetic_operators() {
-        let store: Arc<dyn GraphStoreSearch> =
-            Arc::new(crate::graph::rowgroup::RowGroupStore::new());
+        let store: Arc<dyn GraphStore> = Arc::new(crate::graph::rowgroup::RowGroupStore::new());
         let variable_columns = HashMap::new();
         let builder = DataChunkBuilder::new(&[LogicalType::Int64]);
         let chunk = builder.finish();
@@ -5348,6 +5297,7 @@ mod tests {
             },
             variable_columns.clone(),
             Arc::clone(&store),
+            ReadView::latest(),
         );
         assert!(pred_add.evaluate(&chunk, 0).unwrap());
 
@@ -5364,6 +5314,7 @@ mod tests {
             },
             variable_columns.clone(),
             Arc::clone(&store),
+            ReadView::latest(),
         );
         assert!(pred_sub.evaluate(&chunk, 0).unwrap());
 
@@ -5380,6 +5331,7 @@ mod tests {
             },
             variable_columns.clone(),
             Arc::clone(&store),
+            ReadView::latest(),
         );
         assert!(pred_mul.evaluate(&chunk, 0).unwrap());
 
@@ -5396,6 +5348,7 @@ mod tests {
             },
             variable_columns.clone(),
             Arc::clone(&store),
+            ReadView::latest(),
         );
         assert!(pred_div.evaluate(&chunk, 0).unwrap());
 
@@ -5412,14 +5365,14 @@ mod tests {
             },
             variable_columns,
             store,
+            ReadView::latest(),
         );
         assert!(pred_mod.evaluate(&chunk, 0).unwrap());
     }
 
     #[test]
     fn test_string_operators() {
-        let store: Arc<dyn GraphStoreSearch> =
-            Arc::new(crate::graph::rowgroup::RowGroupStore::new());
+        let store: Arc<dyn GraphStore> = Arc::new(crate::graph::rowgroup::RowGroupStore::new());
         let variable_columns = HashMap::new();
         let builder = DataChunkBuilder::new(&[LogicalType::Int64]);
         let chunk = builder.finish();
@@ -5435,6 +5388,7 @@ mod tests {
             },
             variable_columns.clone(),
             Arc::clone(&store),
+            ReadView::latest(),
         );
         assert!(pred_starts.evaluate(&chunk, 0).unwrap());
 
@@ -5449,6 +5403,7 @@ mod tests {
             },
             variable_columns.clone(),
             Arc::clone(&store),
+            ReadView::latest(),
         );
         assert!(pred_ends.evaluate(&chunk, 0).unwrap());
 
@@ -5463,14 +5418,14 @@ mod tests {
             },
             variable_columns,
             store,
+            ReadView::latest(),
         );
         assert!(pred_contains.evaluate(&chunk, 0).unwrap());
     }
 
     #[test]
     fn test_in_operator() {
-        let store: Arc<dyn GraphStoreSearch> =
-            Arc::new(crate::graph::rowgroup::RowGroupStore::new());
+        let store: Arc<dyn GraphStore> = Arc::new(crate::graph::rowgroup::RowGroupStore::new());
         let variable_columns = HashMap::new();
         let builder = DataChunkBuilder::new(&[LogicalType::Int64]);
         let chunk = builder.finish();
@@ -5490,6 +5445,7 @@ mod tests {
             },
             variable_columns.clone(),
             Arc::clone(&store),
+            ReadView::latest(),
         );
         assert!(pred_in.evaluate(&chunk, 0).unwrap());
 
@@ -5509,14 +5465,14 @@ mod tests {
             },
             variable_columns,
             store,
+            ReadView::latest(),
         );
         assert!(pred_not_in.evaluate(&chunk, 0).unwrap());
     }
 
     #[test]
     fn test_logical_operators() {
-        let store: Arc<dyn GraphStoreSearch> =
-            Arc::new(crate::graph::rowgroup::RowGroupStore::new());
+        let store: Arc<dyn GraphStore> = Arc::new(crate::graph::rowgroup::RowGroupStore::new());
         let variable_columns = HashMap::new();
         let builder = DataChunkBuilder::new(&[LogicalType::Int64]);
         let chunk = builder.finish();
@@ -5530,6 +5486,7 @@ mod tests {
             },
             variable_columns.clone(),
             Arc::clone(&store),
+            ReadView::latest(),
         );
         assert!(pred_and.evaluate(&chunk, 0).unwrap());
 
@@ -5542,6 +5499,7 @@ mod tests {
             },
             variable_columns.clone(),
             Arc::clone(&store),
+            ReadView::latest(),
         );
         assert!(pred_or.evaluate(&chunk, 0).unwrap());
 
@@ -5554,14 +5512,14 @@ mod tests {
             },
             variable_columns,
             store,
+            ReadView::latest(),
         );
         assert!(pred_xor.evaluate(&chunk, 0).unwrap());
     }
 
     #[test]
     fn test_case_expression_simple() {
-        let store: Arc<dyn GraphStoreSearch> =
-            Arc::new(crate::graph::rowgroup::RowGroupStore::new());
+        let store: Arc<dyn GraphStore> = Arc::new(crate::graph::rowgroup::RowGroupStore::new());
         let variable_columns = HashMap::new();
         let builder = DataChunkBuilder::new(&[LogicalType::Int64]);
         let chunk = builder.finish();
@@ -5590,14 +5548,14 @@ mod tests {
             },
             variable_columns,
             store,
+            ReadView::latest(),
         );
         assert!(pred_case.evaluate(&chunk, 0).unwrap());
     }
 
     #[test]
     fn test_case_expression_searched() {
-        let store: Arc<dyn GraphStoreSearch> =
-            Arc::new(crate::graph::rowgroup::RowGroupStore::new());
+        let store: Arc<dyn GraphStore> = Arc::new(crate::graph::rowgroup::RowGroupStore::new());
         let variable_columns = HashMap::new();
         let builder = DataChunkBuilder::new(&[LogicalType::Int64]);
         let chunk = builder.finish();
@@ -5624,14 +5582,14 @@ mod tests {
             },
             variable_columns,
             store,
+            ReadView::latest(),
         );
         assert!(pred_case.evaluate(&chunk, 0).unwrap());
     }
 
     #[test]
     fn test_list_functions() {
-        let store: Arc<dyn GraphStoreSearch> =
-            Arc::new(crate::graph::rowgroup::RowGroupStore::new());
+        let store: Arc<dyn GraphStore> = Arc::new(crate::graph::rowgroup::RowGroupStore::new());
         let variable_columns = HashMap::new();
         let builder = DataChunkBuilder::new(&[LogicalType::Int64]);
         let chunk = builder.finish();
@@ -5652,6 +5610,7 @@ mod tests {
             },
             variable_columns.clone(),
             Arc::clone(&store),
+            ReadView::latest(),
         );
         assert!(pred_head.evaluate(&chunk, 0).unwrap());
 
@@ -5671,6 +5630,7 @@ mod tests {
             },
             variable_columns.clone(),
             Arc::clone(&store),
+            ReadView::latest(),
         );
         assert!(pred_last.evaluate(&chunk, 0).unwrap());
 
@@ -5690,14 +5650,14 @@ mod tests {
             },
             variable_columns,
             store,
+            ReadView::latest(),
         );
         assert!(pred_size.evaluate(&chunk, 0).unwrap());
     }
 
     #[test]
     fn test_type_conversion_functions() {
-        let store: Arc<dyn GraphStoreSearch> =
-            Arc::new(crate::graph::rowgroup::RowGroupStore::new());
+        let store: Arc<dyn GraphStore> = Arc::new(crate::graph::rowgroup::RowGroupStore::new());
         let variable_columns = HashMap::new();
         let builder = DataChunkBuilder::new(&[LogicalType::Int64]);
         let chunk = builder.finish();
@@ -5714,6 +5674,7 @@ mod tests {
             },
             variable_columns.clone(),
             Arc::clone(&store),
+            ReadView::latest(),
         );
         assert!(pred_to_int.evaluate(&chunk, 0).unwrap());
 
@@ -5729,6 +5690,7 @@ mod tests {
             },
             variable_columns.clone(),
             Arc::clone(&store),
+            ReadView::latest(),
         );
         assert!(pred_to_float.evaluate(&chunk, 0).unwrap());
 
@@ -5744,14 +5706,14 @@ mod tests {
             },
             variable_columns,
             store,
+            ReadView::latest(),
         );
         assert!(pred_to_bool.evaluate(&chunk, 0).unwrap());
     }
 
     #[test]
     fn test_coalesce_function() {
-        let store: Arc<dyn GraphStoreSearch> =
-            Arc::new(crate::graph::rowgroup::RowGroupStore::new());
+        let store: Arc<dyn GraphStore> = Arc::new(crate::graph::rowgroup::RowGroupStore::new());
         let variable_columns = HashMap::new();
         let builder = DataChunkBuilder::new(&[LogicalType::Int64]);
         let chunk = builder.finish();
@@ -5772,6 +5734,7 @@ mod tests {
             },
             variable_columns,
             store,
+            ReadView::latest(),
         );
         assert!(pred_coalesce.evaluate(&chunk, 0).unwrap());
     }
@@ -5835,8 +5798,7 @@ mod tests {
 
     #[test]
     fn test_mixed_type_comparison_int_float() {
-        let store: Arc<dyn GraphStoreSearch> =
-            Arc::new(crate::graph::rowgroup::RowGroupStore::new());
+        let store: Arc<dyn GraphStore> = Arc::new(crate::graph::rowgroup::RowGroupStore::new());
         let variable_columns = HashMap::new();
         let builder = DataChunkBuilder::new(&[LogicalType::Int64]);
         let chunk = builder.finish();
@@ -5850,6 +5812,7 @@ mod tests {
             },
             variable_columns,
             store,
+            ReadView::latest(),
         );
         assert!(pred_mixed.evaluate(&chunk, 0).unwrap());
     }
@@ -6000,7 +5963,8 @@ mod tests {
                 }),
             },
             variable_columns,
-            store.clone() as Arc<dyn GraphStoreSearch>,
+            store.clone() as Arc<dyn GraphStore>,
+            ReadView::latest(),
         );
 
         assert!(pred.evaluate(&chunk, 0).unwrap());
@@ -6040,7 +6004,7 @@ mod tests {
     fn test_cross_type_string_int_equality() {
         use crate::graph::rowgroup::RowGroupStore;
 
-        let store: Arc<dyn GraphStoreSearch> = Arc::new(RowGroupStore::new());
+        let store: Arc<dyn GraphStore> = Arc::new(RowGroupStore::new());
         let vc = HashMap::new();
         let builder = DataChunkBuilder::new(&[LogicalType::Int64]);
         let chunk = builder.finish();
@@ -6054,6 +6018,7 @@ mod tests {
             },
             vc.clone(),
             Arc::clone(&store),
+            ReadView::latest(),
         );
         assert!(pred.evaluate(&chunk, 0).unwrap());
 
@@ -6066,6 +6031,7 @@ mod tests {
             },
             vc.clone(),
             Arc::clone(&store),
+            ReadView::latest(),
         );
         assert!(pred_ne.evaluate(&chunk, 0).unwrap());
 
@@ -6078,6 +6044,7 @@ mod tests {
             },
             vc,
             store,
+            ReadView::latest(),
         );
         assert!(!pred_bad.evaluate(&chunk, 0).unwrap());
     }
@@ -6087,7 +6054,7 @@ mod tests {
     fn test_cross_type_string_float_equality() {
         use crate::graph::rowgroup::RowGroupStore;
 
-        let store: Arc<dyn GraphStoreSearch> = Arc::new(RowGroupStore::new());
+        let store: Arc<dyn GraphStore> = Arc::new(RowGroupStore::new());
         let vc = HashMap::new();
         let builder = DataChunkBuilder::new(&[LogicalType::Int64]);
         let chunk = builder.finish();
@@ -6100,6 +6067,7 @@ mod tests {
             },
             vc.clone(),
             Arc::clone(&store),
+            ReadView::latest(),
         );
         assert!(pred.evaluate(&chunk, 0).unwrap());
 
@@ -6112,6 +6080,7 @@ mod tests {
             },
             vc,
             store,
+            ReadView::latest(),
         );
         assert!(pred_ne.evaluate(&chunk, 0).unwrap());
     }
@@ -6124,7 +6093,7 @@ mod tests {
     fn test_cross_type_string_numeric_ordering() {
         use crate::graph::rowgroup::RowGroupStore;
 
-        let store: Arc<dyn GraphStoreSearch> = Arc::new(RowGroupStore::new());
+        let store: Arc<dyn GraphStore> = Arc::new(RowGroupStore::new());
         let vc = HashMap::new();
         let builder = DataChunkBuilder::new(&[LogicalType::Int64]);
         let chunk = builder.finish();
@@ -6138,6 +6107,7 @@ mod tests {
             },
             vc.clone(),
             Arc::clone(&store),
+            ReadView::latest(),
         );
         assert!(pred_gt.evaluate(&chunk, 0).unwrap());
 
@@ -6150,6 +6120,7 @@ mod tests {
             },
             vc.clone(),
             Arc::clone(&store),
+            ReadView::latest(),
         );
         assert!(pred_lt.evaluate(&chunk, 0).unwrap());
 
@@ -6162,6 +6133,7 @@ mod tests {
             },
             vc.clone(),
             Arc::clone(&store),
+            ReadView::latest(),
         );
         assert!(pred_le.evaluate(&chunk, 0).unwrap());
 
@@ -6174,6 +6146,7 @@ mod tests {
             },
             vc,
             store,
+            ReadView::latest(),
         );
         assert!(pred_ge.evaluate(&chunk, 0).unwrap());
     }
@@ -6224,8 +6197,8 @@ mod tests {
     fn eval_literal_expr(expr: FilterExpression) -> Option<Value> {
         use crate::graph::rowgroup::RowGroupStore;
 
-        let store: Arc<dyn GraphStoreSearch> = Arc::new(RowGroupStore::new());
-        let pred = ExpressionPredicate::new(expr, HashMap::new(), store);
+        let store: Arc<dyn GraphStore> = Arc::new(RowGroupStore::new());
+        let pred = ExpressionPredicate::new(expr, HashMap::new(), store, ReadView::latest());
         let builder = DataChunkBuilder::new(&[LogicalType::Int64]);
         let chunk = builder.finish();
         pred.eval_at(&chunk, 0).unwrap()
@@ -6547,12 +6520,12 @@ mod tests {
         // which IS NULL treats as true
         use crate::graph::rowgroup::RowGroupStore;
 
-        let store: Arc<dyn GraphStoreSearch> = Arc::new(RowGroupStore::new());
+        let store: Arc<dyn GraphStore> = Arc::new(RowGroupStore::new());
         let expr = FilterExpression::Unary {
             op: UnaryFilterOp::IsNull,
             operand: Box::new(FilterExpression::Variable("missing_var".to_string())),
         };
-        let pred = ExpressionPredicate::new(expr, HashMap::new(), store);
+        let pred = ExpressionPredicate::new(expr, HashMap::new(), store, ReadView::latest());
         let builder = DataChunkBuilder::new(&[LogicalType::Int64]);
         let chunk = builder.finish();
         let result = pred.eval_at(&chunk, 0).unwrap();
@@ -6618,7 +6591,7 @@ mod tests {
     fn test_eval_in_operator() {
         use crate::graph::rowgroup::RowGroupStore;
 
-        let store: Arc<dyn GraphStoreSearch> = Arc::new(RowGroupStore::new());
+        let store: Arc<dyn GraphStore> = Arc::new(RowGroupStore::new());
         let builder = DataChunkBuilder::new(&[LogicalType::Int64]);
         let chunk = builder.finish();
 
@@ -6632,7 +6605,8 @@ mod tests {
                 FilterExpression::Literal(Value::Int64(3)),
             ])),
         };
-        let pred = ExpressionPredicate::new(expr, HashMap::new(), Arc::clone(&store));
+        let pred =
+            ExpressionPredicate::new(expr, HashMap::new(), Arc::clone(&store), ReadView::latest());
         let result = pred.eval_at(&chunk, 0).unwrap();
         assert_eq!(result, Some(Value::Bool(true)));
 
@@ -6646,7 +6620,8 @@ mod tests {
                 FilterExpression::Literal(Value::Int64(3)),
             ])),
         };
-        let pred = ExpressionPredicate::new(expr, HashMap::new(), Arc::clone(&store));
+        let pred =
+            ExpressionPredicate::new(expr, HashMap::new(), Arc::clone(&store), ReadView::latest());
         let result = pred.eval_at(&chunk, 0).unwrap();
         assert_eq!(result, Some(Value::Bool(false)));
     }
@@ -6655,7 +6630,7 @@ mod tests {
     fn test_eval_in_operator_strings() {
         use crate::graph::rowgroup::RowGroupStore;
 
-        let store: Arc<dyn GraphStoreSearch> = Arc::new(RowGroupStore::new());
+        let store: Arc<dyn GraphStore> = Arc::new(RowGroupStore::new());
         let builder = DataChunkBuilder::new(&[LogicalType::Int64]);
         let chunk = builder.finish();
 
@@ -6669,7 +6644,7 @@ mod tests {
                 FilterExpression::Literal(Value::String("cherry".into())),
             ])),
         };
-        let pred = ExpressionPredicate::new(expr, HashMap::new(), store);
+        let pred = ExpressionPredicate::new(expr, HashMap::new(), store, ReadView::latest());
         let result = pred.eval_at(&chunk, 0).unwrap();
         assert_eq!(result, Some(Value::Bool(true)));
     }
@@ -7169,12 +7144,12 @@ mod tests {
 
     #[test]
     fn test_eval_modulo_by_zero() {
-        let store: Arc<dyn GraphStoreSearch> =
-            Arc::new(crate::graph::rowgroup::RowGroupStore::new());
+        let store: Arc<dyn GraphStore> = Arc::new(crate::graph::rowgroup::RowGroupStore::new());
         let pred = ExpressionPredicate::new(
             binary(Value::Int64(10), BinaryFilterOp::Mod, Value::Int64(0)),
             HashMap::new(),
             store,
+            ReadView::latest(),
         );
         let chunk = DataChunkBuilder::new(&[LogicalType::Int64]).finish();
         let error = pred.eval_at(&chunk, 0).unwrap_err();
@@ -7258,7 +7233,7 @@ mod tests {
     #[test]
     fn test_eval_tostring_types() {
         use crate::graph::rowgroup::RowGroupStore;
-        let store: Arc<dyn GraphStoreSearch> = Arc::new(RowGroupStore::new());
+        let store: Arc<dyn GraphStore> = Arc::new(RowGroupStore::new());
         let vc = HashMap::new();
         let builder = DataChunkBuilder::new(&[LogicalType::Int64]);
         let chunk = builder.finish();
@@ -7271,6 +7246,7 @@ mod tests {
             },
             vc.clone(),
             Arc::clone(&store),
+            ReadView::latest(),
         );
         assert_eq!(
             pred.eval_at(&chunk, 0).unwrap(),
@@ -7285,6 +7261,7 @@ mod tests {
             },
             vc.clone(),
             Arc::clone(&store),
+            ReadView::latest(),
         );
         assert_eq!(
             pred.eval_at(&chunk, 0).unwrap(),
@@ -7299,6 +7276,7 @@ mod tests {
             },
             vc,
             store,
+            ReadView::latest(),
         );
         assert_eq!(pred.eval_at(&chunk, 0).unwrap(), Some(Value::Null));
     }
@@ -7306,7 +7284,7 @@ mod tests {
     #[test]
     fn test_eval_toboolean() {
         use crate::graph::rowgroup::RowGroupStore;
-        let store: Arc<dyn GraphStoreSearch> = Arc::new(RowGroupStore::new());
+        let store: Arc<dyn GraphStore> = Arc::new(RowGroupStore::new());
         let vc = HashMap::new();
         let builder = DataChunkBuilder::new(&[LogicalType::Int64]);
         let chunk = builder.finish();
@@ -7318,6 +7296,7 @@ mod tests {
             },
             vc.clone(),
             Arc::clone(&store),
+            ReadView::latest(),
         );
         assert_eq!(pred.eval_at(&chunk, 0).unwrap(), Some(Value::Bool(true)));
 
@@ -7328,6 +7307,7 @@ mod tests {
             },
             vc.clone(),
             Arc::clone(&store),
+            ReadView::latest(),
         );
         assert_eq!(pred.eval_at(&chunk, 0).unwrap(), Some(Value::Bool(false)));
 
@@ -7338,6 +7318,7 @@ mod tests {
             },
             vc,
             store,
+            ReadView::latest(),
         );
         assert_eq!(pred.eval_at(&chunk, 0).unwrap(), Some(Value::Bool(true)));
     }
@@ -7345,7 +7326,7 @@ mod tests {
     #[test]
     fn test_eval_tofloat() {
         use crate::graph::rowgroup::RowGroupStore;
-        let store: Arc<dyn GraphStoreSearch> = Arc::new(RowGroupStore::new());
+        let store: Arc<dyn GraphStore> = Arc::new(RowGroupStore::new());
         let vc = HashMap::new();
         let builder = DataChunkBuilder::new(&[LogicalType::Int64]);
         let chunk = builder.finish();
@@ -7357,6 +7338,7 @@ mod tests {
             },
             vc.clone(),
             Arc::clone(&store),
+            ReadView::latest(),
         );
         if let Some(Value::Float64(v)) = pred.eval_at(&chunk, 0).unwrap() {
             assert!((v - 2.72).abs() < 0.001);
@@ -7371,6 +7353,7 @@ mod tests {
             },
             vc,
             store,
+            ReadView::latest(),
         );
         assert_eq!(pred.eval_at(&chunk, 0).unwrap(), Some(Value::Float64(42.0)));
     }
@@ -7378,7 +7361,7 @@ mod tests {
     #[test]
     fn test_eval_tointeger_from_float() {
         use crate::graph::rowgroup::RowGroupStore;
-        let store: Arc<dyn GraphStoreSearch> = Arc::new(RowGroupStore::new());
+        let store: Arc<dyn GraphStore> = Arc::new(RowGroupStore::new());
         let vc = HashMap::new();
         let builder = DataChunkBuilder::new(&[LogicalType::Int64]);
         let chunk = builder.finish();
@@ -7390,6 +7373,7 @@ mod tests {
             },
             vc,
             store,
+            ReadView::latest(),
         );
         assert_eq!(pred.eval_at(&chunk, 0).unwrap(), Some(Value::Int64(3)));
     }
@@ -7461,12 +7445,12 @@ mod tests {
     }
 }
 
-#[cfg(all(test, feature = "text-index", feature = "lpg"))]
+#[cfg(all(test, feature = "text-index"))]
 mod text_fn_tests {
     use super::*;
     use crate::execution::chunk::DataChunkBuilder;
+    use crate::graph::GraphStore;
     use crate::graph::GraphStoreMut as _;
-    use crate::graph::GraphStoreSearch;
     use crate::graph::rowgroup::RowGroupStore;
     use crate::index::text::{BM25Config, InvertedIndex};
     use grafeo_common::types::LogicalType;
@@ -7532,7 +7516,8 @@ mod text_fn_tests {
                 right: Box::new(FilterExpression::Literal(Value::Float64(0.0))),
             },
             variable_columns,
-            store as Arc<dyn GraphStoreSearch>,
+            store as Arc<dyn GraphStore>,
+            ReadView::latest(),
         );
 
         // n1 matches "rust database" — should pass
@@ -7569,7 +7554,8 @@ mod text_fn_tests {
                     args: vec![FilterExpression::Variable("n".to_string())],
                 },
                 HashMap::from([("n".to_string(), 0)]),
-                Arc::clone(&store) as Arc<dyn GraphStoreSearch>,
+                Arc::clone(&store) as Arc<dyn GraphStore>,
+                ReadView::latest(),
             )
             .eval(&DataChunk::new(vec![column]), 0)
         };
@@ -7607,7 +7593,8 @@ mod text_fn_tests {
                     args: vec![FilterExpression::Variable("r".to_string())],
                 },
                 HashMap::from([("r".to_string(), 0)]),
-                Arc::clone(&store) as Arc<dyn GraphStoreSearch>,
+                Arc::clone(&store) as Arc<dyn GraphStore>,
+                ReadView::latest(),
             );
             predicate.eval(&DataChunk::new(vec![column]), 0)
         };
@@ -7674,7 +7661,8 @@ mod text_fn_tests {
                 ],
             },
             variable_columns,
-            store as Arc<dyn GraphStoreSearch>,
+            store as Arc<dyn GraphStore>,
+            ReadView::latest(),
         );
 
         // n1 contains "rust" — text_match should return Bool(true) → evaluates to true
@@ -7703,7 +7691,8 @@ mod text_fn_tests {
                 args: vec![FilterExpression::Literal(Value::String("only_one".into()))],
             },
             variable_columns,
-            store as Arc<dyn GraphStoreSearch>,
+            store as Arc<dyn GraphStore>,
+            ReadView::latest(),
         );
         assert!(!predicate.evaluate(&chunk, 0).unwrap());
     }
@@ -7736,7 +7725,8 @@ mod text_fn_tests {
                 ],
             },
             variable_columns,
-            store as Arc<dyn GraphStoreSearch>,
+            store as Arc<dyn GraphStore>,
+            ReadView::latest(),
         );
         // No index → score_text returns None → eval returns None → evaluate returns false
         assert!(!predicate.evaluate(&chunk, 0).unwrap());

@@ -17,7 +17,7 @@
 use std::sync::Arc;
 
 use grafeo_common::change::Entity;
-use grafeo_common::types::{EdgeId, EpochId, NodeId, Value};
+use grafeo_common::types::{EdgeId, EpochId, NodeId, ReadView, Value};
 use grafeo_common::utils::error::Result;
 
 use super::traits::GraphStore;
@@ -43,6 +43,10 @@ pub struct LoadedNames<'n> {
 /// Every method changes the store at once, as recovery does; none may run
 /// while a transaction is open in the store or a reader reads it.
 pub trait LoadTarget: GraphStore + Send + Sync + Sized {
+    /// The view a load reads the store at: a committed reader that sees
+    /// every row loaded so far (nothing else runs while a store loads).
+    fn load_view(&self) -> ReadView;
+
     /// Creates node `id` with `labels` and no values.
     ///
     /// # Errors
@@ -153,6 +157,7 @@ pub trait LoadTarget: GraphStore + Send + Sync + Sized {
 /// What the tests of the loaders compare: two stores holding the same rows.
 #[cfg(test)]
 pub(crate) mod testing {
+    use grafeo_common::types::ReadView;
     use std::collections::BTreeMap;
 
     use grafeo_common::types::{EdgeId, NodeId, Value};
@@ -171,8 +176,11 @@ pub(crate) mod testing {
     ) -> (BTreeMap<NodeId, NodeRow>, BTreeMap<EdgeId, EdgeRow>) {
         let mut nodes = BTreeMap::new();
         let mut edges = BTreeMap::new();
-        for id in store.node_ids() {
-            let node = store.get_node(id).expect("a node it lists");
+        for id in store.node_ids(ReadView::latest()).unwrap() {
+            let node = store
+                .node(id, ReadView::latest())
+                .unwrap()
+                .expect("a node it lists");
             let mut labels: Vec<String> = node.labels.iter().map(ToString::to_string).collect();
             labels.sort();
             let values = node
@@ -181,8 +189,14 @@ pub(crate) mod testing {
                 .map(|(key, value)| (key.to_string(), value.clone()))
                 .collect();
             nodes.insert(id, (labels, values));
-            for (_, edge) in store.edges_from(id, Direction::Outgoing) {
-                let edge = store.get_edge(edge).expect("an edge it lists");
+            for (_, edge) in store
+                .edges(id, Direction::Outgoing, &[], ReadView::latest())
+                .unwrap()
+            {
+                let edge = store
+                    .edge(edge, ReadView::latest())
+                    .unwrap()
+                    .expect("an edge it lists");
                 let values = edge
                     .properties
                     .iter()
@@ -256,8 +270,14 @@ pub(crate) mod testing {
     pub(crate) fn assert_same_rows(a: &dyn GraphStore, b: &dyn GraphStore, what: &str) {
         assert_eq!(rows(a), rows(b), "{what}");
         assert_eq!(
-            (a.node_count(), a.edge_count()),
-            (b.node_count(), b.edge_count()),
+            (
+                a.node_count(ReadView::latest()).unwrap(),
+                a.edge_count(ReadView::latest()).unwrap()
+            ),
+            (
+                b.node_count(ReadView::latest()).unwrap(),
+                b.edge_count(ReadView::latest()).unwrap()
+            ),
             "{what}: the counts"
         );
     }

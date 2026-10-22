@@ -341,7 +341,7 @@ fn mia_storage_tiers_lists_only_section_consumers() {
         assert!(valid, "unexpected section type in tiers: {k:?}");
     }
 
-    // LpgStore is always registered when feature lpg is on.
+    // The LPG store's section consumer is always registered.
     assert!(
         tiers.contains_key(&SectionType::LpgStore),
         "LpgStore consumer must be registered: {tiers:?}"

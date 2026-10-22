@@ -291,7 +291,7 @@ fn test_merge_creates_when_not_exists() {
 
     assert_eq!(result.rows().len(), 1);
     assert_eq!(result.rows()[0][0], Value::String("Cat".into()));
-    assert_eq!(db.node_count(), 1);
+    assert_eq!(db.node_count().unwrap(), 1);
 }
 
 #[test]
@@ -299,7 +299,7 @@ fn test_merge_matches_existing() {
     let db = create_social_network();
     let session = db.session();
 
-    let before = db.node_count();
+    let before = db.node_count().unwrap();
 
     let result = session
         .execute("MERGE (n:Person {name: 'Alix'}) RETURN n.name")
@@ -308,7 +308,7 @@ fn test_merge_matches_existing() {
     assert_eq!(result.rows().len(), 1);
     assert_eq!(result.rows()[0][0], Value::String("Alix".into()));
     // No new node created
-    assert_eq!(db.node_count(), before);
+    assert_eq!(db.node_count().unwrap(), before);
 }
 
 #[test]
@@ -389,7 +389,7 @@ fn test_create_edge_anonymous() {
     let db = create_social_network();
     let session = db.session();
 
-    let edges_before = db.edge_count();
+    let edges_before = db.edge_count().unwrap();
 
     session
         .execute_cypher(
@@ -398,7 +398,7 @@ fn test_create_edge_anonymous() {
         )
         .unwrap();
 
-    assert_eq!(db.edge_count(), edges_before + 1);
+    assert_eq!(db.edge_count().unwrap(), edges_before + 1);
 }
 
 #[test]
@@ -416,8 +416,8 @@ fn test_create_path_with_new_nodes() {
         .unwrap();
     session.create_edge(paris, france, "IN").unwrap();
 
-    assert_eq!(db.node_count(), 2);
-    assert_eq!(db.edge_count(), 1);
+    assert_eq!(db.node_count().unwrap(), 2);
+    assert_eq!(db.edge_count().unwrap(), 1);
 
     // Verify the path can be queried via GQL
     let result = session
@@ -438,21 +438,21 @@ fn test_delete_node_by_match() {
     let db = create_social_network();
     let session = db.session();
 
-    let before = db.node_count();
+    let before = db.node_count().unwrap();
 
     // Delete Harm (who has KNOWS edges)
     session
         .execute("MATCH (n:Person) WHERE n.name = 'Harm' DETACH DELETE n")
         .unwrap();
 
-    assert!(db.node_count() < before);
+    assert!(db.node_count().unwrap() < before);
 }
 
 #[test]
 fn test_delete_node_reduces_count() {
     let db = create_social_network();
 
-    let before = db.node_count();
+    let before = db.node_count().unwrap();
 
     // DETACH DELETE a single node removes it and its edges
     let session = db.session();
@@ -460,7 +460,7 @@ fn test_delete_node_reduces_count() {
         .execute("MATCH (n:Company {name: 'TechCorp'}) DETACH DELETE n")
         .unwrap();
 
-    assert_eq!(db.node_count(), before - 1);
+    assert_eq!(db.node_count().unwrap(), before - 1);
 }
 
 #[test]
@@ -470,8 +470,8 @@ fn test_detach_delete_all_nodes() {
 
     session.execute("MATCH (n) DETACH DELETE n").unwrap();
 
-    assert_eq!(db.node_count(), 0);
-    assert_eq!(db.edge_count(), 0);
+    assert_eq!(db.node_count().unwrap(), 0);
+    assert_eq!(db.edge_count().unwrap(), 0);
 }
 
 // ============================================================================
@@ -1669,13 +1669,13 @@ fn test_gql_match_detach_delete_ordered() {
     let db = create_social_network();
     let session = db.session();
 
-    let before = db.node_count();
+    let before = db.node_count().unwrap();
 
     session
         .execute("MATCH (n:Company {name: 'TechCorp'}) DETACH DELETE n")
         .unwrap();
 
-    assert_eq!(db.node_count(), before - 1);
+    assert_eq!(db.node_count().unwrap(), before - 1);
 }
 
 // ============================================================================
@@ -1710,10 +1710,10 @@ fn test_gql_ordered_create_delete() {
     session
         .execute("INSERT (:Temp {name: 'ephemeral'})")
         .unwrap();
-    assert_eq!(db.node_count(), 1);
+    assert_eq!(db.node_count().unwrap(), 1);
 
     session.execute("MATCH (n:Temp) DETACH DELETE n").unwrap();
-    assert_eq!(db.node_count(), 0);
+    assert_eq!(db.node_count().unwrap(), 0);
 }
 
 // ============================================================================
@@ -1769,7 +1769,7 @@ mod cypher_mutations {
     fn test_merge_relationship_creates() {
         let db = create_social_network();
         let session = db.session();
-        let edges_before = db.edge_count();
+        let edges_before = db.edge_count().unwrap();
 
         session
             .execute_cypher(
@@ -1778,7 +1778,7 @@ mod cypher_mutations {
             )
             .unwrap();
 
-        assert_eq!(db.edge_count(), edges_before + 1);
+        assert_eq!(db.edge_count().unwrap(), edges_before + 1);
     }
 
     #[cfg(feature = "cypher")]
@@ -1786,7 +1786,7 @@ mod cypher_mutations {
     fn test_merge_relationship_matches() {
         let db = create_social_network();
         let session = db.session();
-        let edges_before = db.edge_count();
+        let edges_before = db.edge_count().unwrap();
 
         session
             .execute_cypher(
@@ -1795,7 +1795,7 @@ mod cypher_mutations {
             )
             .unwrap();
 
-        assert_eq!(db.edge_count(), edges_before);
+        assert_eq!(db.edge_count().unwrap(), edges_before);
     }
 
     #[cfg(feature = "cypher")]

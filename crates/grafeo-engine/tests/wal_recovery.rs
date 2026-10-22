@@ -38,8 +38,8 @@ mod wal {
         // Reopen and verify
         {
             let db = GrafeoDB::open(&path).expect("reopen");
-            assert_eq!(db.node_count(), 2);
-            assert_eq!(db.edge_count(), 1);
+            assert_eq!(db.node_count().unwrap(), 2);
+            assert_eq!(db.edge_count().unwrap(), 1);
 
             let session = db.session();
             let result = session
@@ -99,11 +99,11 @@ mod wal {
         {
             let db = GrafeoDB::open(&path).expect("reopen");
             assert_eq!(
-                db.node_count(),
+                db.node_count().unwrap(),
                 2,
                 "deleted node should not survive recovery"
             );
-            assert_eq!(db.edge_count(), 1);
+            assert_eq!(db.edge_count().unwrap(), 1);
             db.close().expect("close");
         }
     }
@@ -127,8 +127,8 @@ mod wal {
 
         // Open the saved database
         let restored = GrafeoDB::open(&save_path).expect("open saved");
-        assert_eq!(restored.node_count(), 2);
-        assert_eq!(restored.edge_count(), 1);
+        assert_eq!(restored.node_count().unwrap(), 2);
+        assert_eq!(restored.edge_count().unwrap(), 1);
         restored.close().expect("close");
     }
 
@@ -148,7 +148,7 @@ mod wal {
 
         // Load into memory (detached from file)
         let mem_db = GrafeoDB::open_in_memory(&path).expect("open_in_memory");
-        assert_eq!(mem_db.node_count(), 1);
+        assert_eq!(mem_db.node_count().unwrap(), 1);
         assert!(
             !mem_db.is_persistent(),
             "should be in-memory after open_in_memory"
@@ -156,11 +156,11 @@ mod wal {
 
         // Modifications to the in-memory copy don't affect the file
         mem_db.create_node(&["Extra"]).unwrap();
-        assert_eq!(mem_db.node_count(), 2);
+        assert_eq!(mem_db.node_count().unwrap(), 2);
 
         // Reopening the file should still show 1 node
         let file_db = GrafeoDB::open(&path).expect("reopen");
-        assert_eq!(file_db.node_count(), 1);
+        assert_eq!(file_db.node_count().unwrap(), 1);
         file_db.close().expect("close");
     }
 
@@ -212,8 +212,16 @@ mod wal {
         // Reopen and verify all query-created data survived
         {
             let db = GrafeoDB::open(&path).expect("reopen");
-            assert_eq!(db.node_count(), 2, "query-created nodes should persist");
-            assert_eq!(db.edge_count(), 1, "query-created edges should persist");
+            assert_eq!(
+                db.node_count().unwrap(),
+                2,
+                "query-created nodes should persist"
+            );
+            assert_eq!(
+                db.edge_count().unwrap(),
+                1,
+                "query-created edges should persist"
+            );
 
             let session = db.session();
             let result = session
@@ -253,7 +261,7 @@ mod wal {
 
         {
             let db = GrafeoDB::open(&path).expect("reopen");
-            assert_eq!(db.node_count(), 1, "delete should persist");
+            assert_eq!(db.node_count().unwrap(), 1, "delete should persist");
             let session = db.session();
             let result = session.execute("MATCH (n:Person) RETURN n.name").unwrap();
             assert_eq!(result.rows().len(), 1);
@@ -305,7 +313,7 @@ mod wal {
         db.wal_checkpoint().expect("checkpoint should succeed");
 
         // Verify data is still accessible after checkpoint
-        assert_eq!(db.node_count(), 1);
+        assert_eq!(db.node_count().unwrap(), 1);
 
         db.close().expect("close");
     }
@@ -327,7 +335,7 @@ mod wal {
             session
                 .execute("INSERT (:KPI {name: 'pageviews', count: 42})")
                 .unwrap();
-            assert_eq!(db.node_count(), 0, "default graph should be empty");
+            assert_eq!(db.node_count().unwrap(), 0, "default graph should be empty");
             db.close().expect("close");
         }
 
@@ -335,7 +343,7 @@ mod wal {
             let db = GrafeoDB::open(&path).expect("reopen");
             let session = db.session();
             // Default graph should still be empty
-            assert_eq!(db.node_count(), 0);
+            assert_eq!(db.node_count().unwrap(), 0);
 
             // Named graph should have the data
             session.execute("USE GRAPH analytics").unwrap();
@@ -1087,7 +1095,7 @@ mod wal {
         db.save(&save_path).expect("save should succeed");
 
         let restored = GrafeoDB::open(&save_path).expect("open saved");
-        assert_eq!(restored.node_count(), 1, "default graph: 1 person");
+        assert_eq!(restored.node_count().unwrap(), 1, "default graph: 1 person");
 
         let session2 = restored.session();
         session2.execute("USE GRAPH analytics").unwrap();

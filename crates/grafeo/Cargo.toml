@@ -56,15 +56,15 @@ jsonl-import = ["grafeo-engine/jsonl-import"]  # JSON Lines bulk import
 parquet-import = ["grafeo-engine/parquet-import"]  # Apache Parquet bulk import
 
 # Persona-based profiles
-lpg = ["grafeo-engine/lpg", "gql", "cypher", "gremlin", "sql-pgq", "storage", "regex"]  # Graph App Developer: LPG model + all LPG query languages
-rdf = ["triple-store", "grafeo-engine/lpg", "gql", "sparql", "graphql", "storage", "regex", "shacl"]  # Knowledge Engineer: RDF model + SPARQL/GraphQL + SHACL validation; the engine's triple store brings the LPG store, which persistence needs (#544)
+lpg = ["gql", "cypher", "gremlin", "sql-pgq", "storage", "regex"]  # Graph App Developer: LPG model + all LPG query languages
+rdf = ["triple-store", "gql", "sparql", "graphql", "storage", "regex", "shacl"]  # Knowledge Engineer: RDF model + SPARQL/GraphQL + SHACL validation
 analytics = ["algos", "vector-index", "text-index", "hybrid-search", "jsonl-import", "parquet-import"]  # Data Scientist: algorithms + search + bulk import
 ai = ["vector-index", "text-index", "hybrid-search", "cdc"]  # AI/Agent Developer: search + change tracking
-edge = ["grafeo-engine/lpg", "gql", "regex-lite"]  # Frontend/Edge: minimal WASM-friendly
+edge = ["gql", "regex-lite"]  # Frontend/Edge: minimal WASM-friendly
 enterprise = ["metrics", "tracing", "async-storage"]  # Platform Operator: observability + async I/O
 
 # Deployment-based profiles (deprecated, use persona profiles instead)
-embedded = ["grafeo-engine/lpg", "gql", "ai", "algos", "parallel", "regex", "grafeo-file", "arrow-export"]  # Deprecated: use lpg + ai + algos
+embedded = ["gql", "ai", "algos", "parallel", "regex", "grafeo-file", "arrow-export"]  # Deprecated: use lpg + ai + algos
 browser = ["edge"]  # Deprecated: use edge
 server = ["embedded", "languages", "storage", "triple-store", "cdc", "async-storage", "tracing", "shacl"]  # Deprecated: use lpg + rdf + ai + enterprise
 full = ["server"]  # Deprecated: use lpg + rdf + analytics + ai

@@ -12,7 +12,7 @@
 //! cargo test -p grafeo-engine --all-features --test history_retention
 //! ```
 
-#![cfg(all(feature = "gql", feature = "lpg"))]
+#![cfg(feature = "gql")]
 
 use grafeo_common::types::{EpochId, Timestamp, Value, ZonedDatetime};
 use grafeo_engine::{Config, GrafeoDB, HistoryRetention, TimePoint};

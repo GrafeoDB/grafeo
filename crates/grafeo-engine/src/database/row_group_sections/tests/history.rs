@@ -39,15 +39,15 @@ fn state_at(store: &RowGroupStore, epoch: EpochId) -> State {
     };
     let mut nodes = BTreeMap::new();
     let mut edges = BTreeMap::new();
-    for id in store.all_node_ids() {
-        let Some(node) = store.get_node_at(id, view) else {
+    for id in store.node_ids(ReadView::latest()).unwrap() {
+        let Some(node) = store.node(id, view).unwrap() else {
             continue;
         };
         let mut labels: Vec<String> = node.labels.iter().map(ToString::to_string).collect();
         labels.sort();
         nodes.insert(id.as_u64(), (labels, sorted(&node.properties)));
-        for (_, edge) in store.edges_from_at(id, Direction::Outgoing, view) {
-            if let Some(edge) = store.get_edge_at(edge, view) {
+        for (_, edge) in store.edges(id, Direction::Outgoing, &[], view).unwrap() {
+            if let Some(edge) = store.edge(edge, view).unwrap() {
                 edges.insert(
                     edge.id.as_u64(),
                     (
@@ -106,7 +106,8 @@ fn moves(database: &Database, alix: NodeId, gus: NodeId, paris: NodeId) -> [Epoc
             .unwrap();
         let knows = writer
             .store()
-            .edges_from(gus, Direction::Outgoing)
+            .edges(gus, Direction::Outgoing, &[], ReadView::latest())
+            .unwrap()
             .first()
             .map(|(_, edge)| *edge)
             .unwrap();
@@ -559,7 +560,11 @@ fn closed_timeline(database: &Database, graph: Option<&str>) -> Timeline {
 
 /// Checks the timeline in `store` at each of its epochs.
 fn assert_timeline(store: &RowGroupStore, timeline: Timeline, what: &str) {
-    let node = |epoch: EpochId| store.get_node_at(timeline.subject, ReadView::committed(epoch));
+    let node = |epoch: EpochId| {
+        store
+            .node(timeline.subject, ReadView::committed(epoch))
+            .unwrap()
+    };
     let state = |epoch: EpochId| {
         store.get_node_property_at_epoch(
             timeline.subject,
@@ -569,7 +574,8 @@ fn assert_timeline(store: &RowGroupStore, timeline: Timeline, what: &str) {
     };
     let weight = |epoch: EpochId| {
         store
-            .get_edge_at(timeline.edge, ReadView::committed(epoch))
+            .edge(timeline.edge, ReadView::committed(epoch))
+            .unwrap()
             .and_then(|edge| edge.get_property("weight").cloned())
     };
     let labels = |epoch: EpochId| {
@@ -626,7 +632,8 @@ fn assert_timeline(store: &RowGroupStore, timeline: Timeline, what: &str) {
     );
     assert!(
         store
-            .get_node_at(timeline.peer, ReadView::committed(timeline.node_deleted))
+            .node(timeline.peer, ReadView::committed(timeline.node_deleted))
+            .unwrap()
             .is_some(),
         "{what}: the peer stays"
     );

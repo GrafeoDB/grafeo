@@ -23,7 +23,7 @@ struct DatabaseInfoOutput {
 /// Run the info command.
 pub fn run(path: &Path, format: OutputFormat) -> Result<()> {
     let db = super::open_existing_read_only(path)?;
-    let info = db.info();
+    let info = db.info()?;
 
     let output = DatabaseInfoOutput {
         mode: format!("{:?}", info.mode),

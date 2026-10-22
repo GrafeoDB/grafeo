@@ -632,7 +632,7 @@ mod hybrid {
         // "Rust graph database engine" should rank highest: matches both
         // text ("Rust graph") and vector (closest to [1,0,0])
         let top_node = results[0].0;
-        let top_props = db.get_node(top_node).expect("top node exists");
+        let top_props = db.get_node(top_node).unwrap().expect("top node exists");
         let content = top_props
             .properties
             .get(&grafeo_common::types::PropertyKey::new("content"))
@@ -857,7 +857,7 @@ mod hybrid {
         // emb [0.9,0.1,0] (n3: "Rust systems programming language").
         // Both match "Rust" in text, but n1 is closer in vector space.
         let top_node = results[0].0;
-        let top_props = db.get_node(top_node).expect("top node exists");
+        let top_props = db.get_node(top_node).unwrap().expect("top node exists");
         let content = top_props
             .properties
             .get(&grafeo_common::types::PropertyKey::new("content"))

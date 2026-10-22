@@ -19,7 +19,7 @@ struct CompactionOutput {
 /// Run the compact command.
 pub fn run(path: &Path, dry_run: bool, format: OutputFormat, quiet: bool) -> Result<()> {
     let db = super::open_existing(path)?;
-    let stats_before = db.detailed_stats();
+    let stats_before = db.detailed_stats()?;
 
     if dry_run {
         output::status("Dry run, no changes will be made", quiet);
@@ -49,7 +49,7 @@ pub fn run(path: &Path, dry_run: bool, format: OutputFormat, quiet: bool) -> Res
         output::status("Compacting database...", quiet);
         db.gc();
 
-        let stats_after = db.detailed_stats();
+        let stats_after = db.detailed_stats()?;
 
         let result = CompactionOutput {
             dry_run: false,

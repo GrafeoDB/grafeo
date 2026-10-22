@@ -13,7 +13,7 @@ use grafeo_core::execution::DataChunk;
 use grafeo_core::execution::operators::{
     Operator, OperatorError, OperatorResult, ReadCounter, Recording, WriteCounter,
 };
-use grafeo_core::graph::{GraphStoreMut, GraphStoreSearch};
+use grafeo_core::graph::{GraphStore, GraphStoreMut};
 
 use crate::catalog::Catalog;
 use crate::database::QueryResult;
@@ -64,7 +64,7 @@ pub(crate) fn bind_body(
 /// Execution context shared across sub-query operators.
 pub struct ProcedureContext {
     /// Store for sub-query execution (read path).
-    pub store: Arc<dyn GraphStoreSearch>,
+    pub store: Arc<dyn GraphStore>,
     /// Writable store for sub-query mutations (None for read-only).
     pub store_mut: Option<Arc<dyn GraphStoreMut>>,
     /// Transaction manager for sub-query coordination.
@@ -84,7 +84,6 @@ pub struct ProcedureContext {
     pub recording: Option<Recording>,
     /// The database's projections, so a `CALL ... {projection: ...}` in the
     /// body runs as it does at the top level.
-    #[cfg(feature = "lpg")]
     pub projections: Option<crate::session::ProjectionRegistry>,
 }
 
@@ -103,7 +102,7 @@ pub struct UserProcedureOperator {
     /// YIELD column filter (if specified by caller).
     yield_columns: Option<Vec<String>>,
     /// Store for sub-query execution (read path).
-    store: Arc<dyn GraphStoreSearch>,
+    store: Arc<dyn GraphStore>,
     /// Writable store for sub-query mutations (None for read-only).
     store_mut: Option<Arc<dyn GraphStoreMut>>,
     /// Transaction manager for sub-query.
@@ -121,7 +120,6 @@ pub struct UserProcedureOperator {
     /// The calling statement's recording.
     recording: Option<Recording>,
     /// The database's projections, for `CALL ... {projection: ...}` in the body.
-    #[cfg(feature = "lpg")]
     projections: Option<crate::session::ProjectionRegistry>,
     /// Buffered result rows from execution.
     result_rows: Option<Vec<Vec<Value>>>,
@@ -158,7 +156,6 @@ impl UserProcedureOperator {
             write_counter: ctx.write_counter,
             read_counter: ctx.read_counter,
             recording: ctx.recording,
-            #[cfg(feature = "lpg")]
             projections: ctx.projections,
             result_rows: None,
             row_index: 0,
@@ -184,7 +181,7 @@ impl UserProcedureOperator {
             }
             p.with_recording(self.recording.clone())
         } else {
-            let mut p = Planner::new(Arc::clone(&self.store));
+            let mut p = Planner::new(Arc::clone(&self.store), self.viewing_epoch);
             if let Some(ref cat) = self.catalog {
                 p = p.with_catalog(Arc::clone(cat));
             }
@@ -192,7 +189,6 @@ impl UserProcedureOperator {
         }
         .with_write_counter(Arc::clone(&self.write_counter))
         .with_read_counter(Arc::clone(&self.read_counter));
-        #[cfg(feature = "lpg")]
         let planner = match &self.projections {
             Some(projections) => planner.with_projections(Arc::clone(projections)),
             None => planner,

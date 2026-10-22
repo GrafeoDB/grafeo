@@ -464,7 +464,11 @@ fn every_edge_write_applies_the_default() {
         .unwrap();
     let route = db.create_edge(paris, berlin, "ROUTE").unwrap();
     assert_eq!(
-        db.get_edge(route).unwrap().get_property("km").cloned(),
+        db.get_edge(route)
+            .unwrap()
+            .unwrap()
+            .get_property("km")
+            .cloned(),
         Some(Value::Int64(88)),
         "the direct API"
     );

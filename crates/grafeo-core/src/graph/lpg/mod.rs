@@ -11,34 +11,27 @@
 //! - **Edges** that connect nodes, with types (like "KNOWS", "WORKS_AT") and their own properties
 //!
 //! A read returns them as [`Node`] and [`Edge`]. The graphs themselves live
-//! in the row-group store (`graph::rowgroup`, with the `lpg` feature).
+//! in the row-group store (`graph::rowgroup`).
 //!
 //! The readers of the LPG sections of 0.5.x (the block layout) and of
 //! 0.6.0-beta.1 (version 3, in chunks) load a file of those releases into
 //! the row-group store through `graph::load::LoadTarget`: no build writes
 //! those sections any more.
 
-#[cfg(feature = "lpg")]
 pub(crate) mod block;
-#[cfg(feature = "lpg")]
 mod chunked;
 mod compare;
-#[cfg(feature = "lpg")]
 pub(crate) mod dictionary;
 mod edge;
 mod node;
-#[cfg(feature = "lpg")]
 mod section;
 
 pub use compare::CompareOp;
 pub use edge::Edge;
 pub use node::Node;
 
-#[cfg(feature = "lpg")]
 pub(crate) use chunked::{
     LPG_SECTION_VERSION as LPG_SECTION_VERSION_3, read_lpg_chunks as read_version_3_chunks,
 };
-#[cfg(feature = "lpg")]
 pub(crate) use section::load_blocks as load_0_5_blocks;
-#[cfg(feature = "lpg")]
 pub use section::load_versions;

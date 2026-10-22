@@ -18,7 +18,6 @@
 #![cfg(all(
     feature = "testing-statement-injection",
     feature = "testing-crash-injection",
-    feature = "lpg",
     feature = "gql",
     feature = "wal",
     feature = "grafeo-file"

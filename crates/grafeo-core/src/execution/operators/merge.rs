@@ -10,8 +10,8 @@ use super::{
     SessionContext,
 };
 use crate::execution::chunk::{DataChunk, DataChunkBuilder, copied_column_types};
-use crate::graph::GraphStoreSearch;
-use grafeo_common::types::{EdgeId, LogicalType, NodeId, PropertyKey, ReadView, Value};
+use crate::graph::GraphStore;
+use grafeo_common::types::{EdgeId, LogicalType, NodeId, PropertyKey, Value};
 use std::sync::Arc;
 
 /// Configuration for a node merge operation.
@@ -82,7 +82,7 @@ pub struct MergeOperator {
     /// Search-store handle used to evaluate `PropertySource::Expression`
     /// runtime expressions in `ON CREATE` / `ON MATCH SET`. None when no
     /// expression sources are present (the planner skips threading it).
-    search_store: Option<Arc<dyn GraphStoreSearch>>,
+    search_store: Option<Arc<dyn GraphStore>>,
     /// Compiled computed match properties, built on first use.
     match_expressions: Option<super::mutation::PropertyExpressions>,
     /// Session context for expression evaluation (info, schema, etc.).
@@ -123,7 +123,7 @@ impl MergeOperator {
     /// Provides a search-store handle so `PropertySource::Expression`
     /// sources in `ON CREATE` / `ON MATCH SET` can be evaluated.
     #[must_use]
-    pub fn with_search_store(mut self, search_store: Arc<dyn GraphStoreSearch>) -> Self {
+    pub fn with_search_store(mut self, search_store: Arc<dyn GraphStore>) -> Self {
         self.search_store = Some(search_store);
         self
     }
@@ -146,12 +146,12 @@ impl MergeOperator {
         chunk: Option<&DataChunk>,
         row: usize,
         writer: &GraphWriter,
-    ) -> Vec<(String, Value)> {
+    ) -> Result<Vec<(String, Value)>, OperatorError> {
         props
             .iter()
             .map(|(name, source)| {
                 let value = if let Some(chunk) = chunk {
-                    source.resolve(chunk, row, writer)
+                    source.resolve(chunk, row, writer)?
                 } else {
                     // Standalone mode: only constants are valid
                     match source {
@@ -159,7 +159,7 @@ impl MergeOperator {
                         _ => Value::Null,
                     }
                 };
-                (name.clone(), value)
+                Ok((name.clone(), value))
             })
             .collect()
     }
@@ -224,7 +224,7 @@ impl MergeOperator {
         if !Self::has_expression_source(props) {
             // Fast path: no runtime expressions, fall through to the existing
             // resolver which understands Column/Constant/PropertyAccess.
-            return Ok(Self::resolve_properties(props, chunk, row, &self.writer));
+            return Self::resolve_properties(props, chunk, row, &self.writer);
         }
 
         let augmented = self.build_augmented_node_chunk(chunk, row, merged_node);
@@ -241,19 +241,16 @@ impl MergeOperator {
                                 .to_string(),
                         )
                     })?;
-                    let mut predicate = ExpressionPredicate::new(
+                    let predicate = ExpressionPredicate::new(
                         (**expr).clone(),
                         variable_columns.clone(),
                         Arc::clone(search_store),
+                        self.writer.view(),
                     )
                     .with_session_context(self.session_context.clone());
-                    if let Some(epoch) = self.writer.viewing_epoch() {
-                        predicate =
-                            predicate.with_transaction_context(epoch, self.writer.transaction_id());
-                    }
                     predicate.eval_at(&augmented, 0)?.unwrap_or(Value::Null)
                 }
-                _ => source.resolve(&augmented, 0, &self.writer),
+                _ => source.resolve(&augmented, 0, &self.writer)?,
             };
             out.push((name.clone(), value));
         }
@@ -265,75 +262,60 @@ impl MergeOperator {
     /// labels with as many nodes the first written. Each node read is checked
     /// for all the labels, so the matches are the same whichever label is
     /// read, in the same (ID) order.
-    fn scan_label(&self) -> Option<&str> {
+    fn scan_label(&self) -> Result<Option<&str>, OperatorError> {
         match self.config.labels.as_slice() {
-            [] => None,
-            [label] => Some(label),
+            [] => Ok(None),
+            [label] => Ok(Some(label)),
             labels => {
                 let store = self.writer.store();
-                labels
-                    .iter()
-                    .map(String::as_str)
-                    .min_by_key(|label| store.nodes_by_label_count(label))
+                let mut best: Option<(&str, usize)> = None;
+                for label in labels {
+                    let count = store.nodes_by_label_count(label, self.writer.view())?;
+                    if best.is_none_or(|(_, fewest)| count < fewest) {
+                        best = Some((label, count));
+                    }
+                }
+                Ok(best.map(|(label, _)| label))
             }
         }
     }
 
     /// The nodes that match the given resolved properties (every one, as in
     /// openCypher, where MERGE binds each match).
-    fn find_matching_nodes(&self, resolved_match_props: &[(String, Value)]) -> Vec<NodeId> {
+    fn find_matching_nodes(
+        &self,
+        resolved_match_props: &[(String, Value)],
+    ) -> Result<Vec<NodeId>, OperatorError> {
         // Use a property index when available to avoid a full label scan.
         // Null conditions are excluded from the index query and verified in the loop.
         let use_index = resolved_match_props
             .iter()
             .any(|(k, v)| !v.is_null() && self.writer.store().has_property_index(k));
 
-        // In a transaction the store answers at its view, its own creates
-        // included; the checks below read each candidate the same way.
+        // The store answers at the writer's view, a transaction's own
+        // creates included (UNWIND-driven MERGE relies on seeing the rows it
+        // created to dedupe); the checks below read each candidate the same
+        // way.
         let store = self.writer.store();
-        let view = match (self.writer.viewing_epoch(), self.writer.transaction_id()) {
-            (Some(epoch), Some(transaction_id)) => {
-                Some(ReadView::transaction(transaction_id, epoch))
-            }
-            _ => None,
-        };
+        let view = self.writer.view();
         let candidates: Vec<NodeId> = if use_index {
             let conditions: Vec<(&str, Value)> = resolved_match_props
                 .iter()
                 .filter(|(_, v)| !v.is_null())
                 .map(|(k, v)| (k.as_str(), v.clone()))
                 .collect();
-            match view {
-                Some(view) => store.find_nodes_by_properties_at(&conditions, view),
-                None => store.find_nodes_by_properties(&conditions),
-            }
-        } else if let Some(label) = self.scan_label() {
-            match view {
-                Some(view) => store.nodes_by_label_at(label, view),
-                None => store.nodes_by_label(label),
-            }
+            store.find_nodes_by_properties(&conditions, view)?
+        } else if let Some(label) = self.scan_label()? {
+            store.nodes_by_label(label, view)?
         } else {
-            match view {
-                Some(view) => store.filter_visible_node_ids_at(&store.all_node_ids(), view),
-                None => store.node_ids(),
-            }
+            store.node_ids(view)?
         };
 
         let mut matches = Vec::new();
         for node_id in candidates {
-            // Transactional creates write their version at `EpochId::PENDING`,
-            // so the unversioned `get_node` (which checks visibility against
-            // the current real epoch) hides nodes this same transaction has
-            // just created. UNWIND-driven MERGE relies on seeing those rows
-            // to dedupe, so route through the versioned read when we have a
-            // transaction context attached.
-            let node_opt = match (self.writer.viewing_epoch(), self.writer.transaction_id()) {
-                (Some(epoch), Some(tid)) => {
-                    self.writer.store().get_node_versioned(node_id, epoch, tid)
-                }
-                _ => self.writer.store().get_node(node_id),
+            let Some(node) = store.node(node_id, view)? else {
+                continue;
             };
-            let Some(node) = node_opt else { continue };
 
             let has_all_labels = self.config.labels.iter().all(|label| node.has_label(label));
             if !has_all_labels {
@@ -355,7 +337,7 @@ impl MergeOperator {
             }
         }
 
-        matches
+        Ok(matches)
     }
 
     /// Merges match and ON CREATE property lists, with ON CREATE values
@@ -396,7 +378,7 @@ impl MergeOperator {
             },
         )?;
 
-        let matches = self.find_matching_nodes(&resolved_match);
+        let matches = self.find_matching_nodes(&resolved_match)?;
         if !matches.is_empty() {
             for &existing_id in &matches {
                 // Resolve ON MATCH SET against an augmented row containing the
@@ -436,7 +418,7 @@ impl MergeOperator {
                 chunk,
                 row,
                 &self.writer,
-            );
+            )?;
             self.writer
                 .create_node(
                     &self.created_labels,
@@ -592,7 +574,7 @@ pub struct MergeRelationshipOperator {
     /// Merge configuration.
     config: MergeRelationshipConfig,
     /// Search-store handle for evaluating `PropertySource::Expression`.
-    search_store: Option<Arc<dyn GraphStoreSearch>>,
+    search_store: Option<Arc<dyn GraphStore>>,
     /// Compiled computed match properties, built on first use.
     match_expressions: Option<super::mutation::PropertyExpressions>,
     /// Session context for expression evaluation.
@@ -618,7 +600,7 @@ impl MergeRelationshipOperator {
 
     /// Provides a search-store handle for runtime expression evaluation.
     #[must_use]
-    pub fn with_search_store(mut self, search_store: Arc<dyn GraphStoreSearch>) -> Self {
+    pub fn with_search_store(mut self, search_store: Arc<dyn GraphStore>) -> Self {
         self.search_store = Some(search_store);
         self
     }
@@ -672,12 +654,7 @@ impl MergeRelationshipOperator {
         merged_edge: EdgeId,
     ) -> Result<Vec<(String, Value)>, super::OperatorError> {
         if !MergeOperator::has_expression_source(props) {
-            return Ok(MergeOperator::resolve_properties(
-                props,
-                Some(chunk),
-                row,
-                &self.writer,
-            ));
+            return MergeOperator::resolve_properties(props, Some(chunk), row, &self.writer);
         }
 
         let augmented = self.build_augmented_edge_chunk(chunk, row, merged_edge);
@@ -694,19 +671,16 @@ impl MergeRelationshipOperator {
                                 .to_string(),
                         )
                     })?;
-                    let mut predicate = ExpressionPredicate::new(
+                    let predicate = ExpressionPredicate::new(
                         (**expr).clone(),
                         variable_columns.clone(),
                         Arc::clone(search_store),
+                        self.writer.view(),
                     )
                     .with_session_context(self.session_context.clone());
-                    if let Some(epoch) = self.writer.viewing_epoch() {
-                        predicate =
-                            predicate.with_transaction_context(epoch, self.writer.transaction_id());
-                    }
                     predicate.eval_at(&augmented, 0)?.unwrap_or(Value::Null)
                 }
-                _ => source.resolve(&augmented, 0, &self.writer),
+                _ => source.resolve(&augmented, 0, &self.writer)?,
             };
             out.push((name.clone(), value));
         }
@@ -722,18 +696,22 @@ impl MergeRelationshipOperator {
         src: NodeId,
         dst: NodeId,
         resolved_match_props: &[(String, Value)],
-    ) -> Vec<EdgeId> {
+    ) -> Result<Vec<EdgeId>, OperatorError> {
         use crate::graph::Direction;
 
+        // At the writer's view, as `find_matching_nodes` reads: the edges
+        // this transaction created earlier in the statement are found, so a
+        // repeated row creates no second edge.
         let store = self.writer.store();
+        let view = self.writer.view();
         let mut candidates: Vec<EdgeId> = store
-            .edges_from(src, Direction::Outgoing)
+            .edges(src, Direction::Outgoing, &[], view)?
             .into_iter()
             .filter(|&(target, _)| target == dst)
             .map(|(_, edge_id)| edge_id)
             .collect();
         if self.config.undirected {
-            for (source, edge_id) in store.edges_from(src, Direction::Incoming) {
+            for (source, edge_id) in store.edges(src, Direction::Incoming, &[], view)? {
                 if source == dst && !candidates.contains(&edge_id) {
                     candidates.push(edge_id);
                 }
@@ -742,17 +720,7 @@ impl MergeRelationshipOperator {
 
         let mut matches = Vec::new();
         for edge_id in candidates {
-            // Same as `find_matching_node`: edges this transaction created
-            // earlier in the statement sit at `EpochId::PENDING`, so the
-            // unversioned read would hide them and every repeated row would
-            // create another edge.
-            let edge_opt = match (self.writer.viewing_epoch(), self.writer.transaction_id()) {
-                (Some(epoch), Some(tid)) => {
-                    self.writer.store().get_edge_versioned(edge_id, epoch, tid)
-                }
-                _ => self.writer.store().get_edge(edge_id),
-            };
-            if let Some(edge) = edge_opt {
+            if let Some(edge) = store.edge(edge_id, view)? {
                 if edge.edge_type.as_str() != self.config.edge_type {
                     continue;
                 }
@@ -773,7 +741,7 @@ impl MergeRelationshipOperator {
             }
         }
 
-        matches
+        Ok(matches)
     }
 }
 
@@ -825,7 +793,7 @@ impl Operator for MergeRelationshipOperator {
                     },
                 )?;
 
-                let matches = self.find_matching_edges(src_val, dst_val, &resolved_match);
+                let matches = self.find_matching_edges(src_val, dst_val, &resolved_match)?;
                 if !matches.is_empty() {
                     for &existing in &matches {
                         let resolved_on_match = self.resolve_action_properties(
@@ -863,7 +831,7 @@ impl Operator for MergeRelationshipOperator {
                             Some(&chunk),
                             row,
                             &self.writer,
-                        );
+                        )?;
                         self.writer.create_edge(
                             src_val,
                             dst_val,
@@ -914,7 +882,7 @@ impl Operator for MergeRelationshipOperator {
 
 /// What a MERGE needs to evaluate computed match properties.
 struct MatchContext<'a> {
-    search_store: Option<&'a Arc<dyn GraphStoreSearch>>,
+    search_store: Option<&'a Arc<dyn GraphStore>>,
     session_context: &'a SessionContext,
     /// The MERGE's writer: values are read as its transaction sees them.
     writer: &'a GraphWriter,
@@ -932,12 +900,7 @@ fn resolve_match_properties(
     context: MatchContext<'_>,
 ) -> Result<Vec<(String, Value)>, OperatorError> {
     if !MergeOperator::has_expression_source(props) {
-        return Ok(MergeOperator::resolve_properties(
-            props,
-            chunk,
-            row,
-            context.writer,
-        ));
+        return MergeOperator::resolve_properties(props, chunk, row, context.writer);
     }
     let chunk = chunk.ok_or_else(|| {
         OperatorError::Internal(
@@ -955,12 +918,13 @@ fn resolve_match_properties(
         .resolve_row(props, chunk, row, context.writer)
 }
 
-#[cfg(all(test, feature = "lpg"))]
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::execution::operators::ConstraintValidator;
     use crate::graph::GraphStoreMut;
     use crate::graph::rowgroup::RowGroupStore;
+    use grafeo_common::types::ReadView;
     use grafeo_common::types::TransactionId;
 
     fn const_props(props: Vec<(&str, Value)>) -> Vec<(String, PropertySource)> {
@@ -996,10 +960,10 @@ mod tests {
         assert!(result.is_some());
 
         // Verify node was created
-        let nodes = store.nodes_by_label("Person");
+        let nodes = store.nodes_by_label("Person", ReadView::latest()).unwrap();
         assert_eq!(nodes.len(), 1);
 
-        let node = store.get_node(nodes[0]).unwrap();
+        let node = store.node(nodes[0], ReadView::latest()).unwrap().unwrap();
         assert!(node.has_label("Person"));
         assert_eq!(
             node.properties.get(&PropertyKey::new("name")),
@@ -1039,7 +1003,7 @@ mod tests {
         assert!(result.is_some());
 
         // Verify only one node exists (no new node created)
-        let nodes = store.nodes_by_label("Person");
+        let nodes = store.nodes_by_label("Person", ReadView::latest()).unwrap();
         assert_eq!(nodes.len(), 1);
     }
 
@@ -1068,8 +1032,8 @@ mod tests {
         let _ = merge.next().unwrap();
 
         // Verify node has both match properties and on_create properties
-        let nodes = store.nodes_by_label("Person");
-        let node = store.get_node(nodes[0]).unwrap();
+        let nodes = store.nodes_by_label("Person", ReadView::latest()).unwrap();
+        let node = store.node(nodes[0], ReadView::latest()).unwrap().unwrap();
         assert_eq!(
             node.properties.get(&PropertyKey::new("name")),
             Some(&Value::String("Vincent".into()))
@@ -1111,7 +1075,7 @@ mod tests {
         let _ = merge.next().unwrap();
 
         // Verify node has the on_match property added
-        let node = store.get_node(node_id).unwrap();
+        let node = store.node(node_id, ReadView::latest()).unwrap().unwrap();
         assert_eq!(
             node.properties.get(&PropertyKey::new("updated")),
             Some(&Value::Bool(true))
@@ -1164,14 +1128,14 @@ mod tests {
         assert!(result.is_some());
 
         // ON MATCH should have fired on the correct node
-        let node = store.get_node(target_id).unwrap();
+        let node = store.node(target_id, ReadView::latest()).unwrap().unwrap();
         assert_eq!(
             node.properties.get(&PropertyKey::new("found")),
             Some(&Value::Bool(true))
         );
 
         // No new node should have been created
-        let persons = store.nodes_by_label("Person");
+        let persons = store.nodes_by_label("Person", ReadView::latest()).unwrap();
         assert_eq!(persons.len(), 51);
     }
 
@@ -1208,12 +1172,12 @@ mod tests {
         let result = merge.next().unwrap();
         assert!(result.is_some());
 
-        let persons = store.nodes_by_label("Person");
+        let persons = store.nodes_by_label("Person", ReadView::latest()).unwrap();
         assert_eq!(persons.len(), 2);
 
         let new_nodes: Vec<_> = persons
             .iter()
-            .filter_map(|&id| store.get_node(id))
+            .filter_map(|&id| store.node(id, ReadView::latest()).unwrap())
             .filter(|n| {
                 n.properties.get(&PropertyKey::new("name"))
                     == Some(&Value::String("Shosanna".into()))
@@ -1238,7 +1202,7 @@ mod tests {
 
         let lpg = Arc::new(RowGroupStore::new());
         let store: Arc<dyn GraphStoreMut> = Arc::clone(&lpg) as Arc<dyn GraphStoreMut>;
-        let search: Arc<dyn GraphStoreSearch> = Arc::clone(&lpg) as Arc<dyn GraphStoreSearch>;
+        let search: Arc<dyn GraphStore> = Arc::clone(&lpg) as Arc<dyn GraphStore>;
 
         // Pre-create the matching node so the MERGE goes into the ON MATCH branch.
         let id = store.create_node_with_props(
@@ -1289,7 +1253,7 @@ mod tests {
 
         merge.next().unwrap();
 
-        let node = store.get_node(id).unwrap();
+        let node = store.node(id, ReadView::latest()).unwrap().unwrap();
         assert_eq!(
             node.properties.get(&PropertyKey::new("x")),
             Some(&Value::Int64(12)),
@@ -1307,7 +1271,7 @@ mod tests {
 
         let lpg = Arc::new(RowGroupStore::new());
         let store: Arc<dyn GraphStoreMut> = Arc::clone(&lpg) as Arc<dyn GraphStoreMut>;
-        let search: Arc<dyn GraphStoreSearch> = Arc::clone(&lpg) as Arc<dyn GraphStoreSearch>;
+        let search: Arc<dyn GraphStore> = Arc::clone(&lpg) as Arc<dyn GraphStore>;
 
         let coalesce = FilterExpression::FunctionCall {
             function: crate::execution::operators::BuiltinFunction::Coalesce,
@@ -1348,9 +1312,9 @@ mod tests {
 
         merge.next().unwrap();
 
-        let nodes = store.nodes_by_label("Item");
+        let nodes = store.nodes_by_label("Item", ReadView::latest()).unwrap();
         assert_eq!(nodes.len(), 1);
-        let node = store.get_node(nodes[0]).unwrap();
+        let node = store.node(nodes[0], ReadView::latest()).unwrap().unwrap();
         assert_eq!(
             node.properties.get(&PropertyKey::new("x")),
             Some(&Value::Int64(99))
@@ -1507,13 +1471,13 @@ mod tests {
 
         let lpg = Arc::new(RowGroupStore::new());
         let store: Arc<dyn GraphStoreMut> = Arc::clone(&lpg) as Arc<dyn GraphStoreMut>;
-        let search: Arc<dyn GraphStoreSearch> = Arc::clone(&lpg) as Arc<dyn GraphStoreSearch>;
+        let search: Arc<dyn GraphStore> = Arc::clone(&lpg) as Arc<dyn GraphStore>;
 
         let mut variable_columns = HashMap::new();
         variable_columns.insert("n".to_string(), 0_usize);
 
         let mut merge = MergeOperator::new(
-            GraphWriter::new(Arc::clone(&store)).with_validator(Arc::new(
+            GraphWriter::new(Arc::clone(&store), ReadView::latest()).with_validator(Arc::new(
                 RequirePropertyValidator {
                     required_property: "x",
                 },
@@ -1545,9 +1509,9 @@ mod tests {
             .next()
             .expect("MERGE must succeed because ON CREATE supplies the required property");
 
-        let nodes = store.nodes_by_label("Item");
+        let nodes = store.nodes_by_label("Item", ReadView::latest()).unwrap();
         assert_eq!(nodes.len(), 1);
-        let node = store.get_node(nodes[0]).unwrap();
+        let node = store.node(nodes[0], ReadView::latest()).unwrap().unwrap();
         assert_eq!(
             node.properties.get(&PropertyKey::new("x")),
             Some(&Value::Int64(99)),
@@ -1566,7 +1530,7 @@ mod tests {
 
         let lpg = Arc::new(RowGroupStore::new());
         let store: Arc<dyn GraphStoreMut> = Arc::clone(&lpg) as Arc<dyn GraphStoreMut>;
-        let search: Arc<dyn GraphStoreSearch> = Arc::clone(&lpg) as Arc<dyn GraphStoreSearch>;
+        let search: Arc<dyn GraphStore> = Arc::clone(&lpg) as Arc<dyn GraphStore>;
 
         let mut variable_columns = HashMap::new();
         variable_columns.insert("n".to_string(), 0_usize);
@@ -1574,7 +1538,7 @@ mod tests {
         let recorder = Arc::new(RecordingUniqueValidator::new());
 
         let mut merge = MergeOperator::new(
-            GraphWriter::new(Arc::clone(&store))
+            GraphWriter::new(Arc::clone(&store), ReadView::latest())
                 .with_validator(Arc::clone(&recorder) as Arc<dyn ConstraintValidator>),
             None,
             MergeConfig {
@@ -1617,7 +1581,7 @@ mod tests {
 
         let lpg = Arc::new(RowGroupStore::new());
         let store: Arc<dyn GraphStoreMut> = Arc::clone(&lpg) as Arc<dyn GraphStoreMut>;
-        let search: Arc<dyn GraphStoreSearch> = Arc::clone(&lpg) as Arc<dyn GraphStoreSearch>;
+        let search: Arc<dyn GraphStore> = Arc::clone(&lpg) as Arc<dyn GraphStore>;
 
         let src_id = store.create_node_with_props(
             &["Node"],
@@ -1666,7 +1630,7 @@ mod tests {
         variable_columns.insert("r".to_string(), 2_usize);
 
         let mut merge_rel = MergeRelationshipOperator::new(
-            GraphWriter::new(Arc::clone(&store)).with_validator(Arc::new(
+            GraphWriter::new(Arc::clone(&store), ReadView::latest()).with_validator(Arc::new(
                 RequirePropertyValidator {
                     required_property: "x",
                 },
@@ -1701,12 +1665,13 @@ mod tests {
         // Confirm the edge was created with `x` set to the expression value.
         use crate::graph::Direction;
         let edges: Vec<EdgeId> = store
-            .edges_from(src_id, Direction::Outgoing)
+            .edges(src_id, Direction::Outgoing, &[], ReadView::latest())
+            .unwrap()
             .into_iter()
             .filter_map(|(target, edge_id)| (target == dst_id).then_some(edge_id))
             .collect();
         assert_eq!(edges.len(), 1, "expected exactly one outgoing edge");
-        let edge = store.get_edge(edges[0]).unwrap();
+        let edge = store.edge(edges[0], ReadView::latest()).unwrap().unwrap();
         assert_eq!(edge.get_property("x"), Some(&Value::Int64(7)));
     }
 
@@ -1752,8 +1717,10 @@ mod tests {
         // pending until it commits.
         let tx = TransactionId::new(19);
         let mut merge = MergeOperator::new(
-            GraphWriter::new(Arc::clone(&store))
-                .with_transaction_context(EpochId::INITIAL, Some(tx)),
+            GraphWriter::new(
+                Arc::clone(&store),
+                ReadView::new(EpochId::INITIAL, Some(tx)),
+            ),
             Some(Box::new(OneShot(Some(chunk)))),
             MergeConfig {
                 variable: "n".to_string(),
@@ -1773,10 +1740,11 @@ mod tests {
 
         // All three rows had val = 1, so MERGE must observe the node it
         // created on iteration 1 in iterations 2 and 3 and skip the create.
-        let nodes = store.nodes_by_label("Item");
+        let own = ReadView::transaction(tx, EpochId::INITIAL);
+        let nodes = store.nodes_by_label("Item", own).unwrap();
         let visible: Vec<_> = nodes
             .iter()
-            .filter_map(|&id| store.get_node_versioned(id, EpochId::INITIAL, tx))
+            .filter_map(|&id| store.node(id, own).unwrap())
             .collect();
         assert_eq!(
             visible.len(),
@@ -1850,7 +1818,7 @@ mod tests {
             (&["Tag"][..], Some("Tag")),
             (&[][..], None),
         ] {
-            assert_eq!(merge(labels).scan_label(), expected, "{labels:?}");
+            assert_eq!(merge(labels).scan_label().unwrap(), expected, "{labels:?}");
         }
     }
 }

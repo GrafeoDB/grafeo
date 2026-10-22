@@ -24,7 +24,7 @@
 //! cargo test -p grafeo-engine --all-features --test snapshot_without_its_features
 //! ```
 
-#![cfg(all(feature = "lpg", feature = "gql", not(miri)))]
+#![cfg(all(feature = "gql", not(miri)))]
 
 use std::path::Path;
 

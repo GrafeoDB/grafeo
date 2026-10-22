@@ -21,7 +21,6 @@ use grafeo_common::types::{EpochId, TransactionId};
 use grafeo_common::utils::error::{Error, Result, TransactionError};
 use grafeo_storage::wal::{GroupError, GroupWriter};
 
-#[cfg(feature = "lpg")]
 use crate::transaction::StandaloneChange;
 use crate::transaction::{CommitGuard, TransactionChanges};
 
@@ -114,7 +113,6 @@ pub(crate) fn write_group_at(
 /// # Errors
 ///
 /// As [`write_group`].
-#[cfg(feature = "lpg")]
 pub(crate) fn write_standalone(
     group: &mut GroupWriter<'_>,
     change: &StandaloneChange,
@@ -138,7 +136,6 @@ pub(crate) fn write_standalone(
 /// # Errors
 ///
 /// As [`write_group`].
-#[cfg(feature = "lpg")]
 pub(crate) fn write_copy(
     group: &mut GroupWriter<'_>,
     change: &StandaloneChange,
@@ -291,7 +288,7 @@ pub(crate) fn now_ms() -> u64 {
         })
 }
 
-#[cfg(all(test, feature = "lpg"))]
+#[cfg(test)]
 mod tests {
     use grafeo_common::change::{
         Before, ChangeSet, DataModel, DataOp, EdgeImage, GraphRef, Labels, NodeImage,

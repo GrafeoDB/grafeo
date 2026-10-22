@@ -28,7 +28,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use grafeo_common::change::{Before, DataOp, Labels, Properties, Table};
 use grafeo_common::storage::value_codec::{MAX_PROPERTY_VALUE_DEPTH, nests_too_deep};
 use grafeo_common::types::{
-    ArcStr, EdgeId, EpochId, NodeId, PropertyKey, PropertyMap, TransactionId, Value,
+    ArcStr, EdgeId, EpochId, NodeId, PropertyKey, PropertyMap, ReadView, TransactionId, Value,
 };
 use grafeo_common::utils::hash::FxHashSet;
 
@@ -192,8 +192,9 @@ pub struct Recording {
 #[derive(Clone)]
 pub struct GraphWriter {
     store: Arc<dyn GraphStoreMut>,
-    viewing_epoch: Option<EpochId>,
-    transaction_id: Option<TransactionId>,
+    /// Who the writer reads as: its transaction at its snapshot, or a
+    /// committed reader at the epoch of an immediate write.
+    view: ReadView,
     validator: Option<Arc<dyn ConstraintValidator>>,
     counter: Option<Arc<WriteCounter>>,
     /// Where the writes go and are recorded; `None` to write through the
@@ -205,19 +206,21 @@ pub struct GraphWriter {
 }
 
 impl From<Arc<dyn GraphStoreMut>> for GraphWriter {
-    /// A writer without a transaction, validator or write tracker.
+    /// A writer without a transaction, validator or write tracker: its
+    /// writes commit at once, and it reads what every commit so far left
+    /// (an immediate write reads the newest committed state).
     fn from(store: Arc<dyn GraphStoreMut>) -> Self {
-        Self::new(store)
+        Self::new(store, ReadView::latest())
     }
 }
 
 impl GraphWriter {
-    /// Creates a writer without a transaction, validator or write tracker.
-    pub fn new(store: Arc<dyn GraphStoreMut>) -> Self {
+    /// Creates a writer without a validator or write tracker that reads as
+    /// `view`, and writes as its transaction when it has one.
+    pub fn new(store: Arc<dyn GraphStoreMut>, view: ReadView) -> Self {
         Self {
             store,
-            viewing_epoch: None,
-            transaction_id: None,
+            view,
             validator: None,
             counter: None,
             recording: None,
@@ -246,32 +249,14 @@ impl GraphWriter {
     pub fn with_recording(mut self, recording: Recording) -> Self {
         match recording.recorder.writer() {
             Writer::Transaction { id, snapshot } => {
-                self.viewing_epoch = Some(snapshot);
-                self.transaction_id = Some(id);
+                self.view = ReadView::transaction(id, snapshot);
             }
             Writer::Immediate { epoch, .. } => {
-                self.viewing_epoch = Some(epoch);
-                self.transaction_id = None;
+                self.view = ReadView::committed(epoch);
             }
             Writer::Replay { .. } => {}
         }
         self.recording = Some(recording);
-        self
-    }
-
-    /// Writes as `transaction_id` through the store's versioned methods,
-    /// reading at `epoch`, without claims or a record of what it changed:
-    /// nothing stamps or undoes the versions it writes (a writer of a
-    /// transaction the engine runs gets a [`Recording`] instead, see
-    /// [`with_recording`](Self::with_recording)).
-    #[must_use]
-    pub fn with_transaction_context(
-        mut self,
-        epoch: EpochId,
-        transaction_id: Option<TransactionId>,
-    ) -> Self {
-        self.viewing_epoch = Some(epoch);
-        self.transaction_id = transaction_id;
         self
     }
 
@@ -304,80 +289,66 @@ impl GraphWriter {
         &self.store
     }
 
-    /// The epoch reads see, if a transaction context was given.
+    /// Who the writer reads as.
     #[must_use]
-    pub fn viewing_epoch(&self) -> Option<EpochId> {
-        self.viewing_epoch
+    pub fn view(&self) -> ReadView {
+        self.view
     }
 
     /// The transaction written as, if any.
     #[must_use]
     pub fn transaction_id(&self) -> Option<TransactionId> {
-        self.transaction_id
+        self.view.transaction
     }
 
+    /// The epoch the writer reads at.
     fn epoch(&self) -> EpochId {
-        self.viewing_epoch
-            .unwrap_or_else(|| self.store.current_epoch())
+        self.view.epoch
     }
 
     /// The node as this writer's transaction sees it, its own writes included.
-    #[must_use]
-    pub fn node(&self, id: NodeId) -> Option<Node> {
-        match (self.viewing_epoch, self.transaction_id) {
-            (Some(epoch), Some(transaction_id)) => {
-                self.store.get_node_versioned(id, epoch, transaction_id)
-            }
-            _ => self.store.get_node(id),
-        }
+    ///
+    /// # Errors
+    ///
+    /// Returns the error of a read the store cannot do.
+    pub fn node(&self, id: NodeId) -> Result<Option<Node>, OperatorError> {
+        Ok(self.store.node(id, self.view)?)
     }
 
     /// The edge as this writer's transaction sees it, its own writes included.
-    #[must_use]
-    pub fn edge(&self, id: EdgeId) -> Option<Edge> {
-        match (self.viewing_epoch, self.transaction_id) {
-            (Some(epoch), Some(transaction_id)) => {
-                self.store.get_edge_versioned(id, epoch, transaction_id)
-            }
-            _ => self.store.get_edge(id),
-        }
+    ///
+    /// # Errors
+    ///
+    /// Returns the error of a read the store cannot do.
+    pub fn edge(&self, id: EdgeId) -> Result<Option<Edge>, OperatorError> {
+        Ok(self.store.edge(id, self.view)?)
     }
 
     /// Whether this writer's transaction sees the node, without reading its
     /// labels and properties.
-    #[must_use]
-    pub fn has_node(&self, id: NodeId) -> bool {
-        match (self.viewing_epoch, self.transaction_id) {
-            (Some(epoch), Some(transaction_id)) => {
-                self.store
-                    .is_node_visible_versioned(id, epoch, transaction_id)
-            }
-            _ => self
-                .store
-                .is_node_visible_at_epoch(id, self.store.current_epoch()),
-        }
+    ///
+    /// # Errors
+    ///
+    /// Returns the error of a read the store cannot do.
+    pub fn has_node(&self, id: NodeId) -> Result<bool, OperatorError> {
+        Ok(self.store.is_node_visible(id, self.view)?)
     }
 
     /// Whether this writer's transaction sees the edge, without reading its
     /// properties.
-    #[must_use]
-    pub fn has_edge(&self, id: EdgeId) -> bool {
-        match (self.viewing_epoch, self.transaction_id) {
-            (Some(epoch), Some(transaction_id)) => {
-                self.store
-                    .is_edge_visible_versioned(id, epoch, transaction_id)
-            }
-            _ => self
-                .store
-                .is_edge_visible_at_epoch(id, self.store.current_epoch()),
-        }
+    ///
+    /// # Errors
+    ///
+    /// Returns the error of a read the store cannot do.
+    pub fn has_edge(&self, id: EdgeId) -> Result<bool, OperatorError> {
+        Ok(self.store.is_edge_visible(id, self.view)?)
     }
 
     /// Fails when this writer's transaction cannot see the node: one it
     /// deleted earlier, or one that does not exist. A write to it would change
     /// nothing anyone sees.
     fn require_node(&self, id: NodeId) -> Result<(), OperatorError> {
-        if self.has_node(id) {
+        if self.has_node(id)? {
             Ok(())
         } else {
             Err(OperatorError::Execution(format!(
@@ -390,7 +361,7 @@ impl GraphWriter {
     /// Fails when this writer's transaction cannot see the edge, like
     /// [`require_node`](Self::require_node).
     fn require_edge(&self, id: EdgeId) -> Result<(), OperatorError> {
-        if self.has_edge(id) {
+        if self.has_edge(id)? {
             Ok(())
         } else {
             Err(OperatorError::Execution(format!(
@@ -538,7 +509,7 @@ impl GraphWriter {
                 for (key, value) in assigned_values(&assignments) {
                     validator.validate_node_property(&[], key, value)?;
                 }
-            } else if let Some(node) = self.node(id) {
+            } else if let Some(node) = self.node(id)? {
                 let labels = node_labels(&node);
                 if let Some(converted) = convert_assignments(&assignments, |key, value| {
                     validator.convert_node_property(&labels, key, value)
@@ -563,7 +534,7 @@ impl GraphWriter {
     pub fn remove_node_property(&self, id: NodeId, key: &str) -> Result<bool, OperatorError> {
         self.require_node(id)?;
         self.claim(WriteClaim::Node(id))?;
-        let Some(node) = self.node(id) else {
+        let Some(node) = self.node(id)? else {
             return Ok(false);
         };
         if node.get_property(key).is_none() {
@@ -592,7 +563,7 @@ impl GraphWriter {
     pub fn add_labels(&self, id: NodeId, labels: &[String]) -> Result<usize, OperatorError> {
         self.require_node(id)?;
         self.claim(WriteClaim::Node(id))?;
-        let Some(node) = self.node(id) else {
+        let Some(node) = self.node(id)? else {
             return Ok(0);
         };
         let mut converted = Vec::new();
@@ -628,7 +599,7 @@ impl GraphWriter {
         let _writing = self.write_in_progress();
         let mut added = 0;
         for label in labels {
-            let new = match (&self.recording, self.transaction_id) {
+            let new = match (&self.recording, self.view.transaction) {
                 (Some(recording), _) => self.apply_op(
                     recording,
                     DataOp::AddNodeLabel {
@@ -657,13 +628,13 @@ impl GraphWriter {
     pub fn remove_labels(&self, id: NodeId, labels: &[String]) -> Result<usize, OperatorError> {
         self.require_node(id)?;
         self.claim(WriteClaim::Node(id))?;
-        if self.node(id).is_none() {
+        if self.node(id)?.is_none() {
             return Ok(0);
         }
         let _writing = self.write_in_progress();
         let mut removed = 0;
         for label in labels {
-            let had = match (&self.recording, self.transaction_id) {
+            let had = match (&self.recording, self.view.transaction) {
                 (Some(recording), _) => self.apply_op(
                     recording,
                     DataOp::RemoveNodeLabel {
@@ -693,20 +664,20 @@ impl GraphWriter {
         self.claim(WriteClaim::NodeDelete(id))?;
         let _writing = self.write_in_progress();
         if detach {
-            let outgoing = self.store.edges_from(id, Direction::Outgoing);
-            let incoming = self.store.edges_from(id, Direction::Incoming);
-            for (_, edge) in outgoing.into_iter().chain(incoming) {
+            // Every edge the transaction sees: a self-loop is in both lists
+            // and goes once.
+            for (_, edge) in self.store.edges(id, Direction::Both, &[], self.view)? {
                 self.remove_edge(edge, Some(id))?;
             }
         } else {
-            let degree = self.connected_edge_count(id);
+            let degree = self.connected_edge_count(id)?;
             if degree > 0 {
                 return Err(OperatorError::edges_still_exist(format!(
                     "Cannot delete node with {degree} connected edge(s). Use DETACH DELETE."
                 )));
             }
         }
-        let deleted = match (&self.recording, self.transaction_id) {
+        let deleted = match (&self.recording, self.view.transaction) {
             (Some(recording), _) => self.apply_op(recording, DataOp::DeleteNode { id })?,
             (None, Some(transaction_id)) => self
                 .store
@@ -718,36 +689,39 @@ impl GraphWriter {
         Ok(deleted)
     }
 
-    /// The edges of node `id` that a delete without `DETACH` refuses, among
-    /// those the store lists for it (a store lists an edge until it collects
-    /// it, also one a committed delete took out or a transaction's delete
-    /// still open): the edges this writer's transaction sees (its own new
-    /// ones included), and those committed now that it did not delete
-    /// itself, so edges others created or committed after its snapshot still
-    /// count. An edge the transaction deleted is one visible at its snapshot
-    /// that it no longer sees. Without a transaction, the edges committed
-    /// now.
-    fn connected_edge_count(&self, id: NodeId) -> usize {
-        let outgoing = self.store.edges_from(id, Direction::Outgoing);
-        let incoming = self.store.edges_from(id, Direction::Incoming);
-        let edges = outgoing.into_iter().chain(incoming).map(|(_, edge)| edge);
-        let now = self.store.current_epoch();
-        let (Some(epoch), Some(transaction_id)) = (self.viewing_epoch, self.transaction_id) else {
-            return edges
-                .filter(|&edge| self.store.is_edge_visible_at_epoch(edge, now))
-                .count();
-        };
-        edges
-            .filter(|&edge| {
-                let seen = self
-                    .store
-                    .is_edge_visible_versioned(edge, epoch, transaction_id);
-                let deleted_by_this_transaction =
-                    !seen && self.store.is_edge_visible_at_epoch(edge, epoch);
-                seen || (!deleted_by_this_transaction
-                    && self.store.is_edge_visible_at_epoch(edge, now))
-            })
-            .count()
+    /// The edges of node `id` that a delete without `DETACH` refuses: the
+    /// edges this writer's transaction sees (its own new ones included), and
+    /// those committed by now that it did not delete itself, so edges others
+    /// created or committed after its snapshot still count. An edge the
+    /// transaction deleted is one its snapshot sees that it no longer sees.
+    /// Without a transaction, the edges committed by now.
+    fn connected_edge_count(&self, id: NodeId) -> Result<usize, OperatorError> {
+        let latest = ReadView::latest();
+        let committed: FxHashSet<EdgeId> = self
+            .store
+            .edges(id, Direction::Both, &[], latest)?
+            .into_iter()
+            .map(|(_, edge)| edge)
+            .collect();
+        if self.view.transaction.is_none() {
+            return Ok(committed.len());
+        }
+        let seen: FxHashSet<EdgeId> = self
+            .store
+            .edges(id, Direction::Both, &[], self.view)?
+            .into_iter()
+            .map(|(_, edge)| edge)
+            .collect();
+        let mut count = seen.len();
+        let snapshot = ReadView::committed(self.view.epoch);
+        for edge in committed.difference(&seen) {
+            // Committed by now and not seen: refused unless the transaction
+            // deleted it, an edge its snapshot sees.
+            if !self.store.is_edge_visible(*edge, snapshot)? {
+                count += 1;
+            }
+        }
+        Ok(count)
     }
 
     // === Edges ===
@@ -862,7 +836,7 @@ impl GraphWriter {
         self.claim(WriteClaim::Edge(id))?;
         let mut assignments = Cow::Borrowed(assignments);
         if let Some(validator) = &self.validator
-            && let Some(edge) = self.edge(id)
+            && let Some(edge) = self.edge(id)?
         {
             let edge_type = edge.edge_type.as_str();
             if let Some(converted) = convert_assignments(&assignments, |key, value| {
@@ -892,7 +866,7 @@ impl GraphWriter {
     pub fn remove_edge_property(&self, id: EdgeId, key: &str) -> Result<bool, OperatorError> {
         self.require_edge(id)?;
         self.claim(WriteClaim::Edge(id))?;
-        let Some(edge) = self.edge(id) else {
+        let Some(edge) = self.edge(id)? else {
             return Ok(false);
         };
         if edge.get_property(key).is_none() {
@@ -1045,7 +1019,7 @@ impl GraphWriter {
             // not see is "not found", as a single create through the direct
             // API reports it.
             for (new, endpoint) in [(new_src, src), (new_dst, dst)] {
-                if new && !self.has_node(endpoint) {
+                if new && !self.has_node(endpoint)? {
                     return Err(OperatorError::from(
                         grafeo_common::utils::error::Error::NodeNotFound(endpoint),
                     ));
@@ -1137,7 +1111,7 @@ impl GraphWriter {
                 }
                 record_applied(recording, op, applied)?
             }
-            None => match self.transaction_id {
+            None => match self.view.transaction {
                 Some(transaction_id) => {
                     self.store
                         .delete_edge_versioned(id, self.epoch(), transaction_id)
@@ -1199,12 +1173,10 @@ impl GraphWriter {
     ) -> Result<(), OperatorError> {
         for (name, value) in values {
             validator.validate_node_property(labels, name, value)?;
-            let unchanged = own.is_some_and(|id| {
-                self.store
-                    .get_node_property(id, &PropertyKey::new(name.as_str()))
-                    .as_ref()
-                    == Some(value)
-            });
+            let unchanged = match own {
+                Some(id) => self.store.node_property(id, name, self.view)?.as_ref() == Some(value),
+                None => false,
+            };
             if !unchanged {
                 validator.check_unique_node_property(labels, name, value)?;
             }
@@ -1241,12 +1213,13 @@ impl GraphWriter {
         if !validator.constrains_edge_endpoints(edge_type) {
             return Ok(());
         }
-        let labels_of = |id| {
-            self.node(id)
+        let labels_of = |id| -> Result<Vec<String>, OperatorError> {
+            Ok(self
+                .node(id)?
                 .map(|node| node_labels(&node))
-                .unwrap_or_default()
+                .unwrap_or_default())
         };
-        validator.validate_edge_endpoints(edge_type, &labels_of(src), &labels_of(dst))
+        validator.validate_edge_endpoints(edge_type, &labels_of(src)?, &labels_of(dst)?)
     }
 
     // === Store writes ===
@@ -1262,7 +1235,7 @@ impl GraphWriter {
             return self.create_recorded_node(recording, labels, properties);
         }
         let label_refs: Vec<&str> = labels.iter().map(String::as_str).collect();
-        let id = match self.transaction_id {
+        let id = match self.view.transaction {
             Some(transaction_id) => {
                 self.store
                     .create_node_versioned(&label_refs, self.epoch(), transaction_id)
@@ -1340,7 +1313,7 @@ impl GraphWriter {
         if let Some(recording) = &self.recording {
             return self.create_recorded_edge(recording, src, dst, edge_type, properties);
         }
-        let id = match self.transaction_id {
+        let id = match self.view.transaction {
             Some(transaction_id) => self
                 .store
                 .create_edge_versioned(src, dst, edge_type, self.epoch(), transaction_id)
@@ -1437,7 +1410,7 @@ impl GraphWriter {
             self.count(|c| &c.properties_set, usize::from(changed));
             return Ok(());
         }
-        match (entity, self.transaction_id) {
+        match (entity, self.view.transaction) {
             (Entity::Node(id), Some(transaction_id)) => {
                 self.store
                     .set_node_property_versioned(id, key, value, transaction_id)
@@ -1466,7 +1439,7 @@ impl GraphWriter {
             return Ok(());
         }
         let removed =
-            match (entity, self.transaction_id) {
+            match (entity, self.view.transaction) {
                 (Entity::Node(id), Some(transaction_id)) => self
                     .store
                     .remove_node_property_versioned(id, key, transaction_id),
@@ -1481,19 +1454,19 @@ impl GraphWriter {
         Ok(())
     }
 
-    fn existing_keys(&self, entity: Entity) -> Vec<String> {
+    fn existing_keys(&self, entity: Entity) -> Result<Vec<String>, OperatorError> {
         let properties = match entity {
-            Entity::Node(id) => self.node(id).map(|node| node.properties),
-            Entity::Edge(id) => self.edge(id).map(|edge| edge.properties),
+            Entity::Node(id) => self.node(id)?.map(|node| node.properties),
+            Entity::Edge(id) => self.edge(id)?.map(|edge| edge.properties),
         };
-        properties
+        Ok(properties
             .map(|properties| {
                 properties
                     .iter()
                     .map(|(key, _)| key.as_str().to_string())
                     .collect()
             })
-            .unwrap_or_default()
+            .unwrap_or_default())
     }
 
     /// Applies a SET: plain assignments write their value, map entries write
@@ -1514,7 +1487,7 @@ impl GraphWriter {
                 continue;
             };
             if replace {
-                for key in self.existing_keys(entity) {
+                for key in self.existing_keys(entity)? {
                     self.remove_value(entity, &key)?;
                 }
             }
@@ -1759,8 +1732,9 @@ fn overlay(mut base: Vec<(String, Value)>, changes: &[(String, Value)]) -> Vec<(
     base
 }
 
-#[cfg(all(test, feature = "lpg"))]
+#[cfg(test)]
 mod tests {
+    use grafeo_common::types::ReadView;
     use std::sync::Arc;
     use std::time::Duration;
 
@@ -1784,7 +1758,7 @@ mod tests {
     fn writer() -> (Arc<RowGroupStore>, GraphWriter) {
         let store = Arc::new(RowGroupStore::new());
         let target: Arc<dyn GraphStoreMut> = Arc::clone(&store) as Arc<dyn GraphStoreMut>;
-        (store, GraphWriter::new(target))
+        (store, GraphWriter::new(target, ReadView::latest()))
     }
 
     pub(super) fn labels(names: &[&str]) -> Vec<String> {
@@ -1815,7 +1789,11 @@ mod tests {
             error.contains("\"trips\"") && error.contains(&MAX_PROPERTY_VALUE_DEPTH.to_string()),
             "the error names the property and the limit: {error}"
         );
-        assert_eq!(store.node_count(), 0, "a refused node is not created");
+        assert_eq!(
+            store.node_count(ReadView::latest()).unwrap(),
+            0,
+            "a refused node is not created"
+        );
 
         let deepest = nested(MAX_PROPERTY_VALUE_DEPTH);
         let alix = writer
@@ -1837,7 +1815,9 @@ mod tests {
             "SET n += {{trips: ...}}"
         );
         assert_eq!(
-            store.get_node_property(alix, &trips),
+            store
+                .node_property(alix, trips.as_str(), ReadView::latest())
+                .unwrap(),
             Some(deepest),
             "a refused SET leaves the value as it was"
         );
@@ -1853,7 +1833,7 @@ mod tests {
         let gus = writer
             .create_node(&labels(&["Person"]), Vec::new())
             .unwrap();
-        let edges_before = store.edge_count();
+        let edges_before = store.edge_count(ReadView::latest()).unwrap();
         assert!(
             writer
                 .create_edge(alix, gus, "KNOWS", pairs("route", &too_deep))
@@ -1861,7 +1841,7 @@ mod tests {
             "CREATE ()-[{{route: ...}}]->()"
         );
         assert_eq!(
-            store.edge_count(),
+            store.edge_count(ReadView::latest()).unwrap(),
             edges_before,
             "a refused edge is not created"
         );
@@ -1971,7 +1951,11 @@ mod tests {
         let alix = store.create_node(&["Person"]);
         let gus = store.create_node(&["Person"]);
         let km = PropertyKey::new("km");
-        let km_of = |edge| store.get_edge_property(edge, &km);
+        let km_of = |edge| {
+            store
+                .edge_property(edge, km.as_str(), ReadView::latest())
+                .unwrap()
+        };
 
         let route = writer.create_edge(alix, gus, "ROUTE", Vec::new()).unwrap();
         assert_eq!(km_of(route), Some(Value::Int64(88)), "create_edge");
@@ -2011,7 +1995,11 @@ mod tests {
             Ok(pairs("name", &Value::from("Gus")))
         });
         assert!(refused_trips(&merged), "create_node_with: {merged:?}");
-        assert_eq!(store.node_count(), 0, "no node with the default is written");
+        assert_eq!(
+            store.node_count(ReadView::latest()).unwrap(),
+            0,
+            "no node with the default is written"
+        );
 
         let alix = store.create_node(&["Person"]);
         let gus = store.create_node(&["Person"]);
@@ -2023,7 +2011,11 @@ mod tests {
         assert!(refused_legs(&created), "create_edge: {created:?}");
         let merged = writer.create_edge_with(alix, gus, "TRAVELS", Vec::new(), |_| Ok(Vec::new()));
         assert!(refused_legs(&merged), "create_edge_with: {merged:?}");
-        assert_eq!(store.edge_count(), 0, "no edge with the default is written");
+        assert_eq!(
+            store.edge_count(ReadView::latest()).unwrap(),
+            0,
+            "no edge with the default is written"
+        );
     }
 
     // === Every write method ===
@@ -2135,6 +2127,6 @@ mod tests {
 }
 
 /// The writer with a recording: through a change target, into a change set.
-#[cfg(all(test, feature = "lpg"))]
+#[cfg(test)]
 #[path = "writer_recording_tests.rs"]
 mod recording_tests;

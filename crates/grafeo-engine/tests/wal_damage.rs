@@ -11,13 +11,7 @@
 //! cargo test -p grafeo-engine --all-features --test wal_damage
 //! ```
 
-#![cfg(all(
-    feature = "lpg",
-    feature = "gql",
-    feature = "wal",
-    feature = "grafeo-file",
-    not(miri)
-))]
+#![cfg(all(feature = "gql", feature = "wal", feature = "grafeo-file", not(miri)))]
 
 use std::path::{Path, PathBuf};
 

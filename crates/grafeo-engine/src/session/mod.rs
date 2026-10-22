@@ -15,32 +15,25 @@ mod rdf;
 
 use std::sync::Arc;
 use std::sync::atomic::AtomicUsize;
-#[cfg(feature = "lpg")]
 use std::sync::atomic::Ordering;
 use std::time::Duration;
 
 use grafeo_common::clock::Instant;
-#[cfg(feature = "lpg")]
 use grafeo_common::grafeo_debug_span;
 use grafeo_common::grafeo_info_span;
-#[cfg(feature = "lpg")]
 use grafeo_common::types::{EdgeId, NodeId};
 use grafeo_common::types::{EpochId, PropertyKey, ReadView, TransactionId, Value};
 use grafeo_common::utils::error::Result;
-#[cfg(feature = "lpg")]
 use grafeo_core::graph::Direction;
-#[cfg(feature = "lpg")]
 use grafeo_core::graph::lpg::{Edge, Node};
 #[cfg(feature = "triple-store")]
 use grafeo_core::graph::rdf::RdfStore;
-#[cfg(feature = "lpg")]
 use grafeo_core::graph::rowgroup::RowGroupStore;
-use grafeo_core::graph::{GraphStore, GraphStoreMut, GraphStoreSearch};
+use grafeo_core::graph::{GraphStore, GraphStoreMut};
 
 use crate::catalog::{Catalog, CatalogConstraintValidator};
 use crate::config::GraphModel;
 use crate::database::QueryResult;
-#[cfg(feature = "lpg")]
 use crate::database::direct;
 use crate::query::Executor;
 use crate::query::cache::QueryCache;
@@ -51,7 +44,6 @@ use crate::transaction::TransactionManager;
 const SCHEMA_DEFAULT_GRAPH: &str = "__default__";
 
 /// The database's named graph projections, shared by its sessions.
-#[cfg(feature = "lpg")]
 pub(crate) type ProjectionRegistry = Arc<
     parking_lot::RwLock<
         std::collections::HashMap<String, Arc<grafeo_core::graph::GraphProjection>>,
@@ -90,7 +82,7 @@ impl Drop for StatementFocus<'_> {
 }
 
 /// What a session does once the change of a schema statement is applied.
-#[cfg(all(feature = "lpg", feature = "gql"))]
+#[cfg(feature = "gql")]
 enum AfterSchemaChange {
     /// Nothing.
     Nothing,
@@ -143,7 +135,7 @@ fn parse_default_literal(text: &str) -> Value {
 ///
 /// A semantic error when the catalog refuses the type (one that nests too
 /// many `LIST<...>` levels).
-#[cfg(all(feature = "lpg", feature = "gql"))]
+#[cfg(feature = "gql")]
 fn typed_property(
     definition: &grafeo_adapters::query::gql::ast::PropertyDefinition,
 ) -> Result<crate::catalog::TypedProperty> {
@@ -170,7 +162,7 @@ fn typed_property(
 /// A semantic error when the catalog refuses a property's type (one that
 /// nests too many `LIST<...>` levels), or the types nest more `LIST<...>`
 /// levels in all than the type's catalog record holds.
-#[cfg(all(feature = "lpg", feature = "gql"))]
+#[cfg(feature = "gql")]
 fn typed_properties(
     definitions: &[grafeo_adapters::query::gql::ast::PropertyDefinition],
 ) -> Result<Vec<crate::catalog::TypedProperty>> {
@@ -226,7 +218,6 @@ pub(crate) struct SessionConfig {
     /// The identity bound to this session (for permission checks).
     pub identity: crate::auth::Identity,
     /// Named graph projections shared with the database.
-    #[cfg(feature = "lpg")]
     pub projections: Arc<
         parking_lot::RwLock<
             std::collections::HashMap<String, Arc<grafeo_core::graph::GraphProjection>>,
@@ -242,16 +233,14 @@ pub(crate) struct SessionConfig {
 pub struct Session {
     /// The underlying store. Read it through
     /// [`root_store`](Self::root_store).
-    #[cfg(feature = "lpg")]
     store: Arc<RowGroupStore>,
     /// Classifies the role of `store` for the active backend.
     /// Search procedures (CALL grafeo.search.*) only reach into `store` when
     /// this is `Active`. External-store sessions keep `store` as a placeholder
     /// and must not expose it: it has no indexes or data.
-    #[cfg(feature = "lpg")]
     lpg_backend: LpgBackend,
     /// Graph store trait object for pluggable storage backends (read path).
-    graph_store: Arc<dyn GraphStoreSearch>,
+    graph_store: Arc<dyn GraphStore>,
     /// Writable graph store (None for read-only databases).
     graph_store_mut: Option<Arc<dyn GraphStoreMut>>,
     /// Schema and metadata catalog shared across sessions.
@@ -348,7 +337,6 @@ pub struct Session {
     #[cfg(feature = "metrics")]
     tx_start_time: parking_lot::Mutex<Option<Instant>>,
     /// Named graph projections shared with the database.
-    #[cfg(feature = "lpg")]
     projections: Arc<
         parking_lot::RwLock<
             std::collections::HashMap<String, Arc<grafeo_core::graph::GraphProjection>>,
@@ -357,14 +345,13 @@ pub struct Session {
 }
 
 /// Role of the session's internal row-group store.
-#[cfg(feature = "lpg")]
 #[derive(Clone, Copy)]
 enum LpgBackend {
     /// The internal store is the session's active backing store. Search
     /// procedures can reach its HNSW/BM25 indexes.
     Active,
     /// The internal store is an empty placeholder because the session is
-    /// backed by an external `GraphStoreSearch` implementation. Search
+    /// backed by an external `GraphStore` implementation. Search
     /// procedures must not use it.
     Placeholder,
 }
@@ -381,9 +368,9 @@ struct SavepointState {
 impl Session {
     /// Creates a session that reads and writes `store`. A build with the
     /// triple store uses `with_rdf_store` instead.
-    #[cfg(all(feature = "lpg", not(feature = "triple-store")))]
+    #[cfg(not(feature = "triple-store"))]
     pub(crate) fn with_store(store: Arc<RowGroupStore>, cfg: SessionConfig) -> Self {
-        let graph_store = Arc::clone(&store) as Arc<dyn GraphStoreSearch>;
+        let graph_store = Arc::clone(&store) as Arc<dyn GraphStore>;
         let graph_store_mut = Some(Arc::clone(&store) as Arc<dyn GraphStoreMut>);
         Self {
             store,
@@ -440,7 +427,6 @@ impl Session {
 
     /// The session's own row-group store: the default graph's store, which holds
     /// the named graphs and on which its transactions commit and roll back.
-    #[cfg(feature = "lpg")]
     fn root_store(&self) -> Arc<RowGroupStore> {
         Arc::clone(&self.store)
     }
@@ -470,7 +456,7 @@ impl Session {
     ///
     /// Each commit writes one group: the records of its change set (see
     /// `database::wal_log`), its RDF triples included.
-    #[cfg(all(feature = "wal", feature = "lpg"))]
+    #[cfg(feature = "wal")]
     pub(crate) fn set_wal(&mut self, wal: Arc<grafeo_storage::wal::Wal>) {
         self.wal = Some(wal);
     }
@@ -529,7 +515,7 @@ impl Session {
     ///
     /// Returns an error if the internal arena allocation fails (out of memory).
     pub(crate) fn with_external_store(
-        read_store: Arc<dyn GraphStoreSearch>,
+        read_store: Arc<dyn GraphStore>,
         write_store: Option<Arc<dyn GraphStoreMut>>,
         cfg: SessionConfig,
     ) -> Result<Self> {
@@ -539,9 +525,7 @@ impl Session {
             )))
         });
         Ok(Self {
-            #[cfg(feature = "lpg")]
             store: Arc::new(RowGroupStore::new()),
-            #[cfg(feature = "lpg")]
             lpg_backend: LpgBackend::Placeholder,
             graph_store: read_store,
             graph_store_mut: write_store,
@@ -591,7 +575,6 @@ impl Session {
             metrics: None,
             #[cfg(feature = "metrics")]
             tx_start_time: parking_lot::Mutex::new(None),
-            #[cfg(feature = "lpg")]
             projections: cfg.projections,
         })
     }
@@ -669,7 +652,7 @@ impl Session {
     /// A graph that has the graph type with the key `graph_type` as its type,
     /// which keeps the graph type from being dropped (ISO/IEC 39075:2024 12.7,
     /// Syntax Rule 6). The binding a dropped graph left behind does not count.
-    #[cfg(all(feature = "lpg", any(feature = "gql", feature = "sql-pgq")))]
+    #[cfg(any(feature = "gql", feature = "sql-pgq"))]
     fn graph_typed_by(&self, graph_type: &str) -> Option<String> {
         let store = self.root_store();
         self.catalog
@@ -681,7 +664,7 @@ impl Session {
     }
 
     /// The error that refuses to drop `graph_type`, the type of `graph`.
-    #[cfg(all(feature = "lpg", any(feature = "gql", feature = "sql-pgq")))]
+    #[cfg(any(feature = "gql", feature = "sql-pgq"))]
     fn graph_type_in_use(graph_type: &str, graph: &str) -> grafeo_common::utils::error::Error {
         use grafeo_common::utils::error::{Error, QueryError, QueryErrorKind};
         Error::Query(QueryError::new(
@@ -740,7 +723,6 @@ impl Session {
                 ),
             )));
         }
-        #[cfg(feature = "lpg")]
         if !default
             && self
                 .root_store()
@@ -763,24 +745,21 @@ impl Session {
     /// graph's store from the root store. Writes go through a transaction's
     /// recording (see [`recording_for`](Self::recording_for)), which logs
     /// them and reports them to change data capture at commit.
-    fn active_store(&self) -> Arc<dyn GraphStoreSearch> {
+    fn active_store(&self) -> Arc<dyn GraphStore> {
         self.store_for_key(self.active_graph_storage_key().as_deref())
     }
 
     /// The graph store for the graph with storage key `key` (see
     /// [`active_store`](Self::active_store)).
-    fn store_for_key(&self, key: Option<&str>) -> Arc<dyn GraphStoreSearch> {
+    fn store_for_key(&self, key: Option<&str>) -> Arc<dyn GraphStore> {
         match key {
             None => Arc::clone(&self.graph_store),
-            #[cfg(feature = "lpg")]
             Some(name) => match self.root_store().graph(name) {
-                Some(named_store) => named_store as Arc<dyn GraphStoreSearch>,
+                Some(named_store) => named_store as Arc<dyn GraphStore>,
                 // Dropped meanwhile: no data, never the default graph's (the
                 // graph check before a statement reports the drop).
-                None => Arc::new(grafeo_core::graph::NullGraphStore) as Arc<dyn GraphStoreSearch>,
+                None => Arc::new(grafeo_core::graph::NullGraphStore) as Arc<dyn GraphStore>,
             },
-            #[cfg(not(feature = "lpg"))]
-            Some(_) => Arc::clone(&self.graph_store),
         }
     }
 
@@ -796,15 +775,12 @@ impl Session {
     fn write_store_for_key(&self, key: Option<&str>) -> Option<Arc<dyn GraphStoreMut>> {
         match key {
             None => self.graph_store_mut.as_ref().map(Arc::clone),
-            #[cfg(feature = "lpg")]
             Some(name) => self
                 .root_store()
                 .graph(name)
                 // Dropped meanwhile: nothing to write to, never the default
                 // graph (see `store_for_key`).
                 .map(|named_store| named_store as Arc<dyn GraphStoreMut>),
-            #[cfg(not(feature = "lpg"))]
-            Some(_) => self.graph_store_mut.as_ref().map(Arc::clone),
         }
     }
 
@@ -812,7 +788,6 @@ impl Session {
     ///
     /// Used by direct CRUD methods that need the concrete store type
     /// for versioned operations.
-    #[cfg(feature = "lpg")]
     fn active_lpg_store(&self) -> Arc<RowGroupStore> {
         self.active_lpg_graph_key()
             .and_then(|name| self.root_store().graph(&name))
@@ -822,7 +797,6 @@ impl Session {
     /// The storage key of the graph [`active_lpg_store`](Self::active_lpg_store)
     /// writes to: the active graph, or `None` (the default graph) when no
     /// graph of that name exists, which is where writes then go.
-    #[cfg(feature = "lpg")]
     fn active_lpg_graph_key(&self) -> Option<String> {
         self.active_graph_storage_key()
             .filter(|name| self.root_store().graph(name).is_some())
@@ -830,7 +804,6 @@ impl Session {
 
     /// Resolves a graph name to a concrete row-group store.
     /// `None` and `"default"` resolve to the session's root store.
-    #[cfg(feature = "lpg")]
     fn resolve_store(&self, graph_name: &Option<String>) -> Arc<RowGroupStore> {
         match graph_name {
             None => self.root_store(),
@@ -863,7 +836,6 @@ impl Session {
         };
         let target = match &self.external_target {
             Some(external) => WriteTarget::External(Arc::clone(external)),
-            #[cfg(feature = "lpg")]
             None if self.searches_own_store() => {
                 let store = match key {
                     None => self.root_store(),
@@ -1001,19 +973,23 @@ impl Session {
     /// Returns all versions of a node with their creation/deletion epochs.
     ///
     /// Properties and labels reflect the current state (not versioned per-epoch).
-    #[cfg(feature = "lpg")]
-    #[must_use]
-    pub fn get_node_history(&self, id: NodeId) -> Vec<(EpochId, Option<EpochId>, Node)> {
-        self.active_lpg_store().get_node_history(id)
+    ///
+    /// # Errors
+    ///
+    /// The error of a read the store cannot do.
+    pub fn get_node_history(&self, id: NodeId) -> Result<Vec<(EpochId, Option<EpochId>, Node)>> {
+        self.active_store().node_history(id)
     }
 
     /// Returns all versions of an edge with their creation/deletion epochs.
     ///
     /// Properties reflect the current state (not versioned per-epoch).
-    #[cfg(feature = "lpg")]
-    #[must_use]
-    pub fn get_edge_history(&self, id: EdgeId) -> Vec<(EpochId, Option<EpochId>, Edge)> {
-        self.active_lpg_store().get_edge_history(id)
+    ///
+    /// # Errors
+    ///
+    /// The error of a read the store cannot do.
+    pub fn get_edge_history(&self, id: EdgeId) -> Result<Vec<(EpochId, Option<EpochId>, Edge)>> {
+        self.active_store().edge_history(id)
     }
 
     /// Checks that the session's graph model supports LPG operations.
@@ -1069,11 +1045,8 @@ impl Session {
         cmd: grafeo_adapters::query::gql::ast::SessionCommand,
     ) -> Result<QueryResult> {
         use grafeo_adapters::query::gql::ast::SessionCommand;
-        #[cfg(feature = "lpg")]
         use grafeo_adapters::query::gql::ast::TransactionIsolationLevel;
-        #[cfg(feature = "lpg")]
         use grafeo_common::change::StandaloneOp;
-        #[cfg(feature = "lpg")]
         use grafeo_common::storage::catalog_record::{CatalogRecord, GraphBindingRecord};
         use grafeo_common::utils::error::{Error, QueryError, QueryErrorKind};
 
@@ -1119,7 +1092,6 @@ impl Session {
         // inside a transaction, whose rollback keeps it. Projections change
         // only this session's state, which nothing persists.
         match cmd {
-            #[cfg(feature = "lpg")]
             SessionCommand::CreateGraph {
                 name,
                 if_not_exists,
@@ -1239,7 +1211,6 @@ impl Session {
                 self.commit_standalone(change, &held)?;
                 Ok(QueryResult::empty())
             }
-            #[cfg(feature = "lpg")]
             SessionCommand::DropGraph { name, if_exists } => {
                 let storage_key = self.effective_graph_key(&name);
                 // A drop also keeps the writes of open transactions out
@@ -1273,7 +1244,6 @@ impl Session {
                 }
                 Ok(QueryResult::empty())
             }
-            #[cfg(feature = "lpg")]
             SessionCommand::UseGraph(name) => {
                 // Check per-graph grant before switching
                 if self.identity.has_grants()
@@ -1303,7 +1273,6 @@ impl Session {
                 self.use_graph(&name);
                 Ok(QueryResult::empty())
             }
-            #[cfg(feature = "lpg")]
             SessionCommand::SessionSetGraph(name) => {
                 // ISO/IEC 39075 Section 7.1 GR2: set session graph (resolved within current schema)
                 // Check per-graph grant before switching (same as USE GRAPH)
@@ -1386,7 +1355,6 @@ impl Session {
                 self.reset_session();
                 Ok(QueryResult::empty())
             }
-            #[cfg(feature = "lpg")]
             SessionCommand::StartTransaction {
                 read_only,
                 isolation_level,
@@ -1405,34 +1373,28 @@ impl Session {
                 self.begin_transaction_inner(read_only, engine_level)?;
                 Ok(QueryResult::status("Transaction started"))
             }
-            #[cfg(feature = "lpg")]
             SessionCommand::Commit => {
                 self.commit_inner()?;
                 Ok(QueryResult::status("Transaction committed"))
             }
-            #[cfg(feature = "lpg")]
             SessionCommand::Rollback => {
                 self.rollback_inner()?;
                 Ok(QueryResult::status("Transaction rolled back"))
             }
-            #[cfg(feature = "lpg")]
             SessionCommand::Savepoint(name) => {
                 self.savepoint(&name)?;
                 Ok(QueryResult::status(format!("Savepoint '{name}' created")))
             }
-            #[cfg(feature = "lpg")]
             SessionCommand::RollbackToSavepoint(name) => {
                 self.rollback_to_savepoint(&name)?;
                 Ok(QueryResult::status(format!(
                     "Rolled back to savepoint '{name}'"
                 )))
             }
-            #[cfg(feature = "lpg")]
             SessionCommand::ReleaseSavepoint(name) => {
                 self.release_savepoint(&name)?;
                 Ok(QueryResult::status(format!("Savepoint '{name}' released")))
             }
-            #[cfg(feature = "lpg")]
             SessionCommand::CreateProjection {
                 name,
                 node_labels,
@@ -1459,7 +1421,6 @@ impl Session {
                     }
                 }
             }
-            #[cfg(feature = "lpg")]
             SessionCommand::DropProjection { name } => {
                 let removed = self.projections.write().remove(&name).is_some();
                 if !removed {
@@ -1470,7 +1431,6 @@ impl Session {
                 }
                 Ok(QueryResult::status(format!("Projection '{name}' dropped")))
             }
-            #[cfg(feature = "lpg")]
             SessionCommand::ShowProjections => {
                 let mut names: Vec<String> = self.projections.read().keys().cloned().collect();
                 names.sort();
@@ -1483,12 +1443,6 @@ impl Session {
                     ..QueryResult::empty()
                 })
             }
-            #[cfg(not(feature = "lpg"))]
-            _ => Err(grafeo_common::utils::error::Error::Query(
-                grafeo_common::utils::error::QueryError::unsupported(
-                    "this build has no labeled property graph (the `lpg` feature)",
-                ),
-            )),
         }
     }
 
@@ -1500,7 +1454,6 @@ impl Session {
     ///
     /// The database-closed error after `close()` of a persistent database,
     /// and the incomplete-commit error after a commit that did not complete.
-    #[cfg(feature = "lpg")]
     fn hold_for_standalone(&self, writes_too: bool) -> Result<crate::transaction::CommitsHeld<'_>> {
         crate::database::standalone::hold(&self.transaction_manager, writes_too)
     }
@@ -1512,7 +1465,6 @@ impl Session {
     ///
     /// The error of writing the group, which applies nothing; an op that
     /// does not apply once logged, which poisons the database.
-    #[cfg(feature = "lpg")]
     fn commit_standalone(
         &self,
         change: crate::transaction::StandaloneChange,
@@ -1537,7 +1489,7 @@ impl Session {
     /// An invalid reference when no graph has that name, and a permission
     /// error when the user may not read it.
     #[cfg(feature = "sql-pgq")]
-    fn statement_store(&self, graph: Option<&str>) -> Result<Arc<dyn GraphStoreSearch>> {
+    fn statement_store(&self, graph: Option<&str>) -> Result<Arc<dyn GraphStore>> {
         use grafeo_common::utils::error::{Error, QueryError, QueryErrorKind};
 
         let Some(name) = graph else {
@@ -1557,7 +1509,6 @@ impl Session {
             )));
         }
         let key = self.effective_graph_key(name);
-        #[cfg(feature = "lpg")]
         if self.root_store().graph(&key).is_some() {
             return Ok(self.store_for_key(Some(&key)));
         }
@@ -1579,7 +1530,7 @@ impl Session {
     /// (without `OR REPLACE`, or one that is not this property graph's);
     /// `OR REPLACE` of a graph type another graph has; the user may not run
     /// DDL; a read-only transaction.
-    #[cfg(all(feature = "lpg", feature = "sql-pgq"))]
+    #[cfg(feature = "sql-pgq")]
     fn create_property_graph(
         &self,
         op: &crate::query::plan::CreatePropertyGraphOp,
@@ -1769,7 +1720,7 @@ impl Session {
     /// No graph or graph type of that name (without `IF EXISTS`); a graph
     /// type another graph has; open writes to the graph; the user may not
     /// run DDL; a read-only transaction.
-    #[cfg(all(feature = "lpg", feature = "sql-pgq"))]
+    #[cfg(feature = "sql-pgq")]
     fn drop_property_graph(
         &self,
         op: &crate::query::plan::DropPropertyGraphOp,
@@ -1842,7 +1793,7 @@ impl Session {
 
     /// The result of a SQL/PGQ DDL statement: one row with its `status`, as
     /// a SQL client reads it.
-    #[cfg(all(feature = "lpg", feature = "sql-pgq"))]
+    #[cfg(feature = "sql-pgq")]
     fn ddl_status(message: String) -> QueryResult {
         QueryResult {
             columns: vec!["status".into()],
@@ -1859,7 +1810,7 @@ impl Session {
 
     /// The node and edge types of graph type `def` that no other graph type
     /// lists: they go when `def` goes.
-    #[cfg(all(feature = "lpg", feature = "sql-pgq"))]
+    #[cfg(feature = "sql-pgq")]
     fn element_types_only_of(
         &self,
         def: &crate::catalog::GraphTypeDefinition,
@@ -1894,7 +1845,7 @@ impl Session {
     /// change is logged as a WAL group of its own and applied. It takes
     /// effect at once, also inside a transaction, whose rollback keeps it.
     /// A statement its checks refuse changes nothing.
-    #[cfg(all(feature = "lpg", feature = "gql"))]
+    #[cfg(feature = "gql")]
     fn execute_schema_command(
         &self,
         cmd: grafeo_adapters::query::gql::ast::SchemaStatement,
@@ -1951,7 +1902,7 @@ impl Session {
     /// # Errors
     ///
     /// The error that refuses the statement; `change` is not applied then.
-    #[cfg(all(feature = "lpg", feature = "gql"))]
+    #[cfg(feature = "gql")]
     fn schema_change(
         &self,
         cmd: grafeo_adapters::query::gql::ast::SchemaStatement,
@@ -2678,7 +2629,7 @@ impl Session {
     ///
     /// The errors of the build, and an error in a build without the
     /// `vector-index` feature.
-    #[cfg(all(feature = "lpg", feature = "gql"))]
+    #[cfg(feature = "gql")]
     fn vector_index_change(
         &self,
         change: &mut crate::transaction::StandaloneChange,
@@ -2727,7 +2678,7 @@ impl Session {
     ///
     /// An invalid-value error for options no text index takes, and an error
     /// in a build without the `text-index` feature.
-    #[cfg(all(feature = "lpg", feature = "gql"))]
+    #[cfg(feature = "gql")]
     fn text_index_change(
         &self,
         change: &mut crate::transaction::StandaloneChange,
@@ -2746,7 +2697,7 @@ impl Session {
             let graph = self.active_lpg_graph_key();
             let store = self.active_lpg_store();
             let index =
-                crate::database::index::text_index_from_data(&*store, label, property, &options);
+                crate::database::index::text_index_from_data(&*store, label, property, &options)?;
             change.push_built(
                 crate::database::index::put_index(
                     graph.as_deref(),
@@ -2998,7 +2949,6 @@ impl Session {
     /// When a session schema is set, only graphs belonging to that schema are
     /// shown (their compound prefix is stripped). When no schema is set, graphs
     /// without a schema prefix are shown (the default schema).
-    #[cfg(feature = "lpg")]
     fn execute_show_graphs(&self) -> Result<QueryResult> {
         let schema = self.current_schema.lock().clone();
         let all_names = self.root_store().graph_names();
@@ -3220,7 +3170,6 @@ impl Session {
                     gql::GqlTranslationResult::SessionCommand(cmd) => {
                         return self.execute_session_command(cmd);
                     }
-                    #[cfg(feature = "lpg")]
                     gql::GqlTranslationResult::SchemaCommand(cmd) => {
                         // All DDL requires Admin role
                         self.require_permission(crate::auth::StatementKind::Admin)?;
@@ -3230,14 +3179,6 @@ impl Session {
                             ));
                         }
                         return self.execute_schema_command(cmd);
-                    }
-                    #[cfg(not(feature = "lpg"))]
-                    gql::GqlTranslationResult::SchemaCommand(_) => {
-                        return Err(grafeo_common::utils::error::Error::Query(
-                            grafeo_common::utils::error::QueryError::unsupported(
-                                "this build has no labeled property graph (the `lpg` feature)",
-                            ),
-                        ));
                     }
                     gql::GqlTranslationResult::Plan(plan) => {
                         if params.is_some() {
@@ -3281,14 +3222,9 @@ impl Session {
         // EXPLAIN: annotate pushdown hints and return the plan tree
         if optimized_plan.explain {
             use crate::query::processor::{annotate_pushdown_hints, explain_result};
-            #[cfg(feature = "lpg")]
             self.check_graph_access(self.plan_writes(&optimized_plan.root))?;
             let mut plan = optimized_plan;
-            annotate_pushdown_hints(
-                &mut plan.root,
-                active.as_ref(),
-                self.may_choose_scan_label(),
-            );
+            annotate_pushdown_hints(&mut plan.root, active.as_ref());
             return Ok(explain_result(&plan));
         }
 
@@ -3414,7 +3350,7 @@ impl Session {
     ///
     /// Returns an error if parsing or planning fails, if the query is a
     /// kind that cannot be streamed, or if permission checks fail.
-    #[cfg(all(feature = "gql", feature = "lpg"))]
+    #[cfg(feature = "gql")]
     pub fn execute_streaming(
         &self,
         query: &str,
@@ -3434,7 +3370,7 @@ impl Session {
     /// Rejects session/schema commands, mutations, EXPLAIN/PROFILE, and plans
     /// that require a push-based pipeline. Used by both
     /// [`Session::execute_streaming`] and [`GrafeoDB::execute_streaming`].
-    #[cfg(all(feature = "gql", feature = "lpg"))]
+    #[cfg(feature = "gql")]
     pub(crate) fn build_streaming_plan(
         &self,
         query: &str,
@@ -3744,7 +3680,6 @@ impl Session {
                 Some(plan) => plan,
                 // Schema DDL and SHOW commands run before the normal query path.
                 None => match cypher::translate_full(query)? {
-                    #[cfg(feature = "lpg")]
                     cypher::CypherTranslationResult::SchemaCommand(cmd) => {
                         self.require_permission(crate::auth::StatementKind::Admin)?;
                         // As in GQL: a read-only transaction refuses DDL (25G03).
@@ -3754,14 +3689,6 @@ impl Session {
                             ));
                         }
                         return self.execute_schema_command(cmd);
-                    }
-                    #[cfg(not(feature = "lpg"))]
-                    cypher::CypherTranslationResult::SchemaCommand(_) => {
-                        return Err(grafeo_common::utils::error::Error::Query(
-                            grafeo_common::utils::error::QueryError::unsupported(
-                                "this build has no labeled property graph (the `lpg` feature)",
-                            ),
-                        ));
                     }
                     cypher::CypherTranslationResult::ShowIndexes => {
                         return self.execute_show_indexes();
@@ -3815,14 +3742,9 @@ impl Session {
         // EXPLAIN
         if optimized_plan.explain {
             use crate::query::processor::{annotate_pushdown_hints, explain_result};
-            #[cfg(feature = "lpg")]
             self.check_graph_access(self.plan_writes(&optimized_plan.root))?;
             let mut plan = optimized_plan;
-            annotate_pushdown_hints(
-                &mut plan.root,
-                active.as_ref(),
-                self.may_choose_scan_label(),
-            );
+            annotate_pushdown_hints(&mut plan.root, active.as_ref());
             return Ok(explain_result(&plan));
         }
 
@@ -4282,25 +4204,14 @@ impl Session {
                     // Property graph DDL is a standalone change of its own (see
                     // `create_property_graph`), outside the query pipeline.
                     match &logical_plan.root {
-                        #[cfg(feature = "lpg")]
                         LogicalOperator::CreatePropertyGraph(op) => {
                             return self.create_property_graph(op);
                         }
-                        #[cfg(feature = "lpg")]
                         LogicalOperator::DropPropertyGraph(op) => {
                             return self.drop_property_graph(op);
                         }
                         // Without the labeled property graph there are no
                         // graphs to declare or drop.
-                        #[cfg(not(feature = "lpg"))]
-                        LogicalOperator::CreatePropertyGraph(_)
-                        | LogicalOperator::DropPropertyGraph(_) => {
-                            return Err(grafeo_common::utils::error::Error::Query(
-                                grafeo_common::utils::error::QueryError::unsupported(
-                                    "this build has no labeled property graph (the `lpg` feature)",
-                                ),
-                            ));
-                        }
                         _ => {}
                     }
                     if params.is_some() {
@@ -4490,7 +4401,6 @@ impl Session {
     /// # Errors
     ///
     /// Returns an error if a transaction is already active.
-    #[cfg(feature = "lpg")]
     pub fn begin_transaction(&mut self) -> Result<()> {
         self.begin_transaction_inner(false, None)
     }
@@ -4502,7 +4412,6 @@ impl Session {
     /// # Errors
     ///
     /// Returns an error if a transaction is already active.
-    #[cfg(feature = "lpg")]
     pub fn begin_transaction_with_isolation(
         &mut self,
         isolation_level: crate::transaction::IsolationLevel,
@@ -4511,7 +4420,6 @@ impl Session {
     }
 
     /// Core transaction begin logic, usable from both `&mut self` and `&self` paths.
-    #[cfg(feature = "lpg")]
     fn begin_transaction_inner(
         &self,
         read_only: bool,
@@ -4560,13 +4468,11 @@ impl Session {
     /// # Errors
     ///
     /// Returns an error if no transaction is active.
-    #[cfg(feature = "lpg")]
     pub fn commit(&mut self) -> Result<()> {
         self.commit_inner()
     }
 
     /// Core commit logic, usable from both `&mut self` and `&self` paths.
-    #[cfg(feature = "lpg")]
     fn commit_inner(&self) -> Result<()> {
         let _span = grafeo_debug_span!("grafeo::tx::commit");
 
@@ -4802,13 +4708,11 @@ impl Session {
     /// # Ok(())
     /// # }
     /// ```
-    #[cfg(feature = "lpg")]
     pub fn rollback(&mut self) -> Result<()> {
         self.rollback_inner()
     }
 
     /// Core rollback logic, usable from both `&mut self` and `&self` paths.
-    #[cfg(feature = "lpg")]
     fn rollback_inner(&self) -> Result<()> {
         let _span = grafeo_debug_span!("grafeo::tx::rollback");
         self.check_no_active_streams("rollback")?;
@@ -4863,7 +4767,6 @@ impl Session {
     /// was built on), the error names the graph: everything else is undone
     /// and the transaction is aborted, but that store keeps its writes. A
     /// store that fails to undo poisons the database.
-    #[cfg(feature = "lpg")]
     fn abort_transaction(
         &self,
         transaction_id: TransactionId,
@@ -4896,7 +4799,6 @@ impl Session {
     /// The error of an undo that did not restore everything: a store kept
     /// writes it has no undo for (named), or a store failed to undo, which
     /// poisons the database.
-    #[cfg(feature = "lpg")]
     fn undo_failed(
         &self,
         transaction_id: TransactionId,
@@ -4927,7 +4829,6 @@ impl Session {
     /// # Errors
     ///
     /// Returns an error if no transaction is active.
-    #[cfg(feature = "lpg")]
     pub fn savepoint(&self, name: &str) -> Result<()> {
         let tx_id = self.current_transaction.lock().ok_or_else(|| {
             grafeo_common::utils::error::Error::Transaction(
@@ -4944,7 +4845,6 @@ impl Session {
 
     /// The state a savepoint named `name` restores: how far the open
     /// transaction's changes reach.
-    #[cfg(feature = "lpg")]
     fn capture_savepoint(&self, name: &str) -> SavepointState {
         let mark = self.changes.lock().as_ref().map_or_else(
             || grafeo_common::change::ChangeSet::new().mark(),
@@ -4963,7 +4863,6 @@ impl Session {
     /// # Errors
     ///
     /// Returns an error if no transaction is active or the savepoint does not exist.
-    #[cfg(feature = "lpg")]
     pub fn rollback_to_savepoint(&self, name: &str) -> Result<()> {
         let transaction_id = self.current_transaction.lock().ok_or_else(|| {
             grafeo_common::utils::error::Error::Transaction(
@@ -5007,7 +4906,6 @@ impl Session {
     /// `refuse_external` nothing is undone (a rollback to a savepoint);
     /// without, everything else is undone and that store keeps its writes (a
     /// failed statement). A store that fails to undo poisons the database.
-    #[cfg(feature = "lpg")]
     fn restore_savepoint(
         &self,
         transaction_id: TransactionId,
@@ -5120,7 +5018,6 @@ impl Session {
     /// # Ok(())
     /// # }
     /// ```
-    #[cfg(feature = "lpg")]
     pub fn prepare_commit(&mut self) -> Result<crate::transaction::PreparedCommit<'_>> {
         crate::transaction::PreparedCommit::new(self)
     }
@@ -5323,7 +5220,6 @@ impl Session {
     ///
     /// Every statement and direct write passes here: a write fails first
     /// when the session may not write (see `check_writable`).
-    #[cfg(feature = "lpg")]
     fn with_auto_commit<T, F>(&self, has_mutations: bool, body: F) -> Result<T>
     where
         F: FnOnce() -> Result<T>,
@@ -5342,7 +5238,6 @@ impl Session {
     /// and which goes on. A read runs as it is, outside a transaction pinned
     /// at the published epoch for its run (#412 decision Q6), so garbage
     /// collection keeps what it reads.
-    #[cfg(feature = "lpg")]
     pub(super) fn in_statement_transaction<T, F>(&self, has_mutations: bool, body: F) -> Result<T>
     where
         F: FnOnce() -> Result<T>,
@@ -5384,7 +5279,7 @@ impl Session {
     /// transaction of its own when none is open, otherwise inside the open
     /// one. An error undoes everything `body` wrote; an open transaction
     /// goes on.
-    #[cfg(all(feature = "lpg", feature = "gql"))]
+    #[cfg(feature = "gql")]
     pub(crate) fn as_one_write<T>(&self, body: impl FnOnce() -> Result<T>) -> Result<T> {
         if self.current_transaction.lock().is_some() {
             return self.with_auto_commit(true, body);
@@ -5407,7 +5302,6 @@ impl Session {
     /// for it (see `check_active_graph` and `check_graph_grant`). Every
     /// statement checks this in `with_auto_commit`; `EXPLAIN`, which shows a
     /// plan without running it, and streamed queries check it themselves.
-    #[cfg(feature = "lpg")]
     fn check_graph_access(&self, writes: bool) -> Result<()> {
         self.check_active_graph()?;
         if writes {
@@ -5440,7 +5334,6 @@ impl Session {
     /// read-write one to write. `use_graph` selects a graph without the check
     /// `USE GRAPH` makes, so every statement and direct call checks here. The
     /// default graph needs no grant, as for `USE GRAPH`.
-    #[cfg(feature = "lpg")]
     fn check_graph_grant(&self, writes: bool) -> Result<()> {
         if !self.identity.has_grants() {
             return Ok(());
@@ -5473,7 +5366,6 @@ impl Session {
     /// Fails when the selected graph no longer exists, because another session
     /// dropped it or its schema: the statement would otherwise read and write
     /// the default graph.
-    #[cfg(feature = "lpg")]
     fn check_active_graph(&self) -> Result<()> {
         match self.active_graph_storage_key() {
             Some(key) if self.root_store().graph(&key).is_none() => {
@@ -5491,22 +5383,8 @@ impl Session {
         }
     }
 
-    /// Without the labeled property graph there are no transactions, and
-    /// nothing to write (the triple store needs the labeled property graph).
-    #[cfg(not(feature = "lpg"))]
-    fn with_auto_commit<T, F>(&self, has_mutations: bool, body: F) -> Result<T>
-    where
-        F: FnOnce() -> Result<T>,
-    {
-        if has_mutations {
-            self.check_writable()?;
-        }
-        body()
-    }
-
     /// Returns `Err(Transaction(InvalidState))` if any `ResultStream` is
     /// still outstanding for this session.
-    #[cfg(feature = "lpg")]
     fn check_no_active_streams(&self, op: &str) -> Result<()> {
         if self.active_streams.load(Ordering::Acquire) > 0 {
             return Err(grafeo_common::utils::error::Error::Transaction(
@@ -5640,7 +5518,6 @@ impl Session {
     ///
     /// For a time-travel read before the history floor: "history before ...
     /// is not retained" (see `TransactionManager::pin_read_at`).
-    #[cfg(feature = "lpg")]
     pub(crate) fn pin_read_statement(&self) -> Result<crate::transaction::ReadPin> {
         let viewing = *self.viewing_epoch_override.lock();
         match viewing {
@@ -5652,25 +5529,10 @@ impl Session {
     /// The view the session's direct reads read at: its transaction at its
     /// snapshot, or committed at the published epoch (or the epoch it was
     /// set to read at), never a stamped commit that has not published.
-    #[cfg(feature = "lpg")]
     #[must_use]
     fn read_view(&self) -> ReadView {
         let (epoch, transaction_id) = self.get_transaction_context();
         ReadView::new(epoch, transaction_id)
-    }
-
-    /// Whether the planner may scan another of a pattern's labels than the
-    /// one written, as it decides for this session's reads (see
-    /// [`may_choose_scan_label`](crate::query::planner::lpg::scan::may_choose_scan_label)):
-    /// `EXPLAIN` shows the label that runs.
-    fn may_choose_scan_label(&self) -> bool {
-        let (viewing_epoch, transaction_id) = self.get_transaction_context();
-        crate::query::planner::lpg::scan::may_choose_scan_label(
-            viewing_epoch,
-            transaction_id,
-            Some(self.transaction_manager.current_epoch()),
-            self.active_store().answers_at_view(),
-        )
     }
 
     /// Turns the reachability search of variable-length expands on (the
@@ -5688,7 +5550,7 @@ impl Session {
     /// `self.active_store()` for graph-aware execution).
     fn create_planner_for_store(
         &self,
-        store: Arc<dyn GraphStoreSearch>,
+        store: Arc<dyn GraphStore>,
         viewing_epoch: EpochId,
         transaction_id: Option<TransactionId>,
         open_cypher: bool,
@@ -5711,7 +5573,7 @@ impl Session {
     /// another store: the graph was dropped and created again since.
     fn create_planner_for_store_with_read_only(
         &self,
-        store: Arc<dyn GraphStoreSearch>,
+        store: Arc<dyn GraphStore>,
         viewing_epoch: EpochId,
         transaction_id: Option<TransactionId>,
         read_only: bool,
@@ -5722,6 +5584,12 @@ impl Session {
 
         // Capture store reference for lazy introspection (only computed if info()/schema() called).
         let info_store = Arc::clone(&store);
+        // The counts as the statement sees the graph.
+        let info_view = if read_only {
+            ReadView::committed(viewing_epoch)
+        } else {
+            ReadView::new(viewing_epoch, transaction_id)
+        };
         let schema_store = Arc::clone(&store);
 
         let session_context = SessionContext {
@@ -5730,12 +5598,11 @@ impl Session {
             home_schema: self.home_schema.clone(),
             home_graph: self.home_graph.clone(),
             temporal_comparison: self.temporal_comparison(open_cypher),
-            db_info: LazyValue::new(move || Self::build_info_value(&*info_store)),
+            db_info: LazyValue::new(move || Self::build_info_value(&*info_store, info_view)),
             schema_info: LazyValue::new(move || Self::build_schema_value(&*schema_store)),
         };
 
         let write_store = self.active_write_store();
-        #[cfg(feature = "lpg")]
         let planner_writes = write_store.is_some();
 
         let mut planner = Planner::with_context(
@@ -5755,7 +5622,6 @@ impl Session {
 
         // The graph the writes land in: the active one, or the default graph
         // when no graph of that name exists.
-        #[cfg(feature = "lpg")]
         if transaction_id.is_some() && planner_writes {
             planner =
                 planner.with_recording(self.recording_for(self.active_lpg_graph_key().as_deref())?);
@@ -5765,12 +5631,10 @@ impl Session {
         // HNSW / BM25 indexes. Skip when the session is backed by an external
         // store — `self.store` is an empty placeholder in that case and would
         // make search procedures see a store with no data or indexes.
-        #[cfg(feature = "lpg")]
         if self.searches_own_store() {
             planner = planner.with_lpg_store(self.root_store());
         }
 
-        #[cfg(feature = "lpg")]
         {
             planner = planner.with_projections(Arc::clone(&self.projections));
         }
@@ -5788,7 +5652,6 @@ impl Session {
     /// Whether search procedures reach the session's own store: the
     /// database's built-in store, not the empty placeholder of a session on
     /// an external store.
-    #[cfg(feature = "lpg")]
     fn searches_own_store(&self) -> bool {
         matches!(self.lpg_backend, LpgBackend::Active)
     }
@@ -5799,7 +5662,7 @@ impl Session {
     /// property size limit.
     fn constraint_validator(
         &self,
-        store: Arc<dyn GraphStoreSearch>,
+        store: Arc<dyn GraphStore>,
         epoch: EpochId,
         transaction_id: Option<TransactionId>,
     ) -> CatalogConstraintValidator {
@@ -5829,7 +5692,6 @@ impl Session {
     ///
     /// Returns the error of `write` (a constraint violation or a write
     /// conflict), `ReadOnly` on a read-only session, or the commit's error.
-    #[cfg(feature = "lpg")]
     pub(crate) fn write<T>(
         &self,
         write: impl FnOnce(
@@ -5848,8 +5710,7 @@ impl Session {
                 ),
             )?;
             let (epoch, transaction_id) = self.get_transaction_context();
-            let mut writer = GraphWriter::new(store)
-                .with_transaction_context(epoch, transaction_id)
+            let mut writer = GraphWriter::new(store, ReadView::new(epoch, transaction_id))
                 .with_validator(Arc::new(self.constraint_validator(
                     self.store_for_key(key.as_deref()),
                     epoch,
@@ -5870,7 +5731,7 @@ impl Session {
     }
 
     /// Builds a `Value::Map` for the `info()` introspection function.
-    fn build_info_value(store: &dyn GraphStore) -> Value {
+    fn build_info_value(store: &dyn GraphStore, view: ReadView) -> Result<Value> {
         use grafeo_common::types::PropertyKey;
         use std::collections::BTreeMap;
 
@@ -5878,36 +5739,36 @@ impl Session {
         map.insert(PropertyKey::from("mode"), Value::String("lpg".into()));
         // reason: node/edge counts will not exceed i64::MAX
         #[allow(clippy::cast_possible_wrap)]
-        let node_count = store.node_count() as i64;
+        let node_count = store.node_count(view)? as i64;
         // reason: value is a small counter, well within i64::MAX
         #[allow(clippy::cast_possible_wrap)]
-        let edge_count = store.edge_count() as i64;
+        let edge_count = store.edge_count(view)? as i64;
         map.insert(PropertyKey::from("node_count"), Value::Int64(node_count));
         map.insert(PropertyKey::from("edge_count"), Value::Int64(edge_count));
         map.insert(
             PropertyKey::from("version"),
             Value::String(env!("CARGO_PKG_VERSION").into()),
         );
-        Value::Map(map.into())
+        Ok(Value::Map(map.into()))
     }
 
     /// Builds a `Value::Map` for the `schema()` introspection function.
-    fn build_schema_value(store: &dyn GraphStore) -> Value {
+    fn build_schema_value(store: &dyn GraphStore) -> Result<Value> {
         use grafeo_common::types::PropertyKey;
         use std::collections::BTreeMap;
 
         let labels: Vec<Value> = store
-            .all_labels()
+            .all_labels()?
             .into_iter()
             .map(|l| Value::String(l.into()))
             .collect();
         let edge_types: Vec<Value> = store
-            .all_edge_types()
+            .all_edge_types()?
             .into_iter()
             .map(|t| Value::String(t.into()))
             .collect();
         let property_keys: Vec<Value> = store
-            .all_property_keys()
+            .all_property_keys()?
             .into_iter()
             .map(|k| Value::String(k.into()))
             .collect();
@@ -5922,7 +5783,7 @@ impl Session {
             PropertyKey::from("property_keys"),
             Value::List(property_keys.into()),
         );
-        Value::Map(map.into())
+        Ok(Value::Map(map.into()))
     }
 
     // =========================================================================
@@ -5940,7 +5801,6 @@ impl Session {
     ///
     /// Returns an error if the node violates the schema, for example a label
     /// a closed graph type does not allow or a `NOT NULL` property it lacks.
-    #[cfg(feature = "lpg")]
     pub fn create_node(&self, labels: &[&str]) -> Result<NodeId> {
         self.create_node_with_props(labels, std::iter::empty::<(PropertyKey, Value)>())
     }
@@ -5951,7 +5811,6 @@ impl Session {
     ///
     /// Returns an error if the node violates the schema or a constraint, for
     /// example a `UNIQUE` value another node already has.
-    #[cfg(feature = "lpg")]
     pub fn create_node_with_props(
         &self,
         labels: &[&str],
@@ -5968,7 +5827,6 @@ impl Session {
     ///
     /// Returns an error if an endpoint does not exist or the edge violates the
     /// schema (its type or its endpoints' labels).
-    #[cfg(feature = "lpg")]
     pub fn create_edge(&self, src: NodeId, dst: NodeId, edge_type: &str) -> Result<EdgeId> {
         self.create_edge_with_props(
             src,
@@ -5984,7 +5842,6 @@ impl Session {
     ///
     /// Returns an error if an endpoint does not exist or the edge violates the
     /// schema.
-    #[cfg(feature = "lpg")]
     pub fn create_edge_with_props(
         &self,
         src: NodeId,
@@ -6003,7 +5860,6 @@ impl Session {
     /// Returns an error if the node does not exist or the value violates a
     /// constraint of its labels (type, `NOT NULL`, `UNIQUE`, size limit,
     /// vector index size).
-    #[cfg(feature = "lpg")]
     pub fn set_node_property(&self, id: NodeId, key: &str, value: Value) -> Result<()> {
         self.write(|writer| direct::set_node_property(writer, id, key, value))
     }
@@ -6014,7 +5870,6 @@ impl Session {
     ///
     /// Returns an error if the edge does not exist or the value violates its
     /// type.
-    #[cfg(feature = "lpg")]
     pub fn set_edge_property(&self, id: EdgeId, key: &str, value: Value) -> Result<()> {
         self.write(|writer| direct::set_edge_property(writer, id, key, value))
     }
@@ -6025,7 +5880,6 @@ impl Session {
     ///
     /// Returns an error if a constraint requires the property (`NOT NULL`,
     /// `NODE KEY`).
-    #[cfg(feature = "lpg")]
     pub fn remove_node_property(&self, id: NodeId, key: &str) -> Result<bool> {
         self.write(|writer| writer.remove_node_property(id, key))
     }
@@ -6035,7 +5889,6 @@ impl Session {
     /// # Errors
     ///
     /// Returns an error if the edge's type requires the property.
-    #[cfg(feature = "lpg")]
     pub fn remove_edge_property(&self, id: EdgeId, key: &str) -> Result<bool> {
         self.write(|writer| writer.remove_edge_property(id, key))
     }
@@ -6046,7 +5899,6 @@ impl Session {
     /// # Errors
     ///
     /// Returns an error if the node violates a constraint of the new label.
-    #[cfg(feature = "lpg")]
     pub fn add_node_label(&self, id: NodeId, label: &str) -> Result<bool> {
         self.write(|writer| direct::add_node_label(writer, id, label))
     }
@@ -6057,7 +5909,6 @@ impl Session {
     /// # Errors
     ///
     /// Returns an error if another transaction is writing the node.
-    #[cfg(feature = "lpg")]
     pub fn remove_node_label(&self, id: NodeId, label: &str) -> Result<bool> {
         self.write(|writer| direct::remove_node_label(writer, id, label))
     }
@@ -6070,7 +5921,6 @@ impl Session {
     /// # Errors
     ///
     /// Returns an error if the node still has edges.
-    #[cfg(feature = "lpg")]
     pub fn delete_node(&self, id: NodeId) -> Result<bool> {
         self.write(|writer| writer.delete_node(id, false))
     }
@@ -6085,7 +5935,6 @@ impl Session {
     ///
     /// Returns a write conflict with another transaction that writes the
     /// node or one of its edges, or creates an edge to it.
-    #[cfg(feature = "lpg")]
     pub fn detach_delete_node(&self, id: NodeId) -> Result<bool> {
         self.write(|writer| writer.delete_node(id, true))
     }
@@ -6095,7 +5944,6 @@ impl Session {
     /// # Errors
     ///
     /// Returns an error if another transaction is writing the edge.
-    #[cfg(feature = "lpg")]
     pub fn delete_edge(&self, id: EdgeId) -> Result<bool> {
         self.write(|writer| writer.delete_edge(id))
     }
@@ -6107,7 +5955,6 @@ impl Session {
     ///
     /// Returns the first node's error (for example a vector of another size
     /// than the property's vector index); nothing of the batch is created then.
-    #[cfg(feature = "lpg")]
     pub fn batch_create_nodes(
         &self,
         label: &str,
@@ -6125,7 +5972,6 @@ impl Session {
     /// Returns the first node's error (for example a `UNIQUE` value that
     /// another node, or an earlier node of the batch, already has); nothing of
     /// the batch is created then.
-    #[cfg(feature = "lpg")]
     pub fn batch_create_nodes_with_props(
         &self,
         label: &str,
@@ -6140,7 +5986,6 @@ impl Session {
     /// # Errors
     ///
     /// Returns the first node's error; nothing of the batch is created then.
-    #[cfg(feature = "lpg")]
     pub fn batch_create_nodes_with_labels(
         &self,
         labels: &[&str],
@@ -6156,7 +6001,6 @@ impl Session {
     ///
     /// Returns the first edge's error (an endpoint that does not exist, or a
     /// schema violation); nothing of the batch is created then.
-    #[cfg(feature = "lpg")]
     pub fn batch_create_edges(&self, edges: Vec<direct::BatchEdge>) -> Result<Vec<EdgeId>> {
         self.write(|writer| direct::create_edges(writer, edges))
     }
@@ -6166,15 +6010,13 @@ impl Session {
     /// With a property index on `property` this is a lookup, otherwise a scan
     /// of the committed nodes. Returns the nodes the session sees: in a
     /// transaction, its own writes found through the index included.
-    #[cfg(feature = "lpg")]
-    #[must_use]
-    pub fn find_nodes_by_property(&self, property: &str, value: &Value) -> Vec<NodeId> {
-        GraphStore::find_nodes_by_property_at(
-            &*self.active_lpg_store(),
-            property,
-            value,
-            self.read_view(),
-        )
+    ///
+    /// # Errors
+    ///
+    /// The error of a read the store cannot do.
+    pub fn find_nodes_by_property(&self, property: &str, value: &Value) -> Result<Vec<NodeId>> {
+        self.active_store()
+            .find_nodes_by_property(property, value, self.read_view())
     }
 
     /// Creates an index on a node property of the session's graph. Commits
@@ -6185,7 +6027,6 @@ impl Session {
     /// Returns the database-closed error after `close()` of a persistent
     /// database, and the incomplete-commit error after a commit that did not
     /// complete.
-    #[cfg(feature = "lpg")]
     pub fn create_property_index(&self, property: &str) -> Result<()> {
         let held = self.hold_for_standalone(false)?;
         if self.active_lpg_store().has_property_index(property) {
@@ -6207,7 +6048,6 @@ impl Session {
     /// # Errors
     ///
     /// As [`create_property_index`](Self::create_property_index).
-    #[cfg(feature = "lpg")]
     pub fn drop_property_index(&self, property: &str) -> Result<bool> {
         let held = self.hold_for_standalone(false)?;
         if !self.active_lpg_store().has_property_index(property) {
@@ -6225,7 +6065,6 @@ impl Session {
     }
 
     /// Returns whether a node property of the session's graph has an index.
-    #[cfg(feature = "lpg")]
     #[must_use]
     pub fn has_property_index(&self, property: &str) -> bool {
         self.active_lpg_store().has_property_index(property)
@@ -6255,13 +6094,16 @@ impl Session {
     /// let node_id = session.create_node(&["Person"]).unwrap();
     ///
     /// // Direct lookup - O(1), no query planning
-    /// let node = session.get_node(node_id);
+    /// let node = session.get_node(node_id).unwrap();
     /// assert!(node.is_some());
     /// ```
-    #[cfg(feature = "lpg")]
-    #[must_use]
-    pub fn get_node(&self, id: NodeId) -> Option<Node> {
-        GraphStore::get_node_at(&*self.active_lpg_store(), id, self.read_view())
+    ///
+    /// # Errors
+    ///
+    /// The error of a read the store cannot do: a read that fails is never
+    /// an absent node.
+    pub fn get_node(&self, id: NodeId) -> Result<Option<Node>> {
+        self.active_store().node(id, self.read_view())
     }
 
     /// Gets a single property from a node by ID, bypassing query planning.
@@ -6284,14 +6126,15 @@ impl Session {
     /// let id = session.create_node_with_props(&["Person"], [("name", Value::from("Alix"))]).unwrap();
     ///
     /// // Direct property access - O(1)
-    /// let name = session.get_node_property(id, "name");
+    /// let name = session.get_node_property(id, "name").unwrap();
     /// assert_eq!(name, Some(Value::String("Alix".into())));
     /// ```
-    #[cfg(feature = "lpg")]
-    #[must_use]
-    pub fn get_node_property(&self, id: NodeId, key: &str) -> Option<Value> {
-        self.get_node(id)
-            .and_then(|node| node.get_property(key).cloned())
+    ///
+    /// # Errors
+    ///
+    /// As [`get_node`](Self::get_node).
+    pub fn get_node_property(&self, id: NodeId, key: &str) -> Result<Option<Value>> {
+        self.active_store().node_property(id, key, self.read_view())
     }
 
     /// Gets an edge by ID directly, bypassing query planning.
@@ -6300,10 +6143,12 @@ impl Session {
     ///
     /// - Time complexity: O(1) average case
     /// - No lock contention
-    #[cfg(feature = "lpg")]
-    #[must_use]
-    pub fn get_edge(&self, id: EdgeId) -> Option<Edge> {
-        GraphStore::get_edge_at(&*self.active_lpg_store(), id, self.read_view())
+    ///
+    /// # Errors
+    ///
+    /// As [`get_node`](Self::get_node).
+    pub fn get_edge(&self, id: EdgeId) -> Result<Option<Edge>> {
+        self.active_store().edge(id, self.read_view())
     }
 
     /// The edges of a node in `direction` as `(neighbor, edge)` pairs, as the
@@ -6311,26 +6156,22 @@ impl Session {
     /// without a query: only those of `edge_types` unless it is empty.
     /// `Direction::Both` lists a self-loop once; a node that does not exist
     /// has none. See [`GrafeoDB::get_node_edges`](crate::GrafeoDB::get_node_edges).
-    #[cfg(feature = "lpg")]
-    #[must_use]
+    ///
+    /// # Errors
+    ///
+    /// As [`get_node`](Self::get_node).
     pub fn get_node_edges(
         &self,
         node: NodeId,
         direction: Direction,
         edge_types: &[&str],
-    ) -> Vec<(NodeId, EdgeId)> {
-        let view = self.read_view();
-        let transaction_id = view.transaction.unwrap_or(TransactionId::SYSTEM);
-        let store = self.active_store();
-        let node_visible = store.is_node_visible_at(node, view);
+    ) -> Result<Vec<(NodeId, EdgeId)>> {
         crate::database::direct::node_edges(
-            &*store,
+            &*self.active_store(),
             node,
             direction,
             edge_types,
-            node_visible,
-            |edge| store.is_edge_visible_at(edge, view),
-            |edge| store.edge_type_versioned(edge, view.epoch, transaction_id),
+            self.read_view(),
         )
     }
 
@@ -6355,21 +6196,16 @@ impl Session {
     /// session.create_edge(alix, gus, "KNOWS").unwrap();
     ///
     /// // Direct neighbor lookup - O(degree)
-    /// let neighbors = session.get_neighbors_outgoing(alix);
+    /// let neighbors = session.get_neighbors_outgoing(alix).unwrap();
     /// assert_eq!(neighbors.len(), 1);
     /// assert_eq!(neighbors[0].0, gus);
     /// ```
-    #[cfg(feature = "lpg")]
-    #[must_use]
-    pub fn get_neighbors_outgoing(&self, node: NodeId) -> Vec<(NodeId, EdgeId)> {
-        GraphStore::edges_from_at(
-            &*self.active_lpg_store(),
-            node,
-            Direction::Outgoing,
-            self.read_view(),
-        )
-        .into_iter()
-        .collect()
+    ///
+    /// # Errors
+    ///
+    /// As [`get_node`](Self::get_node).
+    pub fn get_neighbors_outgoing(&self, node: NodeId) -> Result<Vec<(NodeId, EdgeId)>> {
+        self.get_node_edges(node, Direction::Outgoing, &[])
     }
 
     /// Gets incoming neighbors of a node directly, bypassing query planning.
@@ -6380,17 +6216,12 @@ impl Session {
     ///
     /// - Time complexity: O(degree) where degree is the number of incoming edges
     /// - Uses backward adjacency index for direct access
-    #[cfg(feature = "lpg")]
-    #[must_use]
-    pub fn get_neighbors_incoming(&self, node: NodeId) -> Vec<(NodeId, EdgeId)> {
-        GraphStore::edges_from_at(
-            &*self.active_lpg_store(),
-            node,
-            Direction::Incoming,
-            self.read_view(),
-        )
-        .into_iter()
-        .collect()
+    ///
+    /// # Errors
+    ///
+    /// As [`get_node`](Self::get_node).
+    pub fn get_neighbors_incoming(&self, node: NodeId) -> Result<Vec<(NodeId, EdgeId)>> {
+        self.get_node_edges(node, Direction::Incoming, &[])
     }
 
     /// Gets outgoing neighbors filtered by edge type, bypassing query planning.
@@ -6402,27 +6233,18 @@ impl Session {
     /// # let db = GrafeoDB::new_in_memory();
     /// # let session = db.session();
     /// # let alix = session.create_node(&["Person"]).unwrap();
-    /// let neighbors = session.get_neighbors_outgoing_by_type(alix, "KNOWS");
+    /// let neighbors = session.get_neighbors_outgoing_by_type(alix, "KNOWS").unwrap();
     /// ```
-    #[cfg(feature = "lpg")]
-    #[must_use]
+    ///
+    /// # Errors
+    ///
+    /// As [`get_node`](Self::get_node).
     pub fn get_neighbors_outgoing_by_type(
         &self,
         node: NodeId,
         edge_type: &str,
-    ) -> Vec<(NodeId, EdgeId)> {
-        GraphStore::edges_from_at(
-            &*self.active_lpg_store(),
-            node,
-            Direction::Outgoing,
-            self.read_view(),
-        )
-        .into_iter()
-        .filter(|(_, edge_id)| {
-            self.get_edge(*edge_id)
-                .is_some_and(|e| e.edge_type.as_str() == edge_type)
-        })
-        .collect()
+    ) -> Result<Vec<(NodeId, EdgeId)>> {
+        self.get_node_edges(node, Direction::Outgoing, &[edge_type])
     }
 
     /// Checks if a node exists, bypassing query planning.
@@ -6431,29 +6253,36 @@ impl Session {
     ///
     /// - Time complexity: O(1)
     /// - Fastest existence check available
-    #[cfg(feature = "lpg")]
-    #[must_use]
-    pub fn node_exists(&self, id: NodeId) -> bool {
-        self.get_node(id).is_some()
+    ///
+    /// # Errors
+    ///
+    /// As [`get_node`](Self::get_node).
+    pub fn node_exists(&self, id: NodeId) -> Result<bool> {
+        self.active_store().is_node_visible(id, self.read_view())
     }
 
     /// Checks if an edge exists, bypassing query planning.
-    #[cfg(feature = "lpg")]
-    #[must_use]
-    pub fn edge_exists(&self, id: EdgeId) -> bool {
-        self.get_edge(id).is_some()
+    ///
+    /// # Errors
+    ///
+    /// As [`get_node`](Self::get_node).
+    pub fn edge_exists(&self, id: EdgeId) -> Result<bool> {
+        self.active_store().is_edge_visible(id, self.read_view())
     }
 
     /// Gets the degree (number of edges) of a node.
     ///
     /// Returns (outgoing_degree, incoming_degree).
-    #[cfg(feature = "lpg")]
-    #[must_use]
-    pub fn get_degree(&self, node: NodeId) -> (usize, usize) {
-        let active = self.active_lpg_store();
-        let out = active.out_degree(node);
-        let in_degree = active.in_degree(node);
-        (out, in_degree)
+    ///
+    /// # Errors
+    ///
+    /// As [`get_node`](Self::get_node).
+    pub fn get_degree(&self, node: NodeId) -> Result<(usize, usize)> {
+        let view = self.read_view();
+        let active = self.active_store();
+        let out = active.degree(node, Direction::Outgoing, view)?;
+        let in_degree = active.degree(node, Direction::Incoming, view)?;
+        Ok((out, in_degree))
     }
 
     /// Batch lookup of multiple nodes by ID.
@@ -6465,14 +6294,14 @@ impl Session {
     ///
     /// - Time complexity: O(n) where n is the number of IDs
     /// - Better cache utilization than individual lookups
-    #[cfg(feature = "lpg")]
-    #[must_use]
-    pub fn get_nodes_batch(&self, ids: &[NodeId]) -> Vec<Option<Node>> {
+    ///
+    /// # Errors
+    ///
+    /// As [`get_node`](Self::get_node).
+    pub fn get_nodes_batch(&self, ids: &[NodeId]) -> Result<Vec<Option<Node>>> {
         let view = self.read_view();
-        let active = self.active_lpg_store();
-        ids.iter()
-            .map(|&id| GraphStore::get_node_at(&*active, id, view))
-            .collect()
+        let active = self.active_store();
+        ids.iter().map(|&id| active.node(id, view)).collect()
     }
 
     // ── Change Data Capture ─────────────────────────────────────────────
@@ -6542,7 +6371,6 @@ impl Session {
 /// `error`, the error of a statement whose writes were undone by `undo`,
 /// telling also that a store without undo keeps some of them when the
 /// undo says so. The statement's error is the one to report either way.
-#[cfg(feature = "lpg")]
 fn with_kept_writes(
     error: grafeo_common::utils::error::Error,
     undo: Result<()>,
@@ -6561,7 +6389,6 @@ impl Drop for Session {
     fn drop(&mut self) {
         // Auto-rollback any active transaction to prevent leaked MVCC state,
         // dangling write locks, and uncommitted versions lingering in the store.
-        #[cfg(feature = "lpg")]
         if self.in_transaction() {
             let _ = self.rollback_inner();
         }
@@ -6605,6 +6432,7 @@ fn params_to_fill<'a>(
 mod tests {
     use super::parse_default_literal;
     use crate::database::GrafeoDB;
+    use grafeo_common::types::ReadView;
     use grafeo_common::types::Value;
     use grafeo_core::graph::GraphStore as _;
 
@@ -6672,7 +6500,7 @@ mod tests {
 
         let id = session.create_node(&["Person"]).unwrap();
         assert!(id.is_valid());
-        assert_eq!(db.node_count(), 1);
+        assert_eq!(db.node_count().unwrap(), 1);
     }
 
     #[test]
@@ -6717,7 +6545,7 @@ mod tests {
     /// its run (#412 decision Q6): commits published while it runs leave the
     /// read horizon at the read's epoch, and the horizon moves once the read
     /// returns, also when it fails.
-    #[cfg(all(feature = "lpg", feature = "gql"))]
+    #[cfg(feature = "gql")]
     #[test]
     fn a_read_outside_a_transaction_holds_the_read_horizon_for_its_run() {
         use grafeo_common::utils::error::{Error, Result};
@@ -6748,7 +6576,7 @@ mod tests {
 
     /// A stream read outside a transaction holds the read horizon at its
     /// epoch for as long as it lives, a session's and the database's.
-    #[cfg(all(feature = "lpg", feature = "gql"))]
+    #[cfg(feature = "gql")]
     #[test]
     fn a_stream_outside_a_transaction_holds_the_read_horizon_while_it_lives() {
         let db = GrafeoDB::new_in_memory();
@@ -6792,7 +6620,11 @@ mod tests {
         // Create a node outside of any transaction
         let node_before = db.create_node(&["Person"]).unwrap();
         assert!(node_before.is_valid());
-        assert_eq!(db.node_count(), 1, "Should have 1 node before transaction");
+        assert_eq!(
+            db.node_count().unwrap(),
+            1,
+            "Should have 1 node before transaction"
+        );
 
         // Start a transaction and create a node through the session
         let mut session = db.session();
@@ -6806,14 +6638,15 @@ mod tests {
         // Uncommitted nodes use EpochId::PENDING, so they are invisible to
         // non-versioned lookups. Verify the node is visible only to its own tx.
         assert_eq!(
-            db.node_count(),
+            db.node_count().unwrap(),
             1,
             "PENDING nodes should be invisible to non-versioned node_count()"
         );
         let epoch = db.store().current_epoch();
         assert!(
             db.store()
-                .get_node_versioned(node_in_tx, epoch, transaction_id)
+                .node(node_in_tx, ReadView::transaction(transaction_id, epoch))
+                .unwrap()
                 .is_some(),
             "Transaction node should be visible to its own transaction"
         );
@@ -6822,7 +6655,7 @@ mod tests {
         session.rollback().unwrap();
 
         // The node created via session.create_node() should be discarded
-        let count_after = db.node_count();
+        let count_after = db.node_count().unwrap();
         assert_eq!(
             count_after, 1,
             "Rollback should discard node created via session.create_node().unwrap(), but got {count_after}"
@@ -6838,7 +6671,11 @@ mod tests {
 
         // Create a node outside of any transaction
         db.create_node(&["Person"]).unwrap();
-        assert_eq!(db.node_count(), 1, "Should have 1 node before transaction");
+        assert_eq!(
+            db.node_count().unwrap(),
+            1,
+            "Should have 1 node before transaction"
+        );
 
         // Start a transaction and create a node with properties
         let mut session = db.session();
@@ -6853,14 +6690,15 @@ mod tests {
         // Uncommitted nodes use EpochId::PENDING, so they are invisible to
         // non-versioned lookups. Verify the node is visible only to its own tx.
         assert_eq!(
-            db.node_count(),
+            db.node_count().unwrap(),
             1,
             "PENDING nodes should be invisible to non-versioned node_count()"
         );
         let epoch = db.store().current_epoch();
         assert!(
             db.store()
-                .get_node_versioned(node_in_tx, epoch, transaction_id)
+                .node(node_in_tx, ReadView::transaction(transaction_id, epoch))
+                .unwrap()
                 .is_some(),
             "Transaction node should be visible to its own transaction"
         );
@@ -6869,7 +6707,7 @@ mod tests {
         session.rollback().unwrap();
 
         // The node should be discarded
-        let count_after = db.node_count();
+        let count_after = db.node_count().unwrap();
         assert_eq!(
             count_after, 1,
             "Rollback should discard node created via session.create_node_with_props()"
@@ -7192,7 +7030,7 @@ mod tests {
             let session = db.session();
 
             let id = session.create_node(&["Person"]).unwrap();
-            let node = session.get_node(id);
+            let node = session.get_node(id).unwrap();
 
             assert!(node.is_some());
             let node = node.unwrap();
@@ -7207,7 +7045,7 @@ mod tests {
             let session = db.session();
 
             // Try to get a non-existent node
-            let node = session.get_node(NodeId::new(9999));
+            let node = session.get_node(NodeId::new(9999)).unwrap();
             assert!(node.is_none());
         }
 
@@ -7220,11 +7058,11 @@ mod tests {
                 .create_node_with_props(&["Person"], [("name", Value::String("Alix".into()))])
                 .unwrap();
 
-            let name = session.get_node_property(id, "name");
+            let name = session.get_node_property(id, "name").unwrap();
             assert_eq!(name, Some(Value::String("Alix".into())));
 
             // Non-existent property
-            let missing = session.get_node_property(id, "missing");
+            let missing = session.get_node_property(id, "missing").unwrap();
             assert!(missing.is_none());
         }
 
@@ -7237,7 +7075,7 @@ mod tests {
             let gus = session.create_node(&["Person"]).unwrap();
             let edge_id = session.create_edge(alix, gus, "KNOWS").unwrap();
 
-            let edge = session.get_edge(edge_id);
+            let edge = session.get_edge(edge_id).unwrap();
             assert!(edge.is_some());
             let edge = edge.unwrap();
             assert_eq!(edge.id, edge_id);
@@ -7252,7 +7090,7 @@ mod tests {
             let db = GrafeoDB::new_in_memory();
             let session = db.session();
 
-            let edge = session.get_edge(EdgeId::new(9999));
+            let edge = session.get_edge(EdgeId::new(9999)).unwrap();
             assert!(edge.is_none());
         }
 
@@ -7268,7 +7106,7 @@ mod tests {
             session.create_edge(alix, gus, "KNOWS").unwrap();
             session.create_edge(alix, harm, "KNOWS").unwrap();
 
-            let neighbors = session.get_neighbors_outgoing(alix);
+            let neighbors = session.get_neighbors_outgoing(alix).unwrap();
             assert_eq!(neighbors.len(), 2);
 
             let neighbor_ids: Vec<_> = neighbors.iter().map(|(node_id, _)| *node_id).collect();
@@ -7288,7 +7126,7 @@ mod tests {
             session.create_edge(gus, alix, "KNOWS").unwrap();
             session.create_edge(harm, alix, "KNOWS").unwrap();
 
-            let neighbors = session.get_neighbors_incoming(alix);
+            let neighbors = session.get_neighbors_incoming(alix).unwrap();
             assert_eq!(neighbors.len(), 2);
 
             let neighbor_ids: Vec<_> = neighbors.iter().map(|(node_id, _)| *node_id).collect();
@@ -7308,16 +7146,22 @@ mod tests {
             session.create_edge(alix, gus, "KNOWS").unwrap();
             session.create_edge(alix, company, "WORKS_AT").unwrap();
 
-            let knows_neighbors = session.get_neighbors_outgoing_by_type(alix, "KNOWS");
+            let knows_neighbors = session
+                .get_neighbors_outgoing_by_type(alix, "KNOWS")
+                .unwrap();
             assert_eq!(knows_neighbors.len(), 1);
             assert_eq!(knows_neighbors[0].0, gus);
 
-            let works_neighbors = session.get_neighbors_outgoing_by_type(alix, "WORKS_AT");
+            let works_neighbors = session
+                .get_neighbors_outgoing_by_type(alix, "WORKS_AT")
+                .unwrap();
             assert_eq!(works_neighbors.len(), 1);
             assert_eq!(works_neighbors[0].0, company);
 
             // No edges of this type
-            let no_neighbors = session.get_neighbors_outgoing_by_type(alix, "LIKES");
+            let no_neighbors = session
+                .get_neighbors_outgoing_by_type(alix, "LIKES")
+                .unwrap();
             assert!(no_neighbors.is_empty(), "{no_neighbors:?}");
         }
 
@@ -7330,8 +7174,8 @@ mod tests {
 
             let id = session.create_node(&["Person"]).unwrap();
 
-            assert!(session.node_exists(id));
-            assert!(!session.node_exists(NodeId::new(9999)));
+            assert!(session.node_exists(id).unwrap());
+            assert!(!session.node_exists(NodeId::new(9999)).unwrap());
         }
 
         #[test]
@@ -7345,8 +7189,8 @@ mod tests {
             let gus = session.create_node(&["Person"]).unwrap();
             let edge_id = session.create_edge(alix, gus, "KNOWS").unwrap();
 
-            assert!(session.edge_exists(edge_id));
-            assert!(!session.edge_exists(EdgeId::new(9999)));
+            assert!(session.edge_exists(edge_id).unwrap());
+            assert!(!session.edge_exists(EdgeId::new(9999)).unwrap());
         }
 
         #[test]
@@ -7364,13 +7208,13 @@ mod tests {
             // Gus knows Alix (1 incoming for Alix)
             session.create_edge(gus, alix, "KNOWS").unwrap();
 
-            let (out_degree, in_degree) = session.get_degree(alix);
+            let (out_degree, in_degree) = session.get_degree(alix).unwrap();
             assert_eq!(out_degree, 2);
             assert_eq!(in_degree, 1);
 
             // Node with no edges
             let lonely = session.create_node(&["Person"]).unwrap();
-            let (out, in_deg) = session.get_degree(lonely);
+            let (out, in_deg) = session.get_degree(lonely).unwrap();
             assert_eq!(out, 0);
             assert_eq!(in_deg, 0);
         }
@@ -7384,7 +7228,7 @@ mod tests {
             let gus = session.create_node(&["Person"]).unwrap();
             let harm = session.create_node(&["Person"]).unwrap();
 
-            let nodes = session.get_nodes_batch(&[alix, gus, harm]);
+            let nodes = session.get_nodes_batch(&[alix, gus, harm]).unwrap();
             assert_eq!(nodes.len(), 3);
             assert!(nodes[0].is_some());
             assert!(nodes[1].is_some());
@@ -7392,7 +7236,9 @@ mod tests {
 
             // With non-existent node
             use grafeo_common::types::NodeId;
-            let nodes_with_missing = session.get_nodes_batch(&[alix, NodeId::new(9999), harm]);
+            let nodes_with_missing = session
+                .get_nodes_batch(&[alix, NodeId::new(9999), harm])
+                .unwrap();
             assert_eq!(nodes_with_missing.len(), 3);
             assert!(nodes_with_missing[0].is_some());
             assert!(nodes_with_missing[1].is_none()); // Missing node
@@ -7462,13 +7308,13 @@ mod tests {
             let edge_id = session.create_edge(alix, gus, "KNOWS").unwrap();
 
             // Edge should be visible in the transaction
-            assert!(session.edge_exists(edge_id));
+            assert!(session.edge_exists(edge_id).unwrap());
 
             // Commit
             session.commit().unwrap();
 
             // Edge should still be visible
-            assert!(session.edge_exists(edge_id));
+            assert!(session.edge_exists(edge_id).unwrap());
         }
 
         #[test]
@@ -7479,16 +7325,17 @@ mod tests {
             let lonely = session.create_node(&["Person"]).unwrap();
 
             assert!(
-                session.get_neighbors_outgoing(lonely).is_empty(),
+                session.get_neighbors_outgoing(lonely).unwrap().is_empty(),
                 "expected empty"
             );
             assert!(
-                session.get_neighbors_incoming(lonely).is_empty(),
+                session.get_neighbors_incoming(lonely).unwrap().is_empty(),
                 "expected empty"
             );
             assert!(
                 session
                     .get_neighbors_outgoing_by_type(lonely, "KNOWS")
+                    .unwrap()
                     .is_empty(),
                 "expected no neighbors"
             );
@@ -7514,7 +7361,7 @@ mod tests {
         session.commit().unwrap();
 
         // Verify the database is still functional after GC
-        assert_eq!(db.node_count(), 2);
+        assert_eq!(db.node_count().unwrap(), 2);
     }
 
     #[test]
@@ -8101,7 +7948,6 @@ mod tests {
     /// A selected graph that was dropped meanwhile resolves to no data and no
     /// writable store, never to the default graph's: a statement that passed
     /// its graph check just before the drop must not read or write there.
-    #[cfg(feature = "lpg")]
     #[test]
     fn a_dropped_selected_graph_resolves_to_nothing() {
         let db = GrafeoDB::new_in_memory();
@@ -8111,7 +7957,13 @@ mod tests {
         session.use_graph("model");
         assert!(db.drop_graph("model").unwrap());
 
-        assert_eq!(session.active_store().node_count(), 0);
+        assert_eq!(
+            session
+                .active_store()
+                .node_count(ReadView::latest())
+                .unwrap(),
+            0
+        );
         assert!(session.active_write_store().is_none());
     }
 
@@ -8120,7 +7972,6 @@ mod tests {
     /// commit logs nothing under the graph's name: the drop went through as
     /// the transaction had no change in the graph yet, and the dropped
     /// graph's store refuses the write.
-    #[cfg(feature = "lpg")]
     #[test]
     fn a_write_through_a_graph_resolved_before_its_drop_is_refused() {
         use grafeo_common::change::DataOp;
@@ -8165,7 +8016,7 @@ mod tests {
     /// graph's store refuses the write otherwise, which then leaves nothing.
     /// So the log holds no write into the graph after its drop, and replay
     /// cannot create it again.
-    #[cfg(all(feature = "lpg", feature = "wal", feature = "grafeo-file"))]
+    #[cfg(all(feature = "wal", feature = "grafeo-file"))]
     #[test]
     fn a_write_outside_a_transaction_never_lands_in_a_dropped_graph() {
         use grafeo_common::change::StandaloneOp;

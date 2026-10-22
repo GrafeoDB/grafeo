@@ -419,7 +419,11 @@ mod tests {
         let status = grafeo_batch_create_edges(db, edges.as_ptr(), &raw mut ids, &raw mut count);
         assert_ne!(status, GrafeoStatus::Ok);
         assert!(ids.is_null() && count == 0, "no ids on an error");
-        assert_eq!(grafeo_edge_count(db), 0, "none of the batch");
+        assert_eq!(
+            crate::database::counted(grafeo_edge_count, db),
+            0,
+            "none of the batch"
+        );
         grafeo_close(db);
         grafeo_free_database(db);
     }
@@ -451,7 +455,7 @@ mod tests {
         let status = grafeo_batch_create_edges(db, edges.as_ptr(), &raw mut ids, &raw mut count);
         assert_eq!(status, GrafeoStatus::ErrorSerialization);
         assert!(last_error().contains("\"dst\""), "{}", last_error());
-        assert_eq!(grafeo_node_count(db), 0);
+        assert_eq!(crate::database::counted(grafeo_node_count, db), 0);
         grafeo_close(db);
         grafeo_free_database(db);
     }

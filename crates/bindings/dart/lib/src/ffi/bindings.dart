@@ -322,10 +322,12 @@ final class GrafeoBindings {
       int Function(
           Pointer<Void>, int, Pointer<Utf8>)>('grafeo_remove_node_label');
 
-  /// Get labels for a node as JSON. Caller must free with grafeoFreeString.
+  /// Get labels for a node as JSON into the out pointer (null when the node
+  /// does not exist); a status. Caller must free with grafeoFreeString.
   late final grafeoGetNodeLabels = library.lookupFunction<
-      Pointer<Utf8> Function(Pointer<Void>, Uint64),
-      Pointer<Utf8> Function(Pointer<Void>, int)>('grafeo_get_node_labels');
+      Int32 Function(Pointer<Void>, Uint64, Pointer<Pointer<Utf8>>),
+      int Function(Pointer<Void>, int,
+          Pointer<Pointer<Utf8>>)>('grafeo_get_node_labels');
 
   /// Get node ID from an opaque node pointer.
   late final grafeoNodeId = library.lookupFunction<
@@ -619,15 +621,15 @@ final class GrafeoBindings {
   // Statistics
   // ===========================================================================
 
-  /// Get the number of nodes.
+  /// Get the number of nodes into the out pointer; a status.
   late final grafeoNodeCount = library.lookupFunction<
-      IntPtr Function(Pointer<Void>),
-      int Function(Pointer<Void>)>('grafeo_node_count');
+      Int32 Function(Pointer<Void>, Pointer<IntPtr>),
+      int Function(Pointer<Void>, Pointer<IntPtr>)>('grafeo_node_count');
 
-  /// Get the number of edges.
+  /// Get the number of edges into the out pointer; a status.
   late final grafeoEdgeCount = library.lookupFunction<
-      IntPtr Function(Pointer<Void>),
-      int Function(Pointer<Void>)>('grafeo_edge_count');
+      Int32 Function(Pointer<Void>, Pointer<IntPtr>),
+      int Function(Pointer<Void>, Pointer<IntPtr>)>('grafeo_edge_count');
 
   // ===========================================================================
   // Transactions
@@ -833,12 +835,13 @@ final class GrafeoBindings {
       int Function(
           Pointer<Void>, int, Pointer<Pointer<Void>>)>('grafeo_as_of_get_edge');
 
-  /// A node's property value at a view's epoch as JSON, null when there was
-  /// none. Free with grafeoFreeString.
+  /// A node's property value at a view's epoch as JSON into the out pointer,
+  /// null when there was none; a status. Free with grafeoFreeString.
   late final grafeoAsOfGetNodeProperty = library.lookupFunction<
-      Pointer<Utf8> Function(Pointer<Void>, Uint64, Pointer<Utf8>),
-      Pointer<Utf8> Function(Pointer<Void>, int,
-          Pointer<Utf8>)>('grafeo_as_of_get_node_property');
+      Int32 Function(
+          Pointer<Void>, Uint64, Pointer<Utf8>, Pointer<Pointer<Utf8>>),
+      int Function(Pointer<Void>, int, Pointer<Utf8>,
+          Pointer<Pointer<Utf8>>)>('grafeo_as_of_get_node_property');
 
   /// Free a view.
   late final grafeoFreeAsOf = library.lookupFunction<

@@ -7,8 +7,7 @@
 //! cargo test -p grafeo-engine --features full --test post_compact_index
 //! ```
 
-#![cfg(feature = "lpg")]
-
+use grafeo_common::types::ReadView;
 use grafeo_common::types::Value;
 use grafeo_engine::GrafeoDB;
 
@@ -98,7 +97,8 @@ fn vector_index_after_compact_nearest_neighbor_is_correct() {
     // Verify it's the right node by checking its property
     let title = db
         .graph_store()
-        .get_node_property(nearest_id, &grafeo_common::types::PropertyKey::new("title"));
+        .node_property(nearest_id, "title", ReadView::latest())
+        .unwrap();
     assert_eq!(title, Some(Value::String("alpha".into())));
 }
 

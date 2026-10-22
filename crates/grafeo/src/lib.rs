@@ -92,19 +92,8 @@ pub use grafeo_engine::config::EncryptionConfig;
 pub use grafeo_engine::config::StorageFormat;
 
 // Re-export time travel: the retention setting `Config` takes, and the view and
-// points in time `GrafeoDB::as_of` works with. The engine builds those with its
-// LPG store, so the gate lists every facade feature that enables
-// `grafeo-engine/lpg` directly or through `grafeo-engine/triple-store` (`rdf`,
-// `ring-index`, `server` and `full` enable one of these): keep it in step with
-// Cargo.toml.
+// points in time `GrafeoDB::as_of` works with, in every build.
 pub use grafeo_engine::HistoryRetention;
-#[cfg(any(
-    feature = "lpg",
-    feature = "embedded",
-    feature = "edge",
-    feature = "triple-store",
-    feature = "sparql"
-))]
 pub use grafeo_engine::{AsOfView, TimePoint};
 
 // Re-export what `GrafeoDB::create_text_index_with` takes

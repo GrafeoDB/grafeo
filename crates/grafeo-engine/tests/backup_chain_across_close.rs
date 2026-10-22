@@ -13,12 +13,7 @@
 //! cargo test -p grafeo-engine --all-features --test backup_chain_across_close
 //! ```
 
-#![cfg(all(
-    feature = "wal",
-    feature = "grafeo-file",
-    feature = "lpg",
-    feature = "gql"
-))]
+#![cfg(all(feature = "wal", feature = "grafeo-file", feature = "gql"))]
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};

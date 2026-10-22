@@ -112,7 +112,7 @@ fn during_next_commit<T: Send + 'static>(
 }
 
 fn by(db: &GrafeoDB, node: NodeId) -> Option<Value> {
-    db.get_node(node)?.get_property("by").cloned()
+    db.get_node(node).unwrap()?.get_property("by").cloned()
 }
 
 /// A transaction that sets `by` on `hub` and starts `work` (given the
@@ -182,7 +182,7 @@ fn a_transaction_during_a_commit_does_not_see_it_and_one_after_it_does() {
     let sees = move |db: &GrafeoDB| {
         let mut reader = db.session();
         reader.begin_transaction().unwrap();
-        let seen = reader.get_node(doc).is_some();
+        let seen = reader.get_node(doc).unwrap().is_some();
         // A commit, even of nothing, takes the next epoch and so waits for
         // the commit in progress: a read rolls back.
         reader.rollback().unwrap();

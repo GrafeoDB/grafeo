@@ -370,7 +370,7 @@ fn cypher_missing_parameter_is_an_error() {
 // Vector search arguments
 // ---------------------------------------------------------------------------
 
-#[cfg(all(feature = "vector-index", feature = "lpg"))]
+#[cfg(feature = "vector-index")]
 mod vector {
     use super::*;
 

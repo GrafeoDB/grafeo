@@ -18,8 +18,6 @@ use crate::graph::rowgroup::section::{
     write_lpg_section_with_history,
 };
 use crate::graph::traits::GraphStore;
-#[cfg(any(feature = "text-index", feature = "vector-index"))]
-use crate::graph::traits::GraphStoreSearch;
 
 /// A section in memory, open to tampering.
 #[derive(Default, Clone)]
@@ -156,11 +154,11 @@ fn replay_keeps_what_it_replaces_only_in_a_store_that_keeps_history() {
         apply_all(&store, &ops, Writer::Replay { epoch }).unwrap();
         let at = |epoch: EpochId| {
             let view = ReadView::committed(epoch);
-            let labels = store.get_node_at(people.gus, view).unwrap().labels.len();
+            let labels = store.node(people.gus, view).unwrap().unwrap().labels.len();
             (
-                store.node_property_at(people.gus, "age", view),
+                store.node_property(people.gus, "age", view).unwrap(),
                 labels,
-                store.edge_property_at(people.gus_mia, "since", view),
+                store.edge_property(people.gus_mia, "since", view).unwrap(),
             )
         };
         assert_eq!(
@@ -209,7 +207,11 @@ fn a_collect_at_the_horizon_keeps_every_later_read_and_moves_the_floor() {
     let ages = |store: &RowGroupStore| -> Vec<Option<Value>> {
         epochs
             .iter()
-            .map(|epoch| store.node_property_at(people.gus, "age", ReadView::committed(*epoch)))
+            .map(|epoch| {
+                store
+                    .node_property(people.gus, "age", ReadView::committed(*epoch))
+                    .unwrap()
+            })
             .collect()
     };
     let before = ages(&store);
@@ -238,7 +240,8 @@ fn a_collect_at_the_horizon_keeps_every_later_read_and_moves_the_floor() {
     );
     assert!(
         store
-            .get_node_at(people.mia, ReadView::committed(horizon))
+            .node(people.mia, ReadView::committed(horizon))
+            .unwrap()
             .is_some(),
         "Mia, deleted after the horizon, is still there for a reader at it"
     );
@@ -285,7 +288,7 @@ fn the_history_calls_list_each_commit_with_what_it_wrote() {
         None
     );
 
-    let versions = store.get_node_history(people.gus);
+    let versions = store.node_history(people.gus).unwrap();
     let spans: Vec<(EpochId, Option<EpochId>)> = versions
         .iter()
         .map(|(start, end, _)| (*start, *end))
@@ -315,7 +318,7 @@ fn the_history_calls_list_each_commit_with_what_it_wrote() {
         None,
         "the age removed"
     );
-    let mia = store.get_node_history(people.mia);
+    let mia = store.node_history(people.mia).unwrap();
     assert_eq!(
         mia.iter()
             .map(|(start, end, _)| (*start, *end))
@@ -325,7 +328,8 @@ fn the_history_calls_list_each_commit_with_what_it_wrote() {
     );
     assert_eq!(
         store
-            .get_edge_history(people.alix_gus)
+            .edge_history(people.alix_gus)
+            .unwrap()
             .iter()
             .map(|(start, end, _)| (*start, *end))
             .collect::<Vec<_>>(),
@@ -449,8 +453,14 @@ fn a_checkpoint_with_history_reads_alike_at_every_epoch_of_its_window() {
         }
         assert_eq!(loaded.current_epoch(), epoch, "seed {seed}");
         assert_eq!(
-            (loaded.node_count(), loaded.edge_count()),
-            (store.node_count(), store.edge_count()),
+            (
+                loaded.node_count(ReadView::latest()).unwrap(),
+                loaded.edge_count(ReadView::latest()).unwrap()
+            ),
+            (
+                store.node_count(ReadView::latest()).unwrap(),
+                store.edge_count(ReadView::latest()).unwrap()
+            ),
             "seed {seed}: the counts at the epoch"
         );
         store.collect(epoch);
@@ -517,7 +527,9 @@ fn a_cold_column_keeps_its_loaded_value_for_readers_before_a_write() {
         )
         .unwrap();
     let city = |store: &RowGroupStore, at: EpochId| {
-        store.node_property_at(people.alix, "city", ReadView::committed(at))
+        store
+            .node_property(people.alix, "city", ReadView::committed(at))
+            .unwrap()
     };
     assert_eq!(city(&store, loaded_at), Some(Value::from("Amsterdam")));
     assert_eq!(city(&store, epoch), Some(Value::from("Berlin")));
@@ -627,7 +639,11 @@ fn the_reader_refuses_history_no_writer_writes() {
 fn an_edge_deleted_in_the_window_is_read_until_its_delete_after_a_load() {
     let (store, people, epochs) = gus_ages();
     let loaded = loaded(&written(&store, Some(epochs[0]), ChunkCaps::current()));
-    let edge = |at: EpochId| loaded.get_edge_at(people.gus_mia, ReadView::committed(at));
+    let edge = |at: EpochId| {
+        loaded
+            .edge(people.gus_mia, ReadView::committed(at))
+            .unwrap()
+    };
     assert_eq!(
         edge(epochs[2]).map(|edge| edge.dst),
         Some(people.mia),
@@ -635,11 +651,14 @@ fn an_edge_deleted_in_the_window_is_read_until_its_delete_after_a_load() {
     );
     assert!(edge(epochs[3]).is_none(), "from the delete on");
     let outgoing = |at: EpochId| {
-        loaded.edges_from_at(
-            people.gus,
-            crate::graph::Direction::Outgoing,
-            ReadView::committed(at),
-        )
+        loaded
+            .edges(
+                people.gus,
+                crate::graph::Direction::Outgoing,
+                &[],
+                ReadView::committed(at),
+            )
+            .unwrap()
     };
     assert_eq!(outgoing(epochs[2]), [(people.mia, people.gus_mia)]);
     assert_eq!(outgoing(epochs[3]), []);
@@ -710,7 +729,8 @@ fn a_text_search_in_the_window_finds_what_existed_then() {
         rewritten_docs(|store| store.add_text_index("Doc", "body", index()));
     let found = |store: &RowGroupStore, at: EpochId| -> Vec<grafeo_common::types::NodeId> {
         let mut found: Vec<_> = store
-            .text_search_at("Doc", "body", "graph", 10, ReadView::committed(at))
+            .text_search("Doc", "body", "graph", 10, ReadView::committed(at))
+            .unwrap()
             .into_iter()
             .map(|(id, _)| id)
             .collect();
@@ -724,9 +744,10 @@ fn a_text_search_in_the_window_finds_what_existed_then() {
     let built = index();
     {
         let mut built = built.write();
-        for id in loaded.nodes_by_label("Doc") {
-            if let Some(Value::String(text)) =
-                loaded.get_node_property(id, &PropertyKey::new("body"))
+        for id in loaded.nodes_by_label("Doc", ReadView::latest()).unwrap() {
+            if let Some(Value::String(text)) = loaded
+                .node_property(id, "body", ReadView::latest())
+                .unwrap()
             {
                 built.insert(id, &text);
             }
@@ -760,7 +781,7 @@ fn a_vector_search_in_the_window_finds_the_vectors_of_then() {
         rewritten_docs(|store| store.add_vector_index("Doc", "embedding", index()));
     let nearest = |store: &RowGroupStore, at: EpochId| {
         store
-            .vector_search_at(
+            .vector_search(
                 Some("Doc"),
                 "embedding",
                 &[1.0, 0.0, 0.0],
@@ -768,6 +789,7 @@ fn a_vector_search_in_the_window_finds_the_vectors_of_then() {
                 DistanceMetric::Euclidean,
                 ReadView::committed(at),
             )
+            .unwrap()
             .first()
             .map(|(id, _)| *id)
     };
@@ -788,7 +810,9 @@ fn a_property_lookup_in_the_window_finds_the_values_of_then() {
     let (store, people, epochs) = gus_ages();
     store.create_property_index("age");
     let found = |store: &RowGroupStore, age: i64, at: EpochId| {
-        store.find_nodes_by_property_at("age", &Value::Int64(age), ReadView::committed(at))
+        store
+            .find_nodes_by_property("age", &Value::Int64(age), ReadView::committed(at))
+            .unwrap()
     };
     for store in [
         &store,

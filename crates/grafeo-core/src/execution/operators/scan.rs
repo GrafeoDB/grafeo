@@ -1,15 +1,15 @@
 //! Scan operator for reading data from storage.
 
-use super::{Operator, OperatorResult, ReadCounter};
+use super::{Operator, OperatorError, OperatorResult, ReadCounter};
 use crate::execution::DataChunk;
-use crate::graph::GraphStoreSearch;
-use grafeo_common::types::{EpochId, LogicalType, NodeId, ReadView, TransactionId};
+use crate::graph::GraphStore;
+use grafeo_common::types::{LogicalType, NodeId, ReadView};
 use std::sync::Arc;
 
 /// A scan operator that reads nodes from storage.
 pub struct ScanOperator {
     /// The store to scan from.
-    store: Arc<dyn GraphStoreSearch>,
+    store: Arc<dyn GraphStore>,
     /// The labels a node needs one of (empty: every node).
     labels: Vec<String>,
     /// Current position in the scan.
@@ -20,38 +20,30 @@ pub struct ScanOperator {
     exhausted: bool,
     /// Chunk capacity.
     chunk_capacity: usize,
-    /// Transaction ID for MVCC visibility (None = use current epoch).
-    transaction_id: Option<TransactionId>,
-    /// Epoch for version visibility.
-    viewing_epoch: Option<EpochId>,
+    /// Who reads: the scan lists the nodes this view sees.
+    view: ReadView,
     /// Counts the node IDs the scan reads.
     reads: Option<Arc<ReadCounter>>,
 }
 
 impl ScanOperator {
-    /// Creates a new scan operator for all nodes.
-    pub fn new(store: Arc<dyn GraphStoreSearch>) -> Self {
-        Self {
-            store,
-            labels: Vec::new(),
-            position: 0,
-            batch: Vec::new(),
-            exhausted: false,
-            chunk_capacity: 2048,
-            transaction_id: None,
-            viewing_epoch: None,
-            reads: None,
-        }
+    /// Creates a scan of every node `view` sees.
+    pub fn new(store: Arc<dyn GraphStore>, view: ReadView) -> Self {
+        Self::with_any_label(store, Vec::new(), view)
     }
 
-    /// Creates a new scan operator for nodes with a specific label.
-    pub fn with_label(store: Arc<dyn GraphStoreSearch>, label: impl Into<String>) -> Self {
-        Self::with_any_label(store, vec![label.into()])
+    /// Creates a scan of the nodes with `label` that `view` sees.
+    pub fn with_label(
+        store: Arc<dyn GraphStore>,
+        label: impl Into<String>,
+        view: ReadView,
+    ) -> Self {
+        Self::with_any_label(store, vec![label.into()], view)
     }
 
-    /// Creates a new scan operator for the nodes with at least one of
-    /// `labels`, each once, in ID order.
-    pub fn with_any_label(store: Arc<dyn GraphStoreSearch>, labels: Vec<String>) -> Self {
+    /// Creates a scan of the nodes with at least one of `labels` (every
+    /// node for none) that `view` sees, each once, in ID order.
+    pub fn with_any_label(store: Arc<dyn GraphStore>, labels: Vec<String>, view: ReadView) -> Self {
         Self {
             store,
             labels,
@@ -59,8 +51,7 @@ impl ScanOperator {
             batch: Vec::new(),
             exhausted: false,
             chunk_capacity: 2048,
-            transaction_id: None,
-            viewing_epoch: None,
+            view,
             reads: None,
         }
     }
@@ -78,57 +69,30 @@ impl ScanOperator {
         self
     }
 
-    /// Sets the transaction context for MVCC visibility.
-    ///
-    /// When set, the scan will only return nodes visible to this transaction.
-    pub fn with_transaction_context(
-        mut self,
-        epoch: EpochId,
-        transaction_id: Option<TransactionId>,
-    ) -> Self {
-        self.viewing_epoch = Some(epoch);
-        self.transaction_id = transaction_id;
-        self
-    }
-
-    fn load_batch(&mut self) {
+    /// Lists the nodes the view sees, or those with the labels as the view
+    /// sees them, once.
+    fn load_batch(&mut self) -> Result<(), OperatorError> {
         if !self.batch.is_empty() || self.exhausted {
-            return;
+            return Ok(());
         }
-
-        // With a transaction context the store answers at the view: every
-        // node the view sees (its own pending ones included), or the nodes
-        // with the label as the view sees them. Without one, the nodes of
-        // now.
         let labels: Vec<&str> = self.labels.iter().map(String::as_str).collect();
-        self.batch = match self.viewing_epoch {
-            Some(epoch) => {
-                let view = ReadView::new(epoch, self.transaction_id);
-                match labels.as_slice() {
-                    [] => self
-                        .store
-                        .filter_visible_node_ids_at(&self.store.all_node_ids(), view),
-                    [label] => self.store.nodes_by_label_at(label, view),
-                    labels => self.store.nodes_with_any_label_at(labels, view),
-                }
-            }
-            None => match labels.as_slice() {
-                [] => self.store.node_ids(),
-                [label] => self.store.nodes_by_label(label),
-                labels => self.store.nodes_with_any_label(labels),
-            },
+        self.batch = match labels.as_slice() {
+            [] => self.store.node_ids(self.view)?,
+            [label] => self.store.nodes_by_label(label, self.view)?,
+            labels => self.store.nodes_with_any_label(labels, self.view)?,
         };
 
         super::read_counter::count(self.reads.as_deref(), self.batch.len());
         if self.batch.is_empty() {
             self.exhausted = true;
         }
+        Ok(())
     }
 }
 
 impl Operator for ScanOperator {
     fn next(&mut self) -> OperatorResult {
-        self.load_batch();
+        self.load_batch()?;
 
         if self.exhausted || self.position >= self.batch.len() {
             return Ok(None);
@@ -172,7 +136,7 @@ impl Operator for ScanOperator {
     }
 }
 
-#[cfg(all(test, feature = "lpg"))]
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::graph::GraphStoreMut;
@@ -186,8 +150,11 @@ mod tests {
         store.create_node(&["Person"]);
         store.create_node(&["Animal"]);
 
-        let mut scan =
-            ScanOperator::with_label(store.clone() as Arc<dyn GraphStoreSearch>, "Person");
+        let mut scan = ScanOperator::with_label(
+            store.clone() as Arc<dyn GraphStore>,
+            "Person",
+            ReadView::latest(),
+        );
 
         let chunk = scan.next().unwrap().unwrap();
         assert_eq!(chunk.row_count(), 2);
@@ -208,12 +175,13 @@ mod tests {
         let person = store.create_node(&["Person"]);
 
         let mut scan = ScanOperator::with_any_label(
-            store.clone() as Arc<dyn GraphStoreSearch>,
+            store.clone() as Arc<dyn GraphStore>,
             vec![
                 "Person".to_string(),
                 "Director".to_string(),
                 "Missing".to_string(),
             ],
+            ReadView::latest(),
         );
         let chunk = scan.next().unwrap().unwrap();
         let column = chunk.column(0).unwrap();
@@ -229,8 +197,11 @@ mod tests {
         let store: Arc<dyn GraphStoreMut> = Arc::new(RowGroupStore::new());
         store.create_node(&["Person"]);
 
-        let mut scan =
-            ScanOperator::with_label(store.clone() as Arc<dyn GraphStoreSearch>, "Person");
+        let mut scan = ScanOperator::with_label(
+            store.clone() as Arc<dyn GraphStore>,
+            "Person",
+            ReadView::latest(),
+        );
 
         // First scan
         let chunk1 = scan.next().unwrap().unwrap();
@@ -255,7 +226,7 @@ mod tests {
         store.create_node(&["Place"]);
 
         // Full scan (no label filter) should return all nodes
-        let mut scan = ScanOperator::new(store.clone() as Arc<dyn GraphStoreSearch>);
+        let mut scan = ScanOperator::new(store.clone() as Arc<dyn GraphStore>, ReadView::latest());
 
         let chunk = scan.next().unwrap().unwrap();
         assert_eq!(chunk.row_count(), 4, "Full scan should return all 4 nodes");
@@ -267,7 +238,7 @@ mod tests {
 
     #[test]
     fn test_scan_with_mvcc_context() {
-        let store: Arc<dyn GraphStoreMut> = Arc::new(RowGroupStore::new());
+        let store = Arc::new(RowGroupStore::new());
 
         // Two nodes, then a third: each create commits at its own epoch.
         store.create_node(&["Person"]);
@@ -277,9 +248,11 @@ mod tests {
         let late = store.current_epoch();
 
         // A scan at the earlier epoch sees the first two nodes.
-        let mut scan =
-            ScanOperator::with_label(store.clone() as Arc<dyn GraphStoreSearch>, "Person")
-                .with_transaction_context(early, None);
+        let mut scan = ScanOperator::with_label(
+            store.clone() as Arc<dyn GraphStore>,
+            "Person",
+            ReadView::new(early, None),
+        );
 
         let chunk = scan.next().unwrap().unwrap();
         assert_eq!(
@@ -289,9 +262,11 @@ mod tests {
         );
 
         // A scan at the later epoch sees all three.
-        let mut scan_all =
-            ScanOperator::with_label(store.clone() as Arc<dyn GraphStoreSearch>, "Person")
-                .with_transaction_context(late, None);
+        let mut scan_all = ScanOperator::with_label(
+            store.clone() as Arc<dyn GraphStore>,
+            "Person",
+            ReadView::new(late, None),
+        );
 
         let chunk_all = scan_all.next().unwrap().unwrap();
         assert_eq!(
@@ -304,7 +279,11 @@ mod tests {
     #[test]
     fn test_scan_into_any() {
         let store: Arc<dyn GraphStoreMut> = Arc::new(RowGroupStore::new());
-        let op = ScanOperator::with_label(store.clone() as Arc<dyn GraphStoreSearch>, "Person");
+        let op = ScanOperator::with_label(
+            store.clone() as Arc<dyn GraphStore>,
+            "Person",
+            ReadView::latest(),
+        );
         let any = Box::new(op).into_any();
         assert!(any.downcast::<ScanOperator>().is_ok());
     }

@@ -2,7 +2,7 @@
 //! row, also when the key comes from the row (`UNWIND`, an earlier `MATCH`):
 //! the results are those of a scan, only without scanning.
 
-#![cfg(all(feature = "lpg", feature = "gql"))]
+#![cfg(feature = "gql")]
 
 use std::collections::HashMap;
 

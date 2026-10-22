@@ -185,7 +185,7 @@ fn a_panic_at_each_point_of_close_leaves_a_usable_database() {
         );
 
         assert_eq!(
-            db.edge_count(),
+            db.edge_count().unwrap(),
             1,
             "crash_point={crash_point} ({point}): edge lost after crash"
         );
@@ -342,7 +342,7 @@ fn repeated_panics_in_close_leave_a_usable_database() {
     // Final verification: the drop after each panic completed that close.
     let db = GrafeoDB::open(&path).unwrap();
     assert_eq!(
-        db.node_count(),
+        db.node_count().unwrap(),
         people.len(),
         "the node of every session, also of those closed with a panic"
     );
@@ -391,7 +391,7 @@ fn a_panic_before_the_sidecar_wal_removal_leaves_a_usable_database() {
     assert_recoverable(&path, "crash before sidecar WAL removal");
 
     let db = GrafeoDB::open(&path).unwrap();
-    let count = db.node_count();
+    let count = db.node_count().unwrap();
     assert_eq!(
         count, 2,
         "both nodes must survive crash before sidecar removal"
@@ -477,7 +477,7 @@ fn wal_disabled_checkpoint_preserves_data() {
     );
 
     assert_eq!(
-        db.edge_count(),
+        db.edge_count().unwrap(),
         1,
         "edge must survive close-reopen with WAL disabled"
     );
@@ -691,7 +691,11 @@ fn wal_disabled_uncommitted_data_lost_on_crash() {
         !names.contains(&"Django".to_string()),
         "uncommitted data (Django) must NOT be present after crash"
     );
-    assert_eq!(db.node_count(), 1, "only the committed node should exist");
+    assert_eq!(
+        db.node_count().unwrap(),
+        1,
+        "only the committed node should exist"
+    );
 
     db.close().unwrap();
 }

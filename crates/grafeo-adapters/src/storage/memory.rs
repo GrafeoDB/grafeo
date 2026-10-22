@@ -44,6 +44,7 @@ impl Default for MemoryBackend {
 
 #[cfg(test)]
 mod tests {
+    use grafeo_common::types::ReadView;
     use grafeo_core::graph::{GraphStore, GraphStoreMut};
 
     use super::*;
@@ -55,6 +56,6 @@ mod tests {
 
         let id = store.create_node(&["Test"]);
         assert!(id.is_valid());
-        assert_eq!(store.node_count(), 1);
+        assert_eq!(store.node_count(ReadView::latest()).unwrap(), 1);
     }
 }

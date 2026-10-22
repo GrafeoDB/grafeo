@@ -129,7 +129,7 @@ fn arrow_table_to_pandas<'py>(
 
 #[cfg(feature = "algos")]
 use crate::bridges::{PyAlgorithms, PyNetworkXAdapter, PySolvORAdapter};
-use crate::error::PyGrafeoError;
+use crate::error::{PyGrafeoError, raised};
 use crate::gil::without_gil;
 use crate::graph::{PyEdge, PyNode};
 use crate::query::{PyQueryBuilder, PyQueryResult};
@@ -997,13 +997,13 @@ impl PyGrafeoDB {
     /// Get a node by ID.
     fn get_node(&self, id: u64) -> PyResult<Option<PyNode>> {
         let db = self.inner.read();
-        Ok(db.get_node(NodeId(id)).map(crate::direct::node))
+        Ok(raised(db.get_node(NodeId(id)))?.map(crate::direct::node))
     }
 
     /// Get an edge by ID.
     fn get_edge(&self, id: u64) -> PyResult<Option<PyEdge>> {
         let db = self.inner.read();
-        Ok(db.get_edge(EdgeId(id)).map(crate::direct::edge))
+        Ok(raised(db.get_edge(EdgeId(id)))?.map(crate::direct::edge))
     }
 
     /// The edges of a node as ``(neighbor_id, edge_id)`` tuples, without a
@@ -1033,11 +1033,11 @@ impl PyGrafeoDB {
         let edge_types = crate::direct::edge_types(edge_types)?;
         let edge_types: Vec<&str> = edge_types.iter().map(String::as_str).collect();
         let db = self.inner.read();
-        Ok(crate::direct::edge_pairs(db.get_node_edges(
+        Ok(crate::direct::edge_pairs(raised(db.get_node_edges(
             NodeId(node_id),
             direction,
             &edge_types,
-        )))
+        ))?))
     }
 
     /// Get a node at a specific historical epoch.
@@ -1109,7 +1109,7 @@ impl PyGrafeoDB {
         let db = self.inner.read();
         let node_id = NodeId(id);
 
-        let history = db.get_node_history(node_id);
+        let history = raised(db.get_node_history(node_id))?;
         let mut result = Vec::with_capacity(history.len());
         for (created, deleted, node) in history {
             let labels: Vec<String> = node.labels.iter().map(|s| s.to_string()).collect();
@@ -1133,7 +1133,7 @@ impl PyGrafeoDB {
         let db = self.inner.read();
         let edge_id = EdgeId(id);
 
-        let history = db.get_edge_history(edge_id);
+        let history = raised(db.get_edge_history(edge_id))?;
         let mut result = Vec::with_capacity(history.len());
         for (created, deleted, edge) in history {
             let properties: HashMap<
@@ -1186,14 +1186,14 @@ impl PyGrafeoDB {
         id: u64,
         key: &str,
         py: Python<'_>,
-    ) -> Vec<(u64, Py<PyAny>)> {
+    ) -> PyResult<Vec<(u64, Py<PyAny>)>> {
         let db = self.inner.read();
         let node_id = NodeId(id);
-        let history = db.get_node_property_history(node_id, key);
-        history
+        let history = raised(db.get_node_property_history(node_id, key))?;
+        Ok(history
             .into_iter()
             .map(|(epoch, value)| (epoch.as_u64(), PyValue::to_py(&value, py)))
-            .collect()
+            .collect())
     }
 
     /// Get the full version history for ALL properties of a node.
@@ -1204,10 +1204,10 @@ impl PyGrafeoDB {
         &self,
         id: u64,
         py: Python<'_>,
-    ) -> HashMap<String, Vec<(u64, Py<PyAny>)>> {
+    ) -> PyResult<HashMap<String, Vec<(u64, Py<PyAny>)>>> {
         let db = self.inner.read();
         let node_id = NodeId(id);
-        let history = db.get_all_node_property_history(node_id);
+        let history = raised(db.get_all_node_property_history(node_id))?;
         let mut result = HashMap::new();
         for (key, entries) in history {
             let py_entries: Vec<(u64, Py<PyAny>)> = entries
@@ -1216,7 +1216,7 @@ impl PyGrafeoDB {
                 .collect();
             result.insert(key.to_string(), py_entries);
         }
-        result
+        Ok(result)
     }
 
     /// Returns the current epoch of the database.
@@ -1266,7 +1266,7 @@ impl PyGrafeoDB {
             // of one committed state.
             let now = committed_now(db)?;
             let (store, view) = (db.store(), now.read_view());
-            let mut node_ids = store.nodes_by_label_at(label, view);
+            let mut node_ids = store.nodes_by_label(label, view)?;
 
             // Apply offset and limit
             node_ids.drain(..offset.min(node_ids.len()));
@@ -1275,7 +1275,7 @@ impl PyGrafeoDB {
             }
 
             // Batch get all properties
-            let props_batch = store.get_nodes_properties_batch_at(&node_ids, view);
+            let props_batch = store.node_properties_batch(&node_ids, view)?;
             Ok((node_ids, props_batch))
         })?;
 
@@ -1318,7 +1318,7 @@ impl PyGrafeoDB {
             let now = committed_now(db)?;
             Ok(db
                 .store()
-                .get_node_property_batch_at(&ids, &key, now.read_view()))
+                .node_property_batch(&ids, &key, now.read_view())?)
         })?;
 
         Ok(values
@@ -1422,7 +1422,7 @@ impl PyGrafeoDB {
     /// ```
     fn get_node_labels(&self, node_id: u64) -> PyResult<Option<Vec<String>>> {
         let db = self.inner.read();
-        Ok(db.get_node_labels(NodeId(node_id)))
+        raised(db.get_node_labels(NodeId(node_id)))
     }
 
     /// Set a property on an edge.
@@ -2302,7 +2302,7 @@ impl PyGrafeoDB {
         py: Python<'_>,
     ) -> PyResult<Vec<u64>> {
         let val = PyValue::from_py(value)?;
-        let nodes = self.released(py, |db| Ok(db.find_nodes_by_property(property, &val)))?;
+        let nodes = self.released(py, |db| Ok(db.find_nodes_by_property(property, &val)?))?;
         Ok(nodes.into_iter().map(|n| n.0).collect())
     }
 
@@ -2374,10 +2374,10 @@ impl PyGrafeoDB {
     fn stats(&self) -> PyResult<PyDatabaseStats> {
         let db = self.inner.read();
         Ok(PyDatabaseStats {
-            node_count: db.node_count() as u64,
-            edge_count: db.edge_count() as u64,
-            label_count: db.label_count() as u64,
-            property_count: db.property_key_count() as u64,
+            node_count: raised(db.node_count())? as u64,
+            edge_count: raised(db.edge_count())? as u64,
+            label_count: raised(db.label_count())? as u64,
+            property_count: raised(db.property_key_count())? as u64,
         })
     }
 
@@ -2396,7 +2396,7 @@ impl PyGrafeoDB {
     ///     print(f"Nodes: {info['node_count']}, Edges: {info['edge_count']}")
     fn info(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         let db = self.inner.read();
-        let info = db.info();
+        let info = raised(db.info())?;
 
         let dict = pyo3::types::PyDict::new(py);
         dict.set_item("mode", info.mode.to_string())?;
@@ -2422,7 +2422,7 @@ impl PyGrafeoDB {
     ///     print(f"Memory: {stats['memory_bytes']} bytes")
     fn detailed_stats(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         let db = self.inner.read();
-        let stats = db.detailed_stats();
+        let stats = raised(db.detailed_stats())?;
 
         let dict = pyo3::types::PyDict::new(py);
         dict.set_item("node_count", stats.node_count)?;
@@ -2638,7 +2638,7 @@ impl PyGrafeoDB {
     ///         print(f"{label['name']}: {label['count']} nodes")
     fn schema(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         let db = self.inner.read();
-        let schema = db.schema();
+        let schema = raised(db.schema())?;
 
         let dict = pyo3::types::PyDict::new(py);
 
@@ -2700,7 +2700,7 @@ impl PyGrafeoDB {
     ///     if not errors:
     ///         print("Database is valid")
     fn validate(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
-        let result = self.released(py, |db| Ok(db.validate()))?;
+        let result = self.released(py, |db| Ok(db.validate()?))?;
 
         let errors = pyo3::types::PyList::empty(py);
         for error in result.errors {
@@ -3035,16 +3035,16 @@ impl PyGrafeoDB {
 
     /// Get number of nodes.
     #[getter]
-    fn node_count(&self) -> usize {
+    fn node_count(&self) -> PyResult<usize> {
         let db = self.inner.read();
-        db.node_count()
+        raised(db.node_count())
     }
 
     /// Get number of edges.
     #[getter]
-    fn edge_count(&self) -> usize {
+    fn edge_count(&self) -> PyResult<usize> {
         let db = self.inner.read();
-        db.edge_count()
+        raised(db.edge_count())
     }
 
     // =====================================================================

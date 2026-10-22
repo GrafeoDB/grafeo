@@ -10,7 +10,7 @@
 //! cargo test -p grafeo-engine --all-features --test functions_without_their_features
 //! ```
 
-#![cfg(all(feature = "lpg", feature = "gql"))]
+#![cfg(feature = "gql")]
 
 use grafeo_common::utils::error::Result;
 use grafeo_engine::GrafeoDB;

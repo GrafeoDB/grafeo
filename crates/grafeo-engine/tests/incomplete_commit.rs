@@ -28,11 +28,7 @@
 //! cargo test -p grafeo-engine --all-features --test incomplete_commit
 //! ```
 
-#![cfg(all(
-    feature = "testing-statement-injection",
-    feature = "lpg",
-    feature = "gql"
-))]
+#![cfg(all(feature = "testing-statement-injection", feature = "gql"))]
 
 use std::sync::{Arc, mpsc};
 
@@ -103,17 +99,19 @@ struct Seen {
 fn seen(db: &GrafeoDB, alix: NodeId, gus: NodeId, knows: EdgeId) -> Seen {
     let city = db
         .get_node(alix)
+        .unwrap()
         .and_then(|node| node.get_property("city").cloned());
     Seen {
-        nodes: db.node_count(),
-        edges: db.edge_count(),
+        nodes: db.node_count().unwrap(),
+        edges: db.edge_count().unwrap(),
         epoch: db.current_epoch(),
-        gus: db.get_node(gus).is_some(),
-        knows: db.get_edge(knows).is_some(),
+        gus: db.get_node(gus).unwrap().is_some(),
+        knows: db.get_edge(knows).unwrap().is_some(),
         city,
         iterated: (db.iter_nodes().count(), db.iter_edges().count()),
         no_edges_warning: db
             .validate()
+            .unwrap()
             .warnings
             .iter()
             .any(|warning| warning.code == "NO_EDGES"),
@@ -434,11 +432,11 @@ fn an_import_waiting_for_a_commit_that_fails_refuses() {
                 }
             }
         }
-        if db.node_count() != 1 || db.edge_count() != 0 {
+        if db.node_count().unwrap() != 1 || db.edge_count().unwrap() != 0 {
             failures.push(format!(
                 "{name}: the import added {} nodes and {} edges",
-                db.node_count() - 1,
-                db.edge_count()
+                db.node_count().unwrap() - 1,
+                db.edge_count().unwrap()
             ));
         }
         #[cfg(feature = "triple-store")]
@@ -574,7 +572,7 @@ fn a_memory_pressure_merge_never_folds_a_failed_commit_into_the_base() {
         [Value::from("Alix")],
         "the merge did not fold the failed commit into the base"
     );
-    assert_eq!(db.node_count(), 1);
+    assert_eq!(db.node_count().unwrap(), 1);
 }
 
 /// Direct reads from another thread inside a commit, once its versions are
@@ -849,8 +847,14 @@ fn a_commit_failing_before_its_wal_records_is_not_replayed_on_reopen() {
     assert!(unwound.is_err(), "the commit panicked");
     assert_eq!(people(&db), [Value::from("Alix")], "not published");
     assert_eq!(db.current_epoch(), before, "no commit epoch was published");
-    assert!(db.get_node(gus).is_none(), "Gus remains unpublished");
-    assert!(db.get_edge(knows).is_none(), "the edge remains unpublished");
+    assert!(
+        db.get_node(gus).unwrap().is_none(),
+        "Gus remains unpublished"
+    );
+    assert!(
+        db.get_edge(knows).unwrap().is_none(),
+        "the edge remains unpublished"
+    );
     assert_eq!(
         city_of_alix(&db),
         Value::Null,
@@ -869,7 +873,7 @@ fn a_commit_failing_before_its_wal_records_is_not_replayed_on_reopen() {
     let db = GrafeoDB::open(&path).unwrap();
     assert_eq!(people(&db), [Value::from("Alix")], "nothing was replayed");
     assert_eq!(city_of_alix(&db), Value::Null, "Alix never moved to Paris");
-    assert_eq!(db.node_count(), 1);
-    assert_eq!(db.edge_count(), 0);
+    assert_eq!(db.node_count().unwrap(), 1);
+    assert_eq!(db.edge_count().unwrap(), 0);
     db.close().unwrap();
 }

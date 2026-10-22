@@ -52,7 +52,10 @@ fn graph() -> Graph {
 fn edges_by_direction() {
     let g = graph();
     assert_eq!(
-        sorted(g.db.get_node_edges(g.alix, Direction::Outgoing, &[])),
+        sorted(
+            g.db.get_node_edges(g.alix, Direction::Outgoing, &[])
+                .unwrap()
+        ),
         sorted(vec![
             (g.gus, g.knows_gus),
             (g.vincent, g.knows_vincent),
@@ -60,12 +63,15 @@ fn edges_by_direction() {
         ])
     );
     assert_eq!(
-        sorted(g.db.get_node_edges(g.alix, Direction::Incoming, &[])),
+        sorted(
+            g.db.get_node_edges(g.alix, Direction::Incoming, &[])
+                .unwrap()
+        ),
         sorted(vec![(g.gus, g.works_with), (g.alix, g.note)])
     );
     // Both directions list the self-loop once.
     assert_eq!(
-        sorted(g.db.get_node_edges(g.alix, Direction::Both, &[])),
+        sorted(g.db.get_node_edges(g.alix, Direction::Both, &[]).unwrap()),
         sorted(vec![
             (g.gus, g.knows_gus),
             (g.vincent, g.knows_vincent),
@@ -74,11 +80,13 @@ fn edges_by_direction() {
         ])
     );
     assert_eq!(
-        g.db.get_node_edges(g.vincent, Direction::Incoming, &[]),
+        g.db.get_node_edges(g.vincent, Direction::Incoming, &[])
+            .unwrap(),
         vec![(g.alix, g.knows_vincent)]
     );
     assert_eq!(
-        g.db.get_node_edges(g.vincent, Direction::Outgoing, &[]),
+        g.db.get_node_edges(g.vincent, Direction::Outgoing, &[])
+            .unwrap(),
         Vec::new()
     );
 }
@@ -87,15 +95,22 @@ fn edges_by_direction() {
 fn edges_of_some_types() {
     let g = graph();
     assert_eq!(
-        sorted(g.db.get_node_edges(g.alix, Direction::Both, &["KNOWS"])),
+        sorted(
+            g.db.get_node_edges(g.alix, Direction::Both, &["KNOWS"])
+                .unwrap()
+        ),
         sorted(vec![(g.gus, g.knows_gus), (g.vincent, g.knows_vincent)])
     );
     assert_eq!(
-        sorted(g.db.get_node_edges(g.alix, Direction::Both, &["WORKS_WITH", "NOTE"])),
+        sorted(
+            g.db.get_node_edges(g.alix, Direction::Both, &["WORKS_WITH", "NOTE"])
+                .unwrap()
+        ),
         sorted(vec![(g.gus, g.works_with), (g.alix, g.note)])
     );
     assert_eq!(
-        g.db.get_node_edges(g.alix, Direction::Both, &["MISSING"]),
+        g.db.get_node_edges(g.alix, Direction::Both, &["MISSING"])
+            .unwrap(),
         Vec::new()
     );
 }
@@ -105,25 +120,32 @@ fn deleted_edges_and_nodes_are_gone() {
     let g = graph();
     assert!(g.db.delete_edge(g.knows_gus).unwrap());
     assert_eq!(
-        sorted(g.db.get_node_edges(g.alix, Direction::Outgoing, &["KNOWS"])),
+        sorted(
+            g.db.get_node_edges(g.alix, Direction::Outgoing, &["KNOWS"])
+                .unwrap()
+        ),
         vec![(g.vincent, g.knows_vincent)]
     );
     assert_eq!(
-        g.db.get_node_edges(g.gus, Direction::Incoming, &[]),
+        g.db.get_node_edges(g.gus, Direction::Incoming, &[])
+            .unwrap(),
         Vec::new()
     );
 
     assert!(g.db.detach_delete_node(g.vincent).unwrap());
     assert_eq!(
-        g.db.get_node_edges(g.vincent, Direction::Both, &[]),
+        g.db.get_node_edges(g.vincent, Direction::Both, &[])
+            .unwrap(),
         Vec::new()
     );
     assert_eq!(
-        g.db.get_node_edges(g.alix, Direction::Outgoing, &["KNOWS"]),
+        g.db.get_node_edges(g.alix, Direction::Outgoing, &["KNOWS"])
+            .unwrap(),
         Vec::new()
     );
     assert_eq!(
-        g.db.get_node_edges(NodeId(88_888), Direction::Both, &[]),
+        g.db.get_node_edges(NodeId(88_888), Direction::Both, &[])
+            .unwrap(),
         Vec::new()
     );
 }
@@ -137,19 +159,24 @@ fn a_session_sees_its_own_uncommitted_edges() {
     assert!(session.delete_edge(g.knows_gus).unwrap());
 
     assert_eq!(
-        session.get_node_edges(g.gus, Direction::Incoming, &["KNOWS"]),
+        session
+            .get_node_edges(g.gus, Direction::Incoming, &["KNOWS"])
+            .unwrap(),
         vec![(g.vincent, added)]
     );
     // The uncommitted edge and the uncommitted delete are the session's own:
     // the database still sees `knows_gus`, and not the new edge (#412).
     assert_eq!(
-        g.db.get_node_edges(g.gus, Direction::Incoming, &["KNOWS"]),
+        g.db.get_node_edges(g.gus, Direction::Incoming, &["KNOWS"])
+            .unwrap(),
         vec![(g.alix, g.knows_gus)]
     );
 
     session.rollback().unwrap();
     assert_eq!(
-        session.get_node_edges(g.gus, Direction::Incoming, &["KNOWS"]),
+        session
+            .get_node_edges(g.gus, Direction::Incoming, &["KNOWS"])
+            .unwrap(),
         vec![(g.alix, g.knows_gus)]
     );
 }
@@ -173,7 +200,8 @@ fn a_graph_handle_lists_the_edges_of_its_graph() {
         vec![(berlin, route)]
     );
     assert_eq!(
-        db.get_node_edges(default_node, Direction::Both, &[]),
+        db.get_node_edges(default_node, Direction::Both, &[])
+            .unwrap(),
         vec![(default_node, default_edge)]
     );
     assert!(

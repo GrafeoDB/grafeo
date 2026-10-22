@@ -3,7 +3,7 @@
 //! section that does not decode. A read-only open and a read-write open
 //! report it alike, and neither writes to the file.
 
-#![cfg(all(feature = "grafeo-file", feature = "lpg", feature = "gql"))]
+#![cfg(all(feature = "grafeo-file", feature = "gql"))]
 
 use std::path::Path;
 

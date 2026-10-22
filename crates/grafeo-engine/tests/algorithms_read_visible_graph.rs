@@ -3,7 +3,7 @@
 //! uncommitted edges, nor reach a node deleted at the store level whose edges
 //! remain.
 
-#![cfg(all(feature = "algos", feature = "lpg"))]
+#![cfg(feature = "algos")]
 
 use std::collections::BTreeMap;
 

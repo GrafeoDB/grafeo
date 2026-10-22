@@ -2091,8 +2091,8 @@ mod tests {
     }
 
     // `=` is evaluated by a filter over an LPG store.
-    #[cfg(feature = "lpg")]
     mod value_equality {
+        use grafeo_common::types::ReadView;
         use std::collections::BTreeMap;
         use std::sync::Arc;
 
@@ -2104,7 +2104,7 @@ mod tests {
         use crate::execution::operators::filter::{
             BinaryFilterOp, ExpressionPredicate, FilterExpression,
         };
-        use crate::graph::GraphStoreSearch;
+        use crate::graph::GraphStore;
         use crate::graph::rowgroup::RowGroupStore;
 
         fn list(items: Vec<Value>) -> Value {
@@ -2208,7 +2208,7 @@ mod tests {
 
         /// Whether `a = b` is TRUE, evaluated as a filter evaluates it.
         fn equal(a: &Value, b: &Value) -> bool {
-            let store: Arc<dyn GraphStoreSearch> = Arc::new(RowGroupStore::new());
+            let store: Arc<dyn GraphStore> = Arc::new(RowGroupStore::new());
             let predicate = ExpressionPredicate::new(
                 FilterExpression::Binary {
                     left: Box::new(FilterExpression::Literal(a.clone())),
@@ -2217,6 +2217,7 @@ mod tests {
                 },
                 std::collections::HashMap::new(),
                 store,
+                ReadView::latest(),
             );
             let chunk = DataChunkBuilder::new(&[LogicalType::Int64]).finish();
             predicate.eval_at(&chunk, 0).unwrap() == Some(Value::Bool(true))

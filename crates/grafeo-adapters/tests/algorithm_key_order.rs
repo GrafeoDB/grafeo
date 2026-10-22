@@ -3,8 +3,9 @@
 //! were inserted in (#566 `key=`). Without a key they follow the internal ids,
 //! which the insertion order decides (#592).
 
-#![cfg(all(feature = "lpg", feature = "algos"))]
+#![cfg(feature = "algos")]
 
+use grafeo_common::types::ReadView;
 use std::collections::BTreeMap;
 
 use grafeo_adapters::plugins::algorithms::{
@@ -103,7 +104,7 @@ fn load(nodes: usize, edges: &[(usize, usize)], reversed: bool) -> RowGroupStore
 }
 
 fn key_order(store: &RowGroupStore) -> Vec<NodeId> {
-    order_by_key(store, "key")
+    order_by_key(store, ReadView::latest(), "key")
         .unwrap()
         .into_iter()
         .map(|(node, _)| node)
@@ -118,20 +119,32 @@ fn by_key<T>(
     let property = PropertyKey::new("key");
     result
         .into_iter()
-        .map(
-            |(node, value)| match store.get_node_property(node, &property) {
+        .map(|(node, value)| {
+            match store
+                .node_property(node, property.as_str(), ReadView::latest())
+                .unwrap()
+            {
                 Some(Value::String(key)) => (key.to_string(), value),
                 other => panic!("key of {node:?}: {other:?}"),
-            },
-        )
+            }
+        })
         .collect()
 }
 
 fn pagerank_bits(store: &RowGroupStore, keyed: bool, directed: bool) -> BTreeMap<String, u64> {
     let scores = if keyed {
-        pagerank_in_order(store, &key_order(store), 0.85, 100, 1e-12, directed)
+        pagerank_in_order(
+            store,
+            ReadView::latest(),
+            &key_order(store),
+            0.85,
+            100,
+            1e-12,
+            directed,
+        )
+        .unwrap()
     } else {
-        pagerank(store, 0.85, 100, 1e-12, directed)
+        pagerank(store, ReadView::latest(), 0.85, 100, 1e-12, directed).unwrap()
     };
     by_key(
         store,
@@ -144,9 +157,9 @@ fn pagerank_bits(store: &RowGroupStore, keyed: bool, directed: bool) -> BTreeMap
 /// Louvain's communities by key, with the modularity's bits.
 fn louvain_by_key(store: &RowGroupStore, keyed: bool) -> (BTreeMap<String, u64>, u64) {
     let result = if keyed {
-        louvain_in_order(store, &key_order(store), 1.0)
+        louvain_in_order(store, ReadView::latest(), &key_order(store), 1.0).unwrap()
     } else {
-        louvain(store, 1.0)
+        louvain(store, ReadView::latest(), 1.0).unwrap()
     };
     (
         by_key(store, result.communities),
@@ -156,9 +169,9 @@ fn louvain_by_key(store: &RowGroupStore, keyed: bool) -> (BTreeMap<String, u64>,
 
 fn label_propagation_by_key(store: &RowGroupStore, keyed: bool) -> BTreeMap<String, u64> {
     let labels = if keyed {
-        label_propagation_in_order(store, &key_order(store), 100)
+        label_propagation_in_order(store, ReadView::latest(), &key_order(store), 100).unwrap()
     } else {
-        label_propagation(store, 100)
+        label_propagation(store, ReadView::latest(), 100).unwrap()
     };
     by_key(store, labels)
 }
@@ -203,7 +216,7 @@ fn results_in_key_order_do_not_depend_on_the_insertion_order() {
 fn keys_that_sort_like_ids_give_the_results_without_a_key() {
     let (nodes, edges) = code_graph(MODULES);
     let store = load(nodes, &edges, false);
-    let mut ids = store.node_ids();
+    let mut ids = store.node_ids(ReadView::latest()).unwrap();
     ids.sort_unstable();
     assert_eq!(key_order(&store), ids);
 
@@ -245,13 +258,17 @@ fn communities_are_numbered_by_their_smallest_key() {
     let second = triangle(["Alix", "Gus", "Butch"]);
     let order = key_order(&store);
 
-    let plain = louvain(&store, 1.0).communities;
-    let keyed = louvain_in_order(&store, &order, 1.0).communities;
+    let plain = louvain(&store, ReadView::latest(), 1.0)
+        .unwrap()
+        .communities;
+    let keyed = louvain_in_order(&store, ReadView::latest(), &order, 1.0)
+        .unwrap()
+        .communities;
     assert_eq!((plain[&first[0]], plain[&second[0]]), (0, 1));
     assert_eq!((keyed[&first[0]], keyed[&second[0]]), (1, 0));
 
-    let plain = label_propagation(&store, 100);
-    let keyed = label_propagation_in_order(&store, &order, 100);
+    let plain = label_propagation(&store, ReadView::latest(), 100).unwrap();
+    let keyed = label_propagation_in_order(&store, ReadView::latest(), &order, 100).unwrap();
     assert_eq!((plain[&first[0]], plain[&second[0]]), (0, 1));
     assert_eq!((keyed[&first[0]], keyed[&second[0]]), (1, 0));
 }

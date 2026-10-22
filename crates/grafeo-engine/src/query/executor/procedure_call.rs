@@ -11,7 +11,7 @@ use grafeo_adapters::plugins::{AlgorithmResult, Parameters};
 use grafeo_common::types::{LogicalType, ReadView, Value};
 use grafeo_core::execution::DataChunk;
 use grafeo_core::execution::operators::{Operator, OperatorError, OperatorResult};
-use grafeo_core::graph::GraphStoreSearch;
+use grafeo_core::graph::GraphStore;
 
 use crate::procedures::{Procedure, ProcedureContext};
 
@@ -21,15 +21,14 @@ use crate::procedures::{Procedure, ProcedureContext};
 /// the full result is cached. Subsequent calls yield rows in chunks of
 /// `CHUNK_SIZE` until exhausted.
 pub struct ProcedureCallOperator {
-    store: Arc<dyn GraphStoreSearch>,
+    store: Arc<dyn GraphStore>,
     procedure: Arc<dyn Procedure>,
     params: Parameters,
     /// Optional LPG store handle, required by search procedures that reach
     /// the HNSW / BM25 indexes rather than the raw graph store.
-    #[cfg(feature = "lpg")]
     lpg_store: Option<Arc<grafeo_core::graph::rowgroup::RowGroupStore>>,
-    /// The view the calling query reads at, for the search procedures.
-    view: Option<ReadView>,
+    /// The view the calling query reads at, pinned for the call.
+    view: ReadView,
     /// YIELD items: (original_column, alias). `None` means yield all columns.
     yield_columns: Option<Vec<(String, Option<String>)>>,
     /// Canonical column names from the procedure registry (e.g., `["node_id", "score"]`
@@ -52,19 +51,19 @@ const CHUNK_SIZE: usize = 1024;
 impl ProcedureCallOperator {
     /// Creates a new procedure call operator.
     pub fn new(
-        store: Arc<dyn GraphStoreSearch>,
+        store: Arc<dyn GraphStore>,
         procedure: Arc<dyn Procedure>,
         params: Parameters,
         yield_columns: Option<Vec<(String, Option<String>)>>,
         canonical_columns: Vec<String>,
+        view: ReadView,
     ) -> Self {
         Self {
             store,
             procedure,
             params,
-            #[cfg(feature = "lpg")]
             lpg_store: None,
-            view: None,
+            view,
             yield_columns,
             canonical_columns,
             result: None,
@@ -76,7 +75,6 @@ impl ProcedureCallOperator {
 
     /// Attaches an LPG store handle so search procedures can reach vector /
     /// text indexes.
-    #[cfg(feature = "lpg")]
     #[must_use]
     pub fn with_lpg_store(
         mut self,
@@ -86,24 +84,12 @@ impl ProcedureCallOperator {
         self
     }
 
-    /// Runs the procedure as the calling query reads, at `view`: the search
-    /// procedures return only the nodes it sees.
-    #[must_use]
-    pub fn with_view(mut self, view: ReadView) -> Self {
-        self.view = Some(view);
-        self
-    }
-
     /// Executes the procedure and resolves YIELD column mapping.
     fn execute_algorithm(&mut self) -> Result<(), OperatorError> {
-        #[cfg(feature = "lpg")]
         let ctx = match self.lpg_store.as_deref() {
-            Some(lpg) => ProcedureContext::with_lpg_store(&*self.store, lpg),
-            None => ProcedureContext::new(&*self.store),
+            Some(lpg) => ProcedureContext::with_lpg_store(&*self.store, lpg, self.view),
+            None => ProcedureContext::new(&*self.store, self.view),
         };
-        #[cfg(not(feature = "lpg"))]
-        let ctx = ProcedureContext::new(&*self.store);
-        let ctx = ctx.with_view(self.view);
         let result = self
             .procedure
             .execute(&ctx, &self.params)

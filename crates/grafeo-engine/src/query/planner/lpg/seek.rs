@@ -6,7 +6,7 @@ use std::collections::HashSet;
 use grafeo_core::execution::operators::{
     ExpressionPredicate, FilterOperator, NodeSeekOperator, Operator, SeekKey, SingleRowOperator,
 };
-use grafeo_core::graph::GraphStoreSearch;
+use grafeo_core::graph::GraphStore;
 
 use super::{Arc, HashMap, Result};
 use crate::query::optimizer::movable_variables;
@@ -280,14 +280,13 @@ impl super::Planner {
         {
             return Ok(None);
         }
-        // A property index holds the values of now (see
-        // `reads_the_current_store`); an ID is no index.
-        let current = self.reads_the_current_store();
+        // A property index looks values up at the query's view; an ID is no
+        // index.
         let after_a_write = !self.reads_the_store_as_planned();
         let Some(seek) = choose_seek(
             &filter.predicate,
             scan,
-            |property| current && self.store.has_property_index(property),
+            |property| self.store.has_property_index(property),
             after_a_write,
         ) else {
             return Ok(None);
@@ -315,7 +314,7 @@ impl super::Planner {
                 .chain(std::iter::once(filter.predicate.clone()));
             LogicalExpression::conjunction(conjuncts).expect("the filter's predicate")
         };
-        let store = Arc::clone(&self.store) as Arc<dyn GraphStoreSearch>;
+        let store = Arc::clone(&self.store) as Arc<dyn GraphStore>;
         let expression =
             |expr: &LogicalExpression, columns: &[String]| -> Result<ExpressionPredicate> {
                 let variable_columns: HashMap<String, usize> = columns
@@ -327,8 +326,8 @@ impl super::Planner {
                     self.convert_expression(expr)?,
                     variable_columns,
                     Arc::clone(&store),
+                    self.read_view(),
                 )
-                .with_transaction_context(self.viewing_epoch, self.transaction_id)
                 .with_session_context(self.session_context.clone()))
             };
 
@@ -352,10 +351,15 @@ impl super::Planner {
         }
 
         let key = expression(seek.value, &columns)?;
-        let mut rows =
-            NodeSeekOperator::new(Arc::clone(&store), input, seek.key, key, scan.label.clone())
-                .with_transaction_context(self.viewing_epoch, self.transaction_id)
-                .with_read_counter(self.read_counter());
+        let mut rows = NodeSeekOperator::new(
+            Arc::clone(&store),
+            input,
+            seek.key,
+            key,
+            scan.label.clone(),
+            self.read_view(),
+        )
+        .with_read_counter(self.read_counter());
         if seek.list {
             rows = rows.with_list_key();
         }

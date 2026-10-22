@@ -2,6 +2,7 @@
 //! engine's sections, flush and file (#412 S8): what a reopen holds, a
 //! checkpoint during an open write, and a crash during a later checkpoint.
 
+use grafeo_common::types::ReadView;
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
@@ -96,7 +97,8 @@ impl Database {
                 WriteTarget::Store(Arc::clone(&store) as Arc<dyn ChangeTarget>),
             )
             .unwrap();
-        let writer = GraphWriter::new(store as Arc<dyn GraphStoreMut>).with_recording(recording);
+        let writer = GraphWriter::new(store as Arc<dyn GraphStoreMut>, ReadView::latest())
+            .with_recording(recording);
         Open {
             transaction,
             changes,
@@ -233,13 +235,19 @@ fn committed_of(store: &dyn GraphStore) -> (BTreeMap<u64, NodeView>, BTreeMap<u6
     };
     let mut nodes = BTreeMap::new();
     let mut edges = BTreeMap::new();
-    for id in store.node_ids() {
-        let node = store.get_node(id).expect("a node it lists");
+    for id in store.node_ids(ReadView::latest()).unwrap() {
+        let node = store
+            .node(id, ReadView::latest())
+            .unwrap()
+            .expect("a node it lists");
         let mut labels: Vec<String> = node.labels.iter().map(ToString::to_string).collect();
         labels.sort();
         nodes.insert(id.as_u64(), (labels, sorted(&node.properties)));
-        for (_, edge) in store.edges_from(id, Direction::Outgoing) {
-            if let Some(edge) = store.get_edge(edge) {
+        for (_, edge) in store
+            .edges(id, Direction::Outgoing, &[], ReadView::latest())
+            .unwrap()
+        {
+            if let Some(edge) = store.edge(edge, ReadView::latest()).unwrap() {
                 edges.insert(
                     edge.id.as_u64(),
                     (
@@ -340,7 +348,8 @@ fn travels(database: &Database) -> Travellers {
                 "Person",
                 "bio",
                 &grafeo_core::index::text::TextIndexOptions::new(),
-            ),
+            )
+            .unwrap(),
         )),
     );
     #[cfg(feature = "vector-index")]
@@ -404,7 +413,8 @@ fn open_writes(database: &Database, travellers: Travellers) -> OpenWrites {
         .unwrap();
     for (_, edge) in database
         .root
-        .edges_from(travellers.gus, Direction::Outgoing)
+        .edges(travellers.gus, Direction::Outgoing, &[], ReadView::latest())
+        .unwrap()
     {
         root.writer.delete_edge(edge).unwrap();
     }
@@ -457,7 +467,9 @@ fn assert_holds(loaded: &Database, expected: &Images, what: &str) {
             .map(|(_, value)| value.clone())
             .unwrap();
         assert_eq!(
-            root.find_nodes_by_property("name", &name).len(),
+            root.find_nodes_by_property("name", &name, ReadView::latest())
+                .unwrap()
+                .len(),
             1,
             "{what}: {name:?} through the index"
         );
@@ -465,9 +477,15 @@ fn assert_holds(loaded: &Database, expected: &Images, what: &str) {
     #[cfg(feature = "text-index")]
     {
         let bios = |query: &str| -> Vec<NodeId> {
-            let mut found: Vec<NodeId> = grafeo_core::graph::GraphStoreSearch::text_search(
-                &**root, "Person", "bio", query, 10,
+            let mut found: Vec<NodeId> = grafeo_core::graph::GraphStore::text_search(
+                &**root,
+                "Person",
+                "bio",
+                query,
+                10,
+                ReadView::latest(),
             )
+            .unwrap()
             .into_iter()
             .map(|(id, _)| id)
             .collect();
@@ -524,17 +542,23 @@ fn a_copy_during_open_writes_holds_the_committed_state_of_every_graph() {
     let loaded = Database::load(&image, None).unwrap();
     assert_holds(&loaded, &before, "the copy");
     assert!(
-        loaded.root.get_node(open.mia).is_none()
+        loaded
+            .root
+            .node(open.mia, ReadView::latest())
+            .unwrap()
+            .is_none()
             && loaded
                 .root
-                .find_nodes_by_property("name", &Value::from("Mia"))
+                .find_nodes_by_property("name", &Value::from("Mia"), ReadView::latest())
+                .unwrap()
                 .is_empty(),
         "Mia was never committed"
     );
     assert!(
         loaded
             .store(Some("trips"))
-            .get_node(open.second_guide)
+            .node(open.second_guide, ReadView::latest())
+            .unwrap()
             .is_none(),
         "nor the second guide"
     );
@@ -554,7 +578,8 @@ fn a_copy_during_open_writes_holds_the_committed_state_of_every_graph() {
     assert_eq!(
         loaded
             .root
-            .find_nodes_by_property("name", &Value::from("Jules"))
+            .find_nodes_by_property("name", &Value::from("Jules"), ReadView::latest())
+            .unwrap()
             .len(),
         1,
         "the index the load built takes the next commit"
@@ -570,7 +595,8 @@ fn a_copy_during_open_writes_holds_the_committed_state_of_every_graph() {
     assert_eq!(
         again
             .root
-            .find_nodes_by_property("name", &Value::from("Mia"))
+            .find_nodes_by_property("name", &Value::from("Mia"), ReadView::latest())
+            .unwrap()
             .len(),
         1
     );
@@ -578,6 +604,7 @@ fn a_copy_during_open_writes_holds_the_committed_state_of_every_graph() {
 
 #[cfg(feature = "grafeo-file")]
 mod file {
+    use grafeo_common::types::ReadView;
     use grafeo_storage::file::GrafeoFileManager;
 
     use super::*;
@@ -720,7 +747,8 @@ mod file {
             opened
                 .database
                 .root
-                .find_nodes_by_property("name", &Value::from("Mia")),
+                .find_nodes_by_property("name", &Value::from("Mia"), ReadView::latest())
+                .unwrap(),
             Vec::<NodeId>::new(),
             "Mia was never committed"
         );

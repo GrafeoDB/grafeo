@@ -173,6 +173,7 @@ GrafeoStatus    grafeo_reset_schema(GrafeoDatabase* db);
 const char*     grafeo_current_schema(const GrafeoDatabase* db);
 
 /* ---- Node CRUD ----------------------------------------------------------- */
+/* A read returns a status only for a failure: GRAFEO_OK with *out NULL when the node or edge does not exist. */
 
 uint64_t     grafeo_create_node(GrafeoDatabase* db, const char* labels_json, const char* properties_json);
 GrafeoStatus grafeo_get_node(GrafeoDatabase* db, uint64_t id, GrafeoNode** out);
@@ -182,7 +183,8 @@ GrafeoStatus grafeo_set_node_property(GrafeoDatabase* db, uint64_t id, const cha
 int32_t      grafeo_remove_node_property(GrafeoDatabase* db, uint64_t id, const char* key);
 int32_t      grafeo_add_node_label(GrafeoDatabase* db, uint64_t id, const char* label);
 int32_t      grafeo_remove_node_label(GrafeoDatabase* db, uint64_t id, const char* label);
-char*        grafeo_get_node_labels(GrafeoDatabase* db, uint64_t id);
+/* *out_json: a JSON array to free with grafeo_free_string, NULL when the node does not exist. */
+GrafeoStatus grafeo_get_node_labels(GrafeoDatabase* db, uint64_t id, char** out_json);
 
 uint64_t    grafeo_node_id(const GrafeoNode* node);
 const char* grafeo_node_labels_json(const GrafeoNode* node);
@@ -297,8 +299,8 @@ GrafeoStatus  grafeo_graph_upsert_edges(GrafeoGraph* graph, const char* edge_typ
  * retained"); grafeo_open_with_history sets how much it keeps (GRAFEO_HISTORY_DURATION: duration_ms before now; a
  * NULL path opens an in-memory database; a database file stores the setting). A view keeps the history it reads
  * until grafeo_free_as_of; a query that writes through it is refused. grafeo_as_of_get_node and _get_edge give
- * the node or edge as it was (GRAFEO_ERROR_DATABASE when it did not exist then), and _get_node_property a value as
- * JSON (NULL when there was none; free with grafeo_free_string). */
+ * the node or edge as it was (GRAFEO_OK with *out NULL when it did not exist then), and _get_node_property a value
+ * as JSON (*out_json NULL when there was none; free with grafeo_free_string). */
 #define GRAFEO_POINT_EPOCH 0
 #define GRAFEO_POINT_TIME  1
 #define GRAFEO_POINT_AGO   2
@@ -314,7 +316,8 @@ uint64_t        grafeo_as_of_epoch(const GrafeoAsOf* view);
 GrafeoResult*   grafeo_as_of_execute(const GrafeoAsOf* view, const char* query, const char* params_json);
 GrafeoStatus    grafeo_as_of_get_node(const GrafeoAsOf* view, uint64_t id, GrafeoNode** out);
 GrafeoStatus    grafeo_as_of_get_edge(const GrafeoAsOf* view, uint64_t id, GrafeoEdge** out);
-char*           grafeo_as_of_get_node_property(const GrafeoAsOf* view, uint64_t id, const char* key);
+/* *out_json: the value as JSON to free with grafeo_free_string, NULL when the node or property did not exist then. */
+GrafeoStatus    grafeo_as_of_get_node_property(const GrafeoAsOf* view, uint64_t id, const char* key, char** out_json);
 void            grafeo_free_as_of(GrafeoAsOf* view);
 
 /* ---- Change data capture (requires cdc; JSON arrays of events, NULL on error, free with grafeo_free_string) ----
@@ -327,8 +330,8 @@ char*        grafeo_changes_between(GrafeoDatabase* db, uint64_t start_epoch, ui
 
 /* ---- Statistics ---------------------------------------------------------- */
 
-size_t grafeo_node_count(GrafeoDatabase* db);
-size_t grafeo_edge_count(GrafeoDatabase* db);
+GrafeoStatus grafeo_node_count(GrafeoDatabase* db, size_t* out_count);
+GrafeoStatus grafeo_edge_count(GrafeoDatabase* db, size_t* out_count);
 
 /* ---- Transactions -------------------------------------------------------- */
 

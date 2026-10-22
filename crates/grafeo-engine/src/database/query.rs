@@ -61,7 +61,7 @@ impl super::GrafeoDB {
     ///
     /// Returns an error if parsing or planning fails, or if the query is a
     /// kind that cannot be streamed.
-    #[cfg(all(feature = "gql", feature = "lpg"))]
+    #[cfg(feature = "gql")]
     pub fn execute_streaming(
         &self,
         query: &str,

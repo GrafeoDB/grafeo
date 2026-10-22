@@ -3,7 +3,7 @@
 use super::reachability::ReachabilityMode;
 use super::{
     Arc, Direction, Error, ExecutionPathMode, ExpandDirection, ExpandOp, ExpandOperator,
-    ExpandStep, GraphStoreSearch, LazyFactorizedChainOperator, LogicalExpression, LogicalOperator,
+    ExpandStep, GraphStore, LazyFactorizedChainOperator, LogicalExpression, LogicalOperator,
     Operator, PathMode, Result, VariableLengthExpandOperator,
 };
 
@@ -90,17 +90,16 @@ impl super::Planner {
             };
 
             let mut expand_op = VariableLengthExpandOperator::new(
-                Arc::clone(&self.store) as Arc<dyn GraphStoreSearch>,
+                Arc::clone(&self.store) as Arc<dyn GraphStore>,
                 input_op,
                 source_column,
                 direction,
-                expand.edge_types.clone(),
+                self.stored_edge_types(&expand.edge_types)?,
                 min_hops,
                 max_hops,
+                self.read_view(),
             )
             .with_path_mode(exec_path_mode)
-            .with_transaction_context(self.viewing_epoch, self.transaction_id)
-            .with_read_only(self.read_only)
             .with_read_counter(self.read_counter())
             .with_memory_budget(self.path_search_budget);
 
@@ -151,8 +150,8 @@ impl super::Planner {
                     self.convert_expression(&predicate)?,
                     variable_columns,
                     Arc::clone(&self.store),
+                    self.read_view(),
                 )
-                .with_transaction_context(self.viewing_epoch, self.transaction_id)
                 .with_session_context(self.session_context.clone());
                 expand_op = expand_op.with_edge_condition(Box::new(predicate));
             }
@@ -170,14 +169,13 @@ impl super::Planner {
         } else {
             // Use simple ExpandOperator for single-hop paths without named paths
             let expand_op = ExpandOperator::new(
-                Arc::clone(&self.store) as Arc<dyn GraphStoreSearch>,
+                Arc::clone(&self.store) as Arc<dyn GraphStore>,
                 input_op,
                 source_column,
                 direction,
-                expand.edge_types.clone(),
+                self.stored_edge_types(&expand.edge_types)?,
+                self.read_view(),
             )
-            .with_transaction_context(self.viewing_epoch, self.transaction_id)
-            .with_read_only(self.read_only)
             .with_read_counter(self.read_counter());
             Box::new(expand_op)
         };
@@ -289,7 +287,7 @@ impl super::Planner {
             steps.push(ExpandStep {
                 source_column,
                 direction,
-                edge_types: expand.edge_types.clone(),
+                edge_types: self.stored_edge_types(&expand.edge_types)?,
             });
 
             // Add edge and target columns
@@ -301,19 +299,13 @@ impl super::Planner {
         }
 
         // Create lazy operator that executes at query time, not planning time
-        let mut lazy_op = LazyFactorizedChainOperator::new(
-            Arc::clone(&self.store) as Arc<dyn GraphStoreSearch>,
+        let lazy_op = LazyFactorizedChainOperator::new(
+            Arc::clone(&self.store) as Arc<dyn GraphStore>,
             base_op,
             steps,
+            self.read_view(),
         )
-        .with_read_only(self.read_only)
         .with_read_counter(self.read_counter());
-
-        if let Some(transaction_id) = self.transaction_id {
-            lazy_op = lazy_op.with_transaction_context(self.viewing_epoch, Some(transaction_id));
-        } else {
-            lazy_op = lazy_op.with_transaction_context(self.viewing_epoch, None);
-        }
 
         Ok((Box::new(lazy_op), columns))
     }

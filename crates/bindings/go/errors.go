@@ -13,6 +13,16 @@ import (
 // ErrDatabase is the base error for all Grafeo database errors.
 var ErrDatabase = errors.New("grafeo")
 
+// ErrNotFound is the error of a read of a node or edge that does not exist
+// (it also matches ErrDatabase). Check it with errors.Is: a read that fails
+// is another error, never ErrNotFound.
+var ErrNotFound = errors.New("not found")
+
+// notFound is the ErrNotFound error for the node or edge `what`.
+func notFound(what string, id uint64) error {
+	return fmt.Errorf("%w: %w: %s %d", ErrDatabase, ErrNotFound, what, id)
+}
+
 // Error is a Grafeo database error: its message, which starts with its
 // Grafeo code (such as GRAFEO-Q006), and its GQLSTATUS, the five-character
 // ISO GQL status of the condition ("22012" for a division by zero, "42001"

@@ -141,7 +141,7 @@ fn test_detailed_stats_memory_matches_memory_usage_total() {
             .unwrap();
     }
 
-    let stats = db.detailed_stats();
+    let stats = db.detailed_stats().unwrap();
     let usage = db.memory_usage();
     assert_eq!(
         stats.memory_bytes, usage.total_bytes,

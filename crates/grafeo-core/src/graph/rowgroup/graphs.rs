@@ -430,6 +430,7 @@ impl RowGroupStore {
 
 #[cfg(test)]
 mod tests {
+    use grafeo_common::types::ReadView;
     use std::sync::Arc;
 
     use grafeo_common::storage::{
@@ -494,8 +495,16 @@ mod tests {
             (&expected.nodes, &expected.edges),
             "{what}"
         );
-        assert_eq!(loaded.all_labels(), store.all_labels(), "{what}: labels");
-        assert_eq!(loaded.node_count(), store.node_count(), "{what}: count");
+        assert_eq!(
+            loaded.all_labels().unwrap(),
+            store.all_labels().unwrap(),
+            "{what}: labels"
+        );
+        assert_eq!(
+            loaded.node_count(ReadView::latest()).unwrap(),
+            store.node_count(ReadView::latest()).unwrap(),
+            "{what}: count"
+        );
         assert_eq!(loaded.graph_id(), store.graph_id(), "{what}: the graph id");
         let next = |store: &RowGroupStore| {
             (
@@ -533,14 +542,28 @@ mod tests {
             assert!(!graph.is_dropped());
             assert_same(&graph, &root.graph(name).unwrap(), name);
         }
-        assert_eq!(loaded.graph("trips").unwrap().node_count(), 2);
+        assert_eq!(
+            loaded
+                .graph("trips")
+                .unwrap()
+                .node_count(ReadView::latest())
+                .unwrap(),
+            2
+        );
         loaded.create_graph("travel").unwrap();
         assert_eq!(
             loaded.graph("travel").unwrap().graph_id(),
             4,
             "travel created again gets a new id"
         );
-        assert_eq!(loaded.graph("travel").unwrap().node_count(), 0);
+        assert_eq!(
+            loaded
+                .graph("travel")
+                .unwrap()
+                .node_count(ReadView::latest())
+                .unwrap(),
+            0
+        );
     }
 
     /// A checkpoint during open writes in the root and in a named graph
@@ -556,7 +579,10 @@ mod tests {
         let (root_before, trips_before) = (committed(&root), committed(&*trips));
         let (vincent, paris, visit) = (NodeId::new(0), NodeId::new(1), EdgeId::new(0));
         assert_eq!(
-            trips.get_node(vincent).map(|node| node.labels.len()),
+            trips
+                .node(vincent, ReadView::latest())
+                .unwrap()
+                .map(|node| node.labels.len()),
             Some(1),
             "Vincent of trips"
         );
@@ -632,7 +658,7 @@ mod tests {
             "the file's ids, and the unlisted graph past them"
         );
         assert_eq!(
-            scratch.node_count(),
+            scratch.node_count(ReadView::latest()).unwrap(),
             1,
             "a graph the file does not name keeps its data"
         );
@@ -681,7 +707,11 @@ mod tests {
             let refused = root.read_section(&*source(&written)).unwrap_err();
             assert!(matches!(refused, Error::Corruption(_)), "{refused:?}");
             assert_eq!(
-                (root.node_count(), root.graph_names(), root.next_graph_id()),
+                (
+                    root.node_count(ReadView::latest()).unwrap(),
+                    root.graph_names(),
+                    root.next_graph_id()
+                ),
                 (0, vec!["travel".to_string()], 2),
                 "nothing changed"
             );

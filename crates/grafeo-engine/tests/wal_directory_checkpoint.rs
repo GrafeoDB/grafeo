@@ -8,12 +8,7 @@
 //! cargo test -p grafeo-engine --features full --test wal_directory_checkpoint
 //! ```
 
-#![cfg(all(
-    feature = "lpg",
-    feature = "gql",
-    feature = "wal",
-    feature = "grafeo-file"
-))]
+#![cfg(all(feature = "gql", feature = "wal", feature = "grafeo-file"))]
 
 use std::path::{Path, PathBuf};
 

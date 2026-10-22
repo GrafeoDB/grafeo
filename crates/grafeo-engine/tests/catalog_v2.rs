@@ -8,7 +8,6 @@
 //! ```
 
 #![cfg(all(
-    feature = "lpg",
     feature = "gql",
     feature = "grafeo-file",
     feature = "vector-index",

@@ -296,7 +296,7 @@ fn database_gc_prunes_old_cdc_events_with_session_commits() {
     }
 
     // All 20 nodes should exist
-    assert_eq!(db.node_count(), 20);
+    assert_eq!(db.node_count().unwrap(), 20);
 
     // CDC should have events (auto-GC may have pruned some old ones)
     let events = db

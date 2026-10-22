@@ -106,12 +106,12 @@ class GrafeoGraph implements Finalizable {
               _bindings.grafeoGraphCreateEdge(
                   _open, sourceId, targetId, p[0], p[1])));
 
-  /// Get a node by [id]; throws when it does not exist.
-  Node getNode(int id) => takeNode(
+  /// Get a node by [id], or null when it does not exist.
+  Node? getNode(int id) => takeNodeOrNull(
       _bindings, (out) => _bindings.grafeoGraphGetNode(_open, id, out));
 
-  /// Get an edge by [id]; throws when it does not exist.
-  Edge getEdge(int id) => takeEdge(
+  /// Get an edge by [id], or null when it does not exist.
+  Edge? getEdge(int id) => takeEdgeOrNull(
       _bindings, (out) => _bindings.grafeoGraphGetEdge(_open, id, out));
 
   /// [GrafeoDB.getNodeEdges] in the graph.

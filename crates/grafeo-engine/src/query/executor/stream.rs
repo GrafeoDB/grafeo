@@ -212,7 +212,7 @@ impl Iterator for RowIterator<'_> {
 ///
 /// Used by language bindings (Python, Node.js, WASM) where Rust lifetimes
 /// cannot be expressed at the FFI boundary. The operator tree is `'static`
-/// because operators hold `Arc<dyn GraphStoreSearch>` rather than borrows; the
+/// because operators hold `Arc<dyn GraphStore>` rather than borrows; the
 /// stores remain alive as long as the stream does.
 ///
 /// Callers that need to tie the stream's lifetime to something else (e.g.

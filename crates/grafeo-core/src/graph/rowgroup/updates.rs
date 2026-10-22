@@ -459,6 +459,7 @@ impl<T> Updates<T> {
 
     /// Everything a node of any vector holds for `row`, oldest first: what
     /// the row held before each write some reader may not see.
+    #[cfg(feature = "text-index")]
     pub(super) fn kept(&self, row: usize) -> impl Iterator<Item = &T> + '_ {
         let at = offset(row);
         self.chain(row)
@@ -467,8 +468,8 @@ impl<T> Updates<T> {
             .filter_map(move |node| node.get(at))
     }
 
-    /// As [`kept`](Self::kept), each with the stamp of its node: who wrote
-    /// over it, a transaction (with [`PENDING`]) or a commit epoch.
+    /// As `kept`, each with the stamp of its node: who wrote over it, a
+    /// transaction (with [`PENDING`]) or a commit epoch.
     pub(super) fn kept_stamped(&self, row: usize) -> impl Iterator<Item = (u64, &T)> + '_ {
         let at = offset(row);
         self.chain(row)
@@ -845,16 +846,16 @@ mod tests {
         for (node, (id, state)) in model.ids.iter().zip(&expected).enumerate() {
             let what = format!("{what}, node {node}");
             assert_eq!(
-                store.node_property_at(*id, "age", view),
+                store.node_property(*id, "age", view).unwrap(),
                 state.age.map(Value::Int64),
                 "{what}: age"
             );
             assert_eq!(
-                store.node_property_at(*id, "city", view),
+                store.node_property(*id, "city", view).unwrap(),
                 state.city.clone().map(Value::from),
                 "{what}: city"
             );
-            let found = store.get_node_at(*id, view).expect("the node exists");
+            let found = store.node(*id, view).unwrap().expect("the node exists");
             let mut names: Vec<String> = found.labels.iter().map(ToString::to_string).collect();
             names.sort();
             let mut wanted: Vec<String> = state.labels.iter().map(ToString::to_string).collect();
@@ -867,15 +868,18 @@ mod tests {
             );
             for label in LABELS {
                 assert_eq!(
-                    store.node_has_label_at(*id, label, view),
+                    store.node_has_label(*id, label, view).unwrap(),
                     Some(state.labels.contains(label)),
                     "{what}: has {label}"
                 );
             }
         }
         for label in LABELS {
-            let found: BTreeSet<NodeId> =
-                store.nodes_by_label_at(label, view).into_iter().collect();
+            let found: BTreeSet<NodeId> = store
+                .nodes_by_label(label, view)
+                .unwrap()
+                .into_iter()
+                .collect();
             for (id, state) in model.ids.iter().zip(&expected) {
                 assert_eq!(
                     found.contains(id),
@@ -886,7 +890,8 @@ mod tests {
         }
         for city in CITIES {
             let found: BTreeSet<NodeId> = store
-                .find_nodes_by_property_at("city", &Value::from(city), view)
+                .find_nodes_by_property("city", &Value::from(city), view)
+                .unwrap()
                 .into_iter()
                 .collect();
             for (id, state) in model.ids.iter().zip(&expected) {

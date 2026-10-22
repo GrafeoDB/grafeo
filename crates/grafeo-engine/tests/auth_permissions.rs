@@ -14,7 +14,7 @@ fn session_with_identity_admin_can_write() {
 
     let result = session.execute("INSERT (:Person {name: 'Alix'})");
     assert!(result.is_ok(), "Admin identity should be able to write");
-    assert_eq!(db.node_count(), 1);
+    assert_eq!(db.node_count().unwrap(), 1);
 }
 
 #[test]
@@ -25,7 +25,7 @@ fn session_with_identity_readwrite_can_write() {
 
     let result = session.execute("INSERT (:Person {name: 'Gus'})");
     assert!(result.is_ok(), "ReadWrite identity should be able to write");
-    assert_eq!(db.node_count(), 1);
+    assert_eq!(db.node_count().unwrap(), 1);
 }
 
 #[test]
@@ -79,7 +79,7 @@ fn session_with_role_readwrite() {
 
     let result = session.execute("INSERT (:City {name: 'Berlin'})");
     assert!(result.is_ok(), "ReadWrite role should allow writes");
-    assert_eq!(db.node_count(), 1);
+    assert_eq!(db.node_count().unwrap(), 1);
 }
 
 #[test]
@@ -154,7 +154,7 @@ fn readwrite_session_parameterized_write_succeeds() {
         "ReadWrite session should accept parameterized writes: {:?}",
         result.err()
     );
-    assert_eq!(db.node_count(), 1);
+    assert_eq!(db.node_count().unwrap(), 1);
 }
 
 // ── Projection API ──────────────────────────────────────────────

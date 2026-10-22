@@ -23,6 +23,7 @@
     not(miri)
 ))]
 
+use grafeo_common::types::ReadView;
 use std::collections::BTreeSet;
 use std::path::Path;
 
@@ -187,13 +188,18 @@ fn check(db: &GrafeoDB, ids: &[NodeId], expected: &[Expected], search: Search, p
             .unwrap();
         if *expected == Expected::Deleted {
             assert!(result.rows().is_empty(), "{phase}: {id:?} was deleted");
-            assert!(db.get_node(id).is_none(), "{phase}: get_node of {id:?}");
             assert!(
-                session.get_node(id).is_none(),
+                db.get_node(id).unwrap().is_none(),
+                "{phase}: get_node of {id:?}"
+            );
+            assert!(
+                session.get_node(id).unwrap().is_none(),
                 "{phase}: Session::get_node of {id:?}"
             );
             assert_eq!(
-                db.store().get_node_property_batch(&[id], &key),
+                db.store()
+                    .node_property_batch(&[id], &key, ReadView::latest())
+                    .unwrap(),
                 vec![None],
                 "{phase}: get_node_property_batch of {id:?}"
             );
@@ -218,31 +224,35 @@ fn check(db: &GrafeoDB, ids: &[NodeId], expected: &[Expected], search: Search, p
             want,
             "{phase}: properties(n) of {id:?}"
         );
-        let node = db.get_node(id).expect("the node");
+        let node = db.get_node(id).unwrap().expect("the node");
         assert_eq!(
             node.get_property("embedding").and_then(vector),
             want,
             "{phase}: get_node of {id:?}"
         );
-        let node = session.get_node(id).expect("the node");
+        let node = session.get_node(id).unwrap().expect("the node");
         assert_eq!(
             node.get_property("embedding").and_then(vector),
             want,
             "{phase}: Session::get_node of {id:?}"
         );
         assert_eq!(
-            db.store().get_node_property_batch(&[id], &key)[0]
+            db.store()
+                .node_property_batch(&[id], &key, ReadView::latest())
+                .unwrap()[0]
                 .as_ref()
                 .and_then(vector),
             want,
             "{phase}: get_node_property_batch of {id:?}"
         );
         assert_eq!(
-            db.store().get_nodes_properties_batch(&[id])[0]
+            db.store()
+                .node_properties_batch(&[id], ReadView::latest())
+                .unwrap()[0]
                 .get(&key)
                 .and_then(vector),
             want,
-            "{phase}: get_nodes_properties_batch of {id:?}"
+            "{phase}: node_properties_batch of {id:?}"
         );
     }
 

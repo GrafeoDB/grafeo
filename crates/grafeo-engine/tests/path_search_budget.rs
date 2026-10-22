@@ -20,7 +20,7 @@
 //! cargo test -p grafeo-engine --all-features --test path_search_budget
 //! ```
 
-#![cfg(all(feature = "lpg", feature = "gql", feature = "cypher"))]
+#![cfg(all(feature = "gql", feature = "cypher"))]
 #![expect(
     unsafe_code,
     reason = "GlobalAlloc is an unsafe trait; this forwards to System below a cap"

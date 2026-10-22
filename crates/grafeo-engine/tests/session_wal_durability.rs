@@ -71,7 +71,7 @@ mod session_wal_durability {
             },
         );
         assert_eq!(
-            db.node_count(),
+            db.node_count().unwrap(),
             1,
             "node created via Session::create_node_with_props was lost on reopen"
         );
@@ -102,12 +102,12 @@ mod session_wal_durability {
             },
         );
         assert_eq!(
-            db.node_count(),
+            db.node_count().unwrap(),
             2,
             "anchor nodes lost (DB-direct path should always survive)"
         );
         assert_eq!(
-            db.edge_count(),
+            db.edge_count().unwrap(),
             1,
             "edge created via Session::create_edge_with_props was lost on reopen"
         );
@@ -146,7 +146,10 @@ mod session_wal_durability {
             alix,
             "replay changed the id of the node"
         );
-        let node = db.get_node(alix).expect("anchor node lost on reopen");
+        let node = db
+            .get_node(alix)
+            .unwrap()
+            .expect("anchor node lost on reopen");
         let name_key = PropertyKey::from("name");
         assert_eq!(
             node.properties.get(&name_key).cloned(),
@@ -182,7 +185,10 @@ mod session_wal_durability {
             edge_id,
             "replay changed the id of the edge"
         );
-        let edge = db.get_edge(edge_id).expect("anchor edge lost on reopen");
+        let edge = db
+            .get_edge(edge_id)
+            .unwrap()
+            .expect("anchor edge lost on reopen");
         let since_key = PropertyKey::from("since");
         assert_eq!(
             edge.properties.get(&since_key).cloned(),
@@ -205,7 +211,7 @@ mod session_wal_durability {
             },
         );
         assert_eq!(
-            db.node_count(),
+            db.node_count().unwrap(),
             1,
             "Cypher-created node was lost on reopen (oracle test failed; bug is broader than #327)"
         );
@@ -282,7 +288,7 @@ mod session_wal_durability {
             },
         );
         assert_eq!(
-            db.node_count(),
+            db.node_count().unwrap(),
             1,
             "node from Session::create_node was lost on reopen"
         );
@@ -304,7 +310,7 @@ mod session_wal_durability {
             },
         );
         assert_eq!(
-            db.edge_count(),
+            db.edge_count().unwrap(),
             1,
             "edge from Session::create_edge was lost on reopen"
         );
@@ -327,7 +333,7 @@ mod session_wal_durability {
             },
         );
         assert_eq!(
-            db.node_count(),
+            db.node_count().unwrap(),
             1,
             "delete via Session::delete_node was not durable across reopen"
         );
@@ -352,7 +358,7 @@ mod session_wal_durability {
             },
         );
         assert_eq!(
-            db.edge_count(),
+            db.edge_count().unwrap(),
             1,
             "delete via Session::delete_edge was not durable across reopen"
         );
@@ -395,7 +401,7 @@ mod session_wal_durability {
             },
         );
         assert_eq!(
-            db.node_count(),
+            db.node_count().unwrap(),
             1,
             "rolled-back node was resurrected by a later commit (TransactionAbort missing from rollback path)"
         );
@@ -420,7 +426,6 @@ mod session_wal_durability {
     #[cfg(all(
         feature = "wal",
         feature = "grafeo-file",
-        feature = "lpg",
         feature = "gql",
         feature = "testing-crash-injection"
     ))]
@@ -478,7 +483,7 @@ mod session_wal_durability {
                 "a failed acknowledgement must not publish CDC events",
             );
             assert_eq!(
-                db.node_count(),
+                db.node_count().unwrap(),
                 0,
                 "direct reads must not publish the failed write"
             );
@@ -567,7 +572,7 @@ mod session_wal_durability {
 
                 write(db, "Durable").expect("a later write through the same caller must succeed");
                 assert_eq!(
-                    db.node_count(),
+                    db.node_count().unwrap(),
                     1,
                     "only the later write is visible directly"
                 );
@@ -575,7 +580,7 @@ mod session_wal_durability {
                 assert_eq!(only_id(db, "MATCH (n:Rejected) RETURN count(n)"), 0);
             });
             assert_eq!(
-                db.node_count(),
+                db.node_count().unwrap(),
                 1,
                 "only the later write survives WAL replay"
             );
@@ -613,7 +618,11 @@ mod session_wal_durability {
                 );
                 assert_eq!(wal_log_bytes(db), wal_before_close);
             });
-            assert_eq!(db.node_count(), 0, "the log holds nothing of the call");
+            assert_eq!(
+                db.node_count().unwrap(),
+                0,
+                "the log holds nothing of the call"
+            );
         }
 
         fn unknown_after_group_sync(test: &str, write: Write) {
@@ -650,7 +659,7 @@ mod session_wal_durability {
                 );
             });
             assert_eq!(
-                db.node_count(),
+                db.node_count().unwrap(),
                 1,
                 "the written group survives WAL replay exactly once"
             );
@@ -688,7 +697,7 @@ mod session_wal_durability {
 
         fn assert_revision(db: &GrafeoDB, expected: &str) {
             use grafeo_common::types::Value;
-            assert_eq!(db.node_count(), 1, "updates must not add nodes");
+            assert_eq!(db.node_count().unwrap(), 1, "updates must not add nodes");
             let node = db.iter_nodes().next().expect("the seed node");
             assert_eq!(node.get_property("revision"), Some(&Value::from(expected)));
             let result = db.execute("MATCH (n:Probe) RETURN n.revision").unwrap();

@@ -14,13 +14,13 @@ use grafeo_engine::GrafeoDB;
 #[test]
 fn test_get_nonexistent_node() {
     let db = GrafeoDB::new_in_memory();
-    assert!(db.get_node(NodeId::new(999)).is_none());
+    assert!(db.get_node(NodeId::new(999)).unwrap().is_none());
 }
 
 #[test]
 fn test_get_nonexistent_edge() {
     let db = GrafeoDB::new_in_memory();
-    assert!(db.get_edge(EdgeId::new(999)).is_none());
+    assert!(db.get_edge(EdgeId::new(999)).unwrap().is_none());
 }
 
 #[test]
@@ -34,7 +34,7 @@ fn test_set_property_on_nonexistent_node() {
         matches!(err, grafeo_common::utils::error::Error::NodeNotFound(id) if id == NodeId::new(999)),
         "{err}"
     );
-    assert!(db.get_node(NodeId::new(999)).is_none());
+    assert!(db.get_node(NodeId::new(999)).unwrap().is_none());
 }
 
 #[test]
@@ -52,7 +52,7 @@ fn test_delete_nonexistent_edge() {
 #[test]
 fn test_get_labels_nonexistent_node() {
     let db = GrafeoDB::new_in_memory();
-    assert!(db.get_node_labels(NodeId::new(999)).is_none());
+    assert!(db.get_node_labels(NodeId::new(999)).unwrap().is_none());
 }
 
 #[test]
@@ -221,14 +221,14 @@ fn test_count_on_empty_database() {
 #[test]
 fn test_validate_empty_database() {
     let db = GrafeoDB::new_in_memory();
-    let result = db.validate();
+    let result = db.validate().unwrap();
     assert!(result.is_valid(), "Empty database should be valid");
 }
 
 #[test]
 fn test_schema_empty_database() {
     let db = GrafeoDB::new_in_memory();
-    let schema = db.schema();
+    let schema = db.schema().unwrap();
     match schema {
         grafeo_engine::SchemaInfo::Lpg(lpg) => {
             assert!(lpg.labels.is_empty(), "No labels in empty db");
@@ -241,7 +241,7 @@ fn test_schema_empty_database() {
 #[test]
 fn test_info_empty_database() {
     let db = GrafeoDB::new_in_memory();
-    let info = db.info();
+    let info = db.info().unwrap();
     assert_eq!(info.node_count, 0);
     assert_eq!(info.edge_count, 0);
     assert!(!info.is_persistent);
@@ -262,7 +262,7 @@ fn setting_a_property_to_null_removes_it() {
 
     // A property with a null value does not exist, with or without the
     // `temporal` feature, as for `SET n.key = NULL`.
-    let node = db.get_node(n).unwrap();
+    let node = db.get_node(n).unwrap().unwrap();
     assert_eq!(node.get_property("key"), None, "null removes the property");
     assert_eq!(
         node.get_property("never_set"),
@@ -279,7 +279,7 @@ fn test_property_with_empty_string() {
     db.set_node_property(n, "key", Value::String("".into()))
         .unwrap();
 
-    let node = db.get_node(n).unwrap();
+    let node = db.get_node(n).unwrap().unwrap();
     assert_eq!(
         node.get_property("key"),
         Some(&Value::String("".into())),
@@ -292,9 +292,9 @@ fn test_node_with_no_labels() {
     let db = GrafeoDB::new_in_memory();
     let n = db.create_node(&[]).unwrap();
 
-    let node = db.get_node(n);
+    let node = db.get_node(n).unwrap();
     assert!(node.is_some(), "Node with no labels should exist");
-    assert_eq!(db.node_count(), 1);
+    assert_eq!(db.node_count().unwrap(), 1);
 }
 
 #[test]
@@ -316,7 +316,7 @@ fn test_node_with_many_labels() {
         .collect();
     let n = db.create_node(&labels).unwrap();
 
-    let stored_labels = db.get_node_labels(n).unwrap();
+    let stored_labels = db.get_node_labels(n).unwrap().unwrap();
     assert_eq!(stored_labels.len(), 10);
 }
 
@@ -326,7 +326,7 @@ fn test_self_referencing_edge() {
     let n = db.create_node(&["Node"]).unwrap();
     let e = db.create_edge(n, n, "SELF").unwrap();
 
-    let edge = db.get_edge(e).unwrap();
+    let edge = db.get_edge(e).unwrap().unwrap();
     assert_eq!(edge.src, n);
     assert_eq!(edge.dst, n);
 }

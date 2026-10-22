@@ -75,8 +75,8 @@ fn export_import_empty_database() {
     let db = GrafeoDB::new_in_memory();
     let bytes = db.export_snapshot().unwrap();
     let restored = GrafeoDB::import_snapshot(&bytes).unwrap();
-    assert_eq!(restored.node_count(), 0);
-    assert_eq!(restored.edge_count(), 0);
+    assert_eq!(restored.node_count().unwrap(), 0);
+    assert_eq!(restored.edge_count().unwrap(), 0);
 }
 
 #[test]
@@ -93,7 +93,7 @@ fn export_import_preserves_nodes() {
     let bytes = db.export_snapshot().unwrap();
     let restored = GrafeoDB::import_snapshot(&bytes).unwrap();
 
-    assert_eq!(restored.node_count(), 2);
+    assert_eq!(restored.node_count().unwrap(), 2);
 
     let session2 = restored.session();
     let result = session2
@@ -114,8 +114,8 @@ fn export_import_preserves_edges() {
     let bytes = db.export_snapshot().unwrap();
     let restored = GrafeoDB::import_snapshot(&bytes).unwrap();
 
-    assert_eq!(restored.node_count(), 2);
-    assert_eq!(restored.edge_count(), 1);
+    assert_eq!(restored.node_count().unwrap(), 2);
+    assert_eq!(restored.edge_count().unwrap(), 1);
 
     let session2 = restored.session();
     let result = session2
@@ -205,7 +205,7 @@ fn export_import_preserves_multiple_labels() {
     let bytes = db.export_snapshot().unwrap();
     let restored = GrafeoDB::import_snapshot(&bytes).unwrap();
 
-    assert_eq!(restored.node_count(), 3);
+    assert_eq!(restored.node_count().unwrap(), 3);
 
     let session = restored.session();
     let persons = session.execute("MATCH (p:Person) RETURN p").unwrap();
@@ -344,8 +344,8 @@ fn export_import_preserves_multiple_edge_types() {
     let bytes = db.export_snapshot().unwrap();
     let restored = GrafeoDB::import_snapshot(&bytes).unwrap();
 
-    assert_eq!(restored.node_count(), 3);
-    assert_eq!(restored.edge_count(), 3);
+    assert_eq!(restored.node_count().unwrap(), 3);
+    assert_eq!(restored.edge_count().unwrap(), 3);
 
     let session = restored.session();
     let knows = session.execute("MATCH ()-[e:KNOWS]->() RETURN e").unwrap();
@@ -368,7 +368,7 @@ fn export_import_preserves_empty_property_nodes() {
     let bytes = db.export_snapshot().unwrap();
     let restored = GrafeoDB::import_snapshot(&bytes).unwrap();
 
-    assert_eq!(restored.node_count(), 2);
+    assert_eq!(restored.node_count().unwrap(), 2);
 
     let session = restored.session();
     let result = session.execute("MATCH (e:Empty) RETURN e").unwrap();
@@ -401,8 +401,8 @@ fn export_import_moderate_dataset() {
 
     let restored = GrafeoDB::import_snapshot(&bytes).unwrap();
 
-    assert_eq!(restored.node_count(), 100);
-    assert_eq!(restored.edge_count(), 50);
+    assert_eq!(restored.node_count().unwrap(), 100);
+    assert_eq!(restored.edge_count().unwrap(), 50);
 
     // Verify a sample property survived
     let session = restored.session();
@@ -565,7 +565,7 @@ fn export_import_preserves_named_graphs() {
     let restored = GrafeoDB::import_snapshot(&bytes).unwrap();
 
     // Default graph
-    assert_eq!(restored.node_count(), 1);
+    assert_eq!(restored.node_count().unwrap(), 1);
     let session2 = restored.session();
     let result = session2.execute("MATCH (p:Person) RETURN p.name").unwrap();
     assert_eq!(result.rows().len(), 1);
@@ -636,7 +636,11 @@ fn restore_snapshot_includes_named_graphs() {
     // Restore
     db.restore_snapshot(&snapshot).unwrap();
 
-    assert_eq!(db.node_count(), 1, "default graph restored to 1 node");
+    assert_eq!(
+        db.node_count().unwrap(),
+        1,
+        "default graph restored to 1 node"
+    );
 
     let session2 = db.session();
     session2.execute("USE GRAPH metrics").unwrap();
@@ -689,8 +693,8 @@ fn to_memory_keeps_property_history() {
         .unwrap();
 
     let copy = db.to_memory().unwrap();
-    let history = copy.get_node_property_history(alix, "city");
-    assert_eq!(history, db.get_node_property_history(alix, "city"));
+    let history = copy.get_node_property_history(alix, "city").unwrap();
+    assert_eq!(history, db.get_node_property_history(alix, "city").unwrap());
     assert_eq!(history.len(), 2, "{history:?}");
     assert_eq!(copy.current_epoch(), db.current_epoch());
 }
@@ -710,7 +714,7 @@ fn to_memory_copies_named_graphs() {
     let copy = db.to_memory().unwrap();
 
     // Default graph copied
-    assert_eq!(copy.node_count(), 1);
+    assert_eq!(copy.node_count().unwrap(), 1);
 
     // Named graph copied
     let session2 = copy.session();

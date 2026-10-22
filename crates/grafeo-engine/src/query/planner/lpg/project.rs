@@ -5,9 +5,9 @@ use grafeo_common::types::Value;
 use grafeo_core::execution::operators::{EntityValue, LimitOperator};
 
 use super::{
-    Arc, Error, FilterExpression, GraphStoreSearch, HashMap, LimitOp, LogicalExpression,
-    LogicalOperator, LogicalType, Operator, PhysicalSortKey, ProjectExpr, ProjectOperator, Result,
-    ReturnOp, SkipOp, SortDirection, SortOp, SortOperator, SortOrder, common, output_column_name,
+    Arc, Error, FilterExpression, GraphStore, HashMap, LimitOp, LogicalExpression, LogicalOperator,
+    LogicalType, Operator, PhysicalSortKey, ProjectExpr, ProjectOperator, Result, ReturnOp, SkipOp,
+    SortDirection, SortOp, SortOperator, SortOrder, common, output_column_name,
     resolved_column_name, value_to_logical_type,
 };
 use crate::query::plan::{BuiltinFunction, Callee};
@@ -335,9 +335,9 @@ impl super::Planner {
                     input_op,
                     projections,
                     output_types,
-                    Arc::clone(&self.store) as Arc<dyn GraphStoreSearch>,
+                    Arc::clone(&self.store) as Arc<dyn GraphStore>,
+                    self.read_view(),
                 )
-                .with_transaction_context(self.viewing_epoch, self.transaction_id)
                 .with_session_context(self.session_context.clone()),
             );
 
@@ -402,9 +402,9 @@ impl super::Planner {
                         input_op,
                         projections,
                         output_types,
-                        Arc::clone(&self.store) as Arc<dyn GraphStoreSearch>,
+                        Arc::clone(&self.store) as Arc<dyn GraphStore>,
+                        self.read_view(),
                     )
-                    .with_transaction_context(self.viewing_epoch, self.transaction_id)
                     .with_session_context(self.session_context.clone()),
                 );
                 Ok((operator, columns))
@@ -550,9 +550,9 @@ impl super::Planner {
                 input_op,
                 projections,
                 output_types,
-                Arc::clone(&self.store) as Arc<dyn GraphStoreSearch>,
+                Arc::clone(&self.store) as Arc<dyn GraphStore>,
+                self.read_view(),
             )
-            .with_transaction_context(self.viewing_epoch, self.transaction_id)
             .with_session_context(self.session_context.clone()),
         );
 
@@ -1046,9 +1046,9 @@ impl super::Planner {
                     input_op,
                     projections,
                     output_types,
-                    Arc::clone(&self.store) as Arc<dyn GraphStoreSearch>,
+                    Arc::clone(&self.store) as Arc<dyn GraphStore>,
+                    self.read_view(),
                 )
-                .with_transaction_context(self.viewing_epoch, self.transaction_id)
                 .with_session_context(self.session_context.clone()),
             );
         }
@@ -1866,7 +1866,7 @@ pub(super) fn text_score_column_name(
 
 #[cfg(all(test, feature = "vector-index"))]
 mod tests {
-    use super::super::{Arc, GraphStoreSearch, LogicalExpression, Planner, Value};
+    use super::super::{Arc, GraphStore, LogicalExpression, Planner, Value};
     use crate::query::plan::Callee;
     use grafeo_core::graph::rowgroup::RowGroupStore;
 
@@ -1875,7 +1875,10 @@ mod tests {
     /// in any spelling too, or the score is computed a second time per row.
     #[test]
     fn a_projected_score_is_found_in_any_spelling() {
-        let planner = Planner::new(Arc::new(RowGroupStore::new()) as Arc<dyn GraphStoreSearch>);
+        let planner = Planner::new(
+            Arc::new(RowGroupStore::new()) as Arc<dyn GraphStore>,
+            grafeo_common::types::EpochId::LATEST,
+        );
         let query = LogicalExpression::List(vec![
             LogicalExpression::Literal(Value::Float64(1.0)),
             LogicalExpression::Literal(Value::Float64(0.0)),

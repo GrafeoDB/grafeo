@@ -10,7 +10,7 @@
 //! cargo test -p grafeo-engine --all-features --test use_graph_statement
 //! ```
 
-#![cfg(all(feature = "lpg", feature = "gql"))]
+#![cfg(feature = "gql")]
 
 use std::sync::Arc;
 

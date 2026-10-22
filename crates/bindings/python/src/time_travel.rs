@@ -185,20 +185,25 @@ impl PyAsOfView {
 
     /// The node as it was at the view's epoch, or None.
     fn get_node(&self, id: u64) -> PyResult<Option<PyNode>> {
-        self.with_view(|view| Ok(view.get_node(NodeId(id)).map(crate::direct::node)))
+        self.with_view(|view| {
+            Ok(crate::error::raised(view.get_node(NodeId(id)))?.map(crate::direct::node))
+        })
     }
 
     /// The edge as it was at the view's epoch, or None.
     fn get_edge(&self, id: u64) -> PyResult<Option<PyEdge>> {
-        self.with_view(|view| Ok(view.get_edge(EdgeId(id)).map(crate::direct::edge)))
+        self.with_view(|view| {
+            Ok(crate::error::raised(view.get_edge(EdgeId(id)))?.map(crate::direct::edge))
+        })
     }
 
     /// A node's value of `key` as it was at the view's epoch, or None.
     fn get_node_property(&self, id: u64, key: &str, py: Python<'_>) -> PyResult<Option<Py<PyAny>>> {
         self.with_view(|view| {
-            Ok(view
-                .get_node_property(NodeId(id), key)
-                .map(|value| PyValue::to_py(&value, py)))
+            Ok(
+                crate::error::raised(view.get_node_property(NodeId(id), key))?
+                    .map(|value| PyValue::to_py(&value, py)),
+            )
         })
     }
 

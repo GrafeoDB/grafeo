@@ -12,7 +12,7 @@
 //! cargo test -p grafeo-engine --all-features --test compact_whole_state
 //! ```
 
-#![cfg(all(feature = "lpg", feature = "gql"))]
+#![cfg(feature = "gql")]
 
 use grafeo_common::types::Value;
 use grafeo_engine::GrafeoDB;
@@ -77,8 +77,8 @@ fn assert_holds_the_snapshot(db: &GrafeoDB, stage: &str) {
         Vec::<Vec<Value>>::new(),
         "{stage}: Amsterdam was only in the base"
     );
-    assert_eq!(db.node_count(), 2, "{stage}");
-    assert_eq!(db.edge_count(), 1, "{stage}");
+    assert_eq!(db.node_count().unwrap(), 2, "{stage}");
+    assert_eq!(db.edge_count().unwrap(), 1, "{stage}");
 }
 
 /// A compacted database with a base delete and an overlay node, restored

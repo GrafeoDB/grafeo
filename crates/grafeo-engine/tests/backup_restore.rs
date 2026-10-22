@@ -7,7 +7,7 @@
 //! cargo test -p grafeo-engine --features full --test backup_restore
 //! ```
 
-#![cfg(all(feature = "wal", feature = "grafeo-file", feature = "lpg"))]
+#![cfg(all(feature = "wal", feature = "grafeo-file"))]
 
 use std::path::{Path, PathBuf};
 
@@ -74,7 +74,11 @@ fn full_backup_and_restore_to_epoch() {
 
     // Verify restored data
     let restored = GrafeoDB::open(&restore_path).expect("open restored");
-    assert_eq!(restored.node_count(), 2, "restored should have 2 nodes");
+    assert_eq!(
+        restored.node_count().unwrap(),
+        2,
+        "restored should have 2 nodes"
+    );
     let session = restored.session();
     let result = session
         .execute("MATCH (n:Person) RETURN n.name ORDER BY n.name")
@@ -256,7 +260,11 @@ fn backup_full_on_read_only_database() {
         .expect("restore should succeed");
 
     let restored = GrafeoDB::open(&restore_path).expect("open restored");
-    assert_eq!(restored.node_count(), 2, "restored should have 2 nodes");
+    assert_eq!(
+        restored.node_count().unwrap(),
+        2,
+        "restored should have 2 nodes"
+    );
     restored.close().expect("close");
     assert_eq!(
         restored_people(&backup_dir, segment.end_epoch),
@@ -301,7 +309,11 @@ fn backup_full_works_while_database_is_open() {
         .expect("restore should succeed");
 
     let restored = GrafeoDB::open(&restore_path).expect("open restored");
-    assert_eq!(restored.node_count(), 2, "restored should have 2 nodes");
+    assert_eq!(
+        restored.node_count().unwrap(),
+        2,
+        "restored should have 2 nodes"
+    );
     restored.close().expect("close");
     assert_eq!(
         restored_people(&backup_dir, segment.end_epoch),
@@ -346,7 +358,7 @@ fn backup_full_twice_produces_two_segments() {
         .expect("restore should succeed");
 
     let restored = GrafeoDB::open(&restore_path).expect("open restored");
-    assert_eq!(restored.node_count(), 2);
+    assert_eq!(restored.node_count().unwrap(), 2);
     restored.close().expect("close");
     assert_eq!(
         restored_people(&backup_dir, seg1.end_epoch),

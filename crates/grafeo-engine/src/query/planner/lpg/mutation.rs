@@ -253,8 +253,8 @@ impl super::Planner {
                     filter_expr,
                     variable_columns,
                     Arc::clone(&self.store),
+                    self.read_view(),
                 )
-                .with_transaction_context(self.viewing_epoch, self.transaction_id)
                 .with_session_context(self.session_context.clone());
                 let condition: Box<dyn JoinCondition> =
                     Box::new(JoinedRowCondition::new(Box::new(predicate)));
@@ -323,8 +323,8 @@ impl super::Planner {
                     }],
                     vec![LogicalType::Any],
                     Arc::clone(&self.store),
+                    self.read_view(),
                 )
-                .with_transaction_context(self.viewing_epoch, self.transaction_id)
                 .with_session_context(self.session_context.clone()),
             );
             (project_op, vec!["__list__".to_string()])
@@ -375,8 +375,8 @@ impl super::Planner {
                     proj_exprs,
                     proj_schema,
                     Arc::clone(&self.store),
+                    self.read_view(),
                 )
-                .with_transaction_context(self.viewing_epoch, self.transaction_id)
                 .with_session_context(self.session_context.clone()),
             );
             let list_col = input_columns.len();
@@ -685,23 +685,23 @@ impl super::Planner {
                 input_op,
                 source_column,
                 target_column,
-                sp.edge_types.clone(),
+                self.stored_edge_types(&sp.edge_types)?,
                 direction,
+                self.read_view(),
             ),
             None => ShortestPathOperator::from_source(
                 Arc::clone(&self.store),
                 input_op,
                 source_column,
-                sp.edge_types.clone(),
+                self.stored_edge_types(&sp.edge_types)?,
                 direction,
+                self.read_view(),
             ),
         };
         let mut operator = operator
             .with_selection(selection)
             .with_path_mode(path_mode)
             .with_hop_bounds(sp.min_hops, sp.max_hops)
-            .with_transaction_context(self.viewing_epoch, self.transaction_id)
-            .with_read_only(self.read_only)
             .with_read_counter(self.read_counter())
             .with_memory_budget(self.path_search_budget)
             .with_path_output();
@@ -719,8 +719,8 @@ impl super::Planner {
                 self.convert_expression(&condition.predicate)?,
                 variable_columns,
                 Arc::clone(&self.store),
+                self.read_view(),
             )
-            .with_transaction_context(self.viewing_epoch, self.transaction_id)
             .with_session_context(self.session_context.clone());
             operator = operator.with_edge_condition(Box::new(predicate));
         }
@@ -849,9 +849,8 @@ impl super::Planner {
             params,
             yield_columns,
             canonical_columns,
-        )
-        .with_view(self.read_view());
-        #[cfg(feature = "lpg")]
+            self.read_view(),
+        );
         if let Some(lpg_store) = self.lpg_store.as_ref() {
             op = op.with_lpg_store(Arc::clone(lpg_store));
         }
@@ -936,8 +935,8 @@ impl super::Planner {
             self.convert_expression(expression)?,
             HashMap::new(),
             Arc::clone(&self.store),
+            self.read_view(),
         )
-        .with_transaction_context(self.viewing_epoch, self.transaction_id)
         .with_session_context(self.session_context.clone());
         evaluator
             .eval_at(&grafeo_core::execution::DataChunk::empty(), 0)
@@ -956,17 +955,16 @@ impl super::Planner {
     fn procedure_store(
         &self,
         params: &grafeo_adapters::plugins::Parameters,
-    ) -> Result<Arc<dyn grafeo_core::graph::GraphStoreSearch>> {
+    ) -> Result<Arc<dyn grafeo_core::graph::GraphStore>> {
         let Some(name) = params.get_string("projection") else {
             return Ok(Arc::clone(&self.store));
         };
-        #[cfg(feature = "lpg")]
         if let Some(projection) = self
             .projections
             .as_ref()
             .and_then(|projections| projections.read().get(name).cloned())
         {
-            return Ok(projection as Arc<dyn grafeo_core::graph::GraphStoreSearch>);
+            return Ok(projection as Arc<dyn grafeo_core::graph::GraphStore>);
         }
         Err(Error::Query(QueryError::invalid_reference(format!(
             "Projection '{name}' does not exist"
@@ -1093,7 +1091,6 @@ impl super::Planner {
                 write_counter: self.write_counter(),
                 read_counter: self.read_counter(),
                 recording: self.recording.clone(),
-                #[cfg(feature = "lpg")]
                 projections: self.projections.clone(),
             },
         ));
@@ -1261,8 +1258,8 @@ impl super::Planner {
                     projection_exprs,
                     proj_schema,
                     Arc::clone(&self.store),
+                    self.read_view(),
                 )
-                .with_transaction_context(self.viewing_epoch, self.transaction_id)
                 .with_session_context(self.session_context.clone()),
             )
         } else {
@@ -1485,12 +1482,16 @@ impl super::Planner {
                 };
                 // A call that fails is left to run with the statement, which
                 // reports its error.
-                ExpressionPredicate::new(call, HashMap::new(), Arc::clone(&self.store))
-                    .with_transaction_context(self.viewing_epoch, self.transaction_id)
-                    .with_session_context(self.session_context.clone())
-                    .eval_at(&DataChunk::empty(), 0)
-                    .ok()
-                    .flatten()
+                ExpressionPredicate::new(
+                    call,
+                    HashMap::new(),
+                    Arc::clone(&self.store),
+                    self.read_view(),
+                )
+                .with_session_context(self.session_context.clone())
+                .eval_at(&DataChunk::empty(), 0)
+                .ok()
+                .flatten()
             }
             LogicalExpression::Map(entries) => {
                 let folded: Option<Vec<(String, Value)>> = entries

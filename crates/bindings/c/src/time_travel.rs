@@ -269,8 +269,8 @@ pub extern "C" fn grafeo_as_of_execute(
 }
 
 /// Writes to `out` the node `id` as it was at the view's epoch: a
-/// `GrafeoNode` to free with `grafeo_free_node`, or NULL and
-/// `GRAFEO_ERROR_DATABASE` when it did not exist then (as `grafeo_get_node`).
+/// `GrafeoNode` to free with `grafeo_free_node`, or NULL with `GRAFEO_OK`
+/// when it did not exist then (as `grafeo_get_node`).
 #[unsafe(no_mangle)]
 pub extern "C" fn grafeo_as_of_get_node(
     view: *const GrafeoAsOf,
@@ -283,12 +283,15 @@ pub extern "C" fn grafeo_as_of_get_node(
     }
     // SAFETY: Caller guarantees ptr from grafeo_as_of and not yet freed.
     let view = &unsafe { &*view }.view;
-    node_out(view.get_node(NodeId::new(id)), id, out)
+    match view.get_node(NodeId::new(id)) {
+        Ok(node) => node_out(node, out),
+        Err(err) => set_error(&err),
+    }
 }
 
 /// Writes to `out` the edge `id` as it was at the view's epoch: a
-/// `GrafeoEdge` to free with `grafeo_free_edge`, or NULL and
-/// `GRAFEO_ERROR_DATABASE` when it did not exist then (as `grafeo_get_edge`).
+/// `GrafeoEdge` to free with `grafeo_free_edge`, or NULL with `GRAFEO_OK`
+/// when it did not exist then (as `grafeo_get_edge`).
 #[unsafe(no_mangle)]
 pub extern "C" fn grafeo_as_of_get_edge(
     view: *const GrafeoAsOf,
@@ -301,31 +304,46 @@ pub extern "C" fn grafeo_as_of_get_edge(
     }
     // SAFETY: Caller guarantees ptr from grafeo_as_of and not yet freed.
     let view = &unsafe { &*view }.view;
-    edge_out(view.get_edge(EdgeId(id)), id, out)
+    match view.get_edge(EdgeId(id)) {
+        Ok(edge) => edge_out(edge, out),
+        Err(err) => set_error(&err),
+    }
 }
 
-/// The value of node `id`'s property `key` as it was at the view's epoch, as
-/// JSON (in the shape of `grafeo_result_json`'s values). NULL when the node
-/// or the property did not exist then. Free with `grafeo_free_string`.
+/// Writes to `out_json` the value of node `id`'s property `key` as it was at
+/// the view's epoch, as JSON (in the shape of `grafeo_result_json`'s values),
+/// to free with `grafeo_free_string`; NULL when the node or the property did
+/// not exist then. Returns `Ok`, or the error status of a read the store
+/// cannot do (with `out_json` NULL).
 #[unsafe(no_mangle)]
 pub extern "C" fn grafeo_as_of_get_node_property(
     view: *const GrafeoAsOf,
     id: u64,
     key: *const c_char,
-) -> *mut c_char {
-    if view.is_null() {
-        set_last_error("Null view pointer");
-        return std::ptr::null_mut();
+    out_json: *mut *mut c_char,
+) -> GrafeoStatus {
+    if view.is_null() || out_json.is_null() {
+        set_last_error("Null pointer");
+        return GrafeoStatus::ErrorNullPointer;
     }
-    let Ok(key) = str_from_ptr(key) else {
-        return std::ptr::null_mut();
+    // SAFETY: checked not null above.
+    unsafe { *out_json = std::ptr::null_mut() };
+    let key = match str_from_ptr(key) {
+        Ok(key) => key,
+        Err(status) => return status,
     };
     // SAFETY: Caller guarantees ptr from grafeo_as_of and not yet freed.
     let view = &unsafe { &*view }.view;
     match view.get_node_property(NodeId::new(id), key) {
-        Some(value) => CString::new(value_to_json(&value).to_string())
-            .map_or(std::ptr::null_mut(), CString::into_raw),
-        None => std::ptr::null_mut(),
+        Ok(Some(value)) => {
+            let raw = CString::new(value_to_json(&value).to_string())
+                .map_or(std::ptr::null_mut(), CString::into_raw);
+            // SAFETY: checked not null above.
+            unsafe { *out_json = raw };
+            GrafeoStatus::Ok
+        }
+        Ok(None) => GrafeoStatus::Ok,
+        Err(err) => set_error(&err),
     }
 }
 
@@ -441,7 +459,11 @@ mod tests {
         let view = grafeo_as_of(db, GRAFEO_POINT_EPOCH, then);
 
         let name = CString::new("name").unwrap();
-        let value = grafeo_as_of_get_node_property(view, alix, name.as_ptr());
+        let mut value = std::ptr::null_mut();
+        assert_eq!(
+            grafeo_as_of_get_node_property(view, alix, name.as_ptr(), &raw mut value),
+            GrafeoStatus::Ok
+        );
         // SAFETY: a string the call just handed out, freed below.
         assert_eq!(
             unsafe { CStr::from_ptr(value) }.to_str().unwrap(),
@@ -449,7 +471,12 @@ mod tests {
         );
         crate::database::grafeo_free_string(value);
         let missing = CString::new("city").unwrap();
-        assert!(grafeo_as_of_get_node_property(view, alix, missing.as_ptr()).is_null());
+        let mut absent = std::ptr::null_mut();
+        assert_eq!(
+            grafeo_as_of_get_node_property(view, alix, missing.as_ptr(), &raw mut absent),
+            GrafeoStatus::Ok
+        );
+        assert!(absent.is_null(), "no city then");
 
         let mut node = std::ptr::null_mut();
         assert_eq!(
@@ -465,7 +492,8 @@ mod tests {
         crate::database::grafeo_free_node(node);
         assert_eq!(
             grafeo_as_of_get_node(view, alix + 1000, &raw mut node),
-            GrafeoStatus::ErrorDatabase
+            GrafeoStatus::Ok,
+            "an absent node is no failure"
         );
         assert!(node.is_null());
 
@@ -479,8 +507,9 @@ mod tests {
         let now = grafeo_as_of(db, GRAFEO_POINT_AGO, 0);
         assert_eq!(
             grafeo_as_of_get_edge(now, knows, &raw mut edge),
-            GrafeoStatus::ErrorDatabase
+            GrafeoStatus::Ok
         );
+        assert!(edge.is_null(), "the edge is gone now");
         grafeo_free_as_of(now);
         grafeo_free_as_of(view);
         grafeo_free_database(db);

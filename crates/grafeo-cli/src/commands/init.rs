@@ -26,7 +26,7 @@ pub fn run(path: &Path, mode: GraphMode, format: OutputFormat, quiet: bool) -> R
     let db = GrafeoDB::with_config(config)
         .with_context(|| format!("Failed to create database at {}", path.display()))?;
 
-    let info = db.info();
+    let info = db.info()?;
 
     let fmt: Format = format.into();
     match fmt {

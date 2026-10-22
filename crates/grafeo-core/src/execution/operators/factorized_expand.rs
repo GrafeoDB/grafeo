@@ -14,14 +14,14 @@
 
 use std::sync::Arc;
 
-use super::expand::{EdgeWalk, visible_edges_from};
+use super::expand::{EdgeWalk, stored_types, visible_edges_from};
 use super::{FactorizedOperator, Operator, OperatorError, OperatorResult, ReadCounter};
 use crate::execution::DataChunk;
 use crate::execution::factorized_chunk::FactorizedChunk;
 use crate::execution::vector::ValueVector;
 use crate::graph::Direction;
-use crate::graph::GraphStoreSearch;
-use grafeo_common::types::{EdgeId, EpochId, LogicalType, NodeId, TransactionId};
+use crate::graph::GraphStore;
+use grafeo_common::types::{ArcStr, EdgeId, LogicalType, NodeId, ReadView};
 
 /// Result type for factorized operations.
 pub type FactorizedResult = Result<Option<FactorizedChunk>, OperatorError>;
@@ -50,21 +50,17 @@ pub type FactorizedResult = Result<Option<FactorizedChunk>, OperatorError>;
 /// - Memory: ~11,100 values (no duplication)
 pub struct FactorizedExpandOperator {
     /// The store to traverse.
-    store: Arc<dyn GraphStoreSearch>,
+    store: Arc<dyn GraphStore>,
     /// Input operator providing source nodes.
     input: Box<dyn Operator>,
     /// Index of the source node column in input.
     source_column: usize,
     /// Direction of edge traversal.
     direction: Direction,
-    /// Edge type filter (empty = match all types, multiple = match any).
-    edge_types: Vec<String>,
-    /// Transaction ID for MVCC visibility (None = use current epoch).
-    transaction_id: Option<TransactionId>,
-    /// Epoch for version visibility.
-    viewing_epoch: Option<EpochId>,
-    /// When true, skip versioned MVCC lookups (fast path for read-only queries).
-    read_only: bool,
+    /// The edge types to follow, as stored (every type when empty).
+    edge_types: Vec<ArcStr>,
+    /// Who reads: the expand follows the edges this view sees.
+    view: ReadView,
     /// Counts the edges the expansion reads.
     reads: Option<Arc<ReadCounter>>,
     /// Whether the operator is exhausted.
@@ -74,48 +70,30 @@ pub struct FactorizedExpandOperator {
 }
 
 impl FactorizedExpandOperator {
-    /// Creates a new factorized expand operator.
+    /// Creates a factorized expand of the edges of `edge_types` (as stored,
+    /// every type when empty) that `view` sees.
     pub fn new(
-        store: Arc<dyn GraphStoreSearch>,
+        store: Arc<dyn GraphStore>,
         input: Box<dyn Operator>,
         source_column: usize,
         direction: Direction,
         edge_types: Vec<String>,
+        view: ReadView,
     ) -> Self {
         Self {
             store,
             input,
             source_column,
             direction,
-            edge_types,
-            transaction_id: None,
-            viewing_epoch: None,
-            read_only: false,
+            edge_types: stored_types(edge_types),
+            view,
             reads: None,
             exhausted: false,
             input_column_names: Vec::new(),
         }
     }
 
-    /// Sets the transaction context for MVCC visibility.
-    pub fn with_transaction_context(
-        mut self,
-        epoch: EpochId,
-        transaction_id: Option<TransactionId>,
-    ) -> Self {
-        self.viewing_epoch = Some(epoch);
-        self.transaction_id = transaction_id;
-        self
-    }
-
-    /// Marks this expand as read-only, enabling fast-path lookups.
-    pub fn with_read_only(mut self, read_only: bool) -> Self {
-        self.read_only = read_only;
-        self
-    }
-
-    /// Counts the edges the expansion reads in `reads`, before the type and
-    /// visibility checks.
+    /// Counts the edges the expansion reads in `reads`.
     #[must_use]
     pub fn with_read_counter(mut self, reads: Arc<ReadCounter>) -> Self {
         self.reads = Some(reads);
@@ -130,16 +108,14 @@ impl FactorizedExpandOperator {
 
     /// Gets neighbors for a source node with type and visibility filtering
     /// (see [`visible_edges_from`]).
-    fn get_neighbors(&self, source_id: NodeId) -> Vec<(NodeId, EdgeId)> {
+    fn get_neighbors(&self, source_id: NodeId) -> Result<Vec<(NodeId, EdgeId)>, OperatorError> {
         visible_edges_from(
             self.store.as_ref(),
             source_id,
             self.direction,
             &EdgeWalk {
                 edge_types: &self.edge_types,
-                epoch: self.viewing_epoch,
-                transaction_id: self.transaction_id,
-                read_only: self.read_only,
+                view: self.view,
                 reads: self.reads.as_deref(),
             },
         )
@@ -167,7 +143,7 @@ impl FactorizedExpandOperator {
                 let source_id = source_col.get_node_id(row_idx).ok_or_else(|| {
                     OperatorError::Internal("Expected node ID in source column".into())
                 })?;
-                self.get_neighbors(source_id)
+                self.get_neighbors(source_id)?
             };
 
             for (target_id, edge_id) in neighbors {
@@ -270,53 +246,30 @@ impl FactorizedOperator for FactorizedExpandOperator {
 /// factorized across multiple expansion steps.
 pub struct FactorizedExpandChain {
     /// The store to traverse.
-    store: Arc<dyn GraphStoreSearch>,
+    store: Arc<dyn GraphStore>,
     /// The source operator for the first expansion.
     source: Option<Box<dyn Operator>>,
     /// Accumulated factorized result.
     current_result: Option<FactorizedChunk>,
-    /// Transaction context.
-    transaction_id: Option<TransactionId>,
-    viewing_epoch: Option<EpochId>,
-    /// When true, skip versioned MVCC lookups (fast path for read-only queries).
-    read_only: bool,
+    /// Who reads: the chain follows the edges this view sees.
+    view: ReadView,
     /// Counts the edges the expansion reads.
     reads: Option<Arc<ReadCounter>>,
 }
 
 impl FactorizedExpandChain {
-    /// Creates a new chain starting from a source operator.
-    pub fn new(store: Arc<dyn GraphStoreSearch>, source: Box<dyn Operator>) -> Self {
+    /// Creates a chain starting from a source operator, reading at `view`.
+    pub fn new(store: Arc<dyn GraphStore>, source: Box<dyn Operator>, view: ReadView) -> Self {
         Self {
             store,
             source: Some(source),
             current_result: None,
-            transaction_id: None,
-            viewing_epoch: None,
-            read_only: false,
+            view,
             reads: None,
         }
     }
 
-    /// Sets the transaction context.
-    pub fn with_transaction_context(
-        mut self,
-        epoch: EpochId,
-        transaction_id: Option<TransactionId>,
-    ) -> Self {
-        self.viewing_epoch = Some(epoch);
-        self.transaction_id = transaction_id;
-        self
-    }
-
-    /// Marks this chain as read-only, enabling fast-path lookups.
-    pub fn with_read_only(mut self, read_only: bool) -> Self {
-        self.read_only = read_only;
-        self
-    }
-
-    /// Counts the edges the expansion reads in `reads`, before the type and
-    /// visibility checks.
+    /// Counts the edges the expansion reads in `reads`.
     #[must_use]
     pub fn with_read_counter(mut self, reads: Arc<ReadCounter>) -> Self {
         self.reads = Some(reads);
@@ -350,11 +303,10 @@ impl FactorizedExpandChain {
                         source_column,
                         direction,
                         edge_types,
-                    )
-                    .with_read_only(self.read_only);
-
-                    if let Some(epoch) = self.viewing_epoch {
-                        expand = expand.with_transaction_context(epoch, self.transaction_id);
+                        self.view,
+                    );
+                    if let Some(reads) = &self.reads {
+                        expand = expand.with_read_counter(Arc::clone(reads));
                     }
 
                     if let Some(result) = expand.next_factorized()? {
@@ -469,6 +421,7 @@ impl FactorizedExpandChain {
         };
 
         // Collect all edges for all source nodes in the deepest level
+        let edge_types = stored_types(edge_types);
         let mut edge_ids = ValueVector::with_type(LogicalType::Edge);
         let mut target_ids = ValueVector::with_type(LogicalType::Node);
         let source_len = source_col.physical_len();
@@ -490,12 +443,10 @@ impl FactorizedExpandChain {
                     direction,
                     &EdgeWalk {
                         edge_types: &edge_types,
-                        epoch: self.viewing_epoch,
-                        transaction_id: self.transaction_id,
-                        read_only: self.read_only,
+                        view: self.view,
                         reads: self.reads.as_deref(),
                     },
-                )
+                )?
             };
 
             for (target_id, edge_id) in neighbors {
@@ -584,18 +535,14 @@ pub struct ExpandStep {
 /// aggregation), this avoids flattening and provides massive speedups.
 pub struct LazyFactorizedChainOperator {
     /// The graph store.
-    store: Arc<dyn GraphStoreSearch>,
+    store: Arc<dyn GraphStore>,
     /// The source operator (filter, scan, etc). It stays here, so a reset
     /// can run the chain again.
     source: Box<dyn Operator>,
     /// The expand steps to execute.
     steps: Vec<ExpandStep>,
-    /// Transaction ID for MVCC visibility.
-    transaction_id: Option<TransactionId>,
-    /// Epoch for version visibility.
-    viewing_epoch: Option<EpochId>,
-    /// When true, skip versioned MVCC lookups (fast path for read-only queries).
-    read_only: bool,
+    /// Who reads: the chain follows the edges this view sees.
+    view: ReadView,
     /// Counts the edges the expansion reads.
     reads: Option<Arc<ReadCounter>>,
     /// Cached flat result after execution.
@@ -609,17 +556,16 @@ pub struct LazyFactorizedChainOperator {
 impl LazyFactorizedChainOperator {
     /// Creates a new lazy factorized chain operator.
     pub fn new(
-        store: Arc<dyn GraphStoreSearch>,
+        store: Arc<dyn GraphStore>,
         source: Box<dyn Operator>,
         steps: Vec<ExpandStep>,
+        view: ReadView,
     ) -> Self {
         Self {
             store,
             source,
             steps,
-            transaction_id: None,
-            viewing_epoch: None,
-            read_only: false,
+            view,
             reads: None,
             result: None,
             factorized_result: None,
@@ -627,25 +573,7 @@ impl LazyFactorizedChainOperator {
         }
     }
 
-    /// Sets the transaction context for MVCC visibility.
-    pub fn with_transaction_context(
-        mut self,
-        epoch: EpochId,
-        transaction_id: Option<TransactionId>,
-    ) -> Self {
-        self.viewing_epoch = Some(epoch);
-        self.transaction_id = transaction_id;
-        self
-    }
-
-    /// Marks this operator as read-only, enabling fast-path lookups.
-    pub fn with_read_only(mut self, read_only: bool) -> Self {
-        self.read_only = read_only;
-        self
-    }
-
-    /// Counts the edges the expansion reads in `reads`, before the type and
-    /// visibility checks.
+    /// Counts the edges the expansion reads in `reads`.
     #[must_use]
     pub fn with_read_counter(mut self, reads: Arc<ReadCounter>) -> Self {
         self.reads = Some(reads);
@@ -669,14 +597,10 @@ impl LazyFactorizedChainOperator {
         let mut chain = FactorizedExpandChain::new(
             Arc::clone(&self.store),
             Box::new(SingleChunkOperator::new(input)),
-        )
-        .with_read_only(self.read_only);
+            self.view,
+        );
         if let Some(reads) = &self.reads {
             chain = chain.with_read_counter(Arc::clone(reads));
-        }
-
-        if let Some(epoch) = self.viewing_epoch {
-            chain = chain.with_transaction_context(epoch, self.transaction_id);
         }
 
         // Execute each expand step
@@ -746,7 +670,7 @@ impl Operator for LazyFactorizedChainOperator {
     }
 }
 
-#[cfg(all(test, feature = "lpg"))]
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::execution::operators::ScanOperator;
@@ -766,7 +690,11 @@ mod tests {
         store.create_edge(alix, gus, "KNOWS");
         store.create_edge(alix, vincent, "KNOWS");
 
-        let scan = Box::new(ScanOperator::with_label(store.clone(), "Person"));
+        let scan = Box::new(ScanOperator::with_label(
+            store.clone(),
+            "Person",
+            ReadView::latest(),
+        ));
 
         let mut expand = FactorizedExpandOperator::new(
             store.clone(),
@@ -774,6 +702,7 @@ mod tests {
             0,
             Direction::Outgoing,
             vec!["KNOWS".to_string()],
+            ReadView::latest(),
         );
 
         // Get factorized result
@@ -807,17 +736,37 @@ mod tests {
         store.create_edge(gus, vincent, "KNOWS");
 
         // Run factorized expand
-        let scan1 = Box::new(ScanOperator::with_label(store.clone(), "Person"));
-        let mut factorized_expand =
-            FactorizedExpandOperator::new(store.clone(), scan1, 0, Direction::Outgoing, vec![]);
+        let scan1 = Box::new(ScanOperator::with_label(
+            store.clone(),
+            "Person",
+            ReadView::latest(),
+        ));
+        let mut factorized_expand = FactorizedExpandOperator::new(
+            store.clone(),
+            scan1,
+            0,
+            Direction::Outgoing,
+            vec![],
+            ReadView::latest(),
+        );
 
         let factorized_result = factorized_expand.next_factorized().unwrap().unwrap();
         let flat_from_factorized = factorized_result.flatten();
 
         // Run regular expand (using the factorized operator's flat interface)
-        let scan2 = Box::new(ScanOperator::with_label(store.clone(), "Person"));
-        let mut regular_expand =
-            FactorizedExpandOperator::new(store.clone(), scan2, 0, Direction::Outgoing, vec![]);
+        let scan2 = Box::new(ScanOperator::with_label(
+            store.clone(),
+            "Person",
+            ReadView::latest(),
+        ));
+        let mut regular_expand = FactorizedExpandOperator::new(
+            store.clone(),
+            scan2,
+            0,
+            Direction::Outgoing,
+            vec![],
+            ReadView::latest(),
+        );
 
         let flat_result = regular_expand.next().unwrap().unwrap();
 
@@ -837,10 +786,20 @@ mod tests {
         store.create_node(&["Person"]);
         store.create_node(&["Person"]);
 
-        let scan = Box::new(ScanOperator::with_label(store.clone(), "Person"));
+        let scan = Box::new(ScanOperator::with_label(
+            store.clone(),
+            "Person",
+            ReadView::latest(),
+        ));
 
-        let mut expand =
-            FactorizedExpandOperator::new(store.clone(), scan, 0, Direction::Outgoing, vec![]);
+        let mut expand = FactorizedExpandOperator::new(
+            store.clone(),
+            scan,
+            0,
+            Direction::Outgoing,
+            vec![],
+            ReadView::latest(),
+        );
 
         let result = expand.next_factorized().unwrap();
         assert!(result.is_some());
@@ -883,7 +842,7 @@ mod tests {
         let source = Box::new(SingleChunkOperator::new(source_chunk));
 
         // Build 2-hop chain
-        let chain = FactorizedExpandChain::new(store.clone(), source)
+        let chain = FactorizedExpandChain::new(store.clone(), source, ReadView::latest())
             .expand(0, Direction::Outgoing, vec!["KNOWS".to_string()])
             .unwrap()
             .expand(1, Direction::Outgoing, vec!["KNOWS".to_string()]) // column 1 is target from first expand
@@ -919,7 +878,11 @@ mod tests {
         store.create_edge(alix, vincent, "LIVES_IN");
         store.create_edge(gus, vincent, "WORKS_AT");
 
-        let scan = Box::new(ScanOperator::with_label(store.clone(), "Person"));
+        let scan = Box::new(ScanOperator::with_label(
+            store.clone(),
+            "Person",
+            ReadView::latest(),
+        ));
 
         // Filter for KNOWS and LIVES_IN (case-insensitive)
         let mut expand = FactorizedExpandOperator::new(
@@ -928,6 +891,7 @@ mod tests {
             0,
             Direction::Outgoing,
             vec!["knows".to_string(), "lives_in".to_string()],
+            ReadView::latest(),
         );
 
         let result = expand.next_factorized().unwrap().unwrap();
@@ -958,8 +922,14 @@ mod tests {
 
         let single = Box::new(SingleChunkOperator::new(source_chunk));
 
-        let mut expand =
-            FactorizedExpandOperator::new(store.clone(), single, 0, Direction::Outgoing, vec![]);
+        let mut expand = FactorizedExpandOperator::new(
+            store.clone(),
+            single,
+            0,
+            Direction::Outgoing,
+            vec![],
+            ReadView::latest(),
+        );
 
         let factorized = expand.next_factorized().unwrap().unwrap();
 
@@ -978,8 +948,19 @@ mod tests {
     #[test]
     fn test_factorized_expand_into_any() {
         let store = Arc::new(RowGroupStore::new());
-        let scan = Box::new(ScanOperator::with_label(store.clone(), "Person"));
-        let op = FactorizedExpandOperator::new(store.clone(), scan, 0, Direction::Outgoing, vec![]);
+        let scan = Box::new(ScanOperator::with_label(
+            store.clone(),
+            "Person",
+            ReadView::latest(),
+        ));
+        let op = FactorizedExpandOperator::new(
+            store.clone(),
+            scan,
+            0,
+            Direction::Outgoing,
+            vec![],
+            ReadView::latest(),
+        );
         let any = Box::new(op).into_any();
         assert!(any.downcast::<FactorizedExpandOperator>().is_ok());
     }
@@ -995,7 +976,11 @@ mod tests {
         store.create_edge(alix, gus, "KNOWS");
         store.create_edge(gus, berlin, "LIVES_IN");
 
-        let scan = Box::new(ScanOperator::with_label(store.clone(), "Person"));
+        let scan = Box::new(ScanOperator::with_label(
+            store.clone(),
+            "Person",
+            ReadView::latest(),
+        ));
         let step = |edge_type: &str, source_column| ExpandStep {
             source_column,
             direction: Direction::Outgoing,
@@ -1005,6 +990,7 @@ mod tests {
             store.clone(),
             scan,
             vec![step("KNOWS", 0), step("LIVES_IN", 1)],
+            ReadView::latest(),
         );
         let rows = |chain: &mut LazyFactorizedChainOperator| {
             let mut rows = 0;
@@ -1022,8 +1008,12 @@ mod tests {
     #[test]
     fn test_lazy_factorized_chain_into_any() {
         let store = Arc::new(RowGroupStore::new());
-        let scan = Box::new(ScanOperator::with_label(store.clone(), "Person"));
-        let op = LazyFactorizedChainOperator::new(store.clone(), scan, vec![]);
+        let scan = Box::new(ScanOperator::with_label(
+            store.clone(),
+            "Person",
+            ReadView::latest(),
+        ));
+        let op = LazyFactorizedChainOperator::new(store.clone(), scan, vec![], ReadView::latest());
         let any = Box::new(op).into_any();
         assert!(any.downcast::<LazyFactorizedChainOperator>().is_ok());
     }

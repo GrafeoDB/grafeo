@@ -144,12 +144,20 @@ class AsOfView implements Finalizable {
   /// Node [id]'s value of [key] as it was at the view's epoch, or null when
   /// the node or the property did not exist then.
   dynamic getNodeProperty(int id, String key) => withNativeStrings([key], (p) {
-        final json = _bindings.grafeoAsOfGetNodeProperty(_open, id, p[0]);
-        if (json == nullptr) return null;
+        final out = malloc<Pointer<Utf8>>();
         try {
-          return decodeValue(jsonDecode(json.toDartString()));
+          final status =
+              _bindings.grafeoAsOfGetNodeProperty(_open, id, p[0], out);
+          if (status != GrafeoStatus.ok.code) throwStatus(_bindings, status);
+          final json = out.value;
+          if (json == nullptr) return null;
+          try {
+            return decodeValue(jsonDecode(json.toDartString()));
+          } finally {
+            _bindings.grafeoFreeString(json.cast());
+          }
         } finally {
-          _bindings.grafeoFreeString(json.cast());
+          malloc.free(out);
         }
       });
 }

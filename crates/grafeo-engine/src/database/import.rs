@@ -482,8 +482,8 @@ mod tests {
 
         assert_eq!(nodes, 3);
         assert_eq!(edges, 3);
-        assert_eq!(db.node_count(), 3);
-        assert_eq!(db.edge_count(), 3);
+        assert_eq!(db.node_count().unwrap(), 3);
+        assert_eq!(db.edge_count().unwrap(), 3);
     }
 
     #[test]
@@ -652,7 +652,8 @@ mod tests {
 
         // Verify the adapter works on the imported RDF data
         let adapter = RdfGraphStoreAdapter::new(&db.rdf_store);
-        assert_eq!(adapter.node_count(), 3);
-        assert_eq!(adapter.edge_count(), 3);
+        let view = grafeo_common::types::ReadView::latest();
+        assert_eq!(adapter.node_count(view).unwrap(), 3);
+        assert_eq!(adapter.edge_count(view).unwrap(), 3);
     }
 }

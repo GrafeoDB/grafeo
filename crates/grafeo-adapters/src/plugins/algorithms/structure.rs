@@ -9,13 +9,13 @@ use grafeo_common::utils::error::Result;
 use grafeo_common::utils::hash::{FxHashMap, FxHashSet};
 use grafeo_core::graph::Direction;
 use grafeo_core::graph::GraphStore;
-#[cfg(all(test, feature = "lpg"))]
+#[cfg(test)]
 use grafeo_core::graph::GraphStoreMut as _;
-#[cfg(all(test, feature = "lpg"))]
+#[cfg(test)]
 use grafeo_core::graph::rowgroup::RowGroupStore;
 
 use super::super::{AlgorithmResult, ParameterDef, ParameterType, Parameters};
-use super::traits::{GraphAlgorithm, impl_algorithm, visible_edges_from};
+use super::traits::{GraphAlgorithm, impl_algorithm};
 
 // ============================================================================
 // Articulation Points (Cut Vertices)
@@ -43,7 +43,21 @@ use super::traits::{GraphAlgorithm, impl_algorithm, visible_edges_from};
 /// # Complexity
 ///
 /// O(V + E)
-pub fn articulation_points(store: &dyn GraphStore) -> FxHashSet<NodeId> {
+///
+/// # Errors
+///
+/// The error of a read of the store that fails.
+pub fn articulation_points(
+    store: &dyn GraphStore,
+    view: grafeo_common::types::ReadView,
+) -> grafeo_common::utils::error::Result<FxHashSet<NodeId>> {
+    let graph = super::traits::GraphView::new(store, view);
+    let found = articulation_points_on(&graph);
+    graph.finish(found)
+}
+
+/// [`articulation_points`] on the graph a [`GraphView`](super::traits::GraphView) reads.
+pub(crate) fn articulation_points_on(store: &super::traits::GraphView<'_>) -> FxHashSet<NodeId> {
     let nodes = store.node_ids();
     let n = nodes.len();
 
@@ -142,7 +156,21 @@ pub fn articulation_points(store: &dyn GraphStore) -> FxHashSet<NodeId> {
 /// # Complexity
 ///
 /// O(V + E), the bridges put in node-id order by counting sort.
-pub fn bridges(store: &dyn GraphStore) -> Vec<(NodeId, NodeId)> {
+///
+/// # Errors
+///
+/// The error of a read of the store that fails.
+pub fn bridges(
+    store: &dyn GraphStore,
+    view: grafeo_common::types::ReadView,
+) -> grafeo_common::utils::error::Result<Vec<(NodeId, NodeId)>> {
+    let graph = super::traits::GraphView::new(store, view);
+    let found = bridges_on(&graph);
+    graph.finish(found)
+}
+
+/// [`bridges`] on the graph a [`GraphView`](super::traits::GraphView) reads.
+pub(crate) fn bridges_on(store: &super::traits::GraphView<'_>) -> Vec<(NodeId, NodeId)> {
     let nodes = store.node_ids();
     let n = nodes.len();
 
@@ -212,7 +240,10 @@ pub fn bridges(store: &dyn GraphStore) -> Vec<(NodeId, NodeId)> {
 /// adjacency lists of indices into `nodes`: edge direction is ignored, each
 /// neighbour is listed once however many edges join the two, and self-loops
 /// are left out. O(V + E).
-fn simple_undirected_adjacency(store: &dyn GraphStore, nodes: &[NodeId]) -> Vec<Vec<usize>> {
+fn simple_undirected_adjacency(
+    store: &super::traits::GraphView<'_>,
+    nodes: &[NodeId],
+) -> Vec<Vec<usize>> {
     let n = nodes.len();
     let node_to_idx: FxHashMap<NodeId, usize> = nodes
         .iter()
@@ -222,7 +253,7 @@ fn simple_undirected_adjacency(store: &dyn GraphStore, nodes: &[NodeId]) -> Vec<
 
     let mut adj: Vec<Vec<usize>> = vec![Vec::new(); n];
     for (i, &node) in nodes.iter().enumerate() {
-        for (neighbor, _) in visible_edges_from(store, node, Direction::Outgoing) {
+        for (neighbor, _) in store.edges(node, Direction::Outgoing) {
             if let Some(&j) = node_to_idx.get(&neighbor)
                 && j != i
             {
@@ -333,7 +364,21 @@ impl KCoreResult {
 /// # Complexity
 ///
 /// O(V + E), the bin-sort peeling of Batagelj and Zaversnik.
-pub fn kcore_decomposition(store: &dyn GraphStore) -> KCoreResult {
+///
+/// # Errors
+///
+/// The error of a read of the store that fails.
+pub fn kcore_decomposition(
+    store: &dyn GraphStore,
+    view: grafeo_common::types::ReadView,
+) -> grafeo_common::utils::error::Result<KCoreResult> {
+    let graph = super::traits::GraphView::new(store, view);
+    let found = kcore_decomposition_on(&graph);
+    graph.finish(found)
+}
+
+/// [`kcore_decomposition`] on the graph a [`GraphView`](super::traits::GraphView) reads.
+pub(crate) fn kcore_decomposition_on(store: &super::traits::GraphView<'_>) -> KCoreResult {
     let nodes = store.node_ids();
     let n = nodes.len();
 
@@ -400,8 +445,23 @@ pub fn kcore_decomposition(store: &dyn GraphStore) -> KCoreResult {
 }
 
 /// Extracts the k-core subgraph (nodes with core number >= k).
-pub fn k_core(store: &dyn GraphStore, k: usize) -> Vec<NodeId> {
-    let result = kcore_decomposition(store);
+///
+/// # Errors
+///
+/// The error of a read of the store that fails.
+pub fn k_core(
+    store: &dyn GraphStore,
+    view: grafeo_common::types::ReadView,
+    k: usize,
+) -> grafeo_common::utils::error::Result<Vec<NodeId>> {
+    let graph = super::traits::GraphView::new(store, view);
+    let found = k_core_on(&graph, k);
+    graph.finish(found)
+}
+
+/// [`k_core`] on the graph a [`GraphView`](super::traits::GraphView) reads.
+pub(crate) fn k_core_on(store: &super::traits::GraphView<'_>, k: usize) -> Vec<NodeId> {
+    let result = kcore_decomposition_on(store);
     result.k_core(k)
 }
 
@@ -444,7 +504,23 @@ impl KTrussResult {
 /// # Complexity
 ///
 /// O(m * d_max) where m is the number of edges and d_max is the maximum degree
-pub fn edge_triangle_support(store: &dyn GraphStore) -> FxHashMap<(NodeId, NodeId), u64> {
+///
+/// # Errors
+///
+/// The error of a read of the store that fails.
+pub fn edge_triangle_support(
+    store: &dyn GraphStore,
+    view: grafeo_common::types::ReadView,
+) -> grafeo_common::utils::error::Result<FxHashMap<(NodeId, NodeId), u64>> {
+    let graph = super::traits::GraphView::new(store, view);
+    let found = edge_triangle_support_on(&graph);
+    graph.finish(found)
+}
+
+/// [`edge_triangle_support`] on the graph a [`GraphView`](super::traits::GraphView) reads.
+pub(crate) fn edge_triangle_support_on(
+    store: &super::traits::GraphView<'_>,
+) -> FxHashMap<(NodeId, NodeId), u64> {
     let nodes = store.node_ids();
     if nodes.is_empty() {
         return FxHashMap::default();
@@ -500,7 +576,21 @@ pub fn edge_triangle_support(store: &dyn GraphStore) -> FxHashMap<(NodeId, NodeI
 /// # Complexity
 ///
 /// O(m^1.5) total across all peeling iterations
-pub fn ktruss_decomposition(store: &dyn GraphStore) -> KTrussResult {
+///
+/// # Errors
+///
+/// The error of a read of the store that fails.
+pub fn ktruss_decomposition(
+    store: &dyn GraphStore,
+    view: grafeo_common::types::ReadView,
+) -> grafeo_common::utils::error::Result<KTrussResult> {
+    let graph = super::traits::GraphView::new(store, view);
+    let found = ktruss_decomposition_on(&graph);
+    graph.finish(found)
+}
+
+/// [`ktruss_decomposition`] on the graph a [`GraphView`](super::traits::GraphView) reads.
+pub(crate) fn ktruss_decomposition_on(store: &super::traits::GraphView<'_>) -> KTrussResult {
     let nodes = store.node_ids();
     if nodes.is_empty() {
         return KTrussResult {
@@ -622,8 +712,23 @@ pub fn ktruss_decomposition(store: &dyn GraphStore) -> KTrussResult {
 
 /// Extracts edges in the k-truss subgraph (of the simple undirected graph, see
 /// [`ktruss_decomposition`]), in node-id order.
-pub fn k_truss(store: &dyn GraphStore, k: usize) -> Vec<(NodeId, NodeId)> {
-    let result = ktruss_decomposition(store);
+///
+/// # Errors
+///
+/// The error of a read of the store that fails.
+pub fn k_truss(
+    store: &dyn GraphStore,
+    view: grafeo_common::types::ReadView,
+    k: usize,
+) -> grafeo_common::utils::error::Result<Vec<(NodeId, NodeId)>> {
+    let graph = super::traits::GraphView::new(store, view);
+    let found = k_truss_on(&graph, k);
+    graph.finish(found)
+}
+
+/// [`k_truss`] on the graph a [`GraphView`](super::traits::GraphView) reads.
+pub(crate) fn k_truss_on(store: &super::traits::GraphView<'_>, k: usize) -> Vec<(NodeId, NodeId)> {
+    let result = ktruss_decomposition_on(store);
     result.k_truss(k)
 }
 
@@ -636,7 +741,7 @@ fn ordered_pair(a: NodeId, b: NodeId) -> (NodeId, NodeId) {
 /// is ignored, each neighbour is in the set once however many edges join the
 /// two, and self-loops are left out (a self-loop closes no triangle).
 fn simple_undirected_neighbor_sets(
-    store: &dyn GraphStore,
+    store: &super::traits::GraphView<'_>,
     nodes: &[NodeId],
 ) -> FxHashMap<NodeId, FxHashSet<NodeId>> {
     let mut neighbors: FxHashMap<NodeId, FxHashSet<NodeId>> = nodes
@@ -644,7 +749,7 @@ fn simple_undirected_neighbor_sets(
         .map(|&node| (node, FxHashSet::default()))
         .collect();
     for &node in nodes {
-        for (neighbor, _) in visible_edges_from(store, node, Direction::Outgoing) {
+        for (neighbor, _) in store.edges(node, Direction::Outgoing) {
             if neighbor == node || !neighbors.contains_key(&neighbor) {
                 continue;
             }
@@ -679,7 +784,7 @@ impl_algorithm! {
     description: "Find articulation points (cut vertices) in the graph",
     params: articulation_params,
     execute(store, _params) {
-        let points = articulation_points(store);
+        let points = articulation_points_on(store);
 
         let mut result = AlgorithmResult::new(vec!["node_id".to_string()]);
 
@@ -710,7 +815,7 @@ impl_algorithm! {
     description: "Find bridges (cut edges) in the graph",
     params: bridges_params,
     execute(store, _params) {
-        let bridge_list = bridges(store);
+        let bridge_list = bridges_on(store);
 
         let mut result = AlgorithmResult::new(vec!["source".to_string(), "target".to_string()]);
 
@@ -759,50 +864,60 @@ impl GraphAlgorithm for KCoreAlgorithm {
 
     // reason: node IDs and core numbers are bounded by graph size
     #[allow(clippy::cast_possible_wrap)]
-    fn execute(&self, store: &dyn GraphStore, params: &Parameters) -> Result<AlgorithmResult> {
-        let decomposition = kcore_decomposition(store);
+    fn execute(
+        &self,
+        store: &dyn GraphStore,
+        view: grafeo_common::types::ReadView,
+        params: &Parameters,
+    ) -> Result<AlgorithmResult> {
+        let graph = super::traits::GraphView::new(store, view);
+        let store = &graph;
+        let found = super::traits::evaluated(|| {
+            let decomposition = kcore_decomposition_on(store);
 
-        if let Some(k) = params.get_int("k") {
-            if k < 0 {
-                return Err(grafeo_common::utils::error::Error::InvalidValue(format!(
-                    "k-core requires a non-negative k value, got {k}"
-                )));
-            }
-            let k_usize = usize::try_from(k).map_err(|_| {
-                grafeo_common::utils::error::Error::InvalidValue(format!(
-                    "k-core k value {k} exceeds maximum supported size"
-                ))
-            })?;
-            let k_core_nodes = decomposition.k_core(k_usize);
+            if let Some(k) = params.get_int("k") {
+                if k < 0 {
+                    return Err(grafeo_common::utils::error::Error::InvalidValue(format!(
+                        "k-core requires a non-negative k value, got {k}"
+                    )));
+                }
+                let k_usize = usize::try_from(k).map_err(|_| {
+                    grafeo_common::utils::error::Error::InvalidValue(format!(
+                        "k-core k value {k} exceeds maximum supported size"
+                    ))
+                })?;
+                let k_core_nodes = decomposition.k_core(k_usize);
 
-            let mut result =
-                AlgorithmResult::new(vec!["node_id".to_string(), "in_k_core".to_string()]);
+                let mut result =
+                    AlgorithmResult::new(vec!["node_id".to_string(), "in_k_core".to_string()]);
 
-            for node in k_core_nodes {
-                result.add_row(vec![Value::Int64(node.0 as i64), Value::Bool(true)]);
-            }
+                for node in k_core_nodes {
+                    result.add_row(vec![Value::Int64(node.0 as i64), Value::Bool(true)]);
+                }
 
-            result.sort_by_id_columns(1);
-            Ok(result)
-        } else {
-            // Return full decomposition
-            let mut result = AlgorithmResult::new(vec![
-                "node_id".to_string(),
-                "core_number".to_string(),
-                "max_core".to_string(),
-            ]);
-
-            for (node, core) in decomposition.core_numbers {
-                result.add_row(vec![
-                    Value::Int64(node.0 as i64),
-                    Value::Int64(core as i64),
-                    Value::Int64(decomposition.max_core as i64),
+                result.sort_by_id_columns(1);
+                Ok(result)
+            } else {
+                // Return full decomposition
+                let mut result = AlgorithmResult::new(vec![
+                    "node_id".to_string(),
+                    "core_number".to_string(),
+                    "max_core".to_string(),
                 ]);
-            }
 
-            result.sort_by_id_columns(1);
-            Ok(result)
-        }
+                for (node, core) in decomposition.core_numbers {
+                    result.add_row(vec![
+                        Value::Int64(node.0 as i64),
+                        Value::Int64(core as i64),
+                        Value::Int64(decomposition.max_core as i64),
+                    ]);
+                }
+
+                result.sort_by_id_columns(1);
+                Ok(result)
+            }
+        });
+        graph.finish(found)?
     }
 }
 
@@ -841,49 +956,60 @@ impl GraphAlgorithm for KTrussAlgorithm {
 
     // reason: node IDs and truss numbers are bounded by graph size
     #[allow(clippy::cast_possible_wrap)]
-    fn execute(&self, store: &dyn GraphStore, params: &Parameters) -> Result<AlgorithmResult> {
-        let decomposition = ktruss_decomposition(store);
+    fn execute(
+        &self,
+        store: &dyn GraphStore,
+        view: grafeo_common::types::ReadView,
+        params: &Parameters,
+    ) -> Result<AlgorithmResult> {
+        let graph = super::traits::GraphView::new(store, view);
+        let store = &graph;
+        let found = super::traits::evaluated(|| {
+            let decomposition = ktruss_decomposition_on(store);
 
-        if let Some(k) = params.get_int("k") {
-            if k < 0 {
-                return Err(grafeo_common::utils::error::Error::InvalidValue(format!(
-                    "k-truss requires a non-negative k value, got {k}"
-                )));
-            }
-            let k_usize = usize::try_from(k).map_err(|_| {
-                grafeo_common::utils::error::Error::InvalidValue(format!(
-                    "k-truss k value {k} exceeds maximum supported size"
-                ))
-            })?;
-            let edges = decomposition.k_truss(k_usize);
+            if let Some(k) = params.get_int("k") {
+                if k < 0 {
+                    return Err(grafeo_common::utils::error::Error::InvalidValue(format!(
+                        "k-truss requires a non-negative k value, got {k}"
+                    )));
+                }
+                let k_usize = usize::try_from(k).map_err(|_| {
+                    grafeo_common::utils::error::Error::InvalidValue(format!(
+                        "k-truss k value {k} exceeds maximum supported size"
+                    ))
+                })?;
+                let edges = decomposition.k_truss(k_usize);
 
-            let mut result = AlgorithmResult::new(vec!["source".to_string(), "target".to_string()]);
+                let mut result =
+                    AlgorithmResult::new(vec!["source".to_string(), "target".to_string()]);
 
-            for (src, dst) in edges {
-                result.add_row(vec![Value::Int64(src.0 as i64), Value::Int64(dst.0 as i64)]);
-            }
+                for (src, dst) in edges {
+                    result.add_row(vec![Value::Int64(src.0 as i64), Value::Int64(dst.0 as i64)]);
+                }
 
-            result.sort_by_id_columns(2);
-            Ok(result)
-        } else {
-            // Return full decomposition
-            let mut result = AlgorithmResult::new(vec![
-                "source".to_string(),
-                "target".to_string(),
-                "truss_number".to_string(),
-            ]);
-
-            for ((src, dst), truss) in &decomposition.truss_numbers {
-                result.add_row(vec![
-                    Value::Int64(src.0 as i64),
-                    Value::Int64(dst.0 as i64),
-                    Value::Int64(*truss as i64),
+                result.sort_by_id_columns(2);
+                Ok(result)
+            } else {
+                // Return full decomposition
+                let mut result = AlgorithmResult::new(vec![
+                    "source".to_string(),
+                    "target".to_string(),
+                    "truss_number".to_string(),
                 ]);
-            }
 
-            result.sort_by_id_columns(2);
-            Ok(result)
-        }
+                for ((src, dst), truss) in &decomposition.truss_numbers {
+                    result.add_row(vec![
+                        Value::Int64(src.0 as i64),
+                        Value::Int64(dst.0 as i64),
+                        Value::Int64(*truss as i64),
+                    ]);
+                }
+
+                result.sort_by_id_columns(2);
+                Ok(result)
+            }
+        });
+        graph.finish(found)?
     }
 }
 
@@ -891,9 +1017,10 @@ impl GraphAlgorithm for KTrussAlgorithm {
 // Tests
 // ============================================================================
 
-#[cfg(all(test, feature = "lpg"))]
+#[cfg(test)]
 mod tests {
     use super::*;
+    use grafeo_common::types::ReadView;
 
     fn create_simple_path() -> RowGroupStore {
         // Path: 0 - 1 - 2 - 3 (all are articulation points except endpoints)
@@ -965,7 +1092,7 @@ mod tests {
     #[test]
     fn test_articulation_points_path() {
         let store = create_simple_path();
-        let ap = articulation_points(&store);
+        let ap = articulation_points(&store, ReadView::latest()).unwrap();
 
         // In a path, middle nodes are articulation points
         // 0-1-2-3: nodes 1 and 2 are articulation points
@@ -976,7 +1103,7 @@ mod tests {
     #[test]
     fn test_articulation_points_diamond() {
         let store = create_diamond();
-        let ap = articulation_points(&store);
+        let ap = articulation_points(&store, ReadView::latest()).unwrap();
 
         // Diamond has no articulation points (it's 2-connected)
         assert!(ap.is_empty());
@@ -985,7 +1112,7 @@ mod tests {
     #[test]
     fn test_articulation_points_tree() {
         let store = create_tree();
-        let ap = articulation_points(&store);
+        let ap = articulation_points(&store, ReadView::latest()).unwrap();
 
         // In a tree, all non-leaf nodes are articulation points
         // Tree: 0 has children 1, 2. Node 1 has child 3.
@@ -996,14 +1123,14 @@ mod tests {
     #[test]
     fn test_articulation_points_empty() {
         let store = RowGroupStore::new();
-        let ap = articulation_points(&store);
+        let ap = articulation_points(&store, ReadView::latest()).unwrap();
         assert!(ap.is_empty());
     }
 
     #[test]
     fn test_bridges_path() {
         let store = create_simple_path();
-        let br = bridges(&store);
+        let br = bridges(&store, ReadView::latest()).unwrap();
 
         // In a path, all edges are bridges
         assert_eq!(br.len(), 3);
@@ -1012,7 +1139,7 @@ mod tests {
     #[test]
     fn test_bridges_diamond() {
         let store = create_diamond();
-        let br = bridges(&store);
+        let br = bridges(&store, ReadView::latest()).unwrap();
 
         // Diamond has no bridges (every edge is part of a cycle)
         assert!(br.is_empty(), "{br:?}");
@@ -1021,14 +1148,14 @@ mod tests {
     #[test]
     fn test_bridges_empty() {
         let store = RowGroupStore::new();
-        let br = bridges(&store);
+        let br = bridges(&store, ReadView::latest()).unwrap();
         assert!(br.is_empty(), "{br:?}");
     }
 
     #[test]
     fn test_kcore_path() {
         let store = create_simple_path();
-        let result = kcore_decomposition(&store);
+        let result = kcore_decomposition(&store, ReadView::latest()).unwrap();
 
         // Every node of a path is in the 1-core and none is in the 2-core.
         assert_eq!(result.core_numbers.len(), 4);
@@ -1050,7 +1177,7 @@ mod tests {
         store.create_edge(n0, n2, "EDGE");
         store.create_edge(n2, n0, "EDGE");
 
-        let result = kcore_decomposition(&store);
+        let result = kcore_decomposition(&store, ReadView::latest()).unwrap();
 
         // Edges in both directions count once: every node of a triangle has core number 2.
         assert_eq!(core_numbers_in_order(&result, &[n0, n1, n2]), vec![2, 2, 2]);
@@ -1060,7 +1187,7 @@ mod tests {
     #[test]
     fn test_kcore_empty() {
         let store = RowGroupStore::new();
-        let result = kcore_decomposition(&store);
+        let result = kcore_decomposition(&store, ReadView::latest()).unwrap();
 
         assert!(result.core_numbers.is_empty());
         assert_eq!(result.max_core, 0);
@@ -1072,7 +1199,7 @@ mod tests {
         store.create_node(&["Node"]);
         store.create_node(&["Node"]);
 
-        let result = kcore_decomposition(&store);
+        let result = kcore_decomposition(&store, ReadView::latest()).unwrap();
 
         // Isolated nodes have core number 0
         for (_, &core) in &result.core_numbers {
@@ -1083,9 +1210,9 @@ mod tests {
     #[test]
     fn test_k_core_extraction() {
         let store = create_simple_path();
-        let result = kcore_decomposition(&store);
+        let result = kcore_decomposition(&store, ReadView::latest()).unwrap();
 
-        // k_core(0) should return all nodes
+        // k_core(0, ReadView::latest()).unwrap() should return all nodes
         let k0_core = result.k_core(0);
         assert_eq!(k0_core.len(), 4);
 
@@ -1100,7 +1227,7 @@ mod tests {
     #[test]
     fn test_k_shell() {
         let store = create_simple_path();
-        let result = kcore_decomposition(&store);
+        let result = kcore_decomposition(&store, ReadView::latest()).unwrap();
 
         // Total nodes in all shells should equal total nodes
         let total_in_shells: usize = (0..=result.max_core).map(|k| result.k_shell(k).len()).sum();
@@ -1137,7 +1264,7 @@ mod tests {
         for (n, edges, expected) in cases {
             let (store, nodes) = store_from_edges(n, &edges);
             for _ in 0..3 {
-                let result = kcore_decomposition(&store);
+                let result = kcore_decomposition(&store, ReadView::latest()).unwrap();
                 assert_eq!(
                     core_numbers_in_order(&result, &nodes),
                     expected,
@@ -1168,7 +1295,7 @@ mod tests {
             (3, 3),
         ];
         let (store, nodes) = store_from_edges(4, &edges);
-        let result = kcore_decomposition(&store);
+        let result = kcore_decomposition(&store, ReadView::latest()).unwrap();
         assert_eq!(core_numbers_in_order(&result, &nodes), vec![2, 2, 2, 0]);
         assert_eq!(result.max_core, 2);
     }
@@ -1222,7 +1349,7 @@ mod tests {
             let edge_count = next(n * 4 + 1);
             let edges: Vec<(usize, usize)> = (0..edge_count).map(|_| (next(n), next(n))).collect();
             let (store, nodes) = store_from_edges(n, &edges);
-            let result = kcore_decomposition(&store);
+            let result = kcore_decomposition(&store, ReadView::latest()).unwrap();
             let expected = reference_core_numbers(n, &edges);
             assert_eq!(
                 core_numbers_in_order(&result, &nodes),
@@ -1250,7 +1377,7 @@ mod tests {
     #[test]
     fn test_ktruss_empty_graph() {
         let store = RowGroupStore::new();
-        let result = ktruss_decomposition(&store);
+        let result = ktruss_decomposition(&store, ReadView::latest()).unwrap();
         assert!(result.truss_numbers.is_empty());
         assert_eq!(result.max_truss, 0);
     }
@@ -1258,7 +1385,7 @@ mod tests {
     #[test]
     fn test_ktruss_path_graph() {
         let store = create_simple_path();
-        let result = ktruss_decomposition(&store);
+        let result = ktruss_decomposition(&store, ReadView::latest()).unwrap();
 
         // Path has no triangles, so all edges have truss number 2.
         for (_, &truss) in &result.truss_numbers {
@@ -1280,7 +1407,7 @@ mod tests {
         store.create_edge(n2, n0, "EDGE");
         store.create_edge(n0, n2, "EDGE");
 
-        let result = ktruss_decomposition(&store);
+        let result = ktruss_decomposition(&store, ReadView::latest()).unwrap();
 
         // Triangle (K_3): each edge has support 1, so truss number = 3.
         assert_eq!(result.max_truss, 3);
@@ -1292,7 +1419,7 @@ mod tests {
     #[test]
     fn test_ktruss_complete_k4() {
         let store = create_complete(4);
-        let result = ktruss_decomposition(&store);
+        let result = ktruss_decomposition(&store, ReadView::latest()).unwrap();
 
         // K_4: each edge has support 2 (2 common neighbors), truss number = 4.
         assert_eq!(result.max_truss, 4);
@@ -1304,7 +1431,7 @@ mod tests {
     #[test]
     fn test_ktruss_complete_k5() {
         let store = create_complete(5);
-        let result = ktruss_decomposition(&store);
+        let result = ktruss_decomposition(&store, ReadView::latest()).unwrap();
 
         // K_5: each edge has 3 common neighbors, truss number = 5.
         assert_eq!(result.max_truss, 5);
@@ -1316,11 +1443,11 @@ mod tests {
     #[test]
     fn test_ktruss_extraction() {
         let store = create_complete(4);
-        let edges_4 = k_truss(&store, 4);
+        let edges_4 = k_truss(&store, ReadView::latest(), 4).unwrap();
         // All 6 edges of K_4 should be in 4-truss
         assert_eq!(edges_4.len(), 6);
 
-        let edges_5 = k_truss(&store, 5);
+        let edges_5 = k_truss(&store, ReadView::latest(), 5).unwrap();
         // No edges should be in 5-truss for K_4
         assert!(edges_5.is_empty(), "{edges_5:?}");
     }
@@ -1328,7 +1455,7 @@ mod tests {
     #[test]
     fn test_edge_triangle_support() {
         let store = create_complete(4);
-        let support = edge_triangle_support(&store);
+        let support = edge_triangle_support(&store, ReadView::latest()).unwrap();
 
         // K_4: each edge is in 2 triangles
         for (_, &count) in &support {
@@ -1345,14 +1472,14 @@ mod tests {
 
         // Full decomposition
         let params = Parameters::new();
-        let result = algo.execute(&store, &params).unwrap();
+        let result = algo.execute(&store, ReadView::latest(), &params).unwrap();
         assert_eq!(result.columns.len(), 3); // source, target, truss_number
         assert_eq!(result.row_count(), 6); // 6 edges in K_4
 
         // Extract k=4 truss
         let mut params = Parameters::new();
         params.set_int("k", 4);
-        let result = algo.execute(&store, &params).unwrap();
+        let result = algo.execute(&store, ReadView::latest(), &params).unwrap();
         assert_eq!(result.columns.len(), 2); // source, target
         assert_eq!(result.row_count(), 6);
     }
@@ -1368,7 +1495,7 @@ mod tests {
 
         // Full decomposition (no k parameter)
         let params = Parameters::new();
-        let result = algo.execute(&store, &params).unwrap();
+        let result = algo.execute(&store, ReadView::latest(), &params).unwrap();
         assert_eq!(result.columns.len(), 3); // node_id, core_number, max_core
         assert_eq!(result.row_count(), 4); // 4 nodes in K_4
     }
@@ -1381,7 +1508,7 @@ mod tests {
         // Extract k=2 core: with peeling, only some nodes retain core >= 2
         let mut params = Parameters::new();
         params.set_int("k", 2);
-        let result = algo.execute(&store, &params).unwrap();
+        let result = algo.execute(&store, ReadView::latest(), &params).unwrap();
         assert_eq!(result.columns.len(), 2); // node_id, in_k_core
         // At least some nodes should be in the 2-core
         assert!(result.row_count() > 0);
@@ -1396,7 +1523,7 @@ mod tests {
 
         let mut params = Parameters::new();
         params.set_int("k", -1);
-        let result = algo.execute(&store, &params);
+        let result = algo.execute(&store, ReadView::latest(), &params);
         assert!(result.is_err(), "negative k should return an error");
     }
 
@@ -1420,14 +1547,14 @@ mod tests {
 
         // Full decomposition: returns all 3 nodes with core numbers
         let params = Parameters::new();
-        let result = algo.execute(&store, &params).unwrap();
+        let result = algo.execute(&store, ReadView::latest(), &params).unwrap();
         assert_eq!(result.columns.len(), 3); // node_id, core_number, max_core
         assert_eq!(result.row_count(), 3); // all 3 nodes decomposed
 
         // With k=1: at least some nodes should have core >= 1
         let mut params = Parameters::new();
         params.set_int("k", 1);
-        let result = algo.execute(&store, &params).unwrap();
+        let result = algo.execute(&store, ReadView::latest(), &params).unwrap();
         assert_eq!(result.columns.len(), 2); // node_id, in_k_core
         assert!(result.row_count() > 0);
     }
@@ -1440,7 +1567,7 @@ mod tests {
 
         let mut params = Parameters::new();
         params.set_int("k", -1);
-        let result = algo.execute(&store, &params);
+        let result = algo.execute(&store, ReadView::latest(), &params);
         assert!(result.is_err(), "negative k should return an error");
     }
 
@@ -1462,7 +1589,7 @@ mod tests {
         let algo = KTrussAlgorithm;
         let mut params = Parameters::new();
         params.set_int("k", 3);
-        let result = algo.execute(&store, &params).unwrap();
+        let result = algo.execute(&store, ReadView::latest(), &params).unwrap();
         assert_eq!(result.columns.len(), 2); // source, target
         assert_eq!(result.row_count(), 3); // 3 edges in 3-truss
     }
@@ -1488,11 +1615,11 @@ mod tests {
         }
 
         let adapter = RdfGraphStoreAdapter::new(&rdf);
-        let rdf_result = ktruss_decomposition(&adapter);
+        let rdf_result = ktruss_decomposition(&adapter, ReadView::latest()).unwrap();
 
         // K_4 via LPG
         let lpg = create_complete(4);
-        let lpg_result = ktruss_decomposition(&lpg);
+        let lpg_result = ktruss_decomposition(&lpg, ReadView::latest()).unwrap();
 
         assert_eq!(
             rdf_result.max_truss, lpg_result.max_truss,
@@ -1525,10 +1652,10 @@ mod tests {
         }
 
         let adapter = RdfGraphStoreAdapter::new(&rdf);
-        let rdf_result = kcore_decomposition(&adapter);
+        let rdf_result = kcore_decomposition(&adapter, ReadView::latest()).unwrap();
 
         let lpg = create_complete(4);
-        let lpg_result = kcore_decomposition(&lpg);
+        let lpg_result = kcore_decomposition(&lpg, ReadView::latest()).unwrap();
 
         // Every node of K_4 has core number 3, in both models.
         assert_eq!(rdf_result.core_numbers.len(), 4);
@@ -1543,8 +1670,11 @@ mod tests {
     fn bridges_by_definition(store: &RowGroupStore) -> Vec<(NodeId, NodeId)> {
         let mut edges: std::collections::BTreeSet<(NodeId, NodeId)> =
             std::collections::BTreeSet::new();
-        for node in store.node_ids() {
-            for (neighbor, _) in store.edges_from(node, Direction::Outgoing) {
+        for node in store.node_ids(ReadView::latest()).unwrap() {
+            for (neighbor, _) in store
+                .edges(node, Direction::Outgoing, &[], ReadView::latest())
+                .unwrap()
+            {
                 if neighbor != node {
                     edges.insert((node.min(neighbor), node.max(neighbor)));
                 }
@@ -1603,7 +1733,7 @@ mod tests {
                 }
             }
             assert_eq!(
-                bridges(&store),
+                bridges(&store, ReadView::latest()).unwrap(),
                 bridges_by_definition(&store),
                 "round {round}"
             );
@@ -1626,7 +1756,7 @@ mod tests {
             store.create_edge(hub, leaf, "EDGE");
         }
         let started = std::time::Instant::now();
-        let found = bridges(&store);
+        let found = bridges(&store, ReadView::latest()).unwrap();
         let elapsed = started.elapsed();
         assert_eq!(found.len(), 50_000);
         assert!(found.windows(2).all(|w| w[0] < w[1]), "in node-id order");
@@ -1660,7 +1790,7 @@ mod tests {
         let (store, n) = triangle_with_loops_and_parallel_edges();
         let triangle = vec![(n[0], n[1]), (n[0], n[2]), (n[1], n[2])];
 
-        let result = ktruss_decomposition(&store);
+        let result = ktruss_decomposition(&store, ReadView::latest()).unwrap();
         let mut numbers: Vec<((NodeId, NodeId), usize)> = result
             .truss_numbers
             .iter()
@@ -1673,16 +1803,23 @@ mod tests {
             "a self-loop closes no triangle and is no edge of the simple graph"
         );
         assert_eq!(result.max_truss, 3);
-        assert_eq!(k_truss(&store, 2), triangle);
-        assert_eq!(k_truss(&store, 3), triangle);
-        assert!(k_truss(&store, 4).is_empty(), "{:?}", k_truss(&store, 4));
+        assert_eq!(k_truss(&store, ReadView::latest(), 2).unwrap(), triangle);
+        assert_eq!(k_truss(&store, ReadView::latest(), 3).unwrap(), triangle);
+        assert!(
+            k_truss(&store, ReadView::latest(), 4).unwrap().is_empty(),
+            "{:?}",
+            k_truss(&store, ReadView::latest(), 4).unwrap()
+        );
     }
 
     #[test]
     fn edge_triangle_support_ignores_self_loops_and_parallel_edges() {
         let (store, n) = triangle_with_loops_and_parallel_edges();
         let mut support: Vec<((NodeId, NodeId), u64)> =
-            edge_triangle_support(&store).into_iter().collect();
+            edge_triangle_support(&store, ReadView::latest())
+                .unwrap()
+                .into_iter()
+                .collect();
         support.sort_unstable();
         assert_eq!(
             support,
@@ -1735,7 +1872,7 @@ mod tests {
             let edge_count = next(n * 4 + 1);
             let edges: Vec<(usize, usize)> = (0..edge_count).map(|_| (next(n), next(n))).collect();
             let (store, nodes) = store_from_edges(n, &edges);
-            let result = ktruss_decomposition(&store);
+            let result = ktruss_decomposition(&store, ReadView::latest()).unwrap();
             for k in 2..=6 {
                 let expected: Vec<(NodeId, NodeId)> = reference_k_truss(n, &edges, k)
                     .into_iter()
@@ -1750,7 +1887,7 @@ mod tests {
     /// removal leaves more components among the other nodes, in node-id
     /// order.
     fn articulation_points_by_definition(store: &RowGroupStore) -> Vec<NodeId> {
-        let nodes = store.node_ids();
+        let nodes = store.node_ids(ReadView::latest()).unwrap();
         let components_without = |removed: Option<NodeId>| {
             let mut seen: FxHashSet<NodeId> = removed.into_iter().collect();
             let mut components = 0;
@@ -1762,9 +1899,14 @@ mod tests {
                 let mut stack = vec![start];
                 while let Some(u) = stack.pop() {
                     let around = store
-                        .edges_from(u, Direction::Outgoing)
+                        .edges(u, Direction::Outgoing, &[], ReadView::latest())
+                        .unwrap()
                         .into_iter()
-                        .chain(store.edges_from(u, Direction::Incoming));
+                        .chain(
+                            store
+                                .edges(u, Direction::Incoming, &[], ReadView::latest())
+                                .unwrap(),
+                        );
                     for (v, _) in around {
                         if seen.insert(v) {
                             stack.push(v);
@@ -1806,7 +1948,10 @@ mod tests {
                     store.create_edge(b, a, "EDGE");
                 }
             }
-            let mut found: Vec<NodeId> = articulation_points(&store).into_iter().collect();
+            let mut found: Vec<NodeId> = articulation_points(&store, ReadView::latest())
+                .unwrap()
+                .into_iter()
+                .collect();
             found.sort_unstable();
             assert_eq!(
                 found,
@@ -1833,7 +1978,7 @@ mod tests {
             store.create_edge(hub, leaf, "EDGE");
         }
         let started = std::time::Instant::now();
-        let found = articulation_points(&store);
+        let found = articulation_points(&store, ReadView::latest()).unwrap();
         let elapsed = started.elapsed();
         assert_eq!(found.into_iter().collect::<Vec<_>>(), vec![hub]);
         assert!(

@@ -169,7 +169,8 @@ pub extern "C" fn grafeo_graph_create_edge(
     })
 }
 
-/// Gets a node of the graph into `out` (free with `grafeo_free_node`).
+/// Gets a node of the graph into `out` (free with `grafeo_free_node`; NULL
+/// with `Ok` when it does not exist).
 #[unsafe(no_mangle)]
 pub extern "C" fn grafeo_graph_get_node(
     graph: *mut GrafeoGraph,
@@ -182,7 +183,7 @@ pub extern "C" fn grafeo_graph_get_node(
     }
     with_graph!(graph, GrafeoStatus::ErrorDatabase, |handle| {
         match handle.get_node(NodeId::new(id)) {
-            Ok(node) => node_out(node, id, out),
+            Ok(node) => node_out(node, out),
             Err(e) => set_error(&e),
         }
     })
@@ -218,7 +219,8 @@ pub extern "C" fn grafeo_graph_get_node_edges(
     })
 }
 
-/// Gets an edge of the graph into `out` (free with `grafeo_free_edge`).
+/// Gets an edge of the graph into `out` (free with `grafeo_free_edge`; NULL
+/// with `Ok` when it does not exist).
 #[unsafe(no_mangle)]
 pub extern "C" fn grafeo_graph_get_edge(
     graph: *mut GrafeoGraph,
@@ -231,7 +233,7 @@ pub extern "C" fn grafeo_graph_get_edge(
     }
     with_graph!(graph, GrafeoStatus::ErrorDatabase, |handle| {
         match handle.get_edge(EdgeId::new(id)) {
-            Ok(edge) => edge_out(edge, id, out),
+            Ok(edge) => edge_out(edge, out),
             Err(e) => set_error(&e),
         }
     })
@@ -556,6 +558,38 @@ mod tests {
         grafeo_free_database(db);
     }
 
+    /// An absent node or edge of a graph is `Ok` with NULL; once the graph is
+    /// dropped, a read fails with an error status (not NULL with `Ok`).
+    #[test]
+    fn a_graph_handle_tells_an_absent_node_from_a_failed_read() {
+        let (db, graph) = with_trips();
+        let (labels, props) = (c(r#"["City"]"#), c(r#"{"name": "Berlin"}"#));
+        let berlin = grafeo_graph_create_node(graph, labels.as_ptr(), props.as_ptr());
+        let mut node: *mut GrafeoNode = std::ptr::null_mut();
+        assert_eq!(
+            grafeo_graph_get_node(graph, 424_242, &raw mut node),
+            GrafeoStatus::Ok
+        );
+        assert!(node.is_null(), "absent");
+        let mut edge: *mut GrafeoEdge = std::ptr::null_mut();
+        assert_eq!(
+            grafeo_graph_get_edge(graph, 424_242, &raw mut edge),
+            GrafeoStatus::Ok
+        );
+        assert!(edge.is_null(), "absent");
+
+        let drop = c("DROP GRAPH trips");
+        grafeo_free_result(grafeo_execute(db, drop.as_ptr()));
+        assert_ne!(
+            grafeo_graph_get_node(graph, berlin, &raw mut node),
+            GrafeoStatus::Ok,
+            "a read of a dropped graph fails"
+        );
+        assert!(node.is_null());
+        assert!(last_error().contains("does not exist"), "{}", last_error());
+        close(db, graph);
+    }
+
     #[test]
     fn a_graph_handle_writes_and_reads_in_its_graph_only() {
         let (db, graph) = with_trips();
@@ -567,7 +601,11 @@ mod tests {
         let edge =
             grafeo_graph_create_edge(graph, prague, berlin, route.as_ptr(), std::ptr::null());
         assert_ne!(edge, u64::MAX, "{}", last_error());
-        assert_eq!(grafeo_node_count(db), 0, "the default graph is untouched");
+        assert_eq!(
+            crate::database::counted(grafeo_node_count, db),
+            0,
+            "the default graph is untouched"
+        );
 
         let query = c("MATCH (a:City)-[:ROUTE]->(b:City) RETURN a.name, b.name");
         assert_eq!(
@@ -699,7 +737,11 @@ mod tests {
                 {"a.name": "Paris", "b.name": "Amsterdam"}
             ])
         );
-        assert_eq!(grafeo_node_count(db), 0, "the default graph is untouched");
+        assert_eq!(
+            crate::database::counted(grafeo_node_count, db),
+            0,
+            "the default graph is untouched"
+        );
         close(db, graph);
     }
 

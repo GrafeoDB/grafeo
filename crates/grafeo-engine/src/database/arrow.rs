@@ -556,7 +556,6 @@ pub fn record_batch_to_ipc_stream(batch: &RecordBatch) -> Result<Vec<u8>, ArrowE
 // Bulk export: nodes and edges to Arrow RecordBatch
 // =========================================================================
 
-#[cfg(feature = "lpg")]
 mod bulk_export {
     use std::collections::HashSet;
     use std::sync::Arc;
@@ -742,7 +741,6 @@ mod bulk_export {
     }
 }
 
-#[cfg(feature = "lpg")]
 pub use bulk_export::{
     edges_to_ipc_stream, edges_to_record_batch, nodes_to_ipc_stream, nodes_to_record_batch,
 };
@@ -1346,7 +1344,6 @@ mod tests {
     // Bulk export: nodes and edges
     // =====================================================================
 
-    #[cfg(feature = "lpg")]
     mod bulk_export_tests {
         use super::*;
         use grafeo_common::types::{EdgeId, NodeId};

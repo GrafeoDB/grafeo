@@ -14,7 +14,7 @@
 //! cargo test -p grafeo-engine --all-features --test write_values_from_new_entities
 //! ```
 
-#![cfg(all(feature = "lpg", feature = "gql", feature = "cypher"))]
+#![cfg(all(feature = "gql", feature = "cypher"))]
 
 use grafeo_common::types::Value;
 use grafeo_engine::{GrafeoDB, Session};

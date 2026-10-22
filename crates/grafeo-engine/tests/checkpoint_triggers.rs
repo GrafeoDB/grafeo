@@ -5,13 +5,7 @@
 //! cargo test -p grafeo-engine --all-features --test checkpoint_triggers
 //! ```
 
-#![cfg(all(
-    feature = "lpg",
-    feature = "gql",
-    feature = "wal",
-    feature = "grafeo-file",
-    not(miri)
-))]
+#![cfg(all(feature = "gql", feature = "wal", feature = "grafeo-file", not(miri)))]
 
 use std::path::Path;
 use std::time::{Duration, Instant};

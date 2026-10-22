@@ -1,12 +1,12 @@
 //! Variable-length expand operator for multi-hop path traversal.
 
-use super::expand::{EdgeWalk, visible_edges_from};
+use super::expand::{EdgeWalk, stored_types, visible_edges_from};
 use super::filter::Predicate;
 use super::{Operator, OperatorError, OperatorResult, ReadCounter};
 use crate::execution::DataChunk;
 use crate::graph::Direction;
-use crate::graph::GraphStoreSearch;
-use grafeo_common::types::{EdgeId, EpochId, LogicalType, NodeId, TransactionId};
+use crate::graph::GraphStore;
+use grafeo_common::types::{ArcStr, EdgeId, LogicalType, NodeId, ReadView};
 use grafeo_common::utils::hash::FxHashSet;
 use std::collections::VecDeque;
 use std::sync::Arc;
@@ -78,27 +78,23 @@ pub enum PathMode {
 #[allow(clippy::struct_excessive_bools)]
 pub struct VariableLengthExpandOperator {
     /// The store to traverse.
-    store: Arc<dyn GraphStoreSearch>,
+    store: Arc<dyn GraphStore>,
     /// Input operator providing source nodes.
     input: Box<dyn Operator>,
     /// Index of the source node column in input.
     source_column: usize,
     /// Direction of edge traversal.
     direction: Direction,
-    /// Edge type filter (empty = match all types, multiple = match any).
-    edge_types: Vec<String>,
+    /// The edge types to follow, as stored (every type when empty).
+    edge_types: Vec<ArcStr>,
     /// Minimum number of hops.
     min_hops: u32,
     /// Maximum number of hops.
     max_hops: u32,
     /// Chunk capacity.
     chunk_capacity: usize,
-    /// Transaction ID for MVCC visibility.
-    transaction_id: Option<TransactionId>,
-    /// Epoch for version visibility.
-    viewing_epoch: Option<EpochId>,
-    /// When true, skip versioned MVCC lookups (fast path for read-only queries).
-    read_only: bool,
+    /// Who reads: the expand follows the edges this view sees.
+    view: ReadView,
     /// Counts the edges the expansion reads.
     reads: Option<Arc<ReadCounter>>,
     /// Materialized input rows.
@@ -315,28 +311,32 @@ impl Drop for PathSegment {
 }
 
 impl VariableLengthExpandOperator {
-    /// Creates a new variable-length expand operator.
+    /// Creates a variable-length expand along the edges of `edge_types` (as
+    /// stored, every type when empty) that `view` sees.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the pattern's parts and the view it reads at; the options are builders"
+    )]
     pub fn new(
-        store: Arc<dyn GraphStoreSearch>,
+        store: Arc<dyn GraphStore>,
         input: Box<dyn Operator>,
         source_column: usize,
         direction: Direction,
         edge_types: Vec<String>,
         min_hops: u32,
         max_hops: u32,
+        view: ReadView,
     ) -> Self {
         Self {
             store,
             input,
             source_column,
             direction,
-            edge_types,
+            edge_types: stored_types(edge_types),
             min_hops,
             max_hops: max_hops.max(min_hops), // Ensure max >= min
             chunk_capacity: 2048,
-            transaction_id: None,
-            viewing_epoch: None,
-            read_only: false,
+            view,
             reads: None,
             input_rows: None,
             current_input_idx: 0,
@@ -483,25 +483,7 @@ impl VariableLengthExpandOperator {
         self
     }
 
-    /// Sets the transaction context for MVCC visibility.
-    pub fn with_transaction_context(
-        mut self,
-        epoch: EpochId,
-        transaction_id: Option<TransactionId>,
-    ) -> Self {
-        self.viewing_epoch = Some(epoch);
-        self.transaction_id = transaction_id;
-        self
-    }
-
-    /// Marks this expand as read-only, enabling fast-path lookups.
-    pub fn with_read_only(mut self, read_only: bool) -> Self {
-        self.read_only = read_only;
-        self
-    }
-
-    /// Counts the edges the expansion reads in `reads`, before the type and
-    /// visibility checks.
+    /// Counts the edges the expansion reads in `reads`.
     #[must_use]
     pub fn with_read_counter(mut self, reads: Arc<ReadCounter>) -> Self {
         self.reads = Some(reads);
@@ -584,12 +566,10 @@ impl VariableLengthExpandOperator {
             self.direction,
             &EdgeWalk {
                 edge_types: &self.edge_types,
-                epoch: self.viewing_epoch,
-                transaction_id: self.transaction_id,
-                read_only: self.read_only,
+                view: self.view,
                 reads: self.reads.as_deref(),
             },
-        );
+        )?;
         if let (Some(condition), Some(row)) = (&self.edge_condition, condition_row) {
             let edge_column = row.column_count() - 1;
             let mut failure = None;
@@ -1116,7 +1096,7 @@ fn edge_id_list(edges: &[EdgeId]) -> Result<Vec<grafeo_common::types::Value>, Op
         .collect()
 }
 
-#[cfg(all(test, feature = "lpg"))]
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::execution::operators::ScanOperator;
@@ -1144,19 +1124,21 @@ mod tests {
 
         // Create scan for all nodes
         let scan = Box::new(ScanOperator::with_label(
-            Arc::clone(&store) as Arc<dyn GraphStoreSearch>,
+            Arc::clone(&store) as Arc<dyn GraphStore>,
             "Node",
+            ReadView::latest(),
         ));
 
         // Expand 1-3 hops from all nodes
         let mut expand = VariableLengthExpandOperator::new(
-            Arc::clone(&store) as Arc<dyn GraphStoreSearch>,
+            Arc::clone(&store) as Arc<dyn GraphStore>,
             scan,
             0,
             Direction::Outgoing,
             vec!["NEXT".to_string()],
             1,
             3,
+            ReadView::latest(),
         );
 
         let mut results = Vec::new();
@@ -1193,20 +1175,22 @@ mod tests {
         store.create_edge(b, c, "NEXT");
 
         let scan = Box::new(ScanOperator::with_label(
-            Arc::clone(&store) as Arc<dyn GraphStoreSearch>,
+            Arc::clone(&store) as Arc<dyn GraphStore>,
             "Node",
+            ReadView::latest(),
         ));
 
         // Expand 2-3 hops only (skip 1 hop)
         let mut expand = VariableLengthExpandOperator::new(
-            Arc::clone(&store) as Arc<dyn GraphStoreSearch>,
+            Arc::clone(&store) as Arc<dyn GraphStore>,
             scan,
             0,
             Direction::Outgoing,
             vec!["NEXT".to_string()],
             2, // min 2 hops
-            3, // max 3 hops
-        );
+            3,
+            ReadView::latest(),
+        ); // max 3 hops
 
         let mut results = Vec::new();
         while let Ok(Some(chunk)) = expand.next() {
@@ -1250,17 +1234,19 @@ mod tests {
         store.create_edge(c, d, "EDGE");
 
         let scan = Box::new(ScanOperator::with_label(
-            Arc::clone(&store) as Arc<dyn GraphStoreSearch>,
+            Arc::clone(&store) as Arc<dyn GraphStore>,
             "Node",
+            ReadView::latest(),
         ));
         let mut expand = VariableLengthExpandOperator::new(
-            Arc::clone(&store) as Arc<dyn GraphStoreSearch>,
+            Arc::clone(&store) as Arc<dyn GraphStore>,
             scan,
             0,
             Direction::Outgoing,
             vec![],
             1,
             2,
+            ReadView::latest(),
         );
 
         let mut results = Vec::new();
@@ -1294,18 +1280,20 @@ mod tests {
         store.create_edge(a, b, "KNOWS");
 
         let scan = Box::new(ScanOperator::with_label(
-            Arc::clone(&store) as Arc<dyn GraphStoreSearch>,
+            Arc::clone(&store) as Arc<dyn GraphStore>,
             "Node",
+            ReadView::latest(),
         ));
         // Filter for LIKES edges (which don't exist)
         let mut expand = VariableLengthExpandOperator::new(
-            Arc::clone(&store) as Arc<dyn GraphStoreSearch>,
+            Arc::clone(&store) as Arc<dyn GraphStore>,
             scan,
             0,
             Direction::Outgoing,
             vec!["LIKES".to_string()],
             1,
             3,
+            ReadView::latest(),
         );
 
         let result = expand.next().unwrap();
@@ -1321,18 +1309,20 @@ mod tests {
         store.create_edge(a, b, "EDGE");
 
         let scan = Box::new(ScanOperator::with_label(
-            Arc::clone(&store) as Arc<dyn GraphStoreSearch>,
+            Arc::clone(&store) as Arc<dyn GraphStore>,
             "Node",
+            ReadView::latest(),
         ));
         // Exactly 1 hop
         let mut expand = VariableLengthExpandOperator::new(
-            Arc::clone(&store) as Arc<dyn GraphStoreSearch>,
+            Arc::clone(&store) as Arc<dyn GraphStore>,
             scan,
             0,
             Direction::Outgoing,
             vec![],
             1,
             1,
+            ReadView::latest(),
         );
 
         let mut results = Vec::new();
@@ -1361,17 +1351,19 @@ mod tests {
         store.create_edge(b, c, "EDGE");
 
         let scan = Box::new(ScanOperator::with_label(
-            Arc::clone(&store) as Arc<dyn GraphStoreSearch>,
+            Arc::clone(&store) as Arc<dyn GraphStore>,
             "Node",
+            ReadView::latest(),
         ));
         let mut expand = VariableLengthExpandOperator::new(
-            Arc::clone(&store) as Arc<dyn GraphStoreSearch>,
+            Arc::clone(&store) as Arc<dyn GraphStore>,
             scan,
             0,
             Direction::Outgoing,
             vec![],
             1,
             2,
+            ReadView::latest(),
         )
         .with_path_length_output();
 
@@ -1393,17 +1385,19 @@ mod tests {
         store.create_edge(a, b, "EDGE");
 
         let scan = Box::new(ScanOperator::with_label(
-            Arc::clone(&store) as Arc<dyn GraphStoreSearch>,
+            Arc::clone(&store) as Arc<dyn GraphStore>,
             "Node",
+            ReadView::latest(),
         ));
         let mut expand = VariableLengthExpandOperator::new(
-            Arc::clone(&store) as Arc<dyn GraphStoreSearch>,
+            Arc::clone(&store) as Arc<dyn GraphStore>,
             scan,
             0,
             Direction::Outgoing,
             vec![],
             1,
             1,
+            ReadView::latest(),
         );
 
         // First pass
@@ -1427,17 +1421,19 @@ mod tests {
     fn test_variable_length_expand_name() {
         let store = Arc::new(RowGroupStore::new());
         let scan = Box::new(ScanOperator::with_label(
-            Arc::clone(&store) as Arc<dyn GraphStoreSearch>,
+            Arc::clone(&store) as Arc<dyn GraphStore>,
             "Node",
+            ReadView::latest(),
         ));
         let expand = VariableLengthExpandOperator::new(
-            Arc::clone(&store) as Arc<dyn GraphStoreSearch>,
+            Arc::clone(&store) as Arc<dyn GraphStore>,
             scan,
             0,
             Direction::Outgoing,
             vec![],
             1,
             3,
+            ReadView::latest(),
         );
         assert_eq!(expand.name(), "VariableLengthExpand");
     }
@@ -1446,17 +1442,19 @@ mod tests {
     fn test_variable_length_expand_empty_input() {
         let store = Arc::new(RowGroupStore::new());
         let scan = Box::new(ScanOperator::with_label(
-            Arc::clone(&store) as Arc<dyn GraphStoreSearch>,
+            Arc::clone(&store) as Arc<dyn GraphStore>,
             "Nonexistent",
+            ReadView::latest(),
         ));
         let mut expand = VariableLengthExpandOperator::new(
-            Arc::clone(&store) as Arc<dyn GraphStoreSearch>,
+            Arc::clone(&store) as Arc<dyn GraphStore>,
             scan,
             0,
             Direction::Outgoing,
             vec![],
             1,
             3,
+            ReadView::latest(),
         );
 
         let result = expand.next().unwrap();
@@ -1475,17 +1473,19 @@ mod tests {
         }
 
         let scan = Box::new(ScanOperator::with_label(
-            Arc::clone(&store) as Arc<dyn GraphStoreSearch>,
+            Arc::clone(&store) as Arc<dyn GraphStore>,
             "Node",
+            ReadView::latest(),
         ));
         let mut expand = VariableLengthExpandOperator::new(
-            Arc::clone(&store) as Arc<dyn GraphStoreSearch>,
+            Arc::clone(&store) as Arc<dyn GraphStore>,
             scan,
             0,
             Direction::Outgoing,
             vec![],
             1,
             1,
+            ReadView::latest(),
         )
         .with_chunk_capacity(2);
 
@@ -1511,17 +1511,19 @@ mod tests {
         store.create_edge(b, a, "EDGE");
 
         let scan = Box::new(ScanOperator::with_label(
-            Arc::clone(&store) as Arc<dyn GraphStoreSearch>,
+            Arc::clone(&store) as Arc<dyn GraphStore>,
             "Node",
+            ReadView::latest(),
         ));
         let mut expand = VariableLengthExpandOperator::new(
-            Arc::clone(&store) as Arc<dyn GraphStoreSearch>,
+            Arc::clone(&store) as Arc<dyn GraphStore>,
             scan,
             0,
             Direction::Outgoing,
             vec![],
             1,
             4,
+            ReadView::latest(),
         )
         .with_path_mode(PathMode::Trail);
 
@@ -1551,17 +1553,19 @@ mod tests {
         store.create_edge(b, a, "EDGE");
 
         let scan = Box::new(ScanOperator::with_label(
-            Arc::clone(&store) as Arc<dyn GraphStoreSearch>,
+            Arc::clone(&store) as Arc<dyn GraphStore>,
             "Node",
+            ReadView::latest(),
         ));
         let mut expand = VariableLengthExpandOperator::new(
-            Arc::clone(&store) as Arc<dyn GraphStoreSearch>,
+            Arc::clone(&store) as Arc<dyn GraphStore>,
             scan,
             0,
             Direction::Outgoing,
             vec![],
             1,
             4,
+            ReadView::latest(),
         )
         .with_path_mode(PathMode::Acyclic);
 
@@ -1584,17 +1588,19 @@ mod tests {
     fn test_variable_length_expand_into_any() {
         let store = Arc::new(RowGroupStore::new());
         let scan = Box::new(ScanOperator::with_label(
-            Arc::clone(&store) as Arc<dyn GraphStoreSearch>,
+            Arc::clone(&store) as Arc<dyn GraphStore>,
             "Node",
+            ReadView::latest(),
         ));
         let op = VariableLengthExpandOperator::new(
-            Arc::clone(&store) as Arc<dyn GraphStoreSearch>,
+            Arc::clone(&store) as Arc<dyn GraphStore>,
             scan,
             0,
             Direction::Outgoing,
             vec![],
             1,
             3,
+            ReadView::latest(),
         );
         let any = Box::new(op).into_any();
         assert!(any.downcast::<VariableLengthExpandOperator>().is_ok());
@@ -1766,17 +1772,19 @@ mod tests {
         store.create_edge(gus, alix, "KNOWS");
 
         let scan = Box::new(ScanOperator::with_label(
-            Arc::clone(&store) as Arc<dyn GraphStoreSearch>,
+            Arc::clone(&store) as Arc<dyn GraphStore>,
             "Person",
+            ReadView::latest(),
         ));
         let mut expand = VariableLengthExpandOperator::new(
-            Arc::clone(&store) as Arc<dyn GraphStoreSearch>,
+            Arc::clone(&store) as Arc<dyn GraphStore>,
             scan,
             0,
             Direction::Outgoing,
             vec![],
             1,
             3,
+            ReadView::latest(),
         )
         .with_path_mode(PathMode::Walk);
 
@@ -1812,17 +1820,19 @@ mod tests {
         store.create_edge(mia, vincent, "KNOWS");
 
         let scan = Box::new(ScanOperator::with_label(
-            Arc::clone(&store) as Arc<dyn GraphStoreSearch>,
+            Arc::clone(&store) as Arc<dyn GraphStore>,
             "Person",
+            ReadView::latest(),
         ));
         let mut expand = VariableLengthExpandOperator::new(
-            Arc::clone(&store) as Arc<dyn GraphStoreSearch>,
+            Arc::clone(&store) as Arc<dyn GraphStore>,
             scan,
             0,
             Direction::Outgoing,
             vec![],
             1,
             5,
+            ReadView::latest(),
         )
         .with_path_mode(PathMode::Simple);
 
@@ -1862,17 +1872,19 @@ mod tests {
         store.create_edge(vincent, butch, "KNOWS");
 
         let scan = Box::new(ScanOperator::with_label(
-            Arc::clone(&store) as Arc<dyn GraphStoreSearch>,
+            Arc::clone(&store) as Arc<dyn GraphStore>,
             "Start",
+            ReadView::latest(),
         ));
         let mut expand = VariableLengthExpandOperator::new(
-            Arc::clone(&store) as Arc<dyn GraphStoreSearch>,
+            Arc::clone(&store) as Arc<dyn GraphStore>,
             scan,
             0,
             Direction::Outgoing,
             vec![],
             1,
             5,
+            ReadView::latest(),
         )
         .with_path_mode(PathMode::Simple)
         .with_path_length_output();
@@ -1918,17 +1930,19 @@ mod tests {
         store.create_edge(gus, vincent, "KNOWS");
 
         let scan = Box::new(ScanOperator::with_label(
-            Arc::clone(&store) as Arc<dyn GraphStoreSearch>,
+            Arc::clone(&store) as Arc<dyn GraphStore>,
             "Person",
+            ReadView::latest(),
         ));
         let mut expand = VariableLengthExpandOperator::new(
-            Arc::clone(&store) as Arc<dyn GraphStoreSearch>,
+            Arc::clone(&store) as Arc<dyn GraphStore>,
             scan,
             0,
             Direction::Outgoing,
             vec!["KNOWS".to_string()],
             1,
             2,
+            ReadView::latest(),
         )
         .with_path_detail_output();
 
@@ -1979,8 +1993,10 @@ mod tests {
 
     // --- Edge type filtering tests ---
 
+    /// The expand matches edge types as stored: the planner resolves the
+    /// query's spelling to the stored one before it builds the expand.
     #[test]
-    fn test_edge_type_filter_case_insensitive() {
+    fn test_edge_type_filter_matches_the_stored_name() {
         let store = Arc::new(RowGroupStore::new());
 
         // Alix -[:KNOWS]-> Gus, Alix -[:LIKES]-> Vincent
@@ -1990,19 +2006,21 @@ mod tests {
         store.create_edge(alix, gus, "KNOWS");
         store.create_edge(alix, vincent, "LIKES");
 
-        // Filter with lowercase "knows", should still match "KNOWS"
+        // The stored name finds the KNOWS edge only
         let scan = Box::new(ScanOperator::with_label(
-            Arc::clone(&store) as Arc<dyn GraphStoreSearch>,
+            Arc::clone(&store) as Arc<dyn GraphStore>,
             "Person",
+            ReadView::latest(),
         ));
         let mut expand = VariableLengthExpandOperator::new(
-            Arc::clone(&store) as Arc<dyn GraphStoreSearch>,
+            Arc::clone(&store) as Arc<dyn GraphStore>,
             scan,
             0,
             Direction::Outgoing,
-            vec!["knows".to_string()],
+            vec!["KNOWS".to_string()],
             1,
             1,
+            ReadView::latest(),
         );
 
         let mut results = Vec::new();
@@ -2014,7 +2032,7 @@ mod tests {
             }
         }
 
-        // From Alix, only Gus should be reached (KNOWS matches "knows")
+        // From Alix, only Gus should be reached
         let alix_targets: Vec<NodeId> = results
             .iter()
             .filter(|(s, _)| *s == alix)
@@ -2022,7 +2040,7 @@ mod tests {
             .collect();
         assert!(
             alix_targets.contains(&gus),
-            "Case-insensitive match should find KNOWS edge"
+            "the stored name finds the KNOWS edge"
         );
         assert!(
             !alix_targets.contains(&vincent),
@@ -2055,13 +2073,14 @@ mod tests {
         search: Search,
     ) -> Vec<(NodeId, NodeId)> {
         let mut expand = VariableLengthExpandOperator::new(
-            Arc::clone(store) as Arc<dyn GraphStoreSearch>,
+            Arc::clone(store) as Arc<dyn GraphStore>,
             input,
             0,
             direction,
             edge_types.iter().map(ToString::to_string).collect(),
             hops.0,
             hops.1,
+            ReadView::latest(),
         );
         expand = match search {
             Search::Walks => expand,
@@ -2082,8 +2101,9 @@ mod tests {
 
     fn scan(store: &Arc<RowGroupStore>, label: &str) -> Box<dyn Operator> {
         Box::new(ScanOperator::with_label(
-            Arc::clone(store) as Arc<dyn GraphStoreSearch>,
+            Arc::clone(store) as Arc<dyn GraphStore>,
             label,
+            ReadView::latest(),
         ))
     }
 
@@ -2620,13 +2640,14 @@ mod tests {
     fn reachability_across_rows_starts_over_after_reset() {
         let store = mixed_graph();
         let mut expand = VariableLengthExpandOperator::new(
-            Arc::clone(&store) as Arc<dyn GraphStoreSearch>,
+            Arc::clone(&store) as Arc<dyn GraphStore>,
             scan(&store, "Node"),
             0,
             Direction::Both,
             vec![],
             1,
             2,
+            ReadView::latest(),
         )
         .with_reachability_across_rows();
         fn targets(expand: &mut VariableLengthExpandOperator) -> Vec<NodeId> {
@@ -2655,13 +2676,14 @@ mod tests {
         store.create_edge(gus, vincent, "KNOWS");
 
         let mut expand = VariableLengthExpandOperator::new(
-            Arc::clone(&store) as Arc<dyn GraphStoreSearch>,
+            Arc::clone(&store) as Arc<dyn GraphStore>,
             scan(&store, "Node"),
             0,
             Direction::Both,
             vec![],
             0,
             2,
+            ReadView::latest(),
         )
         .with_edge_list_output()
         .with_path_length_output()
@@ -2691,13 +2713,14 @@ mod tests {
 
         let pairs = |reachability: bool| {
             let mut expand = VariableLengthExpandOperator::new(
-                Arc::clone(&store) as Arc<dyn GraphStoreSearch>,
+                Arc::clone(&store) as Arc<dyn GraphStore>,
                 scan(&store, "Node"),
                 0,
                 Direction::Outgoing,
                 vec![],
                 1,
                 4,
+                ReadView::latest(),
             )
             .with_path_mode(PathMode::Trail);
             if reachability {
@@ -2736,13 +2759,14 @@ mod tests {
         max_hops: u32,
     ) -> VariableLengthExpandOperator {
         VariableLengthExpandOperator::new(
-            Arc::clone(store) as Arc<dyn GraphStoreSearch>,
+            Arc::clone(store) as Arc<dyn GraphStore>,
             scan(store, "Source"),
             0,
             Direction::Outgoing,
             vec![],
             min_hops,
             max_hops,
+            ReadView::latest(),
         )
     }
 
@@ -2833,13 +2857,14 @@ mod tests {
         let store = mixed_graph();
         let walks = |chunk_capacity: usize| {
             let mut expand = VariableLengthExpandOperator::new(
-                Arc::clone(&store) as Arc<dyn GraphStoreSearch>,
+                Arc::clone(&store) as Arc<dyn GraphStore>,
                 scan(&store, "Node"),
                 0,
                 Direction::Both,
                 vec![],
                 0,
                 3,
+                ReadView::latest(),
             )
             .with_path_detail_output()
             .with_chunk_capacity(chunk_capacity);

@@ -14,7 +14,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use grafeo_common::types::{EdgeId, EpochId, NodeId, PropertyKey, Value};
+use grafeo_common::types::{EdgeId, EpochId, NodeId, PropertyKey, ReadView, Value};
 use grafeo_common::utils::error::Result;
 use grafeo_core::graph::Direction;
 use grafeo_core::graph::lpg::{Edge, Node};
@@ -86,13 +86,16 @@ impl super::GrafeoDB {
             .create_node_with_props(labels, properties)
     }
 
-    /// Gets a node by ID, as of the current epoch.
-    #[must_use]
-    pub fn get_node(&self, id: NodeId) -> Option<Node> {
-        let epoch = self.read_epoch();
-        self.read_store(DirectTarget::Current)
-            .ok()?
-            .get_node_at_epoch(id, epoch)
+    /// Gets a node by ID, as of the current epoch: `None` when it does not
+    /// exist then.
+    ///
+    /// # Errors
+    ///
+    /// The error of a read the store cannot do (an external store's own):
+    /// a read that fails is never an absent node.
+    pub fn get_node(&self, id: NodeId) -> Result<Option<Node>> {
+        let view = ReadView::committed(self.read_epoch());
+        self.read_store(DirectTarget::Current)?.node(id, view)
     }
 
     /// The edges of a node in `direction` as `(neighbor, edge)` pairs, as of
@@ -106,18 +109,23 @@ impl super::GrafeoDB {
     /// let alix = db.create_node(&["Person"]).unwrap();
     /// let gus = db.create_node(&["Person"]).unwrap();
     /// let knows = db.create_edge(alix, gus, "KNOWS").unwrap();
-    /// assert_eq!(db.get_node_edges(alix, Direction::Outgoing, &["KNOWS"]), vec![(gus, knows)]);
+    /// assert_eq!(
+    ///     db.get_node_edges(alix, Direction::Outgoing, &["KNOWS"]).unwrap(),
+    ///     vec![(gus, knows)]
+    /// );
     /// ```
-    #[must_use]
+    ///
+    /// # Errors
+    ///
+    /// As [`get_node`](Self::get_node).
     pub fn get_node_edges(
         &self,
         node: NodeId,
         direction: Direction,
         edge_types: &[&str],
-    ) -> Vec<(NodeId, EdgeId)> {
+    ) -> Result<Vec<(NodeId, EdgeId)>> {
         self.direct(DirectTarget::Current)
             .get_node_edges(node, direction, edge_types)
-            .unwrap_or_default()
     }
 
     /// Gets a node as it existed at a specific epoch.
@@ -135,9 +143,8 @@ impl super::GrafeoDB {
     /// garbage collection may have dropped.
     pub fn get_node_at_epoch(&self, id: NodeId, epoch: EpochId) -> Result<Option<Node>> {
         let (_pin, epoch) = self.pin_epoch(epoch)?;
-        Ok(self
-            .read_store(DirectTarget::Current)?
-            .get_node_at_epoch(id, epoch))
+        self.read_store(DirectTarget::Current)?
+            .node(id, ReadView::committed(epoch))
     }
 
     /// Pins a direct read at `epoch` (at the current epoch for a later one)
@@ -162,37 +169,45 @@ impl super::GrafeoDB {
     /// As [`get_node_at_epoch`](Self::get_node_at_epoch).
     pub fn get_edge_at_epoch(&self, id: EdgeId, epoch: EpochId) -> Result<Option<Edge>> {
         let (_pin, epoch) = self.pin_epoch(epoch)?;
-        Ok(self
-            .read_store(DirectTarget::Current)?
-            .get_edge_at_epoch(id, epoch))
+        self.read_store(DirectTarget::Current)?
+            .edge(id, ReadView::committed(epoch))
     }
 
     /// Returns all versions of a node with their creation/deletion epochs,
     /// up to the current epoch.
     ///
     /// Properties and labels reflect the current state (not versioned per-epoch).
-    #[must_use]
-    pub fn get_node_history(&self, id: NodeId) -> Vec<(EpochId, Option<EpochId>, Node)> {
+    ///
+    /// # Errors
+    ///
+    /// As [`get_node`](Self::get_node), and the unsupported error of an
+    /// external store that keeps no history.
+    pub fn get_node_history(&self, id: NodeId) -> Result<Vec<(EpochId, Option<EpochId>, Node)>> {
         let epoch = self.read_epoch();
-        self.read_store(DirectTarget::Current)
-            .map_or_else(|_| Vec::new(), |store| store.get_node_history(id))
+        Ok(self
+            .read_store(DirectTarget::Current)?
+            .node_history(id)?
             .into_iter()
             .filter_map(|version| history_at(version, epoch))
-            .collect()
+            .collect())
     }
 
     /// Returns all versions of an edge with their creation/deletion epochs,
     /// up to the current epoch.
     ///
     /// Properties reflect the current state (not versioned per-epoch).
-    #[must_use]
-    pub fn get_edge_history(&self, id: EdgeId) -> Vec<(EpochId, Option<EpochId>, Edge)> {
+    ///
+    /// # Errors
+    ///
+    /// As [`get_node_history`](Self::get_node_history).
+    pub fn get_edge_history(&self, id: EdgeId) -> Result<Vec<(EpochId, Option<EpochId>, Edge)>> {
         let epoch = self.read_epoch();
-        self.read_store(DirectTarget::Current)
-            .map_or_else(|_| Vec::new(), |store| store.get_edge_history(id))
+        Ok(self
+            .read_store(DirectTarget::Current)?
+            .edge_history(id)?
             .into_iter()
             .filter_map(|version| history_at(version, epoch))
-            .collect()
+            .collect())
     }
 
     /// Returns a property value as it existed at a specific epoch.
@@ -212,9 +227,25 @@ impl super::GrafeoDB {
         epoch: EpochId,
     ) -> Result<Option<Value>> {
         let (_pin, epoch) = self.pin_epoch(epoch)?;
-        Ok(self
-            .current_lpg_store()
-            .get_node_property_at_epoch(id, &PropertyKey::new(key), epoch))
+        Ok(self.property_history_store()?.get_node_property_at_epoch(
+            id,
+            &PropertyKey::new(key),
+            epoch,
+        ))
+    }
+
+    /// The store whose property versions the property history reads: the
+    /// current graph's row-group store. An external store keeps none the
+    /// database can read: the unsupported error.
+    fn property_history_store(&self) -> Result<Arc<RowGroupStore>> {
+        if self.root_store().is_none() {
+            return Err(grafeo_common::utils::error::Error::Query(
+                grafeo_common::utils::error::QueryError::unsupported(
+                    "this store does not support property history (an external store keeps none)",
+                ),
+            ));
+        }
+        Ok(self.current_lpg_store())
     }
 
     /// Returns the version timeline for a single property of a node, up to
@@ -223,14 +254,21 @@ impl super::GrafeoDB {
     /// Each entry is `(epoch, value)` in ascending epoch order. Tombstones
     /// (deletions) appear as `Value::Null`. It holds the versions the
     /// database keeps (see [`HistoryRetention`](crate::config::HistoryRetention)).
-    #[must_use]
-    pub fn get_node_property_history(&self, id: NodeId, key: &str) -> Vec<(EpochId, Value)> {
+    ///
+    /// # Errors
+    ///
+    /// The unsupported error with an external store.
+    pub fn get_node_property_history(
+        &self,
+        id: NodeId,
+        key: &str,
+    ) -> Result<Vec<(EpochId, Value)>> {
         let epoch = self.read_epoch();
         let mut history = self
-            .current_lpg_store()
+            .property_history_store()?
             .node_property_history_for_key(id, key);
         history.retain(|(at, _)| *at <= epoch);
-        history
+        Ok(history)
     }
 
     /// Returns the version history for ALL properties of a node, up to the
@@ -239,18 +277,21 @@ impl super::GrafeoDB {
     /// Each entry is `(property_key, Vec<(epoch, value)>)`; a property whose
     /// versions are all later is left out. It holds the versions the
     /// database keeps (see [`HistoryRetention`](crate::config::HistoryRetention)).
-    #[must_use]
+    ///
+    /// # Errors
+    ///
+    /// As [`get_node_property_history`](Self::get_node_property_history).
     pub fn get_all_node_property_history(
         &self,
         id: NodeId,
-    ) -> Vec<(PropertyKey, Vec<(EpochId, Value)>)> {
+    ) -> Result<Vec<(PropertyKey, Vec<(EpochId, Value)>)>> {
         let epoch = self.read_epoch();
-        let mut history = self.current_lpg_store().node_property_history(id);
+        let mut history = self.property_history_store()?.node_property_history(id);
         for (_, versions) in &mut history {
             versions.retain(|(at, _)| *at <= epoch);
         }
         history.retain(|(_, versions)| !versions.is_empty());
-        history
+        Ok(history)
     }
 
     /// Returns the current epoch of the database: the last one whose commit
@@ -367,15 +408,21 @@ impl super::GrafeoDB {
     /// let db = GrafeoDB::new_in_memory();
     /// let alix = db.create_node(&["Person", "Employee"])?;
     ///
-    /// let labels = db.get_node_labels(alix).unwrap();
+    /// let labels = db.get_node_labels(alix)?.unwrap();
     /// assert!(labels.contains(&"Person".to_string()));
     /// assert!(labels.contains(&"Employee".to_string()));
     /// # Ok::<(), grafeo_common::utils::error::Error>(())
     /// ```
-    #[must_use]
-    pub fn get_node_labels(&self, id: NodeId) -> Option<Vec<String>> {
-        self.get_node(id)
-            .map(|node| node.labels.iter().map(|s| s.to_string()).collect())
+    ///
+    /// # Errors
+    ///
+    /// As [`get_node`](Self::get_node).
+    pub fn get_node_labels(&self, id: NodeId) -> Result<Option<Vec<String>>> {
+        let view = ReadView::committed(self.read_epoch());
+        Ok(self
+            .read_store(DirectTarget::Current)?
+            .node_labels(id, view)?
+            .map(|labels| labels.iter().map(ToString::to_string).collect()))
     }
 
     // === Edge Operations ===
@@ -429,13 +476,15 @@ impl super::GrafeoDB {
             .create_edge_with_props(src, dst, edge_type, properties)
     }
 
-    /// Gets an edge by ID, as of the current epoch.
-    #[must_use]
-    pub fn get_edge(&self, id: EdgeId) -> Option<Edge> {
-        let epoch = self.read_epoch();
-        self.read_store(DirectTarget::Current)
-            .ok()?
-            .get_edge_at_epoch(id, epoch)
+    /// Gets an edge by ID, as of the current epoch: `None` when it does not
+    /// exist then.
+    ///
+    /// # Errors
+    ///
+    /// As [`get_node`](Self::get_node).
+    pub fn get_edge(&self, id: EdgeId) -> Result<Option<Edge>> {
+        let view = ReadView::committed(self.read_epoch());
+        self.read_store(DirectTarget::Current)?.edge(id, view)
     }
 
     /// Deletes an edge and returns whether it existed.

@@ -410,7 +410,8 @@ impl JsGrafeoDB {
     pub fn get_node(&self, id: f64) -> Result<Option<JsNode>> {
         let node_id = validate_node_id(id)?;
         let db = self.inner.read();
-        Ok(db.get_node(node_id).map(|node| {
+        let node = db.get_node(node_id).map_err(NodeGrafeoError::from)?;
+        Ok(node.map(|node| {
             let labels: Vec<String> = node.labels.iter().map(|s| s.to_string()).collect();
             let properties = node.properties.into_iter().collect();
             JsNode::new(node_id, labels, properties)
@@ -431,11 +432,10 @@ impl JsGrafeoDB {
         let (direction, edge_types) = node_edges_options(options)?;
         let edge_types: Vec<&str> = edge_types.iter().map(String::as_str).collect();
         let db = self.inner.read();
-        Ok(edge_pairs(db.get_node_edges(
-            node_id,
-            direction,
-            &edge_types,
-        )))
+        Ok(edge_pairs(
+            db.get_node_edges(node_id, direction, &edge_types)
+                .map_err(NodeGrafeoError::from)?,
+        ))
     }
 
     /// Get an edge by ID.
@@ -443,7 +443,8 @@ impl JsGrafeoDB {
     pub fn get_edge(&self, id: f64) -> Result<Option<JsEdge>> {
         let edge_id = validate_edge_id(id)?;
         let db = self.inner.read();
-        Ok(db.get_edge(edge_id).map(|edge| {
+        let edge = db.get_edge(edge_id).map_err(NodeGrafeoError::from)?;
+        Ok(edge.map(|edge| {
             let properties = edge.properties.into_iter().collect();
             JsEdge::new(
                 edge_id,
@@ -518,20 +519,30 @@ impl JsGrafeoDB {
 
     /// Get the number of nodes.
     #[napi(js_name = "nodeCount")]
-    pub fn node_count(&self) -> u32 {
+    pub fn node_count(&self) -> Result<u32> {
+        let count = self
+            .inner
+            .read()
+            .node_count()
+            .map_err(NodeGrafeoError::from)?;
         // reason: WASM targets use 32-bit usize; on 64-bit, graphs with >4B nodes are unrealistic
         #[allow(clippy::cast_possible_truncation)]
-        let count = self.inner.read().node_count() as u32;
-        count
+        let count = count as u32;
+        Ok(count)
     }
 
     /// Get the number of edges.
     #[napi(js_name = "edgeCount")]
-    pub fn edge_count(&self) -> u32 {
+    pub fn edge_count(&self) -> Result<u32> {
+        let count = self
+            .inner
+            .read()
+            .edge_count()
+            .map_err(NodeGrafeoError::from)?;
         // reason: WASM targets use 32-bit usize; on 64-bit, graphs with >4B edges are unrealistic
         #[allow(clippy::cast_possible_truncation)]
-        let count = self.inner.read().edge_count() as u32;
-        count
+        let count = count as u32;
+        Ok(count)
     }
 
     /// Begin a transaction with an optional isolation level.
@@ -691,14 +702,14 @@ impl JsGrafeoDB {
     pub fn get_node_labels(&self, id: f64) -> Result<Option<Vec<String>>> {
         let node_id = validate_node_id(id)?;
         let db = self.inner.read();
-        Ok(db.get_node_labels(node_id))
+        Ok(db.get_node_labels(node_id).map_err(NodeGrafeoError::from)?)
     }
 
     /// Returns high-level database information as a JSON object.
     #[napi]
     pub fn info(&self) -> Result<serde_json::Value> {
         let db = self.inner.read();
-        let info = db.info();
+        let info = db.info().map_err(NodeGrafeoError::from)?;
         serde_json::to_value(&info).map_err(|e| NodeGrafeoError::Database(e.to_string()).into())
     }
 
@@ -706,7 +717,7 @@ impl JsGrafeoDB {
     #[napi]
     pub fn schema(&self) -> Result<serde_json::Value> {
         let db = self.inner.read();
-        let schema = db.schema();
+        let schema = db.schema().map_err(NodeGrafeoError::from)?;
         serde_json::to_value(&schema).map_err(|e| NodeGrafeoError::Database(e.to_string()).into())
     }
 
@@ -1676,6 +1687,7 @@ pub(crate) fn json_to_value(v: &serde_json::Value) -> std::result::Result<Value,
 /// Fetch a node from the database and wrap it as JsNode.
 fn fetch_node(db: &GrafeoDB, id: NodeId) -> Result<JsNode> {
     db.get_node(id)
+        .map_err(NodeGrafeoError::from)?
         .map(|node| {
             let labels: Vec<String> = node.labels.iter().map(|s| s.to_string()).collect();
             let properties = node.properties.into_iter().collect();
@@ -1687,6 +1699,7 @@ fn fetch_node(db: &GrafeoDB, id: NodeId) -> Result<JsNode> {
 /// Fetch an edge from the database and wrap it as JsEdge.
 fn fetch_edge(db: &GrafeoDB, id: EdgeId) -> Result<JsEdge> {
     db.get_edge(id)
+        .map_err(NodeGrafeoError::from)?
         .map(|edge| {
             let properties = edge.properties.into_iter().collect();
             JsEdge::new(

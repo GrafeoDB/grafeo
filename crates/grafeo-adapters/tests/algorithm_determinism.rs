@@ -4,7 +4,7 @@
 //! pinned below, so any change to an algorithm's output fails here and goes
 //! into the CHANGELOG's "Result changes".
 
-#![cfg(all(feature = "lpg", feature = "algos", feature = "parallel"))]
+#![cfg(all(feature = "algos", feature = "parallel"))]
 
 use grafeo_adapters::plugins::Parameters;
 use grafeo_adapters::plugins::algorithms::{
@@ -14,6 +14,7 @@ use grafeo_adapters::plugins::algorithms::{
     LabelPropagationAlgorithm, LouvainAlgorithm, PageRankAlgorithm,
     StronglyConnectedComponentsAlgorithm,
 };
+use grafeo_common::types::ReadView;
 use grafeo_common::types::{NodeId, Value};
 use grafeo_core::graph::rowgroup::RowGroupStore;
 use grafeo_core::graph::{GraphStore as _, GraphStoreMut as _};
@@ -110,7 +111,10 @@ fn run(
     store: &RowGroupStore,
     params: &Parameters,
 ) -> Vec<Vec<Value>> {
-    algorithm.execute(store, params).unwrap().rows
+    algorithm
+        .execute(store, ReadView::latest(), params)
+        .unwrap()
+        .rows
 }
 
 fn with(pairs: &[(&str, Value)]) -> Parameters {
@@ -242,9 +246,9 @@ const GOLDEN: &[(&str, u64)] = &[
 #[test]
 fn the_graph_is_one_code_base_sized_component() {
     let store = code_graph(LARGE_MODULES);
-    let n = store.node_ids().len();
+    let n = store.node_ids(ReadView::latest()).unwrap().len();
     assert!((9_000..=11_000).contains(&n), "{n} nodes");
-    let components = algorithms::connected_components(&store);
+    let components = algorithms::connected_components(&store, ReadView::latest()).unwrap();
     let distinct: std::collections::BTreeSet<u64> = components.values().copied().collect();
     assert_eq!(distinct.len(), 1);
 }
@@ -370,7 +374,7 @@ fn neumaier(values: impl IntoIterator<Item = f64>) -> f64 {
 #[test]
 fn the_average_clustering_coefficient_is_the_same_every_time() {
     let store = code_graph(LARGE_MODULES);
-    let local = algorithms::local_clustering_coefficient(&store);
+    let local = algorithms::local_clustering_coefficient(&store, ReadView::latest()).unwrap();
     let mut by_node: Vec<(NodeId, f64)> = local.into_iter().collect();
     by_node.sort_unstable_by_key(|&(node, _)| node);
     let n = by_node.len() as f64;
@@ -378,11 +382,14 @@ fn the_average_clustering_coefficient_is_the_same_every_time() {
 
     for _ in 0..5 {
         assert_eq!(
-            algorithms::global_clustering_coefficient(&store).to_bits(),
+            algorithms::global_clustering_coefficient(&store, ReadView::latest())
+                .unwrap()
+                .to_bits(),
             expected
         );
         assert_eq!(
-            algorithms::clustering_coefficient(&store)
+            algorithms::clustering_coefficient(&store, ReadView::latest())
+                .unwrap()
                 .global_coefficient
                 .to_bits(),
             expected
@@ -393,7 +400,9 @@ fn the_average_clustering_coefficient_is_the_same_every_time() {
             .num_threads(threads)
             .build()
             .unwrap();
-        let parallel = pool.install(|| algorithms::clustering_coefficient_parallel(&store, 1));
+        let parallel = pool.install(|| {
+            algorithms::clustering_coefficient_parallel(&store, ReadView::latest(), 1).unwrap()
+        });
         assert_eq!(
             parallel.global_coefficient.to_bits(),
             expected,
@@ -408,21 +417,26 @@ fn the_average_clustering_coefficient_is_the_same_every_time() {
 fn rust_lists_come_in_node_id_order() {
     let store = code_graph(SMALL_MODULES);
     let strictly_increasing = |ids: &[NodeId]| ids.windows(2).all(|w| w[0] < w[1]);
-    let decomposition = algorithms::kcore_decomposition(&store);
+    let decomposition = algorithms::kcore_decomposition(&store, ReadView::latest()).unwrap();
     for k in 0..=decomposition.max_core {
-        assert!(strictly_increasing(&decomposition.k_core(k)), "k_core({k})");
+        assert!(
+            strictly_increasing(&decomposition.k_core(k)),
+            "k_core({k}, ReadView::latest()).unwrap()"
+        );
         assert!(
             strictly_increasing(&decomposition.k_shell(k)),
             "k_shell({k})"
         );
     }
-    assert!(strictly_increasing(&algorithms::k_core(&store, 2)));
-    let bridges = algorithms::bridges(&store);
+    assert!(strictly_increasing(
+        &algorithms::k_core(&store, ReadView::latest(), 2).unwrap()
+    ));
+    let bridges = algorithms::bridges(&store, ReadView::latest()).unwrap();
     assert!(
         bridges.len() >= 2,
         "the graph needs bridges to check their order"
     );
     assert!(bridges.windows(2).all(|w| w[0] < w[1]), "bridges");
-    let truss = algorithms::k_truss(&store, 3);
+    let truss = algorithms::k_truss(&store, ReadView::latest(), 3).unwrap();
     assert!(truss.windows(2).all(|w| w[0] < w[1]), "k_truss");
 }

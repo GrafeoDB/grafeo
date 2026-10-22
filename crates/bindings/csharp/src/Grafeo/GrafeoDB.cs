@@ -360,8 +360,8 @@ public sealed class GrafeoDB : IGrafeoDB, IDisposable, IAsyncDisposable
     public Node? GetNode(long id)
     {
         ThrowIfDisposed();
-        var status = NativeMethods.grafeo_get_node(Handle, (ulong)id, out var nodePtr);
-        if (status != (int)GrafeoStatus.Ok)
+        GrafeoException.ThrowIfFailed(NativeMethods.grafeo_get_node(Handle, (ulong)id, out var nodePtr));
+        if (nodePtr == nint.Zero)
             return null;
         try
         {
@@ -447,8 +447,8 @@ public sealed class GrafeoDB : IGrafeoDB, IDisposable, IAsyncDisposable
     public Edge? GetEdge(long id)
     {
         ThrowIfDisposed();
-        var status = NativeMethods.grafeo_get_edge(Handle, (ulong)id, out var edgePtr);
-        if (status != (int)GrafeoStatus.Ok)
+        GrafeoException.ThrowIfFailed(NativeMethods.grafeo_get_edge(Handle, (ulong)id, out var edgePtr));
+        if (edgePtr == nint.Zero)
             return null;
         try
         {
@@ -573,7 +573,8 @@ public sealed class GrafeoDB : IGrafeoDB, IDisposable, IAsyncDisposable
         get
         {
             ThrowIfDisposed();
-            return (long)NativeMethods.grafeo_node_count(Handle);
+            GrafeoException.ThrowIfFailed(NativeMethods.grafeo_node_count(Handle, out var count));
+            return (long)count;
         }
     }
 
@@ -583,7 +584,8 @@ public sealed class GrafeoDB : IGrafeoDB, IDisposable, IAsyncDisposable
         get
         {
             ThrowIfDisposed();
-            return (long)NativeMethods.grafeo_edge_count(Handle);
+            GrafeoException.ThrowIfFailed(NativeMethods.grafeo_edge_count(Handle, out var count));
+            return (long)count;
         }
     }
 

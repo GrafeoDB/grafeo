@@ -519,7 +519,7 @@ fn multiple_incremental_backups_in_sequence() {
     session
         .execute("INSERT (:Person {name: 'Alix'})")
         .expect("insert");
-    db.backup_full(&backup_dir).expect("full backup");
+    let full = db.backup_full(&backup_dir).expect("full backup");
 
     // First incremental
     session
@@ -548,6 +548,20 @@ fn multiple_incremental_backups_in_sequence() {
     );
 
     db.close().expect("close");
+
+    // Each backup restores the people of its epoch.
+    assert_eq!(
+        restored_people(&backup_dir, full.end_epoch),
+        names(&["Alix"])
+    );
+    assert_eq!(
+        restored_people(&backup_dir, incr1.end_epoch),
+        names(&["Alix", "Gus"])
+    );
+    assert_eq!(
+        restored_people(&backup_dir, incr2.end_epoch),
+        names(&["Alix", "Gus", "Vincent"])
+    );
 }
 
 // ── Backups while other sessions write ────────────────────────────

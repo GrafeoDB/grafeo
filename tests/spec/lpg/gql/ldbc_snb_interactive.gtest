@@ -750,7 +750,7 @@ tests:
 
   # IC14. Trusted connection paths.
   - name: ic14_trusted_connection_paths
-    skip: "startNode(r).id is rejected (property access on a function result); #318: the path of ALL SHORTEST with ->* is not bound"
+    skip: "a COUNT subquery inside a list comprehension fails (Internal error: Unsupported EXISTS subquery pattern)"
     params:
       person1Id: 228
       person2Id: 41

@@ -281,7 +281,7 @@ RETURN d.meta.score, d.meta.source.kind, d.meta['route']
 -- columns: d.meta.score, d.meta.source.kind, d.meta['route']
 ```
 
-Dotted access needs a map value: a property, a variable, a parameter, a map literal or `properties(n)`. On a node or edge that an expression returns, such as `startNode(r).name`, it is an error; match the node with a variable and read its property instead.
+Dotted access reads a key of a map value (a property, a variable, a parameter, a map literal or `properties(n)`), and the property of a node or edge that an expression returns, such as `startNode(r).name`. On an aggregate in the same clause, such as `head(collect(n)).name`, it is an error: name the aggregate with `WITH` first.
 
 ## SESSION_USER
 

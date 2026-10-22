@@ -1276,7 +1276,12 @@ fn test_import_rows_failure_keeps_nothing() {
 #[wasm_bindgen_test]
 fn test_set_schema_of_a_missing_schema_fails_and_keeps_the_schema() {
     let db = Database::new().expect("create db");
-    assert!(db.set_schema("missing").is_err());
+    let error = db.set_schema("missing").expect_err("a missing schema");
+    let message = String::from(js_sys::Error::from(error).message());
+    assert!(
+        message.contains("Schema 'missing' does not exist"),
+        "{message}"
+    );
     assert_eq!(db.current_schema(), None);
 }
 

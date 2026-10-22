@@ -4331,32 +4331,39 @@ mod with_clause {
 mod multi_match_create_edge {
     use super::*;
 
+    /// #181: two MATCH clauses then an insert created phantom nodes for the
+    /// edge's ends. The comma form is the control. Every node is counted, not
+    /// only `:Person` ones, since a phantom has no label.
     #[test]
     fn match_match_create_relationship() {
-        let db = db();
-        let s = db.session();
-        s.execute("INSERT (:Person {name: 'Alix'})").unwrap();
-        s.execute("INSERT (:Person {name: 'Gus'})").unwrap();
-
-        s.execute(
+        for insert in [
+            "MATCH (a:Person {name: 'Alix'}) MATCH (b:Person {name: 'Gus'}) \
+             INSERT (a)-[:KNOWS]->(b)",
             "MATCH (a:Person {name: 'Alix'}), (b:Person {name: 'Gus'}) \
              INSERT (a)-[:KNOWS]->(b)",
-        )
-        .unwrap();
+        ] {
+            let db = db();
+            let s = db.session();
+            s.execute("INSERT (:Person {name: 'Alix'})").unwrap();
+            s.execute("INSERT (:Person {name: 'Gus'})").unwrap();
 
-        // Must create exactly 1 edge, no phantom nodes
-        let nodes = s
-            .execute("MATCH (n:Person) RETURN count(n) AS cnt")
-            .unwrap();
-        let edges = s
-            .execute("MATCH ()-[r:KNOWS]->() RETURN count(r) AS cnt")
-            .unwrap();
-        assert_eq!(
-            nodes.rows()[0][0],
-            Value::Int64(2),
-            "Should still have 2 nodes"
-        );
-        assert_eq!(edges.rows()[0][0], Value::Int64(1), "Should have 1 edge");
+            s.execute(insert).unwrap();
+
+            let nodes = s.execute("MATCH (n) RETURN count(n) AS cnt").unwrap();
+            assert_eq!(
+                nodes.rows(),
+                [[Value::Int64(2)]],
+                "{insert}: no phantom nodes"
+            );
+            let edges = s
+                .execute("MATCH (a)-[r:KNOWS]->(b) RETURN a.name, b.name")
+                .unwrap();
+            assert_eq!(
+                edges.rows(),
+                [[Value::from("Alix"), Value::from("Gus")]],
+                "{insert}: one edge, between the matched nodes"
+            );
+        }
     }
 
     #[test]

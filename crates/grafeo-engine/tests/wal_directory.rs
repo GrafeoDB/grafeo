@@ -406,8 +406,8 @@ fn a_0_5_directory_read_in_place_reports_its_size() {
     db.close().unwrap();
 }
 
-/// Regression test for GrafeoDB/grafeo#221 (WAL deadlock on the second batch),
-/// on a database at a path without an extension, which is now a single file.
+/// Regression test for a WAL deadlock on the second batch of writes, on a
+/// database at a path without an extension, which is now a single file.
 ///
 /// Direct CRUD calls on a persistent database with WAL would deadlock on
 /// the second batch of writes because `sync_all()` was called while holding

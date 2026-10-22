@@ -1408,6 +1408,8 @@ mod tests {
         /// Old code reserved these bare names, causing silent data loss.
         #[test]
         fn test_nodes_property_named_id_preserved() {
+            use arrow_array::cast::AsArray;
+            use arrow_array::types::UInt64Type;
             let mut node = make_node(1, &["Method"]);
             node.properties
                 .insert(PropertyKey::new("id"), Value::String("custom-uuid".into()));
@@ -1431,6 +1433,14 @@ mod tests {
                 names.contains(&"labels".to_string()),
                 "property 'labels' must be preserved"
             );
+            // Each column keeps its own value: the properties do not take the
+            // structural columns' place, nor the other way around.
+            let cell = |name: &str| render(batch.column_by_name(name).unwrap(), 0);
+            assert_eq!(cell("id"), "'custom-uuid'");
+            assert_eq!(cell("labels"), "'meta'");
+            assert_eq!(cell("_labels"), "['Method']");
+            let structural_id = batch.column_by_name("_id").unwrap();
+            assert_eq!(structural_id.as_primitive::<UInt64Type>().value(0), 1);
         }
 
         #[test]
@@ -1477,6 +1487,8 @@ mod tests {
         /// Old code reserved these bare names, causing silent data loss.
         #[test]
         fn test_edges_property_named_source_preserved() {
+            use arrow_array::cast::AsArray;
+            use arrow_array::types::UInt64Type;
             let mut edge = make_edge(1, 10, 20, "CALLS");
             edge.properties
                 .insert(PropertyKey::new("source"), Value::String("jdt".into()));
@@ -1497,6 +1509,20 @@ mod tests {
                 "property 'source' must be preserved"
             );
             assert!(names.contains(&"confidence".to_string()));
+            // The property and the structural ends keep their own values.
+            assert_eq!(render(batch.column_by_name("source").unwrap(), 0), "'jdt'");
+            assert_eq!(
+                render(batch.column_by_name("confidence").unwrap(), 0),
+                "0.9"
+            );
+            let end = |name: &str| {
+                batch
+                    .column_by_name(name)
+                    .unwrap()
+                    .as_primitive::<UInt64Type>()
+                    .value(0)
+            };
+            assert_eq!((end("_id"), end("_source"), end("_target")), (1, 10, 20));
         }
 
         /// Regression: boolean properties must appear in Arrow export.

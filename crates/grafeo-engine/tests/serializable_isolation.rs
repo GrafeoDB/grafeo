@@ -10,9 +10,10 @@
 //! (`TransactionManager::record_read` has no caller outside its unit
 //! tests), so every such transaction commits; those tests are ignored
 //! until #400 is fixed. Snapshot isolation allows write skew, as
-//! documented. A UNIQUE constraint should keep a concurrent duplicate out at
-//! any level; it does not yet (it is checked when a statement runs, never
-//! at commit), so those tests are ignored too.
+//! documented. A UNIQUE constraint keeps a concurrent duplicate out at any
+//! level: the second insert or its commit fails with the retryable write
+//! conflict on the key (or the constraint violation, once the first one is
+//! committed and seen), and one node is left.
 //!
 //! ```bash
 //! cargo test -p grafeo-engine --all-features --test serializable_isolation -- --include-ignored
@@ -51,6 +52,17 @@ fn is_serialization_failure(error: &Error) -> bool {
         error,
         Error::Transaction(TransactionError::SerializationFailure(_))
     )
+}
+
+/// Whether `error` is what a duplicate of a UNIQUE key gets: the retryable
+/// write conflict on the key, or the constraint violation.
+fn is_duplicate_key(error: &Error) -> bool {
+    match error {
+        Error::Transaction(TransactionError::WriteConflict(message)) => {
+            message.contains("on key :Memory(idempotency_key")
+        }
+        other => other.to_string().contains("UNIQUE constraint violation"),
+    }
 }
 
 /// Insert if absent in `session`, at `level`: `Ok(true)` when it inserted
@@ -215,11 +227,15 @@ fn unique_constraint_rejects_an_interleaved_duplicate() {
     alix.execute(INSERT_KEY).unwrap();
     match gus.execute(INSERT_KEY) {
         // Refused at the insert: the first transaction still commits.
-        Err(_) => alix.commit().unwrap(),
+        Err(error) => {
+            assert!(is_duplicate_key(&error), "{error}");
+            alix.commit().unwrap();
+        }
         // Refused at the commit, after the first one committed.
         Ok(_) => {
             alix.commit().unwrap();
-            assert!(gus.commit().is_err(), "the duplicate's commit must fail");
+            let error = gus.commit().expect_err("the duplicate's commit must fail");
+            assert!(is_duplicate_key(&error), "{error}");
         }
     }
     assert_eq!(keys(&db), Value::Int64(1));
@@ -239,5 +255,11 @@ fn unique_constraint_rejects_a_concurrent_duplicate() {
         .filter(|result| matches!(result, Ok(true)))
         .count();
     assert_eq!(committed, 1, "{results:?}");
+    // Every other thread found the key or lost on it.
+    for result in &results {
+        if let Err(error) = result {
+            assert!(is_duplicate_key(error), "{results:?}");
+        }
+    }
     assert_eq!(keys(&db), Value::Int64(1));
 }

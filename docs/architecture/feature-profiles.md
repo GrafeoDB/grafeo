@@ -32,16 +32,16 @@ Examples:
 
 ```toml
 # AI memory developer
-grafeo = { version = "0.5", default-features = false, features = ["lpg", "ai"] }
+grafeo = { version = "0.6", default-features = false, features = ["lpg", "ai"] }
 
 # Semantic data scientist
-grafeo = { version = "0.5", default-features = false, features = ["rdf", "analytics"] }
+grafeo = { version = "0.6", default-features = false, features = ["rdf", "analytics"] }
 
 # Browser app
-grafeo = { version = "0.5", default-features = false, features = ["edge"] }
+grafeo = { version = "0.6", default-features = false, features = ["edge"] }
 
 # Power user: just Cypher and vector search with persistence
-grafeo = { version = "0.5", default-features = false, features = ["cypher", "vector-index", "wal"] }
+grafeo = { version = "0.6", default-features = false, features = ["cypher", "vector-index", "wal"] }
 
 # Full production stack (grafeo-server)
 # grafeo-server = { features = ["lpg", "rdf", "ai", "enterprise"] }

@@ -179,5 +179,5 @@ profiles include it. The `edge` (WASM) profile does not.
 
 ```toml
 [dependencies]
-grafeo = { version = "0.5", features = ["ai"] }  # includes cdc
+grafeo = { version = "0.6", features = ["ai"] }  # includes cdc
 ```

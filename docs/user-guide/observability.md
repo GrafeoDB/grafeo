@@ -17,7 +17,7 @@ Enable the `metrics` feature in your `Cargo.toml`:
 
 ```toml
 [dependencies]
-grafeo = { version = "0.5", features = ["metrics"] }
+grafeo = { version = "0.6", features = ["metrics"] }
 ```
 
 !!! note
@@ -367,7 +367,7 @@ Change Data Capture (CDC, since 0.5.19) tracks every mutation to nodes and edges
 
 ```toml
 [dependencies]
-grafeo = { version = "0.5", features = ["cdc"] }
+grafeo = { version = "0.6", features = ["cdc"] }
 ```
 
 !!! note

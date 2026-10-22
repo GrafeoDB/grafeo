@@ -1107,6 +1107,95 @@ pub(crate) fn every_access_path_agrees<S: Store>(make: &dyn Fn() -> S) -> Outcom
     Ok(())
 }
 
+/// No edge read shows an edge whose other end the reader does not see:
+/// after each transaction of a seeded workload of commits, rollbacks and
+/// savepoint rollbacks (the histories the engine lets through: its claims
+/// keep an edge's create and a delete of one of its ends from both
+/// committing), a committed reader at every epoch so far, and the next
+/// transaction at its snapshot with its own writes, find every listed
+/// edge's other end, in both directions, through `edges`, `neighbors` and
+/// `degree` alike. A store answers it without checking the other end on
+/// its reads.
+pub(crate) fn no_edge_read_shows_an_end_the_reader_does_not_see<S: Store>(
+    make: &dyn Fn() -> S,
+) -> Outcome {
+    for seed in 1..=8 {
+        let store = make();
+        let mut rng = Rng::new(seed);
+        for transaction in 0..10_u64 {
+            let mut tx = Tx::begin(&store, 200 + transaction);
+            for step in 0..14 {
+                if step == 7 && rng.below(2) == 0 {
+                    let mark = tx.mark();
+                    random_write(&mut tx, &mut rng)?;
+                    tx.roll_back_to(mark)?;
+                }
+                random_write(&mut tx, &mut rng)?;
+            }
+            let own = Reader::Transaction(tx.id, tx.snapshot);
+            ends_seen(
+                &store,
+                own,
+                &format!("seed {seed}, transaction {transaction}"),
+            )?;
+            if rng.below(3) == 0 {
+                tx.roll_back()?;
+            } else {
+                tx.commit()?;
+            }
+            for epoch in 0..=store.committed_epoch().as_u64() {
+                ends_seen(
+                    &store,
+                    Reader::At(EpochId::new(epoch)),
+                    &format!("seed {seed}, after transaction {transaction}, at epoch {epoch}"),
+                )?;
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Every edge `reader` reads of every node it sees ends at a node it sees.
+fn ends_seen<S: Store>(store: &S, reader: Reader, what: &str) -> Outcome {
+    let view = super::read_view(reader);
+    let nodes: std::collections::BTreeSet<u64> = ok(store.node_ids(view), "node_ids")
+        .iter()
+        .map(|id| id.as_u64())
+        .collect();
+    for &raw in &nodes {
+        let node = NodeId::new(raw);
+        for direction in [Direction::Outgoing, Direction::Incoming, Direction::Both] {
+            let edges = ok(store.edges(node, direction, &[], view), "edges");
+            for (other, edge) in &edges {
+                ensure(nodes.contains(&other.as_u64()), || {
+                    format!(
+                        "{what}: edge {} of node {raw} ({direction:?}) ends at node {}, which the reader does not see",
+                        edge.as_u64(),
+                        other.as_u64()
+                    )
+                })?;
+            }
+            let neighbors = ok(store.neighbors(node, direction, view), "neighbors");
+            ensure(
+                neighbors
+                    .iter()
+                    .all(|other| nodes.contains(&other.as_u64())),
+                || {
+                    format!(
+                        "{what}: a neighbor of node {raw} ({direction:?}) the reader does not see"
+                    )
+                },
+            )?;
+            same(
+                &ok(store.degree(node, direction, view), "degree"),
+                &edges.len(),
+                &format!("{what}: node {raw}'s degree ({direction:?})"),
+            )?;
+        }
+    }
+    Ok(())
+}
+
 /// A node delete while the writer sees an edge of the node is refused
 /// (`HasEdges`), for outgoing and incoming edges (a store without backward
 /// adjacency finds the incoming ones by a scan); detach deletes remove the

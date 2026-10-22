@@ -54,6 +54,11 @@ and keeps the writes:
 
 `commit` and the rollbacks receive the recorded changes, read-only, so a backend needs no undo log of its own.
 
+The engine also keeps every edge's ends alive: an edge's create claims its two ends and a node's delete claims the
+node, so of an edge's create and a concurrent delete of one of its ends only the first writer commits (the other
+gets a retryable conflict, also at commit), and a delete of a node with edges is refused unless it detaches them.
+So no committed edge ever ends at a deleted node, and a backend's reads need not check an edge's other end.
+
 ## Durability
 
 A database on a store of your own with a path (`Config::persistent(path)`) logs every commit to its own

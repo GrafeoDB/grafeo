@@ -408,6 +408,65 @@ fn cast_operand(value: Value, target: &str) -> Value {
     }
 }
 
+/// What a comparison operand is, as far as the evaluator can tell (see
+/// `ExpressionPredicate::operand_kind`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum OperandKind {
+    Node,
+    Edge,
+    Value,
+    Unknown,
+}
+
+impl OperandKind {
+    /// A node or an edge by its shape, unknown otherwise.
+    fn of_shape(shape: &LogicalType) -> Self {
+        match shape {
+            LogicalType::Node => Self::Node,
+            LogicalType::Edge => Self::Edge,
+            _ => Self::Unknown,
+        }
+    }
+
+    /// Whether two operands are known to be of kinds a comparison keeps
+    /// apart: an entity and a value, or a node and an edge.
+    fn apart_from(self, other: Self) -> bool {
+        match (self, other) {
+            (Self::Unknown, _) | (_, Self::Unknown) => false,
+            (a, b) => a != b,
+        }
+    }
+
+    fn name(self) -> &'static str {
+        match self {
+            Self::Node => "a node",
+            Self::Edge => "an edge",
+            Self::Value | Self::Unknown => "a value",
+        }
+    }
+}
+
+/// The error of a comparison between a node or an edge and a value of
+/// another kind, in GQL (22G04).
+fn not_comparable(
+    left: &Value,
+    left_kind: OperandKind,
+    right: &Value,
+    right_kind: OperandKind,
+) -> OperatorError {
+    let describe = |value: &Value, kind: OperandKind| match kind {
+        OperandKind::Value | OperandKind::Unknown => {
+            format!("{} of type {} ({value})", kind.name(), value.type_name())
+        }
+        entity => entity.name().to_string(),
+    };
+    OperatorError::values_not_comparable(format!(
+        "{} cannot be compared with {}",
+        describe(left, left_kind),
+        describe(right, right_kind)
+    ))
+}
+
 /// The error of a decimal operation that failed with `error`.
 fn decimal_error(
     error: DecimalError,
@@ -1271,7 +1330,7 @@ impl ExpressionPredicate {
                 // For IN operator, right side is a list that we evaluate specially
                 if *op == BinaryFilterOp::In {
                     let left_val = self.eval_expr(left, chunk, row)?;
-                    return self.eval_in_operator(&left_val, right, chunk, row);
+                    return self.eval_in_operator(left, &left_val, right, chunk, row);
                 }
                 // For logical operators (AND/OR/XOR), treat missing values as
                 // NULL so three-valued logic works correctly. Without this,
@@ -1294,6 +1353,12 @@ impl ExpressionPredicate {
                 }
                 let left_val = self.eval_expr(left, chunk, row)?;
                 let right_val = self.eval_expr(right, chunk, row)?;
+                if let Some((left_kind, right_kind)) =
+                    self.kinds_apart(left, &left_val, *op, right, &right_val, chunk, row)
+                {
+                    return self
+                        .compare_across_kinds(&left_val, left_kind, *op, &right_val, right_kind);
+                }
                 self.eval_binary_op(&left_val, *op, &right_val)
             }
             FilterExpression::Unary { op, operand } => {
@@ -2209,6 +2274,7 @@ impl ExpressionPredicate {
     /// - Otherwise yields `true` on first match, `false` if none match.
     fn eval_in_operator(
         &self,
+        needle: &FilterExpression,
         left: &Value,
         right: &FilterExpression,
         chunk: &DataChunk,
@@ -2221,11 +2287,41 @@ impl ExpressionPredicate {
                 if left.is_null() {
                     return Some(Value::Null);
                 }
+                // A node or an edge meets only items of its own kind (see
+                // `compare_across_kinds`), item by item as the list's shape
+                // types them
+                let needle_kind = self.operand_kind(needle, chunk, row);
+                let list_shape = self.shape(right, chunk, row);
                 let mut has_null = false;
-                for item in items.iter() {
+                for (position, item) in items.iter().enumerate() {
                     if item.is_null() {
                         has_null = true;
-                    } else if self.values_equal(left, item) {
+                        continue;
+                    }
+                    // An item of a list written in the query has the kind of
+                    // its expression; one of a list value, its shape's
+                    let item_kind = match right {
+                        FilterExpression::List(expressions) => expressions
+                            .get(position)
+                            .map_or(OperandKind::Unknown, |expression| {
+                                self.operand_kind(expression, chunk, row)
+                            }),
+                        _ => i64::try_from(position).map_or(OperandKind::Unknown, |position| {
+                            OperandKind::of_shape(&super::project::item_type_at(
+                                &list_shape,
+                                position,
+                            ))
+                        }),
+                    };
+                    if needle_kind.apart_from(item_kind) {
+                        if let TemporalComparison::LocalAt(_) =
+                            self.session_context.temporal_comparison
+                        {
+                            return self.fail(not_comparable(left, needle_kind, item, item_kind));
+                        }
+                        continue;
+                    }
+                    if self.values_equal(left, item) {
                         return Some(Value::Bool(true));
                     }
                 }
@@ -4273,6 +4369,114 @@ impl ExpressionPredicate {
                 Value::Null => None,
                 other => self.fail(sign_of_a_non_number('+', &other)),
             },
+        }
+    }
+
+    /// The kinds of the operands of `=`, `<>`, `<`, `<=`, `>` and `>=` when
+    /// they are known to be kept apart (see `OperandKind::apart_from`): a node
+    /// or an edge, which evaluate to their ids, against a value or an entity
+    /// of the other kind. `None` when the comparison runs on the values.
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "both operands as expressions (for their kind) and as values, as the binary arm has them"
+    )]
+    fn kinds_apart(
+        &self,
+        left: &FilterExpression,
+        left_val: &Value,
+        op: BinaryFilterOp,
+        right: &FilterExpression,
+        right_val: &Value,
+        chunk: &DataChunk,
+        row: usize,
+    ) -> Option<(OperandKind, OperandKind)> {
+        let comparison = matches!(
+            op,
+            BinaryFilterOp::Eq
+                | BinaryFilterOp::Ne
+                | BinaryFilterOp::Lt
+                | BinaryFilterOp::Le
+                | BinaryFilterOp::Gt
+                | BinaryFilterOp::Ge
+        );
+        // An entity evaluates to its id, an integer: only then can the kinds differ
+        if !comparison
+            || left_val.is_null()
+            || right_val.is_null()
+            || !(matches!(left_val, Value::Int64(_)) || matches!(right_val, Value::Int64(_)))
+        {
+            return None;
+        }
+        let left_kind = self.operand_kind(left, chunk, row);
+        let right_kind = self.operand_kind(right, chunk, row);
+        left_kind
+            .apart_from(right_kind)
+            .then_some((left_kind, right_kind))
+    }
+
+    /// A comparison between operands of kinds kept apart: Cypher keeps them
+    /// apart, as openCypher does (`=` is false, `<>` true, the ordering
+    /// operators null), and GQL fails the comparison as not comparable
+    /// (22G04), as ISO GQL makes a node and a number.
+    fn compare_across_kinds(
+        &self,
+        left: &Value,
+        left_kind: OperandKind,
+        op: BinaryFilterOp,
+        right: &Value,
+        right_kind: OperandKind,
+    ) -> Option<Value> {
+        match self.session_context.temporal_comparison {
+            TemporalComparison::TypesApart => match op {
+                BinaryFilterOp::Eq => Some(Value::Bool(false)),
+                BinaryFilterOp::Ne => Some(Value::Bool(true)),
+                _ => None,
+            },
+            TemporalComparison::LocalAt(_) => {
+                self.fail(not_comparable(left, left_kind, right, right_kind))
+            }
+        }
+    }
+
+    /// What a comparison operand is: a node or an edge by its shape (they
+    /// evaluate to their ids), a value by the form of its expression (a
+    /// literal, a property, arithmetic, a sign, or a function that gives a
+    /// value, such as `id()`), and otherwise unknown: a column whose type is
+    /// lost (after `collect()`, a list value) may hold either.
+    fn operand_kind(&self, expr: &FilterExpression, chunk: &DataChunk, row: usize) -> OperandKind {
+        match OperandKind::of_shape(&self.shape(expr, chunk, row)) {
+            OperandKind::Unknown => {}
+            entity => return entity,
+        }
+        match expr {
+            FilterExpression::Literal(value) if !value.is_null() => OperandKind::Value,
+            FilterExpression::Property { .. } => OperandKind::Value,
+            FilterExpression::Binary {
+                op:
+                    BinaryFilterOp::Add
+                    | BinaryFilterOp::Sub
+                    | BinaryFilterOp::Mul
+                    | BinaryFilterOp::Div
+                    | BinaryFilterOp::Mod
+                    | BinaryFilterOp::Concat,
+                ..
+            } => OperandKind::Value,
+            FilterExpression::Unary {
+                op: UnaryFilterOp::Neg | UnaryFilterOp::Pos,
+                ..
+            } => OperandKind::Value,
+            FilterExpression::FunctionCall {
+                function:
+                    BuiltinFunction::Id
+                    | BuiltinFunction::ElementId
+                    | BuiltinFunction::Type
+                    | BuiltinFunction::Size
+                    | BuiltinFunction::ToString
+                    | BuiltinFunction::ToInteger
+                    | BuiltinFunction::ToFloat,
+                ..
+            } => OperandKind::Value,
+            _ => OperandKind::Unknown,
         }
     }
 

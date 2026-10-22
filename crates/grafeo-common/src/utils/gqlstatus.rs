@@ -225,6 +225,7 @@ impl From<&super::error::Error> for GqlStatus {
                 QueryErrorKind::InvalidTimeZoneDisplacement => {
                     GqlStatus::DATA_INVALID_TIME_ZONE_DISPLACEMENT
                 }
+                QueryErrorKind::ValuesNotComparable => GqlStatus::DATA_VALUES_NOT_COMPARABLE,
                 // GQL defines no class for a feature an implementation lacks.
                 QueryErrorKind::Unsupported => GqlStatus::SYNTAX_ERROR,
             },
@@ -487,6 +488,11 @@ mod tests {
             (
                 QueryErrorKind::InvalidTimeZoneDisplacement,
                 "22009",
+                ErrorCode::QueryExecution,
+            ),
+            (
+                QueryErrorKind::ValuesNotComparable,
+                "22G04",
                 ErrorCode::QueryExecution,
             ),
         ] {

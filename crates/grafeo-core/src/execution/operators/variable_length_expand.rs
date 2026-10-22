@@ -529,15 +529,20 @@ impl VariableLengthExpandOperator {
                     let col = chunk
                         .column(col_idx)
                         .expect("col_idx within column_count range");
-                    let value = if let Some(node_id) = col.get_node_id(row_idx) {
-                        ColumnValue::NodeId(node_id)
-                    } else if let Some(edge_id) = col.get_edge_id(row_idx) {
-                        ColumnValue::EdgeId(edge_id)
-                    } else if let Some(val) = col.get_value(row_idx) {
-                        ColumnValue::Value(val)
-                    } else {
-                        ColumnValue::Value(grafeo_common::types::Value::Null)
+                    // By the column's type: an integer in a column of values
+                    // stays a value, not the id of a node (a condition reads
+                    // it as the number, and compares it as one)
+                    let entity = match col.data_type() {
+                        LogicalType::Node => col.get_node_id(row_idx).map(ColumnValue::NodeId),
+                        LogicalType::Edge => col.get_edge_id(row_idx).map(ColumnValue::EdgeId),
+                        _ => None,
                     };
+                    let value = entity.unwrap_or_else(|| {
+                        ColumnValue::Value(
+                            col.get_value(row_idx)
+                                .unwrap_or(grafeo_common::types::Value::Null),
+                        )
+                    });
                     columns.push(value);
                 }
 

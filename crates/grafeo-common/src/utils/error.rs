@@ -730,7 +730,8 @@ impl QueryError {
             | QueryErrorKind::DivisionByZero
             | QueryErrorKind::NegativeLimit
             | QueryErrorKind::InvalidValueType
-            | QueryErrorKind::InvalidTimeZoneDisplacement => ErrorCode::QueryExecution,
+            | QueryErrorKind::InvalidTimeZoneDisplacement
+            | QueryErrorKind::ValuesNotComparable => ErrorCode::QueryExecution,
             QueryErrorKind::Timeout => ErrorCode::QueryTimeout,
             QueryErrorKind::Unsupported => ErrorCode::QueryUnsupported,
         }
@@ -858,6 +859,9 @@ pub enum QueryErrorKind {
     /// A time zone that is not a UTC offset (`+01:00`, `Z`, `UTC`), or one
     /// past 14 hours (GQLSTATUS 22009).
     InvalidTimeZoneDisplacement,
+    /// Two values a comparison cannot compare, such as a node and a number
+    /// in GQL (GQLSTATUS 22G04).
+    ValuesNotComparable,
 }
 
 impl fmt::Display for QueryErrorKind {
@@ -879,6 +883,7 @@ impl fmt::Display for QueryErrorKind {
             QueryErrorKind::InvalidTimeZoneDisplacement => {
                 write!(f, "invalid time zone displacement value")
             }
+            QueryErrorKind::ValuesNotComparable => write!(f, "values not comparable"),
         }
     }
 }

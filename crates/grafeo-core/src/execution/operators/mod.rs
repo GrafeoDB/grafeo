@@ -506,6 +506,16 @@ impl OperatorError {
         )
     }
 
+    /// Two values a comparison cannot compare, such as a node and a number
+    /// in GQL (GQLSTATUS 22G04); `message` says which.
+    #[must_use]
+    pub fn values_not_comparable(message: impl Into<String>) -> Self {
+        Self::query_data(
+            grafeo_common::utils::error::QueryErrorKind::ValuesNotComparable,
+            message,
+        )
+    }
+
     fn query_data(
         kind: grafeo_common::utils::error::QueryErrorKind,
         operation: impl Into<String>,

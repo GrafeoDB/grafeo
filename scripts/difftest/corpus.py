@@ -1992,4 +1992,16 @@ for case_id, query in [
     case(case_id, query, CYPHER, "empty")
 ordered("DA4", "UNWIND [3, 1, 2, 5] AS x RETURN x ORDER BY x SKIP 1 LIMIT 2", CYPHER, "empty")
 
+# CZ: a node or an edge compared with a value of another kind (#180): Cypher keeps them apart
+#     (= false, <> true, ordering null) and GQL fails the comparison as not comparable (22G04),
+#     so the parity run reports CZ1 to CZ3 on purpose; a node compared with a node, and ids
+#     with ids, are unchanged (CZ4)
+for case_id, query in [
+    ("CZ1", "MATCH (a:Person {name: 'Alix'})-[r:KNOWS]->(b) RETURN startNode(r) = id(a) AS node_is_id"),
+    ("CZ2", "MATCH (a:Person {name: 'Alix'})-[r:KNOWS]->(b) RETURN a = r AS node_is_edge"),
+    ("CZ3", "MATCH (p:Person) WHERE p = 0 RETURN p.name AS name"),
+    ("CZ4", "MATCH (a:Person {name: 'Alix'})-[r:KNOWS]->(b) RETURN startNode(r) = a AS same, id(startNode(r)) = id(a) AS ids ORDER BY same"),
+]:
+    case(case_id, query, BOTH)
+
 # fmt: on

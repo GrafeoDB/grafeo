@@ -668,3 +668,11 @@ CY8|gql c27bd4ce58 Parts of one statement on different graphs are not supported 
 DA1|cypher 5931a31f88 A clause after RETURN is a syntax error that names it; the earlier RETURN was dropped and the last one answered.
 DA2|cypher 54fd389148 A clause after RETURN is a syntax error that names it; the earlier RETURN was dropped and the MATCH after it ran.
 DA3|cypher 8766abf286 A clause after RETURN is a syntax error that names it, WITH too; the earlier RETURN was dropped.
+CZ1|cypher b992cdc0e9 A node compared with an integer is false in Cypher, as openCypher keeps a node and a number apart; startNode(r) = id(a) compared the node's id and was true.
+CZ1|gql c69250cac6 A node compared with an integer is 22G04 (values not comparable) in GQL, as ISO GQL makes a node and a number; it compared the node's id and was true.
+CZ2|cypher 52b6a18503 A node compared with an edge is false in Cypher; node 0 = edge 0 compared the ids and was true.
+CZ2|gql 8cf11bd3cc A node compared with an edge is 22G04 (values not comparable) in GQL; node 0 = edge 0 compared the ids and was true.
+CZ3|cypher f0c845b50c WHERE p = 0 on a node keeps no row in Cypher; it kept the node with id 0.
+CZ3|gql c69250cac6 WHERE p = 0 on a node is 22G04 (values not comparable) in GQL; it kept the node with id 0.
+CZ4|cypher 8b50ea7401 startNode(r) = a is true and id(startNode(r)) gives the node's id; id(startNode(r)) was null.
+CZ4|gql 8b50ea7401 startNode(r) = a is true and id(startNode(r)) gives the node's id; id(startNode(r)) was null.

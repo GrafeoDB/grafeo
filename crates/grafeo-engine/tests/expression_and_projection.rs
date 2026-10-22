@@ -1918,12 +1918,21 @@ fn test_start_node_equals_source_id() {
         .unwrap();
     let r = session
         .execute_cypher(
-            "MATCH (s)-[r:KNOWS]->(t) RETURN startNode(r) = id(s) AS src_match, endNode(r) = id(t) AS dst_match",
+            "MATCH (s)-[r:KNOWS]->(t) RETURN startNode(r) = s AS src_match, endNode(r) = t AS dst_match, \
+             id(startNode(r)) = id(s) AS src_id, startNode(r) = id(s) AS node_is_id",
         )
         .unwrap();
     assert_eq!(r.row_count(), 1);
-    assert_eq!(r.rows()[0][0], Value::Bool(true), "startNode(r) != id(s)");
-    assert_eq!(r.rows()[0][1], Value::Bool(true), "endNode(r) != id(t)");
+    assert_eq!(
+        r.rows()[0],
+        [
+            Value::Bool(true),
+            Value::Bool(true),
+            Value::Bool(true),
+            // openCypher keeps a node and its id apart (#180)
+            Value::Bool(false),
+        ]
+    );
 }
 
 // ============================================================================

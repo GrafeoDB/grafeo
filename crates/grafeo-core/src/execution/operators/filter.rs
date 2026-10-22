@@ -390,6 +390,21 @@ fn sign_of_a_non_number(sign: char, value: &Value) -> OperatorError {
     ))
 }
 
+/// The value CAST gives the conversion function of the `target` category
+/// (`INTEGER`, `FLOAT`, `DECIMAL`, `BOOLEAN` or a temporal type, as the
+/// parsers name it): a boolean is 1 or 0 to a number, and a number is true
+/// unless it is 0 to a boolean, in every direction, as DuckDB casts them.
+/// Every other value is the value itself.
+fn cast_operand(value: Value, target: &str) -> Value {
+    match (target, value) {
+        ("INTEGER" | "FLOAT" | "DECIMAL", Value::Bool(b)) => Value::Int64(i64::from(b)),
+        ("BOOLEAN", Value::Int64(i)) => Value::Bool(i != 0),
+        ("BOOLEAN", Value::Float64(f)) => Value::Bool(f != 0.0),
+        ("BOOLEAN", Value::Decimal(d)) => Value::Bool(d.signum() != 0),
+        (_, value) => value,
+    }
+}
+
 /// The error of a decimal operation that failed with `error`.
 fn decimal_error(
     error: DecimalError,
@@ -2613,6 +2628,18 @@ impl ExpressionPredicate {
                     _ => None,
                 }
             }
+            BuiltinFunction::CastOperand => {
+                // cast_operand(value, target): the value CAST converts to the
+                // target category (see `cast_operand`)
+                if args.len() != 2 {
+                    return None;
+                }
+                let val = self.eval_expr(&args[0], chunk, row)?;
+                let Value::String(target) = self.eval_expr(&args[1], chunk, row)? else {
+                    return None;
+                };
+                Some(cast_operand(val, &target))
+            }
             BuiltinFunction::ToList => {
                 // toList(value) - wraps a scalar in a single-element list, or returns list as-is
                 if args.len() != 1 {
@@ -4412,6 +4439,7 @@ impl ExpressionPredicate {
             "FLOAT" | "FLOAT64" | "DOUBLE" => match val {
                 Value::Float64(_) => Some(val),
                 Value::Int64(i) => Some(Value::Float64(i as f64)),
+                Value::Bool(b) => Some(Value::Float64(if b { 1.0 } else { 0.0 })),
                 Value::Decimal(d) => Some(Value::Float64(d.to_f64())),
                 Value::String(ref s) => s.parse::<f64>().ok().map(Value::Float64),
                 _ => None,
@@ -4424,6 +4452,9 @@ impl ExpressionPredicate {
             },
             "BOOLEAN" | "BOOL" => match val {
                 Value::Bool(_) => Some(val),
+                Value::Int64(i) => Some(Value::Bool(i != 0)),
+                Value::Float64(f) => Some(Value::Bool(f != 0.0)),
+                Value::Decimal(d) => Some(Value::Bool(d.signum() != 0)),
                 Value::String(ref s) => match s.to_lowercase().as_str() {
                     "true" => Some(Value::Bool(true)),
                     "false" => Some(Value::Bool(false)),

@@ -168,6 +168,7 @@ builtin_functions! {
     ToBoolean => ["toBoolean", "toBool"], "1", Type, immutable;
     ToList => ["toList"], "1", Type, immutable;
     ToTypedList => ["toTypedList"], "2", Type, immutable;
+    CastOperand => ["cast_operand"], "2", Type, immutable;
     IsTyped => ["isTyped"], "2", Type, immutable;
     Size => ["size", "length", "cardinality"], "1", Collection, immutable;
     Coalesce => ["coalesce"], "1+", Collection, immutable;
@@ -522,7 +523,7 @@ mod tests {
                 assert!(previous.is_none_or(|p| p == function), "{alias}");
             }
         }
-        assert_eq!(BuiltinFunction::ALL.len(), 110);
+        assert_eq!(BuiltinFunction::ALL.len(), 111);
     }
 
     #[test]

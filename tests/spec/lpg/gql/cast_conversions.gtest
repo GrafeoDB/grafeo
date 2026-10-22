@@ -74,12 +74,29 @@ tests:
       rows:
         - [null, null]
 
+  # Booleans and numbers convert into each other, 1 and 0, in every direction
+  # (as DuckDB casts them; ISO GQL has no such cast).
   - name: cast_a_boolean_to_float64
-    skip: "CAST(true AS FLOAT64) is null while CAST(true AS INT64) is 1 (inbox value-kinds/cast-of-padded-text-and-booleans.md)"
     query: "RETURN CAST(true AS FLOAT64) AS t, CAST(false AS FLOAT64) AS f"
     expect:
       rows:
         - [1, 0]
+
+  - name: cast_a_boolean_to_decimal
+    query: "RETURN CAST(true AS DECIMAL) AS t, CAST(false AS DECIMAL(5, 2)) AS f, CAST(true AS DECIMAL) IS TYPED DECIMAL AS typed"
+    expect:
+      rows:
+        - [1, 0.00, true]
+
+  - name: cast_a_stored_boolean_to_each_number
+    setup:
+      - "INSERT (:N {b: true}), (:N {b: false})"
+    query: "MATCH (n:N) RETURN CAST(n.b AS INT64) AS i, CAST(n.b AS FLOAT64) AS f ORDER BY i"
+    expect:
+      ordered: true
+      rows:
+        - [0, 0]
+        - [1, 1]
 
   # ---------------------------------------------------------------------------
   # STRING
@@ -102,10 +119,16 @@ tests:
         - [true, false, true, null]
 
   - name: cast_to_boolean_of_a_boolean_and_of_a_number
-    query: "RETURN CAST(true AS BOOLEAN) AS a, CAST(0 AS BOOLEAN) AS b, CAST(1.5e0 AS BOOLEAN) AS c"
+    query: "RETURN CAST(true AS BOOLEAN) AS a, CAST(0 AS BOOLEAN) AS b, CAST(1.5e0 AS BOOLEAN) AS c, CAST(-3 AS BOOLEAN) AS d, CAST(0.0e0 AS BOOLEAN) AS e, CAST(0.00 AS BOOLEAN) AS f, CAST(0.01 AS BOOLEAN) AS g"
     expect:
       rows:
-        - [true, null, null]
+        - [true, false, true, true, false, false, true]
+
+  - name: cast_a_list_of_booleans_and_numbers
+    query: "RETURN CAST([true, false] AS LIST<FLOAT64>) AS f, CAST([true, false] AS LIST<FLOAT64>)[0] IS TYPED FLOAT64 AS typed, CAST([0, 2] AS LIST<BOOLEAN>) AS b"
+    expect:
+      rows:
+        - [[1, 0], true, [false, true]]
 
   # ---------------------------------------------------------------------------
   # Temporal types

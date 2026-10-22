@@ -1931,4 +1931,13 @@ for case_id, query, languages, fixture in [
 ]:
     case(case_id, query, languages, fixture)
 
+# CW: CAST converts booleans and numbers into each other, 1 and 0 (CW1: to FLOAT64 and DECIMAL,
+#     CW2: to BOOLEAN, which was null), as DuckDB does; Cypher's toFloat(true) stays null (CW3)
+for case_id, query, languages in [
+    ("CW1", "RETURN CAST(true AS FLOAT64) AS f, CAST(false AS DECIMAL) AS d, CAST(true AS INT64) AS i", GQL),
+    ("CW2", "RETURN CAST(0 AS BOOLEAN) AS zero, CAST(2 AS BOOLEAN) AS two, CAST(0.0e0 AS BOOLEAN) AS f", GQL),
+    ("CW3", "RETURN toFloat(true) AS f, toBoolean(0) AS b", CYPHER),
+]:
+    case(case_id, query, languages, "empty")
+
 # fmt: on

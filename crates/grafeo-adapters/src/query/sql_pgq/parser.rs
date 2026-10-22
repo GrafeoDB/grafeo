@@ -1603,6 +1603,28 @@ impl<'a> Parser<'a> {
             args,
         };
         let integer = |value: u8| Expression::Literal(Literal::Integer(i64::from(value)));
+        // What CAST converts: booleans and numbers into each other
+        // (`cast_operand`), for every target but a string
+        let category = match data_type {
+            SqlDataType::Bigint | SqlDataType::Int => Some("INTEGER"),
+            SqlDataType::Float | SqlDataType::Double => Some("FLOAT"),
+            SqlDataType::Decimal(_) => Some("DECIMAL"),
+            SqlDataType::Boolean => Some("BOOLEAN"),
+            SqlDataType::Date => Some("DATE"),
+            SqlDataType::Time => Some("TIME"),
+            SqlDataType::Timestamp => Some("TIMESTAMP"),
+            SqlDataType::Varchar(_) => None,
+        };
+        let expr = match category {
+            Some(category) => call(
+                "cast_operand",
+                vec![
+                    expr,
+                    Expression::Literal(Literal::String(category.to_string())),
+                ],
+            ),
+            None => expr,
+        };
         Ok(match data_type {
             SqlDataType::Bigint | SqlDataType::Int => call("toInteger", vec![expr]),
             SqlDataType::Float | SqlDataType::Double => call("toFloat", vec![expr]),

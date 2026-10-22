@@ -4692,6 +4692,28 @@ impl<'a> Parser<'a> {
                     None
                 };
                 self.expect(TokenKind::RParen)?;
+                // What CAST converts: booleans and numbers into each other
+                // (`cast_operand`), for every target but a string or a list
+                let category = match type_name.as_str() {
+                    "INTEGER" | "INT" | "INT64" | "BIGINT" => Some("INTEGER"),
+                    "FLOAT" | "DOUBLE" | "FLOAT64" | "REAL" => Some("FLOAT"),
+                    "DECIMAL" | "DEC" => Some("DECIMAL"),
+                    "BOOLEAN" | "BOOL" => Some("BOOLEAN"),
+                    "STRING" | "VARCHAR" | "TEXT" | "LIST" => None,
+                    s if s.starts_with("LIST<") => None,
+                    other => Some(other),
+                };
+                let expr = match category {
+                    Some(category) => Expression::FunctionCall {
+                        name: "cast_operand".to_string(),
+                        args: vec![
+                            expr,
+                            Expression::Literal(Literal::String(category.to_string())),
+                        ],
+                        distinct: false,
+                    },
+                    None => expr,
+                };
                 if let Some(decimal_type) = decimal_type {
                     return Ok(Expression::FunctionCall {
                         name: "toDecimal".to_string(),

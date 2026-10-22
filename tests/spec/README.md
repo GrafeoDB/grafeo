@@ -45,7 +45,7 @@ If you find a query that produces wrong results, you can report it directly as a
         - [1]
 ```
 
-The `skip:` field keeps CI green while documenting the expected behavior. When the bug is fixed, remove `skip:` and the test enforces the fix across all 7 bindings.
+The `skip:` field keeps CI green while documenting the expected behavior. When the bug is fixed, remove `skip:` and the test enforces the fix across all 7 bindings. The Rust runner still builds a skipped case, ignored with its reason, so `cargo test -p grafeo-spec-tests --all-features -- --ignored` runs every skipped case and shows which ones pass already.
 
 ## File format reference
 
@@ -69,7 +69,7 @@ The `skip:` field keeps CI green while documenting the expected behavior. When t
 | `query` | Single query to execute. Use `\|` for multi-line block scalar |
 | `statements` | List of queries: all execute, last captures result |
 | `setup` | List of queries to run before the test (always in the file's `language`) |
-| `skip` | Reason string: test is ignored with this message |
+| `skip` | Reason string: test is ignored with this message (the Rust runner runs it with `--ignored`) |
 | `params` | Key-value map for parameterized queries (see "Parameter values") |
 | `variants` | Rosetta map: `{gql: "...", cypher: "..."}` runs the same test in multiple languages |
 | `expect` | Assertion block (see below) |

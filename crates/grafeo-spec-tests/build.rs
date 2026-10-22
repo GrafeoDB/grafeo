@@ -795,18 +795,9 @@ fn generate_tests(
         .any(|r| r == "text-index" || r == "vector-index");
 
     for tc in &file.tests {
-        // Skip tests with skip field
-        if tc.skip.is_some() {
-            writeln!(
-                output,
-                "    #[test]\n    #[ignore = \"skipped in .gtest\"]\n    fn {}() {{}}\n",
-                sanitize_test_name(&tc.name)
-            )
-            .unwrap();
-            count += 1;
-            continue;
-        }
-
+        // A case with `skip:` is generated in full and ignored with its
+        // reason (see `generate_single_test`): `--include-ignored` runs it,
+        // so it shows whether the reason still holds.
         let case_needs_persistent = file_needs_persistent
             || tc
                 .requires
@@ -987,6 +978,9 @@ fn generate_single_test(output: &mut String, spec: &TestSpec<'_>) {
     }
 
     writeln!(output, "    #[test]").unwrap();
+    if let Some(reason) = &tc.skip {
+        writeln!(output, "    #[ignore = {reason:?}]").unwrap();
+    }
     writeln!(output, "    fn {fn_name}() {{").unwrap();
 
     // Create DB and load dataset. The persistent variant exercises the

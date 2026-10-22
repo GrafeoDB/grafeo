@@ -510,7 +510,7 @@ impl OperatorError {
         kind: grafeo_common::utils::error::QueryErrorKind,
         operation: impl Into<String>,
     ) -> Self {
-        grafeo_common::utils::error::Error::Query(grafeo_common::utils::error::QueryError::new(
+        grafeo_common::utils::error::Error::from(grafeo_common::utils::error::QueryError::new(
             kind, operation,
         ))
         .into()

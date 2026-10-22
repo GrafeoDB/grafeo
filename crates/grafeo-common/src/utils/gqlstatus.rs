@@ -250,7 +250,7 @@ impl From<&super::error::Error> for GqlStatus {
                 // The one case the class was made for.
                 TransactionError::CommitOutcomeUnknown(_) => GqlStatus::TX_COMPLETION_UNKNOWN,
             },
-            Error::TypeMismatch { .. } => GqlStatus::DATA_INVALID_VALUE_TYPE,
+            Error::TypeMismatch(_) => GqlStatus::DATA_INVALID_VALUE_TYPE,
             Error::InvalidValue(_) => GqlStatus::DATA_EXCEPTION,
             Error::Constraint { kind, .. } => match kind {
                 ConstraintKind::Schema => GqlStatus::GRAPH_TYPE_VIOLATION,
@@ -415,7 +415,7 @@ mod tests {
     fn test_error_to_gqlstatus() {
         use super::super::error::{Error, QueryError, QueryErrorKind, TransactionError};
 
-        let syntax_err = Error::Query(QueryError::new(QueryErrorKind::Syntax, "bad syntax"));
+        let syntax_err = Error::from(QueryError::new(QueryErrorKind::Syntax, "bad syntax"));
         assert_eq!(GqlStatus::from(&syntax_err), GqlStatus::SYNTAX_INVALID);
 
         let tx_err = Error::Transaction(TransactionError::ReadOnly);
@@ -424,10 +424,7 @@ mod tests {
         let conflict = Error::Transaction(TransactionError::Conflict);
         assert_eq!(GqlStatus::from(&conflict), GqlStatus::TX_ROLLBACK);
 
-        let type_err = Error::TypeMismatch {
-            expected: "INT64".into(),
-            found: "STRING".into(),
-        };
+        let type_err = Error::type_mismatch("INT64", "STRING");
         assert_eq!(
             GqlStatus::from(&type_err),
             GqlStatus::DATA_INVALID_VALUE_TYPE
@@ -496,7 +493,7 @@ mod tests {
             let error = QueryError::new(kind, "message");
             assert_eq!(error.error_code(), code, "{kind:?}");
             assert_eq!(
-                GqlStatus::from(&Error::Query(error)).as_str(),
+                GqlStatus::from(&Error::from(error)).as_str(),
                 status,
                 "{kind:?}"
             );
@@ -525,7 +522,7 @@ mod tests {
             let error = QueryError::new(kind, "integer overflow in 9223372036854775807 + 1");
             assert_eq!(error.error_code(), ErrorCode::QueryExecution, "{kind}");
             assert_eq!(kind.to_string(), shown);
-            assert_eq!(GqlStatus::from(&Error::Query(error)), status, "{kind}");
+            assert_eq!(GqlStatus::from(&Error::from(error)), status, "{kind}");
         }
     }
 

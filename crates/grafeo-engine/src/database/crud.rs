@@ -239,7 +239,7 @@ impl super::GrafeoDB {
     /// database can read: the unsupported error.
     fn property_history_store(&self) -> Result<Arc<RowGroupStore>> {
         if self.root_store().is_none() {
-            return Err(grafeo_common::utils::error::Error::Query(
+            return Err(grafeo_common::utils::error::Error::from(
                 grafeo_common::utils::error::QueryError::unsupported(
                     "this store does not support property history (an external store keeps none)",
                 ),

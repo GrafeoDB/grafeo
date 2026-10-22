@@ -767,7 +767,7 @@ pub(crate) fn replay<S: RootStore>(
     use grafeo_common::utils::error::StorageError;
 
     let failed = |reason: String| {
-        Error::Storage(StorageError::RecoveryFailed(format!(
+        Error::from(StorageError::RecoveryFailed(format!(
             "cannot replay a standalone change of the WAL {}: {reason}",
             wal.display()
         )))

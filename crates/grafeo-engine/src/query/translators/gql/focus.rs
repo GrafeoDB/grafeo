@@ -89,7 +89,7 @@ impl Graphs {
         let name = |graph: Option<&str>| {
             graph.map_or_else(|| "the session's graph".to_string(), |g| format!("'{g}'"))
         };
-        Err(Error::Query(QueryError::unsupported(format!(
+        Err(Error::from(QueryError::unsupported(format!(
             "the parts of this statement read different graphs ({} and {}), which is not \
              supported yet: give every part the same USE, or run each part as a statement of \
              its own",

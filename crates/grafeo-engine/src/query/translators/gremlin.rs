@@ -495,13 +495,13 @@ impl GremlinTranslator {
         }
 
         let from_var = from_var.ok_or_else(|| {
-            Error::Query(QueryError::new(
+            Error::from(QueryError::new(
                 QueryErrorKind::Semantic,
                 "addE requires from() step",
             ))
         })?;
         let to_var = to_var.ok_or_else(|| {
-            Error::Query(QueryError::new(
+            Error::from(QueryError::new(
                 QueryErrorKind::Semantic,
                 "addE requires to() step",
             ))
@@ -655,7 +655,7 @@ impl GremlinTranslator {
             }
             ast::TraversalSource::AddE(_label) => {
                 // AddE needs from/to steps to complete
-                Err(Error::Query(QueryError::new(
+                Err(Error::from(QueryError::new(
                     QueryErrorKind::Semantic,
                     "addE requires from() and to() steps",
                 )))
@@ -891,7 +891,7 @@ impl GremlinTranslator {
             }
             ast::Step::Range(start, end) => {
                 if end < start {
-                    return Err(Error::Query(QueryError::new(
+                    return Err(Error::from(QueryError::new(
                         QueryErrorKind::Semantic,
                         format!("range() end ({end}) must be >= start ({start})"),
                     )));
@@ -1685,7 +1685,7 @@ impl GremlinTranslator {
                 let branches = self.translate_branches(traversals, &input, current_var, &alias)?;
                 let mut iter = branches.into_iter().rev();
                 let mut accumulator = iter.next().ok_or_else(|| {
-                    Error::Query(QueryError::new(
+                    Error::from(QueryError::new(
                         QueryErrorKind::Semantic,
                         "coalesce() requires at least one traversal",
                     ))
@@ -2060,7 +2060,7 @@ impl GremlinTranslator {
                     .map(|pred| Self::translate_predicate(pred, expr.clone()))
                     .collect::<Result<Vec<_>>>()?;
                 LogicalExpression::balanced(op, operands).ok_or_else(|| {
-                    Error::Query(QueryError::new(
+                    Error::from(QueryError::new(
                         QueryErrorKind::Semantic,
                         "A predicate combination needs at least one predicate",
                     ))
@@ -2339,7 +2339,7 @@ impl GremlinTranslator {
                 // Leaving a step out would loosen the filter: refuse it until
                 // it is translated.
                 other => {
-                    return Err(Error::Query(QueryError::new(
+                    return Err(Error::from(QueryError::new(
                         QueryErrorKind::Unsupported,
                         format!(
                             "the Gremlin step {}() is not supported inside and(), or(), not(), where() or choose() yet",

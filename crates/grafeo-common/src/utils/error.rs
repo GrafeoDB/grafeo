@@ -184,13 +184,9 @@ pub enum Error {
     /// A label was not found.
     LabelNotFound(String),
 
-    /// Type mismatch error.
-    TypeMismatch {
-        /// The expected type.
-        expected: String,
-        /// The actual type found.
-        found: String,
-    },
+    /// Type mismatch error. Boxed so the error stays small; build one with
+    /// [`Error::type_mismatch`].
+    TypeMismatch(Box<TypeMismatch>),
 
     /// Invalid value error.
     InvalidValue(String),
@@ -201,18 +197,21 @@ pub enum Error {
     Constraint {
         /// What the write breaks, which decides the GQLSTATUS.
         kind: ConstraintKind,
-        /// What was refused and why.
-        message: String,
+        /// What was refused and why (a boxed `str`, so the error stays
+        /// small).
+        message: Box<str>,
     },
 
     /// Transaction error.
     Transaction(TransactionError),
 
-    /// Storage error.
-    Storage(StorageError),
+    /// Storage error. Boxed so the error stays small: build one with
+    /// `Error::from(storage_error)`.
+    Storage(Box<StorageError>),
 
-    /// Query error.
-    Query(QueryError),
+    /// Query error. Boxed so the error stays small: build one with
+    /// `Error::from(query_error)` (or `?` on a `Result<_, QueryError>`).
+    Query(Box<QueryError>),
 
     /// Serialization error: input that does not decode as expected (query
     /// parameters, JSON, imports, snapshots), or a value a file cannot hold.
@@ -228,6 +227,24 @@ pub enum Error {
 
     /// Internal error (should not happen in normal operation).
     Internal(String),
+}
+
+// Every `Result` the engine, the stores and the bindings return carries an
+// `Error`: its large payloads are boxed so a `Result` of a small value stays
+// small (32 bytes on 64-bit targets, so a read's `Result<Option<Value>>`
+// is no larger than the value itself needs).
+const _: () = assert!(
+    std::mem::size_of::<Error>() <= 32,
+    "Error grew past 32 bytes: box the payload that grew it"
+);
+
+/// The types of a [`Error::TypeMismatch`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TypeMismatch {
+    /// The expected type.
+    pub expected: String,
+    /// The actual type found.
+    pub found: String,
 }
 
 /// What is damaged in a file Grafeo wrote, and where (see
@@ -278,6 +295,15 @@ impl fmt::Display for Corruption {
 }
 
 impl Error {
+    /// A [`TypeMismatch`]: `expected` was wanted, `found` was given.
+    #[must_use]
+    pub fn type_mismatch(expected: impl Into<String>, found: impl Into<String>) -> Self {
+        Self::TypeMismatch(Box::new(TypeMismatch {
+            expected: expected.into(),
+            found: found.into(),
+        }))
+    }
+
     /// A [`Corruption`] described by `what`.
     #[must_use]
     pub fn corruption(what: impl Into<String>) -> Self {
@@ -345,7 +371,7 @@ impl Error {
             Error::EdgeNotFound(_) => ErrorCode::EdgeNotFound,
             Error::PropertyNotFound(_) => ErrorCode::PropertyNotFound,
             Error::LabelNotFound(_) => ErrorCode::LabelNotFound,
-            Error::TypeMismatch { .. } => ErrorCode::TypeMismatch,
+            Error::TypeMismatch(_) => ErrorCode::TypeMismatch,
             Error::InvalidValue(_) | Error::Constraint { .. } => ErrorCode::InvalidInput,
             Error::Transaction(e) => e.error_code(),
             Error::Storage(e) => e.error_code(),
@@ -366,10 +392,11 @@ impl fmt::Display for Error {
             Error::EdgeNotFound(id) => write!(f, "{code}: Edge not found: {id}"),
             Error::PropertyNotFound(key) => write!(f, "{code}: Property not found: {key}"),
             Error::LabelNotFound(label) => write!(f, "{code}: Label not found: {label}"),
-            Error::TypeMismatch { expected, found } => {
+            Error::TypeMismatch(mismatch) => {
                 write!(
                     f,
-                    "{code}: Type mismatch: expected {expected}, found {found}"
+                    "{code}: Type mismatch: expected {}, found {}",
+                    mismatch.expected, mismatch.found
                 )
             }
             Error::InvalidValue(msg) => write!(f, "{code}: Invalid value: {msg}"),
@@ -397,10 +424,7 @@ impl Clone for Error {
             Error::EdgeNotFound(id) => Error::EdgeNotFound(*id),
             Error::PropertyNotFound(key) => Error::PropertyNotFound(key.clone()),
             Error::LabelNotFound(label) => Error::LabelNotFound(label.clone()),
-            Error::TypeMismatch { expected, found } => Error::TypeMismatch {
-                expected: expected.clone(),
-                found: found.clone(),
-            },
+            Error::TypeMismatch(mismatch) => Error::TypeMismatch(mismatch.clone()),
             Error::InvalidValue(message) => Error::InvalidValue(message.clone()),
             Error::Constraint { kind, message } => Error::Constraint {
                 kind: *kind,
@@ -422,8 +446,8 @@ impl std::error::Error for Error {
         match self {
             Error::Io(e) => Some(e),
             Error::Transaction(e) => Some(e),
-            Error::Storage(e) => Some(e),
-            Error::Query(e) => Some(e),
+            Error::Storage(e) => Some(&**e),
+            Error::Query(e) => Some(&**e),
             _ => None,
         }
     }
@@ -611,7 +635,7 @@ impl std::error::Error for StorageError {}
 
 impl From<StorageError> for Error {
     fn from(e: StorageError) -> Self {
-        Error::Storage(e)
+        Error::Storage(Box::new(e))
     }
 }
 
@@ -769,7 +793,7 @@ impl std::error::Error for QueryError {}
 
 impl From<QueryError> for Error {
     fn from(e: QueryError) -> Self {
-        Error::Query(e)
+        Error::Query(Box::new(e))
     }
 }
 
@@ -896,10 +920,7 @@ mod tests {
         let err = Error::NodeNotFound(crate::types::NodeId::new(42));
         assert_eq!(err.to_string(), "GRAFEO-V002: Node not found: 42");
 
-        let err = Error::TypeMismatch {
-            expected: "INT64".to_string(),
-            found: "STRING".to_string(),
-        };
+        let err = Error::type_mismatch("INT64", "STRING");
         assert_eq!(
             err.to_string(),
             "GRAFEO-V006: Type mismatch: expected INT64, found STRING"

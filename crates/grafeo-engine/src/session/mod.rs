@@ -142,7 +142,7 @@ fn typed_property(
     use grafeo_common::utils::error::{Error, QueryError, QueryErrorKind};
 
     let data_type = crate::catalog::PropertyDataType::from_type_name(&definition.data_type)
-        .map_err(|e| Error::Query(QueryError::new(QueryErrorKind::Semantic, e.to_string())))?;
+        .map_err(|e| Error::from(QueryError::new(QueryErrorKind::Semantic, e.to_string())))?;
     Ok(crate::catalog::TypedProperty {
         name: definition.name.clone(),
         data_type,
@@ -173,7 +173,7 @@ fn typed_properties(
         .map(typed_property)
         .collect::<Result<Vec<_>>>()?;
     crate::catalog::TypedProperty::check_list_levels(&properties)
-        .map_err(|e| Error::Query(QueryError::new(QueryErrorKind::Semantic, e.to_string())))?;
+        .map_err(|e| Error::from(QueryError::new(QueryErrorKind::Semantic, e.to_string())))?;
     Ok(properties)
 }
 
@@ -667,7 +667,7 @@ impl Session {
     #[cfg(any(feature = "gql", feature = "sql-pgq"))]
     fn graph_type_in_use(graph_type: &str, graph: &str) -> grafeo_common::utils::error::Error {
         use grafeo_common::utils::error::{Error, QueryError, QueryErrorKind};
-        Error::Query(QueryError::new(
+        Error::from(QueryError::new(
             QueryErrorKind::Semantic,
             format!(
                 "graph type '{graph_type}' is the type of graph '{graph}': drop the graph first"
@@ -715,7 +715,7 @@ impl Session {
                 .identity
                 .can_access_graph(name, crate::auth::Role::ReadOnly)
         {
-            return Err(Error::Query(QueryError::new(
+            return Err(Error::from(QueryError::new(
                 QueryErrorKind::Semantic,
                 format!(
                     "permission denied: no grant for graph '{name}' (user: {})",
@@ -729,7 +729,7 @@ impl Session {
                 .graph(&self.effective_graph_key(name))
                 .is_none()
         {
-            return Err(Error::Query(QueryError::invalid_reference(format!(
+            return Err(Error::from(QueryError::invalid_reference(format!(
                 "Graph '{name}' does not exist"
             ))));
         }
@@ -866,7 +866,7 @@ impl Session {
         use grafeo_common::utils::error::{Error, QueryError, QueryErrorKind};
 
         if TemporalComparison::parse_displacement(tz).is_none() {
-            return Err(Error::Query(QueryError::new(
+            return Err(Error::from(QueryError::new(
                 QueryErrorKind::InvalidTimeZoneDisplacement,
                 format!(
                     "'{tz}' is not a time zone displacement: give a UTC offset such as \
@@ -995,7 +995,7 @@ impl Session {
     /// Checks that the session's graph model supports LPG operations.
     fn require_lpg(&self, language: &str) -> Result<()> {
         if self.graph_model == GraphModel::Rdf {
-            return Err(grafeo_common::utils::error::Error::Query(
+            return Err(grafeo_common::utils::error::Error::from(
                 grafeo_common::utils::error::QueryError::unsupported(format!(
                     "this is an RDF database: {language} queries need an LPG database"
                 )),
@@ -1016,7 +1016,7 @@ impl Session {
             return Ok(());
         }
         crate::auth::check_permission(&self.identity, kind).map_err(|denied| {
-            grafeo_common::utils::error::Error::Query(grafeo_common::utils::error::QueryError::new(
+            grafeo_common::utils::error::Error::from(grafeo_common::utils::error::QueryError::new(
                 grafeo_common::utils::error::QueryErrorKind::Semantic,
                 denied.to_string(),
             ))
@@ -1066,7 +1066,7 @@ impl Session {
                         .identity
                         .can_access_graph(name, crate::auth::Role::ReadWrite) =>
                 {
-                    return Err(Error::Query(QueryError::new(
+                    return Err(Error::from(QueryError::new(
                         QueryErrorKind::Semantic,
                         format!(
                             "permission denied: no grant for graph '{name}' (user: {})",
@@ -1102,7 +1102,7 @@ impl Session {
             } => {
                 // ISO/IEC 39075 Section 12.4: graphs are created within the current schema
                 if name.contains('/') {
-                    return Err(Error::Query(QueryError::new(
+                    return Err(Error::from(QueryError::new(
                         QueryErrorKind::Semantic,
                         format!(
                             "Graph name '{name}' must not contain '/' (reserved as schema/graph separator)"
@@ -1116,7 +1116,7 @@ impl Session {
                 if let Some(ref src) = like_graph {
                     let src_key = self.effective_graph_key(src);
                     if self.root_store().graph(&src_key).is_none() {
-                        return Err(Error::Query(QueryError::new(
+                        return Err(Error::from(QueryError::new(
                             QueryErrorKind::InvalidReference,
                             format!("Source graph '{src}' does not exist"),
                         )));
@@ -1125,7 +1125,7 @@ impl Session {
                 if let Some(ref src) = copy_of {
                     let src_key = self.effective_graph_key(src);
                     if self.root_store().graph(&src_key).is_none() {
-                        return Err(Error::Query(QueryError::new(
+                        return Err(Error::from(QueryError::new(
                             QueryErrorKind::InvalidReference,
                             format!("Source graph '{src}' does not exist"),
                         )));
@@ -1136,7 +1136,7 @@ impl Session {
                     if if_not_exists {
                         return Ok(QueryResult::empty());
                     }
-                    return Err(Error::Query(QueryError::new(
+                    return Err(Error::from(QueryError::new(
                         QueryErrorKind::Semantic,
                         format!("Graph '{name}' already exists"),
                     )));
@@ -1156,7 +1156,7 @@ impl Session {
                         self.effective_type_key(&type_name)
                     };
                     if self.catalog.get_graph_type_def(&graph_type).is_none() {
-                        return Err(Error::Query(QueryError::new(
+                        return Err(Error::from(QueryError::new(
                             QueryErrorKind::InvalidReference,
                             crate::catalog::CatalogError::TypeNotFound(graph_type).to_string(),
                         )));
@@ -1190,7 +1190,7 @@ impl Session {
                 if let Some(ref src) = copy_of {
                     let src_key = self.effective_graph_key(src);
                     let source = self.root_store().graph(&src_key).ok_or_else(|| {
-                        Error::Query(QueryError::new(
+                        Error::from(QueryError::new(
                             QueryErrorKind::InvalidReference,
                             format!("Source graph '{src}' does not exist"),
                         ))
@@ -1220,7 +1220,7 @@ impl Session {
                     if if_exists {
                         return Ok(QueryResult::empty());
                     }
-                    return Err(Error::Query(QueryError::new(
+                    return Err(Error::from(QueryError::new(
                         QueryErrorKind::InvalidReference,
                         format!("Graph '{name}' does not exist"),
                     )));
@@ -1252,7 +1252,7 @@ impl Session {
                         .identity
                         .can_access_graph(&name, crate::auth::Role::ReadOnly)
                 {
-                    return Err(Error::Query(QueryError::new(
+                    return Err(Error::from(QueryError::new(
                         QueryErrorKind::Semantic,
                         format!(
                             "permission denied: no grant for graph '{name}' (user: {})",
@@ -1265,7 +1265,7 @@ impl Session {
                 if !name.eq_ignore_ascii_case("default")
                     && self.root_store().graph(&effective_key).is_none()
                 {
-                    return Err(Error::Query(QueryError::new(
+                    return Err(Error::from(QueryError::new(
                         QueryErrorKind::InvalidReference,
                         format!("Graph '{name}' does not exist"),
                     )));
@@ -1282,7 +1282,7 @@ impl Session {
                         .identity
                         .can_access_graph(&name, crate::auth::Role::ReadOnly)
                 {
-                    return Err(Error::Query(QueryError::new(
+                    return Err(Error::from(QueryError::new(
                         QueryErrorKind::Semantic,
                         format!(
                             "permission denied: no grant for graph '{name}' (user: {})",
@@ -1294,7 +1294,7 @@ impl Session {
                 if !name.eq_ignore_ascii_case("default")
                     && self.root_store().graph(&effective_key).is_none()
                 {
-                    return Err(Error::Query(QueryError::new(
+                    return Err(Error::from(QueryError::new(
                         QueryErrorKind::InvalidReference,
                         format!("Graph '{name}' does not exist"),
                     )));
@@ -1305,7 +1305,7 @@ impl Session {
             SessionCommand::SessionSetSchema(name) => {
                 // ISO/IEC 39075 Section 7.1 GR1: set session schema (independent of graph)
                 if !self.catalog.schema_exists(&name) {
-                    return Err(Error::Query(QueryError::new(
+                    return Err(Error::from(QueryError::new(
                         QueryErrorKind::InvalidReference,
                         format!("Schema '{name}' does not exist"),
                     )));
@@ -1328,7 +1328,7 @@ impl Session {
                             self.set_viewing_epoch(EpochId::new(epoch));
                             Ok(QueryResult::status(format!("Set viewing_epoch to {n}")))
                         }
-                        _ => Err(Error::Query(QueryError::new(
+                        _ => Err(Error::from(QueryError::new(
                             QueryErrorKind::Semantic,
                             "viewing_epoch must be a non-negative integer literal",
                         ))),
@@ -1411,7 +1411,7 @@ impl Session {
                 let projection = Arc::new(GraphProjection::new(store, spec));
                 let mut projections = self.projections.write();
                 match projections.entry(name.clone()) {
-                    Entry::Occupied(_) => Err(Error::Query(QueryError::new(
+                    Entry::Occupied(_) => Err(Error::from(QueryError::new(
                         QueryErrorKind::Semantic,
                         format!("Projection '{name}' already exists"),
                     ))),
@@ -1424,7 +1424,7 @@ impl Session {
             SessionCommand::DropProjection { name } => {
                 let removed = self.projections.write().remove(&name).is_some();
                 if !removed {
-                    return Err(Error::Query(QueryError::new(
+                    return Err(Error::from(QueryError::new(
                         QueryErrorKind::InvalidReference,
                         format!("Projection '{name}' does not exist"),
                     )));
@@ -1500,7 +1500,7 @@ impl Session {
                 .identity
                 .can_access_graph(name, crate::auth::Role::ReadOnly)
         {
-            return Err(Error::Query(QueryError::new(
+            return Err(Error::from(QueryError::new(
                 QueryErrorKind::Semantic,
                 format!(
                     "permission denied: no grant for graph '{name}' (user: {})",
@@ -1512,7 +1512,7 @@ impl Session {
         if self.root_store().graph(&key).is_some() {
             return Ok(self.store_for_key(Some(&key)));
         }
-        Err(Error::Query(QueryError::invalid_reference(format!(
+        Err(Error::from(QueryError::invalid_reference(format!(
             "Graph '{name}' does not exist"
         ))))
     }
@@ -1549,7 +1549,7 @@ impl Session {
         use grafeo_common::utils::error::{Error, QueryError, QueryErrorKind};
 
         let semantic =
-            |message: String| Error::Query(QueryError::new(QueryErrorKind::Semantic, message));
+            |message: String| Error::from(QueryError::new(QueryErrorKind::Semantic, message));
         self.require_permission(crate::auth::StatementKind::Admin)?;
         if *self.read_only_tx.lock() {
             return Err(Error::Transaction(
@@ -1744,7 +1744,7 @@ impl Session {
             if op.if_exists {
                 return Ok(Self::ddl_status("No change".to_string()));
             }
-            return Err(Error::Query(QueryError::invalid_reference(format!(
+            return Err(Error::from(QueryError::invalid_reference(format!(
                 "Property graph '{}' does not exist",
                 op.name
             ))));
@@ -1923,9 +1923,9 @@ impl Session {
         use grafeo_common::utils::error::{Error, QueryError, QueryErrorKind};
 
         let semantic =
-            |message: String| Error::Query(QueryError::new(QueryErrorKind::Semantic, message));
+            |message: String| Error::from(QueryError::new(QueryErrorKind::Semantic, message));
         let invalid_reference = |message: String| {
-            Error::Query(QueryError::new(QueryErrorKind::InvalidReference, message))
+            Error::from(QueryError::new(QueryErrorKind::InvalidReference, message))
         };
         let done = |result: QueryResult| Ok((result, AfterSchemaChange::Nothing));
 
@@ -2662,7 +2662,7 @@ impl Session {
         #[cfg(not(feature = "vector-index"))]
         {
             let _ = (change, label, property, dimensions, metric);
-            Err(grafeo_common::utils::error::Error::Query(
+            Err(grafeo_common::utils::error::Error::from(
                 grafeo_common::utils::error::QueryError::unsupported(
                     "this build has no vector indexes (the `vector-index` feature)",
                 ),
@@ -2710,7 +2710,7 @@ impl Session {
         #[cfg(not(feature = "text-index"))]
         {
             let _ = (change, label, property, options);
-            Err(grafeo_common::utils::error::Error::Query(
+            Err(grafeo_common::utils::error::Error::from(
                 grafeo_common::utils::error::QueryError::unsupported(
                     "this build has no text indexes (the `text-index` feature)",
                 ),
@@ -2993,7 +2993,7 @@ impl Session {
         use grafeo_common::utils::error::{Error, QueryError, QueryErrorKind};
 
         let def = self.catalog.get_graph_type_def(name).ok_or_else(|| {
-            Error::Query(QueryError::new(
+            Error::from(QueryError::new(
                 QueryErrorKind::InvalidReference,
                 format!("Graph type '{name}' not found"),
             ))
@@ -3397,7 +3397,7 @@ impl Session {
         let translation = gql::translate_full(query)?;
         let logical_plan = match translation {
             gql::GqlTranslationResult::SessionCommand(_) => {
-                return Err(grafeo_common::utils::error::Error::Query(
+                return Err(grafeo_common::utils::error::Error::from(
                     grafeo_common::utils::error::QueryError::new(
                         grafeo_common::utils::error::QueryErrorKind::Semantic,
                         "session commands cannot be streamed; use execute() instead",
@@ -3405,7 +3405,7 @@ impl Session {
                 ));
             }
             gql::GqlTranslationResult::SchemaCommand(_) => {
-                return Err(grafeo_common::utils::error::Error::Query(
+                return Err(grafeo_common::utils::error::Error::from(
                     grafeo_common::utils::error::QueryError::new(
                         grafeo_common::utils::error::QueryErrorKind::Semantic,
                         "schema DDL cannot be streamed; use execute() instead",
@@ -3414,7 +3414,7 @@ impl Session {
             }
             gql::GqlTranslationResult::Plan(plan) => {
                 if self.plan_writes(&plan.root) {
-                    return Err(grafeo_common::utils::error::Error::Query(
+                    return Err(grafeo_common::utils::error::Error::from(
                         grafeo_common::utils::error::QueryError::new(
                             grafeo_common::utils::error::QueryErrorKind::Semantic,
                             "mutating queries cannot be streamed; use execute() instead",
@@ -3447,7 +3447,7 @@ impl Session {
         };
 
         if optimized_plan.explain || optimized_plan.profile {
-            return Err(grafeo_common::utils::error::Error::Query(
+            return Err(grafeo_common::utils::error::Error::from(
                 grafeo_common::utils::error::QueryError::new(
                     grafeo_common::utils::error::QueryErrorKind::Semantic,
                     "EXPLAIN and PROFILE cannot be streamed; use execute() instead",
@@ -3499,7 +3499,7 @@ impl Session {
             }
         };
         if !push_ops.is_empty() {
-            return Err(grafeo_common::utils::error::Error::Query(
+            return Err(grafeo_common::utils::error::Error::from(
                 grafeo_common::utils::error::QueryError::new(
                     grafeo_common::utils::error::QueryErrorKind::Semantic,
                     "query requires a push-based pipeline (ORDER BY / aggregate / DISTINCT) \
@@ -3604,7 +3604,7 @@ impl Session {
         _query: &str,
         _params: std::collections::HashMap<String, Value>,
     ) -> Result<QueryResult> {
-        Err(grafeo_common::utils::error::Error::Query(
+        Err(grafeo_common::utils::error::Error::from(
             grafeo_common::utils::error::QueryError::unsupported(
                 "this build has no query language (the `gql` or `cypher` feature)",
             ),
@@ -3618,7 +3618,7 @@ impl Session {
     /// Returns an error if no query language is enabled.
     #[cfg(not(any(feature = "gql", feature = "cypher")))]
     pub fn execute(&self, _query: &str) -> Result<QueryResult> {
-        Err(grafeo_common::utils::error::Error::Query(
+        Err(grafeo_common::utils::error::Error::from(
             grafeo_common::utils::error::QueryError::unsupported(
                 "this build has no query language (the `gql` or `cypher` feature)",
             ),
@@ -5171,7 +5171,7 @@ impl Session {
 
     /// The error for a query language this build does not know.
     fn unknown_language(language: &str) -> grafeo_common::utils::error::Error {
-        grafeo_common::utils::error::Error::Query(grafeo_common::utils::error::QueryError::new(
+        grafeo_common::utils::error::Error::from(grafeo_common::utils::error::QueryError::new(
             grafeo_common::utils::error::QueryErrorKind::Semantic,
             format!("Unknown query language: '{language}'"),
         ))
@@ -5315,7 +5315,7 @@ impl Session {
     /// write there would change the past.
     fn check_reads_the_present(&self) -> Result<()> {
         match *self.viewing_epoch_override.lock() {
-            Some(epoch) => Err(grafeo_common::utils::error::Error::Query(
+            Some(epoch) => Err(grafeo_common::utils::error::Error::from(
                 grafeo_common::utils::error::QueryError::new(
                     grafeo_common::utils::error::QueryErrorKind::Semantic,
                     format!(
@@ -5352,7 +5352,7 @@ impl Session {
         if self.identity.can_access_graph(&graph, role) {
             return Ok(());
         }
-        Err(grafeo_common::utils::error::Error::Query(
+        Err(grafeo_common::utils::error::Error::from(
             grafeo_common::utils::error::QueryError::new(
                 grafeo_common::utils::error::QueryErrorKind::Semantic,
                 format!(
@@ -5372,7 +5372,7 @@ impl Session {
                 let name = self
                     .effective_graph()
                     .unwrap_or_else(|| "default".to_string());
-                Err(grafeo_common::utils::error::Error::Query(
+                Err(grafeo_common::utils::error::Error::from(
                     grafeo_common::utils::error::QueryError::new(
                         grafeo_common::utils::error::QueryErrorKind::InvalidReference,
                         format!("Graph '{name}' does not exist"),

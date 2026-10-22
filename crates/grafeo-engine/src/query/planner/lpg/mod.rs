@@ -1011,7 +1011,7 @@ impl Planner {
             #[cfg(feature = "algos")]
             LogicalOperator::CallProcedure(call) => self.plan_call_procedure(call),
             #[cfg(not(feature = "algos"))]
-            LogicalOperator::CallProcedure(_) => Err(grafeo_common::utils::error::Error::Query(
+            LogicalOperator::CallProcedure(_) => Err(grafeo_common::utils::error::Error::from(
                 grafeo_common::utils::error::QueryError::unsupported(
                     "this build has no procedures (the `algos` feature)",
                 ),
@@ -1024,12 +1024,12 @@ impl Planner {
             #[cfg(feature = "vector-index")]
             LogicalOperator::VectorScan(scan) => self.plan_vector_scan(scan),
             #[cfg(not(feature = "vector-index"))]
-            LogicalOperator::VectorScan(_) => Err(grafeo_common::utils::error::Error::Query(
+            LogicalOperator::VectorScan(_) => Err(grafeo_common::utils::error::Error::from(
                 grafeo_common::utils::error::QueryError::unsupported(
                     "this build has no vector indexes (the `vector-index` feature)",
                 ),
             )),
-            LogicalOperator::VectorJoin(_) => Err(grafeo_common::utils::error::Error::Query(
+            LogicalOperator::VectorJoin(_) => Err(grafeo_common::utils::error::Error::from(
                 grafeo_common::utils::error::QueryError::unsupported(
                     "this build has no vector indexes (the `vector-index` feature)",
                 ),
@@ -1037,7 +1037,7 @@ impl Planner {
             #[cfg(feature = "text-index")]
             LogicalOperator::TextScan(scan) => self.plan_text_scan(scan),
             #[cfg(not(feature = "text-index"))]
-            LogicalOperator::TextScan(_) => Err(grafeo_common::utils::error::Error::Query(
+            LogicalOperator::TextScan(_) => Err(grafeo_common::utils::error::Error::from(
                 grafeo_common::utils::error::QueryError::unsupported(
                     "this build has no text indexes (the `text-index` feature)",
                 ),
@@ -1155,7 +1155,7 @@ impl Planner {
                 )));
             }
             _ => {
-                return Err(grafeo_common::utils::error::Error::Query(
+                return Err(grafeo_common::utils::error::Error::from(
                     grafeo_common::utils::error::QueryError::semantic(
                         "a text search query must be a string literal or a parameter",
                     ),

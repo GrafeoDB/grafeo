@@ -2382,7 +2382,7 @@ impl<'a> Parser<'a> {
         } else {
             "An edge has one type".to_string()
         };
-        Err(Error::Query(
+        Err(Error::from(
             QueryError::new(
                 QueryErrorKind::Syntax,
                 format!(
@@ -6674,7 +6674,7 @@ impl<'a> Parser<'a> {
                     .then(|| name.clone())
             };
             if let Some(type_name) = unsupported {
-                return Err(Error::Query(
+                return Err(Error::from(
                     QueryError::new(
                         QueryErrorKind::Unsupported,
                         format!(
@@ -7784,7 +7784,7 @@ impl<'a> Parser<'a> {
     }
 
     fn error(&self, message: &str) -> Error {
-        Error::Query(
+        Error::from(
             QueryError::new(QueryErrorKind::Syntax, format!("[GQL] {message}"))
                 .with_span(self.current.span)
                 .with_source(self.source.to_string()),
@@ -7800,7 +7800,7 @@ impl<'a> Parser<'a> {
         if value.is_finite() {
             return Ok(value);
         }
-        Err(Error::Query(
+        Err(Error::from(
             QueryError::new(
                 QueryErrorKind::NumericOutOfRange,
                 format!("[GQL] Float literal '{text}' is outside the FLOAT64 range"),

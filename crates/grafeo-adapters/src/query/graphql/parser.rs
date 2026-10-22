@@ -465,7 +465,7 @@ impl<'a> Parser<'a> {
     }
 
     fn error(&self, message: &str) -> Error {
-        Error::Query(
+        Error::from(
             grafeo_common::utils::error::QueryError::new(
                 grafeo_common::utils::error::QueryErrorKind::Syntax,
                 format!("[GraphQL] {message}"),

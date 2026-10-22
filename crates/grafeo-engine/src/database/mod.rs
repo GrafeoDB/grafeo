@@ -1747,7 +1747,7 @@ impl GrafeoDB {
             return Ok(());
         }
         logs.sort();
-        Err(Error::Query(
+        Err(Error::from(
             grafeo_common::utils::error::QueryError::unsupported(format!(
                 "{} has records in its sidecar WAL {} (log files {}), commits that only a build with \
              the `wal` feature can replay: open it with such a build",
@@ -1797,7 +1797,7 @@ impl GrafeoDB {
             let _ = (store, catalog, unbuilt, salvage);
             #[cfg(feature = "triple-store")]
             let _ = rdf_store;
-            Err(Error::Query(
+            Err(Error::from(
                 grafeo_common::utils::error::QueryError::unsupported(format!(
                     "{} is a 0.5.x WAL-directory database, whose data only a build with the `wal` \
                  feature can replay: open or migrate it with such a build",
@@ -2195,7 +2195,7 @@ impl GrafeoDB {
             && let Some(store) = self.root_store()
             && store.graph(name).is_none()
         {
-            return Err(Error::Query(QueryError::new(
+            return Err(Error::from(QueryError::new(
                 QueryErrorKind::InvalidReference,
                 format!("Graph '{name}' does not exist"),
             )));
@@ -2225,7 +2225,7 @@ impl GrafeoDB {
         if let Some(name) = name
             && !self.catalog.schema_exists(name)
         {
-            return Err(Error::Query(QueryError::new(
+            return Err(Error::from(QueryError::new(
                 QueryErrorKind::InvalidReference,
                 format!("Schema '{name}' does not exist"),
             )));
@@ -2338,7 +2338,7 @@ impl GrafeoDB {
     /// and the incomplete-commit error after a commit that did not complete.
     pub fn create_graph(&self, name: &str) -> Result<bool> {
         if self.root_store().is_none() {
-            return Err(grafeo_common::utils::error::Error::Query(
+            return Err(grafeo_common::utils::error::Error::from(
                 grafeo_common::utils::error::QueryError::new(
                     grafeo_common::utils::error::QueryErrorKind::Unsupported,
                     "Named graphs need the built-in store; this database uses an external store",
@@ -3201,7 +3201,7 @@ impl GrafeoDB {
     pub fn set_stored_config(&self, changes: &Config) -> Result<()> {
         let _open = self.hold_open()?;
         let unsupported =
-            |what: &str| Error::Query(grafeo_common::utils::error::QueryError::unsupported(what));
+            |what: &str| Error::from(grafeo_common::utils::error::QueryError::unsupported(what));
         let (Some(fm), Some(path)) = (self.file_manager.as_ref(), self.config.path()) else {
             return Err(unsupported(
                 "a stored configuration needs a database file: an in-memory database stores none",
@@ -3265,7 +3265,7 @@ impl GrafeoDB {
     pub fn backup_full(&self, backup_dir: &std::path::Path) -> Result<backup::BackupSegment> {
         let _open = self.hold_open()?;
         let fm = self.file_manager.as_ref().ok_or_else(|| {
-            Error::Query(grafeo_common::utils::error::QueryError::unsupported(
+            Error::from(grafeo_common::utils::error::QueryError::unsupported(
                 "a backup needs a persistent database",
             ))
         })?;
@@ -3298,7 +3298,7 @@ impl GrafeoDB {
     ) -> Result<backup::BackupSegment> {
         let _open = self.hold_open()?;
         let wal = self.wal.as_ref().ok_or_else(|| {
-            Error::Query(grafeo_common::utils::error::QueryError::unsupported(
+            Error::from(grafeo_common::utils::error::QueryError::unsupported(
                 "an incremental backup needs a database with a WAL",
             ))
         })?;
@@ -3490,7 +3490,7 @@ fn wal_directories_are_no_longer_created(path: &std::path::Path) -> Error {
 /// build cannot run is unsupported.
 fn config_error(error: crate::config::ConfigError) -> Error {
     match error {
-        crate::config::ConfigError::RdfFeatureRequired => Error::Query(
+        crate::config::ConfigError::RdfFeatureRequired => Error::from(
             grafeo_common::utils::error::QueryError::unsupported(error.to_string()),
         ),
         other => Error::InvalidValue(other.to_string()),
@@ -3623,7 +3623,7 @@ impl QueryResult {
         // Column lists are short; report the first duplicate in column order.
         for (idx, name) in columns.iter().enumerate() {
             if columns[..idx].contains(name) {
-                return Err(Error::Query(QueryError::new(
+                return Err(Error::from(QueryError::new(
                     QueryErrorKind::Semantic,
                     format!(
                         "duplicate column name '{name}' in query result: a result cannot carry \
@@ -3900,45 +3900,45 @@ pub trait FromValue: Sized {
 
 impl FromValue for i64 {
     fn from_value(value: &grafeo_common::types::Value) -> Result<Self> {
-        value
-            .as_int64()
-            .ok_or_else(|| grafeo_common::utils::error::Error::TypeMismatch {
-                expected: "INT64".to_string(),
-                found: value.type_name().to_string(),
-            })
+        value.as_int64().ok_or_else(|| {
+            grafeo_common::utils::error::Error::type_mismatch(
+                "INT64".to_string(),
+                value.type_name().to_string(),
+            )
+        })
     }
 }
 
 impl FromValue for f64 {
     fn from_value(value: &grafeo_common::types::Value) -> Result<Self> {
-        value
-            .as_float64()
-            .ok_or_else(|| grafeo_common::utils::error::Error::TypeMismatch {
-                expected: "FLOAT64".to_string(),
-                found: value.type_name().to_string(),
-            })
+        value.as_float64().ok_or_else(|| {
+            grafeo_common::utils::error::Error::type_mismatch(
+                "FLOAT64".to_string(),
+                value.type_name().to_string(),
+            )
+        })
     }
 }
 
 impl FromValue for String {
     fn from_value(value: &grafeo_common::types::Value) -> Result<Self> {
         value.as_str().map(String::from).ok_or_else(|| {
-            grafeo_common::utils::error::Error::TypeMismatch {
-                expected: "STRING".to_string(),
-                found: value.type_name().to_string(),
-            }
+            grafeo_common::utils::error::Error::type_mismatch(
+                "STRING".to_string(),
+                value.type_name().to_string(),
+            )
         })
     }
 }
 
 impl FromValue for bool {
     fn from_value(value: &grafeo_common::types::Value) -> Result<Self> {
-        value
-            .as_bool()
-            .ok_or_else(|| grafeo_common::utils::error::Error::TypeMismatch {
-                expected: "BOOL".to_string(),
-                found: value.type_name().to_string(),
-            })
+        value.as_bool().ok_or_else(|| {
+            grafeo_common::utils::error::Error::type_mismatch(
+                "BOOL".to_string(),
+                value.type_name().to_string(),
+            )
+        })
     }
 }
 

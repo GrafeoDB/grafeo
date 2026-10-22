@@ -2388,7 +2388,7 @@ impl<'a> Parser<'a> {
     }
 
     fn error(&self, message: &str) -> Error {
-        Error::Query(
+        Error::from(
             QueryError::new(QueryErrorKind::Syntax, format!("[SPARQL] {message}"))
                 .with_span(self.current.span)
                 .with_source(self.source.to_string()),

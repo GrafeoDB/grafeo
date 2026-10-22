@@ -261,7 +261,7 @@ impl Procedure for PropertyKeysProcedure {
 #[cfg(feature = "vector-index")]
 fn require_lpg_store<'a>(ctx: &ProcedureContext<'a>, proc_name: &str) -> Result<&'a RowGroupStore> {
     ctx.lpg_store.ok_or_else(|| {
-        grafeo_common::utils::error::Error::Query(
+        grafeo_common::utils::error::Error::from(
             grafeo_common::utils::error::QueryError::unsupported(format!(
                 "{proc_name} needs an LPG database"
             )),
@@ -630,7 +630,7 @@ impl Procedure for SearchTextProcedure {
 
     fn execute(&self, ctx: &ProcedureContext<'_>, params: &Parameters) -> Result<AlgorithmResult> {
         let lpg = ctx.lpg_store.ok_or_else(|| {
-            grafeo_common::utils::error::Error::Query(
+            grafeo_common::utils::error::Error::from(
                 grafeo_common::utils::error::QueryError::unsupported(
                     "CALL grafeo.search.text needs an LPG database",
                 ),
@@ -986,7 +986,7 @@ fn set_parameter(
                 Some(Type::List) => "a list",
                 None => "a number, string, boolean or list",
             };
-            return Err(Error::Query(QueryError::new(
+            return Err(Error::from(QueryError::new(
                 QueryErrorKind::InvalidValueType,
                 format!(
                     "Argument '{name}' of {procedure} must be {wanted}, got a {} value",

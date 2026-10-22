@@ -971,7 +971,7 @@ impl super::GrafeoDB {
         // still open (the hold also holds its writes).
         let commits = self.transaction_manager.hold_commits()?;
         let root = self.root_store().ok_or_else(|| {
-            Error::Query(grafeo_common::utils::error::QueryError::unsupported(
+            Error::from(grafeo_common::utils::error::QueryError::unsupported(
                 "a snapshot export needs the built-in LPG store",
             ))
         })?;

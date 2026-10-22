@@ -97,6 +97,15 @@ Changes since 0.6.0-beta.1.
 
   Rust's graph algorithms (`grafeo_adapters::plugins::algorithms`) take the store and a view and return a `Result`, and `GraphAlgorithm::execute` takes the view too. Deprecating first does not fit a change to a trait's required methods: an implementation written against both families would compile against neither.
 
+- **Breaking (Rust): `grafeo::Error` is 32 bytes** (it was 112): its large payloads are boxed, so every `Result` of the engine, the stores and the bindings is cheaper to return; a read's `Result<Option<Value>>` is now the size of the value. Code that builds or matches these variants with their payloads directly changes; `?`, `to_string()`, `error_code()`, the GQLSTATUS and the messages do not.
+
+  | Before | Now |
+  | --- | --- |
+  | `Error::Query(query_error)` | `Error::from(query_error)` (or `?`); a match binds a `Box<QueryError>`, whose fields read as before |
+  | `Error::Storage(storage_error)` | `Error::from(storage_error)`; match `Error::Storage(e)`, then `*e` or `&**e` |
+  | `Error::TypeMismatch { expected, found }` | `Error::type_mismatch(expected, found)`; match `Error::TypeMismatch(mismatch)`, then `mismatch.expected` and `mismatch.found` |
+  | `Error::Constraint { kind, message: String }` | `message` is a `Box<str>` (`message.into()`) |
+
 - **Breaking (Rust): a `Snapshot` reads one pinned state of a graph** ([#416](https://github.com/GrafeoDB/grafeo/issues/416)): `GrafeoDB::snapshot()` (the graph `set_current_graph` selects), `GraphHandle::snapshot()`, `AsOfView::snapshot()` (an earlier epoch, which outlives the view) and `GrafeoDB::projection(name)` give a `Snapshot`: the graph's store, the `ReadView` its reads take, and a pin that keeps the versions that view reads while it lives, so several reads see one state across later commits and garbage collection. They replace `graph_store()`, `GraphHandle::graph_store()` and `selected_graph_store()`, which returned an unpinned store; `projection(name)` returns `Option<Snapshot>` (it returned the store). Graph algorithms read through one snapshot, in `CALL` procedures and in Python's `db.algorithms`, `as_networkx()` and `as_solvor()`, where they read the store's own epoch and could see a commit midway. The counts and admin reports read one pinned state each. `GrafeoDB::store()` stays, now marked experimental, for admin work.
 
   | Before | Now |

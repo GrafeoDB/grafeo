@@ -274,7 +274,7 @@ impl super::Planner {
         input_writes: bool,
     ) -> Result<Box<dyn Operator>> {
         let returned = returned_column(&subplan).ok_or_else(|| {
-            Error::Query(QueryError::new(
+            Error::from(QueryError::new(
                 QueryErrorKind::Semantic,
                 "A VALUE subquery returns one column",
             ))

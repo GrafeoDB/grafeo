@@ -82,7 +82,7 @@ impl GrafeoDB {
                 return Ok(());
             }
             let Some(ref fm) = db.file_manager else {
-                return Err(Error::Query(
+                return Err(Error::from(
                     grafeo_common::utils::error::QueryError::unsupported(
                         "a snapshot write needs a persistent database",
                     ),

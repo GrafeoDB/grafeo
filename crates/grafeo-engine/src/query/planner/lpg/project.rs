@@ -156,7 +156,7 @@ impl super::Planner {
                             Callee::Builtin(BuiltinFunction::Type) => {
                                 // type(r) returns the edge type string
                                 if args.len() != 1 {
-                                    return Err(grafeo_common::utils::error::Error::Query(
+                                    return Err(grafeo_common::utils::error::Error::from(
                                         grafeo_common::utils::error::QueryError::semantic(
                                             "type() takes exactly one argument",
                                         ),
@@ -189,7 +189,7 @@ impl super::Planner {
                                 // or delegates to the expression evaluator for other
                                 // arguments (e.g. length(a.name) on strings/lists).
                                 if args.len() != 1 {
-                                    return Err(grafeo_common::utils::error::Error::Query(
+                                    return Err(grafeo_common::utils::error::Error::from(
                                         grafeo_common::utils::error::QueryError::semantic(
                                             "length() takes exactly one argument",
                                         ),
@@ -220,7 +220,7 @@ impl super::Planner {
                             Callee::Builtin(BuiltinFunction::Nodes | BuiltinFunction::Edges) => {
                                 // nodes(p) / edges(p) / relationships(p) returns path components
                                 if args.len() != 1 {
-                                    return Err(grafeo_common::utils::error::Error::Query(
+                                    return Err(grafeo_common::utils::error::Error::from(
                                         grafeo_common::utils::error::QueryError::semantic(format!(
                                             "{name}() takes exactly one argument"
                                         )),
@@ -257,7 +257,7 @@ impl super::Planner {
                                     });
                                     output_types.push(LogicalType::Any);
                                 } else {
-                                    return Err(grafeo_common::utils::error::Error::Query(
+                                    return Err(grafeo_common::utils::error::Error::from(
                                         grafeo_common::utils::error::QueryError::unsupported(
                                             format!("the argument of {name}() must be a variable"),
                                         ),

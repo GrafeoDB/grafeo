@@ -128,7 +128,7 @@ fn index_kind<G: grafeo_core::graph::GraphStore + ?Sized>(
         "btree" => Ok(Some((property, Some(IndexNameKindRecord::BTree)))),
         "text" => text_index_kind(index, wal).map(Some),
         "vector" => vector_index_kind(index, graph, wal),
-        other => Err(Error::Storage(StorageError::RecoveryFailed(format!(
+        other => Err(Error::from(StorageError::RecoveryFailed(format!(
             "the WAL {} defines the index '{}' of the unknown kind '{other}'",
             wal.display(),
             index.name

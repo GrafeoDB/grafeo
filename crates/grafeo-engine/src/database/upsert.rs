@@ -210,7 +210,7 @@ fn upsert_edges(
     }
     let (key_field, src_field, dst_field) = (&options.key, &options.src_field, &options.dst_field);
     if key_field == src_field || key_field == dst_field || src_field == dst_field {
-        return Err(Error::Query(QueryError::new(
+        return Err(Error::from(QueryError::new(
             QueryErrorKind::Semantic,
             format!(
                 "upsert: the key ({key_field}), source field ({src_field}) and target field \
@@ -391,7 +391,7 @@ fn quote(name: &str) -> String {
 
 fn check_name(what: &str, name: &str) -> Result<()> {
     if name.is_empty() {
-        return Err(Error::Query(QueryError::new(
+        return Err(Error::from(QueryError::new(
             QueryErrorKind::Semantic,
             format!("upsert: the {what} must not be empty"),
         )));

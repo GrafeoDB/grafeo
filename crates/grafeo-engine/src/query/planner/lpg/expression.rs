@@ -77,7 +77,7 @@ impl super::Planner {
                     }),
                     // An aggregate the planner did not group (`WHERE count(p)
                     // > 0` on a match): the evaluator has no value for it.
-                    Callee::Aggregate(_) => Err(Error::Query(QueryError::semantic(format!(
+                    Callee::Aggregate(_) => Err(Error::from(QueryError::semantic(format!(
                         "Aggregate function '{name}' cannot be used here: it needs a RETURN or WITH that groups rows"
                     )))),
                 }

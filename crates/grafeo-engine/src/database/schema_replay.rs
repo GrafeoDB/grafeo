@@ -193,7 +193,7 @@ fn tolerate_repeat(
 }
 
 fn replay_failed(record: &WalRecord, reason: &str) -> Error {
-    Error::Storage(StorageError::RecoveryFailed(format!(
+    Error::from(StorageError::RecoveryFailed(format!(
         "cannot replay WAL record {record:?}: {reason}"
     )))
 }

@@ -48,7 +48,7 @@ impl GqlTranslator {
                 // NULLIF(a, b) desugars to CASE WHEN a = b THEN NULL ELSE a END
                 if BuiltinFunction::from_name(name) == Some(BuiltinFunction::Nullif) {
                     if args.len() != 2 {
-                        return Err(Error::Query(QueryError::new(
+                        return Err(Error::from(QueryError::new(
                             QueryErrorKind::Semantic,
                             "NULLIF requires exactly 2 arguments",
                         )));

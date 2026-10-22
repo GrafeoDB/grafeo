@@ -136,7 +136,7 @@ impl GqlTranslator {
                 return Ok(false);
             };
             if aggregate.expression2.is_some() {
-                return Err(Error::Query(QueryError::new(
+                return Err(Error::from(QueryError::new(
                     QueryErrorKind::Unsupported,
                     format!(
                         "a binary set function over the group variable '{list_column}' is not \
@@ -584,7 +584,7 @@ impl GqlTranslator {
                     else_clause: else_expr,
                 })
             }
-            _ => Err(Error::Query(QueryError::new(
+            _ => Err(Error::from(QueryError::new(
                 QueryErrorKind::Unsupported,
                 "Unsupported expression wrapping an aggregate",
             ))),
@@ -697,7 +697,7 @@ impl GqlTranslator {
 
 /// A semantic error of a grouping query (see `translate_group_by`).
 fn grouping_error(message: String) -> Error {
-    Error::Query(QueryError::new(QueryErrorKind::Semantic, message))
+    Error::from(QueryError::new(QueryErrorKind::Semantic, message))
 }
 
 /// Whether the rows of `plan` hold `variable` as the edge list of a quantified

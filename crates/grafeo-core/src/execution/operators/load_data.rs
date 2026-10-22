@@ -199,12 +199,10 @@ impl LoadDataOperator {
     #[cfg(not(feature = "jsonl-import"))]
     fn next_jsonl(&mut self) -> OperatorResult {
         Err(OperatorError::from(
-            grafeo_common::utils::error::Error::Query(
-                grafeo_common::utils::error::QueryError::new(
-                    grafeo_common::utils::error::QueryErrorKind::Unsupported,
-                    "this build cannot load JSONL files (the `jsonl-import` feature)",
-                ),
-            ),
+            grafeo_common::utils::error::Error::from(grafeo_common::utils::error::QueryError::new(
+                grafeo_common::utils::error::QueryErrorKind::Unsupported,
+                "this build cannot load JSONL files (the `jsonl-import` feature)",
+            )),
         ))
     }
 
@@ -285,7 +283,7 @@ impl Operator for LoadDataOperator {
                 }
                 #[cfg(not(feature = "parquet-import"))]
                 Err(OperatorError::from(
-                    grafeo_common::utils::error::Error::Query(
+                    grafeo_common::utils::error::Error::from(
                         grafeo_common::utils::error::QueryError::new(
                             grafeo_common::utils::error::QueryErrorKind::Unsupported,
                             "this build cannot load Parquet files (the `parquet-import` feature)",

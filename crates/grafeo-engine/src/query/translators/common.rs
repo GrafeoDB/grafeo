@@ -61,7 +61,7 @@ pub(crate) fn expand_subquery_return_star(
         return Ok(());
     }
     let (Some(outer), Some(bound)) = (outer, ret.input.bound_variables(outer)) else {
-        return Err(Error::Query(QueryError::new(
+        return Err(Error::from(QueryError::new(
             QueryErrorKind::Unsupported,
             "RETURN * in this CALL subquery cannot tell which variables it binds: return them by name",
         )));
@@ -296,7 +296,7 @@ pub(crate) fn resolve_implicitly_grouped(
             } else {
                 key_texts.join(", ")
             };
-            return Err(Error::Query(QueryError::new(
+            return Err(Error::from(QueryError::new(
                 QueryErrorKind::Semantic,
                 format!(
                     "{clause} item {item} reads {name} beside an aggregate, but {name} is not \
@@ -489,7 +489,7 @@ pub(crate) fn check_sort_reads_projection(
         )
     };
     // The variable is out of scope: a name that resolves to nothing.
-    Err(Error::Query(QueryError::invalid_reference(message)))
+    Err(Error::from(QueryError::invalid_reference(message)))
 }
 
 /// The error for a `WITH` item that is an expression without a name. As in
@@ -497,7 +497,7 @@ pub(crate) fn check_sort_reads_projection(
 /// property read such as `n.name` does not keep `n`.
 #[cfg(any(feature = "gql", feature = "cypher"))]
 pub(crate) fn unaliased_with_expression() -> Error {
-    Error::Query(QueryError::new(
+    Error::from(QueryError::new(
         QueryErrorKind::Semantic,
         "Expression in WITH must be aliased (use AS)",
     ))
@@ -630,7 +630,7 @@ impl VarGen {
 #[cfg(any(feature = "gql", feature = "cypher", feature = "sql-pgq", test))]
 pub(crate) fn combine_with_and(predicates: Vec<LogicalExpression>) -> Result<LogicalExpression> {
     LogicalExpression::conjunction(predicates).ok_or_else(|| {
-        Error::Query(QueryError::new(
+        Error::from(QueryError::new(
             QueryErrorKind::Semantic,
             "Empty property predicate",
         ))
@@ -990,7 +990,7 @@ pub(crate) fn every_edge_matches(
 pub(crate) fn map_access(base: LogicalExpression, key: &str) -> Result<LogicalExpression> {
     if calls_an_aggregate(&base) {
         let base = crate::query::planner::common::expression_to_string(&base);
-        return Err(Error::Query(QueryError::new(
+        return Err(Error::from(QueryError::new(
             QueryErrorKind::Semantic,
             format!(
                 "{base} reads an aggregate, so .{key} cannot read from it in the same clause: \
@@ -1000,7 +1000,7 @@ pub(crate) fn map_access(base: LogicalExpression, key: &str) -> Result<LogicalEx
     }
     if !can_be_map(&base) {
         let base = crate::query::planner::common::expression_to_string(&base);
-        return Err(Error::Query(QueryError::new(
+        return Err(Error::from(QueryError::new(
             QueryErrorKind::Semantic,
             format!(
                 "{base} is not a map value, a node or an edge, so .{key} cannot read from it: \
@@ -2000,7 +2000,7 @@ pub(crate) fn check_branch_columns(operation: &str, branches: &[LogicalOperator]
             .zip(&columns)
             .any(|(a, b)| matches!((a, b), (Some(a), Some(b)) if a != b));
         if first.len() != columns.len() || names_conflict {
-            return Err(Error::Query(QueryError::new(
+            return Err(Error::from(QueryError::new(
                 QueryErrorKind::Semantic,
                 format!(
                     "All {operation} branches must return the same columns in the same order: \

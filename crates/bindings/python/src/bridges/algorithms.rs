@@ -31,7 +31,7 @@ struct KeyOrder {
 
 /// A `key=` that cannot order the nodes, as a `GrafeoError`.
 fn key_error(message: String) -> PyGrafeoError {
-    PyGrafeoError::from(Error::Query(QueryError::new(
+    PyGrafeoError::from(Error::from(QueryError::new(
         QueryErrorKind::Semantic,
         message,
     )))
@@ -218,7 +218,7 @@ impl PyAlgorithms {
     ) -> Result<Snapshot, PyGrafeoError> {
         if let Some(name) = projection {
             return db.projection(name).ok_or_else(|| {
-                PyGrafeoError::from(Error::Query(QueryError::new(
+                PyGrafeoError::from(Error::from(QueryError::new(
                     QueryErrorKind::Semantic,
                     format!("Projection '{name}' does not exist"),
                 )))

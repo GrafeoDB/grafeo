@@ -673,7 +673,7 @@ impl SparqlTranslator {
         // USING / USING NAMED is parsed but not executed yet; reject it instead
         // of evaluating the WHERE clause against the wrong dataset.
         if !using_clauses.is_empty() {
-            return Err(Error::Query(QueryError::new(
+            return Err(Error::from(QueryError::new(
                 QueryErrorKind::Unsupported,
                 "SPARQL Update USING / USING NAMED is not yet supported",
             )));
@@ -847,7 +847,7 @@ impl SparqlTranslator {
             ast::GraphTarget::Default => Ok(None),
             ast::GraphTarget::Named(iri) => Ok(Some(self.resolve_iri(iri))),
             ast::GraphTarget::AllNamed | ast::GraphTarget::All => {
-                Err(Error::Query(QueryError::new(
+                Err(Error::from(QueryError::new(
                     QueryErrorKind::Semantic,
                     "COPY, MOVE and ADD name one graph: DEFAULT or a graph IRI, not NAMED or ALL",
                 )))
@@ -1080,7 +1080,7 @@ impl SparqlTranslator {
                 Ok(plan.root)
             }
 
-            ast::GraphPattern::Service { .. } => Err(Error::Query(QueryError::new(
+            ast::GraphPattern::Service { .. } => Err(Error::from(QueryError::new(
                 QueryErrorKind::Unsupported,
                 "SPARQL SERVICE (federated queries) is not yet supported",
             ))),
@@ -1328,7 +1328,7 @@ impl SparqlTranslator {
                 "http://www.w3.org/1999/02/22-rdf-syntax-ns#type".to_string(),
             )),
             // Complex property paths are not fully supported yet
-            _ => Err(Error::Query(QueryError::new(
+            _ => Err(Error::from(QueryError::new(
                 QueryErrorKind::Unsupported,
                 "Complex property paths not yet supported",
             ))),
@@ -2265,7 +2265,7 @@ impl SparqlTranslator {
                 .map(|p| self.translate_path_step(p))
                 .collect::<Result<Vec<_>>>()
                 .map(PathStep::Alternative),
-            _ => Err(Error::Query(QueryError::new(
+            _ => Err(Error::from(QueryError::new(
                 QueryErrorKind::Unsupported,
                 "Repeated property paths support IRIs, inverse, sequence and alternative; nested quantifiers and negated sets are not supported",
             ))),

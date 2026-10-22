@@ -79,7 +79,7 @@ fn statement_graph(statement: &ast::Statement) -> Result<Option<String>> {
             let left = &set_op.left.graph_table.graph_name;
             let right = &set_op.right.graph_table.graph_name;
             if left != right {
-                return Err(Error::Query(QueryError::unsupported(
+                return Err(Error::from(QueryError::unsupported(
                     "a set operation reads one graph: the GRAPH_TABLE of each side names another graph",
                 )));
             }
@@ -353,7 +353,7 @@ impl SqlPgqTranslator {
                         .filter(|name| !grouping_keys.contains(*name))
                         .min()
                     {
-                        Some(column) => Err(Error::Query(QueryError::new(
+                        Some(column) => Err(Error::from(QueryError::new(
                             QueryErrorKind::Semantic,
                             format!(
                                 "SELECT item {} reads {column}, which is neither \
@@ -643,7 +643,7 @@ impl SqlPgqTranslator {
         }
 
         plan.ok_or_else(|| {
-            Error::Query(QueryError::new(
+            Error::from(QueryError::new(
                 QueryErrorKind::Semantic,
                 "Empty MATCH pattern",
             ))
@@ -660,7 +660,7 @@ impl SqlPgqTranslator {
             ast::Pattern::Path(path) => self.translate_path_pattern(path, input),
             ast::Pattern::Quantified { .. }
             | ast::Pattern::Union(_)
-            | ast::Pattern::MultisetUnion(_) => Err(Error::Query(QueryError::new(
+            | ast::Pattern::MultisetUnion(_) => Err(Error::from(QueryError::new(
                 QueryErrorKind::Semantic,
                 "SQL/PGQ does not support quantified or union patterns",
             ))),
@@ -821,7 +821,7 @@ impl SqlPgqTranslator {
     fn reject_column_aggregates(columns: &ast::ColumnsClause) -> Result<()> {
         for col in &columns.items {
             if let Some(aggregate) = first_aggregate(&col.expression) {
-                return Err(Error::Query(QueryError::new(
+                return Err(Error::from(QueryError::new(
                     QueryErrorKind::Semantic,
                     format!(
                         "aggregate {aggregate} in the COLUMNS of GRAPH_TABLE (column \
@@ -1320,15 +1320,15 @@ impl SqlPgqTranslator {
                     .collect::<Result<Vec<_>>>()?;
                 Ok(LogicalExpression::Map(entries))
             }
-            ast::Expression::ExistsSubquery { .. } => Err(Error::Query(QueryError::new(
+            ast::Expression::ExistsSubquery { .. } => Err(Error::from(QueryError::new(
                 QueryErrorKind::Unsupported,
                 "EXISTS subquery not supported in SQL/PGQ",
             ))),
-            ast::Expression::CountSubquery { .. } => Err(Error::Query(QueryError::new(
+            ast::Expression::CountSubquery { .. } => Err(Error::from(QueryError::new(
                 QueryErrorKind::Unsupported,
                 "COUNT subquery not supported in SQL/PGQ",
             ))),
-            ast::Expression::ValueSubquery { .. } => Err(Error::Query(QueryError::new(
+            ast::Expression::ValueSubquery { .. } => Err(Error::from(QueryError::new(
                 QueryErrorKind::Unsupported,
                 "VALUE subquery not supported in SQL/PGQ",
             ))),
@@ -1364,7 +1364,7 @@ impl SqlPgqTranslator {
             ast::Expression::LetIn { .. }
             | ast::Expression::ListComprehension { .. }
             | ast::Expression::ListPredicate { .. }
-            | ast::Expression::Reduce { .. } => Err(Error::Query(QueryError::new(
+            | ast::Expression::Reduce { .. } => Err(Error::from(QueryError::new(
                 QueryErrorKind::Unsupported,
                 "This expression type is not supported in SQL/PGQ",
             ))),
@@ -1462,7 +1462,7 @@ impl SqlPgqTranslator {
         cpg: &ast::CreatePropertyGraphStatement,
     ) -> Result<LogicalPlan> {
         let semantic =
-            |message: String| Error::Query(QueryError::new(QueryErrorKind::Semantic, message));
+            |message: String| Error::from(QueryError::new(QueryErrorKind::Semantic, message));
         let mut tables: HashSet<&str> = HashSet::new();
         for name in cpg
             .node_tables
@@ -1531,14 +1531,14 @@ impl SqlPgqTranslator {
             }
             for (column, reference) in &references {
                 let Some(target) = node_table(&reference.table) else {
-                    return Err(Error::Query(QueryError::invalid_reference(format!(
+                    return Err(Error::from(QueryError::invalid_reference(format!(
                         "Edge table '{}': column '{}' references '{}', which is no node table \
                          of property graph '{}'",
                         table.name, column.name, reference.table, cpg.name
                     ))));
                 };
                 if !target.columns.iter().any(|c| c.name == reference.column) {
-                    return Err(Error::Query(QueryError::invalid_reference(format!(
+                    return Err(Error::from(QueryError::invalid_reference(format!(
                         "Edge table '{}': column '{}' references '{}({})', a column node table \
                          '{}' does not have",
                         table.name, column.name, reference.table, reference.column, reference.table
@@ -1546,7 +1546,7 @@ impl SqlPgqTranslator {
                 }
             }
             if let Some(column) = table.columns.iter().find(|c| c.primary_key) {
-                return Err(Error::Query(QueryError::unsupported(format!(
+                return Err(Error::from(QueryError::unsupported(format!(
                     "Edge table '{}': a PRIMARY KEY on an edge table (column '{}') is not \
                      supported; an edge is identified by its endpoints",
                     table.name, column.name
@@ -1660,7 +1660,7 @@ fn wrap_offset_and_limit(
 ) -> Result<LogicalOperator> {
     let count = |value: u64, clause: &str| {
         usize::try_from(value).map_err(|_| {
-            Error::Query(QueryError::new(
+            Error::from(QueryError::new(
                 QueryErrorKind::Semantic,
                 format!("{clause} {value} is larger than this platform can count"),
             ))

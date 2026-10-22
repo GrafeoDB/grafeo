@@ -47,7 +47,7 @@ impl GqlTranslator {
             ast::Pattern::Quantified { .. }
             | ast::Pattern::Union(_)
             | ast::Pattern::MultisetUnion(_) => {
-                return Err(Error::Query(QueryError::new(
+                return Err(Error::from(QueryError::new(
                     QueryErrorKind::Semantic,
                     "MERGE does not support quantified or union patterns",
                 )));
@@ -86,7 +86,7 @@ impl GqlTranslator {
             .iter()
             .map(|assignment| {
                 if assignment.variable != variable {
-                    return Err(Error::Query(QueryError::new(
+                    return Err(Error::from(QueryError::new(
                         QueryErrorKind::Unsupported,
                         format!(
                             "MERGE ... {clause} SET sets {}, but can only set the element the \
@@ -120,7 +120,7 @@ impl GqlTranslator {
         input: LogicalOperator,
     ) -> Result<LogicalOperator> {
         let semantic =
-            |message: &str| Error::Query(QueryError::new(QueryErrorKind::Semantic, message));
+            |message: &str| Error::from(QueryError::new(QueryErrorKind::Semantic, message));
         for edge in &path.edges {
             match edge.types.as_slice() {
                 [_] => {}
@@ -168,7 +168,7 @@ impl GqlTranslator {
         let outer_names = input
             .bound_variables(self.call_scope.borrow().as_ref())
             .ok_or_else(|| {
-                Error::Query(QueryError::unsupported(
+                Error::from(QueryError::unsupported(
                     "MERGE cannot tell which variables the rows before it bind here; name them \
                      in a RETURN ... NEXT or a WITH before the MERGE",
                 ))
@@ -339,7 +339,7 @@ impl GqlTranslator {
                 ast::Pattern::Quantified { .. }
                 | ast::Pattern::Union(_)
                 | ast::Pattern::MultisetUnion(_) => {
-                    return Err(Error::Query(QueryError::new(
+                    return Err(Error::from(QueryError::new(
                         QueryErrorKind::Semantic,
                         "CREATE does not support quantified or union patterns",
                     )));
@@ -853,7 +853,7 @@ pub(super) fn insert_endpoint(
     let declares = !node.labels.is_empty() || !node.properties.is_empty();
     if bound.contains(variable) {
         if declares {
-            return Err(Error::Query(QueryError::new(
+            return Err(Error::from(QueryError::new(
                 QueryErrorKind::Semantic,
                 format!(
                     "INSERT cannot add labels or properties to the bound variable '{variable}': \
@@ -978,7 +978,7 @@ pub(super) fn different_edges(patterns: &[&ast::Pattern]) -> Result<Option<Logic
                 collect(pattern, single_edge, seen, edges)?;
             }
             ast::Pattern::Union(_) | ast::Pattern::MultisetUnion(_) => {
-                return Err(Error::Query(QueryError::new(
+                return Err(Error::from(QueryError::new(
                     QueryErrorKind::Unsupported,
                     "DIFFERENT EDGES is not supported for a union of path patterns",
                 )));

@@ -60,15 +60,13 @@ struct TripleOperands {
 fn check_mutation_graph(graph_name: Option<&str>) -> std::result::Result<(), OperatorError> {
     match graph_name {
         Some(name) if name.starts_with('?') => Err(OperatorError::from(
-            grafeo_common::utils::error::Error::Query(
-                grafeo_common::utils::error::QueryError::new(
-                    grafeo_common::utils::error::QueryErrorKind::Semantic,
-                    format!(
-                        "SPARQL Update cannot target a variable graph ({name}); use a concrete \
+            grafeo_common::utils::error::Error::from(grafeo_common::utils::error::QueryError::new(
+                grafeo_common::utils::error::QueryErrorKind::Semantic,
+                format!(
+                    "SPARQL Update cannot target a variable graph ({name}); use a concrete \
                          graph IRI or a WITH clause"
-                    ),
                 ),
-            ),
+            )),
         )),
         _ => Ok(()),
     }
@@ -342,7 +340,7 @@ impl RdfPlanner {
                     TripleComponent::Iri(iri) => iri.clone(),
                     TripleComponent::Literal(Value::String(iri)) => iri.to_string(),
                     _ => {
-                        return Err(Error::Query(QueryError::new(
+                        return Err(Error::from(QueryError::new(
                             QueryErrorKind::Semantic,
                             "A path graph must be an IRI or variable",
                         )));

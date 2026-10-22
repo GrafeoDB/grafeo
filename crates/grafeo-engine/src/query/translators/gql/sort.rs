@@ -170,7 +170,7 @@ impl GqlTranslator {
                     *distinct,
                 )
             }
-            other if contains_aggregate(other) => Err(Error::Query(QueryError::new(
+            other if contains_aggregate(other) => Err(Error::from(QueryError::new(
                 QueryErrorKind::Semantic,
                 format!(
                     "Invalid use of an aggregating function in ORDER BY: {text} is not an \

@@ -20,12 +20,12 @@ use std::collections::HashSet;
 
 /// Creates a semantic binding error.
 fn binding_error(message: impl Into<String>) -> Error {
-    Error::Query(QueryError::new(QueryErrorKind::Semantic, message))
+    Error::from(QueryError::new(QueryErrorKind::Semantic, message))
 }
 
 /// Creates a semantic binding error with a hint.
 fn binding_error_with_hint(message: impl Into<String>, hint: impl Into<String>) -> Error {
-    Error::Query(QueryError::new(QueryErrorKind::Semantic, message).with_hint(hint))
+    Error::from(QueryError::new(QueryErrorKind::Semantic, message).with_hint(hint))
 }
 
 /// What a pattern binds a variable to.
@@ -58,7 +58,7 @@ fn undefined_variable_error(variable: &str, context: &BindingContext, suffix: &s
     let candidates_ref: Vec<&str> = candidates.iter().map(|s| s.as_str()).collect();
 
     let error = QueryError::invalid_reference(format!("Undefined variable '{variable}'{suffix}"));
-    Error::Query(match find_similar(variable, &candidates_ref) {
+    Error::from(match find_similar(variable, &candidates_ref) {
         Some(suggestion) => error.with_hint(format_suggestion(suggestion)),
         None => error,
     })

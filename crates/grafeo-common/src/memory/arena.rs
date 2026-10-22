@@ -69,7 +69,7 @@ impl From<AllocError> for crate::Error {
     fn from(e: AllocError) -> Self {
         match e {
             AllocError::OutOfMemory | AllocError::InsufficientSpace => {
-                crate::Error::Storage(crate::utils::error::StorageError::Full)
+                crate::Error::from(crate::utils::error::StorageError::Full)
             }
             AllocError::EpochNotFound(id) => {
                 crate::Error::Internal(format!("epoch {id} not found in arena allocator"))

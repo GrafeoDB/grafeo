@@ -85,7 +85,7 @@ pub(crate) fn replay<S: RootStore>(
     while let Some(mut group) = scan.next_group().map_err(Error::from)? {
         let start = group.start_lsn();
         let failed = |reason: String| {
-            Error::Storage(StorageError::RecoveryFailed(format!(
+            Error::from(StorageError::RecoveryFailed(format!(
                 "cannot replay the group at log position {start} of the WAL {}: {reason}",
                 dir.display()
             )))
@@ -396,7 +396,10 @@ mod tests {
         }
         let store = Arc::new(RowGroupStore::new());
         let error = replay_into(dir.path(), 0, &store, &Catalog::new()).unwrap_err();
-        let Error::Storage(StorageError::RecoveryFailed(message)) = &error else {
+        let Error::Storage(storage) = &error else {
+            panic!("not a storage error: {error}");
+        };
+        let StorageError::RecoveryFailed(message) = &**storage else {
             panic!("not a recovery failure: {error}");
         };
         assert!(

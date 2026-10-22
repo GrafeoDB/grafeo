@@ -87,7 +87,7 @@ pub(crate) fn check_aggregate_call(
 
 /// A semantic error with `message`.
 fn semantic(message: String) -> Error {
-    Error::Query(QueryError::new(QueryErrorKind::Semantic, message))
+    Error::from(QueryError::new(QueryErrorKind::Semantic, message))
 }
 
 /// Checks a call to the function `name` with `arguments` arguments: an
@@ -111,7 +111,7 @@ pub(crate) fn check_function_call(name: &str, arguments: usize) -> Result<()> {
             "Function '{name}' takes {arity}, got {arguments}"
         ))),
         FunctionSupport::NeedsFeature(feature) => {
-            Err(Error::Query(QueryError::unsupported(format!(
+            Err(Error::from(QueryError::unsupported(format!(
                 "Function '{name}' is not available in this build: it needs the '{feature}' \
                  feature"
             ))))
@@ -121,7 +121,7 @@ pub(crate) fn check_function_call(name: &str, arguments: usize) -> Result<()> {
                 .chain(AggregateFunction::ALIASES.iter().map(|&(alias, _)| alias))
                 .collect();
             let error = QueryError::invalid_reference(format!("Unknown function '{name}'"));
-            Err(Error::Query(match find_similar(name, &known) {
+            Err(Error::from(match find_similar(name, &known) {
                 Some(similar) => error.with_hint(format_suggestion(similar)),
                 None => error,
             }))
@@ -148,7 +148,7 @@ pub(crate) fn resolve_call(
         None => {
             check_function_call(name, args.len())?;
             let function = BuiltinFunction::from_name(name).ok_or_else(|| {
-                Error::Query(QueryError::invalid_reference(format!(
+                Error::from(QueryError::invalid_reference(format!(
                     "Unknown function '{name}'"
                 )))
             })?;
@@ -180,7 +180,7 @@ pub(crate) fn check_pattern_match(op: BinaryOp, pattern: &LogicalExpression) -> 
         _ => return Ok(()),
     };
     if !REGEX_SUPPORT {
-        return Err(Error::Query(QueryError::unsupported(format!(
+        return Err(Error::from(QueryError::unsupported(format!(
             "{operator} needs regular expressions, and this build has no regular expressions: \
              it needs the 'regex' or 'regex-lite' feature"
         ))));

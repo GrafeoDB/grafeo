@@ -720,7 +720,7 @@ fn clone_pair((key, value): (&PropertyKey, &Value)) -> (PropertyKey, Value) {
 
 /// The error a read the store does not support returns.
 fn unsupported(what: &str) -> grafeo_common::utils::error::Error {
-    grafeo_common::utils::error::Error::Query(grafeo_common::utils::error::QueryError::unsupported(
+    grafeo_common::utils::error::Error::from(grafeo_common::utils::error::QueryError::unsupported(
         format!("this store does not support {what}"),
     ))
 }

@@ -660,15 +660,18 @@ fn with_migration_context(path: &Path, error: Error) -> Error {
             corruption.what = format!("while migrating it to the 0.6 format: {}", corruption.what);
             Error::Corruption(corruption).in_file(path)
         }
-        Error::Storage(StorageError::InvalidWalEntry(message)) => {
-            Error::Storage(StorageError::InvalidWalEntry(context(&message)))
-        }
-        Error::Storage(StorageError::RecoveryFailed(message)) => {
-            Error::Storage(StorageError::RecoveryFailed(context(&message)))
-        }
-        Error::Storage(StorageError::CheckpointFailed(message)) => {
-            Error::Storage(StorageError::CheckpointFailed(context(&message)))
-        }
+        Error::Storage(storage) => Error::from(match *storage {
+            StorageError::InvalidWalEntry(message) => {
+                StorageError::InvalidWalEntry(context(&message))
+            }
+            StorageError::RecoveryFailed(message) => {
+                StorageError::RecoveryFailed(context(&message))
+            }
+            StorageError::CheckpointFailed(message) => {
+                StorageError::CheckpointFailed(context(&message))
+            }
+            other => other,
+        }),
         other => other,
     }
 }
@@ -1258,9 +1261,9 @@ mod tests {
             ),
             "{corrupt:?}"
         );
-        let full = with_migration_context(path, Error::Storage(StorageError::Full));
+        let full = with_migration_context(path, Error::from(StorageError::Full));
         assert!(
-            matches!(full, Error::Storage(StorageError::Full)),
+            matches!(&full, Error::Storage(storage) if matches!(**storage, StorageError::Full)),
             "an error without a message stays as it is: {full:?}"
         );
     }

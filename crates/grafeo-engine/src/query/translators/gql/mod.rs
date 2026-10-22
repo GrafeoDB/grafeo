@@ -56,11 +56,11 @@ pub enum GqlTranslationResult {
 pub fn translate(query: &str) -> Result<LogicalPlan> {
     match translate_full(query)? {
         GqlTranslationResult::Plan(plan) => Ok(plan),
-        GqlTranslationResult::SessionCommand(_) => Err(Error::Query(QueryError::new(
+        GqlTranslationResult::SessionCommand(_) => Err(Error::from(QueryError::new(
             QueryErrorKind::Unsupported,
             "Session commands cannot be executed as queries",
         ))),
-        GqlTranslationResult::SchemaCommand(_) => Err(Error::Query(QueryError::new(
+        GqlTranslationResult::SchemaCommand(_) => Err(Error::from(QueryError::new(
             QueryErrorKind::Unsupported,
             "Schema DDL commands cannot be executed as queries",
         ))),
@@ -1157,7 +1157,7 @@ impl GqlTranslator {
                 Ok(CountExpr::Literal(n))
             }
             ast::Expression::Parameter(name) => Ok(CountExpr::Parameter(name.clone())),
-            _ => Err(Error::Query(QueryError::new(
+            _ => Err(Error::from(QueryError::new(
                 QueryErrorKind::Semantic,
                 "Expected integer literal or parameter for SKIP/LIMIT",
             ))),
@@ -1460,7 +1460,7 @@ impl GqlTranslator {
         }
 
         let mut result = plan.ok_or_else(|| {
-            Error::Query(QueryError::new(
+            Error::from(QueryError::new(
                 QueryErrorKind::Semantic,
                 "Empty MATCH clause",
             ))
@@ -1909,7 +1909,7 @@ impl GqlTranslator {
         let any = matches!(search.selection, plan::PathSelection::Any(_));
         let what = if any { "an ANY" } else { "a shortest" };
         let ast::Pattern::Path(path) = pattern else {
-            return Err(Error::Query(QueryError::new(
+            return Err(Error::from(QueryError::new(
                 QueryErrorKind::Unsupported,
                 format!(
                     "{what} path search over a parenthesized, alternated or node-only path \
@@ -1920,7 +1920,7 @@ impl GqlTranslator {
         let edge = match path.edges.as_slice() {
             [edge] => edge,
             [] => {
-                return Err(Error::Query(QueryError::new(
+                return Err(Error::from(QueryError::new(
                     QueryErrorKind::Semantic,
                     format!("{what} path search needs an edge pattern between two nodes"),
                 )));
@@ -1928,7 +1928,7 @@ impl GqlTranslator {
             // Only the first edge pattern would be searched, and the nodes
             // between the edge patterns ignored
             _ => {
-                return Err(Error::Query(QueryError::new(
+                return Err(Error::from(QueryError::new(
                     QueryErrorKind::Unsupported,
                     format!("{what} path search over more than one edge pattern is not supported"),
                 )));
@@ -1962,7 +1962,7 @@ impl GqlTranslator {
         // checks for each edge like the edge pattern's own conditions
         let bound_edge = edge.variable.as_ref().filter(|name| bound.contains(*name));
         if let (Some(name), true) = (bound_edge, quantified) {
-            return Err(Error::Query(QueryError::new(
+            return Err(Error::from(QueryError::new(
                 QueryErrorKind::Semantic,
                 format!(
                     "'{name}' is bound to one edge before, so a quantified edge pattern cannot \
@@ -2176,7 +2176,7 @@ impl GqlTranslator {
         input: LogicalOperator,
     ) -> Result<LogicalOperator> {
         if delete.targets.is_empty() {
-            return Err(Error::Query(QueryError::new(
+            return Err(Error::from(QueryError::new(
                 QueryErrorKind::Semantic,
                 "DELETE requires at least one target",
             )));
@@ -2236,7 +2236,7 @@ impl GqlTranslator {
         input: LogicalOperator,
     ) -> Result<LogicalOperator> {
         if set.assignments.is_empty() {
-            return Err(Error::Query(QueryError::new(
+            return Err(Error::from(QueryError::new(
                 QueryErrorKind::Semantic,
                 "SET requires at least one assignment",
             )));
@@ -2282,7 +2282,7 @@ impl GqlTranslator {
     /// as `INSERT (a) INSERT (b) RETURN a, b`.
     fn insert_chain(&self, patterns: &[ast::Pattern]) -> Result<LogicalOperator> {
         if patterns.is_empty() {
-            return Err(Error::Query(QueryError::new(
+            return Err(Error::from(QueryError::new(
                 QueryErrorKind::Semantic,
                 "Empty INSERT statement",
             )));
@@ -2328,7 +2328,7 @@ impl GqlTranslator {
                 ast::Pattern::Quantified { .. }
                 | ast::Pattern::Union(_)
                 | ast::Pattern::MultisetUnion(_) => {
-                    return Err(Error::Query(QueryError::new(
+                    return Err(Error::from(QueryError::new(
                         QueryErrorKind::Semantic,
                         "INSERT does not support quantified or union patterns",
                     )));
@@ -2337,7 +2337,7 @@ impl GqlTranslator {
         }
 
         if elements.is_empty() {
-            return Err(Error::Query(QueryError::new(
+            return Err(Error::from(QueryError::new(
                 QueryErrorKind::Semantic,
                 "INSERT must create at least one node",
             )));

@@ -326,7 +326,7 @@ impl QueryProcessor {
             }
             #[cfg(not(feature = "triple-store"))]
             {
-                Err(grafeo_common::utils::error::Error::Query(
+                Err(grafeo_common::utils::error::Error::from(
                     grafeo_common::utils::error::QueryError::unsupported(
                         "this build has no RDF support (the `triple-store` feature)",
                     ),
@@ -1147,7 +1147,7 @@ fn resolve_count_param(
 
     if let CountExpr::Parameter(name) = count {
         let value = params.get(name.as_str()).ok_or_else(|| {
-            Error::Query(QueryError::invalid_reference(format!(
+            Error::from(QueryError::invalid_reference(format!(
                 "Missing parameter for SKIP/LIMIT: ${name}"
             )))
         })?;
@@ -1156,13 +1156,13 @@ fn resolve_count_param(
             #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
             Value::Int64(i) if *i >= 0 => *i as usize,
             Value::Int64(i) => {
-                return Err(Error::Query(QueryError::new(
+                return Err(Error::from(QueryError::new(
                     QueryErrorKind::NegativeLimit,
                     format!("SKIP/LIMIT parameter ${name} must be non-negative, got {i}"),
                 )));
             }
             other => {
-                return Err(Error::Query(QueryError::new(
+                return Err(Error::from(QueryError::new(
                     QueryErrorKind::InvalidValueType,
                     format!("SKIP/LIMIT parameter ${name} must be an integer, got {other:?}"),
                 )));
@@ -1182,7 +1182,7 @@ fn substitute_in_expression(expr: &mut LogicalExpression, params: &QueryParams) 
             if let Some(value) = params.get(name) {
                 *expr = LogicalExpression::Literal(value.clone());
             } else {
-                return Err(Error::Query(grafeo_common::utils::error::QueryError::new(
+                return Err(Error::from(grafeo_common::utils::error::QueryError::new(
                     grafeo_common::utils::error::QueryErrorKind::InvalidReference,
                     format!("Missing parameter: ${name}"),
                 )));

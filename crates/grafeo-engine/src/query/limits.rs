@@ -64,7 +64,7 @@ pub(crate) fn check_partial_plan_depth(plan: &mut LogicalOperator) -> Result<()>
 /// The error of a statement whose plan nests deeper than
 /// [`MAX_PLAN_DEPTH`].
 pub(crate) fn plan_depth_error() -> Error {
-    Error::Query(QueryError::new(
+    Error::from(QueryError::new(
         QueryErrorKind::Semantic,
         format!(
             "the statement nests deeper than the plan depth limit of {MAX_PLAN_DEPTH} levels: \

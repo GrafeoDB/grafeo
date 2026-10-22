@@ -130,7 +130,7 @@ impl Executor {
     /// The error of a query that ran past its deadline, naming the limit
     /// when the executor knows it.
     fn timeout_error(&self) -> Error {
-        Error::Query(match self.query_timeout {
+        Error::from(match self.query_timeout {
             Some(d) => QueryError::timeout_with_limit(d),
             None => QueryError::timeout(),
         })
@@ -346,11 +346,11 @@ impl Default for Executor {
 /// an internal error, and an error raised below the operator keeps its own.
 pub(crate) fn convert_operator_error(err: OperatorError) -> Error {
     match err {
-        OperatorError::TypeMismatch { expected, found } => Error::TypeMismatch { expected, found },
+        OperatorError::TypeMismatch { expected, found } => Error::type_mismatch(expected, found),
         // A column an operator expects and its input lacks: the planner
         // and the operator disagree, a bug.
         OperatorError::ColumnNotFound(name) => Error::Internal(format!("Column not found: {name}")),
-        OperatorError::Execution(msg) => Error::Query(QueryError::new(
+        OperatorError::Execution(msg) => Error::from(QueryError::new(
             grafeo_common::utils::error::QueryErrorKind::Execution,
             msg,
         )),
@@ -361,16 +361,19 @@ pub(crate) fn convert_operator_error(err: OperatorError) -> Error {
         OperatorError::ConstraintViolation(ConstraintKind::Limit, message) => {
             Error::InvalidValue(format!("Constraint violation: {message}"))
         }
-        OperatorError::ConstraintViolation(kind, message) => Error::Constraint { kind, message },
+        OperatorError::ConstraintViolation(kind, message) => Error::Constraint {
+            kind,
+            message: message.into(),
+        },
         OperatorError::InvalidValue(msg) => Error::InvalidValue(msg),
         OperatorError::WriteConflict(msg) => {
             Error::Transaction(grafeo_common::utils::error::TransactionError::WriteConflict(msg))
         }
-        OperatorError::LimitExceeded(msg) => Error::Query(QueryError::new(
+        OperatorError::LimitExceeded(msg) => Error::from(QueryError::new(
             grafeo_common::utils::error::QueryErrorKind::Execution,
             msg,
         )),
-        OperatorError::Timeout => Error::Query(QueryError::timeout()),
+        OperatorError::Timeout => Error::from(QueryError::timeout()),
         _ => Error::Internal(format!("{err}")),
     }
 }
@@ -671,7 +674,13 @@ mod tests {
             expected: "Int64".to_string(),
             found: "String".to_string(),
         });
-        assert!(matches!(err, Error::TypeMismatch { .. }));
+        let Error::TypeMismatch(mismatch) = &err else {
+            panic!("a type mismatch, got {err:?}");
+        };
+        assert_eq!(
+            (mismatch.expected.as_str(), mismatch.found.as_str()),
+            ("Int64", "String")
+        );
 
         let err = convert_operator_error(OperatorError::ColumnNotFound("col_x".to_string()));
         assert!(matches!(err, Error::Internal(_)));

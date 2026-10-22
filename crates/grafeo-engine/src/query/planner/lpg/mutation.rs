@@ -806,7 +806,7 @@ impl super::Planner {
 
         // Look up the procedure
         let procedure = registry.get(&call.name).ok_or_else(|| {
-            grafeo_common::utils::error::Error::Query(
+            grafeo_common::utils::error::Error::from(
                 grafeo_common::utils::error::QueryError::invalid_reference(format!(
                     "unknown procedure '{}'; CALL grafeo.procedures() lists the procedures",
                     call.name.join(".")
@@ -911,19 +911,19 @@ impl super::Planner {
         expression: &LogicalExpression,
     ) -> Result<Value> {
         let semantic =
-            |message: String| Error::Query(QueryError::new(QueryErrorKind::Semantic, message));
+            |message: String| Error::from(QueryError::new(QueryErrorKind::Semantic, message));
         let reads = match first_non_constant(expression, &mut Vec::new()) {
             None => None,
             Some(NonConstant::Row(variable)) => Some(format!("the variable '{variable}'")),
             Some(NonConstant::Graph) => Some("the graph (a subquery or a pattern)".to_string()),
             Some(NonConstant::Parameter(name)) => {
-                return Err(Error::Query(QueryError::invalid_reference(format!(
+                return Err(Error::from(QueryError::invalid_reference(format!(
                     "Missing parameter: ${name}"
                 ))));
             }
         };
         if let Some(reads) = reads {
-            return Err(Error::Query(QueryError::unsupported(format!(
+            return Err(Error::from(QueryError::unsupported(format!(
                 "Argument '{argument}' of {procedure} reads {reads}: a procedure argument must \
                  be a constant (a literal, a parameter or an expression of them)"
             ))));
@@ -966,7 +966,7 @@ impl super::Planner {
         {
             return Ok(projection as Arc<dyn grafeo_core::graph::GraphStore>);
         }
-        Err(Error::Query(QueryError::invalid_reference(format!(
+        Err(Error::from(QueryError::invalid_reference(format!(
             "Projection '{name}' does not exist"
         ))))
     }
@@ -988,7 +988,7 @@ impl super::Planner {
                     .iter()
                     .position(|c| c == &item.field_name)
                     .ok_or_else(|| {
-                        grafeo_common::utils::error::Error::Query(
+                        grafeo_common::utils::error::Error::from(
                             grafeo_common::utils::error::QueryError::invalid_reference(format!(
                                 "YIELD column '{}' is no column of the procedure (it has: {})",
                                 item.field_name,
@@ -1036,7 +1036,7 @@ impl super::Planner {
 
         // Validate argument count
         if call.arguments.len() != proc_def.params.len() {
-            return Err(grafeo_common::utils::error::Error::Query(
+            return Err(grafeo_common::utils::error::Error::from(
                 grafeo_common::utils::error::QueryError::semantic(format!(
                     "procedure '{}' takes {} arguments, the call gives {}",
                     proc_def.name,
@@ -1356,7 +1356,7 @@ impl super::Planner {
             .iter()
             .map(|(name, expr)| {
                 let source = self.row_property_source(expr, columns).map_err(|e| {
-                    Error::Query(QueryError::new(
+                    Error::from(QueryError::new(
                         QueryErrorKind::Semantic,
                         format!("Cannot evaluate the value of property '{name}': {e}"),
                     ))

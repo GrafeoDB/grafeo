@@ -505,7 +505,7 @@ impl super::GrafeoDB {
                 ef_construction,
                 quantization,
             );
-            Err(Error::Query(
+            Err(Error::from(
                 grafeo_common::utils::error::QueryError::unsupported(
                     "this build has no vector indexes (the `vector-index` feature)",
                 ),

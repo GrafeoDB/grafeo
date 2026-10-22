@@ -52,7 +52,7 @@ pub enum CypherTranslationResult {
 pub fn translate(query: &str) -> Result<LogicalPlan> {
     match translate_full(query)? {
         CypherTranslationResult::Plan(plan) => Ok(plan),
-        _ => Err(Error::Query(QueryError::new(
+        _ => Err(Error::from(QueryError::new(
             QueryErrorKind::Unsupported,
             "Schema commands cannot be translated to a logical plan",
         ))),
@@ -163,15 +163,15 @@ impl CypherTranslator {
             ast::Statement::Query(query) => self.translate_query(query),
             ast::Statement::Create(create) => self.translate_create_statement(create),
             ast::Statement::Merge(merge) => self.translate_merge_statement(merge),
-            ast::Statement::Delete(_) => Err(Error::Query(QueryError::new(
+            ast::Statement::Delete(_) => Err(Error::from(QueryError::new(
                 QueryErrorKind::Semantic,
                 "Standalone DELETE requires a preceding MATCH clause. Use: MATCH (n) WHERE ... DELETE n",
             ))),
-            ast::Statement::Set(_) => Err(Error::Query(QueryError::new(
+            ast::Statement::Set(_) => Err(Error::from(QueryError::new(
                 QueryErrorKind::Semantic,
                 "Standalone SET requires a preceding MATCH clause. Use: MATCH (n) WHERE ... SET n.prop = value",
             ))),
-            ast::Statement::Remove(_) => Err(Error::Query(QueryError::new(
+            ast::Statement::Remove(_) => Err(Error::from(QueryError::new(
                 QueryErrorKind::Semantic,
                 "Standalone REMOVE requires a preceding MATCH clause. Use: MATCH (n) WHERE ... REMOVE n.prop",
             ))),
@@ -238,7 +238,7 @@ impl CypherTranslator {
         if let Some(ast::Clause::CallSubquery { query: inner, .. }) = query.clauses.last()
             && returns_rows(inner)
         {
-            return Err(Error::Query(QueryError::new(
+            return Err(Error::from(QueryError::new(
                 QueryErrorKind::Semantic,
                 concat!(
                     "Query cannot conclude with CALL (must be a RETURN clause, an update clause, ",
@@ -252,9 +252,8 @@ impl CypherTranslator {
             plan = Some(self.translate_clause(clause, plan)?);
         }
 
-        let root = plan.ok_or_else(|| {
-            Error::Query(QueryError::new(QueryErrorKind::Semantic, "Empty query"))
-        })?;
+        let root = plan
+            .ok_or_else(|| Error::from(QueryError::new(QueryErrorKind::Semantic, "Empty query")))?;
         // A query that ends with an update has no result (openCypher).
         if query.clauses.last().is_some_and(ends_without_result) {
             return Ok(LogicalPlan::new(no_result(root)));
@@ -480,7 +479,7 @@ impl CypherTranslator {
         });
         self.call_scope.replace(enclosing);
         let mut inner_plan = translated?.ok_or_else(|| {
-            Error::Query(QueryError::new(
+            Error::from(QueryError::new(
                 QueryErrorKind::Semantic,
                 "CALL subquery requires at least one clause",
             ))
@@ -545,7 +544,7 @@ impl CypherTranslator {
         if let Some(reason) = not_allowed {
             const IMPORTING_WITH: &str =
                 "Importing WITH should consist only of simple references to outside variables.";
-            return Err(Error::Query(QueryError::new(
+            return Err(Error::from(QueryError::new(
                 QueryErrorKind::Semantic,
                 format!("{IMPORTING_WITH} {reason}"),
             )));
@@ -666,7 +665,7 @@ impl CypherTranslator {
         input: Option<LogicalOperator>,
     ) -> Result<LogicalOperator> {
         if patterns.is_empty() {
-            return Err(Error::Query(QueryError::new(
+            return Err(Error::from(QueryError::new(
                 QueryErrorKind::Semantic,
                 "Empty MATCH pattern",
             )));
@@ -1001,7 +1000,7 @@ impl CypherTranslator {
         let path = match pattern {
             ast::Pattern::Path(p) => p,
             ast::Pattern::Node(_) => {
-                return Err(Error::Query(QueryError::new(
+                return Err(Error::from(QueryError::new(
                     QueryErrorKind::Semantic,
                     "shortestPath requires a path pattern, not a node",
                 )));
@@ -1011,7 +1010,7 @@ impl CypherTranslator {
                 if let ast::Pattern::Path(p) = inner.as_ref() {
                     p
                 } else {
-                    return Err(Error::Query(QueryError::new(
+                    return Err(Error::from(QueryError::new(
                         QueryErrorKind::Semantic,
                         "shortestPath requires a path pattern",
                     )));
@@ -1022,7 +1021,7 @@ impl CypherTranslator {
         // One relationship pattern between two node patterns: only the first
         // would be searched, and the nodes between them ignored
         let [rel] = path.chain.as_slice() else {
-            return Err(Error::Query(QueryError::new(
+            return Err(Error::from(QueryError::new(
                 QueryErrorKind::Semantic,
                 "shortestPath requires a pattern of exactly one relationship",
             )));
@@ -1334,7 +1333,7 @@ impl CypherTranslator {
         input: Option<LogicalOperator>,
     ) -> Result<LogicalOperator> {
         let input = input.ok_or_else(|| {
-            Error::Query(QueryError::new(
+            Error::from(QueryError::new(
                 QueryErrorKind::Semantic,
                 "WHERE requires input",
             ))
@@ -1553,7 +1552,7 @@ impl CypherTranslator {
         input: &LogicalOperator,
     ) -> Result<Vec<ast::ProjectionItem>> {
         let Some(bound) = input.bound_variables(self.call_scope.borrow().as_ref()) else {
-            return Err(Error::Query(QueryError::new(
+            return Err(Error::from(QueryError::new(
                 QueryErrorKind::Unsupported,
                 format!(
                     "{clause} * with an aggregate cannot tell which variables are in scope \
@@ -1601,7 +1600,7 @@ impl CypherTranslator {
                 .iter()
                 .any(|projection| projection.alias.as_deref() == Some(name.as_str()))
             {
-                return Err(Error::Query(QueryError::new(
+                return Err(Error::from(QueryError::new(
                     QueryErrorKind::Semantic,
                     format!("{clause} *, ...: the column {name} is already one of the items"),
                 )));
@@ -1708,7 +1707,7 @@ impl CypherTranslator {
                 ast::Pattern::Node(n) => n,
                 ast::Pattern::Path(path) => &path.start,
                 _ => {
-                    return Err(Error::Query(QueryError::new(
+                    return Err(Error::from(QueryError::new(
                         QueryErrorKind::Semantic,
                         "MERGE NamedPath must contain a node or path",
                     )));
@@ -1766,7 +1765,7 @@ impl CypherTranslator {
         input: Option<LogicalOperator>,
     ) -> Result<LogicalOperator> {
         let semantic =
-            |message: &str| Error::Query(QueryError::new(QueryErrorKind::Semantic, message));
+            |message: &str| Error::from(QueryError::new(QueryErrorKind::Semantic, message));
         // A node alone is a path of no relationships.
         let alone = |node: &ast::NodePattern| ast::PathPattern {
             start: node.clone(),
@@ -1839,7 +1838,7 @@ impl CypherTranslator {
             Some(outer) => outer
                 .bound_variables(self.call_scope.borrow().as_ref())
                 .ok_or_else(|| {
-                    Error::Query(QueryError::unsupported(
+                    Error::from(QueryError::unsupported(
                         "MERGE cannot tell which variables the rows before it bind here; name \
                          them in a WITH before the MERGE",
                     ))
@@ -1965,7 +1964,7 @@ impl CypherTranslator {
         takes_labels: bool,
     ) -> Result<(Vec<(String, LogicalExpression)>, Vec<String>)> {
         let error = |kind: QueryErrorKind, message: String| {
-            Err(Error::Query(QueryError::new(
+            Err(Error::from(QueryError::new(
                 kind,
                 format!("MERGE ... {clause} SET {message}"),
             )))
@@ -2411,7 +2410,7 @@ impl CypherTranslator {
                     else_clause: else_expr,
                 })
             }
-            _ => Err(Error::Query(QueryError::new(
+            _ => Err(Error::from(QueryError::new(
                 QueryErrorKind::Unsupported,
                 "Unsupported expression wrapping an aggregate",
             ))),
@@ -2523,7 +2522,7 @@ impl CypherTranslator {
         scope: Option<&SortScope>,
     ) -> Result<LogicalOperator> {
         let input = input.ok_or_else(|| {
-            Error::Query(QueryError::new(
+            Error::from(QueryError::new(
                 QueryErrorKind::Semantic,
                 "ORDER BY requires input",
             ))
@@ -2536,7 +2535,7 @@ impl CypherTranslator {
                 .iter()
                 .any(|item| contains_aggregate(&item.expression))
         {
-            return Err(Error::Query(QueryError::new(
+            return Err(Error::from(QueryError::new(
                 QueryErrorKind::Semantic,
                 format!(
                     "Invalid use of an aggregating function in ORDER BY: the {} it sorts does \
@@ -2709,7 +2708,7 @@ impl CypherTranslator {
                         .collect::<Result<_>>()?,
                 )
             }
-            other if contains_aggregate(other) => Err(Error::Query(QueryError::new(
+            other if contains_aggregate(other) => Err(Error::from(QueryError::new(
                 QueryErrorKind::Semantic,
                 format!(
                     "Invalid use of an aggregating function in ORDER BY: {text} is not an \
@@ -2748,7 +2747,7 @@ impl CypherTranslator {
         input: Option<LogicalOperator>,
     ) -> Result<LogicalOperator> {
         let input = input.ok_or_else(|| {
-            Error::Query(QueryError::new(
+            Error::from(QueryError::new(
                 QueryErrorKind::Semantic,
                 "SKIP requires input",
             ))
@@ -2764,7 +2763,7 @@ impl CypherTranslator {
         input: Option<LogicalOperator>,
     ) -> Result<LogicalOperator> {
         let input = input.ok_or_else(|| {
-            Error::Query(QueryError::new(
+            Error::from(QueryError::new(
                 QueryErrorKind::Semantic,
                 "LIMIT requires input",
             ))
@@ -2782,7 +2781,7 @@ impl CypherTranslator {
         let elements = self.create_elements(&create_clause.patterns)?;
         if elements.is_empty() {
             return input.ok_or_else(|| {
-                Error::Query(QueryError::new(
+                Error::from(QueryError::new(
                     QueryErrorKind::Semantic,
                     "Empty CREATE pattern",
                 ))
@@ -2818,7 +2817,7 @@ impl CypherTranslator {
                 let mut previous_variable = self.push_created_node(&path.start, elements)?;
                 for rel in &path.chain {
                     if rel.direction == ast::Direction::Undirected {
-                        return Err(Error::Query(QueryError::new(
+                        return Err(Error::from(QueryError::new(
                             QueryErrorKind::Semantic,
                             "CREATE needs the direction of each relationship: write \
                              (a)-[:TYPE]->(b) or (a)<-[:TYPE]-(b)",
@@ -2827,7 +2826,7 @@ impl CypherTranslator {
                     let target_variable = self.push_created_node(&rel.target, elements)?;
                     // openCypher gives a created relationship exactly one type.
                     let edge_type = rel.types.first().cloned().ok_or_else(|| {
-                        Error::Query(QueryError::new(
+                        Error::from(QueryError::new(
                             QueryErrorKind::Semantic,
                             "CREATE needs the type of each relationship: write (a)-[:TYPE]->(b)",
                         ))
@@ -2887,7 +2886,7 @@ impl CypherTranslator {
     fn translate_create_statement(&self, create: &ast::CreateClause) -> Result<LogicalPlan> {
         let elements = self.create_elements(&create.patterns)?;
         if elements.is_empty() {
-            return Err(Error::Query(QueryError::new(
+            return Err(Error::from(QueryError::new(
                 QueryErrorKind::Semantic,
                 "Empty CREATE",
             )));
@@ -2906,7 +2905,7 @@ impl CypherTranslator {
     ) -> Result<LogicalOperator> {
         // Without a clause before it, nothing binds what DELETE names.
         let input = input.ok_or_else(|| {
-            Error::Query(match delete_clause.expressions.first() {
+            Error::from(match delete_clause.expressions.first() {
                 Some(ast::Expression::Variable(variable)) => {
                     QueryError::invalid_reference(format!(
                         "Undefined variable '{variable}': DELETE needs a clause before it that \
@@ -2935,7 +2934,7 @@ impl CypherTranslator {
                     });
                 }
             } else {
-                return Err(Error::Query(QueryError::new(
+                return Err(Error::from(QueryError::new(
                     QueryErrorKind::Unsupported,
                     "DELETE only supports variable expressions",
                 )));
@@ -2951,7 +2950,7 @@ impl CypherTranslator {
         input: Option<LogicalOperator>,
     ) -> Result<LogicalOperator> {
         let input = input.ok_or_else(|| {
-            Error::Query(QueryError::new(
+            Error::from(QueryError::new(
                 QueryErrorKind::Semantic,
                 "SET requires input",
             ))
@@ -3025,7 +3024,7 @@ impl CypherTranslator {
         input: Option<LogicalOperator>,
     ) -> Result<LogicalOperator> {
         let input = input.ok_or_else(|| {
-            Error::Query(QueryError::new(
+            Error::from(QueryError::new(
                 QueryErrorKind::Semantic,
                 "REMOVE requires input",
             ))
@@ -3321,7 +3320,7 @@ impl CypherTranslator {
                     plan = Some(self.translate_where(w, plan)?);
                 }
                 _ => {
-                    return Err(Error::Query(QueryError::new(
+                    return Err(Error::from(QueryError::new(
                         QueryErrorKind::Unsupported,
                         "EXISTS and COUNT subqueries only support MATCH, OPTIONAL MATCH and WHERE clauses",
                     )));
@@ -3330,7 +3329,7 @@ impl CypherTranslator {
         }
 
         plan.ok_or_else(|| {
-            Error::Query(QueryError::new(
+            Error::from(QueryError::new(
                 QueryErrorKind::Semantic,
                 "EXISTS subquery requires at least one MATCH clause",
             ))
@@ -3394,7 +3393,7 @@ impl CypherTranslator {
                 Ok(CountExpr::Literal(n))
             }
             ast::Expression::Parameter(name) => Ok(CountExpr::Parameter(name.clone())),
-            _ => Err(Error::Query(QueryError::new(
+            _ => Err(Error::from(QueryError::new(
                 QueryErrorKind::Unsupported,
                 "Expected integer literal or parameter for SKIP/LIMIT",
             ))),
@@ -3652,7 +3651,7 @@ impl CypherTranslator {
             {
                 // 1. Extract anchor variable
                 let anchor = Self::extract_anchor_variable(subplan).ok_or_else(|| {
-                    Error::Query(QueryError::new(
+                    Error::from(QueryError::new(
                         QueryErrorKind::Semantic,
                         "Pattern comprehension must start with a node pattern",
                     ))
@@ -3795,7 +3794,7 @@ fn star_item_name(
         (None, _) => return Ok(None),
     };
     if bound.is_some_and(|bound| bound.contains(&name)) {
-        return Err(Error::Query(QueryError::new(
+        return Err(Error::from(QueryError::new(
             QueryErrorKind::Semantic,
             format!("{clause} *, {name}: {name} is already one of the variables * passes on"),
         )));

@@ -111,7 +111,7 @@ impl<'s> ResultStream<'s> {
     ///
     /// # Errors
     ///
-    /// Propagates operator errors and returns `Error::Query(QueryError::Timeout)`
+    /// Propagates operator errors and returns `Error::from(QueryError::Timeout)`
     /// if the session's query deadline has passed.
     pub fn next_chunk(&mut self) -> Result<Option<DataChunk>> {
         if self.exhausted {
@@ -382,7 +382,7 @@ fn check_deadline(deadline: Option<Instant>) -> Result<()> {
     if let Some(d) = deadline
         && Instant::now() >= d
     {
-        return Err(Error::Query(QueryError::timeout()));
+        return Err(Error::from(QueryError::timeout()));
     }
     Ok(())
 }

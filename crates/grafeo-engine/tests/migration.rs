@@ -1960,6 +1960,160 @@ fn a_pending_0_5_44_checkpoint_image_is_migrated_and_kept() {
     );
 }
 
+/// Writes at `path` a 0.5.x container v1 file: the database as one snapshot
+/// blob after the headers, the form 0.5.x used before container v2.
+fn write_0_5_snapshot_file(path: &Path, snapshot: &[u8]) {
+    use std::io::{Seek, SeekFrom, Write};
+
+    use grafeo_storage::file::format::DATA_OFFSET;
+    use grafeo_storage::file::header::{write_db_header, write_file_header};
+    use grafeo_storage::file::{DbHeader, FileHeader};
+
+    let mut file = std::fs::File::create(path).unwrap();
+    write_file_header(&mut file, &FileHeader::new()).unwrap();
+    write_db_header(&mut file, 0, &DbHeader::EMPTY).unwrap();
+    write_db_header(
+        &mut file,
+        1,
+        &DbHeader {
+            iteration: 1,
+            checksum: crc32fast::hash(snapshot),
+            snapshot_length: u64::try_from(snapshot.len()).unwrap(),
+            epoch: 1,
+            ..DbHeader::EMPTY
+        },
+    )
+    .unwrap();
+    file.seek(SeekFrom::Start(DATA_OFFSET)).unwrap();
+    file.write_all(snapshot).unwrap();
+}
+
+/// The graph of the version 4 snapshot `tests/fixtures/snapshot_v4.bin`
+/// (0.5.x wrote it): every node with its labels and properties, then every
+/// edge with its endpoints and property.
+fn snapshot_graph(db: &GrafeoDB) -> (Vec<Vec<Value>>, Vec<Vec<Value>>) {
+    (
+        rows(
+            db,
+            "MATCH (n) RETURN n.name AS name, labels(n), n.age ORDER BY name",
+        ),
+        rows(
+            db,
+            "MATCH (a)-[r]->(b) RETURN a.name AS a, type(r), b.name, r.since, r.role ORDER BY a",
+        ),
+    )
+}
+
+fn expected_snapshot_graph() -> (Vec<Vec<Value>>, Vec<Vec<Value>>) {
+    let labels = |names: &[&str]| Value::List(names.iter().map(|n| Value::from(*n)).collect());
+    (
+        vec![
+            vec![Value::from("Acme Corp"), labels(&["Company"]), Value::Null],
+            vec![Value::from("Alix"), labels(&["Person"]), Value::Int64(30)],
+            vec![
+                Value::from("Gus"),
+                labels(&["Employee", "Person"]),
+                Value::Int64(25),
+            ],
+        ],
+        vec![
+            vec![
+                Value::from("Alix"),
+                Value::from("KNOWS"),
+                Value::from("Gus"),
+                Value::Int64(2020),
+                Value::Null,
+            ],
+            vec![
+                Value::from("Gus"),
+                Value::from("WORKS_AT"),
+                Value::from("Acme Corp"),
+                Value::Null,
+                Value::from("Engineer"),
+            ],
+        ],
+    )
+}
+
+/// A 0.5.x container v1 file (#323: a reader once mistook such files for
+/// container v2 and refused them) holds its LPG graph in one snapshot. A
+/// read-only open reads the graph and leaves the file byte for byte; a
+/// read-write open migrates it with its graph, keeps the 0.5.x file as
+/// `<path>.pre-0.6`, and the migrated database takes new writes, whose ids
+/// do not collide with the migrated ones, across a reopen.
+#[test]
+fn a_0_5_snapshot_file_migrates_with_its_graph() {
+    let snapshot = include_bytes!("fixtures/snapshot_v4.bin");
+    assert_eq!(snapshot[0], 4, "a version 4 snapshot, as 0.5.x wrote");
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("db.grafeo");
+    write_0_5_snapshot_file(&path, snapshot);
+    assert_eq!(detect(&path).unwrap(), OnDisk::LegacyFile);
+    let before = files(dir.path());
+
+    let db = GrafeoDB::open_read_only(&path).unwrap();
+    assert_eq!(snapshot_graph(&db), expected_snapshot_graph(), "read-only");
+    db.close().unwrap();
+    drop(db);
+    assert_eq!(
+        files(dir.path()),
+        before,
+        "a read-only open changes nothing"
+    );
+
+    let db = GrafeoDB::open(&path).unwrap();
+    assert_eq!(snapshot_graph(&db), expected_snapshot_graph(), "migrated");
+    db.execute(
+        "MATCH (g:Person {name: 'Gus'}) INSERT (g)-[:KNOWS {since: 2026}]->(:Person {name: 'Vincent', age: 40})",
+    )
+    .unwrap();
+    db.close().unwrap();
+    drop(db);
+    assert_eq!(detect(&path).unwrap(), OnDisk::Current);
+    assert_eq!(
+        std::fs::read(with_suffix(&path, ".pre-0.6")).unwrap(),
+        snapshot_file_bytes(&before),
+        "the 0.5.x file is kept as it was"
+    );
+    assert_no_leftovers(&path, "after the migration");
+
+    let db = GrafeoDB::open(&path).unwrap();
+    assert_eq!(
+        rows(
+            &db,
+            "MATCH (a)-[r:KNOWS]->(b) RETURN a.name AS a, b.name, b.age, r.since ORDER BY a"
+        ),
+        vec![
+            vec![
+                Value::from("Alix"),
+                Value::from("Gus"),
+                Value::Int64(25),
+                Value::Int64(2020),
+            ],
+            vec![
+                Value::from("Gus"),
+                Value::from("Vincent"),
+                Value::Int64(40),
+                Value::Int64(2026),
+            ],
+        ]
+    );
+    assert_eq!(
+        rows(&db, "MATCH (n) RETURN count(DISTINCT id(n)), count(n)"),
+        vec![vec![Value::Int64(4), Value::Int64(4)]],
+        "four nodes with four distinct ids"
+    );
+    db.close().unwrap();
+}
+
+/// The bytes of the one file in `listing` (of [`files`]).
+fn snapshot_file_bytes(listing: &BTreeMap<PathBuf, Entry>) -> Vec<u8> {
+    match listing.values().collect::<Vec<_>>().as_slice() {
+        [Entry::File(bytes)] => bytes.clone(),
+        other => panic!("one file, got {other:?}"),
+    }
+}
+
 /// While another handle holds the 0.5.x file locked for writing, as a 0.5.x
 /// process does, the migration fails with a "locked" error and changes nothing.
 #[test]

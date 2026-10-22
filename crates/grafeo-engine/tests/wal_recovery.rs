@@ -12,7 +12,7 @@ mod common;
 
 #[cfg(all(feature = "wal", feature = "grafeo-file"))]
 mod wal {
-    use crate::common::replay::reopened_after_crash;
+    use crate::common::replay::{reopened_after_crash, reopened_after_crash_at};
     use grafeo_common::types::Value;
     use grafeo_engine::GrafeoDB;
 
@@ -1095,5 +1095,54 @@ mod wal {
         assert_eq!(result.rows().len(), 1);
         assert_eq!(result.rows()[0][0], Value::String("views".into()));
         restored.close().expect("close");
+    }
+
+    /// A new path without the `.grafeo` extension replays its sidecar WAL
+    /// after a crash (#252: the server's database, killed before any
+    /// checkpoint, came back empty). The child process writes through
+    /// queries with the default configuration and exits without `close()`;
+    /// before the reopen the path is still a 0.6 file with its WAL beside it.
+    #[test]
+    fn a_path_without_the_grafeo_extension_replays_after_a_crash() {
+        use grafeo_engine::Config;
+        use grafeo_storage::file::detect::{OnDisk, detect};
+
+        let (_dir, db) = reopened_after_crash_at(
+            "wal::a_path_without_the_grafeo_extension_replays_after_a_crash",
+            "db",
+            |path| {
+                if path.exists() {
+                    let mut wal = path.as_os_str().to_owned();
+                    wal.push(".wal");
+                    assert!(path.is_file(), "the database is a file");
+                    assert!(
+                        std::path::Path::new(&wal).is_dir(),
+                        "the crash left the sidecar WAL beside it"
+                    );
+                    assert_eq!(detect(path).unwrap(), OnDisk::Current);
+                }
+                GrafeoDB::with_config(Config::persistent(path)).unwrap()
+            },
+            |db| {
+                db.execute("INSERT (:Person {name: 'Alix'})").unwrap();
+                db.execute("INSERT (:Person {name: 'Gus'})-[:KNOWS {since: 2020}]->(:City {name: 'Amsterdam'})")
+                    .unwrap();
+            },
+        );
+        let rows = db
+            .execute("MATCH (p:Person) OPTIONAL MATCH (p)-[k:KNOWS]->(c) RETURN p.name, k.since, c.name ORDER BY p.name")
+            .unwrap();
+        assert_eq!(
+            rows.rows(),
+            [
+                vec![Value::from("Alix"), Value::Null, Value::Null],
+                vec![
+                    Value::from("Gus"),
+                    Value::Int64(2020),
+                    Value::from("Amsterdam")
+                ],
+            ]
+        );
+        db.close().unwrap();
     }
 }

@@ -33,6 +33,21 @@ pub fn reopened_after_crash(
     open: impl Fn(&Path) -> GrafeoDB,
     write: impl FnOnce(&GrafeoDB),
 ) -> (tempfile::TempDir, GrafeoDB) {
+    reopened_after_crash_at(test, "db.grafeo", open, write)
+}
+
+/// [`reopened_after_crash`] for a database named `file_name` in the
+/// temporary directory, such as a path without the `.grafeo` extension.
+///
+/// # Panics
+///
+/// As [`reopened_after_crash`].
+pub fn reopened_after_crash_at(
+    test: &str,
+    file_name: &str,
+    open: impl Fn(&Path) -> GrafeoDB,
+    write: impl FnOnce(&GrafeoDB),
+) -> (tempfile::TempDir, GrafeoDB) {
     if let Some(path) = std::env::var_os(CHILD_PATH_VAR) {
         let db = open(Path::new(&path));
         write(&db);
@@ -40,7 +55,7 @@ pub fn reopened_after_crash(
         std::process::exit(0);
     }
     let dir = tempfile::tempdir().expect("create temp dir");
-    let path = dir.path().join("db.grafeo");
+    let path = dir.path().join(file_name);
     let status = child_process::run(
         std::process::Command::new(std::env::current_exe().expect("the test executable"))
             .args(["--exact", test, "--include-ignored", "--nocapture"])

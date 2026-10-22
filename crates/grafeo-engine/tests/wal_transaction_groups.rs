@@ -218,6 +218,11 @@ mod tests {
                     .unwrap();
                 db.wal_checkpoint().unwrap();
             }
+            // The same write without the checkpoint.
+            "db_write" => {
+                db.create_node_with_props(&["Document"], [("title", Value::from("test"))])
+                    .unwrap();
+            }
             // Every database-level write call, outside any transaction.
             "db_crud" => {
                 let alix = db.create_node(&["Person"]).unwrap();
@@ -459,6 +464,27 @@ mod tests {
             rows(&open(&path), "MATCH (d:Document) RETURN d.title"),
             vec![row(&["test"])]
         );
+    }
+
+    /// #395 at the path the reporter used, without the `.grafeo` extension:
+    /// a database-level write survives a crash without `close()`, after a
+    /// `wal_checkpoint()` and without one. The crash leaves the sidecar WAL.
+    #[test]
+    fn database_level_write_survives_a_crash_at_a_path_without_extension() {
+        for scenario in ["db_write_then_checkpoint", "db_write"] {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("single");
+            crash_after(scenario, &path);
+            assert!(
+                path.is_file() && wal_dir(&path).is_dir(),
+                "{scenario}: the crash left the file and its sidecar WAL"
+            );
+            assert_eq!(
+                rows(&open(&path), "MATCH (d:Document) RETURN d.title"),
+                vec![row(&["test"])],
+                "{scenario}"
+            );
+        }
     }
 
     /// Every database-level write call is durable when it returns.

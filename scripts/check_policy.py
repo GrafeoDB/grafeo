@@ -18,6 +18,7 @@ Add `--json` for machine-readable output. Exit code 1 when an error is found.
     T2  workflow toolchain pins match rust-toolchain.toml or the MSRV
     T3  the private planning directory is never tracked or referenced
     T4  no em or en dashes in public docs, README, CHANGELOG, CONTRIBUTING, .github
+    T5  every published workspace crate declares the workspace's rust-version (the MSRV)
     D1  an added #[allow(...)] states a reason = "..."
     D2  no em or en dashes in added Markdown lines or code comments
     D3  no added references to private planning notes; no internal phase wording in docs
@@ -130,6 +131,7 @@ HINTS = {
     "T2": "bump the pin together with rust-toolchain.toml (or rust-version for the MSRV job)",
     "T3": "restate what matters inline or link a public issue",
     "T4": "rewrite with a comma, colon or parentheses",
+    "T5": "add `rust-version.workspace = true` to the crate's [package]",
     "D1": 'add reason = "..." naming the bound or invariant that makes it safe',
     "D2": "em or en dash; rewrite with a comma, colon or parentheses",
     "D3": "public text must stand on its own; restate the content or link a public issue",
@@ -349,6 +351,49 @@ def cargo_metadata(root: Path) -> dict:
     return json.loads(result.stdout)
 
 
+def rust_version_findings(root: Path, metadata: dict) -> list[Finding]:
+    """T5: every published workspace crate declares the workspace's `rust-version`.
+
+    A crate without it tells cargo nothing about the compiler it needs, so a user on an older
+    one gets build errors instead of a clear message (#390: the `grafeo` crate declared none).
+    Crates with `publish = false` (an empty `publish` list) are left out.
+    """
+    manifest = root / "Cargo.toml"
+    msrv = (
+        tomllib.loads(manifest.read_text(encoding="utf-8"))
+        .get("workspace", {})
+        .get("package", {})
+        .get("rust-version")
+        if manifest.exists()
+        else None
+    )
+    if msrv is None:
+        return []
+    members = set(metadata.get("workspace_members", []))
+    findings = []
+    for package in sorted(metadata["packages"], key=lambda p: p["name"]):
+        if package["id"] not in members or package.get("publish") == []:
+            continue
+        declared = package.get("rust_version")
+        if declared == msrv:
+            continue
+        path = Path(package.get("manifest_path", "Cargo.toml"))
+        try:
+            rel = path.resolve().relative_to(root.resolve()).as_posix()
+        except ValueError:
+            rel = path.as_posix()
+        findings.append(
+            finding(
+                "T5",
+                rel,
+                None,
+                f"{package['name']} declares rust-version {declared or 'none'}, "
+                f"not the workspace's {msrv}",
+            )
+        )
+    return findings
+
+
 def toolchain_findings(root: Path) -> list[Finding]:
     """T2: every pinned toolchain in the workflows is the channel or the MSRV."""
     toolchain_file, manifest = root / "rust-toolchain.toml", root / "Cargo.toml"
@@ -424,6 +469,7 @@ def tree_findings(root: Path, metadata_arg: str | None) -> list[Finding]:
         else:
             metadata = cargo_metadata(root)
         findings += boundary_findings(metadata)
+        findings += rust_version_findings(root, metadata)
     return findings
 
 

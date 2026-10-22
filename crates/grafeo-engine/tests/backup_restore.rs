@@ -15,6 +15,28 @@ use grafeo_common::types::{EpochId, Value};
 use grafeo_engine::GrafeoDB;
 use grafeo_engine::database::backup::BackupKind;
 
+/// The names of the people in the database restored from `backups` to
+/// `epoch`.
+fn restored_people(backups: &Path, epoch: EpochId) -> Vec<Value> {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("restored.grafeo");
+    GrafeoDB::restore_to_epoch(backups, epoch, &path).unwrap();
+    let db = GrafeoDB::open(&path).unwrap();
+    let names = db
+        .execute("MATCH (p:Person) RETURN p.name AS name ORDER BY name")
+        .unwrap()
+        .rows()
+        .iter()
+        .map(|row| row[0].clone())
+        .collect();
+    db.close().unwrap();
+    names
+}
+
+fn names(values: &[&str]) -> Vec<Value> {
+    values.iter().map(|value| Value::from(*value)).collect()
+}
+
 // ── Full backup roundtrip ─────────────────────────────────────────
 
 #[test]
@@ -236,6 +258,10 @@ fn backup_full_on_read_only_database() {
     let restored = GrafeoDB::open(&restore_path).expect("open restored");
     assert_eq!(restored.node_count(), 2, "restored should have 2 nodes");
     restored.close().expect("close");
+    assert_eq!(
+        restored_people(&backup_dir, segment.end_epoch),
+        names(&["Alix", "Gus"])
+    );
 }
 
 /// Regression: backup_full() must work on Windows where the .grafeo file
@@ -277,6 +303,10 @@ fn backup_full_works_while_database_is_open() {
     let restored = GrafeoDB::open(&restore_path).expect("open restored");
     assert_eq!(restored.node_count(), 2, "restored should have 2 nodes");
     restored.close().expect("close");
+    assert_eq!(
+        restored_people(&backup_dir, segment.end_epoch),
+        names(&["Alix", "Gus"])
+    );
 }
 
 /// Two full backups into the same directory produce two distinct segments
@@ -318,6 +348,14 @@ fn backup_full_twice_produces_two_segments() {
     let restored = GrafeoDB::open(&restore_path).expect("open restored");
     assert_eq!(restored.node_count(), 2);
     restored.close().expect("close");
+    assert_eq!(
+        restored_people(&backup_dir, seg1.end_epoch),
+        names(&["Alix"])
+    );
+    assert_eq!(
+        restored_people(&backup_dir, seg2.end_epoch),
+        names(&["Alix", "Gus"])
+    );
 
     db.close().expect("close");
 }
@@ -359,6 +397,52 @@ fn incremental_backup_works_without_manual_rotation() {
     assert!(incr.start_epoch > full.end_epoch);
 
     db.close().expect("close");
+
+    // Each backup restores the people of its epoch.
+    assert_eq!(
+        restored_people(&backup_dir, full.end_epoch),
+        names(&["Alix"])
+    );
+    assert_eq!(
+        restored_people(&backup_dir, incr.end_epoch),
+        names(&["Alix", "Gus", "Vincent"])
+    );
+}
+
+/// An incremental backup of a database opened read-only is refused: the
+/// open has no WAL of its own to take the records from. The backup
+/// directory keeps its one full backup, which restores as before.
+#[test]
+fn incremental_backup_of_a_read_only_database_is_refused() {
+    let dir = tempfile::tempdir().expect("create temp dir");
+    let db_path = dir.path().join("readonly_incremental.grafeo");
+    let backup_dir = dir.path().join("backups");
+    let full = {
+        let db = GrafeoDB::open(&db_path).expect("open");
+        db.execute("INSERT (:Person {name: 'Alix'})").unwrap();
+        let full = db.backup_full(&backup_dir).unwrap();
+        db.execute("INSERT (:Person {name: 'Gus'})").unwrap();
+        db.close().expect("close");
+        full
+    };
+    let db = GrafeoDB::open_read_only(&db_path).expect("open read-only");
+    let error = db
+        .backup_incremental(&backup_dir)
+        .expect_err("a read-only database takes no incremental backup")
+        .to_string();
+    assert!(
+        error.contains("an incremental backup needs a database with a WAL"),
+        "{error}"
+    );
+    db.close().unwrap();
+    let manifest = GrafeoDB::read_backup_manifest(&backup_dir)
+        .unwrap()
+        .unwrap();
+    assert_eq!(manifest.segments.len(), 1, "only the full backup");
+    assert_eq!(
+        restored_people(&backup_dir, full.end_epoch),
+        names(&["Alix"])
+    );
 }
 
 /// An incremental backup with nothing new to back up fails without touching

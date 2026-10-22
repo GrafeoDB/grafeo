@@ -525,3 +525,61 @@ def test_commit_message(tmp_path: Path, message: str, expected: list[str]) -> No
     result = policy(tmp_path, "commit-msg", str(path))
     assert found(result) == expected
     assert result.returncode == (1 if expected else 0)
+
+
+def test_t5_every_published_crate_declares_the_msrv(tmp_path: Path) -> None:
+    write(tmp_path, "Cargo.toml", '[workspace.package]\nrust-version = "1.99.0"\n')
+
+    def package(name: str, rust_version: str | None, **extra: object) -> dict:
+        return {
+            "id": f"path+file:///ws#{name}@1.0.0",
+            "name": name,
+            "source": None,
+            "rust_version": rust_version,
+            "manifest_path": str(tmp_path / "crates" / name / "Cargo.toml"),
+            **extra,
+        }
+
+    packages = [
+        package("grafeo", None),
+        package("grafeo-core", "1.99.0"),
+        package("grafeo-engine", "1.91.1"),
+        package("grafeo-spec-tests", None, publish=[]),
+        {
+            "id": "registry+https://github.com/rust-lang/crates.io-index#serde@1.0.0",
+            "name": "serde",
+            "source": "registry",
+            "rust_version": "1.61",
+        },
+    ]
+    meta = {
+        "packages": packages,
+        "workspace_members": [p["id"] for p in packages if p["source"] is None],
+    }
+    findings = check_policy.rust_version_findings(tmp_path, meta)
+    assert [(f.rule, f.path, f.message) for f in findings] == [
+        (
+            "T5",
+            "crates/grafeo/Cargo.toml",
+            (
+                "grafeo declares rust-version none, not the workspace's 1.99.0; "
+                "add `rust-version.workspace = true` to the crate's [package]"
+            ),
+        ),
+        (
+            "T5",
+            "crates/grafeo-engine/Cargo.toml",
+            (
+                "grafeo-engine declares rust-version 1.91.1, not the workspace's 1.99.0; "
+                "add `rust-version.workspace = true` to the crate's [package]"
+            ),
+        ),
+    ]
+
+
+def test_t5_holds_for_this_repository() -> None:
+    root = SCRIPT.parents[1]
+    assert (
+        check_policy.rust_version_findings(root, check_policy.cargo_metadata(root))
+        == []
+    )

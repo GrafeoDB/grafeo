@@ -558,6 +558,20 @@ jobs:
           # GQL-only: minimal viable config (no AI, no RDF, no extra languages)
           - profile: gql-only
             features: "--features gql"
+          # One other language without GQL each: a parser or translator that
+          # leans on GQL code without the feature fails to compile (#232).
+          - profile: cypher-only
+            features: "--features cypher"
+            engine_features: "--features lpg,cypher"
+          - profile: gremlin-only
+            features: "--features gremlin"
+            engine_features: "--features lpg,gremlin"
+          - profile: sparql-only
+            features: "--features sparql,triple-store"
+            engine_features: "--features sparql,triple-store"
+          - profile: graphql-only
+            features: "--features graphql"
+            engine_features: "--features lpg,graphql"
           # LPG persona: Graph App Developer (LPG model + all LPG query languages)
           - profile: lpg
             features: "--features lpg,gql,cypher,gremlin,sql-pgq,spill,mmap,regex"

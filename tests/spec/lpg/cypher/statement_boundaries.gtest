@@ -1,0 +1,62 @@
+# Cypher: where a query ends
+#
+# A query string holds one query. Its clauses all run (CREATE after CREATE),
+# a trailing semicolon is allowed, and anything after the end, another
+# statement after a semicolon or stray words, is an error instead of being
+# dropped silently, as the GQL quickstart's second and third INSERT were
+# (#380, see gql/15.1_insert.gtest). openCypher 9 allows RETURN only as the
+# last clause of a query part.
+
+meta:
+  language: cypher
+  model: lpg
+  section: "3"
+  title: Statement boundaries
+  dataset: empty
+
+tests:
+
+  - name: create_clauses_in_one_query_all_run
+    statements:
+      - |
+        CREATE (:Person {name: 'Alix', age: 30})
+        CREATE (:Person {name: 'Gus', age: 25})
+        CREATE (:Person {name: 'Harm', age: 35})
+      - "MATCH (p:Person) RETURN p.name ORDER BY p.name"
+    expect:
+      ordered: true
+      rows:
+        - [Alix]
+        - [Gus]
+        - [Harm]
+
+  - name: a_trailing_semicolon_is_accepted
+    statements:
+      - "CREATE (:Marker);"
+      - "MATCH (m:Marker) RETURN count(m) AS c"
+    expect:
+      rows:
+        - [1]
+
+  - name: statements_separated_by_semicolon_are_rejected
+    query: "CREATE (:A); CREATE (:B)"
+    expect:
+      error: "multiple statements separated by ';'"
+
+  - name: trailing_words_after_a_create_are_rejected
+    query: "CREATE (:A) garbage"
+    expect:
+      error: "Expected end of query"
+
+  - name: trailing_words_after_a_return_are_rejected
+    setup:
+      - "CREATE (:Person {name: 'Alix'})"
+    query: "MATCH (p:Person) RETURN p.name garbage"
+    expect:
+      error: "Expected end of query"
+
+  - name: a_clause_after_return_is_rejected
+    query: "RETURN 1 AS a RETURN 2 AS b"
+    skip: "a clause after RETURN is accepted: the earlier RETURN is dropped and the last one answers"
+    expect:
+      error: "RETURN"

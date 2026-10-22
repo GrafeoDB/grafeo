@@ -1590,6 +1590,7 @@ name = "grafeo-cli"
 version = "0.6.0-beta.1"
 dependencies = [
  "anyhow",
+ "arrow-ipc",
  "clap",
  "clap_complete",
  "comfy-table",

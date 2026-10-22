@@ -23,6 +23,8 @@ mod tests {
     /// in a separate process.
     const CHILD_PATH_VAR: &str = "GRAFEO_LOCK_TEST_CHILD_PATH";
     const CHILD_FORMAT_VAR: &str = "GRAFEO_LOCK_TEST_CHILD_FORMAT";
+    /// Set when the child opens the database read-only.
+    const CHILD_READ_ONLY_VAR: &str = "GRAFEO_LOCK_TEST_CHILD_READ_ONLY";
 
     /// The databases each test runs on, both with the default format: a
     /// `.grafeo` file, and a file without an extension (a path that was a WAL
@@ -161,8 +163,49 @@ mod tests {
         }
     }
 
-    /// Helper for [`open_from_another_process_fails`]; a no-op when run
-    /// directly.
+    /// A read-only open from another process while this one writes is refused
+    /// too: it would read a file the writer is changing (#405).
+    #[test]
+    fn read_only_open_from_another_process_while_a_writer_holds_it() {
+        let dir = tempfile::tempdir().unwrap();
+        for (name, path, format) in formats(dir.path()) {
+            let first = open(&path, format).unwrap();
+            insert(&first, "Alix");
+
+            let child = child_process::output(
+                std::process::Command::new(std::env::current_exe().unwrap())
+                    .args(["--exact", "tests::child_open_fails", "--nocapture"])
+                    .env(CHILD_PATH_VAR, &path)
+                    .env(CHILD_FORMAT_VAR, name)
+                    .env(CHILD_READ_ONLY_VAR, "1"),
+            )
+            .unwrap();
+            let stdout = String::from_utf8_lossy(&child.stdout);
+            assert!(
+                child.status.success(),
+                "{name}: the other process could open the database read-only\n{}",
+                String::from_utf8_lossy(&child.stderr)
+            );
+            assert!(
+                stdout.contains("1 passed"),
+                "{name}: the child ran no test:\n{stdout}"
+            );
+
+            insert(&first, "Gus");
+            first.close().unwrap();
+            let reopened = open(&path, format).unwrap();
+            assert_eq!(
+                names(&reopened),
+                vec![Value::String("Alix".into()), Value::String("Gus".into())],
+                "{name}: data after reopen"
+            );
+            reopened.close().unwrap();
+        }
+    }
+
+    /// Helper for [`open_from_another_process_fails`] and
+    /// [`read_only_open_from_another_process_while_a_writer_holds_it`]; a
+    /// no-op when run directly.
     #[test]
     fn child_open_fails() {
         let (Some(path), Ok(format)) = (
@@ -172,7 +215,12 @@ mod tests {
             return;
         };
         let format = format_from_name(&format);
-        match open(Path::new(&path), format) {
+        let opened = if std::env::var_os(CHILD_READ_ONLY_VAR).is_some() {
+            GrafeoDB::open_read_only(Path::new(&path))
+        } else {
+            open(Path::new(&path), format)
+        };
+        match opened {
             Ok(db) => {
                 // Do not write anything on the way out.
                 std::mem::forget(db);

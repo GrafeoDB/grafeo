@@ -1,15 +1,18 @@
 //! Transaction manager.
 
+use std::collections::VecDeque;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
-use grafeo_common::types::{EdgeId, EpochId, NodeId, TransactionId};
+use grafeo_common::types::{EdgeId, EpochId, HashableValue, NodeId, Timestamp, TransactionId};
 use grafeo_common::utils::error::{Error, Result, TransactionError};
 use grafeo_common::utils::hash::{FxHashMap, FxHashSet};
 use grafeo_core::execution::operators::WriteInProgress;
 use parking_lot::{Condvar, Mutex, MutexGuard, RwLock, RwLockWriteGuard};
 
 use super::changes::TransactionChanges;
+use super::history::{History, HistoryImage};
+use crate::config::HistoryRetention;
 
 /// State of a transaction.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -144,6 +147,42 @@ impl std::fmt::Display for GraphEntity {
     }
 }
 
+/// A value a transaction writes under a UNIQUE, PRIMARY KEY or NODE KEY
+/// constraint: the graph, the constraint's label and properties, and the
+/// values, one per property. Two transactions that write the same one
+/// conflict as two writes of one entity do: between open transactions the
+/// first writer wins, and at commit a transaction loses to one that wrote it
+/// and committed after it began. Within one transaction a value may be
+/// written any number of times.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct KeyClaim {
+    /// The graph's storage key; `None` for the default graph.
+    pub graph: Option<Arc<str>>,
+    /// The label the constraint is on.
+    pub label: Arc<str>,
+    /// The constraint's properties, in its order.
+    pub properties: Vec<String>,
+    /// The value of each property.
+    pub values: Vec<HashableValue>,
+}
+
+impl std::fmt::Display for KeyClaim {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, ":{}(", self.label)?;
+        for (index, (property, value)) in self.properties.iter().zip(&self.values).enumerate() {
+            if index > 0 {
+                write!(f, ", ")?;
+            }
+            write!(f, "{property} = {:?}", value.0)?;
+        }
+        write!(f, ")")?;
+        if let Some(graph) = &self.graph {
+            write!(f, " in graph '{graph}'")?;
+        }
+        Ok(())
+    }
+}
+
 /// Information about an active transaction.
 pub struct TransactionInfo {
     /// Transaction state.
@@ -163,6 +202,9 @@ pub struct TransactionInfo {
     /// a delete by another transaction (see
     /// [`TransactionManager::record_endpoints`]).
     pub endpoint_set: FxHashSet<GraphEntity>,
+    /// The values the transaction wrote under UNIQUE, PRIMARY KEY and NODE
+    /// KEY constraints (see [`TransactionManager::record_key`]).
+    pub(crate) key_set: FxHashSet<KeyClaim>,
     /// What the transaction changed, while it is open or committing: a
     /// checkpoint reads the committed state of what open transactions
     /// changed from it (see [`TransactionManager::open_change_sets`]).
@@ -191,6 +233,7 @@ impl TransactionInfo {
             read_set: FxHashSet::default(),
             delete_set: FxHashSet::default(),
             endpoint_set: FxHashSet::default(),
+            key_set: FxHashSet::default(),
             changes: Some(changes),
             private,
         }
@@ -330,6 +373,128 @@ pub struct TransactionManager {
     /// Signalled when an epoch is published, and when a commit does not
     /// complete.
     published: Condvar,
+    /// The readers that hold the read horizon back, by the epoch each reads
+    /// at: the snapshot of every open and committing transaction, and every
+    /// read outside a transaction that runs now (see
+    /// [`pin_read`](Self::pin_read)). The read horizon is its oldest epoch,
+    /// or the published epoch when it holds none, so it never walks the
+    /// finished transactions.
+    ///
+    /// Lock order: after the `transactions` lock (a transaction's snapshot
+    /// is counted and released while that lock is held); the read horizon,
+    /// a pin and its drop take this one alone, and the collect horizon takes
+    /// the history's locks after it.
+    reads: Arc<ReadPins>,
+    /// The history: its retention, the commit times and the floor of what a
+    /// read may ask for (see `history`).
+    history: History,
+}
+
+/// The epochs the readers that hold the read horizon back read at, each with
+/// how many such readers: open and committing transactions by their
+/// snapshot, reads outside a transaction by the epoch they pinned.
+///
+/// Ascending, each epoch once with a count above 0: every reader is counted
+/// at the published epoch, read under the lock, which only moves forward, so
+/// a new epoch goes at the back. The oldest is the front, and the buffer is
+/// kept from one reader to the next (a reader that begins and ends allocates
+/// nothing).
+#[derive(Debug, Default)]
+struct ReadPins {
+    epochs: Mutex<VecDeque<(u64, usize)>>,
+}
+
+impl ReadPins {
+    /// Counts a reader at the published epoch, read while the lock is held,
+    /// and returns that epoch: the read horizon reads the published epoch
+    /// under the same lock, so it never passes a reader it has not counted.
+    fn hold_published(&self, published: &AtomicU64) -> EpochId {
+        let mut epochs = self.epochs.lock();
+        let epoch = published.load(Ordering::Acquire);
+        match epochs.back_mut() {
+            Some((newest, readers)) if *newest == epoch => *readers += 1,
+            _ => {
+                debug_assert!(
+                    epochs.back().is_none_or(|(newest, _)| *newest < epoch),
+                    "the published epoch only moves forward"
+                );
+                epochs.push_back((epoch, 1));
+            }
+        }
+        EpochId::new(epoch)
+    }
+
+    /// Counts a reader at `epoch`, at or before the published epoch, in its
+    /// place among the readers (ascending).
+    fn hold_at(epochs: &mut VecDeque<(u64, usize)>, epoch: u64) {
+        match epochs.binary_search_by_key(&epoch, |(at, _)| *at) {
+            Ok(index) => epochs[index].1 += 1,
+            Err(index) => epochs.insert(index, (epoch, 1)),
+        }
+    }
+
+    /// Releases one reader at `epoch`.
+    fn release(&self, epoch: EpochId) {
+        let mut epochs = self.epochs.lock();
+        if let Ok(index) = epochs.binary_search_by_key(&epoch.as_u64(), |(at, _)| *at) {
+            let readers = &mut epochs[index].1;
+            *readers -= 1;
+            if *readers == 0 {
+                epochs.remove(index);
+            }
+        }
+    }
+
+    /// The oldest epoch a reader reads at, `None` with no reader.
+    fn oldest(epochs: &VecDeque<(u64, usize)>) -> Option<u64> {
+        epochs.front().map(|(epoch, _)| *epoch)
+    }
+}
+
+/// A read outside any transaction, pinned at the epoch it reads at from
+/// [`TransactionManager::pin_read`] until it is dropped (also by the unwind
+/// of a panic in the read): the read horizon stays at that epoch or before,
+/// so garbage collection keeps every version the read may still need (#412
+/// decision Q6: every read statement outside a transaction pins its epoch
+/// for its run).
+#[must_use = "a read is pinned only while the pin lives"]
+pub(crate) struct ReadPin {
+    pins: Arc<ReadPins>,
+    epoch: EpochId,
+}
+
+impl ReadPin {
+    /// The epoch the read is pinned at: the published epoch when it was
+    /// pinned.
+    #[must_use]
+    pub(crate) fn epoch(&self) -> EpochId {
+        self.epoch
+    }
+
+    /// Another pin at the same epoch, released on its own: this pin keeps
+    /// the epoch at or after the history floor while the new one is made.
+    pub(crate) fn again(&self) -> ReadPin {
+        let mut epochs = self.pins.epochs.lock();
+        ReadPins::hold_at(&mut epochs, self.epoch.as_u64());
+        ReadPin {
+            pins: Arc::clone(&self.pins),
+            epoch: self.epoch,
+        }
+    }
+}
+
+impl std::fmt::Debug for ReadPin {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ReadPin")
+            .field("epoch", &self.epoch)
+            .finish_non_exhaustive()
+    }
+}
+
+impl Drop for ReadPin {
+    fn drop(&mut self) {
+        self.pins.release(self.epoch);
+    }
 }
 
 /// Commits held off (see [`TransactionManager::hold_commits`]): while this
@@ -384,6 +549,14 @@ impl CommitGuard<'_> {
         self.commit.epoch
     }
 
+    /// When the commit happened, while the database keeps history (`None`
+    /// otherwise): its WAL group carries this time, so a replay records the
+    /// time the live commit recorded.
+    #[cfg(feature = "wal")]
+    pub(crate) fn commit_time(&self) -> Option<u64> {
+        self.commit.commit_time
+    }
+
     /// Publishes the commit while the commit lock is held: the transaction is
     /// committed, readers see its epoch, and what waited for it can run.
     ///
@@ -400,10 +573,7 @@ impl CommitGuard<'_> {
     /// which is safe because the commit lock is still held and no later
     /// commit took one, and the transaction is active again, with its claims,
     /// for the caller to roll back. Nothing is published or poisoned.
-    ///
-    /// Built for tests only until a failed log write fails the commit
-    /// (WAL v2, #498).
-    #[cfg(test)]
+    #[cfg(any(test, feature = "wal"))]
     pub(crate) fn abort(self) {
         let Self {
             mut commit,
@@ -426,14 +596,10 @@ impl CommitGuard<'_> {
     }
 }
 
-#[cfg(test)]
 impl<'a> CommitGuard<'a> {
     /// The commit's group is in the log: releases the commit lock, so the
     /// next commit can take its epoch and write, and returns the handle that
     /// publishes this one after every commit below it.
-    ///
-    /// Built for tests only until the engine's commit writes its own log
-    /// group and publishes outside the commit lock (WAL v2).
     pub(crate) fn written(self) -> Publish<'a> {
         let Self { commit, _commit } = self;
         commit
@@ -456,6 +622,9 @@ pub(crate) struct Publish<'a> {
     manager: &'a TransactionManager,
     transaction_id: TransactionId,
     epoch: EpochId,
+    /// When the commit happened, while the database keeps history: recorded
+    /// in the time index as it publishes, and the time of its WAL group.
+    commit_time: Option<u64>,
     /// Whether the commit was published or taken back.
     finished: bool,
 }
@@ -473,12 +642,28 @@ impl Publish<'_> {
     ///
     /// # Errors
     ///
+    /// As [`complete_with`](Self::complete_with).
+    pub(crate) fn complete(self) -> Result<()> {
+        self.complete_with(|| Ok(()))
+    }
+
+    /// Publishes the commit as [`complete`](Self::complete) does, once
+    /// `ordered` ran in the commit's turn: after every commit below it is
+    /// published and before any above it publishes. The commit's steps whose
+    /// order must follow the epochs go there: stamping its versions, applying
+    /// its RDF triples, reporting its change events, moving the store's epoch.
+    /// `ordered` must not wait for anything that waits for a commit to be
+    /// published (it holds the publish turn).
+    ///
+    /// # Errors
+    ///
     /// [`TransactionError::IncompleteCommit`] when a commit at a lower epoch
     /// did not complete meanwhile (or the manager was poisoned): this one is
     /// then not published either (its epoch would show the other's stamped
     /// versions) and stays `Committing`, in the log as it was written, until
-    /// the database is reopened.
-    pub(crate) fn complete(mut self) -> Result<()> {
+    /// the database is reopened. The error of `ordered`, which leaves the
+    /// commit incomplete as a dropped handle does.
+    pub(crate) fn complete_with(mut self, ordered: impl FnOnce() -> Result<()>) -> Result<()> {
         let manager = self.manager;
         let mut turn = manager.publish_turn.lock();
         loop {
@@ -492,12 +677,20 @@ impl Publish<'_> {
             }
             manager.published.wait(&mut turn);
         }
+        if let Err(error) = ordered() {
+            // Not published: the handle, dropped unfinished, poisons the
+            // manager once the turn is free.
+            drop(turn);
+            return Err(error);
+        }
         {
             let mut transactions = manager.transactions.write();
             if let Some(info) = transactions.get_mut(&self.transaction_id) {
                 info.state = TransactionState::Committed;
                 // Stamped: what it changed is committed state now.
                 info.changes = None;
+                // It reads no more: its snapshot holds the horizon no more.
+                manager.reads.release(info.start_epoch);
                 // A private transaction no open one began before: only a
                 // transaction that began before this commit was published
                 // can conflict with it, and each is counted while the
@@ -519,6 +712,10 @@ impl Publish<'_> {
             manager
                 .published_epoch
                 .fetch_max(self.epoch.as_u64(), Ordering::Release);
+        }
+        // In the turn, so the times are recorded in epoch order.
+        if let Some(time) = self.commit_time {
+            manager.history.record(self.epoch, time);
         }
         self.finished = true;
         drop(turn);
@@ -563,6 +760,19 @@ impl TransactionManager {
             unpublishable_from: AtomicU64::new(u64::MAX),
             publish_turn: Mutex::new(()),
             published: Condvar::new(),
+            reads: Arc::new(ReadPins::default()),
+            history: History::default(),
+        }
+    }
+
+    /// A manager whose commits take their times from `clock` (milliseconds
+    /// since the Unix epoch) once history is on: for tests of the retention
+    /// window.
+    #[cfg(test)]
+    pub(crate) fn with_history_clock(clock: super::history::Clock) -> Self {
+        Self {
+            history: History::with_clock(clock),
+            ..Self::new()
         }
     }
 
@@ -573,11 +783,11 @@ impl TransactionManager {
 
     /// Begins a new transaction with the specified isolation level.
     pub fn begin_with_isolation(&self, isolation_level: IsolationLevel) -> TransactionId {
-        // Wait for a direct call that commits at once, and for a commit in
-        // progress: the snapshot holds every commit up to its epoch,
-        // complete.
+        // Wait for a direct call that commits at once (it needs no open
+        // transaction), not for a commit in progress: the snapshot is the
+        // published epoch, which holds every commit up to it, complete, and
+        // none of one still being written or synced.
         let _gate = self.idle_gate.lock();
-        let _commit = self.commit_lock.lock();
         self.register(isolation_level, false).0
     }
 
@@ -595,13 +805,11 @@ impl TransactionManager {
     /// Begins a private transaction: one without a session, for a direct
     /// call of the database or a graph handle while a transaction is open
     /// (or a batch), committed or rolled back by the call itself. Like
-    /// [`begin`](Self::begin) it waits for a commit in progress (and for a
-    /// checkpoint holding commits off, and a direct call holding the idle
-    /// gate), so it never starts in the middle of one: a direct call made
-    /// while a transaction commits lands after it. It does not wait for open transactions: its
-    /// writes are claimed like any transaction's, so it conflicts with an
-    /// open transaction that wrote the same entity first, and the other way
-    /// round.
+    /// [`begin`](Self::begin) it waits for a direct call holding the idle
+    /// gate, not for a commit in progress: it reads at the published epoch.
+    /// It does not wait for open transactions either: its writes are claimed
+    /// like any transaction's, so it conflicts with an open (or committing)
+    /// transaction that wrote the same entity first, and the other way round.
     ///
     /// # Errors
     ///
@@ -609,7 +817,6 @@ impl TransactionManager {
     /// [`check_open`](Self::check_open)): the call's commit would fail.
     pub(crate) fn begin_private(&self) -> Result<(TransactionId, Arc<TransactionChanges>)> {
         let _gate = self.idle_gate.lock();
-        let _commit = self.commit_lock.lock();
         self.check_open()?;
         Ok(self.register(IsolationLevel::default(), true))
     }
@@ -638,14 +845,16 @@ impl TransactionManager {
     ) -> (TransactionId, Arc<TransactionChanges>) {
         let transaction_id =
             TransactionId::new(self.next_transaction_id.fetch_add(1, Ordering::Relaxed));
-        let epoch = self.current_epoch();
-        let changes = Arc::new(TransactionChanges::new(transaction_id, epoch));
-        let info = TransactionInfo::new(epoch, isolation_level, Arc::clone(&changes), private);
         // Counted while the `transactions` lock is held: a commit that
         // publishes meanwhile sees this transaction or does not, never half
         // (it drops a private transaction's claims only when no other is
-        // counted, see `Publish::complete`).
+        // counted, see `Publish::complete`). The snapshot is read and held
+        // under the readers' lock, so the read horizon, which reads the
+        // published epoch under it, never passes a snapshot it has not seen.
         let mut transactions = self.transactions.write();
+        let epoch = self.reads.hold_published(&self.published_epoch);
+        let changes = Arc::new(TransactionChanges::new(transaction_id, epoch));
+        let info = TransactionInfo::new(epoch, isolation_level, Arc::clone(&changes), private);
         transactions.insert(transaction_id, info);
         self.active_count.fetch_add(1, Ordering::Release);
         drop(transactions);
@@ -787,12 +996,16 @@ impl TransactionManager {
     /// Records `claim` of each of `entities` for `transaction_id`, after
     /// checking it against the writes and claims of the other open
     /// transactions (first-writer-wins): all of them, or none on a conflict.
+    /// After a commit that did not complete nothing can commit, so a write
+    /// fails with that error first, not with a conflict a retry cannot get
+    /// past (the incomplete commit keeps its claims until the reopen).
     fn record_claims<const N: usize>(
         &self,
         transaction_id: TransactionId,
         claim: Claim,
         entities: [GraphEntity; N],
     ) -> Result<()> {
+        self.check_no_incomplete_commit()?;
         let mut txns = self.transactions.write();
 
         // First-writer-wins conflict detection. Skip the scan when only one
@@ -846,6 +1059,53 @@ impl TransactionManager {
                 }
             }
         }
+        Ok(())
+    }
+
+    /// Claims `key`, a value the transaction writes under a UNIQUE, PRIMARY
+    /// KEY or NODE KEY constraint, so no two transactions commit the same
+    /// one: when another open transaction claimed it, this one fails, first
+    /// writer wins, and at commit it fails if one that claimed it committed
+    /// after it began. A constraint check calls this once it found no
+    /// committed node with the value.
+    ///
+    /// # Errors
+    ///
+    /// Returns a write conflict if another open transaction claimed `key`,
+    /// and an error if the transaction is not active or an earlier commit did
+    /// not complete.
+    pub fn record_key(&self, transaction_id: TransactionId, key: KeyClaim) -> Result<()> {
+        self.check_no_incomplete_commit()?;
+        let mut txns = self.transactions.write();
+        if self.active_count.load(Ordering::Relaxed) > 1 {
+            for (other_tx, other_info) in txns.iter() {
+                if *other_tx != transaction_id
+                    && matches!(
+                        other_info.state,
+                        TransactionState::Active | TransactionState::Committing
+                    )
+                    && other_info.key_set.contains(&key)
+                {
+                    return Err(Error::Transaction(TransactionError::WriteConflict(
+                        format!(
+                            "Write conflict on key {key}: another open transaction writes the same \
+                         value of the key"
+                        ),
+                    )));
+                }
+            }
+        }
+        let info = txns.get_mut(&transaction_id).ok_or_else(|| {
+            Error::Transaction(TransactionError::InvalidState(
+                "Transaction not found".to_string(),
+            ))
+        })?;
+        if info.state != TransactionState::Active {
+            return Err(Error::Transaction(TransactionError::InvalidState(
+                "Transaction is not active".to_string(),
+            )));
+        }
+        info.key_set.insert(key);
         Ok(())
     }
 
@@ -911,7 +1171,7 @@ impl TransactionManager {
         if let Some(changes) = changes {
             // A store that fails leaves the commit half stamped: the guard,
             // dropped uncompleted, poisons the manager.
-            changes.stamp(epoch).map_err(|error| {
+            changes.commit(epoch).map_err(|error| {
                 Error::Internal(format!(
                     "the commit of transaction {transaction_id:?} could not stamp its changes: \
                      {error}"
@@ -1012,6 +1272,29 @@ impl TransactionManager {
             }
         }
 
+        // The same for the values of unique keys: a transaction that
+        // committed after our snapshot wrote a value we write, which neither
+        // the other's constraint check nor ours could see.
+        if others_committed && !ours.key_set.is_empty() {
+            for (other_tx, commit_epoch) in committed.iter() {
+                if *other_tx != transaction_id
+                    && commit_epoch.as_u64() > our_start_epoch.as_u64()
+                    && let Some(other_info) = txns.get(other_tx)
+                    && let Some(key) = ours
+                        .key_set
+                        .iter()
+                        .find(|key| other_info.key_set.contains(*key))
+                {
+                    return Err(Error::Transaction(TransactionError::WriteConflict(
+                        format!(
+                            "Write conflict on key {key}: a transaction that committed after this \
+                         one began wrote the same value of the key"
+                        ),
+                    )));
+                }
+            }
+        }
+
         // SSI validation for Serializable isolation level.
         // Check for read-write conflicts: if we read an entity that another
         // transaction (that committed after we started) wrote, we have a
@@ -1061,6 +1344,8 @@ impl TransactionManager {
                 manager: self,
                 transaction_id,
                 epoch: commit_epoch,
+                // Under the commit lock: the times follow the epochs.
+                commit_time: self.history.commit_time(),
                 finished: false,
             },
             _commit: commit_lock,
@@ -1206,12 +1491,12 @@ impl TransactionManager {
                 // A store change in progress: a checkpoint never reads the
                 // store or the change set halfway through the undo.
                 let _writing = self.write_in_progress();
-                changes.undo_after(changes.start(), false)
+                changes.rollback()
             }
-            None => Ok(None),
+            None => Ok(()),
         };
         let undo_error = match undone {
-            Err(super::UndoFailure::Broken(error)) => {
+            Err(error) => {
                 let message = format!(
                     "the abort of transaction {transaction_id:?} could not undo its changes: \
                      {error}"
@@ -1219,8 +1504,7 @@ impl TransactionManager {
                 self.poison(&message);
                 Some(Error::Internal(message))
             }
-            // A store without undo keeps its writes: the caller chose it.
-            Ok(_) | Err(super::UndoFailure::External(_)) => None,
+            Ok(()) => None,
         };
         self.abort_registered(transaction_id)?;
         undo_error.map_or(Ok(()), Err)
@@ -1244,6 +1528,7 @@ impl TransactionManager {
 
         info.state = TransactionState::Aborted;
         info.changes = None;
+        self.reads.release(info.start_epoch);
         // An aborted transaction conflicts with nobody: a private one, whose
         // state nobody asks for, leaves at once (others at the next `gc`).
         if info.private {
@@ -1300,6 +1585,7 @@ impl TransactionManager {
             if info.state == TransactionState::Active {
                 info.state = TransactionState::Aborted;
                 info.changes = None;
+                self.reads.release(info.start_epoch);
                 self.active_count.fetch_sub(1, Ordering::Relaxed);
             }
         }
@@ -1342,18 +1628,177 @@ impl TransactionManager {
         self.wake_publish_waiters();
     }
 
-    /// Returns the minimum epoch that must be preserved for active transactions.
+    /// The read horizon: the oldest epoch any reader may still read at, now
+    /// or from now on. Garbage collection keeps every version a reader at
+    /// the horizon or later can see (`gc_versions`, `collect`).
     ///
-    /// This is used for garbage collection - versions visible at this epoch
-    /// must be preserved.
+    /// It is the oldest of: the snapshot of every open transaction and of
+    /// every committing one (a commit whose publish has not come, or never
+    /// comes after an unknown outcome, still reads at its snapshot and its
+    /// versions stay pending), the epoch of every read pinned outside a
+    /// transaction (`pin_read`: every read statement outside a transaction
+    /// pins for its run), and the published epoch, at which every reader
+    /// that starts from now on reads.
+    ///
+    /// Each of them is counted by the epoch it reads at as it begins (a
+    /// transaction's snapshot until its commit is published or it aborts,
+    /// a pin until it is dropped), so this reads the oldest counted epoch
+    /// and costs the same however many transactions finished. A reader's
+    /// epoch is read and counted under the lock this reads them under, so a
+    /// reader that starts meanwhile is either counted or reads at the
+    /// published epoch read here or a later one.
     #[must_use]
-    pub fn min_active_epoch(&self) -> EpochId {
-        let txns = self.transactions.read();
-        txns.values()
-            .filter(|info| info.state == TransactionState::Active)
-            .map(|info| info.start_epoch)
-            .min()
-            .unwrap_or_else(|| self.current_epoch())
+    pub fn read_horizon(&self) -> EpochId {
+        let readers = self.reads.epochs.lock();
+        let published = self.published_epoch.load(Ordering::Acquire);
+        EpochId::new(ReadPins::oldest(&readers).map_or(published, |oldest| oldest.min(published)))
+    }
+
+    /// Pins a read outside any transaction at the published epoch, for as
+    /// long as the returned pin lives: the [read horizon](Self::read_horizon)
+    /// stays at its epoch or before. The read may read at that epoch or at
+    /// any later one it loads after the pin (the published epoch only moves
+    /// forward). Read statements outside a transaction pin for their run
+    /// (#412 decision Q6), so collecting at the horizon never takes a version
+    /// such a statement still reads.
+    pub(crate) fn pin_read(&self) -> ReadPin {
+        let epoch = self.reads.hold_published(&self.published_epoch);
+        ReadPin {
+            pins: Arc::clone(&self.reads),
+            epoch,
+        }
+    }
+
+    /// Pins a read at `epoch`, a time-travel read's (one after the
+    /// published epoch reads at the published one), for as long as the
+    /// returned pin lives: the collect horizon stays at its epoch or before,
+    /// so the versions it reads stay while it runs.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::InvalidValue`] for an epoch before the history floor (see
+    /// [`history_floor`](Self::history_floor)): "history before ... is not
+    /// retained". The floor is read under the lock the collect horizon moves
+    /// it under, so a read pinned here is never collected past.
+    pub(crate) fn pin_read_at(&self, epoch: EpochId) -> Result<ReadPin> {
+        let mut epochs = self.reads.epochs.lock();
+        if epoch < self.history.floor() {
+            return Err(self.history.before_floor(epoch));
+        }
+        let epoch = epoch.min(EpochId::new(self.published_epoch.load(Ordering::Acquire)));
+        ReadPins::hold_at(&mut epochs, epoch.as_u64());
+        Ok(ReadPin {
+            pins: Arc::clone(&self.reads),
+            epoch,
+        })
+    }
+
+    /// The horizon garbage collection runs at: the older of the
+    /// [read horizon](Self::read_horizon) and the start of the database's
+    /// retention window (none while history is off, so it is the read
+    /// horizon then, as without history). Every version a reader at it or
+    /// later reads is kept, and it becomes the history floor: from now on a
+    /// read before it is refused. The engine's collects run at it.
+    #[must_use]
+    pub fn collect_horizon(&self) -> EpochId {
+        let readers = self.reads.epochs.lock();
+        let published = self.published_epoch.load(Ordering::Acquire);
+        let read = ReadPins::oldest(&readers).map_or(published, |oldest| oldest.min(published));
+        let horizon = match self.history.retention_horizon() {
+            Some(start) => read.min(start),
+            None => read,
+        };
+        let horizon = EpochId::new(horizon);
+        self.history.collected_at(horizon);
+        horizon
+    }
+
+    /// The oldest epoch a read may still ask for: the newest collect
+    /// horizon (see [`collect_horizon`](Self::collect_horizon)). A
+    /// time-travel read before it is refused.
+    #[must_use]
+    pub fn history_floor(&self) -> EpochId {
+        self.history.floor()
+    }
+
+    /// Sets how long the database keeps history, from now on (see
+    /// [`HistoryRetention`]): turned on, the commit times are recorded from
+    /// the published epoch on; turned off, the time index goes, and the
+    /// collect horizon is the read horizon again.
+    pub fn set_history_retention(&self, retention: HistoryRetention) {
+        self.history
+            .set_retention(retention, self.published_epoch.load(Ordering::Acquire));
+    }
+
+    /// How long the database keeps history.
+    #[must_use]
+    pub fn history_retention(&self) -> HistoryRetention {
+        self.history.retention()
+    }
+
+    /// The epoch a read at `timestamp` reads at: the last one committed at
+    /// or before it (at the resolution of a millisecond).
+    ///
+    /// # Errors
+    ///
+    /// [`Error::InvalidValue`] while the database keeps no history, and for a
+    /// time before what it keeps.
+    pub fn epoch_at(&self, timestamp: Timestamp) -> Result<EpochId> {
+        self.history.epoch_at(timestamp)
+    }
+
+    /// Now on the clock commit times come from, in milliseconds since the
+    /// Unix epoch.
+    pub(crate) fn history_now(&self) -> u64 {
+        self.history.now()
+    }
+
+    /// The time a write outside a transaction that commits at once takes,
+    /// under the commit lock, while the database keeps history: its WAL
+    /// group carries it, and [`record_commit_time`](Self::record_commit_time)
+    /// records it once its epoch is published.
+    pub(crate) fn commit_time(&self) -> Option<u64> {
+        self.history.commit_time()
+    }
+
+    /// Records that `epoch` committed at `millis`: a write outside a
+    /// transaction, once published, and a replayed WAL group. Nothing while
+    /// history is off.
+    pub(crate) fn record_commit_time(&self, epoch: EpochId, millis: u64) {
+        self.history.record(epoch, millis);
+    }
+
+    /// What a checkpoint writes of the history, `None` while it is off.
+    pub(crate) fn history_image(&self) -> Option<HistoryImage> {
+        self.history.image()
+    }
+
+    /// Sets the retention an open starts with, before it loads the file and
+    /// replays the log (see [`anchor_history`](Self::anchor_history)).
+    pub(crate) fn open_history(&self, retention: HistoryRetention) {
+        self.history.open(retention);
+    }
+
+    /// Takes in what a load found of the history: the image of a file's
+    /// `TIME_INDEX` section, or, for a file without one, the epoch of its
+    /// checkpoint, before which nothing is retained.
+    pub(crate) fn restore_history_or_floor(
+        &self,
+        image: Option<HistoryImage>,
+        checkpoint: EpochId,
+    ) {
+        match image {
+            Some(image) => self.history.restore(image),
+            None => self.history.collected_at(checkpoint),
+        }
+    }
+
+    /// At the end of an open or a new database: a history that is on and
+    /// holds no commit at or after the published epoch starts there, now,
+    /// so a read at a time from now on finds its epoch.
+    pub(crate) fn anchor_history(&self) {
+        self.history
+            .anchor(self.published_epoch.load(Ordering::Acquire));
     }
 
     /// Returns the number of active transactions.
@@ -1579,25 +2024,167 @@ mod tests {
         assert!(mgr.commit(tx).is_ok());
     }
 
+    /// With no reader the horizon is the published epoch; with open
+    /// transactions, the oldest snapshot, until it ends.
     #[test]
-    fn test_min_active_epoch() {
+    fn the_read_horizon_is_the_oldest_open_snapshot() {
         let mgr = TransactionManager::new();
+        assert_eq!(
+            mgr.read_horizon(),
+            mgr.current_epoch(),
+            "no reader: the published epoch"
+        );
 
-        // No active transactions - should return current epoch
-        assert_eq!(mgr.min_active_epoch(), mgr.current_epoch());
-
-        // Start some transactions
         let tx1 = mgr.begin();
         let epoch1 = mgr.start_epoch(tx1).unwrap();
-
-        // Advance epoch
         let tx2 = mgr.begin();
         mgr.commit(tx2).unwrap();
-
         let _tx3 = mgr.begin();
+        assert_eq!(mgr.read_horizon(), epoch1, "the earliest open snapshot");
 
-        // min_active_epoch should be tx1's start epoch (earliest active)
-        assert_eq!(mgr.min_active_epoch(), epoch1);
+        mgr.abort(tx1).unwrap();
+        assert_eq!(mgr.read_horizon(), mgr.current_epoch());
+    }
+
+    /// A read outside any transaction holds the horizon at the epoch it
+    /// pinned while later commits publish; two reads pinned at one epoch
+    /// hold it until both end, and then it moves to the published epoch.
+    #[test]
+    fn a_pinned_read_holds_the_read_horizon_back() {
+        let mgr = TransactionManager::new();
+        let first = mgr.begin();
+        let committed = mgr.commit(first).unwrap();
+        let read = mgr.pin_read();
+        let again = mgr.pin_read();
+        assert_eq!((read.epoch(), again.epoch()), (committed, committed));
+        for _ in 0..2 {
+            let tx = mgr.begin();
+            mgr.commit(tx).unwrap();
+        }
+        assert_eq!(mgr.current_epoch(), EpochId::new(committed.as_u64() + 2));
+        assert_eq!(mgr.read_horizon(), committed, "the pinned read");
+        drop(read);
+        assert_eq!(mgr.read_horizon(), committed, "the second read");
+        let later = mgr.pin_read();
+        drop(again);
+        assert_eq!(mgr.read_horizon(), later.epoch(), "the later read");
+        drop(later);
+        assert_eq!(mgr.read_horizon(), mgr.current_epoch());
+    }
+
+    /// A pin dropped by the unwind of a panic in its read unpins it.
+    #[test]
+    fn a_read_that_panics_unpins() {
+        let mgr = TransactionManager::new();
+        let tx = mgr.begin();
+        let pinned = mgr.commit(tx).unwrap();
+        let read = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _pin = mgr.pin_read();
+            let tx = mgr.begin();
+            mgr.commit(tx).unwrap();
+            assert_eq!(mgr.read_horizon(), pinned);
+            panic!("the read fails");
+        }));
+        assert!(read.is_err());
+        assert_eq!(mgr.read_horizon(), mgr.current_epoch());
+        assert!(mgr.current_epoch() > pinned);
+    }
+
+    /// A committing transaction (its epoch assigned, its publish not come)
+    /// still reads at its snapshot, which holds the horizon back after a
+    /// later snapshot's commit published; the horizon never passes the
+    /// published epoch for an epoch assigned but not published, and moves
+    /// once the commit publishes.
+    #[test]
+    fn a_committing_transaction_holds_the_read_horizon_back() {
+        let mgr = TransactionManager::new();
+        let slow = mgr.begin();
+        let snapshot = mgr.start_epoch(slow).unwrap();
+        let fast = mgr.begin();
+        mgr.commit(fast).unwrap();
+        let published = mgr.current_epoch();
+        assert!(published > snapshot);
+
+        let publish = mgr.start_commit(slow).unwrap().written();
+        assert_eq!(mgr.state(slow), Some(TransactionState::Committing));
+        assert_eq!(mgr.read_horizon(), snapshot, "the committing snapshot");
+        let reader = mgr.begin();
+        assert_eq!(mgr.start_epoch(reader), Some(published));
+        mgr.abort(reader).unwrap();
+        assert_eq!(mgr.read_horizon(), snapshot);
+
+        let epoch = publish.epoch();
+        publish.complete().unwrap();
+        assert_eq!(mgr.read_horizon(), epoch, "published: no reader before it");
+    }
+
+    /// While a commit is written and not published, the horizon stays at
+    /// the published epoch: a reader that starts meanwhile reads there.
+    #[test]
+    fn the_read_horizon_stays_at_the_published_epoch_during_a_commit() {
+        let mgr = TransactionManager::new();
+        let tx = mgr.begin();
+        let published = mgr.current_epoch();
+        let publish = mgr.start_commit(tx).unwrap().written();
+        // The committing transaction's snapshot is the published epoch; the
+        // horizon does not reach the epoch it was assigned.
+        assert!(publish.epoch() > published);
+        assert_eq!(mgr.read_horizon(), published);
+        let read = mgr.pin_read();
+        assert_eq!(read.epoch(), published, "a read reads what is published");
+        publish.complete().unwrap();
+        assert_eq!(mgr.read_horizon(), published, "the read is pinned");
+        drop(read);
+        assert_eq!(mgr.read_horizon(), mgr.current_epoch());
+    }
+
+    /// Every way a transaction finishes lets go of its snapshot, before any
+    /// `gc` drops it: a commit (private or not), an abort, the abort of every
+    /// active one; a commit taken back keeps the snapshot until the
+    /// transaction's rollback.
+    #[test]
+    fn a_finished_transaction_no_longer_holds_the_read_horizon() {
+        let mgr = TransactionManager::new();
+        let oldest = mgr.begin();
+        let snapshot = mgr.start_epoch(oldest).unwrap();
+        for round in 0..100 {
+            let tx = mgr.begin();
+            if round % 2 == 0 {
+                mgr.commit(tx).unwrap();
+            } else {
+                mgr.abort(tx).unwrap();
+            }
+            let (private, _) = mgr.begin_private().unwrap();
+            mgr.commit(private).unwrap();
+        }
+        assert_eq!(mgr.read_horizon(), snapshot, "the oldest open snapshot");
+        mgr.abort(oldest).unwrap();
+        assert_eq!(mgr.read_horizon(), mgr.current_epoch(), "no reader left");
+
+        // A commit whose log write failed is taken back: the transaction is
+        // active again and still reads at its snapshot.
+        let taken_back = mgr.begin();
+        let snapshot = mgr.start_epoch(taken_back).unwrap();
+        let other = mgr.begin();
+        mgr.commit(other).unwrap();
+        mgr.start_commit(taken_back).unwrap().abort();
+        assert_eq!(mgr.state(taken_back), Some(TransactionState::Active));
+        assert_eq!(mgr.read_horizon(), snapshot, "the commit taken back");
+        mgr.abort(taken_back).unwrap();
+        assert_eq!(mgr.read_horizon(), mgr.current_epoch());
+
+        let first = mgr.begin();
+        let held = mgr.start_epoch(first).unwrap();
+        let tx = mgr.begin();
+        mgr.commit(tx).unwrap();
+        let _second = mgr.begin();
+        assert_eq!(mgr.read_horizon(), held);
+        mgr.abort_all_active();
+        assert_eq!(
+            mgr.read_horizon(),
+            mgr.current_epoch(),
+            "all aborted at once"
+        );
     }
 
     #[test]
@@ -2143,68 +2730,61 @@ mod tests {
         mgr.record_write(next, NodeId::new(1)).unwrap();
     }
 
-    /// A private transaction (a direct call) begins between commits too: it
-    /// waits for the commit in progress and starts at its epoch, registered
-    /// with its change set. It does not wait for an open transaction, and
-    /// conflicts with one that wrote an entity first.
+    /// A private transaction (a direct call) begins during a commit without
+    /// waiting for it, at the published epoch, registered with its change
+    /// set; it conflicts with the committing transaction on what that one
+    /// wrote, and with an open transaction that wrote an entity first.
     #[test]
-    fn a_private_transaction_waits_for_a_commit_in_progress_only() {
+    fn a_private_transaction_begins_during_a_commit_at_the_published_epoch() {
         let mgr = TransactionManager::new();
         let open = mgr.begin();
         mgr.record_write(open, NodeId::new(3)).unwrap();
         let tx = mgr.begin();
+        mgr.record_write(tx, NodeId::new(19)).unwrap();
+        let published = mgr.current_epoch();
         let commit = mgr.start_commit(tx).unwrap();
-        let epoch = commit.epoch();
 
-        let manager = &mgr;
-        std::thread::scope(|scope| {
-            let (finished, late) =
-                spawn_and_wait(scope, BRIEFLY, move || manager.begin_private().unwrap());
-            assert!(!finished, "begin_private returned during the commit");
-            commit.complete().unwrap();
-            let (direct, changes) = late.join().unwrap();
-            assert_eq!(mgr.start_epoch(direct), Some(epoch));
-            assert_eq!((changes.id(), changes.snapshot()), (direct, epoch));
-            assert!(mgr.changes(direct).is_some(), "registered with its set");
+        let (direct, changes) = mgr.begin_private().unwrap();
+        assert_eq!(mgr.start_epoch(direct), Some(published));
+        assert_eq!((changes.id(), changes.snapshot()), (direct, published));
+        assert!(mgr.changes(direct).is_some(), "registered with its set");
+        for (node, whose) in [(3, "the open transaction"), (19, "the committing one")] {
             assert!(
                 matches!(
-                    mgr.record_write(direct, NodeId::new(3)),
+                    mgr.record_write(direct, NodeId::new(node)),
                     Err(Error::Transaction(TransactionError::WriteConflict(_)))
                 ),
-                "the open transaction wrote the node first"
+                "{whose} wrote node {node} first"
             );
-            mgr.abort(direct).unwrap();
-            assert!(mgr.changes(direct).is_none(), "an abort drops its set");
-        });
+        }
+        commit.complete().unwrap();
+        mgr.abort(direct).unwrap();
+        assert!(mgr.changes(direct).is_none(), "an abort drops its set");
     }
 
-    /// A transaction begins between commits, never during one: it waits for
-    /// the commit in progress and starts at its epoch.
+    /// A transaction begins during a commit without waiting for it: it
+    /// starts at the published epoch, which holds none of the commit; one
+    /// that begins once the commit is published starts at its epoch.
     #[test]
-    fn begin_waits_for_a_commit_in_progress() {
+    fn begin_does_not_wait_for_a_commit_in_progress() {
         let mgr = TransactionManager::new();
         let tx = mgr.begin();
+        let published = mgr.current_epoch();
         let commit = mgr.start_commit(tx).unwrap();
         let epoch = commit.epoch();
 
-        let manager = &mgr;
-        std::thread::scope(|scope| {
-            let (began, waited) = std::sync::mpsc::channel();
-            let late = scope.spawn(move || {
-                let late = manager.begin();
-                began.send(()).unwrap();
-                late
-            });
-            assert!(
-                waited
-                    .recv_timeout(std::time::Duration::from_millis(100))
-                    .is_err(),
-                "begin returned while the commit was in progress"
-            );
-            commit.complete().unwrap();
-            let late = late.join().unwrap();
-            assert_eq!(mgr.start_epoch(late), Some(epoch));
-        });
+        let during = mgr.begin();
+        assert_eq!(mgr.start_epoch(during), Some(published));
+        let publish = commit.written();
+        let written = mgr.begin();
+        assert_eq!(
+            mgr.start_epoch(written),
+            Some(published),
+            "written is not published"
+        );
+        publish.complete().unwrap();
+        let after = mgr.begin();
+        assert_eq!(mgr.start_epoch(after), Some(epoch));
     }
 
     /// Readers see a commit's epoch only once the commit is complete, so a
@@ -2551,8 +3131,9 @@ mod tests {
     /// A commit that does not complete (its code panicked between the commit
     /// decision and `complete`) is not reported as committed and does not
     /// publish its epoch: its writes stay locked against other transactions,
-    /// and the commit lock is released, so transactions still begin (no
-    /// transaction commits afterwards, see the next test).
+    /// which get the error of the failed commit (not a retryable conflict)
+    /// when they write, and the commit lock is released, so transactions
+    /// still begin (no transaction commits afterwards, see the next test).
     #[test]
     fn a_commit_that_does_not_complete_keeps_its_writes_locked() {
         let mgr = TransactionManager::new();
@@ -2571,7 +3152,7 @@ mod tests {
         assert_eq!(mgr.current_epoch(), before);
         assert!(matches!(
             mgr.record_write(other, NodeId::new(1)),
-            Err(Error::Transaction(TransactionError::WriteConflict(_)))
+            Err(Error::Transaction(TransactionError::IncompleteCommit))
         ));
         let next = mgr.begin();
         assert_eq!(mgr.start_epoch(next), Some(before));
@@ -2603,7 +3184,13 @@ mod tests {
                 "a new transaction reads what was published before the failed commit"
             );
             if wrote {
-                mgr.record_write(next, NodeId::new(19)).unwrap();
+                assert!(
+                    matches!(
+                        mgr.record_write(next, NodeId::new(19)),
+                        Err(Error::Transaction(TransactionError::IncompleteCommit))
+                    ),
+                    "a write fails with the failed commit's error"
+                );
             }
             let Err(error) = mgr.start_commit(next) else {
                 panic!("a commit after an incomplete one (wrote: {wrote}) succeeded");

@@ -5,8 +5,36 @@ use super::ast::*;
 use super::lexer::{Lexer, Token, TokenKind};
 use crate::query::keywords::unescape_string;
 use crate::query::limits::{Chain, Nesting, nesting_error_message};
+use crate::query::schema::IndexOptionValue;
 use grafeo_common::storage::value_codec::MAX_PROPERTY_VALUE_DEPTH;
+use grafeo_common::types::{Decimal, DecimalError, DecimalType, MAX_DECIMAL_DIGITS};
 use grafeo_common::utils::error::{Error, QueryError, QueryErrorKind, Result, SourceSpan};
+
+/// The value of the string literal token `text`, quotes included: a doubled
+/// quote of the literal's own quote character is that quote (ISO/IEC
+/// 39075:2024 21.2: `'O''Brien'`, `"say ""hi"""`), and backslash escapes
+/// are read by [`unescape_string`]. A backslash pair stays a pair for it, so
+/// `'a\\''b'` is `a\'b`.
+fn string_literal_value(text: &str) -> String {
+    let quote = text.chars().next().unwrap_or('\'');
+    let inner = &text[quote.len_utf8()..text.len() - quote.len_utf8()];
+    let mut undoubled = String::with_capacity(inner.len());
+    let mut chars = inner.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if ch == '\\' {
+            undoubled.push(ch);
+            if let Some(escaped) = chars.next() {
+                undoubled.push(escaped);
+            }
+        } else if ch == quote && chars.peek() == Some(&quote) {
+            chars.next();
+            undoubled.push(ch);
+        } else {
+            undoubled.push(ch);
+        }
+    }
+    unescape_string(&undoubled)
+}
 
 /// A graph type body: the names of its node types and of its edge types, the
 /// element types it declares, and whether it is open.
@@ -210,12 +238,12 @@ impl<'a> Parser<'a> {
     }
 
     /// Gets the identifier name from the current token.
-    /// For quoted identifiers, strips the backticks.
+    /// For quoted identifiers, strips the backticks, and a doubled backtick
+    /// inside is one backtick (`` `a``b` `` is ``a`b``).
     fn get_identifier_name(&self) -> String {
         let text = &self.current.text;
         if self.current.kind == TokenKind::QuotedIdentifier {
-            // Strip backticks from `name` -> name
-            text[1..text.len() - 1].to_string()
+            text[1..text.len() - 1].replace("``", "`")
         } else {
             text.clone()
         }
@@ -462,7 +490,7 @@ impl<'a> Parser<'a> {
                 let name = self.get_identifier_name();
                 match name.to_uppercase().as_str() {
                     "DROP" => self.parse_drop(),
-                    "USE" => self.parse_use_graph().map(Statement::SessionCommand),
+                    "USE" => self.parse_use(),
                     "SESSION" => self.parse_session_command().map(Statement::SessionCommand),
                     "START" => self
                         .parse_start_transaction()
@@ -551,6 +579,14 @@ impl<'a> Parser<'a> {
     /// CALL name.space(args) [YIELD field [AS alias], ...]
     /// ```
     fn parse_call_statement(&mut self) -> Result<CallStatement> {
+        self.parse_procedure_call(true)
+    }
+
+    /// Parses `CALL name(args) [YIELD ... [WHERE ...]]`, and with
+    /// `with_return` the `RETURN` a statement-level call may end with. A call
+    /// inside a query leaves its `RETURN` to the query, which goes on after
+    /// it.
+    fn parse_procedure_call(&mut self, with_return: bool) -> Result<CallStatement> {
         let span_start = self.current.span.start;
         self.expect(TokenKind::Call)?;
 
@@ -597,11 +633,12 @@ impl<'a> Parser<'a> {
         };
 
         // Parse optional RETURN clause (only valid after YIELD)
-        let return_clause = if yield_items.is_some() && self.current.kind == TokenKind::Return {
-            Some(self.parse_return_clause()?)
-        } else {
-            None
-        };
+        let return_clause =
+            if with_return && yield_items.is_some() && self.current.kind == TokenKind::Return {
+                Some(self.parse_return_clause()?)
+            } else {
+                None
+            };
 
         Ok(CallStatement {
             procedure_name: name_parts,
@@ -823,7 +860,7 @@ impl<'a> Parser<'a> {
                             ordered_clauses.push(self.parse_inline_call(true)?);
                         } else {
                             // OPTIONAL CALL procedure(...)
-                            let call = self.parse_call_statement()?;
+                            let call = self.parse_procedure_call(false)?;
                             ordered_clauses.push(QueryClause::CallProcedure(call));
                         }
                     } else {
@@ -868,7 +905,7 @@ impl<'a> Parser<'a> {
                     if matches!(self.peek_kind(), TokenKind::LBrace | TokenKind::LParen) {
                         ordered_clauses.push(self.parse_inline_call(false)?);
                     } else {
-                        let call = self.parse_call_statement()?;
+                        let call = self.parse_procedure_call(false)?;
                         ordered_clauses.push(QueryClause::CallProcedure(call));
                     }
                 }
@@ -883,6 +920,15 @@ impl<'a> Parser<'a> {
                 {
                     let clause = self.parse_load_data_clause()?;
                     ordered_clauses.push(QueryClause::LoadData(clause));
+                }
+                // `USE g` before a later part of the query: the graph the
+                // clauses after it read (a focused linear query statement part).
+                _ if self.is_identifier()
+                    && self.get_identifier_name().eq_ignore_ascii_case("USE") =>
+                {
+                    self.advance(); // consume USE
+                    let graph = self.parse_use_graph_name()?;
+                    ordered_clauses.push(QueryClause::Use(graph));
                 }
                 // A FILTER statement, or a WHERE after a clause: a WHERE right
                 // after a MATCH is that MATCH's graph pattern WHERE clause.
@@ -927,8 +973,11 @@ impl<'a> Parser<'a> {
         }
 
         // Parse RETURN, FINISH, or SELECT clause
+        let mut having_after_group_by = None;
         let return_clause = if self.current.kind == TokenKind::Return {
-            self.parse_return_clause()?
+            let (return_clause, having) = self.parse_return_and_having(true)?;
+            having_after_group_by = having;
+            return_clause
         } else if self.is_identifier() && self.get_identifier_name().eq_ignore_ascii_case("FINISH")
         {
             // FINISH: consume input, return empty result
@@ -975,11 +1024,15 @@ impl<'a> Parser<'a> {
             return Err(self.error("Expected RETURN, FINISH, or SELECT"));
         };
 
-        // Parse optional HAVING clause (after RETURN, filters aggregate results)
+        // Parse optional HAVING clause (after RETURN, filters aggregate
+        // results), unless the GROUP BY of the RETURN had one
         let having_clause = if self.current.kind == TokenKind::Having {
+            if having_after_group_by.is_some() {
+                return Err(self.error("A RETURN takes one HAVING"));
+            }
             Some(self.parse_having_clause()?)
         } else {
-            None
+            having_after_group_by
         };
 
         Ok(QueryStatement {
@@ -1104,7 +1157,7 @@ impl<'a> Parser<'a> {
             if !self.is_identifier() {
                 return Err(self.error("Expected variable name in SET"));
             }
-            let variable = self.current.text.clone();
+            let variable = self.get_identifier_name();
             self.advance();
 
             // Check if this is a label operation (n:Label) or property assignment (n.prop = value)
@@ -1117,7 +1170,7 @@ impl<'a> Parser<'a> {
                     if !self.is_label_or_type_name() {
                         return Err(self.error("Expected label name after colon in SET"));
                     }
-                    labels.push(self.current.text.clone());
+                    labels.push(self.get_identifier_name());
                     self.advance();
                 }
                 label_operations.push(LabelOperation { variable, labels });
@@ -1128,7 +1181,7 @@ impl<'a> Parser<'a> {
                 if !self.is_label_or_type_name() {
                     return Err(self.error("Expected property name in SET"));
                 }
-                let property = self.current.text.clone();
+                let property = self.get_identifier_name();
                 self.advance();
 
                 self.expect(TokenKind::Eq)?;
@@ -1190,7 +1243,7 @@ impl<'a> Parser<'a> {
             if !self.is_identifier() {
                 return Err(self.error("Expected variable name in REMOVE"));
             }
-            let variable = self.current.text.clone();
+            let variable = self.get_identifier_name();
             self.advance();
 
             // Check if this is a label removal (n:Label) or property removal (n.prop)
@@ -1202,7 +1255,7 @@ impl<'a> Parser<'a> {
                     if !self.is_label_or_type_name() {
                         return Err(self.error("Expected label name after colon in REMOVE"));
                     }
-                    labels.push(self.current.text.clone());
+                    labels.push(self.get_identifier_name());
                     self.advance();
                 }
                 label_operations.push(LabelOperation { variable, labels });
@@ -1213,7 +1266,7 @@ impl<'a> Parser<'a> {
                 if !self.is_label_or_type_name() {
                     return Err(self.error("Expected property name in REMOVE"));
                 }
-                let property = self.current.text.clone();
+                let property = self.get_identifier_name();
                 self.advance();
 
                 property_removals.push((variable, property));
@@ -1413,9 +1466,7 @@ impl<'a> Parser<'a> {
         if self.current.kind != TokenKind::String {
             return Err(self.error("Expected string literal"));
         }
-        let text = &self.current.text;
-        let inner = &text[1..text.len() - 1];
-        let value = unescape_string(inner);
+        let value = string_literal_value(&self.current.text);
         self.advance();
         Ok(value)
     }
@@ -2332,7 +2383,7 @@ impl<'a> Parser<'a> {
         } else {
             "An edge has one type".to_string()
         };
-        Err(Error::Query(
+        Err(Error::from(
             QueryError::new(
                 QueryErrorKind::Syntax,
                 format!(
@@ -2904,6 +2955,17 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_return_clause(&mut self) -> Result<ReturnClause> {
+        Ok(self.parse_return_and_having(false)?.0)
+    }
+
+    /// Parses a RETURN clause and, with `accept_having`, a HAVING right after
+    /// its GROUP BY (before ORDER BY, as SQL orders them): the return clause
+    /// and that HAVING, if any. A query statement also takes its HAVING after
+    /// the whole RETURN clause.
+    fn parse_return_and_having(
+        &mut self,
+        accept_having: bool,
+    ) -> Result<(ReturnClause, Option<HavingClause>)> {
         self.expect(TokenKind::Return)?;
 
         let distinct = if self.current.kind == TokenKind::Distinct {
@@ -2944,6 +3006,12 @@ impl<'a> Parser<'a> {
         } else {
             Vec::new()
         };
+        let having =
+            if accept_having && !group_by.is_empty() && self.current.kind == TokenKind::Having {
+                Some(self.parse_having_clause()?)
+            } else {
+                None
+            };
 
         let order_by = if self.current.kind == TokenKind::Order {
             Some(self.parse_order_by()?)
@@ -2967,17 +3035,20 @@ impl<'a> Parser<'a> {
             None
         };
 
-        Ok(ReturnClause {
-            distinct,
-            items,
-            is_wildcard,
-            group_by,
-            order_by,
-            skip,
-            limit,
-            is_finish: false,
-            span: None,
-        })
+        Ok((
+            ReturnClause {
+                distinct,
+                items,
+                is_wildcard,
+                group_by,
+                order_by,
+                skip,
+                limit,
+                is_finish: false,
+                span: None,
+            },
+            having,
+        ))
     }
 
     /// Parses a SELECT clause (SQL-style projection, same semantics as RETURN).
@@ -3019,20 +3090,21 @@ impl<'a> Parser<'a> {
         }
         self.advance(); // consume FROM
 
-        // Parse graph reference: a single name or dot-qualified name (schema.graph),
-        // or CURRENT_GRAPH / CURRENT_PROPERTY_GRAPH. Skip if MATCH follows directly.
-        if self.is_identifier() && self.current.kind != TokenKind::Match {
-            self.advance(); // consume graph name
-            // Optional dot-qualified continuation (e.g., schema.graph_name)
-            while self.current.kind == TokenKind::Dot && self.peek_kind() != TokenKind::Eof {
-                self.advance(); // consume dot
-                if self.is_identifier() {
-                    self.advance(); // consume qualifier
-                } else {
-                    break;
-                }
+        // The graph it reads, as a USE names it: a graph name, or
+        // CURRENT_GRAPH / CURRENT_PROPERTY_GRAPH. None when MATCH follows
+        // directly: the session's graph.
+        let graph = if self.is_identifier() && self.current.kind != TokenKind::Match {
+            let graph = self.parse_use_graph_name()?;
+            if self.current.kind == TokenKind::Dot {
+                return Err(self.error(
+                    "a qualified graph name after SELECT ... FROM is not supported yet: \
+                     select the schema with SESSION SET SCHEMA",
+                ));
             }
-        }
+            graph
+        } else {
+            None
+        };
 
         // Expect MATCH
         if self.current.kind != TokenKind::Match {
@@ -3101,7 +3173,7 @@ impl<'a> Parser<'a> {
             span: None,
         };
 
-        Ok(Statement::Query(QueryStatement {
+        let query = Statement::Query(QueryStatement {
             match_clauses: vec![match_clause],
             where_clause,
             set_clauses: Vec::new(),
@@ -3115,7 +3187,14 @@ impl<'a> Parser<'a> {
             having_clause: None,
             ordered_clauses: Vec::new(),
             span: Some(SourceSpan::new(span_start, self.current.span.end, 1, 1)),
-        }))
+        });
+        Ok(match graph {
+            Some(graph) => Statement::Use {
+                graph: Some(graph),
+                statement: Box::new(query),
+            },
+            None => query,
+        })
     }
 
     fn parse_select_clause(&mut self) -> Result<ReturnClause> {
@@ -3572,29 +3651,9 @@ impl<'a> Parser<'a> {
                     let kw = self.get_identifier_name().to_uppercase();
                     match kw.as_str() {
                         "TYPED" => {
-                            // IS [NOT] TYPED <type_name>
-                            // Supports LIST<element_type> parameterized form
+                            // IS [NOT] TYPED <value type>
                             self.advance();
-                            let type_name = if self.is_identifier() {
-                                let base = self.get_identifier_name().to_uppercase();
-                                self.advance();
-                                // Handle LIST<type> parameterized syntax
-                                if base == "LIST" && self.current.kind == TokenKind::Lt {
-                                    self.advance(); // consume <
-                                    if self.is_identifier() {
-                                        let elem = self.get_identifier_name().to_uppercase();
-                                        self.advance();
-                                        self.expect(TokenKind::Gt)?;
-                                        format!("LIST<{elem}>")
-                                    } else {
-                                        return Err(self.error("Expected element type after LIST<"));
-                                    }
-                                } else {
-                                    base
-                                }
-                            } else {
-                                return Err(self.error("Expected type name after IS TYPED"));
-                            };
+                            let type_name = self.parse_value_type_name()?;
                             let call = Expression::FunctionCall {
                                 name: "isTyped".to_string(),
                                 args: vec![left, Expression::Literal(Literal::String(type_name))],
@@ -3860,10 +3919,15 @@ impl<'a> Parser<'a> {
                     }
                 }
                 if self.current.kind == TokenKind::Float {
-                    let text = &self.current.text;
-                    if let Ok(val) = format!("-{text}").parse::<f64>() {
+                    let value = self.float_literal()?;
+                    self.advance();
+                    return Ok(Expression::Literal(Literal::Float(-value)));
+                }
+                if self.current.kind == TokenKind::Decimal {
+                    let text = number_text(&self.current.text);
+                    if let Ok(val) = Decimal::parse(&format!("-{text}")) {
                         self.advance();
-                        return Ok(Expression::Literal(Literal::Float(val)));
+                        return Ok(Expression::Literal(Literal::Decimal(val)));
                     }
                 }
                 self.enter_nesting()?;
@@ -4155,18 +4219,22 @@ impl<'a> Parser<'a> {
                 Ok(Expression::Literal(Literal::Integer(value)))
             }
             TokenKind::Float => {
-                let value = self
-                    .current
-                    .text
-                    .parse()
-                    .map_err(|_| self.error("Invalid float"))?;
+                let value = self.float_literal()?;
                 self.advance();
                 Ok(Expression::Literal(Literal::Float(value)))
             }
-            TokenKind::String => {
+            TokenKind::Decimal => {
                 let text = &self.current.text;
-                let inner = &text[1..text.len() - 1]; // Remove quotes
-                let value = unescape_string(inner);
+                let value = Decimal::parse(number_text(text)).map_err(|_| {
+                    self.error(&format!(
+                        "Decimal literal '{text}' has more than {MAX_DECIMAL_DIGITS} digits"
+                    ))
+                })?;
+                self.advance();
+                Ok(Expression::Literal(Literal::Decimal(value)))
+            }
+            TokenKind::String => {
+                let value = string_literal_value(&self.current.text);
                 self.advance();
                 Ok(Expression::Literal(Literal::String(value)))
             }
@@ -4294,6 +4362,33 @@ impl<'a> Parser<'a> {
                     return Ok(Expression::FunctionCall {
                         name: "nullif".to_string(),
                         args: vec![expr1, expr2],
+                        distinct: false,
+                    });
+                }
+
+                // NORMALIZE(string [, NFC|NFD|NFKC|NFKD]) - ISO GQL normalize function,
+                // NFC by default
+                if name.eq_ignore_ascii_case("NORMALIZE") && self.peek_kind() == TokenKind::LParen {
+                    self.advance(); // consume NORMALIZE
+                    self.advance(); // consume (
+                    let mut args = vec![self.parse_expression()?];
+                    if self.current.kind == TokenKind::Comma {
+                        self.advance();
+                        let form = if self.is_identifier() {
+                            self.get_identifier_name().to_uppercase()
+                        } else {
+                            String::new()
+                        };
+                        if !matches!(form.as_str(), "NFC" | "NFD" | "NFKC" | "NFKD") {
+                            return Err(self.error("Expected NFC, NFD, NFKC or NFKD in NORMALIZE"));
+                        }
+                        self.advance();
+                        args.push(Expression::Literal(Literal::String(form)));
+                    }
+                    self.expect(TokenKind::RParen)?;
+                    return Ok(Expression::FunctionCall {
+                        name: "normalize".to_string(),
+                        args,
                         distinct: false,
                     });
                 }
@@ -4459,11 +4554,7 @@ impl<'a> Parser<'a> {
                 // Typed temporal literals: DATE 'str', TIME 'str', DURATION 'str', DATETIME 'str'
                 if self.current.kind == TokenKind::String {
                     let upper = name.to_uppercase();
-                    let make_val = |parser: &Self| {
-                        let text = &parser.current.text;
-                        let inner = &text[1..text.len() - 1];
-                        unescape_string(inner)
-                    };
+                    let make_val = |parser: &Self| string_literal_value(&parser.current.text);
                     let typed_lit = match upper.as_str() {
                         "DATE" => Some(Literal::Date(make_val(self))),
                         "TIME" => Some(Literal::Time(make_val(self))),
@@ -4483,9 +4574,7 @@ impl<'a> Parser<'a> {
                     if sub == "DATETIME" || sub == "TIME" {
                         self.advance(); // consume DATETIME/TIME
                         if self.current.kind == TokenKind::String {
-                            let text = &self.current.text;
-                            let inner = &text[1..text.len() - 1];
-                            let val = unescape_string(inner);
+                            let val = string_literal_value(&self.current.text);
                             self.advance();
                             return Ok(Expression::Literal(if sub == "DATETIME" {
                                 Literal::ZonedDatetime(val)
@@ -4612,10 +4701,54 @@ impl<'a> Parser<'a> {
                 } else {
                     return Err(self.error("Expected type name after AS"));
                 };
+                // DECIMAL(precision[, scale]): toDecimal(expr, precision, scale)
+                let decimal_type = if matches!(type_name.as_str(), "DECIMAL" | "DEC")
+                    && self.current.kind == TokenKind::LParen
+                {
+                    Some(self.parse_decimal_precision(&type_name)?)
+                } else {
+                    None
+                };
                 self.expect(TokenKind::RParen)?;
+                // What CAST converts: booleans and numbers into each other
+                // (`cast_operand`), for every target but a string or a list
+                let category = match type_name.as_str() {
+                    "INTEGER" | "INT" | "INT64" | "BIGINT" => Some("INTEGER"),
+                    "FLOAT" | "DOUBLE" | "FLOAT64" | "REAL" => Some("FLOAT"),
+                    "DECIMAL" | "DEC" => Some("DECIMAL"),
+                    "BOOLEAN" | "BOOL" => Some("BOOLEAN"),
+                    "STRING" | "VARCHAR" | "TEXT" | "LIST" => None,
+                    s if s.starts_with("LIST<") => None,
+                    other => Some(other),
+                };
+                let expr = match category {
+                    Some(category) => Expression::FunctionCall {
+                        name: "cast_operand".to_string(),
+                        args: vec![
+                            expr,
+                            Expression::Literal(Literal::String(category.to_string())),
+                        ],
+                        distinct: false,
+                    },
+                    None => expr,
+                };
+                if let Some(decimal_type) = decimal_type {
+                    return Ok(Expression::FunctionCall {
+                        name: "toDecimal".to_string(),
+                        args: vec![
+                            expr,
+                            Expression::Literal(Literal::Integer(i64::from(
+                                decimal_type.precision(),
+                            ))),
+                            Expression::Literal(Literal::Integer(i64::from(decimal_type.scale()))),
+                        ],
+                        distinct: false,
+                    });
+                }
                 let (func_name, extra_arg) = match type_name.as_str() {
                     "INTEGER" | "INT" | "INT64" | "BIGINT" => ("toInteger", None),
                     "FLOAT" | "DOUBLE" | "FLOAT64" | "REAL" => ("toFloat", None),
+                    "DECIMAL" | "DEC" => ("toDecimal", None),
                     "STRING" | "VARCHAR" | "TEXT" => ("toString", None),
                     "BOOLEAN" | "BOOL" => ("toBoolean", None),
                     "DATE" => ("toDate", None),
@@ -4643,6 +4776,33 @@ impl<'a> Parser<'a> {
             }
             _ => Err(self.error("Expected expression")),
         }
+    }
+
+    /// The `(precision[, scale])` after `DECIMAL` or `DEC` (`name`): a
+    /// precision from 1 to 38 and a scale from 0 to it, 0 when left out.
+    fn parse_decimal_precision(&mut self, name: &str) -> Result<DecimalType> {
+        self.expect(TokenKind::LParen)?;
+        let number = |parser: &mut Self| -> Result<i64> {
+            if parser.current.kind != TokenKind::Integer {
+                return Err(parser.error(&format!("Expected an integer in {name}(...)")));
+            }
+            let value = parser.current.text.parse::<i64>().unwrap_or(i64::MAX);
+            parser.advance();
+            Ok(value)
+        };
+        let precision = number(self)?;
+        let scale = if self.current.kind == TokenKind::Comma {
+            self.advance();
+            number(self)?
+        } else {
+            0
+        };
+        self.expect(TokenKind::RParen)?;
+        match (u8::try_from(precision), u8::try_from(scale)) {
+            (Ok(precision), Ok(scale)) => DecimalType::new(precision, scale),
+            _ => Err(DecimalError::InvalidPrecision),
+        }
+        .map_err(|error| self.error(&format!("{name}({precision}, {scale}): {error}")))
     }
 
     /// Parses a CASE expression.
@@ -5302,52 +5462,23 @@ impl<'a> Parser<'a> {
         }
     }
 
-    /// Parses the options of a text index, `{k1: 1.2, b: 0.75, tokenizer:
-    /// 'standard', stop_words: ['and', 'or']}` (each optional, names in any
-    /// case), into `options`.
-    fn parse_text_index_options(&mut self, options: &mut IndexOptions) -> Result<()> {
+    /// Parses the options of a text or vector index, `{name: value, ...}`
+    /// (names in any case), into `options`: `{k1: 1.2, b: 0.75, tokenizer:
+    /// 'standard', stop_words: ['and', 'or']}` for text, `{dimensions: 384,
+    /// metric: 'cosine'}` for vector. [`IndexOptions::set`] checks each one.
+    fn parse_index_options(&mut self, kind: IndexKind, options: &mut IndexOptions) -> Result<()> {
         self.expect(TokenKind::LBrace)?;
         while self.current.kind != TokenKind::RBrace {
             if !self.is_identifier() {
                 return Err(self.error("Expected option name"));
             }
-            let opt_name = self.get_identifier_name();
+            let name = self.get_identifier_name();
             self.advance();
             self.expect(TokenKind::Colon)?;
-            match opt_name.to_uppercase().as_str() {
-                "K1" => options.k1 = Some(self.parse_index_option_number("k1")?),
-                "B" => options.b = Some(self.parse_index_option_number("b")?),
-                "TOKENIZER" => {
-                    if self.current.kind != TokenKind::String {
-                        return Err(self.error("Expected string for tokenizer"));
-                    }
-                    options.tokenizer = Some(self.index_option_string());
-                    self.advance();
-                }
-                "STOP_WORDS" => {
-                    self.expect(TokenKind::LBracket)?;
-                    let mut words = Vec::new();
-                    while self.current.kind != TokenKind::RBracket {
-                        if self.current.kind != TokenKind::String {
-                            return Err(self.error("Expected string in stop_words"));
-                        }
-                        words.push(self.index_option_string());
-                        self.advance();
-                        if self.current.kind == TokenKind::Comma {
-                            self.advance();
-                        } else {
-                            break;
-                        }
-                    }
-                    self.expect(TokenKind::RBracket)?;
-                    options.stop_words = Some(words);
-                }
-                _ => {
-                    return Err(self.error(&format!(
-                        "Unknown text index option '{opt_name}'. Use: k1, b, tokenizer, stop_words"
-                    )));
-                }
-            }
+            let value = self.parse_index_option_value(&name)?;
+            options
+                .set(kind, &name, value)
+                .map_err(|message| self.error(&message))?;
             if self.current.kind == TokenKind::Comma {
                 self.advance();
             }
@@ -5356,24 +5487,47 @@ impl<'a> Parser<'a> {
         Ok(())
     }
 
-    /// Parses the number of the index option `name`: an integer or a float,
-    /// with an optional leading minus (which the engine then refuses as out
-    /// of range, naming the option).
-    fn parse_index_option_number(&mut self, name: &str) -> Result<f64> {
+    /// Parses the value of the index option `name`: a number with an
+    /// optional leading minus (which the engine then refuses as out of
+    /// range, naming the option), a string, or a list of them. Any other
+    /// token is read as [`IndexOptionValue::Other`].
+    fn parse_index_option_value(&mut self, name: &str) -> Result<IndexOptionValue> {
         let negative = self.current.kind == TokenKind::Minus;
         if negative {
             self.advance();
         }
-        if !matches!(self.current.kind, TokenKind::Integer | TokenKind::Float) {
-            return Err(self.error(&format!("Expected a number for {name}")));
-        }
-        let value: f64 = self
-            .current
-            .text
-            .parse()
-            .map_err(|_| self.error(&format!("Invalid number for {name}")))?;
+        let value = match self.current.kind {
+            TokenKind::Integer => {
+                let n = integer_literal(number_text(&self.current.text), negative)
+                    .ok_or_else(|| self.error(&format!("Invalid number for {name}")))?;
+                IndexOptionValue::Integer(n)
+            }
+            TokenKind::Float | TokenKind::Decimal => {
+                let value: f64 = number_text(&self.current.text)
+                    .parse()
+                    .map_err(|_| self.error(&format!("Invalid number for {name}")))?;
+                IndexOptionValue::Float(if negative { -value } else { value })
+            }
+            _ if negative => return Err(self.error(&format!("Expected a number for {name}"))),
+            TokenKind::String => IndexOptionValue::String(self.index_option_string()),
+            TokenKind::LBracket => {
+                self.advance();
+                let mut items = Vec::new();
+                while self.current.kind != TokenKind::RBracket {
+                    items.push(self.parse_index_option_value(name)?);
+                    if self.current.kind == TokenKind::Comma {
+                        self.advance();
+                    } else {
+                        break;
+                    }
+                }
+                self.expect(TokenKind::RBracket)?;
+                return Ok(IndexOptionValue::List(items));
+            }
+            _ => IndexOptionValue::Other,
+        };
         self.advance();
-        Ok(if negative { -value } else { value })
+        Ok(value)
     }
 
     /// The text of the current string literal, without its quotes.
@@ -5458,69 +5612,12 @@ impl<'a> Parser<'a> {
                 self.get_identifier_name()
             };
             self.advance();
-            match kind_text.to_uppercase().as_str() {
-                "TEXT" => {
-                    index_kind = IndexKind::Text;
-                    // Parse optional {k1: 1.2, b: 0.75, tokenizer: 'name', stop_words: [...]}
-                    if self.current.kind == TokenKind::LBrace {
-                        self.parse_text_index_options(&mut options)?;
-                    }
-                }
-                "VECTOR" => {
-                    index_kind = IndexKind::Vector;
-                    // Parse optional {dimensions: N, metric: 'name'}
-                    if self.current.kind == TokenKind::LBrace {
-                        self.advance();
-                        while self.current.kind != TokenKind::RBrace {
-                            if !self.is_identifier() {
-                                return Err(self.error("Expected option name"));
-                            }
-                            let opt_name = self.get_identifier_name();
-                            self.advance();
-                            self.expect(TokenKind::Colon)?;
-                            match opt_name.to_uppercase().as_str() {
-                                "DIMENSIONS" | "DIMENSION" => {
-                                    if self.current.kind != TokenKind::Integer {
-                                        return Err(self.error("Expected integer for dimensions"));
-                                    }
-                                    let dim: usize = self
-                                        .current
-                                        .text
-                                        .parse()
-                                        .map_err(|_| self.error("Invalid dimension value"))?;
-                                    self.advance();
-                                    options.dimensions = Some(dim);
-                                }
-                                "METRIC" => {
-                                    if self.current.kind != TokenKind::String {
-                                        return Err(self.error("Expected string for metric"));
-                                    }
-                                    let metric = self
-                                        .current
-                                        .text
-                                        .trim_matches('\'')
-                                        .trim_matches('"')
-                                        .to_string();
-                                    self.advance();
-                                    options.metric = Some(metric);
-                                }
-                                _ => {
-                                    return Err(
-                                        self.error(&format!("Unknown index option '{opt_name}'"))
-                                    );
-                                }
-                            }
-                            if self.current.kind == TokenKind::Comma {
-                                self.advance();
-                            }
-                        }
-                        self.expect(TokenKind::RBrace)?;
-                    }
-                }
-                "BTREE" => index_kind = IndexKind::BTree,
-                _ => {
-                    return Err(self.error(&format!("Unknown index type '{kind_text}'")));
-                }
+            index_kind = IndexKind::from_using_name(&kind_text)
+                .ok_or_else(|| self.error(&format!("Unknown index type '{kind_text}'")))?;
+            if matches!(index_kind, IndexKind::Text | IndexKind::Vector)
+                && self.current.kind == TokenKind::LBrace
+            {
+                self.parse_index_options(index_kind, &mut options)?;
             }
         }
 
@@ -6452,6 +6549,14 @@ impl<'a> Parser<'a> {
                 return Err(self.error(&unknown_property_type(&name)));
             };
             self.advance();
+            // DECIMAL(precision[, scale]), spelled as the catalog prints it
+            if kind == PropertyTypeKind::Decimal(None) && self.current.kind == TokenKind::LParen {
+                let decimal = self.parse_decimal_precision(&name.to_ascii_uppercase())?;
+                break (
+                    decimal.to_string(),
+                    PropertyTypeKind::Decimal(Some(decimal)),
+                );
+            }
             break (name, kind);
         };
 
@@ -6468,6 +6573,61 @@ impl<'a> Parser<'a> {
             PropertyTypeKind::Other
         };
         Ok((element, kind))
+    }
+
+    /// Reads the type after `IS [NOT] TYPED` (ISO/IEC 39075:2024 19.7
+    /// `<value type predicate>`) and returns its name as
+    /// [`ValueType`](grafeo_common::types::ValueType) spells it: a type of
+    /// type DDL (two-word names, `DECIMAL(p, s)` and nested `LIST<...>`
+    /// included), `NULL` or `PATH`. Reading only one word, it refused
+    /// `ZONED DATETIME` and `LIST<LIST<INT64>>`.
+    ///
+    /// # Errors
+    ///
+    /// A syntax error for a name that is no type, and a 42000 "not supported"
+    /// error for an ISO type the predicate cannot decide yet (`INT32`,
+    /// `ZONED TIME`), which would otherwise be a silent false.
+    fn parse_value_type_name(&mut self) -> Result<String> {
+        use grafeo_common::types::ValueType;
+
+        if self.current.kind == TokenKind::Null {
+            self.advance();
+            return Ok("NULL".to_string());
+        }
+        if self.is_identifier() {
+            let name = self.get_identifier_name().to_ascii_uppercase();
+            if matches!(name.as_str(), "PATH" | "GRAPH" | "NOTHING") {
+                self.advance();
+                return Ok(name);
+            }
+            let unsupported = if (name == "ZONED" || name == "LOCAL") && {
+                self.peek_kind();
+                self.peek_text_upper() == "TIME"
+            } {
+                Some(format!("{name} TIME"))
+            } else {
+                UNSUPPORTED_VALUE_TYPES
+                    .contains(&name.as_str())
+                    .then(|| name.clone())
+            };
+            if let Some(type_name) = unsupported {
+                return Err(Error::from(
+                    QueryError::new(
+                        QueryErrorKind::Unsupported,
+                        format!(
+                            "[GQL] IS TYPED {type_name} is not supported yet: Grafeo keeps every \
+                             integer as an INT64, every float as a FLOAT64 and every time as TIME"
+                        ),
+                    )
+                    .with_span(self.current.span)
+                    .with_source(self.source.to_string()),
+                ));
+            }
+        }
+        let (name, _) = self.parse_property_type_name()?;
+        ValueType::from_name(&name)
+            .map(|value_type| value_type.to_string())
+            .ok_or_else(|| self.error(&crate::query::schema::unknown_property_type(&name)))
     }
 
     /// Reads one property of type DDL (ISO/IEC 39075:2024 18.6
@@ -6515,7 +6675,9 @@ impl<'a> Parser<'a> {
     /// (taking literals of `kind`): a string, a signed number (ISO/IEC
     /// 39075:2024 21.2 `<signed numeric literal>`), `TRUE`, `FALSE` or
     /// `NULL`. Returns it as [`PropertyDefinition::default_value`] spells it:
-    /// an integer default of a `FLOAT64` property as the float.
+    /// an integer default of a `FLOAT64` property as the float, and an exact
+    /// number (or an integer) of a `DECIMAL` property as the decimal with the
+    /// suffix `M`, rounded to the scale of a `DECIMAL(p, s)`.
     ///
     /// A literal that is not a value of the type is refused, and so is `NULL`
     /// for a `NOT NULL` property: they used to be accepted, and then every
@@ -6531,7 +6693,10 @@ impl<'a> Parser<'a> {
             TokenKind::Minus | TokenKind::Plus => {
                 let negative = self.current.kind == TokenKind::Minus;
                 self.advance();
-                if !matches!(self.current.kind, TokenKind::Integer | TokenKind::Float) {
+                if !matches!(
+                    self.current.kind,
+                    TokenKind::Integer | TokenKind::Float | TokenKind::Decimal
+                ) {
                     return Err(self.error("Expected a number after the sign of a DEFAULT"));
                 }
                 Some(negative)
@@ -6548,6 +6713,22 @@ impl<'a> Parser<'a> {
                 "DEFAULT {written} is not a value of type {data_type}"
             ))
         };
+        // A decimal default, rounded to the scale of a DECIMAL(p, s) and
+        // spelled with the suffix M, which the session reads as a decimal.
+        let decimal_default =
+            |parser: &Self, value: Decimal, decimal_type: Option<DecimalType>| -> Result<String> {
+                match decimal_type {
+                    None => Ok(format!("{value}M")),
+                    Some(decimal_type) => decimal_type
+                        .fit(&value)
+                        .map(|value| format!("{value}M"))
+                        .map_err(|_| {
+                            parser.error(&format!(
+                                "DEFAULT {written} has more integer digits than {data_type} holds"
+                            ))
+                        }),
+                }
+            };
 
         let spelled = match self.current.kind {
             TokenKind::Null if nullable => "NULL".to_string(),
@@ -6562,8 +6743,7 @@ impl<'a> Parser<'a> {
             },
             TokenKind::String => match kind {
                 PropertyTypeKind::String | PropertyTypeKind::Any => {
-                    let text = &self.current.text;
-                    format!("'{}'", unescape_string(&text[1..text.len() - 1]))
+                    format!("'{}'", string_literal_value(&self.current.text))
                 }
                 _ => return Err(not_of_type(self)),
             },
@@ -6586,16 +6766,32 @@ impl<'a> Parser<'a> {
                             )));
                         }
                     },
+                    PropertyTypeKind::Decimal(decimal_type) => {
+                        decimal_default(self, Decimal::from_i64(value), decimal_type)?
+                    }
                     _ => return Err(not_of_type(self)),
                 }
             }
-            TokenKind::Float => match kind {
+            // An exact number: a decimal of a DECIMAL or ANY property.
+            TokenKind::Decimal
+                if matches!(kind, PropertyTypeKind::Decimal(_) | PropertyTypeKind::Any) =>
+            {
+                let digits = number_text(&self.current.text);
+                let value = if negative == Some(true) {
+                    Decimal::parse(&format!("-{digits}"))
+                } else {
+                    Decimal::parse(digits)
+                }
+                .map_err(|error| self.error(&format!("DEFAULT {written}: {error}")))?;
+                let decimal_type = match kind {
+                    PropertyTypeKind::Decimal(decimal_type) => decimal_type,
+                    _ => None,
+                };
+                decimal_default(self, value, decimal_type)?
+            }
+            TokenKind::Float | TokenKind::Decimal => match kind {
                 PropertyTypeKind::Float | PropertyTypeKind::Any => {
-                    let value: f64 = self
-                        .current
-                        .text
-                        .parse()
-                        .map_err(|_| self.error("Invalid float"))?;
+                    let value = self.float_literal()?;
                     let value = if negative == Some(true) {
                         -value
                     } else {
@@ -7192,24 +7388,60 @@ impl<'a> Parser<'a> {
         Ok(SessionCommand::DropGraph { name, if_exists })
     }
 
-    /// Parses `USE GRAPH <name>`.
-    fn parse_use_graph(&mut self) -> Result<SessionCommand> {
+    /// Parses `USE [GRAPH] <graph> [<statement>]`. `USE GRAPH g` alone is
+    /// the session command that selects the session's graph. Followed by a
+    /// query, a data-modifying statement or a procedure call, `USE g` focuses
+    /// that statement on g (ISO/IEC 39075 use graph clause): it reads and
+    /// writes g, and leaves the session's graph as it is.
+    fn parse_use(&mut self) -> Result<Statement> {
         self.advance(); // consume USE
-
-        // Expect GRAPH
-        if !self.is_identifier() || !self.get_identifier_name().eq_ignore_ascii_case("GRAPH") {
-            return Err(self.error("Expected GRAPH after USE"));
+        let graph_keyword =
+            self.is_identifier() && self.get_identifier_name().eq_ignore_ascii_case("GRAPH");
+        if graph_keyword {
+            self.advance(); // consume GRAPH
         }
-        self.advance();
+        let graph = self.parse_use_graph_name()?;
+        let follows = |graph: &Option<String>| {
+            format!(
+                "USE {} must be followed by a query or a data-modifying statement",
+                graph.as_deref().unwrap_or("CURRENT_GRAPH")
+            )
+        };
+        if matches!(self.current.kind, TokenKind::Eof | TokenKind::Semicolon) {
+            return match graph {
+                Some(name) if graph_keyword => {
+                    Ok(Statement::SessionCommand(SessionCommand::UseGraph(name)))
+                }
+                graph => Err(self.error(&follows(&graph))),
+            };
+        }
+        let statement = self.parse_single_statement()?;
+        if !matches!(
+            statement,
+            Statement::Query(_) | Statement::DataModification(_) | Statement::Call(_)
+        ) {
+            return Err(self.error(&follows(&graph)));
+        }
+        Ok(Statement::Use {
+            graph,
+            statement: Box::new(statement),
+        })
+    }
 
-        // Parse graph name
+    /// The graph a `USE` names (an ISO/IEC 39075 graph expression): a graph
+    /// name, or `None` for `CURRENT_GRAPH` and `CURRENT_PROPERTY_GRAPH`.
+    fn parse_use_graph_name(&mut self) -> Result<Option<String>> {
         if !self.is_identifier() {
-            return Err(self.error("Expected graph name"));
+            return Err(self.error("Expected a graph name after USE"));
         }
         let name = self.get_identifier_name();
         self.advance();
-
-        Ok(SessionCommand::UseGraph(name))
+        if name.eq_ignore_ascii_case("CURRENT_GRAPH")
+            || name.eq_ignore_ascii_case("CURRENT_PROPERTY_GRAPH")
+        {
+            return Ok(None);
+        }
+        Ok(Some(name))
     }
 
     /// Parses SESSION commands: SET, RESET, CLOSE.
@@ -7489,11 +7721,30 @@ impl<'a> Parser<'a> {
     }
 
     fn error(&self, message: &str) -> Error {
-        Error::Query(
+        Error::from(
             QueryError::new(QueryErrorKind::Syntax, format!("[GQL] {message}"))
                 .with_span(self.current.span)
                 .with_source(self.source.to_string()),
         )
+    }
+
+    /// The value of the approximate number literal at the current token. A
+    /// literal outside the FLOAT64 range, as `1e400`, is a data exception
+    /// (ISO GQL 22003), not infinity.
+    fn float_literal(&self) -> Result<f64> {
+        let text = number_text(&self.current.text);
+        let value: f64 = text.parse().map_err(|_| self.error("Invalid float"))?;
+        if value.is_finite() {
+            return Ok(value);
+        }
+        Err(Error::from(
+            QueryError::new(
+                QueryErrorKind::NumericOutOfRange,
+                format!("[GQL] Float literal '{text}' is outside the FLOAT64 range"),
+            )
+            .with_span(self.current.span)
+            .with_source(self.source.to_string()),
+        ))
     }
 }
 
@@ -7513,6 +7764,39 @@ fn is_associative(op: CompositeOp) -> bool {
 
 /// What a property type of type DDL takes as a `DEFAULT`.
 type PropertyTypeKind = crate::query::schema::PropertyTypeKind;
+
+/// The digits of a number literal without its ISO GQL suffix (`M`, `F` or
+/// `D`, in either case).
+/// ISO/IEC 39075 predefined value types `IS TYPED` cannot decide yet: every
+/// integer is an INT64 and every approximate number a FLOAT64, so whether 3 is
+/// of INT32 is open. (No value is of GRAPH or NOTHING, which `IS TYPED`
+/// answers.)
+const UNSUPPORTED_VALUE_TYPES: &[&str] = &[
+    "INT8",
+    "INT16",
+    "INT32",
+    "INT128",
+    "INT256",
+    "SMALLINT",
+    "UINT",
+    "UINT8",
+    "UINT16",
+    "UINT32",
+    "UINT64",
+    "UINT128",
+    "UINT256",
+    "USMALLINT",
+    "UBIGINT",
+    "FLOAT16",
+    "FLOAT32",
+    "FLOAT128",
+    "FLOAT256",
+];
+
+fn number_text(text: &str) -> &str {
+    text.strip_suffix(['M', 'm', 'F', 'f', 'D', 'd'])
+        .unwrap_or(text)
+}
 
 /// The value of the integer literal `text` (decimal, or `0x`, `0o`, `0b`
 /// digits), negated when `negative`; `None` when it is out of the INT64
@@ -9872,6 +10156,97 @@ mod tests {
         } else {
             panic!("Expected UseGraph session command");
         }
+    }
+
+    /// `USE [GRAPH] g` before a statement focuses it on g; alone, only `USE
+    /// GRAPH g` is a statement (the session command).
+    #[test]
+    fn use_before_a_statement_focuses_it() {
+        for (query, graph) in [
+            ("USE floria MATCH (n) RETURN n", Some("floria")),
+            ("USE GRAPH floria INSERT (:Person)", Some("floria")),
+            ("USE CURRENT_GRAPH MATCH (n) RETURN n", None),
+            ("USE CURRENT_PROPERTY_GRAPH MATCH (n) RETURN n", None),
+            ("USE floria CALL grafeo.pagerank()", Some("floria")),
+        ] {
+            let statement = Parser::new(query).parse().unwrap();
+            let Statement::Use {
+                graph: parsed,
+                statement,
+            } = statement
+            else {
+                panic!("{query}: {statement:?}");
+            };
+            assert_eq!(parsed.as_deref(), graph, "{query}");
+            assert!(
+                matches!(
+                    *statement,
+                    Statement::Query(_) | Statement::DataModification(_) | Statement::Call(_)
+                ),
+                "{query}: {statement:?}"
+            );
+        }
+        for (query, message) in [
+            ("USE floria", "USE floria must be followed by"),
+            ("USE CURRENT_GRAPH", "USE CURRENT_GRAPH must be followed by"),
+            (
+                "USE floria CREATE GRAPH other",
+                "USE floria must be followed by",
+            ),
+            (
+                "USE floria SESSION SET GRAPH other",
+                "USE floria must be followed by",
+            ),
+            ("USE", "Expected a graph name after USE"),
+        ] {
+            let error = Parser::new(query).parse().unwrap_err().to_string();
+            assert!(error.contains(message), "{query}: {error}");
+        }
+    }
+
+    /// A `USE` inside a query and on each operand of a composite query is
+    /// parsed where it stands; the translator checks the graphs agree.
+    #[test]
+    fn use_inside_a_query_and_on_operands_is_kept() {
+        let statement = Parser::new("USE a MATCH (p) USE b MATCH (c) RETURN p, c")
+            .parse()
+            .unwrap();
+        let Statement::Use { graph, statement } = statement else {
+            panic!("{statement:?}");
+        };
+        assert_eq!(graph.as_deref(), Some("a"));
+        let Statement::Query(query) = *statement else {
+            panic!("{statement:?}");
+        };
+        assert!(matches!(
+            &query.ordered_clauses[1],
+            QueryClause::Use(Some(name)) if name == "b"
+        ));
+
+        let statement = Parser::new("USE a MATCH (p) RETURN p UNION USE b MATCH (p) RETURN p")
+            .parse()
+            .unwrap();
+        let Statement::CompositeQuery { left, right, .. } = statement else {
+            panic!("{statement:?}");
+        };
+        assert!(matches!(*left, Statement::Use { graph: Some(ref g), .. } if g == "a"));
+        assert!(matches!(*right, Statement::Use { graph: Some(ref g), .. } if g == "b"));
+    }
+
+    /// `SELECT ... FROM g MATCH ...` reads g: it is focused on it.
+    #[test]
+    fn select_from_a_graph_focuses_on_it() {
+        let statement = Parser::new("SELECT n.name FROM floria MATCH (n)")
+            .parse()
+            .unwrap();
+        assert!(matches!(statement, Statement::Use { graph: Some(ref g), .. } if g == "floria"));
+        let statement = Parser::new("SELECT n.name FROM MATCH (n)").parse().unwrap();
+        assert!(matches!(statement, Statement::Query(_)));
+        let error = Parser::new("SELECT n.name FROM europe.floria MATCH (n)")
+            .parse()
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("not supported yet"), "{error}");
     }
 
     #[test]
@@ -12865,6 +13240,32 @@ mod tests {
             ),
         ] {
             assert_eq!(clause_names(query), expected, "{query}");
+        }
+    }
+
+    /// A float literal outside the FLOAT64 range is a data exception (ISO
+    /// GQL 22003), in an expression, after a minus and as a DEFAULT; the
+    /// largest finite ones stay literals.
+    #[test]
+    fn test_a_float_literal_past_the_range() {
+        for query in [
+            "RETURN 1e400",
+            "RETURN -1.5e400",
+            "RETURN 1e400F",
+            "CREATE NODE TYPE Ship (weight FLOAT64 DEFAULT 1e400)",
+            "CREATE NODE TYPE Ship (weight FLOAT64 DEFAULT -1e400)",
+        ] {
+            let error = Parser::new(query).parse().expect_err(query);
+            assert!(
+                matches!(&error, Error::Query(q) if q.kind == QueryErrorKind::NumericOutOfRange),
+                "{query}: {error}"
+            );
+        }
+        for query in [
+            "RETURN 1.7976931348623157e308, -1.7976931348623157e308",
+            "RETURN 1e-400",
+        ] {
+            assert!(Parser::new(query).parse().is_ok(), "{query}");
         }
     }
 }

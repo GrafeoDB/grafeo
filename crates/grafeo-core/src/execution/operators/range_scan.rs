@@ -1,7 +1,7 @@
 //! Range scan operator for property-bounded node scans.
 //!
 //! `RangeScanOperator` consumes
-//! [`GraphStoreSearch::find_nodes_in_range_iter`](crate::graph::GraphStoreSearch::find_nodes_in_range_iter)
+//! [`GraphStore::find_nodes_in_range`](crate::graph::GraphStore::find_nodes_in_range)
 //! and emits `DataChunk`s of node ids whose property value falls within
 //! `[min, max]` (with configurable inclusivity).
 //!
@@ -21,37 +21,32 @@
 //!
 //! ## Materialization strategy
 //!
-//! Phase 4c materializes the iterator into a `Vec<NodeId>` on the first
-//! `next()` call, then chunks. Block-level skip pruning still happens
-//! during iterator construction, so the architectural value is intact.
-//! The materialization step is bounded by the optional limit set via
-//! [`with_limit`](Self::with_limit) (Phase 4e). Streaming chunk-by-chunk
-//! materialization is a future pass; it requires either a self-referential
-//! struct or a cursor-based API on the store, neither of which is free
-//! in safe Rust today.
+//! The operator materializes the lookup into a `Vec<NodeId>` on the first
+//! `next()` call, then chunks. The optional limit set via
+//! [`with_limit`](RangeScanOperator::with_limit) bounds what it keeps after
+//! the label filter. Streaming chunk-by-chunk materialization needs a
+//! cursor-based API on the store.
 //!
 //! ## Label and MVCC filtering
 //!
-//! The planner used to filter the eager `Vec<NodeId>` after the range
-//! lookup. The operator absorbs both filters via
-//! [`with_label_filter`](Self::with_label_filter) and
-//! [`with_transaction_context`](Self::with_transaction_context), preserving
-//! the existing semantics while keeping the `RangeScanOperator` as the
-//! single entry point.
+//! The operator absorbs both filters: the label through
+//! [`with_label_filter`](RangeScanOperator::with_label_filter), visibility
+//! through the view it reads at, so the store's range lookup returns only
+//! the nodes the view sees.
 
 use std::sync::Arc;
 
-use grafeo_common::types::{EpochId, LogicalType, NodeId, TransactionId, Value};
+use grafeo_common::types::{LogicalType, NodeId, ReadView, Value};
 use grafeo_common::utils::hash::FxHashSet;
 
-use super::{Operator, OperatorResult};
+use super::{Operator, OperatorError, OperatorResult, ReadCounter};
 use crate::execution::DataChunk;
-use crate::graph::GraphStoreSearch;
+use crate::graph::GraphStore;
 
 /// Pull-based operator that emits node ids whose property value falls
 /// within a range. See the module docs for details.
 pub struct RangeScanOperator {
-    store: Arc<dyn GraphStoreSearch>,
+    store: Arc<dyn GraphStore>,
     property: String,
     min: Option<Value>,
     max: Option<Value>,
@@ -62,29 +57,37 @@ pub struct RangeScanOperator {
     limit: Option<usize>,
     /// Optional label filter (only nodes of this label survive).
     label_filter: Option<String>,
-    /// Optional MVCC transaction context (epoch + tx).
-    transaction_context: Option<(EpochId, TransactionId)>,
+    /// Who reads: the scan finds the nodes this view sees.
+    view: ReadView,
 
     /// Materialized result, lazily built on first `next()`.
     materialized: Option<Vec<NodeId>>,
     /// Current cursor into `materialized`.
     position: usize,
+    /// Counts the node IDs the range index yields.
+    reads: Option<Arc<ReadCounter>>,
 }
 
 impl RangeScanOperator {
-    /// Creates a range scan over `store` for the given property and bounds.
+    /// Creates a range scan over `store` for the given property and bounds,
+    /// of the nodes `view` sees.
     ///
     /// `chunk_capacity` is the number of rows per emitted `DataChunk`;
     /// the standard default in this codebase is 2048.
     #[must_use]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the range's parts and the view it reads at; the options are builders"
+    )]
     pub fn new(
-        store: Arc<dyn GraphStoreSearch>,
+        store: Arc<dyn GraphStore>,
         property: impl Into<String>,
         min: Option<Value>,
         max: Option<Value>,
         min_inclusive: bool,
         max_inclusive: bool,
         chunk_capacity: usize,
+        view: ReadView,
     ) -> Self {
         Self {
             store,
@@ -96,17 +99,24 @@ impl RangeScanOperator {
             chunk_capacity,
             limit: None,
             label_filter: None,
-            transaction_context: None,
+            view,
             materialized: None,
             position: 0,
+            reads: None,
         }
     }
 
-    /// Sets a row-count cap that bounds the materialization step.
-    ///
-    /// When set, the underlying iterator is consumed via `take(limit)`,
-    /// so blocks past the cap are never decoded. Wired by the planner
-    /// in Phase 4e when a downstream `LIMIT k` is known statically.
+    /// Counts the node IDs the range index yields in `reads`, before the
+    /// label filter.
+    #[must_use]
+    pub fn with_read_counter(mut self, reads: Arc<ReadCounter>) -> Self {
+        self.reads = Some(reads);
+        self
+    }
+
+    /// Sets a row-count cap that bounds the materialization step: the scan
+    /// keeps at most `limit` nodes of those that pass the label filter.
+    /// Wired by the planner when a downstream `LIMIT k` is known statically.
     #[must_use]
     pub fn with_limit(mut self, limit: usize) -> Self {
         self.limit = Some(limit);
@@ -124,63 +134,50 @@ impl RangeScanOperator {
     /// Restricts the result to nodes carrying `label`.
     ///
     /// Applied during materialization by intersecting the iterator's
-    /// output with `store.nodes_by_label(label)`. Mirrors the eager
-    /// `find_nodes_in_range` + `nodes_by_label` retain pattern that the
-    /// planner used pre-Phase-4d.
+    /// output with the nodes of the label (as the view sees them, with
+    /// one).
     #[must_use]
     pub fn with_label_filter(mut self, label: impl Into<String>) -> Self {
         self.label_filter = Some(label.into());
         self
     }
 
-    /// Filters results by MVCC visibility at the given epoch and tx.
-    ///
-    /// Applied during materialization via `store.get_node_versioned`.
-    /// Required for any planner-emitted scan: the existing `plan_range_filter`
-    /// always applies this filter, and the operator preserves that.
-    #[must_use]
-    pub fn with_transaction_context(
-        mut self,
-        epoch: EpochId,
-        transaction_id: TransactionId,
-    ) -> Self {
-        self.transaction_context = Some((epoch, transaction_id));
-        self
-    }
-
-    fn ensure_materialized(&mut self) {
+    fn ensure_materialized(&mut self) -> Result<(), OperatorError> {
         if self.materialized.is_some() {
-            return;
+            return Ok(());
         }
 
         // Pre-compute the label set once (avoids repeated lookups in the
         // hot path).
-        let label_set: Option<FxHashSet<NodeId>> = self
-            .label_filter
-            .as_ref()
-            .map(|label| self.store.nodes_by_label(label).into_iter().collect());
-        let tx_ctx = self.transaction_context;
+        let label_set: Option<FxHashSet<NodeId>> = match self.label_filter.as_ref() {
+            Some(label) => Some(
+                self.store
+                    .nodes_by_label(label, self.view)?
+                    .into_iter()
+                    .collect(),
+            ),
+            None => None,
+        };
 
-        let iter = self.store.find_nodes_in_range_iter(
+        let (min, max) = (self.min.as_ref(), self.max.as_ref());
+        let iter = self.store.find_nodes_in_range(
             &self.property,
-            self.min.as_ref(),
-            self.max.as_ref(),
+            min,
+            max,
             self.min_inclusive,
             self.max_inclusive,
-        );
+            self.view,
+        )?;
 
-        // Filter inline (label + MVCC) and stop only after `limit` matches
-        // *survive* the filters. Applying limit before filtering would
+        // Filter inline by label and stop only after `limit` matches
+        // *survive* the filter. Applying limit before filtering would
         // under-return rows when early range hits are filtered out.
         let mut collected: Vec<NodeId> = Vec::new();
+        let mut read = 0;
         for id in iter {
+            read += 1;
             if let Some(set) = label_set.as_ref()
                 && !set.contains(&id)
-            {
-                continue;
-            }
-            if let Some((epoch, tx)) = tx_ctx
-                && self.store.get_node_versioned(id, epoch, tx).is_none()
             {
                 continue;
             }
@@ -192,13 +189,15 @@ impl RangeScanOperator {
             }
         }
 
+        super::read_counter::count(self.reads.as_deref(), read);
         self.materialized = Some(collected);
+        Ok(())
     }
 }
 
 impl Operator for RangeScanOperator {
     fn next(&mut self) -> OperatorResult {
-        self.ensure_materialized();
+        self.ensure_materialized()?;
         let nodes = self
             .materialized
             .as_ref()
@@ -244,15 +243,15 @@ impl Operator for RangeScanOperator {
     }
 }
 
-#[cfg(all(test, feature = "lpg"))]
+#[cfg(test)]
 mod tests {
     use super::*;
-    use crate::graph::lpg::LpgStore;
+    use crate::graph::rowgroup::RowGroupStore;
 
     /// A store holding, per `(label, property, values)`, one node with that
     /// label for each value of the property.
-    fn store_with(tables: &[(&str, &str, &[i64])]) -> Arc<dyn GraphStoreSearch> {
-        let store = LpgStore::new().unwrap();
+    fn store_with(tables: &[(&str, &str, &[i64])]) -> Arc<dyn GraphStore> {
+        let store = RowGroupStore::new();
         for (label, property, values) in tables {
             for value in *values {
                 let id = store.create_node(&[label]);
@@ -262,7 +261,7 @@ mod tests {
         Arc::new(store)
     }
 
-    fn build_person_store() -> Arc<dyn GraphStoreSearch> {
+    fn build_person_store() -> Arc<dyn GraphStore> {
         store_with(&[("Person", "age", &[25, 30, 35, 40, 45])])
     }
 
@@ -277,6 +276,7 @@ mod tests {
             true,
             true,
             2048,
+            ReadView::latest(),
         );
 
         let chunk = op.next().unwrap().expect("first chunk should be Some");
@@ -290,7 +290,8 @@ mod tests {
         let values: Vec<i64> = (0..100).collect();
         let store = store_with(&[("Big", "v", &values)]);
 
-        let mut op = RangeScanOperator::new(store, "v", None, None, true, true, 10);
+        let mut op =
+            RangeScanOperator::new(store, "v", None, None, true, true, 10, ReadView::latest());
 
         let mut total = 0usize;
         let mut chunk_count = 0usize;
@@ -308,7 +309,9 @@ mod tests {
         let values: Vec<i64> = (0..1000).collect();
         let store = store_with(&[("Big", "v", &values)]);
 
-        let mut op = RangeScanOperator::new(store, "v", None, None, true, true, 64).with_limit(5);
+        let mut op =
+            RangeScanOperator::new(store, "v", None, None, true, true, 64, ReadView::latest())
+                .with_limit(5);
 
         let mut total = 0usize;
         while let Some(chunk) = op.next().unwrap() {
@@ -328,6 +331,7 @@ mod tests {
             true,
             true,
             2048,
+            ReadView::latest(),
         );
         assert!(op.next().unwrap().is_none());
     }
@@ -343,6 +347,7 @@ mod tests {
             true,
             true,
             2,
+            ReadView::latest(),
         );
 
         let first_pass: Vec<usize> = std::iter::from_fn(|| op.next().unwrap())
@@ -361,7 +366,16 @@ mod tests {
     #[test]
     fn butch_range_scan_into_any_downcasts() {
         let store = build_person_store();
-        let op = RangeScanOperator::new(store, "age", None, None, true, true, 2048);
+        let op = RangeScanOperator::new(
+            store,
+            "age",
+            None,
+            None,
+            true,
+            true,
+            2048,
+            ReadView::latest(),
+        );
         let any = Box::new(op).into_any();
         assert!(any.downcast::<RangeScanOperator>().is_ok());
     }
@@ -369,7 +383,16 @@ mod tests {
     #[test]
     fn shosanna_range_scan_name_is_stable() {
         let store = build_person_store();
-        let op = RangeScanOperator::new(store, "age", None, None, true, true, 2048);
+        let op = RangeScanOperator::new(
+            store,
+            "age",
+            None,
+            None,
+            true,
+            true,
+            2048,
+            ReadView::latest(),
+        );
         assert_eq!(op.name(), "RangeScan");
     }
 
@@ -379,15 +402,25 @@ mod tests {
         // restrict results to one label only.
         let store = store_with(&[("A", "v", &[1, 2, 3]), ("B", "v", &[1, 2, 3])]);
 
-        let mut op = RangeScanOperator::new(Arc::clone(&store), "v", None, None, true, true, 2048)
-            .with_label_filter("A");
+        let mut op = RangeScanOperator::new(
+            Arc::clone(&store),
+            "v",
+            None,
+            None,
+            true,
+            true,
+            2048,
+            ReadView::latest(),
+        )
+        .with_label_filter("A");
 
         let chunk = op.next().unwrap().expect("at least one chunk");
         // Only nodes from label A survive; A has 3 rows.
         assert_eq!(chunk.row_count(), 3);
 
         // Sanity: without the label filter, we'd see 6 rows.
-        let mut op_no_label = RangeScanOperator::new(store, "v", None, None, true, true, 2048);
+        let mut op_no_label =
+            RangeScanOperator::new(store, "v", None, None, true, true, 2048, ReadView::latest());
         let chunk2 = op_no_label.next().unwrap().expect("at least one chunk");
         assert_eq!(chunk2.row_count(), 6);
     }
@@ -397,7 +430,8 @@ mod tests {
         let store = store_with(&[("A", "v", &[1, 2, 3])]);
 
         let mut op =
-            RangeScanOperator::new(store, "v", None, None, true, true, 2048).with_label_filter("Z");
+            RangeScanOperator::new(store, "v", None, None, true, true, 2048, ReadView::latest())
+                .with_label_filter("Z");
 
         // Label "Z" doesn't exist; intersection is empty.
         assert!(op.next().unwrap().is_none());
@@ -405,7 +439,7 @@ mod tests {
 
     #[test]
     fn django_range_scan_through_a_dyn_store_finds_every_match() {
-        // The store reached as `Arc<dyn GraphStoreSearch>`: the trait
+        // The store reached as `Arc<dyn GraphStore>`: the trait
         // dispatch of `find_nodes_in_range_iter` finds every match.
         let store = build_person_store();
         let mut op = RangeScanOperator::new(
@@ -416,25 +450,9 @@ mod tests {
             true,
             true,
             2048,
+            ReadView::latest(),
         );
         let chunk = op.next().unwrap().expect("at least one chunk");
         assert_eq!(chunk.row_count(), 5);
-    }
-
-    /// The lazy `find_nodes_in_range_iter` of an `Arc<dyn GraphStoreSearch>`
-    /// yields the same set as the eager `find_nodes_in_range`.
-    #[test]
-    fn tarantino_dyn_dispatch_yields_same_results_as_eager() {
-        let store = build_person_store();
-        let min = Value::Int64(30);
-        let max = Value::Int64(40);
-        let lazy: Vec<NodeId> = store
-            .find_nodes_in_range_iter("age", Some(&min), Some(&max), true, true)
-            .collect();
-        let mut eager = store.find_nodes_in_range("age", Some(&min), Some(&max), true, true);
-        let mut lazy_sorted = lazy;
-        lazy_sorted.sort_unstable();
-        eager.sort_unstable();
-        assert_eq!(lazy_sorted, eager);
     }
 }

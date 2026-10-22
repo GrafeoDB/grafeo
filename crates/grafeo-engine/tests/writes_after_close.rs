@@ -15,7 +15,7 @@
 //! cargo test -p grafeo-engine --no-default-features --features lpg,gql,grafeo-file --test writes_after_close
 //! ```
 
-#![cfg(all(feature = "lpg", feature = "gql", feature = "grafeo-file"))]
+#![cfg(all(feature = "gql", feature = "grafeo-file"))]
 
 use std::path::Path;
 
@@ -147,9 +147,14 @@ fn a_direct_write_after_close_fails_and_changes_nothing() {
             .expect_err("set_node_property fails"),
     );
     assert_closed(&db.delete_node(alix).expect_err("delete_node fails"));
-    assert_eq!(db.node_count(), 1, "nothing was created or deleted");
+    assert_eq!(
+        db.node_count().unwrap(),
+        1,
+        "nothing was created or deleted"
+    );
     assert_eq!(
         db.get_node(alix)
+            .unwrap()
             .and_then(|node| node.get_property("city").cloned()),
         None,
         "the property was not set"
@@ -259,7 +264,7 @@ fn an_in_memory_database_still_takes_writes_after_close() {
     db.execute("INSERT (:Person {name: 'Gus'})").unwrap();
     db.create_node(&["City"]).unwrap();
     assert_eq!(people(&db), vec![Value::from("Alix"), Value::from("Gus")]);
-    assert_eq!(db.node_count(), 3);
+    assert_eq!(db.node_count().unwrap(), 3);
 }
 
 /// The race `close()` used to lose: work that waits for the final checkpoint
@@ -328,7 +333,7 @@ fn a_direct_write_waiting_for_the_final_checkpoint_fails() {
     let (write, finished) = started.recv().expect("close() checkpointed");
     assert!(!finished, "the write waits for the final checkpoint");
     assert_closed(&write.join().expect_err("the write fails"));
-    assert_eq!(db.node_count(), 1, "nothing was created");
+    assert_eq!(db.node_count().unwrap(), 1, "nothing was created");
     drop(db);
     assert_eq!(people_after_reopen(&path), vec![Value::from("Alix")]);
 }
@@ -515,10 +520,9 @@ fn a_closed_handle_overwrites_nothing_a_later_handle_wrote() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("paris.grafeo");
     let config = || {
-        let mut config = Config::persistent(&path)
-            .with_checkpoint_interval(std::time::Duration::from_millis(50));
-        config.wal_enabled = false;
-        config
+        Config::persistent(&path)
+            .with_checkpoint_interval(std::time::Duration::from_millis(50))
+            .without_wal()
     };
 
     let first = GrafeoDB::with_config(config()).unwrap();
@@ -927,7 +931,7 @@ fn imports_and_restores_after_close_fail() {
         assert_eq!(db.rdf_store().len(), 0, "no triple was added");
     }
     assert_eq!(people(&db), vec![Value::from("Alix")], "nothing changed");
-    assert_eq!(db.node_count(), 1);
+    assert_eq!(db.node_count().unwrap(), 1);
 }
 
 /// After `close()` an RDF batch insert refuses before it pulls the caller's
@@ -1051,7 +1055,7 @@ fn imports() -> Vec<Import> {
 /// The items an import added to `db`, which holds Alix besides: its nodes
 /// and edges, and its triples.
 fn imported(db: &GrafeoDB) -> usize {
-    let items = db.node_count() - 1 + db.edge_count();
+    let items = db.node_count().unwrap() - 1 + db.edge_count().unwrap();
     #[cfg(feature = "triple-store")]
     let items = items + db.rdf_store().len();
     items
@@ -1347,7 +1351,12 @@ fn direct_calls() -> Vec<DirectCall> {
                 db.create_vector_index("Person", "vec3", Some(3), None, None, None, None)
                     .unwrap();
             },
-            done: |db| db.store().get_vector_index("Person", "vec3").is_some(),
+            done: |db| {
+                db.store()
+                    .unwrap()
+                    .get_vector_index("Person", "vec3")
+                    .is_some()
+            },
             image_needle: Some("vec3"),
         },
         DirectCall {
@@ -1359,7 +1368,12 @@ fn direct_calls() -> Vec<DirectCall> {
             call: |db| {
                 db.drop_vector_index("Person", "vec3").unwrap();
             },
-            done: |db| db.store().get_vector_index("Person", "vec3").is_none(),
+            done: |db| {
+                db.store()
+                    .unwrap()
+                    .get_vector_index("Person", "vec3")
+                    .is_none()
+            },
             image_needle: None,
         },
     ]);
@@ -1369,7 +1383,12 @@ fn direct_calls() -> Vec<DirectCall> {
             name: "create_text_index",
             setup: |_| {},
             call: |db| db.create_text_index("Person", "bio").unwrap(),
-            done: |db| db.store().get_text_index("Person", "bio").is_some(),
+            done: |db| {
+                db.store()
+                    .unwrap()
+                    .get_text_index("Person", "bio")
+                    .is_some()
+            },
             image_needle: Some("bio"),
         },
         DirectCall {
@@ -1378,7 +1397,12 @@ fn direct_calls() -> Vec<DirectCall> {
             call: |db| {
                 db.drop_text_index("Person", "bio").unwrap();
             },
-            done: |db| db.store().get_text_index("Person", "bio").is_none(),
+            done: |db| {
+                db.store()
+                    .unwrap()
+                    .get_text_index("Person", "bio")
+                    .is_none()
+            },
             image_needle: None,
         },
     ]);

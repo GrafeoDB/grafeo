@@ -1,0 +1,67 @@
+# Grouping and DISTINCT over stored numbers of mixed types (#605)
+#
+# An integer, a float and a decimal of the same value are one group and one
+# distinct value, and so are 0 and -0.0, in GQL, Cypher and SQL/PGQ, over
+# values stored on nodes (openCypher's equivalence, ISO's "not distinct").
+# #605 reported counters that GROUP BY merged although they differed, and a
+# PROFILE that disagreed with the rows.
+
+meta:
+  model: lpg
+  section: rosetta
+  title: Grouping stored mixed numbers
+  dataset: empty
+  requires: [cypher, sql-pgq]
+
+tests:
+
+  - name: groups_of_a_stored_mixed_number_column
+    setup:
+      - "INSERT (:N {v: 1}), (:N {v: 1.0e0}), (:N {v: 1.00}), (:N {v: 2}), (:N {v: 0}), (:N {v: -0.0e0})"
+    variants:
+      gql: "MATCH (n:N) WITH n.v AS v, count(*) AS c RETURN c ORDER BY c"
+      cypher: "MATCH (n:N) WITH n.v AS v, count(*) AS c RETURN c ORDER BY c"
+      sql-pgq: "SELECT COUNT(*) AS c FROM GRAPH_TABLE (MATCH (n:N) COLUMNS (n.v AS v)) GROUP BY v ORDER BY c"
+    expect:
+      ordered: true
+      rows:
+        - [1]
+        - [2]
+        - [3]
+
+  - name: distinct_over_a_stored_mixed_number_column
+    setup:
+      - "INSERT (:N {v: 1}), (:N {v: 1.0e0}), (:N {v: 1.00}), (:N {v: 2}), (:N {v: 0}), (:N {v: -0.0e0})"
+    variants:
+      gql: "MATCH (n:N) RETURN count(DISTINCT n.v) AS d"
+      cypher: "MATCH (n:N) RETURN count(DISTINCT n.v) AS d"
+      sql-pgq: "SELECT COUNT(DISTINCT v) AS d FROM GRAPH_TABLE (MATCH (n:N) COLUMNS (n.v AS v))"
+    expect:
+      rows:
+        - [3]
+
+  - name: distinct_rows_of_a_stored_mixed_number_column
+    setup:
+      - "INSERT (:N {v: 2}), (:N {v: 2.0e0}), (:N {v: 2.00}), (:N {v: 3})"
+    variants:
+      gql: "MATCH (n:N) RETURN DISTINCT n.v AS v ORDER BY v"
+      cypher: "MATCH (n:N) RETURN DISTINCT n.v AS v ORDER BY v"
+      sql-pgq: "SELECT DISTINCT v FROM GRAPH_TABLE (MATCH (n:N) COLUMNS (n.v AS v)) ORDER BY v"
+    expect:
+      ordered: true
+      rows:
+        - [2]
+        - [3]
+
+  - name: a_sum_per_stored_group_is_exact
+    setup:
+      - "INSERT (:N {k: 1, w: 10}), (:N {k: 1.0e0, w: 5}), (:N {k: 2, w: 1})"
+    variants:
+      gql: "MATCH (n:N) WITH n.k AS k, sum(n.w) AS s RETURN s ORDER BY s"
+      cypher: "MATCH (n:N) WITH n.k AS k, sum(n.w) AS s RETURN s ORDER BY s"
+      sql-pgq: "SELECT SUM(w) AS s FROM GRAPH_TABLE (MATCH (n:N) COLUMNS (n.k AS k, n.w AS w)) GROUP BY k ORDER BY s"
+    expect:
+      ordered: true
+      rows:
+        - [1]
+        - [15]

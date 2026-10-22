@@ -163,6 +163,12 @@ impl Adjacency {
         self.removed.extend(sorted);
     }
 
+    /// Whether the delta is empty and no edge waits to be dropped: a merge
+    /// would change nothing.
+    pub(super) fn is_merged(&self) -> bool {
+        self.delta_len == 0 && self.removed.is_empty()
+    }
+
     /// Merges the delta into the sorted lists and drops the removed edges.
     pub(super) fn merge(&mut self) {
         let rows = self
@@ -206,8 +212,11 @@ impl Adjacency {
         self.offsets.capacity() * std::mem::size_of::<usize>()
             + (self.sorted.capacity() + self.delta_len) * std::mem::size_of::<Adjacent>()
             + self.removed.capacity() * std::mem::size_of::<u64>()
-            + self.delta.capacity()
-                * (std::mem::size_of::<usize>() + std::mem::size_of::<Vec<Adjacent>>())
+            // The table's allocation, not its capacity: a removed row's slot
+            // may stay a tombstone, which takes capacity depending on where
+            // the map's random hash put the row, so two adjacencies that
+            // took the same pushes and removes would report different sizes.
+            + self.delta.allocation_size()
     }
 }
 
@@ -301,5 +310,25 @@ mod tests {
         }
         assert_eq!(adjacency.delta_len, 0, "the push past the minimum merged");
         assert_eq!(adjacency.sorted.len(), MERGE_MIN + 1);
+    }
+
+    /// Two adjacencies that took the same pushes and removes report the same
+    /// heap size, whatever the random hash state of their maps: a removed
+    /// row's tombstone does not count.
+    #[test]
+    fn the_same_writes_report_the_same_heap_size() {
+        let build = || {
+            let mut adjacency = Adjacency::default();
+            for row in 0..200 {
+                adjacency.push(row, edge(1, row as u64, row as u64));
+            }
+            for row in (0..200).step_by(3) {
+                adjacency.remove(row, row as u64);
+            }
+            adjacency
+        };
+        let sizes: std::collections::BTreeSet<usize> =
+            (0..64).map(|_| build().heap_bytes()).collect();
+        assert_eq!(sizes.len(), 1, "sizes {sizes:?}");
     }
 }

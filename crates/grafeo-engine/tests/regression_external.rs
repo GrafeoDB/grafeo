@@ -6,7 +6,7 @@
 //! cargo test -p grafeo-engine --test regression_external -- --nocapture
 //! ```
 
-use grafeo_common::types::Value;
+use grafeo_common::types::{Decimal, Value};
 use grafeo_engine::GrafeoDB;
 use grafeo_engine::database::QueryResult;
 
@@ -570,7 +570,7 @@ mod where_filter_and_projection {
         // The returned value must be the actual reading, NOT boolean true
         assert_eq!(
             r.rows()[0][1],
-            Value::Float64(42.5),
+            Value::Decimal(Decimal::parse("42.5").unwrap()),
             "WHERE IS NOT NULL must not replace the returned value with boolean"
         );
     }
@@ -1538,12 +1538,13 @@ mod integer_overflow {
     fn i64_max_plus_one_overflows() {
         let db = db();
         let s = db.session();
-        // i64::MAX + 1 overflows: returns NULL (SQL overflow semantics)
-        let r = s.execute("RETURN 9223372036854775807 + 1 AS r").unwrap();
-        assert_eq!(
-            r.rows()[0][0],
-            Value::Null,
-            "i64::MAX + 1 should return NULL (overflow)"
+        // i64::MAX + 1 overflows: an error, as in SQL (22003, #639)
+        let error = s
+            .execute("RETURN 9223372036854775807 + 1 AS r")
+            .unwrap_err();
+        assert!(
+            error.to_string().contains("numeric value out of range"),
+            "{error}"
         );
     }
 
@@ -1570,13 +1571,14 @@ mod integer_overflow {
         let s = db.session();
         // 100 * 1_000_000_000 = 100_000_000_000 (fits i64)
         // 100_000_000_000 * 100_000_000 = 10^19 (overflows i64)
-        let r = s
+        let error = s
             .execute("RETURN 100 * 1000000000 * 100000000 AS r")
-            .unwrap();
-        assert_eq!(
-            r.rows()[0][0],
-            Value::Null,
-            "Intermediate multiplication overflow should return NULL"
+            .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("numeric value out of range: 100000000000 * 100000000"),
+            "Intermediate multiplication overflow should fail: {error}"
         );
     }
 }
@@ -3318,7 +3320,7 @@ mod float_precision {
     fn float64_full_precision_roundtrip() {
         let db = db();
         let s = db.session();
-        s.execute("INSERT (:M {val: 0.123456789012345})").unwrap();
+        s.execute("INSERT (:M {val: 0.123456789012345e0})").unwrap();
 
         let r = s.execute("MATCH (m:M) RETURN m.val").unwrap();
         assert_eq!(r.row_count(), 1);
@@ -4404,7 +4406,7 @@ mod negative_numerics {
     fn insert_negative_float() {
         let db = db();
         let s = db.session();
-        s.execute("INSERT (:Location {lat: -33.8688, lon: 151.2093})")
+        s.execute("INSERT (:Location {lat: -33.8688e0, lon: 151.2093e0})")
             .unwrap();
 
         let r = s.execute("MATCH (l:Location) RETURN l.lat, l.lon").unwrap();

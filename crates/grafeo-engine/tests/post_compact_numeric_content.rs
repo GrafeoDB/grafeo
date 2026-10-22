@@ -19,7 +19,7 @@
 //!     --test post_compact_numeric_content
 //! ```
 
-#![cfg(all(feature = "lpg", feature = "gql"))]
+#![cfg(feature = "gql")]
 
 use grafeo_common::types::Value;
 use grafeo_engine::GrafeoDB;

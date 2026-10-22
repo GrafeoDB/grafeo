@@ -1,0 +1,127 @@
+# Rosetta: the GQLSTATUS of refused writes
+#
+# ISO/IEC 39075 codes: a write whose data does not conform to the graph's
+# schema is G2000 (graph type violation), whether the schema comes from a
+# graph type (a property of another type, a missing NOT NULL property, a
+# label, edge type or property a closed graph type does not declare) or from
+# a constraint on a label (NOT NULL, UNIQUE). Deleting a node that still has
+# edges without DETACH is G1001 (dependent object error: edges still exist).
+# A value past a limit of the database rather than of the schema, such as a
+# vector of another size than its index, stays 22000 (data exception).
+# All were 22000 (data exception) before; the messages are unchanged.
+
+meta:
+  model: lpg
+  section: rosetta
+  title: GQLSTATUS of refused writes
+  dataset: empty
+  requires: [cypher, vector-index]
+
+tests:
+
+  # ---------------------------------------------------------------------------
+  # G2000: the data does not conform to the graph type
+  # ---------------------------------------------------------------------------
+
+  - name: a_missing_not_null_property_of_a_node_type
+    setup:
+      - "CREATE NODE TYPE Customer (customerId STRING NOT NULL)"
+    variants:
+      gql: "INSERT (:Customer {name: 'Alix'})"
+      cypher: "CREATE (:Customer {name: 'Alix'})"
+    expect:
+      error: "missing required property 'customerId' on :Customer"
+      gql_status: "G2000"
+
+  - name: a_property_of_another_type
+    setup:
+      - "CREATE NODE TYPE Item (price DECIMAL(6, 2))"
+    variants:
+      gql: "INSERT (:Item {price: 12345.6})"
+      cypher: "CREATE (:Item {price: 12345.6})"
+    expect:
+      error: "property 'price' on :Item expects DECIMAL(6,2)"
+      gql_status: "G2000"
+
+  - name: setting_a_not_null_property_to_null
+    setup:
+      - "CREATE NODE TYPE Customer (customerId STRING NOT NULL)"
+      - "INSERT (:Customer {customerId: 'c1'})"
+    variants:
+      gql: "MATCH (c:Customer) SET c.customerId = NULL"
+      cypher: "MATCH (c:Customer) SET c.customerId = null"
+    expect:
+      gql_status: "G2000"
+
+  - name: a_label_a_closed_graph_type_does_not_declare
+    statements:
+      - "CREATE NODE TYPE Customer (customerId STRING NOT NULL)"
+      - "CREATE GRAPH TYPE shop (NODE TYPE Customer)"
+      - "CREATE GRAPH g TYPED shop"
+      - "USE GRAPH g"
+      - "INSERT (:Spaceship {id: 'x'})"
+    expect:
+      error: "label 'Spaceship' is not a node type of closed graph type 'shop'"
+      gql_status: "G2000"
+
+  # ---------------------------------------------------------------------------
+  # G2000: the data breaks a constraint on a label
+  # ---------------------------------------------------------------------------
+
+  - name: a_unique_constraint
+    setup:
+      - "CREATE CONSTRAINT unique_email FOR (p:Person) ON (p.email) UNIQUE"
+      - "INSERT (:Person {name: 'Alix', email: 'alix@example.org'})"
+    variants:
+      gql: "INSERT (:Person {name: 'Gus', email: 'alix@example.org'})"
+      cypher: "CREATE (:Person {name: 'Gus', email: 'alix@example.org'})"
+    expect:
+      error: "UNIQUE constraint violation"
+      gql_status: "G2000"
+
+  - name: a_not_null_constraint
+    setup:
+      - "CREATE CONSTRAINT FOR (p:Person) ON (p.name) NOT NULL"
+    variants:
+      gql: "INSERT (:Person {email: 'gus@example.org'})"
+      cypher: "CREATE (:Person {email: 'gus@example.org'})"
+    expect:
+      error: "missing required property 'name' on :Person"
+      gql_status: "G2000"
+
+  # ---------------------------------------------------------------------------
+  # G1001: a node to delete still has edges
+  # ---------------------------------------------------------------------------
+
+  - name: deleting_a_node_that_has_edges
+    setup:
+      - "INSERT (:Person {name: 'Alix'})-[:KNOWS]->(:Person {name: 'Gus'})"
+    variants:
+      gql: "MATCH (p:Person {name: 'Alix'}) DELETE p"
+      cypher: "MATCH (p:Person {name: 'Alix'}) DELETE p"
+    expect:
+      error: "Use DETACH DELETE"
+      gql_status: "G1001"
+
+  - name: detach_delete_removes_the_node_and_its_edges
+    setup:
+      - "INSERT (:Person {name: 'Alix'})-[:KNOWS]->(:Person {name: 'Gus'})"
+    statements:
+      - "MATCH (p:Person {name: 'Alix'}) DETACH DELETE p"
+      - "MATCH (p:Person) RETURN p.name AS name"
+    expect:
+      rows:
+        - [Gus]
+
+  # ---------------------------------------------------------------------------
+  # 22000: a value past a limit of the database
+  # ---------------------------------------------------------------------------
+
+  - name: a_vector_of_another_size_than_its_index
+    setup:
+      - "CREATE VECTOR INDEX doc_emb ON :Doc(emb) DIMENSION 2 METRIC 'cosine'"
+    variants:
+      gql: "INSERT (:Doc {emb: vector([0.1, 0.2, 0.3])})"
+    expect:
+      error: "has a vector index of 2 dimensions, got a vector of 3"
+      gql_status: "22000"

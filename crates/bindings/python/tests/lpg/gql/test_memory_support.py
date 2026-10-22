@@ -243,8 +243,9 @@ class TestVectorSearchOperatorFilters:
 class TestTemporalPropertyVersioning:
     """Tests for get_node_property_at_epoch and get_node_property_history.
 
-    These require the `temporal` feature to be enabled at build time.
-    Tests are skipped if the methods are not available.
+    Every build has them since 0.6.0 (the `temporal` feature enables nothing):
+    they answer from the history the database keeps. A test skips when a
+    build lacks a method.
     """
 
     def test_property_history_available(self, db):
@@ -273,8 +274,13 @@ class TestTemporalPropertyVersioning:
             tx.execute("MATCH (p:Person {name: 'Gus'}) SET p.name = 'Gustav'")
             tx.commit()
 
-        val = db.get_node_property_at_epoch(node_id, "name", epoch_after_create)
-        assert val == "Gus"
+        assert db.get_node_property_at_epoch(node_id, "name", db.current_epoch()) == "Gustav"
+        # A database keeps the history its retention asks for, and one opened
+        # from Python keeps none yet: the version the rename replaced is
+        # collected, so a read before it is refused, never answered with the
+        # value of now.
+        with pytest.raises(Exception, match="not retained"):
+            db.get_node_property_at_epoch(node_id, "name", epoch_after_create)
 
     def test_all_property_history_available(self, db):
         if not hasattr(db, "get_all_node_property_history"):

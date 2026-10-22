@@ -6,11 +6,14 @@
 
 use arcstr::ArcStr;
 use serde::{Deserialize, Serialize};
+
+use super::Decimal;
 use std::collections::BTreeMap;
 use std::fmt;
 use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 
+use super::rdf::Term;
 use super::{Date, Duration, Time, Timestamp, ZonedDatetime};
 
 /// An interned property name - cheap to clone and compare.
@@ -172,6 +175,14 @@ pub enum Value {
         /// magnitudes).
         neg: Arc<std::collections::HashMap<String, u64>>,
     },
+    /// Exact decimal number, at most 38 digits, with the scale it was written
+    /// with (`1.50`). The last variant: serde encodes the variant index, so
+    /// adding it here keeps the encodings of the others.
+    Decimal(Decimal),
+    /// An RDF term (an IRI, a blank node, or a literal with its datatype or
+    /// language tag), as SPARQL results carry it. Equal and hashed by term
+    /// identity (SPARQL `sameTerm`). After `Decimal`, for the same reason.
+    RdfTerm(Arc<Term>),
 }
 
 impl Value {
@@ -208,6 +219,90 @@ impl Value {
     pub const fn as_float64(&self) -> Option<f64> {
         match self {
             Value::Float64(f) => Some(*f),
+            _ => None,
+        }
+    }
+
+    /// The order of two numbers when at least one is a decimal: decimals
+    /// exactly, an integer as a decimal, a float by its shortest round-trip
+    /// text (see [`Decimal::cmp_f64`]). `None` when neither is a decimal, the
+    /// other is not a number, or the other is a NaN float.
+    #[must_use]
+    pub fn compare_decimal(&self, other: &Value) -> Option<std::cmp::Ordering> {
+        match (self, other) {
+            (Value::Decimal(a), Value::Decimal(b)) => Some(a.cmp(b)),
+            (Value::Decimal(a), Value::Int64(b)) => Some(a.cmp(&Decimal::from_i64(*b))),
+            (Value::Int64(a), Value::Decimal(b)) => Some(Decimal::from_i64(*a).cmp(b)),
+            (Value::Decimal(a), Value::Float64(b)) if !b.is_nan() => Some(a.cmp_f64(*b)),
+            (Value::Float64(a), Value::Decimal(b)) if !a.is_nan() => Some(b.cmp_f64(*a).reverse()),
+            _ => None,
+        }
+    }
+
+    /// The value of an integer from outside the engine (a parameter, a
+    /// property, a loaded row), by the rule every input shares: an INT64 when
+    /// it fits 64 bits, else an exact DECIMAL with scale 0.
+    ///
+    /// # Errors
+    ///
+    /// [`DecimalError::Overflow`](super::DecimalError::Overflow) when the
+    /// integer has more than 38 digits.
+    pub fn from_wide_integer(integer: i128) -> Result<Self, super::DecimalError> {
+        match i64::try_from(integer) {
+            Ok(narrow) => Ok(Value::Int64(narrow)),
+            Err(_) => Decimal::new(integer, 0).map(Value::Decimal),
+        }
+    }
+
+    /// The value of a number written as text from outside the engine (a JSON
+    /// number, a host's big integer): an integer (`[+-]digits`) by
+    /// [`Self::from_wide_integer`] at any length, any other number a FLOAT64.
+    ///
+    /// # Errors
+    ///
+    /// An integer with more than 38 digits, a float past the FLOAT64 range,
+    /// or text that is not a number.
+    pub fn from_number_text(text: &str) -> Result<Self, NumberTextError> {
+        let digits = text.strip_prefix(['+', '-']).unwrap_or(text);
+        if !digits.is_empty() && digits.bytes().all(|byte| byte.is_ascii_digit()) {
+            // An i128 holds every integer of 38 digits; a longer one has more.
+            return text
+                .parse::<i128>()
+                .ok()
+                .and_then(|integer| Self::from_wide_integer(integer).ok())
+                .ok_or_else(|| NumberTextError::IntegerTooWide(text.to_string()));
+        }
+        match text.parse::<f64>() {
+            Ok(float) if float.is_finite() => Ok(Value::Float64(float)),
+            Ok(_) => Err(NumberTextError::FloatOutOfRange(text.to_string())),
+            Err(_) => Err(NumberTextError::Invalid(text.to_string())),
+        }
+    }
+
+    /// The value as a vector component: an integer, a float or a decimal as
+    /// the nearest `f32`, the type vectors and their indexes store. `None` for
+    /// any other value.
+    #[must_use]
+    #[allow(
+        clippy::cast_possible_truncation,
+        clippy::cast_precision_loss,
+        reason = "a vector component is an f32: the nearest one is the value stored"
+    )]
+    pub fn as_vector_component(&self) -> Option<f32> {
+        match self {
+            Value::Float64(f) => Some(*f as f32),
+            Value::Int64(i) => Some(*i as f32),
+            Value::Decimal(d) => Some(d.to_f64() as f32),
+            _ => None,
+        }
+    }
+
+    /// Returns the decimal if this is a Decimal, otherwise None.
+    #[inline]
+    #[must_use]
+    pub const fn as_decimal(&self) -> Option<Decimal> {
+        match self {
+            Value::Decimal(d) => Some(*d),
             _ => None,
         }
     }
@@ -382,6 +477,8 @@ impl Value {
             Value::Path { .. } => "PATH",
             Value::GCounter(_) => "GCOUNTER",
             Value::OnCounter { .. } => "PNCOUNTER",
+            Value::Decimal(_) => "DECIMAL",
+            Value::RdfTerm(_) => "RDF_TERM",
         }
     }
 
@@ -420,7 +517,8 @@ impl Value {
             | Value::Date(_)
             | Value::Time(_)
             | Value::Duration(_)
-            | Value::ZonedDatetime(_) => 0,
+            | Value::ZonedDatetime(_)
+            | Value::Decimal(_) => 0,
             Value::String(s) => s.len(),
             Value::Bytes(b) => b.len(),
             Value::Vector(v) => v.len() * size_of::<f32>(),
@@ -445,6 +543,18 @@ impl Value {
                 let n: usize = neg.keys().map(|k| k.len() + size_of::<u64>()).sum();
                 p + n
             }
+            Value::RdfTerm(term) => {
+                size_of::<Term>()
+                    + match term.as_ref() {
+                        Term::Iri(iri) => iri.as_str().len(),
+                        Term::BlankNode(node) => node.id().len(),
+                        Term::Literal(literal) => {
+                            literal.value().len()
+                                + literal.datatype().len()
+                                + literal.language().map_or(0, str::len)
+                        }
+                    }
+            }
         }
     }
 }
@@ -456,6 +566,8 @@ impl fmt::Debug for Value {
             Value::Bool(b) => write!(f, "Bool({b})"),
             Value::Int64(i) => write!(f, "Int64({i})"),
             Value::Float64(fl) => write!(f, "Float64({fl})"),
+            Value::Decimal(d) => write!(f, "Decimal({d})"),
+            Value::RdfTerm(term) => write!(f, "RdfTerm({})", term.to_ntriples()),
             Value::String(s) => write!(f, "String({s:?})"),
             Value::Bytes(b) => write!(f, "Bytes([{}; {} bytes])", b.first().unwrap_or(&0), b.len()),
             Value::Timestamp(t) => write!(f, "Timestamp({t:?})"),
@@ -498,6 +610,8 @@ impl fmt::Display for Value {
             Value::Bool(b) => write!(f, "{b}"),
             Value::Int64(i) => write!(f, "{i}"),
             Value::Float64(fl) => write!(f, "{fl}"),
+            Value::Decimal(d) => write!(f, "{d}"),
+            Value::RdfTerm(term) => f.write_str(&term.to_ntriples()),
             Value::String(s) => write!(f, "{s:?}"),
             Value::Bytes(b) => write!(f, "<bytes: {} bytes>", b.len()),
             Value::Timestamp(t) => write!(f, "{t}"),
@@ -569,6 +683,20 @@ impl fmt::Display for Value {
     }
 }
 
+/// Why a number written as text has no value (see [`Value::from_number_text`]).
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum NumberTextError {
+    /// An integer with more than 38 digits, past the widest exact DECIMAL.
+    #[error("the integer {0} has more than 38 digits")]
+    IntegerTooWide(String),
+    /// A float past the FLOAT64 range.
+    #[error("the number {0} is out of the FLOAT64 range")]
+    FloatOutOfRange(String),
+    /// Text that is not a number.
+    #[error("{0} is not a number")]
+    Invalid(String),
+}
+
 // Convenient From implementations
 impl From<bool> for Value {
     fn from(b: bool) -> Self {
@@ -591,6 +719,12 @@ impl From<i32> for Value {
 impl From<f64> for Value {
     fn from(f: f64) -> Self {
         Value::Float64(f)
+    }
+}
+
+impl From<Decimal> for Value {
+    fn from(d: Decimal) -> Self {
+        Value::Decimal(d)
     }
 }
 
@@ -828,7 +962,7 @@ impl TryFrom<&Value> for OrderableValue {
     /// Attempts to create an `OrderableValue` from a `Value`.
     ///
     /// Returns `Err(())` for types that don't have a natural ordering
-    /// (`Null`, `Bytes`, `List`, `Map`, `Vector`).
+    /// (`Null`, `Bytes`, `List`, `Map`, `Vector`, `RdfTerm`).
     fn try_from(value: &Value) -> Result<Self, Self::Error> {
         match value {
             Value::Int64(i) => Ok(Self::Int64(*i)),
@@ -847,7 +981,9 @@ impl TryFrom<&Value> for OrderableValue {
             | Value::Vector(_)
             | Value::Path { .. }
             | Value::GCounter(_)
-            | Value::OnCounter { .. } => Err(()),
+            | Value::OnCounter { .. }
+            | Value::Decimal(_)
+            | Value::RdfTerm(_) => Err(()),
         }
     }
 }
@@ -1005,6 +1141,8 @@ fn hash_value<H: Hasher>(value: &Value, state: &mut H) {
         Value::Bool(b) => b.hash(state),
         Value::Int64(i) => i.hash(state),
         Value::Float64(f) => f.to_bits().hash(state),
+        Value::Decimal(d) => d.hash(state),
+        Value::RdfTerm(term) => term.hash(state),
         Value::String(s) => s.hash(state),
         Value::Bytes(b) => b.hash(state),
         Value::Timestamp(t) => t.hash(state),
@@ -1136,6 +1274,7 @@ impl From<HashableValue> for Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::types::rdf::{Literal, Term};
 
     #[test]
     fn test_value_type_checks() {
@@ -1151,6 +1290,95 @@ mod tests {
 
         assert_eq!(Value::Float64(1.234).as_float64(), Some(1.234));
         assert_eq!(Value::String("hello".into()).as_str(), Some("hello"));
+    }
+
+    #[test]
+    fn a_wide_integer_is_int64_then_an_exact_decimal_up_to_38_digits() {
+        let decimal = |text: &str| Value::Decimal(Decimal::parse(text).unwrap());
+        assert_eq!(
+            Value::from_wide_integer(i128::from(i64::MAX)),
+            Ok(Value::Int64(i64::MAX))
+        );
+        assert_eq!(
+            Value::from_wide_integer(i128::from(i64::MIN)),
+            Ok(Value::Int64(i64::MIN))
+        );
+        assert_eq!(
+            Value::from_wide_integer(1 << 63),
+            Ok(decimal("9223372036854775808"))
+        );
+        assert_eq!(
+            Value::from_wide_integer(1 << 64),
+            Ok(decimal("18446744073709551616"))
+        );
+        assert_eq!(
+            Value::from_wide_integer(-(1 << 63) - 1),
+            Ok(decimal("-9223372036854775809"))
+        );
+        let largest = 10_i128.pow(38) - 1;
+        assert_eq!(
+            Value::from_wide_integer(largest),
+            Ok(decimal(&largest.to_string()))
+        );
+        assert_eq!(
+            Value::from_wide_integer(-largest),
+            Ok(decimal(&(-largest).to_string()))
+        );
+        for past in [10_i128.pow(38), -10_i128.pow(38), i128::MAX, i128::MIN] {
+            assert_eq!(
+                Value::from_wide_integer(past),
+                Err(super::super::DecimalError::Overflow)
+            );
+        }
+    }
+
+    #[test]
+    fn number_text_follows_the_integer_rule_and_keeps_floats() {
+        let decimal = |text: &str| Value::Decimal(Decimal::parse(text).unwrap());
+        let read = Value::from_number_text;
+        assert_eq!(read("9223372036854775807"), Ok(Value::Int64(i64::MAX)));
+        assert_eq!(read("-9223372036854775808"), Ok(Value::Int64(i64::MIN)));
+        assert_eq!(read("-0"), Ok(Value::Int64(0)));
+        assert_eq!(
+            read("9223372036854775808"),
+            Ok(decimal("9223372036854775808"))
+        );
+        assert_eq!(
+            read("18446744073709551616"),
+            Ok(decimal("18446744073709551616"))
+        );
+        let largest = "9".repeat(38);
+        assert_eq!(read(&largest), Ok(decimal(&largest)));
+        assert_eq!(
+            read(&format!("-{largest}")),
+            Ok(decimal(&format!("-{largest}")))
+        );
+        for wide in [format!("1{}", "0".repeat(38)), "7".repeat(60)] {
+            assert_eq!(
+                read(&wide),
+                Err(NumberTextError::IntegerTooWide(wide.clone()))
+            );
+        }
+        assert_eq!(
+            read(&format!("1{}", "0".repeat(38)))
+                .unwrap_err()
+                .to_string(),
+            format!("the integer 1{} has more than 38 digits", "0".repeat(38))
+        );
+        // Any other number is a float with the same value: `1.50` is 1.5.
+        assert_eq!(read("1.50"), Ok(Value::Float64(1.5)));
+        assert_eq!(read("-0.0"), Ok(Value::Float64(-0.0)));
+        assert_eq!(read("1e300"), Ok(Value::Float64(1e300)));
+        assert_eq!(read("9.2e18"), Ok(Value::Float64(9.2e18)));
+        assert_eq!(
+            read("1e400"),
+            Err(NumberTextError::FloatOutOfRange("1e400".into()))
+        );
+        assert_eq!(
+            read("twelve"),
+            Err(NumberTextError::Invalid("twelve".into()))
+        );
+        assert_eq!(read(""), Err(NumberTextError::Invalid(String::new())));
     }
 
     #[test]
@@ -1250,6 +1478,54 @@ mod tests {
         assert!(!Value::Int64(42).is_vector());
         assert_eq!(Value::Int64(42).as_vector(), None);
         assert_eq!(Value::Int64(42).vector_dimensions(), None);
+    }
+
+    /// A value is 40 bytes: a path holds two fat pointers, and a decimal (24
+    /// bytes) fits beside the tag.
+    #[test]
+    fn a_value_is_forty_bytes() {
+        assert_eq!(size_of::<Value>(), 40);
+    }
+
+    /// Decimals compare and hash by value, and keep the scale they were
+    /// written with for display.
+    #[test]
+    fn decimals_are_equal_across_scales() {
+        let written = Value::Decimal(Decimal::parse("1.50").unwrap());
+        let shorter = Value::Decimal(Decimal::parse("1.5").unwrap());
+        assert_eq!(written, shorter);
+        assert_eq!(
+            HashableValue::new(written.clone()),
+            HashableValue::new(shorter.clone())
+        );
+        let hash = |value: &Value| {
+            let mut hasher = std::collections::hash_map::DefaultHasher::new();
+            HashableValue::new(value.clone()).hash(&mut hasher);
+            hasher.finish()
+        };
+        assert_eq!(hash(&written), hash(&shorter));
+        assert_eq!(written.to_string(), "1.50");
+        assert_eq!(format!("{written:?}"), "Decimal(1.50)");
+        assert_eq!(written.type_name(), "DECIMAL");
+        assert_eq!(written.as_decimal().map(|d| d.scale()), Some(2));
+        assert_ne!(written, Value::Float64(1.5));
+        assert_eq!(
+            Value::from(Decimal::from_i64(3)),
+            Value::Decimal(Decimal::parse("3.0").unwrap())
+        );
+    }
+
+    /// A decimal serializes as its text with its scale, in every serde
+    /// format, and an older value's encoding is unchanged: the variant is
+    /// the last of `Value`.
+    #[test]
+    fn decimals_serialize_as_text_and_keep_older_encodings() {
+        let decimal = Value::Decimal(Decimal::parse("-0.050").unwrap());
+        let bytes = decimal.serialize().unwrap();
+        let back = Value::deserialize(&bytes).unwrap();
+        assert_eq!(back.to_string(), "-0.050");
+        // Int64 is variant 2 whatever variants come after it.
+        assert_eq!(Value::Int64(7).serialize().unwrap(), vec![2, 14]);
     }
 
     #[test]
@@ -2018,5 +2294,61 @@ mod tests {
             displayed.contains("10:30:00"),
             "Display should contain the time"
         );
+    }
+
+    fn rdf(term: Term) -> Value {
+        Value::RdfTerm(Arc::new(term))
+    }
+
+    #[test]
+    fn an_rdf_term_is_a_value_of_its_own() {
+        let label = rdf(Term::lang_literal("Fruit", "en"));
+        assert_eq!(label.type_name(), "RDF_TERM");
+        assert_eq!(label.to_string(), "\"Fruit\"@en");
+        assert_eq!(format!("{label:?}"), "RdfTerm(\"Fruit\"@en)");
+        assert_eq!(
+            rdf(Term::iri("http://example.org/a")).to_string(),
+            "<http://example.org/a>"
+        );
+        assert_eq!(rdf(Term::blank("b0")).to_string(), "_:b0");
+        assert!(label.estimated_size_bytes() >= "Fruit".len() + "en".len());
+        assert!(OrderableValue::try_from(&label).is_err());
+    }
+
+    #[test]
+    fn rdf_terms_are_equal_only_when_they_are_the_same_term() {
+        use std::collections::hash_map::DefaultHasher;
+        let hash = |value: &Value| {
+            let mut hasher = DefaultHasher::new();
+            HashableValue(value.clone()).hash(&mut hasher);
+            hasher.finish()
+        };
+        let english = rdf(Term::lang_literal("Fruit", "en"));
+        let french = rdf(Term::lang_literal("Fruit", "fr"));
+        assert_eq!(english, rdf(Term::lang_literal("Fruit", "en")));
+        assert_eq!(
+            hash(&english),
+            hash(&rdf(Term::lang_literal("Fruit", "en")))
+        );
+        assert_ne!(english, french);
+        assert_ne!(hash(&english), hash(&french));
+        assert_ne!(english, Value::String("Fruit".into()));
+        assert_ne!(
+            rdf(Term::iri("http://example.org/Fruit")),
+            Value::String("http://example.org/Fruit".into())
+        );
+        assert_ne!(
+            rdf(Term::literal("1")),
+            rdf(Term::typed_literal("1", Literal::XSD_INTEGER))
+        );
+    }
+
+    #[test]
+    fn an_rdf_term_serializes_and_back() {
+        for term in crate::types::rdf::testing::unusual_terms() {
+            let value = rdf(term);
+            let bytes = value.serialize().unwrap();
+            assert_eq!(Value::deserialize(&bytes).unwrap(), value);
+        }
     }
 }

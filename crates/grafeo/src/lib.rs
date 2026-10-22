@@ -38,6 +38,13 @@
 //! # Ok::<(), grafeo::Error>(())
 //! ```
 //!
+//! ## Stability
+//!
+//! Everything this crate exports is stable unless its documentation has a
+//! `# Stability: Experimental` section: a stable item breaks only in a minor
+//! release (`0.6` to `0.7`), an experimental one may change in any release.
+//! See <https://grafeo.dev/stability/> and <https://grafeo.dev/versioning/>.
+//!
 #![forbid(unsafe_code)]
 
 //! ## Performance Features
@@ -66,8 +73,8 @@ static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 // Re-export the main database API
 pub use grafeo_engine::{
-    AccessMode, Catalog, CatalogError, Config, ConfigError, DurabilityMode, GrafeoDB, Grant,
-    GraphModel, GraphStore, GraphStoreMut, Identity, IndexDefinition, IndexType, Role, Session,
+    AccessMode, Catalog, CatalogError, Config, ConfigError, Direction, DurabilityMode, GrafeoDB,
+    Grant, GraphModel, GraphStore, Identity, IndexDefinition, IndexType, Role, Session, Snapshot,
     StatementKind, VERSION,
 };
 
@@ -84,6 +91,11 @@ pub use grafeo_engine::cdc::CdcRetentionConfig;
 pub use grafeo_engine::config::EncryptionConfig;
 pub use grafeo_engine::config::StorageFormat;
 
+// Re-export time travel: the retention setting `Config` takes, and the view and
+// points in time `GrafeoDB::as_of` works with, in every build.
+pub use grafeo_engine::HistoryRetention;
+pub use grafeo_engine::{AsOfView, TimePoint};
+
 // Re-export what `GrafeoDB::create_text_index_with` takes
 #[cfg(feature = "text-index")]
 pub use grafeo_engine::{TextIndexOptions, TokenizerKind};
@@ -94,11 +106,14 @@ pub use grafeo_engine::auth;
 #[cfg(feature = "cdc")]
 pub use grafeo_engine::cdc;
 pub use grafeo_engine::database;
+#[cfg(feature = "gql")]
+pub use grafeo_engine::import;
 pub use grafeo_engine::memory_usage;
 pub use grafeo_engine::session;
 
 // Re-export query results
 pub use grafeo_engine::database::QueryResult;
+pub use grafeo_engine::database::ResultKind;
 
 // Re-export MemoryUsage, ProjectionSpec at top level for convenience
 pub use grafeo_engine::MemoryUsage;
@@ -109,3 +124,39 @@ pub use grafeo_common::types::{EdgeId, NodeId, Value};
 
 // Re-export error types so users don't need to depend on grafeo-common directly
 pub use grafeo_common::utils::error::{Error, Result};
+
+/// The store contract: what a store of one's own implements to hold a
+/// database's graph, for [`GrafeoDB::with_store`] (the read side
+/// [`GraphStore`] and the write side
+/// [`GraphBackend`](store::GraphBackend)) or [`GrafeoDB::with_read_store`]
+/// (the read side only), with the types their methods take. The built-in
+/// [`RowGroupStore`](store::RowGroupStore) is a store to delegate to.
+///
+/// With the `conformance` feature, [`conformance_suite!`](store::conformance_suite)
+/// runs the suite the built-in store passes against a store of one's own,
+/// one test per case. See <https://grafeo.dev/user-guide/extending/storage-backends/>.
+///
+/// # Stability: Experimental
+///
+/// Calling the traits is stable. Implementing them, and the conformance
+/// suite, are experimental through 0.6.x: a release may add a required
+/// method or a case.
+pub mod store {
+    pub use grafeo_common::change::{
+        Before, Change, ChangeMark, DataOp, Entity, Labels, PendingVersion, Properties,
+    };
+    pub use grafeo_common::types::{
+        ArcStr, EdgeId, EpochId, NodeId, PropertyKey, ReadView, TransactionId, Value,
+    };
+    pub use grafeo_common::utils::error::{Error, Result};
+    pub use grafeo_core::graph::apply::{Applied, ApplyError, Writer};
+    pub use grafeo_core::graph::lpg::{Edge, Node};
+    pub use grafeo_core::graph::rowgroup::RowGroupStore;
+    pub use grafeo_core::graph::{BackendTransaction, Direction, GraphBackend, GraphStore};
+    pub use grafeo_core::statistics::Statistics;
+
+    #[cfg(feature = "conformance")]
+    pub use grafeo_core::conformance_suite;
+    #[cfg(feature = "conformance")]
+    pub use grafeo_core::graph::conformance::{KnownGap, Store, run_named};
+}

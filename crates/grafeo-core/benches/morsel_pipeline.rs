@@ -17,6 +17,7 @@
 //! whether wiring it in pays off. Run it with
 //! `cargo bench -p grafeo-core --bench morsel_pipeline`.
 
+use grafeo_common::types::ReadView;
 use std::collections::BTreeMap;
 use std::hint::black_box;
 use std::sync::Arc;
@@ -34,8 +35,8 @@ use grafeo_core::execution::{
     ChunkCollector, CloneableOperatorFactory, DataChunk, ParallelPipeline, ParallelPipelineConfig,
     Pipeline, PushOperator, Sink, ValueVector,
 };
-use grafeo_core::graph::GraphStoreSearch;
-use grafeo_core::graph::lpg::LpgStore;
+use grafeo_core::graph::GraphStore;
+use grafeo_core::graph::rowgroup::RowGroupStore;
 
 const CITIES: [&str; 5] = ["Amsterdam", "Berlin", "Paris", "Prague", "Barcelona"];
 const SIZES: [usize; 2] = [100_000, 1_000_000];
@@ -91,26 +92,32 @@ fn age_of(i: usize) -> i64 {
 
 /// Loads `persons` Person nodes and a tenth as many Company nodes, which have
 /// an age too: the label scan must skip them.
-fn load(persons: usize) -> Arc<LpgStore> {
-    let store = Arc::new(LpgStore::new().expect("arena for the benchmark store"));
+fn load(persons: usize) -> Arc<RowGroupStore> {
+    let store = Arc::new(RowGroupStore::new());
     for i in 0..persons {
         store.create_node_with_props(
             &["Person"],
-            [
-                ("age", Value::Int64(age_of(i))),
-                ("city", Value::from(CITIES[i % CITIES.len()])),
+            &[
+                (PropertyKey::new("age"), Value::Int64(age_of(i))),
+                (
+                    PropertyKey::new("city"),
+                    Value::from(CITIES[i % CITIES.len()]),
+                ),
             ],
         );
     }
     for i in 0..persons / 10 {
-        store.create_node_with_props(&["Company"], [("age", Value::Int64(age_of(i)))]);
+        store.create_node_with_props(
+            &["Company"],
+            &[(PropertyKey::new("age"), Value::Int64(age_of(i)))],
+        );
     }
     store
 }
 
 /// Loads `age` and `city` for the nodes of column 0.
 struct FetchProperties {
-    store: Arc<LpgStore>,
+    store: Arc<RowGroupStore>,
     age: PropertyKey,
     city: PropertyKey,
 }
@@ -128,11 +135,19 @@ impl PushOperator for FetchProperties {
                 .collect(),
         };
         let mut ages = ValueVector::with_capacity(LogicalType::Int64, ids.len());
-        for age in self.store.get_node_property_batch(&ids, &self.age) {
+        for age in self
+            .store
+            .node_property_batch(&ids, &self.age, ReadView::latest())
+            .unwrap()
+        {
             ages.push_value(age.unwrap_or(Value::Null));
         }
         let mut cities = ValueVector::with_capacity(LogicalType::String, ids.len());
-        for city in self.store.get_node_property_batch(&ids, &self.city) {
+        for city in self
+            .store
+            .node_property_batch(&ids, &self.city, ReadView::latest())
+            .unwrap()
+        {
             cities.push_value(city.unwrap_or(Value::Null));
         }
         let mut nodes = ValueVector::with_capacity(LogicalType::Node, ids.len());
@@ -151,7 +166,7 @@ impl PushOperator for FetchProperties {
     }
 }
 
-fn fetch(store: &Arc<LpgStore>) -> Box<dyn PushOperator> {
+fn fetch(store: &Arc<RowGroupStore>) -> Box<dyn PushOperator> {
     Box::new(FetchProperties {
         store: Arc::clone(store),
         age: PropertyKey::from("age"),
@@ -174,11 +189,16 @@ fn group_by_city() -> Box<dyn PushOperator> {
     ))
 }
 
-fn person_scan(store: &Arc<LpgStore>) -> ParallelNodeScanSource {
-    ParallelNodeScanSource::with_label(Arc::clone(store) as Arc<dyn GraphStoreSearch>, "Person")
+fn person_scan(store: &Arc<RowGroupStore>) -> ParallelNodeScanSource {
+    ParallelNodeScanSource::with_label(
+        Arc::clone(store) as Arc<dyn GraphStore>,
+        "Person",
+        ReadView::latest(),
+    )
+    .unwrap()
 }
 
-fn run_single(store: &Arc<LpgStore>, workload: Workload) -> Vec<DataChunk> {
+fn run_single(store: &Arc<RowGroupStore>, workload: Workload) -> Vec<DataChunk> {
     let mut operators = vec![fetch(store), filter(workload)];
     if workload == Workload::GroupBy {
         operators.push(group_by_city());
@@ -197,7 +217,7 @@ fn run_single(store: &Arc<LpgStore>, workload: Workload) -> Vec<DataChunk> {
         .into_chunks()
 }
 
-fn run_parallel(store: &Arc<LpgStore>, workload: Workload, workers: usize) -> Vec<DataChunk> {
+fn run_parallel(store: &Arc<RowGroupStore>, workload: Workload, workers: usize) -> Vec<DataChunk> {
     let fetch_store = Arc::clone(store);
     let mut factory = CloneableOperatorFactory::new()
         .with_operator(move || fetch(&fetch_store))

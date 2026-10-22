@@ -6,20 +6,21 @@
 //! This planner follows the same push-based, vectorized execution model as
 //! the LPG planner for consistent performance characteristics.
 
+use grafeo_common::types::ReadView;
 use std::collections::HashMap;
 use std::sync::Arc;
 
 use grafeo_common::change::RdfGraphOp;
 use grafeo_common::storage::log_record::RdfGraphTarget;
-use grafeo_common::types::{LogicalType, Value};
-use grafeo_common::utils::error::{Error, Result};
+use grafeo_common::types::{Decimal, LogicalType, Value};
+use grafeo_common::utils::error::{Error, QueryError, QueryErrorKind, Result};
 use grafeo_core::execution::DataChunk;
 use grafeo_core::execution::operators::{
     BinaryFilterOp, FilterExpression, FilterOperator, HashAggregateOperator, Operator,
     OperatorError, Predicate, ProjectExpr, ProjectOperator, SimpleAggregateOperator,
     SingleRowOperator, SortOperator, UnaryFilterOp,
 };
-use grafeo_core::graph::GraphStoreSearch;
+use grafeo_core::graph::GraphStore;
 use grafeo_core::graph::rdf::{Literal, RdfStore, Term, Triple, TriplePattern};
 
 use crate::query::plan::{
@@ -59,15 +60,13 @@ struct TripleOperands {
 fn check_mutation_graph(graph_name: Option<&str>) -> std::result::Result<(), OperatorError> {
     match graph_name {
         Some(name) if name.starts_with('?') => Err(OperatorError::from(
-            grafeo_common::utils::error::Error::Query(
-                grafeo_common::utils::error::QueryError::new(
-                    grafeo_common::utils::error::QueryErrorKind::Semantic,
-                    format!(
-                        "SPARQL Update cannot target a variable graph ({name}); use a concrete \
+            grafeo_common::utils::error::Error::from(grafeo_common::utils::error::QueryError::new(
+                grafeo_common::utils::error::QueryErrorKind::Semantic,
+                format!(
+                    "SPARQL Update cannot target a variable graph ({name}); use a concrete \
                          graph IRI or a WITH clause"
-                    ),
                 ),
-            ),
+            )),
         )),
         _ => Ok(()),
     }
@@ -112,6 +111,13 @@ pub struct RdfPlanner {
     encoded_columns: std::cell::RefCell<std::collections::HashSet<String>>,
     /// Whether a plan without `ORDER BY` returns its rows in random order.
     shuffle_unordered: bool,
+    /// One traversal's maximum resident memory, narrowed by the caller's budget.
+    path_search_budget: usize,
+    /// The same execution deadline used by the caller's executor.
+    deadline: Option<grafeo_common::clock::Instant>,
+    /// Counts the triples the plan's scans read: the statement's
+    /// `rows_scanned`.
+    read_counter: Arc<grafeo_core::execution::operators::ReadCounter>,
 }
 
 impl RdfPlanner {
@@ -128,7 +134,17 @@ impl RdfPlanner {
             dictionary: None,
             encoded_columns: std::cell::RefCell::new(std::collections::HashSet::new()),
             shuffle_unordered: false,
+            path_search_budget: grafeo_core::execution::operators::DEFAULT_PATH_SEARCH_BUDGET,
+            deadline: None,
+            read_counter: Arc::default(),
         }
+    }
+
+    /// Counts the triples the plan's scans read, before any filter: the
+    /// statement's `rows_scanned`.
+    #[must_use]
+    pub fn read_counter(&self) -> Arc<grafeo_core::execution::operators::ReadCounter> {
+        Arc::clone(&self.read_counter)
     }
 
     /// Sets the chunk size for vectorized execution.
@@ -143,6 +159,20 @@ impl RdfPlanner {
     #[must_use]
     pub fn with_shuffle_unordered(mut self, shuffle: bool) -> Self {
         self.shuffle_unordered = shuffle;
+        self
+    }
+
+    /// Sets the memory one native property-path traversal may retain.
+    #[must_use]
+    pub fn with_path_search_budget(mut self, bytes: usize) -> Self {
+        self.path_search_budget = bytes;
+        self
+    }
+
+    /// Sets the deadline checked inside native property-path lookups.
+    #[must_use]
+    pub fn with_deadline(mut self, deadline: Option<grafeo_common::clock::Instant>) -> Self {
+        self.deadline = deadline;
         self
     }
 
@@ -259,6 +289,7 @@ impl RdfPlanner {
     ) -> Result<(Box<dyn Operator>, Vec<String>, Vec<LogicalType>)> {
         let result = match op {
             LogicalOperator::TripleScan(scan) => self.plan_triple_scan(scan),
+            LogicalOperator::PropertyPath(path) => self.plan_property_path(path),
             LogicalOperator::Filter(filter) => self.plan_filter(filter),
             LogicalOperator::Project(project) => self.plan_project(project),
             LogicalOperator::Limit(limit) => self.plan_limit(limit),
@@ -293,6 +324,68 @@ impl RdfPlanner {
             ))),
         };
         self.maybe_profile(result, op)
+    }
+
+    fn plan_property_path(
+        &self,
+        path: &crate::query::plan::PropertyPathOp,
+    ) -> Result<(Box<dyn Operator>, Vec<String>, Vec<LogicalType>)> {
+        use grafeo_core::execution::operators::{RdfPathConfig, RdfPathGraph, RdfPathOperator};
+        let graph = match path.graph.as_ref() {
+            Some(TripleComponent::Variable(_)) => {
+                RdfPathGraph::NamedGraphs(path.dataset.as_ref().map(|ds| ds.named_graphs.clone()))
+            }
+            Some(component) => {
+                let iri = match component {
+                    TripleComponent::Iri(iri) => iri.clone(),
+                    TripleComponent::Literal(Value::String(iri)) => iri.to_string(),
+                    _ => {
+                        return Err(Error::from(QueryError::new(
+                            QueryErrorKind::Semantic,
+                            "A path graph must be an IRI or variable",
+                        )));
+                    }
+                };
+                if path
+                    .dataset
+                    .as_ref()
+                    .is_some_and(|ds| !ds.named_graphs.contains(&iri))
+                {
+                    RdfPathGraph::NamedGraphs(Some(Vec::new()))
+                } else {
+                    RdfPathGraph::Named(iri)
+                }
+            }
+            None => path.dataset.as_ref().map_or(RdfPathGraph::Default, |ds| {
+                RdfPathGraph::Union(ds.default_graphs.clone())
+            }),
+        };
+        let operator = RdfPathOperator::new(
+            Arc::clone(&self.store),
+            RdfPathConfig {
+                subject: component_to_term(&path.subject),
+                object: component_to_term(&path.object),
+                subject_var: path.subject.as_variable().map(str::to_string),
+                object_var: path.object.as_variable().map(str::to_string),
+                graph_var: path
+                    .graph
+                    .as_ref()
+                    .and_then(TripleComponent::as_variable)
+                    .map(str::to_string),
+                min_hops: !path.zero_length,
+                path: path.path.clone(),
+                graph,
+                companions: self.needs_companion_columns.get(),
+                transaction_id: None,
+                chunk_capacity: self.chunk_size,
+            },
+        )
+        .with_memory_budget(self.path_search_budget)
+        .with_deadline(self.deadline)
+        .with_read_overlay(self.writer.as_ref().map(RdfWriter::path_overlay));
+        let columns = operator.columns();
+        let types = vec![LogicalType::Any; columns.len()];
+        Ok((Box::new(operator), columns, types))
     }
 
     /// Plans a triple scan operator.
@@ -366,7 +459,8 @@ impl RdfPlanner {
             emit_companion_columns,
             emit_datatype_column,
         )
-        .with_writer(self.writer.clone());
+        .with_writer(self.writer.clone())
+        .with_read_counter(self.read_counter());
 
         // Dictionary encoding is available but not yet automatically enabled for
         // all queries. The infrastructure (TermDictionary, DictResolveOperator) is
@@ -376,7 +470,17 @@ impl RdfPlanner {
         let _ = &self.dictionary; // suppress unused warning
         let _ = &self.encoded_columns;
 
-        let types = vec![LogicalType::String; columns.len()];
+        // Text, except the object's column: a literal there may be a number.
+        let types = columns
+            .iter()
+            .map(|column| {
+                if object_var_name.as_ref() == Some(column) {
+                    LogicalType::Any
+                } else {
+                    LogicalType::String
+                }
+            })
+            .collect();
         Ok((Box::new(scan_op), columns, types))
     }
 
@@ -583,7 +687,10 @@ impl RdfPlanner {
                 input_op,
                 projections,
                 output_types,
-                Arc::new(grafeo_core::graph::NullGraphStore) as Arc<dyn GraphStoreSearch>,
+                Arc::new(grafeo_core::graph::NullGraphStore) as Arc<dyn GraphStore>,
+                // The SPARQL expressions read the row's values: the null store
+                // is never read, at any view.
+                ReadView::latest(),
             ));
         }
 
@@ -705,11 +812,22 @@ impl RdfPlanner {
         output_columns.push(bind.variable.clone());
         input_types.push(LogicalType::Any);
 
-        let operator = Box::new(RdfBindOperator::new(
+        // The language tag of the bound literal goes into the variable's
+        // hidden __lang_<var> companion, as the triple scan fills it, so
+        // LANG, LANGMATCHES and DATATYPE of the new variable read it.
+        let lang_expr = FilterExpression::SparqlCall {
+            name: "LANG".to_string(),
+            args: vec![filter_expr.clone()],
+        };
+        let operator: Box<dyn Operator> = Box::new(RdfBindOperator::new(
             input_op,
             filter_expr,
-            variable_columns,
+            variable_columns.clone(),
         ));
+        let operator: Box<dyn Operator> =
+            Box::new(RdfBindOperator::new(operator, lang_expr, variable_columns));
+        output_columns.push(format!("__lang_{}", bind.variable));
+        input_types.push(LogicalType::Any);
         Ok((operator, output_columns, input_types))
     }
 
@@ -822,7 +940,10 @@ impl RdfPlanner {
                 input_op,
                 projections,
                 output_types,
-                Arc::new(grafeo_core::graph::NullGraphStore) as Arc<dyn GraphStoreSearch>,
+                Arc::new(grafeo_core::graph::NullGraphStore) as Arc<dyn GraphStore>,
+                // The SPARQL expressions read the row's values: the null store
+                // is never read, at any view.
+                ReadView::latest(),
             ));
         }
 
@@ -872,15 +993,14 @@ impl RdfPlanner {
         }
 
         for agg_expr in &agg.aggregates {
-            // For RDF, numeric values are strings that get converted to floats
-            // So SUM should also output Float64 (since SumFloat returns Float64)
+            // A scan gives numbers as numbers of their XSD type, so SUM, AVG,
+            // MIN, MAX and SAMPLE give an integer, a decimal, a float or a term.
             let result_type = match agg_expr.function {
                 LogicalAggregateFunction::Count | LogicalAggregateFunction::CountNonNull => {
                     LogicalType::Int64
                 }
-                LogicalAggregateFunction::Sum => LogicalType::Float64,
-                LogicalAggregateFunction::Avg => LogicalType::Float64,
-                _ => LogicalType::String,
+                LogicalAggregateFunction::GroupConcat => LogicalType::String,
+                _ => LogicalType::Any,
             };
             output_schema.push(result_type);
             output_columns.push(
@@ -1222,7 +1342,7 @@ impl RdfPlanner {
 
         // Build output columns and types
         let columns = all_vars.clone();
-        let types = vec![LogicalType::String; columns.len()];
+        let types = vec![LogicalType::Any; columns.len()];
 
         let operator = Box::new(RdfLeapfrogOperator::new(ring, annotated, columns.clone()));
         Some(Ok((operator, columns, types)))
@@ -1343,32 +1463,8 @@ impl RdfPlanner {
         match component {
             TripleComponent::Iri(iri) => Ok(Term::Iri(iri.clone().into())),
             TripleComponent::Literal(value) => {
-                let lit = match value {
-                    Value::String(s) => Literal::simple(s.to_string()),
-                    Value::Int64(n) => Literal::integer(*n),
-                    Value::Float64(f) => {
-                        Literal::typed(f.to_string(), "http://www.w3.org/2001/XMLSchema#double")
-                    }
-                    Value::Bool(b) => {
-                        Literal::typed(b.to_string(), "http://www.w3.org/2001/XMLSchema#boolean")
-                    }
-                    Value::Date(d) => {
-                        Literal::typed(d.to_string(), "http://www.w3.org/2001/XMLSchema#date")
-                    }
-                    Value::Time(t) => {
-                        Literal::typed(t.to_string(), "http://www.w3.org/2001/XMLSchema#time")
-                    }
-                    Value::Timestamp(ts) => {
-                        Literal::typed(ts.to_string(), "http://www.w3.org/2001/XMLSchema#dateTime")
-                    }
-                    Value::ZonedDatetime(zdt) => {
-                        Literal::typed(zdt.to_string(), "http://www.w3.org/2001/XMLSchema#dateTime")
-                    }
-                    Value::Duration(dur) => {
-                        Literal::typed(dur.to_string(), "http://www.w3.org/2001/XMLSchema#duration")
-                    }
-                    _ => Literal::simple(format!("{:?}", value)),
-                };
+                let lit =
+                    value_literal(value).unwrap_or_else(|| Literal::simple(format!("{:?}", value)));
                 Ok(Term::Literal(lit))
             }
             TripleComponent::LangLiteral { value, lang } => {
@@ -1664,17 +1760,8 @@ impl RdfInsertPatternOperator {
             TripleComponent::Iri(iri) => Some(Term::Iri(iri.clone().into())),
             TripleComponent::BlankNode(label) => Some(Term::blank(label.clone())),
             TripleComponent::Literal(value) => {
-                let lit = match value {
-                    Value::String(s) => Literal::simple(s.to_string()),
-                    Value::Int64(n) => Literal::integer(*n),
-                    Value::Float64(f) => {
-                        Literal::typed(f.to_string(), "http://www.w3.org/2001/XMLSchema#double")
-                    }
-                    Value::Bool(b) => {
-                        Literal::typed(b.to_string(), "http://www.w3.org/2001/XMLSchema#boolean")
-                    }
-                    _ => Literal::simple(format!("{:?}", value)),
-                };
+                let lit =
+                    value_literal(value).unwrap_or_else(|| Literal::simple(format!("{:?}", value)));
                 Some(Term::Literal(lit))
             }
             TripleComponent::LangLiteral { value, lang } => {
@@ -1687,32 +1774,10 @@ impl RdfInsertPatternOperator {
                     && let Some(col) = chunk.column(col_idx)
                     && let Some(value) = col.get_value(row)
                 {
-                    return Self::value_to_term(&value);
+                    return value_to_term(&value);
                 }
                 None
             }
-        }
-    }
-
-    fn value_to_term(value: &Value) -> Option<Term> {
-        match value {
-            Value::String(s) => {
-                if s.starts_with("http://") || s.starts_with("https://") || s.starts_with("urn:") {
-                    Some(Term::Iri(s.to_string().into()))
-                } else {
-                    Some(Term::Literal(Literal::simple(s.to_string())))
-                }
-            }
-            Value::Int64(n) => Some(Term::Literal(Literal::integer(*n))),
-            Value::Float64(f) => Some(Term::Literal(Literal::typed(
-                f.to_string(),
-                "http://www.w3.org/2001/XMLSchema#double",
-            ))),
-            Value::Bool(b) => Some(Term::Literal(Literal::typed(
-                b.to_string(),
-                "http://www.w3.org/2001/XMLSchema#boolean",
-            ))),
-            _ => None,
         }
     }
 }
@@ -1858,17 +1923,8 @@ impl RdfDeletePatternOperator {
             TripleComponent::Iri(iri) => Some(Term::Iri(iri.clone().into())),
             TripleComponent::BlankNode(label) => Some(Term::blank(label.clone())),
             TripleComponent::Literal(value) => {
-                let lit = match value {
-                    Value::String(s) => Literal::simple(s.to_string()),
-                    Value::Int64(n) => Literal::integer(*n),
-                    Value::Float64(f) => {
-                        Literal::typed(f.to_string(), "http://www.w3.org/2001/XMLSchema#double")
-                    }
-                    Value::Bool(b) => {
-                        Literal::typed(b.to_string(), "http://www.w3.org/2001/XMLSchema#boolean")
-                    }
-                    _ => Literal::simple(format!("{:?}", value)),
-                };
+                let lit =
+                    value_literal(value).unwrap_or_else(|| Literal::simple(format!("{:?}", value)));
                 Some(Term::Literal(lit))
             }
             TripleComponent::LangLiteral { value, lang } => {
@@ -1881,32 +1937,10 @@ impl RdfDeletePatternOperator {
                     && let Some(col) = chunk.column(col_idx)
                     && let Some(value) = col.get_value(row)
                 {
-                    return Self::value_to_term(&value);
+                    return value_to_term(&value);
                 }
                 None
             }
-        }
-    }
-
-    fn value_to_term(value: &Value) -> Option<Term> {
-        match value {
-            Value::String(s) => {
-                if s.starts_with("http://") || s.starts_with("https://") || s.starts_with("urn:") {
-                    Some(Term::Iri(s.to_string().into()))
-                } else {
-                    Some(Term::Literal(Literal::simple(s.to_string())))
-                }
-            }
-            Value::Int64(n) => Some(Term::Literal(Literal::integer(*n))),
-            Value::Float64(f) => Some(Term::Literal(Literal::typed(
-                f.to_string(),
-                "http://www.w3.org/2001/XMLSchema#double",
-            ))),
-            Value::Bool(b) => Some(Term::Literal(Literal::typed(
-                b.to_string(),
-                "http://www.w3.org/2001/XMLSchema#boolean",
-            ))),
-            _ => None,
         }
     }
 }
@@ -2103,17 +2137,8 @@ impl RdfModifyOperator {
             TripleComponent::Iri(iri) => Some(Term::Iri(iri.clone().into())),
             TripleComponent::BlankNode(label) => Some(Term::blank(label.clone())),
             TripleComponent::Literal(value) => {
-                let lit = match value {
-                    Value::String(s) => Literal::simple(s.to_string()),
-                    Value::Int64(n) => Literal::integer(*n),
-                    Value::Float64(f) => {
-                        Literal::typed(f.to_string(), "http://www.w3.org/2001/XMLSchema#double")
-                    }
-                    Value::Bool(b) => {
-                        Literal::typed(b.to_string(), "http://www.w3.org/2001/XMLSchema#boolean")
-                    }
-                    _ => Literal::simple(format!("{:?}", value)),
-                };
+                let lit =
+                    value_literal(value).unwrap_or_else(|| Literal::simple(format!("{:?}", value)));
                 Some(Term::Literal(lit))
             }
             TripleComponent::LangLiteral { value, lang } => {
@@ -2125,32 +2150,10 @@ impl RdfModifyOperator {
                     && let Some(col) = chunk.column(col_idx)
                     && let Some(value) = col.get_value(row)
                 {
-                    return Self::value_to_term(&value);
+                    return value_to_term(&value);
                 }
                 None
             }
-        }
-    }
-
-    fn value_to_term(value: &Value) -> Option<Term> {
-        match value {
-            Value::String(s) => {
-                if s.starts_with("http://") || s.starts_with("https://") || s.starts_with("urn:") {
-                    Some(Term::Iri(s.to_string().into()))
-                } else {
-                    Some(Term::Literal(Literal::simple(s.to_string())))
-                }
-            }
-            Value::Int64(n) => Some(Term::Literal(Literal::integer(*n))),
-            Value::Float64(f) => Some(Term::Literal(Literal::typed(
-                f.to_string(),
-                "http://www.w3.org/2001/XMLSchema#double",
-            ))),
-            Value::Bool(b) => Some(Term::Literal(Literal::typed(
-                b.to_string(),
-                "http://www.w3.org/2001/XMLSchema#boolean",
-            ))),
-            _ => None,
         }
     }
 }
@@ -2600,17 +2603,17 @@ impl RdfLeapfrogOperator {
     }
 
     /// Extracts the value for a variable from a set of matched triples.
-    fn resolve_variable(&self, var: &str, matched_triples: &[Triple]) -> Option<String> {
+    fn resolve_variable(&self, var: &str, matched_triples: &[Triple]) -> Option<Value> {
         for (i, ap) in self.annotated_patterns.iter().enumerate() {
             if let Some(triple) = matched_triples.get(i) {
                 if ap.subject_var.as_deref() == Some(var) {
-                    return Some(term_to_string(triple.subject()));
+                    return Some(triple.subject().query_value());
                 }
                 if ap.predicate_var.as_deref() == Some(var) {
-                    return Some(term_to_string(triple.predicate()));
+                    return Some(triple.predicate().query_value());
                 }
                 if ap.object_var.as_deref() == Some(var) {
-                    return Some(term_to_string(triple.object()));
+                    return Some(triple.object().query_value());
                 }
             }
         }
@@ -2631,7 +2634,7 @@ impl Operator for RdfLeapfrogOperator {
         let batch_size = end - self.position;
         let col_count = self.output_columns.len();
 
-        let schema = vec![LogicalType::String; col_count];
+        let schema = vec![LogicalType::Any; col_count];
         let mut chunk = DataChunk::with_capacity(&schema, batch_size);
 
         for i in self.position..end {
@@ -2639,7 +2642,7 @@ impl Operator for RdfLeapfrogOperator {
             for (col_idx, var_name) in self.output_columns.iter().enumerate() {
                 if let Some(col) = chunk.column_mut(col_idx) {
                     if let Some(val) = self.resolve_variable(var_name, matched) {
-                        col.push_string(val);
+                        col.push_value(val);
                     } else {
                         col.push_value(Value::Null);
                     }
@@ -2817,7 +2820,8 @@ impl Operator for ConstantOperator {
     }
 }
 
-/// Resolves dictionary-encoded Int64 term IDs back to String values.
+/// Resolves dictionary-encoded Int64 term IDs back to the values a query reads
+/// for their terms (see [`Term::query_value`]).
 ///
 /// Placed at the result boundary (just before output) so that all intermediate
 /// operators (joins, aggregates, sorts) work with compact Int64 keys.
@@ -2855,11 +2859,11 @@ impl Operator for DictResolveOperator {
         let row_count = chunk.row_count();
         let col_count = chunk.column_count();
 
-        // Build output schema: replace Int64 encoded columns with String
+        // Build output schema: an encoded column holds any value of a term
         let mut schema = Vec::with_capacity(col_count);
         for col_idx in 0..col_count {
             if self.encoded_col_indices.contains(&col_idx) {
-                schema.push(LogicalType::String);
+                schema.push(LogicalType::Any);
             } else if let Some(col) = chunk.column(col_idx) {
                 schema.push(col.data_type().clone());
             } else {
@@ -2887,7 +2891,7 @@ impl Operator for DictResolveOperator {
                         #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
                         let tid = term_id as u32;
                         if let Some(term) = self.dictionary.get_term(tid) {
-                            out_col.push_string(term_to_string(term));
+                            out_col.push_value(term.query_value());
                         } else {
                             out_col.push_value(Value::Null);
                         }
@@ -2950,6 +2954,8 @@ struct RdfTripleScanOperator {
     dictionary: Option<Arc<grafeo_core::graph::rdf::TermDictionary>>,
     /// The writer of the scan's transaction, whose own writes it sees.
     writer: Option<RdfWriter>,
+    /// Counts the triples the scan reads.
+    reads: Option<Arc<grafeo_core::execution::operators::ReadCounter>>,
 }
 
 impl RdfTripleScanOperator {
@@ -2974,6 +2980,7 @@ impl RdfTripleScanOperator {
             position: 0,
             dictionary: None,
             writer: None,
+            reads: None,
         }
     }
 
@@ -2981,6 +2988,15 @@ impl RdfTripleScanOperator {
     /// (read-your-writes).
     fn with_writer(mut self, writer: Option<RdfWriter>) -> Self {
         self.writer = writer;
+        self
+    }
+
+    /// Counts the triples the scan reads in `reads`, before any filter.
+    fn with_read_counter(
+        mut self,
+        reads: Arc<grafeo_core::execution::operators::ReadCounter>,
+    ) -> Self {
+        self.reads = Some(reads);
         self
     }
 
@@ -3095,6 +3111,9 @@ impl RdfTripleScanOperator {
                     }
                 }
             });
+            if let (Some(reads), Some(triples)) = (&self.reads, &self.triples) {
+                reads.add(triples.len());
+            }
         }
     }
 
@@ -3111,14 +3130,16 @@ impl RdfTripleScanOperator {
     /// Builds the output schema. In dictionary mode, S/P/O variable columns
     /// are Int64 (term IDs), companion and graph columns remain String.
     fn build_output_schema(&self, col_count: usize, dict_mode: bool) -> Vec<LogicalType> {
-        if !dict_mode {
-            return vec![LogicalType::String; col_count];
-        }
         let mut schema = Vec::with_capacity(col_count);
-        // S, P, O variable columns get Int64
+        // S, P, O variable columns: Int64 term IDs in dictionary mode; otherwise
+        // text, and any value for the object, where a literal is a number.
         for i in 0..3 {
             if self.output_mask[i] {
-                schema.push(LogicalType::Int64);
+                schema.push(match (dict_mode, i) {
+                    (true, _) => LogicalType::Int64,
+                    (false, 2) => LogicalType::Any,
+                    (false, _) => LogicalType::String,
+                });
             }
         }
         // Companion columns (lang, datatype) are always String
@@ -3341,7 +3362,7 @@ impl RdfExpressionPredicate {
                 let col_idx = *self.variable_columns.get(var)?;
                 chunk.column(col_idx)?.get_value(row)
             }
-            FilterExpression::FunctionCall { name, args } => {
+            FilterExpression::SparqlCall { name, args } => {
                 self.eval_function_call(name, args, chunk, row)
             }
             FilterExpression::List(items) => {
@@ -3376,102 +3397,10 @@ impl RdfExpressionPredicate {
             BinaryFilterOp::Le => compare_values(left, right, |o| o.is_le()),
             BinaryFilterOp::Gt => compare_values(left, right, |o| o.is_gt()),
             BinaryFilterOp::Ge => compare_values(left, right, |o| o.is_ge()),
-            BinaryFilterOp::Add => {
-                // Helper to convert to f64 for arithmetic
-                fn to_f64(v: &Value) -> Option<f64> {
-                    match v {
-                        Value::Int64(i) => Some(*i as f64),
-                        Value::Float64(f) => Some(*f),
-                        Value::String(s) => s.parse::<f64>().ok(),
-                        _ => None,
-                    }
-                }
-                match (left, right) {
-                    (Value::Int64(l), Value::Int64(r)) => Some(Value::Int64(l + r)),
-                    (Value::Float64(l), Value::Float64(r)) => Some(Value::Float64(l + r)),
-                    (Value::Int64(l), Value::Float64(r)) => Some(Value::Float64(*l as f64 + r)),
-                    (Value::Float64(l), Value::Int64(r)) => Some(Value::Float64(l + *r as f64)),
-                    // Handle string-to-numeric conversion for RDF
-                    _ => {
-                        let l = to_f64(left)?;
-                        let r = to_f64(right)?;
-                        Some(Value::Float64(l + r))
-                    }
-                }
-            }
-            BinaryFilterOp::Sub => {
-                fn to_f64(v: &Value) -> Option<f64> {
-                    match v {
-                        Value::Int64(i) => Some(*i as f64),
-                        Value::Float64(f) => Some(*f),
-                        Value::String(s) => s.parse::<f64>().ok(),
-                        _ => None,
-                    }
-                }
-                match (left, right) {
-                    (Value::Int64(l), Value::Int64(r)) => Some(Value::Int64(l - r)),
-                    (Value::Float64(l), Value::Float64(r)) => Some(Value::Float64(l - r)),
-                    (Value::Int64(l), Value::Float64(r)) => Some(Value::Float64(*l as f64 - r)),
-                    (Value::Float64(l), Value::Int64(r)) => Some(Value::Float64(l - *r as f64)),
-                    _ => {
-                        let l = to_f64(left)?;
-                        let r = to_f64(right)?;
-                        Some(Value::Float64(l - r))
-                    }
-                }
-            }
-            BinaryFilterOp::Mul => {
-                fn to_f64(v: &Value) -> Option<f64> {
-                    match v {
-                        Value::Int64(i) => Some(*i as f64),
-                        Value::Float64(f) => Some(*f),
-                        Value::String(s) => s.parse::<f64>().ok(),
-                        _ => None,
-                    }
-                }
-                match (left, right) {
-                    (Value::Int64(l), Value::Int64(r)) => Some(Value::Int64(l * r)),
-                    (Value::Float64(l), Value::Float64(r)) => Some(Value::Float64(l * r)),
-                    (Value::Int64(l), Value::Float64(r)) => Some(Value::Float64(*l as f64 * r)),
-                    (Value::Float64(l), Value::Int64(r)) => Some(Value::Float64(l * *r as f64)),
-                    _ => {
-                        let l = to_f64(left)?;
-                        let r = to_f64(right)?;
-                        Some(Value::Float64(l * r))
-                    }
-                }
-            }
-            BinaryFilterOp::Div => {
-                fn to_f64(v: &Value) -> Option<f64> {
-                    match v {
-                        Value::Int64(i) => Some(*i as f64),
-                        Value::Float64(f) => Some(*f),
-                        Value::String(s) => s.parse::<f64>().ok(),
-                        _ => None,
-                    }
-                }
-                match (left, right) {
-                    (Value::Int64(l), Value::Int64(r)) if *r != 0 => Some(Value::Int64(l / r)),
-                    (Value::Float64(l), Value::Float64(r)) if *r != 0.0 => {
-                        Some(Value::Float64(l / r))
-                    }
-                    (Value::Int64(l), Value::Float64(r)) if *r != 0.0 => {
-                        Some(Value::Float64(*l as f64 / r))
-                    }
-                    (Value::Float64(l), Value::Int64(r)) if *r != 0 => {
-                        Some(Value::Float64(l / *r as f64))
-                    }
-                    _ => {
-                        let l = to_f64(left)?;
-                        let r = to_f64(right)?;
-                        if r != 0.0 {
-                            Some(Value::Float64(l / r))
-                        } else {
-                            None
-                        }
-                    }
-                }
-            }
+            BinaryFilterOp::Add
+            | BinaryFilterOp::Sub
+            | BinaryFilterOp::Mul
+            | BinaryFilterOp::Div => numeric_op(left, op, right),
             BinaryFilterOp::Mod => match (left, right) {
                 (Value::Int64(l), Value::Int64(r)) if *r != 0 => Some(Value::Int64(l % r)),
                 _ => None,
@@ -3602,11 +3531,82 @@ impl RdfExpressionPredicate {
             UnaryFilterOp::IsNull => Some(Value::Bool(val.is_none())),
             UnaryFilterOp::IsNotNull => Some(Value::Bool(val.is_some())),
             UnaryFilterOp::Neg => match val? {
-                Value::Int64(v) => Some(Value::Int64(-v)),
+                // -i64::MIN is past the i64 range: a decimal, as XPath integers have no limit.
+                Value::Int64(v) => Some(
+                    v.checked_neg()
+                        .map_or_else(|| Value::Decimal(Decimal::from_i64(v).neg()), Value::Int64),
+                ),
                 Value::Float64(v) => Some(Value::Float64(-v)),
+                Value::Decimal(v) => Some(Value::Decimal(v.neg())),
                 _ => None,
             },
             _ => None,
+        }
+    }
+
+    /// The language tag of the literal `expr` evaluates to, or `""` when it
+    /// has none. A variable's tag is in its hidden `__lang_<var>` companion
+    /// column (the triple scan and BIND fill it); `STRLANG` gives its second
+    /// argument; `COALESCE` and `IF` the tag of the argument they choose; the
+    /// functions SPARQL 1.1 defines to keep the tag of their first argument
+    /// (`UCASE`, `LCASE`, `SUBSTR`, `STRBEFORE`, `STRAFTER`, `REPLACE`) keep it;
+    /// `CONCAT` keeps a tag all its arguments share. Every other expression
+    /// gives a literal without a tag.
+    fn expression_language(
+        &self,
+        expr: &FilterExpression,
+        chunk: &DataChunk,
+        row: usize,
+    ) -> String {
+        match expr {
+            FilterExpression::Variable(var_name) => self
+                .variable_columns
+                .get(&format!("__lang_{var_name}"))
+                .and_then(|&col_idx| chunk.column(col_idx)?.get_value(row))
+                .and_then(|value| match value {
+                    Value::String(tag) => Some(tag.to_string()),
+                    _ => None,
+                })
+                .unwrap_or_default(),
+            FilterExpression::SparqlCall { name, args } => match name.to_uppercase().as_str() {
+                "STRLANG" => match args.get(1).and_then(|tag| self.eval_expr(tag, chunk, row)) {
+                    Some(Value::String(tag)) => tag.to_string(),
+                    _ => String::new(),
+                },
+                "COALESCE" => args
+                    .iter()
+                    .find(|arg| {
+                        self.eval_expr(arg, chunk, row)
+                            .is_some_and(|value| !matches!(value, Value::Null))
+                    })
+                    .map(|arg| self.expression_language(arg, chunk, row))
+                    .unwrap_or_default(),
+                "IF" if args.len() >= 3 => {
+                    match self
+                        .eval_expr(&args[0], chunk, row)
+                        .and_then(|c| c.as_bool())
+                    {
+                        Some(true) => self.expression_language(&args[1], chunk, row),
+                        Some(false) => self.expression_language(&args[2], chunk, row),
+                        None => String::new(),
+                    }
+                }
+                "UCASE" | "LCASE" | "SUBSTR" | "STRBEFORE" | "STRAFTER" | "REPLACE" => args
+                    .first()
+                    .map(|arg| self.expression_language(arg, chunk, row))
+                    .unwrap_or_default(),
+                "CONCAT" => {
+                    let mut tags = args
+                        .iter()
+                        .map(|arg| self.expression_language(arg, chunk, row));
+                    match tags.next() {
+                        Some(first) if !first.is_empty() && tags.all(|tag| tag == first) => first,
+                        _ => String::new(),
+                    }
+                }
+                _ => String::new(),
+            },
+            _ => String::new(),
         }
     }
 
@@ -3962,19 +3962,28 @@ impl RdfExpressionPredicate {
                     return None;
                 }
                 let val = self.eval_expr(&args[0], chunk, row)?;
-                let is_numeric = matches!(val, Value::Int64(_) | Value::Float64(_))
-                    || matches!(&val, Value::String(s) if s.parse::<f64>().is_ok());
+                // A numeric literal reads as a number of its type; a plain or
+                // ill-typed literal stays text and is not numeric ("1").
+                let is_numeric =
+                    matches!(val, Value::Int64(_) | Value::Float64(_) | Value::Decimal(_));
                 Some(Value::Bool(is_numeric))
             }
 
-            // ABS - absolute value
+            // ABS - absolute value; past the i64 range it goes on as a
+            // decimal, as XPath integers are unbounded
             "ABS" => {
                 if args.is_empty() {
                     return None;
                 }
                 match self.eval_expr(&args[0], chunk, row)? {
-                    Value::Int64(v) => Some(Value::Int64(v.abs())),
+                    Value::Int64(v) => {
+                        Some(v.checked_abs().map_or_else(
+                            || Value::Decimal(Decimal::from_i64(v).abs()),
+                            Value::Int64,
+                        ))
+                    }
                     Value::Float64(v) => Some(Value::Float64(v.abs())),
+                    Value::Decimal(v) => Some(Value::Decimal(v.abs())),
                     _ => None,
                 }
             }
@@ -3987,6 +3996,7 @@ impl RdfExpressionPredicate {
                 match self.eval_expr(&args[0], chunk, row)? {
                     Value::Int64(v) => Some(Value::Int64(v)),
                     Value::Float64(v) => Some(Value::Float64(v.ceil())),
+                    Value::Decimal(v) => Some(Value::Decimal(v.ceil())),
                     _ => None,
                 }
             }
@@ -3999,18 +4009,24 @@ impl RdfExpressionPredicate {
                 match self.eval_expr(&args[0], chunk, row)? {
                     Value::Int64(v) => Some(Value::Int64(v)),
                     Value::Float64(v) => Some(Value::Float64(v.floor())),
+                    Value::Decimal(v) => Some(Value::Decimal(v.floor())),
                     _ => None,
                 }
             }
 
-            // ROUND - round to nearest integer
+            // ROUND - fn:round: the nearest integer, of two equally near ones
+            // the one nearer positive infinity (ROUND(-2.5) is -2)
             "ROUND" => {
                 if args.is_empty() {
                     return None;
                 }
                 match self.eval_expr(&args[0], chunk, row)? {
                     Value::Int64(v) => Some(Value::Int64(v)),
-                    Value::Float64(v) => Some(Value::Float64(v.round())),
+                    Value::Float64(v) => Some(Value::Float64(round_half_up(v))),
+                    Value::Decimal(v) => Some(Value::Decimal(
+                        v.checked_add(&Decimal::new(5, 1).ok()?)
+                            .map_or_else(|_| v.round(), |half_up| half_up.floor()),
+                    )),
                     _ => None,
                 }
             }
@@ -4295,20 +4311,10 @@ impl RdfExpressionPredicate {
 
             // LANG - language tag of a literal
             "LANG" => {
-                // Look up the companion language-tag column for the variable.
-                // The triple scan emits a hidden __lang_<var> column alongside
-                // each object variable.
-                if let Some(FilterExpression::Variable(var_name)) = args.first() {
-                    let lang_col_name = format!("__lang_{var_name}");
-                    if let Some(&col_idx) = self.variable_columns.get(&lang_col_name)
-                        && let Some(col) = chunk.column(col_idx)
-                        && let Some(Value::String(tag)) = col.get_value(row)
-                    {
-                        return Some(Value::String(tag));
-                    }
-                }
-                // No language tag found: return empty string per SPARQL spec
-                Some(Value::String(String::new().into()))
+                // The tag of the literal the argument evaluates to; "" when it
+                // has none (SPARQL 1.1, 17.4.2.7).
+                let tag = self.expression_language(args.first()?, chunk, row);
+                Some(Value::String(tag.into()))
             }
 
             // LANGMATCHES - BCP47 language range matching (Section 17.4.2.9)
@@ -4354,14 +4360,26 @@ impl RdfExpressionPredicate {
                     }
                 }
                 let val = self.eval_expr(args.first()?, chunk, row)?;
+                // A language-tagged literal is an rdf:langString (SPARQL 1.1,
+                // 17.4.2.8).
+                if matches!(val, Value::String(_))
+                    && !self.expression_language(&args[0], chunk, row).is_empty()
+                {
+                    return Some(Value::String(
+                        "http://www.w3.org/1999/02/22-rdf-syntax-ns#langString".into(),
+                    ));
+                }
                 let dt = match &val {
                     Value::String(_) => "http://www.w3.org/2001/XMLSchema#string",
                     Value::Int64(_) => "http://www.w3.org/2001/XMLSchema#integer",
                     Value::Float64(_) => "http://www.w3.org/2001/XMLSchema#double",
+                    Value::Decimal(_) => "http://www.w3.org/2001/XMLSchema#decimal",
                     Value::Bool(_) => "http://www.w3.org/2001/XMLSchema#boolean",
                     Value::Date(_) => "http://www.w3.org/2001/XMLSchema#date",
                     Value::Time(_) => "http://www.w3.org/2001/XMLSchema#time",
-                    Value::Timestamp(_) => "http://www.w3.org/2001/XMLSchema#dateTime",
+                    Value::Timestamp(_) | Value::ZonedDatetime(_) => {
+                        "http://www.w3.org/2001/XMLSchema#dateTime"
+                    }
                     Value::Duration(_) => "http://www.w3.org/2001/XMLSchema#duration",
                     _ => return None,
                 };
@@ -4408,9 +4426,11 @@ impl RdfExpressionPredicate {
                         lex_str.parse::<i64>().ok().map(Value::Int64)
                     }
                     "http://www.w3.org/2001/XMLSchema#double"
-                    | "http://www.w3.org/2001/XMLSchema#float"
-                    | "http://www.w3.org/2001/XMLSchema#decimal" => {
+                    | "http://www.w3.org/2001/XMLSchema#float" => {
                         lex_str.parse::<f64>().ok().map(Value::Float64)
+                    }
+                    "http://www.w3.org/2001/XMLSchema#decimal" => {
+                        Decimal::parse(&lex_str).ok().map(Value::Decimal)
                     }
                     "http://www.w3.org/2001/XMLSchema#boolean" => match lex_str.as_str() {
                         "true" | "1" => Some(Value::Bool(true)),
@@ -4435,8 +4455,8 @@ impl RdfExpressionPredicate {
                 use std::sync::atomic::{AtomicU64, Ordering};
                 static UUID_COUNTER: AtomicU64 = AtomicU64::new(0);
                 let id = UUID_COUNTER.fetch_add(1, Ordering::Relaxed);
-                let ts = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
+                let ts = grafeo_common::clock::SystemTime::now()
+                    .duration_since(grafeo_common::clock::UNIX_EPOCH)
                     .map_or(0, |d| d.as_nanos());
                 Some(Value::String(format!("urn:uuid:{ts:032x}-{id:04x}").into()))
             }
@@ -4446,8 +4466,8 @@ impl RdfExpressionPredicate {
                 use std::sync::atomic::{AtomicU64, Ordering};
                 static STRUUID_COUNTER: AtomicU64 = AtomicU64::new(0);
                 let id = STRUUID_COUNTER.fetch_add(1, Ordering::Relaxed);
-                let ts = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
+                let ts = grafeo_common::clock::SystemTime::now()
+                    .duration_since(grafeo_common::clock::UNIX_EPOCH)
                     .map_or(0, |d| d.as_nanos());
                 Some(Value::String(format!("{ts:032x}-{id:04x}").into()))
             }
@@ -4477,8 +4497,8 @@ impl RdfExpressionPredicate {
                 state.hash(&mut hasher);
                 // reason: truncation is intentional for hash seed entropy
                 #[allow(clippy::cast_possible_truncation)]
-                std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
+                grafeo_common::clock::SystemTime::now()
+                    .duration_since(grafeo_common::clock::UNIX_EPOCH)
                     .map_or(0u64, |d| d.as_nanos() as u64)
                     .hash(&mut hasher);
                 let bits = hasher.finish();
@@ -4486,10 +4506,120 @@ impl RdfExpressionPredicate {
                 Some(Value::Float64(value))
             }
 
+            // XPath constructor functions (SPARQL 1.1, 17.5): `xsd:decimal(x)`
+            // and the others, called by their IRI.
+            iri if iri.starts_with("HTTP://WWW.W3.ORG/2001/XMLSCHEMA#") => {
+                let value = self.eval_expr(args.first()?, chunk, row)?;
+                xsd_cast(&iri["HTTP://WWW.W3.ORG/2001/XMLSCHEMA#".len()..], &value)
+            }
+
             // Unknown function
             _ => None,
         }
     }
+}
+
+/// The XPath cast of `value` to the XSD type `name` (in capitals): `DECIMAL`,
+/// `DOUBLE`, `FLOAT`, `INTEGER` (and `INT`, `LONG`), `STRING`, `BOOLEAN`,
+/// `DATE`, `TIME` or `DATETIME`.
+/// A number casts to a number (a double by its shortest text to a decimal, a
+/// decimal or a double to an integer by truncation); a string casts as the
+/// lexical form of the type. `None` for another type, a value that does not
+/// cast, NaN or an infinity to a decimal or an integer.
+#[allow(
+    clippy::cast_precision_loss,
+    clippy::cast_possible_truncation,
+    reason = "XPath casts an integer to the nearest double, and a double to an integer by \
+              truncation after the range check"
+)]
+fn xsd_cast(name: &str, value: &Value) -> Option<Value> {
+    match name {
+        "DECIMAL" => match value {
+            Value::Decimal(d) => Some(Value::Decimal(*d)),
+            Value::Int64(i) => Some(Value::Decimal(Decimal::from_i64(*i))),
+            Value::Float64(f) => Decimal::from_f64(*f).ok().map(Value::Decimal),
+            Value::Bool(b) => Some(Value::Decimal(Decimal::from_i64(i64::from(*b)))),
+            Value::String(s) => Decimal::parse(s.trim()).ok().map(Value::Decimal),
+            _ => None,
+        },
+        "DOUBLE" | "FLOAT" => match value {
+            Value::Float64(f) => Some(Value::Float64(*f)),
+            Value::Int64(i) => Some(Value::Float64(*i as f64)),
+            Value::Decimal(d) => Some(Value::Float64(d.to_f64())),
+            Value::Bool(b) => Some(Value::Float64(f64::from(u8::from(*b)))),
+            Value::String(s) => s.trim().parse::<f64>().ok().map(Value::Float64),
+            _ => None,
+        },
+        "INTEGER" | "INT" | "LONG" => match value {
+            Value::Int64(i) => Some(Value::Int64(*i)),
+            Value::Decimal(d) => d.trunc_to_i64().map(Value::Int64),
+            Value::Float64(f) if f.is_finite() && f.abs() < 9.223_372_036_854_775e18 => {
+                Some(Value::Int64(f.trunc() as i64))
+            }
+            Value::Bool(b) => Some(Value::Int64(i64::from(*b))),
+            Value::String(s) => s.trim().parse::<i64>().ok().map(Value::Int64),
+            _ => None,
+        },
+        "STRING" => Some(Value::String(value_to_string(value).into())),
+        "BOOLEAN" => match value {
+            Value::Bool(b) => Some(Value::Bool(*b)),
+            Value::Int64(i) => Some(Value::Bool(*i != 0)),
+            Value::Decimal(d) => Some(Value::Bool(d.signum() != 0)),
+            Value::Float64(f) => Some(Value::Bool(*f != 0.0 && !f.is_nan())),
+            Value::String(s) => match s.trim() {
+                "true" | "1" => Some(Value::Bool(true)),
+                "false" | "0" => Some(Value::Bool(false)),
+                _ => None,
+            },
+            _ => None,
+        },
+        // A date from its text or from a dateTime (its local date).
+        "DATE" => match value {
+            Value::Date(d) => Some(Value::Date(*d)),
+            Value::String(s) => grafeo_common::types::Date::parse(s.trim()).map(Value::Date),
+            Value::Timestamp(_) | Value::ZonedDatetime(_) => {
+                parse_datetime_date(&value_to_string(value)).map(Value::Date)
+            }
+            _ => None,
+        },
+        // A time from its text or from a dateTime (its local time).
+        "TIME" => match value {
+            Value::Time(t) => Some(Value::Time(*t)),
+            Value::String(s) => grafeo_common::types::Time::parse(s.trim()).map(Value::Time),
+            Value::Timestamp(_) | Value::ZonedDatetime(_) => {
+                parse_datetime_time(&value_to_string(value)).map(Value::Time)
+            }
+            _ => None,
+        },
+        // A dateTime from its text (zoned when it has an offset) or from a
+        // date (its midnight).
+        "DATETIME" => match value {
+            Value::Timestamp(_) | Value::ZonedDatetime(_) => Some(value.clone()),
+            Value::String(s) => parse_xsd_datetime(s.trim()),
+            Value::Date(d) => grafeo_common::types::Time::parse("00:00:00").map(|midnight| {
+                Value::Timestamp(grafeo_common::types::Timestamp::from_date_time(
+                    *d, midnight,
+                ))
+            }),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+/// The value of an `xsd:dateTime` lexical form: a zoned datetime when it has
+/// an offset, otherwise a timestamp of its date and time. `None` when it is no
+/// dateTime (a date alone has no `T`).
+fn parse_xsd_datetime(text: &str) -> Option<Value> {
+    if let Some(zoned) = grafeo_common::types::ZonedDatetime::parse(text) {
+        return Some(Value::ZonedDatetime(zoned));
+    }
+    let pos = text.find('T')?;
+    let date = grafeo_common::types::Date::parse(&text[..pos])?;
+    let time = grafeo_common::types::Time::parse(&text[pos + 1..])?;
+    Some(Value::Timestamp(
+        grafeo_common::types::Timestamp::from_date_time(date, time),
+    ))
 }
 
 /// Parses the date component from a dateTime or date string.
@@ -4531,8 +4661,14 @@ fn format_tz_offset(offset_secs: i32) -> String {
 }
 
 impl Predicate for RdfExpressionPredicate {
-    fn evaluate(&self, chunk: &DataChunk, row: usize) -> bool {
-        matches!(self.eval(chunk, row), Some(Value::Bool(true)))
+    /// SPARQL turns an expression error into an unbound value (SPARQL 1.1,
+    /// 17.3), so a filter never fails the query.
+    fn evaluate(
+        &self,
+        chunk: &DataChunk,
+        row: usize,
+    ) -> std::result::Result<bool, grafeo_core::execution::operators::OperatorError> {
+        Ok(matches!(self.eval(chunk, row), Some(Value::Bool(true))))
     }
 }
 
@@ -4608,32 +4744,55 @@ fn pad_union_branch(
     ))
 }
 
+/// The RDF literal a SPARQL statement writes or matches for `value`: a string
+/// as a simple literal; a number, boolean, date, time, datetime or duration as
+/// a literal of its XSD type (a decimal with its scale, `"1.50"^^xsd:decimal`).
+/// `None` for a value with no literal form, such as a list or a map.
+fn value_literal(value: &Value) -> Option<Literal> {
+    Some(match value {
+        Value::String(s) => Literal::simple(s.to_string()),
+        Value::Int64(n) => Literal::integer(*n),
+        Value::Float64(f) => Literal::typed(f.to_string(), Literal::XSD_DOUBLE),
+        Value::Decimal(d) => Literal::typed(d.to_string(), Literal::XSD_DECIMAL),
+        Value::Bool(b) => Literal::typed(b.to_string(), Literal::XSD_BOOLEAN),
+        Value::Date(d) => Literal::typed(d.to_string(), "http://www.w3.org/2001/XMLSchema#date"),
+        Value::Time(t) => Literal::typed(t.to_string(), "http://www.w3.org/2001/XMLSchema#time"),
+        Value::Timestamp(ts) => Literal::typed(ts.to_string(), Literal::XSD_DATETIME),
+        Value::ZonedDatetime(zdt) => Literal::typed(zdt.to_string(), Literal::XSD_DATETIME),
+        Value::Duration(dur) => {
+            Literal::typed(dur.to_string(), "http://www.w3.org/2001/XMLSchema#duration")
+        }
+        _ => return None,
+    })
+}
+
+/// The RDF term of a value bound in a template: a string that looks like an
+/// IRI as that IRI, any other value as its literal (see [`value_literal`]).
+fn value_to_term(value: &Value) -> Option<Term> {
+    match value {
+        Value::String(s)
+            if s.starts_with("http://") || s.starts_with("https://") || s.starts_with("urn:") =>
+        {
+            Some(Term::Iri(s.to_string().into()))
+        }
+        _ => value_literal(value).map(Term::Literal),
+    }
+}
+
 /// Converts an RDF Term to a string for IRI/blank node representation.
 fn term_to_string(term: &Term) -> String {
     match term {
         Term::Iri(iri) => iri.as_str().to_string(),
         Term::BlankNode(bnode) => format!("_:{}", bnode.id()),
         Term::Literal(lit) => lit.value().to_string(),
-        _ => String::new(),
     }
 }
 
-/// Pushes an RDF term value to a column.
-///
-/// For RDF columns (which use String type), we always push as string to avoid
-/// type mismatches. The typed literal's value is preserved as a string, and
-/// numeric comparisons are handled at the filter level.
+/// Pushes the value a query reads for an RDF term to a column (see
+/// [`Term::query_value`]): a numeric literal as its number, anything else as
+/// its text. A column a term goes into is an `Any` column.
 fn push_term_value(col: &mut grafeo_core::execution::ValueVector, term: &Term) {
-    match term {
-        Term::Iri(iri) => col.push_string(iri.as_str().to_string()),
-        Term::BlankNode(bnode) => col.push_string(format!("_:{}", bnode.id())),
-        Term::Literal(lit) => {
-            // Always push as string since RDF columns are String type
-            // Numeric operations are handled by the filter evaluation
-            col.push_string(lit.value().to_string());
-        }
-        _ => col.push_value(Value::Null),
-    }
+    col.push_value(term.query_value());
 }
 
 /// Converts a TripleComponent to an Option<Term> for pattern matching.
@@ -4642,13 +4801,9 @@ fn component_to_term(component: &TripleComponent) -> Option<Term> {
         TripleComponent::Variable(_) => None,
         TripleComponent::BlankNode(label) => Some(Term::blank(label.clone())),
         TripleComponent::Iri(iri) => Some(Term::iri(iri.clone())),
-        TripleComponent::Literal(value) => match value {
-            Value::String(s) => Some(Term::literal(s.clone())),
-            Value::Int64(i) => Some(Term::typed_literal(i.to_string(), Literal::XSD_INTEGER)),
-            Value::Float64(f) => Some(Term::typed_literal(f.to_string(), Literal::XSD_DOUBLE)),
-            Value::Bool(b) => Some(Term::typed_literal(b.to_string(), Literal::XSD_BOOLEAN)),
-            _ => Some(Term::literal(value.to_string())),
-        },
+        TripleComponent::Literal(value) => Some(Term::Literal(
+            value_literal(value).unwrap_or_else(|| Literal::simple(value.to_string())),
+        )),
         TripleComponent::LangLiteral { value, lang } => {
             Some(Term::lang_literal(value.clone(), lang.clone()))
         }
@@ -4713,13 +4868,14 @@ fn uses_lang_or_datatype(op: &LogicalOperator) -> bool {
 /// Checks whether a logical expression references LANG, LANGMATCHES, or DATATYPE.
 fn expr_uses_lang_or_datatype(expr: &LogicalExpression) -> bool {
     match expr {
-        LogicalExpression::FunctionCall { name, args, .. } => {
+        LogicalExpression::SparqlCall { name, args } => {
             let upper = name.to_uppercase();
             if upper == "LANG" || upper == "LANGMATCHES" || upper == "DATATYPE" {
                 return true;
             }
             args.iter().any(expr_uses_lang_or_datatype)
         }
+        LogicalExpression::FunctionCall { args, .. } => args.iter().any(expr_uses_lang_or_datatype),
         LogicalExpression::Binary { left, right, .. } => {
             expr_uses_lang_or_datatype(left) || expr_uses_lang_or_datatype(right)
         }
@@ -4873,12 +5029,101 @@ fn value_to_string(value: &Value) -> String {
     }
 }
 
+/// A SPARQL numeric operand by its XPath type. A string, as a triple scan
+/// gives a literal, reads as the double its text is.
+enum Numeric {
+    Integer(i64),
+    Decimal(Decimal),
+    Double(f64),
+}
+
+fn numeric(value: &Value) -> Option<Numeric> {
+    match value {
+        Value::Int64(i) => Some(Numeric::Integer(*i)),
+        Value::Decimal(d) => Some(Numeric::Decimal(*d)),
+        Value::Float64(f) => Some(Numeric::Double(*f)),
+        Value::String(s) => s.parse::<f64>().ok().map(Numeric::Double),
+        _ => None,
+    }
+}
+
+/// fn:round of a double: the nearest integer, of two equally near ones the
+/// one nearer positive infinity, keeping the sign of a negative value that
+/// rounds to zero. `v - v.floor()` is exact for every finite double.
+fn round_half_up(v: f64) -> f64 {
+    let floor = v.floor();
+    let rounded = if v - floor >= 0.5 { floor + 1.0 } else { floor };
+    if rounded == 0.0 {
+        0.0_f64.copysign(v)
+    } else {
+        rounded
+    }
+}
+
+/// `+`, `-`, `*` and `/` by the XPath numeric promotion of SPARQL 1.1
+/// (`op:numeric-add` and the others): a double makes a double; otherwise a
+/// decimal makes a decimal; two integers give an integer, except a division,
+/// which gives a decimal, and a result past the `i64` range, computed as
+/// decimals. Division by zero and decimal overflow give `None`.
+#[allow(
+    clippy::cast_precision_loss,
+    reason = "an integer meeting a double is promoted to that double, as XPath promotes it"
+)]
+fn numeric_op(left: &Value, op: BinaryFilterOp, right: &Value) -> Option<Value> {
+    let (l, r) = (numeric(left)?, numeric(right)?);
+    let as_double = |n: &Numeric| match n {
+        Numeric::Integer(i) => *i as f64,
+        Numeric::Decimal(d) => d.to_f64(),
+        Numeric::Double(f) => *f,
+    };
+    if matches!(l, Numeric::Double(_)) || matches!(r, Numeric::Double(_)) {
+        let (a, b) = (as_double(&l), as_double(&r));
+        return match op {
+            BinaryFilterOp::Add => Some(Value::Float64(a + b)),
+            BinaryFilterOp::Sub => Some(Value::Float64(a - b)),
+            BinaryFilterOp::Mul => Some(Value::Float64(a * b)),
+            // IEEE 754: a double divided by zero is INF, -INF or NaN.
+            BinaryFilterOp::Div => Some(Value::Float64(a / b)),
+            _ => None,
+        };
+    }
+    if let (Numeric::Integer(a), Numeric::Integer(b)) = (&l, &r) {
+        let integer = match op {
+            BinaryFilterOp::Add => a.checked_add(*b),
+            BinaryFilterOp::Sub => a.checked_sub(*b),
+            BinaryFilterOp::Mul => a.checked_mul(*b),
+            _ => None,
+        };
+        if let Some(integer) = integer {
+            return Some(Value::Int64(integer));
+        }
+    }
+    let as_decimal = |n: &Numeric| match n {
+        Numeric::Integer(i) => Some(Decimal::from_i64(*i)),
+        Numeric::Decimal(d) => Some(*d),
+        Numeric::Double(_) => None,
+    };
+    let (a, b) = (as_decimal(&l)?, as_decimal(&r)?);
+    match op {
+        BinaryFilterOp::Add => a.checked_add(&b),
+        BinaryFilterOp::Sub => a.checked_sub(&b),
+        BinaryFilterOp::Mul => a.checked_mul(&b),
+        BinaryFilterOp::Div => a.checked_div(&b),
+        _ => return None,
+    }
+    .ok()
+    .map(Value::Decimal)
+}
+
 /// Compares two values and returns a boolean result.
 fn compare_values<F>(left: &Value, right: &Value, cmp: F) -> Option<Value>
 where
     F: Fn(std::cmp::Ordering) -> bool,
 {
     let ordering = match (left, right) {
+        (Value::Decimal(_), _) | (_, Value::Decimal(_)) => {
+            grafeo_core::execution::operators::value_utils::compare_with_decimal(left, right)?
+        }
         (Value::Int64(l), Value::Int64(r)) => l.cmp(r),
         (Value::Float64(l), Value::Float64(r)) => l.partial_cmp(r)?,
         (Value::String(l), Value::String(r)) => {
@@ -4889,24 +5134,25 @@ where
                 l.cmp(r)
             }
         }
-        (Value::Int64(l), Value::Float64(r)) => (*l as f64).partial_cmp(r)?,
-        (Value::Float64(l), Value::Int64(r)) => l.partial_cmp(&(*r as f64))?,
+        // An integer and a double compare exactly, as ORDER BY and = do.
+        (Value::Int64(l), Value::Float64(r)) => {
+            grafeo_core::execution::operators::value_utils::partial_cmp_int_float(*l, *r)?
+        }
+        (Value::Float64(l), Value::Int64(r)) => {
+            grafeo_core::execution::operators::value_utils::partial_cmp_int_float(*r, *l)?.reverse()
+        }
         // RDF values are often stored as strings - try numeric conversion
         (Value::String(s), Value::Int64(r)) => {
-            let l_num = s.parse::<f64>().ok()?;
-            l_num.partial_cmp(&(*r as f64))?
+            grafeo_core::execution::operators::value_utils::partial_cmp_text_int(s, *r)?
         }
         (Value::String(s), Value::Float64(r)) => {
-            let l_num = s.parse::<f64>().ok()?;
-            l_num.partial_cmp(r)?
+            grafeo_core::execution::operators::value_utils::partial_cmp_text_float(s, *r)?
         }
         (Value::Int64(l), Value::String(s)) => {
-            let r_num = s.parse::<f64>().ok()?;
-            (*l as f64).partial_cmp(&r_num)?
+            grafeo_core::execution::operators::value_utils::partial_cmp_text_int(s, *l)?.reverse()
         }
         (Value::Float64(l), Value::String(s)) => {
-            let r_num = s.parse::<f64>().ok()?;
-            l.partial_cmp(&r_num)?
+            grafeo_core::execution::operators::value_utils::partial_cmp_text_float(s, *l)?.reverse()
         }
         _ => return None,
     };
@@ -4919,19 +5165,24 @@ where
 /// of the right-hand list.
 fn rdf_values_equal(left: &Value, right: &Value) -> bool {
     match (left, right) {
+        (Value::Decimal(_), _) | (_, Value::Decimal(_)) => {
+            grafeo_core::execution::operators::value_utils::compare_with_decimal(left, right)
+                == Some(std::cmp::Ordering::Equal)
+        }
         (Value::Bool(a), Value::Bool(b)) => a == b,
         (Value::Int64(a), Value::Int64(b)) => a == b,
-        (Value::Float64(a), Value::Float64(b)) => (a - b).abs() < f64::EPSILON,
+        // op:numeric-equal on doubles is IEEE: NaN equals nothing.
+        (Value::Float64(a), Value::Float64(b)) => a == b,
         (Value::String(a), Value::String(b)) => a == b,
         (Value::Int64(a), Value::Float64(b)) | (Value::Float64(b), Value::Int64(a)) => {
-            (*a as f64 - b).abs() < f64::EPSILON
+            grafeo_core::execution::operators::value_utils::int_equals_float(*a, *b)
         }
         // RDF stores numeric literals as strings: allow cross-type equality
         (Value::String(s), Value::Int64(i)) | (Value::Int64(i), Value::String(s)) => {
             s.parse::<i64>().is_ok_and(|n| n == *i)
         }
         (Value::String(s), Value::Float64(f)) | (Value::Float64(f), Value::String(s)) => {
-            s.parse::<f64>().is_ok_and(|n| (n - f).abs() < f64::EPSILON)
+            grafeo_core::execution::operators::value_utils::text_equals_float(s, *f)
         }
         _ => false,
     }
@@ -5179,7 +5430,9 @@ mod tests {
         assert!(execute_update(&store, &plan).is_ok());
     }
 
-    /// Triple scan propagates LogicalType::String for every output column.
+    /// Triple scan propagates LogicalType::String for the subject, predicate
+    /// and companion columns, and Any for the object, where a literal may be a
+    /// number of its XSD type.
     #[test]
     fn test_type_propagation_triple_scan() {
         let store = Arc::new(RdfStore::new());
@@ -5200,19 +5453,19 @@ mod tests {
         });
 
         let (_op, columns, types) = planner.plan_operator(&scan).unwrap();
-        // All RDF columns are String: s, p, o, plus __lang_o companion
+        // s, p and the __lang_o companion are String, o is Any
         assert_eq!(columns.len(), types.len());
         for (i, ty) in types.iter().enumerate() {
-            assert_eq!(
-                *ty,
-                LogicalType::String,
-                "column {i} ({}) should be String",
-                columns[i]
-            );
+            let expected = if columns[i] == "o" {
+                LogicalType::Any
+            } else {
+                LogicalType::String
+            };
+            assert_eq!(*ty, expected, "column {i} ({})", columns[i]);
         }
     }
 
-    /// Join of two triple scans propagates String types through to output.
+    /// Join of two triple scans propagates the types of both sides.
     #[test]
     fn test_type_propagation_join() {
         use crate::query::plan::JoinOp;
@@ -5257,14 +5510,14 @@ mod tests {
 
         let (_op, columns, types) = planner.plan_operator(&join).unwrap();
         assert_eq!(columns.len(), types.len());
-        // All output columns should be String (join preserves types from both sides)
+        // The objects (name, age) are Any, every other column String
         for (i, ty) in types.iter().enumerate() {
-            assert_eq!(
-                *ty,
-                LogicalType::String,
-                "join column {i} ({}) should be String",
-                columns[i]
-            );
+            let expected = if columns[i] == "name" || columns[i] == "age" {
+                LogicalType::Any
+            } else {
+                LogicalType::String
+            };
+            assert_eq!(*ty, expected, "join column {i} ({})", columns[i]);
         }
     }
 
@@ -5296,16 +5549,25 @@ mod tests {
         });
 
         let (_op, columns, types) = planner.plan_operator(&bind).unwrap();
-        assert_eq!(columns.last(), Some(&"label".to_string()));
-        // Input columns are String, BIND column is Any
-        let last_idx = types.len() - 1;
+        // The BIND variable, then its hidden language-tag companion
+        let n = columns.len();
+        assert_eq!(columns[n - 2], "label");
+        assert_eq!(columns[n - 1], "__lang_label");
+        // The input columns keep their types (the object, name, is Any), and
+        // the BIND column is Any
+        let last_idx = n - 2;
         assert_eq!(
             types[last_idx],
             LogicalType::Any,
             "BIND column should be Any"
         );
-        for ty in &types[..last_idx] {
-            assert_eq!(*ty, LogicalType::String, "input columns should be String");
+        for (column, ty) in columns.iter().zip(&types).take(last_idx) {
+            let expected = if column == "name" {
+                LogicalType::Any
+            } else {
+                LogicalType::String
+            };
+            assert_eq!(*ty, expected, "input column {column}");
         }
     }
 
@@ -6208,12 +6470,11 @@ mod tests {
         let bind = LogicalOperator::Bind(BindOp {
             input: Box::new(scan),
             variable: "upper".to_string(),
-            expression: crate::query::plan::LogicalExpression::FunctionCall {
+            expression: crate::query::plan::LogicalExpression::SparqlCall {
                 name: "UCASE".to_string(),
                 args: vec![crate::query::plan::LogicalExpression::Variable(
                     "name".to_string(),
                 )],
-                distinct: false,
             },
         });
         let physical = planner.plan(&LogicalPlan::new(bind)).unwrap();
@@ -6811,5 +7072,53 @@ mod tests {
         ));
         let any = op.into_any();
         assert!(any.downcast::<RdfTripleScanOperator>().is_ok());
+    }
+
+    /// fn:round takes a half towards positive infinity, keeps the sign of a
+    /// negative value that rounds to zero, and passes infinities and NaN on.
+    #[test]
+    fn round_half_up_follows_fn_round() {
+        assert_eq!(round_half_up(2.5), 3.0);
+        assert_eq!(round_half_up(-2.5), -2.0);
+        assert_eq!(round_half_up(-2.6), -3.0);
+        assert_eq!(round_half_up(0.49999999999999994), 0.0);
+        assert!(round_half_up(-0.4).is_sign_negative());
+        assert_eq!(round_half_up(-0.4), 0.0);
+        assert_eq!(round_half_up(-0.5), 0.0);
+        assert!(round_half_up(-0.5).is_sign_negative());
+        assert_eq!(round_half_up(f64::INFINITY), f64::INFINITY);
+        assert_eq!(round_half_up(f64::NEG_INFINITY), f64::NEG_INFINITY);
+        assert!(round_half_up(f64::NAN).is_nan());
+        assert_eq!(
+            round_half_up(4_503_599_627_370_495.5),
+            4_503_599_627_370_496.0
+        );
+    }
+
+    /// A double divided by zero follows IEEE 754; integer and decimal
+    /// division by zero leave the result unbound.
+    #[test]
+    fn numeric_division_by_zero() {
+        let divide = |left: Value, right: Value| numeric_op(&left, BinaryFilterOp::Div, &right);
+        assert_eq!(
+            divide(Value::Float64(1.0), Value::Int64(0)),
+            Some(Value::Float64(f64::INFINITY))
+        );
+        assert_eq!(
+            divide(Value::Float64(-1.0), Value::Int64(0)),
+            Some(Value::Float64(f64::NEG_INFINITY))
+        );
+        assert!(matches!(
+            divide(Value::Float64(0.0), Value::Float64(0.0)),
+            Some(Value::Float64(v)) if v.is_nan()
+        ));
+        assert_eq!(divide(Value::Int64(1), Value::Int64(0)), None);
+        assert_eq!(
+            divide(
+                Value::Decimal(Decimal::new(15, 1).unwrap()),
+                Value::Int64(0)
+            ),
+            None
+        );
     }
 }

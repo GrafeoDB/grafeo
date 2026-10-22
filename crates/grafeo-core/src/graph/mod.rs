@@ -23,25 +23,29 @@
 //! 0.5.x database file, so that opening the file folds it into the LPG store.
 
 pub mod apply;
-/// The conformance suite of the stores behind the change set.
-#[cfg(all(test, feature = "lpg"))]
-mod conformance;
+/// The conformance suite of the store contract (the `conformance`
+/// feature): the cases a store of one's own passes.
+#[cfg(any(test, feature = "conformance"))]
+pub mod conformance;
+// Rows loaded under their ids: the readers of earlier formats and the
+// copies of graph data write into either store through it.
+pub mod load;
 pub mod lpg;
 pub mod projection;
-/// The row-group store (workstream H): not used by the engine until H2d.
-#[cfg(feature = "lpg")]
-#[doc(hidden)]
+pub mod property_filter;
+/// The row-group store (workstream H), the store the engine holds its
+/// graphs in.
 pub mod rowgroup;
 pub mod traits;
 
-#[cfg(feature = "lpg")]
 pub mod compact;
 
 #[cfg(feature = "triple-store")]
 pub mod rdf;
 
+pub use apply::{BackendTransaction, GraphBackend};
 pub use projection::{GraphProjection, ProjectionSpec};
-pub use traits::{GraphStore, GraphStoreMut, GraphStoreSearch, NullGraphStore};
+pub use traits::{GraphStore, Labels, NullGraphStore, list_self_loops_once};
 
 /// Controls which edges to follow during traversal.
 ///

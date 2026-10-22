@@ -77,7 +77,7 @@ Per the standard, minimum conformance requires:
 
 | Feature | Status | Notes |
 |---------|--------|-------|
-| USE GRAPH | Supported | |
+| USE GRAPH | Supported | `USE GRAPH g` alone selects the session's graph; `USE g <statement>` focuses one statement on g (GQ01) |
 | SESSION SET GRAPH | Supported | |
 | SESSION SET TIME ZONE | Supported | |
 | SESSION SET PARAMETER | Supported | |
@@ -441,7 +441,7 @@ refuses `=~` and LIKE with an error that says so.
 
 | ID | Feature | Status |
 |----|---------|--------|
-| GQ01 | USE graph clause | Supported |
+| GQ01 | USE graph clause | Partial: `USE g <statement>` runs the whole statement on g; parts of one statement that use different graphs are not supported yet |
 | GQ02 | OTHERWISE | Supported |
 | GQ03 | UNION | Supported |
 | GQ04 | EXCEPT DISTINCT | Supported |
@@ -486,7 +486,7 @@ refuses `=~` and LIKE with an error that says so.
 | GV14 | 128-bit signed integer numbers | **Not yet** |
 | GV15 | 256-bit unsigned integer numbers | **Not yet** |
 | GV16 | 256-bit signed integer numbers | **Not yet** |
-| GV17 | Decimal numbers | **Not yet** |
+| GV17 | Decimal numbers | Supported |
 | GV18 | Small signed integer numbers | **Not yet** |
 | GV19 | Big signed integer numbers | **Not yet** |
 | GV20 | 16-bit floating point numbers | **Not yet** |
@@ -533,13 +533,13 @@ refuses `=~` and LIKE with an error that says so.
 | GL01 | Hexadecimal literals | **Supported** |
 | GL02 | Octal literals | **Supported** |
 | GL03 | Binary literals | **Supported** |
-| GL04 | Exact number in common notation without suffix | **Not yet** |
-| GL05 | Exact number in common notation or as decimal integer with suffix | **Not yet** |
+| GL04 | Exact number in common notation without suffix | Supported |
+| GL05 | Exact number in common notation or as decimal integer with suffix | Supported |
 | GL06 | Exact number in scientific notation with suffix | **Not yet** |
-| GL07 | Approximate number in common notation or as decimal integer with suffix | **Not yet** |
-| GL08 | Approximate number in scientific notation with suffix | **Not yet** |
-| GL09 | Optional float number suffix | **Not yet** |
-| GL10 | Optional double number suffix | **Not yet** |
+| GL07 | Approximate number in common notation or as decimal integer with suffix | Supported |
+| GL08 | Approximate number in scientific notation with suffix | Supported |
+| GL09 | Optional float number suffix | Supported |
+| GL10 | Optional double number suffix | Supported |
 | GL11 | Opt-out character escaping | **Not yet** |
 | GL12 | SQL datetime and interval formats | **Not yet** |
 

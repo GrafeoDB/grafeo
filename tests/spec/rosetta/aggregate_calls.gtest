@@ -1,0 +1,213 @@
+# Aggregate calls in GQL and Cypher: an aggregate takes its number of
+# arguments, a COUNT subquery inside an aggregate or as a grouping key runs per
+# row, and without GROUP BY an item with an aggregate reads only the grouping
+# keys (the items without one), aggregates, constants and a CALL body's
+# imports (openCypher's AmbiguousAggregationExpression otherwise).
+
+meta:
+  language: gql
+  model: lpg
+  title: Aggregate calls and implicit grouping
+  dataset: empty
+  requires: [cypher]
+
+tests:
+
+  # ---------------------------------------------------------------------------
+  # Number of arguments
+  # ---------------------------------------------------------------------------
+
+  - name: count_with_two_arguments_is_refused
+    setup:
+      - "INSERT (:P {v: 3}), (:P {v: 19})"
+    variants:
+      gql: "MATCH (p:P) RETURN count(p.v, p.v) AS c"
+      cypher: "MATCH (p:P) RETURN count(p.v, p.v) AS c"
+    expect:
+      error: "Function 'count' takes 0 or 1 arguments, got 2"
+
+  - name: sum_without_an_argument_is_refused
+    setup:
+      - "INSERT (:P {v: 3})"
+    variants:
+      gql: "MATCH (p:P) RETURN sum() AS s"
+      cypher: "MATCH (p:P) RETURN sum() AS s"
+    expect:
+      error: "Function 'sum' takes 1 argument, got 0"
+
+  - name: collect_with_two_arguments_is_refused
+    setup:
+      - "INSERT (:P {v: 3})"
+    variants:
+      gql: "MATCH (p:P) RETURN collect(p.v, p.v) AS l"
+      cypher: "MATCH (p:P) RETURN collect(p.v, p.v) AS l"
+    expect:
+      error: "Function 'collect' takes 1 argument, got 2"
+
+  - name: the_accepted_forms_still_count
+    setup:
+      - "INSERT (:P {v: 3}), (:P {v: 19}), (:P)"
+    variants:
+      gql: "MATCH (p:P) RETURN count(*) AS rows, count(p.v) AS with_v, sum(p.v) AS total"
+      cypher: "MATCH (p:P) RETURN count(*) AS rows, count(p.v) AS with_v, sum(p.v) AS total"
+    expect:
+      rows:
+        - [3, 2, 22]
+
+  # ---------------------------------------------------------------------------
+  # COUNT subqueries inside an aggregate and as a key
+  # ---------------------------------------------------------------------------
+
+  - name: a_count_subquery_inside_sum_runs_per_row
+    # Rows 1 and 2 look for k 300 and 299; only 300 exists.
+    setup:
+      - "INSERT (:T {k: 300})"
+    variants:
+      gql: "UNWIND [1, 2] AS i RETURN sum(COUNT { MATCH (t:T) WHERE t.k = 301 - i }) AS s"
+      cypher: "UNWIND [1, 2] AS i RETURN sum(COUNT { MATCH (t:T) WHERE t.k = 301 - i }) AS s"
+    expect:
+      rows:
+        - [1]
+
+  - name: a_count_subquery_as_a_grouping_key
+    setup:
+      - "INSERT (:T {k: 300})"
+    variants:
+      gql: "UNWIND [1, 2, 3] AS i RETURN COUNT { MATCH (t:T) WHERE t.k = 301 - i } AS found, count(*) AS c ORDER BY found"
+      cypher: "UNWIND [1, 2, 3] AS i RETURN COUNT { MATCH (t:T) WHERE t.k = 301 - i } AS found, count(*) AS c ORDER BY found"
+    expect:
+      ordered: true
+      rows:
+        - [0, 2]
+        - [1, 1]
+
+  - name: a_count_subquery_with_no_input_rows_sums_to_null_in_gql
+    # ISO GQL, as SQL: the sum of no values is null.
+    query: "UNWIND [] AS i RETURN sum(COUNT { MATCH (t:T) WHERE t.k = i }) AS s"
+    expect:
+      rows:
+        - [null]
+
+  - name: a_count_subquery_with_no_input_rows_sums_to_zero_in_cypher
+    skip: "openCypher sums no values to 0 (Neo4j: sum(null) is 0); Grafeo's Cypher returns null"
+    variants:
+      cypher: "UNWIND [] AS i RETURN sum(COUNT { MATCH (t:T) WHERE t.k = i }) AS s"
+    expect:
+      rows:
+        - [0]
+
+  # ---------------------------------------------------------------------------
+  # Implicit grouping
+  # ---------------------------------------------------------------------------
+
+  - name: an_item_reading_a_non_key_beside_an_aggregate_is_refused
+    setup:
+      - "INSERT (:P {g: 'f', b: 2}), (:P {g: 'f', b: 5})"
+    variants:
+      gql: "MATCH (p:P) RETURN p.g AS g, count(*) + p.b AS n"
+      cypher: "MATCH (p:P) RETURN p.g AS g, count(*) + p.b AS n"
+    expect:
+      error: "RETURN item n reads p beside an aggregate, but p is not a grouping key"
+
+  - name: without_any_key_the_item_is_refused_too
+    setup:
+      - "INSERT (:P {b: 2})"
+    variants:
+      gql: "MATCH (p:P) RETURN count(*) + p.b AS n"
+      cypher: "MATCH (p:P) RETURN count(*) + p.b AS n"
+    expect:
+      error: "(it has none)"
+
+  - name: an_aggregating_with_refuses_it_as_well
+    setup:
+      - "INSERT (:P {g: 'f', b: 2})"
+    variants:
+      gql: "MATCH (p:P) WITH p.g AS g, sum(p.b) * p.b AS n RETURN g, n"
+      cypher: "MATCH (p:P) WITH p.g AS g, sum(p.b) * p.b AS n RETURN g, n"
+    expect:
+      error: "WITH item n reads p"
+
+  - name: a_key_beside_an_aggregate_reads_the_key
+    setup:
+      - "INSERT (:P {b: 2}), (:P {b: 2}), (:P {b: 5})"
+    variants:
+      gql: "MATCH (p:P) RETURN p.b AS b, count(*) * 10 + p.b AS n ORDER BY b"
+      cypher: "MATCH (p:P) RETURN p.b AS b, count(*) * 10 + p.b AS n ORDER BY b"
+    expect:
+      ordered: true
+      rows:
+        - [2, 22]
+        - [5, 15]
+
+  - name: a_key_inside_a_case_beside_an_aggregate
+    setup:
+      - "INSERT (:P {b: 2}), (:P {b: 2}), (:P {b: 5})"
+    variants:
+      gql: "MATCH (p:P) RETURN p.b AS b, CASE WHEN count(*) > 1 THEN -1 ELSE p.b END AS c ORDER BY b"
+      cypher: "MATCH (p:P) RETURN p.b AS b, CASE WHEN count(*) > 1 THEN -1 ELSE p.b END AS c ORDER BY b"
+    expect:
+      ordered: true
+      rows:
+        - [2, -1]
+        - [5, 5]
+
+  - name: a_property_of_a_node_key
+    setup:
+      - "INSERT (:P {b: 2}), (:P {b: 5})"
+    variants:
+      gql: "MATCH (p:P) WITH p, count(*) * 10 + p.b AS n RETURN n ORDER BY n"
+      cypher: "MATCH (p:P) WITH p, count(*) * 10 + p.b AS n RETURN n ORDER BY n"
+    expect:
+      ordered: true
+      rows:
+        - [12]
+        - [15]
+
+  - name: a_call_import_beside_an_aggregate
+    # The import t has one value per call.
+    setup:
+      - "INSERT (:P {b: 2}), (:P {b: 5}), (:P {b: 7})"
+    variants:
+      gql: "UNWIND [100, 200] AS t CALL (t) { MATCH (p:P) RETURN count(*) + t AS n } RETURN n ORDER BY n"
+      cypher: "UNWIND [100, 200] AS t CALL (t) { MATCH (p:P) RETURN count(*) + t AS n } RETURN n ORDER BY n"
+    expect:
+      ordered: true
+      rows:
+        - [103]
+        - [203]
+
+  # ---------------------------------------------------------------------------
+  # GQL HAVING
+  # ---------------------------------------------------------------------------
+
+  - name: gql_having_right_after_group_by
+    setup:
+      - "INSERT (:P {city: 'Paris'}), (:P {city: 'Paris'}), (:P {city: 'Prague'}), (:P {city: 'Berlin'}), (:P {city: 'Berlin'})"
+    query: "MATCH (p:P) RETURN p.city AS city GROUP BY city HAVING count(*) > 1 ORDER BY city"
+    expect:
+      ordered: true
+      rows:
+        - [Berlin]
+        - [Paris]
+
+  - name: gql_having_after_order_by_as_before
+    setup:
+      - "INSERT (:P {city: 'Paris'}), (:P {city: 'Paris'}), (:P {city: 'Prague'})"
+    query: "MATCH (p:P) RETURN p.city AS city GROUP BY city ORDER BY city HAVING count(*) > 1"
+    expect:
+      rows:
+        - [Paris]
+
+  - name: gql_two_having_clauses_are_refused
+    setup:
+      - "INSERT (:P {city: 'Paris'})"
+    query: "MATCH (p:P) RETURN p.city AS city GROUP BY city HAVING count(*) > 1 ORDER BY city HAVING count(*) > 0"
+    expect:
+      error: "one HAVING"
+
+  - name: gql_having_a_group_by_count_of_zero_keeps_nothing
+    setup:
+      - "INSERT (:P {city: 'Paris'})"
+    query: "MATCH (p:P) RETURN p.city AS city GROUP BY city HAVING count(*) > 5"
+    expect:
+      empty: true

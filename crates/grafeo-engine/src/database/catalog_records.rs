@@ -69,6 +69,7 @@ pub(crate) fn property_type_record(data_type: &PropertyDataType) -> PropertyType
             PropertyDataType::Node => break PropertyTypeRecord::Node,
             PropertyDataType::Edge => break PropertyTypeRecord::Edge,
             PropertyDataType::Any => break PropertyTypeRecord::Any,
+            PropertyDataType::Decimal(decimal) => break PropertyTypeRecord::Decimal(*decimal),
         };
     };
     (0..levels).fold(element, |inner, _| {
@@ -108,6 +109,7 @@ pub(crate) fn property_data_type(record: &PropertyTypeRecord) -> PropertyDataTyp
             PropertyTypeRecord::Node => break PropertyDataType::Node,
             PropertyTypeRecord::Edge => break PropertyDataType::Edge,
             PropertyTypeRecord::Any => break PropertyDataType::Any,
+            PropertyTypeRecord::Decimal(decimal) => break PropertyDataType::Decimal(*decimal),
         };
     };
     (0..levels).fold(element, |inner, _| {
@@ -718,6 +720,7 @@ pub(crate) fn graph_indexes(records: Vec<IndexRecord>) -> Result<Vec<GraphIndexe
 #[must_use]
 pub(crate) fn record_name(record: &CatalogRecord) -> String {
     match record {
+        CatalogRecord::StoredConfig(_) => "the stored configuration".to_string(),
         CatalogRecord::Schema(record) => format!("schema '{}'", record.name),
         CatalogRecord::NodeType(record) => format!("node type '{}'", record.name),
         CatalogRecord::EdgeType(record) => format!("edge type '{}'", record.name),

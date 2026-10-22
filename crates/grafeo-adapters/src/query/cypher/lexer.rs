@@ -260,6 +260,10 @@ impl<'a> Lexer<'a> {
                 if self.current_char() == '.' {
                     self.advance();
                     TokenKind::DotDot
+                } else if self.current_char().is_ascii_digit() {
+                    // `.5`: openCypher's RegularDecimalReal needs no digit
+                    // before the point.
+                    self.scan_fraction()
                 } else {
                     TokenKind::Dot
                 }
@@ -444,20 +448,7 @@ impl<'a> Lexer<'a> {
         // Check for decimal point
         if self.current_char() == '.' && self.peek_char().is_ascii_digit() {
             self.advance(); // .
-            while self.current_char().is_ascii_digit() {
-                self.advance();
-            }
-            // Check for exponent
-            if self.current_char() == 'e' || self.current_char() == 'E' {
-                self.advance();
-                if self.current_char() == '+' || self.current_char() == '-' {
-                    self.advance();
-                }
-                while self.current_char().is_ascii_digit() {
-                    self.advance();
-                }
-            }
-            return TokenKind::Float;
+            return self.scan_fraction();
         }
 
         // Check for exponent without decimal
@@ -473,6 +464,24 @@ impl<'a> Lexer<'a> {
         }
 
         TokenKind::Integer
+    }
+
+    /// The digits after a float's point, which was consumed, and its
+    /// optional exponent.
+    fn scan_fraction(&mut self) -> TokenKind {
+        while self.current_char().is_ascii_digit() {
+            self.advance();
+        }
+        if self.current_char() == 'e' || self.current_char() == 'E' {
+            self.advance();
+            if self.current_char() == '+' || self.current_char() == '-' {
+                self.advance();
+            }
+            while self.current_char().is_ascii_digit() {
+                self.advance();
+            }
+        }
+        TokenKind::Float
     }
 
     fn scan_identifier(&mut self) -> TokenKind {
@@ -660,6 +669,85 @@ mod tests {
         assert_eq!(lexer.next_token().kind, TokenKind::Dot);
         assert_eq!(lexer.next_token().kind, TokenKind::DotDot);
         assert_eq!(lexer.next_token().kind, TokenKind::Dot);
+    }
+
+    fn kinds_and_texts(text: &str) -> Vec<(TokenKind, String)> {
+        let mut lexer = Lexer::new(text);
+        let mut tokens = Vec::new();
+        loop {
+            let token = lexer.next_token();
+            if token.kind == TokenKind::Eof {
+                return tokens;
+            }
+            tokens.push((token.kind, token.text));
+        }
+    }
+
+    /// openCypher writes a float with no digit before its point (`.5`, with
+    /// an exponent too); a point with no digit after it ends the number, as
+    /// in openCypher, where `5.` is no literal.
+    #[test]
+    fn test_a_float_without_a_leading_digit() {
+        for text in [".5", ".25e3", ".5E-2"] {
+            assert_eq!(
+                kinds_and_texts(text),
+                [(TokenKind::Float, text.to_string())],
+                "{text}"
+            );
+        }
+        let token = |kind, text: &str| (kind, text.to_string());
+        assert_eq!(
+            kinds_and_texts("5."),
+            [token(TokenKind::Integer, "5"), token(TokenKind::Dot, ".")]
+        );
+        // Ranges, properties, slices and sums lex as before.
+        assert_eq!(
+            kinds_and_texts("*1..5"),
+            [
+                token(TokenKind::Star, "*"),
+                token(TokenKind::Integer, "1"),
+                token(TokenKind::DotDot, ".."),
+                token(TokenKind::Integer, "5"),
+            ]
+        );
+        assert_eq!(
+            kinds_and_texts("[..5]"),
+            [
+                token(TokenKind::LBracket, "["),
+                token(TokenKind::DotDot, ".."),
+                token(TokenKind::Integer, "5"),
+                token(TokenKind::RBracket, "]"),
+            ]
+        );
+        assert_eq!(
+            kinds_and_texts("n.name"),
+            [
+                token(TokenKind::Identifier, "n"),
+                token(TokenKind::Dot, "."),
+                token(TokenKind::Identifier, "name"),
+            ]
+        );
+        assert_eq!(
+            kinds_and_texts("x+1"),
+            [
+                token(TokenKind::Identifier, "x"),
+                token(TokenKind::Plus, "+"),
+                token(TokenKind::Integer, "1"),
+            ]
+        );
+    }
+
+    /// openCypher has no digit separators: `1_000` is the number 1 and then
+    /// a name.
+    #[test]
+    fn test_no_digit_separators() {
+        assert_eq!(
+            kinds_and_texts("1_000"),
+            [
+                (TokenKind::Integer, "1".to_string()),
+                (TokenKind::Identifier, "_000".to_string()),
+            ]
+        );
     }
 
     #[test]

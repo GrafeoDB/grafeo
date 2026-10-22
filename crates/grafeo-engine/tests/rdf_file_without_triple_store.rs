@@ -24,7 +24,7 @@
 //! cargo test -p grafeo-engine --all-features --test rdf_file_without_triple_store
 //! ```
 
-#![cfg(all(feature = "lpg", feature = "gql", feature = "grafeo-file", not(miri)))]
+#![cfg(all(feature = "gql", feature = "grafeo-file", not(miri)))]
 
 #[cfg(not(feature = "triple-store"))]
 #[path = "common/legacy_file.rs"]

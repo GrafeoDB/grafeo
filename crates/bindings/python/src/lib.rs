@@ -44,11 +44,13 @@ mod bridges;
 mod database;
 mod direct;
 mod error;
+mod gil;
 mod graph;
 mod graph_handle;
 mod quantization;
 mod query;
 mod stream;
+mod time_travel;
 mod types;
 
 #[cfg(feature = "algos")]
@@ -78,7 +80,7 @@ fn simd_support() -> &'static str {
 /// Names are the Cargo feature names: the query languages (`gql`, `cypher`,
 /// `sparql`, `gremlin`, `graphql`, `sql-pgq`) and the optional capabilities
 /// (`algos`, `vector-index`, `text-index`, `hybrid-search`, `cdc`,
-/// `triple-store`, `shacl`, `temporal`, `embed`, `arrow-export`,
+/// `triple-store`, `shacl`, `embed`, `arrow-export`,
 /// `jsonl-import`, `parquet-import`, `metrics`). Groups and profiles such as
 /// `full` or `ai` are not listed, only the features they enable. Persistence
 /// (WAL and `.grafeo` files) is part of every build, and so is reading a
@@ -104,7 +106,6 @@ fn features() -> Vec<&'static str> {
         ("cdc", cfg!(feature = "cdc")),
         ("triple-store", cfg!(feature = "triple-store")),
         ("shacl", cfg!(feature = "shacl")),
-        ("temporal", cfg!(feature = "temporal")),
         ("embed", cfg!(feature = "embed")),
         ("arrow-export", cfg!(feature = "arrow-export")),
         ("jsonl-import", cfg!(feature = "jsonl-import")),
@@ -174,6 +175,7 @@ fn grafeo(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyEdge>()?;
     m.add_class::<PyQueryResult>()?;
     m.add_class::<PyResultStream>()?;
+    m.add_class::<time_travel::PyAsOfView>()?;
     m.add_class::<AsyncQueryResult>()?;
     m.add_class::<AsyncQueryResultIter>()?;
     m.add_class::<PyValue>()?;

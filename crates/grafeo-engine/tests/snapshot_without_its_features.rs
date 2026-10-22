@@ -24,7 +24,7 @@
 //! cargo test -p grafeo-engine --all-features --test snapshot_without_its_features
 //! ```
 
-#![cfg(all(feature = "lpg", feature = "gql", not(miri)))]
+#![cfg(all(feature = "gql", not(miri)))]
 
 use std::path::Path;
 
@@ -159,7 +159,8 @@ fn assert_documents(db: &GrafeoDB) {
         "the nearest document"
     );
     let config = db
-        .graph_store()
+        .snapshot()
+        .unwrap()
         .vector_index_config("Document", "embedding")
         .expect("the vector index of the documents");
     assert_eq!(

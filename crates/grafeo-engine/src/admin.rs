@@ -5,6 +5,12 @@
 //!
 //! The result structs are read, not built: later releases may add fields, so
 //! they are `#[non_exhaustive]` and a pattern names their fields with `..`.
+//!
+//! # Stability
+//!
+//! The `grafeo` crate re-exports this module. Its items are stable unless
+//! their documentation has a `# Stability: Experimental` section: see
+//! <https://grafeo.dev/stability/>.
 
 use std::path::PathBuf;
 
@@ -179,6 +185,74 @@ pub struct WalStatus {
     pub current_epoch: u64,
 }
 
+/// When a database checkpoints by itself (see
+/// [`GrafeoDB::set_checkpoint_triggers`](crate::GrafeoDB::set_checkpoint_triggers)):
+/// when the interval has passed since the last automatic checkpoint, or when
+/// the WAL holds more than the given bytes since the last checkpoint. Both
+/// are off by default, and a checkpoint then runs only when asked
+/// (`wal_checkpoint()`) and at `close()`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
+pub struct CheckpointTriggers {
+    /// Checkpoint when this long has passed since the last automatic one.
+    pub interval: Option<std::time::Duration>,
+    /// Checkpoint once the WAL holds this many bytes since the last
+    /// checkpoint (checked every 100 ms).
+    pub wal_bytes: Option<u64>,
+}
+
+impl CheckpointTriggers {
+    /// No automatic checkpoints.
+    #[must_use]
+    pub fn none() -> Self {
+        Self::default()
+    }
+
+    /// These triggers, also checkpointing when `interval` has passed.
+    #[must_use]
+    pub fn with_interval(mut self, interval: std::time::Duration) -> Self {
+        self.interval = Some(interval);
+        self
+    }
+
+    /// These triggers, also checkpointing once the WAL holds `bytes` since
+    /// the last checkpoint.
+    #[must_use]
+    pub fn with_wal_bytes(mut self, bytes: u64) -> Self {
+        self.wal_bytes = Some(bytes);
+        self
+    }
+
+    /// Whether any trigger is set.
+    #[must_use]
+    pub fn any(&self) -> bool {
+        self.interval.is_some() || self.wal_bytes.is_some()
+    }
+}
+
+/// How the automatic checkpoints of a database fare (see
+/// [`GrafeoDB::checkpoint_status`](crate::GrafeoDB::checkpoint_status)).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
+pub struct CheckpointStatus {
+    /// The triggers in force.
+    pub triggers: CheckpointTriggers,
+    /// When the last checkpoint of any kind finished (Unix epoch seconds),
+    /// `None` before the first.
+    pub last_checkpoint: Option<u64>,
+    /// Automatic checkpoints that failed since the last one that succeeded.
+    /// A failed one is retried after a pause that doubles from one second
+    /// to five minutes; the WAL keeps the commits meanwhile.
+    pub failures: u64,
+    /// The error of the last failed automatic checkpoint.
+    pub last_error: Option<String>,
+    /// When that one failed (Unix epoch seconds).
+    pub last_failure: Option<u64>,
+    /// Whether automatic checkpoints have stopped: after a commit that did
+    /// not complete, none can succeed until the database is reopened.
+    pub stopped: bool,
+}
+
 /// Validation result.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[non_exhaustive]
@@ -289,6 +363,10 @@ pub struct CompactReport {
     /// The old versions dropped, in every graph: versions no open transaction
     /// can see any more.
     pub versions_collected: u64,
+    /// The nodes and edges of the row groups whose property values were
+    /// compressed, in every graph (a report from before 0.6.0 reads as 0).
+    #[serde(default)]
+    pub rows_compressed: u64,
     /// How long `compact()` took, in milliseconds.
     pub duration_ms: u64,
 }
@@ -302,16 +380,32 @@ pub struct CompactReport {
 /// Implemented by [`GrafeoDB`](crate::GrafeoDB).
 pub trait AdminService {
     /// Returns high-level database information (counts, mode, persistence).
-    fn info(&self) -> DatabaseInfo;
+    ///
+    /// # Errors
+    ///
+    /// The error of a read the store cannot do.
+    fn info(&self) -> grafeo_common::utils::error::Result<DatabaseInfo>;
 
     /// Returns detailed database statistics (memory, disk, indexes).
-    fn detailed_stats(&self) -> DatabaseStats;
+    ///
+    /// # Errors
+    ///
+    /// The error of a read the store cannot do.
+    fn detailed_stats(&self) -> grafeo_common::utils::error::Result<DatabaseStats>;
 
     /// Returns schema information (labels, edge types, property keys).
-    fn schema(&self) -> SchemaInfo;
+    ///
+    /// # Errors
+    ///
+    /// The error of a read the store cannot do.
+    fn schema(&self) -> grafeo_common::utils::error::Result<SchemaInfo>;
 
     /// Validates database integrity, returning errors and warnings.
-    fn validate(&self) -> ValidationResult;
+    ///
+    /// # Errors
+    ///
+    /// The error of a read the store cannot do.
+    fn validate(&self) -> grafeo_common::utils::error::Result<ValidationResult>;
 
     /// Returns WAL (Write-Ahead Log) status.
     fn wal_status(&self) -> WalStatus;
@@ -579,15 +673,22 @@ mod tests {
         let report = CompactReport {
             checkpointed: true,
             versions_collected: 19,
+            rows_compressed: 3,
             duration_ms: 88,
         };
         let json = serde_json::to_string(&report).unwrap();
         assert_eq!(
-            json, r#"{"checkpointed":true,"versions_collected":19,"duration_ms":88}"#,
+            json,
+            r#"{"checkpointed":true,"versions_collected":19,"rows_compressed":3,"duration_ms":88}"#,
             "the field names the bindings and server clients read"
         );
         let parsed: CompactReport = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed, report);
+        let older: CompactReport = serde_json::from_str(
+            r#"{"checkpointed":false,"versions_collected":2,"duration_ms":1}"#,
+        )
+        .unwrap();
+        assert_eq!(older.rows_compressed, 0, "a report without the field");
     }
 
     #[test]

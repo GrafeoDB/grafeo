@@ -7,7 +7,7 @@
 //! cargo test -p grafeo-engine --all-features --test index_persistence
 //! ```
 
-#![cfg(all(feature = "lpg", feature = "gql"))]
+#![cfg(feature = "gql")]
 
 use grafeo_common::types::Value;
 use grafeo_engine::GrafeoDB;
@@ -31,7 +31,12 @@ fn build(db: &GrafeoDB) {
 fn assert_built(db: &GrafeoDB) {
     assert!(db.has_property_index("id"));
     assert!(db.has_property_index("size"));
-    assert_eq!(db.find_nodes_by_property("id", &Value::from("f0")).len(), 1);
+    assert_eq!(
+        db.find_nodes_by_property("id", &Value::from("f0"))
+            .unwrap()
+            .len(),
+        1
+    );
     let duplicate = db.execute("INSERT (:File {id: 'f0'})").unwrap_err();
     assert!(duplicate.to_string().contains("UNIQUE"), "{duplicate}");
 
@@ -42,7 +47,10 @@ fn assert_built(db: &GrafeoDB) {
         "indexes stay in their graph"
     );
     assert_eq!(
-        model.find_nodes_by_property("id", &Value::from("c0")).len(),
+        model
+            .find_nodes_by_property("id", &Value::from("c0"))
+            .unwrap()
+            .len(),
         1
     );
 }
@@ -65,6 +73,7 @@ fn to_memory_keeps_indexes_and_constraints() {
     assert_built(&db);
     assert!(
         db.find_nodes_by_property("id", &Value::from("f1"))
+            .unwrap()
             .is_empty(),
         "expected no nodes"
     );

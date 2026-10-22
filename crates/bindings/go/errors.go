@@ -13,14 +13,51 @@ import (
 // ErrDatabase is the base error for all Grafeo database errors.
 var ErrDatabase = errors.New("grafeo")
 
+// ErrNotFound is the error of a read of a node or edge that does not exist
+// (it also matches ErrDatabase). Check it with errors.Is: a read that fails
+// is another error, never ErrNotFound.
+var ErrNotFound = errors.New("not found")
+
+// notFound is the ErrNotFound error for the node or edge `what`.
+func notFound(what string, id uint64) error {
+	return fmt.Errorf("%w: %w: %s %d", ErrDatabase, ErrNotFound, what, id)
+}
+
+// Error is a Grafeo database error: its message, which starts with its
+// Grafeo code (such as GRAFEO-Q006), and its GQLSTATUS, the five-character
+// ISO GQL status of the condition ("22012" for a division by zero, "42001"
+// for a syntax error). It matches ErrDatabase with errors.Is; get it with
+// errors.As:
+//
+//	var grafeoErr *grafeo.Error
+//	if errors.As(err, &grafeoErr) && grafeoErr.GQLStatus == "22012" { ... }
+type Error struct {
+	Message   string
+	GQLStatus string
+}
+
+// Error returns the message, as "grafeo: <message>".
+func (e *Error) Error() string {
+	return fmt.Sprintf("%s: %s", ErrDatabase, e.Message)
+}
+
+// Unwrap returns ErrDatabase, so errors.Is(err, ErrDatabase) holds.
+func (e *Error) Unwrap() error {
+	return ErrDatabase
+}
+
 // lastError reads the thread-local error from the C layer.
 // Must be called on the same OS thread as the C call that set the error.
 func lastError() error {
 	msg := C.grafeo_last_error()
 	if msg == nil {
-		return fmt.Errorf("%w: unknown error", ErrDatabase)
+		return &Error{Message: "unknown error"}
 	}
-	return fmt.Errorf("%w: %s", ErrDatabase, C.GoString(msg))
+	err := &Error{Message: C.GoString(msg)}
+	if status := C.grafeo_last_error_gql_status(); status != nil {
+		err.GQLStatus = C.GoString(status)
+	}
+	return err
 }
 
 // statusToError converts a GrafeoStatus to a Go error (nil on success).

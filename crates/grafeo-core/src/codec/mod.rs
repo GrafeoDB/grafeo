@@ -35,8 +35,6 @@ pub mod block;
 pub mod column_chunk;
 pub mod delta;
 pub mod dictionary;
-#[cfg(feature = "tiered-storage")]
-pub mod epoch_store;
 pub mod limits;
 pub mod rows_chunker;
 pub mod runlength;
@@ -54,13 +52,6 @@ pub use rows_chunker::{ChunkColumn, RowsChunker};
 pub use runlength::{Run, RunLengthAnalyzer, RunLengthEncoding, SignedRunLengthEncoding};
 pub use selector::{
     CodecSelector, CompressedData, CompressionCodec, CompressionMetadata, TypeSpecificCompressor,
-};
-
-// Tiered storage exports (feature-gated)
-#[cfg(feature = "tiered-storage")]
-pub use epoch_store::{
-    CompressedEpochBlock, CompressionType, EpochBlockHeader, EpochStore, EpochStoreStats,
-    IndexEntry, ZoneMap,
 };
 
 // Succinct data structure exports (feature-gated)

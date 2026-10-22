@@ -305,16 +305,16 @@ class TestCreateEdgePhantom:
         assert start["_id"] != end["_id"]
 
     def test_startnode_equals_source(self, db):
-        """startNode(r) == id(s) and endNode(r) == id(t) (#180)."""
+        """startNode(r) is s and endNode(r) is t; a node is not its id (#180)."""
         db.execute_cypher("CREATE (:Person {name: 'Alix'})-[:KNOWS]->(:Person {name: 'Gus'})")
         result = list(
             db.execute_cypher(
                 "MATCH (s)-[r:KNOWS]->(t) "
-                "RETURN startNode(r) = id(s) AS src_ok, endNode(r) = id(t) AS dst_ok"
+                "RETURN startNode(r) = s AS src_ok, endNode(r) = t AS dst_ok, "
+                "id(startNode(r)) = id(s) AS src_id, startNode(r) = id(s) AS node_is_id"
             )
         )
-        assert result[0]["src_ok"] is True
-        assert result[0]["dst_ok"] is True
+        assert result == [{"src_ok": True, "dst_ok": True, "src_id": True, "node_is_id": False}]
 
     def test_timestamp_returns_millis(self, db):
         """timestamp() returns millisecond epoch as integer (#179)."""

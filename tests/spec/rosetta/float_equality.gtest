@@ -1,0 +1,158 @@
+# Rosetta: float equality is exact (IEEE 754), in GQL and Cypher
+#
+# `=` and `<>` compare floats exactly: 0.1 + 0.2 is 0.30000000000000004, not
+# 0.3; -0.0 equals 0.0; NaN equals nothing, itself included; an integer
+# equals only a float of exactly its value. A property index, a hash join and
+# a filter find the same rows. Grouping and DISTINCT keep NaN together
+# (equivalence, as openCypher defines it).
+#
+# GQL writes a float with an exponent (0.1e0); a number with a point alone is
+# an exact decimal there. Cypher's 0.1 is a float.
+
+meta:
+  model: lpg
+  section: rosetta
+  title: Float equality cross-language equivalence
+  dataset: empty
+  requires: [cypher]
+
+tests:
+
+  # ---------------------------------------------------------------------------
+  # Literals
+  # ---------------------------------------------------------------------------
+
+  - name: a_float_sum_is_not_its_rounded_value
+    variants:
+      gql: "RETURN 0.1e0 + 0.2e0 = 0.3e0 AS eq, 0.1e0 + 0.2e0 <> 0.3e0 AS ne"
+      cypher: "RETURN 0.1 + 0.2 = 0.3 AS eq, 0.1 + 0.2 <> 0.3 AS ne"
+    expect:
+      rows:
+        - [false, true]
+
+  - name: an_equal_float_is_equal
+    variants:
+      gql: "RETURN 0.5e0 + 0.25e0 = 0.75e0 AS eq, 1.0e0 = 1 AS int"
+      cypher: "RETURN 0.5 + 0.25 = 0.75 AS eq, 1.0 = 1 AS int"
+    expect:
+      rows:
+        - [true, true]
+
+  - name: negative_zero_equals_zero
+    variants:
+      gql: "RETURN -0.0e0 = 0.0e0 AS float, -0.0e0 = 0 AS int, -0.0e0 <> 0.0e0 AS ne"
+      cypher: "RETURN -0.0 = 0.0 AS float, -0.0 = 0 AS int, -0.0 <> 0.0 AS ne"
+    expect:
+      rows:
+        - [true, true, false]
+
+  - name: nan_equals_nothing_not_even_itself
+    variants:
+      gql: "RETURN NaN = NaN AS self, NaN <> NaN AS ne, NaN = 0 AS zero, NaN IN [NaN] AS listed"
+      cypher: "RETURN NaN = NaN AS self, NaN <> NaN AS ne, NaN = 0 AS zero, NaN IN [NaN] AS listed"
+    expect:
+      rows:
+        - [false, true, false, false]
+
+  - name: infinity_equals_itself
+    variants:
+      gql: "RETURN Infinity = Infinity AS pos, -Infinity = -Infinity AS neg, Infinity = -Infinity AS mixed"
+      cypher: "RETURN Infinity = Infinity AS pos, -Infinity = -Infinity AS neg, Infinity = -Infinity AS mixed"
+    expect:
+      rows:
+        - [true, true, false]
+
+  - name: a_value_near_zero_is_not_zero
+    variants:
+      gql: "RETURN 1.0e-300 = 0.0e0 AS float, 1.0e-300 = 0 AS int, -1.0e-300 = 1.0e-300 AS opposite"
+      cypher: "RETURN 1.0e-300 = 0.0 AS float, 1.0e-300 = 0 AS int, -1.0e-300 = 1.0e-300 AS opposite"
+    expect:
+      rows:
+        - [false, false, false]
+
+  - name: a_value_just_below_one_is_not_one
+    variants:
+      gql: "RETURN 0.9999999999999999e0 = 1 AS int, 0.9999999999999999e0 = 1.0e0 AS float"
+      cypher: "RETURN 0.9999999999999999 = 1 AS int, 0.9999999999999999 = 1.0 AS float"
+    expect:
+      rows:
+        - [false, false]
+
+  - name: large_magnitudes_compare_exactly
+    variants:
+      gql: "RETURN 9007199254740993 = 9007199254740992.0e0 AS above, 9007199254740992 = 9007199254740992.0e0 AS exact, 1.0e300 = 1.0e300 + 1 AS absorbed"
+      cypher: "RETURN 9007199254740993 = 9007199254740992.0 AS above, 9007199254740992 = 9007199254740992.0 AS exact, 1.0e300 = 1.0e300 + 1 AS absorbed"
+    expect:
+      rows:
+        - [false, true, true]
+
+  - name: a_numeric_string_compares_exactly
+    variants:
+      gql: "RETURN '9007199254740993' = 9007199254740992.0e0 AS above, '0.3' = 0.3e0 AS text, '0.3' = 0.1e0 + 0.2e0 AS sum"
+      cypher: "RETURN '9007199254740993' = 9007199254740992.0 AS above, '0.3' = 0.3 AS text, '0.3' = 0.1 + 0.2 AS sum"
+    expect:
+      rows:
+        - [false, true, false]
+
+  # ---------------------------------------------------------------------------
+  # Stored values: a filter, a property index and a join agree
+  # ---------------------------------------------------------------------------
+
+  - name: a_filter_on_a_float_property_is_exact
+    setup:
+      - "INSERT (:Doc {name: 'Alix', p: 0.1e0 + 0.2e0}), (:Doc {name: 'Gus', p: 0.3e0}), (:Doc {name: 'Vincent', p: -0.0e0}), (:Doc {name: 'Jules', p: 0}), (:Doc {name: 'Mia', p: NaN})"
+    variants:
+      gql: "MATCH (d:Doc) WHERE d.p = 0.3e0 OR d.p = 0.0e0 OR d.p = NaN RETURN d.name"
+      cypher: "MATCH (d:Doc) WHERE d.p = 0.3 OR d.p = 0.0 OR d.p = NaN RETURN d.name"
+    expect:
+      rows:
+        - [Gus]
+        - [Vincent]
+        - [Jules]
+
+  - name: a_property_index_finds_what_the_filter_finds
+    setup:
+      - "CREATE INDEX doc_p FOR (n:Doc) ON (n.p)"
+      - "INSERT (:Doc {name: 'Alix', p: 0.1e0 + 0.2e0}), (:Doc {name: 'Gus', p: 0.3e0}), (:Doc {name: 'Vincent', p: -0.0e0}), (:Doc {name: 'Jules', p: 0}), (:Doc {name: 'Mia', p: NaN})"
+    variants:
+      gql: "UNWIND [0.3e0, 0.0e0, NaN] AS key MATCH (d:Doc {p: key}) RETURN d.name"
+      cypher: "UNWIND [0.3, 0.0, NaN] AS key MATCH (d:Doc {p: key}) RETURN d.name"
+    expect:
+      rows:
+        - [Gus]
+        - [Vincent]
+        - [Jules]
+
+  - name: a_property_index_finds_an_integer_by_its_exact_float
+    setup:
+      - "CREATE INDEX doc_p FOR (n:Doc) ON (n.p)"
+      - "INSERT (:Doc {name: 'Alix', p: 9007199254740993}), (:Doc {name: 'Gus', p: 9007199254740992}), (:Doc {name: 'Mia', p: 1})"
+    variants:
+      gql: "MATCH (d:Doc) WHERE d.p = 9007199254740992.0e0 OR d.p = 0.9999999999999999e0 RETURN d.name"
+      cypher: "MATCH (d:Doc) WHERE d.p = 9007199254740992.0 OR d.p = 0.9999999999999999 RETURN d.name"
+    expect:
+      rows:
+        - [Gus]
+
+  - name: a_join_on_floats_pairs_equal_values_only
+    setup:
+      - "INSERT (:A {name: 'Alix', v: 0.3e0}), (:A {name: 'Gus', v: 0.0e0}), (:A {name: 'Mia', v: NaN})"
+      - "INSERT (:B {name: 'Vincent', v: 0.1e0 + 0.2e0}), (:B {name: 'Jules', v: -0.0e0}), (:B {name: 'Butch', v: NaN})"
+    variants:
+      gql: "MATCH (a:A), (b:B) WHERE a.v = b.v RETURN a.name, b.name"
+      cypher: "MATCH (a:A), (b:B) WHERE a.v = b.v RETURN a.name, b.name"
+    expect:
+      rows:
+        - [Gus, Jules]
+
+  # ---------------------------------------------------------------------------
+  # Grouping keeps equivalence
+  # ---------------------------------------------------------------------------
+
+  - name: distinct_keeps_nan_together_and_zeros_together
+    variants:
+      gql: "UNWIND [NaN, NaN, 0.0e0, -0.0e0, 0.3e0, 0.1e0 + 0.2e0] AS x RETURN count(DISTINCT x) AS n"
+      cypher: "UNWIND [NaN, NaN, 0.0, -0.0, 0.3, 0.1 + 0.2] AS x RETURN count(DISTINCT x) AS n"
+    expect:
+      rows:
+        - [4]

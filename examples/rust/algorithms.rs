@@ -57,7 +57,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     println!("PageRank (most influential people):");
     for (node_id, score) in &scores {
-        let name = get_person_name(&db, *node_id);
+        let name = get_person_name(&db, *node_id)?;
         println!("  {:<10} {:.4}", name, score);
     }
 
@@ -69,7 +69,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     for row in result.iter() {
         let node_id = row[0].as_int64().unwrap_or(0);
         let component = row[1].as_int64().unwrap_or(0);
-        let name = get_person_name(&db, node_id);
+        let name = get_person_name(&db, node_id)?;
         println!("  {:<10} component {}", name, component);
     }
 
@@ -81,7 +81,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     for row in result.iter() {
         let node_id = row[0].as_int64().unwrap_or(0);
         let community = row[1].as_int64().unwrap_or(0);
-        let name = get_person_name(&db, node_id);
+        let name = get_person_name(&db, node_id)?;
         println!("  {:<10} community {}", name, community);
     }
 
@@ -107,7 +107,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("  {:<10} {:<5} {:<6} Total", "Name", "In", "Out");
     println!("  {}", "-".repeat(30));
     for (node_id, in_deg, out_deg, total) in &degrees {
-        let name = get_person_name(&db, *node_id);
+        let name = get_person_name(&db, *node_id)?;
         println!("  {:<10} {:<5} {:<6} {}", name, in_deg, out_deg, total);
     }
 
@@ -116,12 +116,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 /// Look up a person's name by their raw node ID from CALL procedure results.
-fn get_person_name(db: &GrafeoDB, raw_id: i64) -> String {
+fn get_person_name(db: &GrafeoDB, raw_id: i64) -> grafeo::Result<String> {
     let node_id = NodeId::from(raw_id as u64);
-    db.get_node(node_id)
+    Ok(db
+        .get_node(node_id)?
         .and_then(|n| {
             n.get_property("name")
                 .and_then(|v| v.as_str().map(String::from))
         })
-        .unwrap_or_else(|| "?".to_string())
+        .unwrap_or_else(|| "?".to_string()))
 }

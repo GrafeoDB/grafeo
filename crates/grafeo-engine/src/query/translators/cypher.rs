@@ -8,17 +8,19 @@ use super::common::{
     check_branch_columns, collect_expression_variables, combine_with_and,
     comma_part_join_variables, comma_part_reads_earlier_rows, different_edges, edges_to_compare,
     expand_subquery_return_star, has_all_labels, is_aggregate_function, is_binary_set_function,
-    no_result, optional_join, push_set_property, to_aggregate_function, with_imports,
-    wrap_distinct, wrap_filter, wrap_limit, wrap_return, wrap_skip, wrap_sort,
+    no_result, optional_join, push_set_property, with_imports, wrap_distinct, wrap_filter,
+    wrap_limit, wrap_return, wrap_skip, wrap_sort,
 };
+use crate::query::functions::resolve_call;
+use crate::query::plan::BuiltinFunction;
 use crate::query::plan::{
     AddLabelOp, AggregateExpr, AggregateFunction, AggregateOp, ApplyOp, BinaryOp, CallProcedureOp,
     CountExpr, CreateElement, CreateOp, DeleteEdgeOp, DeleteNodeOp, ExpandDirection, ExpandOp,
     JoinCondition, JoinOp, JoinType, ListPredicateKind, LoadDataFormat, LoadDataOp,
-    LogicalExpression, LogicalOperator, LogicalPlan, MapProjectionEntry, MergeOp,
-    MergeRelationshipOp, NodeScanOp, ParameterScanOp, PathMode, PathSelection, ProcedureYield,
-    ProjectOp, Projection, RemoveLabelOp, ReturnItem, SetPropertyOp, ShortestPathEdgeCondition,
-    ShortestPathOp, SortKey, SortOrder, UnaryOp, UnionOp, UnwindOp,
+    LogicalExpression, LogicalOperator, LogicalPlan, MapProjectionEntry, MergeOp, NodeScanOp,
+    OtherwiseOp, ParameterScanOp, PathMode, PathSelection, ProcedureYield, ProjectOp, Projection,
+    RemoveLabelOp, ReturnItem, SetPropertyOp, ShortestPathEdgeCondition, ShortestPathOp, SortKey,
+    SortOrder, UnaryOp, UnionOp, UnwindOp,
 };
 use grafeo_adapters::query::cypher::{self, ast};
 use grafeo_common::types::Value;
@@ -50,8 +52,8 @@ pub enum CypherTranslationResult {
 pub fn translate(query: &str) -> Result<LogicalPlan> {
     match translate_full(query)? {
         CypherTranslationResult::Plan(plan) => Ok(plan),
-        _ => Err(Error::Query(QueryError::new(
-            QueryErrorKind::Semantic,
+        _ => Err(Error::from(QueryError::new(
+            QueryErrorKind::Unsupported,
             "Schema commands cannot be translated to a logical plan",
         ))),
     }
@@ -105,10 +107,9 @@ struct SortScope {
     clause: &'static str,
     /// Whether the projection aggregates.
     aggregating: bool,
-    /// Whether the projection is a DISTINCT WITH, after which only its
-    /// columns are in scope. After a RETURN DISTINCT the RETURN's planning
-    /// adds a key that reads a dropped variable to the distinct row.
-    distinct_with: bool,
+    /// Whether the projection is DISTINCT, after which only its columns are
+    /// in scope.
+    distinct: bool,
     /// The items it projects, or `None` when they are not known here
     /// (`RETURN *`, a `*` whose variables are not known).
     items: Option<Vec<ast::ProjectionItem>>,
@@ -123,6 +124,8 @@ struct SortScope {
 struct ProjectedColumn {
     text: String,
     name: String,
+    /// Whether the item has an alias, which names its column.
+    aliased: bool,
 }
 
 impl CypherTranslator {
@@ -160,15 +163,15 @@ impl CypherTranslator {
             ast::Statement::Query(query) => self.translate_query(query),
             ast::Statement::Create(create) => self.translate_create_statement(create),
             ast::Statement::Merge(merge) => self.translate_merge_statement(merge),
-            ast::Statement::Delete(_) => Err(Error::Query(QueryError::new(
+            ast::Statement::Delete(_) => Err(Error::from(QueryError::new(
                 QueryErrorKind::Semantic,
                 "Standalone DELETE requires a preceding MATCH clause. Use: MATCH (n) WHERE ... DELETE n",
             ))),
-            ast::Statement::Set(_) => Err(Error::Query(QueryError::new(
+            ast::Statement::Set(_) => Err(Error::from(QueryError::new(
                 QueryErrorKind::Semantic,
                 "Standalone SET requires a preceding MATCH clause. Use: MATCH (n) WHERE ... SET n.prop = value",
             ))),
-            ast::Statement::Remove(_) => Err(Error::Query(QueryError::new(
+            ast::Statement::Remove(_) => Err(Error::from(QueryError::new(
                 QueryErrorKind::Semantic,
                 "Standalone REMOVE requires a preceding MATCH clause. Use: MATCH (n) WHERE ... REMOVE n.prop",
             ))),
@@ -206,10 +209,9 @@ impl CypherTranslator {
             ast::Statement::Schema(_)
             | ast::Statement::ShowIndexes
             | ast::Statement::ShowConstraints
-            | ast::Statement::ShowCurrentGraphType => Err(Error::Query(QueryError::new(
-                QueryErrorKind::Semantic,
-                "Schema commands should be routed through translate_statement_full",
-            ))),
+            | ast::Statement::ShowCurrentGraphType => Err(Error::Internal(
+                "Schema commands should be routed through translate_statement_full".to_string(),
+            )),
         }
     }
 
@@ -236,7 +238,7 @@ impl CypherTranslator {
         if let Some(ast::Clause::CallSubquery { query: inner, .. }) = query.clauses.last()
             && returns_rows(inner)
         {
-            return Err(Error::Query(QueryError::new(
+            return Err(Error::from(QueryError::new(
                 QueryErrorKind::Semantic,
                 concat!(
                     "Query cannot conclude with CALL (must be a RETURN clause, an update clause, ",
@@ -250,9 +252,8 @@ impl CypherTranslator {
             plan = Some(self.translate_clause(clause, plan)?);
         }
 
-        let root = plan.ok_or_else(|| {
-            Error::Query(QueryError::new(QueryErrorKind::Semantic, "Empty query"))
-        })?;
+        let root = plan
+            .ok_or_else(|| Error::from(QueryError::new(QueryErrorKind::Semantic, "Empty query")))?;
         // A query that ends with an update has no result (openCypher).
         if query.clauses.last().is_some_and(ends_without_result) {
             return Ok(LogicalPlan::new(no_result(root)));
@@ -316,10 +317,13 @@ impl CypherTranslator {
         }))
     }
 
+    /// A call after other clauses runs once for each of their rows (an
+    /// uncorrelated Apply, as GQL plans it): its rows join every incoming row,
+    /// whose variables stay in scope. Its arguments are constants.
     fn translate_call_clause(
         &self,
         call: &ast::CallClause,
-        _input: Option<LogicalOperator>,
+        input: Option<LogicalOperator>,
     ) -> Result<LogicalOperator> {
         let arguments = call
             .arguments
@@ -337,11 +341,21 @@ impl CypherTranslator {
                 .collect()
         });
 
-        Ok(LogicalOperator::CallProcedure(CallProcedureOp {
+        let call_plan = LogicalOperator::CallProcedure(CallProcedureOp {
             name: call.procedure_name.clone(),
             arguments,
             yield_items,
-        }))
+        });
+        Ok(match input {
+            None | Some(LogicalOperator::Empty) => call_plan,
+            Some(input) => LogicalOperator::Apply(ApplyOp {
+                input: Box::new(input),
+                subplan: Box::new(call_plan),
+                shared_variables: Vec::new(),
+                optional: false,
+                unit: false,
+            }),
+        })
     }
 
     /// Translates `CALL { subquery }` to an Apply operator.
@@ -465,7 +479,7 @@ impl CypherTranslator {
         });
         self.call_scope.replace(enclosing);
         let mut inner_plan = translated?.ok_or_else(|| {
-            Error::Query(QueryError::new(
+            Error::from(QueryError::new(
                 QueryErrorKind::Semantic,
                 "CALL subquery requires at least one clause",
             ))
@@ -530,7 +544,7 @@ impl CypherTranslator {
         if let Some(reason) = not_allowed {
             const IMPORTING_WITH: &str =
                 "Importing WITH should consist only of simple references to outside variables.";
-            return Err(Error::Query(QueryError::new(
+            return Err(Error::from(QueryError::new(
                 QueryErrorKind::Semantic,
                 format!("{IMPORTING_WITH} {reason}"),
             )));
@@ -651,7 +665,7 @@ impl CypherTranslator {
         input: Option<LogicalOperator>,
     ) -> Result<LogicalOperator> {
         if patterns.is_empty() {
-            return Err(Error::Query(QueryError::new(
+            return Err(Error::from(QueryError::new(
                 QueryErrorKind::Semantic,
                 "Empty MATCH pattern",
             )));
@@ -986,7 +1000,7 @@ impl CypherTranslator {
         let path = match pattern {
             ast::Pattern::Path(p) => p,
             ast::Pattern::Node(_) => {
-                return Err(Error::Query(QueryError::new(
+                return Err(Error::from(QueryError::new(
                     QueryErrorKind::Semantic,
                     "shortestPath requires a path pattern, not a node",
                 )));
@@ -996,7 +1010,7 @@ impl CypherTranslator {
                 if let ast::Pattern::Path(p) = inner.as_ref() {
                     p
                 } else {
-                    return Err(Error::Query(QueryError::new(
+                    return Err(Error::from(QueryError::new(
                         QueryErrorKind::Semantic,
                         "shortestPath requires a path pattern",
                     )));
@@ -1007,7 +1021,7 @@ impl CypherTranslator {
         // One relationship pattern between two node patterns: only the first
         // would be searched, and the nodes between them ignored
         let [rel] = path.chain.as_slice() else {
-            return Err(Error::Query(QueryError::new(
+            return Err(Error::from(QueryError::new(
                 QueryErrorKind::Semantic,
                 "shortestPath requires a pattern of exactly one relationship",
             )));
@@ -1192,9 +1206,11 @@ impl CypherTranslator {
 
         let (min_hops, max_hops) = hop_bounds(rel);
 
-        // A property map on a variable-length edge must hold for every hop, so
-        // it is checked over the path's edges; that needs a path column.
-        let per_hop_properties = rel.length.is_some() && !rel.properties.is_empty();
+        // A property map or an inline WHERE on a variable-length edge must
+        // hold for every hop, so it is checked over the path's edges; that
+        // needs a path column.
+        let per_hop_properties =
+            rel.length.is_some() && (!rel.properties.is_empty() || rel.where_clause.is_some());
         let path_alias = if per_hop_properties {
             path_alias.or_else(|| Some(self.next_anon_var()))
         } else {
@@ -1237,17 +1253,15 @@ impl CypherTranslator {
             wrap_filter(
                 expand,
                 LogicalExpression::Binary {
-                    left: Box::new(LogicalExpression::FunctionCall {
-                        name: "id".into(),
-                        args: vec![LogicalExpression::Variable(expand_target)],
-                        distinct: false,
-                    }),
+                    left: Box::new(LogicalExpression::builtin(
+                        BuiltinFunction::Id,
+                        vec![LogicalExpression::Variable(expand_target)],
+                    )),
                     op: BinaryOp::Eq,
-                    right: Box::new(LogicalExpression::FunctionCall {
-                        name: "id".into(),
-                        args: vec![LogicalExpression::Variable(to_variable.clone())],
-                        distinct: false,
-                    }),
+                    right: Box::new(LogicalExpression::builtin(
+                        BuiltinFunction::Id,
+                        vec![LogicalExpression::Variable(to_variable.clone())],
+                    )),
                 },
             )
         } else {
@@ -1279,9 +1293,23 @@ impl CypherTranslator {
             result = wrap_filter(result, predicate);
         }
 
-        // Apply inline WHERE clause from relationship pattern: -[r WHERE expr]->
+        // Apply inline WHERE clause from relationship pattern: -[r WHERE expr]->.
+        // On a variable-length edge it holds for each edge, its variable then
+        // the one edge (as Neo4j 5 reads it): `all(r IN edges(path) WHERE
+        // expr)`; after the pattern `r` is the list of the edges.
         if let Some(where_expr) = &rel.where_clause {
             let predicate = self.translate_expression(where_expr)?;
+            let predicate = match (
+                property_path.clone().filter(|_| per_hop_properties),
+                &edge_variable_for_filter,
+            ) {
+                (Some(path), Some(edge)) => crate::query::translators::common::every_edge_matches(
+                    path,
+                    edge.clone(),
+                    predicate,
+                ),
+                _ => predicate,
+            };
             result = wrap_filter(result, predicate);
         }
 
@@ -1305,7 +1333,7 @@ impl CypherTranslator {
         input: Option<LogicalOperator>,
     ) -> Result<LogicalOperator> {
         let input = input.ok_or_else(|| {
-            Error::Query(QueryError::new(
+            Error::from(QueryError::new(
                 QueryErrorKind::Semantic,
                 "WHERE requires input",
             ))
@@ -1394,7 +1422,7 @@ impl CypherTranslator {
             self.sort_scope.replace(Some(SortScope {
                 clause: "WITH",
                 aggregating: false,
-                distinct_with: with_clause.distinct,
+                distinct: with_clause.distinct,
                 items: None,
                 keeps_input: false,
             }));
@@ -1402,17 +1430,28 @@ impl CypherTranslator {
         };
 
         let mut plan = if has_aggregates {
-            let (mut aggregates, mut group_by, post_return) =
+            let (mut aggregates, mut group_by, mut post_return) =
                 self.extract_aggregates_and_groups_from_items(items)?;
+            let imports_read = super::common::resolve_implicitly_grouped(
+                "WITH",
+                post_return.as_deref_mut().unwrap_or_default(),
+                &group_by,
+                &aggregates,
+                &self.call_imports,
+            )?;
             let input =
                 self.lift_aggregate_pattern_comprehensions(input, &mut aggregates, &mut group_by)?;
 
-            let agg_op = LogicalOperator::Aggregate(AggregateOp {
-                group_by,
-                aggregates,
-                input: Box::new(input),
-                having: None,
-            });
+            let agg_op = super::common::with_imports(
+                LogicalOperator::Aggregate(AggregateOp {
+                    group_by,
+                    aggregates,
+                    input: Box::new(input),
+                    having: None,
+                }),
+                imports_read,
+                true,
+            );
 
             if let Some(return_items) = post_return {
                 let projections = return_items
@@ -1496,7 +1535,7 @@ impl CypherTranslator {
         self.sort_scope.replace(Some(SortScope {
             clause: "WITH",
             aggregating: has_aggregates,
-            distinct_with: with_clause.distinct,
+            distinct: with_clause.distinct,
             items: Some(items.clone()),
             keeps_input: !has_aggregates && !with_clause.distinct,
         }));
@@ -1513,8 +1552,8 @@ impl CypherTranslator {
         input: &LogicalOperator,
     ) -> Result<Vec<ast::ProjectionItem>> {
         let Some(bound) = input.bound_variables(self.call_scope.borrow().as_ref()) else {
-            return Err(Error::Query(QueryError::new(
-                QueryErrorKind::Semantic,
+            return Err(Error::from(QueryError::new(
+                QueryErrorKind::Unsupported,
                 format!(
                     "{clause} * with an aggregate cannot tell which variables are in scope \
                      here: name them"
@@ -1561,7 +1600,7 @@ impl CypherTranslator {
                 .iter()
                 .any(|projection| projection.alias.as_deref() == Some(name.as_str()))
             {
-                return Err(Error::Query(QueryError::new(
+                return Err(Error::from(QueryError::new(
                     QueryErrorKind::Semantic,
                     format!("{clause} *, ...: the column {name} is already one of the items"),
                 )));
@@ -1619,7 +1658,6 @@ impl CypherTranslator {
         merge_clause: &ast::MergeClause,
         input: Option<LogicalOperator>,
     ) -> Result<LogicalOperator> {
-        let input = input.unwrap_or(LogicalOperator::Empty);
         let pattern = &merge_clause.pattern;
 
         // Check if this is a relationship (path) pattern
@@ -1632,9 +1670,34 @@ impl CypherTranslator {
             _ => None,
         };
 
-        if let Some(path) = path {
-            return self.translate_merge_relationship(path, merge_clause, input);
+        // The node MERGE operator sets properties of its own node only, by
+        // key from a map literal: a `SET n = {...}` (which replaces every
+        // property), a `SET n += m` of another map or a SET of another
+        // variable goes through the whole-pattern plan, whose SET is the SET
+        // clause's.
+        let set_items = merge_clause
+            .on_create
+            .iter()
+            .chain(&merge_clause.on_match)
+            .flat_map(|set| &set.items);
+        let node_variable = Self::pattern_start(pattern);
+        let sets_like_a_clause = set_items.into_iter().any(|item| match item {
+            ast::SetItem::AllProperties { .. } => true,
+            ast::SetItem::MergeProperties {
+                variable,
+                properties,
+            } => {
+                Some(variable.as_str()) != node_variable
+                    || !matches!(properties, ast::Expression::Map(_))
+            }
+            ast::SetItem::Property { variable, .. } | ast::SetItem::Labels { variable, .. } => {
+                Some(variable.as_str()) != node_variable
+            }
+        });
+        if path.is_some() || sets_like_a_clause {
+            return self.translate_merge_pattern(merge_clause, input);
         }
+        let input = input.unwrap_or(LogicalOperator::Empty);
 
         // Node-only MERGE
         let node = match pattern {
@@ -1644,7 +1707,7 @@ impl CypherTranslator {
                 ast::Pattern::Node(n) => n,
                 ast::Pattern::Path(path) => &path.start,
                 _ => {
-                    return Err(Error::Query(QueryError::new(
+                    return Err(Error::from(QueryError::new(
                         QueryErrorKind::Semantic,
                         "MERGE NamedPath must contain a node or path",
                     )));
@@ -1674,6 +1737,7 @@ impl CypherTranslator {
             self.merge_actions(merge_clause.on_match.as_ref(), "ON MATCH", &variable, true)?;
 
         Ok(LogicalOperator::Merge(MergeOp {
+            index_hint: None,
             variable,
             labels,
             match_properties,
@@ -1685,100 +1749,207 @@ impl CypherTranslator {
         }))
     }
 
-    fn translate_merge_relationship(
+    /// Translates the MERGE of a pattern with relationships: for each input
+    /// row it matches the whole pattern, or when nothing matches creates all
+    /// of it, as openCypher defines MERGE. Variables bound before are reused,
+    /// never created; every other node and relationship of the pattern is
+    /// matched or created with the rest. `ON MATCH SET` runs on each match,
+    /// `ON CREATE SET` on what was created.
+    ///
+    /// The plan is a correlated subquery over the bound variables, as
+    /// `CALL (bound) { MATCH pattern ... RETURN new }` with an `OTHERWISE` of
+    /// `CREATE pattern ... RETURN new`: both branches return the pattern's
+    /// other variables, so the rows that follow see them either way.
+    fn translate_merge_pattern(
         &self,
-        path: &ast::PathPattern,
         merge_clause: &ast::MergeClause,
-        input: LogicalOperator,
+        input: Option<LogicalOperator>,
     ) -> Result<LogicalOperator> {
-        // One relationship: a longer pattern would have to be matched or
-        // created as a whole (openCypher 9, MERGE), and merging its first
-        // relationship alone dropped the rest
-        let rel = match path.chain.as_slice() {
-            [rel] => rel,
-            [] => {
-                return Err(Error::Query(QueryError::new(
-                    QueryErrorKind::Semantic,
-                    "MERGE relationship pattern is empty",
-                )));
+        let semantic =
+            |message: &str| Error::from(QueryError::new(QueryErrorKind::Semantic, message));
+        // A node alone is a path of no relationships.
+        let alone = |node: &ast::NodePattern| ast::PathPattern {
+            start: node.clone(),
+            chain: Vec::new(),
+            span: None,
+        };
+        let (path_name, path) = match &merge_clause.pattern {
+            ast::Pattern::Path(path) => (None, path.clone()),
+            ast::Pattern::Node(node) => (None, alone(node)),
+            ast::Pattern::NamedPath {
+                name,
+                path_function: None,
+                pattern,
+            } => match pattern.as_ref() {
+                ast::Pattern::Path(path) => (Some(name.clone()), path.clone()),
+                ast::Pattern::Node(node) => (Some(name.clone()), alone(node)),
+                ast::Pattern::NamedPath { .. } => {
+                    return Err(semantic("MERGE NamedPath must contain a path"));
+                }
+            },
+            ast::Pattern::NamedPath { .. } => {
+                return Err(semantic(
+                    "MERGE cannot use shortestPath or allShortestPaths",
+                ));
             }
-            _ => return Err(super::common::merge_of_a_longer_path()),
         };
+        for rel in &path.chain {
+            match rel.types.as_slice() {
+                [_] => {}
+                [] => {
+                    return Err(semantic(
+                        "MERGE relationship pattern requires a relationship type",
+                    ));
+                }
+                types => {
+                    return Err(semantic(&format!(
+                        "MERGE gives a relationship one type: :{} names alternatives, which only \
+                         a pattern to match can have",
+                        types.join("|")
+                    )));
+                }
+            }
+            if rel.length.is_some() {
+                return Err(semantic(
+                    "MERGE cannot merge a variable-length relationship",
+                ));
+            }
+            if rel.where_clause.is_some() {
+                return Err(semantic(
+                    "MERGE cannot have a WHERE inside a relationship pattern",
+                ));
+            }
+        }
 
-        // The source node, merged first when the pattern defines it
-        let (source_variable, current_input) = self.merge_end_node(&path.start, input)?;
+        // Every element gets a name, so both branches return the same columns
+        // and a match of several relationships gives a row each.
+        let mut path = path;
+        let name = |variable: &mut Option<String>| {
+            variable.get_or_insert_with(|| self.next_anon_var()).clone()
+        };
+        let mut elements = vec![name(&mut path.start.variable)];
+        for rel in &mut path.chain {
+            let edge = name(&mut rel.variable);
+            self.register_edge_variable(&edge);
+            elements.push(edge);
+            elements.push(name(&mut rel.target.variable));
+        }
 
-        // Extract relationship variable
-        let variable = rel.variable.clone().unwrap_or_else(|| self.next_anon_var());
-        self.register_edge_variable(&variable);
+        let outer_names = match &input {
+            Some(outer) => outer
+                .bound_variables(self.call_scope.borrow().as_ref())
+                .ok_or_else(|| {
+                    Error::from(QueryError::unsupported(
+                        "MERGE cannot tell which variables the rows before it bind here; name \
+                         them in a WITH before the MERGE",
+                    ))
+                })?,
+            None => HashSet::new(),
+        };
+        // What the MERGE binds: the pattern's elements the row does not hold.
+        let mut new: Vec<String> = Vec::new();
+        for element in elements.into_iter().chain(path_name.clone()) {
+            if !outer_names.contains(&element) && !new.contains(&element) {
+                new.push(element);
+            }
+        }
 
-        // Extract relationship type
-        let edge_type = rel.types.first().cloned().ok_or_else(|| {
-            Error::Query(QueryError::new(
-                QueryErrorKind::Semantic,
-                "MERGE relationship pattern requires a relationship type",
-            ))
-        })?;
+        let named = |path: ast::PathPattern| match &path_name {
+            Some(name) => ast::Pattern::NamedPath {
+                name: name.clone(),
+                path_function: None,
+                pattern: Box::new(ast::Pattern::Path(path)),
+            },
+            None => ast::Pattern::Path(path),
+        };
+        // An undirected relationship is matched either way and created from
+        // left to right.
+        let mut created = path.clone();
+        for rel in &mut created.chain {
+            if rel.direction == ast::Direction::Undirected {
+                rel.direction = ast::Direction::Outgoing;
+            }
+        }
+        let returned = ast::Clause::Return(ast::ReturnClause {
+            distinct: false,
+            items: ast::ReturnItems::Explicit(
+                new.iter()
+                    .map(|variable| ast::ProjectionItem {
+                        expression: ast::Expression::Variable(variable.clone()),
+                        alias: None,
+                        span: None,
+                    })
+                    .collect(),
+            ),
+            span: None,
+        });
+        let branch = |first: Vec<ast::Clause>, set: Option<&ast::SetClause>| ast::Query {
+            clauses: first
+                .into_iter()
+                .chain(set.cloned().map(ast::Clause::Set))
+                .chain(std::iter::once(returned.clone()))
+                .collect(),
+            span: None,
+        };
+        let matched = branch(
+            vec![ast::Clause::Match(ast::MatchClause {
+                patterns: vec![named(path)],
+                span: None,
+            })],
+            merge_clause.on_match.as_ref(),
+        );
+        // CREATE binds no path: the path variable is matched through the
+        // elements it just created, every one of them bound.
+        let mut create_clauses = vec![ast::Clause::Create(ast::CreateClause {
+            patterns: vec![ast::Pattern::Path(created.clone())],
+            span: None,
+        })];
+        if path_name.is_some() {
+            let mut bare = created;
+            bare.start.labels.clear();
+            bare.start.properties.clear();
+            for rel in &mut bare.chain {
+                rel.properties.clear();
+                rel.target.labels.clear();
+                rel.target.properties.clear();
+            }
+            create_clauses.push(ast::Clause::Match(ast::MatchClause {
+                patterns: vec![named(bare)],
+                span: None,
+            }));
+        }
+        let create = branch(create_clauses, merge_clause.on_create.as_ref());
 
-        // The target node, merged next when the pattern defines it
-        let (target_variable, current_input) = self.merge_end_node(&rel.target, current_input)?;
-
-        // Extract relationship properties
-        let match_properties: Vec<(String, LogicalExpression)> = rel
-            .properties
-            .iter()
-            .map(|(k, v)| Ok((k.clone(), self.translate_expression(v)?)))
-            .collect::<Result<Vec<_>>>()?;
-
-        let (on_create, _) = self.merge_actions(
-            merge_clause.on_create.as_ref(),
-            "ON CREATE",
-            &variable,
-            false,
+        // The branches see the whole row: the pattern's properties and the
+        // SET items may read any variable bound before.
+        let has_input = input.is_some();
+        let imports = ["*".to_string()];
+        let (matched, _) = self.translate_call_subquery_part(
+            &matched,
+            Some(&imports),
+            has_input,
+            Some(&outer_names),
         )?;
-        let (on_match, _) =
-            self.merge_actions(merge_clause.on_match.as_ref(), "ON MATCH", &variable, false)?;
-
-        // `(a)<-[:T]-(b)` is a relationship from b to a.
-        let (source_variable, target_variable) = if rel.direction == ast::Direction::Incoming {
-            (target_variable, source_variable)
-        } else {
-            (source_variable, target_variable)
-        };
-        Ok(LogicalOperator::MergeRelationship(MergeRelationshipOp {
-            variable,
-            source_variable,
-            target_variable,
-            undirected: rel.direction == ast::Direction::Undirected,
-            edge_type,
-            match_properties,
-            on_create,
-            on_match,
-            input: Box::new(current_input),
+        let (create, _) = self.translate_call_subquery_part(
+            &create,
+            Some(&imports),
+            has_input,
+            Some(&outer_names),
+        )?;
+        Ok(LogicalOperator::Apply(ApplyOp {
+            input: Box::new(input.unwrap_or(LogicalOperator::Empty)),
+            subplan: Box::new(LogicalOperator::Otherwise(OtherwiseOp {
+                left: Box::new(matched),
+                right: Box::new(create),
+            })),
+            shared_variables: if has_input {
+                imports.to_vec()
+            } else {
+                Vec::new()
+            },
+            optional: false,
+            unit: false,
         }))
-    }
-
-    /// The variable of an end node of a MERGE relationship pattern and the
-    /// plan that binds it (see [`super::common::merge_end_node`]): as in
-    /// `MERGE (h)-[:R]->(:T {x: 3})`, a node the pattern gives a label or
-    /// properties is merged on its own first.
-    fn merge_end_node(
-        &self,
-        node: &ast::NodePattern,
-        input: LogicalOperator,
-    ) -> Result<(String, LogicalOperator)> {
-        let match_properties = node
-            .properties
-            .iter()
-            .map(|(k, v)| Ok((k.clone(), self.translate_expression(v)?)))
-            .collect::<Result<Vec<_>>>()?;
-        super::common::merge_end_node(
-            node.variable.as_deref(),
-            &node.labels,
-            match_properties,
-            input,
-            || self.next_anon_var(),
-        )
     }
 
     /// The SET items of an `ON CREATE` or `ON MATCH` (`clause`) of a MERGE
@@ -1793,12 +1964,13 @@ impl CypherTranslator {
         variable: &str,
         takes_labels: bool,
     ) -> Result<(Vec<(String, LogicalExpression)>, Vec<String>)> {
-        let unsupported = |message: String| {
-            Err(Error::Query(QueryError::new(
-                QueryErrorKind::Semantic,
+        let error = |kind: QueryErrorKind, message: String| {
+            Err(Error::from(QueryError::new(
+                kind,
                 format!("MERGE ... {clause} SET {message}"),
             )))
         };
+        let unsupported = |message: String| error(QueryErrorKind::Unsupported, message);
         let mut properties = Vec::new();
         let mut labels: Vec<String> = Vec::new();
         for item in set_clause.map_or(&[][..], |set| &set.items) {
@@ -1850,10 +2022,13 @@ impl CypherTranslator {
                 }
                 ast::SetItem::Labels { labels: added, .. } => {
                     if !takes_labels {
-                        return unsupported(format!(
-                            "{item_variable}:{}: a relationship has no labels",
-                            added.join(":")
-                        ));
+                        return error(
+                            QueryErrorKind::Semantic,
+                            format!(
+                                "{item_variable}:{}: a relationship has no labels",
+                                added.join(":")
+                            ),
+                        );
                     }
                     for label in added {
                         if !labels.contains(label) {
@@ -1901,7 +2076,7 @@ impl CypherTranslator {
         self.sort_scope.replace(Some(SortScope {
             clause: "RETURN",
             aggregating,
-            distinct_with: false,
+            distinct: return_clause.distinct,
             items: items.map(<[ast::ProjectionItem]>::to_vec),
             keeps_input: false,
         }));
@@ -1936,8 +2111,15 @@ impl CypherTranslator {
             //   2. A post-aggregate projection (`_agg_0 > 0 AS exists`)
             // With aliases (e.g. `n.city AS city`) the post-Return renames the
             // columns, which ORDER BY alias resolution and result naming need.
-            let (mut aggregates, mut group_by, post_return) =
+            let (mut aggregates, mut group_by, mut post_return) =
                 self.extract_aggregates_and_groups_from_items(items)?;
+            let imports_read = super::common::resolve_implicitly_grouped(
+                "RETURN",
+                post_return.as_deref_mut().unwrap_or_default(),
+                &group_by,
+                &aggregates,
+                &self.call_imports,
+            )?;
             let input =
                 self.lift_aggregate_pattern_comprehensions(input, &mut aggregates, &mut group_by)?;
 
@@ -1957,12 +2139,16 @@ impl CypherTranslator {
                 }
             }
 
-            let agg_op = LogicalOperator::Aggregate(AggregateOp {
-                group_by,
-                aggregates,
-                input: Box::new(input),
-                having: None,
-            });
+            let agg_op = super::common::with_imports(
+                LogicalOperator::Aggregate(AggregateOp {
+                    group_by,
+                    aggregates,
+                    input: Box::new(input),
+                    having: None,
+                }),
+                imports_read,
+                true,
+            );
 
             if let Some(return_items) = post_return {
                 // Post-projection renames columns using aliases.
@@ -2158,11 +2344,7 @@ impl CypherTranslator {
                         translated_args.push(self.translate_expression(arg)?);
                     }
                 }
-                Ok(LogicalExpression::FunctionCall {
-                    name: name.clone(),
-                    args: translated_args,
-                    distinct: false,
-                })
+                resolve_cypher_call(name, translated_args)
             }
             ast::Expression::Binary { left, op, right } => {
                 let binary_op = self.translate_binary_op(*op)?;
@@ -2184,10 +2366,6 @@ impl CypherTranslator {
             }
             ast::Expression::Unary { op, operand } => {
                 let sub = self.extract_wrapped_aggregates(operand, agg_counter, aggregates_out)?;
-                // Unary positive is identity: just return the operand
-                if *op == ast::UnaryOp::Pos {
-                    return Ok(sub);
-                }
                 let unary_op = self.translate_unary_op(*op)?;
                 Ok(LogicalExpression::Unary {
                     op: unary_op,
@@ -2233,8 +2411,8 @@ impl CypherTranslator {
                     else_clause: else_expr,
                 })
             }
-            _ => Err(Error::Query(QueryError::new(
-                QueryErrorKind::Semantic,
+            _ => Err(Error::from(QueryError::new(
+                QueryErrorKind::Unsupported,
                 "Unsupported expression wrapping an aggregate",
             ))),
         }
@@ -2252,7 +2430,8 @@ impl CypherTranslator {
                 args,
                 distinct,
             } => {
-                if let Some(function) = to_aggregate_function(name) {
+                if let Some(function) = AggregateFunction::from_name(name) {
+                    crate::query::functions::check_aggregate_call(name, function, args.len())?;
                     // count(*) is represented as FunctionCall with Variable("*") arg
                     let is_count_star = function == AggregateFunction::Count
                         && args.len() == 1
@@ -2344,7 +2523,7 @@ impl CypherTranslator {
         scope: Option<&SortScope>,
     ) -> Result<LogicalOperator> {
         let input = input.ok_or_else(|| {
-            Error::Query(QueryError::new(
+            Error::from(QueryError::new(
                 QueryErrorKind::Semantic,
                 "ORDER BY requires input",
             ))
@@ -2357,7 +2536,7 @@ impl CypherTranslator {
                 .iter()
                 .any(|item| contains_aggregate(&item.expression))
         {
-            return Err(Error::Query(QueryError::new(
+            return Err(Error::from(QueryError::new(
                 QueryErrorKind::Semantic,
                 format!(
                     "Invalid use of an aggregating function in ORDER BY: the {} it sorts does \
@@ -2367,10 +2546,10 @@ impl CypherTranslator {
             )));
         }
 
-        // After an aggregating projection or a DISTINCT WITH only its columns
-        // are in scope (TCK WithOrderBy4 [13], [14])
+        // After an aggregating or DISTINCT projection only its columns are in
+        // scope (TCK WithOrderBy4 [13], [14], ReturnOrderBy2 [13])
         let projected = match scope {
-            Some(scope) if scope.aggregating || scope.distinct_with => scope
+            Some(scope) if scope.aggregating || scope.distinct => scope
                 .items
                 .as_deref()
                 .map(|items| self.projected_columns(items))
@@ -2384,10 +2563,23 @@ impl CypherTranslator {
             .map(|item| {
                 let expression = match (scope, &projected) {
                     (Some(scope), Some(columns)) => {
-                        let resolved =
-                            self.translate_projected_sort_key(&item.expression, columns, scope)?;
+                        let resolved = self.translate_projected_sort_key(
+                            &item.expression,
+                            columns,
+                            scope,
+                            false,
+                        )?;
                         check_reads_projection(&resolved, columns, scope)?;
-                        resolved
+                        if scope.aggregating {
+                            resolved
+                        } else {
+                            self.translate_projected_sort_key(
+                                &item.expression,
+                                columns,
+                                scope,
+                                true,
+                            )?
+                        }
                     }
                     _ => self.translate_sort_key(&item.expression)?,
                 };
@@ -2445,7 +2637,11 @@ impl CypherTranslator {
             .map(|item| {
                 let text = self.projection_text(&item.expression)?;
                 let name = item.alias.clone().unwrap_or_else(|| text.clone());
-                Ok(ProjectedColumn { text, name })
+                Ok(ProjectedColumn {
+                    text,
+                    name,
+                    aliased: item.alias.is_some(),
+                })
             })
             .collect()
     }
@@ -2464,28 +2660,38 @@ impl CypherTranslator {
     /// Translates an ORDER BY key after an aggregating or DISTINCT
     /// projection: an expression the projection returns, whole or inside
     /// the key (`max(a.age) + 1`), reads its column. An aggregate it does
-    /// not return is an error: its groups are gone.
+    /// not return is an error: its groups are gone. `as_planned` gives the
+    /// key the sort reads after a DISTINCT RETURN, where an unaliased item's
+    /// column has no name the binder knows: the item's expression itself,
+    /// which has the column's value; without it, each such expression reads
+    /// its column, as the check of what the key reads needs.
     fn translate_projected_sort_key(
         &self,
         expression: &ast::Expression,
         columns: &[ProjectedColumn],
         scope: &SortScope,
+        as_planned: bool,
     ) -> Result<LogicalExpression> {
         let text = self.projection_text(expression)?;
         if let Some(column) = columns.iter().find(|column| column.text == text) {
+            if as_planned && !column.aliased {
+                return self.translate_expression(expression);
+            }
             return Ok(LogicalExpression::Variable(column.name.clone()));
         }
         match expression {
             ast::Expression::Binary { left, op, right } => Ok(LogicalExpression::Binary {
-                left: Box::new(self.translate_projected_sort_key(left, columns, scope)?),
+                left: Box::new(
+                    self.translate_projected_sort_key(left, columns, scope, as_planned)?,
+                ),
                 op: self.translate_binary_op(*op)?,
-                right: Box::new(self.translate_projected_sort_key(right, columns, scope)?),
+                right: Box::new(
+                    self.translate_projected_sort_key(right, columns, scope, as_planned)?,
+                ),
             }),
             ast::Expression::Unary { op, operand } => {
-                let operand = self.translate_projected_sort_key(operand, columns, scope)?;
-                if *op == ast::UnaryOp::Pos {
-                    return Ok(operand);
-                }
+                let operand =
+                    self.translate_projected_sort_key(operand, columns, scope, as_planned)?;
                 Ok(LogicalExpression::Unary {
                     op: self.translate_unary_op(*op)?,
                     operand: Box::new(operand),
@@ -2494,16 +2700,16 @@ impl CypherTranslator {
             ast::Expression::FunctionCall { name, args, .. }
                 if !is_aggregate_function(name) && args.iter().any(contains_aggregate) =>
             {
-                Ok(LogicalExpression::FunctionCall {
-                    name: name.clone(),
-                    args: args
-                        .iter()
-                        .map(|arg| self.translate_projected_sort_key(arg, columns, scope))
+                resolve_cypher_call(
+                    name,
+                    args.iter()
+                        .map(|arg| {
+                            self.translate_projected_sort_key(arg, columns, scope, as_planned)
+                        })
                         .collect::<Result<_>>()?,
-                    distinct: false,
-                })
+                )
             }
-            other if contains_aggregate(other) => Err(Error::Query(QueryError::new(
+            other if contains_aggregate(other) => Err(Error::from(QueryError::new(
                 QueryErrorKind::Semantic,
                 format!(
                     "Invalid use of an aggregating function in ORDER BY: {text} is not an \
@@ -2533,33 +2739,7 @@ impl CypherTranslator {
                 (None, _) => None,
             })
             .collect();
-        let mut read = HashSet::new();
-        for key in &keys {
-            collect_expression_variables(&key.expression, &mut read);
-        }
-        let mut kept: Vec<String> = read
-            .into_iter()
-            .filter(|name| !projected.contains(name))
-            .collect();
-        if kept.is_empty() {
-            return wrap_sort(plan, keys);
-        }
-        kept.sort();
-        let (plan, kept_them) = keep_columns(plan, &kept);
-        if !kept_them {
-            return wrap_sort(plan, keys);
-        }
-        LogicalOperator::Project(ProjectOp {
-            projections: projected
-                .into_iter()
-                .map(|name| Projection {
-                    expression: LogicalExpression::Variable(name),
-                    alias: None,
-                })
-                .collect(),
-            input: Box::new(wrap_sort(plan, keys)),
-            pass_through_input: false,
-        })
+        super::common::sort_keeping_input(plan, keys, projected)
     }
 
     fn translate_skip(
@@ -2568,7 +2748,7 @@ impl CypherTranslator {
         input: Option<LogicalOperator>,
     ) -> Result<LogicalOperator> {
         let input = input.ok_or_else(|| {
-            Error::Query(QueryError::new(
+            Error::from(QueryError::new(
                 QueryErrorKind::Semantic,
                 "SKIP requires input",
             ))
@@ -2584,7 +2764,7 @@ impl CypherTranslator {
         input: Option<LogicalOperator>,
     ) -> Result<LogicalOperator> {
         let input = input.ok_or_else(|| {
-            Error::Query(QueryError::new(
+            Error::from(QueryError::new(
                 QueryErrorKind::Semantic,
                 "LIMIT requires input",
             ))
@@ -2602,7 +2782,7 @@ impl CypherTranslator {
         let elements = self.create_elements(&create_clause.patterns)?;
         if elements.is_empty() {
             return input.ok_or_else(|| {
-                Error::Query(QueryError::new(
+                Error::from(QueryError::new(
                     QueryErrorKind::Semantic,
                     "Empty CREATE pattern",
                 ))
@@ -2638,18 +2818,20 @@ impl CypherTranslator {
                 let mut previous_variable = self.push_created_node(&path.start, elements)?;
                 for rel in &path.chain {
                     if rel.direction == ast::Direction::Undirected {
-                        return Err(Error::Query(QueryError::new(
+                        return Err(Error::from(QueryError::new(
                             QueryErrorKind::Semantic,
                             "CREATE needs the direction of each relationship: write \
                              (a)-[:TYPE]->(b) or (a)<-[:TYPE]-(b)",
                         )));
                     }
                     let target_variable = self.push_created_node(&rel.target, elements)?;
-                    let edge_type = rel
-                        .types
-                        .first()
-                        .cloned()
-                        .unwrap_or_else(|| "RELATED".to_string());
+                    // openCypher gives a created relationship exactly one type.
+                    let edge_type = rel.types.first().cloned().ok_or_else(|| {
+                        Error::from(QueryError::new(
+                            QueryErrorKind::Semantic,
+                            "CREATE needs the type of each relationship: write (a)-[:TYPE]->(b)",
+                        ))
+                    })?;
                     // `(a)<-[:T]-(b)` is a relationship from b to a.
                     let (from_variable, to_variable) = if rel.direction == ast::Direction::Incoming
                     {
@@ -2705,7 +2887,7 @@ impl CypherTranslator {
     fn translate_create_statement(&self, create: &ast::CreateClause) -> Result<LogicalPlan> {
         let elements = self.create_elements(&create.patterns)?;
         if elements.is_empty() {
-            return Err(Error::Query(QueryError::new(
+            return Err(Error::from(QueryError::new(
                 QueryErrorKind::Semantic,
                 "Empty CREATE",
             )));
@@ -2724,14 +2906,15 @@ impl CypherTranslator {
     ) -> Result<LogicalOperator> {
         // Without a clause before it, nothing binds what DELETE names.
         let input = input.ok_or_else(|| {
-            let message = match delete_clause.expressions.first() {
-                Some(ast::Expression::Variable(variable)) => format!(
-                    "Undefined variable '{variable}': DELETE needs a clause before it that \
-                     binds it, such as MATCH"
-                ),
-                _ => "DELETE requires input".to_string(),
-            };
-            Error::Query(QueryError::new(QueryErrorKind::Semantic, message))
+            Error::from(match delete_clause.expressions.first() {
+                Some(ast::Expression::Variable(variable)) => {
+                    QueryError::invalid_reference(format!(
+                        "Undefined variable '{variable}': DELETE needs a clause before it that \
+                         binds it, such as MATCH"
+                    ))
+                }
+                _ => QueryError::new(QueryErrorKind::Semantic, "DELETE requires input"),
+            })
         })?;
 
         let mut plan = input;
@@ -2752,8 +2935,8 @@ impl CypherTranslator {
                     });
                 }
             } else {
-                return Err(Error::Query(QueryError::new(
-                    QueryErrorKind::Semantic,
+                return Err(Error::from(QueryError::new(
+                    QueryErrorKind::Unsupported,
                     "DELETE only supports variable expressions",
                 )));
             }
@@ -2768,7 +2951,7 @@ impl CypherTranslator {
         input: Option<LogicalOperator>,
     ) -> Result<LogicalOperator> {
         let input = input.ok_or_else(|| {
-            Error::Query(QueryError::new(
+            Error::from(QueryError::new(
                 QueryErrorKind::Semantic,
                 "SET requires input",
             ))
@@ -2842,7 +3025,7 @@ impl CypherTranslator {
         input: Option<LogicalOperator>,
     ) -> Result<LogicalOperator> {
         let input = input.ok_or_else(|| {
-            Error::Query(QueryError::new(
+            Error::from(QueryError::new(
                 QueryErrorKind::Semantic,
                 "REMOVE requires input",
             ))
@@ -2932,10 +3115,6 @@ impl CypherTranslator {
             }
             ast::Expression::Unary { op, operand } => {
                 let operand_expr = self.translate_expression(operand)?;
-                // Unary positive is identity: just return the operand
-                if *op == ast::UnaryOp::Pos {
-                    return Ok(operand_expr);
-                }
                 let unary_op = self.translate_unary_op(*op)?;
 
                 Ok(LogicalExpression::Unary {
@@ -2963,11 +3142,7 @@ impl CypherTranslator {
                     .map(|a| self.translate_expression(a))
                     .collect::<Result<_>>()?;
 
-                Ok(LogicalExpression::FunctionCall {
-                    name: name.clone(),
-                    args: translated_args,
-                    distinct: false,
-                })
+                resolve_cypher_call(name, translated_args)
             }
             ast::Expression::List(items) => {
                 let translated: Vec<LogicalExpression> = items
@@ -3146,8 +3321,8 @@ impl CypherTranslator {
                     plan = Some(self.translate_where(w, plan)?);
                 }
                 _ => {
-                    return Err(Error::Query(QueryError::new(
-                        QueryErrorKind::Semantic,
+                    return Err(Error::from(QueryError::new(
+                        QueryErrorKind::Unsupported,
                         "EXISTS and COUNT subqueries only support MATCH, OPTIONAL MATCH and WHERE clauses",
                     )));
                 }
@@ -3155,7 +3330,7 @@ impl CypherTranslator {
         }
 
         plan.ok_or_else(|| {
-            Error::Query(QueryError::new(
+            Error::from(QueryError::new(
                 QueryErrorKind::Semantic,
                 "EXISTS subquery requires at least one MATCH clause",
             ))
@@ -3203,12 +3378,7 @@ impl CypherTranslator {
         Ok(match op {
             ast::UnaryOp::Not => UnaryOp::Not,
             ast::UnaryOp::Neg => UnaryOp::Neg,
-            ast::UnaryOp::Pos => {
-                return Err(Error::Query(QueryError::new(
-                    QueryErrorKind::Semantic,
-                    "Unary positive not yet supported",
-                )));
-            }
+            ast::UnaryOp::Pos => UnaryOp::Pos,
             ast::UnaryOp::IsNull => UnaryOp::IsNull,
             ast::UnaryOp::IsNotNull => UnaryOp::IsNotNull,
         })
@@ -3224,8 +3394,8 @@ impl CypherTranslator {
                 Ok(CountExpr::Literal(n))
             }
             ast::Expression::Parameter(name) => Ok(CountExpr::Parameter(name.clone())),
-            _ => Err(Error::Query(QueryError::new(
-                QueryErrorKind::Semantic,
+            _ => Err(Error::from(QueryError::new(
+                QueryErrorKind::Unsupported,
                 "Expected integer literal or parameter for SKIP/LIMIT",
             ))),
         }
@@ -3237,10 +3407,9 @@ impl CypherTranslator {
             LogicalOperator::Expand(expand) => Ok(expand.to_variable.clone()),
             LogicalOperator::Filter(filter) => Self::get_last_variable(&filter.input),
             LogicalOperator::Project(project) => Self::get_last_variable(&project.input),
-            _ => Err(Error::Query(QueryError::new(
-                QueryErrorKind::Semantic,
-                "Cannot get variable from operator",
-            ))),
+            _ => Err(Error::Internal(
+                "Cannot get variable from operator".to_string(),
+            )),
         }
     }
 
@@ -3483,7 +3652,7 @@ impl CypherTranslator {
             {
                 // 1. Extract anchor variable
                 let anchor = Self::extract_anchor_variable(subplan).ok_or_else(|| {
-                    Error::Query(QueryError::new(
+                    Error::from(QueryError::new(
                         QueryErrorKind::Semantic,
                         "Pattern comprehension must start with a node pattern",
                     ))
@@ -3606,56 +3775,8 @@ fn check_reads_projection(
     columns: &[ProjectedColumn],
     scope: &SortScope,
 ) -> Result<()> {
-    let mut read = HashSet::new();
-    collect_expression_variables(key, &mut read);
-    let missing = read
-        .into_iter()
-        .filter(|name| !columns.iter().any(|column| &column.name == name))
-        .min();
-    match missing {
-        None => Ok(()),
-        Some(name) => Err(Error::Query(QueryError::new(
-            QueryErrorKind::Semantic,
-            format!(
-                "Undefined variable '{name}': after {} {}, ORDER BY reads only what it returns",
-                if scope.aggregating {
-                    "an aggregating"
-                } else {
-                    "a DISTINCT"
-                },
-                scope.clause
-            ),
-        ))),
-    }
-}
-
-/// Adds the variables `kept` to the projection of a WITH (`plan`, maybe
-/// under the filter of its WHERE), so that a sort after it reads them, and
-/// says whether it did. A plan of another shape, or a WHERE that reads one
-/// of them (where they are not in scope), comes back unchanged.
-fn keep_columns(plan: LogicalOperator, kept: &[String]) -> (LogicalOperator, bool) {
-    match plan {
-        LogicalOperator::Project(mut project) if !project.pass_through_input => {
-            project
-                .projections
-                .extend(kept.iter().map(|name| Projection {
-                    expression: LogicalExpression::Variable(name.clone()),
-                    alias: None,
-                }));
-            (LogicalOperator::Project(project), true)
-        }
-        LogicalOperator::Filter(mut filter) => {
-            let mut read = HashSet::new();
-            collect_expression_variables(&filter.predicate, &mut read);
-            if kept.iter().any(|name| read.contains(name)) {
-                return (LogicalOperator::Filter(filter), false);
-            }
-            let (input, kept_them) = keep_columns(*filter.input, kept);
-            filter.input = Box::new(input);
-            (LogicalOperator::Filter(filter), kept_them)
-        }
-        other => (other, false),
-    }
+    let names: Vec<&str> = columns.iter().map(|column| column.name.as_str()).collect();
+    super::common::check_sort_reads_projection(key, &names, scope.clause, scope.aggregating)
 }
 
 /// The column name of `item`, an item after `*` in a WITH or RETURN
@@ -3674,7 +3795,7 @@ fn star_item_name(
         (None, _) => return Ok(None),
     };
     if bound.is_some_and(|bound| bound.contains(&name)) {
-        return Err(Error::Query(QueryError::new(
+        return Err(Error::from(QueryError::new(
             QueryErrorKind::Semantic,
             format!("{clause} *, {name}: {name} is already one of the variables * passes on"),
         )));
@@ -3733,6 +3854,25 @@ fn contains_aggregate(expr: &ast::Expression) -> bool {
         }
         _ => false,
     }
+}
+
+/// The call for `name(args)` in Cypher, as [`resolve_call`] builds it, except
+/// that openCypher's `datetime()` and `time()` are zoned: they keep the
+/// input's offset, and are at +00:00 without one (`localdatetime()` and
+/// `localtime()` are the local ones, as GQL's `datetime` and `time` are).
+fn resolve_cypher_call(name: &str, args: Vec<LogicalExpression>) -> Result<LogicalExpression> {
+    let zoned = if name.eq_ignore_ascii_case("datetime") {
+        "zoned_datetime"
+    } else if name.eq_ignore_ascii_case("time") {
+        "zoned_time"
+    } else {
+        return resolve_call(name, args, false);
+    };
+    let mut call = resolve_call(zoned, args, false)?;
+    if let LogicalExpression::FunctionCall { name: called, .. } = &mut call {
+        *called = name.to_string();
+    }
+    Ok(call)
 }
 
 #[cfg(test)]
@@ -3805,6 +3945,7 @@ mod tests {
                 "{:?}",
                 key(
                     LogicalExpression::FunctionCall {
+                        callee: crate::query::plan::Callee::named("startNode"),
                         name: "startNode".to_string(),
                         args: vec![LogicalExpression::Variable("r".to_string())],
                         distinct: false,
@@ -4465,22 +4606,22 @@ mod tests {
 
     #[test]
     fn test_translate_merge_with_relationship() {
-        // MERGE with a relationship pattern should produce MergeRelationship operator
+        // MERGE with a relationship pattern matches the whole pattern, or
+        // else creates it: an Apply over an Otherwise of the two
         let plan =
             translate("MATCH (a {id: 'x'}), (b {id: 'y'}) MERGE (a)-[r:KNOWS]->(b) RETURN r")
                 .unwrap();
-
-        // The plan root should be a Return
-        if let LogicalOperator::Return(ret) = &plan.root {
-            // The input to Return should be MergeRelationship
-            assert!(
-                matches!(ret.input.as_ref(), LogicalOperator::MergeRelationship(_)),
-                "Expected MergeRelationship, got: {:?}",
-                std::mem::discriminant(ret.input.as_ref())
-            );
-        } else {
+        let LogicalOperator::Return(ret) = &plan.root else {
             panic!("Expected Return at root");
-        }
+        };
+        let LogicalOperator::Apply(apply) = ret.input.as_ref() else {
+            panic!("Expected Apply, got: {:?}", ret.input);
+        };
+        assert!(
+            matches!(apply.subplan.as_ref(), LogicalOperator::Otherwise(_)),
+            "Expected Otherwise, got: {:?}",
+            apply.subplan
+        );
     }
 
     #[test]

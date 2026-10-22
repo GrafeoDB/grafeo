@@ -13,7 +13,7 @@ vi.setConfig({ testTimeout: 60_000 })
 import { readFileSync, readdirSync, statSync, existsSync } from 'fs'
 import { join, relative, resolve } from 'path'
 import { parseGtestFile, coerceParams, paramValue } from './parser.mjs'
-import { assertRowsSorted, assertRowsOrdered, assertRowsWithPrecision, assertHash, resultToRows } from './comparator.mjs'
+import { assertRowsSorted, assertRowsOrdered, assertRowsWithPrecision, assertHash, describeError, assertGqlStatus } from './comparator.mjs'
 
 // ---------------------------------------------------------------------------
 // Import GrafeoDB (skip all tests gracefully if unavailable)
@@ -23,7 +23,7 @@ let GrafeoDB
 let GRAFEO_AVAILABLE = false
 
 try {
-  const mod = await import('../../../../crates/bindings/node/index.js')
+  const mod = await import('../../../../crates/bindings/node/grafeo.js')
   GrafeoDB = mod.GrafeoDB
   GRAFEO_AVAILABLE = true
 } catch {
@@ -140,15 +140,16 @@ describe('parameter values', () => {
     expect(paramValue('{"min": -9223372036854775808}')).toEqual({ min: -9223372036854775808n })
   })
 
-  it('makes a JSON integer past 64 bits a float', () => {
+  it('passes a JSON integer past 64 bits as a BigInt, which the binding types', () => {
     expect(paramValue('[9223372036854775808, {"big": 18446744073709551616}]')).toEqual([
-      9223372036854775808,
-      { big: 18446744073709551616 },
+      9223372036854775808n,
+      { big: 18446744073709551616n },
     ])
+    expect(paramValue(`1${'0'.repeat(38)}`)).toBe(10n ** 38n)
   })
 
   it('refuses a JSON number past the f64 range', () => {
-    for (const text of ['[1e400]', '{"tiny": [-1e400]}', `[1${'0'.repeat(400)}]`]) {
+    for (const text of ['[1e400]', '{"tiny": [-1e400]}', `[1${'0'.repeat(400)}.0]`]) {
       expect(() => paramValue(text)).toThrow('out of the f64 range')
     }
   })
@@ -262,21 +263,25 @@ async function runTestCase(db, tc, language, setupLanguage) {
   const params = coerceParams(tc.params)
 
   // Determine queries
-  const queries = tc.statements.length > 0 ? tc.statements : (tc.query || exp.error != null) ? [tc.query ?? ''] : []
+  const queries = tc.statements.length > 0 ? tc.statements : (tc.query || exp.error != null || exp.gqlStatus != null) ? [tc.query ?? ''] : []
   if (queries.length === 0) throw new Error(`No query or statements in test '${tc.name}'`)
 
   // Error case: execute all-but-last normally, only last should fail
-  if (exp.error != null) {
+  if (exp.error != null || exp.gqlStatus != null) {
     for (let i = 0; i < queries.length - 1; i++) {
       await executeQuery(db, language, queries[i], params)
     }
+    let failure = null
     try {
       await executeQuery(db, language, queries[queries.length - 1], params)
-      throw new Error(`Expected error containing '${exp.error}' but query succeeded`)
     } catch (err) {
-      if (err.message.startsWith('Expected error')) throw err
-      expect(err.message || String(err)).toContain(exp.error)
+      failure = err
     }
+    if (failure === null) {
+      throw new Error(`Expected error ${describeError(exp)} but query succeeded`)
+    }
+    if (exp.error != null) expect(failure.message || String(failure)).toContain(exp.error)
+    if (exp.gqlStatus != null) assertGqlStatus(failure, exp.gqlStatus)
     return
   }
 

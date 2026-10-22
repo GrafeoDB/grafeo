@@ -1,10 +1,10 @@
 //! Expand operator for relationship traversal.
 
-use super::{Operator, OperatorError, OperatorResult};
+use super::{Operator, OperatorError, OperatorResult, ReadCounter};
 use crate::execution::DataChunk;
 use crate::graph::Direction;
-use crate::graph::GraphStoreSearch;
-use grafeo_common::types::{EdgeId, EpochId, LogicalType, NodeId, TransactionId};
+use crate::graph::GraphStore;
+use grafeo_common::types::{ArcStr, EdgeId, LogicalType, NodeId, ReadView};
 use std::sync::Arc;
 
 /// An expand operator that traverses edges from source nodes.
@@ -13,15 +13,15 @@ use std::sync::Arc;
 /// output rows for each neighbor connected via matching edges.
 pub struct ExpandOperator {
     /// The store to traverse.
-    store: Arc<dyn GraphStoreSearch>,
+    store: Arc<dyn GraphStore>,
     /// Input operator providing source nodes.
     input: Box<dyn Operator>,
     /// Index of the source node column in input.
     source_column: usize,
     /// Direction of edge traversal.
     direction: Direction,
-    /// Edge type filter (empty = match all types, multiple = match any).
-    edge_types: Vec<String>,
+    /// The edge types to follow, as stored (every type when empty).
+    edge_types: Vec<ArcStr>,
     /// Chunk capacity.
     chunk_capacity: usize,
     /// Current input chunk being processed.
@@ -34,40 +34,37 @@ pub struct ExpandOperator {
     current_edge_idx: usize,
     /// Whether the operator is exhausted.
     exhausted: bool,
-    /// Transaction ID for MVCC visibility (None = use current epoch).
-    transaction_id: Option<TransactionId>,
-    /// Epoch for version visibility.
-    viewing_epoch: Option<EpochId>,
-    /// When true, skip versioned (MVCC) lookups even if a transaction ID is
-    /// present.  Safe for read-only queries where the transaction has no
-    /// pending writes, avoiding the cost of walking version chains.
-    read_only: bool,
+    /// Who reads: the expand follows the edges this view sees.
+    view: ReadView,
+    /// Counts the edges the expansion reads.
+    reads: Option<Arc<ReadCounter>>,
 }
 
 impl ExpandOperator {
-    /// Creates a new expand operator.
+    /// Creates an expand of the edges of `edge_types` (as stored, every type
+    /// when empty) that `view` sees.
     pub fn new(
-        store: Arc<dyn GraphStoreSearch>,
+        store: Arc<dyn GraphStore>,
         input: Box<dyn Operator>,
         source_column: usize,
         direction: Direction,
         edge_types: Vec<String>,
+        view: ReadView,
     ) -> Self {
         Self {
             store,
             input,
             source_column,
             direction,
-            edge_types,
+            edge_types: stored_types(edge_types),
             chunk_capacity: 2048,
             current_input: None,
             current_row: 0,
             current_edges: Vec::with_capacity(16), // typical node degree
             current_edge_idx: 0,
             exhausted: false,
-            transaction_id: None,
-            viewing_epoch: None,
-            read_only: false,
+            view,
+            reads: None,
         }
     }
 
@@ -77,26 +74,10 @@ impl ExpandOperator {
         self
     }
 
-    /// Sets the transaction context for MVCC visibility.
-    ///
-    /// When set, the expand will only traverse visible edges and nodes.
-    pub fn with_transaction_context(
-        mut self,
-        epoch: EpochId,
-        transaction_id: Option<TransactionId>,
-    ) -> Self {
-        self.viewing_epoch = Some(epoch);
-        self.transaction_id = transaction_id;
-        self
-    }
-
-    /// Marks this expand as read-only, enabling fast-path lookups.
-    ///
-    /// When the query has no mutations, versioned MVCC lookups (which walk
-    /// version chains to find PENDING writes) can be skipped in favour of
-    /// cheaper epoch-only visibility checks.
-    pub fn with_read_only(mut self, read_only: bool) -> Self {
-        self.read_only = read_only;
+    /// Counts the edges the expansion reads in `reads`.
+    #[must_use]
+    pub fn with_read_counter(mut self, reads: Arc<ReadCounter>) -> Self {
+        self.reads = Some(reads);
         self
     }
 
@@ -143,6 +124,13 @@ impl ExpandOperator {
             OperatorError::ColumnNotFound(format!("Column {} not found", self.source_column))
         })?;
 
+        // A null source (a node an OPTIONAL MATCH did not find) has no edges:
+        // a pattern from it matches nothing.
+        if col.is_null(self.current_row) {
+            self.current_edges = Vec::new();
+            self.current_edge_idx = 0;
+            return Ok(true);
+        }
         let source_id = col
             .get_node_id(self.current_row)
             .ok_or_else(|| OperatorError::Internal("Expected node ID in source column".into()))?;
@@ -151,73 +139,55 @@ impl ExpandOperator {
             self.store.as_ref(),
             source_id,
             self.direction,
-            &self.edge_types,
-            self.viewing_epoch,
-            self.transaction_id,
-            self.read_only,
-        );
+            &EdgeWalk {
+                edge_types: &self.edge_types,
+                view: self.view,
+                reads: self.reads.as_deref(),
+            },
+        )?;
         self.current_edge_idx = 0;
         Ok(true)
     }
 }
 
-/// The edges from `node` in `direction` that a query sees, each with the node
-/// at its other end: those of one of `edge_types` (any type when empty) whose
-/// edge and other end are visible at `epoch` (every edge without one). The
-/// expand operators, variable-length expands, factorized chains and shortest
-/// paths all walk edges with it.
+/// The edge types of a pattern as the store holds them: the planner has
+/// resolved the query's names to the stored ones, which the store matches
+/// exactly.
+pub(crate) fn stored_types(edge_types: Vec<String>) -> Vec<ArcStr> {
+    edge_types.into_iter().map(ArcStr::from).collect()
+}
+
+/// What an edge walker passes to [`visible_edges_from`] besides the node and
+/// direction: the edge types it takes (any type when empty), who reads, and
+/// the counter of the edges it reads.
+#[derive(Clone, Copy)]
+pub(super) struct EdgeWalk<'a> {
+    /// The edge types to take, as stored; every type when empty.
+    pub(super) edge_types: &'a [ArcStr],
+    /// Who reads.
+    pub(super) view: ReadView,
+    /// Counts the edges read.
+    pub(super) reads: Option<&'a ReadCounter>,
+}
+
+/// The edges from `node` in `direction` that a query sees, each with the
+/// node at its other end: those of one of the walk's types (any type when
+/// empty) that its view sees, whose other end it sees, a self-loop once
+/// both ways ([`GraphStore::edges`]). The expand operators, variable-length
+/// expands, factorized chains and shortest paths all walk edges with it.
 ///
-/// A query that may have written (`read_only` false) in a transaction reads
-/// the type and the visibility as of its transaction: they see the edges it
-/// created and has not committed (the committed type, `edge_type`, has none
-/// for them), and not those it deleted. A read-only query outside a
-/// transaction has no writes pending, so the committed state at its epoch
-/// answers both, without walking version chains.
+/// # Errors
+///
+/// Returns the error of a read the store cannot do.
 pub(super) fn visible_edges_from(
-    store: &dyn GraphStoreSearch,
+    store: &dyn GraphStore,
     node: NodeId,
     direction: Direction,
-    edge_types: &[String],
-    epoch: Option<EpochId>,
-    transaction_id: Option<TransactionId>,
-    read_only: bool,
-) -> Vec<(NodeId, EdgeId)> {
-    let versioned = if read_only {
-        None
-    } else {
-        epoch.zip(transaction_id)
-    };
-    let mut edges = store.edges_from(node, direction);
-    edges.retain(|&(other, edge)| {
-        if !edge_types.is_empty() {
-            let actual = match versioned {
-                Some((epoch, transaction_id)) => {
-                    store.edge_type_versioned(edge, epoch, transaction_id)
-                }
-                None => store.edge_type(edge),
-            };
-            let type_matches = actual.is_some_and(|actual| {
-                edge_types
-                    .iter()
-                    .any(|wanted| actual.as_str().eq_ignore_ascii_case(wanted))
-            });
-            if !type_matches {
-                return false;
-            }
-        }
-        match (versioned, epoch) {
-            (Some((epoch, transaction_id)), _) => {
-                store.is_edge_visible_versioned(edge, epoch, transaction_id)
-                    && store.is_node_visible_versioned(other, epoch, transaction_id)
-            }
-            (None, Some(epoch)) => {
-                store.is_edge_visible_at_epoch(edge, epoch)
-                    && store.is_node_visible_at_epoch(other, epoch)
-            }
-            (None, None) => true,
-        }
-    });
-    edges
+    walk: &EdgeWalk<'_>,
+) -> Result<Vec<(NodeId, EdgeId)>, OperatorError> {
+    let edges = store.edges(node, direction, walk.edge_types, walk.view)?;
+    super::read_counter::count(walk.reads, edges.len());
+    Ok(edges)
 }
 
 impl Operator for ExpandOperator {
@@ -334,17 +304,17 @@ impl Operator for ExpandOperator {
     }
 }
 
-#[cfg(all(test, feature = "lpg"))]
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::execution::operators::ScanOperator;
-    use crate::graph::lpg::LpgStore;
+    use crate::graph::rowgroup::RowGroupStore;
 
-    /// Creates a new `LpgStore` wrapped in an `Arc` and returns both the
+    /// Creates a new `RowGroupStore` wrapped in an `Arc` and returns both the
     /// concrete handle (for mutation) and a trait-object handle (for operators).
-    fn test_store() -> (Arc<LpgStore>, Arc<dyn GraphStoreSearch>) {
-        let store = Arc::new(LpgStore::new().unwrap());
-        let dyn_store: Arc<dyn GraphStoreSearch> = Arc::clone(&store) as Arc<dyn GraphStoreSearch>;
+    fn test_store() -> (Arc<RowGroupStore>, Arc<dyn GraphStore>) {
+        let store = Arc::new(RowGroupStore::new());
+        let dyn_store: Arc<dyn GraphStore> = Arc::clone(&store) as Arc<dyn GraphStore>;
         (store, dyn_store)
     }
 
@@ -362,7 +332,11 @@ mod tests {
         store.create_edge(alix, vincent, "KNOWS");
 
         // Scan Alix only
-        let scan = Box::new(ScanOperator::with_label(Arc::clone(&dyn_store), "Person"));
+        let scan = Box::new(ScanOperator::with_label(
+            Arc::clone(&dyn_store),
+            "Person",
+            ReadView::latest(),
+        ));
 
         let mut expand = ExpandOperator::new(
             Arc::clone(&dyn_store),
@@ -370,6 +344,7 @@ mod tests {
             0, // source column
             Direction::Outgoing,
             vec![],
+            ReadView::latest(),
         );
 
         // Collect all results
@@ -408,7 +383,11 @@ mod tests {
         store.create_edge(alix, gus, "KNOWS");
         store.create_edge(alix, company, "WORKS_AT");
 
-        let scan = Box::new(ScanOperator::with_label(Arc::clone(&dyn_store), "Person"));
+        let scan = Box::new(ScanOperator::with_label(
+            Arc::clone(&dyn_store),
+            "Person",
+            ReadView::latest(),
+        ));
 
         let mut expand = ExpandOperator::new(
             Arc::clone(&dyn_store),
@@ -416,6 +395,7 @@ mod tests {
             0,
             Direction::Outgoing,
             vec!["KNOWS".to_string()],
+            ReadView::latest(),
         );
 
         let mut results = Vec::new();
@@ -441,10 +421,20 @@ mod tests {
         store.create_edge(alix, gus, "KNOWS");
 
         // Scan Gus
-        let scan = Box::new(ScanOperator::with_label(Arc::clone(&dyn_store), "Person"));
+        let scan = Box::new(ScanOperator::with_label(
+            Arc::clone(&dyn_store),
+            "Person",
+            ReadView::latest(),
+        ));
 
-        let mut expand =
-            ExpandOperator::new(Arc::clone(&dyn_store), scan, 0, Direction::Incoming, vec![]);
+        let mut expand = ExpandOperator::new(
+            Arc::clone(&dyn_store),
+            scan,
+            0,
+            Direction::Incoming,
+            vec![],
+            ReadView::latest(),
+        );
 
         let mut results = Vec::new();
         while let Ok(Some(chunk)) = expand.next() {
@@ -467,10 +457,20 @@ mod tests {
 
         store.create_node(&["Person"]);
 
-        let scan = Box::new(ScanOperator::with_label(Arc::clone(&dyn_store), "Person"));
+        let scan = Box::new(ScanOperator::with_label(
+            Arc::clone(&dyn_store),
+            "Person",
+            ReadView::latest(),
+        ));
 
-        let mut expand =
-            ExpandOperator::new(Arc::clone(&dyn_store), scan, 0, Direction::Outgoing, vec![]);
+        let mut expand = ExpandOperator::new(
+            Arc::clone(&dyn_store),
+            scan,
+            0,
+            Direction::Outgoing,
+            vec![],
+            ReadView::latest(),
+        );
 
         let result = expand.next().unwrap();
         assert!(result.is_none());
@@ -484,9 +484,19 @@ mod tests {
         let b = store.create_node(&["Person"]);
         store.create_edge(a, b, "KNOWS");
 
-        let scan = Box::new(ScanOperator::with_label(Arc::clone(&dyn_store), "Person"));
-        let mut expand =
-            ExpandOperator::new(Arc::clone(&dyn_store), scan, 0, Direction::Outgoing, vec![]);
+        let scan = Box::new(ScanOperator::with_label(
+            Arc::clone(&dyn_store),
+            "Person",
+            ReadView::latest(),
+        ));
+        let mut expand = ExpandOperator::new(
+            Arc::clone(&dyn_store),
+            scan,
+            0,
+            Direction::Outgoing,
+            vec![],
+            ReadView::latest(),
+        );
 
         // First pass
         let mut count1 = 0;
@@ -508,9 +518,19 @@ mod tests {
     #[test]
     fn test_expand_name() {
         let (_store, dyn_store) = test_store();
-        let scan = Box::new(ScanOperator::with_label(Arc::clone(&dyn_store), "Person"));
-        let expand =
-            ExpandOperator::new(Arc::clone(&dyn_store), scan, 0, Direction::Outgoing, vec![]);
+        let scan = Box::new(ScanOperator::with_label(
+            Arc::clone(&dyn_store),
+            "Person",
+            ReadView::latest(),
+        ));
+        let expand = ExpandOperator::new(
+            Arc::clone(&dyn_store),
+            scan,
+            0,
+            Direction::Outgoing,
+            vec![],
+            ReadView::latest(),
+        );
         assert_eq!(expand.name(), "Expand");
     }
 
@@ -524,10 +544,20 @@ mod tests {
             store.create_edge(a, b, "KNOWS");
         }
 
-        let scan = Box::new(ScanOperator::with_label(Arc::clone(&dyn_store), "Person"));
-        let mut expand =
-            ExpandOperator::new(Arc::clone(&dyn_store), scan, 0, Direction::Outgoing, vec![])
-                .with_chunk_capacity(2);
+        let scan = Box::new(ScanOperator::with_label(
+            Arc::clone(&dyn_store),
+            "Person",
+            ReadView::latest(),
+        ));
+        let mut expand = ExpandOperator::new(
+            Arc::clone(&dyn_store),
+            scan,
+            0,
+            Direction::Outgoing,
+            vec![],
+            ReadView::latest(),
+        )
+        .with_chunk_capacity(2);
 
         // With capacity 2 and 5 edges from node a, we should get multiple chunks
         let mut total = 0;
@@ -544,21 +574,29 @@ mod tests {
         );
     }
 
+    /// The expand matches edge types as stored: the planner resolves a
+    /// query's names to the stored ones (case-insensitively) before it
+    /// builds the expand.
     #[test]
-    fn test_expand_edge_type_case_insensitive() {
+    fn test_expand_edge_type_matches_the_stored_name() {
         let (store, dyn_store) = test_store();
 
         let a = store.create_node(&["Person"]);
         let b = store.create_node(&["Person"]);
         store.create_edge(a, b, "KNOWS");
 
-        let scan = Box::new(ScanOperator::with_label(Arc::clone(&dyn_store), "Person"));
+        let scan = Box::new(ScanOperator::with_label(
+            Arc::clone(&dyn_store),
+            "Person",
+            ReadView::latest(),
+        ));
         let mut expand = ExpandOperator::new(
             Arc::clone(&dyn_store),
             scan,
             0,
             Direction::Outgoing,
-            vec!["knows".to_string()], // lowercase
+            vec!["knows".to_string()],
+            ReadView::latest(),
         );
 
         let mut count = 0;
@@ -566,8 +604,7 @@ mod tests {
             count += chunk.row_count();
         }
 
-        // Should match case-insensitively
-        assert_eq!(count, 1);
+        assert_eq!(count, 0, "another spelling is another type to the store");
     }
 
     #[test]
@@ -581,9 +618,19 @@ mod tests {
         store.create_edge(a, c, "KNOWS");
         store.create_edge(b, c, "KNOWS");
 
-        let scan = Box::new(ScanOperator::with_label(Arc::clone(&dyn_store), "Person"));
-        let mut expand =
-            ExpandOperator::new(Arc::clone(&dyn_store), scan, 0, Direction::Outgoing, vec![]);
+        let scan = Box::new(ScanOperator::with_label(
+            Arc::clone(&dyn_store),
+            "Person",
+            ReadView::latest(),
+        ));
+        let mut expand = ExpandOperator::new(
+            Arc::clone(&dyn_store),
+            scan,
+            0,
+            Direction::Outgoing,
+            vec![],
+            ReadView::latest(),
+        );
 
         let mut results = Vec::new();
         while let Ok(Some(chunk)) = expand.next() {
@@ -606,9 +653,16 @@ mod tests {
         let scan = Box::new(ScanOperator::with_label(
             Arc::clone(&dyn_store),
             "Nonexistent",
+            ReadView::latest(),
         ));
-        let mut expand =
-            ExpandOperator::new(Arc::clone(&dyn_store), scan, 0, Direction::Outgoing, vec![]);
+        let mut expand = ExpandOperator::new(
+            Arc::clone(&dyn_store),
+            scan,
+            0,
+            Direction::Outgoing,
+            vec![],
+            ReadView::latest(),
+        );
 
         let result = expand.next().unwrap();
         assert!(result.is_none());
@@ -617,8 +671,19 @@ mod tests {
     #[test]
     fn test_expand_into_any() {
         let (_store, dyn_store) = test_store();
-        let scan = Box::new(ScanOperator::with_label(Arc::clone(&dyn_store), "Person"));
-        let op = ExpandOperator::new(Arc::clone(&dyn_store), scan, 0, Direction::Outgoing, vec![]);
+        let scan = Box::new(ScanOperator::with_label(
+            Arc::clone(&dyn_store),
+            "Person",
+            ReadView::latest(),
+        ));
+        let op = ExpandOperator::new(
+            Arc::clone(&dyn_store),
+            scan,
+            0,
+            Direction::Outgoing,
+            vec![],
+            ReadView::latest(),
+        );
         let any = Box::new(op).into_any();
         assert!(any.downcast::<ExpandOperator>().is_ok());
     }

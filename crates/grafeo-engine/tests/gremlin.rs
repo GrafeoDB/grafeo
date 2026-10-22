@@ -1115,6 +1115,117 @@ fn test_step_not_excludes_matching() {
 }
 
 // ============================================================================
+// Anonymous Traversals (`__`)
+// ============================================================================
+
+#[test]
+fn test_anon_and_matches_bare_form() {
+    let db = create_social_network();
+    let prefixed = db
+        .execute_gremlin("g.V().and(__.has('age', gt(25)), __.has('city', 'Amsterdam'))")
+        .unwrap();
+    assert_eq!(prefixed.row_count(), 1, "Only Alix matches");
+}
+
+#[test]
+fn test_anon_or_matches_bare_form() {
+    let db = create_social_network();
+    let prefixed = db
+        .execute_gremlin("g.V().hasLabel('Person').or(__.has('age', 25), __.has('age', 35))")
+        .unwrap();
+    assert_eq!(prefixed.row_count(), 2, "Gus (25) and Vincent (35)");
+}
+
+#[test]
+fn test_anon_not_matches_bare_form() {
+    let db = create_social_network();
+    let prefixed = db
+        .execute_gremlin("g.V().hasLabel('Person').not(__.has('city', 'Berlin'))")
+        .unwrap();
+    assert_eq!(prefixed.row_count(), 2, "Alix and Vincent");
+}
+
+#[test]
+fn test_anon_mixed_prefixed_and_bare_args() {
+    let db = create_social_network();
+    let result = db
+        .execute_gremlin("g.V().or(__.has('city', 'Berlin'), has('city', 'Paris'))")
+        .unwrap();
+    assert_eq!(result.row_count(), 2, "Gus (Berlin) and Vincent (Paris)");
+}
+
+#[test]
+fn test_anon_where_traversal() {
+    let db = create_social_network();
+    let result = db
+        .execute_gremlin("g.V().hasLabel('Person').where(__.out('KNOWS'))")
+        .unwrap();
+    assert_eq!(result.row_count(), 2, "Alix and Gus have outgoing KNOWS");
+}
+
+#[test]
+fn test_anon_nested_compound_group() {
+    // Regression: nested and()/or() inside a compound group used to be dropped
+    // silently, yielding only the last sub-traversal's predicate.
+    let db = create_social_network();
+    let result = db
+        .execute_gremlin(
+            "g.V().hasLabel('Person')\
+             .or(__.and(__.has('age', gt(25)), __.has('city', 'Amsterdam')), \
+                 __.has('city', 'Paris'))",
+        )
+        .unwrap();
+    assert_eq!(
+        result.row_count(),
+        2,
+        "Alix (age>25 AND Amsterdam) and Vincent (Paris); Gus excluded"
+    );
+}
+
+#[test]
+fn test_anon_nested_compound_group_and_of_ors() {
+    let db = create_social_network();
+    let result = db
+        .execute_gremlin(
+            "g.V().hasLabel('Person')\
+             .and(__.or(__.has('city', 'Berlin'), __.has('city', 'Paris')), \
+                  __.has('age', gt(30)))",
+        )
+        .unwrap();
+    assert_eq!(
+        result.row_count(),
+        1,
+        "Only Vincent is (Berlin OR Paris) AND age > 30"
+    );
+}
+
+#[test]
+fn test_not_retains_vertices_missing_the_property() {
+    // TinkerPop: not() keeps traversers where the inner traversal yields nothing,
+    // including vertices that simply lack the property. Acme (Company) has no `city`.
+    let db = create_social_network();
+    let result = db
+        .execute_gremlin("g.V().not(__.has('city', 'Berlin'))")
+        .unwrap();
+    assert_eq!(
+        result.row_count(),
+        3,
+        "Alix, Vincent, and Acme (no `city` property) are retained; Gus excluded"
+    );
+}
+
+#[test]
+fn test_nested_not_is_null_safe_too() {
+    let db = create_social_network();
+    let result = db
+        .execute_gremlin(
+            "g.V().and(__.not(__.has('city', 'Berlin')), __.has('name', neq('Nobody')))",
+        )
+        .unwrap();
+    assert_eq!(result.row_count(), 3, "Alix, Vincent, Acme");
+}
+
+// ============================================================================
 // Compound Predicates via Equivalent Built-in Predicates
 //
 // The AST supports Predicate::And/Or/Not, but the parser does not yet
@@ -1994,4 +2105,25 @@ fn test_element_map_no_args() {
         }
         other => panic!("Expected Map value from elementMap(), got: {other:?}"),
     }
+}
+
+/// A step a predicate traversal cannot evaluate yet fails the query: leaving
+/// it out loosened the filter, so `or(has('name', 'Gus'), outE('KNOWS'))`
+/// returned Gus alone where TinkerPop also returns Alix.
+#[test]
+fn an_unsupported_step_in_a_predicate_is_an_error() {
+    let db = create_social_network();
+    let error = db
+        .execute_gremlin("g.V().or(__.has('name', 'Gus'), __.outE('KNOWS'))")
+        .unwrap_err()
+        .to_string();
+    assert!(
+        error.contains("outE") && error.contains("not supported"),
+        "{error}"
+    );
+    let error = db
+        .execute_gremlin("g.V().where(__.outE('KNOWS'))")
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("outE"), "{error}");
 }

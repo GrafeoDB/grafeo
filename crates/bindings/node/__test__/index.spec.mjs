@@ -1,6 +1,6 @@
 import { readFileSync } from 'node:fs'
 import { describe, it, expect, beforeEach, afterEach } from 'vitest'
-import { GrafeoDB, version, simdSupport } from '../index.js'
+import { GrafeoDB, version, simdSupport } from '../grafeo.js'
 
 const packageVersion = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8')).version
 
@@ -375,6 +375,21 @@ describe('GQL queries', () => {
     db.close()
   })
 
+  it('should pass decimals as { $decimal } both ways, keeping the scale', async () => {
+    const db = GrafeoDB.create()
+    const sum = await db.execute('RETURN $a + $b AS total', {
+      a: { $decimal: '0.10' },
+      b: { $decimal: '0.2' },
+    })
+    expect(sum.scalar()).toEqual({ $decimal: '0.30' })
+    const back = await db.execute('RETURN $d AS d', { d: sum.scalar() })
+    expect(back.scalar()).toEqual({ $decimal: '0.30' })
+    // An object with other keys is a map, not a decimal.
+    const map = await db.execute('RETURN $m AS m', { m: { $decimal: '1', other: 2 } })
+    expect(map.scalar()).toEqual({ $decimal: '1', other: 2 })
+    db.close()
+  })
+
   it('should return scalar value', async () => {
     const db = GrafeoDB.create()
     await db.execute("INSERT (:Person {name: 'Alix'})")
@@ -578,6 +593,51 @@ describe('QueryResult metadata', () => {
     const ids = nodes.map((n) => n.id)
     const uniqueIds = [...new Set(ids)]
     expect(ids.length).toBe(uniqueIds.length)
+    db.close()
+  })
+
+  // A property named like a structural key never replaces the identity, and
+  // a property whose name starts with `_` is kept (#254).
+  it('keeps the identity of nodes with properties named like structural keys', async () => {
+    const db = GrafeoDB.create()
+    await db.execute(
+      "INSERT (:Person {name: 'Alix', _id: 'x', _created: 2020})-[:KNOWS {_note: 'Paris'}]->(:Person {name: 'Gus', _id: 0})"
+    )
+    const ids = Object.fromEntries(
+      (await db.execute('MATCH (p:Person) RETURN p.name AS name, id(p) AS id'))
+        .toArray()
+        .map((row) => [row.name, Number(row.id)])
+    )
+    const nodes = (await db.execute('MATCH (p:Person) RETURN p')).nodes()
+    const byName = Object.fromEntries(nodes.map((n) => [n.get('name'), n]))
+    expect(Object.keys(byName).sort()).toEqual(['Alix', 'Gus'])
+    expect(Number(byName.Alix.id)).toBe(ids.Alix)
+    expect(Number(byName.Gus.id)).toBe(ids.Gus)
+    expect(byName.Alix.get('_created')).toBe(2020)
+    const edges = (await db.execute('MATCH ()-[e:KNOWS]->() RETURN e')).edges()
+    expect(edges.length).toBe(1)
+    expect(edges[0].get('_note')).toBe('Paris')
+    db.close()
+  })
+
+  // A returned edge names its stored endpoints (#268), also when the pattern
+  // reads it from its target.
+  it('returns edges with their source, target and properties', async () => {
+    const db = GrafeoDB.create()
+    await db.execute("INSERT (:Person {name: 'Alix'})-[:KNOWS {since: 2020}]->(:Person {name: 'Gus'})")
+    const ids = Object.fromEntries(
+      (await db.execute('MATCH (p:Person) RETURN p.name AS name, id(p) AS id'))
+        .toArray()
+        .map((row) => [row.name, Number(row.id)])
+    )
+    for (const query of ['MATCH (a)-[r:KNOWS]->(b) RETURN a, r, b', 'MATCH (b)<-[r:KNOWS]-(a) RETURN a, r, b']) {
+      const edges = (await db.executeCypher(query)).edges()
+      expect(edges.length, query).toBe(1)
+      expect(edges[0].edgeType, query).toBe('KNOWS')
+      expect(Number(edges[0].sourceId), query).toBe(ids.Alix)
+      expect(Number(edges[0].targetId), query).toBe(ids.Gus)
+      expect(edges[0].get('since'), query).toBe(2020)
+    }
     db.close()
   })
 
@@ -865,6 +925,62 @@ describe('transaction edge cases', () => {
 })
 
 // ── Persistence and checkpoint ──────────────────────────────────────
+
+describe('detach delete (#465)', () => {
+  it('should delete a node with its edges', () => {
+    const db = GrafeoDB.create()
+    const alix = db.createNode(['Person'], { name: 'Alix' })
+    const gus = db.createNode(['Person'], { name: 'Gus' })
+    const vincent = db.createNode(['Person'], { name: 'Vincent' })
+    db.createEdge(alix.id, gus.id, 'KNOWS')
+    db.createEdge(alix.id, vincent.id, 'KNOWS')
+    db.createEdge(vincent.id, gus.id, 'KNOWS')
+    expect(() => db.deleteNode(gus.id)).toThrow()
+    expect(db.detachDeleteNode(gus.id)).toBe(true)
+    expect(db.nodeCount()).toBe(2)
+    expect(db.edgeCount()).toBe(1)
+    expect(db.detachDeleteNode(gus.id)).toBe(false)
+  })
+})
+
+describe('automatic checkpoints (#426)', () => {
+  it('should set the triggers on an open database, checkpoint and read them back', async () => {
+    const fs = await import('fs')
+    const os = await import('os')
+    const path = await import('path')
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'grafeo-triggers-'))
+    const db = GrafeoDB.create(path.join(dir, 'paris.grafeo'))
+
+    let status = db.checkpointStatus()
+    expect(status.intervalMs).toBeUndefined()
+    expect(status.walBytes).toBeUndefined()
+    expect(status.failures).toBe(0)
+    expect(status.stopped).toBe(false)
+
+    db.createNode(['Person'], { name: 'Gus' })
+    db.setCheckpointTriggers({ intervalMs: 300, walBytes: 64 * 1024 * 1024 })
+    status = db.checkpointStatus()
+    expect(status.intervalMs).toBe(300)
+    expect(status.walBytes).toBe(64 * 1024 * 1024)
+
+    const deadline = Date.now() + 10000
+    while (db.checkpointStatus().lastCheckpoint === undefined && Date.now() < deadline) {
+      await new Promise((resolve) => setTimeout(resolve, 20))
+    }
+    expect(db.checkpointStatus().lastCheckpoint).toBeDefined()
+
+    db.setCheckpointTriggers({})
+    expect(db.checkpointStatus().intervalMs).toBeUndefined()
+    db.close()
+    try { fs.rmSync(dir, { recursive: true, force: true }) } catch { /* ignore */ }
+  })
+
+  it('should refuse triggers where nothing checkpoints, and fractions', () => {
+    const db = GrafeoDB.create()
+    expect(() => db.setCheckpointTriggers({ walBytes: 1024 })).toThrow(/nothing to checkpoint/)
+    expect(() => db.setCheckpointTriggers({ intervalMs: 1.5 })).toThrow(/whole number/)
+  })
+})
 
 describe('persistence and checkpoint', () => {
   it('should checkpoint and reopen with data intact', async () => {
@@ -2047,5 +2163,175 @@ describe('procedure arguments from parameters', () => {
       db.execute('CALL grafeo.pagerank($d) YIELD score RETURN score', { d: 'high' })
     ).rejects.toThrow(/Argument 'damping' of grafeo.pagerank/)
     db.close()
+  })
+})
+
+describe('graph handles', () => {
+  let db
+
+  beforeEach(async () => {
+    db = GrafeoDB.create()
+    await db.execute('CREATE GRAPH trips')
+  })
+
+  afterEach(() => {
+    db.close()
+  })
+
+  it('should refuse a graph that does not exist', () => {
+    expect(() => db.graph('nowhere')).toThrow()
+  })
+
+  it('should work in its graph without switching the current graph', async () => {
+    const trips = db.graph('trips')
+    expect(trips.name).toBe('trips')
+    const prague = trips.createNode(['City'], { name: 'Prague' })
+    const berlin = trips.createNode(['City'], { name: 'Berlin' })
+    const route = trips.createEdge(prague.id, berlin.id, 'ROUTE', { km: 350 })
+    expect([route.sourceId, route.targetId, route.edgeType]).toEqual([prague.id, berlin.id, 'ROUTE'])
+
+    trips.setNodeProperty(prague.id, 'country', 'CZ')
+    expect(trips.getNode(prague.id).get('country')).toBe('CZ')
+    trips.setEdgeProperty(route.id, 'km', 349)
+    expect(trips.getEdge(route.id).get('km')).toBe(349)
+    expect(trips.addNodeLabel(prague.id, 'Capital')).toBe(true)
+    expect(trips.addNodeLabel(prague.id, 'Capital')).toBe(false)
+    expect(trips.removeNodeLabel(prague.id, 'Capital')).toBe(true)
+    expect(trips.removeNodeProperty(prague.id, 'country')).toBe(true)
+    expect(trips.removeEdgeProperty(route.id, 'missing')).toBe(false)
+
+    const result = await trips.execute(
+      'MATCH (c:City {name: $name})-[:ROUTE]->(d) RETURN d.name AS d',
+      { name: 'Prague' }
+    )
+    expect(result.toArray()).toEqual([{ d: 'Berlin' }])
+    const cypher = await trips.executeLanguage('cypher', 'MATCH (c:City) RETURN count(c) AS n')
+    expect(cypher.toArray()).toEqual([{ n: 2 }])
+
+    expect(db.nodeCount()).toBe(0)
+    expect(db.getNode(prague.id)).toBeNull()
+    expect(trips.getNode(88888)).toBeNull()
+  })
+
+  it('should batch, upsert and delete in its graph', async () => {
+    const trips = db.graph('trips')
+    const ids = await trips.batchCreateNodesWithProps(['City', 'Stop'], [{ name: 'Paris' }, { name: 'Amsterdam' }])
+    expect(trips.getNode(ids[1]).labels.sort()).toEqual(['City', 'Stop'])
+    const edgeIds = await trips.batchCreateEdges([{ src: ids[0], dst: ids[1], type: 'ROUTE', properties: { km: 500 } }])
+    expect(trips.getEdge(edgeIds[0]).get('km')).toBe(500)
+    await expect(trips.batchCreateEdges([{ src: ids[0], dst: 88888, type: 'ROUTE' }])).rejects.toThrow()
+
+    const upserted = await trips.upsertNodes(['City'], [{ name: 'Paris', country: 'FR' }, { country: 'NL' }], { key: 'name' })
+    expect(upserted).toEqual({ created: 0, updated: 1, skipped: 1, skippedRows: [1] })
+    const edges = await trips.upsertEdges('ROUTE', [{ id: 'p-a', src: 'Paris', dst: 'Amsterdam' }], {
+      endpointKey: 'name',
+      endpointLabels: ['City'],
+    })
+    expect(edges.created).toBe(1)
+
+    expect(() => trips.deleteNode(ids[0])).toThrow()
+    expect(trips.detachDeleteNode(ids[0])).toBe(true)
+    expect(trips.detachDeleteNode(ids[0])).toBe(false)
+    expect(trips.deleteEdge(edgeIds[0])).toBe(false)
+    expect(db.nodeCount()).toBe(0)
+  })
+
+  it('should group writes in a transaction in its graph', async () => {
+    const trips = db.graph('trips')
+    const tx = trips.beginTransaction()
+    await tx.execute("INSERT (:City {name: 'Barcelona'})")
+    await tx.rollback()
+    expect((await trips.execute('MATCH (c:City) RETURN count(c) AS n')).toArray()).toEqual([{ n: 0 }])
+
+    const committed = trips.beginTransaction()
+    await committed.execute("INSERT (:City {name: 'Barcelona'})")
+    await committed.commit()
+    expect((await trips.execute('MATCH (c:City) RETURN c.name AS name')).toArray()).toEqual([{ name: 'Barcelona' }])
+    expect(db.nodeCount()).toBe(0)
+  })
+
+  it('should throw once its graph is dropped', async () => {
+    const trips = db.graph('trips')
+    await db.execute('DROP GRAPH trips')
+    await expect(trips.execute('RETURN 1')).rejects.toThrow()
+    expect(() => trips.createNode(['City'])).toThrow()
+    expect(() => trips.getNode(0)).toThrow()
+  })
+})
+
+describe('getNodeEdges', () => {
+  let db
+  let ids
+
+  beforeEach(() => {
+    db = GrafeoDB.create()
+    const alix = db.createNode(['Person'], { name: 'Alix' }).id
+    const gus = db.createNode(['Person'], { name: 'Gus' }).id
+    const vincent = db.createNode(['Person'], { name: 'Vincent' }).id
+    ids = {
+      alix,
+      gus,
+      vincent,
+      knowsGus: db.createEdge(alix, gus, 'KNOWS').id,
+      knowsVincent: db.createEdge(alix, vincent, 'KNOWS').id,
+      worksWith: db.createEdge(gus, alix, 'WORKS_WITH').id,
+      note: db.createEdge(alix, alix, 'NOTE').id,
+    }
+  })
+
+  afterEach(() => {
+    db.close()
+  })
+
+  const sorted = (pairs) => [...pairs].sort((a, b) => a[1] - b[1])
+
+  it('should list outgoing edges by default as [neighborId, edgeId] pairs', () => {
+    const { alix, gus, vincent, knowsGus, knowsVincent, note } = ids
+    expect(sorted(db.getNodeEdges(alix))).toEqual(
+      sorted([
+        [gus, knowsGus],
+        [vincent, knowsVincent],
+        [alix, note],
+      ])
+    )
+  })
+
+  it('should take a direction and list a self-loop once for both', () => {
+    const { alix, gus, vincent, knowsGus, knowsVincent, worksWith, note } = ids
+    expect(sorted(db.getNodeEdges(alix, { direction: 'in' }))).toEqual(sorted([[gus, worksWith], [alix, note]]))
+    expect(sorted(db.getNodeEdges(alix, { direction: 'both' }))).toEqual(
+      sorted([
+        [gus, knowsGus],
+        [vincent, knowsVincent],
+        [gus, worksWith],
+        [alix, note],
+      ])
+    )
+    expect(() => db.getNodeEdges(alix, { direction: 'sideways' })).toThrow(/direction/)
+  })
+
+  it('should keep only the given edge types and skip deleted edges', () => {
+    const { alix, gus, vincent, knowsGus, knowsVincent } = ids
+    expect(sorted(db.getNodeEdges(alix, { direction: 'both', edgeTypes: ['KNOWS'] }))).toEqual(
+      sorted([
+        [gus, knowsGus],
+        [vincent, knowsVincent],
+      ])
+    )
+    db.deleteEdge(knowsGus)
+    expect(db.getNodeEdges(alix, { edgeTypes: ['KNOWS'] })).toEqual([[vincent, knowsVincent]])
+    expect(db.getNodeEdges(88888, { direction: 'both' })).toEqual([])
+  })
+
+  it('should list the edges of a graph handle\'s graph', async () => {
+    await db.execute('CREATE GRAPH trips')
+    const trips = db.graph('trips')
+    const prague = trips.createNode(['City'], { name: 'Prague' }).id
+    const berlin = trips.createNode(['City'], { name: 'Berlin' }).id
+    const route = trips.createEdge(prague, berlin, 'ROUTE').id
+    expect(trips.getNodeEdges(prague)).toEqual([[berlin, route]])
+    expect(trips.getNodeEdges(berlin, { direction: 'in', edgeTypes: ['ROUTE'] })).toEqual([[prague, route]])
+    await db.execute('DROP GRAPH trips')
+    expect(() => trips.getNodeEdges(prague)).toThrow()
   })
 })

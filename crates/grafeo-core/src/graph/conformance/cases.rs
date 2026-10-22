@@ -1,14 +1,15 @@
 //! The cases: each checks one guarantee of a store behind the change set,
-//! through `ChangeTarget` and the read traits only.
+//! through `GraphBackend` and the read traits only.
 
 use grafeo_common::change::{Before, DataOp, Table};
 use grafeo_common::types::{ArcStr, EdgeId, EpochId, NodeId, PropertyKey, Value};
 
 use super::{
-    Image, LABELS, Outcome, Reader, Rng, Store, Tx, apply_all, committed, counts, counts_of,
-    ensure, image, labels, next_epoch, people, properties, random_write, reserve_edge,
-    reserve_node, same,
+    Image, LABELS, Outcome, Reader, Rng, Store, Tx, apply_all, committed, committed_view, counts,
+    counts_of, ensure, image, labels, next_epoch, ok, people, properties, random_write,
+    reserve_edge, reserve_node, same,
 };
+use crate::graph::Direction;
 use crate::graph::apply::{Applied, ApplyError, Writer};
 
 /// The nodes and edges two images hold, without their problems.
@@ -606,8 +607,8 @@ pub(crate) fn replay_rebuilds_what_live_commits_wrote<S: Store>(make: &dyn Fn() 
             &what("the replayed data"),
         )?;
         same(
-            &replayed.current_epoch(),
-            &live.current_epoch(),
+            &replayed.committed_epoch(),
+            &live.committed_epoch(),
             &what("the epoch"),
         )?;
         same(
@@ -641,7 +642,7 @@ pub(crate) fn immediate_writes_commit_at_once<S: Store>(make: &dyn Fn() -> S) ->
         matches!(&applied, Ok(Applied::Changed { before: Before::Value(Some(value)), .. }) if *value == Value::from("Amsterdam")),
         || format!("an immediate write with images gave {applied:?}"),
     )?;
-    ensure(store.current_epoch() >= epoch, || {
+    ensure(store.committed_epoch() >= epoch, || {
         "the store's epoch moved to the write".to_string()
     })?;
     image(&store, Reader::At(epoch)).has_node(
@@ -891,6 +892,98 @@ pub(crate) fn bulk_ranges_are_stamped_and_undone_by_range<S: Store>(
     )
 }
 
+/// A bulk range across row groups, with rows at its ends, at the edges of
+/// the groups and nowhere else, commits each row it holds and counts it; a
+/// rolled-back range takes its rows out again.
+pub(crate) fn a_bulk_range_across_row_groups_commits_each_row<S: Store>(
+    make: &dyn Fn() -> S,
+) -> Outcome {
+    const GROUP: u64 = 65_536;
+    let store = make();
+    let people = people(&store)?;
+    let (nodes_before, edges_before, labels_before) = counts(&store, &LABELS);
+    let mut tx = Tx::begin(&store, 10);
+    let ids = store
+        .reserve_node_ids(3 * GROUP + 2)
+        .map_err(|error| format!("{error:?}"))?;
+    let base = ids.start;
+    let rows: Vec<u64> = [
+        0,
+        1,
+        GROUP - base - 1,
+        GROUP - base,
+        2 * GROUP + 7,
+        3 * GROUP + 1,
+    ]
+    .iter()
+    .map(|offset| base + offset)
+    .filter(|raw| ids.contains(raw))
+    .collect();
+    for (index, raw) in rows.iter().enumerate() {
+        let names: &[&str] = if index % 2 == 0 {
+            &["City"]
+        } else {
+            &["City", "Traveller"]
+        };
+        let op = DataOp::CreateNode {
+            id: NodeId::new(*raw),
+            labels: labels(names),
+            properties: properties(&[("name", Value::from("Berlin"))]),
+        };
+        store
+            .apply(&op, tx.writer())
+            .map_err(|error| format!("bulk row {raw}: {error:?}"))?;
+    }
+    tx.push_bulk(Table::Nodes, ids)?;
+    let epoch = tx.commit()?;
+    let after = image(&store, Reader::At(epoch));
+    after.consistent("after the bulk commit")?;
+    for raw in &rows {
+        ensure(after.nodes.contains_key(raw), || {
+            format!("bulk row {raw} is committed")
+        })?;
+    }
+    let mut expected_labels = labels_before.clone();
+    expected_labels[LABELS
+        .iter()
+        .position(|label| *label == "City")
+        .expect("City")] += rows.len();
+    expected_labels[LABELS
+        .iter()
+        .position(|label| *label == "Traveller")
+        .expect("Traveller")] += rows.len() / 2;
+    same(
+        &counts(&store, &LABELS),
+        &(nodes_before + rows.len(), edges_before, expected_labels),
+        "the bulk rows are counted, with their labels",
+    )?;
+
+    let before = committed(&store);
+    let mut tx = Tx::begin(&store, 11);
+    let edge_ids = store
+        .reserve_edge_ids(GROUP + 2)
+        .map_err(|error| format!("{error:?}"))?;
+    let ends = [
+        (rows[0], people.alix.as_u64()),
+        (people.gus.as_u64(), rows[rows.len() - 1]),
+    ];
+    for (raw, (src, dst)) in [edge_ids.start, edge_ids.end - 1].into_iter().zip(ends) {
+        let op = DataOp::CreateEdge {
+            id: EdgeId::new(raw),
+            src: NodeId::new(src),
+            dst: NodeId::new(dst),
+            edge_type: ArcStr::from("ROUTE"),
+            properties: properties(&[]),
+        };
+        store
+            .apply(&op, tx.writer())
+            .map_err(|error| format!("bulk edge {raw}: {error:?}"))?;
+    }
+    tx.push_bulk(Table::Edges, edge_ids)?;
+    tx.roll_back()?;
+    same_data(&committed(&store), &before, "after the bulk rollback")
+}
+
 /// The counts move when a transaction commits, by what it wrote, and not
 /// while it is open or when it rolls back.
 pub(crate) fn counts_move_at_commit_only<S: Store>(make: &dyn Fn() -> S) -> Outcome {
@@ -971,7 +1064,10 @@ pub(crate) fn every_access_path_agrees<S: Store>(make: &dyn Fn() -> S) -> Outcom
             let id = NodeId::new(*raw);
             for (key, value) in values {
                 same(
-                    &store.get_node_property(id, &PropertyKey::new(key.as_str())),
+                    &ok(
+                        store.node_property(id, key, committed_view(&store)),
+                        "node_property",
+                    ),
                     &Some(value.clone()),
                     &format!("seed {seed}: node {raw}'s {key} read alone"),
                 )?;
@@ -979,22 +1075,29 @@ pub(crate) fn every_access_path_agrees<S: Store>(make: &dyn Fn() -> S) -> Outcom
             let out = now.edges.values().filter(|edge| edge.0 == *raw).count();
             let incoming = now.edges.values().filter(|edge| edge.1 == *raw).count();
             same(
-                &store.out_degree(id),
+                &ok(
+                    store.degree(id, Direction::Outgoing, committed_view(&store)),
+                    "degree",
+                ),
                 &out,
                 &format!("seed {seed}: node {raw}'s out-degree"),
             )?;
-            if store.has_backward_adjacency() {
-                same(
-                    &store.in_degree(id),
-                    &incoming,
-                    &format!("seed {seed}: node {raw}'s in-degree"),
-                )?;
-            }
+            same(
+                &ok(
+                    store.degree(id, Direction::Incoming, committed_view(&store)),
+                    "degree",
+                ),
+                &incoming,
+                &format!("seed {seed}: node {raw}'s in-degree"),
+            )?;
         }
         for (raw, (_, _, _, values)) in &now.edges {
             for (key, value) in values {
                 same(
-                    &store.get_edge_property(EdgeId::new(*raw), &PropertyKey::new(key.as_str())),
+                    &ok(
+                        store.edge_property(EdgeId::new(*raw), key, committed_view(&store)),
+                        "edge_property",
+                    ),
                     &Some(value.clone()),
                     &format!("seed {seed}: edge {raw}'s {key} read alone"),
                 )?;
@@ -1005,18 +1108,15 @@ pub(crate) fn every_access_path_agrees<S: Store>(make: &dyn Fn() -> S) -> Outcom
 }
 
 /// A node delete while the writer sees an edge of the node is refused
-/// (`HasEdges`), for outgoing edges and, with backward adjacency, incoming
-/// ones; detach deletes remove the edges first.
+/// (`HasEdges`), for outgoing and incoming edges (a store without backward
+/// adjacency finds the incoming ones by a scan); detach deletes remove the
+/// edges first.
 pub(crate) fn a_node_with_edges_cannot_be_deleted<S: Store>(make: &dyn Fn() -> S) -> Outcome {
     let store = make();
     let people = people(&store)?;
     let before = committed(&store);
     let mut tx = Tx::begin(&store, 10);
-    let mut refused = vec![people.alix, people.gus];
-    if store.has_backward_adjacency() {
-        refused.push(people.mia);
-    }
-    for node in refused {
+    for node in [people.alix, people.gus, people.mia] {
         let applied = tx.apply(DataOp::DeleteNode { id: node });
         ensure(
             matches!(applied, Err(ApplyError::HasEdges(id)) if id == node),
@@ -1043,16 +1143,14 @@ pub(crate) fn names_first_used_by_a_rolled_back_transaction_stay_listed<S: Store
     tx.add_label(people.alix, "Traveller")?;
     tx.create_edge(people.alix, people.mia, "VISITED", &[])?;
     tx.roll_back()?;
+    let labels = ok(store.all_labels(), "all_labels");
+    ensure(labels.iter().any(|label| label == "Traveller"), || {
+        format!("the labels {labels:?} list Traveller")
+    })?;
+    let edge_types = ok(store.all_edge_types(), "all_edge_types");
     ensure(
-        store.all_labels().iter().any(|label| label == "Traveller"),
-        || format!("the labels {:?} list Traveller", store.all_labels()),
-    )?;
-    ensure(
-        store
-            .all_edge_types()
-            .iter()
-            .any(|edge_type| edge_type == "VISITED"),
-        || format!("the edge types {:?} list VISITED", store.all_edge_types()),
+        edge_types.iter().any(|edge_type| edge_type == "VISITED"),
+        || format!("the edge types {edge_types:?} list VISITED"),
     )
 }
 
@@ -1114,7 +1212,7 @@ pub(crate) fn a_reader_at_an_earlier_epoch_keeps_its_values_and_labels<S: Store>
 ) -> Outcome {
     let store = make();
     let people = people(&store)?;
-    let epoch = store.current_epoch();
+    let epoch = store.committed_epoch();
     let before = committed(&store);
     let reader = Tx::begin(&store, 11);
     let mut tx = Tx::begin(&store, 10);
@@ -1143,7 +1241,7 @@ pub(crate) fn a_reader_at_an_earlier_epoch_keeps_deleted_entities<S: Store>(
 ) -> Outcome {
     let store = make();
     let people = people(&store)?;
-    let epoch = store.current_epoch();
+    let epoch = store.committed_epoch();
     let before = committed(&store);
     let reader = Tx::begin(&store, 11);
     let mut tx = Tx::begin(&store, 10);
@@ -1217,4 +1315,364 @@ pub(crate) fn a_delete_is_marked_at_its_commit_epoch<S: Store>(make: &dyn Fn() -
         )?;
     }
     Ok(())
+}
+
+// ── Every read path at a view ───────────────────────────────────────
+
+/// The open writes of values and labels the view cases make: Alix moves to
+/// Berlin and turns 88, Gus loses his age and the label `Employee`, Mia
+/// becomes a `Traveller`, the edge from Alix to Gus gets a new `since`.
+pub(crate) fn value_and_label_writes<S: Store>(
+    tx: &mut Tx<'_, S>,
+    people: &super::People,
+) -> Outcome {
+    tx.set_node(people.alix, "city", Value::from("Berlin"))?;
+    tx.set_node(people.alix, "age", Value::Int64(88))?;
+    tx.remove_node_value(people.gus, "age")?;
+    tx.remove_label(people.gus, "Employee")?;
+    tx.add_label(people.mia, "Traveller")?;
+    tx.set_edge(people.alix_gus, "since", Value::Int64(2019))
+}
+
+/// The open creates and deletes the view cases make: Jules, a `Traveller`
+/// of 40 from Paris, is created with edges to Gus and from Mia; the edge
+/// from Gus to Mia goes, and then Alix's edge and Alix.
+pub(crate) fn create_and_delete_writes<S: Store>(
+    tx: &mut Tx<'_, S>,
+    people: &super::People,
+) -> Outcome {
+    let jules = tx.create_node(
+        &["Person", "Traveller"],
+        &[
+            ("name", Value::from("Jules")),
+            ("age", Value::Int64(40)),
+            ("city", Value::from("Paris")),
+        ],
+    )?;
+    tx.create_edge(jules, people.gus, "KNOWS", &[("since", Value::Int64(2088))])?;
+    tx.create_edge(people.mia, jules, "KNOWS", &[])?;
+    tx.delete_edge(people.gus_mia)?;
+    tx.delete_edge(people.alix_gus)?;
+    tx.delete_node(people.alix)
+}
+
+/// Every read at a transaction's view sees its own writes of every kind,
+/// as its point reads do.
+pub(crate) fn every_read_path_sees_the_transactions_own_writes<S: Store>(
+    make: &dyn Fn() -> S,
+) -> Outcome {
+    let store = make();
+    let people = people(&store)?;
+    let before = committed(&store);
+    let mut tx = Tx::begin(&store, 10);
+    let (jules, jules_alix) = every_op_kind(&mut tx, &people)?;
+    tx.set_node(jules, "age", Value::Int64(40))?;
+    let own = tx.view();
+    own.consistent("the transaction's own view")?;
+    shows_every_op_kind(&own, &people, jules, jules_alix)?;
+    super::paths_at(
+        &store,
+        Reader::Transaction(tx.id, tx.snapshot),
+        &own,
+        &[&before],
+    )
+}
+
+/// Another transaction and a committed reader see none of an open
+/// transaction's creates and deletes, through every read at their views.
+pub(crate) fn every_read_path_hides_an_open_transactions_creates_and_deletes<S: Store>(
+    make: &dyn Fn() -> S,
+) -> Outcome {
+    let store = make();
+    let people = people(&store)?;
+    let before = committed(&store);
+    let other = Tx::begin(&store, 11);
+    let mut tx = Tx::begin(&store, 10);
+    create_and_delete_writes(&mut tx, &people)?;
+    let own = tx.view();
+    super::paths_at(
+        &store,
+        Reader::Transaction(other.id, other.snapshot),
+        &before,
+        &[&own],
+    )?;
+    super::paths_at(
+        &store,
+        Reader::At(store.committed_epoch()),
+        &before,
+        &[&own],
+    )
+}
+
+/// Another transaction and a committed reader see none of an open
+/// transaction's values and labels, through every read at their views
+/// (#412).
+pub(crate) fn every_read_path_hides_an_open_transactions_values_and_labels<S: Store>(
+    make: &dyn Fn() -> S,
+) -> Outcome {
+    let store = make();
+    let people = people(&store)?;
+    let before = committed(&store);
+    let other = Tx::begin(&store, 11);
+    let mut tx = Tx::begin(&store, 10);
+    value_and_label_writes(&mut tx, &people)?;
+    let own = tx.view();
+    super::paths_at(
+        &store,
+        Reader::Transaction(other.id, other.snapshot),
+        &before,
+        &[&own],
+    )?;
+    super::paths_at(
+        &store,
+        Reader::At(store.committed_epoch()),
+        &before,
+        &[&own],
+    )
+}
+
+/// A transaction that began before a commit, and a reader at the epoch
+/// before it, keep the nodes and edges the commit deleted and miss the ones
+/// it created, through every read at their views.
+pub(crate) fn every_read_path_at_an_earlier_epoch_keeps_creates_and_deletes<S: Store>(
+    make: &dyn Fn() -> S,
+) -> Outcome {
+    let store = make();
+    let people = people(&store)?;
+    let epoch = store.committed_epoch();
+    let before = committed(&store);
+    let reader = Tx::begin(&store, 11);
+    let mut tx = Tx::begin(&store, 10);
+    create_and_delete_writes(&mut tx, &people)?;
+    tx.commit()?;
+    let now = committed(&store);
+    super::paths_at(
+        &store,
+        Reader::Transaction(reader.id, reader.snapshot),
+        &before,
+        &[&now],
+    )?;
+    super::paths_at(&store, Reader::At(epoch), &before, &[&now])
+}
+
+/// A transaction that began before a commit, and a reader at the epoch
+/// before it, keep the values and labels of their epoch through every read
+/// at their views (#412).
+pub(crate) fn every_read_path_at_an_earlier_epoch_keeps_values_and_labels<S: Store>(
+    make: &dyn Fn() -> S,
+) -> Outcome {
+    let store = make();
+    let people = people(&store)?;
+    let epoch = store.committed_epoch();
+    let before = committed(&store);
+    let reader = Tx::begin(&store, 11);
+    let mut tx = Tx::begin(&store, 10);
+    value_and_label_writes(&mut tx, &people)?;
+    tx.commit()?;
+    let now = committed(&store);
+    super::paths_at(
+        &store,
+        Reader::Transaction(reader.id, reader.snapshot),
+        &before,
+        &[&now],
+    )?;
+    super::paths_at(&store, Reader::At(epoch), &before, &[&now])
+}
+
+/// A reader at a commit's epoch, and a transaction that begins after it,
+/// see what the transaction saw through every read at their views, and
+/// nothing of what it replaced.
+pub(crate) fn every_read_path_at_the_commit_epoch_sees_the_commit<S: Store>(
+    make: &dyn Fn() -> S,
+) -> Outcome {
+    let store = make();
+    let people = people(&store)?;
+    let before = committed(&store);
+    let mut tx = Tx::begin(&store, 10);
+    value_and_label_writes(&mut tx, &people)?;
+    let jules = tx.create_node(
+        &["Person", "City"],
+        &[("name", Value::from("Jules")), ("age", Value::Int64(19))],
+    )?;
+    tx.create_edge(jules, people.mia, "KNOWS", &[])?;
+    let own = tx.view();
+    let epoch = tx.commit()?;
+    super::paths_at(&store, Reader::At(epoch), &own, &[&before])?;
+    let later = Tx::begin(&store, 11);
+    super::paths_at(
+        &store,
+        Reader::Transaction(later.id, later.snapshot),
+        &own,
+        &[&before],
+    )
+}
+
+/// Immediate writes, with and without their before-images, are what every
+/// read at their epoch and after sees.
+pub(crate) fn an_immediate_write_is_seen_at_its_epoch_through_every_read_path<S: Store>(
+    make: &dyn Fn() -> S,
+) -> Outcome {
+    let store = make();
+    let people = people(&store)?;
+    let before = committed(&store);
+    let mut expected = before.clone();
+    for (op, before_images) in [
+        (
+            DataOp::SetNodeProperty {
+                id: people.alix,
+                key: PropertyKey::new("city"),
+                value: Value::from("Paris"),
+            },
+            true,
+        ),
+        (
+            DataOp::AddNodeLabel {
+                id: people.mia,
+                label: ArcStr::from("Traveller"),
+            },
+            false,
+        ),
+        (
+            DataOp::SetEdgeProperty {
+                id: people.gus_mia,
+                key: PropertyKey::new("since"),
+                value: Value::Int64(2019),
+            },
+            true,
+        ),
+    ] {
+        let writer = Writer::Immediate {
+            epoch: next_epoch(&store),
+            before_images,
+        };
+        store
+            .apply(&op, writer)
+            .map_err(|error| format!("{op:?} as {writer:?}: {error:?}"))?;
+    }
+    expected.set_value(people.alix, "city", Some(Value::from("Paris")));
+    expected.set_labels(people.mia, &["Person", "Traveller"]);
+    expected.set_edge_value(people.gus_mia, "since", Some(Value::Int64(2019)));
+    super::paths_at(
+        &store,
+        Reader::At(store.committed_epoch()),
+        &expected,
+        &[&before],
+    )?;
+    let later = Tx::begin(&store, 11);
+    super::paths_at(
+        &store,
+        Reader::Transaction(later.id, later.snapshot),
+        &expected,
+        &[&before],
+    )
+}
+
+/// A reader older than an immediate write keeps what it read before the
+/// write, through every read at its view: an immediate write keeps the
+/// value it replaced while an older reader is pinned (#412 decision Q6).
+pub(crate) fn an_immediate_write_keeps_the_old_value_for_an_older_reader<S: Store>(
+    make: &dyn Fn() -> S,
+) -> Outcome {
+    let store = make();
+    let people = people(&store)?;
+    let epoch = store.committed_epoch();
+    let before = committed(&store);
+    let reader = Tx::begin(&store, 11);
+    for op in [
+        DataOp::SetNodeProperty {
+            id: people.gus,
+            key: PropertyKey::new("age"),
+            value: Value::Int64(19),
+        },
+        DataOp::RemoveNodeLabel {
+            id: people.gus,
+            label: ArcStr::from("Employee"),
+        },
+    ] {
+        let writer = Writer::Immediate {
+            epoch: next_epoch(&store),
+            before_images: true,
+        };
+        store
+            .apply(&op, writer)
+            .map_err(|error| format!("{op:?} as {writer:?}: {error:?}"))?;
+    }
+    let now = committed(&store);
+    super::paths_at(
+        &store,
+        Reader::Transaction(reader.id, reader.snapshot),
+        &before,
+        &[&now],
+    )?;
+    super::paths_at(&store, Reader::At(epoch), &before, &[&now])
+}
+
+/// Setting a property to null removes it (#412 decision Q8): in a
+/// transaction, as an immediate write and in replay, every read sees no
+/// value, never a stored null, and the write reports the value it removed.
+pub(crate) fn a_property_set_to_null_is_removed<S: Store>(make: &dyn Fn() -> S) -> Outcome {
+    let store = make();
+    let people = people(&store)?;
+    let fresh = committed(&store);
+    let mut expected = fresh.clone();
+    let mut tx = Tx::begin(&store, 10);
+    let applied = tx.apply(DataOp::SetNodeProperty {
+        id: people.alix,
+        key: PropertyKey::new("age"),
+        value: Value::Null,
+    });
+    ensure(
+        matches!(&applied, Ok(Applied::Changed { before: Before::Value(Some(value)), .. }) if *value == Value::Int64(19)),
+        || format!("a set to null in a transaction gave {applied:?}"),
+    )?;
+    tx.set_edge(people.alix_gus, "since", Value::Null)?;
+    expected.set_value(people.alix, "age", None);
+    expected.set_edge_value(people.alix_gus, "since", None);
+    super::paths_at(
+        &store,
+        Reader::Transaction(tx.id, tx.snapshot),
+        &expected,
+        &[],
+    )?;
+    let epoch = tx.commit()?;
+    super::paths_at(&store, Reader::At(epoch), &expected, &[])?;
+
+    let writer = Writer::Immediate {
+        epoch: next_epoch(&store),
+        before_images: true,
+    };
+    store
+        .apply(
+            &DataOp::SetNodeProperty {
+                id: people.gus,
+                key: PropertyKey::new("age"),
+                value: Value::Null,
+            },
+            writer,
+        )
+        .map_err(|error| format!("an immediate set to null: {error:?}"))?;
+    expected.set_value(people.gus, "age", None);
+    super::paths_at(&store, Reader::At(store.committed_epoch()), &expected, &[])?;
+
+    let replayed = make();
+    let replayed_people = super::people(&replayed)?;
+    apply_all(
+        &replayed,
+        &[DataOp::SetNodeProperty {
+            id: replayed_people.mia,
+            key: PropertyKey::new("name"),
+            value: Value::Null,
+        }],
+        Writer::Replay {
+            epoch: next_epoch(&replayed),
+        },
+    )?;
+    let mut expected = fresh;
+    expected.set_value(replayed_people.mia, "name", None);
+    super::paths_at(
+        &replayed,
+        Reader::At(replayed.committed_epoch()),
+        &expected,
+        &[],
+    )
 }

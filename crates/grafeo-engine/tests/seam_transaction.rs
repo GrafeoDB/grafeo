@@ -199,12 +199,12 @@ mod session_state_independence {
         let session = db.session();
 
         session.execute("START TRANSACTION").unwrap();
-        session.execute("SESSION SET TIME ZONE 'UTC+5'").unwrap();
+        session.execute("SESSION SET TIME ZONE '+05:00'").unwrap();
         session.execute("ROLLBACK").unwrap();
 
         assert_eq!(
             session.time_zone(),
-            Some("UTC+5".to_string()),
+            Some("+05:00".to_string()),
             "SESSION SET TIME ZONE should survive ROLLBACK"
         );
     }
@@ -215,7 +215,7 @@ mod session_state_independence {
         let session = db.session();
         session.execute("CREATE GRAPH mydb").unwrap();
         session.execute("SESSION SET GRAPH mydb").unwrap();
-        session.execute("SESSION SET TIME ZONE 'UTC+5'").unwrap();
+        session.execute("SESSION SET TIME ZONE '+05:00'").unwrap();
 
         session.execute("START TRANSACTION").unwrap();
         session.execute("SESSION RESET").unwrap();

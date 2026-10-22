@@ -3,9 +3,10 @@
 //! Translates Gremlin AST to the common logical plan representation.
 
 use super::common::{VarGen, wrap_filter, wrap_limit, wrap_return, wrap_skip, wrap_sort};
+use crate::query::plan::BuiltinFunction;
 use crate::query::plan::{
     AggregateExpr, AggregateFunction, AggregateOp, BinaryOp, CreateEdgeOp, CreateNodeOp,
-    DeleteNodeOp, DistinctOp, ExpandDirection, ExpandOp, JoinOp, JoinType, LeftJoinOp,
+    DeleteNodeOp, DistinctOp, ExpandDirection, ExpandOp, FilterOp, JoinOp, JoinType, LeftJoinOp,
     LogicalExpression, LogicalOperator, LogicalPlan, MapCollectOp, NodeScanOp, OtherwiseOp,
     PathMode, ProjectOp, Projection, ReturnItem, SetPropertyOp, SortKey, SortOrder, UnaryOp,
     UnionOp, UnwindOp,
@@ -78,6 +79,29 @@ struct EdgeContext {
     source_var: String,
     target_var: String,
     direction: ExpandDirection,
+}
+
+/// A step's Gremlin name for messages: `OutE(..)` is `outE`.
+fn step_name(step: &ast::Step) -> String {
+    let debug = format!("{step:?}");
+    let variant = debug.split(['(', ' ', '{']).next().unwrap_or_default();
+    let mut chars = variant.chars();
+    chars.next().map_or_else(String::new, |first| {
+        first.to_lowercase().chain(chars).collect()
+    })
+}
+
+/// TinkerPop `not()` semantics: a traverser missing the property is *retained*.
+/// SQL `NOT NULL` is `NULL` (row dropped), so use `NOT coalesce(p, false)`; `p` appears
+/// once, so nested `not()` stays linear in size.
+fn negate_null_safe(pred: LogicalExpression) -> LogicalExpression {
+    LogicalExpression::Unary {
+        op: UnaryOp::Not,
+        operand: Box::new(LogicalExpression::builtin(
+            BuiltinFunction::Coalesce,
+            vec![pred, LogicalExpression::Literal(Value::Bool(false))],
+        )),
+    }
 }
 
 impl GremlinTranslator {
@@ -471,13 +495,13 @@ impl GremlinTranslator {
         }
 
         let from_var = from_var.ok_or_else(|| {
-            Error::Query(QueryError::new(
+            Error::from(QueryError::new(
                 QueryErrorKind::Semantic,
                 "addE requires from() step",
             ))
         })?;
         let to_var = to_var.ok_or_else(|| {
-            Error::Query(QueryError::new(
+            Error::from(QueryError::new(
                 QueryErrorKind::Semantic,
                 "addE requires to() step",
             ))
@@ -631,7 +655,7 @@ impl GremlinTranslator {
             }
             ast::TraversalSource::AddE(_label) => {
                 // AddE needs from/to steps to complete
-                Err(Error::Query(QueryError::new(
+                Err(Error::from(QueryError::new(
                     QueryErrorKind::Semantic,
                     "addE requires from() and to() steps",
                 )))
@@ -867,7 +891,7 @@ impl GremlinTranslator {
             }
             ast::Step::Range(start, end) => {
                 if end < start {
-                    return Err(Error::Query(QueryError::new(
+                    return Err(Error::from(QueryError::new(
                         QueryErrorKind::Semantic,
                         format!("range() end ({end}) must be >= start ({start})"),
                     )));
@@ -893,11 +917,10 @@ impl GremlinTranslator {
                     let elem_alias = self.var_gen.next();
                     let plan = LogicalOperator::Project(ProjectOp {
                         projections: vec![Projection {
-                            expression: LogicalExpression::FunctionCall {
-                                name: "property_values".to_string(),
-                                args: vec![LogicalExpression::Variable(current_var.to_string())],
-                                distinct: false,
-                            },
+                            expression: LogicalExpression::builtin(
+                                BuiltinFunction::PropertyValues,
+                                vec![LogicalExpression::Variable(current_var.to_string())],
+                            ),
                             alias: Some(list_alias.clone()),
                         }],
                         input: Box::new(input),
@@ -1452,17 +1475,10 @@ impl GremlinTranslator {
                 Ok((plan, None))
             }
 
-            // not() filter: negate a sub-traversal filter
+            // not() filter: negate a sub-traversal filter (null-safe, per TinkerPop)
             ast::Step::Not(steps) => {
                 if let Some(pred) = self.steps_to_predicate(steps, current_var)? {
-                    let plan = wrap_filter(
-                        input,
-                        LogicalExpression::Unary {
-                            op: UnaryOp::Not,
-                            operand: Box::new(pred),
-                        },
-                    );
-                    Ok((plan, None))
+                    Ok((wrap_filter(input, negate_null_safe(pred)), None))
                 } else {
                     Ok((input, None))
                 }
@@ -1669,7 +1685,7 @@ impl GremlinTranslator {
                 let branches = self.translate_branches(traversals, &input, current_var, &alias)?;
                 let mut iter = branches.into_iter().rev();
                 let mut accumulator = iter.next().ok_or_else(|| {
-                    Error::Query(QueryError::new(
+                    Error::from(QueryError::new(
                         QueryErrorKind::Semantic,
                         "coalesce() requires at least one traversal",
                     ))
@@ -1707,11 +1723,10 @@ impl GremlinTranslator {
                 let alias = self.var_gen.next();
                 let plan = LogicalOperator::Project(ProjectOp {
                     projections: vec![Projection {
-                        expression: LogicalExpression::FunctionCall {
-                            name: "properties".to_string(),
-                            args: vec![LogicalExpression::Variable(current_var.to_string())],
-                            distinct: false,
-                        },
+                        expression: LogicalExpression::builtin(
+                            BuiltinFunction::Properties,
+                            vec![LogicalExpression::Variable(current_var.to_string())],
+                        ),
                         alias: Some(alias.clone()),
                     }],
                     input: Box::new(input),
@@ -1763,13 +1778,10 @@ impl GremlinTranslator {
                             ),
                             (
                                 "*".to_string(),
-                                LogicalExpression::FunctionCall {
-                                    name: "properties".to_string(),
-                                    args: vec![LogicalExpression::Variable(
-                                        current_var.to_string(),
-                                    )],
-                                    distinct: false,
-                                },
+                                LogicalExpression::builtin(
+                                    BuiltinFunction::Properties,
+                                    vec![LogicalExpression::Variable(current_var.to_string())],
+                                ),
                             ),
                         ]),
                         alias: Some(alias.clone()),
@@ -2048,7 +2060,7 @@ impl GremlinTranslator {
                     .map(|pred| Self::translate_predicate(pred, expr.clone()))
                     .collect::<Result<Vec<_>>>()?;
                 LogicalExpression::balanced(op, operands).ok_or_else(|| {
-                    Error::Query(QueryError::new(
+                    Error::from(QueryError::new(
                         QueryErrorKind::Semantic,
                         "A predicate combination needs at least one predicate",
                     ))
@@ -2192,7 +2204,7 @@ impl GremlinTranslator {
         current_var: &str,
     ) -> Result<Option<LogicalExpression>> {
         let mut predicates: Vec<LogicalExpression> = Vec::new();
-        for step in steps {
+        for (idx, step) in steps.iter().enumerate() {
             match step {
                 ast::Step::Has(has_step) => {
                     predicates.push(self.translate_has_step(has_step, current_var)?);
@@ -2244,7 +2256,9 @@ impl GremlinTranslator {
                     predicates.push(self.build_id_filter(current_var, ids));
                 }
                 // For navigation steps like out('knows') in where(), check if
-                // expanding produces any results (existence check).
+                // expanding produces any results (existence check). Steps that
+                // follow the navigation apply to the expansion target, not the
+                // outer variable, so they become a filter inside the subquery.
                 ast::Step::Out(labels) | ast::Step::In(labels) | ast::Step::Both(labels) => {
                     let direction = match step {
                         ast::Step::Out(_) => ExpandDirection::Outgoing,
@@ -2253,6 +2267,8 @@ impl GremlinTranslator {
                     };
                     let edge_types = labels.clone();
                     let target_var = self.var_gen.next();
+                    // Remaining steps are evaluated against the expansion target.
+                    let inner = self.steps_to_predicate(&steps[idx + 1..], &target_var)?;
                     // Create an existence subquery via Expand + count > 0
                     let expand = LogicalOperator::Expand(ExpandOp {
                         quantified: false,
@@ -2271,9 +2287,66 @@ impl GremlinTranslator {
                         path_alias: None,
                         path_mode: PathMode::Walk,
                     });
-                    predicates.push(LogicalExpression::ExistsSubquery(Box::new(expand)));
+                    let subquery = match inner {
+                        Some(predicate) => LogicalOperator::Filter(FilterOp {
+                            predicate,
+                            input: Box::new(expand),
+                            pushdown_hint: None,
+                        }),
+                        None => expand,
+                    };
+                    predicates.push(LogicalExpression::ExistsSubquery(Box::new(subquery)));
+                    // Trailing steps consumed by the subquery above.
+                    break;
                 }
-                _ => {}
+                // Nested compound groups: recurse so `.or(__.and(..), __.has(..))` is not
+                // silently dropped by the fallthrough below.
+                // A branch without a condition passes every traverser: it
+                // adds nothing to an `and()` and makes an `or()` pass all.
+                ast::Step::And(traversals) | ast::Step::Or(traversals) => {
+                    let is_and = matches!(step, ast::Step::And(_));
+                    let mut inner: Vec<LogicalExpression> = Vec::new();
+                    let mut passes_all = false;
+                    for sub in traversals {
+                        match self.steps_to_predicate(sub, current_var)? {
+                            Some(pred) => inner.push(pred),
+                            None => passes_all = true,
+                        }
+                    }
+                    let folded = if is_and {
+                        LogicalExpression::conjunction(inner)
+                    } else if passes_all {
+                        None
+                    } else {
+                        LogicalExpression::disjunction(inner)
+                    };
+                    if let Some(pred) = folded {
+                        predicates.push(pred);
+                    }
+                }
+                // `not()` of a branch without a condition passes nothing.
+                ast::Step::Not(inner_steps) => {
+                    predicates.push(match self.steps_to_predicate(inner_steps, current_var)? {
+                        Some(pred) => negate_null_safe(pred),
+                        None => LogicalExpression::Literal(Value::Bool(false)),
+                    });
+                }
+                ast::Step::Where(ast::WhereClause::Traversal(inner_steps)) => {
+                    if let Some(pred) = self.steps_to_predicate(inner_steps, current_var)? {
+                        predicates.push(pred);
+                    }
+                }
+                // Leaving a step out would loosen the filter: refuse it until
+                // it is translated.
+                other => {
+                    return Err(Error::from(QueryError::new(
+                        QueryErrorKind::Unsupported,
+                        format!(
+                            "the Gremlin step {}() is not supported inside and(), or(), not(), where() or choose() yet",
+                            step_name(other)
+                        ),
+                    )));
+                }
             }
         }
         Ok(LogicalExpression::conjunction(predicates))
@@ -2342,7 +2415,7 @@ fn anywhere(pattern: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::query::plan::{FilterOp, LimitOp, SkipOp, SortOp};
+    use crate::query::plan::{LimitOp, SkipOp, SortOp};
 
     // === Basic Traversal Tests ===
 

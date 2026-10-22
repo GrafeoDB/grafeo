@@ -51,9 +51,9 @@ struct PredicateOutput {
 }
 
 /// Run the schema command.
-pub fn run(path: &Path, format: OutputFormat, quiet: bool) -> Result<()> {
-    let db = super::open_existing(path)?;
-    let schema = db.schema();
+pub fn run(path: &Path, format: OutputFormat) -> Result<()> {
+    let db = super::open_existing_read_only(path)?;
+    let schema = db.schema()?;
 
     let fmt: Format = format.into();
 
@@ -82,52 +82,43 @@ pub fn run(path: &Path, format: OutputFormat, quiet: bool) -> Result<()> {
 
             match fmt {
                 Format::Json => {
-                    if !quiet {
-                        println!("{}", serde_json::to_string_pretty(&output)?);
-                    }
+                    println!("{}", serde_json::to_string_pretty(&output)?);
                 }
                 Format::Csv => {
-                    if !quiet {
-                        println!("type,name,count");
-                        for label in &output.labels {
-                            println!("label,{},{}", label.name, label.count);
-                        }
-                        for edge_type in &output.edge_types {
-                            println!("edge_type,{},{}", edge_type.name, edge_type.count);
-                        }
-                        for key in &output.property_keys {
-                            println!("property_key,{},", key);
-                        }
+                    println!("type,name,count");
+                    for label in &output.labels {
+                        println!("label,{},{}", label.name, label.count);
+                    }
+                    for edge_type in &output.edge_types {
+                        println!("edge_type,{},{}", edge_type.name, edge_type.count);
+                    }
+                    for key in &output.property_keys {
+                        println!("property_key,{},", key);
                     }
                 }
                 Format::Table => {
-                    if !quiet {
-                        println!("Mode: LPG (Labeled Property Graph)\n");
+                    println!("Mode: LPG (Labeled Property Graph)\n");
 
-                        let mut table = output::create_table();
-                        output::add_header(&mut table, &["Label", "Count"]);
-                        for label in &output.labels {
-                            table.add_row(vec![Cell::new(&label.name), Cell::new(label.count)]);
-                        }
-                        println!("{table}\n");
-
-                        let mut table = output::create_table();
-                        output::add_header(&mut table, &["Edge Type", "Count"]);
-                        for edge_type in &output.edge_types {
-                            table.add_row(vec![
-                                Cell::new(&edge_type.name),
-                                Cell::new(edge_type.count),
-                            ]);
-                        }
-                        println!("{table}\n");
-
-                        let mut table = output::create_table();
-                        output::add_header(&mut table, &["Property Keys"]);
-                        for key in &output.property_keys {
-                            table.add_row(vec![Cell::new(key)]);
-                        }
-                        println!("{table}");
+                    let mut table = output::create_table();
+                    output::add_header(&mut table, &["Label", "Count"]);
+                    for label in &output.labels {
+                        table.add_row(vec![Cell::new(&label.name), Cell::new(label.count)]);
                     }
+                    println!("{table}\n");
+
+                    let mut table = output::create_table();
+                    output::add_header(&mut table, &["Edge Type", "Count"]);
+                    for edge_type in &output.edge_types {
+                        table.add_row(vec![Cell::new(&edge_type.name), Cell::new(edge_type.count)]);
+                    }
+                    println!("{table}\n");
+
+                    let mut table = output::create_table();
+                    output::add_header(&mut table, &["Property Keys"]);
+                    for key in &output.property_keys {
+                        table.add_row(vec![Cell::new(key)]);
+                    }
+                    println!("{table}");
                 }
             }
         }
@@ -149,43 +140,37 @@ pub fn run(path: &Path, format: OutputFormat, quiet: bool) -> Result<()> {
 
             match fmt {
                 Format::Json => {
-                    if !quiet {
-                        println!("{}", serde_json::to_string_pretty(&output)?);
-                    }
+                    println!("{}", serde_json::to_string_pretty(&output)?);
                 }
                 Format::Csv => {
-                    if !quiet {
-                        println!("type,name,count");
-                        for pred in &output.predicates {
-                            println!("predicate,{},{}", pred.iri, pred.count);
-                        }
-                        for graph in &output.named_graphs {
-                            println!("named_graph,{},", graph);
-                        }
+                    println!("type,name,count");
+                    for pred in &output.predicates {
+                        println!("predicate,{},{}", pred.iri, pred.count);
+                    }
+                    for graph in &output.named_graphs {
+                        println!("named_graph,{},", graph);
                     }
                 }
                 Format::Table => {
-                    if !quiet {
-                        println!("Mode: RDF (Triple Store)\n");
-                        println!(
-                            "Subjects: {}, Objects: {}\n",
-                            output.subject_count, output.object_count
-                        );
+                    println!("Mode: RDF (Triple Store)\n");
+                    println!(
+                        "Subjects: {}, Objects: {}\n",
+                        output.subject_count, output.object_count
+                    );
 
-                        let mut table = output::create_table();
-                        output::add_header(&mut table, &["Predicate", "Count"]);
-                        for pred in &output.predicates {
-                            table.add_row(vec![Cell::new(&pred.iri), Cell::new(pred.count)]);
-                        }
-                        println!("{table}\n");
-
-                        let mut table = output::create_table();
-                        output::add_header(&mut table, &["Named Graphs"]);
-                        for graph in &output.named_graphs {
-                            table.add_row(vec![Cell::new(graph)]);
-                        }
-                        println!("{table}");
+                    let mut table = output::create_table();
+                    output::add_header(&mut table, &["Predicate", "Count"]);
+                    for pred in &output.predicates {
+                        table.add_row(vec![Cell::new(&pred.iri), Cell::new(pred.count)]);
                     }
+                    println!("{table}\n");
+
+                    let mut table = output::create_table();
+                    output::add_header(&mut table, &["Named Graphs"]);
+                    for graph in &output.named_graphs {
+                        table.add_row(vec![Cell::new(graph)]);
+                    }
+                    println!("{table}");
                 }
             }
         }

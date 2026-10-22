@@ -13,7 +13,7 @@ use grafeo_core::execution::operators::{
     ExpressionPredicate, FilterOperator, HashJoinOperator, JoinType as PhysicalJoinType, Operator,
     ProjectExpr, ProjectOperator, ScanOperator,
 };
-use grafeo_core::graph::GraphStoreSearch;
+use grafeo_core::graph::GraphStore;
 
 use super::seek::{CheckedScan, checked_scan, split_conjuncts, value_variables};
 use super::{Arc, HashMap, Result};
@@ -211,7 +211,7 @@ impl super::Planner {
         let (probe, input_columns) = self.plan_operator(input)?;
         // PROFILE entries for the scan and the checks the join absorbs, in
         // the order the plan's tree lists them (children first).
-        self.record_absorbed_scan_entry("HashJoin", operator);
+        self.record_kept_entry("HashJoin", operator);
         for (check, _) in &checks {
             self.record_absorbed_scan_entry("Filter", check);
         }
@@ -221,12 +221,12 @@ impl super::Planner {
             "the input of a value join binds the scanned node"
         );
 
-        let store = Arc::clone(&self.store) as Arc<dyn GraphStoreSearch>;
+        let store = Arc::clone(&self.store) as Arc<dyn GraphStore>;
         let scan_op = match &scan.label {
-            Some(label) => ScanOperator::with_label(Arc::clone(&store), label),
-            None => ScanOperator::new(Arc::clone(&store)),
+            Some(label) => ScanOperator::with_label(Arc::clone(&store), label, self.read_view()),
+            None => ScanOperator::new(Arc::clone(&store), self.read_view()),
         }
-        .with_transaction_context(self.viewing_epoch, self.transaction_id);
+        .with_read_counter(self.read_counter());
         let scan_columns = vec![scan.variable.clone()];
         let mut build: Box<dyn Operator> = Box::new(scan_op);
         let checks = checks.iter().map(|(_, predicate)| (*predicate).clone());
@@ -251,7 +251,7 @@ impl super::Planner {
             PhysicalJoinType::Inner,
             schema,
         )
-        .with_value_equality_keys();
+        .with_value_equality_keys_in(self.session_context.temporal_comparison);
         // The columns of the scan per row: the input's, then the node.
         let kept = (0..width)
             .chain([width + key_count])
@@ -292,9 +292,9 @@ impl super::Planner {
                 input,
                 projections,
                 types,
-                Arc::clone(&self.store) as Arc<dyn GraphStoreSearch>,
+                Arc::clone(&self.store) as Arc<dyn GraphStore>,
+                self.read_view(),
             )
-            .with_transaction_context(self.viewing_epoch, self.transaction_id)
             .with_session_context(self.session_context.clone()),
         ))
     }
@@ -308,9 +308,9 @@ impl super::Planner {
         Ok(ExpressionPredicate::new(
             self.convert_expression(&predicate)?,
             variable_columns(columns),
-            Arc::clone(&self.store) as Arc<dyn GraphStoreSearch>,
+            Arc::clone(&self.store) as Arc<dyn GraphStore>,
+            self.read_view(),
         )
-        .with_transaction_context(self.viewing_epoch, self.transaction_id)
         .with_session_context(self.session_context.clone()))
     }
 }
@@ -411,6 +411,7 @@ mod tests {
         assert_eq!(keys(&joined, true), None, "a statement that writes");
 
         let random = LogicalExpression::FunctionCall {
+            callee: crate::query::plan::Callee::named("rand"),
             name: "rand".to_string(),
             args: Vec::new(),
             distinct: false,
@@ -621,15 +622,7 @@ mod tests {
                 (Value::from("5"), Value::Int64(5)),
                 (Value::from("+5"), Value::Float64(5.0)),
                 (Value::from("1e3"), Value::Float64(1000.0)),
-                (Value::Float64(1e-17), Value::Int64(0)),
                 (Value::Float64(-0.0), Value::Float64(0.0)),
-                (Value::Float64(0.999_999_999_999_999_9), Value::Int64(1)),
-                (Value::Float64(0.999_999_999_999_999_9), Value::Float64(1.0)),
-                (Value::Float64(-0.999_999_999_999_999_9), Value::Int64(-1)),
-                (
-                    Value::Int64(two_to_53 + 1),
-                    Value::Float64(9_007_199_254_740_992.0),
-                ),
                 (list(vec![Value::Null]), list(vec![Value::Null])),
                 (
                     list(vec![Value::from("1")]),
@@ -652,14 +645,28 @@ mod tests {
                 (Value::from("5.0"), Value::Int64(5)),
                 (Value::Float64(f64::NAN), Value::Float64(f64::NAN)),
                 (Value::Float64(2.0), Value::Float64(1.999_999_999_999_999_8)),
-                (time("13:00:00"), time("13:00:00Z")),
                 (Value::Int64(two_to_53), Value::Int64(two_to_53 + 1)),
+                // Floats compare exactly: no tolerance near 0 or 1, and an
+                // integer above 2^53 meets no float.
+                (Value::Float64(1e-17), Value::Int64(0)),
+                (Value::Float64(0.999_999_999_999_999_9), Value::Int64(1)),
+                (Value::Float64(0.999_999_999_999_999_9), Value::Float64(1.0)),
+                (Value::Float64(-0.999_999_999_999_999_9), Value::Int64(-1)),
+                (
+                    Value::Int64(two_to_53 + 1),
+                    Value::Float64(9_007_199_254_740_992.0),
+                ),
             ] {
                 assert!(
                     !joined.contains(&pair(&a, &b)),
                     "{language}: {a:?} <> {b:?}"
                 );
             }
+            // A local and a zoned time at the same UTC instant: equal in GQL,
+            // which reads the local one at the session time zone (UTC here),
+            // and apart in Cypher, as openCypher compares them
+            let local_meets_zoned = joined.contains(&pair(&time("13:00:00"), &time("13:00:00Z")));
+            assert_eq!(local_meets_zoned, language == "gql", "{language}");
             assert!(
                 !joined.iter().any(|row| row.contains(&Value::Int64(-1))),
                 "{language}: a missing `k` meets nothing"

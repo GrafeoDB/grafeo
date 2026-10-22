@@ -1,14 +1,11 @@
 //! Upserts for the Node.js API: create or update nodes and edges by key.
 
-use std::collections::HashMap;
-
 use napi::bindgen_prelude::*;
 use napi_derive::napi;
 
-use grafeo_common::types::{PropertyKey, Value};
 use grafeo_engine::database::{EdgeUpsertOptions, UpsertSummary as EngineUpsertSummary};
 
-use super::{JsGrafeoDB, json_to_value};
+use super::JsGrafeoDB;
 use crate::error::NodeGrafeoError;
 
 /// Options for `upsertNodes`.
@@ -69,7 +66,7 @@ impl From<EngineUpsertSummary> for UpsertSummary {
 
 /// The engine options for `upsertEdges`: each option given, the default for
 /// the rest.
-fn edge_options(options: UpsertEdgesOptions) -> EdgeUpsertOptions {
+pub(super) fn edge_options(options: UpsertEdgesOptions) -> EdgeUpsertOptions {
     let mut edge = EdgeUpsertOptions::new();
     if let Some(key) = options.key {
         edge = edge.with_key(key);
@@ -92,22 +89,13 @@ fn edge_options(options: UpsertEdgesOptions) -> EdgeUpsertOptions {
     edge
 }
 
-/// Rows of properties from JSON objects.
-pub(super) fn rows(rows: &[serde_json::Value]) -> Result<Vec<HashMap<PropertyKey, Value>>> {
-    rows.iter()
-        .map(|row| {
-            let serde_json::Value::Object(fields) = row else {
-                return Err(NodeGrafeoError::InvalidArgument(
-                    "each upsert row must be an object".to_string(),
-                )
-                .into());
-            };
-            fields
-                .iter()
-                .map(|(name, value)| Ok((PropertyKey::new(name.as_str()), json_to_value(value)?)))
-                .collect()
-        })
-        .collect()
+/// The key and replace flag of `upsertNodes`, defaults filled in.
+pub(super) fn node_options(options: Option<UpsertNodesOptions>) -> (String, bool) {
+    let (key, replace) = options.map_or((None, None), |options| (options.key, options.replace));
+    (
+        key.unwrap_or_else(|| "id".to_string()),
+        replace.unwrap_or(false),
+    )
 }
 
 #[napi]
@@ -125,17 +113,16 @@ impl JsGrafeoDB {
     pub async fn upsert_nodes(
         &self,
         labels: Vec<String>,
-        rows: Vec<serde_json::Value>,
+        #[napi(ts_arg_type = "Array<any>")] rows: Vec<crate::types::Properties>,
         options: Option<UpsertNodesOptions>,
     ) -> Result<UpsertSummary> {
-        let rows = self::rows(&rows)?;
-        let (key, replace) = options.map_or((None, None), |options| (options.key, options.replace));
-        let key = key.unwrap_or_else(|| "id".to_string());
+        let rows = crate::types::Properties::rows(rows)?;
+        let (key, replace) = node_options(options);
         let db = self.inner.clone();
         tokio::task::spawn_blocking(move || {
             let labels: Vec<&str> = labels.iter().map(String::as_str).collect();
             db.read()
-                .upsert_nodes(&labels, &key, rows, replace.unwrap_or(false))
+                .upsert_nodes(&labels, &key, rows, replace)
                 .map(UpsertSummary::from)
                 .map_err(|e| NodeGrafeoError::from(e).into())
         })
@@ -156,10 +143,10 @@ impl JsGrafeoDB {
     pub async fn upsert_edges(
         &self,
         edge_type: String,
-        rows: Vec<serde_json::Value>,
+        #[napi(ts_arg_type = "Array<any>")] rows: Vec<crate::types::Properties>,
         options: Option<UpsertEdgesOptions>,
     ) -> Result<UpsertSummary> {
-        let rows = self::rows(&rows)?;
+        let rows = crate::types::Properties::rows(rows)?;
         let options = options.map_or_else(EdgeUpsertOptions::new, edge_options);
         let db = self.inner.clone();
         tokio::task::spawn_blocking(move || {

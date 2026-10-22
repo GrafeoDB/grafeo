@@ -3,7 +3,10 @@
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
+use super::decimal::{Decimal, DecimalError};
+
 const NANOS_PER_SECOND: i64 = 1_000_000_000;
+const NANOS_PER_DAY: i64 = 86_400 * NANOS_PER_SECOND;
 const NANOS_PER_MINUTE: i64 = 60 * NANOS_PER_SECOND;
 const NANOS_PER_HOUR: i64 = 60 * NANOS_PER_MINUTE;
 
@@ -156,6 +159,52 @@ impl Duration {
             days: self.days / divisor,
             nanos: self.nanos / divisor,
         }
+    }
+
+    /// The duration times a number, each component scaled: a fraction of a
+    /// month carries into days (a month is 30.436875 days, the average of the
+    /// Gregorian year) and a fraction of a day into nanoseconds, rounded half
+    /// away from zero, as openCypher multiplies durations. `P1D * 1.5` is
+    /// `P1DT12H`.
+    ///
+    /// # Errors
+    ///
+    /// [`DecimalError::Overflow`] when a component does not fit.
+    pub fn checked_mul_decimal(self, factor: &Decimal) -> Result<Self, DecimalError> {
+        self.scaled(|component| component.checked_mul(factor))
+    }
+
+    /// The duration divided by a number, each component scaled as
+    /// [`checked_mul_decimal`](Self::checked_mul_decimal) scales it:
+    /// `P1D / 2` is `PT12H`.
+    ///
+    /// # Errors
+    ///
+    /// [`DecimalError::DivisionByZero`] for a divisor of zero,
+    /// [`DecimalError::Overflow`] when a component does not fit.
+    pub fn checked_div_decimal(self, divisor: &Decimal) -> Result<Self, DecimalError> {
+        self.scaled(|component| component.checked_div(divisor))
+    }
+
+    /// Applies `step` to each component, carrying the fractions down.
+    fn scaled(
+        self,
+        step: impl Fn(&Decimal) -> Result<Decimal, DecimalError>,
+    ) -> Result<Self, DecimalError> {
+        // The integer part toward zero, and what is left of the value
+        fn split(value: &Decimal) -> Result<(i64, Decimal), DecimalError> {
+            let whole = value.trunc_to_i64().ok_or(DecimalError::Overflow)?;
+            Ok((whole, value.checked_sub(&Decimal::from_i64(whole))?))
+        }
+        let days_per_month = Decimal::new(30_436_875, 6)?;
+        let (months, month_fraction) = split(&step(&Decimal::from_i64(self.months))?)?;
+        let days = step(&Decimal::from_i64(self.days))?
+            .checked_add(&month_fraction.checked_mul(&days_per_month)?)?;
+        let (days, day_fraction) = split(&days)?;
+        let nanos = step(&Decimal::from_i64(self.nanos))?
+            .checked_add(&day_fraction.checked_mul(&Decimal::from_i64(NANOS_PER_DAY))?)?;
+        let nanos = nanos.round().trunc_to_i64().ok_or(DecimalError::Overflow)?;
+        Ok(Self::new(months, days, nanos))
     }
 
     /// Parses a duration from ISO 8601 format "OnYnMnDTnHnMnS".
@@ -373,6 +422,51 @@ impl fmt::Display for Duration {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn scaled_by(text: &str, factor: &str) -> String {
+        let factor = Decimal::parse(factor).unwrap();
+        Duration::parse(text)
+            .unwrap()
+            .checked_mul_decimal(&factor)
+            .unwrap()
+            .to_string()
+    }
+
+    fn divided_by(text: &str, divisor: i64) -> Result<String, DecimalError> {
+        Duration::parse(text)
+            .unwrap()
+            .checked_div_decimal(&Decimal::from_i64(divisor))
+            .map(|d| d.to_string())
+    }
+
+    #[test]
+    fn multiplying_carries_fractions_down() {
+        assert_eq!(scaled_by("P1D", "1.5"), "P1DT12H");
+        assert_eq!(scaled_by("P1D", "2"), "P2D");
+        assert_eq!(scaled_by("PT1H", "0.5"), "PT30M");
+        // Half a month is 15.2184375 days: 15 days, 5 h 14 min 33 s
+        assert_eq!(scaled_by("P1M", "1.5"), "P1M15DT5H14M33S");
+        assert_eq!(scaled_by("P1Y", "0.5"), "P6M");
+        assert_eq!(scaled_by("P1D", "-1.5"), "-P1DT12H");
+        assert_eq!(scaled_by("P1M2DT3H", "0"), "PT0S");
+    }
+
+    #[test]
+    fn dividing_carries_fractions_down() {
+        assert_eq!(divided_by("P1D", 2).unwrap(), "PT12H");
+        assert_eq!(divided_by("P1M", 2).unwrap(), "P15DT5H14M33S");
+        assert_eq!(divided_by("PT1S", 3).unwrap(), "PT0.333333333S");
+        assert_eq!(divided_by("P1D", 0), Err(DecimalError::DivisionByZero));
+    }
+
+    #[test]
+    fn scaling_past_the_range_is_an_overflow() {
+        let factor = Decimal::from_i64(i64::MAX);
+        assert_eq!(
+            Duration::new(0, 2, 0).checked_mul_decimal(&factor),
+            Err(DecimalError::Overflow)
+        );
+    }
 
     #[test]
     fn test_constructors() {

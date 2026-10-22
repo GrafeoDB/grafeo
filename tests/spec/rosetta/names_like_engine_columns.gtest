@@ -1,0 +1,95 @@
+# Rosetta: variables named like the columns the engine makes up
+#
+# The engine names the columns of aggregates (`_agg_0`), anonymous edges
+# (`_anon_edge_0`) and MERGE elements (`_merge_0`) itself; those names now
+# skip the statement's own, so a user variable spelled like one keeps its
+# value. In GQL `_agg_0` read an aggregate's column (`UNWIND [3, 19] AS _agg_0
+# RETURN _agg_0, count(*)` gave 1 twice), and in GQL and Cypher `_anon_edge_0`
+# read the column of an anonymous edge (null). See names_like_generated_ones
+# for `_anon_0` and lpg/cypher/patterns for the Cypher `_agg_0` and `_merge_0`.
+
+meta:
+  model: lpg
+  section: rosetta
+  title: Variables named like engine columns
+  dataset: empty
+  requires: [cypher]
+
+tests:
+
+  - name: a_grouping_key_spelled_like_an_aggregate_column
+    variants:
+      gql: "UNWIND [3, 19] AS _agg_0 RETURN _agg_0, count(*) AS n ORDER BY _agg_0"
+      cypher: "UNWIND [3, 19] AS _agg_0 RETURN _agg_0, count(*) AS n ORDER BY _agg_0"
+    expect:
+      ordered: true
+      rows:
+        - [3, 1]
+        - [19, 1]
+
+  - name: two_keys_spelled_like_two_aggregate_columns
+    variants:
+      gql: "UNWIND [[3, 19], [3, 88]] AS pair WITH pair[0] AS _agg_0, pair[1] AS _agg_1 RETURN _agg_0, _agg_1, count(*) AS n, sum(_agg_1) AS total ORDER BY _agg_1"
+      cypher: "UNWIND [[3, 19], [3, 88]] AS pair WITH pair[0] AS _agg_0, pair[1] AS _agg_1 RETURN _agg_0, _agg_1, count(*) AS n, sum(_agg_1) AS total ORDER BY _agg_1"
+    expect:
+      ordered: true
+      rows:
+        - [3, 19, 1, 19]
+        - [3, 88, 1, 88]
+
+  - name: an_aggregate_aliased_like_an_aggregate_column
+    variants:
+      gql: "UNWIND [3, 19, 88] AS x RETURN count(x) AS _agg_1, sum(x) AS _agg_0"
+      cypher: "UNWIND [3, 19, 88] AS x RETURN count(x) AS _agg_1, sum(x) AS _agg_0"
+    expect:
+      rows:
+        - [3, 110]
+
+  - name: a_with_key_spelled_like_an_aggregate_column
+    variants:
+      gql: "UNWIND [3, 3, 19] AS x WITH x AS _agg_0, count(*) AS n RETURN _agg_0, n ORDER BY _agg_0"
+      cypher: "UNWIND [3, 3, 19] AS x WITH x AS _agg_0, count(*) AS n RETURN _agg_0, n ORDER BY _agg_0"
+    expect:
+      ordered: true
+      rows:
+        - [3, 2]
+        - [19, 1]
+
+  - name: an_edge_spelled_like_an_anonymous_edge
+    setup:
+      - "INSERT (:N {id: 3})-[:T {w: 1}]->(:N {id: 19})-[:T {w: 2}]->(:N {id: 88})"
+    variants:
+      gql: "MATCH (:N {id: 3})-[]->(b)-[_anon_edge_0:T]->(c) RETURN _anon_edge_0.w AS w, c.id AS id"
+      cypher: "MATCH (:N {id: 3})-->(b)-[_anon_edge_0:T]->(c) RETURN _anon_edge_0.w AS w, c.id AS id"
+    expect:
+      rows:
+        - [2, 88]
+
+  - name: two_edges_spelled_like_anonymous_edges
+    setup:
+      - "INSERT (:N {id: 3})-[:T {w: 1}]->(:N {id: 19})-[:T {w: 2}]->(:N {id: 88})"
+    variants:
+      gql: "MATCH (a)-[_anon_edge_1:T]->(b)-[_anon_edge_0:T]->(c) RETURN _anon_edge_1.w AS first, _anon_edge_0.w AS second"
+      cypher: "MATCH (a)-[_anon_edge_1:T]->(b)-[_anon_edge_0:T]->(c) RETURN _anon_edge_1.w AS first, _anon_edge_0.w AS second"
+    expect:
+      rows:
+        - [1, 2]
+
+  - name: a_node_spelled_like_a_merged_node_in_gql
+    setup:
+      - "INSERT (:N {id: 3})"
+    variants:
+      gql: "MATCH (_merge_0:N) MERGE (:M {id: 19}) RETURN _merge_0.id AS id"
+    expect:
+      rows:
+        - [3]
+
+  - name: a_merge_beside_a_node_spelled_like_its_column
+    setup:
+      - "INSERT (:N {id: 3})"
+    variants:
+      gql: "MATCH (_merge_0:N) MERGE (_merge_0)-[:T]->(m:M {id: 19}) RETURN _merge_0.id AS a, m.id AS b"
+      cypher: "MATCH (_merge_0:N) MERGE (_merge_0)-[:T]->(m:M {id: 19}) RETURN _merge_0.id AS a, m.id AS b"
+    expect:
+      rows:
+        - [3, 19]

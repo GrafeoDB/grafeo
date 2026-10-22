@@ -1,7 +1,9 @@
 //! Classic graph algorithms - traversals, paths, centrality, communities.
 //!
-//! Everything you'd expect from a graph analytics library, designed to work
-//! seamlessly with Grafeo's LPG store. All algorithms are available from Python too.
+//! Everything you'd expect from a graph analytics library, on any store that
+//! implements [`GraphStore`](grafeo_core::graph::GraphStore), such as the
+//! row-group store the database holds its graphs in. All algorithms are
+//! available from Python too.
 //!
 //! | Category | Algorithms |
 //! | -------- | ---------- |
@@ -15,23 +17,29 @@
 //! ## Usage
 //!
 //! ```no_run
+//! # {
 //! use grafeo_adapters::plugins::algorithms::{bfs, connected_components, dijkstra};
-//! use grafeo_core::graph::lpg::LpgStore;
-//! use grafeo_common::types::NodeId;
+//! use grafeo_common::types::ReadView;
+//! use grafeo_core::graph::rowgroup::RowGroupStore;
 //!
-//! let store = LpgStore::new().unwrap();
+//! let store = RowGroupStore::new();
 //! let n0 = store.create_node(&["Node"]);
 //! let n1 = store.create_node(&["Node"]);
 //! store.create_edge(n0, n1, "CONNECTS");
 //!
+//! // Every algorithm reads the graph as one view sees it: here a committed
+//! // reader at the store's epoch (the database pins its views).
+//! let view = ReadView::committed(store.current_epoch());
+//!
 //! // Run BFS from the first node
-//! let visited = bfs(&store, n0);
+//! let visited = bfs(&store, view, n0).unwrap();
 //!
 //! // Find connected components
-//! let components = connected_components(&store);
+//! let components = connected_components(&store, view).unwrap();
 //!
 //! // Run Dijkstra's shortest path
-//! let result = dijkstra(&store, n0, Some("weight"));
+//! let result = dijkstra(&store, view, n0, Some("weight")).unwrap();
+//! # }
 //! ```
 
 mod centrality;
@@ -50,7 +58,8 @@ mod traversal;
 
 // Core traits
 pub use traits::{
-    Control, DistanceMap, GraphAlgorithm, MinScored, ParallelGraphAlgorithm, TraversalEvent,
+    Control, DistanceMap, GraphAlgorithm, GraphView, MinScored, ParallelGraphAlgorithm,
+    TraversalEvent,
 };
 
 // Traversal algorithms

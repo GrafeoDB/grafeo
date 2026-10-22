@@ -127,7 +127,7 @@ for PY_VER in "${PYTHON_VERSIONS[@]}"; do
     fi
 
     echo -e "${GRAY}  Installing test dependencies...${NC}"
-    if ! uv pip install pytest pytest-asyncio networkx numpy scipy solvor --python "$PYTHON_CMD"; then
+    if ! uv pip install pytest pytest-asyncio networkx numpy scipy solvor pandas pyarrow polars --python "$PYTHON_CMD"; then
         echo -e "${RED}  Python $PY_VER FAILED: Dependency install failed${NC}"
         FAILED+=("Python $PY_VER")
         continue

@@ -209,12 +209,30 @@ fn an_argument_that_reads_the_graph_is_an_error() {
 fn an_argument_that_cannot_be_evaluated_is_an_error() {
     let db = chain_and_branch();
     let error = db
-        .execute("CALL grafeo.pagerank(1 / 0) YIELD score")
-        .expect_err("1 / 0 has no value to run with");
+        .execute("CALL grafeo.pagerank(1 - 'x') YIELD score")
+        .expect_err("1 - 'x' has no value to run with");
     assert!(
         error
             .to_string()
             .contains("Argument 'damping' of grafeo.pagerank cannot be evaluated"),
+        "unexpected error: {error}"
+    );
+}
+
+/// An argument whose evaluation fails fails the call with that error (#639).
+#[test]
+fn an_argument_that_fails_fails_the_call() {
+    let db = chain_and_branch();
+    let error = db
+        .execute("CALL grafeo.pagerank(1 / 0) YIELD score")
+        .expect_err("1 / 0 fails");
+    assert_eq!(
+        grafeo_common::utils::GqlStatus::from(&error),
+        grafeo_common::utils::GqlStatus::DATA_DIVISION_BY_ZERO,
+        "{error}"
+    );
+    assert!(
+        error.to_string().contains("division by zero: 1 / 0"),
         "unexpected error: {error}"
     );
 }
@@ -352,7 +370,7 @@ fn cypher_missing_parameter_is_an_error() {
 // Vector search arguments
 // ---------------------------------------------------------------------------
 
-#[cfg(all(feature = "vector-index", feature = "lpg"))]
+#[cfg(feature = "vector-index")]
 mod vector {
     use super::*;
 

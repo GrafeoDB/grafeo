@@ -89,11 +89,10 @@
 //!
 //! # Transaction context
 //!
-//! Every operator inherits the planner's `viewing_epoch` and
-//! `transaction_id`. Factorised chains and mutations carry them
-//! through `with_transaction_context()` so MVCC visibility is applied
-//! at every hop: see [`crate::transaction`] for the epoch/visibility
-//! rules.
+//! Every operator reads at the planner's view
+//! ([`Planner::read_view`]), its `viewing_epoch` and `transaction_id`:
+//! factorised chains and mutations carry it so MVCC visibility is applied
+//! at every hop. See [`crate::transaction`] for the epoch/visibility rules.
 
 pub(crate) mod after_write;
 mod aggregate;
@@ -126,24 +125,25 @@ use crate::query::plan::{
 #[cfg(feature = "vector-index")]
 use crate::query::plan::{VectorMetric, VectorScanOp};
 use grafeo_common::grafeo_debug_span;
-use grafeo_common::types::{EpochId, TransactionId};
+use grafeo_common::types::{EpochId, ReadView, TransactionId};
 use grafeo_common::types::{LogicalType, Value};
 use grafeo_common::utils::error::{Error, Result};
 use grafeo_core::execution::operators::{
-    AddLabelOperator, AggregateExpr as PhysicalAggregateExpr, ApplyOperator, ConstraintValidator,
-    CreateOperator, CreateStep, DeleteEdgeOperator, DeleteNodeOperator, EagerOperator,
-    EmptyOperator, EntityKind, EntityValue, ExecutionPathMode, ExpandOperator, ExpandStep,
-    ExpressionPredicate, FactorizedAggregate, FactorizedAggregateOperator, FilterExpression,
-    FilterOperator, HashAggregateOperator, HashJoinOperator, HorizontalAggregateOperator,
-    JoinType as PhysicalJoinType, LazyFactorizedChainOperator, LeapfrogJoinOperator,
-    LoadDataOperator, MapCollectOperator, MergeConfig, MergeOperator, MergeRelationshipConfig,
-    MergeRelationshipOperator, NestedLoopJoinOperator, NodeListOperator, Operator,
-    ParameterScanOperator, ProjectExpr, ProjectOperator, PropertySource, RangeScanOperator,
-    RemoveLabelOperator, ScanOperator, SetPropertyOperator, ShortestPathOperator,
-    SimpleAggregateOperator, SortDirection, SortKey as PhysicalSortKey, SortOperator,
-    UnwindOperator, VariableLengthExpandOperator,
+    AddLabelOperator, AggregateExpr as PhysicalAggregateExpr, ApplyOperator, BuiltinFunction,
+    ConstraintValidator, CreateOperator, CreateStep, DeleteEdgeOperator, DeleteNodeOperator,
+    EagerOperator, EmptyOperator, EntityKind, EntityValue, ExecutionPathMode, ExpandOperator,
+    ExpandStep, ExpressionPredicate, FactorizedAggregate, FactorizedAggregateOperator,
+    FilterExpression, FilterOperator, HashAggregateOperator, HashJoinOperator,
+    HorizontalAggregateOperator, JoinType as PhysicalJoinType, LazyFactorizedChainOperator,
+    LeapfrogJoinOperator, LoadDataOperator, MapCollectOperator, MergeConfig, MergeOperator,
+    MergeRelationshipConfig, MergeRelationshipOperator, NestedLoopJoinOperator, NodeListOperator,
+    Operator, ParameterScanOperator, ProjectExpr, ProjectOperator, PropertySource,
+    RangeScanOperator, RemoveLabelOperator, ScanOperator, SetPropertyOperator,
+    ShortestPathOperator, SimpleAggregateOperator, SortDirection, SortKey as PhysicalSortKey,
+    SortOperator, UnwindOperator, VariableLengthExpandOperator,
 };
-use grafeo_core::graph::{Direction, GraphStoreMut, GraphStoreSearch};
+use grafeo_core::graph::GraphBackend;
+use grafeo_core::graph::{Direction, GraphStore};
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -194,12 +194,23 @@ impl ColumnKinds {
     }
 }
 
+/// Which kind of store the database is on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum StoreKind {
+    /// The built-in store, with its vector and text indexes.
+    BuiltIn,
+    /// A store of its own (`with_store`), which has none of the built-in
+    /// store's indexes: a text search is then the unsupported error rather
+    /// than a missing index.
+    External,
+}
+
 /// Converts a logical plan to a physical operator tree for LPG stores.
 pub struct Planner {
     /// The graph store (read-only operations).
-    pub(super) store: Arc<dyn GraphStoreSearch>,
+    pub(super) store: Arc<dyn GraphStore>,
     /// Writable graph store (None for read-only databases).
-    pub(super) write_store: Option<Arc<dyn GraphStoreMut>>,
+    pub(super) write_store: Option<Arc<dyn GraphBackend>>,
     /// Transaction manager for MVCC operations.
     pub(super) transaction_manager: Option<Arc<TransactionManager>>,
     /// Current transaction ID (if in a transaction).
@@ -208,6 +219,13 @@ pub struct Planner {
     pub(super) viewing_epoch: EpochId,
     /// Counter for generating unique anonymous edge column names.
     pub(super) anon_edge_counter: std::cell::Cell<u32>,
+    /// The names the plan being planned binds, which an anonymous edge's
+    /// column name skips (a user variable `_anon_edge_0` stays the user's).
+    pub(super) plan_names: std::cell::RefCell<std::collections::HashSet<String>>,
+    /// Edge conditions a filter hands to the variable-length expand that
+    /// binds their path, to check during its search (see
+    /// `try_plan_filter_into_variable_length_expand`).
+    pub(super) pending_edge_conditions: std::cell::RefCell<Vec<expand::PendingEdgeCondition>>,
     /// Counter for the column names of subqueries planned per row.
     pub(super) subquery_counter: std::cell::Cell<u32>,
     /// Whether to use factorized execution for multi-hop queries.
@@ -237,11 +255,11 @@ pub struct Planner {
     pub(super) catalog: Option<Arc<crate::catalog::Catalog>>,
     /// LPG store handle for procedures that need direct index access (vector
     /// and text search reach HNSW / BM25 indexes owned by the LPG store).
-    #[cfg(feature = "lpg")]
-    pub(super) lpg_store: Option<Arc<grafeo_core::graph::lpg::LpgStore>>,
+    pub(super) lpg_store: Option<Arc<grafeo_core::graph::rowgroup::RowGroupStore>>,
+    /// Which kind of store the database is on.
+    pub(super) store_kind: StoreKind,
     /// The database's named projections, so `CALL grafeo.<algorithm>({projection: ...})`
     /// can run on one.
-    #[cfg(feature = "lpg")]
     pub(super) projections: Option<crate::session::ProjectionRegistry>,
     /// Shared parameter state for the currently planning correlated Apply.
     /// Set by `plan_apply` before planning the inner operator, consumed by
@@ -265,6 +283,9 @@ pub struct Planner {
     profiling: std::cell::Cell<bool>,
     /// Profile entries collected during planning (post-order).
     profile_entries: std::cell::RefCell<Vec<crate::query::profile::ProfileEntry>>,
+    /// The store's edge type names, read once per plan when a pattern names
+    /// a type (see [`stored_edge_types`](Self::stored_edge_types)).
+    edge_type_names: std::cell::OnceCell<Vec<String>>,
     /// Where the plan's writers write and record their writes: the active
     /// graph's store and the transaction's changes in it. `None` outside a
     /// transaction, where writers write through the write store; a plan in
@@ -272,6 +293,8 @@ pub struct Planner {
     recording: Option<grafeo_core::execution::operators::Recording>,
     /// Counts the writes of the plan's writers.
     write_counter: Arc<grafeo_core::execution::operators::WriteCounter>,
+    /// Counts the rows the plan's access operators read from storage.
+    read_counter: Arc<grafeo_core::execution::operators::ReadCounter>,
     /// Session context for introspection functions (info, schema, current_schema, etc.).
     pub(super) session_context: grafeo_core::execution::operators::SessionContext,
     /// When true, expand operators use epoch-only visibility (no MVCC version
@@ -300,13 +323,11 @@ pub struct Planner {
 }
 
 impl Planner {
-    /// Creates a new planner with the given store.
-    ///
-    /// This creates a planner without transaction context, using the current
-    /// epoch from the store for visibility.
+    /// Creates a planner without transaction context: its operators read
+    /// as a committed reader at `viewing_epoch`.
     #[must_use]
-    pub fn new(store: Arc<dyn GraphStoreSearch>) -> Self {
-        let epoch = store.current_epoch();
+    pub fn new(store: Arc<dyn GraphStore>, viewing_epoch: EpochId) -> Self {
+        let epoch = viewing_epoch;
         Self {
             store,
             write_store: None,
@@ -314,6 +335,8 @@ impl Planner {
             transaction_id: None,
             viewing_epoch: epoch,
             anon_edge_counter: std::cell::Cell::new(0),
+            plan_names: std::cell::RefCell::new(std::collections::HashSet::new()),
+            pending_edge_conditions: std::cell::RefCell::new(Vec::new()),
             subquery_counter: std::cell::Cell::new(0),
             factorized_execution: true,
             shuffle_unordered: false,
@@ -323,9 +346,8 @@ impl Planner {
             entity_list_columns: std::cell::RefCell::new(std::collections::HashMap::new()),
             validator: None,
             catalog: None,
-            #[cfg(feature = "lpg")]
             lpg_store: None,
-            #[cfg(feature = "lpg")]
+            store_kind: StoreKind::BuiltIn,
             projections: None,
             correlated_param_state: std::cell::RefCell::new(None),
             group_list_variables: std::cell::RefCell::new(std::collections::HashSet::new()),
@@ -333,8 +355,10 @@ impl Planner {
             after_a_write: std::cell::Cell::new(false),
             profiling: std::cell::Cell::new(false),
             profile_entries: std::cell::RefCell::new(Vec::new()),
+            edge_type_names: std::cell::OnceCell::new(),
             recording: None,
             write_counter: Arc::default(),
+            read_counter: Arc::default(),
             session_context: grafeo_core::execution::operators::SessionContext::default(),
             read_only: false,
             limit_hint: std::cell::Cell::new(None),
@@ -358,8 +382,8 @@ impl Planner {
     /// Creates a new planner with transaction context for MVCC-aware planning.
     #[must_use]
     pub fn with_context(
-        store: Arc<dyn GraphStoreSearch>,
-        write_store: Option<Arc<dyn GraphStoreMut>>,
+        store: Arc<dyn GraphStore>,
+        write_store: Option<Arc<dyn GraphBackend>>,
         transaction_manager: Arc<TransactionManager>,
         transaction_id: Option<TransactionId>,
         viewing_epoch: EpochId,
@@ -371,6 +395,8 @@ impl Planner {
             transaction_id,
             viewing_epoch,
             anon_edge_counter: std::cell::Cell::new(0),
+            plan_names: std::cell::RefCell::new(std::collections::HashSet::new()),
+            pending_edge_conditions: std::cell::RefCell::new(Vec::new()),
             subquery_counter: std::cell::Cell::new(0),
             factorized_execution: true,
             shuffle_unordered: false,
@@ -380,9 +406,8 @@ impl Planner {
             entity_list_columns: std::cell::RefCell::new(std::collections::HashMap::new()),
             validator: None,
             catalog: None,
-            #[cfg(feature = "lpg")]
             lpg_store: None,
-            #[cfg(feature = "lpg")]
+            store_kind: StoreKind::BuiltIn,
             projections: None,
             correlated_param_state: std::cell::RefCell::new(None),
             group_list_variables: std::cell::RefCell::new(std::collections::HashSet::new()),
@@ -390,8 +415,10 @@ impl Planner {
             after_a_write: std::cell::Cell::new(false),
             profiling: std::cell::Cell::new(false),
             profile_entries: std::cell::RefCell::new(Vec::new()),
+            edge_type_names: std::cell::OnceCell::new(),
             recording: None,
             write_counter: Arc::default(),
+            read_counter: Arc::default(),
             session_context: grafeo_core::execution::operators::SessionContext::default(),
             read_only: false,
             limit_hint: std::cell::Cell::new(None),
@@ -400,8 +427,8 @@ impl Planner {
         }
     }
 
-    /// Marks this planner as planning a read-only query (no mutations),
-    /// enabling fast-path visibility checks in expand operators.
+    /// Marks this planner as planning a read-only query (no mutations): its
+    /// operators read as a committed reader, without the transaction's view.
     #[must_use]
     pub fn with_read_only(mut self, read_only: bool) -> Self {
         self.read_only = read_only;
@@ -421,7 +448,7 @@ impl Planner {
     }
 
     /// Returns the writable store, or `TransactionError::ReadOnly` if unavailable.
-    fn write_store(&self) -> Result<Arc<dyn GraphStoreMut>> {
+    fn write_store(&self) -> Result<Arc<dyn GraphBackend>> {
         self.write_store
             .as_ref()
             .map(Arc::clone)
@@ -436,25 +463,26 @@ impl Planner {
     ///
     /// # Errors
     ///
-    /// Fails without a writable store, and in a transaction without its
-    /// recording (the transaction is no longer open): a write there would
-    /// be neither claimed nor recorded, so no commit could publish it and no
-    /// rollback undo it.
+    /// Fails without a writable store, and without the transaction's
+    /// recording (outside a transaction, or in one no longer open): a write
+    /// there would be neither claimed nor recorded, so no commit could
+    /// publish it and no rollback undo it.
     fn graph_writer(&self) -> Result<grafeo_core::execution::operators::GraphWriter> {
-        let mut writer = grafeo_core::execution::operators::GraphWriter::new(self.write_store()?)
-            .with_transaction_context(self.viewing_epoch, self.transaction_id);
-        match (&self.recording, self.transaction_id) {
-            (Some(recording), _) => writer = writer.with_recording(recording.clone()),
-            (None, Some(transaction)) => {
-                return Err(Error::Transaction(
-                    grafeo_common::utils::error::TransactionError::InvalidState(format!(
-                        "transaction {} is not open: it cannot write",
-                        transaction.as_u64()
-                    )),
-                ));
-            }
-            (None, None) => {}
-        }
+        let store = self.write_store()?;
+        let Some(recording) = &self.recording else {
+            let message = match self.transaction_id {
+                Some(transaction) => format!(
+                    "transaction {} is not open: it cannot write",
+                    transaction.as_u64()
+                ),
+                None => "a write runs in a transaction, and this statement has none".to_string(),
+            };
+            return Err(Error::Transaction(
+                grafeo_common::utils::error::TransactionError::InvalidState(message),
+            ));
+        };
+        let mut writer =
+            grafeo_core::execution::operators::GraphWriter::new(store, recording.clone());
         if let Some(ref validator) = self.validator {
             writer = writer.with_validator(Arc::clone(validator));
         }
@@ -480,6 +508,25 @@ impl Planner {
         self
     }
 
+    /// Counts the rows the plan's access operators read from storage,
+    /// before any filter: the statement's `rows_scanned`.
+    #[must_use]
+    pub fn read_counter(&self) -> Arc<grafeo_core::execution::operators::ReadCounter> {
+        Arc::clone(&self.read_counter)
+    }
+
+    /// Counts the reads into `counter` instead of a counter of its own, so
+    /// the reads of a stored procedure's body count for the statement that
+    /// calls it.
+    #[must_use]
+    pub fn with_read_counter(
+        mut self,
+        counter: Arc<grafeo_core::execution::operators::ReadCounter>,
+    ) -> Self {
+        self.read_counter = counter;
+        self
+    }
+
     /// Returns the viewing epoch for this planner.
     #[must_use]
     pub fn viewing_epoch(&self) -> EpochId {
@@ -490,6 +537,54 @@ impl Planner {
     #[must_use]
     pub fn transaction_id(&self) -> Option<TransactionId> {
         self.transaction_id
+    }
+
+    /// The view this planner's reads and operators read at: its
+    /// transaction at its snapshot, or committed at its viewing epoch,
+    /// as a read-only plan reads (it has no writes of its own to see).
+    #[must_use]
+    pub fn read_view(&self) -> ReadView {
+        if self.read_only {
+            ReadView::committed(self.viewing_epoch)
+        } else {
+            ReadView::new(self.viewing_epoch, self.transaction_id)
+        }
+    }
+
+    /// The stored edge type names a pattern's `names` match: each name
+    /// itself, and every type of the store that differs from it only in
+    /// ASCII case (a pattern's types match regardless of case; the store
+    /// matches the names it is given exactly). The store's types are read
+    /// once per plan; a type a statement creates in another case while it
+    /// runs is not among them.
+    ///
+    /// # Errors
+    ///
+    /// The error of the store's read of its edge types.
+    pub(crate) fn stored_edge_types(&self, names: &[String]) -> Result<Vec<String>> {
+        if names.is_empty() {
+            return Ok(Vec::new());
+        }
+        let stored = match self.edge_type_names.get() {
+            Some(stored) => stored,
+            None => {
+                let read = self.store.all_edge_types()?;
+                self.edge_type_names.get_or_init(|| read)
+            }
+        };
+        let mut resolved: Vec<String> = Vec::with_capacity(names.len());
+        for name in names {
+            for candidate in std::iter::once(name).chain(
+                stored
+                    .iter()
+                    .filter(|stored| *stored != name && stored.eq_ignore_ascii_case(name)),
+            ) {
+                if !resolved.contains(candidate) {
+                    resolved.push(candidate.clone());
+                }
+            }
+        }
+        Ok(resolved)
     }
 
     /// Returns a reference to the transaction manager, if available.
@@ -509,6 +604,7 @@ impl Planner {
     /// [`reachability`] allows it (the default); off, every walk is
     /// enumerated, which tests compare with.
     #[must_use]
+    #[cfg(query_language)]
     pub(crate) fn with_reachability(mut self, enabled: bool) -> Self {
         self.reachability_expands = std::cell::RefCell::new(enabled.then(Vec::new));
         self
@@ -564,16 +660,24 @@ impl Planner {
 
     /// Attaches an LPG store handle so `CALL grafeo.search.*` procedures can
     /// reach the vector and text indexes.
-    #[cfg(feature = "lpg")]
     #[must_use]
-    pub fn with_lpg_store(mut self, lpg_store: Arc<grafeo_core::graph::lpg::LpgStore>) -> Self {
+    pub fn with_lpg_store(
+        mut self,
+        lpg_store: Arc<grafeo_core::graph::rowgroup::RowGroupStore>,
+    ) -> Self {
         self.lpg_store = Some(lpg_store);
+        self
+    }
+
+    /// Marks the database as one on a store of its own (`with_store`).
+    #[must_use]
+    pub fn with_external_store(mut self) -> Self {
+        self.store_kind = StoreKind::External;
         self
     }
 
     /// Attaches the database's projections, so `CALL grafeo.<algorithm>({projection: ...})`
     /// can run on one.
-    #[cfg(feature = "lpg")]
     #[must_use]
     pub fn with_projections(mut self, projections: crate::session::ProjectionRegistry) -> Self {
         self.projections = Some(projections);
@@ -683,9 +787,15 @@ impl Planner {
     /// Returns the column name for the caller to push into its output columns.
     pub(super) fn register_edge_column(&self, edge_variable: &Option<String>) -> String {
         let name = edge_variable.clone().unwrap_or_else(|| {
-            let count = self.anon_edge_counter.get();
-            self.anon_edge_counter.set(count + 1);
-            format!("_anon_edge_{}", count)
+            let taken = self.plan_names.borrow();
+            loop {
+                let count = self.anon_edge_counter.get();
+                self.anon_edge_counter.set(count + 1);
+                let name = format!("_anon_edge_{count}");
+                if !taken.contains(&name) {
+                    break name;
+                }
+            }
         });
         self.edge_columns.borrow_mut().insert(name.clone());
         name
@@ -733,6 +843,14 @@ impl Planner {
         chain
     }
 
+    /// Records the names `logical_plan` binds, so the column names the
+    /// planner makes up for anonymous edges skip them.
+    fn take_plan_names(&self, logical_plan: &LogicalPlan) {
+        let mut names = self.plan_names.borrow_mut();
+        names.clear();
+        crate::query::optimizer::plan_names(&logical_plan.root, &mut names);
+    }
+
     /// Plans a logical plan into a physical operator.
     ///
     /// # Errors
@@ -741,6 +859,7 @@ impl Planner {
     /// or invalid expressions.
     pub fn plan(&self, logical_plan: &LogicalPlan) -> Result<PhysicalPlan> {
         let _span = grafeo_debug_span!("grafeo::query::plan");
+        self.take_plan_names(logical_plan);
         self.find_reachability_expands(&logical_plan.root);
         let (operator, columns) = self.plan_operator(&logical_plan.root)?;
         let operator = self.shuffled_root(logical_plan, operator);
@@ -763,6 +882,7 @@ impl Planner {
     ) -> Result<(PhysicalPlan, Vec<crate::query::profile::ProfileEntry>)> {
         self.profiling.set(true);
         self.profile_entries.borrow_mut().clear();
+        self.take_plan_names(logical_plan);
         self.find_reachability_expands(&logical_plan.root);
 
         let result = self.plan_operator(&logical_plan.root);
@@ -914,7 +1034,7 @@ impl Planner {
             #[cfg(feature = "algos")]
             LogicalOperator::CallProcedure(call) => self.plan_call_procedure(call),
             #[cfg(not(feature = "algos"))]
-            LogicalOperator::CallProcedure(_) => Err(grafeo_common::utils::error::Error::Query(
+            LogicalOperator::CallProcedure(_) => Err(grafeo_common::utils::error::Error::from(
                 grafeo_common::utils::error::QueryError::unsupported(
                     "this build has no procedures (the `algos` feature)",
                 ),
@@ -927,12 +1047,12 @@ impl Planner {
             #[cfg(feature = "vector-index")]
             LogicalOperator::VectorScan(scan) => self.plan_vector_scan(scan),
             #[cfg(not(feature = "vector-index"))]
-            LogicalOperator::VectorScan(_) => Err(grafeo_common::utils::error::Error::Query(
+            LogicalOperator::VectorScan(_) => Err(grafeo_common::utils::error::Error::from(
                 grafeo_common::utils::error::QueryError::unsupported(
                     "this build has no vector indexes (the `vector-index` feature)",
                 ),
             )),
-            LogicalOperator::VectorJoin(_) => Err(grafeo_common::utils::error::Error::Query(
+            LogicalOperator::VectorJoin(_) => Err(grafeo_common::utils::error::Error::from(
                 grafeo_common::utils::error::QueryError::unsupported(
                     "this build has no vector indexes (the `vector-index` feature)",
                 ),
@@ -940,7 +1060,7 @@ impl Planner {
             #[cfg(feature = "text-index")]
             LogicalOperator::TextScan(scan) => self.plan_text_scan(scan),
             #[cfg(not(feature = "text-index"))]
-            LogicalOperator::TextScan(_) => Err(grafeo_common::utils::error::Error::Query(
+            LogicalOperator::TextScan(_) => Err(grafeo_common::utils::error::Error::from(
                 grafeo_common::utils::error::QueryError::unsupported(
                     "this build has no text indexes (the `text-index` feature)",
                 ),
@@ -1003,11 +1123,11 @@ impl Planner {
                 entity_kind,
                 function,
                 ha.property.clone(),
-                Arc::clone(&self.store) as Arc<dyn GraphStoreSearch>,
+                Arc::clone(&self.store) as Arc<dyn GraphStore>,
                 input_column_count,
+                self.read_view(),
             )
-            .with_aggregate_options(ha.distinct, ha.percentile, ha.separator.clone())
-            .with_transaction_context(self.viewing_epoch, self.transaction_id),
+            .with_aggregate_options(ha.distinct, ha.percentile, ha.separator.clone()),
         );
 
         let mut columns = child_columns;
@@ -1058,7 +1178,7 @@ impl Planner {
                 )));
             }
             _ => {
-                return Err(grafeo_common::utils::error::Error::Query(
+                return Err(grafeo_common::utils::error::Error::from(
                     grafeo_common::utils::error::QueryError::semantic(
                         "a text search query must be a string literal or a parameter",
                     ),
@@ -1066,31 +1186,36 @@ impl Planner {
             }
         };
 
-        let operator: Box<dyn Operator> = if let Some(k) = scan.k {
-            Box::new(TextScanOperator::top_k(
+        let operator = if let Some(k) = scan.k {
+            TextScanOperator::top_k(
                 Arc::clone(&self.store),
                 &scan.label,
                 &scan.property,
                 &query_string,
                 k,
-            ))
+                self.read_view(),
+            )
         } else if let Some(threshold) = scan.threshold {
-            Box::new(TextScanOperator::with_threshold(
+            TextScanOperator::with_threshold(
                 Arc::clone(&self.store),
                 &scan.label,
                 &scan.property,
                 &query_string,
                 threshold,
-            ))
+                self.read_view(),
+            )
         } else {
-            Box::new(TextScanOperator::top_k(
+            TextScanOperator::top_k(
                 Arc::clone(&self.store),
                 &scan.label,
                 &scan.property,
                 &query_string,
                 100,
-            ))
+                self.read_view(),
+            )
         };
+        // The documents the query's view sees.
+        let operator: Box<dyn Operator> = Box::new(operator.with_read_counter(self.read_counter()));
 
         let mut columns = vec![scan.variable.clone()];
         if let Some(ref score_col) = scan.score_column {
@@ -1132,12 +1257,13 @@ impl Planner {
         // bounds k to the label's node count so we don't feed usize::MAX
         // into HNSW (which degrades to full traversal and risks overflow
         // in quantized rescore paths even with saturating_mul).
-        let k = scan.k.unwrap_or_else(|| {
-            scan.label.as_ref().map_or_else(
-                || self.store.node_count(),
-                |l| self.store.nodes_by_label_count(l),
-            )
-        });
+        let k = match scan.k {
+            Some(k) => k,
+            None => match scan.label.as_ref() {
+                None => self.store.node_count(self.read_view())?,
+                Some(label) => self.store.nodes_by_label_count(label, self.read_view())?,
+            },
+        };
 
         // A query vector the index cannot measure is an error that names the
         // index (#593), whichever metric the predicate asks for: a search of
@@ -1177,7 +1303,9 @@ impl Planner {
             query_vec,
             k,
             metric,
-        );
+            self.read_view(),
+        )
+        .with_read_counter(self.read_counter());
 
         if let Some(sim) = scan.min_similarity {
             operator = operator.with_min_similarity(sim);
@@ -1219,15 +1347,9 @@ impl Planner {
             LogicalExpression::Literal(Value::List(list)) => {
                 let mut vec = Vec::with_capacity(list.len());
                 for item in list.iter() {
-                    match item {
-                        Value::Float64(f) => vec.push(*f as f32),
-                        Value::Int64(i) => vec.push(*i as f32),
-                        _ => {
-                            return Err(Error::Internal(
-                                "Vector elements must be numeric".to_string(),
-                            ));
-                        }
-                    }
+                    vec.push(item.as_vector_component().ok_or_else(|| {
+                        Error::Internal("Vector elements must be numeric".to_string())
+                    })?);
                 }
                 Ok(vec)
             }
@@ -1236,15 +1358,13 @@ impl Planner {
             LogicalExpression::List(items) => {
                 let mut vec = Vec::with_capacity(items.len());
                 for item in items {
-                    match item {
-                        LogicalExpression::Literal(Value::Float64(f)) => vec.push(*f as f32),
-                        LogicalExpression::Literal(Value::Int64(i)) => vec.push(*i as f32),
-                        _ => {
-                            return Err(Error::Internal(
-                                "Vector elements must be numeric literals".to_string(),
-                            ));
-                        }
-                    }
+                    let component = match item {
+                        LogicalExpression::Literal(value) => value.as_vector_component(),
+                        _ => None,
+                    };
+                    vec.push(component.ok_or_else(|| {
+                        Error::Internal("Vector elements must be numeric literals".to_string())
+                    })?);
                 }
                 Ok(vec)
             }
@@ -1316,11 +1436,10 @@ mod tests {
     };
     use grafeo_common::types::Value;
     use grafeo_core::execution::operators::AggregateFunction as PhysicalAggregateFunction;
-    use grafeo_core::graph::GraphStoreMut;
-    use grafeo_core::graph::lpg::LpgStore;
+    use grafeo_core::graph::rowgroup::RowGroupStore;
 
-    fn create_test_store() -> Arc<LpgStore> {
-        let store = Arc::new(LpgStore::new().unwrap());
+    fn create_test_store() -> Arc<RowGroupStore> {
+        let store = Arc::new(RowGroupStore::new());
         store.create_node(&["Person"]);
         store.create_node(&["Person"]);
         store.create_node(&["Company"]);
@@ -1332,7 +1451,7 @@ mod tests {
     #[test]
     fn test_plan_simple_scan() {
         let store = create_test_store();
-        let planner = Planner::new(store);
+        let planner = Planner::new(store, grafeo_common::types::EpochId::LATEST);
 
         // MATCH (n:Person) RETURN n
         let logical = LogicalPlan::new(LogicalOperator::Return(ReturnOp {
@@ -1355,7 +1474,7 @@ mod tests {
     #[test]
     fn test_plan_scan_without_label() {
         let store = create_test_store();
-        let planner = Planner::new(store);
+        let planner = Planner::new(store, grafeo_common::types::EpochId::LATEST);
 
         // MATCH (n) RETURN n
         let logical = LogicalPlan::new(LogicalOperator::Return(ReturnOp {
@@ -1378,7 +1497,7 @@ mod tests {
     #[test]
     fn test_plan_return_with_alias() {
         let store = create_test_store();
-        let planner = Planner::new(store);
+        let planner = Planner::new(store, grafeo_common::types::EpochId::LATEST);
 
         // MATCH (n:Person) RETURN n AS person
         let logical = LogicalPlan::new(LogicalOperator::Return(ReturnOp {
@@ -1401,7 +1520,7 @@ mod tests {
     #[test]
     fn test_plan_return_property() {
         let store = create_test_store();
-        let planner = Planner::new(store);
+        let planner = Planner::new(store, grafeo_common::types::EpochId::LATEST);
 
         // MATCH (n:Person) RETURN n.name
         let logical = LogicalPlan::new(LogicalOperator::Return(ReturnOp {
@@ -1427,7 +1546,7 @@ mod tests {
     #[test]
     fn test_plan_return_literal() {
         let store = create_test_store();
-        let planner = Planner::new(store);
+        let planner = Planner::new(store, grafeo_common::types::EpochId::LATEST);
 
         // MATCH (n) RETURN 42 AS answer
         let logical = LogicalPlan::new(LogicalOperator::Return(ReturnOp {
@@ -1452,7 +1571,7 @@ mod tests {
     #[test]
     fn test_plan_filter_equality() {
         let store = create_test_store();
-        let planner = Planner::new(store);
+        let planner = Planner::new(store, grafeo_common::types::EpochId::LATEST);
 
         // MATCH (n:Person) WHERE n.age = 30 RETURN n
         let logical = LogicalPlan::new(LogicalOperator::Return(ReturnOp {
@@ -1486,7 +1605,7 @@ mod tests {
     #[test]
     fn test_plan_filter_compound_and() {
         let store = create_test_store();
-        let planner = Planner::new(store);
+        let planner = Planner::new(store, grafeo_common::types::EpochId::LATEST);
 
         // WHERE n.age > 20 AND n.age < 40
         let logical = LogicalPlan::new(LogicalOperator::Return(ReturnOp {
@@ -1531,7 +1650,7 @@ mod tests {
     #[test]
     fn test_plan_filter_unary_not() {
         let store = create_test_store();
-        let planner = Planner::new(store);
+        let planner = Planner::new(store, grafeo_common::types::EpochId::LATEST);
 
         // WHERE NOT n.active
         let logical = LogicalPlan::new(LogicalOperator::Return(ReturnOp {
@@ -1564,7 +1683,7 @@ mod tests {
     #[test]
     fn test_plan_filter_is_null() {
         let store = create_test_store();
-        let planner = Planner::new(store);
+        let planner = Planner::new(store, grafeo_common::types::EpochId::LATEST);
 
         // WHERE n.email IS NULL
         let logical = LogicalPlan::new(LogicalOperator::Return(ReturnOp {
@@ -1597,7 +1716,7 @@ mod tests {
     #[test]
     fn test_plan_filter_function_call() {
         let store = create_test_store();
-        let planner = Planner::new(store);
+        let planner = Planner::new(store, grafeo_common::types::EpochId::LATEST);
 
         // WHERE size(n.friends) > 0
         let logical = LogicalPlan::new(LogicalOperator::Return(ReturnOp {
@@ -1609,6 +1728,7 @@ mod tests {
             input: Box::new(LogicalOperator::Filter(FilterOp {
                 predicate: LogicalExpression::Binary {
                     left: Box::new(LogicalExpression::FunctionCall {
+                        callee: crate::query::plan::Callee::named("size"),
                         name: "size".to_string(),
                         args: vec![LogicalExpression::Property {
                             variable: "n".to_string(),
@@ -1637,7 +1757,7 @@ mod tests {
     #[test]
     fn test_plan_expand_outgoing() {
         let store = create_test_store();
-        let planner = Planner::new(store);
+        let planner = Planner::new(store, grafeo_common::types::EpochId::LATEST);
 
         // MATCH (a:Person)-[:KNOWS]->(b) RETURN a, b
         let logical = LogicalPlan::new(LogicalOperator::Return(ReturnOp {
@@ -1680,7 +1800,7 @@ mod tests {
     #[test]
     fn test_plan_expand_with_edge_variable() {
         let store = create_test_store();
-        let planner = Planner::new(store);
+        let planner = Planner::new(store, grafeo_common::types::EpochId::LATEST);
 
         // MATCH (a)-[r:KNOWS]->(b) RETURN a, r, b
         let logical = LogicalPlan::new(LogicalOperator::Return(ReturnOp {
@@ -1729,7 +1849,7 @@ mod tests {
     #[test]
     fn test_plan_limit() {
         let store = create_test_store();
-        let planner = Planner::new(store);
+        let planner = Planner::new(store, grafeo_common::types::EpochId::LATEST);
 
         // MATCH (n) RETURN n LIMIT 10
         let logical = LogicalPlan::new(LogicalOperator::Return(ReturnOp {
@@ -1755,7 +1875,7 @@ mod tests {
     #[test]
     fn test_plan_skip() {
         let store = create_test_store();
-        let planner = Planner::new(store);
+        let planner = Planner::new(store, grafeo_common::types::EpochId::LATEST);
 
         // MATCH (n) RETURN n SKIP 5
         let logical = LogicalPlan::new(LogicalOperator::Return(ReturnOp {
@@ -1784,7 +1904,7 @@ mod tests {
     fn test_limit_pushdown_into_range_scan_sets_inner_limit() {
         use grafeo_core::execution::operators::{LimitOperator, RangeScanOperator};
         let store = create_test_store();
-        let planner = Planner::new(store);
+        let planner = Planner::new(store, grafeo_common::types::EpochId::LATEST);
 
         // LIMIT 5 over WHERE n.age > 30 over MATCH (n:Person)
         let logical = LogicalPlan::new(LogicalOperator::Limit(LogicalLimitOp {
@@ -1836,7 +1956,7 @@ mod tests {
             LimitOperator, ProjectOperator, RangeScanOperator, SortOperator,
         };
         let store = create_test_store();
-        let planner = Planner::new(store);
+        let planner = Planner::new(store, grafeo_common::types::EpochId::LATEST);
 
         // LIMIT 5 over SORT BY n.name over WHERE n.age > 30 over Scan(n:Person)
         // Sort needs full materialization; the LIMIT must NOT be pushed
@@ -1963,7 +2083,7 @@ mod tests {
     #[test]
     fn test_plan_sort() {
         let store = create_test_store();
-        let planner = Planner::new(store);
+        let planner = Planner::new(store, grafeo_common::types::EpochId::LATEST);
 
         // MATCH (n) RETURN n ORDER BY n.name ASC
         let logical = LogicalPlan::new(LogicalOperator::Return(ReturnOp {
@@ -1993,7 +2113,7 @@ mod tests {
     #[test]
     fn test_plan_sort_descending() {
         let store = create_test_store();
-        let planner = Planner::new(store);
+        let planner = Planner::new(store, grafeo_common::types::EpochId::LATEST);
 
         // ORDER BY n DESC
         let logical = LogicalPlan::new(LogicalOperator::Return(ReturnOp {
@@ -2023,7 +2143,7 @@ mod tests {
     #[test]
     fn test_plan_distinct() {
         let store = create_test_store();
-        let planner = Planner::new(store);
+        let planner = Planner::new(store, grafeo_common::types::EpochId::LATEST);
 
         // MATCH (n) RETURN DISTINCT n
         let logical = LogicalPlan::new(LogicalOperator::Return(ReturnOp {
@@ -2049,7 +2169,7 @@ mod tests {
     #[test]
     fn test_plan_distinct_with_columns() {
         let store = create_test_store();
-        let planner = Planner::new(store);
+        let planner = Planner::new(store, grafeo_common::types::EpochId::LATEST);
 
         // DISTINCT on specific columns (column-specific dedup)
         let logical = LogicalPlan::new(LogicalOperator::Return(ReturnOp {
@@ -2075,7 +2195,7 @@ mod tests {
     #[test]
     fn test_plan_distinct_with_nonexistent_columns() {
         let store = create_test_store();
-        let planner = Planner::new(store);
+        let planner = Planner::new(store, grafeo_common::types::EpochId::LATEST);
 
         // When distinct columns don't match any output columns,
         // it falls back to full-row distinct.
@@ -2104,7 +2224,7 @@ mod tests {
     #[test]
     fn test_plan_aggregate_count() {
         let store = create_test_store();
-        let planner = Planner::new(store);
+        let planner = Planner::new(store, grafeo_common::types::EpochId::LATEST);
 
         // MATCH (n) RETURN count(n)
         let logical = LogicalPlan::new(LogicalOperator::Return(ReturnOp {
@@ -2140,7 +2260,7 @@ mod tests {
     #[test]
     fn test_plan_aggregate_with_group_by() {
         let store = create_test_store();
-        let planner = Planner::new(store);
+        let planner = Planner::new(store, grafeo_common::types::EpochId::LATEST);
 
         // MATCH (n:Person) RETURN n.city, count(n) GROUP BY n.city
         let logical = LogicalPlan::new(LogicalOperator::Aggregate(AggregateOp {
@@ -2172,7 +2292,7 @@ mod tests {
     #[test]
     fn test_plan_aggregate_sum() {
         let store = create_test_store();
-        let planner = Planner::new(store);
+        let planner = Planner::new(store, grafeo_common::types::EpochId::LATEST);
 
         // SUM(n.value)
         let logical = LogicalPlan::new(LogicalOperator::Aggregate(AggregateOp {
@@ -2204,7 +2324,7 @@ mod tests {
     #[test]
     fn test_plan_aggregate_avg() {
         let store = create_test_store();
-        let planner = Planner::new(store);
+        let planner = Planner::new(store, grafeo_common::types::EpochId::LATEST);
 
         // AVG(n.score)
         let logical = LogicalPlan::new(LogicalOperator::Aggregate(AggregateOp {
@@ -2236,7 +2356,7 @@ mod tests {
     #[test]
     fn test_plan_aggregate_min_max() {
         let store = create_test_store();
-        let planner = Planner::new(store);
+        let planner = Planner::new(store, grafeo_common::types::EpochId::LATEST);
 
         // MIN(n.age), MAX(n.age)
         let logical = LogicalPlan::new(LogicalOperator::Aggregate(AggregateOp {
@@ -2285,7 +2405,7 @@ mod tests {
     #[test]
     fn test_plan_inner_join() {
         let store = create_test_store();
-        let planner = Planner::new(store);
+        let planner = Planner::new(store, grafeo_common::types::EpochId::LATEST);
 
         // Inner join between two scans
         let logical = LogicalPlan::new(LogicalOperator::Return(ReturnOp {
@@ -2327,7 +2447,7 @@ mod tests {
     #[test]
     fn test_plan_cross_join() {
         let store = create_test_store();
-        let planner = Planner::new(store);
+        let planner = Planner::new(store, grafeo_common::types::EpochId::LATEST);
 
         // Cross join (no conditions)
         let logical = LogicalPlan::new(LogicalOperator::Join(JoinOp {
@@ -2352,7 +2472,7 @@ mod tests {
     #[test]
     fn test_plan_left_join() {
         let store = create_test_store();
-        let planner = Planner::new(store);
+        let planner = Planner::new(store, grafeo_common::types::EpochId::LATEST);
 
         let logical = LogicalPlan::new(LogicalOperator::Join(JoinOp {
             left: Box::new(LogicalOperator::NodeScan(NodeScanOp {
@@ -2375,9 +2495,15 @@ mod tests {
 
     // ==================== Mutation Tests ====================
 
-    fn create_writable_planner(store: &Arc<LpgStore>) -> Planner {
-        let mut p = Planner::new(Arc::clone(store) as Arc<dyn GraphStoreSearch>);
-        p.write_store = Some(Arc::clone(store) as Arc<dyn GraphStoreMut>);
+    fn create_writable_planner(store: &Arc<RowGroupStore>) -> Planner {
+        let mut p = Planner::new(
+            Arc::clone(store) as Arc<dyn GraphStore>,
+            grafeo_common::types::EpochId::LATEST,
+        );
+        p.write_store = Some(Arc::clone(store) as Arc<dyn GraphBackend>);
+        p.recording = Some(grafeo_core::execution::operators::Recording::immediate(
+            Arc::clone(store),
+        ));
         p
     }
 
@@ -2458,7 +2584,7 @@ mod tests {
     #[test]
     fn test_plan_empty_errors() {
         let store = create_test_store();
-        let planner = Planner::new(store);
+        let planner = Planner::new(store, grafeo_common::types::EpochId::LATEST);
 
         let logical = LogicalPlan::new(LogicalOperator::Empty);
         let result = planner.plan(&logical);
@@ -2468,7 +2594,7 @@ mod tests {
     #[test]
     fn test_plan_missing_variable_in_return() {
         let store = create_test_store();
-        let planner = Planner::new(store);
+        let planner = Planner::new(store, grafeo_common::types::EpochId::LATEST);
 
         // Return variable that doesn't exist in input
         let logical = LogicalPlan::new(LogicalOperator::Return(ReturnOp {
@@ -2541,7 +2667,10 @@ mod tests {
     #[test]
     fn test_planner_accessors() {
         let store = create_test_store();
-        let planner = Planner::new(Arc::clone(&store) as Arc<dyn GraphStoreSearch>);
+        let planner = Planner::new(
+            Arc::clone(&store) as Arc<dyn GraphStore>,
+            grafeo_common::types::EpochId::LATEST,
+        );
 
         assert!(planner.transaction_id().is_none());
         assert!(planner.transaction_manager().is_none());
@@ -2551,7 +2680,7 @@ mod tests {
     #[test]
     fn test_physical_plan_accessors() {
         let store = create_test_store();
-        let planner = Planner::new(store);
+        let planner = Planner::new(store, grafeo_common::types::EpochId::LATEST);
 
         let logical = LogicalPlan::new(LogicalOperator::NodeScan(NodeScanOp {
             variable: "n".to_string(),
@@ -2571,7 +2700,7 @@ mod tests {
     #[test]
     fn test_plan_expand_variable_length() {
         let store = create_test_store();
-        let planner = Planner::new(store);
+        let planner = Planner::new(store, grafeo_common::types::EpochId::LATEST);
 
         // MATCH (a)-[:KNOWS*1..3]->(b) RETURN a, b
         let logical = LogicalPlan::new(LogicalOperator::Return(ReturnOp {
@@ -2613,7 +2742,7 @@ mod tests {
     #[test]
     fn test_plan_expand_with_path_alias() {
         let store = create_test_store();
-        let planner = Planner::new(store);
+        let planner = Planner::new(store, grafeo_common::types::EpochId::LATEST);
 
         // MATCH p = (a)-[:KNOWS*1..3]->(b) RETURN a, b
         let logical = LogicalPlan::new(LogicalOperator::Return(ReturnOp {
@@ -2656,8 +2785,11 @@ mod tests {
     #[test]
     fn test_plan_expand_incoming() {
         let store = create_test_store();
-        let planner = Planner::new(Arc::clone(&store) as Arc<dyn GraphStoreSearch>)
-            .with_factorized_execution(false);
+        let planner = Planner::new(
+            Arc::clone(&store) as Arc<dyn GraphStore>,
+            grafeo_common::types::EpochId::LATEST,
+        )
+        .with_factorized_execution(false);
 
         // MATCH (a)<-[:KNOWS]-(b) RETURN a, b
         let logical = LogicalPlan::new(LogicalOperator::Return(ReturnOp {
@@ -2699,8 +2831,11 @@ mod tests {
     #[test]
     fn test_plan_expand_both_directions() {
         let store = create_test_store();
-        let planner = Planner::new(Arc::clone(&store) as Arc<dyn GraphStoreSearch>)
-            .with_factorized_execution(false);
+        let planner = Planner::new(
+            Arc::clone(&store) as Arc<dyn GraphStore>,
+            grafeo_common::types::EpochId::LATEST,
+        )
+        .with_factorized_execution(false);
 
         // MATCH (a)-[:KNOWS]-(b) RETURN a, b
         let logical = LogicalPlan::new(LogicalOperator::Return(ReturnOp {
@@ -2751,8 +2886,8 @@ mod tests {
         let epoch = transaction_manager.current_epoch();
 
         let planner = Planner::with_context(
-            Arc::clone(&store) as Arc<dyn GraphStoreSearch>,
-            Some(Arc::clone(&store) as Arc<dyn GraphStoreMut>),
+            Arc::clone(&store) as Arc<dyn GraphStore>,
+            Some(Arc::clone(&store) as Arc<dyn GraphBackend>),
             Arc::clone(&transaction_manager),
             Some(transaction_id),
             epoch,
@@ -2766,8 +2901,11 @@ mod tests {
     #[test]
     fn test_planner_with_factorized_execution_disabled() {
         let store = create_test_store();
-        let planner = Planner::new(Arc::clone(&store) as Arc<dyn GraphStoreSearch>)
-            .with_factorized_execution(false);
+        let planner = Planner::new(
+            Arc::clone(&store) as Arc<dyn GraphStore>,
+            grafeo_common::types::EpochId::LATEST,
+        )
+        .with_factorized_execution(false);
 
         // Two consecutive expands - should NOT use factorized execution
         let logical = LogicalPlan::new(LogicalOperator::Return(ReturnOp {
@@ -2823,7 +2961,7 @@ mod tests {
     #[test]
     fn test_plan_sort_by_property() {
         let store = create_test_store();
-        let planner = Planner::new(store);
+        let planner = Planner::new(store, grafeo_common::types::EpochId::LATEST);
 
         // MATCH (n) RETURN n ORDER BY n.name ASC
         let logical = LogicalPlan::new(LogicalOperator::Return(ReturnOp {
@@ -2859,7 +2997,7 @@ mod tests {
     #[test]
     fn test_plan_scan_with_input() {
         let store = create_test_store();
-        let planner = Planner::new(store);
+        let planner = Planner::new(store, grafeo_common::types::EpochId::LATEST);
 
         // A scan with another scan as input (for chained patterns)
         let logical = LogicalPlan::new(LogicalOperator::Return(ReturnOp {
@@ -2907,9 +3045,9 @@ mod tests {
     };
     use grafeo_core::execution::operators::SessionContext;
 
-    fn full_store() -> Arc<LpgStore> {
+    fn full_store() -> Arc<RowGroupStore> {
         // Richer store so expand and shortest path tests have real data.
-        let store = Arc::new(LpgStore::new().unwrap());
+        let store = Arc::new(RowGroupStore::new());
         let vincent = store.create_node(&["Person"]);
         let jules = store.create_node(&["Person"]);
         let mia = store.create_node(&["Person"]);
@@ -2940,12 +3078,18 @@ mod tests {
     #[test]
     fn test_with_read_only_flag() {
         let store = create_test_store();
-        let planner =
-            Planner::new(Arc::clone(&store) as Arc<dyn GraphStoreSearch>).with_read_only(true);
+        let planner = Planner::new(
+            Arc::clone(&store) as Arc<dyn GraphStore>,
+            grafeo_common::types::EpochId::LATEST,
+        )
+        .with_read_only(true);
         assert!(planner.read_only);
 
-        let planner_off =
-            Planner::new(Arc::clone(&store) as Arc<dyn GraphStoreSearch>).with_read_only(false);
+        let planner_off = Planner::new(
+            Arc::clone(&store) as Arc<dyn GraphStore>,
+            grafeo_common::types::EpochId::LATEST,
+        )
+        .with_read_only(false);
         assert!(!planner_off.read_only);
     }
 
@@ -2953,8 +3097,11 @@ mod tests {
     fn test_with_catalog() {
         let store = create_test_store();
         let catalog = Arc::new(Catalog::new());
-        let planner = Planner::new(Arc::clone(&store) as Arc<dyn GraphStoreSearch>)
-            .with_catalog(Arc::clone(&catalog));
+        let planner = Planner::new(
+            Arc::clone(&store) as Arc<dyn GraphStore>,
+            grafeo_common::types::EpochId::LATEST,
+        )
+        .with_catalog(Arc::clone(&catalog));
         assert!(planner.catalog.is_some());
     }
 
@@ -2966,8 +3113,11 @@ mod tests {
             current_graph: Some("main".to_string()),
             ..SessionContext::default()
         };
-        let planner = Planner::new(Arc::clone(&store) as Arc<dyn GraphStoreSearch>)
-            .with_session_context(context);
+        let planner = Planner::new(
+            Arc::clone(&store) as Arc<dyn GraphStore>,
+            grafeo_common::types::EpochId::LATEST,
+        )
+        .with_session_context(context);
         assert_eq!(
             planner.session_context.current_schema.as_deref(),
             Some("public")
@@ -2983,7 +3133,10 @@ mod tests {
     #[test]
     fn test_register_edge_column_named() {
         let store = create_test_store();
-        let planner = Planner::new(Arc::clone(&store) as Arc<dyn GraphStoreSearch>);
+        let planner = Planner::new(
+            Arc::clone(&store) as Arc<dyn GraphStore>,
+            grafeo_common::types::EpochId::LATEST,
+        );
         let name = planner.register_edge_column(&Some("r".to_string()));
         assert_eq!(name, "r");
         assert!(planner.edge_columns.borrow().contains("r"));
@@ -2992,7 +3145,10 @@ mod tests {
     #[test]
     fn test_register_edge_column_anonymous_counter_advances() {
         let store = create_test_store();
-        let planner = Planner::new(Arc::clone(&store) as Arc<dyn GraphStoreSearch>);
+        let planner = Planner::new(
+            Arc::clone(&store) as Arc<dyn GraphStore>,
+            grafeo_common::types::EpochId::LATEST,
+        );
         let a = planner.register_edge_column(&None);
         let b = planner.register_edge_column(&None);
         assert_eq!(a, "_anon_edge_0");
@@ -3007,7 +3163,7 @@ mod tests {
     fn test_create_node_without_write_store_errors() {
         // Read-only planner: CREATE should fail with ReadOnly transaction error.
         let store = create_test_store();
-        let planner = Planner::new(store);
+        let planner = Planner::new(store, grafeo_common::types::EpochId::LATEST);
 
         let logical = LogicalPlan::new(LogicalOperator::CreateNode(CreateNodeOp {
             variable: "n".to_string(),
@@ -3025,7 +3181,7 @@ mod tests {
     #[test]
     fn test_plan_profiled_collects_entries() {
         let store = create_test_store();
-        let planner = Planner::new(store);
+        let planner = Planner::new(store, grafeo_common::types::EpochId::LATEST);
 
         let logical = LogicalPlan::new(LogicalOperator::Return(ReturnOp {
             items: vec![ReturnItem {
@@ -3051,7 +3207,7 @@ mod tests {
     #[test]
     fn test_plan_profiled_propagates_plan_errors() {
         let store = create_test_store();
-        let planner = Planner::new(store);
+        let planner = Planner::new(store, grafeo_common::types::EpochId::LATEST);
         let logical = LogicalPlan::new(LogicalOperator::Empty);
         let result = planner.plan_profiled(&logical);
         assert!(result.is_err());
@@ -3065,7 +3221,7 @@ mod tests {
     fn test_plan_edge_scan_is_unsupported() {
         // LPG planner does not handle bare EdgeScan; this hits the catch-all branch.
         let store = create_test_store();
-        let planner = Planner::new(store);
+        let planner = Planner::new(store, grafeo_common::types::EpochId::LATEST);
         let logical = LogicalPlan::new(LogicalOperator::EdgeScan(EdgeScanOp {
             variable: "e".to_string(),
             edge_types: vec![],
@@ -3078,7 +3234,7 @@ mod tests {
     #[test]
     fn test_plan_triple_scan_is_unsupported() {
         let store = create_test_store();
-        let planner = Planner::new(store);
+        let planner = Planner::new(store, grafeo_common::types::EpochId::LATEST);
         let logical = LogicalPlan::new(LogicalOperator::TripleScan(TripleScanOp {
             subject: TripleComponent::Variable("s".to_string()),
             predicate: TripleComponent::Variable("p".to_string()),
@@ -3093,7 +3249,7 @@ mod tests {
     #[test]
     fn test_plan_bind_is_unsupported() {
         let store = create_test_store();
-        let planner = Planner::new(store);
+        let planner = Planner::new(store, grafeo_common::types::EpochId::LATEST);
         let logical = LogicalPlan::new(LogicalOperator::Bind(BindOp {
             expression: LogicalExpression::Literal(Value::Int64(1)),
             variable: "x".to_string(),
@@ -3105,7 +3261,7 @@ mod tests {
     #[test]
     fn test_plan_parameter_scan_without_apply_errors() {
         let store = create_test_store();
-        let planner = Planner::new(store);
+        let planner = Planner::new(store, grafeo_common::types::EpochId::LATEST);
         let logical = LogicalPlan::new(LogicalOperator::ParameterScan(ParameterScanOp {
             columns: vec!["n".to_string()],
         }));
@@ -3118,7 +3274,7 @@ mod tests {
     #[test]
     fn test_plan_union_dispatch() {
         let store = create_test_store();
-        let planner = Planner::new(store);
+        let planner = Planner::new(store, grafeo_common::types::EpochId::LATEST);
         let logical = LogicalPlan::new(LogicalOperator::Union(UnionOp {
             inputs: vec![scan_person("n"), scan_person("n")],
         }));
@@ -3129,7 +3285,7 @@ mod tests {
     #[test]
     fn test_plan_except_dispatch() {
         let store = create_test_store();
-        let planner = Planner::new(store);
+        let planner = Planner::new(store, grafeo_common::types::EpochId::LATEST);
         let logical = LogicalPlan::new(LogicalOperator::Except(ExceptOp {
             left: Box::new(scan_person("n")),
             right: Box::new(scan_person("n")),
@@ -3142,7 +3298,7 @@ mod tests {
     #[test]
     fn test_plan_intersect_dispatch() {
         let store = create_test_store();
-        let planner = Planner::new(store);
+        let planner = Planner::new(store, grafeo_common::types::EpochId::LATEST);
         let logical = LogicalPlan::new(LogicalOperator::Intersect(IntersectOp {
             left: Box::new(scan_person("n")),
             right: Box::new(scan_person("n")),
@@ -3155,7 +3311,7 @@ mod tests {
     #[test]
     fn test_plan_otherwise_dispatch() {
         let store = create_test_store();
-        let planner = Planner::new(store);
+        let planner = Planner::new(store, grafeo_common::types::EpochId::LATEST);
         let logical = LogicalPlan::new(LogicalOperator::Otherwise(OtherwiseOp {
             left: Box::new(scan_person("n")),
             right: Box::new(scan_any("n")),
@@ -3167,7 +3323,7 @@ mod tests {
     #[test]
     fn test_plan_left_join_dispatch() {
         let store = create_test_store();
-        let planner = Planner::new(store);
+        let planner = Planner::new(store, grafeo_common::types::EpochId::LATEST);
         let logical = LogicalPlan::new(LogicalOperator::LeftJoin(LeftJoinOp {
             left: Box::new(scan_any("a")),
             right: Box::new(scan_any("b")),
@@ -3181,7 +3337,7 @@ mod tests {
     #[test]
     fn test_plan_anti_join_dispatch() {
         let store = create_test_store();
-        let planner = Planner::new(store);
+        let planner = Planner::new(store, grafeo_common::types::EpochId::LATEST);
         let logical = LogicalPlan::new(LogicalOperator::AntiJoin(AntiJoinOp {
             left: Box::new(scan_any("a")),
             right: Box::new(scan_any("b")),
@@ -3193,7 +3349,7 @@ mod tests {
     #[test]
     fn test_plan_apply_uncorrelated_dispatch() {
         let store = create_test_store();
-        let planner = Planner::new(store);
+        let planner = Planner::new(store, grafeo_common::types::EpochId::LATEST);
         let logical = LogicalPlan::new(LogicalOperator::Apply(ApplyOp {
             input: Box::new(scan_any("a")),
             subplan: Box::new(scan_any("b")),
@@ -3209,7 +3365,7 @@ mod tests {
     #[test]
     fn test_plan_unwind_literal_list() {
         let store = create_test_store();
-        let planner = Planner::new(store);
+        let planner = Planner::new(store, grafeo_common::types::EpochId::LATEST);
 
         // UNWIND [1,2,3] AS x
         let logical = LogicalPlan::new(LogicalOperator::Unwind(UnwindOp {
@@ -3234,6 +3390,7 @@ mod tests {
 
         // MERGE (n:Person)
         let logical = LogicalPlan::new(LogicalOperator::Merge(MergeOp {
+            index_hint: None,
             variable: "n".to_string(),
             labels: vec!["Person".to_string()],
             match_properties: vec![],
@@ -3347,7 +3504,10 @@ mod tests {
     #[test]
     fn test_plan_shortest_path_dispatch() {
         let store = full_store();
-        let planner = Planner::new(Arc::clone(&store) as Arc<dyn GraphStoreSearch>);
+        let planner = Planner::new(
+            Arc::clone(&store) as Arc<dyn GraphStore>,
+            grafeo_common::types::EpochId::LATEST,
+        );
 
         // SHORTEST PATH (a)-(b)
         let logical = LogicalPlan::new(LogicalOperator::ShortestPath(ShortestPathOp {
@@ -3383,7 +3543,10 @@ mod tests {
     #[test]
     fn test_plan_shortest_path_missing_source_errors() {
         let store = full_store();
-        let planner = Planner::new(Arc::clone(&store) as Arc<dyn GraphStoreSearch>);
+        let planner = Planner::new(
+            Arc::clone(&store) as Arc<dyn GraphStore>,
+            grafeo_common::types::EpochId::LATEST,
+        );
         let logical = LogicalPlan::new(LogicalOperator::ShortestPath(ShortestPathOp {
             input: Box::new(scan_person("a")),
             source_var: "missing".to_string(),
@@ -3408,7 +3571,7 @@ mod tests {
     fn test_plan_map_collect_dispatch() {
         // Build rows with two columns named 'k' and 'v', then collect k->v into a map.
         let store = create_test_store();
-        let planner = Planner::new(store);
+        let planner = Planner::new(store, grafeo_common::types::EpochId::LATEST);
         let input_with_kv = LogicalOperator::Project(crate::query::plan::ProjectOp {
             projections: vec![
                 crate::query::plan::Projection {
@@ -3436,7 +3599,7 @@ mod tests {
     #[test]
     fn test_plan_map_collect_missing_key_errors() {
         let store = create_test_store();
-        let planner = Planner::new(store);
+        let planner = Planner::new(store, grafeo_common::types::EpochId::LATEST);
         let logical = LogicalPlan::new(LogicalOperator::MapCollect(MapCollectOp {
             key_var: "not_there".to_string(),
             value_var: "also_missing".to_string(),
@@ -3451,7 +3614,7 @@ mod tests {
     #[test]
     fn test_plan_map_collect_missing_value_errors() {
         let store = create_test_store();
-        let planner = Planner::new(store);
+        let planner = Planner::new(store, grafeo_common::types::EpochId::LATEST);
         // Input has column "n" so key resolves but value does not.
         let logical = LogicalPlan::new(LogicalOperator::MapCollect(MapCollectOp {
             key_var: "n".to_string(),
@@ -3467,7 +3630,7 @@ mod tests {
     #[test]
     fn test_plan_horizontal_aggregate_missing_column_errors() {
         let store = create_test_store();
-        let planner = Planner::new(store);
+        let planner = Planner::new(store, grafeo_common::types::EpochId::LATEST);
         let logical = LogicalPlan::new(LogicalOperator::HorizontalAggregate(
             HorizontalAggregateOp {
                 list_column: "not_a_column".to_string(),
@@ -3488,7 +3651,7 @@ mod tests {
     #[test]
     fn test_plan_load_data_dispatch() {
         let store = create_test_store();
-        let planner = Planner::new(store);
+        let planner = Planner::new(store, grafeo_common::types::EpochId::LATEST);
         // Path does not need to exist: planning just builds the operator.
         let logical = LogicalPlan::new(LogicalOperator::LoadData(LoadDataOp {
             format: LoadDataFormat::Csv,
@@ -3506,7 +3669,10 @@ mod tests {
         // Three-way join over three expand inputs. Some configurations may
         // error during planning; we just require no panic.
         let store = full_store();
-        let planner = Planner::new(Arc::clone(&store) as Arc<dyn GraphStoreSearch>);
+        let planner = Planner::new(
+            Arc::clone(&store) as Arc<dyn GraphStore>,
+            grafeo_common::types::EpochId::LATEST,
+        );
         let ab = LogicalOperator::Expand(ExpandOp {
             quantified: false,
             from_variable: "a".to_string(),
@@ -3558,7 +3724,10 @@ mod tests {
     fn test_plan_horizontal_aggregate_dispatch() {
         // Variable-length expand produces a list column that the aggregate targets.
         let store = full_store();
-        let planner = Planner::new(Arc::clone(&store) as Arc<dyn GraphStoreSearch>);
+        let planner = Planner::new(
+            Arc::clone(&store) as Arc<dyn GraphStore>,
+            grafeo_common::types::EpochId::LATEST,
+        );
 
         let path = LogicalOperator::Expand(ExpandOp {
             quantified: false,
@@ -3687,7 +3856,7 @@ mod tests {
     /// We can't inspect VectorScanOperator.k directly — it's private — so the
     /// assertion here is that planning succeeds across all three branches
     /// without panicking or surfacing an internal-state error. Paired with
-    /// `LpgStore::nodes_by_label_count` tests, this guards the full path.
+    /// the store's `nodes_by_label_count` tests, this guards the full path.
     #[cfg(feature = "vector-index")]
     #[test]
     fn test_plan_vector_scan_k_none_bounds_across_label_states() {
@@ -3695,11 +3864,21 @@ mod tests {
 
         let store = create_test_store();
         // Sanity: the test store has 2 Person nodes, 1 Company, 0 Unknown.
-        assert_eq!(store.nodes_by_label_count("Person"), 2);
-        assert_eq!(store.nodes_by_label_count("Unknown"), 0);
-        assert_eq!(store.node_count(), 3);
+        assert_eq!(
+            store
+                .nodes_by_label_count("Person", ReadView::latest())
+                .unwrap(),
+            2
+        );
+        assert_eq!(
+            store
+                .nodes_by_label_count("Unknown", ReadView::latest())
+                .unwrap(),
+            0
+        );
+        assert_eq!(store.node_count(ReadView::latest()).unwrap(), 3);
 
-        let planner = Planner::new(store);
+        let planner = Planner::new(store, grafeo_common::types::EpochId::LATEST);
         let make_scan = |label: Option<&str>| VectorScanOp {
             variable: "n".to_string(),
             index_name: None,

@@ -1,0 +1,204 @@
+# SPARQL language-tagged literals in expressions (SPARQL 1.1 sec 17.4.2.7,
+# 17.4.2.8, 17.4.3)
+#
+# A literal keeps its language tag through every expression that passes it
+# on: BIND, COALESCE, IF, a subquery's projection, STRLANG, and the string
+# functions that keep the tag of their first argument (UCASE, LCASE, SUBSTR,
+# STRBEFORE, STRAFTER, REPLACE; CONCAT when every argument has the same tag).
+# LANG, LANGMATCHES and DATATYPE read it there.
+
+meta:
+  language: sparql
+  model: rdf
+  section: "17.4.2.7"
+  title: Language tags in expressions
+  dataset: empty
+  requires: [sparql, rdf]
+
+tests:
+
+  # ---------------------------------------------------------------------------
+  # Literals written in the query
+  # ---------------------------------------------------------------------------
+
+  - name: lang_of_a_tagged_literal_in_an_expression
+    query: |
+      SELECT (LANG("Alix"@en) AS ?tag) (LANG(STRLANG("hallo", "nl")) AS ?made) (LANG("Gus") AS ?plain) WHERE {}
+    expect:
+      rows:
+        - [en, nl, ""]
+
+  - name: datatype_of_a_tagged_literal_is_lang_string
+    query: |
+      PREFIX xsd: <http://www.w3.org/2001/XMLSchema#>
+      SELECT (DATATYPE("Alix"@en) = <http://www.w3.org/1999/02/22-rdf-syntax-ns#langString> AS ?lang_string)
+             (DATATYPE("Alix") = xsd:string AS ?plain)
+      WHERE {}
+    expect:
+      rows:
+        - [true, true]
+
+  - name: the_value_of_a_tagged_literal_is_its_text
+    query: |
+      SELECT (STR("Amsterdam"@nl) AS ?text) (STRLEN("Amsterdam"@nl) AS ?length) (UCASE("Amsterdam"@nl) AS ?loud) WHERE {}
+    expect:
+      rows:
+        - [Amsterdam, 9, AMSTERDAM]
+
+  - name: a_comparison_with_a_tagged_literal_needs_the_same_tag
+    query: |
+      SELECT ("Alix" = "Alix"@en AS ?tagged) ("Alix"@en = "Alix"@en AS ?same) ("Alix"@en = "Alix"@nl AS ?other) WHERE {}
+    expect:
+      rows:
+        - [false, true, false]
+
+  # ---------------------------------------------------------------------------
+  # Stored literals passed on by BIND, COALESCE, IF and subqueries
+  # ---------------------------------------------------------------------------
+
+  - name: lang_of_a_variable_bound_by_bind
+    setup:
+      - |
+        INSERT DATA {
+          <http://ex.org/amsterdam> <http://www.w3.org/2000/01/rdf-schema#label> "Amsterdam"@nl .
+          <http://ex.org/amsterdam> <http://www.w3.org/2000/01/rdf-schema#label> "Amsterdam"@en .
+          <http://ex.org/berlin> <http://www.w3.org/2000/01/rdf-schema#label> "Berlijn"@nl .
+        }
+    query: |
+      SELECT ?name WHERE {
+        ?city <http://www.w3.org/2000/01/rdf-schema#label> ?label
+        BIND(?label AS ?name)
+        FILTER(LANG(?name) = "nl")
+      }
+    expect:
+      rows:
+        - [Amsterdam]
+        - [Berlijn]
+
+  - name: lang_matches_of_a_variable_bound_by_bind
+    setup:
+      - |
+        INSERT DATA {
+          <http://ex.org/paris> <http://www.w3.org/2000/01/rdf-schema#label> "Paris"@fr .
+          <http://ex.org/paris> <http://www.w3.org/2000/01/rdf-schema#label> "Parijs"@nl-BE .
+        }
+    query: |
+      SELECT ?name (LANG(?name) AS ?tag) WHERE {
+        ?city <http://www.w3.org/2000/01/rdf-schema#label> ?label
+        BIND(?label AS ?name)
+        FILTER(langMatches(LANG(?name), "nl"))
+      }
+    expect:
+      rows:
+        - [Parijs, nl-BE]
+
+  - name: coalesce_passes_the_tag_of_the_value_it_takes
+    setup:
+      - |
+        INSERT DATA {
+          <http://ex.org/alix> <http://ex.org/nickname> "Lix"@nl .
+          <http://ex.org/alix> <http://ex.org/name> "Alix"@en .
+          <http://ex.org/gus> <http://ex.org/name> "Gus"@en .
+        }
+    query: |
+      SELECT ?person ?shown (LANG(?shown) AS ?tag) WHERE {
+        ?person <http://ex.org/name> ?name
+        OPTIONAL { ?person <http://ex.org/nickname> ?nick }
+        BIND(COALESCE(?nick, ?name) AS ?shown)
+      }
+    expect:
+      rows:
+        - [http://ex.org/alix, Lix, nl]
+        - [http://ex.org/gus, Gus, en]
+
+  - name: if_passes_the_tag_of_the_branch_it_takes
+    setup:
+      - |
+        INSERT DATA {
+          <http://ex.org/mia> <http://ex.org/label> "Mia"@it .
+          <http://ex.org/mia> <http://ex.org/alias> "M"@en .
+        }
+    query: |
+      SELECT (LANG(?a) AS ?long) (LANG(?b) AS ?short) WHERE {
+        <http://ex.org/mia> <http://ex.org/label> ?label ; <http://ex.org/alias> ?alias
+        BIND(IF(STRLEN(?label) > 2, ?label, ?alias) AS ?a)
+        BIND(IF(STRLEN(?label) > 5, ?label, ?alias) AS ?b)
+      }
+    expect:
+      rows:
+        - [it, en]
+
+  - name: a_bound_tagged_literal_is_a_lang_string
+    setup:
+      - |
+        INSERT DATA { <http://ex.org/jules> <http://ex.org/motto> "Ezechiel 25:17"@en . }
+    query: |
+      SELECT (DATATYPE(?copy) = <http://www.w3.org/1999/02/22-rdf-syntax-ns#langString> AS ?lang_string) WHERE {
+        <http://ex.org/jules> <http://ex.org/motto> ?motto
+        BIND(?motto AS ?copy)
+      }
+    expect:
+      rows:
+        - [true]
+
+  - name: a_subquery_passes_the_tag_on
+    setup:
+      - |
+        INSERT DATA {
+          <http://ex.org/prague> <http://www.w3.org/2000/01/rdf-schema#label> "Praha"@cs .
+          <http://ex.org/prague> <http://www.w3.org/2000/01/rdf-schema#label> "Prague"@en .
+        }
+    query: |
+      SELECT ?label WHERE {
+        { SELECT ?label WHERE { ?city <http://www.w3.org/2000/01/rdf-schema#label> ?label } }
+        FILTER(LANG(?label) = "cs")
+      }
+    expect:
+      rows:
+        - [Praha]
+
+  # ---------------------------------------------------------------------------
+  # Functions that keep or drop the tag
+  # ---------------------------------------------------------------------------
+
+  - name: string_functions_keep_the_tag_of_their_first_argument
+    query: |
+      SELECT (LANG(UCASE("Amsterdam"@nl)) AS ?u) (LANG(SUBSTR("Amsterdam"@nl, 1, 3)) AS ?s)
+             (LANG(STRBEFORE("Den Haag"@nl, " ")) AS ?b) (LANG(REPLACE("Gent"@nl, "G", "K")) AS ?r)
+      WHERE {}
+    expect:
+      rows:
+        - [nl, nl, nl, nl]
+
+  - name: concat_keeps_a_tag_every_argument_shares
+    query: |
+      SELECT (LANG(CONCAT("Den "@nl, "Haag"@nl)) AS ?shared) (LANG(CONCAT("Den "@nl, "Haag")) AS ?mixed)
+             (LANG(CONCAT("Den "@nl, "Haag"@en)) AS ?different)
+      WHERE {}
+    expect:
+      rows:
+        - [nl, "", ""]
+
+  - name: a_tag_mixed_with_a_plain_literal_in_coalesce
+    setup:
+      - |
+        INSERT DATA {
+          <http://ex.org/vincent> <http://ex.org/name> "Vincent" .
+          <http://ex.org/butch> <http://ex.org/name> "Butch"@en .
+        }
+    query: |
+      SELECT ?person (LANG(?shown) AS ?tag) WHERE {
+        ?person <http://ex.org/name> ?name
+        BIND(COALESCE(?name, "unknown"@en) AS ?shown)
+      }
+    expect:
+      rows:
+        - [http://ex.org/vincent, ""]
+        - [http://ex.org/butch, en]
+
+  - name: other_functions_give_a_literal_without_a_tag
+    query: |
+      SELECT (LANG(STR("Amsterdam"@nl)) AS ?str) (LANG(STRLEN("Amsterdam"@nl)) AS ?len) WHERE {}
+    expect:
+      rows:
+        - ["", ""]

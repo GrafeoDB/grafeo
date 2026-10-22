@@ -14,6 +14,7 @@ use grafeo_engine::{GrafeoDB, GraphHandle};
 use crate::database::PyTransaction;
 use crate::direct;
 use crate::error::PyGrafeoError;
+use crate::gil::without_gil;
 use crate::graph::{PyEdge, PyNode};
 use crate::query::PyQueryResult;
 use crate::types::PyValue;
@@ -54,17 +55,57 @@ impl PyGraphHandle {
     }
 
     /// A session working in this graph.
-    fn session(&self, db: &GrafeoDB) -> PyResult<Session> {
+    fn session(&self, db: &GrafeoDB) -> Result<Session, PyGrafeoError> {
         Ok(db
             .graph_in(self.schema.as_deref(), &self.name)
-            .and_then(|graph| graph.session())
-            .map_err(PyGrafeoError::from)?)
+            .and_then(|graph| graph.session())?)
+    }
+
+    /// Runs a query in `language` in this graph, with the GIL released.
+    fn run(
+        &self,
+        py: Python<'_>,
+        language: &str,
+        query: &str,
+        params: Option<&Bound<'_, PyDict>>,
+    ) -> PyResult<PyQueryResult> {
+        let params = direct::params(params)?;
+        without_gil(py, || {
+            let db = self.db.read();
+            direct::run(&self.session(&db)?, language, query, params)
+        })
     }
 
     /// Runs `call` with a session working in this graph.
     fn with_session<T>(&self, call: impl FnOnce(&Session) -> PyResult<T>) -> PyResult<T> {
         let db = self.db.read();
         call(&self.session(&db)?)
+    }
+
+    /// Runs `work` with a session working in this graph, with the GIL
+    /// released (see [`crate::gil`]).
+    fn session_released<T: Send>(
+        &self,
+        py: Python<'_>,
+        work: impl FnOnce(&Session) -> Result<T, PyGrafeoError> + Send,
+    ) -> PyResult<T> {
+        without_gil(py, || {
+            let db = self.db.read();
+            work(&self.session(&db)?)
+        })
+    }
+
+    /// Runs `work` with the engine's handle on this graph, with the GIL
+    /// released (see [`crate::gil`]).
+    fn graph_released<T: Send>(
+        &self,
+        py: Python<'_>,
+        work: impl FnOnce(&GraphHandle<'_>) -> Result<T, PyGrafeoError> + Send,
+    ) -> PyResult<T> {
+        without_gil(py, || {
+            let db = self.db.read();
+            work(&db.graph_in(self.schema.as_deref(), &self.name)?)
+        })
     }
 
     /// Runs `call` with the engine's handle on this graph, whose direct calls
@@ -106,8 +147,13 @@ impl PyGraphHandle {
 
     /// Runs a GQL query in this graph.
     #[pyo3(signature = (query, params=None))]
-    fn execute(&self, query: &str, params: Option<&Bound<'_, PyDict>>) -> PyResult<PyQueryResult> {
-        self.with_session(|session| direct::run(session, "gql", query, params))
+    fn execute(
+        &self,
+        py: Python<'_>,
+        query: &str,
+        params: Option<&Bound<'_, PyDict>>,
+    ) -> PyResult<PyQueryResult> {
+        self.run(py, "gql", query, params)
     }
 
     /// Runs a Cypher query in this graph.
@@ -115,21 +161,23 @@ impl PyGraphHandle {
     #[pyo3(signature = (query, params=None))]
     fn execute_cypher(
         &self,
+        py: Python<'_>,
         query: &str,
         params: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<PyQueryResult> {
-        self.with_session(|session| direct::run(session, "cypher", query, params))
+        self.run(py, "cypher", query, params)
     }
 
     /// Runs a query in a named language (for example `"cypher"`) in this graph.
     #[pyo3(signature = (language, query, params=None))]
     fn execute_language(
         &self,
+        py: Python<'_>,
         language: &str,
         query: &str,
         params: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<PyQueryResult> {
-        self.with_session(|session| direct::run(session, language, query, params))
+        self.run(py, language, query, params)
     }
 
     /// Begins a transaction in this graph.
@@ -176,26 +224,23 @@ impl PyGraphHandle {
         &self,
         label: &Bound<'_, PyAny>,
         properties_list: &Bound<'_, PyList>,
+        py: Python<'_>,
     ) -> PyResult<Vec<u64>> {
         let labels = direct::labels(label)?;
         let labels: Vec<&str> = labels.iter().map(String::as_str).collect();
         let properties = direct::properties_list(properties_list)?;
-        self.with_graph(|graph| {
-            let ids = graph
-                .batch_create_nodes_with_labels(&labels, properties)
-                .map_err(PyGrafeoError::from)?;
+        self.graph_released(py, |graph| {
+            let ids = graph.batch_create_nodes_with_labels(&labels, properties)?;
             Ok(ids.into_iter().map(|id| id.as_u64()).collect())
         })
     }
 
     /// Creates edges from `(src, dst, type)` or `(src, dst, type, properties)`
     /// tuples, all or none.
-    fn batch_create_edges(&self, edges: &Bound<'_, PyList>) -> PyResult<Vec<u64>> {
+    fn batch_create_edges(&self, edges: &Bound<'_, PyList>, py: Python<'_>) -> PyResult<Vec<u64>> {
         let edges = direct::batch_edges(edges)?;
-        self.with_graph(|graph| {
-            let ids = graph
-                .batch_create_edges(edges)
-                .map_err(PyGrafeoError::from)?;
+        self.graph_released(py, |graph| {
+            let ids = graph.batch_create_edges(edges)?;
             Ok(ids.into_iter().map(|id| id.as_u64()).collect())
         })
     }
@@ -225,7 +270,14 @@ impl PyGraphHandle {
         key: &str,
         replace: bool,
     ) -> PyResult<Bound<'py, PyDict>> {
-        self.with_graph(|graph| crate::direct::upsert_nodes(py, graph, &labels, rows, key, replace))
+        let labels: Vec<&str> = labels.iter().map(String::as_str).collect();
+        let rows = direct::properties_list(rows)?;
+        let summary = self.graph_released(py, |graph| {
+            Ok(direct::DirectTarget::upsert_nodes(
+                graph, &labels, key, rows, replace,
+            )?)
+        })?;
+        direct::upsert_summary(py, &summary)
     }
 
     /// Creates or updates one edge of `edge_type` per row between existing
@@ -280,7 +332,34 @@ impl PyGraphHandle {
             .with_src_field(src_field)
             .with_dst_field(dst_field)
             .with_replace(replace);
-        self.with_graph(|graph| crate::direct::upsert_edges(py, graph, edge_type, rows, &options))
+        let rows = direct::properties_list(rows)?;
+        let summary = self.graph_released(py, |graph| {
+            Ok(direct::DirectTarget::upsert_edges(
+                graph, edge_type, rows, &options,
+            )?)
+        })?;
+        direct::upsert_summary(py, &summary)
+    }
+
+    /// The edges of a node of this graph as ``(neighbor_id, edge_id)`` tuples,
+    /// like ``GrafeoDB.get_node_edges``; raises if the graph no longer exists.
+    #[pyo3(signature = (node_id, direction="out", edge_types=None))]
+    fn get_node_edges(
+        &self,
+        node_id: u64,
+        direction: &str,
+        edge_types: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<Vec<(u64, u64)>> {
+        let direction = direct::direction(direction)?;
+        let edge_types = direct::edge_types(edge_types)?;
+        let edge_types: Vec<&str> = edge_types.iter().map(String::as_str).collect();
+        self.with_graph(|graph| {
+            Ok(direct::edge_pairs(
+                graph
+                    .get_node_edges(NodeId(node_id), direction, &edge_types)
+                    .map_err(PyGrafeoError::from)?,
+            ))
+        })
     }
 
     /// Gets a node by ID, or None.
@@ -306,7 +385,7 @@ impl PyGraphHandle {
     /// Sets a node property; raises if the node does not exist or the value
     /// breaks a constraint.
     fn set_node_property(&self, node_id: u64, key: &str, value: &Bound<'_, PyAny>) -> PyResult<()> {
-        let value = PyValue::from_py(value)?;
+        let value = PyValue::from_py_named(value, "property", key)?;
         self.with_graph(|graph| {
             Ok(graph
                 .set_node_property(NodeId(node_id), key, value)
@@ -317,7 +396,7 @@ impl PyGraphHandle {
     /// Sets an edge property; raises if the edge does not exist or the value
     /// breaks its edge type.
     fn set_edge_property(&self, edge_id: u64, key: &str, value: &Bound<'_, PyAny>) -> PyResult<()> {
-        let value = PyValue::from_py(value)?;
+        let value = PyValue::from_py_named(value, "property", key)?;
         self.with_graph(|graph| {
             Ok(graph
                 .set_edge_property(EdgeId(edge_id), key, value)
@@ -367,6 +446,16 @@ impl PyGraphHandle {
         self.with_graph(|graph| Ok(graph.delete_node(NodeId(id)).map_err(PyGrafeoError::from)?))
     }
 
+    /// Deletes a node with all its edges, as `DETACH DELETE` does; returns
+    /// False if it does not exist.
+    fn detach_delete_node(&self, id: u64) -> PyResult<bool> {
+        self.with_graph(|graph| {
+            Ok(graph
+                .detach_delete_node(NodeId(id))
+                .map_err(PyGrafeoError::from)?)
+        })
+    }
+
     /// Deletes an edge; returns False if it does not exist.
     fn delete_edge(&self, id: u64) -> PyResult<bool> {
         self.with_graph(|graph| Ok(graph.delete_edge(EdgeId(id)).map_err(PyGrafeoError::from)?))
@@ -377,11 +466,12 @@ impl PyGraphHandle {
         &self,
         property: &str,
         value: &Bound<'_, PyAny>,
+        py: Python<'_>,
     ) -> PyResult<Vec<u64>> {
-        let value = PyValue::from_py(value)?;
-        self.with_session(|session| {
+        let value = PyValue::from_py_named(value, "property", property)?;
+        self.session_released(py, |session| {
             Ok(session
-                .find_nodes_by_property(property, &value)
+                .find_nodes_by_property(property, &value)?
                 .into_iter()
                 .map(|id| id.as_u64())
                 .collect())
@@ -389,12 +479,8 @@ impl PyGraphHandle {
     }
 
     /// Creates an index on a node property of this graph.
-    fn create_property_index(&self, property: &str) -> PyResult<()> {
-        self.with_session(|session| {
-            Ok(session
-                .create_property_index(property)
-                .map_err(PyGrafeoError::from)?)
-        })
+    fn create_property_index(&self, property: &str, py: Python<'_>) -> PyResult<()> {
+        self.session_released(py, |session| Ok(session.create_property_index(property)?))
     }
 
     /// Drops the index on a node property of this graph; returns whether

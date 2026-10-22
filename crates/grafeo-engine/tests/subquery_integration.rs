@@ -63,8 +63,16 @@ fn social_graph() -> GrafeoDB {
     session.create_edge(gus, techcorp, "WORKS_AT").unwrap();
 
     // Verify setup: 3 Person + 1 Company = 4 nodes, 3 KNOWS + 2 WORKS_AT = 5 edges
-    assert_eq!(db.node_count(), 4, "social_graph: expected 4 nodes");
-    assert_eq!(db.edge_count(), 5, "social_graph: expected 5 edges");
+    assert_eq!(
+        db.node_count().unwrap(),
+        4,
+        "social_graph: expected 4 nodes"
+    );
+    assert_eq!(
+        db.edge_count().unwrap(),
+        5,
+        "social_graph: expected 5 edges"
+    );
 
     db
 }
@@ -559,7 +567,12 @@ mod subqueries_see_what_the_query_sees {
     }
 
     fn people() -> GrafeoDB {
-        let db = GrafeoDB::new_in_memory();
+        // History kept: a read at an earlier epoch needs it.
+        let db = GrafeoDB::with_config(
+            grafeo_engine::Config::in_memory()
+                .with_history_retention(grafeo_engine::HistoryRetention::Forever),
+        )
+        .unwrap();
         db.execute(
             "INSERT (alix:Person {name: 'Alix'})-[:KNOWS]->(gus:Person {name: 'Gus'}), \
              (gus)-[:KNOWS]->(:Person {name: 'Vincent'}), (:Person {name: 'Mia'})",

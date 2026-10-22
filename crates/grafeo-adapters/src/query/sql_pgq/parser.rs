@@ -8,6 +8,7 @@ use super::ast::*;
 use super::lexer::{Lexer, Token, TokenKind};
 use crate::query::keywords::unescape_string;
 use crate::query::limits::{Chain, Nesting, nesting_error_message};
+use grafeo_common::types::{Decimal, DecimalError, DecimalType, MAX_DECIMAL_DIGITS};
 use grafeo_common::utils::error::{QueryError, QueryErrorKind, Result};
 
 /// SQL/PGQ query parser.
@@ -49,6 +50,7 @@ impl<'a> Parser<'a> {
         let stmt = match self.current.kind {
             TokenKind::Create => self.parse_create_statement()?,
             TokenKind::Call => self.parse_call_statement()?,
+            _ if self.at_word("DROP") => self.parse_drop_statement()?,
             _ => {
                 let select = self.parse_select_statement()?;
 
@@ -385,15 +387,20 @@ impl<'a> Parser<'a> {
         self.expect(TokenKind::GraphTable)?;
         self.expect(TokenKind::LParen)?;
 
-        // Optional graph name reference: GRAPH_TABLE(my_graph, MATCH ...)
-        let graph_name =
-            if self.current.kind == TokenKind::Identifier && self.peek_kind() == TokenKind::Comma {
-                let name = self.expect_identifier()?;
-                self.advance(); // consume comma
-                Some(name)
-            } else {
-                None
-            };
+        // Optional graph name reference: `GRAPH_TABLE (my_graph MATCH ...)`,
+        // as SQL:2023 writes it, or with a comma, `GRAPH_TABLE (my_graph,
+        // MATCH ...)`.
+        let graph_name = if self.can_be_identifier()
+            && matches!(self.peek_kind(), TokenKind::Comma | TokenKind::Match)
+        {
+            let name = self.expect_identifier()?;
+            if self.current.kind == TokenKind::Comma {
+                self.advance();
+            }
+            Some(name)
+        } else {
+            None
+        };
 
         let match_clause = self.parse_match_clause()?;
 
@@ -716,7 +723,13 @@ impl<'a> Parser<'a> {
         })
     }
 
+    /// The bounds after a `*`: `*n` exactly n hops, `*n..m`, `*n..`, `*..m`,
+    /// and `*` alone one or more hops, as in GQL and Cypher (it read as one
+    /// hop).
     fn parse_hop_range(&mut self) -> Result<(Option<u32>, Option<u32>)> {
+        if !matches!(self.current.kind, TokenKind::Integer | TokenKind::Dot) {
+            return Ok((Some(1), None));
+        }
         let min = if self.current.kind == TokenKind::Integer {
             let val = self.current.text.parse().unwrap_or(1);
             self.advance();
@@ -968,23 +981,29 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_unary_expression(&mut self) -> Result<Expression> {
-        match self.current.kind {
-            TokenKind::Minus => {
-                self.advance();
-                self.enter_nesting()?;
-                let operand = self.parse_unary_expression();
-                self.exit_nesting();
-                let operand = operand?;
-                Ok(Expression::Unary {
-                    op: UnaryOp::Neg,
-                    operand: Box::new(operand),
-                })
-            }
-            _ => self.parse_primary_expression(),
-        }
+        // SQL's `<sign>`: `-x` negates a number, `+x` is the number itself.
+        let op = match self.current.kind {
+            TokenKind::Minus => UnaryOp::Neg,
+            TokenKind::Plus => UnaryOp::Pos,
+            _ => return self.parse_primary_expression(),
+        };
+        self.advance();
+        self.enter_nesting()?;
+        let operand = self.parse_unary_expression();
+        self.exit_nesting();
+        Ok(Expression::Unary {
+            op,
+            operand: Box::new(operand?),
+        })
     }
 
     fn parse_primary_expression(&mut self) -> Result<Expression> {
+        if self.can_be_identifier()
+            && self.get_identifier_text().eq_ignore_ascii_case("CAST")
+            && self.peek_kind() == TokenKind::LParen
+        {
+            return self.parse_cast();
+        }
         match self.current.kind {
             // A CASE nests one level more than its operands: parsing and
             // planning one takes more stack.
@@ -1032,6 +1051,16 @@ impl<'a> Parser<'a> {
                 })?;
                 self.advance();
                 Ok(Expression::Literal(Literal::Float(value)))
+            }
+            TokenKind::Decimal => {
+                let text = &self.current.text;
+                let value = Decimal::parse(text).map_err(|_| {
+                    self.error(&format!(
+                        "Decimal literal '{text}' has more than {MAX_DECIMAL_DIGITS} digits"
+                    ))
+                })?;
+                self.advance();
+                Ok(Expression::Literal(Literal::Decimal(value)))
             }
             TokenKind::String => {
                 let text = &self.current.text;
@@ -1354,10 +1383,42 @@ impl<'a> Parser<'a> {
 
     // ==================== DDL Parsing ====================
 
+    /// Whether the current token is the word `word`, in any case, as a
+    /// keyword or a plain name (a quoted name is a name, never a word).
+    fn at_word(&self, word: &str) -> bool {
+        self.current.kind != TokenKind::QuotedIdentifier
+            && self.current.text.eq_ignore_ascii_case(word)
+    }
+
+    /// Consumes the word `word` (see [`Self::at_word`]).
+    fn expect_word(&mut self, word: &str) -> Result<()> {
+        if !self.at_word(word) {
+            return Err(self.error(&format!("Expected {word}")));
+        }
+        self.advance();
+        Ok(())
+    }
+
     fn parse_create_statement(&mut self) -> Result<Statement> {
         self.expect(TokenKind::Create)?;
+        let or_replace = self.at_word("OR");
+        if or_replace {
+            self.advance();
+            self.expect_word("REPLACE")?;
+        }
         self.expect(TokenKind::Property)?;
         self.expect(TokenKind::Graph)?;
+        let if_not_exists = self.at_word("IF");
+        if if_not_exists {
+            self.advance();
+            self.expect_word("NOT")?;
+            self.expect_word("EXISTS")?;
+        }
+        if or_replace && if_not_exists {
+            return Err(
+                self.error("CREATE PROPERTY GRAPH takes OR REPLACE or IF NOT EXISTS, not both")
+            );
+        }
 
         let name = self.expect_identifier()?;
 
@@ -1390,11 +1451,31 @@ impl<'a> Parser<'a> {
         Ok(Statement::CreatePropertyGraph(
             CreatePropertyGraphStatement {
                 name,
+                or_replace,
+                if_not_exists,
                 node_tables,
                 edge_tables,
                 span: None,
             },
         ))
+    }
+
+    /// `DROP PROPERTY GRAPH [IF EXISTS] name`.
+    fn parse_drop_statement(&mut self) -> Result<Statement> {
+        self.expect_word("DROP")?;
+        self.expect(TokenKind::Property)?;
+        self.expect(TokenKind::Graph)?;
+        let if_exists = self.at_word("IF");
+        if if_exists {
+            self.advance();
+            self.expect_word("EXISTS")?;
+        }
+        let name = self.expect_identifier()?;
+        Ok(Statement::DropPropertyGraph(DropPropertyGraphStatement {
+            name,
+            if_exists,
+            span: None,
+        }))
     }
 
     fn parse_node_table_list(&mut self) -> Result<Vec<NodeTableDefinition>> {
@@ -1506,6 +1587,93 @@ impl<'a> Parser<'a> {
         })
     }
 
+    /// `CAST(expr AS type)`: the call of the conversion function of `type`,
+    /// as GQL's `CAST` translates. `VARCHAR(n)` keeps the first `n`
+    /// characters, as an explicit SQL cast does.
+    fn parse_cast(&mut self) -> Result<Expression> {
+        self.advance(); // CAST
+        self.expect(TokenKind::LParen)?;
+        let expr = self.parse_expression()?;
+        self.expect(TokenKind::As)?;
+        let data_type = self.parse_data_type()?;
+        self.expect(TokenKind::RParen)?;
+        let call = |name: &str, args: Vec<Expression>| Expression::FunctionCall {
+            name: name.to_string(),
+            distinct: false,
+            args,
+        };
+        let integer = |value: u8| Expression::Literal(Literal::Integer(i64::from(value)));
+        // What CAST converts: booleans and numbers into each other
+        // (`cast_operand`), for every target but a string
+        let category = match data_type {
+            SqlDataType::Bigint | SqlDataType::Int => Some("INTEGER"),
+            SqlDataType::Float | SqlDataType::Double => Some("FLOAT"),
+            SqlDataType::Decimal(_) => Some("DECIMAL"),
+            SqlDataType::Boolean => Some("BOOLEAN"),
+            SqlDataType::Date => Some("DATE"),
+            SqlDataType::Time => Some("TIME"),
+            SqlDataType::Timestamp => Some("TIMESTAMP"),
+            SqlDataType::Varchar(_) => None,
+        };
+        let expr = match category {
+            Some(category) => call(
+                "cast_operand",
+                vec![
+                    expr,
+                    Expression::Literal(Literal::String(category.to_string())),
+                ],
+            ),
+            None => expr,
+        };
+        Ok(match data_type {
+            SqlDataType::Bigint | SqlDataType::Int => call("toInteger", vec![expr]),
+            SqlDataType::Float | SqlDataType::Double => call("toFloat", vec![expr]),
+            SqlDataType::Decimal(None) => call("toDecimal", vec![expr]),
+            SqlDataType::Decimal(Some(decimal_type)) => call(
+                "toDecimal",
+                vec![
+                    expr,
+                    integer(decimal_type.precision()),
+                    integer(decimal_type.scale()),
+                ],
+            ),
+            SqlDataType::Varchar(None) => call("toString", vec![expr]),
+            SqlDataType::Varchar(Some(length)) => {
+                let length = i64::try_from(length).unwrap_or(i64::MAX);
+                call(
+                    "left",
+                    vec![
+                        call("toString", vec![expr]),
+                        Expression::Literal(Literal::Integer(length)),
+                    ],
+                )
+            }
+            SqlDataType::Boolean => call("toBoolean", vec![expr]),
+            SqlDataType::Date => call("toDate", vec![expr]),
+            SqlDataType::Time => call("toTime", vec![expr]),
+            SqlDataType::Timestamp => call("toDatetime", vec![expr]),
+        })
+    }
+
+    /// The `(precision[, scale])` after `DECIMAL`, `DEC` or `NUMERIC`
+    /// (`name`), a left-out scale being 0.
+    fn parse_decimal_type(&mut self, name: &str) -> Result<DecimalType> {
+        self.expect(TokenKind::LParen)?;
+        let precision = self.parse_integer_literal()?;
+        let scale = if self.current.kind == TokenKind::Comma {
+            self.advance();
+            self.parse_integer_literal()?
+        } else {
+            0
+        };
+        self.expect(TokenKind::RParen)?;
+        match (u8::try_from(precision), u8::try_from(scale)) {
+            (Ok(precision), Ok(scale)) => DecimalType::new(precision, scale),
+            _ => Err(DecimalError::InvalidPrecision),
+        }
+        .map_err(|error| self.error(&format!("{name}({precision}, {scale}): {error}")))
+    }
+
     fn parse_data_type(&mut self) -> Result<SqlDataType> {
         if !self.can_be_identifier() {
             return Err(self.error("Expected data type"));
@@ -1531,8 +1699,27 @@ impl<'a> Parser<'a> {
             }
             "BOOLEAN" | "BOOL" => Ok(SqlDataType::Boolean),
             "FLOAT" | "REAL" => Ok(SqlDataType::Float),
-            "DOUBLE" => Ok(SqlDataType::Double),
+            "DOUBLE" => {
+                // DOUBLE PRECISION
+                if self.can_be_identifier()
+                    && self.get_identifier_text().eq_ignore_ascii_case("PRECISION")
+                {
+                    self.advance();
+                }
+                Ok(SqlDataType::Double)
+            }
             "TIMESTAMP" => Ok(SqlDataType::Timestamp),
+            "DECIMAL" | "DEC" | "NUMERIC" => {
+                if self.current.kind == TokenKind::LParen {
+                    Ok(SqlDataType::Decimal(Some(
+                        self.parse_decimal_type(&type_name)?,
+                    )))
+                } else {
+                    Ok(SqlDataType::Decimal(None))
+                }
+            }
+            "DATE" => Ok(SqlDataType::Date),
+            "TIME" => Ok(SqlDataType::Time),
             _ => Err(self.error(&format!("Unknown data type: {type_name}"))),
         }
     }
@@ -1583,6 +1770,72 @@ mod tests {
         match stmt {
             Statement::CreatePropertyGraph(cpg) => cpg,
             other => panic!("Expected CreatePropertyGraph, got {other:?}"),
+        }
+    }
+
+    /// `CREATE [OR REPLACE] PROPERTY GRAPH [IF NOT EXISTS]`, and `DROP
+    /// PROPERTY GRAPH [IF EXISTS]`, as SQL:2023 writes them.
+    #[test]
+    fn test_property_graph_ddl_options() {
+        let plain = create_pg(parse_ok(
+            "CREATE PROPERTY GRAPH g NODE TABLES (A (id BIGINT))",
+        ));
+        assert!(!plain.or_replace && !plain.if_not_exists);
+        let replace = create_pg(parse_ok(
+            "create or replace property graph g NODE TABLES (A (id BIGINT))",
+        ));
+        assert!(replace.or_replace && !replace.if_not_exists);
+        let kept = create_pg(parse_ok(
+            "CREATE PROPERTY GRAPH IF NOT EXISTS g NODE TABLES (A (id BIGINT))",
+        ));
+        assert!(!kept.or_replace && kept.if_not_exists);
+        assert_eq!(kept.name, "g");
+        assert!(
+            Parser::new(
+                "CREATE OR REPLACE PROPERTY GRAPH IF NOT EXISTS g NODE TABLES (A (id BIGINT))"
+            )
+            .parse()
+            .is_err()
+        );
+
+        for (query, name, if_exists) in [
+            ("DROP PROPERTY GRAPH g", "g", false),
+            ("drop property graph if exists shop", "shop", true),
+        ] {
+            match parse_ok(query) {
+                Statement::DropPropertyGraph(drop) => {
+                    assert_eq!(
+                        (drop.name.as_str(), drop.if_exists),
+                        (name, if_exists),
+                        "{query}"
+                    );
+                }
+                other => panic!("{query}: expected DropPropertyGraph, got {other:?}"),
+            }
+        }
+        assert!(Parser::new("DROP GRAPH g").parse().is_err());
+    }
+
+    /// `GRAPH_TABLE (g MATCH ...)` names the graph g, as SQL:2023 writes it,
+    /// and so does `GRAPH_TABLE (g, MATCH ...)`; without a name it is none.
+    #[test]
+    fn test_graph_table_graph_name() {
+        for (query, name) in [
+            (
+                "SELECT * FROM GRAPH_TABLE (g MATCH (n) COLUMNS (n.x AS x))",
+                Some("g"),
+            ),
+            (
+                "SELECT * FROM GRAPH_TABLE (g, MATCH (n) COLUMNS (n.x AS x))",
+                Some("g"),
+            ),
+            (
+                "SELECT * FROM GRAPH_TABLE (MATCH (n) COLUMNS (n.x AS x))",
+                None,
+            ),
+        ] {
+            let s = select(parse_ok(query));
+            assert_eq!(s.graph_table.graph_name.as_deref(), name, "{query}");
         }
     }
 

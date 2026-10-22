@@ -154,7 +154,7 @@ impl PushOperator for AggregatePushOperator {
             // Global aggregation - single row output
             if let Some(ref accumulators) = self.global_state {
                 for (i, acc) in accumulators.iter().enumerate() {
-                    columns[i].push(acc.finalize());
+                    columns[i].push(acc.finalize()?);
                 }
             }
         } else {
@@ -167,7 +167,7 @@ impl PushOperator for AggregatePushOperator {
 
                 // Output aggregate results
                 for (i, acc) in state.accumulators.iter().enumerate() {
-                    columns[self.group_by.len() + i].push(acc.finalize());
+                    columns[self.group_by.len() + i].push(acc.finalize()?);
                 }
             }
         }
@@ -542,7 +542,7 @@ impl PushOperator for SpillableAggregatePushOperator {
             // Global aggregation - single row output
             if let Some(ref accumulators) = self.global_state {
                 for (i, acc) in accumulators.iter().enumerate() {
-                    columns[i].push(acc.finalize());
+                    columns[i].push(acc.finalize()?);
                 }
             }
         } else if self.using_partitioned {
@@ -560,7 +560,7 @@ impl PushOperator for SpillableAggregatePushOperator {
 
                     // Output aggregate results
                     for (i, acc) in state.accumulators.iter().enumerate() {
-                        columns[self.group_by.len() + i].push(acc.finalize());
+                        columns[self.group_by.len() + i].push(acc.finalize()?);
                     }
                 }
             }
@@ -574,7 +574,7 @@ impl PushOperator for SpillableAggregatePushOperator {
 
                 // Output aggregate results
                 for (i, acc) in state.accumulators.iter().enumerate() {
-                    columns[self.group_by.len() + i].push(acc.finalize());
+                    columns[self.group_by.len() + i].push(acc.finalize()?);
                 }
             }
         }
@@ -775,7 +775,10 @@ mod tests {
         let mut restored = deserialize_group_state(&mut &buf[..]).unwrap();
         restored.accumulators[0].update(Some(path(3)));
         restored.accumulators[0].update(Some(path(2)));
-        assert_eq!(restored.accumulators[0].finalize(), Value::Int64(2));
+        assert_eq!(
+            restored.accumulators[0].finalize().unwrap(),
+            Value::Int64(2)
+        );
     }
 
     #[test]
@@ -972,7 +975,7 @@ mod tests {
         let mut state = AggregateState::new(AggregateFunction::Last, false, None, None);
         state.update(Some(Value::Int64(10)));
         state.update(Some(Value::Int64(20)));
-        assert_eq!(state.finalize(), Value::Int64(20));
+        assert_eq!(state.finalize().unwrap(), Value::Int64(20));
     }
 
     #[test]
@@ -981,7 +984,7 @@ mod tests {
         state.update(Some(Value::Int64(1)));
         state.update(Some(Value::Int64(2)));
         assert_eq!(
-            state.finalize(),
+            state.finalize().unwrap(),
             Value::List(vec![Value::Int64(1), Value::Int64(2)].into())
         );
     }
@@ -992,7 +995,7 @@ mod tests {
         state.update(Some(Value::Float64(2.0)));
         state.update(Some(Value::Float64(4.0)));
         state.update(Some(Value::Float64(6.0)));
-        let result = state.finalize();
+        let result = state.finalize().unwrap();
         assert!(matches!(result, Value::Float64(_)));
     }
 
@@ -1001,27 +1004,27 @@ mod tests {
         let mut state = AggregateState::new(AggregateFunction::First, false, None, None);
         state.update(Some(Value::Int64(10)));
         state.update(Some(Value::Int64(20)));
-        assert_eq!(state.finalize(), Value::Int64(10));
+        assert_eq!(state.finalize().unwrap(), Value::Int64(10));
     }
 
     #[test]
     fn aggregate_state_avg_empty_returns_null() {
         let state = AggregateState::new(AggregateFunction::Avg, false, None, None);
-        assert_eq!(state.finalize(), Value::Null);
+        assert_eq!(state.finalize().unwrap(), Value::Null);
     }
 
     #[test]
     fn aggregate_state_sum_empty_returns_null() {
         let state = AggregateState::new(AggregateFunction::Sum, false, None, None);
-        assert_eq!(state.finalize(), Value::Null);
+        assert_eq!(state.finalize().unwrap(), Value::Null);
     }
 
     #[test]
     fn aggregate_state_min_max_empty_returns_null() {
         let min = AggregateState::new(AggregateFunction::Min, false, None, None);
         let max = AggregateState::new(AggregateFunction::Max, false, None, None);
-        assert_eq!(min.finalize(), Value::Null);
-        assert_eq!(max.finalize(), Value::Null);
+        assert_eq!(min.finalize().unwrap(), Value::Null);
+        assert_eq!(max.finalize().unwrap(), Value::Null);
     }
 
     /// `COUNT(x)` counts the non-null operands; `None` is a `COUNT(*)` row.
@@ -1031,9 +1034,9 @@ mod tests {
         state.update(Some(Value::Null));
         state.update(Some(Value::Int64(5)));
         state.update(Some(Value::Null));
-        assert_eq!(state.finalize(), Value::Int64(1));
+        assert_eq!(state.finalize().unwrap(), Value::Int64(1));
         state.update(None);
-        assert_eq!(state.finalize(), Value::Int64(2));
+        assert_eq!(state.finalize().unwrap(), Value::Int64(2));
     }
 
     #[test]
@@ -1060,7 +1063,10 @@ mod tests {
         serialize_group_state(&state, &mut buf).unwrap();
         let restored = deserialize_group_state(&mut &buf[..]).unwrap();
         assert_eq!(restored.key_values, vec![Value::String("grp".into())]);
-        assert_eq!(restored.accumulators[0].finalize(), Value::Int64(42));
+        assert_eq!(
+            restored.accumulators[0].finalize().unwrap(),
+            Value::Int64(42)
+        );
     }
 
     #[test]
@@ -1073,7 +1079,31 @@ mod tests {
         let mut buf = Vec::new();
         serialize_group_state(&state, &mut buf).unwrap();
         let restored = deserialize_group_state(&mut &buf[..]).unwrap();
-        assert_eq!(restored.accumulators[0].finalize(), Value::Int64(100));
+        assert_eq!(
+            restored.accumulators[0].finalize().unwrap(),
+            Value::Int64(100)
+        );
+    }
+
+    /// A running sum outside the 64-bit range survives a spill whole: added
+    /// back into range after the reload, it finalizes to the exact value.
+    #[test]
+    #[cfg(feature = "spill")]
+    fn spill_roundtrip_sum_int_past_64_bits() {
+        let past = i128::from(i64::MAX) + 2;
+        let state = GroupState {
+            key_values: vec![Value::Int64(1)],
+            accumulators: vec![AggregateState::SumInt(past, 3)],
+        };
+        let mut buf = Vec::new();
+        serialize_group_state(&state, &mut buf).unwrap();
+        let mut restored = deserialize_group_state(&mut &buf[..]).unwrap();
+        assert!(restored.accumulators[0].finalize().is_err());
+        restored.accumulators[0].update(Some(Value::Int64(-2)));
+        assert_eq!(
+            restored.accumulators[0].finalize().unwrap(),
+            Value::Int64(i64::MAX)
+        );
     }
 
     #[test]
@@ -1086,7 +1116,10 @@ mod tests {
         let mut buf = Vec::new();
         serialize_group_state(&state, &mut buf).unwrap();
         let restored = deserialize_group_state(&mut &buf[..]).unwrap();
-        assert_eq!(restored.accumulators[0].finalize(), Value::Float64(3.125));
+        assert_eq!(
+            restored.accumulators[0].finalize().unwrap(),
+            Value::Float64(3.125)
+        );
     }
 
     #[test]
@@ -1099,7 +1132,10 @@ mod tests {
         let mut buf = Vec::new();
         serialize_group_state(&state, &mut buf).unwrap();
         let restored = deserialize_group_state(&mut &buf[..]).unwrap();
-        assert_eq!(restored.accumulators[0].finalize(), Value::Float64(10.0));
+        assert_eq!(
+            restored.accumulators[0].finalize().unwrap(),
+            Value::Float64(10.0)
+        );
     }
 
     #[test]
@@ -1112,7 +1148,10 @@ mod tests {
         let mut buf = Vec::new();
         serialize_group_state(&state, &mut buf).unwrap();
         let restored = deserialize_group_state(&mut &buf[..]).unwrap();
-        assert_eq!(restored.accumulators[0].finalize(), Value::Int64(7));
+        assert_eq!(
+            restored.accumulators[0].finalize().unwrap(),
+            Value::Int64(7)
+        );
     }
 
     #[test]
@@ -1125,7 +1164,7 @@ mod tests {
         let mut buf = Vec::new();
         serialize_group_state(&state, &mut buf).unwrap();
         let restored = deserialize_group_state(&mut &buf[..]).unwrap();
-        assert_eq!(restored.accumulators[0].finalize(), Value::Null);
+        assert_eq!(restored.accumulators[0].finalize().unwrap(), Value::Null);
     }
 
     #[test]
@@ -1138,7 +1177,10 @@ mod tests {
         let mut buf = Vec::new();
         serialize_group_state(&state, &mut buf).unwrap();
         let restored = deserialize_group_state(&mut &buf[..]).unwrap();
-        assert_eq!(restored.accumulators[0].finalize(), Value::Int64(99));
+        assert_eq!(
+            restored.accumulators[0].finalize().unwrap(),
+            Value::Int64(99)
+        );
     }
 
     #[test]
@@ -1152,7 +1194,7 @@ mod tests {
         serialize_group_state(&state, &mut buf).unwrap();
         let restored = deserialize_group_state(&mut &buf[..]).unwrap();
         assert_eq!(
-            restored.accumulators[0].finalize(),
+            restored.accumulators[0].finalize().unwrap(),
             Value::String("hello".into())
         );
     }
@@ -1167,7 +1209,10 @@ mod tests {
         let mut buf = Vec::new();
         serialize_group_state(&state, &mut buf).unwrap();
         let restored = deserialize_group_state(&mut &buf[..]).unwrap();
-        assert_eq!(restored.accumulators[0].finalize(), Value::Float64(2.75));
+        assert_eq!(
+            restored.accumulators[0].finalize().unwrap(),
+            Value::Float64(2.75)
+        );
     }
 
     #[test]
@@ -1185,7 +1230,7 @@ mod tests {
         serialize_group_state(&state, &mut buf).unwrap();
         let restored = deserialize_group_state(&mut &buf[..]).unwrap();
         assert_eq!(
-            restored.accumulators[0].finalize(),
+            restored.accumulators[0].finalize().unwrap(),
             Value::List(vec![Value::Int64(10), Value::Int64(20), Value::Int64(30)].into())
         );
     }
@@ -1217,22 +1262,40 @@ mod tests {
         assert_eq!(restored.key_values[1], Value::Int64(42));
         assert_eq!(restored.accumulators.len(), 9);
 
-        assert_eq!(restored.accumulators[0].finalize(), Value::Int64(10));
-        assert_eq!(restored.accumulators[1].finalize(), Value::Int64(50));
-        assert_eq!(restored.accumulators[2].finalize(), Value::Float64(7.5));
-        assert_eq!(restored.accumulators[3].finalize(), Value::Float64(5.0));
-        assert_eq!(restored.accumulators[4].finalize(), Value::Int64(1));
-        assert_eq!(restored.accumulators[5].finalize(), Value::Int64(99));
         assert_eq!(
-            restored.accumulators[6].finalize(),
+            restored.accumulators[0].finalize().unwrap(),
+            Value::Int64(10)
+        );
+        assert_eq!(
+            restored.accumulators[1].finalize().unwrap(),
+            Value::Int64(50)
+        );
+        assert_eq!(
+            restored.accumulators[2].finalize().unwrap(),
+            Value::Float64(7.5)
+        );
+        assert_eq!(
+            restored.accumulators[3].finalize().unwrap(),
+            Value::Float64(5.0)
+        );
+        assert_eq!(
+            restored.accumulators[4].finalize().unwrap(),
+            Value::Int64(1)
+        );
+        assert_eq!(
+            restored.accumulators[5].finalize().unwrap(),
+            Value::Int64(99)
+        );
+        assert_eq!(
+            restored.accumulators[6].finalize().unwrap(),
             Value::String("first".into())
         );
         assert_eq!(
-            restored.accumulators[7].finalize(),
+            restored.accumulators[7].finalize().unwrap(),
             Value::String("last".into())
         );
         assert_eq!(
-            restored.accumulators[8].finalize(),
+            restored.accumulators[8].finalize().unwrap(),
             Value::List(vec![Value::Int64(1), Value::Int64(2)].into())
         );
     }
@@ -1258,7 +1321,10 @@ mod tests {
         let mut buf = Vec::new();
         serialize_group_state(&state, &mut buf).unwrap();
         let restored = deserialize_group_state(&mut &buf[..]).unwrap();
-        assert_eq!(restored.accumulators[0].finalize(), Value::Int64(3));
+        assert_eq!(
+            restored.accumulators[0].finalize().unwrap(),
+            Value::Int64(3)
+        );
     }
 
     #[test]
@@ -1277,7 +1343,10 @@ mod tests {
         let mut buf = Vec::new();
         serialize_group_state(&state, &mut buf).unwrap();
         let restored = deserialize_group_state(&mut &buf[..]).unwrap();
-        assert_eq!(restored.accumulators[0].finalize(), Value::Float64(3.0));
+        assert_eq!(
+            restored.accumulators[0].finalize().unwrap(),
+            Value::Float64(3.0)
+        );
     }
 
     #[test]
@@ -1299,7 +1368,7 @@ mod tests {
         let mut buf = Vec::new();
         serialize_group_state(&state, &mut buf).unwrap();
         let restored = deserialize_group_state(&mut &buf[..]).unwrap();
-        let result = restored.accumulators[0].finalize();
+        let result = restored.accumulators[0].finalize().unwrap();
         assert!(matches!(result, Value::List(_)));
     }
 
@@ -1315,7 +1384,7 @@ mod tests {
         acc.update(Some(Value::Float64(2.0)));
         acc.update(Some(Value::Float64(4.0)));
         acc.update(Some(Value::Float64(6.0)));
-        let expected = acc.finalize();
+        let expected = acc.finalize().unwrap();
 
         let state = GroupState {
             key_values: vec![Value::Int64(1)],
@@ -1324,7 +1393,7 @@ mod tests {
         let mut buf = Vec::new();
         serialize_group_state(&state, &mut buf).unwrap();
         let restored = deserialize_group_state(&mut &buf[..]).unwrap();
-        assert_eq!(restored.accumulators[0].finalize(), expected);
+        assert_eq!(restored.accumulators[0].finalize().unwrap(), expected);
     }
 
     #[test]
@@ -1337,11 +1406,11 @@ mod tests {
                 percentile: 0.5,
             }],
         };
-        let expected = state.accumulators[0].finalize();
+        let expected = state.accumulators[0].finalize().unwrap();
         let mut buf = Vec::new();
         serialize_group_state(&state, &mut buf).unwrap();
         let restored = deserialize_group_state(&mut &buf[..]).unwrap();
-        assert_eq!(restored.accumulators[0].finalize(), expected);
+        assert_eq!(restored.accumulators[0].finalize().unwrap(), expected);
     }
 
     #[test]
@@ -1354,11 +1423,11 @@ mod tests {
                 ", ".to_string(),
             )],
         };
-        let expected = state.accumulators[0].finalize();
+        let expected = state.accumulators[0].finalize().unwrap();
         let mut buf = Vec::new();
         serialize_group_state(&state, &mut buf).unwrap();
         let restored = deserialize_group_state(&mut &buf[..]).unwrap();
-        assert_eq!(restored.accumulators[0].finalize(), expected);
+        assert_eq!(restored.accumulators[0].finalize().unwrap(), expected);
     }
 
     // ---------------------------------------------------------------
@@ -1663,8 +1732,14 @@ mod tests {
         let restored = deserialize_group_state(&mut &buf[..]).unwrap();
 
         assert_eq!(restored.key_values, vec![Value::String("Alix".into())]);
-        assert_eq!(restored.accumulators[0].finalize(), Value::Int64(42));
-        assert_eq!(restored.accumulators[1].finalize(), Value::Float64(2.72));
+        assert_eq!(
+            restored.accumulators[0].finalize().unwrap(),
+            Value::Int64(42)
+        );
+        assert_eq!(
+            restored.accumulators[1].finalize().unwrap(),
+            Value::Float64(2.72)
+        );
     }
 
     #[test]
@@ -1680,7 +1755,10 @@ mod tests {
         let restored = deserialize_group_state(&mut &buf[..]).unwrap();
 
         assert_eq!(restored.key_values, vec![Value::String("Gus".into())]);
-        assert_eq!(restored.accumulators[0].finalize(), Value::Float64(5.0));
+        assert_eq!(
+            restored.accumulators[0].finalize().unwrap(),
+            Value::Float64(5.0)
+        );
     }
 
     #[test]
@@ -1695,7 +1773,10 @@ mod tests {
         let restored = deserialize_group_state(&mut &buf[..]).unwrap();
 
         assert_eq!(restored.key_values, vec![Value::String("Vincent".into())]);
-        assert_eq!(restored.accumulators[0].finalize(), Value::Int64(17));
+        assert_eq!(
+            restored.accumulators[0].finalize().unwrap(),
+            Value::Int64(17)
+        );
     }
 
     #[test]
@@ -1716,13 +1797,16 @@ mod tests {
         let restored = deserialize_group_state(&mut &buf[..]).unwrap();
 
         assert_eq!(
-            restored.accumulators[0].finalize(),
+            restored.accumulators[0].finalize().unwrap(),
             Value::String("Amsterdam".into())
         );
-        assert_eq!(restored.accumulators[1].finalize(), Value::Float64(99.9));
+        assert_eq!(
+            restored.accumulators[1].finalize().unwrap(),
+            Value::Float64(99.9)
+        );
         // None values serialize as Null and deserialize as Min(None)
-        assert_eq!(restored.accumulators[2].finalize(), Value::Null);
-        assert_eq!(restored.accumulators[3].finalize(), Value::Null);
+        assert_eq!(restored.accumulators[2].finalize().unwrap(), Value::Null);
+        assert_eq!(restored.accumulators[3].finalize().unwrap(), Value::Null);
     }
 
     #[test]
@@ -1742,7 +1826,7 @@ mod tests {
         serialize_group_state(&state, &mut buf).unwrap();
         let restored = deserialize_group_state(&mut &buf[..]).unwrap();
 
-        let result = restored.accumulators[0].finalize();
+        let result = restored.accumulators[0].finalize().unwrap();
         if let Value::List(list) = result {
             assert_eq!(list.len(), 4);
             assert_eq!(list[0], Value::Int64(1));
@@ -1772,14 +1856,20 @@ mod tests {
         serialize_group_state(&state, &mut buf).unwrap();
         let mut restored = deserialize_group_state(&mut &buf[..]).unwrap();
 
-        assert_eq!(restored.accumulators[0].finalize(), Value::Int64(3));
+        assert_eq!(
+            restored.accumulators[0].finalize().unwrap(),
+            Value::Int64(3)
+        );
         assert!(
             matches!(restored.accumulators[0], AggregateState::CountDistinct(..)),
             "DISTINCT must retain its live accumulator"
         );
         restored.accumulators[0].update(Some(Value::String("Paris".into())));
         restored.accumulators[0].update(Some(Value::String("Berlin".into())));
-        assert_eq!(restored.accumulators[0].finalize(), Value::Int64(4));
+        assert_eq!(
+            restored.accumulators[0].finalize().unwrap(),
+            Value::Int64(4)
+        );
     }
 
     // ---------------------------------------------------------------
@@ -1895,12 +1985,12 @@ mod tests {
                     for (y, x) in [(3, 4), (5, 8), (9, 16)] {
                         update(&mut uninterrupted, y, x, floats);
                         update(&mut restored, y, x, floats);
-                        if restored.finalize() != uninterrupted.finalize() {
+                        if restored.finalize().unwrap() != uninterrupted.finalize().unwrap() {
                             failures.push(format!(
                                 "{function:?}, distinct={distinct}, floats={floats}, y={y}: \
                                  {:?} != {:?}",
-                                restored.finalize(),
-                                uninterrupted.finalize()
+                                restored.finalize().unwrap(),
+                                uninterrupted.finalize().unwrap()
                             ));
                         }
                     }
@@ -1927,7 +2017,7 @@ mod tests {
         for x in [3, 19, 88] {
             once.update(Some(Value::Int64(x)));
         }
-        assert_eq!(restored.finalize(), once.finalize());
+        assert_eq!(restored.finalize().unwrap(), once.finalize().unwrap());
     }
 
     /// Each kind of DISTINCT identity survives a spill; a null is no operand,
@@ -1953,17 +2043,20 @@ mod tests {
             count.update(Some(value.clone()));
             collect.update(Some(value.clone()));
         }
-        assert_eq!(count.finalize(), Value::Int64(6));
+        assert_eq!(count.finalize().unwrap(), Value::Int64(6));
         let mut restored_count = restore_spilled_accumulator(&count);
         let mut restored_collect = restore_spilled_accumulator(&collect);
         for value in operands.iter().chain(std::iter::once(&Value::Int64(2))) {
             restored_count.update(Some(value.clone()));
             restored_collect.update(Some(value.clone()));
         }
-        assert_eq!(restored_count.finalize(), Value::Int64(7));
+        assert_eq!(restored_count.finalize().unwrap(), Value::Int64(7));
         let mut expected = identities;
         expected.push(Value::Int64(2));
-        assert_eq!(restored_collect.finalize(), Value::List(expected.into()));
+        assert_eq!(
+            restored_collect.finalize().unwrap(),
+            Value::List(expected.into())
+        );
     }
 
     #[test]
@@ -1996,7 +2089,7 @@ mod tests {
             assert_eq!(restored_compensation.to_bits(), compensation.to_bits());
             state.update(Some(Value::Float64(next)));
             restored.update(Some(Value::Float64(next)));
-            assert_eq!(restored.finalize(), state.finalize());
+            assert_eq!(restored.finalize().unwrap(), state.finalize().unwrap());
         }
     }
 
@@ -2019,7 +2112,7 @@ mod tests {
                     state.update(Some(Value::Null));
                 }
                 let mut restored = restore_spilled_accumulator(&state);
-                assert_eq!(restored.finalize(), Value::Null, "{function:?}");
+                assert_eq!(restored.finalize().unwrap(), Value::Null, "{function:?}");
                 for value in [
                     Value::Null,
                     Value::Int64(19),
@@ -2029,9 +2122,17 @@ mod tests {
                 ] {
                     state.update(Some(value.clone()));
                     restored.update(Some(value));
-                    assert_eq!(restored.finalize(), state.finalize(), "{function:?}");
+                    assert_eq!(
+                        restored.finalize().unwrap(),
+                        state.finalize().unwrap(),
+                        "{function:?}"
+                    );
                 }
-                assert_eq!(restored.finalize(), Value::Int64(expected), "{function:?}");
+                assert_eq!(
+                    restored.finalize().unwrap(),
+                    Value::Int64(expected),
+                    "{function:?}"
+                );
             }
         }
     }
@@ -2069,7 +2170,7 @@ mod tests {
             for value in [4, 8] {
                 restored.update(Some(Value::Int64(value)));
             }
-            assert_eq!(restored.finalize(), expected, "{function:?}");
+            assert_eq!(restored.finalize().unwrap(), expected, "{function:?}");
         }
     }
 

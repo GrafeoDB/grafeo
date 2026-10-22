@@ -1,39 +1,33 @@
-//! The store side of a change set: how a graph's store applies a
-//! transaction's writes, stamps them at commit and undoes them at rollback.
+//! The store contract's write side: how a graph's backend applies a
+//! transaction's writes, commits them and rolls them back
+//! ([`GraphBackend`]).
 //!
 //! A transaction records each write it applies in its
 //! [`ChangeSet`](grafeo_common::change::ChangeSet): the op, with its
-//! after-image, and what the write replaced. A store keeps no log of its own
-//! per transaction: it applies an op and reports what it replaced
-//! ([`ChangeTarget::apply`]), and reads the transaction's entries back to
-//! stamp them with the commit epoch ([`ChangeTarget::stamp`]) or to undo
-//! them ([`ChangeTarget::undo`]). Replay of the log calls the same `apply`,
-//! as a [`Writer::Replay`], so what replay builds cannot drift from what the
-//! live writes built.
+//! after-image, and what the write replaced. That is the one log: a backend
+//! applies an op and reports what it replaced ([`GraphBackend::apply`]), and
+//! is handed the transaction's changes of its graph, read-only, to commit
+//! them at an epoch ([`GraphBackend::commit`]) or to roll them back
+//! ([`GraphBackend::rollback`], [`GraphBackend::rollback_to`]). Replay of
+//! the log calls the same `apply`, as a [`Writer::Replay`], so what replay
+//! builds cannot drift from what the live writes built.
 //!
-//! One target per graph: each named graph is a store of its own. The
-//! targets are [`LpgStore`](crate::graph::lpg::LpgStore) and
-//! [`ExternalTarget`], which bridges a store a database was built on
-//! ([`GraphStoreMut`]).
+//! One backend per graph: each named graph is a store of its own. The
+//! built-in backend is [`RowGroupStore`](crate::graph::rowgroup::RowGroupStore).
 
 use std::fmt;
 use std::ops::Range;
-use std::sync::Arc;
 
-use grafeo_common::change::{
-    Before, Change, DataOp, EdgeImage, Entity, Labels, NodeImage, PendingVersion, Properties,
-};
-use grafeo_common::types::{ArcStr, EdgeId, EpochId, NodeId, PropertyKey, TransactionId, Value};
+use grafeo_common::change::{Before, Change, ChangeMark, DataOp, Entity, PendingVersion};
+use grafeo_common::types::{EpochId, NodeId, ReadView, TransactionId};
 
-use super::Direction;
-use super::lpg::{Edge, Node};
-use super::traits::GraphStoreMut;
+use super::traits::GraphStore;
 
 /// How an op is applied: who writes, and so what it becomes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Writer {
     /// A live transaction (also a direct call's private one, and a bulk
-    /// write): a pending version only it sees until `stamp` or `undo`.
+    /// write): a pending version only it sees until its commit or rollback.
     /// Lenient: a write that changes nothing returns [`Applied::Unchanged`].
     Transaction {
         /// The transaction.
@@ -42,7 +36,7 @@ pub enum Writer {
         snapshot: EpochId,
     },
     /// Replay of a logged group: applied and stamped at its epoch, with all
-    /// [`ChangeTarget::stamp`] does, and no before-image built. Strict: a
+    /// [`GraphBackend::commit`] does, and no before-image built. Strict: a
     /// create at an id in use, a missing entity, a node delete with edges,
     /// removing an absent property or label, or adding a present one is an
     /// error. A property set always applies.
@@ -58,7 +52,7 @@ pub enum Writer {
     /// something returns its before-image ([`Applied::Changed`]), which the
     /// log and change data capture read; without, it returns
     /// [`Applied::Committed`]. The caller runs it while nothing else can
-    /// write what it writes, and never stamps or undoes its entries.
+    /// write what it writes, and never commits or rolls back its entries.
     Immediate {
         /// The epoch it commits at, which it also reads at.
         epoch: EpochId,
@@ -70,7 +64,7 @@ pub enum Writer {
 impl Writer {
     /// Whether the write is applied and stamped at once
     /// ([`Writer::Replay`], [`Writer::Immediate`]), by the system, instead of
-    /// as a transaction's pending version: a target stamps such a write as
+    /// as a transaction's pending version: a backend stamps such a write as
     /// it applies it.
     #[must_use]
     pub const fn stamps_at_once(self) -> bool {
@@ -117,7 +111,7 @@ impl Writer {
     }
 }
 
-/// What [`ChangeTarget::apply`] did.
+/// What [`GraphBackend::apply`] did.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Applied {
     /// Nothing changed ([`Writer::Transaction`], [`Writer::Immediate`]):
@@ -138,8 +132,8 @@ pub enum Applied {
     Committed,
 }
 
-/// Why [`ChangeTarget::apply`], `stamp` or `undo` refused. On an `apply`
-/// error nothing changed; a `stamp` or `undo` error is a broken invariant.
+/// Why [`GraphBackend::apply`], `commit` or a rollback refused. On an `apply`
+/// error nothing changed; a commit or rollback error is a broken invariant.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum ApplyError {
@@ -188,41 +182,122 @@ pub(crate) fn describe(entity: Entity) -> String {
     }
 }
 
-/// What a target's [`ChangeTarget::undo`] promises; fixed for the target's
-/// life.
+/// A backend's transaction: the handle [`GraphBackend::begin`] returns,
+/// which names the transaction its writes apply in
+/// ([`writer`](Self::writer)), its reads see ([`view`](Self::view)), and its
+/// commit and rollback end.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[non_exhaustive]
-pub enum UndoSupport {
-    /// Undo restores every entry it is given and fails only on a broken
-    /// invariant.
-    Exact,
-    /// No undo: the store keeps what `apply` wrote ([`ExternalTarget`]).
-    /// The engine never calls `undo`.
-    None,
+pub struct BackendTransaction {
+    id: TransactionId,
+    snapshot: EpochId,
 }
 
-/// A graph's store, as the change set writes it. One per graph. Every method
-/// takes `&self`; the store synchronizes internally and never calls back
+impl BackendTransaction {
+    /// The handle of transaction `id`, which reads at `snapshot`.
+    #[must_use]
+    pub const fn new(id: TransactionId, snapshot: EpochId) -> Self {
+        Self { id, snapshot }
+    }
+
+    /// The transaction.
+    #[must_use]
+    pub const fn id(self) -> TransactionId {
+        self.id
+    }
+
+    /// The epoch it reads at.
+    #[must_use]
+    pub const fn snapshot(self) -> EpochId {
+        self.snapshot
+    }
+
+    /// The writer its writes apply as.
+    #[must_use]
+    pub const fn writer(self) -> Writer {
+        Writer::Transaction {
+            id: self.id,
+            snapshot: self.snapshot,
+        }
+    }
+
+    /// The view its reads take: its snapshot, its own writes included.
+    #[must_use]
+    pub const fn view(self) -> ReadView {
+        ReadView::transaction(self.id, self.snapshot)
+    }
+}
+
+/// The store contract's write side: a graph's store as the engine writes,
+/// commits and rolls back a transaction in it. One per graph. Every method
+/// takes `&self`; the backend synchronizes internally and never calls back
 /// into the engine.
 ///
-/// # The stamp and undo contract
+/// # Stability: Experimental
 ///
-/// `apply` allocates everything a version needs, so `stamp` only gives the
-/// versions the commit epoch and `undo` only drops or rewrites what `apply`
-/// made. An `Err` from `stamp` or `undo` is a broken invariant: the engine
+/// Implementing this trait (and so building a database on a backend of
+/// one's own, `GrafeoDB::with_store`) is experimental through 0.6.x: any
+/// release may add or change a required method. Calling it is stable.
+///
+/// # The transaction
+///
+/// The backend owns its transactions. The engine opens one with
+/// [`begin`](Self::begin) before the transaction's first write to the graph;
+/// every write of the transaction then [`apply`](Self::apply)s in it (as the
+/// handle's [`writer`](BackendTransaction::writer)), and its reads at the
+/// handle's [`view`](BackendTransaction::view) see them, no other reader
+/// does. [`commit`](Self::commit) makes them visible at the commit's epoch,
+/// [`rollback`](Self::rollback) drops them all, and
+/// [`rollback_to`](Self::rollback_to) drops those after a savepoint and keeps
+/// the transaction open.
+///
+/// # One log
+///
+/// The engine records every write it applies in the transaction's change
+/// set: the op, with its after-image, and what the write replaced (its
+/// [`Before`]). Commit and the rollbacks hand the backend the recorded
+/// changes of its graph, read-only, in the order they were applied: a
+/// backend with versions of its own (the row-group store) stamps or drops
+/// them, one that writes in place undoes from the before-images, one with
+/// native transactions ends them and may ignore the changes. The engine
+/// writes the same changes to its write-ahead log and to change data
+/// capture, and replays a logged group through [`apply`](Self::apply) as a
+/// [`Writer::Replay`], so what recovery builds cannot drift from what the
+/// live writes built.
+///
+/// # Ids
+///
+/// The engine reserves the ids of what a write creates
+/// ([`reserve_node_ids`](Self::reserve_node_ids)) and a create names its id:
+/// a backend creates at the id it is given, so a replay of the log creates
+/// at the logged ids.
+///
+/// # Durability
+///
+/// A database on a backend with a path logs every commit to its own
+/// write-ahead log first. At a checkpoint the engine asks the backend to
+/// make everything up to an epoch durable ([`flush`](Self::flush)), then
+/// drops the logged commits up to the epoch the backend reports durable
+/// ([`durable_epoch`](Self::durable_epoch)); at an open it replays the
+/// logged commits after that epoch. A backend that keeps nothing across a
+/// restart reports [`EpochId::INITIAL`]: the engine then replays the whole
+/// log at every open and never drops any of it, so the log is what persists.
+///
+/// # Errors and invariants
+///
+/// `apply` allocates everything a version needs, so `commit` only makes the
+/// writes visible and the rollbacks only drop or restore what `apply` made.
+/// An `Err` from `commit` or a rollback is a broken invariant: the engine
 /// poisons the database rather than retry, as a commit of two graphs whose
-/// second `stamp` fails is half stamped. The pending version of what an
-/// entry wrote is the newest of its entity, key or label set: the
-/// transaction manager's claims let one transaction at a time write an
-/// entity, so `stamp` and `undo` find it without a handle in the entry.
-pub trait ChangeTarget: Send + Sync {
+/// second commit fails is half done. The transaction manager's claims let
+/// one transaction at a time write an entity, so the newest pending version
+/// of an entity, key or label set is the one a change wrote.
+pub trait GraphBackend: GraphStore {
     /// Reserves `count` consecutive node ids, never handed out again (also
     /// not after a rollback).
     ///
     /// # Errors
     ///
-    /// Returns [`ApplyError::Refused`] when the ids are exhausted, or the
-    /// store gives its own ids ([`ExternalTarget`]).
+    /// Returns [`ApplyError::Refused`] when the ids are exhausted.
     fn reserve_node_ids(&self, count: u64) -> Result<Range<u64>, ApplyError>;
 
     /// Reserves `count` consecutive edge ids.
@@ -231,6 +306,21 @@ pub trait ChangeTarget: Send + Sync {
     ///
     /// As [`reserve_node_ids`](Self::reserve_node_ids).
     fn reserve_edge_ids(&self, count: u64) -> Result<Range<u64>, ApplyError>;
+
+    /// Opens transaction `transaction`, which reads at `snapshot`, before
+    /// its first write to this graph; its writes apply in the returned
+    /// handle. A backend whose versions need no opening (the row-group
+    /// store) returns the handle at once.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ApplyError::Refused`] when the backend cannot open one;
+    /// the engine then fails the write.
+    fn begin(
+        &self,
+        transaction: TransactionId,
+        snapshot: EpochId,
+    ) -> Result<BackendTransaction, ApplyError>;
 
     /// Applies `op` as `writer`; on `Err` nothing changed. A create inserts
     /// at the op's id and keeps the allocator above it. Replay calls this
@@ -244,9 +334,9 @@ pub trait ChangeTarget: Send + Sync {
 
     /// Applies `op`, one row of a bulk write: a create by a transaction
     /// ([`Writer::Transaction`]) at an id of a range it reserved and
-    /// recorded as one entry ([`BulkRange`](grafeo_common::change::BulkRange)),
-    /// which its commit stamps and its rollback undoes as a range. Builds no
-    /// before-image (the range is the entry), and leaves to the bulk write
+    /// recorded as one change ([`BulkRange`](grafeo_common::change::BulkRange)),
+    /// which its commit commits and its rollback drops as a range. Builds no
+    /// before-image (the range is the change), and leaves to the bulk write
     /// what it checked itself for every row: an edge's endpoints, which its
     /// writer sees. On `Err` nothing changed.
     ///
@@ -261,512 +351,87 @@ pub trait ChangeTarget: Send + Sync {
         self.apply(op, writer).map(drop)
     }
 
-    /// Commits `transaction`'s entries of this graph at `epoch`: the pending
-    /// versions they name get the epoch, and the statistics counters and
-    /// dirty marks take the entries. A bulk range costs O(row groups) where
-    /// a run's version is one record, O(ids) at most. Recorded order,
-    /// O(entries).
+    /// Commits `transaction` at `epoch`: its writes in this graph, whose
+    /// recorded `changes` come in the order they were applied, become
+    /// visible to the readers at `epoch` and after, and the handle ends.
+    /// O(changes); a bulk range costs O(row groups) in the row-group store,
+    /// where a run's version is one record.
     ///
     /// # Errors
     ///
     /// A broken invariant (see the trait docs): the database is poisoned.
-    fn stamp(
+    fn commit(
         &self,
-        transaction: TransactionId,
-        entries: &mut dyn Iterator<Item = &Change>,
+        transaction: BackendTransaction,
+        changes: &mut dyn Iterator<Item = &Change>,
         epoch: EpochId,
     ) -> Result<(), ApplyError>;
 
-    /// Undoes `transaction`'s entries, last to first (`next_back`): drops
-    /// the version an entry [created](PendingVersion::Created) (or, in a
-    /// store that writes in place, writes its before-image back), writes the
-    /// before-image back into one it [replaced](PendingVersion::Replaced) and
-    /// keeps it; a bulk range drops its pending ids. O(entries).
+    /// Rolls `transaction` back: none of its writes in this graph stays, and
+    /// the handle ends. Its recorded `changes` come in the order they were
+    /// applied; a backend that undoes walks them last to first (`next_back`):
+    /// it drops the version a change [created](PendingVersion::Created) (or,
+    /// writing in place, writes its before-image back) and writes the
+    /// before-image back into one it [replaced](PendingVersion::Replaced); a
+    /// bulk range drops its pending ids. O(changes).
     ///
     /// # Errors
     ///
     /// A broken invariant (see the trait docs): the database is poisoned.
-    fn undo(
+    fn rollback(
         &self,
-        transaction: TransactionId,
-        entries: &mut dyn DoubleEndedIterator<Item = &Change>,
+        transaction: BackendTransaction,
+        changes: &mut dyn DoubleEndedIterator<Item = &Change>,
     ) -> Result<(), ApplyError>;
 
-    /// Whether `undo` works.
-    fn undo_support(&self) -> UndoSupport {
-        UndoSupport::Exact
-    }
-}
-
-// ── External stores ─────────────────────────────────────────────────
-
-/// A store a database was built on ([`GraphStoreMut`], through
-/// `GrafeoDB::with_store`) as a change target: `apply` writes through the
-/// store's own versioned methods and reads before it writes, so the entry
-/// has its before-image (change data capture reports it); `stamp` does
-/// nothing (the store commits its writes itself); there is no undo
-/// ([`UndoSupport::None`]): the store keeps what `apply` wrote, and the
-/// engine never calls [`undo`](ChangeTarget::undo).
-///
-/// A [`GraphStoreMut`] gives the ids of what it creates and cannot create at
-/// an id given to it, so this target reserves no ids and `apply` refuses
-/// creates: a writer creates through [`create_node`](Self::create_node) and
-/// [`create_edge`](Self::create_edge), which use the store's own ids and
-/// return the op with the id it gave.
-pub struct ExternalTarget {
-    store: Arc<dyn GraphStoreMut>,
-}
-
-impl ExternalTarget {
-    /// A change target writing `store`.
-    #[must_use]
-    pub fn new(store: Arc<dyn GraphStoreMut>) -> Self {
-        Self { store }
-    }
-
-    /// The store this target writes.
-    #[must_use]
-    pub fn store(&self) -> &Arc<dyn GraphStoreMut> {
-        &self.store
-    }
-
-    /// Creates a node with `labels` and `properties` as `writer`, at the id
-    /// the store gives: returns the op with that id, and what to record (a
-    /// create replaced nothing).
+    /// Rolls `transaction` back to `savepoint`, a position in its change
+    /// set: its writes in this graph after the savepoint, whose recorded
+    /// `changes_since` come in the order they were applied, are undone as
+    /// [`rollback`](Self::rollback) undoes them; the writes before it stay
+    /// and the transaction stays open. A savepoint taken before the
+    /// transaction's first write to this graph undoes all of them, and a
+    /// failed statement inside a transaction rolls back to the position
+    /// before it the same way. O(changes since).
     ///
     /// # Errors
     ///
-    /// Returns [`ApplyError::Refused`] when the store refuses a value. The
-    /// store then holds the node with the values set before it: an external
-    /// store keeps what it applied.
-    pub fn create_node(
+    /// A broken invariant (see the trait docs): the database is poisoned.
+    fn rollback_to(
         &self,
-        labels: Labels,
-        properties: Properties,
-        writer: Writer,
-    ) -> Result<(DataOp, Applied), ApplyError> {
-        let names: Vec<&str> = labels.iter().map(ArcStr::as_str).collect();
-        let id = match writer {
-            Writer::Transaction {
-                id: transaction,
-                snapshot,
-            } => self
-                .store
-                .create_node_versioned(&names, snapshot, transaction),
-            Writer::Replay { .. } | Writer::Immediate { .. } => self.store.create_node(&names),
-        };
-        for (key, value) in &properties {
-            match writer {
-                Writer::Transaction {
-                    id: transaction, ..
-                } => self
-                    .store
-                    .set_node_property_versioned(id, key.as_str(), value.clone(), transaction)
-                    .map_err(|error| refused(Entity::Node(id), &error))?,
-                Writer::Replay { .. } | Writer::Immediate { .. } => {
-                    self.store
-                        .set_node_property(id, key.as_str(), value.clone());
-                }
-            }
-        }
-        let op = DataOp::CreateNode {
-            id,
-            labels,
-            properties,
-        };
-        Ok((op, Self::done(writer, Before::Absent)))
-    }
+        transaction: BackendTransaction,
+        savepoint: ChangeMark,
+        changes_since: &mut dyn DoubleEndedIterator<Item = &Change>,
+    ) -> Result<(), ApplyError>;
 
-    /// Creates an edge from `src` to `dst` with `properties` as `writer`, at
-    /// the id the store gives, as [`create_node`](Self::create_node) does a
-    /// node.
+    /// Drops what no reader at `horizon` or later needs: the versions every
+    /// reader sees past. The engine calls it after commits, now and then,
+    /// with the oldest epoch an open reader or the history retention still
+    /// reads. A backend without versions of its own has nothing to drop.
+    fn collect(&self, horizon: EpochId);
+
+    /// The latest epoch whose commits the backend holds durably: the commits
+    /// at it and before it survive a restart of the process, and an open
+    /// replays the logged commits after it. [`EpochId::INITIAL`] for a
+    /// backend that keeps nothing across a restart: an open replays the
+    /// whole log, and the engine never drops any of it.
+    fn durable_epoch(&self) -> EpochId;
+
+    /// Makes every commit up to `epoch` (the database's committed epoch at a
+    /// checkpoint) durable, so [`durable_epoch`](Self::durable_epoch)
+    /// reports `epoch` or later afterwards; then the engine drops the
+    /// logged commits up to it. A backend that keeps nothing across a
+    /// restart returns `Ok` and keeps reporting [`EpochId::INITIAL`]: the
+    /// log keeps every commit.
     ///
     /// # Errors
     ///
-    /// Returns [`ApplyError::Missing`], creating nothing, when the writer
-    /// does not see an endpoint, and [`ApplyError::Refused`] when the store
-    /// refuses the edge or a value (the values set before it stay).
-    pub fn create_edge(
-        &self,
-        src: NodeId,
-        dst: NodeId,
-        edge_type: ArcStr,
-        properties: Properties,
-        writer: Writer,
-    ) -> Result<(DataOp, Applied), ApplyError> {
-        for end in [src, dst] {
-            if self.node(end, writer).is_none() {
-                return Err(ApplyError::Missing(Entity::Node(end)));
-            }
-        }
-        let id = match writer {
-            Writer::Transaction {
-                id: transaction,
-                snapshot,
-            } => self
-                .store
-                .create_edge_versioned(src, dst, &edge_type, snapshot, transaction)
-                .map_err(|error| refused(Entity::Node(src), &error))?,
-            Writer::Replay { .. } | Writer::Immediate { .. } => {
-                self.store.create_edge(src, dst, &edge_type)
-            }
-        };
-        for (key, value) in &properties {
-            match writer {
-                Writer::Transaction {
-                    id: transaction, ..
-                } => {
-                    self.store.set_edge_property_versioned(
-                        id,
-                        key.as_str(),
-                        value.clone(),
-                        transaction,
-                    );
-                }
-                Writer::Replay { .. } | Writer::Immediate { .. } => {
-                    self.store
-                        .set_edge_property(id, key.as_str(), value.clone());
-                }
-            }
-        }
-        let op = DataOp::CreateEdge {
-            id,
-            src,
-            dst,
-            edge_type,
-            properties,
-        };
-        Ok((op, Self::done(writer, Before::Absent)))
-    }
-
-    /// Node `id` as `writer` sees it.
-    fn node(&self, id: NodeId, writer: Writer) -> Option<Node> {
-        match writer {
-            Writer::Transaction {
-                id: transaction,
-                snapshot,
-            } => self.store.get_node_versioned(id, snapshot, transaction),
-            Writer::Replay { .. } | Writer::Immediate { .. } => self.store.get_node(id),
-        }
-    }
-
-    /// Edge `id` as `writer` sees it.
-    fn edge(&self, id: EdgeId, writer: Writer) -> Option<Edge> {
-        match writer {
-            Writer::Transaction {
-                id: transaction,
-                snapshot,
-            } => self.store.get_edge_versioned(id, snapshot, transaction),
-            Writer::Replay { .. } | Writer::Immediate { .. } => self.store.get_edge(id),
-        }
-    }
-
-    /// Whether `writer` sees an edge of node `id`, either way.
-    fn sees_an_edge_of(&self, id: NodeId, writer: Writer) -> bool {
-        self.store
-            .edges_from(id, Direction::Both)
-            .into_iter()
-            .any(|(_, edge)| self.edge(edge, writer).is_some())
-    }
-
-    /// The applied result of a write that replaced `before`.
-    fn done(writer: Writer, before: Before) -> Applied {
-        if writer.builds_images() {
-            Applied::Changed {
-                before,
-                version: PendingVersion::Created,
-            }
-        } else {
-            Applied::Committed
-        }
-    }
-
-    /// Refuses a create: see the type's docs.
-    fn refuse_create(entity: Entity) -> ApplyError {
-        ApplyError::Refused(format!(
-            "{}: an external store gives the ids of what it creates, so it cannot create at \
-             an id reserved for it",
-            describe(entity)
-        ))
-    }
-
-    fn delete_node(&self, id: NodeId, writer: Writer) -> Result<Applied, ApplyError> {
-        let Some(node) = self.node(id, writer) else {
-            return writer.unseen(Entity::Node(id));
-        };
-        if self.sees_an_edge_of(id, writer) {
-            return Err(ApplyError::HasEdges(id));
-        }
-        let image = NodeImage {
-            labels: node.labels.clone(),
-            properties: sorted(node.properties.iter()),
-        };
-        let deleted = match writer {
-            Writer::Transaction {
-                id: transaction,
-                snapshot,
-            } => self
-                .store
-                .delete_node_versioned(id, snapshot, transaction)
-                .map_err(|error| refused(Entity::Node(id), &error))?,
-            Writer::Replay { .. } | Writer::Immediate { .. } => self.store.delete_node(id),
-        };
-        if !deleted {
-            return writer.unseen(Entity::Node(id));
-        }
-        Ok(Self::done(writer, Before::Node(Box::new(image))))
-    }
-
-    fn delete_edge(&self, id: EdgeId, writer: Writer) -> Result<Applied, ApplyError> {
-        let Some(edge) = self.edge(id, writer) else {
-            return writer.unseen(Entity::Edge(id));
-        };
-        let image = EdgeImage {
-            src: edge.src,
-            dst: edge.dst,
-            edge_type: edge.edge_type.clone(),
-            properties: sorted(edge.properties.iter()),
-        };
-        let deleted = match writer {
-            Writer::Transaction {
-                id: transaction,
-                snapshot,
-            } => self.store.delete_edge_versioned(id, snapshot, transaction),
-            Writer::Replay { .. } | Writer::Immediate { .. } => self.store.delete_edge(id),
-        };
-        if !deleted {
-            return writer.unseen(Entity::Edge(id));
-        }
-        Ok(Self::done(writer, Before::Edge(Box::new(image))))
-    }
-
-    fn set_node_value(
-        &self,
-        id: NodeId,
-        key: &PropertyKey,
-        value: &Value,
-        writer: Writer,
-    ) -> Result<Applied, ApplyError> {
-        let Some(node) = self.node(id, writer) else {
-            return writer.unseen(Entity::Node(id));
-        };
-        let old = node.properties.get(key).cloned();
-        match writer {
-            Writer::Transaction {
-                id: transaction, ..
-            } => self
-                .store
-                .set_node_property_versioned(id, key.as_str(), value.clone(), transaction)
-                .map_err(|error| refused(Entity::Node(id), &error))?,
-            Writer::Replay { .. } | Writer::Immediate { .. } => {
-                self.store
-                    .set_node_property(id, key.as_str(), value.clone());
-            }
-        }
-        Ok(Self::done(writer, Before::Value(old)))
-    }
-
-    fn remove_node_value(
-        &self,
-        id: NodeId,
-        key: &PropertyKey,
-        writer: Writer,
-    ) -> Result<Applied, ApplyError> {
-        let Some(node) = self.node(id, writer) else {
-            return writer.unseen(Entity::Node(id));
-        };
-        if node.properties.get(key).is_none() {
-            return writer.no_op(ApplyError::Missing(Entity::Node(id)));
-        }
-        let removed = match writer {
-            Writer::Transaction {
-                id: transaction, ..
-            } => self
-                .store
-                .remove_node_property_versioned(id, key.as_str(), transaction),
-            Writer::Replay { .. } | Writer::Immediate { .. } => {
-                self.store.remove_node_property(id, key.as_str())
-            }
-        }
-        .map_err(|error| refused(Entity::Node(id), &error))?;
-        match removed {
-            Some(old) => Ok(Self::done(writer, Before::Value(Some(old)))),
-            None => writer.no_op(ApplyError::Missing(Entity::Node(id))),
-        }
-    }
-
-    fn set_edge_value(
-        &self,
-        id: EdgeId,
-        key: &PropertyKey,
-        value: &Value,
-        writer: Writer,
-    ) -> Result<Applied, ApplyError> {
-        let Some(edge) = self.edge(id, writer) else {
-            return writer.unseen(Entity::Edge(id));
-        };
-        let old = edge.properties.get(key).cloned();
-        match writer {
-            Writer::Transaction {
-                id: transaction, ..
-            } => {
-                self.store.set_edge_property_versioned(
-                    id,
-                    key.as_str(),
-                    value.clone(),
-                    transaction,
-                );
-            }
-            Writer::Replay { .. } | Writer::Immediate { .. } => {
-                self.store
-                    .set_edge_property(id, key.as_str(), value.clone());
-            }
-        }
-        Ok(Self::done(writer, Before::Value(old)))
-    }
-
-    fn remove_edge_value(
-        &self,
-        id: EdgeId,
-        key: &PropertyKey,
-        writer: Writer,
-    ) -> Result<Applied, ApplyError> {
-        let Some(edge) = self.edge(id, writer) else {
-            return writer.unseen(Entity::Edge(id));
-        };
-        if edge.properties.get(key).is_none() {
-            return writer.no_op(ApplyError::Missing(Entity::Edge(id)));
-        }
-        let removed = match writer {
-            Writer::Transaction {
-                id: transaction, ..
-            } => self
-                .store
-                .remove_edge_property_versioned(id, key.as_str(), transaction),
-            Writer::Replay { .. } | Writer::Immediate { .. } => {
-                self.store.remove_edge_property(id, key.as_str())
-            }
-        }
-        .map_err(|error| refused(Entity::Edge(id), &error))?;
-        match removed {
-            Some(old) => Ok(Self::done(writer, Before::Value(Some(old)))),
-            None => writer.no_op(ApplyError::Missing(Entity::Edge(id))),
-        }
-    }
-
-    fn change_label(
-        &self,
-        id: NodeId,
-        label: &str,
-        add: bool,
-        writer: Writer,
-    ) -> Result<Applied, ApplyError> {
-        let Some(node) = self.node(id, writer) else {
-            return writer.unseen(Entity::Node(id));
-        };
-        if node.has_label(label) == add {
-            return writer.no_op(if add {
-                ApplyError::Exists(Entity::Node(id))
-            } else {
-                ApplyError::Missing(Entity::Node(id))
-            });
-        }
-        let before = node.labels.clone();
-        let changed = match (writer, add) {
-            (
-                Writer::Transaction {
-                    id: transaction, ..
-                },
-                true,
-            ) => self.store.add_label_versioned(id, label, transaction),
-            (
-                Writer::Transaction {
-                    id: transaction, ..
-                },
-                false,
-            ) => self.store.remove_label_versioned(id, label, transaction),
-            (Writer::Replay { .. } | Writer::Immediate { .. }, true) => {
-                self.store.add_label(id, label)
-            }
-            (Writer::Replay { .. } | Writer::Immediate { .. }, false) => {
-                self.store.remove_label(id, label)
-            }
-        };
-        if !changed {
-            return writer.unseen(Entity::Node(id));
-        }
-        Ok(Self::done(writer, Before::Labels(before)))
-    }
-}
-
-impl fmt::Debug for ExternalTarget {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("ExternalTarget").finish_non_exhaustive()
-    }
-}
-
-impl ChangeTarget for ExternalTarget {
-    fn reserve_node_ids(&self, count: u64) -> Result<Range<u64>, ApplyError> {
-        Err(ApplyError::Refused(format!(
-            "{count} node ids: an external store gives the ids of what it creates"
-        )))
-    }
-
-    fn reserve_edge_ids(&self, count: u64) -> Result<Range<u64>, ApplyError> {
-        Err(ApplyError::Refused(format!(
-            "{count} edge ids: an external store gives the ids of what it creates"
-        )))
-    }
-
-    fn apply(&self, op: &DataOp, writer: Writer) -> Result<Applied, ApplyError> {
-        match op {
-            DataOp::CreateNode { id, .. } => Err(Self::refuse_create(Entity::Node(*id))),
-            DataOp::CreateEdge { id, .. } => Err(Self::refuse_create(Entity::Edge(*id))),
-            DataOp::DeleteNode { id } => self.delete_node(*id, writer),
-            DataOp::DeleteEdge { id } => self.delete_edge(*id, writer),
-            DataOp::SetNodeProperty { id, key, value } => {
-                self.set_node_value(*id, key, value, writer)
-            }
-            DataOp::RemoveNodeProperty { id, key } => self.remove_node_value(*id, key, writer),
-            DataOp::SetEdgeProperty { id, key, value } => {
-                self.set_edge_value(*id, key, value, writer)
-            }
-            DataOp::RemoveEdgeProperty { id, key } => self.remove_edge_value(*id, key, writer),
-            DataOp::AddNodeLabel { id, label } => self.change_label(*id, label, true, writer),
-            DataOp::RemoveNodeLabel { id, label } => self.change_label(*id, label, false, writer),
-            DataOp::InsertTriple { .. } | DataOp::DeleteTriple { .. } => Err(refuse_triple(op)),
-        }
-    }
-
-    /// Does nothing: the store commits what `apply` wrote itself.
-    fn stamp(
-        &self,
-        _transaction: TransactionId,
-        _entries: &mut dyn Iterator<Item = &Change>,
-        _epoch: EpochId,
-    ) -> Result<(), ApplyError> {
-        Ok(())
-    }
-
-    /// Never called ([`UndoSupport::None`]): refuses, so a call that should
-    /// not happen does not pass for an undo.
-    fn undo(
-        &self,
-        _transaction: TransactionId,
-        _entries: &mut dyn DoubleEndedIterator<Item = &Change>,
-    ) -> Result<(), ApplyError> {
-        Err(ApplyError::Refused(
-            "an external store has no undo: it keeps what was applied".to_string(),
-        ))
-    }
-
-    fn undo_support(&self) -> UndoSupport {
-        UndoSupport::None
-    }
+    /// When the backend cannot make the commits durable: the checkpoint
+    /// fails, and the log keeps every commit.
+    fn flush(&self, epoch: EpochId) -> Result<(), ApplyError>;
 }
 
 /// Refuses what no bulk write applies as a row (see
-/// [`ChangeTarget::apply_bulk_row`]): an op that is no create, or a writer
+/// [`GraphBackend::apply_bulk_row`]): an op that is no create, or a writer
 /// that is no transaction.
 ///
 /// # Errors
@@ -785,165 +450,4 @@ pub(crate) fn check_bulk_row(op: &DataOp, writer: Writer) -> Result<(), ApplyErr
         )));
     }
     Ok(())
-}
-
-/// The error of a write a store refused with `error`.
-pub(crate) fn refused(entity: Entity, error: &impl fmt::Display) -> ApplyError {
-    ApplyError::Refused(format!("{}: {error}", describe(entity)))
-}
-
-/// The error of a triple op given to a labeled property graph's target.
-pub(crate) fn refuse_triple(op: &DataOp) -> ApplyError {
-    ApplyError::Refused(format!(
-        "an RDF op (kind {}) given to a labeled property graph's store",
-        op.kind()
-    ))
-}
-
-/// Properties in key order, as an image holds them.
-fn sorted<'p>(properties: impl Iterator<Item = (&'p PropertyKey, &'p Value)>) -> Properties {
-    let mut properties: Properties = properties
-        .map(|(key, value)| (key.clone(), value.clone()))
-        .collect();
-    properties.sort_by(|(a, _), (b, _)| a.cmp(b));
-    properties
-}
-
-#[cfg(all(test, feature = "lpg"))]
-mod tests {
-    use grafeo_common::change::Labels;
-    use grafeo_common::types::ArcStr;
-
-    use super::*;
-    use crate::graph::lpg::LpgStore;
-
-    fn labels(names: &[&str]) -> Labels {
-        names.iter().map(|name| ArcStr::from(*name)).collect()
-    }
-
-    /// An external store keeps what `apply` wrote, so its target has no
-    /// undo and refuses a call to it; `apply` reads what each write replaces
-    /// before it writes, so the entries have their before-images (change
-    /// data capture reports them); creates are refused, with nothing
-    /// created, as the store gives its own ids.
-    #[test]
-    fn an_external_target_builds_images_and_has_no_undo() {
-        let store = Arc::new(LpgStore::new().unwrap());
-        let alix = store.create_node_with_props(
-            &["Person"],
-            [
-                ("name", Value::from("Alix")),
-                ("city", Value::from("Amsterdam")),
-            ],
-        );
-        let gus = store.create_node_with_props(&["Person"], [("name", Value::from("Gus"))]);
-        let knows = store.create_edge_with_props(alix, gus, "KNOWS", [("since", Value::Int64(3))]);
-        let target = ExternalTarget::new(Arc::clone(&store) as Arc<dyn GraphStoreMut>);
-        assert_eq!(target.undo_support(), UndoSupport::None);
-        let writer = Writer::Transaction {
-            id: TransactionId::new(19),
-            snapshot: store.current_epoch(),
-        };
-        let key = PropertyKey::new;
-        let changed = |before: Before| {
-            Ok(Applied::Changed {
-                before,
-                version: PendingVersion::Created,
-            })
-        };
-
-        assert_eq!(
-            target.apply(
-                &DataOp::SetNodeProperty {
-                    id: alix,
-                    key: key("city"),
-                    value: Value::from("Paris")
-                },
-                writer
-            ),
-            changed(Before::Value(Some(Value::from("Amsterdam"))))
-        );
-        assert_eq!(
-            target.apply(
-                &DataOp::RemoveNodeProperty {
-                    id: alix,
-                    key: key("name")
-                },
-                writer
-            ),
-            changed(Before::Value(Some(Value::from("Alix"))))
-        );
-        assert_eq!(
-            target.apply(
-                &DataOp::RemoveNodeProperty {
-                    id: alix,
-                    key: key("name")
-                },
-                writer
-            ),
-            Ok(Applied::Unchanged),
-            "a removal of an absent value changes nothing"
-        );
-        assert_eq!(
-            target.apply(
-                &DataOp::AddNodeLabel {
-                    id: gus,
-                    label: ArcStr::from("Traveller")
-                },
-                writer
-            ),
-            changed(Before::Labels(labels(&["Person"])))
-        );
-        assert_eq!(
-            target.apply(&DataOp::DeleteNode { id: gus }, writer),
-            Err(ApplyError::HasEdges(gus))
-        );
-        assert_eq!(
-            target.apply(&DataOp::DeleteEdge { id: knows }, writer),
-            changed(Before::Edge(Box::new(EdgeImage {
-                src: alix,
-                dst: gus,
-                edge_type: ArcStr::from("KNOWS"),
-                properties: vec![(key("since"), Value::Int64(3))],
-            })))
-        );
-        let Ok(Applied::Changed {
-            before: Before::Node(image),
-            ..
-        }) = target.apply(&DataOp::DeleteNode { id: gus }, writer)
-        else {
-            panic!("a node delete has its image");
-        };
-        let mut names: Vec<&str> = image.labels.iter().map(ArcStr::as_str).collect();
-        names.sort_unstable();
-        assert_eq!(names, ["Person", "Traveller"]);
-        assert_eq!(image.properties, vec![(key("name"), Value::from("Gus"))]);
-
-        assert_eq!(
-            target.stamp(TransactionId::new(19), &mut [].iter(), EpochId::new(3)),
-            Ok(())
-        );
-        assert!(matches!(
-            target.undo(TransactionId::new(19), &mut [].iter()),
-            Err(ApplyError::Refused(_))
-        ));
-        let nodes = store.next_node_id();
-        assert!(matches!(
-            target.reserve_node_ids(1),
-            Err(ApplyError::Refused(_))
-        ));
-        assert!(matches!(
-            target.apply(
-                &DataOp::CreateNode {
-                    id: NodeId::new(nodes),
-                    labels: labels(&["Person"]),
-                    properties: Vec::new(),
-                },
-                writer
-            ),
-            Err(ApplyError::Refused(_))
-        ));
-        assert_eq!(store.next_node_id(), nodes, "nothing was created");
-        assert!(store.get_node(NodeId::new(nodes)).is_none());
-    }
 }

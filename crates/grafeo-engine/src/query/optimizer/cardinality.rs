@@ -1228,7 +1228,8 @@ impl CardinalityEstimator {
             UnaryOp::Not => 1.0 - self.default_selectivity,
             UnaryOp::IsNull => self.selectivity_config.is_null,
             UnaryOp::IsNotNull => self.selectivity_config.is_not_null,
-            UnaryOp::Neg => 1.0, // Negation doesn't change cardinality
+            // Negation and unary plus don't change cardinality
+            UnaryOp::Neg | UnaryOp::Pos => 1.0,
         }
     }
 

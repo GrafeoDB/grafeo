@@ -42,15 +42,18 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use grafeo_common::change::{
     Before, ChangeSet, DataModel, DataOp, GraphRef, GraphSlot, PendingVersion,
 };
-use grafeo_common::types::{ArcStr, EdgeId, EpochId, NodeId, PropertyKey, TransactionId, Value};
+use grafeo_common::types::{
+    ArcStr, EdgeId, EpochId, NodeId, PropertyKey, ReadView, TransactionId, Value,
+};
 use grafeo_common::utils::error::{Error, QueryError, QueryErrorKind, Result};
 use grafeo_core::execution::operators::{
     ChangeRecorder, GraphWriter, NewEdge, OperatorError, Recording, WriteClaim, WriteClaims,
-    WriteInProgress, WriteTarget,
+    WriteInProgress,
 };
-use grafeo_core::graph::apply::{ChangeTarget, Writer};
-use grafeo_core::graph::lpg::{Edge, LpgStore, Node};
-use grafeo_core::graph::{GraphStoreMut, GraphStoreSearch};
+use grafeo_core::graph::apply::{GraphBackend, Writer};
+use grafeo_core::graph::lpg::{Edge, Node};
+use grafeo_core::graph::rowgroup::RowGroupStore;
+use grafeo_core::graph::{Direction, GraphStore};
 
 use super::GrafeoDB;
 use crate::catalog::CatalogConstraintValidator;
@@ -161,7 +164,7 @@ struct ImmediateCall<'a> {
     /// Holds commits off until the call's epoch is published.
     commits: CommitsHeld<'a>,
     /// The database's root store, which follows the call's epoch.
-    root: Arc<LpgStore>,
+    root: Arc<RowGroupStore>,
     /// The epoch the call commits at.
     epoch: EpochId,
     /// The call's writer.
@@ -250,7 +253,7 @@ impl GrafeoDB {
     fn direct_store(
         &self,
         target: DirectTarget<'_>,
-    ) -> Result<Option<(Arc<LpgStore>, Option<String>)>> {
+    ) -> Result<Option<(Arc<RowGroupStore>, Option<String>)>> {
         let Some(root) = self.root_store() else {
             return Ok(None);
         };
@@ -287,7 +290,7 @@ impl GrafeoDB {
     /// # Errors
     ///
     /// Returns an error if `target` names a graph that does not exist.
-    pub(crate) fn read_store(&self, target: DirectTarget<'_>) -> Result<Arc<dyn GraphStoreSearch>> {
+    pub(crate) fn read_store(&self, target: DirectTarget<'_>) -> Result<Arc<dyn GraphStore>> {
         Ok(match self.direct_store(target)? {
             Some((store, Some(_))) => store,
             _ => self.graph_store(),
@@ -328,7 +331,7 @@ impl GrafeoDB {
     /// Fails, like a commit, once the database is closed.
     fn write_immediate<T>(
         &self,
-        store: &Arc<LpgStore>,
+        store: &Arc<RowGroupStore>,
         graph: Option<&str>,
         write: impl FnOnce(&GraphWriter) -> std::result::Result<T, OperatorError>,
     ) -> Result<T> {
@@ -338,7 +341,7 @@ impl GrafeoDB {
         // what it wrote is committed and logged first.
         let outcome =
             std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| write(&call.writer)));
-        self.finish_immediate(call, store);
+        self.finish_immediate(call, store)?;
         match outcome {
             Ok(result) => result.map_err(crate::query::executor::convert_operator_error),
             Err(panic) => std::panic::resume_unwind(panic),
@@ -350,11 +353,11 @@ impl GrafeoDB {
     /// the stores to the call's epoch and builds its writer.
     fn start_immediate<'a>(
         &'a self,
-        store: &Arc<LpgStore>,
+        store: &Arc<RowGroupStore>,
         graph: Option<&str>,
     ) -> Result<ImmediateCall<'a>> {
         let commits = self.transaction_manager.hold_commits_for_change()?;
-        let root = self.lpg_store();
+        let root = self.lpg_store()?;
         let epoch = EpochId::new(self.transaction_manager.current_epoch().as_u64() + 1);
         // The stores read at the new epoch from here: the call sees every
         // commit, and stamps its writes (and the store's history) at it.
@@ -372,7 +375,7 @@ impl GrafeoDB {
             graph,
             (epoch, None),
             Recording {
-                target: WriteTarget::Store(Arc::clone(store) as Arc<dyn ChangeTarget>),
+                target: Arc::clone(store) as Arc<dyn GraphBackend>,
                 recorder: Arc::clone(recorder) as Arc<dyn ChangeRecorder>,
             },
         );
@@ -386,7 +389,17 @@ impl GrafeoDB {
 
     /// Finishes a direct call that commits at once: logs what it wrote,
     /// publishes its epoch, reports its changes to change data capture.
-    fn finish_immediate(&self, call: ImmediateCall<'_>, store: &Arc<LpgStore>) {
+    ///
+    /// # Errors
+    ///
+    /// [`TransactionError::CommitOutcomeUnknown`] when its WAL group is not
+    /// written or not made durable: its writes are applied and stamped at an
+    /// epoch nobody reads, and cannot be taken back, so the epoch is not
+    /// published and the database is poisoned; a reopen decides from the log
+    /// whether the call happened.
+    ///
+    /// [`TransactionError::CommitOutcomeUnknown`]: grafeo_common::utils::error::TransactionError::CommitOutcomeUnknown
+    fn finish_immediate(&self, call: ImmediateCall<'_>, store: &Arc<RowGroupStore>) -> Result<()> {
         let ImmediateCall {
             commits,
             root,
@@ -395,24 +408,23 @@ impl GrafeoDB {
         } = call;
         drop(writer);
         let changes = self.immediate_recorder().finish();
+        // While the database keeps history, the time of the call: its WAL
+        // group carries it, and the time index records it once published.
+        let at = self.transaction_manager.commit_time();
 
         #[cfg(feature = "wal")]
         if let Some(wal) = &self.wal
             && !changes.is_empty()
+            && let Err(error) = Self::log_immediate(wal, &changes, epoch, at)
         {
-            use grafeo_storage::wal::WalRecord;
-            let group = crate::transaction::v1_group::build_group(
-                crate::transaction::v1_group::v1_records(&changes),
-                &[
-                    WalRecord::TransactionCommit {
-                        transaction_id: TransactionId::SYSTEM,
-                    },
-                    WalRecord::EpochAdvance { epoch },
-                ],
-            );
-            if let Err(e) = wal.log_batch(&group) {
-                grafeo_common::grafeo_warn!("Failed to write a direct write to the WAL: {}", e);
-            }
+            self.transaction_manager.poison(&format!(
+                "a direct write at epoch {epoch:?} is applied but not in the WAL: {error}"
+            ));
+            return Err(Error::Transaction(
+                grafeo_common::utils::error::TransactionError::CommitOutcomeUnknown(
+                    error.to_string(),
+                ),
+            ));
         }
         // Reported before the epoch is published, while commits are held
         // off: in epoch order, as a commit reports its changes.
@@ -424,8 +436,41 @@ impl GrafeoDB {
         #[cfg(not(any(feature = "wal", feature = "cdc")))]
         drop(changes);
         self.transaction_manager.sync_epoch(epoch);
+        if let Some(at) = at {
+            self.transaction_manager.record_commit_time(epoch, at);
+        }
         drop(commits);
         self.prune_versions(&root, store);
+        Ok(())
+    }
+
+    /// Writes the WAL group of a direct call that committed at once at
+    /// `epoch`, which wrote `changes`.
+    ///
+    /// # Errors
+    ///
+    /// The group's error: it is cut back when it was not written.
+    #[cfg(feature = "wal")]
+    fn log_immediate(
+        wal: &grafeo_storage::wal::Wal,
+        changes: &grafeo_common::change::ChangeSet,
+        epoch: EpochId,
+        at: Option<u64>,
+    ) -> Result<()> {
+        let mut group = wal
+            .begin_group(TransactionId::SYSTEM)
+            .map_err(crate::database::wal_log::commit_error)?;
+        crate::database::wal_log::write_group_at(
+            &mut group,
+            changes,
+            epoch,
+            grafeo_common::storage::log_record::Origin::Direct,
+            at,
+        )?;
+        group
+            .finish()
+            .map(|_| ())
+            .map_err(crate::database::wal_log::commit_error)
     }
 
     /// The writer of a direct call on `store` (the graph with storage key
@@ -434,7 +479,7 @@ impl GrafeoDB {
     /// catalog.
     fn direct_writer(
         &self,
-        store: &Arc<LpgStore>,
+        store: &Arc<RowGroupStore>,
         graph: Option<&str>,
         context: (EpochId, Option<TransactionId>),
         recording: Recording,
@@ -445,16 +490,16 @@ impl GrafeoDB {
             .and_then(|key| key.split_once('/'))
             .map(|(schema, _)| schema);
         let mut validator = CatalogConstraintValidator::new(Arc::clone(&self.catalog))
-            .with_store(Arc::clone(store) as Arc<dyn GraphStoreSearch>)
-            .with_max_property_size(self.config.max_property_size)
+            .with_store(Arc::clone(store) as Arc<dyn GraphStore>)
+            .with_max_property_size(self.config.max_property_size())
             .with_transaction_context(context.0, context.1)
-            .with_schema(schema);
+            .with_schema(schema)
+            .with_key_claims(Arc::clone(&self.transaction_manager), graph);
         if let Some(graph) = graph {
             validator = validator.with_graph_name(graph);
         }
-        GraphWriter::new(Arc::clone(store) as Arc<dyn GraphStoreMut>)
+        GraphWriter::new(Arc::clone(store) as Arc<dyn GraphStore>, recording)
             .with_validator(Arc::new(validator))
-            .with_recording(recording)
     }
 
     /// Whether a commit of the direct API reads what its writes did after
@@ -482,20 +527,16 @@ impl GrafeoDB {
         })
     }
 
-    /// Every `gc_interval` commits, prunes the versions no reader needs, in
-    /// the root store and `store`.
-    fn prune_versions(&self, root: &Arc<LpgStore>, store: &Arc<LpgStore>) {
-        if self.config.gc_interval > 0 {
-            let count = self.commit_counter.fetch_add(1, Ordering::Relaxed) + 1;
-            if count.is_multiple_of(self.config.gc_interval) {
-                let min_epoch = self.transaction_manager.min_active_epoch();
-                root.gc_versions(min_epoch);
-                if !Arc::ptr_eq(root, store) {
-                    store.gc_versions(min_epoch);
-                }
-                self.transaction_manager.gc();
-            }
-        }
+    /// After a direct call that wrote `store`, collects the versions no
+    /// reader needs any more in the root store and `store`, at the read
+    /// horizon, when a collect is due for them (see
+    /// [`AfterWrite`](crate::database::collect::AfterWrite)).
+    fn prune_versions(&self, root: &Arc<RowGroupStore>, store: &Arc<RowGroupStore>) {
+        crate::database::collect::AfterWrite::next(&self.commit_counter, self.config.gc_interval())
+            .run(
+                &self.transaction_manager,
+                &[&**root as &dyn GraphBackend, &**store],
+            );
     }
 
     /// Runs one direct call on `store` (the graph with storage key `graph`)
@@ -505,7 +546,7 @@ impl GrafeoDB {
     /// commit, once the database is closed.
     fn write_private<T>(
         &self,
-        store: &Arc<LpgStore>,
+        store: &Arc<RowGroupStore>,
         graph: Option<&str>,
         write: impl FnOnce(&GraphWriter) -> std::result::Result<T, OperatorError>,
     ) -> Result<T> {
@@ -532,7 +573,7 @@ impl GrafeoDB {
     /// [`write_private`](Self::write_private)) and builds its writer.
     fn start_private(
         &self,
-        store: &Arc<LpgStore>,
+        store: &Arc<RowGroupStore>,
         graph: Option<&str>,
     ) -> Result<(TransactionId, Arc<TransactionChanges>, GraphWriter)> {
         let (transaction, changes) = self.transaction_manager.begin_private()?;
@@ -542,7 +583,7 @@ impl GrafeoDB {
         let recording = match changes.recording(
             &self.transaction_manager,
             graph,
-            WriteTarget::Store(Arc::clone(store) as Arc<dyn ChangeTarget>),
+            Arc::clone(store) as Arc<dyn GraphBackend>,
         ) {
             Ok(recording) => recording,
             Err(error) => {
@@ -582,7 +623,7 @@ impl GrafeoDB {
         &self,
         transaction: TransactionId,
         changes: &TransactionChanges,
-        store: &Arc<LpgStore>,
+        store: &Arc<RowGroupStore>,
     ) -> Result<()> {
         let commit = match self.transaction_manager.start_commit(transaction) {
             Ok(commit) => commit,
@@ -597,46 +638,64 @@ impl GrafeoDB {
         #[cfg(feature = "testing-statement-injection")]
         grafeo_common::testing::commit_hook::run_during_held_change();
 
-        // A store that fails to stamp leaves the commit half done: the
-        // guard, dropped uncompleted, poisons the database.
-        changes.stamp(epoch).map_err(|error| {
-            Error::Internal(format!(
-                "the commit of a direct write could not stamp its changes: {error}"
-            ))
-        })?;
-
+        // The group is in the log before anything of the commit is stamped
+        // (#498): one that is not written takes the commit back, and the
+        // call is rolled back.
         #[cfg(feature = "wal")]
-        if let Some(wal) = &self.wal
-            && !changes.is_empty()
-        {
-            use grafeo_storage::wal::WalRecord;
-            let records = changes.read(crate::transaction::v1_group::v1_records);
-            let group = crate::transaction::v1_group::build_group(
-                records,
-                &[
-                    WalRecord::TransactionCommit {
-                        transaction_id: transaction,
-                    },
-                    WalRecord::EpochAdvance { epoch },
-                ],
-            );
-            if let Err(e) = wal.log_batch(&group) {
-                grafeo_common::grafeo_warn!("Failed to write a direct write to the WAL: {}", e);
+        let (commit, logged) = match &self.wal {
+            Some(wal) => match crate::database::wal_log::write_commit(
+                wal,
+                commit,
+                transaction,
+                changes,
+                grafeo_common::storage::log_record::Origin::Direct,
+            ) {
+                Ok(written) => written,
+                Err(error) => {
+                    if self.transaction_manager.state(transaction)
+                        == Some(crate::transaction::TransactionState::Active)
+                    {
+                        let _ = self.rollback_private(transaction, changes);
+                    }
+                    return Err(error);
+                }
+            },
+            None => (commit, None),
+        };
+
+        // As a session's commit: the commit lock goes once the group is
+        // written, the sync comes after it, then the ordered publish.
+        let publish = commit.written();
+        #[cfg(feature = "wal")]
+        if let (Some(wal), Some(logged)) = (&self.wal, logged) {
+            crate::database::wal_log::sync_commit(wal, logged)?;
+        }
+
+        let root = self.lpg_store()?;
+        let published = publish.complete_with(|| {
+            // A store that fails to stamp leaves the commit half done: it is
+            // not published, which poisons the database.
+            changes.commit(epoch).map_err(|error| {
+                Error::Internal(format!(
+                    "the commit of a direct write could not stamp its changes: {error}"
+                ))
+            })?;
+
+            // Reported in epoch order, before the epoch is published.
+            #[cfg(feature = "cdc")]
+            if self.cdc_active() {
+                changes.read(|set| self.cdc_log.record_commit(set, epoch));
             }
-        }
 
-        // Reported in the commit's ordered step, before its epoch is
-        // published.
-        #[cfg(feature = "cdc")]
-        if self.cdc_active() {
-            changes.read(|set| self.cdc_log.record_commit(set, epoch));
-        }
-
-        // The database has one epoch: the root store follows every commit
-        // (the stamp moved the written store's).
-        let root = self.lpg_store();
-        root.sync_epoch(epoch);
-        commit.complete()?;
+            // The database has one epoch: the root store follows every
+            // commit (the stamp moved the written store's).
+            root.sync_epoch(epoch);
+            Ok(())
+        });
+        #[cfg(feature = "wal")]
+        let published = published
+            .map_err(|error| crate::database::wal_log::publish_error(error, logged.is_some()));
+        published?;
 
         self.prune_versions(&root, store);
         Ok(())
@@ -655,15 +714,14 @@ impl GrafeoDB {
     ) -> Result<()> {
         let undone = {
             let _writing = self.transaction_manager.write_in_progress();
-            changes.undo_after(changes.start(), false)
+            changes.rollback()
         };
         let _ = self.transaction_manager.abort(transaction);
         match undone {
-            Ok(_) => Ok(()),
+            Ok(()) => Ok(()),
             Err(failure) => {
-                let message = format!(
-                    "the rollback of a direct write could not undo its changes: {failure:?}"
-                );
+                let message =
+                    format!("the rollback of a direct write could not undo its changes: {failure}");
                 self.transaction_manager.poison(&message);
                 Err(Error::Internal(message))
             }
@@ -689,7 +747,7 @@ impl DirectCalls<'_> {
     }
 
     /// The store of the graph, for reads (see [`GrafeoDB::read_store`]).
-    fn store(&self) -> Result<Arc<dyn GraphStoreSearch>> {
+    fn store(&self) -> Result<Arc<dyn GraphStore>> {
         self.db.read_store(self.target)
     }
 
@@ -727,7 +785,7 @@ impl DirectCalls<'_> {
             // The direct API reports a missing node as `false`; a query that
             // writes to one fails (see `GraphWriter`).
             |writer| {
-                if writer.has_node(id) {
+                if writer.has_node(id)? {
                     writer.remove_node_property(id, key)
                 } else {
                     Ok(false)
@@ -738,7 +796,7 @@ impl DirectCalls<'_> {
 
     pub(crate) fn remove_edge_property(&self, id: EdgeId, key: &str) -> Result<bool> {
         self.write(|writer| {
-            if writer.has_edge(id) {
+            if writer.has_edge(id)? {
                 writer.remove_edge_property(id, key)
             } else {
                 Ok(false)
@@ -756,6 +814,10 @@ impl DirectCalls<'_> {
 
     pub(crate) fn delete_node(&self, id: NodeId) -> Result<bool> {
         self.write(|writer| writer.delete_node(id, false))
+    }
+
+    pub(crate) fn detach_delete_node(&self, id: NodeId) -> Result<bool> {
+        self.write(|writer| writer.delete_node(id, true))
     }
 
     pub(crate) fn delete_edge(&self, id: EdgeId) -> Result<bool> {
@@ -784,14 +846,39 @@ impl DirectCalls<'_> {
     }
 
     pub(crate) fn get_node(&self, id: NodeId) -> Result<Option<Node>> {
-        let epoch = self.db.read_epoch();
-        Ok(self.store()?.get_node_at_epoch(id, epoch))
+        let view = ReadView::committed(self.db.read_epoch());
+        self.store()?.node(id, view)
     }
 
     pub(crate) fn get_edge(&self, id: EdgeId) -> Result<Option<Edge>> {
-        let epoch = self.db.read_epoch();
-        Ok(self.store()?.get_edge_at_epoch(id, epoch))
+        let view = ReadView::committed(self.db.read_epoch());
+        self.store()?.edge(id, view)
     }
+
+    pub(crate) fn get_node_edges(
+        &self,
+        node: NodeId,
+        direction: Direction,
+        edge_types: &[&str],
+    ) -> Result<Vec<(NodeId, EdgeId)>> {
+        let view = ReadView::committed(self.db.read_epoch());
+        node_edges(&*self.store()?, node, direction, edge_types, view)
+    }
+}
+
+/// The edges of `node` in `direction` that `view` sees, as `(neighbor,
+/// edge)` pairs, only those whose type is one of `edge_types` (as stored)
+/// unless it is empty; none when the view does not see the node.
+/// `Direction::Both` lists a self-loop once (see [`GraphStore::edges`]).
+pub(crate) fn node_edges(
+    store: &dyn GraphStore,
+    node: NodeId,
+    direction: Direction,
+    edge_types: &[&str],
+    view: ReadView,
+) -> Result<Vec<(NodeId, EdgeId)>> {
+    let types: Vec<ArcStr> = edge_types.iter().map(|name| ArcStr::from(*name)).collect();
+    store.edges(node, direction, &types, view)
 }
 
 // === The writes of the direct API, shared with `Session` ===
@@ -805,7 +892,7 @@ pub(crate) fn create_edge(
     properties: Vec<(String, Value)>,
 ) -> std::result::Result<EdgeId, OperatorError> {
     for endpoint in [src, dst] {
-        if !writer.has_node(endpoint) {
+        if !writer.has_node(endpoint)? {
             return Err(missing_node(endpoint));
         }
     }
@@ -819,7 +906,7 @@ pub(crate) fn set_node_property(
     key: &str,
     value: Value,
 ) -> std::result::Result<(), OperatorError> {
-    if !writer.has_node(id) {
+    if !writer.has_node(id)? {
         return Err(missing_node(id));
     }
     writer.set_node_properties(id, &[(key.to_string(), value)], false)
@@ -832,7 +919,7 @@ pub(crate) fn set_edge_property(
     key: &str,
     value: Value,
 ) -> std::result::Result<(), OperatorError> {
-    if !writer.has_edge(id) {
+    if !writer.has_edge(id)? {
         return Err(OperatorError::from(Error::EdgeNotFound(id)));
     }
     writer.set_edge_properties(id, &[(key.to_string(), value)], false)
@@ -844,7 +931,7 @@ pub(crate) fn add_node_label(
     id: NodeId,
     label: &str,
 ) -> std::result::Result<bool, OperatorError> {
-    if !writer.has_node(id) {
+    if !writer.has_node(id)? {
         return Ok(false);
     }
     Ok(writer.add_labels(id, &[label.to_string()])? == 1)
@@ -856,7 +943,7 @@ pub(crate) fn remove_node_label(
     id: NodeId,
     label: &str,
 ) -> std::result::Result<bool, OperatorError> {
-    if !writer.has_node(id) {
+    if !writer.has_node(id)? {
         return Ok(false);
     }
     Ok(writer.remove_labels(id, &[label.to_string()])? == 1)
@@ -927,8 +1014,8 @@ fn missing_node(id: NodeId) -> OperatorError {
 
 /// The error for a graph handle whose graph does not exist.
 pub(crate) fn missing_graph(name: &str) -> Error {
-    Error::Query(QueryError::new(
-        QueryErrorKind::Semantic,
+    Error::from(QueryError::new(
+        QueryErrorKind::InvalidReference,
         format!("Graph '{name}' does not exist"),
     ))
 }
@@ -1018,10 +1105,10 @@ mod tests {
             .unwrap();
 
         assert!(
-            db.get_node(batch).is_none(),
+            db.get_node(batch).unwrap().is_none(),
             "the batch's node is discarded"
         );
-        assert!(db.get_node(single).is_some());
+        assert!(db.get_node(single).unwrap().is_some());
         let events: Vec<EntityId> = db
             .changes_between(EpochId::new(0), db.current_epoch())
             .unwrap()

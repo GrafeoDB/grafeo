@@ -2,11 +2,15 @@
 
 C FFI bindings for [Grafeo](https://grafeo.dev), a high-performance, embeddable graph database with a Rust core.
 
+## Prebuilt Libraries
+
+Every [GitHub release](https://github.com/GrafeoDB/grafeo/releases) has the library with `grafeo.h` for Linux and macOS (x64 and arm64) and Windows (x64), in two variants: `grafeo-c-<tag>-<target>-default` (the default features) and `grafeo-c-<tag>-<target>-all` (every profile: `lpg`, `rdf`, `analytics`, `ai`, so every query language). `FEATURES.txt` in each archive lists the features of its library. A function that `grafeo.h` declares but whose feature the library lacks is not exported. See the [C API docs](https://grafeo.dev/api/c/#prebuilt-libraries).
+
 ## Building
 
 ```bash
-# From the Grafeo repository root:
-cargo build --release -p grafeo-c --features full
+# From the Grafeo repository root, with every profile of the C binding:
+cargo build --release -p grafeo-c --features lpg,rdf,analytics,ai
 
 # Output:
 #   target/release/libgrafeo_c.so      (Linux)
@@ -120,7 +124,7 @@ int32_t      grafeo_remove_node_property(db, id, key);
 int32_t      grafeo_remove_edge_property(db, id, key);
 int32_t      grafeo_add_node_label(db, id, label);
 int32_t      grafeo_remove_node_label(db, id, label);
-char*        grafeo_get_node_labels(db, id);  /* free with grafeo_free_string */
+GrafeoStatus grafeo_get_node_labels(db, id, &json);  /* json: free with grafeo_free_string; NULL when absent */
 ```
 
 ### Transactions
@@ -181,6 +185,7 @@ if (!r) {
 ## Links
 
 - [Documentation](https://grafeo.dev)
+- [API Stability](https://grafeo.dev/stability/): which calls are stable and which are experimental; a call here has the level of the Rust call it wraps
 - [GitHub](https://github.com/GrafeoDB/grafeo)
 - [Go Bindings](https://github.com/GrafeoDB/grafeo/tree/main/crates/bindings/go) (uses this library via CGO)
 - [C# Bindings](https://github.com/GrafeoDB/grafeo/tree/main/crates/bindings/csharp) (uses this library via P/Invoke)

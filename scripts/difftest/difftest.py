@@ -6,7 +6,10 @@ and review every difference. The reviewed differences of a release are listed in
 `scripts/difftest/reviewed/<version>.txt`, one per line: the case key, the fingerprint of
 the reviewed result and why it changed. The gate then fails on a difference nobody
 reviewed, on a reviewed result that changed since, and on a reviewed difference that is
-gone (a fix that was undone). The corpus and its fixtures are in `corpus.py`.
+gone (a fix that was undone). A `~` before the fingerprint marks a case whose result in
+the old build varies from run to run (hash order, a timeout under load): its new result
+must still match the fingerprint, but the case may also not differ. The corpus and its
+fixtures are in `corpus.py`.
 
 Run from the repository root (needs uv; `candidate` also needs maturin and Rust):
 
@@ -91,7 +94,9 @@ def error_text(error: Exception) -> str:
 
 def run_case(db, language: str, query: str) -> dict:
     """The result of one query: its columns and rows, or the first line of its error."""
-    execute = {"gql": db.execute, "cypher": db.execute_cypher}[language]
+    execute = {"gql": db.execute, "cypher": db.execute_cypher, "sql": db.execute_sql}[
+        language
+    ]
     try:
         result = execute(query)
         records = [dict(row) for row in result]
@@ -226,7 +231,7 @@ def compare(old_path: Path, new_path: Path, reviewed_path: Path | None = None) -
             state = "changed"
         elif key not in reviewed:
             state = "NOT REVIEWED"
-        elif reviewed[key][0] != digest:
+        elif reviewed[key][0].removeprefix("~") != digest:
             state = "CHANGED SINCE THE REVIEW"
         else:
             state = "reviewed"
@@ -246,10 +251,17 @@ def compare(old_path: Path, new_path: Path, reviewed_path: Path | None = None) -
     )
     if not reviewed_path:
         return 0
-    gone = sorted(set(reviewed) - set(keys), key=case_order)
-    for key in gone:
-        print(f"=== {key} [NO LONGER DIFFERENT]: reviewed as '{reviewed[key][1]}'")
-    failures += len(gone)
+    for key in sorted(set(reviewed) - set(keys), key=case_order):
+        expected, reason = reviewed[key]
+        if not expected.startswith("~") or key not in new_results:
+            print(f"=== {key} [NO LONGER DIFFERENT]: reviewed as '{reason}'")
+            failures += 1
+        elif fingerprint(new_results[key]) != expected[1:]:
+            # The old build happened to agree, but the new result is not the reviewed one.
+            print(f"=== {key} [CHANGED SINCE THE REVIEW]: {new_results[key]['query']}")
+            print("  new:", summary(new_results[key]))
+            print("  why:", reason)
+            failures += 1
     print(f"{failures} of them need attention" if failures else "all reviewed")
     return 1 if failures else 0
 

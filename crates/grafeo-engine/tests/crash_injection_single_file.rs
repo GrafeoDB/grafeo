@@ -47,23 +47,35 @@ fn sidecar_wal_path(path: &std::path::Path) -> std::path::PathBuf {
 }
 
 /// The crash points of a checkpoint with the WAL enabled, in the order
-/// `wal_checkpoint()` and `close()` reach them: the flush rotates the WAL,
-/// the file manager writes the new image (its chunks, a sync, the header, the
-/// trim), then the flush marks the WAL.
-const CHECKPOINT_POINTS: [&str; 8] = [
+/// `wal_checkpoint()` and `close()` reach them: the flush starts a new WAL
+/// segment (created, its header written, the directory synced), takes its
+/// snapshot and lets commits go on, the file manager writes the new image
+/// (its chunks, a sync, the header, the trim), then the flush removes the
+/// segment the image covers.
+const CHECKPOINT_POINTS: [&str; 14] = [
     "flush:before_serialize",
+    "wal:after_segment_create",
+    "wal:after_segment_header",
+    "wal:before_dir_sync",
     "flush:after_rotate",
+    "flush:after_snapshot",
     "checkpoint:after_chunks",
     "checkpoint:after_data_sync",
     "checkpoint:after_header",
     "checkpoint:before_trim",
     "flush:after_write",
-    "flush:after_mark_checkpoint",
+    "flush:before_remove_segments",
+    "wal:before_remove_segment",
+    "wal:after_remove_segment",
 ];
 
-/// The crash points of `close()` with the WAL enabled: the checkpoint's, then
-/// the removal of the sidecar WAL.
-const CLOSE_POINTS: [&str; 9] = [
+/// The crash points of `close()` with the WAL enabled (in `NoSync` mode, so
+/// no background flusher syncs first): the sync of the WAL and its sync
+/// marker, the checkpoint's, then the removal of the sidecar WAL.
+const CLOSE_POINTS: [&str; 18] = [
+    "wal:before_sync",
+    "wal:after_sync",
+    "wal:after_frame",
     CHECKPOINT_POINTS[0],
     CHECKPOINT_POINTS[1],
     CHECKPOINT_POINTS[2],
@@ -72,6 +84,12 @@ const CLOSE_POINTS: [&str; 9] = [
     CHECKPOINT_POINTS[5],
     CHECKPOINT_POINTS[6],
     CHECKPOINT_POINTS[7],
+    CHECKPOINT_POINTS[8],
+    CHECKPOINT_POINTS[9],
+    CHECKPOINT_POINTS[10],
+    CHECKPOINT_POINTS[11],
+    CHECKPOINT_POINTS[12],
+    CHECKPOINT_POINTS[13],
     "close:before_remove_sidecar_wal",
 ];
 
@@ -119,7 +137,11 @@ fn a_panic_at_each_point_of_close_leaves_a_usable_database() {
 
         // Phase 1: Create and populate
         {
-            let db = GrafeoDB::with_config(Config::persistent(&path)).unwrap();
+            let db = GrafeoDB::with_config(
+                Config::persistent(&path)
+                    .with_wal_durability(grafeo_engine::config::DurabilityMode::NoSync),
+            )
+            .unwrap();
             let session = db.session();
             session.execute("INSERT (:Person {name: 'Alix'})").unwrap();
             session.execute("INSERT (:Person {name: 'Gus'})").unwrap();
@@ -163,7 +185,7 @@ fn a_panic_at_each_point_of_close_leaves_a_usable_database() {
         );
 
         assert_eq!(
-            db.edge_count(),
+            db.edge_count().unwrap(),
             1,
             "crash_point={crash_point} ({point}): edge lost after crash"
         );
@@ -320,7 +342,7 @@ fn repeated_panics_in_close_leave_a_usable_database() {
     // Final verification: the drop after each panic completed that close.
     let db = GrafeoDB::open(&path).unwrap();
     assert_eq!(
-        db.node_count(),
+        db.node_count().unwrap(),
         people.len(),
         "the node of every session, also of those closed with a panic"
     );
@@ -369,7 +391,7 @@ fn a_panic_before_the_sidecar_wal_removal_leaves_a_usable_database() {
     assert_recoverable(&path, "crash before sidecar WAL removal");
 
     let db = GrafeoDB::open(&path).unwrap();
-    let count = db.node_count();
+    let count = db.node_count().unwrap();
     assert_eq!(
         count, 2,
         "both nodes must survive crash before sidecar removal"
@@ -455,7 +477,7 @@ fn wal_disabled_checkpoint_preserves_data() {
     );
 
     assert_eq!(
-        db.edge_count(),
+        db.edge_count().unwrap(),
         1,
         "edge must survive close-reopen with WAL disabled"
     );
@@ -549,9 +571,10 @@ fn wal_disabled_crash_during_checkpoint_recovers() {
 
 /// The crash points of `close()` with the WAL disabled: the checkpoint's
 /// without the WAL mark, then the removal of the (absent) sidecar WAL.
-const WAL_DISABLED_CLOSE_POINTS: [&str; 8] = [
+const WAL_DISABLED_CLOSE_POINTS: [&str; 9] = [
     "flush:before_serialize",
     "flush:after_rotate",
+    "flush:after_snapshot",
     "checkpoint:after_chunks",
     "checkpoint:after_data_sync",
     "checkpoint:after_header",
@@ -562,7 +585,7 @@ const WAL_DISABLED_CLOSE_POINTS: [&str; 8] = [
 
 /// The first point of `WAL_DISABLED_CLOSE_POINTS` (1-based) at which the new
 /// image's database header is written: `checkpoint:after_header`.
-const NEW_HEADER_WRITTEN: u64 = 5;
+const NEW_HEADER_WRITTEN: u64 = 6;
 
 const CHILD_POINT_VAR: &str = "GRAFEO_CRASH_SINGLE_FILE_POINT";
 const CHILD_PATH_VAR: &str = "GRAFEO_CRASH_SINGLE_FILE_PATH";
@@ -668,7 +691,11 @@ fn wal_disabled_uncommitted_data_lost_on_crash() {
         !names.contains(&"Django".to_string()),
         "uncommitted data (Django) must NOT be present after crash"
     );
-    assert_eq!(db.node_count(), 1, "only the committed node should exist");
+    assert_eq!(
+        db.node_count().unwrap(),
+        1,
+        "only the committed node should exist"
+    );
 
     db.close().unwrap();
 }

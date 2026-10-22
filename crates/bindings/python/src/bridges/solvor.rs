@@ -12,10 +12,12 @@ use parking_lot::RwLock;
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
 
-use grafeo_common::types::NodeId;
+use grafeo_common::types::{NodeId, ReadView};
+use grafeo_core::graph::GraphStore;
 use grafeo_engine::database::GrafeoDB;
 
 use crate::error::PyGrafeoError;
+use crate::gil::without_gil;
 
 /// Solve classic OR problems on your graph.
 ///
@@ -44,6 +46,21 @@ impl PySolvORAdapter {
     /// Creates a new solvOR adapter for the given database.
     pub fn new(db: Arc<RwLock<GrafeoDB>>) -> Self {
         Self { db }
+    }
+
+    /// Runs `compute` with the GIL released on a snapshot of the graph
+    /// `set_graph()` selects (the default graph when none is), one pinned
+    /// state for the whole run; a read the store cannot do raises its error.
+    fn compute<T: Send, E: Into<PyGrafeoError>>(
+        &self,
+        py: Python<'_>,
+        compute: impl FnOnce(&dyn GraphStore, ReadView) -> Result<T, E> + Send,
+    ) -> PyResult<T> {
+        without_gil(py, || {
+            let db = self.db.read();
+            let snapshot = db.snapshot()?;
+            compute(snapshot.store(), snapshot.view()).map_err(Into::into)
+        })
     }
 }
 
@@ -75,48 +92,51 @@ impl PySolvORAdapter {
     ) -> PyResult<Py<PyAny>> {
         use grafeo_adapters::plugins::algorithms;
 
-        let db = self.db.read();
-        let store = db.store();
+        if !matches!(method, "dijkstra" | "bellman_ford" | "astar") {
+            return Err(PyGrafeoError::InvalidArgument(format!(
+                "Unknown method: {}. Use 'dijkstra', 'bellman_ford', or 'astar'",
+                method
+            ))
+            .into());
+        }
 
-        let result = match method {
-            "dijkstra" => {
-                algorithms::dijkstra_path(&*store, NodeId::new(source), NodeId::new(target), weight)
-            }
-            "bellman_ford" => {
-                let bf_result = algorithms::bellman_ford(&*store, NodeId::new(source), weight);
-                if bf_result.has_negative_cycle {
-                    return Err(PyGrafeoError::InvalidArgument(
-                        "Graph contains negative cycle".into(),
-                    )
-                    .into());
+        let result = self.compute(py, |store, view| {
+            match method {
+                "dijkstra" => Ok(algorithms::dijkstra_path(
+                    store,
+                    view,
+                    NodeId::new(source),
+                    NodeId::new(target),
+                    weight,
+                )?),
+                "bellman_ford" => {
+                    let bf_result =
+                        algorithms::bellman_ford(store, view, NodeId::new(source), weight)?;
+                    if bf_result.has_negative_cycle {
+                        return Err(PyGrafeoError::InvalidArgument(
+                            "Graph contains negative cycle".into(),
+                        ));
+                    }
+                    Ok(bf_result.path_to(NodeId::new(target)).map(|path| {
+                        let dist = bf_result
+                            .distances
+                            .get(&NodeId::new(target))
+                            .copied()
+                            .unwrap_or(f64::INFINITY);
+                        (dist, path)
+                    }))
                 }
-                bf_result.path_to(NodeId::new(target)).map(|path| {
-                    let dist = bf_result
-                        .distances
-                        .get(&NodeId::new(target))
-                        .copied()
-                        .unwrap_or(f64::INFINITY);
-                    (dist, path)
-                })
-            }
-            "astar" => {
                 // A* with zero heuristic (same as Dijkstra)
-                algorithms::astar(
-                    &*store,
+                _ => Ok(algorithms::astar(
+                    store,
+                    view,
                     NodeId::new(source),
                     NodeId::new(target),
                     weight,
                     |_| 0.0,
-                )
+                )?),
             }
-            _ => {
-                return Err(PyGrafeoError::InvalidArgument(format!(
-                    "Unknown method: {}. Use 'dijkstra', 'bellman_ford', or 'astar'",
-                    method
-                ))
-                .into());
-            }
-        };
+        })?;
 
         match result {
             Some((dist, path)) => {
@@ -144,10 +164,9 @@ impl PySolvORAdapter {
     ) -> PyResult<Py<PyAny>> {
         use grafeo_adapters::plugins::algorithms;
 
-        let db = self.db.read();
-        let store = db.store();
-
-        let result = algorithms::floyd_warshall(&*store, weight);
+        let result = self.compute(py, |store, view| {
+            algorithms::floyd_warshall(store, view, weight)
+        })?;
 
         let dict = PyDict::new(py);
         let nodes = result.nodes();
@@ -189,10 +208,16 @@ impl PySolvORAdapter {
     ) -> PyResult<Py<PyAny>> {
         use grafeo_adapters::plugins::algorithms;
 
-        let db = self.db.read();
-        let store = db.store();
-
-        match algorithms::max_flow(&*store, NodeId::new(source), NodeId::new(sink), capacity) {
+        let result = self.compute(py, |store, view| {
+            algorithms::max_flow(
+                store,
+                view,
+                NodeId::new(source),
+                NodeId::new(sink),
+                capacity,
+            )
+        })?;
+        match result {
             Some(result) => {
                 let flow_edges: Vec<(u64, u64, f64)> = result
                     .flow_edges
@@ -234,16 +259,17 @@ impl PySolvORAdapter {
     ) -> PyResult<Py<PyAny>> {
         use grafeo_adapters::plugins::algorithms;
 
-        let db = self.db.read();
-        let store = db.store();
-
-        match algorithms::min_cost_max_flow(
-            &*store,
-            NodeId::new(source),
-            NodeId::new(sink),
-            capacity,
-            cost,
-        ) {
+        let result = self.compute(py, |store, view| {
+            algorithms::min_cost_max_flow(
+                store,
+                view,
+                NodeId::new(source),
+                NodeId::new(sink),
+                capacity,
+                cost,
+            )
+        })?;
+        match result {
             Some(result) => {
                 let flow_edges: Vec<(u64, u64, f64, f64)> = result
                     .flow_edges
@@ -286,12 +312,9 @@ impl PySolvORAdapter {
     ) -> PyResult<Py<PyAny>> {
         use grafeo_adapters::plugins::algorithms;
 
-        let db = self.db.read();
-        let store = db.store();
-
-        let result = match method {
-            "kruskal" => algorithms::kruskal(&*store, weight),
-            "prim" => algorithms::prim(&*store, weight, None),
+        let prim = match method {
+            "kruskal" => false,
+            "prim" => true,
             _ => {
                 return Err(PyGrafeoError::InvalidArgument(format!(
                     "Unknown method: {}. Use 'kruskal' or 'prim'",
@@ -300,6 +323,13 @@ impl PySolvORAdapter {
                 .into());
             }
         };
+        let result = self.compute(py, |store, view| {
+            if prim {
+                algorithms::prim(store, view, weight, None)
+            } else {
+                algorithms::kruskal(store, view, weight)
+            }
+        })?;
 
         let edges: Vec<(u64, u64, f64)> = result
             .edges
@@ -322,12 +352,12 @@ impl PySolvORAdapter {
     ///
     /// Returns:
     ///     Dict mapping node ID to component ID.
-    fn connected_components(&self) -> PyResult<BTreeMap<u64, u64>> {
+    fn connected_components(&self, py: Python<'_>) -> PyResult<BTreeMap<u64, u64>> {
         use grafeo_adapters::plugins::algorithms;
 
-        let db = self.db.read();
-        let store = db.store();
-        let result = algorithms::connected_components(&*store);
+        let result = self.compute(py, |store, view| {
+            algorithms::connected_components(store, view)
+        })?;
         Ok(result.into_iter().map(|(n, c)| (n.0, c)).collect())
     }
 
@@ -335,12 +365,12 @@ impl PySolvORAdapter {
     ///
     /// Returns:
     ///     Dict mapping node ID to SCC ID.
-    fn strongly_connected_components(&self) -> PyResult<BTreeMap<u64, u64>> {
+    fn strongly_connected_components(&self, py: Python<'_>) -> PyResult<BTreeMap<u64, u64>> {
         use grafeo_adapters::plugins::algorithms;
 
-        let db = self.db.read();
-        let store = db.store();
-        let result = algorithms::strongly_connected_components(&*store);
+        let result = self.compute(py, |store, view| {
+            algorithms::strongly_connected_components(store, view)
+        })?;
         Ok(result.into_iter().map(|(n, c)| (n.0, c)).collect())
     }
 
@@ -348,12 +378,11 @@ impl PySolvORAdapter {
     ///
     /// Returns:
     ///     List of node IDs in topological order, or None if graph has cycle.
-    fn topological_sort(&self) -> PyResult<Option<Vec<u64>>> {
+    fn topological_sort(&self, py: Python<'_>) -> PyResult<Option<Vec<u64>>> {
         use grafeo_adapters::plugins::algorithms;
 
-        let db = self.db.read();
-        let store = db.store();
-        Ok(algorithms::topological_sort(&*store).map(|v| v.into_iter().map(|n| n.0).collect()))
+        let result = self.compute(py, |store, view| algorithms::topological_sort(store, view))?;
+        Ok(result.map(|v| v.into_iter().map(|n| n.0).collect()))
     }
 
     // ==========================================================================
@@ -378,12 +407,13 @@ impl PySolvORAdapter {
         max_iter: usize,
         tol: f64,
         directed: bool,
+        py: Python<'_>,
     ) -> PyResult<BTreeMap<u64, f64>> {
         use grafeo_adapters::plugins::algorithms;
 
-        let db = self.db.read();
-        let store = db.store();
-        let result = algorithms::pagerank(&*store, damping, max_iter, tol, directed);
+        let result = self.compute(py, |store, view| {
+            algorithms::pagerank(store, view, damping, max_iter, tol, directed)
+        })?;
         Ok(result.into_iter().map(|(n, s)| (n.0, s)).collect())
     }
 
@@ -395,12 +425,16 @@ impl PySolvORAdapter {
     /// Returns:
     ///     Dict mapping node ID to betweenness score.
     #[pyo3(signature = (normalized=true))]
-    fn betweenness_centrality(&self, normalized: bool) -> PyResult<BTreeMap<u64, f64>> {
+    fn betweenness_centrality(
+        &self,
+        normalized: bool,
+        py: Python<'_>,
+    ) -> PyResult<BTreeMap<u64, f64>> {
         use grafeo_adapters::plugins::algorithms;
 
-        let db = self.db.read();
-        let store = db.store();
-        let result = algorithms::betweenness_centrality(&*store, normalized);
+        let result = self.compute(py, |store, view| {
+            algorithms::betweenness_centrality(store, view, normalized)
+        })?;
         Ok(result.into_iter().map(|(n, s)| (n.0, s)).collect())
     }
 
@@ -419,9 +453,9 @@ impl PySolvORAdapter {
     fn louvain(&self, resolution: f64, py: Python<'_>) -> PyResult<Py<PyAny>> {
         use grafeo_adapters::plugins::algorithms;
 
-        let db = self.db.read();
-        let store = db.store();
-        let result = algorithms::louvain(&*store, resolution);
+        let result = self.compute(py, |store, view| {
+            algorithms::louvain(store, view, resolution)
+        })?;
 
         let communities: BTreeMap<u64, u64> = result
             .communities
@@ -445,12 +479,12 @@ impl PySolvORAdapter {
     ///
     /// Returns:
     ///     List of node IDs that are articulation points.
-    fn articulation_points(&self) -> PyResult<Vec<u64>> {
+    fn articulation_points(&self, py: Python<'_>) -> PyResult<Vec<u64>> {
         use grafeo_adapters::plugins::algorithms;
 
-        let db = self.db.read();
-        let store = db.store();
-        let result = algorithms::articulation_points(&*store);
+        let result = self.compute(py, |store, view| {
+            algorithms::articulation_points(store, view)
+        })?;
         Ok(result.into_iter().map(|n| n.0).collect())
     }
 
@@ -458,12 +492,10 @@ impl PySolvORAdapter {
     ///
     /// Returns:
     ///     List of (source, target) tuples representing bridges.
-    fn bridges(&self) -> PyResult<Vec<(u64, u64)>> {
+    fn bridges(&self, py: Python<'_>) -> PyResult<Vec<(u64, u64)>> {
         use grafeo_adapters::plugins::algorithms;
 
-        let db = self.db.read();
-        let store = db.store();
-        let result = algorithms::bridges(&*store);
+        let result = self.compute(py, |store, view| algorithms::bridges(store, view))?;
         Ok(result.into_iter().map(|(s, t)| (s.0, t.0)).collect())
     }
 
@@ -474,17 +506,18 @@ impl PySolvORAdapter {
     fn graph_stats(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         use grafeo_adapters::plugins::algorithms;
 
-        let db = self.db.read();
-        let store = db.store();
-
-        let n = db.node_count();
-        let e = db.edge_count();
+        let (n, e, components) = self.compute(py, |store, view| {
+            Ok::<_, PyGrafeoError>((
+                store.node_count(view)?,
+                store.edge_count(view)?,
+                algorithms::connected_component_count(store, view)?,
+            ))
+        })?;
         let density = if n > 1 {
             (e as f64) / ((n * (n - 1)) as f64)
         } else {
             0.0
         };
-        let components = algorithms::connected_component_count(&*store);
 
         let dict = PyDict::new(py);
         dict.set_item("nodes", n)?;
@@ -495,12 +528,17 @@ impl PySolvORAdapter {
         Ok(dict.into_any().unbind())
     }
 
-    fn __repr__(&self) -> String {
+    fn __repr__(&self) -> PyResult<String> {
         let db = self.db.read();
-        format!(
+        let snapshot = db.snapshot().map_err(PyGrafeoError::from)?;
+        Ok(format!(
             "SolvORAdapter(nodes={}, edges={})",
-            db.node_count(),
-            db.edge_count()
-        )
+            snapshot
+                .node_count(snapshot.view())
+                .map_err(PyGrafeoError::from)?,
+            snapshot
+                .edge_count(snapshot.view())
+                .map_err(PyGrafeoError::from)?
+        ))
     }
 }

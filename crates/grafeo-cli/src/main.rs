@@ -44,7 +44,7 @@ struct Cli {
     #[arg(long, global = true, default_value = "auto")]
     format: OutputFormat,
 
-    /// Suppress progress and info messages
+    /// Suppress progress and status messages (on stderr); results still print
     #[arg(long, short, global = true)]
     quiet: bool,
 
@@ -429,10 +429,10 @@ fn main() {
     }
 
     let result = match cli.command {
-        Commands::Info { path } => commands::info::run(&path, cli.format, cli.quiet),
-        Commands::Stats { path } => commands::stats::run(&path, cli.format, cli.quiet),
-        Commands::Schema { path } => commands::schema::run(&path, cli.format, cli.quiet),
-        Commands::Validate { path } => commands::validate::run(&path, cli.format, cli.quiet),
+        Commands::Info { path } => commands::info::run(&path, cli.format),
+        Commands::Stats { path } => commands::stats::run(&path, cli.format),
+        Commands::Schema { path } => commands::schema::run(&path, cli.format),
+        Commands::Validate { path } => commands::validate::run(&path, cli.format),
         Commands::Index(cmd) => commands::index::run(cmd, cli.format, cli.quiet),
         Commands::Backup(cmd) => commands::backup::run(cmd, cli.format, cli.quiet),
         Commands::Data(cmd) => commands::data::run(cmd, cli.format, cli.quiet),
@@ -485,7 +485,9 @@ fn main() {
                 // Validation already printed results, just set the exit code.
                 ExitCode::ValidationFailed
             } else {
-                output::error(&e.to_string());
+                // The whole chain: the context says what failed, the causes
+                // after it why.
+                output::error(&format!("{e:#}"));
                 ExitCode::GeneralError
             }
         }

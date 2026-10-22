@@ -104,7 +104,6 @@ tests:
         - [Vincent, 2]
 
   - name: count_subquery_with_filter
-    skip: "COUNT subquery with WHERE filter"
     query: |
       MATCH (c:Customer)
       RETURN c.name,

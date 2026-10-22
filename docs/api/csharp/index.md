@@ -13,7 +13,7 @@ Complete reference for the `Grafeo` NuGet package, .NET 8 bindings that wrap the
 dotnet add package Grafeo
 ```
 
-The NuGet package bundles pre-built native libraries for Windows (x64), Linux (x64, arm64) and macOS (x64, arm64). No separate native install is required.
+The NuGet package bundles pre-built native libraries for Windows (x64), Linux (x64, arm64) and macOS (x64, arm64), built with every feature of the C binding (the `all` variant of the [prebuilt libraries](../c/index.md#prebuilt-libraries)), so every query language works. No separate native install is required.
 
 ## Quick Start
 
@@ -198,8 +198,77 @@ bool deleted = db.DeleteEdge(edgeId);
 | `CreateEdge(long sourceId, long targetId, string edgeType, Dictionary<string, object?>? properties = null)` | `long` | Create an edge, returns the new edge ID |
 | `GetEdge(long id)` | `Edge?` | Get an edge by ID, or `null` if not found |
 | `DeleteEdge(long id)` | `bool` | Delete an edge, returns `true` if deleted |
+| `GetNodeEdges(long nodeId, Direction direction = Direction.Out, IEnumerable<string>? edgeTypes = null)` | `IReadOnlyList<NodeEdge>` | A node's edges without a query, as `(NeighborId, EdgeId)`; `Direction.Both` lists a self-loop once |
 | `SetEdgeProperty(long id, string key, object? value)` | `void` | Set a property on an edge |
 | `RemoveEdgeProperty(long id, string key)` | `bool` | Remove a property, returns `true` if removed |
+
+### Batches and Upserts
+
+```csharp
+// One transaction each; IDs in input order
+var ids = db.BatchCreateNodesWithProps(["Person"], [
+    new Dictionary<string, object?> { ["name"] = "Alix" },
+    new Dictionary<string, object?> { ["name"] = "Gus" },
+]);
+var edgeIds = db.BatchCreateEdges([new BatchEdge(ids[0], ids[1], "KNOWS")]);
+
+// Create or update by a key property
+UpsertSummary summary = db.UpsertNodes(["File"],
+    [new Dictionary<string, object?> { ["path"] = "a.rs" }],
+    new UpsertNodesOptions { Key = "path" });
+summary = db.UpsertEdges("IMPORTS",
+    [new Dictionary<string, object?> { ["id"] = "a-b", ["src"] = "a.rs", ["dst"] = "b.rs" }],
+    new UpsertEdgesOptions { EndpointKey = "path", EndpointLabels = ["File"] });
+```
+
+| Method | Returns | Description |
+|--------|---------|-------------|
+| `BatchCreateNodesWithProps(IEnumerable<string> labels, IEnumerable<IDictionary<string, object?>> rows)` | `IReadOnlyList<long>` | One node per row, in one transaction |
+| `BatchCreateEdges(IEnumerable<BatchEdge> edges)` | `IReadOnlyList<long>` | The edges in one transaction; an edge to a missing node fails the batch |
+| `UpsertNodes(labels, rows, UpsertNodesOptions? options = null)` | `UpsertSummary` | Create or update nodes matched by the key and all labels; rows without the key are skipped |
+| `UpsertEdges(string edgeType, rows, UpsertEdgesOptions? options = null)` | `UpsertSummary` | Create or update edges between existing endpoints; a row whose endpoint matches no node or several is skipped |
+
+### Named Graphs
+
+`db.Graph(name)` returns a `GrafeoGraph` that works in one named graph without switching the current graph: `Execute`, `ExecuteWithParams`, `ExecuteLanguage`, the node and edge methods (`GetNode` and `GetEdge` throw when the entity does not exist), the batches and the upserts. Once the graph is dropped, every call throws. Dispose frees it.
+
+```csharp
+using var trips = db.Graph("trips");
+long prague = trips.CreateNode(["City"], new Dictionary<string, object?> { ["name"] = "Prague" });
+var result = trips.Execute("MATCH (c:City) RETURN c.name");
+```
+
+### Time Travel
+
+Reads of the database as it was at an earlier epoch or time. `GrafeoDB.Memory(HistoryRetention)` and
+`GrafeoDB.Open(path, HistoryRetention)` set how much history it keeps: `HistoryRetention.Off` (the default),
+`HistoryRetention.Forever` or `HistoryRetention.For(TimeSpan)`; a database file stores the setting. A point is a
+`TimePoint`: `TimePoint.Epoch(ulong)`, `TimePoint.At(DateTimeOffset)` (the last commit at or before it) or
+`TimePoint.Ago(TimeSpan)`. A point before the history the database keeps throws `GrafeoException` ("not retained").
+
+| Member | Returns | Description |
+|--------|---------|-------------|
+| `CurrentEpoch` | `ulong` | The epoch of the last commit |
+| `EpochAsOf(TimePoint point)` | `ulong` | The epoch a point reads at |
+| `AsOf(TimePoint point)` | `AsOfView` | A read-only view at a point: `Epoch`, `Execute`, `ExecuteWithParams`, `GetNode`, `GetEdge` and `GetNodeProperty` (null when the entity or property did not exist then); it keeps the history of its epoch until disposed |
+| `ExecuteAsOf(string query, TimePoint point, Dictionary<string, object?>? parameters = null)` | `QueryResult` | One query at a point |
+
+```csharp
+using var db = GrafeoDB.Memory(HistoryRetention.For(TimeSpan.FromDays(7)));
+using var view = db.AsOf(TimePoint.Ago(TimeSpan.FromMinutes(5)));
+var result = view.Execute("MATCH (p:Person) RETURN count(p) AS n");
+```
+
+### Change History
+
+With `db.CdcEnabled = true`, every committed change is recorded as a `ChangeEvent` (kind, epoch, properties before and after, labels, the endpoints of an edge, and `DeletedWith` on an edge a detach delete removed).
+
+| Method | Returns | Description |
+|--------|---------|-------------|
+| `NodeHistory(long id)` | `IReadOnlyList<ChangeEvent>` | Every change of a node, oldest first |
+| `EdgeHistory(long id)` | `IReadOnlyList<ChangeEvent>` | Every change of an edge, oldest first |
+| `NodeHistorySince(long id, ulong sinceEpoch)` | `IReadOnlyList<ChangeEvent>` | The changes of a node from an epoch on |
+| `ChangesBetween(ulong startEpoch, ulong endEpoch)` | `IReadOnlyList<ChangeEvent>` | Every change in an epoch range, in commit order |
 
 ### Stats and Info
 
@@ -231,7 +300,7 @@ db.Save("/path/to/backup.grafeo");
 
 ```csharp
 // Create a vector index via GQL
-db.Execute("CREATE VECTOR INDEX ON Document(embedding) OPTIONS {dimensions: 384}");
+db.Execute("CREATE VECTOR INDEX document_embedding ON :Document(embedding) DIMENSION 384");
 
 // Similarity search: returns nearest k nodes
 float[] queryVector = GetEmbedding("graph database");
@@ -259,6 +328,7 @@ db.DropVectorIndex("Document", "embedding");
 | `MmrSearch(string label, string property, float[] query, int k, int fetchK, float lambda, int ef = 0)` | `IReadOnlyList<VectorResult>` | Maximal Marginal Relevance search for diverse results |
 | `DropVectorIndex(string label, string property)` | `bool` | Drop a vector index. Returns `true` if dropped, `false` if not found |
 | `RebuildVectorIndex(string label, string property)` | `void` | Rebuild a vector index |
+| `BatchVectorSearch(string label, string property, IReadOnlyList<float[]> queries, int k, int ef = 0, Dictionary<string, object?>? filters = null)` | `IReadOnlyList<IReadOnlyList<VectorResult>>` | Several queries of one dimension at once, with optional property filters |
 
 ## Transaction Class
 
@@ -291,6 +361,22 @@ tx.Commit(); // if this line is not reached, the transaction auto-rolls back
 ## Data Types
 
 All entity types are immutable C# records.
+
+### GrafeoDecimal
+
+An exact decimal from Grafeo (GQL `1.50`, `CAST(x AS DECIMAL(10, 2))`, SPARQL
+`xsd:decimal`): up to 38 digits, kept as its `Text` with its scale. Equal
+values are equal whatever their scale (`1.50` equals `1.5`). `ToDecimal()` and
+`TryToDecimal` give a .NET `decimal` (which holds 28 to 29 digits),
+`ToDouble()` the nearest double, and `GrafeoDecimal.FromDecimal(value)` or
+`new GrafeoDecimal("1.50")` make one to pass as a parameter, exactly.
+
+```csharp
+var result = db.Execute("RETURN 19.99 AS price");
+var price = (GrafeoDecimal)result.Rows[0]["price"];
+Console.WriteLine(price.Text);         // 19.99
+decimal exact = price.ToDecimal();     // 19.99m
+```
 
 ### Node
 
@@ -332,6 +418,7 @@ public sealed record QueryResult(
 | `Edges` | `IReadOnlyList<Edge>` | Edge entities extracted from the result |
 | `ExecutionTimeMs` | `double` | Query execution time in milliseconds |
 | `RowsScanned` | `long` | Number of rows scanned by the engine |
+| `Counters` | `WriteCounters` | What a write changed: `NodesCreated`, `NodesDeleted`, `EdgesCreated`, `EdgesDeleted`, `PropertiesSet`, `LabelsAdded`, `LabelsRemoved` (all zero for a read) |
 
 ### VectorResult
 
@@ -346,10 +433,10 @@ public sealed record VectorResult(long NodeId, double Distance);
 
 ## Exception Hierarchy
 
-All exceptions derive from `GrafeoException`, which carries a `GrafeoStatus` code from the native layer.
+All exceptions derive from `GrafeoException`, which carries a `GrafeoStatus` code from the native layer and the error's GQLSTATUS in `GqlStatus` (`"22012"` for a division by zero, see [Error Codes](../../user-guide/error-codes.md#gqlstatus)).
 
 ```
-GrafeoException             (base, Status property)
+GrafeoException             (base, Status and GqlStatus properties)
 ├── QueryException          (parse or execution errors)
 ├── TransactionException    (commit, rollback, isolation errors)
 ├── StorageException        (WAL, persistence, I/O errors)
@@ -395,6 +482,8 @@ catch (GrafeoException ex)
 | `bool` | Bool | |
 | `int` | Int64 | Widened to `long` |
 | `long` | Int64 | |
+| `byte`, `sbyte`, `short`, `ushort`, `uint` | Int64 | |
+| `ulong`, `Int128`, `UInt128`, `BigInteger` | Int64, or Decimal past 64 bits | Exact up to 38 digits (scale 0); past that an error naming the parameter |
 | `float` | Float64 | Widened to `double` |
 | `double` | Float64 | |
 | `string` | String | |

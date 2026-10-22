@@ -186,6 +186,26 @@ def test_d5_no_new_store_wrappers(repo: Path) -> None:
     ]
 
 
+def test_d5_leaves_test_module_files_alone(repo: Path) -> None:
+    write(
+        repo,
+        "crates/grafeo-core/src/execution/operators/writer_recording_tests.rs",
+        "impl GraphBackend for Refusing {}\nimpl GraphStore for Refusing {}\n",
+    )
+    write(
+        repo,
+        "crates/grafeo-engine/src/database/row_group_sections/tests.rs",
+        "impl GraphStore for Fake {}\n",
+    )
+    write(
+        repo,
+        "crates/grafeo-engine/src/database/contests.rs",
+        "impl GraphBackend for Logged {}\n",
+    )
+    result = policy(repo, "diff", "--base", "HEAD")
+    assert found(result) == ["D5 crates/grafeo-engine/src/database/contests.rs:1"]
+
+
 def test_d5_matches_the_store_trait_not_a_mention(repo: Path) -> None:
     write(
         repo,
@@ -203,7 +223,7 @@ def test_d5_lets_the_stores_implement_the_store_traits(repo: Path) -> None:
         "crates/grafeo-core/src/graph/rowgroup/read.rs",
         "impl GraphStore for RowGroupStore {}\n"
         "impl crate::graph::traits::GraphStoreSearch for RowGroupStore {}\n"
-        "impl GraphStoreMut for super::lpg::LpgStore {}\n"
+        "impl GraphStoreMut for super::rowgroup::RowGroupStore {}\n"
         "impl GraphStore for RowGroupStoreWrapper {}\n"
         "impl<S: GraphStore> GraphStore for Logged<S> {}\n",
     )
@@ -525,3 +545,285 @@ def test_commit_message(tmp_path: Path, message: str, expected: list[str]) -> No
     result = policy(tmp_path, "commit-msg", str(path))
     assert found(result) == expected
     assert result.returncode == (1 if expected else 0)
+
+
+def test_t5_every_published_crate_declares_the_msrv(tmp_path: Path) -> None:
+    write(tmp_path, "Cargo.toml", '[workspace.package]\nrust-version = "1.99.0"\n')
+
+    def package(name: str, rust_version: str | None, **extra: object) -> dict:
+        return {
+            "id": f"path+file:///ws#{name}@1.0.0",
+            "name": name,
+            "source": None,
+            "rust_version": rust_version,
+            "manifest_path": str(tmp_path / "crates" / name / "Cargo.toml"),
+            **extra,
+        }
+
+    packages = [
+        package("grafeo", None),
+        package("grafeo-core", "1.99.0"),
+        package("grafeo-engine", "1.91.1"),
+        package("grafeo-spec-tests", None, publish=[]),
+        {
+            "id": "registry+https://github.com/rust-lang/crates.io-index#serde@1.0.0",
+            "name": "serde",
+            "source": "registry",
+            "rust_version": "1.61",
+        },
+    ]
+    meta = {
+        "packages": packages,
+        "workspace_members": [p["id"] for p in packages if p["source"] is None],
+    }
+    findings = check_policy.rust_version_findings(tmp_path, meta)
+    assert [(f.rule, f.path, f.message) for f in findings] == [
+        (
+            "T5",
+            "crates/grafeo/Cargo.toml",
+            (
+                "grafeo declares rust-version none, not the workspace's 1.99.0; "
+                "add `rust-version.workspace = true` to the crate's [package]"
+            ),
+        ),
+        (
+            "T5",
+            "crates/grafeo-engine/Cargo.toml",
+            (
+                "grafeo-engine declares rust-version 1.91.1, not the workspace's 1.99.0; "
+                "add `rust-version.workspace = true` to the crate's [package]"
+            ),
+        ),
+    ]
+
+
+def test_t5_holds_for_this_repository() -> None:
+    root = SCRIPT.parents[1]
+    assert (
+        check_policy.rust_version_findings(root, check_policy.cargo_metadata(root))
+        == []
+    )
+
+
+# ------------------------------------------------------------------ T6 stability markers
+
+STABILITY_DOC = """# API Stability
+
+## Experimental APIs
+
+| API | Why it is experimental |
+| --- | --- |
+| `Db::run_streaming` and `Stream`, Python `stream()` | New |
+| The `grafeo::probe` module and `probe::read_probe` | New |
+
+## Stable APIs
+
+- `Db::run` is stable
+"""
+
+FACADE = """//! The facade.
+//!
+//! ## Stability
+//!
+//! Stable unless marked.
+
+pub use grafeo_engine::probe;
+pub use grafeo_engine::session;
+
+/// Its own module.
+///
+/// # Stability
+///
+/// Stable.
+pub mod store {}
+"""
+
+SESSION = """//! Sessions.
+//!
+//! # Stability
+//!
+//! Stable unless marked.
+
+pub struct Db;
+
+impl Db {
+    /// Runs a query.
+    pub fn run(&self) {}
+
+    /// Runs a query as a stream.
+    ///
+    /// # Stability: Experimental
+    ///
+    /// New.
+    #[must_use]
+    pub fn run_streaming(&self) -> Stream {
+        Stream
+    }
+}
+
+/// A stream of rows.
+///
+/// # Stability: Experimental
+///
+/// New.
+pub struct Stream;
+"""
+
+PROBE = """//! Probes.
+//!
+//! # Stability: Experimental
+//!
+//! New.
+
+/// Reads a probe.
+///
+/// # Stability: Experimental
+pub fn read_probe() {}
+"""
+
+
+def stability_tree(root: Path, **overrides: str) -> list[str]:
+    """The T6 findings of a facade with an engine, as `path:line message` lines."""
+    files = {
+        "docs/stability.md": STABILITY_DOC,
+        "crates/grafeo/src/lib.rs": FACADE,
+        "crates/grafeo-engine/src/session/mod.rs": SESSION,
+        "crates/grafeo-engine/src/probe.rs": PROBE,
+    }
+    files.update(overrides)
+    for rel, text in files.items():
+        write(root, rel, text)
+    found = check_policy.stability_findings(root, sorted(files))
+    assert all(f.rule == "T6" for f in found)
+    return [f"{f.path}:{f.line} {f.message.split(';')[0]}" for f in found]
+
+
+def test_t6_the_table_and_the_markers_agree(tmp_path: Path) -> None:
+    assert stability_tree(tmp_path) == []
+
+
+def test_t6_a_field_after_an_experimental_field_keeps_its_own_docs(
+    tmp_path: Path,
+) -> None:
+    write(
+        tmp_path,
+        "crates/grafeo-engine/src/result.rs",
+        "/// A result.\npub struct Result {\n"
+        "    /// Its profile.\n    ///\n    /// # Stability: Experimental\n"
+        "    pub profile: Option<u8>,\n"
+        "    /// What it holds.\n    pub kind: u8,\n"
+        "    #[serde(default)]\n    /// Tagged.\n    ///\n    /// # Stability: Experimental\n"
+        "    #[allow(\n        clippy::all,\n    )]\n    pub tagged: u8,\n}\n",
+    )
+    items, _ = check_policy.rust_items(tmp_path, ["crates/grafeo-engine/src/result.rs"])
+    marked = {item.name: item.experimental for item in items if item.kind == "field"}
+    assert marked == {"profile": True, "kind": False, "tagged": True}
+
+
+def test_t6_an_undocumented_field_after_an_experimental_field_is_stable(
+    tmp_path: Path,
+) -> None:
+    write(
+        tmp_path,
+        "crates/grafeo-engine/src/result.rs",
+        "/// A result.\npub struct Result {\n"
+        "    /// Its profile.\n    ///\n    /// # Stability: Experimental\n"
+        "    pub profile: Option<u8>,\n    pub kind: u8,\n}\n",
+    )
+    items, _ = check_policy.rust_items(tmp_path, ["crates/grafeo-engine/src/result.rs"])
+    marked = {item.name: item.experimental for item in items if item.kind == "field"}
+    assert marked == {"profile": True, "kind": False}
+
+
+def test_t6_a_table_entry_needs_its_marker(tmp_path: Path) -> None:
+    unmarked = SESSION.replace(
+        "/// A stream of rows.\n///\n/// # Stability: Experimental\n///\n/// New.\n",
+        "/// A stream of rows.\n",
+    )
+    assert stability_tree(
+        tmp_path, **{"crates/grafeo-engine/src/session/mod.rs": unmarked}
+    ) == [
+        (
+            "crates/grafeo-engine/src/session/mod.rs:25 `Stream` is in the Experimental table "
+            "but has no `# Stability: Experimental` section"
+        )
+    ]
+
+
+def test_t6_a_marker_needs_its_table_entry(tmp_path: Path) -> None:
+    marked = SESSION.replace(
+        "    /// Runs a query.\n",
+        "    /// Runs a query.\n    ///\n    /// # Stability: Experimental\n",
+    )
+    assert stability_tree(
+        tmp_path, **{"crates/grafeo-engine/src/session/mod.rs": marked}
+    ) == [
+        (
+            "crates/grafeo-engine/src/session/mod.rs:13 `run` is marked experimental but not in "
+            "the Experimental table of docs/stability.md"
+        )
+    ]
+
+
+def test_t6_a_table_entry_must_exist(tmp_path: Path) -> None:
+    doc = STABILITY_DOC.replace(
+        "`Db::run_streaming` and", "`Db::run_streaming`, `Db::run_gone` and"
+    )
+    assert stability_tree(tmp_path, **{"docs/stability.md": doc}) == [
+        "docs/stability.md:7 `Db::run_gone` is not defined in the facade's crates"
+    ]
+
+
+def test_t6_the_member_of_another_type_does_not_count(tmp_path: Path) -> None:
+    other = SESSION.replace("impl Db {", "impl Other {")
+    found = stability_tree(
+        tmp_path, **{"crates/grafeo-engine/src/session/mod.rs": other}
+    )
+    assert (
+        "docs/stability.md:7 `Db::run_streaming` is not defined in the facade's crates"
+        in found
+    )
+
+
+def test_t6_an_experimental_module_needs_its_table_entry(tmp_path: Path) -> None:
+    doc = STABILITY_DOC.replace(
+        "| The `grafeo::probe` module and `probe::read_probe` | New |\n", ""
+    )
+    found = stability_tree(tmp_path, **{"docs/stability.md": doc})
+    assert found == [
+        (
+            "crates/grafeo-engine/src/probe.rs:10 `read_probe` is marked experimental but not "
+            "in the Experimental table of docs/stability.md"
+        ),
+        (
+            "crates/grafeo-engine/src/probe.rs:3 module `probe` is marked experimental but not "
+            "in the Experimental table"
+        ),
+    ]
+
+
+def test_t6_the_facade_and_its_modules_say_what_is_stable(tmp_path: Path) -> None:
+    facade = FACADE.replace(
+        "//!\n//! ## Stability\n//!\n//! Stable unless marked.\n", ""
+    ).replace("///\n/// # Stability\n///\n/// Stable.\n", "")
+    session = SESSION.replace(
+        "//!\n//! # Stability\n//!\n//! Stable unless marked.\n", ""
+    )
+    found = stability_tree(
+        tmp_path,
+        **{
+            "crates/grafeo/src/lib.rs": facade,
+            "crates/grafeo-engine/src/session/mod.rs": session,
+        },
+    )
+    assert found == [
+        "crates/grafeo/src/lib.rs:1 the crate documentation has no `# Stability` section",
+        "crates/grafeo/src/lib.rs:4 re-exported module `session` has no `# Stability` section",
+        "crates/grafeo/src/lib.rs:7 module `store` has no `# Stability` section",
+    ]
+
+
+def test_t6_holds_for_this_repository() -> None:
+    root = SCRIPT.parents[1]
+    files = check_policy.git(root, "ls-files").splitlines()
+    assert check_policy.stability_findings(root, files) == []

@@ -87,9 +87,10 @@ pub use record::{
 };
 pub use recovery::{RecoveredWal, WalRecovery};
 pub use segment::{
-    KEY_CHECK_AAD_BYTES, KEY_CHECK_BYTES, SALT_BYTES, SEGMENT_HEADER_BYTES, SEGMENT_MAGIC,
-    SEGMENT_VERSION, SegmentHeader, WalDirectory, is_unfinished_segment, list_wal_directory,
-    parse_segment_file_name, segment_file_name, stored_key_check_aad,
+    DirectoryLock, KEY_CHECK_AAD_BYTES, KEY_CHECK_BYTES, SALT_BYTES, SEGMENT_HEADER_BYTES,
+    SEGMENT_MAGIC, SEGMENT_VERSION, SegmentHeader, WalDirectory, first_segment_header,
+    is_unfinished_segment, list_wal_directory, lock_wal_directory, parse_segment_file_name,
+    segment_file_name, stored_key_check_aad,
 };
 pub use typed::{LpgWal, TypedWal};
 pub use writer::{DEFAULT_SEGMENT_BYTES, GroupEnd, GroupWriter, Wal, WalOptions};

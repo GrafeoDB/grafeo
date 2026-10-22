@@ -89,8 +89,12 @@ fn cypher_datetime_function() {
         .execute_cypher("RETURN datetime('2024-03-15T14:30:00Z') AS dt")
         .unwrap();
     let row = &result.rows()[0];
-    let ts = row[0].as_timestamp().expect("expected Timestamp value");
-    let date = ts.to_date();
+    // openCypher's datetime() is zoned, here at UTC
+    let zoned = row[0]
+        .as_zoned_datetime()
+        .expect("expected a ZonedDatetime value");
+    assert_eq!(zoned.offset_seconds(), 0);
+    let date = zoned.to_local_date();
     assert_eq!(date.year(), 2024);
     assert_eq!(date.month(), 3);
     assert_eq!(date.day(), 15);
@@ -415,14 +419,16 @@ fn cypher_datetime_map_constructor() {
             "RETURN datetime({year: 2024, month: 3, day: 15, hour: 14, minute: 30}) AS dt",
         )
         .unwrap();
-    let ts = result.rows()[0][0]
-        .as_timestamp()
-        .expect("expected Timestamp value");
-    let d = ts.to_date();
+    // A map without a timezone is at +00:00 (openCypher's default zone)
+    let zoned = result.rows()[0][0]
+        .as_zoned_datetime()
+        .expect("expected a ZonedDatetime value");
+    assert_eq!(zoned.offset_seconds(), 0);
+    let d = zoned.to_local_date();
     assert_eq!(d.year(), 2024);
     assert_eq!(d.month(), 3);
     assert_eq!(d.day(), 15);
-    let t = ts.to_time();
+    let t = zoned.to_local_time();
     assert_eq!(t.hour(), 14);
     assert_eq!(t.minute(), 30);
 }

@@ -1,0 +1,312 @@
+# GQL exact decimal numbers: ISO/IEC 39075:2024 sec 21.2 (exact numeric
+# literals) and 20.11 (numeric value expressions)
+#
+# Covers (#610): a number with a point is an exact decimal that keeps its
+# scale; a number with an exponent or the suffix F or D is a float, the
+# suffix M makes a decimal; decimal arithmetic with integers and floats;
+# division and avg precision; functions that keep a decimal and those that
+# return a float; sum, min, max; CAST AS DECIMAL and toDecimal; equality with
+# integers, floats and numeric strings, also through an index; DECIMAL and
+# FLOAT64 property types; decimal division by zero and overflow.
+
+meta:
+  language: gql
+  model: lpg
+  section: "21.2"
+  title: Exact decimal numbers
+  dataset: empty
+
+tests:
+
+  # ---------------------------------------------------------------------------
+  # Literals
+  # ---------------------------------------------------------------------------
+
+  - name: a_number_with_a_point_is_a_decimal
+    query: "RETURN 1.50 AS d, 1.50 IS TYPED DECIMAL AS is_decimal"
+    expect:
+      rows:
+        - [1.50, true]
+
+  - name: a_decimal_keeps_its_scale
+    query: "RETURN 1.50 AS a, 0.10 AS b, -2.000 AS c"
+    expect:
+      rows:
+        - [1.50, 0.10, -2.000]
+
+  - name: point_one_plus_point_two_is_point_three
+    query: "RETURN 0.1 + 0.2 AS s, 0.1 + 0.2 = 0.3 AS exact"
+    expect:
+      rows:
+        - [0.3, true]
+
+  - name: a_number_with_an_exponent_is_a_float
+    query: "RETURN 1.5e0 IS TYPED FLOAT64 AS is_float, 0.1e0 + 0.2e0 AS sum"
+    expect:
+      rows:
+        - [true, 0.30000000000000004]
+
+  - name: float_equality_is_exact
+    query: "RETURN 0.1e0 + 0.2e0 = 0.3e0 AS eq, 0.1e0 + 0.2e0 <> 0.3e0 AS ne"
+    expect:
+      rows:
+        - [false, true]
+
+  - name: the_suffixes_f_and_d_make_a_float
+    query: "RETURN 1.50F IS TYPED FLOAT64 AS f, 1.50D IS TYPED FLOAT64 AS d"
+    expect:
+      rows:
+        - [true, true]
+
+  - name: the_suffix_m_makes_a_decimal
+    query: "RETURN 2M IS TYPED DECIMAL AS is_decimal, 2M / 4 = 0.5 AS quarter"
+    expect:
+      rows:
+        - [true, true]
+
+  - name: an_integer_stays_an_integer
+    query: "RETURN 2 IS TYPED INT64 AS is_int, 7 / 2 AS half"
+    expect:
+      rows:
+        - [true, 3]
+
+  # ---------------------------------------------------------------------------
+  # Arithmetic
+  # ---------------------------------------------------------------------------
+
+  - name: a_decimal_with_an_integer_gives_a_decimal
+    query: "RETURN 1.50 + 1 AS sum, 1.50 * 2 AS product, (1.50 + 1) IS TYPED DECIMAL AS is_decimal"
+    expect:
+      rows:
+        - [2.50, 3.00, true]
+
+  - name: a_decimal_with_a_float_gives_a_float
+    query: "RETURN (1.50 + 1.0e0) IS TYPED FLOAT64 AS is_float, 1.50 + 1.0e0 AS sum"
+    expect:
+      rows:
+        - [true, 2.5]
+
+  # A decimal quotient has 16 significant digits, also when it ends sooner.
+  - name: decimal_division_gives_sixteen_significant_digits
+    query: "RETURN 1.0 / 3 AS third, 1.0 / 4 AS quarter, 10.0 / 8 AS eighth, 2.0 / 3 * 3 = 2 AS back"
+    expect:
+      rows:
+        - [0.3333333333333333, 0.2500000000000000, 1.250000000000000, false]
+
+  - name: a_decimal_quotient_equals_its_exact_value
+    query: "RETURN 1.0 / 4 = 0.25 AS quarter, 10.0 / 8 = 1.25 AS eighth"
+    expect:
+      rows:
+        - [true, true]
+
+  - name: decimal_subtraction_and_negation
+    query: "RETURN 3.10 - 0.25 AS diff, -(1.50) AS neg"
+    expect:
+      rows:
+        - [2.85, -1.50]
+
+  - name: decimal_modulo
+    query: "RETURN 7.5 % 2 AS rem"
+    expect:
+      rows:
+        - [1.5]
+
+  # ---------------------------------------------------------------------------
+  # Functions
+  # ---------------------------------------------------------------------------
+
+  - name: abs_keeps_a_decimal
+    query: "RETURN abs(-1.50) AS a, abs(-1.50) IS TYPED DECIMAL AS is_decimal"
+    expect:
+      rows:
+        - [1.50, true]
+
+  - name: ceil_floor_and_round_keep_a_decimal
+    query: |
+      RETURN ceil(1.25) IS TYPED DECIMAL AS c, floor(1.25) IS TYPED DECIMAL AS f,
+             round(1.25) IS TYPED DECIMAL AS r,
+             ceil(1.25) = 2 AS c2, floor(-1.25) = -2 AS f2
+    expect:
+      rows:
+        - [true, true, true, true, true]
+
+  - name: round_of_a_decimal_rounds_half_away_from_zero
+    query: "RETURN round(2.5) = 3 AS up, round(-2.5) = -3 AS down"
+    expect:
+      rows:
+        - [true, true]
+
+  - name: sqrt_of_a_decimal_is_a_float
+    query: "RETURN sqrt(2.25) IS TYPED FLOAT64 AS is_float, sqrt(2.25) AS root"
+    expect:
+      rows:
+        - [true, 1.5]
+
+  # ---------------------------------------------------------------------------
+  # Aggregates and grouping
+  # ---------------------------------------------------------------------------
+
+  - name: sum_of_decimals_is_exact
+    query: "UNWIND [0.1, 0.2, 0.3] AS x RETURN sum(x) AS total, sum(x) = 0.6 AS exact"
+    expect:
+      rows:
+        - [0.6, true]
+
+  - name: min_and_max_of_decimals
+    query: "UNWIND [1.50, 0.25, 3.125] AS x RETURN min(x) AS lo, max(x) AS hi"
+    expect:
+      rows:
+        - [0.25, 3.125]
+
+  - name: avg_of_decimals_is_a_decimal
+    query: "UNWIND [1.0, 2.0, 2.0] AS x RETURN avg(x) IS TYPED DECIMAL AS is_decimal, avg(x) > 1.6666 AND avg(x) < 1.6667 AS close"
+    expect:
+      rows:
+        - [true, true]
+
+  - name: equal_decimals_group_together
+    query: "UNWIND [1.50, 1.5, 2.25] AS x RETURN x = 1.5 AS one_and_a_half, count(*) AS n ORDER BY n"
+    expect:
+      ordered: true
+      rows:
+        - [false, 1]
+        - [true, 2]
+
+  # ---------------------------------------------------------------------------
+  # CAST and toDecimal
+  # ---------------------------------------------------------------------------
+
+  - name: cast_to_decimal_with_a_scale_rounds_half_away_from_zero
+    query: "RETURN CAST('2.345' AS DECIMAL(10, 2)) AS up, CAST('-2.345' AS DECIMAL(10, 2)) AS down"
+    expect:
+      rows:
+        - [2.35, -2.35]
+
+  - name: cast_to_decimal_with_too_many_integer_digits_is_null
+    query: "RETURN CAST(12345.6 AS DECIMAL(5, 2)) AS d"
+    expect:
+      rows:
+        - [null]
+
+  - name: cast_to_decimal_and_dec
+    query: "RETURN CAST(3 AS DECIMAL) IS TYPED DECIMAL AS d, CAST('1.50' AS DEC) AS dec"
+    expect:
+      rows:
+        - [true, 1.50]
+
+  - name: to_decimal_reads_text_and_numbers
+    query: "RETURN toDecimal('1.50') AS text, toDecimal(2) IS TYPED DECIMAL AS int, toDecimal(2.345, 10, 2) AS scaled"
+    expect:
+      rows:
+        - [1.50, true, 2.35]
+
+  # ---------------------------------------------------------------------------
+  # Equality across numeric types
+  # ---------------------------------------------------------------------------
+
+  - name: a_decimal_equals_the_integer_float_and_string_of_its_value
+    query: "RETURN 2.00 = 2 AS int, 1.50 = 1.5e0 AS float, 1.50 = '1.5' AS text"
+    expect:
+      rows:
+        - [true, true, true]
+
+  - name: a_decimal_finds_an_integer_property_without_an_index
+    setup:
+      - "INSERT (:Item {sku: 1, price: 2}), (:Item {sku: 2, price: 3})"
+    query: "MATCH (i:Item) WHERE i.price = 2.00 RETURN i.sku"
+    expect:
+      rows:
+        - [1]
+
+  - name: a_decimal_finds_an_integer_property_through_an_index
+    setup:
+      - "CREATE INDEX item_price FOR (n:Item) ON (n.price)"
+      - "INSERT (:Item {sku: 1, price: 2}), (:Item {sku: 2, price: 3})"
+    query: "MATCH (i:Item {price: 2.00}) RETURN i.sku"
+    expect:
+      rows:
+        - [1]
+
+  - name: an_integer_finds_a_decimal_property_through_an_index
+    setup:
+      - "CREATE INDEX item_price FOR (n:Item) ON (n.price)"
+      - "INSERT (:Item {sku: 1, price: 2.00}), (:Item {sku: 2, price: 2.50})"
+    query: "MATCH (i:Item {price: 2}) RETURN i.sku"
+    expect:
+      rows:
+        - [1]
+
+  - name: a_decimal_property_compares_in_order
+    setup:
+      - "INSERT (:Item {sku: 1, price: 0.10}), (:Item {sku: 2, price: 2}), (:Item {sku: 3, price: 1.5e0})"
+    query: "MATCH (i:Item) RETURN i.sku ORDER BY i.price"
+    expect:
+      ordered: true
+      rows:
+        - [1]
+        - [3]
+        - [2]
+
+  # ---------------------------------------------------------------------------
+  # Property types
+  # ---------------------------------------------------------------------------
+
+  - name: a_decimal_property_keeps_its_scale
+    setup:
+      - "INSERT (:Item {price: 19.90})"
+    query: "MATCH (i:Item) RETURN i.price, i.price IS TYPED DECIMAL AS is_decimal"
+    expect:
+      rows:
+        - [19.90, true]
+
+  - name: a_decimal_assigned_to_a_float64_property_is_stored_as_a_float
+    setup:
+      - "CREATE NODE TYPE Reading (v FLOAT64)"
+      - "INSERT (:Reading {v: 1.50})"
+    query: "MATCH (r:Reading) RETURN r.v IS TYPED FLOAT64 AS is_float, r.v AS v"
+    expect:
+      rows:
+        - [true, 1.5]
+
+  - name: an_integer_assigned_to_a_decimal_property_is_stored_as_a_decimal
+    setup:
+      - "CREATE NODE TYPE Item (price DECIMAL)"
+      - "INSERT (:Item {price: 3})"
+    query: "MATCH (i:Item) RETURN i.price IS TYPED DECIMAL AS is_decimal"
+    expect:
+      rows:
+        - [true]
+
+  # ---------------------------------------------------------------------------
+  # Errors
+  # ---------------------------------------------------------------------------
+
+  - name: decimal_division_by_zero_fails
+    query: "RETURN 1.0 / 0 AS d"
+    expect:
+      error: "division by zero"
+      gql_status: "22012"
+
+  - name: decimal_modulo_by_zero_fails
+    query: "RETURN 1.5 % 0 AS d"
+    expect:
+      error: "division by zero"
+      gql_status: "22012"
+
+  - name: float_division_by_zero_is_infinity
+    query: "RETURN 1.0e0 / 0.0e0 AS d"
+    expect:
+      rows:
+        - [Infinity]
+
+  - name: decimal_overflow_past_38_digits_fails
+    query: "RETURN 99999999999999999999999999999999999999M * 10 AS d"
+    expect:
+      error: "numeric value out of range"
+      gql_status: "22003"
+
+  - name: decimal_sum_past_38_digits_fails
+    query: "UNWIND [99999999999999999999999999999999999999M, 1M] AS x RETURN sum(x) AS total"
+    expect:
+      error: "numeric value out of range"
+      gql_status: "22003"

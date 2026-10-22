@@ -4,7 +4,7 @@
 //! pinned below, so any change to an algorithm's output fails here and goes
 //! into the CHANGELOG's "Result changes".
 
-#![cfg(all(feature = "lpg", feature = "algos", feature = "parallel"))]
+#![cfg(all(feature = "algos", feature = "parallel"))]
 
 use grafeo_adapters::plugins::Parameters;
 use grafeo_adapters::plugins::algorithms::{
@@ -14,14 +14,16 @@ use grafeo_adapters::plugins::algorithms::{
     LabelPropagationAlgorithm, LouvainAlgorithm, PageRankAlgorithm,
     StronglyConnectedComponentsAlgorithm,
 };
+use grafeo_common::types::ReadView;
 use grafeo_common::types::{NodeId, Value};
-use grafeo_core::graph::lpg::LpgStore;
+use grafeo_core::graph::GraphStore as _;
+use grafeo_core::graph::rowgroup::RowGroupStore;
 
 /// A seeded graph shaped like a code base: a repository holds modules, modules
 /// hold files, files hold functions, and functions call each other, mostly
 /// within their module, sometimes across, with a few shared utility hubs.
 /// About `modules * 220` nodes, one connected component.
-fn code_graph(modules: usize) -> LpgStore {
+fn code_graph(modules: usize) -> RowGroupStore {
     let mut state: u64 = 0x9E37_79B9_7F4A_7C15;
     let mut next = |bound: usize| {
         state ^= state << 13;
@@ -29,13 +31,13 @@ fn code_graph(modules: usize) -> LpgStore {
         state ^= state << 17;
         usize::try_from(state % u64::try_from(bound).unwrap()).unwrap()
     };
-    let store = LpgStore::new().unwrap();
+    let store = RowGroupStore::new();
     let repo = store.create_node(&["Repository"]);
     let mut functions_by_module: Vec<Vec<NodeId>> = Vec::new();
     for _ in 0..modules {
-        // One epoch per module: with `tiered-storage` (on under the workspace's
-        // --all-features), the records of one epoch must fit its arena chunk.
-        // Ids, and so every result, do not depend on the epochs.
+        // One epoch per module, as the graph was first built for `LpgStore`
+        // (whose `tiered-storage` arena held one epoch per chunk). Ids, and
+        // so every result, do not depend on the epochs.
         store.new_epoch();
         let module = store.create_node(&["Module"]);
         store.create_edge(repo, module, "CONTAINS");
@@ -104,8 +106,15 @@ fn rows_digest(rows: &[Vec<Value>]) -> u64 {
     fnv1a(&bytes)
 }
 
-fn run(algorithm: &dyn GraphAlgorithm, store: &LpgStore, params: &Parameters) -> Vec<Vec<Value>> {
-    algorithm.execute(store, params).unwrap().rows
+fn run(
+    algorithm: &dyn GraphAlgorithm,
+    store: &RowGroupStore,
+    params: &Parameters,
+) -> Vec<Vec<Value>> {
+    algorithm
+        .execute(store, ReadView::latest(), params)
+        .unwrap()
+        .rows
 }
 
 fn with(pairs: &[(&str, Value)]) -> Parameters {
@@ -218,23 +227,28 @@ const GOLDEN: &[(&str, u64)] = &[
     ("bridges", 0x7ef97eaf8d068b04),
     ("degree_centrality", 0x235f9a3dc80c2d3b),
     ("connected_components", 0xaa211db929fb3293),
-    ("strongly_connected_components", 0xcfb40e420e8cba43),
+    // 0.6.0: on the row-group store, which lists a node's edges by edge
+    // type and other node (LpgStore listed them in creation order): the
+    // components are numbered in that visit order.
+    ("strongly_connected_components", 0x5d383a0bde7f8f5f),
     ("label_propagation", 0x7466bf931f2950f6),
     // 0.6.0: clustering and k-truss read the simple graph, the self-loops of
     // recursive functions left out.
     ("clustering_coefficient", 0x2e12f21fc91f0237),
     ("clustering_coefficient_sequential", 0x2e12f21fc91f0237),
     ("ktruss", 0xa60d0757ba8bd32a),
-    ("betweenness_centrality", 0x42bccf91788a07a2),
+    // 0.6.0: the same edge order sums the shortest-path shares in another
+    // order (the last bits of some scores).
+    ("betweenness_centrality", 0xdc8c2d83222ad65d),
     ("closeness_centrality", 0x6474cd4c532e5eac),
 ];
 
 #[test]
 fn the_graph_is_one_code_base_sized_component() {
     let store = code_graph(LARGE_MODULES);
-    let n = store.node_ids().len();
+    let n = store.node_ids(ReadView::latest()).unwrap().len();
     assert!((9_000..=11_000).contains(&n), "{n} nodes");
-    let components = algorithms::connected_components(&store);
+    let components = algorithms::connected_components(&store, ReadView::latest()).unwrap();
     let distinct: std::collections::BTreeSet<u64> = components.values().copied().collect();
     assert_eq!(distinct.len(), 1);
 }
@@ -360,7 +374,7 @@ fn neumaier(values: impl IntoIterator<Item = f64>) -> f64 {
 #[test]
 fn the_average_clustering_coefficient_is_the_same_every_time() {
     let store = code_graph(LARGE_MODULES);
-    let local = algorithms::local_clustering_coefficient(&store);
+    let local = algorithms::local_clustering_coefficient(&store, ReadView::latest()).unwrap();
     let mut by_node: Vec<(NodeId, f64)> = local.into_iter().collect();
     by_node.sort_unstable_by_key(|&(node, _)| node);
     let n = by_node.len() as f64;
@@ -368,11 +382,14 @@ fn the_average_clustering_coefficient_is_the_same_every_time() {
 
     for _ in 0..5 {
         assert_eq!(
-            algorithms::global_clustering_coefficient(&store).to_bits(),
+            algorithms::global_clustering_coefficient(&store, ReadView::latest())
+                .unwrap()
+                .to_bits(),
             expected
         );
         assert_eq!(
-            algorithms::clustering_coefficient(&store)
+            algorithms::clustering_coefficient(&store, ReadView::latest())
+                .unwrap()
                 .global_coefficient
                 .to_bits(),
             expected
@@ -383,7 +400,9 @@ fn the_average_clustering_coefficient_is_the_same_every_time() {
             .num_threads(threads)
             .build()
             .unwrap();
-        let parallel = pool.install(|| algorithms::clustering_coefficient_parallel(&store, 1));
+        let parallel = pool.install(|| {
+            algorithms::clustering_coefficient_parallel(&store, ReadView::latest(), 1).unwrap()
+        });
         assert_eq!(
             parallel.global_coefficient.to_bits(),
             expected,
@@ -398,21 +417,26 @@ fn the_average_clustering_coefficient_is_the_same_every_time() {
 fn rust_lists_come_in_node_id_order() {
     let store = code_graph(SMALL_MODULES);
     let strictly_increasing = |ids: &[NodeId]| ids.windows(2).all(|w| w[0] < w[1]);
-    let decomposition = algorithms::kcore_decomposition(&store);
+    let decomposition = algorithms::kcore_decomposition(&store, ReadView::latest()).unwrap();
     for k in 0..=decomposition.max_core {
-        assert!(strictly_increasing(&decomposition.k_core(k)), "k_core({k})");
+        assert!(
+            strictly_increasing(&decomposition.k_core(k)),
+            "k_core({k}, ReadView::latest()).unwrap()"
+        );
         assert!(
             strictly_increasing(&decomposition.k_shell(k)),
             "k_shell({k})"
         );
     }
-    assert!(strictly_increasing(&algorithms::k_core(&store, 2)));
-    let bridges = algorithms::bridges(&store);
+    assert!(strictly_increasing(
+        &algorithms::k_core(&store, ReadView::latest(), 2).unwrap()
+    ));
+    let bridges = algorithms::bridges(&store, ReadView::latest()).unwrap();
     assert!(
         bridges.len() >= 2,
         "the graph needs bridges to check their order"
     );
     assert!(bridges.windows(2).all(|w| w[0] < w[1]), "bridges");
-    let truss = algorithms::k_truss(&store, 3);
+    let truss = algorithms::k_truss(&store, ReadView::latest(), 3).unwrap();
     assert!(truss.windows(2).all(|w| w[0] < w[1]), "k_truss");
 }

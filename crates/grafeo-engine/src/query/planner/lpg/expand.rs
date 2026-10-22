@@ -3,9 +3,21 @@
 use super::reachability::ReachabilityMode;
 use super::{
     Arc, Direction, Error, ExecutionPathMode, ExpandDirection, ExpandOp, ExpandOperator,
-    ExpandStep, GraphStoreSearch, LazyFactorizedChainOperator, LogicalOperator, Operator, PathMode,
-    Result, VariableLengthExpandOperator,
+    ExpandStep, GraphStore, LazyFactorizedChainOperator, LogicalExpression, LogicalOperator,
+    Operator, PathMode, Result, VariableLengthExpandOperator,
 };
+
+/// A condition on every edge of the path a variable-length expand binds: the
+/// edge is `hops` (each of them names it), the predicate may read the input
+/// row's columns too.
+pub(crate) struct PendingEdgeCondition {
+    /// The path variable of the expand that checks it.
+    pub(crate) path: String,
+    /// The names the predicate reads the candidate edge as.
+    pub(crate) hops: Vec<String>,
+    /// The condition.
+    pub(crate) predicate: LogicalExpression,
+}
 
 impl super::Planner {
     /// Plans an expand operator.
@@ -78,17 +90,17 @@ impl super::Planner {
             };
 
             let mut expand_op = VariableLengthExpandOperator::new(
-                Arc::clone(&self.store) as Arc<dyn GraphStoreSearch>,
+                Arc::clone(&self.store) as Arc<dyn GraphStore>,
                 input_op,
                 source_column,
                 direction,
-                expand.edge_types.clone(),
+                self.stored_edge_types(&expand.edge_types)?,
                 min_hops,
                 max_hops,
+                self.read_view(),
             )
             .with_path_mode(exec_path_mode)
-            .with_transaction_context(self.viewing_epoch, self.transaction_id)
-            .with_read_only(self.read_only)
+            .with_read_counter(self.read_counter())
             .with_memory_budget(self.path_search_budget);
 
             // If a path alias is set, enable path length and detail output
@@ -99,6 +111,49 @@ impl super::Planner {
             }
             if binds_edge_list {
                 expand_op = expand_op.with_edge_list_output();
+            }
+            // The conditions a filter over this expand handed over: checked
+            // on each candidate edge, with the input row's columns
+            let conditions: Vec<PendingEdgeCondition> = match &expand.path_alias {
+                Some(path) => {
+                    let mut pending = self.pending_edge_conditions.borrow_mut();
+                    let (taken, kept) = std::mem::take(&mut *pending)
+                        .into_iter()
+                        .partition(|condition| &condition.path == path);
+                    *pending = kept;
+                    taken
+                }
+                None => Vec::new(),
+            };
+            if !conditions.is_empty() {
+                let mut variable_columns: std::collections::HashMap<String, usize> = input_columns
+                    .iter()
+                    .enumerate()
+                    .map(|(i, name)| (name.clone(), i))
+                    .collect();
+                let mut predicates = Vec::with_capacity(conditions.len());
+                for condition in conditions {
+                    for hop in condition.hops {
+                        variable_columns.insert(hop, input_columns.len());
+                    }
+                    predicates.push(condition.predicate);
+                }
+                let predicate = predicates
+                    .into_iter()
+                    .reduce(|left, right| LogicalExpression::Binary {
+                        left: Box::new(left),
+                        op: crate::query::plan::BinaryOp::And,
+                        right: Box::new(right),
+                    })
+                    .expect("at least one condition");
+                let predicate = grafeo_core::execution::operators::ExpressionPredicate::new(
+                    self.convert_expression(&predicate)?,
+                    variable_columns,
+                    Arc::clone(&self.store),
+                    self.read_view(),
+                )
+                .with_session_context(self.session_context.clone());
+                expand_op = expand_op.with_edge_condition(Box::new(predicate));
             }
             match reachability {
                 Some(ReachabilityMode::PerInputRow) => {
@@ -114,14 +169,14 @@ impl super::Planner {
         } else {
             // Use simple ExpandOperator for single-hop paths without named paths
             let expand_op = ExpandOperator::new(
-                Arc::clone(&self.store) as Arc<dyn GraphStoreSearch>,
+                Arc::clone(&self.store) as Arc<dyn GraphStore>,
                 input_op,
                 source_column,
                 direction,
-                expand.edge_types.clone(),
+                self.stored_edge_types(&expand.edge_types)?,
+                self.read_view(),
             )
-            .with_transaction_context(self.viewing_epoch, self.transaction_id)
-            .with_read_only(self.read_only);
+            .with_read_counter(self.read_counter());
             Box::new(expand_op)
         };
 
@@ -232,7 +287,7 @@ impl super::Planner {
             steps.push(ExpandStep {
                 source_column,
                 direction,
-                edge_types: expand.edge_types.clone(),
+                edge_types: self.stored_edge_types(&expand.edge_types)?,
             });
 
             // Add edge and target columns
@@ -244,18 +299,13 @@ impl super::Planner {
         }
 
         // Create lazy operator that executes at query time, not planning time
-        let mut lazy_op = LazyFactorizedChainOperator::new(
-            Arc::clone(&self.store) as Arc<dyn GraphStoreSearch>,
+        let lazy_op = LazyFactorizedChainOperator::new(
+            Arc::clone(&self.store) as Arc<dyn GraphStore>,
             base_op,
             steps,
+            self.read_view(),
         )
-        .with_read_only(self.read_only);
-
-        if let Some(transaction_id) = self.transaction_id {
-            lazy_op = lazy_op.with_transaction_context(self.viewing_epoch, Some(transaction_id));
-        } else {
-            lazy_op = lazy_op.with_transaction_context(self.viewing_epoch, None);
-        }
+        .with_read_counter(self.read_counter());
 
         Ok((Box::new(lazy_op), columns))
     }

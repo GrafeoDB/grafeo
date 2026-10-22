@@ -50,14 +50,14 @@ fn generate_fixture() -> Vec<u8> {
 fn snapshot_round_trip_preserves_node_count() {
     let snapshot = generate_fixture();
     let db = GrafeoDB::import_snapshot(&snapshot).unwrap();
-    assert_eq!(db.node_count(), 3);
+    assert_eq!(db.node_count().unwrap(), 3);
 }
 
 #[test]
 fn snapshot_round_trip_preserves_edge_count() {
     let snapshot = generate_fixture();
     let db = GrafeoDB::import_snapshot(&snapshot).unwrap();
-    assert_eq!(db.edge_count(), 2);
+    assert_eq!(db.edge_count().unwrap(), 2);
 }
 
 #[test]
@@ -151,8 +151,8 @@ fn snapshot_double_round_trip() {
     let re_exported = db.export_snapshot().unwrap();
 
     let db2 = GrafeoDB::import_snapshot(&re_exported).unwrap();
-    assert_eq!(db2.node_count(), 3);
-    assert_eq!(db2.edge_count(), 2);
+    assert_eq!(db2.node_count().unwrap(), 3);
+    assert_eq!(db2.edge_count().unwrap(), 2);
 
     let session = db2.session();
     let result = session

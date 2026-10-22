@@ -273,9 +273,13 @@ tests:
 
   # ON CREATE and ON MATCH write the element the MERGE binds: an assignment to
   # another variable is an error (it used to be written to the merged edge).
-  - name: merge_on_create_set_on_another_variable_is_an_error
+  # ON CREATE and ON MATCH may set any element of the pattern (it was
+  # refused), as Cypher's MERGE does.
+  - name: merge_on_create_set_on_another_variable
     statements:
       - "INSERT (:Person {name: 'Alix'}), (:Person {name: 'Gus'})"
       - "MATCH (a:Person {name: 'Alix'}), (b:Person {name: 'Gus'}) MERGE (a)-[r:KNOWS]->(b) ON CREATE SET a.since = 3"
+      - "MATCH (a:Person {name: 'Alix'}) RETURN a.since AS since"
     expect:
-      error: "MERGE"
+      rows:
+        - [3]

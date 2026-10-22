@@ -1,0 +1,43 @@
+# Transaction commands without a transaction
+#
+# ISO/IEC 39075: COMMIT, ROLLBACK and the savepoint commands need an open
+# transaction; without one they raise 25000 (invalid transaction state).
+
+meta:
+  language: gql
+  model: lpg
+  section: "8.1"
+  title: Transaction commands without a transaction
+  dataset: empty
+
+tests:
+
+  - name: commit_without_a_transaction
+    query: "COMMIT"
+    expect:
+      error: "No active transaction"
+      gql_status: "25000"
+
+  - name: rollback_without_a_transaction
+    query: "ROLLBACK"
+    expect:
+      error: "No active transaction"
+      gql_status: "25000"
+
+  - name: savepoint_without_a_transaction
+    query: "SAVEPOINT s"
+    expect:
+      error: "No active transaction"
+      gql_status: "25000"
+
+  - name: release_savepoint_without_a_transaction
+    query: "RELEASE SAVEPOINT s"
+    expect:
+      error: "No active transaction"
+      gql_status: "25000"
+
+  - name: rollback_to_savepoint_without_a_transaction
+    query: "ROLLBACK TO SAVEPOINT s"
+    expect:
+      error: "No active transaction"
+      gql_status: "25000"

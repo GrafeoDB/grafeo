@@ -16,8 +16,9 @@ Query result iterator.
 |----------|------|-------------|
 | `columns` | `List[str]` | Column names |
 | `execution_time_ms` | `float` | Query execution time in milliseconds |
-| `rows_scanned` | `int` | Number of rows scanned during query execution |
+| `rows_scanned` | `int` | Rows the query read from storage before any filter: nodes its scans and index lookups read, edges its expands read, search hits and RDF triples |
 | `counters` | `dict` | What the query's writes changed: `nodes_created`, `nodes_deleted`, `edges_created`, `edges_deleted`, `properties_set`, `labels_added`, `labels_removed` |
+| `profile` | `dict \| None` | For a `PROFILE` statement, its operators as a tree: `total_time_ms` and `root`, each operator with `operator`, `detail`, `rows`, `calls`, `self_time_ms`, `time_ms` and `children` (experimental); `None` otherwise |
 
 ## Methods
 

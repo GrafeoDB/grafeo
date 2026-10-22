@@ -108,6 +108,19 @@ impl ZonedDatetime {
         })
     }
 
+    /// The zoned datetime a duration later, at the same offset. Months and days
+    /// move the local date and time (`2024-01-31T10:00+01:00` plus `P1M` is
+    /// `2024-02-29T10:00+01:00`), as for a local datetime.
+    #[must_use]
+    pub fn add_duration(&self, duration: &super::Duration) -> Self {
+        let offset_micros = i64::from(self.offset_seconds) * 1_000_000;
+        let local = Timestamp::from_micros(self.utc_micros + offset_micros);
+        Self {
+            utc_micros: local.add_duration(duration).as_micros() - offset_micros,
+            offset_seconds: self.offset_seconds,
+        }
+    }
+
     /// Parses an ISO 8601 datetime string with a mandatory UTC offset.
     ///
     /// Accepted formats:
@@ -163,25 +176,11 @@ impl fmt::Debug for ZonedDatetime {
 impl fmt::Display for ZonedDatetime {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let local_micros = self.utc_micros + self.offset_seconds as i64 * 1_000_000;
-        let ts = Timestamp::from_micros(local_micros);
-        let date = ts.to_date();
-        let time = ts.to_time();
-
-        let (year, month, day) = (date.year(), date.month(), date.day());
-        let (h, m, s) = (time.hour(), time.minute(), time.second());
-        let micro_frac = local_micros.rem_euclid(1_000_000) as u64;
-
-        if micro_frac > 0 {
-            // Trim trailing zeros from fractional seconds
-            let frac = format!("{micro_frac:06}");
-            let trimmed = frac.trim_end_matches('0');
-            write!(
-                f,
-                "{year:04}-{month:02}-{day:02}T{h:02}:{m:02}:{s:02}.{trimmed}"
-            )?;
-        } else {
-            write!(f, "{year:04}-{month:02}-{day:02}T{h:02}:{m:02}:{s:02}")?;
-        }
+        write!(
+            f,
+            "{}",
+            Timestamp::from_micros(local_micros).to_local_text()
+        )?;
 
         match self.offset_seconds {
             0 => write!(f, "Z"),
@@ -199,6 +198,27 @@ impl fmt::Display for ZonedDatetime {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn adding_a_duration_keeps_the_offset() {
+        let zdt = ZonedDatetime::parse("2024-03-15T10:00:00+01:00").unwrap();
+        let hour = super::super::Duration::parse("PT1H").unwrap();
+        assert_eq!(
+            zdt.add_duration(&hour).to_string(),
+            "2024-03-15T11:00:00+01:00"
+        );
+        assert_eq!(
+            zdt.add_duration(&hour.neg()).to_string(),
+            "2024-03-15T09:00:00+01:00"
+        );
+        // A month moves the local date: the last day of January plus a month
+        let end = ZonedDatetime::parse("2024-01-31T23:30:00+01:00").unwrap();
+        let month = super::super::Duration::parse("P1M").unwrap();
+        assert_eq!(
+            end.add_duration(&month).to_string(),
+            "2024-02-29T23:30:00+01:00"
+        );
+    }
 
     #[test]
     fn test_parse_utc() {

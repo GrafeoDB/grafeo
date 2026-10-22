@@ -43,6 +43,8 @@ mod parameter_scan;
 mod project;
 pub mod push;
 mod range_scan;
+mod rdf_path;
+mod read_counter;
 mod scan;
 #[cfg(feature = "text-index")]
 mod scan_text;
@@ -83,7 +85,8 @@ pub use filter::{
     ListPredicateKind, Predicate, SessionContext, UnaryFilterOp,
 };
 pub use functions::{
-    Arity, FunctionSupport, REGEX_SUPPORT, function_names, function_support, regex_pattern_error,
+    Arity, BuiltinFunction, FunctionGroup, FunctionSupport, REGEX_SUPPORT, Volatility,
+    function_names, function_support, regex_pattern_error,
 };
 pub use horizontal_aggregate::{EntityKind, HorizontalAggregateOperator};
 pub use join::{
@@ -111,6 +114,12 @@ pub use push::{
 #[cfg(feature = "spill")]
 pub use push::{SpillableAggregatePushOperator, SpillableSortPushOperator};
 pub use range_scan::RangeScanOperator;
+pub use rdf_path::{PathStep, RdfPathGraph};
+#[cfg(feature = "triple-store")]
+pub use rdf_path::{
+    RdfPathConfig, RdfPathOperator, RdfPathPendingGraph, RdfPathReadControl, RdfPathReadOverlay,
+};
+pub use read_counter::ReadCounter;
 pub use scan::ScanOperator;
 #[cfg(feature = "text-index")]
 pub use scan_text::TextScanOperator;
@@ -128,7 +137,7 @@ pub use variable_length_expand::{
     DEFAULT_PATH_SEARCH_BUDGET, PathMode as ExecutionPathMode, VariableLengthExpandOperator,
 };
 pub use vector_join::VectorJoinOperator;
-pub use writer::{GraphWriter, NewEdge, Recording, WriteCounter, WriteCounters, WriteTarget};
+pub use writer::{GraphWriter, NewEdge, Recording, WriteCounter, WriteCounters};
 
 use std::ops::Range;
 
@@ -403,9 +412,10 @@ pub enum OperatorError {
     /// Execution error.
     #[error("execution error: {0}")]
     Execution(String),
-    /// Schema constraint violation during a write operation.
-    #[error("constraint violation: {0}")]
-    ConstraintViolation(String),
+    /// A write the schema or a database rule refuses, with what it breaks
+    /// (which decides its GQLSTATUS).
+    #[error("constraint violation: {1}")]
+    ConstraintViolation(grafeo_common::utils::error::ConstraintKind, String),
     /// A value the statement gave cannot be used (a user mistake, such as a
     /// query vector of another size than the index's), reported as an
     /// invalid value rather than an execution failure.
@@ -433,9 +443,87 @@ pub enum OperatorError {
     Wrapped(Box<grafeo_common::utils::error::Error>),
 }
 
+impl OperatorError {
+    /// A write the graph's schema refuses: its graph type, or a constraint
+    /// on its labels (GQLSTATUS G2000).
+    #[must_use]
+    pub fn schema_violation(message: String) -> Self {
+        Self::ConstraintViolation(grafeo_common::utils::error::ConstraintKind::Schema, message)
+    }
+
+    /// A node to delete without DETACH that still has edges (GQLSTATUS
+    /// G1001).
+    #[must_use]
+    pub fn edges_still_exist(message: String) -> Self {
+        Self::ConstraintViolation(
+            grafeo_common::utils::error::ConstraintKind::EdgesStillExist,
+            message,
+        )
+    }
+
+    /// A value past a limit of the database rather than of the schema
+    /// (GQLSTATUS 22000).
+    #[must_use]
+    pub fn limit_violation(message: String) -> Self {
+        Self::ConstraintViolation(grafeo_common::utils::error::ConstraintKind::Limit, message)
+    }
+}
+
 impl From<grafeo_common::utils::error::Error> for OperatorError {
     fn from(error: grafeo_common::utils::error::Error) -> Self {
         Self::Wrapped(Box::new(error))
+    }
+}
+
+impl OperatorError {
+    /// An integer or decimal result that does not fit (GQLSTATUS 22003);
+    /// `operation` says which, such as `9223372036854775807 + 1`.
+    #[must_use]
+    pub fn numeric_out_of_range(operation: impl Into<String>) -> Self {
+        Self::query_data(
+            grafeo_common::utils::error::QueryErrorKind::NumericOutOfRange,
+            operation,
+        )
+    }
+
+    /// An integer or decimal division by zero (GQLSTATUS 22012); `operation`
+    /// says which, such as `10 / 0`.
+    #[must_use]
+    pub fn division_by_zero(operation: impl Into<String>) -> Self {
+        Self::query_data(
+            grafeo_common::utils::error::QueryErrorKind::DivisionByZero,
+            operation,
+        )
+    }
+
+    /// A value of a type an operation does not take, such as a string under
+    /// a unary minus (GQLSTATUS 22G03); `message` says which.
+    #[must_use]
+    pub fn invalid_value_type(message: impl Into<String>) -> Self {
+        Self::query_data(
+            grafeo_common::utils::error::QueryErrorKind::InvalidValueType,
+            message,
+        )
+    }
+
+    /// Two values a comparison cannot compare, such as a node and a number
+    /// in GQL (GQLSTATUS 22G04); `message` says which.
+    #[must_use]
+    pub fn values_not_comparable(message: impl Into<String>) -> Self {
+        Self::query_data(
+            grafeo_common::utils::error::QueryErrorKind::ValuesNotComparable,
+            message,
+        )
+    }
+
+    fn query_data(
+        kind: grafeo_common::utils::error::QueryErrorKind,
+        operation: impl Into<String>,
+    ) -> Self {
+        grafeo_common::utils::error::Error::from(grafeo_common::utils::error::QueryError::new(
+            kind, operation,
+        ))
+        .into()
     }
 }
 

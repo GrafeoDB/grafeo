@@ -1,0 +1,249 @@
+# Rosetta: how built-in functions are evaluated, in GQL and Cypher (#540)
+#
+# A function call resolves once per query: an unknown name or a wrong number
+# of arguments is an error wherever the call stands (RETURN, WHERE, WITH,
+# ORDER BY, CASE, an aggregate's argument, SET) and also under EXPLAIN.
+# Deterministic functions give the same value for the same arguments, so a
+# key computed from the row can be looked up in an index; rand() still runs
+# per row, also in a write. A function of null is null.
+
+meta:
+  model: lpg
+  section: rosetta
+  title: Function evaluation cross-language equivalence
+  dataset: empty
+  requires: [cypher]
+
+tests:
+
+  # ---------------------------------------------------------------------------
+  # Unknown functions and wrong arities fail wherever the call stands
+  # ---------------------------------------------------------------------------
+
+  - name: an_unknown_function_in_order_by_fails
+    setup:
+      - "INSERT (:Person {name: 'Alix'})"
+    variants:
+      gql: "MATCH (p:Person) RETURN p.name ORDER BY upperr(p.name)"
+      cypher: "MATCH (p:Person) RETURN p.name ORDER BY upperr(p.name)"
+    expect:
+      error: "Unknown function 'upperr'"
+      gql_status: "42002"
+
+  - name: an_unknown_function_in_with_fails
+    variants:
+      gql: "UNWIND ['Alix'] AS name WITH upperr(name) AS loud RETURN loud"
+      cypher: "UNWIND ['Alix'] AS name WITH upperr(name) AS loud RETURN loud"
+    expect:
+      error: "Unknown function 'upperr'"
+      gql_status: "42002"
+
+  - name: an_unknown_function_in_a_case_branch_that_never_runs_fails
+    variants:
+      gql: "RETURN CASE WHEN false THEN upperr('Alix') ELSE 'Gus' END AS name"
+      cypher: "RETURN CASE WHEN false THEN upperr('Alix') ELSE 'Gus' END AS name"
+    expect:
+      error: "Unknown function 'upperr'"
+      gql_status: "42002"
+
+  - name: an_unknown_function_inside_an_aggregate_fails
+    variants:
+      gql: "UNWIND [1, 2] AS x RETURN sum(upperr(x)) AS total"
+      cypher: "UNWIND [1, 2] AS x RETURN sum(upperr(x)) AS total"
+    expect:
+      error: "Unknown function 'upperr'"
+      gql_status: "42002"
+
+  - name: an_unknown_function_suggests_a_close_name
+    variants:
+      gql: "RETURN upperr('Alix') AS name"
+      cypher: "RETURN upperr('Alix') AS name"
+    expect:
+      error: "Did you mean 'upper'?"
+      gql_status: "42002"
+
+  - name: explain_of_an_unknown_function_fails
+    variants:
+      gql: "EXPLAIN RETURN upperr('Alix') AS name"
+      cypher: "EXPLAIN RETURN upperr('Alix') AS name"
+    expect:
+      error: "Unknown function 'upperr'"
+      gql_status: "42002"
+
+  - name: explain_of_a_wrong_number_of_arguments_fails
+    variants:
+      gql: "EXPLAIN RETURN toUpper('Alix', 'Gus') AS name"
+      cypher: "EXPLAIN RETURN toUpper('Alix', 'Gus') AS name"
+    expect:
+      error: "Function 'toUpper' takes 1 argument, got 2"
+
+  - name: an_unknown_function_on_an_empty_graph_still_fails
+    variants:
+      gql: "MATCH (p:Person) RETURN upperr(p.name) AS name"
+      cypher: "MATCH (p:Person) RETURN upperr(p.name) AS name"
+    expect:
+      error: "Unknown function 'upperr'"
+      gql_status: "42002"
+
+  # ---------------------------------------------------------------------------
+  # Names resolve regardless of case
+  # ---------------------------------------------------------------------------
+
+  - name: function_names_ignore_case
+    variants:
+      gql: "RETURN TOUPPER('alix') AS a, ToUpper('gus') AS b, tolower('MIA') AS c"
+      cypher: "RETURN TOUPPER('alix') AS a, ToUpper('gus') AS b, tolower('MIA') AS c"
+    expect:
+      rows:
+        - [ALIX, GUS, mia]
+
+  # ---------------------------------------------------------------------------
+  # rand() runs per row; deterministic calls give one value
+  # ---------------------------------------------------------------------------
+
+  - name: rand_gives_a_value_per_row
+    variants:
+      gql: "UNWIND range(1, 50) AS i RETURN count(DISTINCT rand()) = 50 AS each_row"
+      cypher: "UNWIND range(1, 50) AS i RETURN count(DISTINCT rand()) = 50 AS each_row"
+    expect:
+      rows:
+        - [true]
+
+  - name: rand_is_in_the_unit_interval
+    variants:
+      gql: "UNWIND range(1, 200) AS i WITH rand() AS r RETURN min(r) >= 0 AND max(r) < 1 AS in_range"
+      cypher: "UNWIND range(1, 200) AS i WITH rand() AS r RETURN min(r) >= 0 AND max(r) < 1 AS in_range"
+    expect:
+      rows:
+        - [true]
+
+  - name: rand_in_a_write_runs_per_row
+    setup:
+      - "UNWIND range(1, 20) AS i INSERT (:Roll {i: i, v: rand()})"
+    variants:
+      gql: "MATCH (r:Roll) RETURN count(DISTINCT r.v) AS distinct_values, count(*) AS rolls"
+      cypher: "MATCH (r:Roll) RETURN count(DISTINCT r.v) AS distinct_values, count(*) AS rolls"
+    expect:
+      rows:
+        - [20, 20]
+
+  - name: a_constant_call_in_set_gives_every_row_its_value
+    setup:
+      - "INSERT (:Person {name: 'Alix'}), (:Person {name: 'Gus'}), (:Person {name: 'Vincent'})"
+    variants:
+      gql: "MATCH (p:Person) SET p.city = toUpper('amsterdam') RETURN p.name, p.city"
+      cypher: "MATCH (p:Person) SET p.city = toUpper('amsterdam') RETURN p.name, p.city"
+    expect:
+      rows:
+        - [Alix, AMSTERDAM]
+        - [Gus, AMSTERDAM]
+        - [Vincent, AMSTERDAM]
+
+  - name: a_call_on_the_row_in_set_gives_each_row_its_own_value
+    setup:
+      - "INSERT (:Person {name: 'Alix'}), (:Person {name: 'Gus'})"
+    variants:
+      gql: "MATCH (p:Person) SET p.loud = toUpper(p.name) RETURN p.loud"
+      cypher: "MATCH (p:Person) SET p.loud = toUpper(p.name) RETURN p.loud"
+    expect:
+      rows:
+        - [ALIX]
+        - [GUS]
+
+  # ---------------------------------------------------------------------------
+  # A key computed from the row finds the same rows with and without an index
+  # ---------------------------------------------------------------------------
+
+  - name: a_computed_key_finds_its_node_without_an_index
+    setup:
+      - "INSERT (:Person {name: 'alix'}), (:Person {name: 'gus'})"
+      - "INSERT (:Badge {owner: 'ALIX', city: 'Amsterdam'}), (:Badge {owner: 'GUS', city: 'Berlin'}), (:Badge {owner: 'MIA', city: 'Paris'})"
+    variants:
+      gql: "MATCH (p:Person) MATCH (b:Badge {owner: toUpper(p.name)}) RETURN p.name, b.city"
+      cypher: "MATCH (p:Person) MATCH (b:Badge {owner: toUpper(p.name)}) RETURN p.name, b.city"
+    expect:
+      rows:
+        - [alix, Amsterdam]
+        - [gus, Berlin]
+
+  - name: a_computed_key_finds_its_node_through_an_index
+    setup:
+      - "CREATE INDEX badge_owner FOR (n:Badge) ON (n.owner)"
+      - "INSERT (:Person {name: 'alix'}), (:Person {name: 'gus'})"
+      - "INSERT (:Badge {owner: 'ALIX', city: 'Amsterdam'}), (:Badge {owner: 'GUS', city: 'Berlin'}), (:Badge {owner: 'MIA', city: 'Paris'})"
+    variants:
+      gql: "MATCH (p:Person) MATCH (b:Badge {owner: toUpper(p.name)}) RETURN p.name, b.city"
+      cypher: "MATCH (p:Person) MATCH (b:Badge {owner: toUpper(p.name)}) RETURN p.name, b.city"
+    expect:
+      rows:
+        - [alix, Amsterdam]
+        - [gus, Berlin]
+
+  - name: a_key_computed_from_a_node_id_finds_its_node_through_an_index
+    setup:
+      - "CREATE INDEX doc_source FOR (n:Doc) ON (n.source)"
+      - "INSERT (:Person {name: 'Alix'})"
+      - "MATCH (p:Person) INSERT (:Doc {source: toString(id(p)), title: 'Pulp'})"
+      - "INSERT (:Doc {source: 'elsewhere', title: 'Kill'})"
+    variants:
+      gql: "MATCH (p:Person) MATCH (d:Doc {source: toString(id(p))}) RETURN p.name, d.title"
+      cypher: "MATCH (p:Person) MATCH (d:Doc {source: toString(id(p))}) RETURN p.name, d.title"
+    expect:
+      rows:
+        - [Alix, Pulp]
+
+  # ---------------------------------------------------------------------------
+  # Null arguments
+  # ---------------------------------------------------------------------------
+
+  - name: a_function_of_null_is_null
+    variants:
+      gql: "RETURN toUpper(null) AS u, abs(null) AS a, size(null) AS s, toString(null) AS t, coalesce(null, null) AS c"
+      cypher: "RETURN toUpper(null) AS u, abs(null) AS a, size(null) AS s, toString(null) AS t, coalesce(null, null) AS c"
+    expect:
+      rows:
+        - [null, null, null, null, null]
+
+  - name: a_missing_property_is_a_null_argument
+    setup:
+      - "INSERT (:Person {name: 'Alix'})"
+    variants:
+      gql: "MATCH (p:Person) RETURN toUpper(p.city) AS city, coalesce(p.city, 'Amsterdam') AS fallback"
+      cypher: "MATCH (p:Person) RETURN toUpper(p.city) AS city, coalesce(p.city, 'Amsterdam') AS fallback"
+    expect:
+      rows:
+        - [null, Amsterdam]
+
+  # ---------------------------------------------------------------------------
+  # Conversions
+  # ---------------------------------------------------------------------------
+
+  - name: conversions_of_text
+    variants:
+      gql: "RETURN toInteger('42') AS i, toInteger('Alix') AS bad_i, toFloat('1.5') AS f, toFloat('Gus') AS bad_f, toBoolean('true') AS b, toBoolean('FALSE') AS b2, toBoolean('yes') AS bad_b"
+      cypher: "RETURN toInteger('42') AS i, toInteger('Alix') AS bad_i, toFloat('1.5') AS f, toFloat('Gus') AS bad_f, toBoolean('true') AS b, toBoolean('FALSE') AS b2, toBoolean('yes') AS bad_b"
+    expect:
+      rows:
+        - [42, null, 1.5, null, true, false, null]
+
+  - name: to_integer_truncates_a_float_towards_zero
+    variants:
+      gql: "RETURN toInteger(4.9e0) AS up, toInteger(-4.9e0) AS down"
+      cypher: "RETURN toInteger(4.9) AS up, toInteger(-4.9) AS down"
+    expect:
+      rows:
+        - [4, -4]
+
+  # ---------------------------------------------------------------------------
+  # The plan cache never returns a stale result
+  # ---------------------------------------------------------------------------
+
+  - name: a_repeated_query_sees_the_writes_between
+    statements:
+      - "INSERT (:Person {name: 'Alix'})"
+      - "MATCH (p:Person) RETURN count(*) AS n"
+      - "INSERT (:Person {name: 'Gus'})"
+      - "MATCH (p:Person) RETURN count(*) AS n"
+    expect:
+      rows:
+        - [2]

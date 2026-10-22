@@ -33,7 +33,7 @@ fn test_database_can_be_opened() {
 
     // Reopen to verify persistence
     let db2 = grafeo_engine::GrafeoDB::open(&db_path).expect("reopen db");
-    let info = db2.info();
+    let info = db2.info().unwrap();
     assert!(info.is_persistent);
 }
 
@@ -43,7 +43,7 @@ fn test_database_info() {
     let db_path = temp_dir.path().join("test.grafeo");
 
     let db = create_test_db(&db_path);
-    let info = db.info();
+    let info = db.info().unwrap();
 
     assert_eq!(info.node_count, 3);
     assert_eq!(info.edge_count, 2);
@@ -56,7 +56,7 @@ fn test_database_stats() {
     let db_path = temp_dir.path().join("test.grafeo");
 
     let db = create_test_db(&db_path);
-    let stats = db.detailed_stats();
+    let stats = db.detailed_stats().unwrap();
 
     assert_eq!(stats.node_count, 3);
     assert_eq!(stats.edge_count, 2);
@@ -83,7 +83,7 @@ fn test_query_execution() {
 #[test]
 fn test_in_memory_database() {
     let db = grafeo_engine::GrafeoDB::new_in_memory();
-    let info = db.info();
+    let info = db.info().unwrap();
 
     assert!(!info.is_persistent);
     assert_eq!(info.node_count, 0);
@@ -98,12 +98,12 @@ fn test_node_and_edge_creation() {
     let n2 = db.create_node(&["Test"]).unwrap();
     let e1 = db.create_edge(n1, n2, "LINKS").unwrap();
 
-    let info = db.info();
+    let info = db.info().unwrap();
     assert_eq!(info.node_count, 2);
     assert_eq!(info.edge_count, 1);
 
     // Verify edge exists
-    let edge = db.get_edge(e1);
+    let edge = db.get_edge(e1).unwrap();
     assert!(edge.is_some());
 }
 
@@ -113,7 +113,7 @@ fn test_validate_passes_on_good_database() {
     let db_path = temp_dir.path().join("test.grafeo");
 
     let db = create_test_db(&db_path);
-    let result = db.validate();
+    let result = db.validate().unwrap();
 
     assert!(result.errors.is_empty(), "expected no validation errors");
 }
@@ -124,7 +124,7 @@ fn test_schema_inspection() {
     let db_path = temp_dir.path().join("test.grafeo");
 
     let db = create_test_db(&db_path);
-    let schema = db.schema();
+    let schema = db.schema().unwrap();
 
     match schema {
         grafeo_engine::SchemaInfo::Lpg(lpg) => {
@@ -151,16 +151,16 @@ fn test_admin_service_trait() {
     db.set_node_property(n1, "key", "value".into()).unwrap();
 
     // AdminService methods should work
-    let info = AdminService::info(&db);
+    let info = AdminService::info(&db).unwrap();
     assert_eq!(info.node_count, 1);
 
-    let stats = AdminService::detailed_stats(&db);
+    let stats = AdminService::detailed_stats(&db).unwrap();
     assert_eq!(stats.node_count, 1);
 
-    let schema = AdminService::schema(&db);
+    let schema = AdminService::schema(&db).unwrap();
     assert!(matches!(schema, grafeo_engine::SchemaInfo::Lpg(_)));
 
-    let validation = AdminService::validate(&db);
+    let validation = AdminService::validate(&db).unwrap();
     assert!(validation.errors.is_empty());
 }
 
@@ -191,7 +191,7 @@ fn test_init_creates_database() {
     let db_path = temp_dir.path().join("new.grafeo");
 
     let db = grafeo_engine::GrafeoDB::open(&db_path).expect("create db");
-    let info = db.info();
+    let info = db.info().unwrap();
     assert_eq!(info.node_count, 0);
     assert_eq!(info.edge_count, 0);
     assert!(info.is_persistent);

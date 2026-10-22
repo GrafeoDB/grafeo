@@ -98,6 +98,14 @@ if (Test-Path ".venv") {
         Write-Host "Installing solvor..." -ForegroundColor Yellow
         & uv pip install solvor 2>$null
     }
+    # The DataFrame and Arrow tests skip without these
+    foreach ($module in @("pandas", "pyarrow", "polars")) {
+        & $pythonCmd -c "import $module" 2>$null
+        if ($LASTEXITCODE -ne 0) {
+            Write-Host "Installing $module..." -ForegroundColor Yellow
+            & uv pip install $module 2>$null
+        }
+    }
 
     if (-not (Run-Check "Python Tests" "& $pythonCmd -m pytest crates/bindings/python/tests/ -v --ignore=crates/bindings/python/tests/benchmark_phases.py")) {
         $failures += "Python Tests"

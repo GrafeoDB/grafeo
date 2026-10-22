@@ -1,12 +1,41 @@
 //! ONNX Runtime embedding model implementation.
 
 use grafeo_common::utils::error::{Error, Result};
+use ort::environment::Environment;
 use ort::session::Session;
 use parking_lot::Mutex;
 use std::path::Path;
+use std::sync::OnceLock;
 use tokenizers::Tokenizer;
 
 use super::EmbeddingModel;
+
+/// The process's ONNX Runtime environment, built on first use and kept for the
+/// life of the process: ONNX Runtime allows one environment per process, and
+/// every session is built in it.
+///
+/// # Errors
+///
+/// When the environment cannot be built, for example because the application
+/// built its own ONNX Runtime environment first: Grafeo cannot share it.
+fn onnx_environment() -> Result<&'static Environment> {
+    static ENVIRONMENT: OnceLock<std::result::Result<Environment, String>> = OnceLock::new();
+    ENVIRONMENT
+        .get_or_init(|| {
+            ort::init()
+                .with_name("grafeo")
+                .build()
+                .map_err(|e| e.to_string())
+        })
+        .as_ref()
+        .map_err(|e| {
+            Error::Internal(format!(
+                "Failed to create the ONNX Runtime environment: {e} (an application that builds \
+                 its own ONNX Runtime environment cannot load Grafeo embedding models in the same \
+                 process)"
+            ))
+        })
+}
 
 /// An embedding model backed by an ONNX session and a Hugging Face tokenizer.
 ///
@@ -68,7 +97,7 @@ impl OnnxEmbeddingModel {
     ) -> Result<Self> {
         let resolved = super::download::resolve(&config)?;
 
-        let mut session = Session::builder()
+        let mut session = Session::builder(onnx_environment()?)
             .map_err(|e| Error::Internal(format!("Failed to create ONNX session builder: {e}")))?
             .with_inter_threads(options.inter_threads)
             .map_err(|e| Error::Internal(format!("Failed to set inter threads: {e}")))?
@@ -107,7 +136,7 @@ impl OnnxEmbeddingModel {
         model_path: impl AsRef<Path>,
         tokenizer_path: impl AsRef<Path>,
     ) -> Result<Self> {
-        let mut session = Session::builder()
+        let mut session = Session::builder(onnx_environment()?)
             .map_err(|e| Error::Internal(format!("Failed to create ONNX session builder: {e}")))?
             .with_inter_threads(1)
             .map_err(|e| Error::Internal(format!("Failed to set inter threads: {e}")))?

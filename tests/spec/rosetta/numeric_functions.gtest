@@ -1,0 +1,181 @@
+# Rosetta: numeric functions in GQL and Cypher
+#
+# round, ceil, floor, abs and sign on integers, floats and decimals (an
+# integer stays an integer; round takes a half away from zero); power, sqrt,
+# exp and the logarithms (a float, with IEEE results outside their domain);
+# the trigonometric functions; integer division and remainder signs.
+#
+# GQL writes a float with an exponent (2.5e0); Cypher's 2.5 is a float.
+# Values that would print as -0.0 are compared instead, since bindings print
+# a negative zero differently.
+
+meta:
+  model: lpg
+  section: rosetta
+  title: Numeric functions cross-language equivalence
+  dataset: empty
+  requires: [cypher]
+
+tests:
+
+  # ---------------------------------------------------------------------------
+  # round, ceil, floor
+  # ---------------------------------------------------------------------------
+
+  - name: round_takes_a_half_away_from_zero
+    variants:
+      gql: "RETURN round(2.5e0) AS a, round(-2.5e0) AS b, round(0.5e0) AS c, round(-0.5e0) AS d, round(2.4e0) AS e"
+      cypher: "RETURN round(2.5) AS a, round(-2.5) AS b, round(0.5) AS c, round(-0.5) AS d, round(2.4) AS e"
+    expect:
+      rows:
+        - [3, -3, 1, -1, 2]
+
+  - name: round_ceil_and_floor_keep_an_integer
+    variants:
+      gql: "RETURN round(7) AS r, ceil(7) AS c, floor(-7) AS f, round(7) + 0.5e0 AS sum"
+      cypher: "RETURN round(7) AS r, ceil(7) AS c, floor(-7) AS f, round(7) + 0.5 AS sum"
+    expect:
+      rows:
+        - [7, 7, -7, 7.5]
+
+  - name: ceil_and_floor_of_fractions
+    variants:
+      gql: "RETURN ceil(1.2e0) AS a, floor(1.8e0) AS b, ceil(-1.2e0) AS c, floor(-1.2e0) AS d, ceil(-0.5e0) = 0 AS e, floor(0.5e0) = 0 AS f"
+      cypher: "RETURN ceil(1.2) AS a, floor(1.8) AS b, ceil(-1.2) AS c, floor(-1.2) AS d, ceil(-0.5) = 0 AS e, floor(0.5) = 0 AS f"
+    expect:
+      rows:
+        - [2, 1, -1, -2, true, true]
+
+  - name: rounding_functions_of_special_floats
+    variants:
+      gql: "RETURN ceil(Infinity) AS inf, floor(-Infinity) AS neg, round(NaN) AS nan, ceil(1.0e300) = 1.0e300 AS huge"
+      cypher: "RETURN ceil(Infinity) AS inf, floor(-Infinity) AS neg, round(NaN) AS nan, ceil(1.0e300) = 1.0e300 AS huge"
+    expect:
+      rows:
+        - [Infinity, -Infinity, NaN, true]
+
+  - name: rounding_functions_of_decimals
+    variants:
+      gql: "RETURN round(toDecimal('2.5')) = 3 AS r, ceil(toDecimal('-1.2')) = -1 AS c, floor(toDecimal('-1.2')) = -2 AS f"
+      cypher: "RETURN round(toDecimal('2.5')) = 3 AS r, ceil(toDecimal('-1.2')) = -1 AS c, floor(toDecimal('-1.2')) = -2 AS f"
+    expect:
+      rows:
+        - [true, true, true]
+
+  # ---------------------------------------------------------------------------
+  # abs and sign
+  # ---------------------------------------------------------------------------
+
+  - name: abs_of_each_kind
+    variants:
+      gql: "RETURN abs(-3) AS i, abs(-2.5e0) AS f, abs(toDecimal('-1.50')) AS d, abs(-Infinity) AS inf, abs(NaN) AS nan, abs(-0.0e0) = 0 AS zero"
+      cypher: "RETURN abs(-3) AS i, abs(-2.5) AS f, abs(toDecimal('-1.50')) AS d, abs(-Infinity) AS inf, abs(NaN) AS nan, abs(-0.0) = 0 AS zero"
+    expect:
+      rows:
+        - [3, 2.5, 1.50, Infinity, NaN, true]
+
+  - name: sign_of_each_kind_is_an_integer
+    variants:
+      gql: "RETURN sign(-3) AS a, sign(0) AS b, sign(2.5e0) AS c, sign(-0.0e0) AS d, sign(toDecimal('-1.5')) AS e, sign(-Infinity) AS f"
+      cypher: "RETURN sign(-3) AS a, sign(0) AS b, sign(2.5) AS c, sign(-0.0) AS d, sign(toDecimal('-1.5')) AS e, sign(-Infinity) AS f"
+    expect:
+      rows:
+        - [-1, 0, 1, 0, -1, -1]
+
+  # ---------------------------------------------------------------------------
+  # power, sqrt, exp, logarithms
+  # ---------------------------------------------------------------------------
+
+  - name: power_gives_a_float
+    variants:
+      gql: "RETURN power(2, 10) AS a, power(2, -1) AS b, 2 ^ 3 AS c, power(0, 0) AS d, power(9, 0.5e0) AS e"
+      cypher: "RETURN power(2, 10) AS a, power(2, -1) AS b, 2 ^ 3 AS c, power(0, 0) AS d, power(9, 0.5) AS e"
+    expect:
+      rows:
+        - [1024, 0.5, 8, 1, 3]
+
+  - name: power_outside_its_domain_is_nan_or_infinite
+    variants:
+      gql: "RETURN power(-8, 1.0e0 / 3) AS root, power(0, -1) AS pole"
+      cypher: "RETURN power(-8, 1.0 / 3) AS root, power(0, -1) AS pole"
+    expect:
+      rows:
+        - [NaN, Infinity]
+
+  - name: sqrt_exp_and_logarithms
+    variants:
+      gql: "RETURN sqrt(16) AS s, exp(0) AS e, ln(1) AS l, log10(1000) AS l10, log2(8) AS l2"
+      cypher: "RETURN sqrt(16) AS s, exp(0) AS e, log(1) AS l, log10(1000) AS l10, log2(8) AS l2"
+    expect:
+      rows:
+        - [4, 1, 0, 3, 3]
+
+  - name: logarithms_and_sqrt_outside_their_domain
+    variants:
+      gql: "RETURN ln(0) AS zero, ln(-1) AS negative, sqrt(-1) AS root"
+      cypher: "RETURN log(0) AS zero, log(-1) AS negative, sqrt(-1) AS root"
+    expect:
+      rows:
+        - [-Infinity, NaN, NaN]
+
+  - name: functions_of_decimals_that_give_a_float
+    variants:
+      gql: "RETURN sqrt(toDecimal('2.25')) AS s, power(toDecimal('1.5'), 2) AS p"
+      cypher: "RETURN sqrt(toDecimal('2.25')) AS s, power(toDecimal('1.5'), 2) AS p"
+    expect:
+      rows:
+        - [1.5, 2.25]
+
+  # ---------------------------------------------------------------------------
+  # Trigonometry
+  # ---------------------------------------------------------------------------
+
+  - name: trigonometric_functions
+    variants:
+      gql: "RETURN sin(0) AS s, cos(0) AS c, tan(0) AS t, degrees(pi()) AS deg, radians(180) = pi() AS rad, atan2(1, 1) = pi() / 4 AS quarter"
+      cypher: "RETURN sin(0) AS s, cos(0) AS c, tan(0) AS t, degrees(pi()) AS deg, radians(180) = pi() AS rad, atan2(1, 1) = pi() / 4 AS quarter"
+    expect:
+      rows:
+        - [0, 1, 0, 180, true, true]
+
+  - name: the_constants_pi_and_e
+    variants:
+      gql: "RETURN pi() > 3.14159e0 AND pi() < 3.1416e0 AS pi, e() > 2.71828e0 AND e() < 2.7183e0 AS e, exp(1) = e() AS exp_one"
+      cypher: "RETURN pi() > 3.14159 AND pi() < 3.1416 AS pi, e() > 2.71828 AND e() < 2.7183 AS e, exp(1) = e() AS exp_one"
+    expect:
+      rows:
+        - [true, true, true]
+
+  # ---------------------------------------------------------------------------
+  # Integer division and remainder
+  # ---------------------------------------------------------------------------
+
+  - name: integer_division_and_remainder_follow_the_dividend_sign
+    variants:
+      gql: "RETURN 5 / 2 AS a, -5 / 2 AS b, 5 % -3 AS c, -5 % 3 AS d, 5.0e0 % 3 AS e"
+      cypher: "RETURN 5 / 2 AS a, -5 / 2 AS b, 5 % -3 AS c, -5 % 3 AS d, 5.0 % 3 AS e"
+    expect:
+      rows:
+        - [2, -2, 2, -2, 2]
+
+  # ---------------------------------------------------------------------------
+  # Known gaps
+  # ---------------------------------------------------------------------------
+
+  - name: to_integer_of_nan_is_null
+    skip: "toInteger(NaN) gives 0 and toInteger(Infinity) the largest integer (inbox value-kinds/numeric-error-followups-from-639.md)"
+    variants:
+      gql: "RETURN toInteger(NaN) AS nan, toInteger(Infinity) AS inf"
+      cypher: "RETURN toInteger(NaN) AS nan, toInteger(Infinity) AS inf"
+    expect:
+      rows:
+        - [null, null]
+
+  - name: to_string_of_infinity
+    skip: "toString(Infinity) is 'inf' while toString(NaN) is 'NaN' (inbox value-kinds/numeric-error-followups-from-639.md)"
+    variants:
+      gql: "RETURN toString(Infinity) AS pos, toString(-Infinity) AS neg, toString(NaN) AS nan"
+      cypher: "RETURN toString(Infinity) AS pos, toString(-Infinity) AS neg, toString(NaN) AS nan"
+    expect:
+      rows:
+        - [Infinity, -Infinity, NaN]

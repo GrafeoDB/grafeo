@@ -13,8 +13,9 @@
 //! cargo test -p grafeo-engine --all-features --test overlay_vector_index
 //! ```
 
-#![cfg(all(feature = "lpg", feature = "gql", feature = "vector-index"))]
+#![cfg(all(feature = "gql", feature = "vector-index"))]
 
+use grafeo_common::types::ReadView;
 use grafeo_common::types::{NodeId, Value};
 use grafeo_engine::GrafeoDB;
 
@@ -93,6 +94,7 @@ fn within(db: &GrafeoDB, query: [f32; 2], distance: f32) -> Vec<String> {
 
 fn name_of(db: &GrafeoDB, id: NodeId) -> String {
     db.get_node(id)
+        .unwrap()
         .and_then(|node| node.get_property("name")?.as_str().map(str::to_string))
         .unwrap_or_else(|| format!("{id:?}"))
 }
@@ -244,7 +246,7 @@ fn a_search_without_an_index_of_its_metric_scans_both_layers() {
         "a compacted node and a later one"
     );
 
-    let store = db.graph_store();
+    let store = db.snapshot().unwrap();
     let found: Vec<String> = store
         .vector_search_with_threshold(
             Some("Person"),
@@ -252,7 +254,9 @@ fn a_search_without_an_index_of_its_metric_scans_both_layers() {
             &[3.0, 3.0],
             19.0,
             DistanceMetric::Euclidean,
+            ReadView::latest(),
         )
+        .unwrap()
         .into_iter()
         .map(|(id, _)| name_of(&db, id))
         .collect();

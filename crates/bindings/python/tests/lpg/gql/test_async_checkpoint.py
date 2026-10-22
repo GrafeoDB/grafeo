@@ -71,7 +71,7 @@ class TestAsyncCheckpoint:
                 "INSERT (:Thing {"
                 "  str_val: 'hello', "
                 "  int_val: 42, "
-                "  float_val: 3.14, "
+                "  float_val: 3.14e0, "
                 "  bool_val: true, "
                 "  list_val: [1, 2, 3]"
                 "})"

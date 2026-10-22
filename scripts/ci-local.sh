@@ -82,6 +82,13 @@ if [[ -d ".venv" ]]; then
         echo -e "${YELLOW}Installing solvor...${NC}"
         uv pip install solvor 2>/dev/null || pip install solvor
     }
+    # The DataFrame and Arrow tests skip without these
+    for module in pandas pyarrow polars; do
+        $PYTHON_CMD -c "import $module" 2>/dev/null || {
+            echo -e "${YELLOW}Installing $module...${NC}"
+            uv pip install "$module" 2>/dev/null || pip install "$module"
+        }
+    done
 
     run_check "Python Tests" "$PYTHON_CMD -m pytest crates/bindings/python/tests/ -v --ignore=crates/bindings/python/tests/benchmark_phases.py"
 else

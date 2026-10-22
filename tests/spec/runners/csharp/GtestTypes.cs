@@ -23,6 +23,7 @@ public sealed class Expect
     public int? Count { get; set; }
     public bool Empty { get; set; }
     public string? Error { get; set; }
+    public string? GqlStatus { get; set; }
     public string? Hash { get; set; }
     public int? Precision { get; set; }
     public List<string> Columns { get; set; } = [];

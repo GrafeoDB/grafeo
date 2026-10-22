@@ -12,10 +12,21 @@ Up to 0.5.44, `compact()` converted the default graph into a separate columnar s
 read-only base, with an overlay on top that took the writes made after it. Since 0.6.0 a
 database keeps one store. `compact()` writes a checkpoint of a persistent database (an
 in-memory or read-only one writes none), drops the old versions no open transaction can see
-any more, in every graph, and reports what it did: whether it wrote a checkpoint, how many
-versions it dropped, and how long it took. Writes after it are logged and recovered like
-any other, and transactions, indexes and named graphs work the same before and after it.
-`recompact()` (Rust) is a deprecated alias of `compact()`.
+any more, in every graph, then compresses the property values the graphs hold decoded in
+memory, and reports what it did: whether it wrote a checkpoint, how many versions it
+dropped, how many nodes and edges it compressed values of, and how long it took. Writes
+after it are logged and recovered like any other, and transactions, indexes and named
+graphs work the same before and after it. `recompact()` (Rust) is a deprecated alias of
+`compact()`.
+
+Compression encodes each row group's property columns as a database file holds them, kept
+in memory: numbers, booleans and the like are read from the encoded form without decoding
+it, so the memory they take drops, in a database file and in memory alike. Every read
+returns what it returned before, at every point in time a transaction or a time-travel read
+looks at. A column goes back to its decoded form when it is written, until the next
+`compact()`. A column whose earlier values an open transaction may still read stays
+decoded, and so do text and mixed-type columns, which cannot be read without decoding them
+whole.
 
 === "Python"
 
@@ -25,7 +36,7 @@ any other, and transactions, indexes and named graphs work the same before and a
     db = grafeo.GrafeoDB("people.grafeo")
     db.execute("INSERT (:Person {name: 'Alix', age: 30})")
     report = db.compact()
-    # {'checkpointed': True, 'versions_collected': 0, 'duration_ms': 4}
+    # {'checkpointed': True, 'versions_collected': 0, 'rows_compressed': 1, 'duration_ms': 4}
     db.execute("INSERT (:Person {name: 'Gus', age: 25})")
     ```
 

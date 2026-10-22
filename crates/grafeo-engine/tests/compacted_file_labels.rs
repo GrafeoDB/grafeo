@@ -27,11 +27,11 @@
 #![cfg(all(
     feature = "grafeo-file",
     feature = "wal",
-    feature = "lpg",
     feature = "gql",
     feature = "cypher"
 ))]
 
+use grafeo_common::types::ReadView;
 use std::path::{Path, PathBuf};
 
 use grafeo_common::types::Value;
@@ -184,7 +184,7 @@ fn assert_each_label_reads_its_nodes(db: &GrafeoDB, stage: &str, nodes: &[(&str,
     assert_eq!(all, expected, "{stage}: the nodes and their labels");
 
     // A scan and a count per label, through the query and the store.
-    let store = db.graph_store();
+    let store = db.snapshot().unwrap();
     for label in LABELS {
         let names = named_with(nodes, &[label]);
         assert_eq!(
@@ -204,13 +204,21 @@ fn assert_each_label_reads_its_nodes(db: &GrafeoDB, stage: &str, nodes: &[(&str,
             expected,
             "{stage}: a {label} count"
         );
+        // The store's label lists without a view hold every version's
+        // members for a reader to check; at the database's epoch they hold
+        // the label's nodes then.
         assert_eq!(
-            store.nodes_by_label(label).len(),
+            store
+                .nodes_by_label(label, ReadView::committed(db.current_epoch()))
+                .unwrap()
+                .len(),
             names.len(),
             "{stage}: the store's {label} index"
         );
         assert_eq!(
-            store.nodes_by_label_count(label),
+            store
+                .nodes_by_label_count(label, ReadView::latest())
+                .unwrap(),
             names.len(),
             "{stage}: the store's {label} count"
         );
@@ -268,8 +276,12 @@ fn assert_the_listed_labels(db: &GrafeoDB, stage: &str, nodes: &[(&str, &[&str])
         .collect();
     listed.sort();
     assert_eq!(listed, LISTED, "{stage}: CALL db.labels()");
-    assert_eq!(db.label_count(), LISTED.len(), "{stage}: label_count()");
-    let SchemaInfo::Lpg(schema) = db.schema() else {
+    assert_eq!(
+        db.label_count().unwrap(),
+        LISTED.len(),
+        "{stage}: label_count()"
+    );
+    let SchemaInfo::Lpg(schema) = db.schema().unwrap() else {
         panic!("{stage}: an LPG schema");
     };
     let mut counts: Vec<(String, usize)> = schema

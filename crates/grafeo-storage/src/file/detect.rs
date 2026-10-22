@@ -134,9 +134,22 @@ pub fn sidecar_wal_path(path: &Path) -> PathBuf {
     with_suffix(path, ".wal")
 }
 
+/// The size of a WAL segment's header (`wal::SEGMENT_HEADER_BYTES`), for
+/// builds without the `wal` feature: a segment no longer holds frames.
+pub const WAL_SEGMENT_HEADER_BYTES: u64 = 128;
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(feature = "wal")]
+    #[test]
+    fn the_segment_header_size_is_the_wal_s() {
+        assert_eq!(
+            WAL_SEGMENT_HEADER_BYTES,
+            crate::wal::SEGMENT_HEADER_BYTES as u64
+        );
+    }
     use crate::file::v3::header::FileHeaderV3;
 
     fn fixture(version: &str, name: &str) -> PathBuf {

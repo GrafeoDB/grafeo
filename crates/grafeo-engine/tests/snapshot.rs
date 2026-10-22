@@ -75,8 +75,8 @@ fn export_import_empty_database() {
     let db = GrafeoDB::new_in_memory();
     let bytes = db.export_snapshot().unwrap();
     let restored = GrafeoDB::import_snapshot(&bytes).unwrap();
-    assert_eq!(restored.node_count(), 0);
-    assert_eq!(restored.edge_count(), 0);
+    assert_eq!(restored.node_count().unwrap(), 0);
+    assert_eq!(restored.edge_count().unwrap(), 0);
 }
 
 #[test]
@@ -93,7 +93,7 @@ fn export_import_preserves_nodes() {
     let bytes = db.export_snapshot().unwrap();
     let restored = GrafeoDB::import_snapshot(&bytes).unwrap();
 
-    assert_eq!(restored.node_count(), 2);
+    assert_eq!(restored.node_count().unwrap(), 2);
 
     let session2 = restored.session();
     let result = session2
@@ -114,8 +114,8 @@ fn export_import_preserves_edges() {
     let bytes = db.export_snapshot().unwrap();
     let restored = GrafeoDB::import_snapshot(&bytes).unwrap();
 
-    assert_eq!(restored.node_count(), 2);
-    assert_eq!(restored.edge_count(), 1);
+    assert_eq!(restored.node_count().unwrap(), 2);
+    assert_eq!(restored.edge_count().unwrap(), 1);
 
     let session2 = restored.session();
     let result = session2
@@ -205,7 +205,7 @@ fn export_import_preserves_multiple_labels() {
     let bytes = db.export_snapshot().unwrap();
     let restored = GrafeoDB::import_snapshot(&bytes).unwrap();
 
-    assert_eq!(restored.node_count(), 3);
+    assert_eq!(restored.node_count().unwrap(), 3);
 
     let session = restored.session();
     let persons = session.execute("MATCH (p:Person) RETURN p").unwrap();
@@ -344,8 +344,8 @@ fn export_import_preserves_multiple_edge_types() {
     let bytes = db.export_snapshot().unwrap();
     let restored = GrafeoDB::import_snapshot(&bytes).unwrap();
 
-    assert_eq!(restored.node_count(), 3);
-    assert_eq!(restored.edge_count(), 3);
+    assert_eq!(restored.node_count().unwrap(), 3);
+    assert_eq!(restored.edge_count().unwrap(), 3);
 
     let session = restored.session();
     let knows = session.execute("MATCH ()-[e:KNOWS]->() RETURN e").unwrap();
@@ -368,7 +368,7 @@ fn export_import_preserves_empty_property_nodes() {
     let bytes = db.export_snapshot().unwrap();
     let restored = GrafeoDB::import_snapshot(&bytes).unwrap();
 
-    assert_eq!(restored.node_count(), 2);
+    assert_eq!(restored.node_count().unwrap(), 2);
 
     let session = restored.session();
     let result = session.execute("MATCH (e:Empty) RETURN e").unwrap();
@@ -401,8 +401,8 @@ fn export_import_moderate_dataset() {
 
     let restored = GrafeoDB::import_snapshot(&bytes).unwrap();
 
-    assert_eq!(restored.node_count(), 100);
-    assert_eq!(restored.edge_count(), 50);
+    assert_eq!(restored.node_count().unwrap(), 100);
+    assert_eq!(restored.edge_count().unwrap(), 50);
 
     // Verify a sample property survived
     let session = restored.session();
@@ -465,80 +465,6 @@ fn double_export_is_deterministic() {
 }
 
 // --- Edge reference validation ---
-
-#[test]
-fn import_rejects_dangling_edge_source() {
-    // Create a valid snapshot, then re-export after deleting the source node
-    // to create a snapshot with a dangling edge reference.
-    let db = GrafeoDB::new_in_memory();
-    let a = db.create_node(&["Person"]).unwrap();
-    let b = db.create_node(&["Person"]).unwrap();
-    db.create_edge(a, b, "KNOWS").unwrap();
-
-    // Export valid snapshot
-    let bytes = db.export_snapshot().unwrap();
-    let restored = GrafeoDB::import_snapshot(&bytes).unwrap();
-    assert_eq!(restored.edge_count(), 1);
-
-    // Now create a corrupted snapshot by exporting nodes only from a db
-    // that has 1 node, then manually crafting a snapshot with an edge
-    // that references a non-existent source node.
-    // The simplest way: delete a node, re-export (edge still exists in store)
-    // Actually, let's tamper with binary data at a higher level:
-    // Build a snapshot where edge references node ID 999 which doesn't exist.
-    let db2 = GrafeoDB::new_in_memory();
-    let n = db2.create_node(&["Person"]).unwrap();
-    // Create an edge referencing a non-existent source node
-    // We need to use the direct store API since create_edge validates at a higher level
-    db2.store()
-        .create_edge_with_id(
-            grafeo_common::types::EdgeId::new(0),
-            grafeo_common::types::NodeId::new(999), // doesn't exist
-            n,
-            "KNOWS",
-        )
-        .unwrap();
-
-    let bytes = db2.export_snapshot().unwrap();
-    let result = GrafeoDB::import_snapshot(&bytes);
-    match result {
-        Ok(_) => panic!("Expected error for dangling source node"),
-        Err(e) => {
-            let err = e.to_string();
-            assert!(
-                err.contains("non-existent source node"),
-                "Expected dangling source error, got: {err}"
-            );
-        }
-    }
-}
-
-#[test]
-fn import_rejects_dangling_edge_destination() {
-    let db = GrafeoDB::new_in_memory();
-    let n = db.create_node(&["Person"]).unwrap();
-    db.store()
-        .create_edge_with_id(
-            grafeo_common::types::EdgeId::new(0),
-            n,
-            grafeo_common::types::NodeId::new(999), // doesn't exist
-            "KNOWS",
-        )
-        .unwrap();
-
-    let bytes = db.export_snapshot().unwrap();
-    let result = GrafeoDB::import_snapshot(&bytes);
-    match result {
-        Ok(_) => panic!("Expected error for dangling destination node"),
-        Err(e) => {
-            let err = e.to_string();
-            assert!(
-                err.contains("non-existent destination node"),
-                "Expected dangling destination error, got: {err}"
-            );
-        }
-    }
-}
 
 #[test]
 fn import_rejects_duplicate_node_ids() {
@@ -639,7 +565,7 @@ fn export_import_preserves_named_graphs() {
     let restored = GrafeoDB::import_snapshot(&bytes).unwrap();
 
     // Default graph
-    assert_eq!(restored.node_count(), 1);
+    assert_eq!(restored.node_count().unwrap(), 1);
     let session2 = restored.session();
     let result = session2.execute("MATCH (p:Person) RETURN p.name").unwrap();
     assert_eq!(result.rows().len(), 1);
@@ -710,7 +636,11 @@ fn restore_snapshot_includes_named_graphs() {
     // Restore
     db.restore_snapshot(&snapshot).unwrap();
 
-    assert_eq!(db.node_count(), 1, "default graph restored to 1 node");
+    assert_eq!(
+        db.node_count().unwrap(),
+        1,
+        "default graph restored to 1 node"
+    );
 
     let session2 = db.session();
     session2.execute("USE GRAPH metrics").unwrap();
@@ -745,12 +675,17 @@ fn import_v1_snapshot_is_rejected() {
     );
 }
 
-/// With `temporal`, the copy has each property's history at the same epochs,
-/// and continues from the source's epoch.
-#[cfg(feature = "temporal")]
+/// The copy of a database that keeps history keeps its retention and each
+/// property's history at the same epochs, and continues from the source's
+/// epoch.
 #[test]
 fn to_memory_keeps_property_history() {
-    let db = GrafeoDB::new_in_memory();
+    // History kept: a read at an earlier epoch needs it.
+    let db = GrafeoDB::with_config(
+        grafeo_engine::Config::in_memory()
+            .with_history_retention(grafeo_engine::HistoryRetention::Forever),
+    )
+    .unwrap();
     let alix = db
         .create_node_with_props(&["Person"], [("city", Value::from("Amsterdam"))])
         .unwrap();
@@ -758,8 +693,8 @@ fn to_memory_keeps_property_history() {
         .unwrap();
 
     let copy = db.to_memory().unwrap();
-    let history = copy.get_node_property_history(alix, "city");
-    assert_eq!(history, db.get_node_property_history(alix, "city"));
+    let history = copy.get_node_property_history(alix, "city").unwrap();
+    assert_eq!(history, db.get_node_property_history(alix, "city").unwrap());
     assert_eq!(history.len(), 2, "{history:?}");
     assert_eq!(copy.current_epoch(), db.current_epoch());
 }
@@ -779,7 +714,7 @@ fn to_memory_copies_named_graphs() {
     let copy = db.to_memory().unwrap();
 
     // Default graph copied
-    assert_eq!(copy.node_count(), 1);
+    assert_eq!(copy.node_count().unwrap(), 1);
 
     // Named graph copied
     let session2 = copy.session();

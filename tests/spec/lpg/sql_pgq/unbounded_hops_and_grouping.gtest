@@ -1,0 +1,125 @@
+# SQL/PGQ: an unbounded variable-length edge, the SELECT items of a GROUP BY,
+# and the number of arguments of an aggregate. `-[:T*]->` is one or more hops
+# (it matched exactly one); with GROUP BY a SELECT item reads only grouping
+# keys, an expression of them or a constant (ISO/IEC 9075-2; another column
+# became one more key and split the groups); an aggregate takes its number of
+# arguments.
+#
+# The dataset's KNOWS edges run Alix -> Gus -> Vincent.
+
+meta:
+  language: sql-pgq
+  model: lpg
+  title: Unbounded hops, GROUP BY items and aggregate arguments
+  dataset: social_network
+
+tests:
+
+  # ---------------------------------------------------------------------------
+  # Unbounded hops
+  # ---------------------------------------------------------------------------
+
+  - name: an_unbounded_edge_is_one_or_more_hops
+    query: |
+      SELECT g.name FROM GRAPH_TABLE (
+        MATCH (a:Person {name: 'Alix'})-[:KNOWS*]->(b:Person)
+        COLUMNS (b.name AS name)
+      ) AS g ORDER BY g.name
+    expect:
+      ordered: true
+      rows:
+        - [Gus]
+        - [Vincent]
+
+  - name: an_unbounded_edge_reads_as_one_or_more
+    query: |
+      SELECT g.name FROM GRAPH_TABLE (
+        MATCH (a:Person {name: 'Alix'})-[:KNOWS*1..]->(b:Person)
+        COLUMNS (b.name AS name)
+      ) AS g ORDER BY g.name
+    expect:
+      ordered: true
+      rows:
+        - [Gus]
+        - [Vincent]
+
+  - name: a_lower_bound_only
+    query: |
+      SELECT g.name FROM GRAPH_TABLE (
+        MATCH (a:Person {name: 'Alix'})-[:KNOWS*2..]->(b:Person)
+        COLUMNS (b.name AS name)
+      ) AS g
+    expect:
+      rows:
+        - [Vincent]
+
+  - name: an_unbounded_edge_from_the_end_of_the_chain_finds_nothing
+    query: |
+      SELECT g.name FROM GRAPH_TABLE (
+        MATCH (a:Person {name: 'Vincent'})-[:KNOWS*]->(b:Person)
+        COLUMNS (b.name AS name)
+      ) AS g
+    expect:
+      empty: true
+
+  # ---------------------------------------------------------------------------
+  # SELECT items of a GROUP BY
+  # ---------------------------------------------------------------------------
+
+  - name: an_item_outside_group_by_is_refused
+    query: |
+      SELECT g.city, g.name, COUNT(*) AS c FROM GRAPH_TABLE (
+        MATCH (p:Person)
+        COLUMNS (p.city AS city, p.name AS name)
+      ) AS g GROUP BY g.city
+    expect:
+      error: "neither in GROUP BY nor in an aggregate"
+
+  - name: an_expression_of_the_key_and_a_constant_are_accepted
+    query: |
+      SELECT g.city, UPPER(g.city) AS loud, 1 AS one, COUNT(*) AS c FROM GRAPH_TABLE (
+        MATCH (p:Person)
+        COLUMNS (p.city AS city)
+      ) AS g GROUP BY g.city ORDER BY g.city
+    expect:
+      ordered: true
+      rows:
+        - [Amsterdam, AMSTERDAM, 1, 1]
+        - [Berlin, BERLIN, 1, 1]
+        - [Paris, PARIS, 1, 1]
+
+  - name: an_item_over_a_computed_key
+    # Alix 4, Gus 3, Vincent 7 letters.
+    query: |
+      SELECT CHAR_LENGTH(g.name) + 1 AS l, COUNT(*) AS c FROM GRAPH_TABLE (
+        MATCH (p:Person)
+        COLUMNS (p.name AS name)
+      ) AS g GROUP BY CHAR_LENGTH(g.name) ORDER BY l
+    expect:
+      ordered: true
+      rows:
+        - [4, 1]
+        - [5, 1]
+        - [8, 1]
+
+  # ---------------------------------------------------------------------------
+  # Number of arguments
+  # ---------------------------------------------------------------------------
+
+  - name: sum_without_an_argument_is_refused
+    query: |
+      SELECT SUM() AS s FROM GRAPH_TABLE (
+        MATCH (p:Person)
+        COLUMNS (p.age AS age)
+      ) AS g
+    expect:
+      error: "Function 'SUM' takes 1 argument, got 0"
+
+  - name: count_with_two_arguments_is_refused
+    query: |
+      SELECT COUNT(g.age, g.age) AS c FROM GRAPH_TABLE (
+        MATCH (p:Person)
+        COLUMNS (p.age AS age)
+      ) AS g
+    expect:
+      error: "takes 0 or 1 arguments, got 2"

@@ -20,19 +20,18 @@ use crate::query::QueryResult;
 use crate::transaction::Transaction;
 use crate::types;
 
-/// Converts a serde_json filter map to a Grafeo filter map.
+/// The property filters of a search, converted by [`types::js_to_value`]
+/// when the call is made.
 fn convert_json_filters(
-    filters: Option<HashMap<String, serde_json::Value>>,
+    filters: Option<types::Properties>,
 ) -> Result<Option<HashMap<String, Value>>> {
-    let Some(map) = filters else {
-        return Ok(None);
-    };
-    let mut result = HashMap::new();
-    for (key, val) in &map {
-        let grafeo_val = json_to_value(val)?;
-        result.insert(key.clone(), grafeo_val);
-    }
-    Ok(Some(result))
+    filters
+        .map(|filters| {
+            filters
+                .into_entries()
+                .map(|entries| entries.into_iter().collect())
+        })
+        .transpose()
 }
 
 /// A JavaScript number as an unsigned 64-bit id: a whole number from 0 to
@@ -46,14 +45,14 @@ fn whole_id(value: f64) -> Option<u64> {
 }
 
 /// Validate a JavaScript number as a node ID (see [`whole_id`]).
-fn validate_node_id(id: f64) -> Result<NodeId> {
+pub(crate) fn validate_node_id(id: f64) -> Result<NodeId> {
     whole_id(id)
         .map(NodeId)
         .ok_or_else(|| NodeGrafeoError::InvalidArgument(format!("Invalid node ID: {id}")).into())
 }
 
 /// Validate a JavaScript number as an edge ID (see [`whole_id`]).
-fn validate_edge_id(id: f64) -> Result<EdgeId> {
+pub(crate) fn validate_edge_id(id: f64) -> Result<EdgeId> {
     whole_id(id)
         .map(EdgeId)
         .ok_or_else(|| NodeGrafeoError::InvalidArgument(format!("Invalid edge ID: {id}")).into())
@@ -72,6 +71,92 @@ pub struct JsGrafeoDB {
     inner: Arc<RwLock<GrafeoDB>>,
 }
 
+/// Options for `getNodeEdges`.
+#[napi(object)]
+pub struct NodeEdgesOptions {
+    /// `"out"` (default), `"in"` or `"both"`.
+    pub direction: Option<String>,
+    /// Only edges of these types (default: every type).
+    pub edge_types: Option<Vec<String>>,
+}
+
+/// The direction and edge types of `getNodeEdges`, defaults filled in.
+fn node_edges_options(
+    options: Option<NodeEdgesOptions>,
+) -> Result<(grafeo_engine::Direction, Vec<String>)> {
+    let (direction, edge_types) = options.map_or((None, None), |options| {
+        (options.direction, options.edge_types)
+    });
+    let direction = match direction.as_deref() {
+        None | Some("out" | "outgoing") => grafeo_engine::Direction::Outgoing,
+        Some("in" | "incoming") => grafeo_engine::Direction::Incoming,
+        Some("both") => grafeo_engine::Direction::Both,
+        Some(other) => {
+            return Err(NodeGrafeoError::InvalidArgument(format!(
+                "direction must be 'out', 'in' or 'both', not '{other}'"
+            ))
+            .into());
+        }
+    };
+    Ok((direction, edge_types.unwrap_or_default()))
+}
+
+/// `[neighborId, edgeId]` pairs for JavaScript.
+fn edge_pairs(edges: Vec<(NodeId, EdgeId)>) -> Vec<Vec<f64>> {
+    edges
+        .into_iter()
+        .map(|(neighbor, edge)| vec![js_number(neighbor.as_u64()), js_number(edge.as_u64())])
+        .collect()
+}
+
+/// When a database checkpoints by itself (`GrafeoDB.setCheckpointTriggers`).
+#[napi(object)]
+pub struct CheckpointTriggers {
+    /// Checkpoint every this many milliseconds.
+    pub interval_ms: Option<f64>,
+    /// Checkpoint once the WAL holds this many bytes since the last
+    /// checkpoint.
+    pub wal_bytes: Option<f64>,
+}
+
+/// How the automatic checkpoints fare (`GrafeoDB.checkpointStatus`).
+#[napi(object)]
+pub struct CheckpointStatus {
+    /// The interval trigger in milliseconds, absent when off.
+    pub interval_ms: Option<f64>,
+    /// The WAL size trigger in bytes, absent when off.
+    pub wal_bytes: Option<f64>,
+    /// When the last checkpoint of any kind finished (Unix seconds).
+    pub last_checkpoint: Option<f64>,
+    /// Automatic checkpoints that failed since the last that succeeded.
+    pub failures: f64,
+    /// The error of the last failed automatic checkpoint.
+    pub last_error: Option<String>,
+    /// When it failed (Unix seconds).
+    pub last_failure: Option<f64>,
+    /// Whether no automatic checkpoint can succeed until a reopen.
+    pub stopped: bool,
+}
+
+/// `value` as a JavaScript number: exact up to `Number.MAX_SAFE_INTEGER`, at
+/// which it stops.
+fn js_number(value: u64) -> f64 {
+    const MAX_SAFE_INTEGER: u64 = (1 << 53) - 1;
+    #[allow(
+        clippy::cast_precision_loss,
+        reason = "clamped to 2^53 - 1, which an f64 holds exactly"
+    )]
+    let number = value.min(MAX_SAFE_INTEGER) as f64;
+    number
+}
+
+/// A JavaScript number as a whole, positive count of `what`.
+fn whole_count(value: f64, what: &str) -> Result<u64> {
+    whole_id(value).ok_or_else(|| {
+        NodeGrafeoError::InvalidArgument(format!("{what} must be a whole number: {value}")).into()
+    })
+}
+
 /// Options for `GrafeoDB.create`.
 #[napi(object)]
 pub struct CreateOptions {
@@ -79,6 +164,17 @@ pub struct CreateOptions {
     /// (default `false`): a test option that finds code relying on a row
     /// order that is unspecified.
     pub shuffle_unordered: Option<bool>,
+    /// Open a database whose WAL has damage before its end, which an open
+    /// refuses, with the commits before the damage (default `false`); what
+    /// it does not replay is kept in `<path>.wal.damaged`. For this open
+    /// only.
+    pub wal_salvage: Option<bool>,
+    /// Keep the database's history for time-travel reads (`asOf`,
+    /// `executeAsOf`): `'off'` (the default for a new database),
+    /// `'forever'`, or a number of milliseconds, how far back it reaches. A
+    /// database file stores it; leave it out to keep the stored one.
+    #[napi(ts_type = "'off' | 'forever' | number")]
+    pub history_retention: Option<Either<String, f64>>,
 }
 
 #[napi]
@@ -87,7 +183,8 @@ impl JsGrafeoDB {
     ///
     /// `options.shuffleUnordered` returns the rows of every query without
     /// ORDER BY in random order: for tests, to find code that relies on a row
-    /// order that is unspecified.
+    /// order that is unspecified. `options.walSalvage` opens a database whose
+    /// WAL is damaged with the commits before the damage.
     #[napi(factory)]
     pub fn create(path: Option<String>, options: Option<CreateOptions>) -> Result<Self> {
         let config = match path {
@@ -95,9 +192,20 @@ impl JsGrafeoDB {
             None => Config::in_memory(),
         };
         let shuffle_unordered = options
+            .as_ref()
             .and_then(|options| options.shuffle_unordered)
             .unwrap_or(false);
-        let config = config.with_shuffle_unordered(shuffle_unordered);
+        let mut config = config.with_shuffle_unordered(shuffle_unordered);
+        let (wal_salvage, history_retention) = options.map_or((None, None), |options| {
+            (options.wal_salvage, options.history_retention)
+        });
+        if wal_salvage.unwrap_or(false) {
+            config = config.with_wal_salvage();
+        }
+        if let Some(retention) = history_retention {
+            config =
+                config.with_history_retention(crate::time_travel::history_retention(retention)?);
+        }
         let db = GrafeoDB::with_config(config).map_err(NodeGrafeoError::from)?;
         Ok(Self {
             inner: Arc::new(RwLock::new(db)),
@@ -134,32 +242,87 @@ impl JsGrafeoDB {
         &self,
         language: &'static str,
         query: String,
-        params: Option<serde_json::Value>,
+        params: Option<types::Params>,
     ) -> Result<QueryResult> {
+        let params = params.map(types::Params::into_map).transpose()?;
         let db = self.inner.clone();
-        let mut result = tokio::task::spawn_blocking(move || {
+        let result = tokio::task::spawn_blocking(move || {
             let db = db.read();
-            execute_language_query(&db, &query, language, params.as_ref())
+            execute_language_query(&db, &query, language, params)
         })
         .await
         .map_err(|e| napi::Error::from_reason(e.to_string()))??;
 
-        let db = self.inner.read();
-        let (nodes, edges) = extract_entities(&result, &db);
-        let columns = std::mem::take(&mut result.columns);
-        let exec_time = result.execution_time_ms;
-        let scanned = result.rows_scanned;
-        let counters = result.counters;
+        Ok(js_result(result))
+    }
 
-        Ok(QueryResult::with_metrics(
-            columns,
-            result.into_rows(),
-            nodes,
-            edges,
-            exec_time,
-            scanned,
-        )
-        .with_counters(counters))
+    /// The epoch of the last commit, as a `bigint`: a point for `asOf`.
+    #[napi(js_name = "currentEpoch")]
+    pub fn current_epoch(&self) -> BigInt {
+        crate::time_travel::epoch_bigint(self.inner.read().current_epoch())
+    }
+
+    /// A read-only view of the database as it was at `point`: a `bigint`
+    /// (an epoch), a `Date` (the state the last commit at or before it
+    /// left) or `{ ago: milliseconds }`. A `number` is a `TypeError`. It
+    /// keeps the history it reads while open: `close()` it when done.
+    ///
+    /// Throws for a point before the history the database keeps (see
+    /// `historyRetention`).
+    #[napi(
+        js_name = "asOf",
+        ts_args_type = "point: bigint | Date | { ago: number }",
+        ts_return_type = "AsOfView"
+    )]
+    pub fn as_of(&self, env: Env, point: Unknown<'_>) -> Result<crate::time_travel::JsAsOfView> {
+        let point = crate::time_travel::time_point(env, point)?;
+        let view = self
+            .inner
+            .read()
+            .as_of(point)
+            .map_err(NodeGrafeoError::from)?;
+        Ok(crate::time_travel::JsAsOfView::new(
+            Arc::clone(&self.inner),
+            view,
+        ))
+    }
+
+    /// Runs a GQL query as the database was at `point` (as `asOf` reads
+    /// it). Returns a Promise<QueryResult>.
+    #[napi(
+        js_name = "executeAsOf",
+        ts_args_type = "query: string, point: bigint | Date | { ago: number }, params?: Record<string, unknown> | undefined | null",
+        ts_return_type = "Promise<QueryResult>"
+    )]
+    pub fn execute_as_of(
+        &self,
+        env: Env,
+        query: String,
+        point: Unknown<'_>,
+        params: Option<types::Params>,
+    ) -> Result<AsyncTask<crate::time_travel::ExecuteAsOf>> {
+        let point = crate::time_travel::time_point(env, point)?;
+        Ok(AsyncTask::new(crate::time_travel::ExecuteAsOf {
+            db: Arc::clone(&self.inner),
+            query,
+            point,
+            params,
+        }))
+    }
+
+    /// The epoch a read as of `point` reads at (see `asOf`), as a `bigint`.
+    #[napi(
+        js_name = "epochAsOf",
+        ts_args_type = "point: bigint | Date | { ago: number }"
+    )]
+    pub fn epoch_as_of(&self, env: Env, point: Unknown<'_>) -> Result<BigInt> {
+        let point = crate::time_travel::time_point(env, point)?;
+        let epoch = self
+            .inner
+            .read()
+            .epoch_as_of(point)
+            .map_err(NodeGrafeoError::from)?;
+        Ok(crate::time_travel::epoch_bigint(epoch))
     }
 
     /// Execute a GQL query. Returns a Promise<QueryResult>.
@@ -167,7 +330,7 @@ impl JsGrafeoDB {
     pub async fn execute(
         &self,
         query: String,
-        params: Option<serde_json::Value>,
+        #[napi(ts_arg_type = "any | undefined | null")] params: Option<types::Params>,
     ) -> Result<QueryResult> {
         self.execute_language_impl("gql", query, params).await
     }
@@ -208,17 +371,7 @@ impl JsGrafeoDB {
         let label_refs: Vec<&str> = labels.iter().map(|s| s.as_str()).collect();
 
         let id = if let Some(props_obj) = properties {
-            let mut props = Vec::new();
-            let keys = props_obj.get_property_names()?;
-            let len = keys.get_array_length()?;
-            for i in 0..len {
-                let key: JsString = keys.get_element(i)?;
-                let key_str = key.into_utf8()?.into_owned()?;
-                let value: Unknown<'_> = props_obj.get_named_property(&key_str)?;
-                let val = types::js_to_value(&env, value)?;
-                props.push((grafeo_common::types::PropertyKey::new(key_str), val));
-            }
-            db.create_node_with_props(&label_refs, props)
+            db.create_node_with_props(&label_refs, object_properties(env, &props_obj)?)
                 .map_err(NodeGrafeoError::from)?
         } else {
             db.create_node(&label_refs).map_err(NodeGrafeoError::from)?
@@ -242,17 +395,7 @@ impl JsGrafeoDB {
         let dst = validate_node_id(target_id)?;
 
         let id = if let Some(props_obj) = properties {
-            let mut props = Vec::new();
-            let keys = props_obj.get_property_names()?;
-            let len = keys.get_array_length()?;
-            for i in 0..len {
-                let key: JsString = keys.get_element(i)?;
-                let key_str = key.into_utf8()?.into_owned()?;
-                let value: Unknown<'_> = props_obj.get_named_property(&key_str)?;
-                let val = types::js_to_value(&env, value)?;
-                props.push((grafeo_common::types::PropertyKey::new(key_str), val));
-            }
-            db.create_edge_with_props(src, dst, &edge_type, props)
+            db.create_edge_with_props(src, dst, &edge_type, object_properties(env, &props_obj)?)
                 .map_err(NodeGrafeoError::from)?
         } else {
             db.create_edge(src, dst, &edge_type)
@@ -267,11 +410,32 @@ impl JsGrafeoDB {
     pub fn get_node(&self, id: f64) -> Result<Option<JsNode>> {
         let node_id = validate_node_id(id)?;
         let db = self.inner.read();
-        Ok(db.get_node(node_id).map(|node| {
+        let node = db.get_node(node_id).map_err(NodeGrafeoError::from)?;
+        Ok(node.map(|node| {
             let labels: Vec<String> = node.labels.iter().map(|s| s.to_string()).collect();
             let properties = node.properties.into_iter().collect();
             JsNode::new(node_id, labels, properties)
         }))
+    }
+
+    /// The edges of a node as `[neighborId, edgeId]` pairs, without a query:
+    /// `options.direction` is `"out"` (default), `"in"` or `"both"` (which
+    /// lists a self-loop once), and `options.edgeTypes` keeps only those
+    /// types. Committed edges; none for a node that does not exist.
+    #[napi(js_name = "getNodeEdges")]
+    pub fn get_node_edges(
+        &self,
+        id: f64,
+        options: Option<NodeEdgesOptions>,
+    ) -> Result<Vec<Vec<f64>>> {
+        let node_id = validate_node_id(id)?;
+        let (direction, edge_types) = node_edges_options(options)?;
+        let edge_types: Vec<&str> = edge_types.iter().map(String::as_str).collect();
+        let db = self.inner.read();
+        Ok(edge_pairs(
+            db.get_node_edges(node_id, direction, &edge_types)
+                .map_err(NodeGrafeoError::from)?,
+        ))
     }
 
     /// Get an edge by ID.
@@ -279,7 +443,8 @@ impl JsGrafeoDB {
     pub fn get_edge(&self, id: f64) -> Result<Option<JsEdge>> {
         let edge_id = validate_edge_id(id)?;
         let db = self.inner.read();
-        Ok(db.get_edge(edge_id).map(|edge| {
+        let edge = db.get_edge(edge_id).map_err(NodeGrafeoError::from)?;
+        Ok(edge.map(|edge| {
             let properties = edge.properties.into_iter().collect();
             JsEdge::new(
                 edge_id,
@@ -297,6 +462,17 @@ impl JsGrafeoDB {
         let node_id = validate_node_id(id)?;
         let db = self.inner.read();
         Ok(db.delete_node(node_id).map_err(NodeGrafeoError::from)?)
+    }
+
+    /// Delete a node with all its edges, as `DETACH DELETE` does. Returns
+    /// true if the node existed; the node and its edges are one change.
+    #[napi(js_name = "detachDeleteNode")]
+    pub fn detach_delete_node(&self, id: f64) -> Result<bool> {
+        let node_id = validate_node_id(id)?;
+        let db = self.inner.read();
+        Ok(db
+            .detach_delete_node(node_id)
+            .map_err(NodeGrafeoError::from)?)
     }
 
     /// Delete an edge by ID. Returns true if the edge existed.
@@ -318,7 +494,7 @@ impl JsGrafeoDB {
     ) -> Result<()> {
         let node_id = validate_node_id(id)?;
         let db = self.inner.read();
-        let val = types::js_to_value(&env, value)?;
+        let val = types::js_to_named_value(env, value, "property", &key)?;
         db.set_node_property(node_id, &key, val)
             .map_err(NodeGrafeoError::from)?;
         Ok(())
@@ -335,7 +511,7 @@ impl JsGrafeoDB {
     ) -> Result<()> {
         let edge_id = validate_edge_id(id)?;
         let db = self.inner.read();
-        let val = types::js_to_value(&env, value)?;
+        let val = types::js_to_named_value(env, value, "property", &key)?;
         db.set_edge_property(edge_id, &key, val)
             .map_err(NodeGrafeoError::from)?;
         Ok(())
@@ -343,20 +519,30 @@ impl JsGrafeoDB {
 
     /// Get the number of nodes.
     #[napi(js_name = "nodeCount")]
-    pub fn node_count(&self) -> u32 {
+    pub fn node_count(&self) -> Result<u32> {
+        let count = self
+            .inner
+            .read()
+            .node_count()
+            .map_err(NodeGrafeoError::from)?;
         // reason: WASM targets use 32-bit usize; on 64-bit, graphs with >4B nodes are unrealistic
         #[allow(clippy::cast_possible_truncation)]
-        let count = self.inner.read().node_count() as u32;
-        count
+        let count = count as u32;
+        Ok(count)
     }
 
     /// Get the number of edges.
     #[napi(js_name = "edgeCount")]
-    pub fn edge_count(&self) -> u32 {
+    pub fn edge_count(&self) -> Result<u32> {
+        let count = self
+            .inner
+            .read()
+            .edge_count()
+            .map_err(NodeGrafeoError::from)?;
         // reason: WASM targets use 32-bit usize; on 64-bit, graphs with >4B edges are unrealistic
         #[allow(clippy::cast_possible_truncation)]
-        let count = self.inner.read().edge_count() as u32;
-        count
+        let count = count as u32;
+        Ok(count)
     }
 
     /// Begin a transaction with an optional isolation level.
@@ -414,7 +600,9 @@ impl JsGrafeoDB {
         query: Vec<f64>,
         k: u32,
         ef: Option<u32>,
-        filters: Option<HashMap<String, serde_json::Value>>,
+        #[napi(ts_arg_type = "Record<string, any> | undefined | null")] filters: Option<
+            types::Properties,
+        >,
     ) -> Result<Vec<Vec<f64>>> {
         let filter_map = convert_json_filters(filters)?;
         let db = self.inner.clone();
@@ -516,14 +704,14 @@ impl JsGrafeoDB {
     pub fn get_node_labels(&self, id: f64) -> Result<Option<Vec<String>>> {
         let node_id = validate_node_id(id)?;
         let db = self.inner.read();
-        Ok(db.get_node_labels(node_id))
+        Ok(db.get_node_labels(node_id).map_err(NodeGrafeoError::from)?)
     }
 
     /// Returns high-level database information as a JSON object.
     #[napi]
     pub fn info(&self) -> Result<serde_json::Value> {
         let db = self.inner.read();
-        let info = db.info();
+        let info = db.info().map_err(NodeGrafeoError::from)?;
         serde_json::to_value(&info).map_err(|e| NodeGrafeoError::Database(e.to_string()).into())
     }
 
@@ -531,7 +719,7 @@ impl JsGrafeoDB {
     #[napi]
     pub fn schema(&self) -> Result<serde_json::Value> {
         let db = self.inner.read();
-        let schema = db.schema();
+        let schema = db.schema().map_err(NodeGrafeoError::from)?;
         serde_json::to_value(&schema).map_err(|e| NodeGrafeoError::Database(e.to_string()).into())
     }
 
@@ -548,6 +736,49 @@ impl JsGrafeoDB {
     #[napi(js_name = "clearPlanCache")]
     pub fn clear_plan_cache(&self) {
         self.inner.read().clear_plan_cache();
+    }
+
+    /// Sets when the database checkpoints by itself: every
+    /// `triggers.intervalMs` milliseconds, and once the WAL holds
+    /// `triggers.walBytes` bytes since the last checkpoint. Leave both out to
+    /// turn automatic checkpoints off (the default). For this open only.
+    /// Throws for a database in memory or opened read-only, and for zero.
+    #[napi(js_name = "setCheckpointTriggers")]
+    pub fn set_checkpoint_triggers(&self, triggers: CheckpointTriggers) -> Result<()> {
+        let mut set = grafeo_engine::admin::CheckpointTriggers::none();
+        if let Some(ms) = triggers.interval_ms {
+            set = set.with_interval(std::time::Duration::from_millis(whole_count(
+                ms,
+                "intervalMs",
+            )?));
+        }
+        if let Some(bytes) = triggers.wal_bytes {
+            set = set.with_wal_bytes(whole_count(bytes, "walBytes")?);
+        }
+        let db = self.inner.read();
+        db.set_checkpoint_triggers(set)
+            .map_err(NodeGrafeoError::from)
+            .map_err(napi::Error::from)
+    }
+
+    /// How the automatic checkpoints fare: the triggers, the last checkpoint,
+    /// and the automatic ones that failed since the last that succeeded.
+    #[napi(js_name = "checkpointStatus")]
+    pub fn checkpoint_status(&self) -> CheckpointStatus {
+        let status = self.inner.read().checkpoint_status();
+        let number = js_number;
+        CheckpointStatus {
+            interval_ms: status
+                .triggers
+                .interval
+                .map(|interval| interval.as_secs_f64() * 1000.0),
+            wal_bytes: status.triggers.wal_bytes.map(number),
+            last_checkpoint: status.last_checkpoint.map(number),
+            failures: number(status.failures),
+            last_error: status.last_error,
+            last_failure: status.last_failure.map(number),
+            stopped: status.stopped,
+        }
     }
 
     /// Forces a WAL checkpoint.
@@ -629,7 +860,7 @@ impl JsGrafeoDB {
         self.inner
             .read()
             .set_current_schema(Some(&name))
-            .map_err(|e| napi::Error::from_reason(e.to_string()))
+            .map_err(|e| napi::Error::from(NodeGrafeoError::from(e)))
     }
 
     /// Clears the current schema context.
@@ -743,7 +974,9 @@ impl JsGrafeoDB {
         queries: Vec<Vec<f64>>,
         k: u32,
         ef: Option<u32>,
-        filters: Option<HashMap<String, serde_json::Value>>,
+        #[napi(ts_arg_type = "Record<string, any> | undefined | null")] filters: Option<
+            types::Properties,
+        >,
     ) -> Result<Vec<Vec<Vec<f64>>>> {
         let filter_map = convert_json_filters(filters)?;
         let db = self.inner.clone();
@@ -797,7 +1030,9 @@ impl JsGrafeoDB {
         fetch_k: Option<u32>,
         lambda_mult: Option<f64>,
         ef: Option<u32>,
-        filters: Option<HashMap<String, serde_json::Value>>,
+        #[napi(ts_arg_type = "Record<string, any> | undefined | null")] filters: Option<
+            types::Properties,
+        >,
     ) -> Result<Vec<Vec<f64>>> {
         let filter_map = convert_json_filters(filters)?;
         let db = self.inner.clone();
@@ -915,7 +1150,9 @@ impl JsGrafeoDB {
         property: String,
         query: String,
         k: u32,
-        filters: Option<HashMap<String, serde_json::Value>>,
+        #[napi(ts_arg_type = "Record<string, any> | undefined | null")] filters: Option<
+            types::Properties,
+        >,
     ) -> Result<Vec<Vec<f64>>> {
         let filter_map = convert_json_filters(filters)?;
         let db = self.inner.clone();
@@ -967,7 +1204,9 @@ impl JsGrafeoDB {
         query_vector: Option<Vec<f64>>,
         fusion: Option<String>,
         weights: Option<Vec<f64>>,
-        filters: Option<HashMap<String, serde_json::Value>>,
+        #[napi(ts_arg_type = "Record<string, any> | undefined | null")] filters: Option<
+            types::Properties,
+        >,
     ) -> Result<Vec<Vec<f64>>> {
         let filter_map = convert_json_filters(filters)?;
         let db = self.inner.clone();
@@ -1012,7 +1251,8 @@ impl JsGrafeoDB {
 impl JsGrafeoDB {
     /// Compacts the database: writes a checkpoint of a persistent database
     /// and drops the old versions no open transaction can see any more.
-    /// Returns what it did: `{checkpointed, versions_collected, duration_ms}`.
+    /// Returns what it did: `{checkpointed, versions_collected, rows_compressed,
+    /// duration_ms}`.
     /// The database keeps one store (`compact()` no longer builds a separate
     /// columnar one), and every write after it is logged as before. Throws if
     /// the checkpoint fails, or after `close()`.
@@ -1245,7 +1485,7 @@ impl JsGrafeoDB {
     pub async fn execute_cypher(
         &self,
         query: String,
-        params: Option<serde_json::Value>,
+        #[napi(ts_arg_type = "any | undefined | null")] params: Option<types::Params>,
     ) -> Result<QueryResult> {
         self.execute_language_impl("cypher", query, params).await
     }
@@ -1259,7 +1499,7 @@ impl JsGrafeoDB {
     pub async fn execute_sql(
         &self,
         query: String,
-        params: Option<serde_json::Value>,
+        #[napi(ts_arg_type = "any | undefined | null")] params: Option<types::Params>,
     ) -> Result<QueryResult> {
         self.execute_language_impl("sql", query, params).await
     }
@@ -1273,7 +1513,7 @@ impl JsGrafeoDB {
     pub async fn execute_gremlin(
         &self,
         query: String,
-        params: Option<serde_json::Value>,
+        #[napi(ts_arg_type = "any | undefined | null")] params: Option<types::Params>,
     ) -> Result<QueryResult> {
         self.execute_language_impl("gremlin", query, params).await
     }
@@ -1287,7 +1527,7 @@ impl JsGrafeoDB {
     pub async fn execute_graphql(
         &self,
         query: String,
-        params: Option<serde_json::Value>,
+        #[napi(ts_arg_type = "any | undefined | null")] params: Option<types::Params>,
     ) -> Result<QueryResult> {
         self.execute_language_impl("graphql", query, params).await
     }
@@ -1301,7 +1541,7 @@ impl JsGrafeoDB {
     pub async fn execute_sparql(
         &self,
         query: String,
-        params: Option<serde_json::Value>,
+        #[napi(ts_arg_type = "any | undefined | null")] params: Option<types::Params>,
     ) -> Result<QueryResult> {
         self.execute_language_impl("sparql", query, params).await
     }
@@ -1312,32 +1552,18 @@ impl JsGrafeoDB {
         &self,
         language: String,
         query: String,
-        params: Option<serde_json::Value>,
+        #[napi(ts_arg_type = "any | undefined | null")] params: Option<types::Params>,
     ) -> Result<QueryResult> {
+        let params = params.map(types::Params::into_map).transpose()?;
         let db = self.inner.clone();
-        let mut result = tokio::task::spawn_blocking(move || {
+        let result = tokio::task::spawn_blocking(move || {
             let db = db.read();
-            execute_language_query(&db, &query, &language, params.as_ref())
+            execute_language_query(&db, &query, &language, params)
         })
         .await
         .map_err(|e| napi::Error::from_reason(e.to_string()))??;
 
-        let db = self.inner.read();
-        let (nodes, edges) = extract_entities(&result, &db);
-        let columns = std::mem::take(&mut result.columns);
-        let exec_time = result.execution_time_ms;
-        let scanned = result.rows_scanned;
-        let counters = result.counters;
-
-        Ok(QueryResult::with_metrics(
-            columns,
-            result.into_rows(),
-            nodes,
-            edges,
-            exec_time,
-            scanned,
-        )
-        .with_counters(counters))
+        Ok(js_result(result))
     }
 }
 
@@ -1347,111 +1573,61 @@ impl JsGrafeoDB {
 impl JsGrafeoDB {
     /// Import a CSV file as graph nodes.
     ///
-    /// Each row becomes a node with the given label. Column headers are used
-    /// as property names. Returns the number of nodes created.
+    /// Each row becomes a node with the given label, and each column a
+    /// property named as the header spells it (`home city` stays `home
+    /// city`); an empty field sets no property. Without headers the columns
+    /// are `column0`, `column1`, and so on. Values are strings. The label is
+    /// used as given. Returns the number of nodes created.
     #[napi(js_name = "importCsv")]
     pub async fn import_csv(&self, path: String, options: Option<CsvImportOptions>) -> Result<i64> {
-        let db = self.inner.clone();
-        tokio::task::spawn_blocking(move || {
-            let opts = options.unwrap_or_default();
-            let label = sanitize_gql_identifier(&opts.label.unwrap_or_else(|| "Row".to_string()));
-            let headers = opts.headers.unwrap_or(true);
-
-            let abs_path = std::path::Path::new(&path)
-                .canonicalize()
-                .map_err(|e| NodeGrafeoError::Database(format!("{path}: {e}")))?;
-            let path_str = escape_gql_string(&abs_path.to_string_lossy().replace('\\', "/"));
-
-            let header_clause = if headers { " WITH HEADERS" } else { "" };
-
-            let insert_clause = if headers {
-                let columns = read_csv_headers(&abs_path, ',')
-                    .map_err(|e| NodeGrafeoError::Database(e.clone()))?;
-                if columns.is_empty() {
-                    format!("INSERT (:{label} {{}})")
-                } else {
-                    let props = columns
-                        .iter()
-                        .map(|col| {
-                            let safe = sanitize_gql_identifier(col);
-                            format!("{safe}: row.{safe}")
-                        })
-                        .collect::<Vec<_>>()
-                        .join(", ");
-                    format!("INSERT (:{label} {{{props}}})")
-                }
-            } else {
-                format!("INSERT (:{label} {{}})")
-            };
-
-            let query = format!(
-                "LOAD DATA FROM '{path_str}' FORMAT CSV{header_clause} AS row {insert_clause}"
-            );
-
-            let db = db.read();
-            let session = db.session();
-
-            let before_count = count_nodes(&session, &label);
-
-            session.execute(&query).map_err(NodeGrafeoError::from)?;
-
-            let count = count_nodes(&session, &label) - before_count;
-
-            Ok(count)
-        })
-        .await
-        .map_err(|e| napi::Error::from_reason(e.to_string()))?
+        let opts = options.unwrap_or_default();
+        let format = grafeo_engine::import::ImportFormat::Csv {
+            headers: opts.headers.unwrap_or(true),
+            delimiter: None,
+        };
+        self.import_nodes(path, opts.label, format).await
     }
 
     /// Import a JSON Lines file as graph nodes.
     ///
-    /// Each line must be a valid JSON object. Object keys become property names.
-    /// Returns the number of nodes created.
+    /// Each line must be a JSON object. Each key becomes a property named as
+    /// the file spells it, whichever line it first appears on, and keeps its
+    /// JSON type. The label is used as given. Returns the number of nodes
+    /// created.
     #[napi(js_name = "importJsonl")]
     pub async fn import_jsonl(
         &self,
         path: String,
         options: Option<JsonlImportOptions>,
     ) -> Result<i64> {
+        let label = options.unwrap_or_default().label;
+        self.import_nodes(path, label, grafeo_engine::import::ImportFormat::Jsonl)
+            .await
+    }
+}
+
+impl JsGrafeoDB {
+    /// [`grafeo_engine::import::import_nodes`] in a session of its own, off
+    /// the event loop; the label is "Row" when none is given.
+    async fn import_nodes(
+        &self,
+        path: String,
+        label: Option<String>,
+        format: grafeo_engine::import::ImportFormat,
+    ) -> Result<i64> {
         let db = self.inner.clone();
         tokio::task::spawn_blocking(move || {
-            let opts = options.unwrap_or_default();
-            let label = sanitize_gql_identifier(&opts.label.unwrap_or_else(|| "Row".to_string()));
-
-            let abs_path = std::path::Path::new(&path)
-                .canonicalize()
-                .map_err(|e| NodeGrafeoError::Database(format!("{path}: {e}")))?;
-            let path_str = escape_gql_string(&abs_path.to_string_lossy().replace('\\', "/"));
-
-            let keys =
-                read_jsonl_keys(&abs_path).map_err(|e| NodeGrafeoError::Database(e.clone()))?;
-
-            let insert_clause = if keys.is_empty() {
-                format!("INSERT (:{label} {{}})")
-            } else {
-                let props = keys
-                    .iter()
-                    .map(|key| {
-                        let safe = sanitize_gql_identifier(key);
-                        format!("{safe}: row.{safe}")
-                    })
-                    .collect::<Vec<_>>()
-                    .join(", ");
-                format!("INSERT (:{label} {{{props}}})")
-            };
-
-            let query = format!("LOAD DATA FROM '{path_str}' FORMAT JSONL AS row {insert_clause}");
-
+            let label = label.unwrap_or_else(|| "Row".to_string());
             let db = db.read();
-            let session = db.session();
-
-            let before_count = count_nodes(&session, &label);
-
-            session.execute(&query).map_err(NodeGrafeoError::from)?;
-
-            let count = count_nodes(&session, &label) - before_count;
-
-            Ok(count)
+            let created = grafeo_engine::import::import_nodes(
+                &db.session(),
+                std::path::Path::new(&path),
+                &label,
+                format,
+            )
+            .map_err(NodeGrafeoError::from)?;
+            i64::try_from(created)
+                .map_err(|_| NodeGrafeoError::Database(format!("{created} nodes created")).into())
         })
         .await
         .map_err(|e| napi::Error::from_reason(e.to_string()))?
@@ -1493,115 +1669,22 @@ pub struct JsonlImportOptions {
     pub label: Option<String>,
 }
 
-/// Read CSV headers from the first line of a file.
-fn read_csv_headers(
-    path: &std::path::Path,
-    delimiter: char,
-) -> std::result::Result<Vec<String>, String> {
-    use std::io::{BufRead, BufReader};
-    let f = std::fs::File::open(path).map_err(|e| format!("{}: {e}", path.display()))?;
-    let mut reader = BufReader::new(f);
-    let mut header_line = String::new();
-    reader
-        .read_line(&mut header_line)
-        .map_err(|e| format!("Failed to read headers: {e}"))?;
-    Ok(header_line
-        .trim()
-        .split(delimiter)
-        .map(|h| h.trim().trim_matches('"').to_string())
-        .filter(|h| !h.is_empty())
-        .collect())
-}
-
-/// Escape single quotes in a string for embedding in a GQL string literal.
-fn escape_gql_string(s: &str) -> String {
-    s.replace('\'', "\\'")
-}
-
-/// Sanitize a name for use as a GQL identifier.
-fn sanitize_gql_identifier(name: &str) -> String {
-    let sanitized: String = name
-        .chars()
-        .map(|c| {
-            if c.is_alphanumeric() || c == '_' {
-                c
-            } else {
-                '_'
-            }
-        })
-        .collect();
-    if sanitized.is_empty() {
-        "_col".to_string()
-    } else if sanitized.starts_with(|c: char| c.is_ascii_digit()) {
-        format!("_{sanitized}")
-    } else {
-        sanitized
-    }
-}
-
-/// Count nodes with a given label.
-fn count_nodes(session: &grafeo_engine::Session, label: &str) -> i64 {
-    session
-        .execute(&format!("MATCH (n:{label}) RETURN count(n) AS c"))
-        .ok()
-        .and_then(|r| r.rows().first().cloned())
-        .and_then(|row| row.first().cloned())
-        .and_then(|v| match v {
-            Value::Int64(n) => Some(n),
-            _ => None,
-        })
-        .unwrap_or(0)
-}
-
-/// Read JSON keys from the first non-empty line of a JSONL file.
-fn read_jsonl_keys(path: &std::path::Path) -> std::result::Result<Vec<String>, String> {
-    use std::io::{BufRead, BufReader};
-    let f = std::fs::File::open(path).map_err(|e| format!("{}: {e}", path.display()))?;
-    let reader = BufReader::new(f);
-    for line in reader.lines() {
-        let line = line.map_err(|e| format!("Failed to read JSONL file: {e}"))?;
-        let trimmed = line.trim();
-        if trimmed.is_empty() {
-            continue;
-        }
-        if let Ok(obj) = serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(trimmed)
-        {
-            return Ok(obj.keys().cloned().collect());
-        }
-        break;
-    }
-    Ok(Vec::new())
-}
-
-/// Execute a query in a given language with optional JSON params.
+/// Execute a query in a given language with optional params.
 fn execute_language_query(
     db: &GrafeoDB,
     query: &str,
     language: &str,
-    params: Option<&serde_json::Value>,
+    params: Option<HashMap<String, Value>>,
 ) -> std::result::Result<EngineQueryResult, napi::Error> {
-    let param_map = convert_json_params(params)?;
-    db.execute_language(query, language, param_map)
+    db.execute_language(query, language, params)
         .map_err(NodeGrafeoError::from)
         .map_err(napi::Error::from)
-}
-
-/// Convert JSON params to a HashMap<String, Value>.
-fn convert_json_params(
-    params: Option<&serde_json::Value>,
-) -> std::result::Result<Option<HashMap<String, Value>>, napi::Error> {
-    grafeo_bindings_common::json::json_params_to_map(params)
-        .map_err(|msg| NodeGrafeoError::InvalidArgument(msg).into())
-}
-
-/// Convert a serde_json::Value to a Grafeo Value.
-pub(crate) fn json_to_value(v: &serde_json::Value) -> std::result::Result<Value, napi::Error> {
-    Ok(grafeo_bindings_common::json::json_to_value(v))
 }
 
 /// Fetch a node from the database and wrap it as JsNode.
 fn fetch_node(db: &GrafeoDB, id: NodeId) -> Result<JsNode> {
     db.get_node(id)
+        .map_err(NodeGrafeoError::from)?
         .map(|node| {
             let labels: Vec<String> = node.labels.iter().map(|s| s.to_string()).collect();
             let properties = node.properties.into_iter().collect();
@@ -1613,6 +1696,7 @@ fn fetch_node(db: &GrafeoDB, id: NodeId) -> Result<JsNode> {
 /// Fetch an edge from the database and wrap it as JsEdge.
 fn fetch_edge(db: &GrafeoDB, id: EdgeId) -> Result<JsEdge> {
     db.get_edge(id)
+        .map_err(NodeGrafeoError::from)?
         .map(|edge| {
             let properties = edge.properties.into_iter().collect();
             JsEdge::new(
@@ -1626,11 +1710,71 @@ fn fetch_edge(db: &GrafeoDB, id: EdgeId) -> Result<JsEdge> {
         .ok_or_else(|| NodeGrafeoError::Database("Failed to fetch created edge".into()).into())
 }
 
+/// The properties of a JavaScript object, as Grafeo values.
+fn object_properties(
+    env: Env,
+    object: &Object<'_>,
+) -> Result<Vec<(grafeo_common::types::PropertyKey, Value)>> {
+    let keys = object.get_property_names()?;
+    let len = keys.get_array_length()?;
+    let mut properties = Vec::with_capacity(len as usize);
+    for i in 0..len {
+        let key: JsString = keys.get_element(i)?;
+        let key = key.into_utf8()?.into_owned()?;
+        let value: Unknown<'_> = object.get_named_property(&key)?;
+        let value = types::js_to_named_value(env, value, "property", &key)?;
+        properties.push((grafeo_common::types::PropertyKey::new(key), value));
+    }
+    Ok(properties)
+}
+
+/// A query result for JavaScript: rows, entities, metrics and counters.
+pub(crate) fn js_result(mut result: EngineQueryResult) -> QueryResult {
+    let (nodes, edges) = entities(&result);
+    let columns = std::mem::take(&mut result.columns);
+    let exec_time = result.execution_time_ms;
+    let scanned = result.rows_scanned;
+    let counters = result.counters;
+    let profile = result.profile.take();
+    QueryResult::with_metrics(
+        columns,
+        result.into_rows(),
+        nodes,
+        edges,
+        exec_time,
+        scanned,
+    )
+    .with_counters(counters)
+    .with_profile(profile)
+}
+
+/// A node of the engine as a JavaScript node.
+pub(crate) fn js_node(id: NodeId, node: grafeo_core::graph::lpg::Node) -> JsNode {
+    let labels: Vec<String> = node.labels.iter().map(|s| s.to_string()).collect();
+    JsNode::new(id, labels, node.properties.into_iter().collect())
+}
+
+/// An edge of the engine as a JavaScript edge.
+pub(crate) fn js_edge(id: EdgeId, edge: grafeo_core::graph::lpg::Edge) -> JsEdge {
+    JsEdge::new(
+        id,
+        edge.edge_type.to_string(),
+        edge.src,
+        edge.dst,
+        edge.properties.into_iter().collect(),
+    )
+}
+
 /// Extract nodes and edges from query results based on column types.
 pub(crate) fn extract_entities(
     result: &EngineQueryResult,
     _db: &GrafeoDB,
 ) -> (Vec<JsNode>, Vec<JsEdge>) {
+    entities(result)
+}
+
+/// The nodes and edges of a query result, by column type.
+fn entities(result: &EngineQueryResult) -> (Vec<JsNode>, Vec<JsEdge>) {
     grafeo_bindings_common::entity::extract_and_map(
         result,
         |n| JsNode::new(n.id, n.labels, n.properties),
@@ -1638,64 +1782,10 @@ pub(crate) fn extract_entities(
     )
 }
 
-/// Convert a Grafeo Value to serde_json::Value.
-#[cfg(feature = "cdc")]
-fn grafeo_value_to_json(v: &Value) -> serde_json::Value {
-    grafeo_bindings_common::json::value_to_json(v)
-}
-
-/// Convert a CDC ChangeEvent to a JSON object.
+/// Convert a CDC ChangeEvent to a JSON object (the shape every binding returns).
 #[cfg(feature = "cdc")]
 fn change_event_to_json(event: &grafeo_engine::cdc::ChangeEvent) -> serde_json::Value {
-    let entity_type = if event.entity_id.is_node() {
-        "node"
-    } else {
-        "edge"
-    };
-    let kind = match event.kind {
-        grafeo_engine::cdc::ChangeKind::Create => "create",
-        grafeo_engine::cdc::ChangeKind::Update => "update",
-        grafeo_engine::cdc::ChangeKind::Delete => "delete",
-        _ => "unknown",
-    };
-
-    let before = match &event.before {
-        Some(props) => {
-            let obj: serde_json::Map<String, serde_json::Value> = props
-                .iter()
-                .map(|(k, v)| (k.clone(), grafeo_value_to_json(v)))
-                .collect();
-            serde_json::Value::Object(obj)
-        }
-        None => serde_json::Value::Null,
-    };
-
-    let after = match &event.after {
-        Some(props) => {
-            let obj: serde_json::Map<String, serde_json::Value> = props
-                .iter()
-                .map(|(k, v)| (k.clone(), grafeo_value_to_json(v)))
-                .collect();
-            serde_json::Value::Object(obj)
-        }
-        None => serde_json::Value::Null,
-    };
-
-    serde_json::json!({
-        "entity_id": event.entity_id.as_u64(),
-        "entity_type": entity_type,
-        "graph": event.graph,
-        "kind": kind,
-        "epoch": event.epoch.0,
-        "timestamp": event.timestamp,
-        "before": before,
-        "after": after,
-        "labels": event.labels,
-        "before_labels": event.before_labels,
-        "edge_type": event.edge_type,
-        "src_id": event.src_id,
-        "dst_id": event.dst_id,
-    })
+    grafeo_bindings_common::cdc::event_to_json(event)
 }
 
 // After `JsGrafeoDB`: napi-derive records a struct's `js_name` when it expands
@@ -1703,4 +1793,5 @@ fn change_event_to_json(event: &grafeo_engine::cdc::ChangeEvent) -> serde_json::
 // the Rust name when the struct has not expanded yet. Declared earlier, these
 // modules' methods would land on a class named after the Rust struct.
 mod batch;
+mod graph_handle;
 mod upsert;

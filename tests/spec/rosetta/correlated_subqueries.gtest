@@ -449,3 +449,63 @@ tests:
         - [Amsterdam, 3]
         - [Berlin, 3]
         - [Paris, 3]
+
+  # ---------------------------------------------------------------------------
+  # #173: the outer node as the target of an anonymous source
+  # ---------------------------------------------------------------------------
+
+  # The subquery pattern starts at an anonymous node and ends at the outer m:
+  # EXISTS was false for every row. Setup: caller CALLS called, and uncalled.
+  - name: exists_with_an_anonymous_source
+    setup:
+      - "INSERT (:Method {name: 'caller'})-[:CALLS]->(:Method {name: 'called'}), (:Method {name: 'uncalled'})"
+    variants:
+      gql: "MATCH (m:Method) WHERE EXISTS { MATCH ()-[:CALLS]->(m) } RETURN m.name AS name"
+      cypher: "MATCH (m:Method) WHERE EXISTS { MATCH ()-[:CALLS]->(m) } RETURN m.name AS name"
+    expect:
+      rows:
+        - [called]
+
+  - name: not_exists_with_an_anonymous_source
+    setup:
+      - "INSERT (:Method {name: 'caller'})-[:CALLS]->(:Method {name: 'called'}), (:Method {name: 'uncalled'})"
+    variants:
+      gql: "MATCH (m:Method) WHERE NOT EXISTS { MATCH ()-[:CALLS]->(m) } RETURN m.name AS name"
+      cypher: "MATCH (m:Method) WHERE NOT EXISTS { MATCH ()-[:CALLS]->(m) } RETURN m.name AS name"
+    expect:
+      rows:
+        - [caller]
+        - [uncalled]
+
+  - name: exists_with_an_anonymous_source_in_either_direction
+    setup:
+      - "INSERT (:Method {name: 'caller'})-[:CALLS]->(:Method {name: 'called'}), (:Method {name: 'uncalled'})"
+    variants:
+      gql: "MATCH (m:Method) WHERE EXISTS { MATCH ()-[:CALLS]-(m) } RETURN m.name AS name"
+      cypher: "MATCH (m:Method) WHERE EXISTS { MATCH ()-[:CALLS]-(m) } RETURN m.name AS name"
+    expect:
+      rows:
+        - [called]
+        - [caller]
+
+  - name: exists_with_an_anonymous_target
+    setup:
+      - "INSERT (:Method {name: 'caller'})-[:CALLS]->(:Method {name: 'called'}), (:Method {name: 'uncalled'})"
+    variants:
+      gql: "MATCH (m:Method) WHERE EXISTS { MATCH (m)-[:CALLS]->() } RETURN m.name AS name"
+      cypher: "MATCH (m:Method) WHERE EXISTS { MATCH (m)-[:CALLS]->() } RETURN m.name AS name"
+    expect:
+      rows:
+        - [caller]
+
+  - name: count_with_an_anonymous_source
+    setup:
+      - "INSERT (caller:Method {name: 'caller'})-[:CALLS]->(called:Method {name: 'called'}), (:Method {name: 'uncalled'}), (caller)-[:CALLS]->(called)"
+    variants:
+      gql: "MATCH (m:Method) RETURN m.name AS name, COUNT { MATCH ()-[:CALLS]->(m) } AS calls"
+      cypher: "MATCH (m:Method) RETURN m.name AS name, COUNT { MATCH ()-[:CALLS]->(m) } AS calls"
+    expect:
+      rows:
+        - [called, 2]
+        - [caller, 0]
+        - [uncalled, 0]

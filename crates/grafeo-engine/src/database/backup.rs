@@ -149,8 +149,15 @@ impl Default for BackupManifest {
 pub struct BackupCursor {
     /// The epoch up to which WAL records have been backed up.
     pub backed_up_epoch: EpochId,
-    /// The WAL log sequence number at the time of the last backup.
+    /// The log file sequence of the last backup, in the WAL format of 0.5.x
+    /// and 0.6.0-beta.1; 0 in the cursors this release writes (see
+    /// [`wal_lsn`](Self::wal_lsn)). Removed in 0.7.0.
     pub log_sequence: u64,
+    /// The log position up to which the WAL has been backed up: the next
+    /// incremental backup copies the segments from there. `None` in a cursor
+    /// of the earlier WAL format, which only a full backup replaces.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wal_lsn: Option<u64>,
     /// Timestamp of the last backup.
     pub timestamp_ms: u64,
 }
@@ -405,6 +412,7 @@ mod bincode_0_5 {
         Ok(BackupCursor {
             backed_up_epoch: EpochId::new(cursor.backed_up_epoch),
             log_sequence: cursor.log_sequence,
+            wal_lsn: None,
             timestamp_ms: cursor.timestamp_ms,
         })
     }
@@ -414,8 +422,12 @@ mod bincode_0_5 {
 
 /// Magic bytes for incremental backup files.
 pub const BACKUP_MAGIC: [u8; 4] = *b"GBAK";
-/// Current backup file version.
-pub const BACKUP_VERSION: u32 = 1;
+/// Current backup file version: 2 holds WAL segments; 1, written by 0.5.x
+/// and 0.6.0-beta.1, holds the frames of the earlier WAL format.
+pub const BACKUP_VERSION: u32 = 2;
+
+/// The backup file version of the earlier WAL format.
+const FIRST_FORMAT_VERSION: u32 = 1;
 
 /// Header for an incremental backup file.
 ///
@@ -424,8 +436,9 @@ pub const BACKUP_VERSION: u32 = 1;
 /// [version: u32 LE]
 /// [start_epoch: u64 LE]
 /// [end_epoch: u64 LE]
-/// [record_count: u64 LE]
-/// ... WAL frames ...
+/// [record_count: u64 LE]   (version 2: the groups it holds)
+/// version 2: per WAL segment [length: u64 LE][the segment file]
+/// version 1: the frames of the earlier WAL format
 /// ```
 pub const BACKUP_HEADER_SIZE: usize = 32;
 
@@ -477,6 +490,12 @@ pub fn read_backup_header(data: &[u8]) -> Result<(EpochId, EpochId, u64)> {
     Ok((start_epoch, end_epoch, record_count))
 }
 
+/// The version of a valid incremental backup file (see [`BACKUP_VERSION`]).
+fn backup_version(data: &[u8]) -> Result<u32> {
+    read_backup_header(data)?;
+    Ok(u32::from_le_bytes([data[4], data[5], data[6], data[7]]))
+}
+
 /// Returns the timestamp in milliseconds since UNIX epoch.
 // reason: millis since UNIX epoch fits u64 for centuries
 #[allow(clippy::cast_possible_truncation)]
@@ -486,16 +505,6 @@ pub(super) fn now_ms() -> u64 {
         .map_or(0, |d| d.as_millis() as u64)
 }
 
-/// The sequence number of a WAL log file (`wal_<sequence>.log`), 0 when the
-/// name has another form.
-fn wal_file_sequence(path: &Path) -> u64 {
-    path.file_stem()
-        .and_then(|s| s.to_str())
-        .and_then(|s| s.strip_prefix("wal_"))
-        .and_then(|s| s.parse::<u64>().ok())
-        .unwrap_or(0)
-}
-
 // ── Backup operations (called from GrafeoDB) ───────────────────────
 
 use std::io::Read;
@@ -503,33 +512,74 @@ use std::io::Read;
 use grafeo_storage::file::GrafeoFileManager;
 use grafeo_storage::file::detect::{OnDisk, detect};
 use grafeo_storage::file::v3::header::{DbHeaderV3, FileHeaderV3, active_header};
-use grafeo_storage::wal::{LpgWal, WalCipher};
+use grafeo_storage::wal::{
+    CipherForSalt, DurabilityMode, ScanOptions, SegmentHeader, Wal, WalCipher, WalOptions, WalScan,
+    list_wal_directory, segment_file_name,
+};
 
 use super::encryption::DatabaseKeys;
 
 /// Size of a page (and of each header) of a `.grafeo` file, in bytes.
 const PAGE_BYTES: usize = 4096;
 
-/// Creates a full backup by copying the .grafeo container file.
+impl super::GrafeoDB {
+    /// The log position a full backup of this database covers when it has no
+    /// WAL to start a segment in: for a read-only database, the end of the
+    /// sidecar WAL its open replayed, whose commits the image holds (the
+    /// shared lock keeps writers out, so the WAL still ends there); otherwise
+    /// the position the file's last checkpoint recorded. A WAL of the format
+    /// before 0.6.0 has no positions of this format: the file's, as its
+    /// commits cannot chain to incremental backups anyway.
+    pub(super) fn log_end_without_wal(
+        &self,
+        fm: &GrafeoFileManager,
+        keys: &DatabaseKeys,
+    ) -> Result<u64> {
+        let checkpoint_lsn = fm.active_header().checkpoint_lsn;
+        if !self.read_only
+            || !fm.has_sidecar_wal()
+            || Self::holds_first_format_wal(&fm.sidecar_wal_path())?
+        {
+            return Ok(checkpoint_lsn);
+        }
+        let options = Self::scan_options(fm, keys, self.config.wal_salvage());
+        let mut scan = WalScan::open(fm.sidecar_wal_path(), options).map_err(Error::from)?;
+        while scan.next_group().map_err(Error::from)?.is_some() {}
+        let end = scan.finish().map_err(Error::from)?;
+        Ok(end.end_lsn.max(checkpoint_lsn))
+    }
+}
+
+/// Creates a full backup: a complete image of the database at an epoch E
+/// (#362).
 ///
-/// 1. Copies the container file to the backup directory via the locked handle.
-/// 2. Updates the manifest and backup cursor.
+/// The image is written from a snapshot at E, as a checkpoint takes it (see
+/// [`write_copy`](super::flush::write_copy)): commits are held off only while
+/// the snapshot is taken and the sections without versions are written, and
+/// go on while the graph is written. The image has the database's id and
+/// keys, and holds every commit up to E and nothing after it. With `wal`, a
+/// new WAL segment starts while commits are held: the groups after E are in
+/// the segments from that one on, which the next incremental backup copies,
+/// so a restore is the image and those segments. Without, `log_end` gives
+/// the log position the image covers (a read-only database: the end of the
+/// sidecar WAL it replayed, whose commits the image holds). The database's
+/// own file is not touched.
 ///
-/// Uses [`GrafeoFileManager::copy_to`] instead of `std::fs::copy()` so the
-/// copy reads through the already-locked file handle. `std::fs::copy()` opens
-/// a new handle, which fails on Windows when an exclusive lock is held.
-///
-/// The backup covers exactly what the copied file holds: its epoch, and the
-/// WAL files before the WAL's checkpoint marker. The files from the marker on
-/// are left to the next incremental backup.
+/// The image is written under a temporary name and renamed once complete, so
+/// the backup directory never holds a full backup that opens as less than E;
+/// the manifest and the cursor are written after it.
 ///
 /// # Errors
 ///
-/// Returns an error if the database has no file manager, or if I/O fails.
+/// Returns an error if commits cannot be held, a section fails to write, or
+/// I/O fails.
 pub(super) fn do_backup_full(
     backup_dir: &Path,
     fm: &GrafeoFileManager,
-    wal: Option<&LpgWal>,
+    sources: &super::sections::CheckpointSources,
+    keys: &DatabaseKeys,
+    wal: Option<&Wal>,
+    log_end: impl FnOnce() -> Result<u64>,
 ) -> Result<BackupSegment> {
     std::fs::create_dir_all(backup_dir)
         .map_err(|e| Error::Internal(format!("failed to create backup directory: {e}")))?;
@@ -539,25 +589,38 @@ pub(super) fn do_backup_full(
     let segment_idx = manifest.segments.len();
     let filename = format!("backup_full_{segment_idx:04}.grafeo");
     let dest_path = backup_dir.join(&filename);
+    // The name follows the manifest's segments, so a file under it is none
+    // the manifest lists: the image of a backup a crash or an error cut off
+    // before its manifest entry, which no restore reads.
+    match std::fs::remove_file(&dest_path) {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => {
+            return Err(Error::Internal(format!(
+                "failed to remove the unlisted backup file {}: {e}",
+                dest_path.display()
+            )));
+        }
+    }
 
-    // No checkpoint may change the file or the WAL's checkpoint marker while
-    // they are read, so the two agree on what the copy contains.
+    // No checkpoint may remove the WAL segments from the image's log
+    // position on before the cursor below names them.
     let _checkpoint = fm.checkpoint_guard();
 
-    // Copy the .grafeo file to the backup directory through the locked handle
-    fm.copy_to(&dest_path)?;
-
-    let file_size = std::fs::metadata(&dest_path).map_or(0, |m| m.len());
-    let file_data = std::fs::read(&dest_path)
-        .map_err(|e| Error::Internal(format!("failed to read backup file for checksum: {e}")))?;
-    let checksum = crc32fast::hash(&file_data);
-    let copied_epoch = active_epoch(&file_data, &dest_path)?;
+    let written =
+        super::flush::write_copy(sources, &dest_path, fm.database_id(), keys, || match wal {
+            Some(wal) => Ok(wal.rotate()?),
+            None => log_end(),
+        })?;
+    let (end_epoch, wal_lsn) = (written.epoch, written.checkpoint_lsn);
+    grafeo_common::testing::crash::maybe_crash("backup:after_image");
+    let (checksum, file_size) = file_checksum(&dest_path)?;
 
     let segment = BackupSegment {
         kind: BackupKind::Full,
         filename,
         start_epoch: EpochId::new(0),
-        end_epoch: copied_epoch,
+        end_epoch: EpochId::new(end_epoch),
         checksum,
         size_bytes: file_size,
         created_at_ms: now_ms(),
@@ -565,21 +628,15 @@ pub(super) fn do_backup_full(
 
     manifest.segments.push(segment.clone());
     write_manifest(backup_dir, &manifest)?;
+    grafeo_common::testing::crash::maybe_crash("backup:after_manifest");
 
-    // The checkpoint that wrote the copied file started a new WAL file (the
-    // marker's sequence), so every record before it is in the copy. The next
-    // incremental backup starts at that file: taking the file active at this
-    // point instead left the records written since the checkpoint in neither.
+    // Every WAL group before the image's log position is in the image, and
+    // none after it: the next incremental backup starts at that segment.
     if let Some(wal) = wal {
-        let covered = wal
-            .read_checkpoint_metadata()?
-            .ok_or_else(|| {
-                Error::Internal("full backup: the WAL has no checkpoint marker".to_string())
-            })?
-            .log_sequence;
         let cursor = BackupCursor {
-            backed_up_epoch: copied_epoch,
-            log_sequence: covered.saturating_sub(1),
+            backed_up_epoch: EpochId::new(end_epoch),
+            log_sequence: 0,
+            wal_lsn: Some(wal_lsn),
             timestamp_ms: now_ms(),
         };
         write_backup_cursor(wal.dir(), &cursor)?;
@@ -588,13 +645,35 @@ pub(super) fn do_backup_full(
     Ok(segment)
 }
 
-/// The epoch of the image a copied `.grafeo` file opens at, from its own
-/// active database header (headers are never encrypted).
+/// The CRC-32 and size of the file at `path`, read in pieces.
+fn file_checksum(path: &Path) -> Result<(u32, u64)> {
+    use std::io::Read;
+
+    let mut file = std::fs::File::open(path)
+        .map_err(|e| Error::Internal(format!("failed to read backup file for checksum: {e}")))?;
+    let mut hasher = crc32fast::Hasher::new();
+    let mut buffer = vec![0u8; 1 << 20];
+    let mut size = 0u64;
+    loop {
+        let read = file.read(&mut buffer).map_err(|e| {
+            Error::Internal(format!("failed to read backup file for checksum: {e}"))
+        })?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&buffer[..read]);
+        size += read as u64;
+    }
+    Ok((hasher.finalize(), size))
+}
+
+/// The active database header of a copied `.grafeo` file: the image it opens
+/// at, with its epoch and log position (headers are never encrypted).
 ///
 /// The manager's in-memory header can be older: after a checkpoint that
 /// failed once its header was written, the manager keeps serving the
 /// previous image while the file opens at the new one.
-fn active_epoch(file_data: &[u8], path: &Path) -> Result<EpochId> {
+fn copied_header(file_data: &[u8], path: &Path) -> Result<DbHeaderV3> {
     let page = |index: usize| {
         let start = index * PAGE_BYTES;
         file_data.get(start..start + PAGE_BYTES).unwrap_or(&[])
@@ -612,21 +691,21 @@ fn active_epoch(file_data: &[u8], path: &Path) -> Result<EpochId> {
                 path.display()
             )),
         })?;
-    Ok(EpochId::new(header.epoch))
+    Ok(header)
 }
 
-/// Creates an incremental backup containing WAL records since the last backup.
-///
-/// Reads WAL log files from the backup cursor's position forward, copies
-/// the raw frames into a backup segment file.
+/// Creates an incremental backup containing the WAL groups since the last
+/// backup: it seals the active segment, then copies the segments from the
+/// cursor's log position up to it, whole.
 ///
 /// # Errors
 ///
-/// Returns an error if no full backup exists, or if the WAL files have been
-/// truncated past the cursor.
+/// Returns an error if no full backup exists, the cursor is of the earlier
+/// WAL format, nothing was logged since the last backup, or the segments
+/// after the cursor were removed.
 pub(super) fn do_backup_incremental(
     backup_dir: &Path,
-    wal: &LpgWal,
+    wal: &Wal,
     current_epoch: EpochId,
 ) -> Result<BackupSegment> {
     let manifest = read_manifest(backup_dir)?.ok_or_else(|| {
@@ -642,109 +721,106 @@ pub(super) fn do_backup_incremental(
     let cursor = read_backup_cursor(wal.dir())?.ok_or_else(|| {
         Error::Internal("no backup cursor found; run a full backup first".to_string())
     })?;
-
-    // Nothing logged since the last backup: fail before sealing, or every
-    // such call (a poll for new data) would leave another empty log file.
-    let has_new_records = wal.log_files()?.iter().any(|path| {
-        wal_file_sequence(path) > cursor.log_sequence
-            && std::fs::metadata(path).is_ok_and(|meta| meta.len() > 0)
-    });
-    if !has_new_records {
-        return Err(Error::Internal(
-            "no new WAL records since last backup".to_string(),
-        ));
-    }
-
-    // Seal the active file first: every record logged so far is then in a
-    // file up to `sealed`, and records logged from now on go to newer files,
-    // which the next incremental backup reads. Reading the active file and
-    // rotating afterwards lost the records appended in between.
-    let sealed = wal.current_sequence();
-    wal.rotate().map_err(|e| {
-        Error::Internal(format!("failed to rotate WAL for incremental backup: {e}"))
+    let from = cursor.wal_lsn.ok_or_else(|| {
+        Error::Internal(
+            "the backup cursor is of the WAL format before 0.6.0; run a full backup first"
+                .to_string(),
+        )
     })?;
 
-    let log_files = wal.log_files()?;
-    if log_files.is_empty() {
-        return Err(Error::Internal("no WAL log files to backup".to_string()));
-    }
-
-    // Read WAL files from cursor position onward
-    let mut wal_data = Vec::new();
-    let mut record_count = 0u64;
-    // cursor.backed_up_epoch used for start_epoch calculation below
-
-    for file_path in &log_files {
-        let seq = wal_file_sequence(file_path);
-
-        // Files up to the cursor are in earlier backups; files after
-        // `sealed` were started after the rotation above and belong to the
-        // next backup.
-        if seq <= cursor.log_sequence || seq > sealed {
-            continue;
-        }
-
-        let file_bytes = std::fs::read(file_path).map_err(|e| {
-            Error::Internal(format!(
-                "failed to read WAL file {}: {e}",
-                file_path.display()
-            ))
-        })?;
-
-        if !file_bytes.is_empty() {
-            wal_data.extend_from_slice(&file_bytes);
-            // Count records by scanning for frame markers (rough count)
-            // Exact count would require parsing, but we record approximate
-            record_count += 1; // Per-file approximation
-        }
-    }
-
-    if wal_data.is_empty() {
+    // Seal the active segment first: every group logged so far is then in a
+    // segment before `sealed`, and groups logged from now on go to later
+    // ones, which the next incremental backup reads. Reading the active
+    // segment instead lost the groups appended while it was copied. A
+    // segment without frames is not sealed, so a poll with nothing new
+    // leaves no empty segment.
+    let sealed = wal.rotate().map_err(|e| {
+        Error::Internal(format!("failed to rotate WAL for incremental backup: {e}"))
+    })?;
+    let groups = groups_between(wal, from, sealed)?;
+    if groups == 0 {
         return Err(Error::Internal(
             "no new WAL records since last backup".to_string(),
         ));
+    }
+
+    let listing = list_wal_directory(wal.dir()).map_err(Error::from)?;
+    let segments: Vec<&std::path::PathBuf> = listing
+        .segments
+        .iter()
+        .filter(|(first_lsn, _)| (from..sealed).contains(first_lsn))
+        .map(|(_, path)| path)
+        .collect();
+    if listing
+        .segments
+        .iter()
+        .all(|(first_lsn, _)| *first_lsn != from)
+    {
+        return Err(Error::Internal(format!(
+            "the WAL segment at log position {from}, where the last backup ended, was removed"
+        )));
     }
 
     let start_epoch = EpochId::new(cursor.backed_up_epoch.as_u64() + 1);
     let end_epoch = current_epoch;
 
-    // Write incremental backup file
+    let mut output = Vec::new();
+    write_backup_header(&mut output, start_epoch, end_epoch, groups);
+    for path in segments {
+        let bytes = std::fs::read(path).map_err(|e| {
+            Error::Internal(format!(
+                "failed to read WAL segment {}: {e}",
+                path.display()
+            ))
+        })?;
+        output.extend_from_slice(&(bytes.len() as u64).to_le_bytes());
+        output.extend_from_slice(&bytes);
+    }
+
     let segment_idx = manifest.segments.len();
     let filename = format!("backup_incr_{segment_idx:04}.wal");
-    let dest_path = backup_dir.join(&filename);
-
-    let mut output = Vec::new();
-    write_backup_header(&mut output, start_epoch, end_epoch, record_count);
-    output.extend_from_slice(&wal_data);
-
-    std::fs::write(&dest_path, &output)
+    std::fs::write(backup_dir.join(&filename), &output)
         .map_err(|e| Error::Internal(format!("failed to write incremental backup: {e}")))?;
 
-    let checksum = crc32fast::hash(&output);
     let segment = BackupSegment {
         kind: BackupKind::Incremental,
         filename,
         start_epoch,
         end_epoch,
-        checksum,
+        checksum: crc32fast::hash(&output),
         size_bytes: output.len() as u64,
         created_at_ms: now_ms(),
     };
 
-    // Update manifest
     let mut manifest = manifest;
     manifest.segments.push(segment.clone());
     write_manifest(backup_dir, &manifest)?;
 
-    // Update backup cursor
-    let new_cursor = BackupCursor {
-        backed_up_epoch: current_epoch,
-        log_sequence: sealed,
-        timestamp_ms: now_ms(),
-    };
-    write_backup_cursor(wal.dir(), &new_cursor)?;
+    write_backup_cursor(
+        wal.dir(),
+        &BackupCursor {
+            backed_up_epoch: current_epoch,
+            log_sequence: 0,
+            wal_lsn: Some(sealed),
+            timestamp_ms: now_ms(),
+        },
+    )?;
 
     Ok(segment)
+}
+
+/// How many complete groups `wal` holds from `from` up to `until`, both
+/// segment boundaries.
+fn groups_between(wal: &Wal, from: u64, until: u64) -> Result<u64> {
+    let mut scan = WalScan::open(wal.dir(), wal.scan_options(from)).map_err(Error::from)?;
+    let mut groups = 0;
+    while let Some(group) = scan.next_group().map_err(Error::from)? {
+        if group.start_lsn() >= until {
+            break;
+        }
+        groups += 1;
+    }
+    Ok(groups)
 }
 
 // ── Restore ────────────────────────────────────────────────────────
@@ -755,10 +831,12 @@ pub(super) fn do_backup_incremental(
 ///    and the incremental segments after it, and checks `keys` against the
 ///    full backup ([`restore_ciphers`]).
 /// 2. Copies the full backup to `output_path`.
-/// 3. Replays incremental segments up to `target_epoch` using epoch-bounded
-///    WAL recovery, and writes the records as the sidecar WAL of the
-///    restored file. For an encrypted backup the segments are decrypted, and
-///    that WAL encrypted, with the WAL key of the backup's database.
+/// 3. Writes the WAL groups of the incremental segments up to `target_epoch`
+///    as the sidecar WAL of the restored file, which its next open replays.
+///    For an encrypted backup the segments are read, and that WAL written,
+///    with the WAL key of the backup's database. A chain of the earlier WAL
+///    format (0.5.x, 0.6.0-beta.1) is restored as that format, which the
+///    open replays once and retires.
 ///
 /// # Errors
 ///
@@ -787,26 +865,29 @@ pub(super) fn do_restore_to_epoch(
         .ok_or_else(|| Error::Internal("no backup manifest found".to_string()))?;
 
     // Find the best full backup (latest one that doesn't exceed target)
-    let full = manifest
+    let full_index = manifest
         .segments
         .iter()
-        .rfind(|s| s.kind == BackupKind::Full && s.end_epoch <= target_epoch)
+        .rposition(|s| s.kind == BackupKind::Full && s.end_epoch <= target_epoch)
         .ok_or_else(|| {
             Error::Internal(format!(
                 "no full backup covers epoch {}",
                 target_epoch.as_u64()
             ))
         })?;
+    let full = &manifest.segments[full_index];
 
-    // Find incremental segments that cover (full.end_epoch, target_epoch]
-    let incrementals: Vec<&BackupSegment> = manifest
-        .segments
+    // The incremental segments taken after the full backup, up to the first
+    // that starts past the target: the WAL from where the image's log
+    // position is on. One can start at or before the full backup's epoch: a
+    // read-only database's full backup cannot move the WAL's backup cursor,
+    // so the writer's next incremental starts at its own last full backup.
+    // Its groups up to the image's log position are in the image too, and
+    // the replay starts at that position, past them. An incremental's epochs
+    // are read while commits go on, so they select by order, not by range.
+    let incrementals: Vec<&BackupSegment> = manifest.segments[full_index + 1..]
         .iter()
-        .filter(|s| {
-            s.kind == BackupKind::Incremental
-                && s.start_epoch > full.end_epoch
-                && s.start_epoch <= target_epoch
-        })
+        .filter(|s| s.kind == BackupKind::Incremental && s.start_epoch <= target_epoch)
         .collect();
 
     // The key is checked before anything is written.
@@ -822,19 +903,8 @@ pub(super) fn do_restore_to_epoch(
         return Ok(());
     }
 
-    // Create a temporary WAL directory for replay
-    let wal_dir = output_path.parent().unwrap_or(Path::new(".")).join(format!(
-        "{}.restore_wal",
-        output_path
-            .file_name()
-            .and_then(|n| n.to_str())
-            .unwrap_or("db")
-    ));
-    std::fs::create_dir_all(&wal_dir)
-        .map_err(|e| Error::Internal(format!("failed to create restore WAL directory: {e}")))?;
-
-    // Write incremental WAL data to temp WAL files for recovery
-    for (i, incr) in incrementals.iter().enumerate() {
+    let mut segments = Vec::with_capacity(incrementals.len());
+    for incr in &incrementals {
         let incr_path = backup_dir.join(&incr.filename);
         let incr_data = std::fs::read(&incr_path).map_err(|e| {
             Error::Internal(format!(
@@ -851,8 +921,209 @@ pub(super) fn do_restore_to_epoch(
                 incr.filename, incr.checksum,
             )));
         }
+        let version = backup_version(&incr_data)?;
+        segments.push((incr.filename.as_str(), version, incr_data));
+    }
 
-        // Skip the backup header, write the raw WAL frames to a temp log file
+    match segments.iter().map(|(_, version, _)| *version).max() {
+        // That format's records replay by epoch, from the first: they would
+        // apply again what the image holds.
+        Some(FIRST_FORMAT_VERSION)
+            if incrementals
+                .iter()
+                .any(|incremental| incremental.start_epoch <= full.end_epoch) =>
+        {
+            Err(Error::Internal(format!(
+                "the incremental backups after the full backup {} start before its epoch {} in \
+                 the WAL format before 0.6.0, which cannot replay from it",
+                full.filename,
+                full.end_epoch.as_u64()
+            )))
+        }
+        Some(FIRST_FORMAT_VERSION) => {
+            restore_first_format(&segments, target_epoch, output_path, ciphers)
+        }
+        _ if segments
+            .iter()
+            .any(|(_, version, _)| *version == FIRST_FORMAT_VERSION) =>
+        {
+            Err(Error::Internal(
+                "the incremental backups after the full backup mix two WAL formats".to_string(),
+            ))
+        }
+        _ => restore_segments(&segments, target_epoch, output_path, ciphers.segments),
+    }
+}
+
+/// Writes the WAL groups of the version 2 incremental backups `segments`, up
+/// to `target_epoch`, as the sidecar WAL of the restored file at
+/// `output_path`, starting at its image's log position.
+fn restore_segments(
+    segments: &[(&str, u32, Vec<u8>)],
+    target_epoch: EpochId,
+    output_path: &Path,
+    cipher_for_salt: Option<CipherForSalt>,
+) -> Result<()> {
+    let image = restored_header(output_path)?;
+    let staging = sibling(output_path, "restore_wal");
+    std::fs::create_dir_all(&staging)
+        .map_err(|e| Error::Internal(format!("failed to create restore WAL directory: {e}")))?;
+    for (filename, _, data) in segments {
+        let mut rest = &data[BACKUP_HEADER_SIZE..];
+        while !rest.is_empty() {
+            let truncated =
+                || Error::Internal(format!("incremental backup {filename} is truncated"));
+            let (length, after) = rest.split_first_chunk::<8>().ok_or_else(truncated)?;
+            let length = usize::try_from(u64::from_le_bytes(*length)).map_err(|_| truncated())?;
+            let (bytes, after) = after.split_at_checked(length).ok_or_else(truncated)?;
+            let header = SegmentHeader::decode(bytes, Path::new(filename)).map_err(Error::from)?;
+            std::fs::write(staging.join(segment_file_name(header.first_lsn)), bytes).map_err(
+                |e| Error::Internal(format!("failed to write WAL segment for restore: {e}")),
+            )?;
+            rest = after;
+        }
+    }
+
+    let sidecar = std::path::PathBuf::from(format!("{}.wal", output_path.display()));
+    copy_groups_until(
+        &staging,
+        &sidecar,
+        ScanOptions {
+            cipher_for_salt: cipher_for_salt.clone(),
+            ..ScanOptions::new(image.database_id, image.checkpoint_lsn)
+        },
+        target_epoch,
+        cipher_for_salt,
+    )?;
+    std::fs::remove_dir_all(&staging)
+        .map_err(|e| Error::Internal(format!("failed to remove restore WAL directory: {e}")))
+}
+
+/// Copies the complete groups of the WAL in `from` (read with `options`) up
+/// to the first one past `target_epoch` into a new WAL in `to`, which starts
+/// at `options.from_lsn`.
+fn copy_groups_until(
+    from: &Path,
+    to: &Path,
+    options: ScanOptions,
+    target_epoch: EpochId,
+    cipher_for_salt: Option<CipherForSalt>,
+) -> Result<()> {
+    use grafeo_common::storage::{LogRecord, read_log_records};
+
+    let write_failed = |e: grafeo_storage::wal::GroupError| {
+        Error::Internal(format!("failed to write the restored WAL: {e}"))
+    };
+    let (database_id, start_lsn) = (options.database_id, options.from_lsn);
+    let mut scan = WalScan::open(from, options).map_err(Error::from)?;
+    std::fs::create_dir_all(to)
+        .map_err(|e| Error::Internal(format!("failed to create the restored WAL: {e}")))?;
+    let wal = Wal::open(
+        to,
+        WalOptions {
+            durability: DurabilityMode::NoSync,
+            cipher_for_salt,
+            ..WalOptions::new(database_id, start_lsn)
+        },
+    )
+    .map_err(Error::from)?;
+    let mut copied_all = true;
+    while let Some(mut group) = scan.next_group().map_err(Error::from)? {
+        let mut payloads = Vec::new();
+        while let Some(payload) = group.next_payload().map_err(Error::from)? {
+            payloads.push(payload.to_vec());
+        }
+        let mut first = None;
+        if let Some(payload) = payloads.first() {
+            read_log_records(payload, &mut |record| {
+                first.get_or_insert(record);
+                Ok(())
+            })?;
+        }
+        let Some(LogRecord::GroupBegin(begin)) = first else {
+            return Err(Error::Internal(format!(
+                "the backed-up group at log position {} does not start with its GroupBegin",
+                group.start_lsn()
+            )));
+        };
+        if begin.epoch > target_epoch {
+            copied_all = false;
+            break;
+        }
+        let mut writer = wal
+            .begin_group(group.transaction_id())
+            .map_err(write_failed)?;
+        for payload in &payloads {
+            writer.push(payload).map_err(write_failed)?;
+        }
+        writer.finish().map_err(write_failed)?;
+    }
+    if copied_all {
+        let end = scan.finish().map_err(Error::from)?;
+        if let Some(tail) = end.tail {
+            return Err(Error::Internal(format!(
+                "the backed-up WAL ends in a damaged group at log position {}: {}",
+                tail.lsn, tail.reason
+            )));
+        }
+    }
+    wal.sync().map_err(Error::from)?;
+    wal.close();
+    Ok(())
+}
+
+/// The active database header of the restored file at `path`, with the id
+/// of its database (from its file header).
+struct RestoredImage {
+    database_id: u128,
+    checkpoint_lsn: u64,
+}
+
+/// Reads the [`RestoredImage`] of the file at `path`.
+fn restored_header(path: &Path) -> Result<RestoredImage> {
+    let mut pages = Vec::with_capacity(3 * PAGE_BYTES);
+    std::fs::File::open(path)
+        .and_then(|file| file.take(3 * PAGE_BYTES as u64).read_to_end(&mut pages))
+        .map_err(|e| {
+            Error::Internal(format!(
+                "cannot read the restored file {}: {e}",
+                path.display()
+            ))
+        })?;
+    let file_header = FileHeaderV3::decode(&pages).map_err(|e| e.wrapped("restore"))?;
+    Ok(RestoredImage {
+        database_id: file_header.database_id,
+        checkpoint_lsn: copied_header(&pages, path)?.checkpoint_lsn,
+    })
+}
+
+/// The path `<output_path file name>.<suffix>` next to `output_path`.
+fn sibling(output_path: &Path, suffix: &str) -> std::path::PathBuf {
+    output_path.parent().unwrap_or(Path::new(".")).join(format!(
+        "{}.{suffix}",
+        output_path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("db")
+    ))
+}
+
+/// Restores the incremental backups `segments` of the WAL format of 0.5.x and
+/// 0.6.0-beta.1: replays them up to `target_epoch` with that format's
+/// recovery and writes the records as a sidecar WAL of that format, which
+/// the restored file's open replays once and retires. Removed in 0.7.0.
+fn restore_first_format(
+    segments: &[(&str, u32, Vec<u8>)],
+    target_epoch: EpochId,
+    output_path: &Path,
+    ciphers: RestoreCiphers,
+) -> Result<()> {
+    let wal_dir = sibling(output_path, "restore_wal");
+    std::fs::create_dir_all(&wal_dir)
+        .map_err(|e| Error::Internal(format!("failed to create restore WAL directory: {e}")))?;
+
+    // Write the frames of each segment to a temp log file for recovery
+    for (i, (_, _, incr_data)) in segments.iter().enumerate() {
         if incr_data.len() > BACKUP_HEADER_SIZE {
             let wal_frames = &incr_data[BACKUP_HEADER_SIZE..];
             let wal_file = wal_dir.join(format!("wal_{i:08}.log"));
@@ -862,7 +1133,7 @@ pub(super) fn do_restore_to_epoch(
         }
     }
 
-    // Recover WAL records up to target epoch, then write a trimmed WAL
+    // Recover WAL records up to target epoch, then write a trimmed WAL    // Recover WAL records up to target epoch, then write a trimmed WAL
     // that contains only records within the epoch boundary. This ensures
     // that when GrafeoDB::open() replays the sidecar WAL, it does not
     // advance beyond the target epoch.
@@ -914,6 +1185,8 @@ pub(super) fn do_restore_to_epoch(
 struct RestoreCiphers {
     decrypt: Option<WalCipher>,
     encrypt: Option<WalCipher>,
+    /// The ciphers of the WAL segments, for a chain of the current format.
+    segments: Option<CipherForSalt>,
 }
 
 /// Checks `keys` against the full backup at `path` before a restore writes
@@ -929,6 +1202,7 @@ fn restore_ciphers(path: &Path, keys: &DatabaseKeys, has_segments: bool) -> Resu
     let plain = RestoreCiphers {
         decrypt: None,
         encrypt: None,
+        segments: None,
     };
     // A full backup taken by 0.5.x is a 0.5.x file, which is never encrypted.
     let encrypted = match detect(path)? {
@@ -975,6 +1249,7 @@ fn restore_ciphers(path: &Path, keys: &DatabaseKeys, has_segments: bool) -> Resu
             Ok(RestoreCiphers {
                 decrypt: keys.wal_cipher(database_id),
                 encrypt: keys.wal_cipher(database_id),
+                segments: keys.wal_segment_ciphers(database_id),
             })
         }
     }
@@ -1182,6 +1457,7 @@ mod tests {
         let cursor = BackupCursor {
             backed_up_epoch: EpochId::new(88),
             log_sequence: 3,
+            wal_lsn: None,
             timestamp_ms: 1_791_331_288_000,
         };
         write_backup_cursor(dir.path(), &cursor).unwrap();
@@ -1356,93 +1632,6 @@ mod tests {
             assert_eq!(serde_json::to_string(&kind).unwrap(), name);
             assert_eq!(serde_json::from_str::<BackupKind>(name).unwrap(), kind);
         }
-    }
-
-    /// A full backup records the epoch of the image it copied. After a
-    /// checkpoint failed once its database header was written, the manager
-    /// still serves the previous image (epoch 3), but the file opens at the
-    /// new one (epoch 19): the backup must say 19, or a restore to an epoch
-    /// in between would copy it and return newer data.
-    #[cfg(feature = "testing-crash-injection")]
-    #[test]
-    fn a_full_backup_records_the_epoch_of_the_image_it_copied() {
-        use grafeo_common::storage::{
-            Section, SectionSink, SectionSource, SectionType, read_raw, write_raw,
-        };
-        use grafeo_common::testing::crash::with_failure_at;
-        use grafeo_storage::file::CheckpointHeader;
-
-        /// A catalog section holding fixed bytes.
-        struct Fixed(&'static [u8]);
-
-        impl Section for Fixed {
-            fn section_type(&self) -> SectionType {
-                SectionType::Catalog
-            }
-
-            fn serialize(&self) -> Result<Vec<u8>> {
-                Ok(self.0.to_vec())
-            }
-
-            fn deserialize(&mut self, _data: &[u8]) -> Result<()> {
-                Ok(())
-            }
-
-            fn write_to(&self, sink: &mut dyn SectionSink) -> Result<()> {
-                write_raw(self, sink)
-            }
-
-            fn read_from(&mut self, source: &dyn SectionSource) -> Result<()> {
-                read_raw(self, source)
-            }
-
-            fn is_dirty(&self) -> bool {
-                true
-            }
-
-            fn mark_clean(&self) {}
-
-            fn memory_usage(&self) -> usize {
-                self.0.len()
-            }
-        }
-
-        let dir = TempDir::new().unwrap();
-        let backup_dir = dir.path().join("backups");
-        let fm = GrafeoFileManager::create(dir.path().join("vincent.grafeo"), None).unwrap();
-        let checkpoint = |data: &'static [u8], epoch: u64| {
-            fm.write_checkpoint(
-                &[&Fixed(data)],
-                &CheckpointHeader {
-                    epoch,
-                    ..CheckpointHeader::default()
-                },
-            )
-        };
-        checkpoint(b"Alix", 3).unwrap();
-        // The third failure point of a checkpoint is checkpoint:after_header.
-        let error = with_failure_at(3, || checkpoint(b"Gus", 19))
-            .unwrap_err()
-            .to_string();
-        assert!(error.contains("checkpoint:after_header"), "{error}");
-        assert_eq!(
-            fm.active_header().epoch,
-            3,
-            "the manager serves the previous image"
-        );
-
-        let segment = do_backup_full(&backup_dir, &fm, None).unwrap();
-        let copy = GrafeoFileManager::open(backup_dir.join(&segment.filename), None).unwrap();
-        assert_eq!(
-            copy.active_header().epoch,
-            19,
-            "the copy opens at the new image"
-        );
-        assert_eq!(
-            segment.end_epoch,
-            EpochId::new(19),
-            "the backup records the epoch of the image it copied"
-        );
     }
 
     #[test]

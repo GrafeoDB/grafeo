@@ -1230,3 +1230,41 @@ fn test_execute_raw_has_a_time() {
             .is_some_and(|ms| ms >= 0.0)
     );
 }
+
+/// An import is one transaction: an edge whose index is out of bounds fails
+/// the call, and none of the nodes before it is kept.
+#[wasm_bindgen_test]
+fn test_import_lpg_failure_keeps_nothing() {
+    let db = Database::new().expect("create db");
+    let data = to_js(&serde_json::json!({
+        "nodes": [
+            { "labels": ["Person"], "properties": { "name": "Alix" } },
+            { "labels": ["Person"], "properties": { "name": "Gus" } }
+        ],
+        "edges": [
+            { "source": 0, "target": 1, "type": "KNOWS" },
+            { "source": 0, "target": 7, "type": "KNOWS" }
+        ]
+    }))
+    .unwrap();
+    assert!(db.import_lpg(data).is_err());
+    assert_eq!((db.node_count(), db.edge_count()), (0, 0));
+}
+
+/// The same for `importRows`: a row without its target column fails the
+/// call, and the rows before it are not kept.
+#[wasm_bindgen_test]
+fn test_import_rows_failure_keeps_nothing() {
+    let db = Database::new().expect("create db");
+    let nodes = to_js(&serde_json::json!([{ "name": "Alix" }, { "name": "Gus" }])).unwrap();
+    let options = to_js(&serde_json::json!({ "mode": "nodes", "label": "Person" })).unwrap();
+    assert_eq!(db.import_rows(nodes, options).expect("nodes"), 2);
+    let edges = to_js(&serde_json::json!([
+        { "source": 0, "target": 1 },
+        { "source": 1 }
+    ]))
+    .unwrap();
+    let options = to_js(&serde_json::json!({ "mode": "edges", "edgeType": "KNOWS" })).unwrap();
+    assert!(db.import_rows(edges, options).is_err());
+    assert_eq!((db.node_count(), db.edge_count()), (2, 0));
+}

@@ -534,3 +534,22 @@ fn a_table_keeps_results_on_stdout_and_the_row_count_on_stderr() {
     assert!(stdout.contains("Alix"), "{stdout}");
     assert_eq!(stderr, "");
 }
+
+/// An error names what failed and why: the whole chain of causes, not only
+/// the outermost context.
+#[test]
+fn an_error_shows_its_cause() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("broken.grafeo");
+    std::fs::write(&file, "text, not a database, long enough for a header").unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_grafeo"))
+        .args(["--no-color", "info", file.to_str().unwrap()])
+        .output()
+        .expect("run grafeo");
+    assert!(!output.status.success());
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(
+        stderr.contains("Failed to open database at") && stderr.contains("not a Grafeo database"),
+        "{stderr}"
+    );
+}

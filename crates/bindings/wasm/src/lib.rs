@@ -1179,10 +1179,17 @@ impl Database {
     /// # Errors
     ///
     /// Returns `JsError` if `data` cannot be deserialised or if an edge references an out-of-bounds node index.
+    /// The import is one transaction: after an error nothing of it is kept.
     #[wasm_bindgen(js_name = "importLpg")]
     pub fn import_lpg(&self, data: JsValue) -> Result<JsValue, JsValue> {
         let import: LpgImport = serde_wasm_bindgen::from_value(data)
             .map_err(|e| JsError::new(&format!("Invalid LPG data: {e}")))?;
+
+        // One transaction: a node or edge that fails, or an edge index out of
+        // bounds, rolls back everything before it (the session's drop rolls
+        // back).
+        let mut session = self.db().session();
+        session.begin_transaction().map_err(database_error)?;
 
         // Phase 1: create all nodes, collecting their IDs
         let mut node_ids = Vec::with_capacity(import.nodes.len());
@@ -1197,8 +1204,7 @@ impl Database {
                         .collect()
                 })
                 .unwrap_or_default();
-            let id = self
-                .db()
+            let id = session
                 .create_node_with_props(&labels, props)
                 .map_err(database_error)?;
             node_ids.push(id);
@@ -1230,11 +1236,12 @@ impl Database {
                         .collect()
                 })
                 .unwrap_or_default();
-            self.db()
+            session
                 .create_edge_with_props(src, dst, &edge.edge_type, props)
                 .map_err(database_error)?;
             edge_count += 1;
         }
+        session.commit().map_err(database_error)?;
 
         let result = js_sys::Object::new();
         let _ = js_sys::Reflect::set(
@@ -1416,6 +1423,8 @@ impl Database {
     /// - `rows` is not an array of objects.
     /// - A required column (`label`, `edgeType`, `source`, `target`) is missing.
     /// - A source/target value is not a valid non-negative integer.
+    ///
+    /// The rows go in as one transaction: after an error none of them is kept.
     #[wasm_bindgen(js_name = "importRows")]
     pub fn import_rows(&self, rows: JsValue, options: JsValue) -> Result<u32, JsValue> {
         let opts: ImportRowsOptions = serde_wasm_bindgen::from_value(options)
@@ -1424,6 +1433,10 @@ impl Database {
             serde_wasm_bindgen::from_value(rows)
                 .map_err(|e| JsError::new(&format!("rows must be an array of objects: {e}")))?;
 
+        // One transaction: a row that fails rolls back every row before it
+        // (the session's drop rolls back).
+        let mut session = self.db().session();
+        session.begin_transaction().map_err(database_error)?;
         let mut count: u32 = 0;
 
         match opts.mode.as_str() {
@@ -1437,7 +1450,7 @@ impl Database {
                         .filter(|(_, v)| !v.is_null())
                         .map(|(k, v)| (PropertyKey::new(k.as_str()), json_to_value(v)))
                         .collect();
-                    self.db()
+                    session
                         .create_node_with_props(&label_refs, props)
                         .map_err(|e| JsError::new(&format!("rows[{count}]: {e}")))?;
                     count += 1;
@@ -1470,7 +1483,7 @@ impl Database {
                         .map(|(k, v)| (PropertyKey::new(k.as_str()), json_to_value(v)))
                         .collect();
 
-                    self.db()
+                    session
                         .create_edge_with_props(src_id, dst_id, edge_type, props)
                         .map_err(|e| JsError::new(&format!("rows[{i}]: {e}")))?;
                     count += 1;
@@ -1483,6 +1496,7 @@ impl Database {
             }
         }
 
+        session.commit().map_err(database_error)?;
         Ok(count)
     }
 

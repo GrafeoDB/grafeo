@@ -3381,6 +3381,9 @@ impl PyGrafeoDB {
     /// `source` and `target` columns must contain integer node IDs.
     /// Remaining columns become edge properties.
     ///
+    /// The rows go in as one transaction: when one fails (a constraint, a
+    /// missing node), none of them is imported.
+    ///
     /// Requires pandas or polars (`uv add pandas` or `uv add polars`).
     ///
     /// Example:
@@ -3435,6 +3438,10 @@ impl PyGrafeoDB {
                 let label_refs: Vec<&str> = labels.iter().map(|s| s.as_str()).collect();
 
                 self.released(py, |db| {
+                    // One transaction: a failing row rolls back every row
+                    // before it (the session's drop rolls back).
+                    let mut session = db.session();
+                    session.begin_transaction()?;
                     let mut count: u64 = 0;
                     for row in &rows {
                         let props: Vec<(
@@ -3452,9 +3459,10 @@ impl PyGrafeoDB {
                             })
                             .collect();
 
-                        db.create_node_with_props(&label_refs, props)?;
+                        session.create_node_with_props(&label_refs, props)?;
                         count += 1;
                     }
+                    session.commit()?;
                     Ok(count)
                 })
             }
@@ -3477,6 +3485,9 @@ impl PyGrafeoDB {
                 })?;
 
                 self.released(py, |db| {
+                    // One transaction, as for nodes.
+                    let mut session = db.session();
+                    session.begin_transaction()?;
                     let mut count: u64 = 0;
                     for row in &rows {
                         let src_id = value_to_node_id(&row[source_idx], source)?;
@@ -3500,9 +3511,10 @@ impl PyGrafeoDB {
                             })
                             .collect();
 
-                        db.create_edge_with_props(src_id, dst_id, edge_type_str, props)?;
+                        session.create_edge_with_props(src_id, dst_id, edge_type_str, props)?;
                         count += 1;
                     }
+                    session.commit()?;
                     Ok(count)
                 })
             }

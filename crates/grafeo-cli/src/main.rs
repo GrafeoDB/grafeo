@@ -485,7 +485,9 @@ fn main() {
                 // Validation already printed results, just set the exit code.
                 ExitCode::ValidationFailed
             } else {
-                output::error(&e.to_string());
+                // The whole chain: the context says what failed, the causes
+                // after it why.
+                output::error(&format!("{e:#}"));
                 ExitCode::GeneralError
             }
         }

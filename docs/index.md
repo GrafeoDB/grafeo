@@ -194,7 +194,7 @@ Choose the query language that fits the project:
 | Language | Data Model | Style |
 |----------|------------|-------|
 | **GQL** (default) | LPG | ISO standard, declarative pattern matching |
-| **Cypher** | LPG | Neo4j-compatible, ASCII-art patterns |
+| **Cypher** | LPG | openCypher, ASCII-art patterns |
 | **Gremlin** | LPG | Apache TinkerPop, traversal-based |
 | **GraphQL** | LPG, RDF | Schema-driven, familiar to web developers |
 | **SPARQL** | RDF | W3C standard for RDF queries |

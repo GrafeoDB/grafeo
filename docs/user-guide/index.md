@@ -43,7 +43,7 @@ Grafeo is GQL-first: [GQL](gql/index.md) (ISO/IEC 39075) sets its semantics, and
 
     ---
 
-    Use Neo4j-compatible Cypher for LPG queries.
+    Use Cypher (openCypher) for LPG queries.
 
     [:octicons-arrow-right-24: Cypher Guide](cypher/index.md)
 

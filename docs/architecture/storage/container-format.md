@@ -711,7 +711,8 @@ These sections hold more, in proportion to their data:
 | `RDF_RING` | The packed term dictionary, built whole before it is written | Each of the six streams in one buffer, which becomes that part of the ring |
 
 **Locks.** A checkpoint holds commits off while it takes its snapshot and
-writes the catalog, the RDF sections and the time index. It then holds a
+writes the catalog, the RDF sections and the time index, and so does a copy
+(see [Copies and Full Backups](#copies-and-full-backups)). It then holds a
 graph store's read lock while it gathers the values of one file row group,
 never while it encodes them or writes to the file: a write to that store
 waits for one row group's values to be read at most.
@@ -817,6 +818,42 @@ step 7 opens the new image. If a checkpoint fails at or after its header
 write, the new header may or may not have reached the disk: the next checkpoint
 spares the pages of both images, and the WAL is kept until a later checkpoint
 succeeds.
+
+### Copies and Full Backups
+
+A full backup, `save()` and `to_memory()` write a complete image of the
+database at an epoch through the same path, with commits going on:
+
+```text
+Copy:
+  1. (Engine) Hold commits off and take the snapshot as a checkpoint does
+     (the epoch E, a read pinned at E), without taking the row groups' marks
+  2. (Engine) For a full backup, start a new WAL segment: its first log
+     position is where the incremental backups after it begin
+  3. Write every section into a new file `<target>.partial` (into memory for
+     `to_memory()`): the sections without versions while commits are still
+     held off, then the `LPG_STORE` section as of E with commits going on;
+     every chunk is written, as nothing is shared with another file
+  4. Write the directory, fsync, the database header, fsync
+  5. Rename `<target>.partial` to the target and sync its directory
+```
+
+The image holds the committed state at E exactly. The copy leaves the marks
+and the baselines of the database alone, so its next checkpoint reuses what it
+would have without the copy. A crash before step 5 leaves the database and
+the target as they were, and at most a `<target>.partial` that the next copy
+to the same target removes. A full backup enters the backup manifest only
+after its rename, so a restore never reads an image a crash cut off, and the
+next full backup replaces an image the manifest does not list. The incremental
+backups after a full backup hold the WAL from the segment it started, so a
+restore to an epoch is the full image and the commits after E up to that
+epoch. A read-only database starts no WAL segment: its image records the end
+of the sidecar WAL its open replayed, and as it cannot move the WAL's backup
+cursor, the writer's next incremental backup starts before that image's epoch.
+A restore therefore replays every incremental backup taken after the full
+backup it starts from, from the image's log position on, which skips what the
+image holds. `export_snapshot()` reads the graphs' rows at E the same way: commits
+are held off while it takes the catalog's records and the RDF triples.
 
 ---
 

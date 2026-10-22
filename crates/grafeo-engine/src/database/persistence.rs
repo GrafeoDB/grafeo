@@ -672,6 +672,9 @@ impl super::GrafeoDB {
     /// same for an in-memory and a persistent database; the original stays
     /// as it is. Like a checkpoint, the copy holds the committed state: a
     /// transaction still open is left out of it (see [`close`](Self::close)).
+    /// Commits wait only while the copy takes its snapshot and the catalog
+    /// and RDF data, and go on while it writes the graphs. The file is
+    /// written as `<path>.partial` and renamed to `path` once complete.
     ///
     /// The copy of an encrypted database (`Config::encryption`) is encrypted
     /// with the same key chain: it has a new database id and so its own
@@ -719,8 +722,10 @@ impl super::GrafeoDB {
     /// with the keys `keys` derive for that id (not encrypted when `keys`
     /// has no key chain).
     ///
-    /// If writing the image fails, the new file is removed again: it would
-    /// open as an empty database, and a retry would find `path` taken.
+    /// The image holds the state at an epoch E, and commits go on while it
+    /// is written (see `flush::write_copy`): it is written under a temporary
+    /// name and renamed to `path` once complete, so `path` never opens as less
+    /// than E.
     ///
     /// # Errors
     ///
@@ -732,37 +737,19 @@ impl super::GrafeoDB {
         path: &Path,
         keys: &super::encryption::DatabaseKeys,
     ) -> Result<()> {
-        use grafeo_storage::file::GrafeoFileManager;
         use grafeo_storage::file::v3::header::new_database_id;
 
-        // Commits held off until the image is written: it holds every commit
-        // whole, and none that did not complete.
-        let commits = self.transaction_manager.hold_commits()?;
-        let sources = self.checkpoint_sources();
-        let sections = sources.sections(&commits);
-        let section_refs: Vec<&dyn grafeo_common::storage::Section> =
-            sections.iter().map(AsRef::as_ref).collect();
-        let database_id = new_database_id();
-        let fm = GrafeoFileManager::create_with_id(
+        // An image of the state at an epoch, written with commits going on
+        // (#362): they are held off only while the snapshot is taken. A new
+        // database: its WAL starts at log position 0.
+        super::flush::write_copy(
+            &self.checkpoint_sources(),
             path,
-            database_id,
-            keys.container_cipher(database_id),
-        )?;
-        // A new database: its WAL starts at log position 0.
-        let written = fm.write_checkpoint(&section_refs, &sources.context().checkpoint_header(0));
-        drop(commits);
-        let written = written.and_then(|_| fm.close());
-        if written.is_err() {
-            drop(fm);
-            // Best effort: the error that matters is the one returned.
-            if let Err(error) = std::fs::remove_file(path) {
-                grafeo_common::grafeo_warn!(
-                    "cannot remove the incomplete image {}: {error}",
-                    path.display()
-                );
-            }
-        }
-        written
+            new_database_id(),
+            keys,
+            || Ok(0),
+        )
+        .map(drop)
     }
 
     /// Creates an in-memory copy of this database.
@@ -833,27 +820,62 @@ impl super::GrafeoDB {
     /// for [`to_memory`](Self::to_memory) to load; `target`'s transaction
     /// manager takes the epoch of the commits they hold.
     ///
-    /// The sections are taken under one commit hold, so they hold every
-    /// commit whole, none that did not complete, and nothing of a
-    /// transaction still open: the LPG section writes every graph as a
-    /// reader at the checkpoint's epoch sees it.
+    /// The sections are taken from one snapshot at an epoch E, as a
+    /// checkpoint takes it, so they hold every commit up to E whole, none
+    /// that did not complete, and nothing of a transaction still open: the
+    /// LPG section writes every graph as a reader at E sees it. Commits are
+    /// held off only while the snapshot is taken and the sections without
+    /// versions are written, and go on while the LPG section is (#362).
     ///
     /// # Errors
     ///
     /// Returns an error if commits cannot be held or a section fails to
     /// write.
     pub(super) fn copy_into(&self, target: &Self) -> Result<grafeo_common::storage::MemoryImage> {
-        use grafeo_common::storage::MemoryImage;
-
-        let mut image = MemoryImage::new();
         let commits = self.transaction_manager.hold_commits()?;
         let sources = self.checkpoint_sources();
+        #[cfg(feature = "grafeo-file")]
+        {
+            let mut image = grafeo_common::storage::MemoryImage::new();
+            // The read pinned at E lives with `snapshot` until the copy is
+            // written.
+            let snapshot = sources.copy_snapshot(&commits)?;
+            target
+                .transaction_manager
+                .sync_epoch(EpochId::new(snapshot.context.epoch));
+            let mut commits = Some(commits);
+            for (index, section) in snapshot.sections.iter().enumerate() {
+                if index == snapshot.held {
+                    // The LPG section is read at E with commits going on.
+                    drop(commits.take());
+                }
+                image.begin_section(section.section_type(), section.version())?;
+                section.write_to(&mut image)?;
+            }
+            Ok(image)
+        }
+        #[cfg(not(feature = "grafeo-file"))]
+        {
+            self.copy_held(target, &sources, &commits)
+        }
+    }
+
+    /// [`copy_into`](Self::copy_into) without the container format, whose
+    /// snapshot a copy takes: every section under the hold.
+    #[cfg(not(feature = "grafeo-file"))]
+    fn copy_held(
+        &self,
+        target: &Self,
+        sources: &super::sections::CheckpointSources,
+        commits: &crate::transaction::CommitsHeld<'_>,
+    ) -> Result<grafeo_common::storage::MemoryImage> {
+        let mut image = grafeo_common::storage::MemoryImage::new();
         // The epoch of the commits the copy holds, for `to_memory` to
         // continue from once its stores are loaded.
         target
             .transaction_manager
             .sync_epoch(EpochId::new(sources.epoch()));
-        for section in sources.sections(&commits) {
+        for section in sources.sections(commits) {
             image.begin_section(section.section_type(), section.version())?;
             section.write_to(&mut image)?;
         }
@@ -953,8 +975,16 @@ impl super::GrafeoDB {
             ))
         })?;
         let epoch = EpochId::new(self.checkpoint_sources().epoch());
-        let exported = row_groups::export(&self.snapshot_parts(&root), epoch);
+        // The graphs are read at the epoch with commits going on, while a
+        // read pinned at it keeps their versions (#362); the rest is taken
+        // under the hold.
+        let pin = self.transaction_manager.pin_read_at(epoch)?;
+        let held = row_groups::export_held(&self.snapshot_parts(&root));
         drop(commits);
+        #[cfg(feature = "testing-statement-injection")]
+        grafeo_common::testing::commit_hook::run_during_checkpoint_write();
+        let exported = row_groups::export_rows(held?, epoch);
+        drop(pin);
         exported
     }
 
@@ -1184,31 +1214,35 @@ pub(super) mod row_groups {
         }
     }
 
-    /// Exports the database to a snapshot of version 5 as a committed
-    /// reader at `epoch` sees it: every graph's rows at `epoch`, the RDF
-    /// triples and the catalog's records with every graph's indexes. The
-    /// caller holds commits off, as `export_snapshot` does, so `epoch` holds
-    /// every commit whole.
+    /// What an export takes while the caller holds commits off: the graphs,
+    /// the RDF triples and the catalog's records, which have no versions to
+    /// be read at the epoch later. [`export_rows`] reads the graphs' rows at
+    /// the epoch afterwards, with commits going on, while a read pinned at
+    /// it keeps their versions (#362).
+    pub(in crate::database) struct ExportHeld {
+        root: Arc<RowGroupStore>,
+        /// The named graphs, by name.
+        named: Vec<(String, Arc<RowGroupStore>)>,
+        rdf_triples: Vec<super::SnapshotTriple>,
+        rdf_named_graphs: Vec<super::RdfNamedGraphSnapshot>,
+        catalog: Vec<u8>,
+    }
+
+    /// Takes the [`ExportHeld`] of `parts`, while the caller holds commits
+    /// off.
     ///
     /// # Errors
     ///
-    /// The error of a catalog record that does not encode, or of the
-    /// encoding.
-    pub(in crate::database) fn export(parts: &Parts<'_>, epoch: EpochId) -> Result<Vec<u8>> {
+    /// The error of a catalog record that does not encode.
+    pub(in crate::database) fn export_held(parts: &Parts<'_>) -> Result<ExportHeld> {
         let root = parts.root;
-        let nodes = root.nodes_at(epoch).map(snapshot_node).collect();
-        let edges = root.edges_at(epoch).map(snapshot_edge).collect();
         let mut names = root.graph_names();
         names.sort_unstable();
-        let named_graphs = names
+        let named = names
             .into_iter()
             .filter_map(|name| {
                 let graph = root.graph(&name)?;
-                Some(NamedGraphSnapshot {
-                    name,
-                    nodes: graph.nodes_at(epoch).map(snapshot_node).collect(),
-                    edges: graph.edges_at(epoch).map(snapshot_edge).collect(),
-                })
+                Some((name, graph))
             })
             .collect();
         #[cfg(feature = "triple-store")]
@@ -1217,6 +1251,41 @@ pub(super) mod row_groups {
         let (rdf_triples, rdf_named_graphs) = (Vec::new(), Vec::new());
         let catalog = CatalogSection::new(Arc::clone(parts.catalog), Arc::clone(root), || 0)
             .snapshot_records()?;
+        Ok(ExportHeld {
+            root: Arc::clone(root),
+            named,
+            rdf_triples,
+            rdf_named_graphs,
+            catalog,
+        })
+    }
+
+    /// The snapshot of version 5 of `held` as a committed reader at `epoch`
+    /// sees it: every graph's rows at `epoch`, the RDF triples and the
+    /// catalog's records with every graph's indexes. The caller pins a read
+    /// at `epoch`, so its versions stay until the rows are read.
+    ///
+    /// # Errors
+    ///
+    /// The error of the encoding.
+    pub(in crate::database) fn export_rows(held: ExportHeld, epoch: EpochId) -> Result<Vec<u8>> {
+        let ExportHeld {
+            root,
+            named,
+            rdf_triples,
+            rdf_named_graphs,
+            catalog,
+        } = held;
+        let nodes = root.nodes_at(epoch).map(snapshot_node).collect();
+        let edges = root.edges_at(epoch).map(snapshot_edge).collect();
+        let named_graphs = named
+            .into_iter()
+            .map(|(name, graph)| NamedGraphSnapshot {
+                name,
+                nodes: graph.nodes_at(epoch).map(snapshot_node).collect(),
+                edges: graph.edges_at(epoch).map(snapshot_edge).collect(),
+            })
+            .collect();
         let snapshot = SnapshotV5 {
             version: SNAPSHOT_VERSION,
             nodes,

@@ -169,6 +169,43 @@ impl CheckpointSources {
         &self,
         commits: &CommitsHeld<'_>,
     ) -> grafeo_common::utils::error::Result<CheckpointImage> {
+        self.snapshot_with(commits, false)
+    }
+
+    /// Takes what a copy of the database into another file writes (a full
+    /// backup, a save, `to_memory`), while the caller holds commits off, as
+    /// [`snapshot`](Self::snapshot) does for a checkpoint: the image holds
+    /// every commit up to E whole and nothing after it, and the caller lets
+    /// commits go on while it writes the LPG section. The copy writes every
+    /// chunk, and leaves the database's marks and baselines to its own next
+    /// checkpoint ([`CheckpointSnapshot::take_copy`]).
+    ///
+    /// # Errors
+    ///
+    /// The error of pinning the read.
+    #[cfg(feature = "grafeo-file")]
+    pub fn copy_snapshot(
+        &self,
+        commits: &CommitsHeld<'_>,
+    ) -> grafeo_common::utils::error::Result<CheckpointImage> {
+        self.snapshot_with(commits, true)
+    }
+
+    /// [`snapshot`](Self::snapshot), or [`copy_snapshot`](Self::copy_snapshot)
+    /// when `copy`.
+    #[cfg(feature = "grafeo-file")]
+    fn snapshot_with(
+        &self,
+        commits: &CommitsHeld<'_>,
+        #[cfg_attr(
+            not(feature = "lpg"),
+            expect(
+                unused_variables,
+                reason = "only the LPG section has marks for a copy to leave alone"
+            )
+        )]
+        copy: bool,
+    ) -> grafeo_common::utils::error::Result<CheckpointImage> {
         let epoch = grafeo_common::types::EpochId::new(self.epoch());
         let history_from = self
             .transaction_manager
@@ -182,7 +219,11 @@ impl CheckpointSources {
         let mut after: Vec<Box<dyn Section>> = Vec::new();
         #[cfg(feature = "lpg")]
         let lpg = self.store.as_ref().map(|root| {
-            let snapshot = Arc::new(CheckpointSnapshot::take(root, epoch, history_from));
+            let snapshot = Arc::new(if copy {
+                CheckpointSnapshot::take_copy(root, epoch, history_from)
+            } else {
+                CheckpointSnapshot::take(root, epoch, history_from)
+            });
             (Arc::clone(root), snapshot)
         });
         for section in self.sections(commits) {
@@ -1772,7 +1813,12 @@ mod tests {
             every_section_type(),
             "every section of a checkpoint"
         );
-        assert_eq!(copied.section_types(), expected.section_types());
+        // The copy writes the sections in the snapshot's order, the LPG
+        // section after the ones read under the hold, as a checkpoint does.
+        assert_eq!(
+            by_byte(copied.section_types()),
+            by_byte(expected.section_types())
+        );
         for section_type in expected.section_types() {
             let copy = copied.section_source(section_type).unwrap();
             let checkpoint = expected.section_source(section_type).unwrap();

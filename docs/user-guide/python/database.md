@@ -240,15 +240,18 @@ with db.begin_transaction_with_cdc(False) as tx:
 ## Backup and Restore
 
 ```python
-# Full backup
-db.backup_full("/backups/full")
+# Full backup: an image of the database at the current epoch, written while
+# commits go on
+db.backup_full("/backups")
 
-# Incremental backup (WAL records since last backup)
-db.backup_incremental("/backups/incr")
+# Incremental backup (the commits since the last backup), in the same directory
+db.backup_incremental("/backups")
 
-# Restore to a specific epoch
-grafeo.GrafeoDB.restore_to_epoch("/backups/full", epoch=100, output_path="./restored")
+# Restore to a specific epoch: the full backup and the incrementals up to it
+grafeo.GrafeoDB.restore_to_epoch("/backups", epoch=100, output_path="./restored.grafeo")
 ```
+
+An incremental backup needs a full backup in its directory, and continues from the last backup there.
 
 ## Persistence
 

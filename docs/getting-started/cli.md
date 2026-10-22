@@ -173,11 +173,11 @@ grafeo index stats ./mydb
 grafeo backup create ./mydb -o backup.grafeo
 grafeo backup restore backup.grafeo ./restored --force
 
-# Incremental backup (WAL-based, for production use)
-grafeo backup full ./mydb -o /backups/full
-grafeo backup incremental ./mydb -o /backups/incr
-grafeo backup status /backups/full
-grafeo backup restore-to-epoch /backups/full --epoch 100 -o ./restored
+# Full and incremental backups (WAL-based, for production use), in one directory
+grafeo backup full ./mydb -o /backups
+grafeo backup incremental ./mydb -o /backups
+grafeo backup status /backups
+grafeo backup restore-to-epoch /backups --epoch 100 -o ./restored
 ```
 
 ### Data Import

@@ -3285,9 +3285,14 @@ impl GrafeoDB {
 
     /// Creates a full backup of the database in the given directory.
     ///
-    /// Checkpoints the database, copies the `.grafeo` file, and creates a
-    /// backup manifest. Subsequent incremental backups will use this as the
-    /// base.
+    /// Writes a `.grafeo` image of the database at the epoch E it starts at,
+    /// from the snapshot a checkpoint takes, and adds it to the backup
+    /// manifest. Commits wait only while the snapshot is taken and the
+    /// catalog and RDF data are copied, and go on while the graphs are
+    /// written; the image holds exactly the commits up to E. The database's
+    /// own file is not checkpointed. Subsequent incremental backups hold the
+    /// commits after E. A read-only database writes what it sees, the
+    /// commits it replayed from the WAL included.
     ///
     /// # Errors
     ///
@@ -3302,14 +3307,17 @@ impl GrafeoDB {
             ))
         })?;
 
-        // Checkpoint to ensure the container has the latest data.
-        // Skip for read-only databases: the on-disk file is already a valid
-        // snapshot and the file manager rejects writes.
-        if !self.read_only {
-            let _ = self.checkpoint_to_file(fm)?;
-        }
-
-        backup::do_backup_full(backup_dir, fm, self.wal.as_deref())
+        // An image of the state at an epoch, written with commits going on
+        // (#362).
+        let keys = encryption::DatabaseKeys::from_config(&self.config);
+        backup::do_backup_full(
+            backup_dir,
+            fm,
+            &self.checkpoint_sources(),
+            &keys,
+            self.wal.as_deref(),
+            || self.log_end_without_wal(fm, &keys),
+        )
     }
 
     /// Creates an incremental backup containing WAL records since the last backup.

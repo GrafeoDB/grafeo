@@ -246,6 +246,158 @@ fn write_sections(
     Ok(FlushResult { sections_written })
 }
 
+/// What [`write_copy`] wrote: the epoch the copy holds, which every commit
+/// up to it is in whole and none after it, and the log position its header
+/// records.
+#[cfg(feature = "grafeo-file")]
+#[derive(Debug, Clone, Copy)]
+pub(super) struct CopyWritten {
+    /// The epoch E of the copy.
+    pub epoch: u64,
+    /// The log position the copy covers, as `log_position` gave it.
+    pub checkpoint_lsn: u64,
+}
+
+/// Writes a complete image of the database at an epoch E to a new file at
+/// `path`, with commits going on while it writes (#362): it holds commits
+/// off only while it takes the snapshot (E, a read pinned at it, the next
+/// ids) and writes the sections without versions, as a checkpoint does, and
+/// lets them go on while it writes the LPG section as a reader at E sees it.
+/// The database's own file, marks and baselines are left as they are.
+///
+/// The file is a database with the id `database_id`, encrypted with the
+/// keys `keys` derive for it. `log_position` runs while commits are held,
+/// after the snapshot, and gives the log position the copy records: every
+/// WAL group before it is in the copy and none after it, so the groups from
+/// there on replay onto it. A full backup starts a new WAL segment there
+/// (its incrementals follow), a read-only database gives the end of the WAL
+/// it replayed, and a database of its own records 0.
+///
+/// The image is written to `<path>.partial` and renamed to `path` once it is
+/// complete and synced: `path` is never a file that opens as less than E (a
+/// crash leaves the partial file, which nothing opens; the next copy to
+/// `path` replaces it).
+///
+/// # Errors
+///
+/// Returns an error if `path` exists, commits cannot be held, a section
+/// fails to write, or the file cannot be written, synced or renamed; the
+/// partial file is removed then.
+#[cfg(feature = "grafeo-file")]
+pub(super) fn write_copy(
+    sources: &CheckpointSources,
+    path: &std::path::Path,
+    database_id: u128,
+    keys: &super::encryption::DatabaseKeys,
+    log_position: impl FnOnce() -> Result<u64>,
+) -> Result<CopyWritten> {
+    use grafeo_common::testing::crash::maybe_crash;
+    use grafeo_common::utils::error::Error;
+
+    // The check `create_with_id` makes of a new file, for `path` (the file
+    // is created at the partial path).
+    match std::fs::symlink_metadata(path) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Ok(_) => {
+            return Err(Error::Internal(format!(
+                "file already exists: {}",
+                path.display()
+            )));
+        }
+        Err(error) => {
+            return Err(Error::Internal(format!(
+                "cannot create {}: the path cannot be inspected, so it may exist: {error}",
+                path.display()
+            )));
+        }
+    }
+    let mut partial = path.as_os_str().to_owned();
+    partial.push(".partial");
+    let partial = std::path::PathBuf::from(partial);
+    // A copy cut off before its rename left this: it never opened as `path`.
+    if partial.exists() {
+        std::fs::remove_file(&partial)?;
+    }
+    // The file is created before commits are held: only the snapshot and the
+    // sections without versions are written under the hold.
+    let fm = GrafeoFileManager::create_with_id(
+        &partial,
+        database_id,
+        keys.container_cipher(database_id),
+    )?;
+    let written = write_copy_into(&fm, sources, log_position).and_then(|written| {
+        fm.close()?;
+        Ok(written)
+    });
+    drop(fm);
+    let renamed = written.and_then(|written| {
+        maybe_crash("copy:before_rename");
+        std::fs::rename(&partial, path)?;
+        sync_parent_dir(path)?;
+        Ok(written)
+    });
+    if renamed.is_err()
+        && let Err(error) = std::fs::remove_file(&partial)
+        && error.kind() != std::io::ErrorKind::NotFound
+    {
+        grafeo_common::grafeo_warn!(
+            "cannot remove the incomplete copy {}: {error}",
+            partial.display()
+        );
+    }
+    renamed
+}
+
+/// The image of [`write_copy`] into `fm`, a new file.
+#[cfg(feature = "grafeo-file")]
+fn write_copy_into(
+    fm: &GrafeoFileManager,
+    sources: &CheckpointSources,
+    log_position: impl FnOnce() -> Result<u64>,
+) -> Result<CopyWritten> {
+    use grafeo_common::testing::crash::maybe_crash;
+
+    let commits = sources.transaction_manager.hold_commits()?;
+    // The read pinned at E lives with `image` until the copy is written.
+    let image = sources.copy_snapshot(&commits)?;
+    let checkpoint_lsn = log_position()?;
+    maybe_crash("copy:after_snapshot");
+    let section_refs: Vec<&dyn Section> = image.sections.iter().map(AsRef::as_ref).collect();
+    let release = move || {
+        drop(commits);
+        maybe_crash("copy:after_release");
+    };
+    fm.write_checkpoint_releasing(
+        &section_refs,
+        image.held,
+        release,
+        &image.context.checkpoint_header(checkpoint_lsn),
+    )?;
+    maybe_crash("copy:after_write");
+    Ok(CopyWritten {
+        epoch: image.context.epoch,
+        checkpoint_lsn,
+    })
+}
+
+/// Makes a rename in the directory holding `path` durable. Windows has no
+/// directory handles to sync; its directory changes are metadata-journaled.
+#[cfg(feature = "grafeo-file")]
+fn sync_parent_dir(path: &std::path::Path) -> Result<()> {
+    #[cfg(unix)]
+    if let Some(parent) = path.parent() {
+        let parent = if parent.as_os_str().is_empty() {
+            std::path::Path::new(".")
+        } else {
+            parent
+        };
+        std::fs::File::open(parent)?.sync_all()?;
+    }
+    #[cfg(not(unix))]
+    let _ = path;
+    Ok(())
+}
+
 impl CheckpointSources {
     /// The header values of the checkpoint.
     pub fn context(&self) -> FlushContext {

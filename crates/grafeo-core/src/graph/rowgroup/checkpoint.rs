@@ -179,6 +179,10 @@ pub struct CheckpointSnapshot {
     pub(super) graphs: Vec<SnapshotGraph>,
     /// Whether the image holding it is written and active.
     written: AtomicBool,
+    /// Whether it took the graphs' marks ([`take`](Self::take)), which a
+    /// failure then gives up, or only reads the graphs for a copy into
+    /// another file ([`take_copy`](Self::take_copy)), which leaves them.
+    took_marks: bool,
 }
 
 impl CheckpointSnapshot {
@@ -193,6 +197,37 @@ impl CheckpointSnapshot {
     /// history, at `epoch`: the section reads the graphs at `epoch`.
     #[must_use]
     pub fn take(root: &Arc<RowGroupStore>, epoch: EpochId, history_from: Option<EpochId>) -> Self {
+        Self::take_with(
+            root,
+            epoch,
+            history_from,
+            RowGroupStore::take_checkpoint_marks,
+            true,
+        )
+    }
+
+    /// Takes the snapshot of `root` and its named graphs at `epoch` for a
+    /// copy into another file (a full backup, a save): as
+    /// [`take`](Self::take), with the next ids and dictionary sizes now, but
+    /// with no marks and no baseline, so the copy writes every chunk, and it
+    /// leaves the graphs' marks and baselines to the database's own next
+    /// checkpoint, whatever becomes of the copy.
+    #[must_use]
+    pub fn take_copy(
+        root: &Arc<RowGroupStore>,
+        epoch: EpochId,
+        history_from: Option<EpochId>,
+    ) -> Self {
+        Self::take_with(root, epoch, history_from, RowGroupStore::copy_marks, false)
+    }
+
+    fn take_with(
+        root: &Arc<RowGroupStore>,
+        epoch: EpochId,
+        history_from: Option<EpochId>,
+        marks_of: fn(&RowGroupStore) -> GraphMarks,
+        took_marks: bool,
+    ) -> Self {
         let mut named: Vec<(String, Arc<RowGroupStore>)> = root
             .graphs
             .named
@@ -206,13 +241,13 @@ impl CheckpointSnapshot {
             id: 0,
             name: String::new(),
             store: Arc::clone(root),
-            marks: root.take_checkpoint_marks(),
+            marks: marks_of(root),
         });
         for (name, store) in named {
             graphs.push(SnapshotGraph {
                 id: store.graph_id(),
                 name,
-                marks: store.take_checkpoint_marks(),
+                marks: marks_of(&store),
                 store,
             });
         }
@@ -223,6 +258,7 @@ impl CheckpointSnapshot {
             next_graph_id: root.next_graph_id(),
             graphs,
             written: AtomicBool::new(false),
+            took_marks,
         }
     }
 
@@ -237,6 +273,11 @@ impl CheckpointSnapshot {
     /// its writes set since the snapshot are what changed since.
     pub fn written_as(&self, image: ImageId) {
         self.written.store(true, Ordering::Release);
+        if !self.took_marks {
+            // A copy's image is another file's: the graphs stay relative to
+            // their own.
+            return;
+        }
         for graph in &self.graphs {
             graph.store.inner.write().baseline = Some(image);
         }
@@ -246,6 +287,9 @@ impl CheckpointSnapshot {
     /// what changed since its baseline any more, and the next checkpoint
     /// writes every chunk.
     pub fn failed(&self) {
+        if !self.took_marks {
+            return;
+        }
         for graph in &self.graphs {
             graph.store.inner.write().baseline = None;
         }
@@ -288,6 +332,24 @@ impl RowGroupStore {
             }
         }
         marks
+    }
+
+    /// The next ids and dictionary sizes now, with no marks and no baseline,
+    /// for a copy that writes every chunk (see
+    /// [`CheckpointSnapshot::take_copy`]): the row groups keep their marks.
+    fn copy_marks(&self) -> GraphMarks {
+        let inner = self.inner.read();
+        GraphMarks {
+            baseline: None,
+            next_node_id: self.next_node_id.load(Ordering::Acquire),
+            next_edge_id: self.next_edge_id.load(Ordering::Acquire),
+            next_names: [
+                inner.labels.next_id(),
+                inner.edge_types.next_id(),
+                inner.keys.next_id(),
+            ],
+            ..GraphMarks::default()
+        }
     }
 
     /// Makes `image` the image this store's chunks are in, as a load from

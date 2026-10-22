@@ -483,15 +483,20 @@ fn assert_migrated_with(
 // =========================================================================
 
 /// The crash points a migrating open of the fixture reaches, in order: writing
-/// the image (creating the file, then its checkpoint), then the steps of the
-/// migration, with a point after each rename (named by its target).
+/// the image (creating its partial file, taking the snapshot, releasing
+/// commits, the checkpoint, then the rename into place), then the steps of
+/// the migration, with a point after each rename (named by its target).
 #[cfg(feature = "testing-crash-injection")]
-const MIGRATION_POINTS: [&str; 11] = [
+const MIGRATION_POINTS: [&str; 15] = [
     "create:after_write",
+    "copy:after_snapshot",
+    "copy:after_release",
     "checkpoint:after_chunks",
     "checkpoint:after_data_sync",
     "checkpoint:after_header",
     "checkpoint:before_trim",
+    "copy:after_write",
+    "copy:before_rename",
     "migrate:after_image",
     "migrate:renamed:.pre-0.6",
     "migrate:renamed:.pre-0.6.wal",
@@ -503,12 +508,16 @@ const MIGRATION_POINTS: [&str; 11] = [
 /// The same for a file with a pending checkpoint image and no sidecar WAL
 /// ([`pending_kept`]): the image moves instead of the WAL.
 #[cfg(feature = "testing-crash-injection")]
-const PENDING_MIGRATION_POINTS: [&str; 11] = [
+const PENDING_MIGRATION_POINTS: [&str; 15] = [
     "create:after_write",
+    "copy:after_snapshot",
+    "copy:after_release",
     "checkpoint:after_chunks",
     "checkpoint:after_data_sync",
     "checkpoint:after_header",
     "checkpoint:before_trim",
+    "copy:after_write",
+    "copy:before_rename",
     "migrate:after_image",
     "migrate:renamed:.pre-0.6",
     "migrate:renamed:.pre-0.6.checkpoint",
@@ -520,12 +529,16 @@ const PENDING_MIGRATION_POINTS: [&str; 11] = [
 /// The same for a WAL directory ([`directory_kept`]): it has no side files,
 /// and the whole directory moves to `<p>.pre-0.6`.
 #[cfg(feature = "testing-crash-injection")]
-const DIRECTORY_MIGRATION_POINTS: [&str; 10] = [
+const DIRECTORY_MIGRATION_POINTS: [&str; 14] = [
     "create:after_write",
+    "copy:after_snapshot",
+    "copy:after_release",
     "checkpoint:after_chunks",
     "checkpoint:after_data_sync",
     "checkpoint:after_header",
     "checkpoint:before_trim",
+    "copy:after_write",
+    "copy:before_rename",
     "migrate:after_image",
     "migrate:renamed:.pre-0.6",
     "migrate:after_old",
@@ -536,12 +549,16 @@ const DIRECTORY_MIGRATION_POINTS: [&str; 10] = [
 /// The same for a file closed while spilled ([`spilled_kept`]): its spill
 /// directory moves after the file.
 #[cfg(feature = "testing-crash-injection")]
-const SPILLED_MIGRATION_POINTS: [&str; 11] = [
+const SPILLED_MIGRATION_POINTS: [&str; 15] = [
     "create:after_write",
+    "copy:after_snapshot",
+    "copy:after_release",
     "checkpoint:after_chunks",
     "checkpoint:after_data_sync",
     "checkpoint:after_header",
     "checkpoint:before_trim",
+    "copy:after_write",
+    "copy:before_rename",
     "migrate:after_image",
     "migrate:renamed:.pre-0.6",
     "migrate:renamed:.pre-0.6.spill",

@@ -2833,8 +2833,9 @@ impl PyGrafeoDB {
 
     /// Creates a full backup of the database.
     ///
-    /// Checkpoints the database, copies the container file to the backup directory,
-    /// and creates a backup manifest.
+    /// Writes an image of the database as of the moment it starts to the backup
+    /// directory, while other threads keep committing, and adds it to the backup
+    /// manifest. Incremental backups to the same directory continue from it.
     ///
     /// Example:
     ///     db = GrafeoDB("./mydb.grafeo")

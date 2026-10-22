@@ -522,26 +522,64 @@ use super::encryption::DatabaseKeys;
 /// Size of a page (and of each header) of a `.grafeo` file, in bytes.
 const PAGE_BYTES: usize = 4096;
 
-/// Creates a full backup by copying the .grafeo container file.
+impl super::GrafeoDB {
+    /// The log position a full backup of this database covers when it has no
+    /// WAL to start a segment in: for a read-only database, the end of the
+    /// sidecar WAL its open replayed, whose commits the image holds (the
+    /// shared lock keeps writers out, so the WAL still ends there); otherwise
+    /// the position the file's last checkpoint recorded. A WAL of the format
+    /// before 0.6.0 has no positions of this format: the file's, as its
+    /// commits cannot chain to incremental backups anyway.
+    pub(super) fn log_end_without_wal(
+        &self,
+        fm: &GrafeoFileManager,
+        keys: &DatabaseKeys,
+    ) -> Result<u64> {
+        let checkpoint_lsn = fm.active_header().checkpoint_lsn;
+        if !self.read_only
+            || !fm.has_sidecar_wal()
+            || Self::holds_first_format_wal(&fm.sidecar_wal_path())?
+        {
+            return Ok(checkpoint_lsn);
+        }
+        let options = Self::scan_options(fm, keys, self.config.wal_salvage());
+        let mut scan = WalScan::open(fm.sidecar_wal_path(), options).map_err(Error::from)?;
+        while scan.next_group().map_err(Error::from)?.is_some() {}
+        let end = scan.finish().map_err(Error::from)?;
+        Ok(end.end_lsn.max(checkpoint_lsn))
+    }
+}
+
+/// Creates a full backup: a complete image of the database at an epoch E
+/// (#362).
 ///
-/// 1. Copies the container file to the backup directory via the locked handle.
-/// 2. Updates the manifest and backup cursor.
+/// The image is written from a snapshot at E, as a checkpoint takes it (see
+/// [`write_copy`](super::flush::write_copy)): commits are held off only while
+/// the snapshot is taken and the sections without versions are written, and
+/// go on while the graph is written. The image has the database's id and
+/// keys, and holds every commit up to E and nothing after it. With `wal`, a
+/// new WAL segment starts while commits are held: the groups after E are in
+/// the segments from that one on, which the next incremental backup copies,
+/// so a restore is the image and those segments. Without, `log_end` gives
+/// the log position the image covers (a read-only database: the end of the
+/// sidecar WAL it replayed, whose commits the image holds). The database's
+/// own file is not touched.
 ///
-/// Uses [`GrafeoFileManager::copy_to`] instead of `std::fs::copy()` so the
-/// copy reads through the already-locked file handle. `std::fs::copy()` opens
-/// a new handle, which fails on Windows when an exclusive lock is held.
-///
-/// The backup covers exactly what the copied file holds: its epoch, and the
-/// WAL groups before the log position its header records. The segments from
-/// there on are left to the next incremental backup.
+/// The image is written under a temporary name and renamed once complete, so
+/// the backup directory never holds a full backup that opens as less than E;
+/// the manifest and the cursor are written after it.
 ///
 /// # Errors
 ///
-/// Returns an error if the database has no file manager, or if I/O fails.
+/// Returns an error if commits cannot be held, a section fails to write, or
+/// I/O fails.
 pub(super) fn do_backup_full(
     backup_dir: &Path,
     fm: &GrafeoFileManager,
+    sources: &super::sections::CheckpointSources,
+    keys: &DatabaseKeys,
     wal: Option<&Wal>,
+    log_end: impl FnOnce() -> Result<u64>,
 ) -> Result<BackupSegment> {
     std::fs::create_dir_all(backup_dir)
         .map_err(|e| Error::Internal(format!("failed to create backup directory: {e}")))?;
@@ -551,26 +589,38 @@ pub(super) fn do_backup_full(
     let segment_idx = manifest.segments.len();
     let filename = format!("backup_full_{segment_idx:04}.grafeo");
     let dest_path = backup_dir.join(&filename);
+    // The name follows the manifest's segments, so a file under it is none
+    // the manifest lists: the image of a backup a crash or an error cut off
+    // before its manifest entry, which no restore reads.
+    match std::fs::remove_file(&dest_path) {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => {
+            return Err(Error::Internal(format!(
+                "failed to remove the unlisted backup file {}: {e}",
+                dest_path.display()
+            )));
+        }
+    }
 
-    // No checkpoint may change the file or remove WAL segments while they
-    // are read, so the two agree on what the copy contains.
+    // No checkpoint may remove the WAL segments from the image's log
+    // position on before the cursor below names them.
     let _checkpoint = fm.checkpoint_guard();
 
-    // Copy the .grafeo file to the backup directory through the locked handle
-    fm.copy_to(&dest_path)?;
-
-    let file_size = std::fs::metadata(&dest_path).map_or(0, |m| m.len());
-    let file_data = std::fs::read(&dest_path)
-        .map_err(|e| Error::Internal(format!("failed to read backup file for checksum: {e}")))?;
-    let checksum = crc32fast::hash(&file_data);
-    let copied = copied_header(&file_data, &dest_path)?;
-    let copied_epoch = EpochId::new(copied.epoch);
+    let written =
+        super::flush::write_copy(sources, &dest_path, fm.database_id(), keys, || match wal {
+            Some(wal) => Ok(wal.rotate()?),
+            None => log_end(),
+        })?;
+    let (end_epoch, wal_lsn) = (written.epoch, written.checkpoint_lsn);
+    grafeo_common::testing::crash::maybe_crash("backup:after_image");
+    let (checksum, file_size) = file_checksum(&dest_path)?;
 
     let segment = BackupSegment {
         kind: BackupKind::Full,
         filename,
         start_epoch: EpochId::new(0),
-        end_epoch: copied_epoch,
+        end_epoch: EpochId::new(end_epoch),
         checksum,
         size_bytes: file_size,
         created_at_ms: now_ms(),
@@ -578,23 +628,43 @@ pub(super) fn do_backup_full(
 
     manifest.segments.push(segment.clone());
     write_manifest(backup_dir, &manifest)?;
+    grafeo_common::testing::crash::maybe_crash("backup:after_manifest");
 
-    // The checkpoint that wrote the copied file started a new WAL segment at
-    // the log position its header records, so every group before it is in
-    // the copy. The next incremental backup starts at that segment: taking
-    // the end of the log at this point instead left the groups written since
-    // the checkpoint in neither.
+    // Every WAL group before the image's log position is in the image, and
+    // none after it: the next incremental backup starts at that segment.
     if let Some(wal) = wal {
         let cursor = BackupCursor {
-            backed_up_epoch: copied_epoch,
+            backed_up_epoch: EpochId::new(end_epoch),
             log_sequence: 0,
-            wal_lsn: Some(copied.checkpoint_lsn),
+            wal_lsn: Some(wal_lsn),
             timestamp_ms: now_ms(),
         };
         write_backup_cursor(wal.dir(), &cursor)?;
     }
 
     Ok(segment)
+}
+
+/// The CRC-32 and size of the file at `path`, read in pieces.
+fn file_checksum(path: &Path) -> Result<(u32, u64)> {
+    use std::io::Read;
+
+    let mut file = std::fs::File::open(path)
+        .map_err(|e| Error::Internal(format!("failed to read backup file for checksum: {e}")))?;
+    let mut hasher = crc32fast::Hasher::new();
+    let mut buffer = vec![0u8; 1 << 20];
+    let mut size = 0u64;
+    loop {
+        let read = file.read(&mut buffer).map_err(|e| {
+            Error::Internal(format!("failed to read backup file for checksum: {e}"))
+        })?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&buffer[..read]);
+        size += read as u64;
+    }
+    Ok((hasher.finalize(), size))
 }
 
 /// The active database header of a copied `.grafeo` file: the image it opens
@@ -795,26 +865,29 @@ pub(super) fn do_restore_to_epoch(
         .ok_or_else(|| Error::Internal("no backup manifest found".to_string()))?;
 
     // Find the best full backup (latest one that doesn't exceed target)
-    let full = manifest
+    let full_index = manifest
         .segments
         .iter()
-        .rfind(|s| s.kind == BackupKind::Full && s.end_epoch <= target_epoch)
+        .rposition(|s| s.kind == BackupKind::Full && s.end_epoch <= target_epoch)
         .ok_or_else(|| {
             Error::Internal(format!(
                 "no full backup covers epoch {}",
                 target_epoch.as_u64()
             ))
         })?;
+    let full = &manifest.segments[full_index];
 
-    // Find incremental segments that cover (full.end_epoch, target_epoch]
-    let incrementals: Vec<&BackupSegment> = manifest
-        .segments
+    // The incremental segments taken after the full backup, up to the first
+    // that starts past the target: the WAL from where the image's log
+    // position is on. One can start at or before the full backup's epoch: a
+    // read-only database's full backup cannot move the WAL's backup cursor,
+    // so the writer's next incremental starts at its own last full backup.
+    // Its groups up to the image's log position are in the image too, and
+    // the replay starts at that position, past them. An incremental's epochs
+    // are read while commits go on, so they select by order, not by range.
+    let incrementals: Vec<&BackupSegment> = manifest.segments[full_index + 1..]
         .iter()
-        .filter(|s| {
-            s.kind == BackupKind::Incremental
-                && s.start_epoch > full.end_epoch
-                && s.start_epoch <= target_epoch
-        })
+        .filter(|s| s.kind == BackupKind::Incremental && s.start_epoch <= target_epoch)
         .collect();
 
     // The key is checked before anything is written.
@@ -853,6 +926,20 @@ pub(super) fn do_restore_to_epoch(
     }
 
     match segments.iter().map(|(_, version, _)| *version).max() {
+        // That format's records replay by epoch, from the first: they would
+        // apply again what the image holds.
+        Some(FIRST_FORMAT_VERSION)
+            if incrementals
+                .iter()
+                .any(|incremental| incremental.start_epoch <= full.end_epoch) =>
+        {
+            Err(Error::Internal(format!(
+                "the incremental backups after the full backup {} start before its epoch {} in \
+                 the WAL format before 0.6.0, which cannot replay from it",
+                full.filename,
+                full.end_epoch.as_u64()
+            )))
+        }
         Some(FIRST_FORMAT_VERSION) => {
             restore_first_format(&segments, target_epoch, output_path, ciphers)
         }
@@ -1545,93 +1632,6 @@ mod tests {
             assert_eq!(serde_json::to_string(&kind).unwrap(), name);
             assert_eq!(serde_json::from_str::<BackupKind>(name).unwrap(), kind);
         }
-    }
-
-    /// A full backup records the epoch of the image it copied. After a
-    /// checkpoint failed once its database header was written, the manager
-    /// still serves the previous image (epoch 3), but the file opens at the
-    /// new one (epoch 19): the backup must say 19, or a restore to an epoch
-    /// in between would copy it and return newer data.
-    #[cfg(feature = "testing-crash-injection")]
-    #[test]
-    fn a_full_backup_records_the_epoch_of_the_image_it_copied() {
-        use grafeo_common::storage::{
-            Section, SectionSink, SectionSource, SectionType, read_raw, write_raw,
-        };
-        use grafeo_common::testing::crash::with_failure_at;
-        use grafeo_storage::file::CheckpointHeader;
-
-        /// A catalog section holding fixed bytes.
-        struct Fixed(&'static [u8]);
-
-        impl Section for Fixed {
-            fn section_type(&self) -> SectionType {
-                SectionType::Catalog
-            }
-
-            fn serialize(&self) -> Result<Vec<u8>> {
-                Ok(self.0.to_vec())
-            }
-
-            fn deserialize(&mut self, _data: &[u8]) -> Result<()> {
-                Ok(())
-            }
-
-            fn write_to(&self, sink: &mut dyn SectionSink) -> Result<()> {
-                write_raw(self, sink)
-            }
-
-            fn read_from(&mut self, source: &dyn SectionSource) -> Result<()> {
-                read_raw(self, source)
-            }
-
-            fn is_dirty(&self) -> bool {
-                true
-            }
-
-            fn mark_clean(&self) {}
-
-            fn memory_usage(&self) -> usize {
-                self.0.len()
-            }
-        }
-
-        let dir = TempDir::new().unwrap();
-        let backup_dir = dir.path().join("backups");
-        let fm = GrafeoFileManager::create(dir.path().join("vincent.grafeo"), None).unwrap();
-        let checkpoint = |data: &'static [u8], epoch: u64| {
-            fm.write_checkpoint(
-                &[&Fixed(data)],
-                &CheckpointHeader {
-                    epoch,
-                    ..CheckpointHeader::default()
-                },
-            )
-        };
-        checkpoint(b"Alix", 3).unwrap();
-        // The third failure point of a checkpoint is checkpoint:after_header.
-        let error = with_failure_at(3, || checkpoint(b"Gus", 19))
-            .unwrap_err()
-            .to_string();
-        assert!(error.contains("checkpoint:after_header"), "{error}");
-        assert_eq!(
-            fm.active_header().epoch,
-            3,
-            "the manager serves the previous image"
-        );
-
-        let segment = do_backup_full(&backup_dir, &fm, None).unwrap();
-        let copy = GrafeoFileManager::open(backup_dir.join(&segment.filename), None).unwrap();
-        assert_eq!(
-            copy.active_header().epoch,
-            19,
-            "the copy opens at the new image"
-        );
-        assert_eq!(
-            segment.end_epoch,
-            EpochId::new(19),
-            "the backup records the epoch of the image it copied"
-        );
     }
 
     #[test]

@@ -4,7 +4,7 @@ All notable changes to Grafeo, for future reference (and enjoyment).
 
 ## [0.6.0] - Unreleased
 
-Changes since 0.6.0-beta.1.
+Breaking:
 
 ### Added
 

@@ -4,7 +4,7 @@
 //! | ----------- | ----------- | ----- |
 //! | `None` | `Null` | |
 //! | `bool` | `Bool` | |
-//! | `int` | `Int64` | |
+//! | `int` | `Int64` | Past 64 bits an exact `Decimal` (scale 0), past 38 digits an error |
 //! | `float` | `Float64` | |
 //! | `str` | `String` | |
 //! | `list[float]` | `Vector` | Lists where every element is a Python float (not int) |
@@ -17,7 +17,9 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use pyo3::prelude::*;
-use pyo3::types::{PyByteArray, PyBytes, PyDate, PyDateTime, PyDict, PyFloat, PyList, PyTime};
+use pyo3::types::{
+    PyByteArray, PyBytes, PyDate, PyDateTime, PyDict, PyFloat, PyInt, PyList, PyTime,
+};
 
 use grafeo_common::types::{Date, Decimal, PropertyKey, Time, Timestamp, Value};
 
@@ -120,6 +122,17 @@ impl PyValue {
 }
 
 impl PyValue {
+    /// [`Self::from_py`] for a named value: a conversion error names it, as
+    /// `parameter 'x'` or `property 'v'`.
+    pub fn from_py_named(obj: &Bound<'_, PyAny>, what: &str, name: &str) -> PyGrafeoResult<Value> {
+        Self::from_py(obj).map_err(|error| match error {
+            PyGrafeoError::Type(message) => {
+                PyGrafeoError::Type(format!("{what} '{name}': {message}"))
+            }
+            other => other,
+        })
+    }
+
     /// Converts a Python object to a Grafeo Value.
     pub fn from_py(obj: &Bound<'_, PyAny>) -> PyGrafeoResult<Value> {
         if obj.is_none() {
@@ -132,6 +145,15 @@ impl PyValue {
 
         if let Ok(v) = obj.extract::<i64>() {
             return Ok(Value::Int64(v));
+        }
+
+        // An int past 64 bits is an exact DECIMAL up to 38 digits (an i128
+        // holds every one of them), and an error past that.
+        if obj.is_instance_of::<PyInt>() {
+            let too_wide =
+                || PyGrafeoError::Type(format!("the integer {obj} has more than 38 digits"));
+            let wide = obj.extract::<i128>().map_err(|_| too_wide())?;
+            return Value::from_wide_integer(wide).map_err(|_| too_wide());
         }
 
         // decimal.Decimal before float: it converts to a float, which would

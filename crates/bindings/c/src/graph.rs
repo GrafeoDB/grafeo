@@ -109,7 +109,9 @@ pub extern "C" fn grafeo_graph_execute_language(
         };
         language
     };
-    let params = crate::types::parse_params(params_json);
+    let Ok(params) = crate::types::parse_params(params_json) else {
+        return std::ptr::null_mut();
+    };
     with_graph!(graph, std::ptr::null_mut(), |handle| {
         match handle.execute_language(query, language, params) {
             Ok(result) => build_result(&result),
@@ -131,7 +133,9 @@ pub extern "C" fn grafeo_graph_create_node(
 ) -> u64 {
     let labels = crate::types::parse_labels(labels_json).unwrap_or_default();
     let label_refs: Vec<&str> = labels.iter().map(String::as_str).collect();
-    let properties = crate::types::parse_properties(properties_json);
+    let Ok(properties) = crate::types::parse_properties(properties_json) else {
+        return u64::MAX;
+    };
     with_graph!(graph, u64::MAX, |handle| {
         created_id(
             match properties {
@@ -156,7 +160,9 @@ pub extern "C" fn grafeo_graph_create_edge(
     let Ok(edge_type) = str_from_ptr(edge_type) else {
         return u64::MAX;
     };
-    let properties = crate::types::parse_properties(properties_json);
+    let Ok(properties) = crate::types::parse_properties(properties_json) else {
+        return u64::MAX;
+    };
     let (src, dst) = (NodeId::new(source_id), NodeId::new(target_id));
     with_graph!(graph, u64::MAX, |handle| {
         created_id(
@@ -279,9 +285,9 @@ fn set_property(
         Ok(key) => key,
         Err(status) => return status,
     };
-    let Some(value) = crate::types::parse_value(value_json) else {
-        set_last_error("Invalid JSON value");
-        return GrafeoStatus::ErrorSerialization;
+    let value = match crate::types::parse_value(value_json) {
+        Ok(value) => value,
+        Err(status) => return status,
     };
     with_graph!(graph, GrafeoStatus::ErrorDatabase, |handle| {
         match set(&handle, key, value) {

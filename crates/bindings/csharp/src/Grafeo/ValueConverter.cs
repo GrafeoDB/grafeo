@@ -38,6 +38,18 @@ internal static class ValueConverter
             bool b => JsonValue.Create(b),
             int i => JsonValue.Create((long)i),
             long l => JsonValue.Create(l),
+            // Every integer goes as a JSON number with its exact digits: one
+            // past 64 bits arrives as an exact decimal up to 38 digits, and
+            // one past that is an error naming the parameter.
+            sbyte i => JsonValue.Create((long)i),
+            byte i => JsonValue.Create((long)i),
+            short i => JsonValue.Create((long)i),
+            ushort i => JsonValue.Create((long)i),
+            uint i => JsonValue.Create((long)i),
+            ulong u => JsonValue.Create(u),
+            Int128 i => IntegerNumber(i.ToString(System.Globalization.CultureInfo.InvariantCulture)),
+            UInt128 u => IntegerNumber(u.ToString(System.Globalization.CultureInfo.InvariantCulture)),
+            System.Numerics.BigInteger b => IntegerNumber(b.ToString(System.Globalization.CultureInfo.InvariantCulture)),
             float f => JsonValue.Create((double)f),
             double d => JsonValue.Create(d),
             string s => JsonValue.Create(s),
@@ -74,6 +86,9 @@ internal static class ValueConverter
             IDictionary<string, object?> dict => DictToJsonObject(dict),
             _ => JsonValue.Create(value.ToString()),
         };
+
+    /// <summary>A JSON number of an integer's decimal digits, written as they are.</summary>
+    private static JsonNode IntegerNumber(string digits) => JsonNode.Parse(digits)!;
 
     private static JsonArray VectorToJsonArray(ReadOnlySpan<float> vector)
     {

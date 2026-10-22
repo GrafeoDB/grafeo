@@ -8,7 +8,7 @@ use wasm_bindgen::prelude::*;
 
 use crate::{database_error, js_error};
 
-use grafeo_bindings_common::json::json_to_value;
+use crate::json_property;
 use grafeo_common::types::{NodeId, PropertyKey, Value};
 use grafeo_engine::database::{BatchEdge, EdgeUpsertOptions, UpsertSummary};
 
@@ -75,14 +75,15 @@ pub(crate) fn rows(value: JsValue) -> Result<Vec<HashMap<PropertyKey, Value>>, J
     let rows: Vec<serde_json::Map<String, serde_json::Value>> =
         serde_wasm_bindgen::from_value(value)
             .map_err(|e| invalid("rows must be an array of objects", e))?;
-    Ok(rows
-        .iter()
+    rows.iter()
         .map(|row| {
             row.iter()
-                .map(|(name, value)| (PropertyKey::new(name.as_str()), json_to_value(value)))
+                .map(|(name, value)| {
+                    Ok((PropertyKey::new(name.as_str()), json_property(name, value)?))
+                })
                 .collect()
         })
-        .collect())
+        .collect()
 }
 
 /// The engine edges of `batchCreateEdges`.
@@ -100,8 +101,8 @@ pub(crate) fn edges(value: JsValue) -> Result<Vec<BatchEdge>, JsValue> {
                 batch_edge = batch_edge.with_properties(
                     properties
                         .iter()
-                        .map(|(name, value)| (name.as_str(), json_to_value(value)))
-                        .collect::<Vec<_>>(),
+                        .map(|(name, value)| Ok((name.as_str(), json_property(name, value)?)))
+                        .collect::<Result<Vec<_>, JsValue>>()?,
                 );
             }
             Ok(batch_edge)

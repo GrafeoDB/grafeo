@@ -103,7 +103,7 @@ await db.executeSql(query, params?);      // SQL/PGQ
 | `number` (float) | Float64 | |
 | `{ $decimal: '1.50' }` | Decimal | An exact decimal as its text with its scale, both ways: GQL `1.50` comes back as `{ $decimal: '1.50' }`. Only as an object's only key; with other keys it is a map |
 | `string` | String | |
-| `BigInt` | Int64 | |
+| `BigInt` | Int64, or Decimal past 64 bits | Exact up to 38 digits (scale 0); past that an error naming the parameter or property |
 | `Array` | List | Elements converted recursively |
 | `Object` | Map | Keys must be strings |
 | `Buffer` | Bytes | |

@@ -15,8 +15,8 @@ use super::upsert::{
     UpsertEdgesOptions, UpsertNodesOptions, UpsertSummary, edge_options, node_options, rows,
 };
 use super::{
-    JsGrafeoDB, NodeEdgesOptions, convert_json_params, edge_pairs, js_edge, js_node, js_result,
-    node_edges_options, object_properties, validate_edge_id, validate_node_id,
+    JsGrafeoDB, NodeEdgesOptions, edge_pairs, js_edge, js_node, js_result, node_edges_options,
+    object_properties, validate_edge_id, validate_node_id,
 };
 use crate::error::NodeGrafeoError;
 use crate::graph::{JsEdge, JsNode};
@@ -107,7 +107,7 @@ impl JsGraphHandle {
     pub async fn execute(
         &self,
         query: String,
-        params: Option<serde_json::Value>,
+        #[napi(ts_arg_type = "any | undefined | null")] params: Option<crate::types::Params>,
     ) -> Result<QueryResult> {
         self.execute_language("gql".to_string(), query, params)
             .await
@@ -120,9 +120,9 @@ impl JsGraphHandle {
         &self,
         language: String,
         query: String,
-        params: Option<serde_json::Value>,
+        #[napi(ts_arg_type = "any | undefined | null")] params: Option<crate::types::Params>,
     ) -> Result<QueryResult> {
-        let params = convert_json_params(params.as_ref())?;
+        let params = params.map(crate::types::Params::into_map).transpose()?;
         let result = self
             .blocking(move |graph| js(graph.execute_language(&query, &language, params)))
             .await?;
@@ -221,7 +221,7 @@ impl JsGraphHandle {
         value: Unknown<'_>,
     ) -> Result<()> {
         let id = validate_node_id(id)?;
-        let value = types::js_to_value(&env, value)?;
+        let value = types::js_to_named_value(env, value, "property", &key)?;
         self.with_graph(|graph| js(graph.set_node_property(id, &key, value)))
     }
 
@@ -235,7 +235,7 @@ impl JsGraphHandle {
         value: Unknown<'_>,
     ) -> Result<()> {
         let id = validate_edge_id(id)?;
-        let value = types::js_to_value(&env, value)?;
+        let value = types::js_to_named_value(env, value, "property", &key)?;
         self.with_graph(|graph| js(graph.set_edge_property(id, &key, value)))
     }
 

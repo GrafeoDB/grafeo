@@ -24,7 +24,7 @@ clap_complete = "4"
 # Output formatting
 comfy-table = "8"
 serde = { workspace = true }
-serde_json = "1"
+serde_json = { version = "1", features = ["arbitrary_precision"] }
 is-terminal = "0.4"
 
 # REPL

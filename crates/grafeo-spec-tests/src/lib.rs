@@ -116,6 +116,19 @@ pub fn execute_query_result_with_params(
     db.execute_language(query, lang_key, Some(params))
 }
 
+/// A parameter written as an integer past `i64`, typed as a binding types one
+/// (see "Parameter values" in the spec README): an exact decimal up to 38
+/// digits, and past that the error a binding gives, naming the parameter.
+///
+/// # Errors
+///
+/// An integer with more than 38 digits.
+pub fn wide_integer_param(name: &str, text: &str) -> Result<Value> {
+    Value::from_number_text(text).map_err(|error| {
+        grafeo_common::utils::error::Error::InvalidValue(format!("parameter '{name}': {error}"))
+    })
+}
+
 /// Convert a QueryResult into rows of string values for comparison.
 pub fn result_to_strings(result: &QueryResult) -> Vec<Vec<String>> {
     result

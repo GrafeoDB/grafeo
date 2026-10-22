@@ -172,12 +172,11 @@ impl JsAsOfView {
     pub async fn execute(
         &self,
         query: String,
-        params: Option<serde_json::Value>,
+        #[napi(ts_arg_type = "any | undefined | null")] params: Option<crate::types::Params>,
     ) -> Result<QueryResult> {
+        let params = params.map(crate::types::Params::into_map).transpose()?;
         let view = Arc::clone(&self.view);
         let result = tokio::task::spawn_blocking(move || {
-            let params = grafeo_bindings_common::json::json_params_to_map(params.as_ref())
-                .map_err(NodeGrafeoError::InvalidArgument)?;
             let view = view.lock();
             let view = view.as_ref().ok_or_else(Self::closed)?;
             match params {
@@ -239,7 +238,7 @@ pub struct ExecuteAsOf {
     pub(crate) db: Arc<RwLock<GrafeoDB>>,
     pub(crate) query: String,
     pub(crate) point: TimePoint,
-    pub(crate) params: Option<serde_json::Value>,
+    pub(crate) params: Option<crate::types::Params>,
 }
 
 impl Task for ExecuteAsOf {
@@ -247,8 +246,11 @@ impl Task for ExecuteAsOf {
     type JsValue = QueryResult;
 
     fn compute(&mut self) -> Result<Self::Output> {
-        let params = grafeo_bindings_common::json::json_params_to_map(self.params.as_ref())
-            .map_err(NodeGrafeoError::InvalidArgument)?;
+        let params = self
+            .params
+            .take()
+            .map(crate::types::Params::into_map)
+            .transpose()?;
         let db = self.db.read();
         let epoch = db.epoch_as_of(self.point).map_err(NodeGrafeoError::from)?;
         db.session()

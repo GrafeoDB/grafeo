@@ -243,12 +243,13 @@ impl JsGrafeoDB {
         &self,
         language: &'static str,
         query: String,
-        params: Option<serde_json::Value>,
+        params: Option<types::Params>,
     ) -> Result<QueryResult> {
+        let params = params.map(types::Params::into_map).transpose()?;
         let db = self.inner.clone();
         let result = tokio::task::spawn_blocking(move || {
             let db = db.read();
-            execute_language_query(&db, &query, language, params.as_ref())
+            execute_language_query(&db, &query, language, params)
         })
         .await
         .map_err(|e| napi::Error::from_reason(e.to_string()))??;
@@ -299,7 +300,7 @@ impl JsGrafeoDB {
         env: Env,
         query: String,
         point: Unknown<'_>,
-        params: Option<serde_json::Value>,
+        params: Option<types::Params>,
     ) -> Result<AsyncTask<crate::time_travel::ExecuteAsOf>> {
         let point = crate::time_travel::time_point(env, point)?;
         Ok(AsyncTask::new(crate::time_travel::ExecuteAsOf {
@@ -330,7 +331,7 @@ impl JsGrafeoDB {
     pub async fn execute(
         &self,
         query: String,
-        params: Option<serde_json::Value>,
+        #[napi(ts_arg_type = "any | undefined | null")] params: Option<types::Params>,
     ) -> Result<QueryResult> {
         self.execute_language_impl("gql", query, params).await
     }
@@ -494,7 +495,7 @@ impl JsGrafeoDB {
     ) -> Result<()> {
         let node_id = validate_node_id(id)?;
         let db = self.inner.read();
-        let val = types::js_to_value(&env, value)?;
+        let val = types::js_to_named_value(env, value, "property", &key)?;
         db.set_node_property(node_id, &key, val)
             .map_err(NodeGrafeoError::from)?;
         Ok(())
@@ -511,7 +512,7 @@ impl JsGrafeoDB {
     ) -> Result<()> {
         let edge_id = validate_edge_id(id)?;
         let db = self.inner.read();
-        let val = types::js_to_value(&env, value)?;
+        let val = types::js_to_named_value(env, value, "property", &key)?;
         db.set_edge_property(edge_id, &key, val)
             .map_err(NodeGrafeoError::from)?;
         Ok(())
@@ -1475,7 +1476,7 @@ impl JsGrafeoDB {
     pub async fn execute_cypher(
         &self,
         query: String,
-        params: Option<serde_json::Value>,
+        #[napi(ts_arg_type = "any | undefined | null")] params: Option<types::Params>,
     ) -> Result<QueryResult> {
         self.execute_language_impl("cypher", query, params).await
     }
@@ -1489,7 +1490,7 @@ impl JsGrafeoDB {
     pub async fn execute_sql(
         &self,
         query: String,
-        params: Option<serde_json::Value>,
+        #[napi(ts_arg_type = "any | undefined | null")] params: Option<types::Params>,
     ) -> Result<QueryResult> {
         self.execute_language_impl("sql", query, params).await
     }
@@ -1503,7 +1504,7 @@ impl JsGrafeoDB {
     pub async fn execute_gremlin(
         &self,
         query: String,
-        params: Option<serde_json::Value>,
+        #[napi(ts_arg_type = "any | undefined | null")] params: Option<types::Params>,
     ) -> Result<QueryResult> {
         self.execute_language_impl("gremlin", query, params).await
     }
@@ -1517,7 +1518,7 @@ impl JsGrafeoDB {
     pub async fn execute_graphql(
         &self,
         query: String,
-        params: Option<serde_json::Value>,
+        #[napi(ts_arg_type = "any | undefined | null")] params: Option<types::Params>,
     ) -> Result<QueryResult> {
         self.execute_language_impl("graphql", query, params).await
     }
@@ -1531,7 +1532,7 @@ impl JsGrafeoDB {
     pub async fn execute_sparql(
         &self,
         query: String,
-        params: Option<serde_json::Value>,
+        #[napi(ts_arg_type = "any | undefined | null")] params: Option<types::Params>,
     ) -> Result<QueryResult> {
         self.execute_language_impl("sparql", query, params).await
     }
@@ -1542,12 +1543,13 @@ impl JsGrafeoDB {
         &self,
         language: String,
         query: String,
-        params: Option<serde_json::Value>,
+        #[napi(ts_arg_type = "any | undefined | null")] params: Option<types::Params>,
     ) -> Result<QueryResult> {
+        let params = params.map(types::Params::into_map).transpose()?;
         let db = self.inner.clone();
         let result = tokio::task::spawn_blocking(move || {
             let db = db.read();
-            execute_language_query(&db, &query, &language, params.as_ref())
+            execute_language_query(&db, &query, &language, params)
         })
         .await
         .map_err(|e| napi::Error::from_reason(e.to_string()))??;
@@ -1658,30 +1660,22 @@ pub struct JsonlImportOptions {
     pub label: Option<String>,
 }
 
-/// Execute a query in a given language with optional JSON params.
+/// Execute a query in a given language with optional params.
 fn execute_language_query(
     db: &GrafeoDB,
     query: &str,
     language: &str,
-    params: Option<&serde_json::Value>,
+    params: Option<HashMap<String, Value>>,
 ) -> std::result::Result<EngineQueryResult, napi::Error> {
-    let param_map = convert_json_params(params)?;
-    db.execute_language(query, language, param_map)
+    db.execute_language(query, language, params)
         .map_err(NodeGrafeoError::from)
         .map_err(napi::Error::from)
 }
 
-/// Convert JSON params to a HashMap<String, Value>.
-fn convert_json_params(
-    params: Option<&serde_json::Value>,
-) -> std::result::Result<Option<HashMap<String, Value>>, napi::Error> {
-    grafeo_bindings_common::json::json_params_to_map(params)
-        .map_err(|msg| NodeGrafeoError::InvalidArgument(msg).into())
-}
-
 /// Convert a serde_json::Value to a Grafeo Value.
 pub(crate) fn json_to_value(v: &serde_json::Value) -> std::result::Result<Value, napi::Error> {
-    Ok(grafeo_bindings_common::json::json_to_value(v))
+    grafeo_bindings_common::json::json_to_value(v)
+        .map_err(|msg| NodeGrafeoError::InvalidArgument(msg).into())
 }
 
 /// Fetch a node from the database and wrap it as JsNode.
@@ -1725,7 +1719,7 @@ fn object_properties(
         let key: JsString = keys.get_element(i)?;
         let key = key.into_utf8()?.into_owned()?;
         let value: Unknown<'_> = object.get_named_property(&key)?;
-        let value = types::js_to_value(&env, value)?;
+        let value = types::js_to_named_value(env, value, "property", &key)?;
         properties.push((grafeo_common::types::PropertyKey::new(key), value));
     }
     Ok(properties)

@@ -342,7 +342,9 @@ pub extern "C" fn grafeo_execute_with_params(
         return std::ptr::null_mut();
     };
     let guard = db.inner.read();
-    let params = crate::types::parse_params(params_json);
+    let Ok(params) = crate::types::parse_params(params_json) else {
+        return std::ptr::null_mut();
+    };
     match guard.execute_language(query_str, "gql", params) {
         Ok(r) => build_result(&r),
         Err(e) => {
@@ -468,7 +470,9 @@ pub extern "C" fn grafeo_execute_cypher_with_params(
     let Ok(query_str) = str_from_ptr(query) else {
         return std::ptr::null_mut();
     };
-    let params = crate::types::parse_params(params_json);
+    let Ok(params) = crate::types::parse_params(params_json) else {
+        return std::ptr::null_mut();
+    };
     match db
         .inner
         .read()
@@ -494,7 +498,9 @@ pub extern "C" fn grafeo_execute_gremlin_with_params(
     let Ok(query_str) = str_from_ptr(query) else {
         return std::ptr::null_mut();
     };
-    let params = crate::types::parse_params(params_json);
+    let Ok(params) = crate::types::parse_params(params_json) else {
+        return std::ptr::null_mut();
+    };
     match db
         .inner
         .read()
@@ -520,7 +526,9 @@ pub extern "C" fn grafeo_execute_graphql_with_params(
     let Ok(query_str) = str_from_ptr(query) else {
         return std::ptr::null_mut();
     };
-    let params = crate::types::parse_params(params_json);
+    let Ok(params) = crate::types::parse_params(params_json) else {
+        return std::ptr::null_mut();
+    };
     match db
         .inner
         .read()
@@ -546,7 +554,9 @@ pub extern "C" fn grafeo_execute_sparql_with_params(
     let Ok(query_str) = str_from_ptr(query) else {
         return std::ptr::null_mut();
     };
-    let params = crate::types::parse_params(params_json);
+    let Ok(params) = crate::types::parse_params(params_json) else {
+        return std::ptr::null_mut();
+    };
     match db
         .inner
         .read()
@@ -572,7 +582,9 @@ pub extern "C" fn grafeo_execute_sql_with_params(
     let Ok(query_str) = str_from_ptr(query) else {
         return std::ptr::null_mut();
     };
-    let params = crate::types::parse_params(params_json);
+    let Ok(params) = crate::types::parse_params(params_json) else {
+        return std::ptr::null_mut();
+    };
     match db.inner.read().execute_language(query_str, "sql", params) {
         Ok(r) => build_result(&r),
         Err(e) => {
@@ -606,7 +618,9 @@ pub extern "C" fn grafeo_execute_language(
     let Ok(query_str) = str_from_ptr(query) else {
         return std::ptr::null_mut();
     };
-    let params = crate::types::parse_params(params_json);
+    let Ok(params) = crate::types::parse_params(params_json) else {
+        return std::ptr::null_mut();
+    };
     match db
         .inner
         .read()
@@ -861,9 +875,12 @@ pub extern "C" fn grafeo_create_node(
     let labels = crate::types::parse_labels(labels_json).unwrap_or_default();
     let label_refs: Vec<&str> = labels.iter().map(String::as_str).collect();
 
+    let Ok(properties) = crate::types::parse_properties(properties_json) else {
+        return u64::MAX;
+    };
     let guard = db.inner.read();
     created_id(
-        if let Some(props) = crate::types::parse_properties(properties_json) {
+        if let Some(props) = properties {
             guard.create_node_with_props(&label_refs, props)
         } else {
             guard.create_node(&label_refs)
@@ -966,9 +983,9 @@ pub extern "C" fn grafeo_set_node_property(
         Ok(s) => s,
         Err(e) => return e,
     };
-    let Some(value) = crate::types::parse_value(value_json) else {
-        set_last_error("Invalid JSON value");
-        return GrafeoStatus::ErrorSerialization;
+    let value = match crate::types::parse_value(value_json) {
+        Ok(value) => value,
+        Err(status) => return status,
     };
     match db
         .inner
@@ -1139,10 +1156,13 @@ pub extern "C" fn grafeo_create_edge(
     };
     let src = NodeId::new(source_id);
     let dst = NodeId::new(target_id);
+    let Ok(properties) = crate::types::parse_properties(properties_json) else {
+        return u64::MAX;
+    };
     let guard = db.inner.read();
 
     created_id(
-        if let Some(props) = crate::types::parse_properties(properties_json) {
+        if let Some(props) = properties {
             guard.create_edge_with_props(src, dst, type_str, props)
         } else {
             guard.create_edge(src, dst, type_str)
@@ -1227,9 +1247,9 @@ pub extern "C" fn grafeo_set_edge_property(
         Ok(s) => s,
         Err(e) => return e,
     };
-    let Some(value) = crate::types::parse_value(value_json) else {
-        set_last_error("Invalid JSON value");
-        return GrafeoStatus::ErrorSerialization;
+    let value = match crate::types::parse_value(value_json) {
+        Ok(value) => value,
+        Err(status) => return status,
     };
     match db
         .inner
@@ -1407,9 +1427,9 @@ pub extern "C" fn grafeo_find_nodes_by_property(
         Ok(s) => s,
         Err(e) => return e,
     };
-    let Some(value) = crate::types::parse_value(value_json) else {
-        set_last_error("Invalid JSON value");
-        return GrafeoStatus::ErrorSerialization;
+    let value = match crate::types::parse_value(value_json) {
+        Ok(value) => value,
+        Err(status) => return status,
     };
     let ids = match db.inner.read().find_nodes_by_property(prop_str, &value) {
         Ok(ids) => ids,
@@ -1963,7 +1983,10 @@ pub extern "C" fn grafeo_transaction_execute_with_params(
         set_last_error("Transaction is no longer active");
         return std::ptr::null_mut();
     };
-    let result = if let Some(params) = crate::types::parse_params(params_json) {
+    let Ok(params) = crate::types::parse_params(params_json) else {
+        return std::ptr::null_mut();
+    };
+    let result = if let Some(params) = params {
         session.execute_with_params(query_str, params)
     } else {
         session.execute(query_str)
@@ -2009,7 +2032,9 @@ pub extern "C" fn grafeo_transaction_execute_language(
         set_last_error("Transaction is no longer active");
         return std::ptr::null_mut();
     };
-    let params = crate::types::parse_params(params_json);
+    let Ok(params) = crate::types::parse_params(params_json) else {
+        return std::ptr::null_mut();
+    };
     match session.execute_language(query_str, lang_str, params) {
         Ok(r) => build_result(&r),
         Err(e) => {

@@ -1074,7 +1074,7 @@ fn generate_single_test(output: &mut String, spec: &TestSpec<'_>) {
             if has_params {
                 writeln!(
                     output,
-                    "        execute_query_result_with_params(&db, \"{}\", \"{}\", \"{}\", params.clone()).expect(\"setup statement failed\");",
+                    "        execute_query_result_with_params(&db, \"{}\", \"{}\", \"{}\", params.as_ref().expect(\"params\").clone()).expect(\"setup statement failed\");",
                     escape_rust_string(language),
                     escape_rust_string(model),
                     escape_rust_string(q),
@@ -1100,8 +1100,14 @@ fn generate_single_test(output: &mut String, spec: &TestSpec<'_>) {
     writeln!(output).unwrap();
 }
 
+/// Emits `params`: the test's parameters, or the error a binding gives for
+/// one it cannot type (an integer past 38 digits, see [`param_value_code`]).
 fn generate_params_hashmap(output: &mut String, tc: &TestCase) {
-    writeln!(output, "        let params = {{").unwrap();
+    writeln!(
+        output,
+        "        fn params() -> grafeo_common::utils::error::Result<std::collections::HashMap<String, grafeo_common::types::Value>> {{"
+    )
+    .unwrap();
     writeln!(
         output,
         "            let mut m = std::collections::HashMap::new();"
@@ -1112,22 +1118,24 @@ fn generate_params_hashmap(output: &mut String, tc: &TestCase) {
             .unwrap_or_else(|e| panic!("test '{}', param '{key}': {e}", tc.name));
         writeln!(
             output,
-            "            m.insert(\"{}\".to_string(), {code});",
+            "            {{ let param = \"{0}\"; m.insert(param.to_string(), {code}); }}",
             escape_rust_string(key)
         )
         .unwrap();
     }
-    writeln!(output, "            m").unwrap();
-    writeln!(output, "        }};").unwrap();
+    writeln!(output, "            Ok(m)").unwrap();
+    writeln!(output, "        }}").unwrap();
+    writeln!(output, "        let params = params();").unwrap();
 }
 
 /// Rust code that builds the `Value` for a parameter, by the rule every runner
 /// follows (this runner is the reference): a quoted value is a string, whatever
 /// it reads like; a bare value starting with `[` or `{` is JSON; a bare decimal
-/// integer that fits `i64` is an `Int64` and any other bare decimal number a
-/// `Float64`; a bare `true` or `false` is a `Bool`; any other bare value is a
-/// string. `inf`, `NaN`, `0x1F` and `1_000` are strings: none of them is a
-/// decimal number.
+/// integer is an `Int64` when it fits `i64`, else an exact decimal up to 38
+/// digits and an error past that (see [`integer_code`]), and any other bare
+/// decimal number a `Float64`; a bare `true` or `false` is a `Bool`; any other
+/// bare value is a string. `inf`, `NaN`, `0x1F` and `1_000` are strings: none
+/// of them is a decimal number.
 fn param_value_code(param: &ParamText) -> Result<String, String> {
     const VALUE: &str = "grafeo_common::types::Value";
     let text = match param {
@@ -1142,10 +1150,8 @@ fn param_value_code(param: &ParamText) -> Result<String, String> {
     if text.starts_with('[') || text.starts_with('{') {
         return json_param_to_value_code(text);
     }
-    if is_decimal_integer(text)
-        && let Ok(n) = text.parse::<i64>()
-    {
-        return Ok(format!("{VALUE}::Int64({n})"));
+    if is_decimal_integer(text) {
+        return Ok(integer_code(text));
     }
     if is_decimal_number(text) {
         let f: f64 = text
@@ -1163,6 +1169,17 @@ fn param_value_code(param: &ParamText) -> Result<String, String> {
         "{VALUE}::String(\"{}\".into())",
         escape_rust_string(text)
     ))
+}
+
+/// Rust code for the `Value` of a decimal integer, by the rule every binding
+/// types one: an `Int64` when it fits `i64`, else `wide_integer_param`, an
+/// exact decimal up to 38 digits and the error a binding gives past that
+/// (`?` in the generated `params()`, whose `param` names the parameter).
+fn integer_code(text: &str) -> String {
+    match text.parse::<i64>() {
+        Ok(n) => format!("grafeo_common::types::Value::Int64({n})"),
+        Err(_) => format!("wide_integer_param(param, \"{text}\")?"),
+    }
 }
 
 /// `[+-]?[0-9]+`: an integer as every runner reads it (no `_`, no hex prefix).
@@ -1298,8 +1315,8 @@ fn json_value_code(chars: &[char], pos: &mut usize) -> Result<String, String> {
                 "true" | "false" => Ok(format!("{VALUE}::Bool({word})")),
                 "null" => Ok(format!("{VALUE}::Null")),
                 _ if is_json_number(&word) => {
-                    if let Ok(n) = word.parse::<i64>() {
-                        Ok(format!("{VALUE}::Int64({n})"))
+                    if is_decimal_integer(&word) {
+                        Ok(integer_code(&word))
                     } else {
                         match word.parse::<f64>() {
                             Ok(f) if f.is_finite() => Ok(format!("{VALUE}::Float64({f:?}_f64)")),
@@ -1436,7 +1453,7 @@ fn generate_execute_and_assert(
         if has_params {
             writeln!(
                 output,
-                "        let result = execute_query_result_with_params(&db, \"{}\", \"{}\", \"{}\", params);",
+                "        let result = params.and_then(|params| execute_query_result_with_params(&db, \"{}\", \"{}\", \"{}\", params));",
                 escape_rust_string(language),
                 escape_rust_string(model),
                 escape_rust_string(query)
@@ -1470,7 +1487,7 @@ fn generate_execute_and_assert(
     if has_params {
         writeln!(
             output,
-            "        let result = execute_query_result_with_params(&db, \"{}\", \"{}\", \"{}\", params).expect(\"query failed\");",
+            "        let result = execute_query_result_with_params(&db, \"{}\", \"{}\", \"{}\", params.expect(\"params\")).expect(\"query failed\");",
             escape_rust_string(language),
             escape_rust_string(model),
             escape_rust_string(query)

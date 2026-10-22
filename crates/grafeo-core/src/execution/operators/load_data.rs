@@ -7,6 +7,8 @@ use std::sync::Arc;
 
 use super::{Operator, OperatorError, OperatorResult};
 use crate::execution::chunk::DataChunkBuilder;
+#[cfg(feature = "jsonl-import")]
+use grafeo_common::types::NumberTextError;
 use grafeo_common::types::{ArcStr, LogicalType, PropertyKey, Value};
 
 /// File format for the load data operator.
@@ -42,6 +44,8 @@ pub struct LoadDataOperator {
     delimiter: u8,
     /// Whether the file has been opened.
     opened: bool,
+    /// The number of the last line read (JSONL), for errors.
+    line: u64,
     /// Buffered Parquet rows (read all upfront, then iterate).
     #[cfg(feature = "parquet-import")]
     parquet_rows: Option<std::vec::IntoIter<Value>>,
@@ -68,6 +72,7 @@ impl LoadDataOperator {
             headers: None,
             with_headers,
             path,
+            line: 0,
             delimiter,
             opened: false,
             #[cfg(feature = "parquet-import")]
@@ -181,16 +186,24 @@ impl LoadDataOperator {
             if bytes_read == 0 {
                 return Ok(None); // EOF
             }
+            self.line += 1;
+            let number = self.line;
 
             let trimmed = line.trim();
             if trimmed.is_empty() {
                 continue; // skip blank lines
             }
 
-            let json_value: serde_json::Value = serde_json::from_str(trimmed)
-                .map_err(|e| OperatorError::Execution(format!("Failed to parse JSON line: {e}")))?;
+            let json_value: serde_json::Value = serde_json::from_str(trimmed).map_err(|e| {
+                OperatorError::Execution(format!("Failed to parse JSON line {number}: {e}"))
+            })?;
 
-            let row_value = json_to_value(&json_value);
+            let row_value = json_to_value(&json_value).map_err(|error| match error {
+                NumberTextError::Invalid(_) => {
+                    OperatorError::Execution(format!("line {number}: {error}"))
+                }
+                _ => OperatorError::numeric_out_of_range(format!("line {number}: {error}")),
+            })?;
             return Ok(Some(build_single_row_chunk(row_value)));
         }
     }
@@ -298,6 +311,7 @@ impl Operator for LoadDataOperator {
         self.reader = None;
         self.headers = None;
         self.opened = false;
+        self.line = 0;
         #[cfg(feature = "parquet-import")]
         {
             self.parquet_rows = None;
@@ -416,34 +430,33 @@ fn parse_csv_row(line: &str, delimiter: u8) -> Vec<String> {
 // JSONL helpers
 // ============================================================================
 
-/// Converts a `serde_json::Value` to a `grafeo_common::types::Value`.
+/// Converts a `serde_json::Value` to a `grafeo_common::types::Value`. A
+/// number follows [`Value::from_number_text`] on its source text (the
+/// workspace reads JSON with `arbitrary_precision`): an integer is an INT64
+/// when it fits 64 bits, else an exact DECIMAL up to 38 digits; any other
+/// number is a FLOAT64.
 #[cfg(feature = "jsonl-import")]
-fn json_to_value(json: &serde_json::Value) -> Value {
-    match json {
+fn json_to_value(json: &serde_json::Value) -> Result<Value, NumberTextError> {
+    Ok(match json {
         serde_json::Value::Null => Value::Null,
         serde_json::Value::Bool(b) => Value::Bool(*b),
-        serde_json::Value::Number(n) => {
-            if let Some(i) = n.as_i64() {
-                Value::Int64(i)
-            } else if let Some(f) = n.as_f64() {
-                Value::Float64(f)
-            } else {
-                Value::String(ArcStr::from(n.to_string().as_str()))
-            }
-        }
+        serde_json::Value::Number(n) => Value::from_number_text(n.as_str())?,
         serde_json::Value::String(s) => Value::String(ArcStr::from(s.as_str())),
         serde_json::Value::Array(arr) => {
-            let items: Vec<Value> = arr.iter().map(json_to_value).collect();
+            let items = arr
+                .iter()
+                .map(json_to_value)
+                .collect::<Result<Vec<_>, _>>()?;
             Value::List(Arc::from(items))
         }
         serde_json::Value::Object(obj) => {
             let mut map = BTreeMap::new();
             for (key, val) in obj {
-                map.insert(PropertyKey::from(key.as_str()), json_to_value(val));
+                map.insert(PropertyKey::from(key.as_str()), json_to_value(val)?);
             }
             Value::Map(Arc::new(map))
         }
-    }
+    })
 }
 
 // ============================================================================
@@ -664,6 +677,11 @@ mod tests {
     #[cfg(feature = "jsonl-import")]
     mod jsonl_tests {
         use super::*;
+
+        /// [`super::json_to_value`] for a value that has one.
+        fn json_to_value(json: &serde_json::Value) -> Value {
+            super::super::json_to_value(json).unwrap()
+        }
 
         #[test]
         fn test_json_to_value_null() {

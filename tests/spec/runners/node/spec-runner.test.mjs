@@ -140,15 +140,16 @@ describe('parameter values', () => {
     expect(paramValue('{"min": -9223372036854775808}')).toEqual({ min: -9223372036854775808n })
   })
 
-  it('makes a JSON integer past 64 bits a float', () => {
+  it('passes a JSON integer past 64 bits as a BigInt, which the binding types', () => {
     expect(paramValue('[9223372036854775808, {"big": 18446744073709551616}]')).toEqual([
-      9223372036854775808,
-      { big: 18446744073709551616 },
+      9223372036854775808n,
+      { big: 18446744073709551616n },
     ])
+    expect(paramValue(`1${'0'.repeat(38)}`)).toBe(10n ** 38n)
   })
 
   it('refuses a JSON number past the f64 range', () => {
-    for (const text of ['[1e400]', '{"tiny": [-1e400]}', `[1${'0'.repeat(400)}]`]) {
+    for (const text of ['[1e400]', '{"tiny": [-1e400]}', `[1${'0'.repeat(400)}.0]`]) {
       expect(() => paramValue(text)).toThrow('out of the f64 range')
     }
   })

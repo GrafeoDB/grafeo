@@ -553,8 +553,6 @@ _DECIMAL_INTEGER = re.compile(r"[+-]?[0-9]+")
 _DECIMAL_NUMBER = re.compile(
     r"[+-]?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)(?:[eE][+-]?[0-9]+)?"
 )
-_I64_MIN = -(2**63)
-_I64_MAX = 2**63 - 1
 
 
 def param_value(text: str) -> object:
@@ -562,9 +560,11 @@ def param_value(text: str) -> object:
 
     The rule of the Rust reference runner, which every runner follows: a
     quoted value is a string, whatever it reads like; a bare value starting
-    with ``[`` or ``{`` is JSON; a bare decimal integer that fits i64 is an
-    int and any other bare decimal number a float; a bare ``true`` or
-    ``false`` is a bool; any other bare value is a string.
+    with ``[`` or ``{`` is JSON; a bare decimal integer is an int, which the
+    binding types (an INT64 when it fits 64 bits, else an exact DECIMAL up to
+    38 digits, an error past that), and any other bare decimal number a
+    float; a bare ``true`` or ``false`` is a bool; any other bare value is a
+    string.
     """
     text = text.strip()
     if _is_quoted(text):
@@ -572,26 +572,16 @@ def param_value(text: str) -> object:
     if text.startswith(("[", "{")):
         return json.loads(
             text,
-            parse_int=_json_integer,
             parse_float=_finite_float,
             parse_constant=_reject_json_constant,
         )
-    if _DECIMAL_INTEGER.fullmatch(text) and _I64_MIN <= int(text) <= _I64_MAX:
+    if _DECIMAL_INTEGER.fullmatch(text):
         return int(text)
     if _DECIMAL_NUMBER.fullmatch(text):
         return _finite_float(text)
     if text in ("true", "false"):
         return text == "true"
     return text
-
-
-def _json_integer(text: str) -> int | float:
-    """A JSON integer, by the rule of a bare one: an int when it fits i64, a
-    float when it does not (``json.loads`` alone keeps any size)."""
-    number = int(text)
-    if _I64_MIN <= number <= _I64_MAX:
-        return number
-    return _finite_float(text)
 
 
 def _finite_float(text: str) -> float:

@@ -234,6 +234,46 @@ impl Value {
         }
     }
 
+    /// The value of an integer from outside the engine (a parameter, a
+    /// property, a loaded row), by the rule every input shares: an INT64 when
+    /// it fits 64 bits, else an exact DECIMAL with scale 0.
+    ///
+    /// # Errors
+    ///
+    /// [`DecimalError::Overflow`](super::DecimalError::Overflow) when the
+    /// integer has more than 38 digits.
+    pub fn from_wide_integer(integer: i128) -> Result<Self, super::DecimalError> {
+        match i64::try_from(integer) {
+            Ok(narrow) => Ok(Value::Int64(narrow)),
+            Err(_) => Decimal::new(integer, 0).map(Value::Decimal),
+        }
+    }
+
+    /// The value of a number written as text from outside the engine (a JSON
+    /// number, a host's big integer): an integer (`[+-]digits`) by
+    /// [`Self::from_wide_integer`] at any length, any other number a FLOAT64.
+    ///
+    /// # Errors
+    ///
+    /// An integer with more than 38 digits, a float past the FLOAT64 range,
+    /// or text that is not a number.
+    pub fn from_number_text(text: &str) -> Result<Self, NumberTextError> {
+        let digits = text.strip_prefix(['+', '-']).unwrap_or(text);
+        if !digits.is_empty() && digits.bytes().all(|byte| byte.is_ascii_digit()) {
+            // An i128 holds every integer of 38 digits; a longer one has more.
+            return text
+                .parse::<i128>()
+                .ok()
+                .and_then(|integer| Self::from_wide_integer(integer).ok())
+                .ok_or_else(|| NumberTextError::IntegerTooWide(text.to_string()));
+        }
+        match text.parse::<f64>() {
+            Ok(float) if float.is_finite() => Ok(Value::Float64(float)),
+            Ok(_) => Err(NumberTextError::FloatOutOfRange(text.to_string())),
+            Err(_) => Err(NumberTextError::Invalid(text.to_string())),
+        }
+    }
+
     /// The value as a vector component: an integer, a float or a decimal as
     /// the nearest `f32`, the type vectors and their indexes store. `None` for
     /// any other value.
@@ -621,6 +661,20 @@ impl fmt::Display for Value {
             }
         }
     }
+}
+
+/// Why a number written as text has no value (see [`Value::from_number_text`]).
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum NumberTextError {
+    /// An integer with more than 38 digits, past the widest exact DECIMAL.
+    #[error("the integer {0} has more than 38 digits")]
+    IntegerTooWide(String),
+    /// A float past the FLOAT64 range.
+    #[error("the number {0} is out of the FLOAT64 range")]
+    FloatOutOfRange(String),
+    /// Text that is not a number.
+    #[error("{0} is not a number")]
+    Invalid(String),
 }
 
 // Convenient From implementations
@@ -1213,6 +1267,95 @@ mod tests {
 
         assert_eq!(Value::Float64(1.234).as_float64(), Some(1.234));
         assert_eq!(Value::String("hello".into()).as_str(), Some("hello"));
+    }
+
+    #[test]
+    fn a_wide_integer_is_int64_then_an_exact_decimal_up_to_38_digits() {
+        let decimal = |text: &str| Value::Decimal(Decimal::parse(text).unwrap());
+        assert_eq!(
+            Value::from_wide_integer(i128::from(i64::MAX)),
+            Ok(Value::Int64(i64::MAX))
+        );
+        assert_eq!(
+            Value::from_wide_integer(i128::from(i64::MIN)),
+            Ok(Value::Int64(i64::MIN))
+        );
+        assert_eq!(
+            Value::from_wide_integer(1 << 63),
+            Ok(decimal("9223372036854775808"))
+        );
+        assert_eq!(
+            Value::from_wide_integer(1 << 64),
+            Ok(decimal("18446744073709551616"))
+        );
+        assert_eq!(
+            Value::from_wide_integer(-(1 << 63) - 1),
+            Ok(decimal("-9223372036854775809"))
+        );
+        let largest = 10_i128.pow(38) - 1;
+        assert_eq!(
+            Value::from_wide_integer(largest),
+            Ok(decimal(&largest.to_string()))
+        );
+        assert_eq!(
+            Value::from_wide_integer(-largest),
+            Ok(decimal(&(-largest).to_string()))
+        );
+        for past in [10_i128.pow(38), -10_i128.pow(38), i128::MAX, i128::MIN] {
+            assert_eq!(
+                Value::from_wide_integer(past),
+                Err(super::super::DecimalError::Overflow)
+            );
+        }
+    }
+
+    #[test]
+    fn number_text_follows_the_integer_rule_and_keeps_floats() {
+        let decimal = |text: &str| Value::Decimal(Decimal::parse(text).unwrap());
+        let read = Value::from_number_text;
+        assert_eq!(read("9223372036854775807"), Ok(Value::Int64(i64::MAX)));
+        assert_eq!(read("-9223372036854775808"), Ok(Value::Int64(i64::MIN)));
+        assert_eq!(read("-0"), Ok(Value::Int64(0)));
+        assert_eq!(
+            read("9223372036854775808"),
+            Ok(decimal("9223372036854775808"))
+        );
+        assert_eq!(
+            read("18446744073709551616"),
+            Ok(decimal("18446744073709551616"))
+        );
+        let largest = "9".repeat(38);
+        assert_eq!(read(&largest), Ok(decimal(&largest)));
+        assert_eq!(
+            read(&format!("-{largest}")),
+            Ok(decimal(&format!("-{largest}")))
+        );
+        for wide in [format!("1{}", "0".repeat(38)), "7".repeat(60)] {
+            assert_eq!(
+                read(&wide),
+                Err(NumberTextError::IntegerTooWide(wide.clone()))
+            );
+        }
+        assert_eq!(
+            read(&format!("1{}", "0".repeat(38)))
+                .unwrap_err()
+                .to_string(),
+            format!("the integer 1{} has more than 38 digits", "0".repeat(38))
+        );
+        // Any other number is a float with the same value: `1.50` is 1.5.
+        assert_eq!(read("1.50"), Ok(Value::Float64(1.5)));
+        assert_eq!(read("-0.0"), Ok(Value::Float64(-0.0)));
+        assert_eq!(read("1e300"), Ok(Value::Float64(1e300)));
+        assert_eq!(read("9.2e18"), Ok(Value::Float64(9.2e18)));
+        assert_eq!(
+            read("1e400"),
+            Err(NumberTextError::FloatOutOfRange("1e400".into()))
+        );
+        assert_eq!(
+            read("twelve"),
+            Err(NumberTextError::Invalid("twelve".into()))
+        );
+        assert_eq!(read(""), Err(NumberTextError::Invalid(String::new())));
     }
 
     #[test]

@@ -6,6 +6,7 @@ use std::sync::Arc;
 
 use parking_lot::RwLock;
 
+use crate::error::GrafeoStatus;
 use grafeo_common::types::{PropertyKey, PropertyMap, Value};
 use grafeo_engine::database::GrafeoDB;
 
@@ -87,9 +88,26 @@ pub fn value_to_json(v: &Value) -> serde_json::Value {
     grafeo_bindings_common::json::value_to_json(v)
 }
 
-/// Convert a `serde_json::Value` to a Grafeo `Value`.
-pub fn json_to_value(v: &serde_json::Value) -> Value {
+/// Convert a `serde_json::Value` to a Grafeo `Value`; `what` names it in
+/// the error (`property 'age'`), which is set as the last error.
+pub fn json_to_value(v: &serde_json::Value, what: &str) -> Result<Value, GrafeoStatus> {
     grafeo_bindings_common::json::json_to_value(v)
+        .map_err(|error| crate::batch::invalid(&format!("{what}: {error}")))
+}
+
+/// The JSON a C string argument holds; `None` for a null pointer or JSON
+/// `null`. `what` names the argument in the error.
+fn json_or_none(
+    json_ptr: *const c_char,
+    what: &str,
+) -> Result<Option<serde_json::Value>, GrafeoStatus> {
+    if json_ptr.is_null() {
+        return Ok(None);
+    }
+    match crate::batch::json_arg(json_ptr, what)? {
+        serde_json::Value::Null => Ok(None),
+        parsed => Ok(Some(parsed)),
+    }
 }
 
 /// Serialize a [`PropertyMap`] to a JSON `CString`.
@@ -102,22 +120,32 @@ pub fn properties_to_json(props: &PropertyMap) -> CString {
     CString::new(json_str).unwrap_or_default()
 }
 
-/// Parse a JSON C-string into a `Vec<(PropertyKey, Value)>` for node/edge creation.
-pub fn parse_properties(json_ptr: *const c_char) -> Option<Vec<(PropertyKey, Value)>> {
-    if json_ptr.is_null() {
-        return None;
-    }
-    // SAFETY: Caller guarantees valid null-terminated C string.
-    let s = unsafe { std::ffi::CStr::from_ptr(json_ptr) }
-        .to_str()
-        .ok()?;
-    let parsed: serde_json::Value = serde_json::from_str(s).ok()?;
-    let obj = parsed.as_object()?;
-    let props: Vec<(PropertyKey, Value)> = obj
-        .iter()
-        .map(|(k, v)| (PropertyKey::new(k.clone()), json_to_value(v)))
-        .collect();
-    Some(props)
+/// Parse a JSON C-string into a `Vec<(PropertyKey, Value)>` for node/edge
+/// creation; `None` for a null pointer or JSON `null`.
+///
+/// # Errors
+///
+/// Invalid JSON, JSON that is not an object, or a property that has no value
+/// (an integer past 38 digits); the error names it and is set as the last
+/// error.
+pub fn parse_properties(
+    json_ptr: *const c_char,
+) -> Result<Option<Vec<(PropertyKey, Value)>>, GrafeoStatus> {
+    let Some(parsed) = json_or_none(json_ptr, "properties")? else {
+        return Ok(None);
+    };
+    let Some(obj) = parsed.as_object() else {
+        return Err(crate::batch::invalid(&format!(
+            "properties: not an object: {parsed}"
+        )));
+    };
+    obj.iter()
+        .map(|(k, v)| {
+            let value = json_to_value(v, &format!("property '{k}'"))?;
+            Ok((PropertyKey::new(k.clone()), value))
+        })
+        .collect::<Result<_, _>>()
+        .map(Some)
 }
 
 /// Parse a JSON C-string into a `Vec<String>` (for labels).
@@ -139,32 +167,32 @@ pub fn parse_labels(json_ptr: *const c_char) -> Option<Vec<String>> {
 }
 
 /// Parse a JSON C-string into a single `Value`.
-pub fn parse_value(json_ptr: *const c_char) -> Option<Value> {
+///
+/// # Errors
+///
+/// A null pointer, invalid JSON, or a value that has none (an integer past
+/// 38 digits); the error is set as the last error.
+pub fn parse_value(json_ptr: *const c_char) -> Result<Value, GrafeoStatus> {
     if json_ptr.is_null() {
-        return None;
+        return Err(crate::batch::invalid("value: null pointer"));
     }
-    // SAFETY: Caller guarantees valid null-terminated C string.
-    let s = unsafe { std::ffi::CStr::from_ptr(json_ptr) }
-        .to_str()
-        .ok()?;
-    let parsed: serde_json::Value = serde_json::from_str(s).ok()?;
-    Some(json_to_value(&parsed))
+    json_to_value(&crate::batch::json_arg(json_ptr, "value")?, "value")
 }
 
-/// Parse a JSON C-string into a `HashMap<String, Value>` for query params.
-pub fn parse_params(json_ptr: *const c_char) -> Option<std::collections::HashMap<String, Value>> {
-    if json_ptr.is_null() {
-        return None;
-    }
-    // SAFETY: Caller guarantees valid null-terminated C string.
-    let s = unsafe { std::ffi::CStr::from_ptr(json_ptr) }
-        .to_str()
-        .ok()?;
-    let parsed: serde_json::Value = serde_json::from_str(s).ok()?;
-    let obj = parsed.as_object()?;
-    let map: std::collections::HashMap<String, Value> = obj
-        .iter()
-        .map(|(k, v)| (k.clone(), json_to_value(v)))
-        .collect();
-    Some(map)
+/// Parse a JSON C-string into a `HashMap<String, Value>` for query params;
+/// `None` for a null pointer or JSON `null`.
+///
+/// # Errors
+///
+/// Invalid JSON, JSON that is not an object, or a parameter that has no
+/// value (an integer past 38 digits); the error names it and is set as the
+/// last error.
+pub fn parse_params(
+    json_ptr: *const c_char,
+) -> Result<Option<std::collections::HashMap<String, Value>>, GrafeoStatus> {
+    let Some(parsed) = json_or_none(json_ptr, "params")? else {
+        return Ok(None);
+    };
+    grafeo_bindings_common::json::json_params_to_map(Some(&parsed))
+        .map_err(|error| crate::batch::invalid(&error))
 }

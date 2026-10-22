@@ -482,6 +482,8 @@ catch (GrafeoException ex)
 | `bool` | Bool | |
 | `int` | Int64 | Widened to `long` |
 | `long` | Int64 | |
+| `byte`, `sbyte`, `short`, `ushort`, `uint` | Int64 | |
+| `ulong`, `Int128`, `UInt128`, `BigInteger` | Int64, or Decimal past 64 bits | Exact up to 38 digits (scale 0); past that an error naming the parameter |
 | `float` | Float64 | Widened to `double` |
 | `double` | Float64 | |
 | `string` | String | |

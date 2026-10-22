@@ -1023,6 +1023,7 @@ enum GrafeoStatus {
 | `null` | Null | |
 | `bool` | Bool | |
 | `int` | Int64 | |
+| `BigInt` | Int64, or Decimal past 64 bits | Exact up to 38 digits (scale 0); past that an error naming the parameter |
 | `double` | Float64 | |
 | `String` | String | |
 | `DateTime` | Timestamp | Encoded as `$timestamp_us` (microseconds, UTC) |

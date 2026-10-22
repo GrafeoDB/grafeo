@@ -18,7 +18,7 @@ grafeo-core = { path = "../../grafeo-core" }
 grafeo-common = { path = "../../grafeo-common" }
 grafeo-bindings-common = { path = "../common" }
 
-serde_json = { version = "1.0", features = ["preserve_order"] }
+serde_json = { version = "1.0", features = ["preserve_order", "arbitrary_precision"] }
 parking_lot.workspace = true
 
 [features]

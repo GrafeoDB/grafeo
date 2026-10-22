@@ -10,17 +10,86 @@
 //! | `Object`         | `Map`         | Keys must be strings           |
 //! | `Buffer`         | `Bytes`       |                                |
 //! | `Date`           | `Timestamp`   | Millisecond precision          |
-//! | `BigInt`         | `Int64`       |                                |
+//! | `BigInt`         | `Int64/Decimal` | Past 64 bits an exact `Decimal`, past 38 digits an error |
 //! | `Float32Array`   | `Vector`      |                                |
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::ffi::CString;
 use std::sync::Arc;
 
 use napi::bindgen_prelude::*;
 use napi::{JsDate, JsString, JsValue, ValueType, sys};
 
-use grafeo_common::types::{Decimal, PropertyKey, Timestamp, Value};
+use grafeo_common::types::{PropertyKey, Timestamp, Value};
+
+/// Query parameters, converted from the JavaScript object by [`js_to_value`]
+/// when the call is made, as a property is: a `BigInt` follows the integer
+/// rule at any width and a whole number is an INT64 (a JSON step would turn
+/// a `BigInt` past 64 bits into a string and 5000000000 into a float). An
+/// error names the parameter; it is kept until [`Params::into_map`], so an
+/// async call rejects its promise rather than throwing.
+pub struct Params(std::result::Result<HashMap<String, Value>, String>);
+
+impl Params {
+    /// The parameters, or the error that converting them gave.
+    pub fn into_map(self) -> Result<HashMap<String, Value>> {
+        self.0
+            .map_err(|message| crate::error::NodeGrafeoError::InvalidArgument(message).into())
+    }
+
+    fn convert(env: Env, value: Unknown<'_>) -> Result<HashMap<String, Value>> {
+        let not_an_object =
+            || napi::Error::new(napi::Status::InvalidArg, "params must be an object");
+        if value.get_type()? != ValueType::Object {
+            return Err(not_an_object());
+        }
+        // SAFETY: the type was checked as Object above
+        let object: Object<'_> = unsafe { value.cast()? };
+        if object.is_array()? {
+            return Err(not_an_object());
+        }
+        let keys = object.get_property_names()?;
+        let len = keys.get_array_length()?;
+        let mut params = HashMap::with_capacity(len as usize);
+        for i in 0..len {
+            let key: JsString = keys.get_element(i)?;
+            let key = key.into_utf8()?.into_owned()?;
+            let value: Unknown<'_> = object.get_named_property(&key)?;
+            let value = js_to_named_value(env, value, "parameter", &key)?;
+            params.insert(key, value);
+        }
+        Ok(params)
+    }
+}
+
+impl TypeName for Params {
+    fn type_name() -> &'static str {
+        "Record<string, unknown>"
+    }
+
+    fn value_type() -> ValueType {
+        ValueType::Object
+    }
+}
+
+impl FromNapiValue for Params {
+    unsafe fn from_napi_value(env: sys::napi_env, napi_val: sys::napi_value) -> Result<Self> {
+        let env = Env::from_raw(env);
+        // SAFETY: env and napi_val come from napi for this argument
+        let value = unsafe { Unknown::from_raw_unchecked(env.raw(), napi_val) };
+        Ok(Self(
+            Self::convert(env, value).map_err(|error| error.reason),
+        ))
+    }
+}
+
+/// [`js_to_value`] for a named value: a conversion error names it, as
+/// `property 'v'`.
+pub fn js_to_named_value(env: Env, val: Unknown<'_>, what: &str, name: &str) -> Result<Value> {
+    js_to_value(&env, val).map_err(|error| {
+        napi::Error::new(error.status, format!("{what} '{name}': {}", error.reason))
+    })
+}
 
 /// Converts a JavaScript value to a Grafeo Value.
 pub fn js_to_value(env: &Env, val: Unknown<'_>) -> Result<Value> {
@@ -50,34 +119,33 @@ pub fn js_to_value(env: &Env, val: Unknown<'_>) -> Result<Value> {
         ValueType::BigInt => {
             // SAFETY: type was checked as BigInt by the match arm, so cast is valid
             let bigint: BigInt = unsafe { val.cast()? };
-            if bigint.words.len() > 1 {
-                return Err(napi::Error::new(
-                    napi::Status::InvalidArg,
-                    "BigInt value too large for i64",
-                ));
-            }
-            let word = if bigint.words.is_empty() {
-                0u64
-            } else {
-                bigint.words[0]
+            // An INT64 when it fits 64 bits, else an exact DECIMAL up to 38
+            // digits: two words hold every one of them as an i128.
+            let wide = match bigint.words.as_slice() {
+                [] => Some(0),
+                [low] => Some(i128::from(*low)),
+                [low, high] => i128::try_from(u128::from(*low) | (u128::from(*high) << 64)).ok(),
+                _ => None,
             };
-            let signed = if bigint.sign_bit {
-                if word == i64::MIN.unsigned_abs() {
-                    i64::MIN
-                } else if let Ok(v) = i64::try_from(word) {
-                    -v
+            let wide = wide.map(|magnitude| {
+                if bigint.sign_bit {
+                    -magnitude
                 } else {
-                    return Err(napi::Error::new(
-                        napi::Status::InvalidArg,
-                        "BigInt value too large for i64",
-                    ));
+                    magnitude
                 }
-            } else {
-                i64::try_from(word).map_err(|_| {
-                    napi::Error::new(napi::Status::InvalidArg, "BigInt value too large for i64")
-                })?
-            };
-            Ok(Value::Int64(signed))
+            });
+            wide.and_then(|integer| Value::from_wide_integer(integer).ok())
+                .ok_or_else(|| {
+                    let text = val
+                        .coerce_to_string()
+                        .and_then(|text| text.into_utf8())
+                        .and_then(|text| text.into_owned())
+                        .unwrap_or_default();
+                    napi::Error::new(
+                        napi::Status::InvalidArg,
+                        format!("the integer {text} has more than 38 digits"),
+                    )
+                })
         }
         ValueType::Object => {
             // SAFETY: type was checked as Object by the match arm, so cast is valid
@@ -144,14 +212,10 @@ fn js_object_to_value(env: &Env, obj: &Object<'_>) -> Result<Value> {
         let value: Unknown<'_> = obj.get_named_property(&key_str)?;
         map.insert(PropertyKey::new(key_str), js_to_value(env, value)?);
     }
-    // `{ $decimal: "1.50" }` alone is a decimal, with its scale.
-    if map.len() == 1
-        && let Some(Value::String(text)) = map.get(&PropertyKey::new("$decimal"))
-        && let Ok(decimal) = Decimal::parse(text)
-    {
-        return Ok(Value::Decimal(decimal));
-    }
-    Ok(Value::Map(Arc::new(map)))
+    // A tagged object (`{ $decimal: "1.50" }` alone, `{ $date: "2024-01-15" }`,
+    // ...) is the value it stands for, as in the JSON the other bindings send.
+    Ok(grafeo_bindings_common::json::tagged_value(&map)
+        .unwrap_or_else(|| Value::Map(Arc::new(map))))
 }
 
 /// Helper to check napi_status and convert to Result.

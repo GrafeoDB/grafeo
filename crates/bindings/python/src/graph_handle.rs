@@ -385,7 +385,7 @@ impl PyGraphHandle {
     /// Sets a node property; raises if the node does not exist or the value
     /// breaks a constraint.
     fn set_node_property(&self, node_id: u64, key: &str, value: &Bound<'_, PyAny>) -> PyResult<()> {
-        let value = PyValue::from_py(value)?;
+        let value = PyValue::from_py_named(value, "property", key)?;
         self.with_graph(|graph| {
             Ok(graph
                 .set_node_property(NodeId(node_id), key, value)
@@ -396,7 +396,7 @@ impl PyGraphHandle {
     /// Sets an edge property; raises if the edge does not exist or the value
     /// breaks its edge type.
     fn set_edge_property(&self, edge_id: u64, key: &str, value: &Bound<'_, PyAny>) -> PyResult<()> {
-        let value = PyValue::from_py(value)?;
+        let value = PyValue::from_py_named(value, "property", key)?;
         self.with_graph(|graph| {
             Ok(graph
                 .set_edge_property(EdgeId(edge_id), key, value)
@@ -468,7 +468,7 @@ impl PyGraphHandle {
         value: &Bound<'_, PyAny>,
         py: Python<'_>,
     ) -> PyResult<Vec<u64>> {
-        let value = PyValue::from_py(value)?;
+        let value = PyValue::from_py_named(value, "property", property)?;
         self.session_released(py, |session| {
             Ok(session
                 .find_nodes_by_property(property, &value)?

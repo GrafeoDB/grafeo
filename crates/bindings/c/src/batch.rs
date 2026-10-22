@@ -32,10 +32,14 @@ pub(crate) fn properties(
 ) -> Result<HashMap<PropertyKey, Value>, GrafeoStatus> {
     match value {
         None | Some(serde_json::Value::Null) => Ok(HashMap::new()),
-        Some(serde_json::Value::Object(map)) => Ok(map
+        Some(serde_json::Value::Object(map)) => map
             .iter()
-            .map(|(key, value)| (PropertyKey::new(key.as_str()), json_to_value(value)))
-            .collect()),
+            .map(|(key, value)| {
+                let value = json_to_value(value)
+                    .map_err(|error| invalid(&format!("{what}: property '{key}': {error}")))?;
+                Ok((PropertyKey::new(key.as_str()), value))
+            })
+            .collect(),
         Some(other) => Err(invalid(&format!("{what}: not an object: {other}"))),
     }
 }

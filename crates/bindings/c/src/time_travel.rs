@@ -177,13 +177,16 @@ pub extern "C" fn grafeo_execute_as_of(
     let Some(point) = time_point(point_kind, point_value) else {
         return std::ptr::null_mut();
     };
+    let Ok(params) = parse_params(params_json) else {
+        return std::ptr::null_mut();
+    };
     // SAFETY: Caller guarantees ptr from grafeo_open* and not yet freed.
     let db = unsafe { &*db };
     let guard = db.inner.read();
     let result = guard.epoch_as_of(point).and_then(|epoch| {
         guard
             .session()
-            .execute_at_epoch_with_params(query, epoch, parse_params(params_json))
+            .execute_at_epoch_with_params(query, epoch, params)
     });
     match result {
         Ok(result) => build_result(&result),
@@ -255,7 +258,10 @@ pub extern "C" fn grafeo_as_of_execute(
     };
     // SAFETY: Caller guarantees ptr from grafeo_as_of and not yet freed.
     let view = &unsafe { &*view }.view;
-    let result = match parse_params(params_json) {
+    let Ok(params) = parse_params(params_json) else {
+        return std::ptr::null_mut();
+    };
+    let result = match params {
         Some(params) => view.execute_with_params(query, params),
         None => view.execute(query),
     };

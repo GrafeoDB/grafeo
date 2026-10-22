@@ -2298,7 +2298,10 @@ this is not json\n";
             (r#"{"Int64":"nineteen"}"#, "a tagged integer that is text"),
             (r#"{"Float64":null}"#, "a float a dump before 0.6.0 lost"),
             (r#"{"Date":"someday"}"#, "a tagged date that is not one"),
-            ("18446744073709551615", "an integer beyond INT64"),
+            (
+                "100000000000000000000000000000000000000",
+                "an integer past 38 digits",
+            ),
             (r#"{"List":[3]}"#, "an untagged value in a tagged list"),
         ] {
             let error = load_fails_and_changes_nothing(&format!(

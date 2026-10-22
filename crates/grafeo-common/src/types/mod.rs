@@ -39,7 +39,9 @@ pub use temporal_comparison::TemporalComparison;
 pub use time::Time;
 pub use timestamp::Timestamp;
 pub use validity::ValidityTs;
-pub use value::{HashableValue, OrderableValue, OrderedFloat64, PropertyKey, Value};
+pub use value::{
+    HashableValue, NumberTextError, OrderableValue, OrderedFloat64, PropertyKey, Value,
+};
 pub use value_type::ValueType;
 pub use zoned_datetime::ZonedDatetime;
 

@@ -25,7 +25,9 @@ pub(crate) fn params(
     };
     let mut map = HashMap::with_capacity(params.len());
     for (key, value) in params.iter() {
-        map.insert(key.extract::<String>()?, PyValue::from_py(&value)?);
+        let name = key.extract::<String>()?;
+        let value = PyValue::from_py_named(&value, "parameter", &name)?;
+        map.insert(name, value);
     }
     Ok(Some(map))
 }
@@ -40,10 +42,9 @@ pub(crate) fn properties(
     properties
         .iter()
         .map(|(key, value)| {
-            Ok((
-                PropertyKey::new(key.extract::<String>()?),
-                PyValue::from_py(&value)?,
-            ))
+            let name = key.extract::<String>()?;
+            let value = PyValue::from_py_named(&value, "property", &name)?;
+            Ok((PropertyKey::new(name), value))
         })
         .collect()
 }

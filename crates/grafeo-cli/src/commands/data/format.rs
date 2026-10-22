@@ -198,19 +198,12 @@ fn read_value(json: Json) -> Result<Value, String> {
     }
 }
 
-/// Reads a plain JSON number: an `INT64` when it is an integer, a `FLOAT64`
-/// when it has a fraction or an exponent.
+/// Reads a plain JSON number by the rule every input shares
+/// ([`Value::from_number_text`] on its source text): an integer is an
+/// `INT64` when it fits 64 bits, else an exact `DECIMAL` up to 38 digits; a
+/// number with a fraction or an exponent is a `FLOAT64`.
 fn read_number(number: &Number) -> Result<Value, String> {
-    if let Some(integer) = number.as_i64() {
-        Ok(Value::Int64(integer))
-    } else if number.is_u64() {
-        Err(format!("{number} is beyond the range of INT64"))
-    } else {
-        number
-            .as_f64()
-            .map(Value::Float64)
-            .ok_or_else(|| format!("{number} is not a number"))
-    }
+    Value::from_number_text(number.as_str()).map_err(|error| error.to_string())
 }
 
 /// Reads a value inside a tagged list, map or path: tagged as well, with
@@ -455,7 +448,7 @@ fn kind(json: &Json) -> &'static str {
 mod tests {
     use std::collections::HashMap;
 
-    use grafeo_common::types::{Date, Duration, Time, Timestamp, ZonedDatetime};
+    use grafeo_common::types::{Date, Decimal, Duration, Time, Timestamp, ZonedDatetime};
     use serde_json::json;
 
     use super::*;
@@ -655,11 +648,35 @@ mod tests {
         }
     }
 
+    /// A plain JSON integer follows the rule every input shares, read from
+    /// its text as the load reads a line: an `INT64` when it fits 64 bits,
+    /// else an exact `DECIMAL` up to 38 digits, and an error past that; any
+    /// other number is a `FLOAT64` with its value.
+    #[test]
+    fn a_plain_number_reads_by_the_integer_rule() {
+        let read = |text: &str| read_value(serde_json::from_str(text).expect("JSON"));
+        let decimal = |text: &str| Value::Decimal(Decimal::parse(text).expect("a decimal"));
+        let largest = "9".repeat(38);
+        assert_eq!(read("9223372036854775807"), Ok(Value::Int64(i64::MAX)));
+        for text in [
+            "18446744073709551615",
+            "-9223372036854775809",
+            largest.as_str(),
+        ] {
+            assert_eq!(read(text), Ok(decimal(text)), "{text}");
+        }
+        assert_eq!(read("1.50"), Ok(Value::Float64(1.5)));
+        let too_wide = format!("1{}", "0".repeat(38));
+        assert_eq!(
+            read(&too_wide),
+            Err(format!("the integer {too_wide} has more than 38 digits"))
+        );
+    }
+
     /// A value that does not read is an error, never a null or a string.
     #[test]
     fn a_tagged_value_that_does_not_read_is_an_error() {
         for json in [
-            json!(18_446_744_073_709_551_615_u64),
             json!({"Int64": 1.5}),
             json!({"Int64": "3"}),
             json!({"Bool": 1}),

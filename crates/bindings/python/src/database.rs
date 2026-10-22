@@ -312,7 +312,7 @@ impl PyGrafeoDB {
         let mut map = HashMap::new();
         for (key, value) in dict.iter() {
             let key_str: String = key.extract()?;
-            let val = PyValue::from_py(&value)?;
+            let val = PyValue::from_py_named(&value, "property", &key_str)?;
             map.insert(key_str, val);
         }
         Ok(Some(map))
@@ -736,7 +736,7 @@ impl PyGrafeoDB {
             let mut map = HashMap::new();
             for (key, value) in p.iter() {
                 let key_str: String = key.extract()?;
-                let val = PyValue::from_py(&value)?;
+                let val = PyValue::from_py_named(&value, "parameter", &key_str)?;
                 map.insert(key_str, val);
             }
             Some(map)
@@ -1358,7 +1358,7 @@ impl PyGrafeoDB {
         value: &Bound<'_, pyo3::prelude::PyAny>,
     ) -> PyResult<()> {
         let db = self.inner.read();
-        let val = PyValue::from_py(value)?;
+        let val = PyValue::from_py_named(value, "property", key)?;
         db.set_node_property(NodeId(node_id), key, val)
             .map_err(PyGrafeoError::from)?;
         Ok(())
@@ -1429,7 +1429,7 @@ impl PyGrafeoDB {
         value: &Bound<'_, pyo3::prelude::PyAny>,
     ) -> PyResult<()> {
         let db = self.inner.read();
-        let val = PyValue::from_py(value)?;
+        let val = PyValue::from_py_named(value, "property", key)?;
         db.set_edge_property(EdgeId(edge_id), key, val)
             .map_err(PyGrafeoError::from)?;
         Ok(())
@@ -2289,7 +2289,7 @@ impl PyGrafeoDB {
         value: &Bound<'_, pyo3::prelude::PyAny>,
         py: Python<'_>,
     ) -> PyResult<Vec<u64>> {
-        let val = PyValue::from_py(value)?;
+        let val = PyValue::from_py_named(value, "property", property)?;
         let nodes = self.released(py, |db| Ok(db.find_nodes_by_property(property, &val)?))?;
         Ok(nodes.into_iter().map(|n| n.0).collect())
     }
@@ -4484,7 +4484,8 @@ fn extract_dataframe(
             let mut row_values = Vec::with_capacity(columns.len());
             for i in 0..columns.len() {
                 let item = row_tuple.get_item(i)?;
-                let val = PyValue::from_py(&item)?;
+                let place = format!("row {}, column", rows.len());
+                let val = PyValue::from_py_named(&item, &place, &columns[i])?;
                 row_values.push(val);
             }
             rows.push(row_values);
@@ -4501,7 +4502,8 @@ fn extract_dataframe(
                 let val = if is_pandas_na(py, &item) {
                     Value::Null
                 } else {
-                    PyValue::from_py(&item)?
+                    let place = format!("row {}, column", rows.len());
+                    PyValue::from_py_named(&item, &place, &columns[i])?
                 };
                 row_values.push(val);
             }

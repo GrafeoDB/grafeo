@@ -14,22 +14,63 @@ import 'types.dart';
 // =============================================================================
 
 /// Encode a parameter map as a JSON string for grafeo_execute_with_params.
-String encodeParams(Map<String, dynamic> params) {
-  final encoded = <String, dynamic>{};
-  for (final entry in params.entries) {
-    encoded[entry.key] = _encodeValue(entry.value);
-  }
-  return jsonEncode(encoded);
-}
+String encodeParams(Map<String, dynamic> params) => _json({
+      for (final entry in params.entries) entry.key: _encodeValue(entry.value),
+    });
 
 /// Encode a single value for the grafeo-c JSON wire format.
-String encodeValue(dynamic value) => jsonEncode(_encodeValue(value));
+String encodeValue(dynamic value) => _json(_encodeValue(value));
+
+/// The decimal digits of a [BigInt], written as a JSON number as they are:
+/// an integer past 64 bits arrives as an exact decimal up to 38 digits, and
+/// one past that is an error naming the parameter.
+final class _IntegerDigits {
+  const _IntegerDigits(this.digits);
+
+  final String digits;
+}
+
+/// The JSON text of an encoded value: [jsonEncode], except that a [BigInt]'s
+/// digits are a number (`jsonEncode` has no way to write one).
+String _json(dynamic encoded) {
+  final out = StringBuffer();
+  void write(dynamic value) {
+    switch (value) {
+      case _IntegerDigits(:final digits):
+        out.write(digits);
+      case List list:
+        out.write('[');
+        for (var i = 0; i < list.length; i++) {
+          if (i > 0) out.write(',');
+          write(list[i]);
+        }
+        out.write(']');
+      case Map map:
+        out.write('{');
+        var first = true;
+        for (final entry in map.entries) {
+          if (!first) out.write(',');
+          first = false;
+          out.write(jsonEncode(entry.key));
+          out.write(':');
+          write(entry.value);
+        }
+        out.write('}');
+      default:
+        out.write(jsonEncode(value));
+    }
+  }
+
+  write(encoded);
+  return out.toString();
+}
 
 dynamic _encodeValue(dynamic value) {
   return switch (value) {
     null => null,
     bool b => b,
     int i => i,
+    BigInt b => _IntegerDigits(b.toString()),
     double d => d,
     String s => s,
     GrafeoDecimal d => {r'$decimal': d.text},

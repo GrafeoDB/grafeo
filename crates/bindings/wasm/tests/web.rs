@@ -8,12 +8,14 @@ use wasm_bindgen_test::*;
 
 use grafeo_wasm::Database;
 
-/// A JS value as JavaScript code writes it: JSON objects become plain objects
-/// (`serde_wasm_bindgen::to_value` makes them `Map`s, which no caller passes).
-fn to_js<T: serde::Serialize>(
-    value: &T,
-) -> Result<wasm_bindgen::JsValue, serde_wasm_bindgen::Error> {
-    value.serialize(&serde_wasm_bindgen::Serializer::json_compatible())
+/// A JS value as JavaScript code writes it: `JSON.parse` of its JSON text, so
+/// objects are plain objects and numbers JS numbers (serializing a
+/// `serde_json::Value` with `serde_wasm_bindgen` gives `Map`s, and, with the
+/// `arbitrary_precision` numbers the workspace reads JSON with, wrapped
+/// numbers, neither of which a caller passes).
+fn to_js<T: serde::Serialize>(value: &T) -> Result<wasm_bindgen::JsValue, wasm_bindgen::JsValue> {
+    let text = serde_json::to_string(value).map_err(|e| e.to_string())?;
+    js_sys::JSON::parse(&text)
 }
 
 #[wasm_bindgen_test]
@@ -1276,4 +1278,143 @@ fn test_set_schema_of_a_missing_schema_fails_and_keeps_the_schema() {
     let db = Database::new().expect("create db");
     assert!(db.set_schema("missing").is_err());
     assert_eq!(db.current_schema(), None);
+}
+
+/// A `BigInt` from its decimal text.
+fn bigint(text: &str) -> wasm_bindgen::JsValue {
+    js_sys::BigInt::new(&wasm_bindgen::JsValue::from_str(text))
+        .expect("a BigInt")
+        .into()
+}
+
+/// A plain object of `entries`.
+fn object(entries: &[(&str, wasm_bindgen::JsValue)]) -> wasm_bindgen::JsValue {
+    let object = js_sys::Object::new();
+    for (key, value) in entries {
+        js_sys::Reflect::set(&object, &(*key).into(), value).unwrap();
+    }
+    object.into()
+}
+
+/// The INT64, DECIMAL and FLOAT64 type tests of `$x`, and `$x`.
+fn typed(db: &Database, x: wasm_bindgen::JsValue) -> serde_json::Value {
+    let rows = db
+        .execute_with_params(
+            "RETURN $x AS x, $x IS TYPED INT64 AS int, $x IS TYPED DECIMAL AS decimal, \
+             $x IS TYPED FLOAT64 AS float",
+            object(&[("x", x)]),
+        )
+        .expect("query");
+    json(&rows)[0].clone()
+}
+
+/// A `BigInt` parameter past 64 bits is an exact DECIMAL up to 38 digits (it
+/// used to be an error past u64 and a float within it), one that fits 64 bits
+/// an INT64, and one past 38 digits an error naming the parameter.
+#[wasm_bindgen_test]
+fn test_a_bigint_parameter_follows_the_integer_rule() {
+    let db = Database::new().expect("create db");
+    let largest = "9".repeat(38);
+    for text in [
+        "9223372036854775808",
+        "18446744073709551616",
+        "-9223372036854775809",
+        largest.as_str(),
+    ] {
+        assert_eq!(
+            typed(&db, bigint(text)),
+            serde_json::json!({ "x": { "$decimal": text }, "int": false, "decimal": true, "float": false }),
+            "{text}"
+        );
+    }
+    let fits = typed(&db, bigint("9223372036854775807"));
+    assert_eq!(
+        (&fits["int"], &fits["decimal"]),
+        (&serde_json::json!(true), &serde_json::json!(false))
+    );
+    let too_wide = format!("1{}", "0".repeat(38));
+    let error = db
+        .execute_with_params("RETURN $x AS x", object(&[("x", bigint(&too_wide))]))
+        .expect_err("past 38 digits");
+    let message = js_sys::Reflect::get(&error, &"message".into())
+        .ok()
+        .and_then(|m| m.as_string())
+        .or_else(|| error.as_string())
+        .unwrap_or_default();
+    assert!(
+        message.contains("parameter 'x'")
+            && message.contains(&too_wide)
+            && message.contains("38 digits"),
+        "{message}"
+    );
+}
+
+/// A whole number is an INT64 and any other a FLOAT64 with its value, and a
+/// tagged object, a `Date`, a list and a `Map` keep their types.
+#[wasm_bindgen_test]
+fn test_parameters_convert_from_the_javascript_value() {
+    let db = Database::new().expect("create db");
+    for whole in [3.0, 5_000_000_000.0, -5_000_000_000.0] {
+        assert_eq!(
+            typed(&db, whole.into())["int"],
+            serde_json::json!(true),
+            "{whole}"
+        );
+    }
+    for float in [1.5, -0.25, 1e300] {
+        let row = typed(&db, float.into());
+        assert_eq!(
+            (row["x"].as_f64(), &row["float"]),
+            (Some(float), &serde_json::json!(true))
+        );
+    }
+    let list = js_sys::Array::of2(&3.0.into(), &bigint("18446744073709551616"));
+    let rows = db
+        .execute_with_params(
+            "UNWIND $xs AS v RETURN v IS TYPED DECIMAL AS decimal",
+            object(&[("xs", list.into())]),
+        )
+        .unwrap();
+    assert_eq!(
+        json(&rows),
+        serde_json::json!([{ "decimal": false }, { "decimal": true }])
+    );
+    let rows = db
+        .execute_with_params(
+            "RETURN $d IS TYPED DATE AS date, $t IS TYPED TIMESTAMP AS ts, $n AS n",
+            object(&[
+                ("d", object(&[("$date", "2024-01-15".into())])),
+                ("t", js_sys::Date::new(&1_700_000_000_000.0.into()).into()),
+                ("n", object(&[("$decimal", "1.50".into())])),
+            ]),
+        )
+        .unwrap();
+    assert_eq!(
+        json(&rows),
+        serde_json::json!([{ "date": true, "ts": true, "n": { "$decimal": "1.50" } }])
+    );
+    let map = js_sys::Map::new();
+    map.set(&"x".into(), &bigint("18446744073709551616"));
+    let rows = db
+        .execute_with_params("RETURN $x IS TYPED DECIMAL AS decimal", map.into())
+        .unwrap();
+    assert_eq!(json(&rows), serde_json::json!([{ "decimal": true }]));
+    assert!(
+        db.execute_with_params("RETURN 1", js_sys::Array::new().into())
+            .is_err()
+    );
+}
+
+/// An invalid `Date` (its time is NaN) is refused, never read as the epoch.
+#[wasm_bindgen_test]
+fn test_an_invalid_date_parameter_is_refused() {
+    let db = Database::new().expect("create db");
+    let invalid = js_sys::Date::new(&f64::NAN.into());
+    let error = db
+        .execute_with_params("RETURN $t AS t", object(&[("t", invalid.into())]))
+        .expect_err("an invalid Date");
+    assert!(
+        format!("{error:?}").contains("an invalid Date"),
+        "{error:?}"
+    );
 }

@@ -37,7 +37,7 @@ use std::rc::Rc;
 use js_sys::Array;
 use wasm_bindgen::prelude::*;
 
-use grafeo_bindings_common::json::{json_params_to_map, json_to_value};
+use grafeo_bindings_common::json::json_to_value;
 use grafeo_common::types::{PropertyKey, Value};
 use grafeo_engine::GrafeoDB;
 use grafeo_engine::session::Session;
@@ -634,11 +634,15 @@ impl Database {
             }
             _ => SearchFilterOptions::default(),
         };
-        let filters = opts.filters.as_ref().map(|f| {
-            f.iter()
-                .map(|(k, v)| (k.clone(), json_to_value(v)))
-                .collect::<HashMap<String, Value>>()
-        });
+        let filters = opts
+            .filters
+            .as_ref()
+            .map(|f| {
+                f.iter()
+                    .map(|(k, v)| Ok((k.clone(), json_property(k, v)?)))
+                    .collect::<Result<HashMap<String, Value>, JsValue>>()
+            })
+            .transpose()?;
         let results = self
             .db()
             .text_search(label, property, query, k, filters.as_ref())
@@ -698,11 +702,15 @@ impl Database {
             }
             _ => SearchFilterOptions::default(),
         };
-        let filters = opts.filters.as_ref().map(|f| {
-            f.iter()
-                .map(|(k, v)| (k.clone(), json_to_value(v)))
-                .collect::<HashMap<String, Value>>()
-        });
+        let filters = opts
+            .filters
+            .as_ref()
+            .map(|f| {
+                f.iter()
+                    .map(|(k, v)| Ok((k.clone(), json_property(k, v)?)))
+                    .collect::<Result<HashMap<String, Value>, JsValue>>()
+            })
+            .transpose()?;
 
         let results = self
             .db()
@@ -844,11 +852,15 @@ impl Database {
                 .map_err(|e| JsError::new(&format!("Invalid options: {e}")))?
         };
 
-        let filters = opts.filters.as_ref().map(|f| {
-            f.iter()
-                .map(|(k, v)| (k.clone(), json_to_value(v)))
-                .collect::<HashMap<String, Value>>()
-        });
+        let filters = opts
+            .filters
+            .as_ref()
+            .map(|f| {
+                f.iter()
+                    .map(|(k, v)| Ok((k.clone(), json_property(k, v)?)))
+                    .collect::<Result<HashMap<String, Value>, JsValue>>()
+            })
+            .transpose()?;
 
         let results = self
             .db()
@@ -891,12 +903,16 @@ impl Database {
             serde_wasm_bindgen::from_value(options)
                 .map_err(|e| JsError::new(&format!("Invalid options: {e}")))?
         };
-        let filters = options.filters.as_ref().map(|filters| {
-            filters
-                .iter()
-                .map(|(name, value)| (name.clone(), json_to_value(value)))
-                .collect::<HashMap<String, Value>>()
-        });
+        let filters = options
+            .filters
+            .as_ref()
+            .map(|filters| {
+                filters
+                    .iter()
+                    .map(|(name, value)| Ok((name.clone(), json_property(name, value)?)))
+                    .collect::<Result<HashMap<String, Value>, JsValue>>()
+            })
+            .transpose()?;
         let results = self
             .db()
             .batch_vector_search(label, property, &queries, k, options.ef, filters.as_ref())
@@ -939,11 +955,15 @@ impl Database {
                 .map_err(|e| JsError::new(&format!("Invalid options: {e}")))?
         };
 
-        let filters = opts.filters.as_ref().map(|f| {
-            f.iter()
-                .map(|(k, v)| (k.clone(), json_to_value(v)))
-                .collect::<HashMap<String, Value>>()
-        });
+        let filters = opts
+            .filters
+            .as_ref()
+            .map(|f| {
+                f.iter()
+                    .map(|(k, v)| Ok((k.clone(), json_property(k, v)?)))
+                    .collect::<Result<HashMap<String, Value>, JsValue>>()
+            })
+            .transpose()?;
 
         let results = self
             .db()
@@ -1210,9 +1230,10 @@ impl Database {
                 .as_ref()
                 .map(|p| {
                     p.iter()
-                        .map(|(k, v)| (PropertyKey::new(k.as_str()), json_to_value(v)))
-                        .collect()
+                        .map(|(k, v)| Ok((PropertyKey::new(k.as_str()), json_property(k, v)?)))
+                        .collect::<Result<_, JsValue>>()
                 })
+                .transpose()?
                 .unwrap_or_default();
             let id = session
                 .create_node_with_props(&labels, props)
@@ -1242,9 +1263,10 @@ impl Database {
                 .as_ref()
                 .map(|p| {
                     p.iter()
-                        .map(|(k, v)| (PropertyKey::new(k.as_str()), json_to_value(v)))
-                        .collect()
+                        .map(|(k, v)| Ok((PropertyKey::new(k.as_str()), json_property(k, v)?)))
+                        .collect::<Result<_, JsValue>>()
                 })
+                .transpose()?
                 .unwrap_or_default();
             session
                 .create_edge_with_props(src, dst, &edge.edge_type, props)
@@ -1459,8 +1481,8 @@ impl Database {
                     let props: Vec<(PropertyKey, Value)> = row
                         .iter()
                         .filter(|(_, v)| !v.is_null())
-                        .map(|(k, v)| (PropertyKey::new(k.as_str()), json_to_value(v)))
-                        .collect();
+                        .map(|(k, v)| Ok((PropertyKey::new(k.as_str()), json_property(k, v)?)))
+                        .collect::<Result<_, JsValue>>()?;
                     session
                         .create_node_with_props(&label_refs, props)
                         .map_err(|e| JsError::new(&format!("rows[{count}]: {e}")))?;
@@ -1491,8 +1513,8 @@ impl Database {
                         .filter(|(k, v)| {
                             k.as_str() != source_col && k.as_str() != target_col && !v.is_null()
                         })
-                        .map(|(k, v)| (PropertyKey::new(k.as_str()), json_to_value(v)))
-                        .collect();
+                        .map(|(k, v)| Ok((PropertyKey::new(k.as_str()), json_property(k, v)?)))
+                        .collect::<Result<_, JsValue>>()?;
 
                     session
                         .create_edge_with_props(src_id, dst_id, edge_type, props)
@@ -1644,10 +1666,25 @@ impl Database {
         if js_val.is_null() || js_val.is_undefined() {
             return Ok(None);
         }
-        let json_val: serde_json::Value =
-            serde_wasm_bindgen::from_value(js_val).map_err(|e| js_error(&e.to_string()))?;
-        json_params_to_map(Some(&json_val)).map_err(|e| js_error(&e))
+        // Straight from the JavaScript value, as a property is: through JSON a
+        // BigInt past 64 bits would not convert and 2^53 would be a float.
+        let entries = types::js_entries(&js_val)
+            .ok_or_else(|| js_error("params must be an object"))?
+            .map_err(|error| js_error(&error))?;
+        let mut map = HashMap::with_capacity(entries.len());
+        for (name, value) in entries {
+            let value = types::js_to_value(&value)
+                .map_err(|error| js_error(&format!("parameter '{name}': {error}")))?;
+            map.insert(name, value);
+        }
+        Ok(Some(map))
     }
+}
+
+/// The value of a property read from JSON (see [`json_to_value`]); an
+/// error names the property.
+pub(crate) fn json_property(name: &str, value: &serde_json::Value) -> Result<Value, JsValue> {
+    json_to_value(value).map_err(|error| js_error(&format!("property '{name}': {error}")))
 }
 
 /// A `PROFILE` operator as `{operator, detail, rows, calls, selfTimeMs, timeMs, children}`.
@@ -2443,7 +2480,7 @@ mod tests {
             let props: Vec<(PropertyKey, Value)> = row
                 .iter()
                 .filter(|(_, v)| !v.is_null())
-                .map(|(k, v)| (PropertyKey::new(k.as_str()), json_to_value(v)))
+                .map(|(k, v)| (PropertyKey::new(k.as_str()), json_to_value(v).unwrap()))
                 .collect();
             db.create_node_with_props(&label_refs, props).unwrap();
         }
@@ -2483,7 +2520,7 @@ mod tests {
             let props: Vec<(PropertyKey, Value)> = row
                 .iter()
                 .filter(|(k, v)| k.as_str() != "source" && k.as_str() != "target" && !v.is_null())
-                .map(|(k, v)| (PropertyKey::new(k.as_str()), json_to_value(v)))
+                .map(|(k, v)| (PropertyKey::new(k.as_str()), json_to_value(v).unwrap()))
                 .collect();
             db.create_edge_with_props(src, dst, "KNOWS", props).unwrap();
         }
@@ -2503,7 +2540,7 @@ mod tests {
             let props: Vec<(PropertyKey, Value)> = row
                 .iter()
                 .filter(|(_, v)| !v.is_null())
-                .map(|(k, v)| (PropertyKey::new(k.as_str()), json_to_value(v)))
+                .map(|(k, v)| (PropertyKey::new(k.as_str()), json_to_value(v).unwrap()))
                 .collect();
             db.create_node_with_props(&["Person"], props).unwrap();
         }
@@ -2530,7 +2567,7 @@ mod tests {
         for row in &rows {
             let props: Vec<(PropertyKey, Value)> = row
                 .iter()
-                .map(|(k, v)| (PropertyKey::new(k.as_str()), json_to_value(v)))
+                .map(|(k, v)| (PropertyKey::new(k.as_str()), json_to_value(v).unwrap()))
                 .collect();
             db.create_node_with_props(&["Item"], props).unwrap();
         }
@@ -2564,7 +2601,7 @@ mod tests {
                 .as_ref()
                 .map(|p| {
                     p.iter()
-                        .map(|(k, v)| (PropertyKey::new(k.as_str()), json_to_value(v)))
+                        .map(|(k, v)| (PropertyKey::new(k.as_str()), json_to_value(v).unwrap()))
                         .collect()
                 })
                 .unwrap_or_default();
@@ -2668,7 +2705,7 @@ mod tests {
                 .as_ref()
                 .map(|p| {
                     p.iter()
-                        .map(|(k, v)| (PropertyKey::new(k.as_str()), json_to_value(v)))
+                        .map(|(k, v)| (PropertyKey::new(k.as_str()), json_to_value(v).unwrap()))
                         .collect()
                 })
                 .unwrap_or_default();

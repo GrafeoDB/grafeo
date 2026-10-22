@@ -686,7 +686,9 @@ impl super::GrafeoDB {
     /// Returns an error if `path` already exists, if the file cannot be
     /// written, after a commit that did not complete (see
     /// [`TransactionManager`](crate::transaction::TransactionManager)), and
-    /// the database-closed error after `close()` of a persistent database.
+    /// the database-closed error after `close()` of a persistent database;
+    /// the unsupported error on a database on a backend of its own
+    /// ([`with_store`](Self::with_store)), whose rows the backend keeps.
     ///
     /// Requires the `wal` feature for persistence support.
     #[cfg(feature = "wal")]
@@ -778,7 +780,8 @@ impl super::GrafeoDB {
     /// # Errors
     ///
     /// Returns an error if the copy operation fails, or after a commit that
-    /// did not complete.
+    /// did not complete; the unsupported error on a database on a backend of
+    /// its own ([`with_store`](Self::with_store)).
     pub fn to_memory(&self) -> Result<Self> {
         // The copy keeps the backward edges this database keeps (10b), and
         // its history retention, with the history its sections hold.

@@ -194,6 +194,17 @@ impl ColumnKinds {
     }
 }
 
+/// Which kind of store the database is on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum StoreKind {
+    /// The built-in store, with its vector and text indexes.
+    BuiltIn,
+    /// A store of its own (`with_store`), which has none of the built-in
+    /// store's indexes: a text search is then the unsupported error rather
+    /// than a missing index.
+    External,
+}
+
 /// Converts a logical plan to a physical operator tree for LPG stores.
 pub struct Planner {
     /// The graph store (read-only operations).
@@ -245,6 +256,8 @@ pub struct Planner {
     /// LPG store handle for procedures that need direct index access (vector
     /// and text search reach HNSW / BM25 indexes owned by the LPG store).
     pub(super) lpg_store: Option<Arc<grafeo_core::graph::rowgroup::RowGroupStore>>,
+    /// Which kind of store the database is on.
+    pub(super) store_kind: StoreKind,
     /// The database's named projections, so `CALL grafeo.<algorithm>({projection: ...})`
     /// can run on one.
     pub(super) projections: Option<crate::session::ProjectionRegistry>,
@@ -334,6 +347,7 @@ impl Planner {
             validator: None,
             catalog: None,
             lpg_store: None,
+            store_kind: StoreKind::BuiltIn,
             projections: None,
             correlated_param_state: std::cell::RefCell::new(None),
             group_list_variables: std::cell::RefCell::new(std::collections::HashSet::new()),
@@ -393,6 +407,7 @@ impl Planner {
             validator: None,
             catalog: None,
             lpg_store: None,
+            store_kind: StoreKind::BuiltIn,
             projections: None,
             correlated_param_state: std::cell::RefCell::new(None),
             group_list_variables: std::cell::RefCell::new(std::collections::HashSet::new()),
@@ -651,6 +666,13 @@ impl Planner {
         lpg_store: Arc<grafeo_core::graph::rowgroup::RowGroupStore>,
     ) -> Self {
         self.lpg_store = Some(lpg_store);
+        self
+    }
+
+    /// Marks the database as one on a store of its own (`with_store`).
+    #[must_use]
+    pub fn with_external_store(mut self) -> Self {
+        self.store_kind = StoreKind::External;
         self
     }
 

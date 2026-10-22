@@ -604,7 +604,10 @@ pub trait GraphStore: Send + Sync {
     ///
     /// # Errors
     ///
-    /// Returns the error of a read the store cannot do.
+    /// Returns the error of a read the store cannot do. The default, for a
+    /// store without text search, is the unsupported error: `text_match` and
+    /// `text_score` in a query then fail, where an absent score made them
+    /// match nothing (#308).
     #[cfg(feature = "text-index")]
     fn score_text(
         &self,
@@ -614,7 +617,7 @@ pub trait GraphStore: Send + Sync {
         _query: &str,
         _view: ReadView,
     ) -> Result<Option<f64>> {
-        Ok(None)
+        Err(unsupported("text search"))
     }
 
     /// The `k` documents `view` sees with the best BM25 scores for `query`,

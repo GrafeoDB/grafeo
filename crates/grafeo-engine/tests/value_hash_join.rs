@@ -862,7 +862,8 @@ fn documents(indexed: bool) -> GrafeoDB {
 
 /// A vector or text predicate that an index search takes shows no
 /// `[label-first]`: the search runs instead of the scan (`PROFILE` names it).
-/// Without the indexes the label is scanned and the filter runs above it.
+/// Without the indexes the label is scanned and the filter runs above it; a
+/// text predicate then has no plan at all, since it needs its index (#308).
 #[cfg(all(feature = "vector-index", feature = "text-index"))]
 #[test]
 fn an_index_search_shows_no_label_first() {
@@ -885,6 +886,18 @@ fn an_index_search_shows_no_label_first() {
         let db = documents(indexed);
         let session = db.session();
         for (query, search) in queries {
+            if !indexed && query.contains("text_score") {
+                for run in [query.to_string(), format!("PROFILE {query}")] {
+                    let error = session
+                        .execute(&run)
+                        .expect_err("a text predicate without its index");
+                    assert!(
+                        error.to_string().contains("needs a text index on 'body'"),
+                        "`{run}`: {error}"
+                    );
+                }
+                continue;
+            }
             let plan = explain(&session, Language::Gql, query);
             let filter = lines(&plan)
                 .into_iter()

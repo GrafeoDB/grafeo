@@ -393,6 +393,8 @@ mod search_indexes {
     const NEAREST: &str = "MATCH (d:Doc) \
                            WHERE cosine_similarity(d.emb, [1.0, 0.1, 0.0]) >= 0.9 RETURN d.id";
     const MATCHING: &str = "MATCH (d:Doc) WHERE text_score(d.body, 'canals') > 0.0 RETURN d.id";
+    /// #308: the reporter's `text_match`, which found nothing on a file.
+    const TEXT_MATCH: &str = "MATCH (d:Doc) WHERE text_match(d.body, 'canals') RETURN d.id";
 
     fn build(db: &GrafeoDB) {
         for graph in [None, Some("library")] {
@@ -432,6 +434,7 @@ mod search_indexes {
         for graph in [None, Some("library")] {
             assert_scans(db, graph, NEAREST, "VectorScan", stage);
             assert_scans(db, graph, MATCHING, "TextScan", stage);
+            assert_scans(db, graph, TEXT_MATCH, "TextScan", stage);
         }
     }
 
@@ -451,5 +454,43 @@ mod search_indexes {
         let db = open_read_only(&path);
         assert_search_indexes(&db, "read-only reopen");
         db.close().unwrap();
+    }
+
+    /// No checkpoint before the crash (#308): the WAL replay makes the
+    /// vector and text indexes of every graph, and their searches find the
+    /// document, read-write and read-only.
+    #[cfg(feature = "wal")]
+    mod after_a_crash {
+        use super::*;
+        use crate::common::replay::reopened_after_crash;
+
+        #[test]
+        fn search_indexes_survive_a_crash_before_any_checkpoint() {
+            let (_dir, db) = reopened_after_crash(
+                "search_indexes::after_a_crash::search_indexes_survive_a_crash_before_any_checkpoint",
+                open,
+                build,
+            );
+            assert_search_indexes(&db, "replayed");
+            db.close().unwrap();
+        }
+
+        #[test]
+        fn search_indexes_survive_a_crash_before_any_checkpoint_read_only() {
+            let (_dir, db) = reopened_after_crash(
+                "search_indexes::after_a_crash::search_indexes_survive_a_crash_before_any_checkpoint_read_only",
+                |path: &Path| {
+                    if path.exists() {
+                        open_read_only(path)
+                    } else {
+                        open(path)
+                    }
+                },
+                build,
+            );
+            assert!(db.is_read_only());
+            assert_search_indexes(&db, "replayed read-only");
+            db.close().unwrap();
+        }
     }
 }

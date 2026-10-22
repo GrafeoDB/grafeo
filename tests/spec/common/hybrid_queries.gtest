@@ -104,12 +104,13 @@ tests:
         - [A1]
 
   # ---------------------------------------------------------------------------
-  # No-index fallthrough: text_score returns 0.0 when no index exists,
-  # so the > 0.0 predicate is false for every row (per-row eval, no error).
-  # This guards Decision D1 (symmetric fallback) in the implementation.
+  # No text index: text_score and text_match are refused before the query
+  # runs, naming the property and the index to create (#308: a missing index
+  # made them match nothing). This replaced Decision D1, the symmetric
+  # fallback that scored such a node 0 (user, 2026-10-22).
   # ---------------------------------------------------------------------------
 
-  - name: text_score_without_index_returns_no_rows
+  - name: text_score_without_index_is_an_error
     setup:
       - "INSERT (:Article {title: 'A1', body: 'attention mechanisms'})"
     query: |
@@ -117,7 +118,26 @@ tests:
       WHERE text_score(n.body, 'attention') > 0.0
       RETURN n.title
     expect:
-      empty: true
+      error: "needs a text index on 'body'"
+
+  - name: text_match_without_index_is_an_error
+    setup:
+      - "INSERT (:Article {title: 'A1', body: 'attention mechanisms'})"
+    query: "MATCH (n:Article) WHERE text_match(n.body, 'attention') RETURN n.title"
+    expect:
+      error: "CREATE INDEX FOR (n:Label) ON (n.body) USING TEXT"
+
+  # A query over several labels runs while one of them has the index: a node
+  # of another label scores null.
+  - name: text_score_over_labels_with_and_without_an_index
+    setup:
+      - "INSERT (:Article {title: 'A1', body: 'attention mechanisms'})"
+      - "INSERT (:Note {title: 'N1', body: 'attention span'})"
+      - "CREATE INDEX article_body FOR (n:Article) ON (n.body) USING TEXT"
+    query: "MATCH (n) WHERE text_match(n.body, 'attention') RETURN n.title"
+    expect:
+      rows:
+        - [A1]
 
   # ---------------------------------------------------------------------------
   # AND compound: vector similarity AND text match on the same label scan.
@@ -187,3 +207,57 @@ tests:
       rows:
         - [A1, true]
         - [A2, false]
+
+  # ---------------------------------------------------------------------------
+  # #619: documents with the same score come back in one order, the tie by
+  # ascending node id and the cut at k keeping the lowest (the `_persistent`
+  # variant checks it on a file too).
+  # ---------------------------------------------------------------------------
+
+  - name: text_search_procedure_tie_keeps_lowest_ids
+    language: cypher
+    requires: [text-index, algos]
+    setup:
+      - "INSERT (:Doc {t: 'a', body: 'graph canals'})"
+      - "INSERT (:Doc {t: 'b', body: 'graph canals'})"
+      - "INSERT (:Doc {t: 'c', body: 'graph canals'})"
+      - "INSERT (:Doc {t: 'd', body: 'bridges'})"
+      - "CREATE INDEX doc_body FOR (d:Doc) ON (d.body) USING TEXT"
+    query: "CALL grafeo.search.text('Doc', 'body', 'canals', 2) YIELD node_id MATCH (d:Doc) WHERE id(d) = node_id RETURN d.t"
+    expect:
+      ordered: true
+      rows:
+        - [a]
+        - [b]
+
+  # ---------------------------------------------------------------------------
+  # #347: ORDER BY text_score(...) LIMIT returns the node itself (it gave a
+  # bare id), in score order, in GQL and Cypher.
+  # ---------------------------------------------------------------------------
+
+  - name: order_by_text_score_limit_returns_the_node
+    setup:
+      - "INSERT (:Article {title: 'A1', body: 'rust database internals'})"
+      - "INSERT (:Article {title: 'A2', body: 'database database database'})"
+      - "INSERT (:Article {title: 'A3', body: 'graph canals'})"
+      - "CREATE INDEX article_body FOR (n:Article) ON (n.body) USING TEXT"
+    query: "MATCH (s:Article) RETURN s IS TYPED NODE AS node, s.title AS title, text_score(s.body, 'database') > 0.0 AS matches ORDER BY text_score(s.body, 'database') DESC LIMIT 2"
+    expect:
+      ordered: true
+      rows:
+        - [true, A2, true]
+        - [true, A1, true]
+
+  - name: order_by_text_score_limit_returns_the_node_cypher
+    language: cypher
+    setup:
+      - "INSERT (:Article {title: 'A1', body: 'rust database internals'})"
+      - "INSERT (:Article {title: 'A2', body: 'database database database'})"
+      - "INSERT (:Article {title: 'A3', body: 'graph canals'})"
+      - "CREATE INDEX article_body FOR (n:Article) ON (n.body) USING TEXT"
+    query: "MATCH (s:Article) RETURN labels(s) AS labels, s.title AS title ORDER BY text_score(s.body, 'database') DESC LIMIT 2"
+    expect:
+      ordered: true
+      rows:
+        - ["[Article]", A2]
+        - ["[Article]", A1]

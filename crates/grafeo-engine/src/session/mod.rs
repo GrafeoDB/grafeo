@@ -5683,6 +5683,8 @@ impl Session {
         // reach its HNSW / BM25 indexes; a backend of one's own has none.
         if let Some(root) = self.root_store() {
             planner = planner.with_lpg_store(root);
+        } else {
+            planner = planner.with_external_store();
         }
 
         {

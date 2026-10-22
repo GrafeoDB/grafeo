@@ -3,6 +3,8 @@
 //! `text_score` and `text_match` need `text-index`. Without the feature a
 //! query that uses one is an error that says what the build lacks, before
 //! any row is read; it used to be null for every row, so a WHERE kept none.
+//! With the feature, the text functions also need a text index on the
+//! property (#308).
 //!
 //! ```bash
 //! cargo test -p grafeo-engine --no-default-features --features lpg,gql,grafeo-file \
@@ -34,7 +36,6 @@ fn row_count(query: &str, result: Result<QueryResult>) -> usize {
 }
 
 /// The message of `result`'s error.
-#[cfg(not(all(any(feature = "regex", feature = "regex-lite"), feature = "text-index")))]
 fn error_of(query: &str, result: Result<QueryResult>) -> String {
     match result {
         Ok(rows) => panic!("{query}: expected an error, got {:?}", rows.rows()),
@@ -77,8 +78,8 @@ fn a_pattern_match_with_regex_runs() {
 
 /// Queries that call a text search function.
 const TEXT_QUERIES: &[&str] = &[
-    "MATCH (d:Directory) RETURN text_score(d.path, 'src') AS score",
-    "MATCH (d:Directory) WHERE text_match(d.path, 'src') RETURN d.path",
+    "MATCH (d:Directory) RETURN text_score(d.path, 'tests') AS score",
+    "MATCH (d:Directory) WHERE text_match(d.path, 'tests') RETURN d.path",
 ];
 
 #[cfg(not(feature = "text-index"))]
@@ -100,8 +101,25 @@ fn a_text_function_without_text_index_says_the_build_lacks_it() {
 #[test]
 fn a_text_function_with_text_index_runs() {
     let db = directories();
-    for query in TEXT_QUERIES {
-        // No text index: the score is unknown, and no row matches.
-        let _ = row_count(query, db.execute(query));
+    db.create_text_index("Directory", "path").unwrap();
+    let counts: Vec<usize> = TEXT_QUERIES
+        .iter()
+        .map(|query| row_count(query, db.execute(query)))
+        .collect();
+    assert_eq!(counts, [2, 1], "a score per directory, one match");
+}
+
+#[cfg(feature = "text-index")]
+#[test]
+fn a_text_function_without_a_text_index_says_to_create_one() {
+    let db = directories();
+    for (query, function) in TEXT_QUERIES.iter().zip(["text_score", "text_match"]) {
+        let error = error_of(query, db.execute(query));
+        assert!(
+            error.contains(&format!(
+                "{function}(d.path, ...) needs a text index on 'path'"
+            )) && error.contains("USING TEXT"),
+            "{query}: {error}"
+        );
     }
 }

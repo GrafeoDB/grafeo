@@ -117,8 +117,8 @@ pub fn simd_support() -> &'static str {
 ///
 /// # Panics
 ///
-/// Debug-asserts that vectors have equal length. In release builds,
-/// mismatched lengths may cause incorrect results.
+/// If the vectors have different lengths, in every build (#311: a release
+/// build read past the shorter one).
 ///
 /// # Examples
 ///
@@ -231,6 +231,36 @@ mod tests {
     use super::*;
 
     const EPSILON: f32 = 1e-5;
+
+    /// #311: vectors of different lengths panic for every metric, whichever
+    /// is the longer, in release builds too (the SIMD kernels read past the
+    /// shorter vector).
+    #[test]
+    fn compute_distance_panics_on_mismatched_lengths_for_every_metric() {
+        let short = [1.0f32; 4];
+        let long = [1.0f32; 19];
+        for metric in [
+            DistanceMetric::Cosine,
+            DistanceMetric::Euclidean,
+            DistanceMetric::DotProduct,
+            DistanceMetric::Manhattan,
+        ] {
+            for (a, b) in [(&short[..], &long[..]), (&long[..], &short[..])] {
+                let outcome = std::panic::catch_unwind(|| compute_distance(a, b, metric));
+                let message = outcome
+                    .expect_err("mismatched lengths must panic")
+                    .downcast::<String>()
+                    .map(|message| *message)
+                    .unwrap_or_default();
+                assert!(
+                    message.contains("vector lengths must match"),
+                    "{metric:?}, {} and {}: {message}",
+                    a.len(),
+                    b.len()
+                );
+            }
+        }
+    }
 
     fn approx_eq(a: f32, b: f32) -> bool {
         (a - b).abs() < EPSILON

@@ -65,6 +65,13 @@ impl super::Planner {
             LogicalExpression::FunctionCall {
                 callee, name, args, ..
             } => {
+                #[cfg(feature = "text-index")]
+                if let Callee::Builtin(
+                    function @ (BuiltinFunction::TextMatch | BuiltinFunction::TextScore),
+                ) = callee
+                {
+                    self.check_text_index(*function, args)?;
+                }
                 // The translator resolved the call and checked its arguments.
                 let filter_args: Vec<FilterExpression> = args
                     .iter()
@@ -456,6 +463,43 @@ impl super::Planner {
             }
             _ => Err(unsupported()),
         }
+    }
+
+    /// `text_match` and `text_score` read a text index on their property:
+    /// without one under any label they would match no row, so the query is
+    /// refused before it runs (#308). This replaced the rule that scored such
+    /// a node 0 (user, 2026-10-22). A query over several labels runs while
+    /// one of them has the index; a node of the others scores null.
+    #[cfg(feature = "text-index")]
+    fn check_text_index(
+        &self,
+        function: BuiltinFunction,
+        args: &[LogicalExpression],
+    ) -> Result<()> {
+        let Some(LogicalExpression::Property { variable, property }) = args.first() else {
+            return Ok(());
+        };
+        let name = if function == BuiltinFunction::TextMatch {
+            "text_match"
+        } else {
+            "text_score"
+        };
+        if self.store_kind == super::StoreKind::External {
+            return Err(Error::from(QueryError::unsupported(format!(
+                "{name} needs a text index, which only the built-in store has: this database is on a store of its own"
+            ))));
+        }
+        let labels = self.store.all_labels()?;
+        if labels
+            .iter()
+            .any(|label| self.store.has_text_index(label, property))
+        {
+            return Ok(());
+        }
+        Err(Error::from(QueryError::semantic(format!(
+            "{name}({variable}.{property}, ...) needs a text index on '{property}': \
+             create one with CREATE INDEX FOR (n:Label) ON (n.{property}) USING TEXT"
+        ))))
     }
 
     /// The variable and label of a `hasLabel(variable, 'Label')` predicate.

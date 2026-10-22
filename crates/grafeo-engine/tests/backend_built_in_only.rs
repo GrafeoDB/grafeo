@@ -209,3 +209,49 @@ fn a_backup_needs_the_built_in_store() {
     assert_eq!(std::fs::read_dir(&backups).unwrap().count(), 0);
     assert_eq!(people(&db), [Value::from("Jules")]);
 }
+
+/// #308: a text search in a query fails with the unsupported error, never
+/// matches nothing (`text_match` and `text_score` read a score the backend
+/// cannot give, and an absent score filtered every row out). The search
+/// procedures fail the same way, and a distance between vectors, which needs
+/// no index, still works.
+#[cfg(all(feature = "vector-index", feature = "text-index"))]
+#[test]
+fn a_text_search_in_a_query_needs_the_built_in_store() {
+    let db = on_backend();
+    for query in [
+        "MATCH (p:Person) WHERE text_match(p.bio, 'graph') RETURN p.name",
+        "MATCH (p:Person) WHERE text_score(p.bio, 'graph') > 0.0 RETURN p.name",
+        "MATCH (p:Person) RETURN p.name, text_score(p.bio, 'graph') AS score",
+    ] {
+        let error = db.execute(query).expect_err(query);
+        assert_eq!(
+            error.error_code(),
+            ErrorCode::QueryUnsupported,
+            "{query}: {error}"
+        );
+        assert!(
+            error.to_string().contains("built-in store"),
+            "{query}: {error}"
+        );
+    }
+    for query in [
+        "CALL grafeo.search.text('Person', 'bio', 'graph', 1) YIELD node_id RETURN node_id",
+        "CALL grafeo.search.vector('Person', 'embedding', [1.0, 0.0], 1) YIELD node_id RETURN node_id",
+    ] {
+        let error = db.execute(query).expect_err(query);
+        assert_eq!(
+            error.error_code(),
+            ErrorCode::QueryUnsupported,
+            "{query}: {error}"
+        );
+    }
+    let near = db
+        .execute(
+            "MATCH (p:Person) WHERE cosine_similarity([1.0, 0.0], [1.0, 0.0]) > 0.5 \
+             RETURN p.name ORDER BY p.name",
+        )
+        .unwrap();
+    assert_eq!(near.rows(), [[Value::from("Alix")], [Value::from("Gus")]]);
+    assert_eq!(people(&db), [Value::from("Alix"), Value::from("Gus")]);
+}

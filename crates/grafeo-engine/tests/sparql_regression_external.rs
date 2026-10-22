@@ -144,6 +144,81 @@ mod tests {
         }
     }
 
+    /// The #361 query shapes from four threads at once, each on a 128 KB
+    /// stack, as a host with several small-stack schedulers runs them, while
+    /// a fifth thread inserts other keys: every read returns the one row of
+    /// its key, and no thread overflows its stack.
+    #[test]
+    fn optionals_with_a_limit_run_on_four_small_stacks_at_once() {
+        const STACK: usize = 128 * 1024;
+        let db = rdf_db();
+        db.execute_sparql(
+            r#"INSERT DATA {
+                <http://ex.org/kv1> <http://ex.org/version_public_key> "deadbeefcafe" .
+                <http://ex.org/kv1> <http://ex.org/version> "1" .
+                <http://ex.org/kv1> <http://ex.org/status> "active" .
+                <http://ex.org/kv1> <http://ex.org/valid_until> "2027-01-01" .
+            }"#,
+        )
+        .unwrap();
+        let pattern = r#"?kv <http://ex.org/version_public_key> "deadbeefcafe" .
+            OPTIONAL { ?kv <http://ex.org/version> ?version }
+            OPTIONAL { ?kv <http://ex.org/status> ?status }
+            OPTIONAL { ?kv <http://ex.org/valid_until> ?valid_until }"#;
+        let queries: Vec<String> = ["LIMIT 1", "", "ORDER BY ?version LIMIT 1"]
+            .iter()
+            .map(|tail| {
+                format!("SELECT ?version ?status ?valid_until WHERE {{ {pattern} }} {tail}")
+            })
+            .collect();
+        let start = std::sync::Barrier::new(5);
+        std::thread::scope(|scope| {
+            let readers: Vec<_> = (0..4)
+                .map(|reader| {
+                    let (db, queries, start) = (&db, &queries, &start);
+                    std::thread::Builder::new()
+                        .stack_size(STACK)
+                        .spawn_scoped(scope, move || {
+                            start.wait();
+                            for round in 0..25 {
+                                for query in queries {
+                                    let rows = db.execute_sparql(query).unwrap().rows().to_vec();
+                                    assert_eq!(
+                                        format!("{rows:?}"),
+                                        r#"[[String("1"), String("active"), String("2027-01-01")]]"#,
+                                        "reader {reader}, round {round}: {query}"
+                                    );
+                                }
+                            }
+                        })
+                        .unwrap()
+                })
+                .collect();
+            let (db, start) = (&db, &start);
+            scope.spawn(move || {
+                start.wait();
+                for key in 2..50 {
+                    db.execute_sparql(&format!(
+                        r#"INSERT DATA {{
+                            <http://ex.org/kv{key}> <http://ex.org/version_public_key> "key{key}" .
+                            <http://ex.org/kv{key}> <http://ex.org/version> "{key}" .
+                        }}"#
+                    ))
+                    .unwrap();
+                }
+            });
+            for reader in readers {
+                reader.join().expect("the reader thread does not panic");
+            }
+        });
+        let keys = db
+            .execute_sparql(
+                "SELECT (COUNT(?kv) AS ?n) WHERE { ?kv <http://ex.org/version_public_key> ?key }",
+            )
+            .unwrap();
+        assert_eq!(format!("{:?}", keys.rows()), "[[Int64(49)]]");
+    }
+
     #[test]
     fn multiple_optionals_preserve_results() {
         let db = rdf_db();

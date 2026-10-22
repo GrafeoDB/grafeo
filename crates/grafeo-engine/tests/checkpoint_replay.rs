@@ -83,6 +83,32 @@ mod tests {
                     .execute("INSERT (:N {i: 5})-[:E]->(:N {i: 6})")
                     .unwrap();
             }
+            // The issue's sequence in a named graph.
+            "named_graph_checkpoint_then_write" => {
+                session.execute("CREATE GRAPH g").unwrap();
+                session.use_graph("g");
+                session
+                    .execute("INSERT (:Person {name: 'Alix'})-[:KNOWS]->(:Person {name: 'Gus'})")
+                    .unwrap();
+                db.wal_checkpoint().unwrap();
+                session
+                    .execute(
+                        "INSERT (:Person {name: 'Vincent'})-[:KNOWS]->(:Person {name: 'Jules'})",
+                    )
+                    .unwrap();
+            }
+            // An edge the checkpoint holds, deleted after it.
+            "checkpoint_then_delete_edge" => {
+                session
+                    .execute("INSERT (:Person {name: 'Alix'})-[:KNOWS]->(:Person {name: 'Gus'})")
+                    .unwrap();
+                db.wal_checkpoint().unwrap();
+                session
+                    .execute("MATCH (:Person {name: 'Alix'})-[r:KNOWS]->() DELETE r")
+                    .unwrap();
+            }
+            // Reopen (replaying the WAL) and crash again, checking nothing.
+            "reopen_only" => {}
             // Reopen (replaying the WAL), check the edges and crash again.
             "reopen" => {
                 assert_eq!(edge_rows(&db), (Value::Int64(3), Value::Int64(3)));
@@ -147,6 +173,116 @@ mod tests {
         );
         assert_eq!(db.edge_count(), 1);
         assert_eq!(db.node_count(), 3);
+    }
+
+    /// Every file under `dir` with its bytes.
+    fn files(dir: &Path) -> std::collections::BTreeMap<PathBuf, Vec<u8>> {
+        let mut found = std::collections::BTreeMap::new();
+        let mut pending = vec![dir.to_path_buf()];
+        while let Some(next) = pending.pop() {
+            for entry in std::fs::read_dir(&next).unwrap() {
+                let path = entry.unwrap().path();
+                if path.is_dir() {
+                    pending.push(path);
+                } else {
+                    found.insert(path.clone(), std::fs::read(&path).unwrap());
+                }
+            }
+        }
+        found
+    }
+
+    /// The issue's crash, reopened read-only: the replay into memory adds
+    /// no edge twice, and the file and its WAL keep every byte; a read-write
+    /// open afterwards sees the same.
+    #[test]
+    fn crash_after_wal_checkpoint_read_only_reopen_does_not_duplicate_edges() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("db.grafeo");
+        crash_after("checkpoint_then_write", &path);
+        assert!(sidecar_wal(&path).exists(), "the crash left the WAL");
+        let before = files(dir.path());
+
+        let db = GrafeoDB::open_read_only(&path).unwrap();
+        assert_eq!(knows(&db), [[Value::from("Alix"), Value::from("Gus")]]);
+        assert_eq!(edge_rows(&db), (Value::Int64(1), Value::Int64(1)));
+        assert_eq!((db.node_count(), db.edge_count()), (3, 1));
+        db.close().unwrap();
+        drop(db);
+        assert!(
+            files(dir.path()) == before,
+            "a read-only open changes no file"
+        );
+
+        let db = open(&path);
+        assert_eq!(knows(&db), [[Value::from("Alix"), Value::from("Gus")]]);
+        assert_eq!((db.node_count(), db.edge_count()), (3, 1));
+    }
+
+    /// The issue's sequence in a named graph, then two more crashes after a
+    /// reopen each: both edges of the graph are there once, and the default
+    /// graph holds none.
+    #[test]
+    fn crash_after_wal_checkpoint_does_not_duplicate_named_graph_edges() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("db.grafeo");
+        crash_after("named_graph_checkpoint_then_write", &path);
+        for _ in 0..2 {
+            crash_after("reopen_only", &path);
+        }
+
+        let db = open(&path);
+        let session = db.session();
+        session.use_graph("g");
+        assert_eq!(
+            session
+                .execute("MATCH (a)-[r:KNOWS]->(b) RETURN a.name, b.name, count(DISTINCT id(r)) ORDER BY a.name")
+                .unwrap()
+                .rows()
+                .to_vec(),
+            [
+                [Value::from("Alix"), Value::from("Gus"), Value::Int64(1)],
+                [Value::from("Vincent"), Value::from("Jules"), Value::Int64(1)],
+            ]
+        );
+        assert_eq!(
+            session
+                .execute("MATCH ()-[r]->() RETURN count(r)")
+                .unwrap()
+                .rows()[0][0],
+            Value::Int64(2),
+            "every edge of g once"
+        );
+        assert_eq!(
+            edge_rows(&db),
+            (Value::Int64(0), Value::Int64(0)),
+            "the default graph"
+        );
+    }
+
+    /// An edge the checkpoint holds and the WAL deletes stays deleted, over
+    /// two more crashes after a reopen each: replaying the delete again finds
+    /// no edge to delete and adds none back.
+    #[test]
+    fn crash_after_deleting_a_checkpointed_edge_keeps_it_deleted() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("db.grafeo");
+        crash_after("checkpoint_then_delete_edge", &path);
+        for _ in 0..2 {
+            crash_after("reopen_only", &path);
+        }
+
+        let db = open(&path);
+        assert_eq!(edge_rows(&db), (Value::Int64(0), Value::Int64(0)));
+        assert_eq!((db.node_count(), db.edge_count()), (2, 0));
+        assert_eq!(
+            db.session()
+                .execute("MATCH (p:Person) RETURN p.name ORDER BY p.name")
+                .unwrap()
+                .rows()
+                .to_vec(),
+            [[Value::from("Alix")], [Value::from("Gus")]]
+        );
     }
 
     /// The server scenario from the issue: a full backup, more writes, then
@@ -375,6 +511,78 @@ mod tests {
     #[test]
     fn failed_checkpoint_after_its_header_keeps_the_database_readable() {
         a_failed_image_write_keeps_the_database_readable("checkpoint:after_header");
+    }
+
+    /// A `close()` whose checkpoint fails inside its image write, at `point`
+    /// (before or after the new header), returns the error and leaves a
+    /// database that reads back every committed write once: from the file
+    /// and WAL the failure left (as after a crash right then), and twice in
+    /// a row, so the first reopen's own checkpoint writes nothing twice
+    /// (#418, whose `close()` hit a full disk). With `open_transaction`, a
+    /// session has Hans inserted and not committed when `close()` runs: he
+    /// is in neither.
+    #[cfg(feature = "testing-crash-injection")]
+    fn a_failed_close_keeps_the_database_readable(point: &str, open_transaction: bool) {
+        use grafeo_common::testing::crash::with_failure_at;
+
+        for count in 1..=16 {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("db.grafeo");
+            let crashed = dir.path().join("crashed.grafeo");
+            let db = open(&path);
+            write_and_checkpoint_then_write_more(&db);
+            db.session()
+                .execute("INSERT (:Person {name: 'Jules'})")
+                .unwrap();
+            let mut session = db.session();
+            if open_transaction {
+                session.begin_transaction().unwrap();
+                session.execute("INSERT (:Person {name: 'Hans'})").unwrap();
+            }
+            let files_before = log_files(&sidecar_wal(&path));
+            let Err(error) = with_failure_at(count, || db.close()) else {
+                panic!("no close() failed at {point}");
+            };
+            if !error.to_string().contains(point) {
+                continue;
+            }
+            assert!(
+                files_before
+                    .iter()
+                    .all(|file| log_files(&sidecar_wal(&path)).contains(file)),
+                "{point}: the failed close() deleted WAL segments"
+            );
+            // What a crash right after the failure leaves: the file and WAL.
+            db.file_manager().unwrap().copy_to(&crashed).unwrap();
+            copy_files(&sidecar_wal(&path), &sidecar_wal(&crashed));
+            drop(session);
+            drop(db);
+
+            for reopen in ["first reopen", "second reopen"] {
+                let what = format!("{point}, open transaction {open_transaction}, {reopen}");
+                let reopened = open(&crashed);
+                assert_every_write_once(&reopened, &what);
+                reopened.close().unwrap();
+            }
+            return;
+        }
+        panic!("no close() failed at {point}");
+    }
+
+    #[cfg(feature = "testing-crash-injection")]
+    #[test]
+    fn a_failed_close_inside_its_image_write_keeps_the_database_readable() {
+        for point in ["checkpoint:after_chunks", "checkpoint:after_header"] {
+            a_failed_close_keeps_the_database_readable(point, false);
+        }
+    }
+
+    #[cfg(feature = "testing-crash-injection")]
+    #[test]
+    fn a_failed_close_with_an_open_transaction_keeps_only_committed_writes() {
+        for point in ["checkpoint:after_chunks", "checkpoint:after_header"] {
+            a_failed_close_keeps_the_database_readable(point, true);
+        }
     }
 
     /// Checkpoints that fail before anything is written (the new WAL file

@@ -855,6 +855,28 @@ fn check_indexes(fixture: Fixture, db: &GrafeoDB) {
         fixture.index_names(),
         "{name}: indexes"
     );
+    // The property index `person_name` on `Person.name` is there as an index,
+    // not only as a name, and an equality on `name` looks it up (#638).
+    if fixture.index_names().contains(&"person_name") {
+        assert!(
+            db.has_property_index("name"),
+            "{name}: the property index on name"
+        );
+        let query = "MATCH (p:Person {name: 'Alix'}) RETURN p.name";
+        let plan = rows(db, &format!("EXPLAIN {query}"));
+        let Value::String(plan) = &plan[0][0] else {
+            panic!("{name}: EXPLAIN returns its plan as text, got {plan:?}");
+        };
+        assert!(
+            plan.contains("[index: name]"),
+            "{name}: `{query}` looks up the index: {plan}"
+        );
+        assert_eq!(
+            rows(db, query),
+            [[Value::from("Alix")]],
+            "{name}: `{query}`"
+        );
+    }
     let vector = db.vector_search("Document", "embedding", &[1.0, 0.0, 0.0], 1, None, None);
     let text = db.text_search("Document", "content", "canals", 3, None);
     if !fixture.has_search_indexes() {

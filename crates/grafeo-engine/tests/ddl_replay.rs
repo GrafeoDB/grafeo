@@ -403,4 +403,74 @@ mod tests {
         );
         assert_eq!(graph_type(&db, "iot")[2], Value::from("Device, Sensor"));
     }
+
+    /// The statements of #316: types, then a graph type and an `ALTER GRAPH
+    /// TYPE` that name them bare (`NODE TYPE Person`), which used to replace
+    /// each named type with an empty one.
+    const BARE_REFERENCES: [&str; 5] = [
+        "CREATE NODE TYPE Person (name STRING NOT NULL, age INTEGER, city STRING)",
+        "CREATE NODE TYPE Product (sku STRING NOT NULL, price FLOAT NOT NULL)",
+        "CREATE EDGE TYPE KNOWS (since INTEGER)",
+        "CREATE GRAPH TYPE shop_schema (NODE TYPE Person, EDGE TYPE KNOWS)",
+        "ALTER GRAPH TYPE shop_schema ADD NODE TYPE Product",
+    ];
+
+    /// The node and edge types of `db` are those the three `CREATE` statements
+    /// of [`BARE_REFERENCES`] alone make (no graph type ever named them),
+    /// the graph type names them, and the type of `Person` still holds.
+    fn assert_bare_references_keep_types(db: &GrafeoDB, stage: &str) {
+        let reference = GrafeoDB::new_in_memory();
+        run(&reference, &BARE_REFERENCES[..3]);
+        let sorted = |db: &GrafeoDB, query: &str| {
+            let mut found = rows(db, query);
+            found.sort_by_key(|row| format!("{row:?}"));
+            found
+        };
+        for query in ["SHOW NODE TYPES", "SHOW EDGE TYPES"] {
+            assert_eq!(
+                sorted(db, query),
+                sorted(&reference, query),
+                "{stage}: {query}"
+            );
+        }
+        let shop = graph_type(db, "shop_schema");
+        assert_eq!(
+            (&shop[2], &shop[3]),
+            (&Value::from("Person, Product"), &Value::from("KNOWS")),
+            "{stage}: {shop:?}"
+        );
+        let error = db
+            .session()
+            .execute("INSERT (:Person {age: 30})")
+            .expect_err("a Person without its NOT NULL name")
+            .to_string();
+        assert!(error.contains("name"), "{stage}: {error}");
+    }
+
+    /// #316 after a crash: the replayed catalog keeps the referenced types.
+    #[test]
+    fn bare_graph_type_references_keep_types_after_replay() {
+        let (_dir, db) = replayed(
+            "tests::bare_graph_type_references_keep_types_after_replay",
+            &BARE_REFERENCES,
+        );
+        assert_bare_references_keep_types(&db, "after replay");
+    }
+
+    /// #316 after `close()`: the checkpointed catalog keeps the referenced
+    /// types, also after a second close of the reopened database.
+    #[test]
+    fn bare_graph_type_references_keep_types_after_reopen() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("db.grafeo");
+        let db = open(&path);
+        run(&db, &BARE_REFERENCES);
+        assert_bare_references_keep_types(&db, "before the close");
+        db.close().unwrap();
+        for stage in ["first reopen", "second reopen"] {
+            let db = open(&path);
+            assert_bare_references_keep_types(&db, stage);
+            db.close().unwrap();
+        }
+    }
 }

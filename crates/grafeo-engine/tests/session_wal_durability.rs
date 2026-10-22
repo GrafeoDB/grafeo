@@ -75,6 +75,11 @@ mod session_wal_durability {
             1,
             "node created via Session::create_node_with_props was lost on reopen"
         );
+        assert_eq!(
+            db.execute("MATCH (p:Probe) RETURN p.name").unwrap().rows(),
+            [[Value::from("Alix")]],
+            "the node keeps its property"
+        );
     }
 
     #[test]
@@ -105,6 +110,13 @@ mod session_wal_durability {
             db.edge_count(),
             1,
             "edge created via Session::create_edge_with_props was lost on reopen"
+        );
+        assert_eq!(
+            db.execute("MATCH (a:Person)-[r:KNOWS]->(b:Person) RETURN id(a) <> id(b), r.since")
+                .unwrap()
+                .rows(),
+            [[Value::Bool(true), Value::Int64(2026)]],
+            "the edge keeps its endpoints and property"
         );
     }
 
@@ -196,6 +208,64 @@ mod session_wal_durability {
             db.node_count(),
             1,
             "Cypher-created node was lost on reopen (oracle test failed; bug is broader than #327)"
+        );
+        assert_eq!(
+            db.execute("MATCH (p:Probe) RETURN p.name").unwrap().rows(),
+            [[Value::from("cypher")]]
+        );
+    }
+
+    /// Four threads commit 50 session-direct writes each, concurrently,
+    /// then the process crashes: the replay brings back all 200 nodes, each
+    /// with its own id and the properties its thread gave it.
+    #[test]
+    fn concurrent_session_direct_ingest_survives_a_crash() {
+        let (_dir, db) = reopened_after_crash(
+            "session_wal_durability::concurrent_session_direct_ingest_survives_a_crash",
+            open,
+            |db| {
+                std::thread::scope(|scope| {
+                    for thread in 0..4_i64 {
+                        scope.spawn(move || {
+                            for i in 0..50_i64 {
+                                let mut session = db.session();
+                                session.begin_transaction().expect("begin");
+                                session
+                                    .create_node_with_props(
+                                        &["Probe"],
+                                        [("thread", Value::Int64(thread)), ("i", Value::Int64(i))],
+                                    )
+                                    .expect("create node");
+                                session.commit().expect("commit");
+                            }
+                        });
+                    }
+                });
+            },
+        );
+        assert_eq!(
+            db.execute("MATCH (p:Probe) RETURN count(p), count(DISTINCT id(p))")
+                .unwrap()
+                .rows(),
+            [[Value::Int64(200), Value::Int64(200)]]
+        );
+        let per_thread: Vec<Vec<Value>> = (0..4)
+            .map(|thread| {
+                [thread, 50, 0, 49, 50]
+                    .into_iter()
+                    .map(Value::Int64)
+                    .collect()
+            })
+            .collect();
+        assert_eq!(
+            db.execute(
+                "MATCH (p:Probe) RETURN p.thread AS t, count(p), min(p.i), max(p.i), \
+                 count(DISTINCT p.i) ORDER BY t"
+            )
+            .unwrap()
+            .rows(),
+            per_thread.as_slice(),
+            "every thread's 50 writes, each once"
         );
     }
 

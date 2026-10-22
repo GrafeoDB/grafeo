@@ -35,6 +35,12 @@ fn open_synced(path: &Path) -> GrafeoDB {
         .unwrap()
 }
 
+/// Opens the file at `path` read-write without a WAL: only a checkpoint
+/// makes its writes durable.
+fn open_without_wal(path: &Path) -> GrafeoDB {
+    GrafeoDB::with_config(Config::persistent(path).without_wal()).unwrap()
+}
+
 /// Opens the file at `path` read-only.
 fn open_read_only(path: &Path) -> GrafeoDB {
     GrafeoDB::with_config(Config::read_only(path)).unwrap()
@@ -198,6 +204,35 @@ fn indexes_survive_an_explicit_checkpoint_and_reopen() {
     db.close().unwrap();
     let db = open(&path);
     assert_indexes(&db, "second reopen");
+    db.close().unwrap();
+}
+
+/// Without a WAL the indexes come from the checkpoint of `close()` alone,
+/// and they are there after a reopen without a WAL, twice, and read-only.
+#[test]
+fn indexes_survive_reopen_without_wal() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("db.grafeo");
+    let db = open_without_wal(&path);
+    build(&db);
+    assert_indexes(&db, "before the close");
+    db.close().unwrap();
+    let mut sidecar = path.as_os_str().to_owned();
+    sidecar.push(".wal");
+    assert!(
+        !Path::new(&sidecar).exists(),
+        "a database without a WAL has no sidecar WAL"
+    );
+
+    for stage in ["reopen without a WAL", "second reopen without a WAL"] {
+        let db = open_without_wal(&path);
+        assert_indexes(&db, stage);
+        assert_named(&db, stage);
+        db.close().unwrap();
+    }
+
+    let db = open_read_only(&path);
+    assert_indexes(&db, "read-only reopen");
     db.close().unwrap();
 }
 

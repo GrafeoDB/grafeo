@@ -119,3 +119,71 @@ fn compact_compresses_a_database_file() {
     );
     db.close().unwrap();
 }
+
+/// The writes after `compact()` of each kind (#302: they were invisible):
+/// a property set, a node and an edge inserted, a node deleted.
+#[cfg(all(feature = "grafeo-file", feature = "wal"))]
+fn write_after_compact(db: &GrafeoDB) {
+    for statement in [
+        "MATCH (p:Person {i: 7}) SET p.score = 0.5",
+        "INSERT (:Person {i: 20000, age: 3, score: 4.5})",
+        "MATCH (a:Person {i: 1}), (b:Person {i: 2}) INSERT (a)-[:KNOWS {since: 2026}]->(b)",
+        "MATCH (p:Person {i: 3}) DETACH DELETE p",
+    ] {
+        db.execute(statement).unwrap();
+    }
+}
+
+/// What [`write_after_compact`] wrote, read back.
+#[cfg(all(feature = "grafeo-file", feature = "wal"))]
+fn written_after_compact(db: &GrafeoDB) -> Vec<Vec<Value>> {
+    [
+        "MATCH (p:Person {i: 7}) RETURN p.score",
+        "MATCH (p:Person {i: 20000}) RETURN p.age",
+        "MATCH (a:Person)-[k:KNOWS]->(b:Person) RETURN a.i * 10 + b.i, k.since",
+        "MATCH (p:Person {i: 3}) RETURN count(p)",
+        "MATCH (p:Person) RETURN count(p)",
+    ]
+    .iter()
+    .flat_map(|query| db.execute(query).unwrap().rows().to_vec())
+    .collect()
+}
+
+/// A database file without a WAL: the writes after `compact()` are there
+/// before the close, after a reopen without a WAL, after a second one, and
+/// read-only. Without a WAL only the checkpoint of `close()` holds them.
+#[cfg(all(feature = "grafeo-file", feature = "wal"))]
+#[test]
+fn writes_after_compact_survive_a_reopen_without_wal() {
+    use grafeo_common::types::Decimal;
+    use grafeo_engine::Config;
+
+    let expected = vec![
+        // An exact literal is a DECIMAL.
+        vec![Value::Decimal(Decimal::parse("0.5").unwrap())],
+        vec![Value::Int64(3)],
+        vec![Value::Int64(12), Value::Int64(2026)],
+        vec![Value::Int64(0)],
+        vec![Value::Int64(20_000)],
+    ];
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("compact.grafeo");
+    let open = || GrafeoDB::with_config(Config::persistent(&path).without_wal()).unwrap();
+    let mut db = open();
+    people(&db);
+    let report = db.compact().unwrap();
+    assert_eq!(report.rows_compressed, 20_000, "{report:?}");
+    write_after_compact(&db);
+    assert_eq!(written_after_compact(&db), expected, "before the close");
+    db.close().unwrap();
+    drop(db);
+
+    for stage in ["reopen without a WAL", "second reopen without a WAL"] {
+        let db = open();
+        assert_eq!(written_after_compact(&db), expected, "{stage}");
+        db.close().unwrap();
+    }
+    let db = GrafeoDB::open_read_only(&path).unwrap();
+    assert_eq!(written_after_compact(&db), expected, "read-only");
+    db.close().unwrap();
+}

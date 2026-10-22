@@ -22,6 +22,49 @@ use napi::{JsDate, JsString, JsValue, ValueType, sys};
 
 use grafeo_common::types::{PropertyKey, Timestamp, Value};
 
+/// The entries of a JavaScript object (not an array), each converted by
+/// [`js_to_value`]; a conversion error names the entry as `{what} 'key'`, and
+/// a value that is no such object gives `not_an_object`.
+fn object_entries(
+    env: Env,
+    value: Unknown<'_>,
+    what: &str,
+    not_an_object: &str,
+) -> Result<Vec<(String, Value)>> {
+    let refuse = || napi::Error::new(napi::Status::InvalidArg, not_an_object);
+    if value.get_type()? != ValueType::Object {
+        return Err(refuse());
+    }
+    // SAFETY: the type was checked as Object above
+    let object: Object<'_> = unsafe { value.cast()? };
+    if object.is_array()? {
+        return Err(refuse());
+    }
+    let keys = object.get_property_names()?;
+    let len = keys.get_array_length()?;
+    let mut entries = Vec::with_capacity(len as usize);
+    for i in 0..len {
+        let key: JsString = keys.get_element(i)?;
+        let key = key.into_utf8()?.into_owned()?;
+        let value: Unknown<'_> = object.get_named_property(&key)?;
+        let value = js_to_named_value(env, value, what, &key)?;
+        entries.push((key, value));
+    }
+    Ok(entries)
+}
+
+/// The JavaScript value of an argument, from napi.
+///
+/// # Safety
+///
+/// `env` and `napi_val` come from napi for this argument.
+unsafe fn argument<'env>(env: sys::napi_env, napi_val: sys::napi_value) -> (Env, Unknown<'env>) {
+    let env = Env::from_raw(env);
+    // SAFETY: the caller passes what napi gave for this argument
+    let value = unsafe { Unknown::from_raw_unchecked(env.raw(), napi_val) };
+    (env, value)
+}
+
 /// Query parameters, converted from the JavaScript object by [`js_to_value`]
 /// when the call is made, as a property is: a `BigInt` follows the integer
 /// rule at any width and a whole number is an INT64 (a JSON step would turn
@@ -35,30 +78,6 @@ impl Params {
     pub fn into_map(self) -> Result<HashMap<String, Value>> {
         self.0
             .map_err(|message| crate::error::NodeGrafeoError::InvalidArgument(message).into())
-    }
-
-    fn convert(env: Env, value: Unknown<'_>) -> Result<HashMap<String, Value>> {
-        let not_an_object =
-            || napi::Error::new(napi::Status::InvalidArg, "params must be an object");
-        if value.get_type()? != ValueType::Object {
-            return Err(not_an_object());
-        }
-        // SAFETY: the type was checked as Object above
-        let object: Object<'_> = unsafe { value.cast()? };
-        if object.is_array()? {
-            return Err(not_an_object());
-        }
-        let keys = object.get_property_names()?;
-        let len = keys.get_array_length()?;
-        let mut params = HashMap::with_capacity(len as usize);
-        for i in 0..len {
-            let key: JsString = keys.get_element(i)?;
-            let key = key.into_utf8()?.into_owned()?;
-            let value: Unknown<'_> = object.get_named_property(&key)?;
-            let value = js_to_named_value(env, value, "parameter", &key)?;
-            params.insert(key, value);
-        }
-        Ok(params)
     }
 }
 
@@ -74,11 +93,67 @@ impl TypeName for Params {
 
 impl FromNapiValue for Params {
     unsafe fn from_napi_value(env: sys::napi_env, napi_val: sys::napi_value) -> Result<Self> {
-        let env = Env::from_raw(env);
-        // SAFETY: env and napi_val come from napi for this argument
-        let value = unsafe { Unknown::from_raw_unchecked(env.raw(), napi_val) };
+        // SAFETY: napi calls this with the argument's env and value
+        let (env, value) = unsafe { argument(env, napi_val) };
+        let params = object_entries(env, value, "parameter", "params must be an object");
         Ok(Self(
-            Self::convert(env, value).map_err(|error| error.reason),
+            params
+                .map(|entries| entries.into_iter().collect())
+                .map_err(|error| error.reason),
+        ))
+    }
+}
+
+/// An object of properties (a batch or upsert row, a set of filters, an
+/// edge's properties), converted as [`Params`] are: by [`js_to_value`] when
+/// the call is made, an error naming the property and kept until
+/// [`Properties::into_entries`].
+pub struct Properties(std::result::Result<Vec<(String, Value)>, String>);
+
+impl Properties {
+    /// The properties, or the error that converting them gave.
+    pub fn into_entries(self) -> Result<Vec<(String, Value)>> {
+        self.0
+            .map_err(|message| crate::error::NodeGrafeoError::InvalidArgument(message).into())
+    }
+
+    /// Rows of properties, an error naming the row (`rows[2]: ...`).
+    pub fn rows(rows: Vec<Self>) -> Result<Vec<HashMap<PropertyKey, Value>>> {
+        rows.into_iter()
+            .enumerate()
+            .map(|(i, row)| match row.0 {
+                Ok(entries) => Ok(entries
+                    .into_iter()
+                    .map(|(key, value)| (PropertyKey::new(key), value))
+                    .collect()),
+                Err(message) => Err(crate::error::NodeGrafeoError::InvalidArgument(format!(
+                    "rows[{i}]: {message}"
+                ))
+                .into()),
+            })
+            .collect()
+    }
+}
+
+impl TypeName for Properties {
+    fn type_name() -> &'static str {
+        "Record<string, unknown>"
+    }
+
+    fn value_type() -> ValueType {
+        ValueType::Object
+    }
+}
+
+impl ValidateNapiValue for Properties {}
+
+impl FromNapiValue for Properties {
+    unsafe fn from_napi_value(env: sys::napi_env, napi_val: sys::napi_value) -> Result<Self> {
+        // SAFETY: napi calls this with the argument's env and value
+        let (env, value) = unsafe { argument(env, napi_val) };
+        Ok(Self(
+            object_entries(env, value, "property", "properties must be an object")
+                .map_err(|error| error.reason),
         ))
     }
 }

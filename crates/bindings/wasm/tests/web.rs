@@ -1418,3 +1418,180 @@ fn test_an_invalid_date_parameter_is_refused() {
         "{error:?}"
     );
 }
+
+/// The INT64 and DECIMAL type tests of `n.v` over the `:N` nodes, by `n.i`.
+fn kinds_of_v(db: &Database) -> serde_json::Value {
+    let rows = db
+        .execute(
+            "MATCH (n:N) RETURN n.v IS TYPED INT64 AS int, n.v IS TYPED DECIMAL AS decimal \
+             ORDER BY n.i",
+        )
+        .expect("query");
+    json(&rows)
+}
+
+/// `importRows` and `importLpg` read their rows and properties from the
+/// JavaScript value, as a property is: a `BigInt` follows the integer rule
+/// (through JSON one past u64 was an error) and an error names the row, the
+/// node or edge, and the property.
+#[wasm_bindgen_test]
+fn test_imports_follow_the_integer_rule() {
+    let db = Database::new().expect("create db");
+    let rows = js_sys::Array::of2(
+        &object(&[("i", 1.0.into()), ("v", bigint("18446744073709551616"))]),
+        &object(&[("i", 2.0.into()), ("v", 5_000_000_000.0.into())]),
+    );
+    let options = object(&[("mode", "nodes".into()), ("label", "N".into())]);
+    assert_eq!(
+        db.import_rows(rows.into(), options).expect("import rows"),
+        2
+    );
+    let edges = js_sys::Array::of1(&object(&[
+        ("source", bigint("0")),
+        ("target", 1.0.into()),
+        ("w", bigint("-9223372036854775809")),
+    ]));
+    let options = object(&[("mode", "edges".into()), ("edgeType", "R".into())]);
+    assert_eq!(
+        db.import_rows(edges.into(), options).expect("import edges"),
+        1
+    );
+    let lpg = object(&[(
+        "nodes",
+        js_sys::Array::of1(&object(&[
+            ("labels", js_sys::Array::of1(&"N".into()).into()),
+            (
+                "properties",
+                object(&[("i", 3.0.into()), ("v", bigint(&"9".repeat(38)))]),
+            ),
+        ]))
+        .into(),
+    )]);
+    db.import_lpg(lpg).expect("import lpg");
+    assert_eq!(
+        kinds_of_v(&db),
+        serde_json::json!([
+            { "int": false, "decimal": true },
+            { "int": true, "decimal": false },
+            { "int": false, "decimal": true }
+        ])
+    );
+    let rows = db.execute("MATCH ()-[r:R]->() RETURN r.w AS w").unwrap();
+    assert_eq!(
+        json(&rows),
+        serde_json::json!([{ "w": { "$decimal": "-9223372036854775809" } }])
+    );
+
+    let too_wide = format!("1{}", "0".repeat(38));
+    let rows = js_sys::Array::of2(
+        &object(&[("v", 1.0.into())]),
+        &object(&[("v", bigint(&too_wide))]),
+    );
+    let options = object(&[("mode", "nodes".into()), ("label", "N".into())]);
+    let message = error_message(db.import_rows(rows.into(), options).expect_err("too wide"));
+    assert!(
+        message.contains("rows[1]: property 'v'") && message.contains(&too_wide),
+        "{message}"
+    );
+    let lpg = object(&[(
+        "nodes",
+        js_sys::Array::of2(
+            &object(&[("labels", js_sys::Array::new().into())]),
+            &object(&[
+                ("labels", js_sys::Array::new().into()),
+                ("properties", object(&[("v", bigint(&too_wide))])),
+            ]),
+        )
+        .into(),
+    )]);
+    let message = error_message(db.import_lpg(lpg).expect_err("too wide"));
+    assert!(
+        message.contains("nodes[1]: property 'v'") && message.contains("38 digits"),
+        "{message}"
+    );
+    assert_eq!(db.node_count().unwrap(), 3, "a failed import keeps nothing");
+}
+
+/// Batch writes and upserts read their rows and edge properties from the
+/// JavaScript value too, with the row in the error.
+#[cfg(feature = "direct-api")]
+#[wasm_bindgen_test]
+fn test_batches_and_upserts_follow_the_integer_rule() {
+    let db = Database::new().unwrap();
+    let rows = js_sys::Array::of2(
+        &object(&[("i", 1.0.into()), ("v", bigint("18446744073709551616"))]),
+        &object(&[("i", 2.0.into()), ("v", 5_000_000_000.0.into())]),
+    );
+    let ids = db
+        .batch_create_nodes_with_props("N".into(), rows.into())
+        .unwrap();
+    let ids = js_sys::Array::from(&ids);
+    let edges = js_sys::Array::of1(&object(&[
+        ("src", ids.get(0)),
+        ("dst", ids.get(1)),
+        ("type", "R".into()),
+        ("properties", object(&[("w", bigint(&"9".repeat(38)))])),
+    ]));
+    db.batch_create_edges(edges.into()).unwrap();
+    let upsert = js_sys::Array::of1(&object(&[
+        ("i", 3.0.into()),
+        ("v", bigint("9223372036854775808")),
+    ]));
+    db.upsert_nodes(
+        js_sys::Array::of1(&"N".into()).into(),
+        upsert.into(),
+        object(&[("key", "i".into())]),
+    )
+    .unwrap();
+    assert_eq!(
+        kinds_of_v(&db),
+        serde_json::json!([
+            { "int": false, "decimal": true },
+            { "int": true, "decimal": false },
+            { "int": false, "decimal": true }
+        ])
+    );
+    let rows = db.execute("MATCH ()-[r:R]->() RETURN r.w AS w").unwrap();
+    assert_eq!(
+        json(&rows),
+        serde_json::json!([{ "w": { "$decimal": "9".repeat(38) } }])
+    );
+
+    let too_wide = format!("1{}", "0".repeat(38));
+    let rows = js_sys::Array::of2(
+        &object(&[("v", 1.0.into())]),
+        &object(&[("v", bigint(&too_wide))]),
+    );
+    let message = error_text(db.batch_create_nodes_with_props("N".into(), rows.into()));
+    assert!(
+        message.contains("rows[1]: property 'v'") && message.contains(&too_wide),
+        "{message}"
+    );
+    assert_eq!(db.node_count().unwrap(), 3, "a failed batch keeps nothing");
+}
+
+/// A search's `filters` are read from the JavaScript value: a `BigInt`
+/// filter finds the node whose property is that exact decimal.
+#[cfg(feature = "text-index")]
+#[wasm_bindgen_test]
+fn test_a_search_filter_follows_the_integer_rule() {
+    let db = Database::new().unwrap();
+    db.execute(
+        "INSERT (:Doc {body: 'graph canals', v: 1}), (:Doc {body: 'graph canals', v: 5000000000})",
+    )
+    .unwrap();
+    let rows = js_sys::Array::of1(&object(&[
+        ("body", "graph canals".into()),
+        ("v", bigint("18446744073709551616")),
+    ]));
+    let options = object(&[("mode", "nodes".into()), ("label", "Doc".into())]);
+    db.import_rows(rows.into(), options).unwrap();
+    db.create_text_index("Doc", "body", None).unwrap();
+    for v in [5_000_000_000.0.into(), bigint("18446744073709551616")] {
+        let options = object(&[("filters", object(&[("v", v)]))]);
+        let hits = db
+            .text_search("Doc", "body", "canals", 10, Some(options))
+            .unwrap();
+        assert_eq!(js_sys::Array::from(&hits).length(), 1);
+    }
+}

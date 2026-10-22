@@ -1,14 +1,11 @@
 //! Upserts for the Node.js API: create or update nodes and edges by key.
 
-use std::collections::HashMap;
-
 use napi::bindgen_prelude::*;
 use napi_derive::napi;
 
-use grafeo_common::types::{PropertyKey, Value};
 use grafeo_engine::database::{EdgeUpsertOptions, UpsertSummary as EngineUpsertSummary};
 
-use super::{JsGrafeoDB, json_to_value};
+use super::JsGrafeoDB;
 use crate::error::NodeGrafeoError;
 
 /// Options for `upsertNodes`.
@@ -101,24 +98,6 @@ pub(super) fn node_options(options: Option<UpsertNodesOptions>) -> (String, bool
     )
 }
 
-/// Rows of properties from JSON objects.
-pub(super) fn rows(rows: &[serde_json::Value]) -> Result<Vec<HashMap<PropertyKey, Value>>> {
-    rows.iter()
-        .map(|row| {
-            let serde_json::Value::Object(fields) = row else {
-                return Err(NodeGrafeoError::InvalidArgument(
-                    "each upsert row must be an object".to_string(),
-                )
-                .into());
-            };
-            fields
-                .iter()
-                .map(|(name, value)| Ok((PropertyKey::new(name.as_str()), json_to_value(value)?)))
-                .collect()
-        })
-        .collect()
-}
-
 #[napi]
 impl JsGrafeoDB {
     /// Creates or updates one node per row, matched by `key` and all of
@@ -134,10 +113,10 @@ impl JsGrafeoDB {
     pub async fn upsert_nodes(
         &self,
         labels: Vec<String>,
-        rows: Vec<serde_json::Value>,
+        #[napi(ts_arg_type = "Array<any>")] rows: Vec<crate::types::Properties>,
         options: Option<UpsertNodesOptions>,
     ) -> Result<UpsertSummary> {
-        let rows = self::rows(&rows)?;
+        let rows = crate::types::Properties::rows(rows)?;
         let (key, replace) = node_options(options);
         let db = self.inner.clone();
         tokio::task::spawn_blocking(move || {
@@ -164,10 +143,10 @@ impl JsGrafeoDB {
     pub async fn upsert_edges(
         &self,
         edge_type: String,
-        rows: Vec<serde_json::Value>,
+        #[napi(ts_arg_type = "Array<any>")] rows: Vec<crate::types::Properties>,
         options: Option<UpsertEdgesOptions>,
     ) -> Result<UpsertSummary> {
-        let rows = self::rows(&rows)?;
+        let rows = crate::types::Properties::rows(rows)?;
         let options = options.map_or_else(EdgeUpsertOptions::new, edge_options);
         let db = self.inner.clone();
         tokio::task::spawn_blocking(move || {

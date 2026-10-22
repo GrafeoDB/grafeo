@@ -214,6 +214,11 @@ a new ID), and property values are plain JSON or tagged with their type, as `dat
 {"type":"edge","source":3,"target":19,"edge_type":"KNOWS","properties":{"since":2019}}
 ```
 
+A plain integer that fits 64 bits loads as an `INT64`, a larger one up to 38 digits as an exact
+`DECIMAL` (past that the load fails, naming the line), and a number with a fraction or an exponent
+as a `FLOAT64`. A dump writes a `DECIMAL` with its text and scale, `{"Decimal":"1.50"}`, which a
+load reads back.
+
 ### WAL Management
 
 ```bash

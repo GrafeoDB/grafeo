@@ -125,6 +125,54 @@ pub fn js_entries(value: &JsValue) -> Option<Result<Vec<(String, JsValue)>, Stri
     )
 }
 
+/// `object[key]`, undefined when the object has no such field.
+pub fn js_field(object: &JsValue, key: &str) -> JsValue {
+    Reflect::get(object, &key.into()).unwrap_or(JsValue::UNDEFINED)
+}
+
+/// The properties of a JavaScript object (a plain object or a `Map`), each
+/// converted by [`js_to_value`]; undefined or null has none.
+///
+/// # Errors
+///
+/// A value that is no object, or a property that has no Grafeo value; the
+/// error names the property.
+pub fn js_properties(value: &JsValue) -> Result<Vec<(String, Value)>, String> {
+    if value.is_undefined() || value.is_null() {
+        return Ok(Vec::new());
+    }
+    js_entries(value)
+        .ok_or_else(|| "properties must be an object".to_string())??
+        .into_iter()
+        .map(|(key, item)| {
+            let item = js_to_value(&item).map_err(|error| format!("property '{key}': {error}"))?;
+            Ok((key, item))
+        })
+        .collect()
+}
+
+/// Rows of properties from an array of objects, each by [`js_properties`].
+///
+/// # Errors
+///
+/// A value that is no array, or a row that is no object or has a property
+/// with no Grafeo value; the error names the row (`rows[2]: ...`).
+pub fn js_rows(value: &JsValue) -> Result<Vec<Vec<(String, Value)>>, String> {
+    if !Array::is_array(value) {
+        return Err("rows must be an array of objects".to_string());
+    }
+    Array::from(value)
+        .iter()
+        .enumerate()
+        .map(|(i, row)| {
+            if row.is_undefined() || row.is_null() {
+                return Err(format!("rows[{i}]: properties must be an object"));
+            }
+            js_properties(&row).map_err(|error| format!("rows[{i}]: {error}"))
+        })
+        .collect()
+}
+
 /// Converts a Grafeo [`Value`] to a JavaScript value.
 pub fn value_to_js(value: &Value) -> JsValue {
     match value {

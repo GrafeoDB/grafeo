@@ -20,19 +20,18 @@ use crate::query::QueryResult;
 use crate::transaction::Transaction;
 use crate::types;
 
-/// Converts a serde_json filter map to a Grafeo filter map.
+/// The property filters of a search, converted by [`types::js_to_value`]
+/// when the call is made.
 fn convert_json_filters(
-    filters: Option<HashMap<String, serde_json::Value>>,
+    filters: Option<types::Properties>,
 ) -> Result<Option<HashMap<String, Value>>> {
-    let Some(map) = filters else {
-        return Ok(None);
-    };
-    let mut result = HashMap::new();
-    for (key, val) in &map {
-        let grafeo_val = json_to_value(val)?;
-        result.insert(key.clone(), grafeo_val);
-    }
-    Ok(Some(result))
+    filters
+        .map(|filters| {
+            filters
+                .into_entries()
+                .map(|entries| entries.into_iter().collect())
+        })
+        .transpose()
 }
 
 /// A JavaScript number as an unsigned 64-bit id: a whole number from 0 to
@@ -601,7 +600,9 @@ impl JsGrafeoDB {
         query: Vec<f64>,
         k: u32,
         ef: Option<u32>,
-        filters: Option<HashMap<String, serde_json::Value>>,
+        #[napi(ts_arg_type = "Record<string, any> | undefined | null")] filters: Option<
+            types::Properties,
+        >,
     ) -> Result<Vec<Vec<f64>>> {
         let filter_map = convert_json_filters(filters)?;
         let db = self.inner.clone();
@@ -973,7 +974,9 @@ impl JsGrafeoDB {
         queries: Vec<Vec<f64>>,
         k: u32,
         ef: Option<u32>,
-        filters: Option<HashMap<String, serde_json::Value>>,
+        #[napi(ts_arg_type = "Record<string, any> | undefined | null")] filters: Option<
+            types::Properties,
+        >,
     ) -> Result<Vec<Vec<Vec<f64>>>> {
         let filter_map = convert_json_filters(filters)?;
         let db = self.inner.clone();
@@ -1027,7 +1030,9 @@ impl JsGrafeoDB {
         fetch_k: Option<u32>,
         lambda_mult: Option<f64>,
         ef: Option<u32>,
-        filters: Option<HashMap<String, serde_json::Value>>,
+        #[napi(ts_arg_type = "Record<string, any> | undefined | null")] filters: Option<
+            types::Properties,
+        >,
     ) -> Result<Vec<Vec<f64>>> {
         let filter_map = convert_json_filters(filters)?;
         let db = self.inner.clone();
@@ -1145,7 +1150,9 @@ impl JsGrafeoDB {
         property: String,
         query: String,
         k: u32,
-        filters: Option<HashMap<String, serde_json::Value>>,
+        #[napi(ts_arg_type = "Record<string, any> | undefined | null")] filters: Option<
+            types::Properties,
+        >,
     ) -> Result<Vec<Vec<f64>>> {
         let filter_map = convert_json_filters(filters)?;
         let db = self.inner.clone();
@@ -1197,7 +1204,9 @@ impl JsGrafeoDB {
         query_vector: Option<Vec<f64>>,
         fusion: Option<String>,
         weights: Option<Vec<f64>>,
-        filters: Option<HashMap<String, serde_json::Value>>,
+        #[napi(ts_arg_type = "Record<string, any> | undefined | null")] filters: Option<
+            types::Properties,
+        >,
     ) -> Result<Vec<Vec<f64>>> {
         let filter_map = convert_json_filters(filters)?;
         let db = self.inner.clone();
@@ -1670,12 +1679,6 @@ fn execute_language_query(
     db.execute_language(query, language, params)
         .map_err(NodeGrafeoError::from)
         .map_err(napi::Error::from)
-}
-
-/// Convert a serde_json::Value to a Grafeo Value.
-pub(crate) fn json_to_value(v: &serde_json::Value) -> std::result::Result<Value, napi::Error> {
-    grafeo_bindings_common::json::json_to_value(v)
-        .map_err(|msg| NodeGrafeoError::InvalidArgument(msg).into())
 }
 
 /// Fetch a node from the database and wrap it as JsNode.

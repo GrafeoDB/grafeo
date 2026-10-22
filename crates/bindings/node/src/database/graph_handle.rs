@@ -12,7 +12,7 @@ use grafeo_engine::database::{EdgeUpsertOptions, GrafeoDB};
 
 use super::batch::{BatchEdgeInput, batch_edges, label_list};
 use super::upsert::{
-    UpsertEdgesOptions, UpsertNodesOptions, UpsertSummary, edge_options, node_options, rows,
+    UpsertEdgesOptions, UpsertNodesOptions, UpsertSummary, edge_options, node_options,
 };
 use super::{
     JsGrafeoDB, NodeEdgesOptions, edge_pairs, js_edge, js_node, js_result, node_edges_options,
@@ -295,10 +295,10 @@ impl JsGraphHandle {
     pub async fn batch_create_nodes_with_props(
         &self,
         labels: Either<String, Vec<String>>,
-        properties_list: Vec<serde_json::Value>,
+        #[napi(ts_arg_type = "Array<any>")] properties_list: Vec<crate::types::Properties>,
     ) -> Result<Vec<f64>> {
         let labels = label_list(labels);
-        let properties_list = rows(&properties_list)?;
+        let properties_list = crate::types::Properties::rows(properties_list)?;
         self.blocking(move |graph| {
             let labels: Vec<&str> = labels.iter().map(String::as_str).collect();
             let ids = js(graph.batch_create_nodes_with_labels(&labels, properties_list))?;
@@ -323,10 +323,10 @@ impl JsGraphHandle {
     pub async fn upsert_nodes(
         &self,
         labels: Vec<String>,
-        rows: Vec<serde_json::Value>,
+        #[napi(ts_arg_type = "Array<any>")] rows: Vec<crate::types::Properties>,
         options: Option<UpsertNodesOptions>,
     ) -> Result<UpsertSummary> {
-        let rows = self::rows(&rows)?;
+        let rows = crate::types::Properties::rows(rows)?;
         let (key, replace) = node_options(options);
         self.blocking(move |graph| {
             let labels: Vec<&str> = labels.iter().map(String::as_str).collect();
@@ -340,10 +340,10 @@ impl JsGraphHandle {
     pub async fn upsert_edges(
         &self,
         edge_type: String,
-        rows: Vec<serde_json::Value>,
+        #[napi(ts_arg_type = "Array<any>")] rows: Vec<crate::types::Properties>,
         options: Option<UpsertEdgesOptions>,
     ) -> Result<UpsertSummary> {
-        let rows = self::rows(&rows)?;
+        let rows = crate::types::Properties::rows(rows)?;
         let options = options.map_or_else(EdgeUpsertOptions::new, edge_options);
         self.blocking(move |graph| {
             js(graph.upsert_edges(&edge_type, rows, &options)).map(UpsertSummary::from)

@@ -8,22 +8,11 @@ use wasm_bindgen::prelude::*;
 
 use crate::{database_error, js_error};
 
-use crate::json_property;
+use crate::types;
 use grafeo_common::types::{NodeId, PropertyKey, Value};
 use grafeo_engine::database::{BatchEdge, EdgeUpsertOptions, UpsertSummary};
 
-use super::{Database, ImportLabel, json_to_node_id};
-
-/// An edge of `batchCreateEdges`.
-#[derive(serde::Deserialize)]
-struct EdgeInput {
-    src: serde_json::Value,
-    dst: serde_json::Value,
-    #[serde(rename = "type")]
-    edge_type: String,
-    #[serde(default)]
-    properties: Option<serde_json::Map<String, serde_json::Value>>,
-}
+use super::{Database, ImportLabel, value_to_node_id};
 
 /// Options of `upsertNodes`.
 #[derive(Default, serde::Deserialize)]
@@ -70,42 +59,45 @@ pub(crate) fn labels(value: JsValue) -> Result<Vec<String>, JsValue> {
     })
 }
 
-/// Rows of properties from an array of objects.
+/// Rows of properties from an array of objects, each converted from the
+/// JavaScript value as a property is; an error names the row.
 pub(crate) fn rows(value: JsValue) -> Result<Vec<HashMap<PropertyKey, Value>>, JsValue> {
-    let rows: Vec<serde_json::Map<String, serde_json::Value>> =
-        serde_wasm_bindgen::from_value(value)
-            .map_err(|e| invalid("rows must be an array of objects", e))?;
-    rows.iter()
+    let rows = types::js_rows(&value).map_err(|error| js_error(&error))?;
+    Ok(rows
+        .into_iter()
         .map(|row| {
-            row.iter()
-                .map(|(name, value)| {
-                    Ok((PropertyKey::new(name.as_str()), json_property(name, value)?))
-                })
+            row.into_iter()
+                .map(|(name, value)| (PropertyKey::new(name), value))
                 .collect()
         })
-        .collect()
+        .collect())
 }
 
-/// The engine edges of `batchCreateEdges`.
+/// The engine edges of `batchCreateEdges`: each `{src, dst, type,
+/// properties}` read from the JavaScript value, as a property is.
 pub(crate) fn edges(value: JsValue) -> Result<Vec<BatchEdge>, JsValue> {
-    let edges: Vec<EdgeInput> = serde_wasm_bindgen::from_value(value)
-        .map_err(|e| invalid("edges must be an array of {src, dst, type, properties}", e))?;
-    edges
-        .into_iter()
+    if !Array::is_array(&value) {
+        return Err(js_error(
+            "edges must be an array of {src, dst, type, properties}",
+        ));
+    }
+    Array::from(&value)
+        .iter()
         .enumerate()
         .map(|(i, edge)| {
-            let src: NodeId = json_to_node_id(&edge.src, "src", i)?;
-            let dst: NodeId = json_to_node_id(&edge.dst, "dst", i)?;
-            let mut batch_edge = BatchEdge::new(src, dst, edge.edge_type);
-            if let Some(properties) = edge.properties {
-                batch_edge = batch_edge.with_properties(
-                    properties
-                        .iter()
-                        .map(|(name, value)| Ok((name.as_str(), json_property(name, value)?)))
-                        .collect::<Result<Vec<_>, JsValue>>()?,
-                );
-            }
-            Ok(batch_edge)
+            let endpoint = |name: &str| -> Result<NodeId, JsValue> {
+                let value = types::js_to_value(&types::js_field(&edge, name))
+                    .map_err(|error| js_error(&format!("edges[{i}].{name}: {error}")))?;
+                value_to_node_id(&value, name, i)
+            };
+            let src = endpoint("src")?;
+            let dst = endpoint("dst")?;
+            let edge_type = types::js_field(&edge, "type")
+                .as_string()
+                .ok_or_else(|| js_error(&format!("edges[{i}].type must be a string")))?;
+            let properties = types::js_properties(&types::js_field(&edge, "properties"))
+                .map_err(|error| js_error(&format!("edges[{i}]: {error}")))?;
+            Ok(BatchEdge::new(src, dst, edge_type).with_properties(properties))
         })
         .collect()
 }

@@ -1687,7 +1687,9 @@ this is not json\n";
     use std::path::Path;
     use std::sync::Arc;
 
-    use grafeo_common::types::{Date, Duration, PropertyKey, Time, Timestamp, ZonedDatetime};
+    use grafeo_common::types::{
+        Date, Decimal, Duration, PropertyKey, Time, Timestamp, ZonedDatetime,
+    };
     use grafeo_engine::GrafeoDB;
 
     /// Runs `grafeo data load input db_path`.
@@ -1846,7 +1848,61 @@ this is not json\n";
             ),
             ("big", Value::Int64(i64::MAX)),
             ("small", Value::Int64(i64::MIN)),
+            ("price", decimal("1.50")),
+            ("wide", decimal("18446744073709551616")),
+            ("widest", decimal(&format!("-{}", "9".repeat(38)))),
         ]
+    }
+
+    fn decimal(text: &str) -> Value {
+        Value::Decimal(Decimal::parse(text).expect("a decimal"))
+    }
+
+    /// Plain JSON integers past 64 bits load as exact decimals, and a dump of
+    /// that database loads back to the same values: a dump writes a DECIMAL
+    /// tagged, with its text and scale, and the load reads the tag.
+    #[test]
+    fn wide_integers_survive_a_load_and_a_dump() {
+        let temp = TempDir::new().unwrap();
+        let input = temp.path().join("input.jsonl");
+        let first = temp.path().join("first.grafeo");
+        let file = temp.path().join("dump.jsonl");
+        let second = temp.path().join("second.grafeo");
+        let widest = "9".repeat(38);
+        std::fs::write(
+            &input,
+            format!(
+                r#"{{"type":"node","id":1,"labels":["N"],"properties":{{"wide":18446744073709551616,"widest":-{widest},"fits":9223372036854775807,"list":[3,9223372036854775808]}}}}"#
+            ),
+        )
+        .unwrap();
+        load(&input, &first).expect("load the plain JSON");
+        let expected = contents_at(&first);
+        let property = |name: &str| {
+            expected.0[0]
+                .1
+                .iter()
+                .find(|(key, _)| key == name)
+                .map(|(_, value)| value.clone())
+        };
+        assert_eq!(property("wide"), Some(decimal("18446744073709551616")));
+        assert_eq!(property("widest"), Some(decimal(&format!("-{widest}"))));
+        assert_eq!(property("fits"), Some(Value::Int64(i64::MAX)));
+        assert_eq!(
+            property("list"),
+            Some(Value::List(
+                vec![Value::Int64(3), decimal("9223372036854775808")].into()
+            ))
+        );
+
+        dump(&first, &file);
+        let text = std::fs::read_to_string(&file).unwrap();
+        assert!(
+            text.contains(r#""wide":{"Decimal":"18446744073709551616"}"#),
+            "{text}"
+        );
+        load(&file, &second).expect("load the dump");
+        assert_eq!(contents_at(&second), expected);
     }
 
     /// Builds the source graph of the round trips at `path`. Its IDs do not

@@ -37,7 +37,6 @@ use std::rc::Rc;
 use js_sys::Array;
 use wasm_bindgen::prelude::*;
 
-use grafeo_bindings_common::json::json_to_value;
 use grafeo_common::types::{PropertyKey, Value};
 use grafeo_engine::GrafeoDB;
 use grafeo_engine::session::Session;
@@ -627,22 +626,8 @@ impl Database {
         k: usize,
         options: Option<JsValue>,
     ) -> Result<JsValue, JsValue> {
-        let opts: SearchFilterOptions = match options {
-            Some(options) if !options.is_undefined() && !options.is_null() => {
-                serde_wasm_bindgen::from_value(options)
-                    .map_err(|e| JsError::new(&format!("Invalid options: {e}")))?
-            }
-            _ => SearchFilterOptions::default(),
-        };
-        let filters = opts
-            .filters
-            .as_ref()
-            .map(|f| {
-                f.iter()
-                    .map(|(k, v)| Ok((k.clone(), json_property(k, v)?)))
-                    .collect::<Result<HashMap<String, Value>, JsValue>>()
-            })
-            .transpose()?;
+        let raw_options = options.unwrap_or(JsValue::UNDEFINED);
+        let filters = search_filters(&raw_options)?;
         let results = self
             .db()
             .text_search(label, property, query, k, filters.as_ref())
@@ -695,22 +680,8 @@ impl Database {
         k: usize,
         options: Option<JsValue>,
     ) -> Result<JsValue, JsValue> {
-        let opts: SearchFilterOptions = match options {
-            Some(options) if !options.is_undefined() && !options.is_null() => {
-                serde_wasm_bindgen::from_value(options)
-                    .map_err(|e| JsError::new(&format!("Invalid options: {e}")))?
-            }
-            _ => SearchFilterOptions::default(),
-        };
-        let filters = opts
-            .filters
-            .as_ref()
-            .map(|f| {
-                f.iter()
-                    .map(|(k, v)| Ok((k.clone(), json_property(k, v)?)))
-                    .collect::<Result<HashMap<String, Value>, JsValue>>()
-            })
-            .transpose()?;
+        let raw_options = options.unwrap_or(JsValue::UNDEFINED);
+        let filters = search_filters(&raw_options)?;
 
         let results = self
             .db()
@@ -845,6 +816,7 @@ impl Database {
         k: usize,
         options: JsValue,
     ) -> Result<JsValue, JsValue> {
+        let raw_options = options.clone();
         let opts: VectorSearchOptions = if options.is_undefined() || options.is_null() {
             VectorSearchOptions::default()
         } else {
@@ -852,15 +824,7 @@ impl Database {
                 .map_err(|e| JsError::new(&format!("Invalid options: {e}")))?
         };
 
-        let filters = opts
-            .filters
-            .as_ref()
-            .map(|f| {
-                f.iter()
-                    .map(|(k, v)| Ok((k.clone(), json_property(k, v)?)))
-                    .collect::<Result<HashMap<String, Value>, JsValue>>()
-            })
-            .transpose()?;
+        let filters = search_filters(&raw_options)?;
 
         let results = self
             .db()
@@ -897,22 +861,14 @@ impl Database {
         let queries: Vec<Vec<f32>> = serde_wasm_bindgen::from_value(queries).map_err(|e| {
             JsError::new(&format!("queries must be an array of number arrays: {e}"))
         })?;
+        let raw_options = options.clone();
         let options: BatchSearchOptions = if options.is_undefined() || options.is_null() {
             BatchSearchOptions::default()
         } else {
             serde_wasm_bindgen::from_value(options)
                 .map_err(|e| JsError::new(&format!("Invalid options: {e}")))?
         };
-        let filters = options
-            .filters
-            .as_ref()
-            .map(|filters| {
-                filters
-                    .iter()
-                    .map(|(name, value)| Ok((name.clone(), json_property(name, value)?)))
-                    .collect::<Result<HashMap<String, Value>, JsValue>>()
-            })
-            .transpose()?;
+        let filters = search_filters(&raw_options)?;
         let results = self
             .db()
             .batch_vector_search(label, property, &queries, k, options.ef, filters.as_ref())
@@ -948,6 +904,7 @@ impl Database {
         k: usize,
         options: JsValue,
     ) -> Result<JsValue, JsValue> {
+        let raw_options = options.clone();
         let opts: MmrSearchOptions = if options.is_undefined() || options.is_null() {
             MmrSearchOptions::default()
         } else {
@@ -955,15 +912,7 @@ impl Database {
                 .map_err(|e| JsError::new(&format!("Invalid options: {e}")))?
         };
 
-        let filters = opts
-            .filters
-            .as_ref()
-            .map(|f| {
-                f.iter()
-                    .map(|(k, v)| Ok((k.clone(), json_property(k, v)?)))
-                    .collect::<Result<HashMap<String, Value>, JsValue>>()
-            })
-            .transpose()?;
+        let filters = search_filters(&raw_options)?;
 
         let results = self
             .db()
@@ -1212,8 +1161,30 @@ impl Database {
     /// The import is one transaction: after an error nothing of it is kept.
     #[wasm_bindgen(js_name = "importLpg")]
     pub fn import_lpg(&self, data: JsValue) -> Result<JsValue, JsValue> {
-        let import: LpgImport = serde_wasm_bindgen::from_value(data)
+        let import: LpgImport = serde_wasm_bindgen::from_value(data.clone())
             .map_err(|e| JsError::new(&format!("Invalid LPG data: {e}")))?;
+        // The properties straight from the JavaScript value, as a property is
+        // (through JSON a BigInt past u64 would not convert).
+        let array = |key: &str| {
+            let items = types::js_field(&data, key);
+            if Array::is_array(&items) {
+                Array::from(&items)
+            } else {
+                Array::new()
+            }
+        };
+        let raw_nodes = array("nodes");
+        let raw_edges = array("edges");
+        let properties = |items: &Array, i: u32, what: &str| {
+            types::js_properties(&types::js_field(&items.get(i), "properties"))
+                .map(|entries| {
+                    entries
+                        .into_iter()
+                        .map(|(key, value)| (PropertyKey::new(key), value))
+                        .collect::<Vec<_>>()
+                })
+                .map_err(|error| js_error(&format!("{what}[{i}]: {error}")))
+        };
 
         // One transaction: a node or edge that fails, or an edge index out of
         // bounds, rolls back everything before it (the session's drop rolls
@@ -1223,18 +1194,9 @@ impl Database {
 
         // Phase 1: create all nodes, collecting their IDs
         let mut node_ids = Vec::with_capacity(import.nodes.len());
-        for node in &import.nodes {
+        for (i, node) in (0..).zip(&import.nodes) {
             let labels: Vec<&str> = node.labels.iter().map(String::as_str).collect();
-            let props: Vec<(PropertyKey, Value)> = node
-                .properties
-                .as_ref()
-                .map(|p| {
-                    p.iter()
-                        .map(|(k, v)| Ok((PropertyKey::new(k.as_str()), json_property(k, v)?)))
-                        .collect::<Result<_, JsValue>>()
-                })
-                .transpose()?
-                .unwrap_or_default();
+            let props = properties(&raw_nodes, i, "nodes")?;
             let id = session
                 .create_node_with_props(&labels, props)
                 .map_err(database_error)?;
@@ -1243,7 +1205,7 @@ impl Database {
 
         // Phase 2: create edges using index-relative source/target
         let mut edge_count: u32 = 0;
-        for (i, edge) in import.edges.iter().enumerate() {
+        for (i, edge) in (0..).zip(&import.edges) {
             let src = *node_ids.get(edge.source).ok_or_else(|| {
                 JsError::new(&format!(
                     "edges[{i}].source index {} out of bounds (0..{})",
@@ -1258,16 +1220,7 @@ impl Database {
                     node_ids.len()
                 ))
             })?;
-            let props: Vec<(PropertyKey, Value)> = edge
-                .properties
-                .as_ref()
-                .map(|p| {
-                    p.iter()
-                        .map(|(k, v)| Ok((PropertyKey::new(k.as_str()), json_property(k, v)?)))
-                        .collect::<Result<_, JsValue>>()
-                })
-                .transpose()?
-                .unwrap_or_default();
+            let props = properties(&raw_edges, i, "edges")?;
             session
                 .create_edge_with_props(src, dst, &edge.edge_type, props)
                 .map_err(database_error)?;
@@ -1462,9 +1415,8 @@ impl Database {
     pub fn import_rows(&self, rows: JsValue, options: JsValue) -> Result<u32, JsValue> {
         let opts: ImportRowsOptions = serde_wasm_bindgen::from_value(options)
             .map_err(|e| JsError::new(&format!("Invalid options: {e}")))?;
-        let data: Vec<serde_json::Map<String, serde_json::Value>> =
-            serde_wasm_bindgen::from_value(rows)
-                .map_err(|e| JsError::new(&format!("rows must be an array of objects: {e}")))?;
+        // Each row straight from the JavaScript value, as a property is.
+        let data = types::js_rows(&rows).map_err(|error| js_error(&error))?;
 
         // One transaction: a row that fails rolls back every row before it
         // (the session's drop rolls back).
@@ -1477,12 +1429,12 @@ impl Database {
                 let labels = opts.labels()?;
                 let label_refs: Vec<&str> = labels.iter().map(String::as_str).collect();
 
-                for row in &data {
+                for row in data {
                     let props: Vec<(PropertyKey, Value)> = row
-                        .iter()
+                        .into_iter()
                         .filter(|(_, v)| !v.is_null())
-                        .map(|(k, v)| Ok((PropertyKey::new(k.as_str()), json_property(k, v)?)))
-                        .collect::<Result<_, JsValue>>()?;
+                        .map(|(k, v)| (PropertyKey::new(k), v))
+                        .collect();
                     session
                         .create_node_with_props(&label_refs, props)
                         .map_err(|e| JsError::new(&format!("rows[{count}]: {e}")))?;
@@ -1497,24 +1449,23 @@ impl Database {
                 let source_col = opts.source.as_deref().unwrap_or("source");
                 let target_col = opts.target.as_deref().unwrap_or("target");
 
-                for (i, row) in data.iter().enumerate() {
-                    let src_val = row.get(source_col).ok_or_else(|| {
-                        JsError::new(&format!("rows[{i}]: missing '{source_col}' column"))
-                    })?;
-                    let dst_val = row.get(target_col).ok_or_else(|| {
-                        JsError::new(&format!("rows[{i}]: missing '{target_col}' column"))
-                    })?;
-
-                    let src_id = json_to_node_id(src_val, source_col, i)?;
-                    let dst_id = json_to_node_id(dst_val, target_col, i)?;
+                for (i, row) in data.into_iter().enumerate() {
+                    let column = |name: &str| {
+                        row.iter()
+                            .find(|(key, _)| key == name)
+                            .map(|(_, value)| value)
+                            .ok_or_else(|| {
+                                JsError::new(&format!("rows[{i}]: missing '{name}' column"))
+                            })
+                    };
+                    let src_id = value_to_node_id(column(source_col)?, source_col, i)?;
+                    let dst_id = value_to_node_id(column(target_col)?, target_col, i)?;
 
                     let props: Vec<(PropertyKey, Value)> = row
-                        .iter()
-                        .filter(|(k, v)| {
-                            k.as_str() != source_col && k.as_str() != target_col && !v.is_null()
-                        })
-                        .map(|(k, v)| Ok((PropertyKey::new(k.as_str()), json_property(k, v)?)))
-                        .collect::<Result<_, JsValue>>()?;
+                        .into_iter()
+                        .filter(|(k, v)| k != source_col && k != target_col && !v.is_null())
+                        .map(|(k, v)| (PropertyKey::new(k), v))
+                        .collect();
 
                     session
                         .create_edge_with_props(src_id, dst_id, edge_type, props)
@@ -1681,10 +1632,24 @@ impl Database {
     }
 }
 
-/// The value of a property read from JSON (see [`json_to_value`]); an
-/// error names the property.
-pub(crate) fn json_property(name: &str, value: &serde_json::Value) -> Result<Value, JsValue> {
-    json_to_value(value).map_err(|error| js_error(&format!("property '{name}': {error}")))
+/// The `filters` of a search's options, converted from the JavaScript value
+/// as a property is; none when the options or the filters are absent.
+#[cfg(any(
+    feature = "text-index",
+    feature = "hybrid-search",
+    feature = "vector-index"
+))]
+fn search_filters(options: &JsValue) -> Result<Option<HashMap<String, Value>>, JsValue> {
+    if options.is_undefined() || options.is_null() {
+        return Ok(None);
+    }
+    let filters = types::js_field(options, "filters");
+    if filters.is_undefined() || filters.is_null() {
+        return Ok(None);
+    }
+    types::js_properties(&filters)
+        .map(|entries| Some(entries.into_iter().collect()))
+        .map_err(|error| js_error(&format!("filters: {error}")))
 }
 
 /// A `PROFILE` operator as `{operator, detail, rows, calls, selfTimeMs, timeMs, children}`.
@@ -1829,7 +1794,6 @@ struct VectorIndexOptions {
 #[serde(rename_all = "camelCase")]
 struct VectorSearchOptions {
     ef: Option<usize>,
-    filters: Option<HashMap<String, serde_json::Value>>,
 }
 
 /// Options of `batchVectorSearch`.
@@ -1838,7 +1802,6 @@ struct VectorSearchOptions {
 #[serde(rename_all = "camelCase")]
 struct BatchSearchOptions {
     ef: Option<usize>,
-    filters: Option<HashMap<String, serde_json::Value>>,
 }
 
 /// Options for `getNodeEdges()`.
@@ -1891,15 +1854,6 @@ struct MmrSearchOptions {
     fetch_k: Option<usize>,
     lambda: Option<f32>,
     ef: Option<usize>,
-    filters: Option<HashMap<String, serde_json::Value>>,
-}
-
-/// Options for `textSearch()` and `hybridSearch()`.
-#[cfg(any(feature = "text-index", feature = "hybrid-search"))]
-#[derive(Default, serde::Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct SearchFilterOptions {
-    filters: Option<HashMap<String, serde_json::Value>>,
 }
 
 /// Options for `createTextIndex()`.
@@ -1974,32 +1928,32 @@ impl ImportRowsOptions {
     }
 }
 
-/// Extracts a `NodeId` from a JSON number value.
-fn json_to_node_id(
-    val: &serde_json::Value,
+/// A node ID from a row's column: a non-negative whole number, an `Int64`
+/// or a whole `Float64` up to 2^53.
+pub(crate) fn value_to_node_id(
+    value: &Value,
     col_name: &str,
     row_idx: usize,
 ) -> Result<grafeo_common::types::NodeId, JsValue> {
-    let n = val
-        .as_u64()
-        .or_else(|| {
-            val.as_f64().and_then(|f| {
-                // reason: Reject negative, NaN, Infinity, fractional, and out-of-range values
-                if (0.0..=9_007_199_254_740_991.0).contains(&f) && f.fract() == 0.0 {
-                    // reason: range check above rejects negative values
-                    #[allow(clippy::cast_sign_loss)]
-                    Some(f as u64)
-                } else {
-                    None
-                }
-            })
-        })
-        .ok_or_else(|| {
-            JsError::new(&format!(
-                "rows[{row_idx}].{col_name}: expected a non-negative integer, got {val}"
-            ))
-        })?;
-    Ok(grafeo_common::types::NodeId::new(n))
+    let id = match value {
+        Value::Int64(n) => u64::try_from(*n).ok(),
+        Value::Float64(f) if (0.0..=9_007_199_254_740_991.0).contains(f) && f.fract() == 0.0 =>
+        {
+            #[allow(
+                clippy::cast_possible_truncation,
+                clippy::cast_sign_loss,
+                reason = "the range check above keeps f whole and in [0, 2^53]"
+            )]
+            Some(*f as u64)
+        }
+        _ => None,
+    };
+    id.map(grafeo_common::types::NodeId::new).ok_or_else(|| {
+        JsError::new(&format!(
+            "rows[{row_idx}].{col_name}: expected a non-negative integer, got {value:?}"
+        ))
+        .into()
+    })
 }
 
 /// LPG batch import payload.
@@ -2014,8 +1968,6 @@ struct LpgImport {
 #[derive(serde::Deserialize)]
 struct LpgNodeSpec {
     labels: Vec<String>,
-    #[serde(default)]
-    properties: Option<serde_json::Map<String, serde_json::Value>>,
 }
 
 /// A single edge in an LPG import. `source` and `target` are zero-based
@@ -2026,8 +1978,6 @@ struct LpgEdgeSpec {
     target: usize,
     #[serde(rename = "type")]
     edge_type: String,
-    #[serde(default)]
-    properties: Option<serde_json::Map<String, serde_json::Value>>,
 }
 
 /// RDF batch import payload.
@@ -2081,6 +2031,7 @@ fn string_to_rdf_term(s: &str) -> grafeo_core::graph::rdf::Term {
 
 #[cfg(test)]
 mod tests {
+    use grafeo_bindings_common::json::json_to_value;
     use serde_json::json;
 
     use super::*;
@@ -2124,9 +2075,8 @@ mod tests {
                 "filters": { "category": "science" }
             }))
             .unwrap();
+            // The filters are read from the JavaScript value (search_filters).
             assert_eq!(opts.ef, Some(200));
-            assert!(opts.filters.is_some());
-            assert_eq!(opts.filters.unwrap()["category"], json!("science"));
         }
 
         #[test]
@@ -2136,7 +2086,6 @@ mod tests {
             assert_eq!(opts.fetch_k, Some(20));
             assert_eq!(opts.lambda, Some(0.7));
             assert!(opts.ef.is_none());
-            assert!(opts.filters.is_none());
         }
 
         // vector_results_to_js requires a JS runtime, tested via wasm-bindgen-test
@@ -2273,7 +2222,7 @@ mod tests {
             "nodes": [{ "labels": ["Tag"] }]
         });
         let import: LpgImport = serde_json::from_value(input).unwrap();
-        assert!(import.nodes[0].properties.is_none());
+        assert_eq!(import.nodes[0].labels, vec!["Tag"]);
     }
 
     #[test]
@@ -2286,32 +2235,6 @@ mod tests {
             import.nodes[0].labels,
             vec!["Person", "Employee", "Developer"]
         );
-    }
-
-    #[test]
-    fn lpg_import_mixed_property_types() {
-        let input = json!({
-            "nodes": [{
-                "labels": ["Thing"],
-                "properties": {
-                    "name": "test",
-                    "count": 42,
-                    "ratio": 1.23,
-                    "active": true,
-                    "tags": ["a", "b"],
-                    "meta": null
-                }
-            }]
-        });
-        let import: LpgImport = serde_json::from_value(input).unwrap();
-        let props = import.nodes[0].properties.as_ref().unwrap();
-        assert_eq!(props.len(), 6);
-        assert_eq!(props["name"], json!("test"));
-        assert_eq!(props["count"], json!(42));
-        assert_eq!(props["ratio"], json!(1.23));
-        assert_eq!(props["active"], json!(true));
-        assert_eq!(props["tags"], json!(["a", "b"]));
-        assert!(props["meta"].is_null());
     }
 
     #[test]
@@ -2332,7 +2255,7 @@ mod tests {
             "edges": [{ "source": 0, "target": 1, "type": "LINKED" }]
         });
         let import: LpgImport = serde_json::from_value(input).unwrap();
-        assert!(import.edges[0].properties.is_none());
+        assert_eq!(import.edges[0].edge_type, "LINKED");
     }
 
     #[test]
@@ -2443,25 +2366,17 @@ mod tests {
     }
 
     #[test]
-    fn json_to_node_id_integer() {
-        let val = json!(42);
-        let id = json_to_node_id(&val, "source", 0).unwrap();
+    fn value_to_node_id_integer() {
+        let val = Value::Int64(42);
+        let id = value_to_node_id(&val, "source", 0).unwrap();
         assert_eq!(id, grafeo_common::types::NodeId::new(42));
     }
 
     #[test]
-    fn json_to_node_id_float_truncates() {
-        let val = json!(7.0);
-        let id = json_to_node_id(&val, "target", 0).unwrap();
+    fn value_to_node_id_whole_float() {
+        let val = Value::Float64(7.0);
+        let id = value_to_node_id(&val, "target", 0).unwrap();
         assert_eq!(id, grafeo_common::types::NodeId::new(7));
-    }
-
-    #[test]
-    fn json_to_node_id_string_is_not_u64() {
-        let val = json!("not_a_number");
-        // as_u64 and as_f64 both return None for strings
-        assert!(val.as_u64().is_none());
-        assert!(val.as_f64().is_none());
     }
 
     // === Engine-level importRows tests ===
@@ -2515,8 +2430,10 @@ mod tests {
         .unwrap();
 
         for row in &rows {
-            let src = json_to_node_id(&row["source"], "source", 0).unwrap();
-            let dst = json_to_node_id(&row["target"], "target", 0).unwrap();
+            let src =
+                value_to_node_id(&json_to_value(&row["source"]).unwrap(), "source", 0).unwrap();
+            let dst =
+                value_to_node_id(&json_to_value(&row["target"]).unwrap(), "target", 0).unwrap();
             let props: Vec<(PropertyKey, Value)> = row
                 .iter()
                 .filter(|(k, v)| k.as_str() != "source" && k.as_str() != "target" && !v.is_null())
@@ -2577,10 +2494,24 @@ mod tests {
 
     // === Engine-level LPG batch tests ===
 
+    /// The properties of a node or edge of an import's JSON, as the browser
+    /// binding reads them from the JavaScript value.
+    fn json_properties(item: &serde_json::Value) -> Vec<(PropertyKey, Value)> {
+        item.get("properties")
+            .and_then(serde_json::Value::as_object)
+            .map(|properties| {
+                properties
+                    .iter()
+                    .map(|(k, v)| (PropertyKey::new(k.as_str()), json_to_value(v).unwrap()))
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
     #[test]
     fn import_lpg_creates_nodes_and_edges() {
         let db = GrafeoDB::new_in_memory();
-        let input: LpgImport = serde_json::from_value(json!({
+        let raw = json!({
             "nodes": [
                 { "labels": ["Person"], "properties": { "name": "Alix", "age": 30 } },
                 { "labels": ["Person"], "properties": { "name": "Gus", "age": 25 } },
@@ -2590,21 +2521,13 @@ mod tests {
                 { "source": 0, "target": 1, "type": "KNOWS" },
                 { "source": 0, "target": 2, "type": "LIVES_IN" }
             ]
-        }))
-        .unwrap();
+        });
+        let input: LpgImport = serde_json::from_value(raw.clone()).unwrap();
 
         let mut node_ids = Vec::with_capacity(input.nodes.len());
-        for node in &input.nodes {
+        for (node, raw_node) in input.nodes.iter().zip(raw["nodes"].as_array().unwrap()) {
             let labels: Vec<&str> = node.labels.iter().map(String::as_str).collect();
-            let props: Vec<(PropertyKey, Value)> = node
-                .properties
-                .as_ref()
-                .map(|p| {
-                    p.iter()
-                        .map(|(k, v)| (PropertyKey::new(k.as_str()), json_to_value(v).unwrap()))
-                        .collect()
-                })
-                .unwrap_or_default();
+            let props = json_properties(raw_node);
             let id = db.create_node_with_props(&labels, props).unwrap();
             node_ids.push(id);
         }
@@ -2696,19 +2619,12 @@ mod tests {
                 "properties": { "index": i }
             }));
         }
-        let input: LpgImport = serde_json::from_value(json!({ "nodes": nodes })).unwrap();
+        let raw = json!({ "nodes": nodes });
+        let input: LpgImport = serde_json::from_value(raw.clone()).unwrap();
 
-        for node in &input.nodes {
+        for (node, raw_node) in input.nodes.iter().zip(raw["nodes"].as_array().unwrap()) {
             let labels: Vec<&str> = node.labels.iter().map(String::as_str).collect();
-            let props: Vec<(PropertyKey, Value)> = node
-                .properties
-                .as_ref()
-                .map(|p| {
-                    p.iter()
-                        .map(|(k, v)| (PropertyKey::new(k.as_str()), json_to_value(v).unwrap()))
-                        .collect()
-                })
-                .unwrap_or_default();
+            let props = json_properties(raw_node);
             db.create_node_with_props(&labels, props).unwrap();
         }
 

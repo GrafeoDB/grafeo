@@ -13,12 +13,14 @@
 //! but no edge can name it. An edge's `id` is not read.
 //!
 //! A property value is plain JSON or tagged with its type. Plain JSON reads
-//! as a boolean, an `INT64` (an integer), a `FLOAT64` (a number with a
-//! fraction or an exponent), a string, a list or a map; a null is no
+//! as a boolean, an `INT64` (an integer that fits 64 bits), a `FLOAT64` (a
+//! number with a fraction or an exponent), a string, a list or a map; a null is no
 //! property. A tagged value is an object with one key, the name of the type
 //! as [`Value`]'s variants are named (`{"Int64": 3}`, `{"Date": 19000}`), and
 //! is the form a dump writes, since plain JSON has no dates, durations,
-//! bytes or vectors. Inside a tagged list, map or path every value is tagged
+//! bytes or vectors. A `DECIMAL` is tagged with its text and scale
+//! (`{"Decimal": "1.50"}`); a plain JSON integer past 64 bits reads as one,
+//! exact up to 38 digits. Inside a tagged list, map or path every value is tagged
 //! too, and a null is `"Null"`. JSON has no NaN or infinities: a dump writes
 //! them as the strings `"NaN"`, `"Infinity"` and `"-Infinity"` under their
 //! tag. A map whose only key is the name of a type reads as that type: write
@@ -146,7 +148,7 @@ fn read_properties(properties: Option<Json>) -> Result<Vec<(PropertyKey, Value)>
 
 /// The names of [`Value`]'s variants that tag a value (the names serde gives
 /// them). A null is not among them: tagged, it is the string `"Null"`.
-const TAGS: [&str; 16] = [
+const TAGS: [&str; 17] = [
     "Bool",
     "Int64",
     "Float64",
@@ -163,6 +165,7 @@ const TAGS: [&str; 16] = [
     "Path",
     "GCounter",
     "OnCounter",
+    "Decimal",
 ];
 
 /// Splits a tagged value into its tag and payload, or gives the object back
@@ -387,7 +390,8 @@ pub(super) fn write_value(value: &Value) -> Result<Json, String> {
         | Value::Duration(_)
         | Value::ZonedDatetime(_)
         | Value::GCounter(_)
-        | Value::OnCounter { .. } => {
+        | Value::OnCounter { .. }
+        | Value::Decimal(_) => {
             serde_json::to_value(value).map_err(|e| format!("cannot write the value: {e}"))?
         }
         other => {
@@ -526,6 +530,15 @@ mod tests {
                 pos: counts(&[("paris", 88)]),
                 neg: counts(&[("prague", 3)]),
             },
+            Value::Decimal(Decimal::parse("1.50").expect("a decimal")),
+            Value::Decimal(Decimal::parse("18446744073709551616").expect("a decimal")),
+            list(vec![
+                Value::Decimal(Decimal::parse("-0.001").expect("a decimal")),
+                map(vec![(
+                    "d",
+                    Value::Decimal(Decimal::parse(&"9".repeat(38)).expect("a decimal")),
+                )]),
+            ]),
         ]
     }
 

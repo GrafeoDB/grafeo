@@ -139,3 +139,67 @@ describe('a parameter', () => {
     await expect(db.execute('RETURN 1', 5)).rejects.toThrow(/params must be an object/)
   })
 })
+
+// Batch, upsert and import rows, edge properties and search filters convert
+// from the JavaScript value as createNode does (they used to go through JSON,
+// which made a BigInt past u64 a string and 5000000000 a float).
+describe('rows, edge properties and filters', () => {
+  const kinds = async (db, query) =>
+    (await db.execute(query)).toArray().map((row) => [row.int, row.decimal])
+
+  it('batchCreateNodesWithProps and batchCreateEdges follow the rule', async () => {
+    const db = GrafeoDB.create()
+    const [a, b] = await db.batchCreateNodesWithProps('N', [{ v: 2n ** 64n }, { v: 5000000000 }])
+    await db.batchCreateEdges([{ src: a, dst: b, type: 'R', properties: { w: 10n ** 38n - 1n } }])
+    expect(
+      await kinds(db, 'MATCH (n:N) RETURN n.v IS TYPED INT64 AS int, n.v IS TYPED DECIMAL AS decimal ORDER BY n.v'),
+    ).toEqual([
+      [true, false],
+      [false, true],
+    ])
+    expect((await db.execute('MATCH ()-[r:R]->() RETURN r.w AS w')).toArray()).toEqual([
+      { w: { $decimal: String(10n ** 38n - 1n) } },
+    ])
+  })
+
+  it('upsert rows follow the rule, also through a graph handle', async () => {
+    const db = GrafeoDB.create()
+    await db.upsertNodes(['K'], [{ id: 2n ** 64n, n: 5000000000 }])
+    await db.upsertNodes(['K'], [{ id: 2n ** 64n, n: 7 }])
+    expect((await db.execute('MATCH (k:K) RETURN k.id AS id, k.n AS n')).toArray()).toEqual([
+      { id: { $decimal: String(2n ** 64n) }, n: 7 },
+    ])
+    await db.execute('CREATE GRAPH g')
+    const graph = db.graph('g')
+    await graph.batchCreateNodesWithProps('N', [{ v: 2n ** 64n }])
+    await graph.upsertNodes(['K'], [{ id: 2n ** 63n }])
+    const rows = (
+      await graph.execute('MATCH (n) RETURN coalesce(n.v, n.id) IS TYPED DECIMAL AS decimal')
+    ).toArray()
+    expect(rows).toEqual([{ decimal: true }, { decimal: true }])
+  })
+
+  it('a row past 38 digits is an error naming the row and the property, and nothing is written', async () => {
+    const db = GrafeoDB.create()
+    const pattern = new RegExp(String.raw`rows\[1\]: property 'v'.*` + `${10n ** 38n}.*38 digits`)
+    await expect(db.batchCreateNodesWithProps('N', [{ v: 1 }, { v: 10n ** 38n }])).rejects.toThrow(pattern)
+    await expect(db.upsertNodes(['N'], [{ id: 1 }, { id: 2, v: 10n ** 38n }])).rejects.toThrow(pattern)
+    await expect(db.batchCreateNodesWithProps('N', [{ v: 1 }, 5])).rejects.toThrow(
+      /rows\[1\]: properties must be an object/,
+    )
+    expect(db.nodeCount()).toBe(0)
+  })
+
+  it('a search filter follows the rule', async () => {
+    const db = GrafeoDB.create()
+    await db.execute(
+      "INSERT (:Doc {body: 'graph canals', v: 1}), (:Doc {body: 'graph canals', v: 5000000000})",
+    )
+    await db.batchCreateNodesWithProps('Doc', [{ body: 'graph canals', v: 2n ** 64n }])
+    await db.createTextIndex('Doc', 'body')
+    for (const v of [5000000000, 2n ** 64n]) {
+      const hits = await db.textSearch('Doc', 'body', 'canals', 10, { v })
+      expect(hits, String(v)).toHaveLength(1)
+    }
+  })
+})

@@ -67,6 +67,17 @@ fn format_bytes(bytes: u64) -> String {
     }
 }
 
+/// The node of the memory `fact_{i}`.
+fn fact(db: &GrafeoDB, i: u64) -> grafeo_common::types::NodeId {
+    let found = db
+        .execute(&format!(
+            "MATCH (m:Memory {{text: 'fact_{i}'}}) RETURN id(m)"
+        ))
+        .unwrap();
+    let id = found.rows()[0][0].as_int64().expect("an id");
+    grafeo_common::types::NodeId::new(u64::try_from(id).unwrap())
+}
+
 /// Entity labels used in agent-memory tests.
 const ENTITY_LABELS: &[&str] = &["Person", "Concept", "Event", "Document"];
 
@@ -133,18 +144,16 @@ fn test_incremental_growth_with_persistence() {
     while inserted < total_nodes as u64 {
         let db = GrafeoDB::open(&path).unwrap();
 
-        // Index metadata is persisted in snapshot v4 (single-file format),
-        // but WAL-based persistence requires manual recreation after reopen.
-        db.create_vector_index(
-            "Memory",
-            "embedding",
-            Some(384),
-            Some("cosine"),
-            None,
-            None,
-            None,
-        )
-        .expect("recreate vector index after reopen");
+        // The index is in the file: a reopen finds it without recreating it
+        // (#401), and fact_0's own vector finds fact_0 first.
+        let nearest = db
+            .vector_search("Memory", "embedding", &random_384d_vector(0), 1, None, None)
+            .expect("search after the reopen");
+        assert_eq!(
+            nearest.first().map(|(node, _)| *node),
+            Some(fact(&db, 0)),
+            "the nearest to fact_0's vector after the reopen"
+        );
 
         let batch_end = (inserted + reopen_every as u64).min(total_nodes as u64);
         for i in inserted..batch_end {
@@ -175,9 +184,11 @@ fn test_incremental_growth_with_persistence() {
                 None,
             )
             .expect("search after batch");
-        assert!(
-            !results.is_empty(),
-            "search should return results after {inserted} inserts"
+        assert_eq!(results.len(), 5, "after {inserted} inserts");
+        assert_eq!(
+            results[0].0,
+            fact(&db, inserted - 1),
+            "the last vector finds its own node after {inserted} inserts"
         );
 
         db.close().unwrap();

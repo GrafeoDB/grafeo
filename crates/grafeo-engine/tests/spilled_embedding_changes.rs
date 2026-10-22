@@ -676,17 +676,15 @@ const CHILD_CASE: &str = "GRAFEO_SPILLED_CHANGES_CASE";
 const IDS_LINE: &str = "spilled-change-ids:";
 
 /// Child-process entry for [`changes_while_spilled_survive_a_crash`]; a
-/// no-op when run directly. Checkpoints the spilled database (a vector index
-/// created since the last checkpoint does not survive a crash yet, #401),
-/// makes the mixed change, maybe checkpoints and reloads, prints the ids and
-/// exits without closing.
+/// no-op when run directly. Makes the mixed change on the spilled database
+/// (its vector index only in the WAL, which keeps it, #401), maybe
+/// checkpoints and reloads, prints the ids and exits without closing.
 #[test]
 fn crash_child() {
     let (Some(path), Ok(case)) = (std::env::var_os(CHILD_PATH), std::env::var(CHILD_CASE)) else {
         return;
     };
     let (db, ids) = spilled(Path::new(&path), 8);
-    db.wal_checkpoint().unwrap();
     mixed_change(&db, &ids);
     if case != "changed" {
         db.wal_checkpoint().unwrap();

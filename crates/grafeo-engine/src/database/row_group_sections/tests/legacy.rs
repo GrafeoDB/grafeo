@@ -92,6 +92,7 @@ fn read_0_5(path: &Path) -> Result<Database> {
             &database.catalog,
             #[cfg(feature = "triple-store")]
             &database.rdf_store,
+            loaded.unbuilt_mut(),
             false,
         )?;
     } else {

@@ -58,6 +58,8 @@ pub use upsert::{EdgeUpsertOptions, UpsertSummary};
 mod import;
 #[cfg(feature = "lpg")]
 pub(crate) mod index;
+#[cfg(all(feature = "wal", feature = "lpg"))]
+mod legacy_index;
 #[cfg(all(feature = "lpg", feature = "grafeo-file", feature = "vector-index"))]
 mod legacy_spill;
 #[cfg(feature = "grafeo-file")]
@@ -633,6 +635,7 @@ impl GrafeoDB {
                                 &catalog,
                                 #[cfg(feature = "triple-store")]
                                 &rdf_store,
+                                loaded_sections.unbuilt_mut(),
                                 config.wal_salvage(),
                             )?;
                         } else {
@@ -1522,6 +1525,8 @@ impl GrafeoDB {
         // `None` means the default graph.
         let mut current_graph: Option<String> = None;
         let mut target_store: Arc<S> = Arc::clone(store);
+        // Defined once the whole WAL is replayed (#401).
+        let mut indexes = legacy_index::LegacyIndexes::default();
 
         for record in records {
             match record {
@@ -1632,9 +1637,7 @@ impl GrafeoDB {
                     schema_replay::apply_schema_record(catalog, record)?;
                 }
                 WalRecord::CreateIndex { .. } | WalRecord::DropIndex { .. } => {
-                    // Logged by 0.5.x without what the index needs (its graph,
-                    // its vector parameters): never replayed. This release logs
-                    // an index as a standalone change (`Standalone` below).
+                    indexes.record(record, current_graph.as_deref());
                 }
 
                 // --- RDF triple replay ---
@@ -1689,7 +1692,7 @@ impl GrafeoDB {
                 }
             }
         }
-        Ok(())
+        indexes.apply(wal, store, catalog, unbuilt)
     }
 
     // =========================================================================
@@ -1823,7 +1826,9 @@ impl GrafeoDB {
     /// every file is replayed even when an older version left checkpoint
     /// metadata, which would otherwise skip the files below its sequence
     /// (#419). A corrupt or torn record ends the replay of its file, and the
-    /// replay goes on with the next file (the recovery is best effort).
+    /// replay goes on with the next file (the recovery is best effort). The
+    /// vector and text indexes its index records define are left in
+    /// `unbuilt`, built from the data once the database is built (#401).
     ///
     /// No lock is taken: the directory's `LOCK` has no shared mode, so a
     /// read-only open reads the WAL while a 0.5.44 writer may still append to
@@ -1846,11 +1851,12 @@ impl GrafeoDB {
         store: &Arc<S>,
         catalog: &Arc<Catalog>,
         #[cfg(feature = "triple-store")] rdf_store: &Arc<RdfStore>,
+        unbuilt: &mut Vec<catalog_section::GraphIndexes>,
         salvage: bool,
     ) -> Result<()> {
         #[cfg(not(feature = "wal"))]
         {
-            let _ = (store, catalog, salvage);
+            let _ = (store, catalog, unbuilt, salvage);
             #[cfg(feature = "triple-store")]
             let _ = rdf_store;
             Err(Error::Query(
@@ -1876,9 +1882,7 @@ impl GrafeoDB {
                 #[cfg(feature = "triple-store")]
                 rdf_store,
                 &recovered?.records,
-                // A 0.5.x log puts no index of its own: its indexes are
-                // rebuilt from the data.
-                &mut Vec::new(),
+                unbuilt,
             )
         }
     }

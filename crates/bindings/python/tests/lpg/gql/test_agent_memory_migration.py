@@ -73,34 +73,83 @@ class TestPersistence:
             assert info2["node_count"] == 50, "nodes should survive close/reopen"
             db2.close()
 
-    def test_vector_index_after_reopen(self):
-        """Vectors persist, but index must be recreated after reopen."""
+    @staticmethod
+    def _fill_with_indexes(db):
+        """200 memories with a vector and a note, and both search indexes."""
+        cities = ["Amsterdam", "Berlin", "Paris", "Prague", "Barcelona"]
+        for i in range(200):
+            db.create_node(
+                ["Memory"],
+                {
+                    "embedding": random_384d_vector(i),
+                    "text": f"fact_{i}",
+                    "note": f"a trip to {cities[i % 5]}",
+                },
+            )
+        db.create_vector_index("Memory", "embedding", dimensions=384, metric="cosine")
+        db.create_text_index("Memory", "note")
+
+    @staticmethod
+    def _searches(db):
+        """The ids the vector search and the text search find."""
+        found = db.vector_search("Memory", "embedding", random_384d_vector(7), k=5)
+        nearest = [node for node, _ in found]
+        prague = sorted(node for node, _ in db.text_search("Memory", "note", "prague", k=100))
+        return nearest, prague
+
+    def test_search_indexes_survive_close_and_reopen(self):
+        """The vector and text indexes are in the file (#401): a reopen and a
+        read-only open find the same nodes without creating them again."""
         with tempfile.TemporaryDirectory() as tmpdir:
             db_path = str(Path(tmpdir) / "vectors.grafeo")
-
             db = GrafeoDB(path=db_path)
-            for i in range(20):
-                db.create_node(
-                    ["Memory"],
-                    {"embedding": random_384d_vector(i), "text": f"fact_{i}"},
-                )
-            db.create_vector_index("Memory", "embedding", dimensions=384, metric="cosine")
-
-            # Search works before close
-            results = db.vector_search("Memory", "embedding", random_384d_vector(0), k=5)
-            assert len(results) == 5
+            self._fill_with_indexes(db)
+            before = self._searches(db)
             db.close()
+            nearest, prague = before
+            assert len(nearest) == 5
+            assert len(prague) == 40
 
-            # Reopen: data persists; index metadata is in snapshot v4 format
-            # but WAL-based persistence requires manual recreation.
-            db2 = GrafeoDB.open(db_path)
-            assert db2.info()["node_count"] == 20
+            for open_db in (GrafeoDB.open, GrafeoDB.open_read_only):
+                db = open_db(db_path)
+                assert db.info()["node_count"] == 200
+                assert self._searches(db) == before, open_db.__name__
+                db.close()
 
-            # Recreate vector index after reopen
-            db2.create_vector_index("Memory", "embedding", dimensions=384, metric="cosine")
-            results2 = db2.vector_search("Memory", "embedding", random_384d_vector(0), k=5)
-            assert len(results2) == 5, "search works after reopen + index recreation"
-            db2.close()
+    def test_search_indexes_survive_a_process_that_exits_without_closing(self):
+        """A process that creates the indexes and exits without closing leaves
+        them in its WAL, which the reopen replays (#401)."""
+        import json
+        import subprocess
+        import sys
+        import textwrap
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = str(Path(tmpdir) / "crashed.grafeo")
+            child = textwrap.dedent(
+                """
+                import importlib.util, json, os, sys
+
+                spec = importlib.util.spec_from_file_location('memory_tests', sys.argv[2])
+                tests = importlib.util.module_from_spec(spec)
+                spec.loader.exec_module(tests)
+                db = tests.GrafeoDB(path=sys.argv[1])
+                tests.TestPersistence._fill_with_indexes(db)
+                print(json.dumps(tests.TestPersistence._searches(db)), flush=True)
+                os._exit(0)
+                """
+            )
+            run = subprocess.run(
+                [sys.executable, "-c", child, db_path, __file__],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            assert run.returncode == 0, run.stderr
+            before = tuple(json.loads(run.stdout.strip().splitlines()[-1]))
+            db = GrafeoDB.open(db_path)
+            assert self._searches(db) == before
+            db.close()
 
     def test_context_manager(self):
         """with-statement lifecycle works correctly."""

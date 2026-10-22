@@ -3,7 +3,7 @@
 //! uncommitted edges, nor reach a node deleted at the store level whose edges
 //! remain.
 
-#![cfg(all(feature = "algos", feature = "lpg"))]
+#![cfg(feature = "algos")]
 
 use std::collections::BTreeMap;
 
@@ -113,7 +113,7 @@ fn an_algorithm_does_not_read_another_transactions_uncommitted_writes() {
 }
 
 #[test]
-fn an_algorithm_skips_a_node_deleted_without_its_edges() {
+fn a_store_level_delete_keeps_a_node_that_has_edges() {
     let db = chain();
     let session = db.session();
     session
@@ -123,20 +123,18 @@ fn an_algorithm_skips_a_node_deleted_without_its_edges() {
         )
         .unwrap();
     let butch = id_of(&session, "Butch");
-    // The store-level delete leaves Butch's edges in place.
+    // The store refuses to delete a node that has edges, so no algorithm
+    // meets a node deleted without its edges (the store of 0.5.x left them
+    // in place).
     assert!(
-        db.store()
+        !db.store()
+            .unwrap()
             .delete_node(NodeId::new(u64::try_from(butch).unwrap()))
-    );
-
-    assert_eq!(
-        bfs_from_alix(&session),
-        expected(&[("Alix", 0), ("Gus", 1), ("Vincent", 2)])
     );
     let centrality = rows(
         &session,
         "CALL grafeo.betweenness_centrality() YIELD node_id, centrality \
          RETURN node_id, centrality ORDER BY node_id",
     );
-    assert_eq!(centrality.len(), 3, "only the three visible people");
+    assert_eq!(centrality.len(), 4, "Butch is still there");
 }

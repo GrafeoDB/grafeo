@@ -14,8 +14,6 @@
 //! both run with timings); silent fall-through under non-PROFILE mode is
 //! the regression class caught by the §2.9 e2e benchmark in `benches/topk_e2e.rs`.
 
-#![cfg(feature = "lpg")]
-
 use grafeo_common::types::{PropertyKey, Value};
 use grafeo_engine::GrafeoDB;
 
@@ -266,33 +264,49 @@ fn order_by_limit_node_return_yields_map() {
     let db = GrafeoDB::new_in_memory();
     let session = db.session();
     session
+        .execute("INSERT (:Article {title: 'A2', body: 'attention mechanisms'})")
+        .unwrap();
+    session
         .execute("INSERT (:Article {title: 'A1', body: 'rust database internals'})")
         .unwrap();
 
-    // Each variant must return Value::Map, not a raw integer NodeId.
-    let result = session.execute("MATCH (n:Article) RETURN n").unwrap();
-    assert!(result.rows()[0][0].as_map().is_some(), "bare RETURN n");
-
+    // Each form returns the first article by title as the node, not its id
+    // (#335), in GQL and Cypher.
+    for query in [
+        "MATCH (n:Article) RETURN n ORDER BY n.title LIMIT 1",
+        "MATCH (n:Article) RETURN n ORDER BY n.title LIMIT 50",
+        "MATCH (n:Article) RETURN n ORDER BY n.title",
+    ] {
+        for (language, result) in [
+            ("gql", session.execute(query)),
+            ("cypher", session.execute_cypher(query)),
+        ] {
+            let result = result.unwrap_or_else(|error| panic!("{language}: {query}: {error}"));
+            assert_article(&result.rows()[0][0], "A1", &format!("{language}: {query}"));
+        }
+    }
     let result = session
         .execute("MATCH (n:Article) RETURN n LIMIT 50")
         .unwrap();
-    assert!(result.rows()[0][0].as_map().is_some(), "RETURN n LIMIT 50");
+    assert_eq!(result.rows().len(), 2, "RETURN n LIMIT 50");
+}
 
-    let result = session
-        .execute("MATCH (n:Article) RETURN n ORDER BY n.title")
-        .unwrap();
-    assert!(
-        result.rows()[0][0].as_map().is_some(),
-        "RETURN n ORDER BY n.title"
+/// `value` is the record of the article titled `title`.
+fn assert_article(value: &Value, title: &str, context: &str) {
+    use grafeo_common::types::PropertyKey;
+
+    let map = value
+        .as_map()
+        .unwrap_or_else(|| panic!("{context}: a node record, got {value:?}"));
+    assert_eq!(
+        map.get(&PropertyKey::new("title")),
+        Some(&Value::from(title)),
+        "{context}"
     );
-
-    let result = session
-        .execute("MATCH (n:Article) RETURN n ORDER BY n.title LIMIT 50")
-        .unwrap();
-    assert!(
-        result.rows()[0][0].as_map().is_some(),
-        "RETURN n ORDER BY n.title LIMIT 50: col 0 = {:?}",
-        result.rows()[0][0]
+    assert_eq!(
+        map.get(&PropertyKey::new("_labels")),
+        Some(&Value::List(vec![Value::from("Article")].into())),
+        "{context}"
     );
 }
 
@@ -398,45 +412,124 @@ fn order_by_reduce_or_subquery_over_dropped_variable_sorts_correctly() {
 #[cfg(feature = "text-index")]
 #[test]
 fn order_by_limit_text_score_key_yields_map() {
-    // Issue #347: a function-call sort key (text_score).
+    // Issue #347: a function-call sort key (text_score), cut by a LIMIT,
+    // returns the node records, each with its own score.
+    use grafeo_common::types::PropertyKey;
     use std::collections::HashMap;
 
+    let session = two_articles();
+    let params = HashMap::from([("sub".to_string(), Value::from("database"))]);
+    let query = "MATCH (s:Article) RETURN s, text_score(s.body, $sub) AS score \
+                 ORDER BY text_score(s.body, $sub) DESC LIMIT 50";
+    let result = session.execute_with_params(query, params).unwrap();
+    let mut scores: Vec<(Value, Value)> = result
+        .rows()
+        .iter()
+        .map(|row| {
+            let title = row[0]
+                .as_map()
+                .unwrap_or_else(|| panic!("a node record, got {:?}", row[0]))
+                .get(&PropertyKey::new("title"))
+                .cloned()
+                .unwrap();
+            (title, row[1].clone())
+        })
+        .collect();
+    scores.sort_by_key(|(title, _)| title.as_str().map(str::to_string));
+    assert_eq!(scores.len(), 2);
+    assert_eq!(scores[0].0, Value::from("A1"));
+    assert!(
+        matches!(scores[0].1, Value::Float64(score) if score > 0.0),
+        "{scores:?}"
+    );
+    assert_eq!(scores[1], (Value::from("A2"), Value::Float64(0.0)));
+    for row in result.rows() {
+        let title = row[0]
+            .as_map()
+            .unwrap()
+            .get(&PropertyKey::new("title"))
+            .unwrap();
+        assert_article(&row[0], title.as_str().unwrap(), query);
+    }
+}
+
+/// The order by text_score of a query that returns the node (#347): the
+/// sort runs after `s` became a node record, whose `_id` names the node to
+/// score. It found no node id there, so every key was null and the rows kept
+/// their insertion order (the non-matching A2 first), without a LIMIT and
+/// with one. Also with the score in an expression, and with the score only
+/// in the ORDER BY, in GQL and Cypher.
+#[test]
+fn order_by_text_score_sorts_the_returned_nodes() {
+    for language in ["gql", "cypher"] {
+        for (returned, key) in [
+            (
+                "s, text_score(s.body, $sub) AS score",
+                "text_score(s.body, $sub)",
+            ),
+            (
+                "s, text_score(s.body, $sub) * 2 AS score",
+                "text_score(s.body, $sub) * 2",
+            ),
+            ("s", "text_score(s.body, $sub)"),
+        ] {
+            assert_text_score_order(
+                language,
+                &format!("MATCH (s:Article) RETURN {returned} ORDER BY {key} DESC"),
+                &["", " LIMIT 1", " LIMIT 50"],
+            );
+        }
+    }
+}
+
+/// A2 'attention mechanisms', then A1 'rust database internals', with a
+/// text index on `body`.
+fn two_articles() -> grafeo_engine::Session {
     let db = GrafeoDB::new_in_memory();
     let session = db.session();
+    session
+        .execute("INSERT (:Article {title: 'A2', body: 'attention mechanisms'})")
+        .unwrap();
     session
         .execute("INSERT (:Article {title: 'A1', body: 'rust database internals'})")
         .unwrap();
     db.create_text_index("Article", "body").expect("index");
+    session
+}
 
+/// Two articles, of which A1 matches `database`: for each of `limits`,
+/// `query` (in `language`, returning `s` and optionally its score, ordered
+/// by the score) finds the A1 node first, with a positive score when it
+/// returns one, and A2 after it when the limit keeps both.
+fn assert_text_score_order(language: &str, query: &str, limits: &[&str]) {
+    use std::collections::HashMap;
+
+    let session = two_articles();
     let params = HashMap::from([("sub".to_string(), Value::from("database"))]);
-
-    // Without LIMIT: already worked, asserting it stays correct.
-    let result = session
-        .execute_with_params(
-            "MATCH (s:Article) RETURN s, text_score(s.body, $sub) \
-             ORDER BY text_score(s.body, $sub) DESC",
-            params.clone(),
-        )
-        .unwrap();
-    assert!(
-        result.rows()[0][0].as_map().is_some(),
-        "without LIMIT: expected Map, got {:?}",
-        result.rows()[0][0]
-    );
-
-    // With LIMIT: the failing case in #347.
-    let result = session
-        .execute_with_params(
-            "MATCH (s:Article) RETURN s, text_score(s.body, $sub) \
-             ORDER BY text_score(s.body, $sub) DESC LIMIT 50",
-            params.clone(),
-        )
-        .unwrap();
-    assert!(
-        result.rows()[0][0].as_map().is_some(),
-        "with LIMIT: expected Map, got {:?}",
-        result.rows()[0][0]
-    );
+    for limit in limits {
+        let query = format!("{query}{limit}");
+        let result = session
+            .execute_language(&query, language, Some(params.clone()))
+            .unwrap_or_else(|error| panic!("{language} {query}: {error}"));
+        let expected = if limit.is_empty() || *limit == " LIMIT 50" {
+            ["A1", "A2"].as_slice()
+        } else {
+            ["A1"].as_slice()
+        };
+        assert_eq!(result.rows().len(), expected.len(), "{language} {query}");
+        for (row, title) in result.rows().iter().zip(expected) {
+            assert_article(&row[0], title, &query);
+        }
+        if result.columns.len() == 2 {
+            let Value::Float64(score) = result.rows()[0][1] else {
+                panic!(
+                    "{language} {query}: a float score, got {:?}",
+                    result.rows()[0][1]
+                );
+            };
+            assert!(score > 0.0, "{language} {query}: {score}");
+        }
+    }
 }
 
 #[test]

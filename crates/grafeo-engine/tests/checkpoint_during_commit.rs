@@ -1,17 +1,21 @@
 //! Checkpoints never capture part of a commit, or part of a change of an
-//! open transaction.
+//! open transaction, and hold commits off only while they take their
+//! snapshot.
 //!
-//! A checkpoint holds commits off while it builds and writes its image: it
-//! waits for a commit in progress (between its epoch and its completion) to
-//! complete, and no commit, transaction start or write outside a transaction
-//! runs until the image is written. It also freezes the store: the writes of
-//! open transactions and their rollbacks wait too, so the image is read from
-//! a store and change logs that do not move. These tests start a checkpoint
-//! from inside a commit, and commits, writes and rollbacks from inside a
-//! checkpoint, with the `testing-statement-injection` hooks, and check what
-//! the image holds. Work that should wait gets 300 ms to finish in the
-//! middle; the child-process tests exit without `close()`, so a reopen reads
-//! the image and what is left of the WAL.
+//! A checkpoint holds commits off while it takes its snapshot (its epoch,
+//! what changed since the last image, the sections without versions) and
+//! starts a new WAL segment: it waits for a commit in progress (between its
+//! epoch and its completion) to complete, and no commit, transaction start or
+//! write outside a transaction runs meanwhile. It also freezes the store for
+//! that time: the writes of open transactions and their rollbacks wait too.
+//! Then commits go on while it writes its image, which holds the committed
+//! state at the snapshot's epoch and nothing after it (H3). These tests start
+//! a checkpoint from inside a commit, and commits, writes and rollbacks from
+//! inside a checkpoint's snapshot and from inside its image write, with the
+//! `testing-statement-injection` hooks, and check what the image holds. Work
+//! that should wait gets 300 ms to finish in the middle; the child-process
+//! tests exit without `close()`, so a reopen reads the image and what is
+//! left of the WAL.
 //!
 //! ```bash
 //! cargo test -p grafeo-engine --all-features --test checkpoint_during_commit
@@ -19,7 +23,6 @@
 
 #![cfg(all(
     feature = "testing-statement-injection",
-    feature = "lpg",
     feature = "gql",
     feature = "wal",
     feature = "grafeo-file"
@@ -34,6 +37,7 @@ use grafeo_common::testing::child_process;
 use grafeo_common::testing::chunk_caps::with_chunk_caps;
 use grafeo_common::testing::commit_hook::{
     after_next_commit_epoch, after_next_commit_stamped, during_next_checkpoint,
+    during_next_checkpoint_write,
 };
 use grafeo_common::types::Value;
 use grafeo_engine::{GrafeoDB, Session};
@@ -64,8 +68,9 @@ fn database_with_alix(path: &Path) {
 }
 
 /// A checkpoint started inside a commit that then fails (after its versions
-/// are stamped) waits for the commit, gets its error, and writes nothing: a
-/// reopen shows the database without the commit.
+/// are stamped) waits for the commit, gets its error, and writes nothing. The
+/// commit wrote its group to the WAL before it stamped, so a reopen resolves
+/// it from the log and has it whole (#498).
 #[test]
 fn a_checkpoint_during_a_failing_commit_gets_its_error_and_writes_nothing() {
     let dir = tempfile::tempdir().unwrap();
@@ -104,7 +109,11 @@ fn a_checkpoint_during_a_failing_commit_gets_its_error_and_writes_nothing() {
         "the file is byte for byte the last checkpoint"
     );
     let db = GrafeoDB::open(&path).unwrap();
-    assert_eq!(people(&db), [Value::from("Alix")]);
+    assert_eq!(
+        people(&db),
+        [Value::from("Alix"), Value::from("Gus")],
+        "the reopen replays the logged commit"
+    );
 }
 
 /// A checkpoint started inside a commit that completes waits for it, and
@@ -216,9 +225,93 @@ fn commits_wait_for_a_checkpoint_and_stay_out_of_its_image() {
     written.expect("the direct write succeeds after the checkpoint");
     assert_eq!(header.node_count, 2, "the image holds Alix and Gus only");
     assert_eq!(
-        db.node_count(),
+        db.node_count().unwrap(),
         3,
         "Vincent is written after the checkpoint"
+    );
+    db.close().unwrap();
+}
+
+/// While a checkpoint writes its image, after its snapshot: the commit of a
+/// transaction that wrote before it, a direct write outside a transaction
+/// and a new transaction's commit, each from another thread, finish without
+/// waiting for the image, and the image holds the state at the snapshot
+/// alone: Alix. A copy of the file without its WAL opens with her only; the
+/// database itself, reopened, has every commit.
+#[test]
+fn commits_go_on_while_a_checkpoint_writes_its_image() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("prague.grafeo");
+    database_with_alix(&path);
+    let db = Arc::new(GrafeoDB::open(&path).unwrap());
+
+    let (go, commit_now) = mpsc::channel::<()>();
+    let (ready, began) = mpsc::channel();
+    let writer = Arc::clone(&db);
+    let transaction = std::thread::spawn(move || {
+        let mut session = writer.session();
+        session.begin_transaction().unwrap();
+        session.execute("INSERT (:Person {name: 'Gus'})").unwrap();
+        ready.send(()).unwrap();
+        commit_now.recv().unwrap();
+        session.commit().map_err(|e| e.to_string())
+    });
+    began.recv().unwrap();
+
+    let (direct, fresh) = (Arc::clone(&db), Arc::clone(&db));
+    let (sender, started) = mpsc::channel();
+    during_next_checkpoint_write(move || {
+        go.send(()).unwrap();
+        let works = [
+            Started::spawn(move || transaction.join().unwrap()),
+            Started::spawn(move || {
+                direct
+                    .create_node_with_props(&["Person"], [("name", Value::from("Vincent"))])
+                    .map(drop)
+                    .map_err(|e| e.to_string())
+            }),
+            Started::spawn(move || {
+                let mut session = fresh.session();
+                session.begin_transaction().map_err(|e| e.to_string())?;
+                session
+                    .execute("INSERT (:Person {name: 'Jules'})")
+                    .map_err(|e| e.to_string())?;
+                session.commit().map_err(|e| e.to_string())
+            }),
+        ];
+        let finished: Vec<bool> = works.iter().map(Started::finishes_briefly).collect();
+        sender.send((works, finished)).unwrap();
+    });
+    db.wal_checkpoint().unwrap();
+    let (works, finished) = started.recv().expect("the checkpoint ran the hook");
+    assert_eq!(finished, [true, true, true], "nothing waits for the image");
+    for work in works {
+        work.join().expect("the write succeeds");
+    }
+    let header = db.file_manager().unwrap().active_header();
+    assert_eq!(header.node_count, 1, "the image holds Alix only");
+    assert!(image_holds(&db, "Alix"));
+    for name in ["Gus", "Vincent", "Jules"] {
+        assert!(!image_holds(&db, name), "{name} is not in the image");
+    }
+
+    let copy = dir.path().join("copy.grafeo");
+    db.file_manager().unwrap().copy_to(&copy).unwrap();
+    let image = GrafeoDB::open(&copy).unwrap();
+    assert_eq!(
+        people(&image),
+        [Value::from("Alix")],
+        "the image alone is the state at the snapshot"
+    );
+    image.close().unwrap();
+
+    let db = Arc::into_inner(db).unwrap();
+    db.close().unwrap();
+    let db = GrafeoDB::open(&path).unwrap();
+    assert_eq!(
+        people(&db),
+        ["Alix", "Gus", "Jules", "Vincent"].map(Value::from),
+        "the commits during the image write are in the WAL after it"
     );
     db.close().unwrap();
 }
@@ -396,8 +489,9 @@ fn checkpoint_child() {
     session.execute("INSERT (:Person {name: 'Gus'})").unwrap();
     let checkpointer = Arc::clone(&db);
     match which.as_str() {
-        // The process ends inside the commit, before its WAL records are
-        // written, with a checkpoint started meanwhile.
+        // The process ends inside the commit, once its versions are stamped
+        // (its group is in the WAL by then), with a checkpoint started
+        // meanwhile.
         "failing" => {
             after_next_commit_stamped(move || {
                 let checkpoint = Started::spawn(move || checkpointer.wal_checkpoint().is_ok());
@@ -717,19 +811,26 @@ fn checkpoints_among_open_transactions_always_leave_a_file_that_opens() {
 }
 
 /// A process that ends inside a commit, with a checkpoint started in it,
-/// leaves no part of the commit: the checkpoint waited for the commit, which
-/// never completed.
+/// leaves no part of the commit in the file: the checkpoint waited for the
+/// commit, which never completed. The commit's group was in the WAL before
+/// the process ended, so the reopen has the commit whole, from the log.
 #[test]
-fn a_crash_inside_a_commit_with_a_checkpoint_started_leaves_none_of_it() {
+fn a_crash_inside_a_commit_with_a_checkpoint_started_is_resolved_by_the_log() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("prague.grafeo");
     database_with_alix(&path);
+    let checkpointed = std::fs::read(&path).unwrap();
     run_child("failing", &path);
+    assert_eq!(
+        std::fs::read(&path).unwrap(),
+        checkpointed,
+        "the waiting checkpoint wrote no image before the crash"
+    );
     let db = GrafeoDB::open(&path).unwrap();
     assert_eq!(
         people(&db),
-        [Value::from("Alix")],
-        "the reopened database has nothing of the commit"
+        [Value::from("Alix"), Value::from("Gus")],
+        "the reopened database has the logged commit"
     );
 }
 

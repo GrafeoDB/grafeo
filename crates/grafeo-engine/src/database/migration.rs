@@ -119,20 +119,13 @@ use grafeo_storage::file::detect::{
 // The migration itself reads the old database into the LPG store; the lock
 // protocol, finishing a cut-off migration and the read-only checks need no
 // `lpg` and run in every build.
-#[cfg(feature = "lpg")]
 use grafeo_common::grafeo_info;
-#[cfg(feature = "lpg")]
 use grafeo_common::utils::error::StorageError;
-#[cfg(feature = "lpg")]
 use grafeo_storage::file::GrafeoFileManager;
-#[cfg(feature = "lpg")]
 use grafeo_storage::lock::{DirectoryLock, LOCK_FILE_NAME};
 
-#[cfg(feature = "lpg")]
 use super::GrafeoDB;
-#[cfg(feature = "lpg")]
 use super::encryption::DatabaseKeys;
-#[cfg(feature = "lpg")]
 use crate::config::Config;
 
 /// How long an open waits for a migration another process is running.
@@ -248,7 +241,6 @@ pub(super) fn lock_if_missing(path: &Path) -> Result<Option<MigrateLock>> {
 /// exists, the old database cannot be read (for example while a 0.5.x process
 /// holds it, or in a build without the `wal` feature when its WAL holds
 /// files), or the image cannot be written or a rename fails.
-#[cfg(feature = "lpg")]
 pub(super) fn migrate(path: &Path, config: &Config) -> Result<()> {
     refuse_kept_copy(path)?;
     let _lock = MigrateLock::acquire(path)?;
@@ -292,16 +284,24 @@ pub(super) fn migrate(path: &Path, config: &Config) -> Result<()> {
     // spill file may hold the old data in plaintext meanwhile.
     let keys = DatabaseKeys::from_config(config);
     let mut old_config = Config::read_only(path);
-    old_config.memory_limit = config.memory_limit;
-    old_config.spill_path.clone_from(&config.spill_path);
+    if let Some(limit) = config.memory_limit() {
+        old_config = old_config.with_memory_limit(limit);
+    }
+    if let Some(spill_path) = config.spill_path() {
+        old_config = old_config.with_spill_path(spill_path);
+    }
     let old = GrafeoDB::with_config_and_spill(old_config, !keys.is_encrypted()).map_err(failed)?;
     old.write_image_with(&migrating, &keys).map_err(failed)?;
+    let (nodes, edges) = (
+        old.node_count().map_err(failed)?,
+        old.edge_count().map_err(failed)?,
+    );
     grafeo_info!(
         "migrating {} to the 0.6 format: {} nodes, {} edges, {} named graphs, {} indexes \
          (as SHOW INDEXES lists them), {} constraints",
         path.display(),
-        old.node_count(),
-        old.edge_count(),
+        nodes,
+        edges,
         old.list_graphs().len(),
         old.catalog.index_count(),
         old.catalog.constraints().len()
@@ -382,7 +382,6 @@ pub(super) fn migrate(path: &Path, config: &Config) -> Result<()> {
 /// The kept copies of the 0.5.x files of `path` that exist, one that cannot
 /// be inspected included: what the warning after an encrypting migration
 /// names.
-#[cfg(feature = "lpg")]
 fn kept_files_present(path: &Path) -> Vec<PathBuf> {
     kept_names(path)
         .into_iter()
@@ -392,7 +391,6 @@ fn kept_files_present(path: &Path) -> Vec<PathBuf> {
 }
 
 /// The suffix of a kept copy: `<path>.pre-0.6`.
-#[cfg(feature = "lpg")]
 const KEPT_SUFFIX: &str = ".pre-0.6";
 
 /// Refuses to migrate a 0.5.x database whose name ends in `.pre-0.6`: it is
@@ -404,7 +402,6 @@ const KEPT_SUFFIX: &str = ".pre-0.6";
 /// # Errors
 ///
 /// Returns an error saying so, naming the original name, for such a path.
-#[cfg(feature = "lpg")]
 fn refuse_kept_copy(path: &Path) -> Result<()> {
     // The bytes of the name, not a UTF-8 reading of it: a name that is not
     // valid UTF-8 is a kept copy all the same.
@@ -425,7 +422,6 @@ fn refuse_kept_copy(path: &Path) -> Result<()> {
 
 /// The node and edge counts the active database header of the image at
 /// `image` records, opened read-only with the keys it was written with.
-#[cfg(feature = "lpg")]
 fn image_counts(image: &Path, keys: &DatabaseKeys) -> Result<(u64, u64)> {
     let manager =
         GrafeoFileManager::open_read_only_with_cipher_for(image, |id| keys.container_cipher(id))?;
@@ -491,7 +487,6 @@ pub(super) fn check_read_only(path: &Path) -> Result<()> {
 ///
 /// Returns an error naming the sidecar WAL in that case, or if it cannot be
 /// inspected.
-#[cfg(feature = "lpg")]
 pub(super) fn refuse_unreplayable_wal(path: &Path, can_replay: bool) -> Result<()> {
     let wal = sidecar_wal_path(path);
     if can_replay || !GrafeoDB::holds_files(&wal)? {
@@ -648,7 +643,6 @@ fn move_side_files_back(path: &Path) -> Result<()> {
 /// variant: an I/O error keeps its kind, a message-carrying error gets the
 /// context in front of its message, and an error without a message is
 /// returned as it is.
-#[cfg(feature = "lpg")]
 fn with_migration_context(path: &Path, error: Error) -> Error {
     let context = |message: &dyn std::fmt::Display| {
         format!(
@@ -666,15 +660,18 @@ fn with_migration_context(path: &Path, error: Error) -> Error {
             corruption.what = format!("while migrating it to the 0.6 format: {}", corruption.what);
             Error::Corruption(corruption).in_file(path)
         }
-        Error::Storage(StorageError::InvalidWalEntry(message)) => {
-            Error::Storage(StorageError::InvalidWalEntry(context(&message)))
-        }
-        Error::Storage(StorageError::RecoveryFailed(message)) => {
-            Error::Storage(StorageError::RecoveryFailed(context(&message)))
-        }
-        Error::Storage(StorageError::CheckpointFailed(message)) => {
-            Error::Storage(StorageError::CheckpointFailed(context(&message)))
-        }
+        Error::Storage(storage) => Error::from(match *storage {
+            StorageError::InvalidWalEntry(message) => {
+                StorageError::InvalidWalEntry(context(&message))
+            }
+            StorageError::RecoveryFailed(message) => {
+                StorageError::RecoveryFailed(context(&message))
+            }
+            StorageError::CheckpointFailed(message) => {
+                StorageError::CheckpointFailed(context(&message))
+            }
+            other => other,
+        }),
         other => other,
     }
 }
@@ -713,7 +710,6 @@ pub(super) fn nothing_at(path: &Path) -> Result<bool> {
 /// # Errors
 ///
 /// Returns an error saying so in that case.
-#[cfg(feature = "lpg")]
 fn refuse_current_directory(path: &Path) -> Result<()> {
     // Canonical forms, so neither `..` nor a symlink or junction hides that
     // the current directory is inside the database directory.
@@ -741,7 +737,6 @@ fn refuse_current_directory(path: &Path) -> Result<()> {
 /// process has a file in it open, and nowhere can a mount point be renamed.
 /// The message is extended, not the formatted error wrapped, so the error
 /// keeps one code.
-#[cfg(feature = "lpg")]
 fn directory_cannot_move(error: Error) -> Error {
     const HINT: &str = "; another process may have a file in it open, or the directory cannot \
                         be renamed (for example a mount point): close it, or move the database \
@@ -850,7 +845,6 @@ fn is_legacy(on_disk: OnDisk) -> bool {
 
 /// What keeps 0.5.x writers away from the old database while a migration
 /// reads it.
-#[cfg(feature = "lpg")]
 enum OldDatabaseLock {
     /// A shared lock on a 0.5.x file, released when dropped.
     File { _shared: SharedLock },
@@ -858,7 +852,6 @@ enum OldDatabaseLock {
     Directory(LegacyDirectoryLock),
 }
 
-#[cfg(feature = "lpg")]
 impl OldDatabaseLock {
     /// The lock to hold while the old database moves: all of it, except the
     /// lock of a directory on Windows, which is inside it and would keep it
@@ -895,7 +888,6 @@ impl OldDatabaseLock {
 /// and one that starts meanwhile fails to open it. Released when dropped,
 /// which also removes a `LOCK` file the lock created, so the kept directory
 /// holds the 0.5.x files as they were.
-#[cfg(feature = "lpg")]
 struct LegacyDirectoryLock {
     /// The held lock, taken out when dropped so its handle closes first.
     lock: Option<DirectoryLock>,
@@ -903,7 +895,6 @@ struct LegacyDirectoryLock {
     created: Option<PathBuf>,
 }
 
-#[cfg(feature = "lpg")]
 impl LegacyDirectoryLock {
     /// Locks the 0.5.x WAL directory at `directory`.
     ///
@@ -922,7 +913,6 @@ impl LegacyDirectoryLock {
     }
 }
 
-#[cfg(feature = "lpg")]
 impl Drop for LegacyDirectoryLock {
     fn drop(&mut self) {
         drop(self.lock.take());
@@ -944,10 +934,8 @@ impl Drop for LegacyDirectoryLock {
 
 /// A shared lock on the 0.5.x database file, released when dropped. A 0.5.x
 /// writer's exclusive lock and this one exclude each other.
-#[cfg(feature = "lpg")]
 struct SharedLock(File);
 
-#[cfg(feature = "lpg")]
 impl Drop for SharedLock {
     fn drop(&mut self) {
         let _ = self.0.unlock();
@@ -955,7 +943,6 @@ impl Drop for SharedLock {
 }
 
 /// Opens the 0.5.x file at `path` under a shared lock.
-#[cfg(feature = "lpg")]
 fn lock_shared(path: &Path) -> Result<SharedLock> {
     let file = File::open(path)
         .map_err(|error| Error::Internal(format!("cannot open {}: {error}", path.display())))?;
@@ -977,7 +964,6 @@ fn lock_shared(path: &Path) -> Result<SharedLock> {
 
 /// Removes the image of a migration that failed. Best effort: the error that
 /// matters is the one returned, and the next open removes a leftover image.
-#[cfg(feature = "lpg")]
 fn remove_after_failure(migrating: &Path) {
     if let Err(error) = fs::remove_file(migrating) {
         grafeo_warn!(
@@ -1132,7 +1118,7 @@ impl Drop for MigrateLock {
     }
 }
 
-#[cfg(all(test, feature = "lpg"))]
+#[cfg(test)]
 mod tests {
     use super::*;
 
@@ -1275,9 +1261,9 @@ mod tests {
             ),
             "{corrupt:?}"
         );
-        let full = with_migration_context(path, Error::Storage(StorageError::Full));
+        let full = with_migration_context(path, Error::from(StorageError::Full));
         assert!(
-            matches!(full, Error::Storage(StorageError::Full)),
+            matches!(&full, Error::Storage(storage) if matches!(**storage, StorageError::Full)),
             "an error without a message stays as it is: {full:?}"
         );
     }

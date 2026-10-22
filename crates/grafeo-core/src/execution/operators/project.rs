@@ -3,11 +3,9 @@
 use super::filter::{ExpressionPredicate, FilterExpression, SessionContext};
 use super::{Operator, OperatorError, OperatorResult};
 use crate::execution::{DataChunk, ValueVector};
-use crate::graph::GraphStoreSearch;
+use crate::graph::GraphStore;
 use crate::graph::lpg::{Edge, Node};
-use grafeo_common::types::{
-    EdgeId, EpochId, LogicalType, NodeId, PropertyKey, TransactionId, Value,
-};
+use grafeo_common::types::{EdgeId, LogicalType, NodeId, PropertyKey, ReadView, Value};
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 
@@ -339,12 +337,9 @@ pub struct ProjectOperator {
     projections: Vec<ProjectExpr>,
     /// Output column types.
     output_types: Vec<LogicalType>,
-    /// Optional store for property access.
-    store: Option<Arc<dyn GraphStoreSearch>>,
-    /// Transaction ID for MVCC-aware property lookups.
-    transaction_id: Option<TransactionId>,
-    /// Viewing epoch for MVCC-aware property lookups.
-    viewing_epoch: Option<EpochId>,
+    /// Optional store for property access, with the view its reads answer
+    /// at.
+    store: Option<(Arc<dyn GraphStore>, ReadView)>,
     /// Session context for introspection functions in expression evaluation.
     session_context: SessionContext,
 }
@@ -366,13 +361,12 @@ impl ProjectOperator {
             projections,
             output_types,
             store: None,
-            transaction_id: None,
-            viewing_epoch: None,
             session_context: SessionContext::default(),
         }
     }
 
-    /// Creates a new project operator with store access for property lookups.
+    /// Creates a project operator whose property lookups read `store` at
+    /// `view`.
     ///
     /// # Panics
     ///
@@ -381,29 +375,25 @@ impl ProjectOperator {
         child: Box<dyn Operator>,
         projections: Vec<ProjectExpr>,
         output_types: Vec<LogicalType>,
-        store: Arc<dyn GraphStoreSearch>,
+        store: Arc<dyn GraphStore>,
+        view: ReadView,
     ) -> Self {
         assert_eq!(projections.len(), output_types.len());
         Self {
             child,
             projections,
             output_types,
-            store: Some(store),
-            transaction_id: None,
-            viewing_epoch: None,
+            store: Some((store, view)),
             session_context: SessionContext::default(),
         }
     }
 
-    /// Sets the transaction context for MVCC-aware property lookups.
-    pub fn with_transaction_context(
-        mut self,
-        epoch: EpochId,
-        transaction_id: Option<TransactionId>,
-    ) -> Self {
-        self.viewing_epoch = Some(epoch);
-        self.transaction_id = transaction_id;
-        self
+    /// The store and the view its lookups read at, required by `what`.
+    fn reader(&self, what: &str) -> Result<(&Arc<dyn GraphStore>, ReadView), OperatorError> {
+        self.store
+            .as_ref()
+            .map(|(store, view)| (store, *view))
+            .ok_or_else(|| OperatorError::Internal(format!("Store required for {what}")))
     }
 
     /// Sets the session context for introspection functions.
@@ -488,9 +478,7 @@ impl Operator for ProjectOperator {
                         .column_mut(i)
                         .expect("column exists: index matches projection schema");
 
-                    let store = self.store.as_ref().ok_or_else(|| {
-                        OperatorError::Internal("Store required for property access".to_string())
-                    })?;
+                    let (store, view) = self.reader("property access")?;
 
                     // Extract property for each row.
                     // For typed columns (VectorData::NodeId / EdgeId) there is
@@ -499,44 +487,23 @@ impl Operator for ProjectOperator {
                     // same Int64 value, so we verify against the store to resolve
                     // the entity type.
                     let prop_key = PropertyKey::new(property);
-                    let epoch = self.viewing_epoch;
-                    let tx_id = self.transaction_id;
                     for row in input.selected_indices() {
+                        // One value of the entity, read without building it.
                         let value = if let Some(node_id) = input_col.get_node_id(row) {
-                            let node = if let (Some(ep), Some(tx)) = (epoch, tx_id) {
-                                store.get_node_versioned(node_id, ep, tx)
-                            } else if let Some(ep) = epoch {
-                                store.get_node_at_epoch(node_id, ep)
-                            } else {
-                                store.get_node(node_id)
-                            };
-                            if let Some(prop) = node.and_then(|n| n.get_property(property).cloned())
-                            {
+                            if let Some(prop) = store.node_property(node_id, property, view)? {
                                 prop
                             } else if let Some(edge_id) = input_col.get_edge_id(row) {
                                 // Node lookup failed: the ID may belong to an
                                 // edge (common with Generic columns after joins).
-                                let edge = if let (Some(ep), Some(tx)) = (epoch, tx_id) {
-                                    store.get_edge_versioned(edge_id, ep, tx)
-                                } else if let Some(ep) = epoch {
-                                    store.get_edge_at_epoch(edge_id, ep)
-                                } else {
-                                    store.get_edge(edge_id)
-                                };
-                                edge.and_then(|e| e.get_property(property).cloned())
+                                store
+                                    .edge_property(edge_id, property, view)?
                                     .unwrap_or(Value::Null)
                             } else {
                                 Value::Null
                             }
                         } else if let Some(edge_id) = input_col.get_edge_id(row) {
-                            let edge = if let (Some(ep), Some(tx)) = (epoch, tx_id) {
-                                store.get_edge_versioned(edge_id, ep, tx)
-                            } else if let Some(ep) = epoch {
-                                store.get_edge_at_epoch(edge_id, ep)
-                            } else {
-                                store.get_edge(edge_id)
-                            };
-                            edge.and_then(|e| e.get_property(property).cloned())
+                            store
+                                .edge_property(edge_id, property, view)?
                                 .unwrap_or(Value::Null)
                         } else {
                             match input_col.get_value(row) {
@@ -563,20 +530,13 @@ impl Operator for ProjectOperator {
                         .column_mut(i)
                         .expect("column exists: index matches projection schema");
 
-                    let store = self.store.as_ref().ok_or_else(|| {
-                        OperatorError::Internal("Store required for edge type access".to_string())
-                    })?;
+                    let (store, view) = self.reader("edge type access")?;
 
-                    let epoch = self.viewing_epoch;
-                    let tx_id = self.transaction_id;
                     for row in input.selected_indices() {
                         let value = if let Some(edge_id) = input_col.get_edge_id(row) {
-                            let etype = if let (Some(ep), Some(tx)) = (epoch, tx_id) {
-                                store.edge_type_versioned(edge_id, ep, tx)
-                            } else {
-                                store.edge_type(edge_id)
-                            };
-                            etype.map_or(Value::Null, Value::String)
+                            store
+                                .edge_type(edge_id, view)?
+                                .map_or(Value::Null, Value::String)
                         } else {
                             Value::Null
                         };
@@ -591,22 +551,16 @@ impl Operator for ProjectOperator {
                         .column_mut(i)
                         .expect("column exists: index matches projection schema");
 
-                    let store = self.store.as_ref().ok_or_else(|| {
-                        OperatorError::Internal(
-                            "Store required for expression evaluation".to_string(),
-                        )
-                    })?;
+                    let (store, view) = self.reader("expression evaluation")?;
 
                     // Use the ExpressionPredicate for expression evaluation
-                    let mut evaluator = ExpressionPredicate::new(
+                    let evaluator = ExpressionPredicate::new(
                         expr.clone(),
                         variable_columns.clone(),
                         Arc::clone(store),
+                        view,
                     )
                     .with_session_context(self.session_context.clone());
-                    if let (Some(ep), tx_id) = (self.viewing_epoch, self.transaction_id) {
-                        evaluator = evaluator.with_transaction_context(ep, tx_id);
-                    }
 
                     // A node or edge column holds ids: it takes a node or edge
                     // map (the items of `nodes(p)`) by its id, and anything
@@ -616,7 +570,7 @@ impl Operator for ProjectOperator {
                         LogicalType::Node | LogicalType::Edge
                     );
                     for row in input.selected_indices() {
-                        let value = evaluator.eval_at(&input, row).unwrap_or(Value::Null);
+                        let value = evaluator.eval_at(&input, row)?.unwrap_or(Value::Null);
                         let value = if entities { entity_id(value) } else { value };
                         output_col.push_value(value);
                     }
@@ -630,9 +584,7 @@ impl Operator for ProjectOperator {
                         .column_mut(i)
                         .expect("column exists: index matches projection schema");
 
-                    let store = self.store.as_ref().ok_or_else(|| {
-                        OperatorError::Internal("Store required for entity resolution".to_string())
-                    })?;
+                    let (store, view) = self.reader("entity resolution")?;
 
                     // The planner says by name whether the column holds nodes
                     // or edges; a column typed by its rows says it per chunk,
@@ -643,31 +595,21 @@ impl Operator for ProjectOperator {
                         LogicalType::Node => false,
                         _ => matches!(proj, ProjectExpr::EdgeResolve { .. }),
                     };
-                    let epoch = self.viewing_epoch;
-                    let tx_id = self.transaction_id;
                     for row in input.selected_indices() {
                         let value = if edges {
-                            input_col.get_edge_id(row).map_or(Value::Null, |edge_id| {
-                                let edge = if let (Some(ep), Some(tx)) = (epoch, tx_id) {
-                                    store.get_edge_versioned(edge_id, ep, tx)
-                                } else if let Some(ep) = epoch {
-                                    store.get_edge_at_epoch(edge_id, ep)
-                                } else {
-                                    store.get_edge(edge_id)
-                                };
-                                edge.map_or(Value::Null, |e| edge_to_map(&e))
-                            })
+                            match input_col.get_edge_id(row) {
+                                Some(edge_id) => store
+                                    .edge(edge_id, view)?
+                                    .map_or(Value::Null, |e| edge_to_map(&e)),
+                                None => Value::Null,
+                            }
                         } else {
-                            input_col.get_node_id(row).map_or(Value::Null, |node_id| {
-                                let node = if let (Some(ep), Some(tx)) = (epoch, tx_id) {
-                                    store.get_node_versioned(node_id, ep, tx)
-                                } else if let Some(ep) = epoch {
-                                    store.get_node_at_epoch(node_id, ep)
-                                } else {
-                                    store.get_node(node_id)
-                                };
-                                node.map_or(Value::Null, |n| node_to_map(&n))
-                            })
+                            match input_col.get_node_id(row) {
+                                Some(node_id) => store
+                                    .node(node_id, view)?
+                                    .map_or(Value::Null, |n| node_to_map(&n)),
+                                None => Value::Null,
+                            }
                         };
                         output_col.push_value(value);
                     }
@@ -681,30 +623,25 @@ impl Operator for ProjectOperator {
                         .column_mut(i)
                         .expect("column exists: index matches projection schema");
 
-                    let store = self.store.as_ref().ok_or_else(|| {
-                        OperatorError::Internal(
-                            "Store required for expression evaluation".to_string(),
-                        )
-                    })?;
+                    let (store, view) = self.reader("expression evaluation")?;
 
-                    let mut evaluator = ExpressionPredicate::new(
+                    let evaluator = ExpressionPredicate::new(
                         expr.clone(),
                         variable_columns.clone(),
                         Arc::clone(store),
+                        view,
                     )
                     .with_session_context(self.session_context.clone());
-                    if let (Some(ep), tx_id) = (self.viewing_epoch, self.transaction_id) {
-                        evaluator = evaluator.with_transaction_context(ep, tx_id);
-                    }
 
                     let shape = kind.logical_type();
                     for row in input.selected_indices() {
-                        let value = evaluator.eval_at(&input, row).unwrap_or(Value::Null);
-                        output_col.push_value(self.resolve_entities(
+                        let value = evaluator.eval_at(&input, row)?.unwrap_or(Value::Null);
+                        output_col.push_value(resolve_entities(
                             store.as_ref(),
+                            view,
                             &value,
                             &shape,
-                        ));
+                        )?);
                     }
                 }
                 ProjectExpr::Coalesce { first, second } => {
@@ -749,100 +686,74 @@ impl Operator for ProjectOperator {
     }
 }
 
-impl ProjectOperator {
-    /// Replaces the entity ids in `value` with node or edge maps, where its
-    /// type `shape` (an [`EntityValue`]'s type) says they are: the value
-    /// itself, the items of a list, the keys of a map, the nodes and edges
-    /// of a path. Ids of entities this read cannot see become null; values
-    /// that are already maps (or null) are kept.
-    fn resolve_entities(
-        &self,
-        store: &dyn GraphStoreSearch,
-        value: &Value,
-        shape: &LogicalType,
-    ) -> Value {
-        match (shape, value) {
-            (LogicalType::Node, Value::Int64(id)) => {
-                u64::try_from(*id).ok().map_or(Value::Null, |id| {
-                    self.visible_node(store, NodeId::new(id))
-                        .map_or(Value::Null, |n| node_to_map(&n))
-                })
-            }
-            (LogicalType::Edge, Value::Int64(id)) => {
-                u64::try_from(*id).ok().map_or(Value::Null, |id| {
-                    self.visible_edge(store, EdgeId::new(id))
-                        .map_or(Value::Null, |e| edge_to_map(&e))
-                })
-            }
-            (LogicalType::List(item), Value::List(items)) => Value::List(
-                items
-                    .iter()
-                    .map(|value| self.resolve_entities(store, value, item))
-                    .collect::<Vec<_>>()
-                    .into(),
-            ),
-            (LogicalType::Tuple(types), Value::List(items)) => Value::List(
-                items
-                    .iter()
-                    .enumerate()
-                    .map(|(i, value)| match types.get(i) {
-                        Some(item) => self.resolve_entities(store, value, item),
-                        None => value.clone(),
-                    })
-                    .collect::<Vec<_>>()
-                    .into(),
-            ),
-            (LogicalType::Struct(_) | LogicalType::Map { .. }, Value::Map(map)) => {
-                Value::Map(Arc::new(
-                    map.iter()
-                        .map(|(key, value)| {
-                            let field = field_type(shape, key.as_str());
-                            (key.clone(), self.resolve_entities(store, value, &field))
-                        })
-                        .collect(),
-                ))
-            }
-            (LogicalType::Path, Value::Path { nodes, edges }) => Value::Path {
-                nodes: nodes
-                    .iter()
-                    .map(|node| self.resolve_entities(store, node, &LogicalType::Node))
-                    .collect::<Vec<_>>()
-                    .into(),
-                edges: edges
-                    .iter()
-                    .map(|edge| self.resolve_entities(store, edge, &LogicalType::Edge))
-                    .collect::<Vec<_>>()
-                    .into(),
-            },
-            _ => value.clone(),
+/// Replaces the entity ids in `value` with node or edge maps, where its
+/// type `shape` (an [`EntityValue`]'s type) says they are: the value
+/// itself, the items of a list, the keys of a map, the nodes and edges of a
+/// path. Ids of entities `view` cannot see become null; values that are
+/// already maps (or null) are kept.
+fn resolve_entities(
+    store: &dyn GraphStore,
+    view: ReadView,
+    value: &Value,
+    shape: &LogicalType,
+) -> Result<Value, OperatorError> {
+    let each = |values: &[Value], item: &dyn Fn(usize) -> Option<LogicalType>| {
+        values
+            .iter()
+            .enumerate()
+            .map(|(i, value)| match item(i) {
+                Some(item) => resolve_entities(store, view, value, &item),
+                None => Ok(value.clone()),
+            })
+            .collect::<Result<Vec<_>, OperatorError>>()
+    };
+    Ok(match (shape, value) {
+        (LogicalType::Node, Value::Int64(id)) => match u64::try_from(*id) {
+            Ok(id) => store
+                .node(NodeId::new(id), view)?
+                .map_or(Value::Null, |n| node_to_map(&n)),
+            Err(_) => Value::Null,
+        },
+        (LogicalType::Edge, Value::Int64(id)) => match u64::try_from(*id) {
+            Ok(id) => store
+                .edge(EdgeId::new(id), view)?
+                .map_or(Value::Null, |e| edge_to_map(&e)),
+            Err(_) => Value::Null,
+        },
+        (LogicalType::List(item), Value::List(items)) => {
+            Value::List(each(items, &|_| Some((**item).clone()))?.into())
         }
-    }
-
-    /// The node `id` as this operator's reads see it.
-    fn visible_node(&self, store: &dyn GraphStoreSearch, id: NodeId) -> Option<Node> {
-        match (self.viewing_epoch, self.transaction_id) {
-            (Some(epoch), Some(tx)) => store.get_node_versioned(id, epoch, tx),
-            (Some(epoch), None) => store.get_node_at_epoch(id, epoch),
-            _ => store.get_node(id),
+        (LogicalType::Tuple(types), Value::List(items)) => {
+            Value::List(each(items, &|i| types.get(i).cloned())?.into())
         }
-    }
-
-    /// The edge `id` as this operator's reads see it.
-    fn visible_edge(&self, store: &dyn GraphStoreSearch, id: EdgeId) -> Option<Edge> {
-        match (self.viewing_epoch, self.transaction_id) {
-            (Some(epoch), Some(tx)) => store.get_edge_versioned(id, epoch, tx),
-            (Some(epoch), None) => store.get_edge_at_epoch(id, epoch),
-            _ => store.get_edge(id),
+        (LogicalType::Struct(_) | LogicalType::Map { .. }, Value::Map(map)) => {
+            let mut resolved = BTreeMap::new();
+            for (key, value) in map.iter() {
+                let field = field_type(shape, key.as_str());
+                resolved.insert(key.clone(), resolve_entities(store, view, value, &field)?);
+            }
+            Value::Map(Arc::new(resolved))
         }
-    }
+        (LogicalType::Path, Value::Path { nodes, edges }) => Value::Path {
+            nodes: each(nodes, &|_| Some(LogicalType::Node))?.into(),
+            edges: each(edges, &|_| Some(LogicalType::Edge))?.into(),
+        },
+        _ => value.clone(),
+    })
 }
 
 /// Converts a [`Node`] to a `Value::Map` with metadata and properties.
 ///
-/// The map contains `_id` (integer), `_labels` (list of strings), and
-/// all node properties at the top level.
+/// The map contains all node properties at the top level, `_id` (integer)
+/// and `_labels` (list of strings): those two always hold the node's id and
+/// labels, also when a property has the name (#254), which the map then
+/// leaves out.
 fn node_to_map(node: &Node) -> Value {
-    let mut map = BTreeMap::new();
+    let mut map: BTreeMap<PropertyKey, Value> = node
+        .properties
+        .iter()
+        .map(|(key, value)| (key.clone(), value.clone()))
+        .collect();
     // reason: entity IDs stored as i64, standard encoding
     #[allow(clippy::cast_possible_wrap)]
     let node_id_i64 = node.id.as_u64() as i64;
@@ -853,18 +764,20 @@ fn node_to_map(node: &Node) -> Value {
         .map(|l| Value::String(l.clone()))
         .collect();
     map.insert(PropertyKey::new("_labels"), Value::List(labels.into()));
-    for (key, value) in &node.properties {
-        map.insert(key.clone(), value.clone());
-    }
     Value::Map(Arc::new(map))
 }
 
 /// Converts an [`Edge`] to a `Value::Map` with metadata and properties.
 ///
-/// The map contains `_id`, `_type`, `_source`, `_target`, and all edge
-/// properties at the top level.
+/// The map contains all edge properties at the top level, `_id`, `_type`,
+/// `_source` and `_target`: those always hold the edge's identity, also when
+/// a property has the name (#254), which the map then leaves out.
 fn edge_to_map(edge: &Edge) -> Value {
-    let mut map = BTreeMap::new();
+    let mut map: BTreeMap<PropertyKey, Value> = edge
+        .properties
+        .iter()
+        .map(|(key, value)| (key.clone(), value.clone()))
+        .collect();
     // reason: entity IDs stored as i64, standard encoding
     #[allow(clippy::cast_possible_wrap)]
     let edge_id_i64 = edge.id.as_u64() as i64;
@@ -881,9 +794,6 @@ fn edge_to_map(edge: &Edge) -> Value {
     );
     map.insert(PropertyKey::new("_source"), Value::Int64(src_id_i64));
     map.insert(PropertyKey::new("_target"), Value::Int64(dst_id_i64));
-    for (key, value) in &edge.properties {
-        map.insert(key.clone(), value.clone());
-    }
     Value::Map(Arc::new(map))
 }
 
@@ -900,11 +810,11 @@ fn entity_id(value: Value) -> Value {
     }
 }
 
-#[cfg(all(test, feature = "lpg"))]
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::execution::chunk::DataChunkBuilder;
-    use crate::graph::lpg::LpgStore;
+    use crate::graph::rowgroup::RowGroupStore;
     use grafeo_common::types::Value;
 
     struct MockScanOperator {
@@ -1188,7 +1098,8 @@ mod tests {
                 expression(Value::from("Alix")),
             ],
             vec![LogicalType::Node, LogicalType::Node, LogicalType::Edge],
-            Arc::new(LpgStore::new().unwrap()),
+            Arc::new(RowGroupStore::new()),
+            ReadView::latest(),
         );
 
         let result = project.next().unwrap().unwrap();
@@ -1205,7 +1116,7 @@ mod tests {
     #[allow(clippy::cast_possible_wrap)]
     fn test_project_node_resolve() {
         // Create a store with a test node
-        let store = LpgStore::new().unwrap();
+        let store = RowGroupStore::new();
         let node_id = store.create_node(&["Person"]);
         store.set_node_property(node_id, "name", Value::String("Alix".into()));
         store.set_node_property(node_id, "age", Value::Int64(30));
@@ -1226,6 +1137,7 @@ mod tests {
             vec![ProjectExpr::NodeResolve { column: 0 }],
             vec![LogicalType::Any],
             Arc::new(store),
+            ReadView::latest(),
         );
 
         let result = project.next().unwrap().unwrap();
@@ -1252,7 +1164,7 @@ mod tests {
     // reason: test IDs are small sequential counters
     #[allow(clippy::cast_possible_wrap)]
     fn test_project_edge_resolve() {
-        let store = LpgStore::new().unwrap();
+        let store = RowGroupStore::new();
         let src = store.create_node(&["Person"]);
         let dst = store.create_node(&["Company"]);
         let edge_id = store.create_edge(src, dst, "WORKS_AT");
@@ -1274,6 +1186,7 @@ mod tests {
             vec![ProjectExpr::EdgeResolve { column: 0 }],
             vec![LogicalType::Any],
             Arc::new(store),
+            ReadView::latest(),
         );
 
         let result = project.next().unwrap().unwrap();
@@ -1308,7 +1221,7 @@ mod tests {
     fn test_project_resolve_missing_entity() {
         use grafeo_common::types::NodeId;
 
-        let store = LpgStore::new().unwrap();
+        let store = RowGroupStore::new();
 
         // Create input chunk with a NodeId that doesn't exist in the store
         let mut builder = DataChunkBuilder::new(&[LogicalType::Node]);
@@ -1329,6 +1242,7 @@ mod tests {
             vec![ProjectExpr::NodeResolve { column: 0 }],
             vec![LogicalType::Any],
             Arc::new(store),
+            ReadView::latest(),
         );
 
         let result = project.next().unwrap().unwrap();
@@ -1366,5 +1280,63 @@ mod tests {
         // Verify child is still functional
         let mut child = child;
         assert!(child.next().unwrap().is_none());
+    }
+
+    /// A property named like a structural key never replaces the node's or
+    /// edge's identity in its map (#254); other properties, those that start
+    /// with `_` too, keep their values.
+    #[test]
+    fn entity_maps_keep_their_identity() {
+        let map = |value: Value| match value {
+            Value::Map(map) => map,
+            other => panic!("{other:?}"),
+        };
+        let mut node = crate::graph::lpg::Node::new(NodeId::new(3));
+        node.add_label("Person");
+        node.set_property("_id", Value::from("x"));
+        node.set_property("_labels", Value::from("y"));
+        node.set_property("_created", Value::Int64(2020));
+        node.set_property("id", Value::Int64(7));
+        let node = map(node_to_map(&node));
+        assert_eq!(node.get(&PropertyKey::new("_id")), Some(&Value::Int64(3)));
+        assert_eq!(
+            node.get(&PropertyKey::new("_labels")),
+            Some(&Value::List(vec![Value::from("Person")].into()))
+        );
+        assert_eq!(
+            node.get(&PropertyKey::new("_created")),
+            Some(&Value::Int64(2020))
+        );
+        assert_eq!(node.get(&PropertyKey::new("id")), Some(&Value::Int64(7)));
+
+        let mut edge =
+            crate::graph::lpg::Edge::new(EdgeId::new(5), NodeId::new(3), NodeId::new(4), "KNOWS");
+        for key in ["_id", "_type", "_source", "_target"] {
+            edge.set_property(key, Value::from("user"));
+        }
+        edge.set_property("source", Value::from("jdt"));
+        edge.set_property("_note", Value::from("met in Paris"));
+        let edge = map(edge_to_map(&edge));
+        assert_eq!(edge.get(&PropertyKey::new("_id")), Some(&Value::Int64(5)));
+        assert_eq!(
+            edge.get(&PropertyKey::new("_type")),
+            Some(&Value::from("KNOWS"))
+        );
+        assert_eq!(
+            edge.get(&PropertyKey::new("_source")),
+            Some(&Value::Int64(3))
+        );
+        assert_eq!(
+            edge.get(&PropertyKey::new("_target")),
+            Some(&Value::Int64(4))
+        );
+        assert_eq!(
+            edge.get(&PropertyKey::new("source")),
+            Some(&Value::from("jdt"))
+        );
+        assert_eq!(
+            edge.get(&PropertyKey::new("_note")),
+            Some(&Value::from("met in Paris"))
+        );
     }
 }

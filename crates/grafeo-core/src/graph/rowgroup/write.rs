@@ -1,8 +1,10 @@
-//! The row-group store's raw writes (`GraphStoreMut`), through `apply`.
+//! The row-group store's raw writes, through `apply`.
 //!
 //! A raw write commits at once: it is an immediate write at the next epoch.
-//! A `*_versioned` raw write is a pending write of its transaction that no
-//! change set records, as `LpgStore`'s are (raw store handles, QJ).
+//! A `*_versioned` raw write, a create, a delete, a value or a label, is a
+//! pending write of its transaction (at the store's epoch as its snapshot)
+//! that no change set records (raw store handles, QJ): the transaction sees
+//! it, no other reader does, and nothing commits it.
 
 use std::sync::atomic::Ordering;
 
@@ -12,8 +14,7 @@ use grafeo_common::utils::error::{Error, Result};
 
 use super::RowGroupStore;
 use crate::graph::Direction;
-use crate::graph::apply::{Applied, ApplyError, ChangeTarget, Writer};
-use crate::graph::traits::GraphStoreMut;
+use crate::graph::apply::{Applied, ApplyError, GraphBackend, Writer};
 
 /// The crate's error for an `apply` that refused.
 fn error(refused: &ApplyError) -> Error {
@@ -46,6 +47,22 @@ impl RowGroupStore {
         )
     }
 
+    /// Applies `op` as a pending write of `transaction`, at the store's
+    /// epoch as its snapshot.
+    fn write_as(
+        &self,
+        op: &DataOp,
+        transaction: TransactionId,
+    ) -> std::result::Result<Applied, ApplyError> {
+        self.apply(
+            op,
+            Writer::Transaction {
+                id: transaction,
+                snapshot: EpochId::new(self.epoch.load(Ordering::Acquire)),
+            },
+        )
+    }
+
     /// The value a removal took out, if any.
     fn removed(applied: std::result::Result<Applied, ApplyError>) -> Result<Option<Value>> {
         match applied {
@@ -69,8 +86,13 @@ impl RowGroupStore {
     }
 }
 
-impl GraphStoreMut for RowGroupStore {
-    fn create_node(&self, names: &[&str]) -> NodeId {
+/// The raw writes: each commits at once (an immediate write at the next
+/// epoch), or, the `*_versioned` ones, applies as a pending write of its
+/// transaction that no change set records. For tests, loaders and seeding;
+/// the engine writes through [`GraphBackend`].
+impl RowGroupStore {
+    /// Creates a new node with the given labels.
+    pub fn create_node(&self, names: &[&str]) -> NodeId {
         let id = self.reserve_node();
         let op = DataOp::CreateNode {
             id,
@@ -81,7 +103,8 @@ impl GraphStoreMut for RowGroupStore {
         id
     }
 
-    fn create_node_versioned(
+    /// Creates a new node within a transaction context.
+    pub fn create_node_versioned(
         &self,
         names: &[&str],
         epoch: EpochId,
@@ -103,7 +126,12 @@ impl GraphStoreMut for RowGroupStore {
         id
     }
 
-    fn create_edge(&self, src: NodeId, dst: NodeId, edge_type: &str) -> EdgeId {
+    /// Creates a new edge between two nodes.
+    ///
+    /// The store does not check the endpoints: the caller makes sure both
+    /// exist (the engine's writes go through
+    /// [`create_edge_versioned`](Self::create_edge_versioned)).
+    pub fn create_edge(&self, src: NodeId, dst: NodeId, edge_type: &str) -> EdgeId {
         let id = self.reserve_edge();
         let op = DataOp::CreateEdge {
             id,
@@ -116,7 +144,18 @@ impl GraphStoreMut for RowGroupStore {
         id
     }
 
-    fn create_edge_versioned(
+    /// Creates a new edge within a transaction context
+    /// (`TransactionId::SYSTEM` outside one).
+    ///
+    /// The caller checks that its transaction sees both endpoints, and claims
+    /// them against a concurrent delete (as `GraphWriter` does).
+    ///
+    /// # Errors
+    ///
+    /// Returns a write conflict, and creates nothing, when the store knows an
+    /// endpoint is deleted, by a committed delete or one in progress: a
+    /// compacted store's base node with a tombstone.
+    pub fn create_edge_versioned(
         &self,
         src: NodeId,
         dst: NodeId,
@@ -143,18 +182,27 @@ impl GraphStoreMut for RowGroupStore {
         .map_err(|refused| error(&refused))
     }
 
-    fn batch_create_edges(&self, edges: &[(NodeId, NodeId, &str)]) -> Vec<EdgeId> {
+    /// Creates multiple edges in batch (single lock acquisition). The
+    /// endpoints are not checked, as for [`create_edge`](Self::create_edge).
+    pub fn batch_create_edges(&self, edges: &[(NodeId, NodeId, &str)]) -> Vec<EdgeId> {
         edges
             .iter()
             .map(|(src, dst, edge_type)| self.create_edge(*src, *dst, edge_type))
             .collect()
     }
 
-    fn delete_node(&self, id: NodeId) -> bool {
+    /// Deletes a node. Returns `true` if the node existed.
+    pub fn delete_node(&self, id: NodeId) -> bool {
         changed(&self.write_now(&DataOp::DeleteNode { id }, false))
     }
 
-    fn delete_node_versioned(
+    /// Deletes a node within a transaction context. Returns `true` if the node existed.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error, and deletes nothing, when the store cannot read the
+    /// node it would delete (a record or value it cannot read).
+    pub fn delete_node_versioned(
         &self,
         id: NodeId,
         epoch: EpochId,
@@ -173,7 +221,8 @@ impl GraphStoreMut for RowGroupStore {
         }
     }
 
-    fn delete_node_edges(&self, node_id: NodeId) {
+    /// Deletes all edges connected to a node (DETACH DELETE).
+    pub fn delete_node_edges(&self, node_id: NodeId) {
         let now = self.now();
         let edges: Vec<EdgeId> = {
             let inner = self.inner.read();
@@ -189,11 +238,13 @@ impl GraphStoreMut for RowGroupStore {
         }
     }
 
-    fn delete_edge(&self, id: EdgeId) -> bool {
+    /// Deletes an edge. Returns `true` if the edge existed.
+    pub fn delete_edge(&self, id: EdgeId) -> bool {
         changed(&self.write_now(&DataOp::DeleteEdge { id }, false))
     }
 
-    fn delete_edge_versioned(
+    /// Deletes an edge within a transaction context. Returns `true` if the edge existed.
+    pub fn delete_edge_versioned(
         &self,
         id: EdgeId,
         epoch: EpochId,
@@ -208,7 +259,8 @@ impl GraphStoreMut for RowGroupStore {
         ))
     }
 
-    fn set_node_property(&self, id: NodeId, key: &str, value: Value) {
+    /// Sets a property on a node.
+    pub fn set_node_property(&self, id: NodeId, key: &str, value: Value) {
         let op = DataOp::SetNodeProperty {
             id,
             key: PropertyKey::new(key),
@@ -217,7 +269,8 @@ impl GraphStoreMut for RowGroupStore {
         let _set = self.write_now(&op, false);
     }
 
-    fn set_edge_property(&self, id: EdgeId, key: &str, value: Value) {
+    /// Sets a property on an edge.
+    pub fn set_edge_property(&self, id: EdgeId, key: &str, value: Value) {
         let op = DataOp::SetEdgeProperty {
             id,
             key: PropertyKey::new(key),
@@ -226,7 +279,126 @@ impl GraphStoreMut for RowGroupStore {
         let _set = self.write_now(&op, false);
     }
 
-    fn remove_node_property(&self, id: NodeId, key: &str) -> Result<Option<Value>> {
+    /// Sets a node property within a transaction context: it writes the value as
+    /// the transaction's pending version.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error, and changes nothing, when the previous value cannot
+    /// be read (a spilled value whose file cannot be read): a rollback could
+    /// not restore it.
+    pub fn set_node_property_versioned(
+        &self,
+        id: NodeId,
+        key: &str,
+        value: Value,
+        transaction_id: TransactionId,
+    ) -> Result<()> {
+        let op = DataOp::SetNodeProperty {
+            id,
+            key: PropertyKey::new(key),
+            value,
+        };
+        self.write_as(&op, transaction_id)
+            .map(|_| ())
+            .map_err(|refused| error(&refused))
+    }
+
+    /// Sets an edge property within a transaction context.
+    pub fn set_edge_property_versioned(
+        &self,
+        id: EdgeId,
+        key: &str,
+        value: Value,
+        transaction_id: TransactionId,
+    ) {
+        let op = DataOp::SetEdgeProperty {
+            id,
+            key: PropertyKey::new(key),
+            value,
+        };
+        let _set = self.write_as(&op, transaction_id);
+    }
+
+    /// Removes a node property within a transaction context. Returns the
+    /// previous value if it existed.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error, and changes nothing, when the previous value cannot
+    /// be read (a spilled value whose file cannot be read).
+    pub fn remove_node_property_versioned(
+        &self,
+        id: NodeId,
+        key: &str,
+        transaction_id: TransactionId,
+    ) -> Result<Option<Value>> {
+        let op = DataOp::RemoveNodeProperty {
+            id,
+            key: PropertyKey::new(key),
+        };
+        Self::removed(self.write_as(&op, transaction_id))
+    }
+
+    /// Removes an edge property within a transaction context.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error, and changes nothing, when the previous value cannot
+    /// be read.
+    pub fn remove_edge_property_versioned(
+        &self,
+        id: EdgeId,
+        key: &str,
+        transaction_id: TransactionId,
+    ) -> Result<Option<Value>> {
+        let op = DataOp::RemoveEdgeProperty {
+            id,
+            key: PropertyKey::new(key),
+        };
+        Self::removed(self.write_as(&op, transaction_id))
+    }
+
+    /// Adds a label within a transaction context.
+    pub fn add_label_versioned(
+        &self,
+        node_id: NodeId,
+        label: &str,
+        transaction_id: TransactionId,
+    ) -> bool {
+        changed(&self.write_as(
+            &DataOp::AddNodeLabel {
+                id: node_id,
+                label: ArcStr::from(label),
+            },
+            transaction_id,
+        ))
+    }
+
+    /// Removes a label within a transaction context.
+    pub fn remove_label_versioned(
+        &self,
+        node_id: NodeId,
+        label: &str,
+        transaction_id: TransactionId,
+    ) -> bool {
+        changed(&self.write_as(
+            &DataOp::RemoveNodeLabel {
+                id: node_id,
+                label: ArcStr::from(label),
+            },
+            transaction_id,
+        ))
+    }
+
+    /// Removes a property from a node. Returns the previous value if it existed.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error, and changes nothing, when the value cannot be read
+    /// (a spilled value whose file cannot be read): the caller logs the
+    /// removal, and a hidden value reported absent would not be logged.
+    pub fn remove_node_property(&self, id: NodeId, key: &str) -> Result<Option<Value>> {
         let op = DataOp::RemoveNodeProperty {
             id,
             key: PropertyKey::new(key),
@@ -234,7 +406,13 @@ impl GraphStoreMut for RowGroupStore {
         Self::removed(self.write_now(&op, true))
     }
 
-    fn remove_edge_property(&self, id: EdgeId, key: &str) -> Result<Option<Value>> {
+    /// Removes a property from an edge. Returns the previous value if it existed.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error, and changes nothing, when the value cannot be read,
+    /// as [`remove_node_property`](Self::remove_node_property) does.
+    pub fn remove_edge_property(&self, id: EdgeId, key: &str) -> Result<Option<Value>> {
         let op = DataOp::RemoveEdgeProperty {
             id,
             key: PropertyKey::new(key),
@@ -242,7 +420,8 @@ impl GraphStoreMut for RowGroupStore {
         Self::removed(self.write_now(&op, true))
     }
 
-    fn add_label(&self, node_id: NodeId, label: &str) -> bool {
+    /// Adds a label to a node. Returns `true` if the label was new.
+    pub fn add_label(&self, node_id: NodeId, label: &str) -> bool {
         changed(&self.write_now(
             &DataOp::AddNodeLabel {
                 id: node_id,
@@ -252,7 +431,8 @@ impl GraphStoreMut for RowGroupStore {
         ))
     }
 
-    fn remove_label(&self, node_id: NodeId, label: &str) -> bool {
+    /// Removes a label from a node. Returns `true` if the label existed.
+    pub fn remove_label(&self, node_id: NodeId, label: &str) -> bool {
         changed(&self.write_now(
             &DataOp::RemoveNodeLabel {
                 id: node_id,
@@ -260,5 +440,35 @@ impl GraphStoreMut for RowGroupStore {
             },
             false,
         ))
+    }
+
+    /// Creates a node with labels and properties: a create, then a set of
+    /// each property, each an immediate write.
+    pub fn create_node_with_props(
+        &self,
+        labels: &[&str],
+        properties: &[(PropertyKey, Value)],
+    ) -> NodeId {
+        let id = self.create_node(labels);
+        for (key, value) in properties {
+            self.set_node_property(id, key.as_str(), value.clone());
+        }
+        id
+    }
+
+    /// Creates an edge with properties: a create, then a set of each
+    /// property, each an immediate write.
+    pub fn create_edge_with_props(
+        &self,
+        src: NodeId,
+        dst: NodeId,
+        edge_type: &str,
+        properties: &[(PropertyKey, Value)],
+    ) -> EdgeId {
+        let id = self.create_edge(src, dst, edge_type);
+        for (key, value) in properties {
+            self.set_edge_property(id, key.as_str(), value.clone());
+        }
+        id
     }
 }

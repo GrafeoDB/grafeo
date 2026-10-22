@@ -2,10 +2,21 @@ package grafeo
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"sync"
 	"testing"
 )
+
+// mustCount is a count that must succeed.
+func mustCount(t *testing.T, count func() (int, error)) int {
+	t.Helper()
+	n, err := count()
+	if err != nil {
+		t.Fatalf("count: %v", err)
+	}
+	return n
+}
 
 // --- Lifecycle ---
 
@@ -16,11 +27,11 @@ func TestOpenInMemory(t *testing.T) {
 	}
 	defer db.Close()
 
-	if db.NodeCount() != 0 {
-		t.Errorf("expected 0 nodes, got %d", db.NodeCount())
+	if mustCount(t, db.NodeCount) != 0 {
+		t.Errorf("expected 0 nodes, got %d", mustCount(t, db.NodeCount))
 	}
-	if db.EdgeCount() != 0 {
-		t.Errorf("expected 0 edges, got %d", db.EdgeCount())
+	if mustCount(t, db.EdgeCount) != 0 {
+		t.Errorf("expected 0 edges, got %d", mustCount(t, db.EdgeCount))
 	}
 }
 
@@ -58,8 +69,8 @@ func TestCreateNode(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if db.NodeCount() != 1 {
-		t.Errorf("expected 1 node, got %d", db.NodeCount())
+	if mustCount(t, db.NodeCount) != 1 {
+		t.Errorf("expected 1 node, got %d", mustCount(t, db.NodeCount))
 	}
 	if node.Labels[0] != "Person" {
 		t.Errorf("expected label Person, got %v", node.Labels)
@@ -83,6 +94,26 @@ func TestGetNode(t *testing.T) {
 	}
 }
 
+// An absent node or edge is ErrNotFound (and still a database error), not
+// another failure; GetNodeLabels gives nil for an absent node.
+func TestAbsentReads(t *testing.T) {
+	db, err := OpenInMemory()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	if _, err := db.GetNode(4242); !errors.Is(err, ErrNotFound) || !errors.Is(err, ErrDatabase) {
+		t.Errorf("GetNode of an absent node: %v, want ErrNotFound", err)
+	}
+	if _, err := db.GetEdge(4242); !errors.Is(err, ErrNotFound) {
+		t.Errorf("GetEdge of an absent edge: %v, want ErrNotFound", err)
+	}
+	if labels, err := db.GetNodeLabels(4242); err != nil || labels != nil {
+		t.Errorf("GetNodeLabels of an absent node: %v %v, want nil, nil", labels, err)
+	}
+}
+
 func TestDeleteNode(t *testing.T) {
 	db, err := OpenInMemory()
 	if err != nil {
@@ -98,8 +129,8 @@ func TestDeleteNode(t *testing.T) {
 	if !deleted {
 		t.Error("expected node to be deleted")
 	}
-	if db.NodeCount() != 0 {
-		t.Errorf("expected 0 nodes after delete, got %d", db.NodeCount())
+	if mustCount(t, db.NodeCount) != 0 {
+		t.Errorf("expected 0 nodes after delete, got %d", mustCount(t, db.NodeCount))
 	}
 }
 
@@ -178,8 +209,8 @@ func TestCreateEdge(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if db.EdgeCount() != 1 {
-		t.Errorf("expected 1 edge, got %d", db.EdgeCount())
+	if mustCount(t, db.EdgeCount) != 1 {
+		t.Errorf("expected 1 edge, got %d", mustCount(t, db.EdgeCount))
 	}
 	if edge.Type != "KNOWS" {
 		t.Errorf("expected KNOWS, got %s", edge.Type)
@@ -222,8 +253,8 @@ func TestDeleteEdge(t *testing.T) {
 	if !deleted {
 		t.Error("expected edge to be deleted")
 	}
-	if db.EdgeCount() != 0 {
-		t.Errorf("expected 0 edges, got %d", db.EdgeCount())
+	if mustCount(t, db.EdgeCount) != 0 {
+		t.Errorf("expected 0 edges, got %d", mustCount(t, db.EdgeCount))
 	}
 }
 
@@ -305,8 +336,8 @@ func TestTransactionCommit(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if db.NodeCount() != 1 {
-		t.Errorf("expected 1 node after commit, got %d", db.NodeCount())
+	if mustCount(t, db.NodeCount) != 1 {
+		t.Errorf("expected 1 node after commit, got %d", mustCount(t, db.NodeCount))
 	}
 }
 
@@ -334,8 +365,8 @@ func TestTransactionRollback(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if db.NodeCount() != 1 {
-		t.Errorf("expected 1 node after rollback, got %d", db.NodeCount())
+	if mustCount(t, db.NodeCount) != 1 {
+		t.Errorf("expected 1 node after rollback, got %d", mustCount(t, db.NodeCount))
 	}
 }
 
@@ -360,8 +391,8 @@ func TestTransactionIsolation(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if db.NodeCount() != 1 {
-		t.Errorf("expected 1 node, got %d", db.NodeCount())
+	if mustCount(t, db.NodeCount) != 1 {
+		t.Errorf("expected 1 node, got %d", mustCount(t, db.NodeCount))
 	}
 }
 

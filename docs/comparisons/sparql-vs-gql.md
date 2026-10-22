@@ -211,7 +211,7 @@ Grafeo supports both query languages:
 ```toml
 # Enable both features
 [dependencies]
-grafeo = { version = "0.5", features = ["gql", "sparql"] }
+grafeo = { version = "0.6", features = ["gql", "sparql"] }
 ```
 
 === "SPARQL Query"

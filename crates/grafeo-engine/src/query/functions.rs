@@ -1,74 +1,93 @@
-//! The functions a query calls and the patterns it matches, checked when the
-//! query is planned.
+//! The functions a query calls and the patterns it matches, checked before
+//! any row is read.
 //!
-//! A call is to a scalar function of the expression evaluator (see
-//! [`function_support`]) or to an aggregate, which groups rows. The LPG
-//! planner checks every call and every `=~` and LIKE it plans, so a query
-//! that calls a function that does not exist (a misspelled `upperr`), passes
-//! a function a number of arguments it does not take (`toUpper('a', 'b')`),
-//! calls a function this build lacks a feature for, or matches a pattern this
-//! build cannot, fails before any row is read. The evaluator would answer
-//! each of these with a null for every row, and a WHERE would keep no rows.
+//! A call is to a built-in function of the expression evaluator or to an
+//! aggregate, which groups rows. The GQL, Cypher and SQL/PGQ translators
+//! resolve every call they translate ([`resolve_call`]), and the LPG planner
+//! checks every `=~` and LIKE it plans, so a query that calls a function that
+//! does not exist (a misspelled `upperr`), passes a function a number of
+//! arguments it does not take (`toUpper('a', 'b')`), calls a function this
+//! build lacks a feature for, or matches a pattern this build cannot, fails
+//! before any row is read. The evaluator would answer each of these with a
+//! null for every row, and a WHERE would keep no rows.
 
 use grafeo_common::types::Value;
 use grafeo_common::utils::error::{Error, QueryError, QueryErrorKind, Result};
+#[cfg(any(test, feature = "gql", feature = "cypher", feature = "sql-pgq"))]
 use grafeo_common::utils::strings::{find_similar, format_suggestion};
-use grafeo_core::execution::operators::{
-    FunctionSupport, REGEX_SUPPORT, function_names, function_support, regex_pattern_error,
-};
+#[cfg(any(test, feature = "gql", feature = "cypher", feature = "sql-pgq"))]
+use grafeo_core::execution::operators::{FunctionSupport, function_names, function_support};
+use grafeo_core::execution::operators::{REGEX_SUPPORT, regex_pattern_error};
 
+#[cfg(any(test, feature = "gql", feature = "cypher", feature = "sql-pgq"))]
+use crate::query::plan::AggregateFunction;
 use crate::query::plan::{BinaryOp, LogicalExpression};
-
-/// The aggregate functions: every spelling a query may use (case does not
-/// matter).
-const AGGREGATE_FUNCTIONS: &[&str] = &[
-    "count",
-    "sum",
-    "avg",
-    "min",
-    "max",
-    "collect",
-    "stdev",
-    "stddev",
-    "stddev_samp",
-    "stdevp",
-    "stddevp",
-    "stddev_pop",
-    "variance",
-    "var_samp",
-    "var_pop",
-    "percentile_disc",
-    "percentileDisc",
-    "percentile_cont",
-    "percentileCont",
-    "group_concat",
-    "groupConcat",
-    "listagg",
-    "sample",
-    "covar_samp",
-    "covar_pop",
-    "corr",
-    "regr_slope",
-    "regr_intercept",
-    "regr_r2",
-    "regr_count",
-    "regr_sxx",
-    "regr_syy",
-    "regr_sxy",
-    "regr_avgx",
-    "regr_avgy",
-];
+#[cfg(any(feature = "gql", feature = "cypher", feature = "sql-pgq"))]
+use crate::query::plan::{BuiltinFunction, Callee};
 
 /// Whether `name` is an aggregate function (case does not matter).
+#[cfg(any(test, feature = "gql", feature = "cypher", feature = "sql-pgq"))]
 pub(crate) fn is_aggregate_function(name: &str) -> bool {
-    AGGREGATE_FUNCTIONS
-        .iter()
-        .any(|aggregate| aggregate.eq_ignore_ascii_case(name))
+    AggregateFunction::from_name(name).is_some()
+}
+
+/// Checks the number of arguments of a call to the aggregate `function`
+/// (named `name` in the query): `count` takes 0 (`count(*)`) or 1,
+/// `group_concat` and `listagg` 1 or 2 (the separator), the percentiles, the
+/// covariances, `corr` and the regressions 2, every other aggregate 1. A call
+/// with another number used to build from what it found: `count(a, b)`
+/// counted `a`, and `sum()` counted the rows.
+///
+/// # Errors
+///
+/// `Function '<name>' takes <numbers>, got <arguments>`, as for a built-in
+/// function.
+#[cfg(any(test, feature = "gql", feature = "cypher", feature = "sql-pgq"))]
+pub(crate) fn check_aggregate_call(
+    name: &str,
+    function: AggregateFunction,
+    arguments: usize,
+) -> Result<()> {
+    let (low, high, takes) = match function {
+        AggregateFunction::Count | AggregateFunction::CountNonNull => (0, 1, "0 or 1 arguments"),
+        AggregateFunction::GroupConcat => (1, 2, "1 or 2 arguments"),
+        AggregateFunction::PercentileDisc
+        | AggregateFunction::PercentileCont
+        | AggregateFunction::CovarSamp
+        | AggregateFunction::CovarPop
+        | AggregateFunction::Corr
+        | AggregateFunction::RegrSlope
+        | AggregateFunction::RegrIntercept
+        | AggregateFunction::RegrR2
+        | AggregateFunction::RegrCount
+        | AggregateFunction::RegrSxx
+        | AggregateFunction::RegrSyy
+        | AggregateFunction::RegrSxy
+        | AggregateFunction::RegrAvgx
+        | AggregateFunction::RegrAvgy => (2, 2, "2 arguments"),
+        AggregateFunction::Sum
+        | AggregateFunction::Avg
+        | AggregateFunction::Min
+        | AggregateFunction::Max
+        | AggregateFunction::Collect
+        | AggregateFunction::StdDev
+        | AggregateFunction::StdDevPop
+        | AggregateFunction::Variance
+        | AggregateFunction::VariancePop
+        | AggregateFunction::Sample => (1, 1, "1 argument"),
+    };
+    if (low..=high).contains(&arguments) {
+        Ok(())
+    } else {
+        Err(semantic(format!(
+            "Function '{name}' takes {takes}, got {arguments}"
+        )))
+    }
 }
 
 /// A semantic error with `message`.
 fn semantic(message: String) -> Error {
-    Error::Query(QueryError::new(QueryErrorKind::Semantic, message))
+    Error::from(QueryError::new(QueryErrorKind::Semantic, message))
 }
 
 /// Checks a call to the function `name` with `arguments` arguments: an
@@ -81,6 +100,7 @@ fn semantic(message: String) -> Error {
 /// one is close; `Function '<name>' takes <numbers>, got <arguments>` for a
 /// number of arguments the function does not take; or, for a function that
 /// needs a feature this build does not have, an error that names the feature.
+#[cfg(any(test, feature = "gql", feature = "cypher", feature = "sql-pgq"))]
 pub(crate) fn check_function_call(name: &str, arguments: usize) -> Result<()> {
     if is_aggregate_function(name) {
         return Ok(());
@@ -90,23 +110,57 @@ pub(crate) fn check_function_call(name: &str, arguments: usize) -> Result<()> {
         FunctionSupport::Available(arity) => Err(semantic(format!(
             "Function '{name}' takes {arity}, got {arguments}"
         ))),
-        FunctionSupport::NeedsFeature(feature) => Err(semantic(format!(
-            "Function '{name}' is not available in this build: it needs the '{feature}' feature"
-        ))),
+        FunctionSupport::NeedsFeature(feature) => {
+            Err(Error::from(QueryError::unsupported(format!(
+                "Function '{name}' is not available in this build: it needs the '{feature}' \
+                 feature"
+            ))))
+        }
         _ => {
             let known: Vec<&str> = function_names()
-                .chain(AGGREGATE_FUNCTIONS.iter().copied())
+                .chain(AggregateFunction::ALIASES.iter().map(|&(alias, _)| alias))
                 .collect();
-            let error = QueryError::new(
-                QueryErrorKind::Semantic,
-                format!("Unknown function '{name}'"),
-            );
-            Err(Error::Query(match find_similar(name, &known) {
+            let error = QueryError::invalid_reference(format!("Unknown function '{name}'"));
+            Err(Error::from(match find_similar(name, &known) {
                 Some(similar) => error.with_hint(format_suggestion(similar)),
                 None => error,
             }))
         }
     }
+}
+
+/// The call a translator builds for `name(args)`: an aggregate, or a built-in
+/// this build computes with that many arguments.
+///
+/// # Errors
+///
+/// The errors of [`check_function_call`], with the same texts: an unknown
+/// function, a number of arguments it does not take, or a feature this build
+/// lacks.
+#[cfg(any(feature = "gql", feature = "cypher", feature = "sql-pgq"))]
+pub(crate) fn resolve_call(
+    name: &str,
+    args: Vec<LogicalExpression>,
+    distinct: bool,
+) -> Result<LogicalExpression> {
+    let callee = match AggregateFunction::from_name(name) {
+        Some(aggregate) => Callee::Aggregate(aggregate),
+        None => {
+            check_function_call(name, args.len())?;
+            let function = BuiltinFunction::from_name(name).ok_or_else(|| {
+                Error::from(QueryError::invalid_reference(format!(
+                    "Unknown function '{name}'"
+                )))
+            })?;
+            Callee::Builtin(function)
+        }
+    };
+    Ok(LogicalExpression::FunctionCall {
+        callee,
+        name: name.to_string(),
+        args,
+        distinct,
+    })
 }
 
 /// Checks a `=~` or LIKE whose pattern is `pattern`: the build must have
@@ -126,10 +180,10 @@ pub(crate) fn check_pattern_match(op: BinaryOp, pattern: &LogicalExpression) -> 
         _ => return Ok(()),
     };
     if !REGEX_SUPPORT {
-        return Err(semantic(format!(
+        return Err(Error::from(QueryError::unsupported(format!(
             "{operator} needs regular expressions, and this build has no regular expressions: \
              it needs the 'regex' or 'regex-lite' feature"
-        )));
+        ))));
     }
     if op == BinaryOp::Regex
         && let LogicalExpression::Literal(Value::String(pattern)) = pattern

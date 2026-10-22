@@ -15,8 +15,13 @@ use grafeo_engine::GrafeoDB;
 // Helper
 // ---------------------------------------------------------------------------
 
+/// A database that keeps its history: a read at an earlier epoch needs it.
 fn setup_db() -> GrafeoDB {
-    GrafeoDB::new_in_memory()
+    GrafeoDB::with_config(
+        grafeo_engine::Config::in_memory()
+            .with_history_retention(grafeo_engine::HistoryRetention::Forever),
+    )
+    .unwrap()
 }
 
 /// Advances the epoch by committing an empty transaction.
@@ -149,15 +154,15 @@ fn test_get_node_at_epoch_deleted_node() {
     db.delete_node(id).unwrap();
 
     // Node should be visible at the epoch after insert (before deletion)
-    let node = db.get_node_at_epoch(id, epoch_after_insert);
+    let node = db.get_node_at_epoch(id, epoch_after_insert).unwrap();
     assert!(node.is_some());
 
     // Node should not be visible at the current epoch (after deletion)
-    let node = db.get_node_at_epoch(id, db.current_epoch());
+    let node = db.get_node_at_epoch(id, db.current_epoch()).unwrap();
     assert!(node.is_none());
 
     // Node should not be visible at epoch 0 (before creation)
-    let node = db.get_node_at_epoch(id, EpochId::new(0));
+    let node = db.get_node_at_epoch(id, EpochId::new(0)).unwrap();
     assert!(node.is_none());
 }
 
@@ -337,11 +342,11 @@ fn test_get_node_at_epoch() {
     let epoch_after = db.current_epoch();
 
     // Node should exist at this epoch
-    let node = db.get_node_at_epoch(id, epoch_after);
+    let node = db.get_node_at_epoch(id, epoch_after).unwrap();
     assert!(node.is_some());
 
     // Node should not exist at epoch 0 (before it was created)
-    let node = db.get_node_at_epoch(id, EpochId::new(0));
+    let node = db.get_node_at_epoch(id, EpochId::new(0)).unwrap();
     assert!(node.is_none());
 }
 
@@ -358,10 +363,10 @@ fn test_get_edge_at_epoch() {
     let edge_id = db.create_edge(src, dst, "KNOWS").unwrap();
     let epoch_after = db.current_epoch();
 
-    let edge = db.get_edge_at_epoch(edge_id, epoch_after);
+    let edge = db.get_edge_at_epoch(edge_id, epoch_after).unwrap();
     assert!(edge.is_some());
 
-    let edge = db.get_edge_at_epoch(edge_id, EpochId::new(0));
+    let edge = db.get_edge_at_epoch(edge_id, EpochId::new(0)).unwrap();
     assert!(edge.is_none());
 }
 
@@ -373,11 +378,12 @@ fn test_get_edge_at_epoch() {
 fn test_node_history_single_version() {
     let db = setup_db();
 
-    let id = db.create_node(&["Person"]).unwrap();
-    db.set_node_property(id, "name", Value::String("Alix".into()))
+    // One commit: one version (a later write adds a version of its own).
+    let id = db
+        .create_node_with_props(&["Person"], [("name", Value::String("Alix".into()))])
         .unwrap();
 
-    let history = db.get_node_history(id);
+    let history = db.get_node_history(id).unwrap();
     assert_eq!(history.len(), 1);
 
     let (created_epoch, deleted_epoch, node) = &history[0];
@@ -393,7 +399,7 @@ fn test_node_history_deleted() {
     let id = db.create_node(&["Person"]).unwrap();
     db.delete_node(id).unwrap();
 
-    let history = db.get_node_history(id);
+    let history = db.get_node_history(id).unwrap();
     // Version chain should still exist with a deleted marker
     assert!(!history.is_empty());
     let (_, deleted_epoch, _) = &history[0];
@@ -405,7 +411,7 @@ fn test_node_history_nonexistent() {
     let db = setup_db();
     use grafeo_common::types::NodeId;
 
-    let history = db.get_node_history(NodeId::new(9999));
+    let history = db.get_node_history(NodeId::new(9999)).unwrap();
     assert!(history.is_empty());
 }
 
@@ -417,7 +423,7 @@ fn test_edge_history_single_version() {
     let dst = db.create_node(&["Person"]).unwrap();
     let edge_id = db.create_edge(src, dst, "KNOWS").unwrap();
 
-    let history = db.get_edge_history(edge_id);
+    let history = db.get_edge_history(edge_id).unwrap();
     assert_eq!(history.len(), 1);
 
     let (created_epoch, deleted_epoch, edge) = &history[0];

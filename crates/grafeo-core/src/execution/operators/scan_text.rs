@@ -3,10 +3,10 @@
 //! Performs full-text search using an inverted index with BM25 scoring.
 //! Supports top-k and score-threshold modes.
 
-use super::{Operator, OperatorError, OperatorResult};
+use super::{Operator, OperatorError, OperatorResult, ReadCounter};
 use crate::execution::DataChunk;
-use crate::graph::traits::GraphStoreSearch;
-use grafeo_common::types::{LogicalType, NodeId};
+use crate::graph::traits::GraphStore;
+use grafeo_common::types::{LogicalType, NodeId, ReadView};
 use std::sync::Arc;
 
 /// A scan operator that retrieves nodes by BM25 text relevance.
@@ -27,7 +27,7 @@ use std::sync::Arc;
 /// 2. `Float64` — The BM25 relevance score
 pub struct TextScanOperator {
     /// The graph store to search.
-    store: Arc<dyn GraphStoreSearch>,
+    store: Arc<dyn GraphStore>,
     /// Label to search within.
     label: String,
     /// Property holding the text to search.
@@ -46,6 +46,10 @@ pub struct TextScanOperator {
     executed: bool,
     /// Rows per output DataChunk (default 2048).
     chunk_capacity: usize,
+    /// Who reads: the search finds the documents this view sees.
+    view: ReadView,
+    /// Counts the hits the search returns.
+    reads: Option<Arc<ReadCounter>>,
 }
 
 impl TextScanOperator {
@@ -54,11 +58,12 @@ impl TextScanOperator {
     /// Returns the `k` highest-scoring nodes for the given query.
     #[must_use]
     pub fn top_k(
-        store: Arc<dyn GraphStoreSearch>,
+        store: Arc<dyn GraphStore>,
         label: impl Into<String>,
         property: impl Into<String>,
         query: impl Into<String>,
         k: usize,
+        view: ReadView,
     ) -> Self {
         Self {
             store,
@@ -71,6 +76,8 @@ impl TextScanOperator {
             position: 0,
             executed: false,
             chunk_capacity: 2048,
+            view,
+            reads: None,
         }
     }
 
@@ -79,11 +86,12 @@ impl TextScanOperator {
     /// Returns all nodes with a BM25 score ≥ `threshold`.
     #[must_use]
     pub fn with_threshold(
-        store: Arc<dyn GraphStoreSearch>,
+        store: Arc<dyn GraphStore>,
         label: impl Into<String>,
         property: impl Into<String>,
         query: impl Into<String>,
         threshold: f64,
+        view: ReadView,
     ) -> Self {
         Self {
             store,
@@ -96,6 +104,8 @@ impl TextScanOperator {
             position: 0,
             executed: false,
             chunk_capacity: 2048,
+            view,
+            reads: None,
         }
     }
 
@@ -106,33 +116,39 @@ impl TextScanOperator {
         self
     }
 
+    /// Counts the hits the search returns in `reads`.
+    #[must_use]
+    pub fn with_read_counter(mut self, reads: Arc<ReadCounter>) -> Self {
+        self.reads = Some(reads);
+        self
+    }
+
     /// Executes the search on first call and caches the results.
-    fn execute_search(&mut self) {
+    fn execute_search(&mut self) -> Result<(), OperatorError> {
         if self.executed {
-            return;
+            return Ok(());
         }
         self.executed = true;
 
-        self.results = if let Some(k) = self.k {
-            self.store
-                .text_search(&self.label, &self.property, &self.query, k)
-        } else if let Some(threshold) = self.threshold {
-            self.store.text_search_with_threshold(
-                &self.label,
-                &self.property,
-                &self.query,
-                threshold,
-            )
-        } else {
-            Vec::new()
+        let (label, property, query) = (&self.label, &self.property, &self.query);
+        self.results = match (self.k, self.threshold) {
+            (Some(k), _) => self
+                .store
+                .text_search(label, property, query, k, self.view)?,
+            (None, Some(threshold)) => self
+                .store
+                .text_search_with_threshold(label, property, query, threshold, self.view)?,
+            (None, None) => Vec::new(),
         };
+        super::read_counter::count(self.reads.as_deref(), self.results.len());
+        Ok(())
     }
 }
 
 impl Operator for TextScanOperator {
     fn next(&mut self) -> OperatorResult {
         // Lazy execution on first call.
-        self.execute_search();
+        self.execute_search()?;
 
         if self.position >= self.results.len() {
             return Ok(None);
@@ -189,18 +205,18 @@ impl Operator for TextScanOperator {
     }
 }
 
-#[cfg(all(test, feature = "text-index", feature = "lpg"))]
+#[cfg(all(test, feature = "text-index"))]
 mod tests {
     use super::*;
-    use crate::graph::lpg::LpgStore;
-    use crate::graph::traits::GraphStoreSearch;
+    use crate::graph::rowgroup::RowGroupStore;
+    use crate::graph::traits::GraphStore;
     use crate::index::text::{BM25Config, InvertedIndex};
     use grafeo_common::types::Value;
     use parking_lot::RwLock;
     use std::sync::Arc;
 
-    fn make_store() -> Arc<LpgStore> {
-        let store = Arc::new(LpgStore::new().expect("arena allocation"));
+    fn make_store() -> Arc<RowGroupStore> {
+        let store = Arc::new(RowGroupStore::new());
 
         // Create nodes
         let n1 = store.create_node(&["Doc"]);
@@ -232,11 +248,12 @@ mod tests {
     fn test_text_scan_top_k() {
         let store = make_store();
         let mut scan = TextScanOperator::top_k(
-            store.clone() as Arc<dyn GraphStoreSearch>,
+            store.clone() as Arc<dyn GraphStore>,
             "Doc",
             "body",
             "rust",
             2,
+            ReadView::latest(),
         );
         let chunk = scan.next().unwrap().unwrap();
         assert_eq!(chunk.row_count(), 2);
@@ -250,15 +267,18 @@ mod tests {
     #[test]
     fn test_text_scan_with_threshold() {
         let store = make_store();
-        let all = store.text_search("Doc", "body", "rust database", 10);
+        let all = store
+            .text_search("Doc", "body", "rust database", 10, ReadView::latest())
+            .unwrap();
         assert_eq!(all.len(), 2);
         let mid = f64::midpoint(all[0].1, all[1].1);
         let mut scan = TextScanOperator::with_threshold(
-            store.clone() as Arc<dyn GraphStoreSearch>,
+            store.clone() as Arc<dyn GraphStore>,
             "Doc",
             "body",
             "rust database",
             mid,
+            ReadView::latest(),
         );
         let chunk = scan.next().unwrap().unwrap();
         assert_eq!(chunk.row_count(), 1);
@@ -270,11 +290,12 @@ mod tests {
     fn test_text_scan_no_matches() {
         let store = make_store();
         let mut scan = TextScanOperator::top_k(
-            store.clone() as Arc<dyn GraphStoreSearch>,
+            store.clone() as Arc<dyn GraphStore>,
             "Doc",
             "body",
             "nonexistent",
             10,
+            ReadView::latest(),
         );
         assert!(scan.next().unwrap().is_none());
     }
@@ -283,11 +304,12 @@ mod tests {
     fn test_text_scan_reset() {
         let store = make_store();
         let mut scan = TextScanOperator::top_k(
-            store.clone() as Arc<dyn GraphStoreSearch>,
+            store.clone() as Arc<dyn GraphStore>,
             "Doc",
             "body",
             "rust",
             10,
+            ReadView::latest(),
         );
         let chunk1 = scan.next().unwrap().unwrap();
         assert_eq!(chunk1.row_count(), 2);
@@ -301,11 +323,12 @@ mod tests {
     fn test_text_scan_name() {
         let store = make_store();
         let scan = TextScanOperator::top_k(
-            store.clone() as Arc<dyn GraphStoreSearch>,
+            store.clone() as Arc<dyn GraphStore>,
             "Doc",
             "body",
             "rust",
             10,
+            ReadView::latest(),
         );
         assert_eq!(scan.name(), "TextScan(BM25)");
     }
@@ -314,11 +337,12 @@ mod tests {
     fn test_text_scan_chunk_capacity() {
         let store = make_store();
         let mut scan = TextScanOperator::top_k(
-            store.clone() as Arc<dyn GraphStoreSearch>,
+            store.clone() as Arc<dyn GraphStore>,
             "Doc",
             "body",
             "rust",
             10,
+            ReadView::latest(),
         )
         .with_chunk_capacity(1);
         let chunk1 = scan.next().unwrap().unwrap();

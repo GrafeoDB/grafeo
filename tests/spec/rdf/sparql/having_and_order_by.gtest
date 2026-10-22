@@ -1,0 +1,209 @@
+# SPARQL HAVING over any aggregate, and ORDER BY over any pattern variable
+# (SPARQL 1.1 sec 11.5, 15.1, 18.2.5)
+#
+# HAVING compares a GROUP_CONCAT, reads an aggregate inside a function call
+# (CONTAINS(GROUP_CONCAT(...)), ABS(SUM(...)), STRLEN(...)) and an aggregate the
+# SELECT does not compute; one with other arguments (another separator) is
+# its own aggregate. ORDER BY reads a variable the SELECT leaves out, since
+# SPARQL orders the solutions before it projects them.
+
+meta:
+  language: sparql
+  model: rdf
+  section: "11.5"
+  title: HAVING and ORDER BY
+  dataset: empty
+  requires: [sparql, rdf]
+
+tests:
+
+  # ---------------------------------------------------------------------------
+  # HAVING
+  # ---------------------------------------------------------------------------
+
+  - name: having_compares_a_group_concat
+    setup:
+      - |
+        PREFIX ex: <http://ex.org/>
+        INSERT DATA {
+          ex:alix ex:name "Alix" ; ex:city "Amsterdam" ; ex:age 30 .
+          ex:gus ex:name "Gus" ; ex:city "Amsterdam" ; ex:age 25 .
+          ex:mia ex:name "Mia" ; ex:city "Berlin" ; ex:age 28 .
+          ex:vincent ex:name "Vincent" ; ex:city "Paris" ; ex:age -5 .
+        }
+    query: |
+      PREFIX ex: <http://ex.org/>
+      SELECT ?city (GROUP_CONCAT(?name; SEPARATOR=",") AS ?names) WHERE { ?p ex:city ?city ; ex:name ?name }
+      GROUP BY ?city
+      HAVING (GROUP_CONCAT(?name; SEPARATOR=",") != "Mia")
+      ORDER BY ?city
+    expect:
+      ordered: true
+      rows:
+        - [Amsterdam, "Alix,Gus"]
+        - [Paris, Vincent]
+
+  - name: having_reads_an_aggregate_inside_a_function
+    setup:
+      - |
+        PREFIX ex: <http://ex.org/>
+        INSERT DATA {
+          ex:alix ex:name "Alix" ; ex:city "Amsterdam" .
+          ex:gus ex:name "Gus" ; ex:city "Amsterdam" .
+          ex:mia ex:name "Mia" ; ex:city "Berlin" .
+        }
+    query: |
+      PREFIX ex: <http://ex.org/>
+      SELECT ?city WHERE { ?p ex:city ?city ; ex:name ?name }
+      GROUP BY ?city
+      HAVING (CONTAINS(GROUP_CONCAT(?name), "Gus"))
+    expect:
+      rows:
+        - [Amsterdam]
+
+  - name: having_reads_a_sum_inside_abs
+    setup:
+      - |
+        PREFIX ex: <http://ex.org/>
+        INSERT DATA {
+          ex:alix ex:city "Amsterdam" ; ex:age 30 .
+          ex:mia ex:city "Berlin" ; ex:age 3 .
+          ex:vincent ex:city "Paris" ; ex:age -5 .
+        }
+    query: |
+      PREFIX ex: <http://ex.org/>
+      SELECT ?city WHERE { ?p ex:city ?city ; ex:age ?age }
+      GROUP BY ?city
+      HAVING (ABS(SUM(?age)) > 4)
+      ORDER BY ?city
+    expect:
+      ordered: true
+      rows:
+        - [Amsterdam]
+        - [Paris]
+
+  - name: having_reads_an_aggregate_the_select_does_not_compute
+    setup:
+      - |
+        PREFIX ex: <http://ex.org/>
+        INSERT DATA {
+          ex:alix ex:city "Amsterdam" ; ex:age 30 .
+          ex:gus ex:city "Amsterdam" ; ex:age 25 .
+          ex:mia ex:city "Berlin" ; ex:age 28 .
+          ex:vincent ex:city "Paris" ; ex:age -5 .
+        }
+    query: |
+      PREFIX ex: <http://ex.org/>
+      SELECT ?city (SUM(?age) AS ?total) WHERE { ?p ex:city ?city ; ex:age ?age }
+      GROUP BY ?city
+      HAVING (MAX(?age) > 26)
+      ORDER BY ?city
+    expect:
+      ordered: true
+      columns: [city, total]
+      rows:
+        - [Amsterdam, 55]
+        - [Berlin, 28]
+
+  - name: a_group_concat_with_another_separator_is_its_own_aggregate
+    setup:
+      - |
+        PREFIX ex: <http://ex.org/>
+        INSERT DATA {
+          ex:alix ex:name "Alix" ; ex:city "Amsterdam" .
+          ex:gus ex:name "Gus" ; ex:city "Amsterdam" .
+          ex:mia ex:name "Mia" ; ex:city "Berlin" .
+        }
+    query: |
+      PREFIX ex: <http://ex.org/>
+      SELECT ?city (GROUP_CONCAT(?name; SEPARATOR=" & ") AS ?names) WHERE { ?p ex:city ?city ; ex:name ?name }
+      GROUP BY ?city
+      HAVING (STRLEN(GROUP_CONCAT(?name)) > 3)
+    expect:
+      rows:
+        - [Amsterdam, "Alix & Gus"]
+
+  # ---------------------------------------------------------------------------
+  # ORDER BY
+  # ---------------------------------------------------------------------------
+
+  - name: order_by_a_variable_the_select_leaves_out
+    setup:
+      - |
+        PREFIX ex: <http://ex.org/>
+        INSERT DATA {
+          ex:alix ex:name "Alix" ; ex:age 30 .
+          ex:gus ex:name "Gus" ; ex:age 25 .
+          ex:mia ex:name "Mia" ; ex:age 28 .
+          ex:vincent ex:name "Vincent" ; ex:age -5 .
+        }
+    query: |
+      PREFIX ex: <http://ex.org/>
+      SELECT ?name WHERE { ?p ex:name ?name ; ex:age ?age } ORDER BY ?age
+    expect:
+      ordered: true
+      columns: [name]
+      rows:
+        - [Vincent]
+        - [Gus]
+        - [Mia]
+        - [Alix]
+
+  - name: order_by_a_left_out_variable_descending_with_limit
+    setup:
+      - |
+        PREFIX ex: <http://ex.org/>
+        INSERT DATA {
+          ex:alix ex:name "Alix" ; ex:age 30 .
+          ex:gus ex:name "Gus" ; ex:age 25 .
+          ex:mia ex:name "Mia" ; ex:age 28 .
+        }
+    query: |
+      PREFIX ex: <http://ex.org/>
+      SELECT ?name WHERE { ?p ex:name ?name ; ex:age ?age } ORDER BY DESC(?age) LIMIT 2
+    expect:
+      ordered: true
+      rows:
+        - [Alix]
+        - [Mia]
+
+  - name: order_by_two_left_out_variables
+    setup:
+      - |
+        PREFIX ex: <http://ex.org/>
+        INSERT DATA {
+          ex:alix ex:name "Alix" ; ex:city "Amsterdam" ; ex:age 30 .
+          ex:gus ex:name "Gus" ; ex:city "Amsterdam" ; ex:age 25 .
+          ex:mia ex:name "Mia" ; ex:city "Berlin" ; ex:age 28 .
+        }
+    query: |
+      PREFIX ex: <http://ex.org/>
+      SELECT ?name WHERE { ?p ex:name ?name ; ex:city ?c ; ex:age ?a } ORDER BY ?c DESC(?a)
+    expect:
+      ordered: true
+      rows:
+        - [Alix]
+        - [Gus]
+        - [Mia]
+
+  - name: order_by_an_aggregate_alias_then_a_group_key
+    setup:
+      - |
+        PREFIX ex: <http://ex.org/>
+        INSERT DATA {
+          ex:alix ex:city "Amsterdam" .
+          ex:gus ex:city "Amsterdam" .
+          ex:mia ex:city "Berlin" .
+          ex:vincent ex:city "Paris" .
+        }
+    query: |
+      PREFIX ex: <http://ex.org/>
+      SELECT ?city (COUNT(?p) AS ?n) WHERE { ?p ex:city ?city }
+      GROUP BY ?city
+      ORDER BY DESC(?n) ?city
+    expect:
+      ordered: true
+      rows:
+        - [Amsterdam, 2]
+        - [Berlin, 1]
+        - [Paris, 1]

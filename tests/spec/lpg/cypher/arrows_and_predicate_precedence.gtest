@@ -1,0 +1,106 @@
+# Cypher arrows, relationship types in CREATE, and predicate precedence, as
+# openCypher 9 reads them: an arrow on both sides (`<-[:T]->`, `<-->`) matches
+# either direction, as no arrow does; CREATE needs a direction and a type; and
+# IN, STARTS WITH, ENDS WITH, CONTAINS, =~ and IS NULL bind tighter than the
+# comparisons.
+
+meta:
+  language: cypher
+  model: lpg
+  title: Arrows both ways, CREATE types, predicate precedence
+  dataset: empty
+
+tests:
+
+  # ---------------------------------------------------------------------------
+  # Arrows both ways
+  # ---------------------------------------------------------------------------
+
+  - name: an_arrow_on_both_sides_matches_either_direction
+    setup:
+      - "CREATE (:Person {name: 'Alix'})-[:KNOWS]->(:Person {name: 'Gus'})"
+    query: "MATCH (g:Person {name: 'Gus'})<-[:KNOWS]->(b) RETURN b.name AS b"
+    expect:
+      rows:
+        - [Alix]
+
+  - name: a_bare_double_arrow_matches_either_direction
+    setup:
+      - "CREATE (:Person {name: 'Alix'})-[:KNOWS]->(:Person {name: 'Gus'})"
+    query: "MATCH (a:Person {name: 'Alix'})<-->(b) RETURN b.name AS b"
+    expect:
+      rows:
+        - [Gus]
+
+  - name: both_ways_finds_both_neighbours
+    setup:
+      - "CREATE (:Person {name: 'Vincent'})-[:KNOWS]->(:Person {name: 'Jules'})-[:KNOWS]->(:Person {name: 'Mia'})"
+    query: "MATCH (j:Person {name: 'Jules'})<-[:KNOWS]->(x) RETURN x.name AS x ORDER BY x"
+    expect:
+      ordered: true
+      rows:
+        - [Mia]
+        - [Vincent]
+
+  - name: create_refuses_an_arrow_on_both_sides
+    query: "CREATE (:A)<-[:T]->(:B)"
+    expect:
+      error: "direction"
+
+  # ---------------------------------------------------------------------------
+  # CREATE needs a relationship type
+  # ---------------------------------------------------------------------------
+
+  - name: create_without_a_type_is_refused
+    query: "CREATE (a)-[]->(b)"
+    expect:
+      error: "type"
+
+  - name: create_with_a_type_creates_it
+    statements:
+      - "CREATE (:A)-[:LINKS]->(:B)"
+      - "MATCH ()-[r]->() RETURN type(r) AS t"
+    expect:
+      rows:
+        - [LINKS]
+
+  # ---------------------------------------------------------------------------
+  # Predicates bind tighter than comparisons
+  # ---------------------------------------------------------------------------
+
+  - name: in_binds_tighter_than_equals
+    query: "RETURN 3 IN [1, 3] = true AS v"
+    expect:
+      rows:
+        - [true]
+
+  - name: starts_with_binds_tighter_than_equals
+    query: "RETURN 'Alix' STARTS WITH 'A' = true AS v"
+    expect:
+      rows:
+        - [true]
+
+  - name: contains_and_ends_with_bind_tighter_than_not_equals
+    query: "RETURN 'Amsterdam' CONTAINS 'ster' <> false AS c, 'Berlin' ENDS WITH 'lin' = true AS e"
+    expect:
+      rows:
+        - [true, true]
+
+  - name: a_regex_match_binds_tighter_than_equals
+    query: "RETURN 'Paris' =~ 'P.*' = true AS v"
+    expect:
+      rows:
+        - [true]
+
+  - name: is_null_binds_tighter_than_equals
+    query: "RETURN null IS NULL = true AS a, 3 IS NOT NULL = true AS b"
+    expect:
+      rows:
+        - [true, true]
+
+  - name: parentheses_still_group_first
+    # (true) = (false): the two IN tests are compared, not chained.
+    query: "RETURN (3 IN [1, 3]) = (2 IN [1, 3]) AS v"
+    expect:
+      rows:
+        - [false]

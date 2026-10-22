@@ -34,6 +34,16 @@ for row in result:
     print(row)
 ```
 
+## Threads
+
+Long-running calls release the GIL while Rust works: queries, commits,
+algorithms, searches, batch writes and upserts, index builds, imports, exports,
+opening a database and persistence (`save()`, backups, checkpoints,
+`compact()`, `close()`). Other Python threads keep running meanwhile, and
+several threads can query one database at once. Cheap calls that read or write
+one node or edge keep the GIL. A transaction is used from one thread at a time
+(see [Transactions](transactions.md#threads)).
+
 ## Query Languages
 
 Grafeo supports multiple query languages:
@@ -87,6 +97,17 @@ db.execute("""
     INSERT (a)-[:KNOWS {since: 2024}]->(b)
 """)
 ```
+
+!!! tip "Writing many nodes or edges"
+    Each direct call is checked and committed on its own. To write many nodes or edges at once, pass them to one
+    batch call: `batch_create_nodes_with_props`, `batch_create_edges`, or `upsert_nodes` and `upsert_edges` to
+    insert or update by a key. A batch is checked, written and committed once for all its rows, and creates none of
+    them if one row fails.
+
+    ```python
+    ids = db.batch_create_nodes_with_props("Person", [{"name": "Alix"}, {"name": "Gus"}])
+    db.batch_create_edges([(ids[0], ids[1], "KNOWS", {"since": 2024})])
+    ```
 
 ## Label Management
 
@@ -194,6 +215,10 @@ print(f"Imported {count} nodes")
 count = db.import_jsonl("events.jsonl", "Event")
 ```
 
+Each column or JSON key becomes a property under the name the file gives it (`home city` stays `home city`), and
+the label is used as given. A CSV without headers (`headers=False`) names its columns `column0`, `column1`, and so
+on. CSV values are strings; JSON values keep their types. An empty CSV field sets no property.
+
 ## Change Data Capture
 
 Control CDC on a per-transaction basis:
@@ -215,15 +240,18 @@ with db.begin_transaction_with_cdc(False) as tx:
 ## Backup and Restore
 
 ```python
-# Full backup
-db.backup_full("/backups/full")
+# Full backup: an image of the database at the current epoch, written while
+# commits go on
+db.backup_full("/backups")
 
-# Incremental backup (WAL records since last backup)
-db.backup_incremental("/backups/incr")
+# Incremental backup (the commits since the last backup), in the same directory
+db.backup_incremental("/backups")
 
-# Restore to a specific epoch
-grafeo.GrafeoDB.restore_to_epoch("/backups/full", epoch=100, output_path="./restored")
+# Restore to a specific epoch: the full backup and the incrementals up to it
+grafeo.GrafeoDB.restore_to_epoch("/backups", epoch=100, output_path="./restored.grafeo")
 ```
+
+An incremental backup needs a full backup in its directory, and continues from the last backup there. The chain survives restarts: once a backup has been taken, `close()` keeps the write-ahead log written since the last backup (in `<file>.wal/`), and the next incremental backup after a reopen takes it.
 
 ## Persistence
 

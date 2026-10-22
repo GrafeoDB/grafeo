@@ -15,12 +15,7 @@
 //! cargo test -p grafeo-engine --all-features --test checkpoint_committed_state
 //! ```
 
-#![cfg(all(
-    feature = "lpg",
-    feature = "gql",
-    feature = "wal",
-    feature = "grafeo-file"
-))]
+#![cfg(all(feature = "gql", feature = "wal", feature = "grafeo-file"))]
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -631,6 +626,7 @@ fn index_docs(db: &GrafeoDB) {
 fn assert_committed_docs(db: &GrafeoDB, after: &str) {
     let title = |id| {
         db.get_node(id)
+            .unwrap()
             .and_then(|node| node.get_property("title").cloned())
     };
     let text = |query: &str| -> Vec<Option<Value>> {

@@ -21,6 +21,7 @@
 //! # Example
 //!
 //! ```
+//! use grafeo_common::types::{EpochId, ReadView};
 //! use grafeo_core::graph::rdf::{RdfStore, Term, Triple, RdfGraphStoreAdapter};
 //! use grafeo_core::graph::GraphStore;
 //!
@@ -32,20 +33,22 @@
 //! ));
 //!
 //! let adapter = RdfGraphStoreAdapter::new(&store);
-//! assert_eq!(adapter.node_count(), 2);
-//! assert_eq!(adapter.edge_count(), 1);
+//! // A snapshot: every view sees the graph it was built from.
+//! let view = ReadView::committed(EpochId::INITIAL);
+//! assert_eq!(adapter.node_count(view).unwrap(), 2);
+//! assert_eq!(adapter.edge_count(view).unwrap(), 1);
 //! ```
 
 use super::store::RdfStore;
 use super::term::{Literal, Term};
 use super::triple::Triple;
 use crate::graph::Direction;
-use crate::graph::lpg::CompareOp;
 use crate::graph::lpg::{Edge, Node};
-use crate::graph::traits::{GraphStore, GraphStoreSearch};
+use crate::graph::traits::{GraphStore, Labels, list_self_loops_once};
 use crate::statistics::{EdgeTypeStatistics, LabelStatistics, Statistics};
 use arcstr::ArcStr;
-use grafeo_common::types::{EdgeId, EpochId, NodeId, PropertyKey, TransactionId, Value};
+use grafeo_common::types::{EdgeId, EpochId, NodeId, PropertyKey, ReadView, Value};
+use grafeo_common::utils::error::Result;
 use grafeo_common::utils::hash::FxHashMap;
 use smallvec::SmallVec;
 use std::sync::Arc;
@@ -60,10 +63,9 @@ const RDF_TYPE: &str = "http://www.w3.org/1999/02/22-rdf-syntax-ns#type";
 /// after construction: it represents a snapshot of the `RdfStore` at the
 /// time `new()` was called.
 ///
-/// For algorithms that only use traversal methods (`neighbors`, `edges_from`,
-/// `node_ids`, `out_degree`), the adapter has the same asymptotic performance
-/// as [`LpgStore`](crate::graph::lpg::LpgStore): adjacency lookups are O(1)
-/// indexing into pre-built Vecs.
+/// For algorithms that only use traversal methods (`neighbors`, `edges`,
+/// `node_ids`, `degree`), the adapter has the same asymptotic performance
+/// as the LPG store: adjacency lookups are O(1) indexing into pre-built Vecs.
 pub struct RdfGraphStoreAdapter {
     /// Term -> NodeId mapping (only IRIs and blank nodes).
     term_to_node: FxHashMap<Term, NodeId>,
@@ -257,197 +259,105 @@ impl RdfGraphStoreAdapter {
     }
 }
 
+/// The adapter is a snapshot without versions: every view sees the graph
+/// it was built from, and no read can fail.
 impl GraphStore for RdfGraphStoreAdapter {
-    // --- Point lookups ---
+    // --- Point reads ---
 
-    fn get_node(&self, id: NodeId) -> Option<Node> {
-        // reason: entity IDs are sequential indices into Vec, fit usize
-        #[allow(clippy::cast_possible_truncation)]
-        let idx = id.as_u64() as usize;
-        if idx >= self.node_to_term.len() {
-            return None;
-        }
+    fn node(&self, id: NodeId, _view: ReadView) -> Result<Option<Node>> {
+        let Some(idx) = self.node_index(id) else {
+            return Ok(None);
+        };
         let mut node = Node::new(id);
         node.labels.clone_from(&self.node_labels[idx]);
         for (key, value) in &self.node_properties[idx] {
             node.properties.insert(key.clone(), value.clone());
         }
-        Some(node)
+        Ok(Some(node))
     }
 
-    fn get_edge(&self, id: EdgeId) -> Option<Edge> {
-        // reason: entity IDs are sequential indices into Vec, fit usize
-        #[allow(clippy::cast_possible_truncation)]
-        let idx = id.as_u64() as usize;
-        let (src, dst, edge_type) = self.edge_data.get(idx)?;
-        Some(Edge {
+    fn edge(&self, id: EdgeId, _view: ReadView) -> Result<Option<Edge>> {
+        let Some((src, dst, edge_type)) = self.edge_entry(id) else {
+            return Ok(None);
+        };
+        Ok(Some(Edge {
             id,
             src: *src,
             dst: *dst,
             edge_type: edge_type.clone(),
             properties: grafeo_common::types::PropertyMap::new(),
-        })
+        }))
     }
 
-    fn get_node_versioned(
-        &self,
-        id: NodeId,
-        _epoch: EpochId,
-        _transaction_id: TransactionId,
-    ) -> Option<Node> {
-        self.get_node(id)
+    fn is_node_visible(&self, id: NodeId, _view: ReadView) -> Result<bool> {
+        Ok(self.node_index(id).is_some())
     }
 
-    fn get_edge_versioned(
-        &self,
-        id: EdgeId,
-        _epoch: EpochId,
-        _transaction_id: TransactionId,
-    ) -> Option<Edge> {
-        self.get_edge(id)
+    fn is_edge_visible(&self, id: EdgeId, _view: ReadView) -> Result<bool> {
+        Ok(self.edge_entry(id).is_some())
     }
 
-    fn get_node_at_epoch(&self, id: NodeId, _epoch: EpochId) -> Option<Node> {
-        self.get_node(id)
+    fn node_property(&self, id: NodeId, key: &str, _view: ReadView) -> Result<Option<Value>> {
+        Ok(self.node_index(id).and_then(|idx| {
+            self.node_properties[idx]
+                .get(&PropertyKey::from(key))
+                .cloned()
+        }))
     }
 
-    fn get_edge_at_epoch(&self, id: EdgeId, _epoch: EpochId) -> Option<Edge> {
-        self.get_edge(id)
-    }
-
-    // --- Property access ---
-
-    fn get_node_property(&self, id: NodeId, key: &PropertyKey) -> Option<Value> {
-        // reason: entity IDs are sequential indices into Vec, fit usize
-        #[allow(clippy::cast_possible_truncation)]
-        let idx = id.as_u64() as usize;
-        self.node_properties.get(idx)?.get(key).cloned()
-    }
-
-    fn get_edge_property(&self, _id: EdgeId, _key: &PropertyKey) -> Option<Value> {
+    fn edge_property(&self, _id: EdgeId, _key: &str, _view: ReadView) -> Result<Option<Value>> {
         // RDF edges (triples) don't carry properties in this mapping.
-        None
+        Ok(None)
     }
 
-    fn get_node_property_batch(&self, ids: &[NodeId], key: &PropertyKey) -> Vec<Option<Value>> {
-        ids.iter()
-            .map(|id| self.get_node_property(*id, key))
-            .collect()
+    fn node_labels(&self, id: NodeId, _view: ReadView) -> Result<Option<Labels>> {
+        Ok(self.node_index(id).map(|idx| self.node_labels[idx].clone()))
     }
 
-    // The triples are in memory: no read can fail.
-    fn try_get_node_property_batch(
-        &self,
-        ids: &[NodeId],
-        key: &PropertyKey,
-    ) -> grafeo_common::utils::error::Result<Vec<Option<Value>>> {
-        Ok(self.get_node_property_batch(ids, key))
-    }
-
-    fn get_nodes_properties_batch(&self, ids: &[NodeId]) -> Vec<FxHashMap<PropertyKey, Value>> {
-        ids.iter()
-            .map(|id| {
-                // reason: entity IDs are sequential indices into Vec, fit usize
-                #[allow(clippy::cast_possible_truncation)]
-                let idx = id.as_u64() as usize;
-                self.node_properties.get(idx).cloned().unwrap_or_default()
-            })
-            .collect()
-    }
-
-    fn get_nodes_properties_selective_batch(
-        &self,
-        ids: &[NodeId],
-        keys: &[PropertyKey],
-    ) -> Vec<FxHashMap<PropertyKey, Value>> {
-        ids.iter()
-            .map(|id| {
-                // reason: entity IDs are sequential indices into Vec, fit usize
-                #[allow(clippy::cast_possible_truncation)]
-                let idx = id.as_u64() as usize;
-                let mut result = FxHashMap::default();
-                if let Some(props) = self.node_properties.get(idx) {
-                    for key in keys {
-                        if let Some(value) = props.get(key) {
-                            result.insert(key.clone(), value.clone());
-                        }
-                    }
-                }
-                result
-            })
-            .collect()
-    }
-
-    fn get_edges_properties_selective_batch(
-        &self,
-        ids: &[EdgeId],
-        _keys: &[PropertyKey],
-    ) -> Vec<FxHashMap<PropertyKey, Value>> {
-        vec![FxHashMap::default(); ids.len()]
+    fn edge_type(&self, id: EdgeId, _view: ReadView) -> Result<Option<ArcStr>> {
+        Ok(self
+            .edge_entry(id)
+            .map(|(_, _, edge_type)| edge_type.clone()))
     }
 
     // --- Traversal (hot path for algorithms) ---
 
-    fn neighbors(&self, node: NodeId, direction: Direction) -> Vec<NodeId> {
-        // reason: node IDs are sequential indices into Vec, fit usize
-        #[allow(clippy::cast_possible_truncation)]
-        let idx = node.as_u64() as usize;
-        match direction {
-            Direction::Outgoing => self
-                .outgoing
-                .get(idx)
-                .map(|adj| adj.iter().map(|(target, _)| *target).collect())
-                .unwrap_or_default(),
-            Direction::Incoming => self
-                .incoming
-                .get(idx)
-                .map(|adj| adj.iter().map(|(target, _)| *target).collect())
-                .unwrap_or_default(),
-            Direction::Both => {
-                let mut result: Vec<NodeId> = Vec::new();
-                if let Some(out) = self.outgoing.get(idx) {
-                    result.extend(out.iter().map(|(t, _)| *t));
-                }
-                if let Some(inc) = self.incoming.get(idx) {
-                    result.extend(inc.iter().map(|(t, _)| *t));
-                }
-                result
-            }
+    fn edges(
+        &self,
+        node: NodeId,
+        direction: Direction,
+        types: &[ArcStr],
+        _view: ReadView,
+    ) -> Result<Vec<(NodeId, EdgeId)>> {
+        let Some(idx) = self.node_index(node) else {
+            return Ok(Vec::new());
+        };
+        let mut edges = Vec::new();
+        if direction != Direction::Incoming {
+            edges.extend_from_slice(&self.outgoing[idx]);
         }
-    }
-
-    fn edges_from(&self, node: NodeId, direction: Direction) -> Vec<(NodeId, EdgeId)> {
-        // reason: node IDs are sequential indices into Vec, fit usize
-        #[allow(clippy::cast_possible_truncation)]
-        let idx = node.as_u64() as usize;
-        match direction {
-            Direction::Outgoing => self.outgoing.get(idx).cloned().unwrap_or_default(),
-            Direction::Incoming => self.incoming.get(idx).cloned().unwrap_or_default(),
-            Direction::Both => {
-                let mut result = Vec::new();
-                if let Some(out) = self.outgoing.get(idx) {
-                    result.extend_from_slice(out);
-                }
-                if let Some(inc) = self.incoming.get(idx) {
-                    result.extend_from_slice(inc);
-                }
-                result
-            }
+        if direction != Direction::Outgoing {
+            edges.extend_from_slice(&self.incoming[idx]);
         }
+        if !types.is_empty() {
+            edges.retain(|(_, edge)| {
+                self.edge_entry(*edge)
+                    .is_some_and(|(_, _, edge_type)| types.contains(edge_type))
+            });
+        }
+        if direction == Direction::Both {
+            list_self_loops_once(node, &mut edges);
+        }
+        Ok(edges)
     }
 
-    fn out_degree(&self, node: NodeId) -> usize {
-        // reason: node IDs are sequential indices into Vec, fit usize
-        #[allow(clippy::cast_possible_truncation)]
-        let idx = node.as_u64() as usize;
-        self.outgoing.get(idx).map_or(0, Vec::len)
-    }
-
-    fn in_degree(&self, node: NodeId) -> usize {
-        // reason: node IDs are sequential indices into Vec, fit usize
-        #[allow(clippy::cast_possible_truncation)]
-        let idx = node.as_u64() as usize;
-        self.incoming.get(idx).map_or(0, Vec::len)
+    fn degree(&self, node: NodeId, direction: Direction, view: ReadView) -> Result<usize> {
+        match (direction, self.node_index(node)) {
+            (_, None) => Ok(0),
+            (Direction::Outgoing, Some(idx)) => Ok(self.outgoing[idx].len()),
+            (Direction::Incoming, Some(idx)) => Ok(self.incoming[idx].len()),
+            (Direction::Both, Some(_)) => Ok(self.edges(node, direction, &[], view)?.len()),
+        }
     }
 
     fn has_backward_adjacency(&self) -> bool {
@@ -456,114 +366,58 @@ impl GraphStore for RdfGraphStoreAdapter {
 
     // --- Scans ---
 
-    fn node_ids(&self) -> Vec<NodeId> {
-        (0..self.node_to_term.len() as u64)
+    fn node_ids(&self, _view: ReadView) -> Result<Vec<NodeId>> {
+        Ok((0..self.node_to_term.len() as u64)
             .map(NodeId::new)
-            .collect()
+            .collect())
     }
 
-    fn nodes_by_label(&self, label: &str) -> Vec<NodeId> {
-        let label_arc = ArcStr::from(label);
-        self.node_labels
+    fn nodes_by_label(&self, label: &str, _view: ReadView) -> Result<Vec<NodeId>> {
+        Ok(self
+            .node_labels
             .iter()
             .enumerate()
-            .filter(|(_, labels)| labels.contains(&label_arc))
+            .filter(|(_, labels)| labels.iter().any(|name| name.as_str() == label))
             .map(|(idx, _)| NodeId::new(idx as u64))
-            .collect()
+            .collect())
     }
 
-    fn nodes_by_label_count(&self, label: &str) -> usize {
-        let label_arc = ArcStr::from(label);
-        self.node_labels
-            .iter()
-            .filter(|labels| labels.contains(&label_arc))
-            .count()
+    fn node_count(&self, _view: ReadView) -> Result<usize> {
+        Ok(self.node_to_term.len())
     }
 
-    fn node_count(&self) -> usize {
-        self.node_to_term.len()
+    fn edge_count(&self, _view: ReadView) -> Result<usize> {
+        Ok(self.edge_data.len())
     }
 
-    fn edge_count(&self) -> usize {
-        self.edge_data.len()
+    // --- Names ---
+
+    fn all_labels(&self) -> Result<Vec<String>> {
+        let mut labels = grafeo_common::utils::hash::FxHashSet::default();
+        for node_labels in &self.node_labels {
+            for label in node_labels {
+                labels.insert(label.to_string());
+            }
+        }
+        Ok(labels.into_iter().collect())
     }
 
-    // --- Entity metadata ---
-
-    fn edge_type(&self, id: EdgeId) -> Option<ArcStr> {
-        self.edge_data
-            // reason: edge IDs are sequential indices into Vec, fit usize
-            // reason: edge IDs are sequential indices into Vec, fit usize
-            .get({
-                // reason: edge IDs are sequential indices into Vec, fit usize
-                #[allow(clippy::cast_possible_truncation)]
-                let idx = id.as_u64() as usize;
-                idx
-            })
-            .map(|(_, _, t)| t.clone())
+    fn all_edge_types(&self) -> Result<Vec<String>> {
+        let mut types = grafeo_common::utils::hash::FxHashSet::default();
+        for (_, _, edge_type) in &self.edge_data {
+            types.insert(edge_type.to_string());
+        }
+        Ok(types.into_iter().collect())
     }
 
-    /// A read-only view without versions: every edge is the committed one.
-    fn edge_type_versioned(&self, id: EdgeId, _: EpochId, _: TransactionId) -> Option<ArcStr> {
-        self.edge_type(id)
-    }
-
-    // --- Filtered search ---
-
-    fn find_nodes_by_property(&self, property: &str, value: &Value) -> Vec<NodeId> {
-        let key = PropertyKey::from(property);
-        self.node_properties
-            .iter()
-            .enumerate()
-            .filter(|(_, props)| props.get(&key) == Some(value))
-            .map(|(idx, _)| NodeId::new(idx as u64))
-            .collect()
-    }
-
-    fn find_nodes_by_properties(&self, conditions: &[(&str, Value)]) -> Vec<NodeId> {
-        self.node_properties
-            .iter()
-            .enumerate()
-            .filter(|(_, props)| {
-                conditions.iter().all(|(key, value)| {
-                    let pk = PropertyKey::from(*key);
-                    props.get(&pk) == Some(value)
-                })
-            })
-            .map(|(idx, _)| NodeId::new(idx as u64))
-            .collect()
-    }
-
-    fn find_nodes_in_range(
-        &self,
-        _property: &str,
-        _min: Option<&Value>,
-        _max: Option<&Value>,
-        _min_inclusive: bool,
-        _max_inclusive: bool,
-    ) -> Vec<NodeId> {
-        // Range queries not supported on the adapter; return empty.
-        Vec::new()
-    }
-
-    // --- Zone maps ---
-
-    fn node_property_might_match(
-        &self,
-        _property: &PropertyKey,
-        _op: CompareOp,
-        _value: &Value,
-    ) -> bool {
-        true // Conservative: always might match.
-    }
-
-    fn edge_property_might_match(
-        &self,
-        _property: &PropertyKey,
-        _op: CompareOp,
-        _value: &Value,
-    ) -> bool {
-        true
+    fn all_property_keys(&self) -> Result<Vec<String>> {
+        let mut keys = grafeo_common::utils::hash::FxHashSet::default();
+        for props in &self.node_properties {
+            for key in props.keys() {
+                keys.insert(key.to_string());
+            }
+        }
+        Ok(keys.into_iter().collect())
     }
 
     // --- Statistics ---
@@ -572,62 +426,31 @@ impl GraphStore for RdfGraphStoreAdapter {
         Arc::clone(&self.statistics)
     }
 
-    fn estimate_label_cardinality(&self, label: &str) -> f64 {
-        self.statistics.estimate_label_cardinality(label)
-    }
-
-    fn estimate_avg_degree(&self, edge_type: &str, outgoing: bool) -> f64 {
-        self.statistics.estimate_avg_degree(edge_type, outgoing)
-    }
-
-    // --- Epoch ---
-
-    fn current_epoch(&self) -> EpochId {
+    fn committed_epoch(&self) -> EpochId {
         EpochId::INITIAL
-    }
-
-    // --- Schema introspection ---
-
-    fn all_labels(&self) -> Vec<String> {
-        let mut labels = grafeo_common::utils::hash::FxHashSet::default();
-        for node_labels in &self.node_labels {
-            for label in node_labels {
-                labels.insert(label.to_string());
-            }
-        }
-        labels.into_iter().collect()
-    }
-
-    fn all_edge_types(&self) -> Vec<String> {
-        let mut types = grafeo_common::utils::hash::FxHashSet::default();
-        for (_, _, edge_type) in &self.edge_data {
-            types.insert(edge_type.to_string());
-        }
-        types.into_iter().collect()
-    }
-
-    fn all_property_keys(&self) -> Vec<String> {
-        let mut keys = grafeo_common::utils::hash::FxHashSet::default();
-        for props in &self.node_properties {
-            for key in props.keys() {
-                keys.insert(key.to_string());
-            }
-        }
-        keys.into_iter().collect()
     }
 }
 
-impl GraphStoreSearch for RdfGraphStoreAdapter {}
+impl RdfGraphStoreAdapter {
+    /// The index of node `id` in the adapter's tables, if it has one.
+    fn node_index(&self, id: NodeId) -> Option<usize> {
+        usize::try_from(id.as_u64())
+            .ok()
+            .filter(|&idx| idx < self.node_to_term.len())
+    }
+
+    /// The source, target and type of edge `id`, if the adapter has it.
+    fn edge_entry(&self, id: EdgeId) -> Option<&(NodeId, NodeId, ArcStr)> {
+        self.edge_data.get(usize::try_from(id.as_u64()).ok()?)
+    }
+}
 
 /// Converts an RDF literal to a Grafeo [`Value`].
 fn literal_to_value(lit: &Literal) -> Value {
+    if let Some(number) = lit.numeric_value() {
+        return number;
+    }
     match lit.datatype() {
-        Literal::XSD_INTEGER => lit
-            .as_integer()
-            .map_or_else(|| Value::String(lit.value().into()), Value::Int64),
-        Literal::XSD_DOUBLE | Literal::XSD_DECIMAL => lit
-            .as_double()
-            .map_or_else(|| Value::String(lit.value().into()), Value::Float64),
         Literal::XSD_BOOLEAN => lit
             .as_boolean()
             .map_or_else(|| Value::String(lit.value().into()), Value::Bool),
@@ -716,9 +539,13 @@ mod tests {
     fn test_empty_store() {
         let store = RdfStore::new();
         let adapter = RdfGraphStoreAdapter::new(&store);
-        assert_eq!(adapter.node_count(), 0);
-        assert_eq!(adapter.edge_count(), 0);
-        assert!(adapter.node_ids().is_empty(), "{:?}", adapter.node_ids());
+        assert_eq!(adapter.node_count(ReadView::latest()).unwrap(), 0);
+        assert_eq!(adapter.edge_count(ReadView::latest()).unwrap(), 0);
+        assert!(
+            adapter.node_ids(ReadView::latest()).unwrap().is_empty(),
+            "{:?}",
+            adapter.node_ids(ReadView::latest()).unwrap()
+        );
     }
 
     #[test]
@@ -727,23 +554,30 @@ mod tests {
         store.insert(Triple::new(ex("alix"), foaf("knows"), ex("gus")));
 
         let adapter = RdfGraphStoreAdapter::new(&store);
-        assert_eq!(adapter.node_count(), 2);
-        assert_eq!(adapter.edge_count(), 1);
+        assert_eq!(adapter.node_count(ReadView::latest()).unwrap(), 2);
+        assert_eq!(adapter.edge_count(ReadView::latest()).unwrap(), 1);
 
         let alix = adapter.node_id_for_term(&ex("alix")).unwrap();
         let gus = adapter.node_id_for_term(&ex("gus")).unwrap();
 
         // Outgoing from Alix
-        let out = adapter.neighbors(alix, Direction::Outgoing);
+        let out = adapter
+            .neighbors(alix, Direction::Outgoing, ReadView::latest())
+            .unwrap();
         assert_eq!(out, vec![gus]);
 
         // Incoming to Gus
-        let inc = adapter.neighbors(gus, Direction::Incoming);
+        let inc = adapter
+            .neighbors(gus, Direction::Incoming, ReadView::latest())
+            .unwrap();
         assert_eq!(inc, vec![alix]);
 
         // No outgoing from Gus
         assert!(
-            adapter.neighbors(gus, Direction::Outgoing).is_empty(),
+            adapter
+                .neighbors(gus, Direction::Outgoing, ReadView::latest())
+                .unwrap()
+                .is_empty(),
             "expected empty"
         );
     }
@@ -756,11 +590,11 @@ mod tests {
 
         let adapter = RdfGraphStoreAdapter::new(&store);
         let alix = adapter.node_id_for_term(&ex("alix")).unwrap();
-        let node = adapter.get_node(alix).unwrap();
+        let node = adapter.node(alix, ReadView::latest()).unwrap().unwrap();
 
         assert!(node.labels.iter().any(|l| l.as_str() == "Person"));
         // rdf:type triple should NOT create an edge
-        assert_eq!(adapter.edge_count(), 1);
+        assert_eq!(adapter.edge_count(ReadView::latest()).unwrap(), 1);
     }
 
     #[test]
@@ -778,13 +612,17 @@ mod tests {
         let alix = adapter.node_id_for_term(&ex("alix")).unwrap();
 
         // Literal triples become properties, not edges or nodes
-        assert_eq!(adapter.node_count(), 2); // alix and gus only
-        assert_eq!(adapter.edge_count(), 1); // knows only
+        assert_eq!(adapter.node_count(ReadView::latest()).unwrap(), 2); // alix and gus only
+        assert_eq!(adapter.edge_count(ReadView::latest()).unwrap(), 1); // knows only
 
-        let name = adapter.get_node_property(alix, &PropertyKey::from("name"));
+        let name = adapter
+            .node_property(alix, "name", ReadView::latest())
+            .unwrap();
         assert_eq!(name, Some(Value::String("Alix".into())));
 
-        let age = adapter.get_node_property(alix, &PropertyKey::from("age"));
+        let age = adapter
+            .node_property(alix, "age", ReadView::latest())
+            .unwrap();
         assert_eq!(age, Some(Value::Int64(19)));
     }
 
@@ -796,13 +634,31 @@ mod tests {
         store.insert(Triple::new(ex("c"), ex("knows"), ex("a")));
 
         let adapter = RdfGraphStoreAdapter::new(&store);
-        assert_eq!(adapter.node_count(), 3);
-        assert_eq!(adapter.edge_count(), 3);
+        assert_eq!(adapter.node_count(ReadView::latest()).unwrap(), 3);
+        assert_eq!(adapter.edge_count(ReadView::latest()).unwrap(), 3);
 
         // Each node has out-degree 1 and in-degree 1
-        for node_id in adapter.node_ids() {
-            assert_eq!(adapter.out_degree(node_id), 1);
-            assert_eq!(adapter.in_degree(node_id), 1);
+        for node_id in adapter.node_ids(ReadView::latest()).unwrap() {
+            assert_eq!(
+                adapter
+                    .degree(
+                        node_id,
+                        crate::graph::Direction::Outgoing,
+                        ReadView::latest()
+                    )
+                    .unwrap(),
+                1
+            );
+            assert_eq!(
+                adapter
+                    .degree(
+                        node_id,
+                        crate::graph::Direction::Incoming,
+                        ReadView::latest()
+                    )
+                    .unwrap(),
+                1
+            );
         }
     }
 
@@ -818,10 +674,12 @@ mod tests {
 
         let adapter = RdfGraphStoreAdapter::new(&store);
 
-        let people = adapter.nodes_by_label("Person");
+        let people = adapter
+            .nodes_by_label("Person", ReadView::latest())
+            .unwrap();
         assert_eq!(people.len(), 2);
 
-        let cities = adapter.nodes_by_label("City");
+        let cities = adapter.nodes_by_label("City", ReadView::latest()).unwrap();
         assert_eq!(cities.len(), 1);
     }
 
@@ -831,7 +689,10 @@ mod tests {
         store.insert(Triple::new(ex("alix"), foaf("knows"), ex("gus")));
 
         let adapter = RdfGraphStoreAdapter::new(&store);
-        let edge = adapter.get_edge(EdgeId::new(0)).unwrap();
+        let edge = adapter
+            .edge(EdgeId::new(0), ReadView::latest())
+            .unwrap()
+            .unwrap();
 
         let alix = adapter.node_id_for_term(&ex("alix")).unwrap();
         let gus = adapter.node_id_for_term(&ex("gus")).unwrap();
@@ -847,7 +708,9 @@ mod tests {
         store.insert(Triple::new(ex("alix"), foaf("knows"), ex("gus")));
 
         let adapter = RdfGraphStoreAdapter::new(&store);
-        let edge_type = adapter.edge_type(EdgeId::new(0));
+        let edge_type = adapter
+            .edge_type(EdgeId::new(0), ReadView::latest())
+            .unwrap();
         assert_eq!(edge_type.as_deref(), Some("knows"));
     }
 
@@ -860,7 +723,9 @@ mod tests {
         assert!(adapter.has_backward_adjacency());
 
         let gus = adapter.node_id_for_term(&ex("gus")).unwrap();
-        let incoming = adapter.edges_from(gus, Direction::Incoming);
+        let incoming = adapter
+            .edges(gus, Direction::Incoming, &[], ReadView::latest())
+            .unwrap();
         assert_eq!(incoming.len(), 1);
     }
 
@@ -873,7 +738,9 @@ mod tests {
         let adapter = RdfGraphStoreAdapter::new(&store);
         let a = adapter.node_id_for_term(&ex("a")).unwrap();
 
-        let both = adapter.neighbors(a, Direction::Both);
+        let both = adapter
+            .neighbors(a, Direction::Both, ReadView::latest())
+            .unwrap();
         assert_eq!(both.len(), 2); // b (outgoing) + c (incoming)
     }
 
@@ -899,13 +766,13 @@ mod tests {
 
         let adapter = RdfGraphStoreAdapter::new(&store);
 
-        let labels = adapter.all_labels();
+        let labels = adapter.all_labels().unwrap();
         assert!(labels.contains(&"Person".to_string()));
 
-        let edge_types = adapter.all_edge_types();
+        let edge_types = adapter.all_edge_types().unwrap();
         assert!(edge_types.contains(&"knows".to_string()));
 
-        let prop_keys = adapter.all_property_keys();
+        let prop_keys = adapter.all_property_keys().unwrap();
         assert!(prop_keys.contains(&"name".to_string()));
     }
 }

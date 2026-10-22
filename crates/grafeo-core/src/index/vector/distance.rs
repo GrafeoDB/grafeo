@@ -117,8 +117,8 @@ pub fn simd_support() -> &'static str {
 ///
 /// # Panics
 ///
-/// Debug-asserts that vectors have equal length. In release builds,
-/// mismatched lengths may cause incorrect results.
+/// If the vectors have different lengths, in every build (#311: a release
+/// build read past the shorter one).
 ///
 /// # Examples
 ///
@@ -232,6 +232,36 @@ mod tests {
 
     const EPSILON: f32 = 1e-5;
 
+    /// #311: vectors of different lengths panic for every metric, whichever
+    /// is the longer, in release builds too (the SIMD kernels read past the
+    /// shorter vector).
+    #[test]
+    fn compute_distance_panics_on_mismatched_lengths_for_every_metric() {
+        let short = [1.0f32; 4];
+        let long = [1.0f32; 19];
+        for metric in [
+            DistanceMetric::Cosine,
+            DistanceMetric::Euclidean,
+            DistanceMetric::DotProduct,
+            DistanceMetric::Manhattan,
+        ] {
+            for (a, b) in [(&short[..], &long[..]), (&long[..], &short[..])] {
+                let outcome = std::panic::catch_unwind(|| compute_distance(a, b, metric));
+                let message = outcome
+                    .expect_err("mismatched lengths must panic")
+                    .downcast::<String>()
+                    .map(|message| *message)
+                    .unwrap_or_default();
+                assert!(
+                    message.contains("vector lengths must match"),
+                    "{metric:?}, {} and {}: {message}",
+                    a.len(),
+                    b.len()
+                );
+            }
+        }
+    }
+
     fn approx_eq(a: f32, b: f32) -> bool {
         (a - b).abs() < EPSILON
     }
@@ -240,7 +270,8 @@ mod tests {
     fn test_cosine_distance_identical() {
         let a = [1.0f32, 2.0, 3.0];
         let b = [1.0f32, 2.0, 3.0];
-        assert!(approx_eq(cosine_distance(&a, &b), 0.0));
+        assert_eq!(cosine_distance(&a, &b), 0.0);
+        assert_eq!(cosine_similarity(&a, &b), 1.0);
     }
 
     #[test]
@@ -254,7 +285,11 @@ mod tests {
     fn test_cosine_distance_opposite() {
         let a = [1.0f32, 0.0, 0.0];
         let b = [-1.0f32, 0.0, 0.0];
-        assert!(approx_eq(cosine_distance(&a, &b), 2.0));
+        assert_eq!(cosine_distance(&a, &b), 2.0);
+        assert_eq!(cosine_similarity(&a, &b), -1.0);
+        let c = [-0.5f32, 0.25, -3.0];
+        let opposite = [0.5f32, -0.25, 3.0];
+        assert_eq!(cosine_distance(&c, &opposite), 2.0);
     }
 
     #[test]
@@ -415,24 +450,22 @@ mod tests {
     fn test_zero_vectors_cosine() {
         let a = [0.0f32, 0.0, 0.0];
         let b = [0.0f32, 0.0, 0.0];
-        let d = cosine_distance(&a, &b);
-        // Zero vectors have undefined cosine; should not panic
-        assert!(!d.is_nan() || d.is_nan()); // Just verify no panic
+        // A zero vector has no direction: distance 1, as for orthogonal vectors
+        assert_eq!(cosine_distance(&a, &b), 1.0);
     }
 
     #[test]
     fn test_one_zero_vector_cosine() {
         let a = [1.0f32, 0.0, 0.0];
         let b = [0.0f32, 0.0, 0.0];
-        let d = cosine_distance(&a, &b);
-        // Should not panic; result depends on implementation
-        assert!(d.is_finite() || d.is_nan());
+        assert_eq!(cosine_distance(&a, &b), 1.0);
+        assert_eq!(cosine_distance(&b, &a), 1.0);
     }
 
     #[test]
     fn test_identical_vectors_all_metrics() {
         let v = [0.5f32, -0.3, 0.8, 1.2];
-        assert!(approx_eq(cosine_distance(&v, &v), 0.0));
+        assert_eq!(cosine_distance(&v, &v), 0.0);
         assert!(approx_eq(euclidean_distance(&v, &v), 0.0));
         assert!(approx_eq(manhattan_distance(&v, &v), 0.0));
     }
@@ -441,7 +474,7 @@ mod tests {
     fn test_negative_values() {
         let a = [-1.0f32, -2.0, -3.0];
         let b = [-1.0f32, -2.0, -3.0];
-        assert!(approx_eq(cosine_distance(&a, &b), 0.0));
+        assert_eq!(cosine_distance(&a, &b), 0.0);
         assert!(approx_eq(euclidean_distance(&a, &b), 0.0));
     }
 
@@ -495,7 +528,7 @@ mod tests {
         let a = [1e10f32, 1e10, 1e10];
         let b = [1e10f32, 1e10, 1e10];
         assert!(approx_eq(euclidean_distance(&a, &b), 0.0));
-        assert!(approx_eq(cosine_distance(&a, &b), 0.0));
+        assert_eq!(cosine_distance(&a, &b), 0.0);
     }
 
     #[test]
@@ -503,6 +536,10 @@ mod tests {
         let a = [1e-10f32, 1e-10];
         let b = [1e-10f32, 1e-10];
         assert!(approx_eq(euclidean_distance(&a, &b), 0.0));
+        // Short vectors keep their direction: an epsilon in the denominator once made this 1
+        assert_eq!(cosine_distance(&a, &b), 0.0);
+        assert_eq!(cosine_distance(&a, &[-1e-10f32, -1e-10]), 2.0);
+        assert_eq!(cosine_distance(&a, &[1e-10f32, -1e-10]), 1.0);
     }
 
     #[test]

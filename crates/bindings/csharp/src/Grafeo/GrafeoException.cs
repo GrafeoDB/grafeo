@@ -30,6 +30,13 @@ public class GrafeoException : Exception
     /// <summary>The native status code that produced this error.</summary>
     public GrafeoStatus Status { get; }
 
+    /// <summary>
+    /// The GQLSTATUS of the error: the five-character ISO GQL status of the
+    /// condition, such as <c>"22012"</c> (division by zero) or
+    /// <c>"42001"</c> (syntax error). Null when the native layer reported none.
+    /// </summary>
+    public string? GqlStatus { get; internal set; }
+
     public GrafeoException(string message, GrafeoStatus status)
         : base(message) => Status = status;
 
@@ -47,7 +54,10 @@ public class GrafeoException : Exception
         var message = errorPtr != nint.Zero
             ? Marshal.PtrToStringUTF8(errorPtr) ?? "Unknown error"
             : "Unknown error";
-        return Classify(fallbackStatus, message);
+        var statusPtr = NativeMethods.grafeo_last_error_gql_status();
+        var exception = Classify(fallbackStatus, message);
+        exception.GqlStatus = statusPtr != nint.Zero ? Marshal.PtrToStringUTF8(statusPtr) : null;
+        return exception;
     }
 
     /// <summary>

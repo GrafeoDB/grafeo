@@ -137,8 +137,17 @@ class TestGraphElementTypes:
         a = db.create_node(["Person"], {"name": "Alix"})
         b = db.create_node(["Person"], {"name": "Gus"})
         db.create_edge(a.id, b.id, "KNOWS", {"since": 2020})
-        result = list(db.execute_cypher("MATCH ()-[r:KNOWS]->() RETURN r"))
-        assert len(result) == 1
+        # The edge names its stored endpoints (#268), also when the pattern
+        # reads it from its target.
+        for query in (
+            "MATCH (a)-[r:KNOWS]->(b) RETURN a, r, b",
+            "MATCH (b)<-[r:KNOWS]-(a) RETURN a, r, b",
+        ):
+            result = db.execute_cypher(query)
+            (edge,) = result.edges()
+            assert (edge.edge_type, edge.source_id, edge.target_id) == ("KNOWS", a.id, b.id), query
+            assert edge.properties()["since"] == 2020, query
+            assert sorted(node.properties()["name"] for node in result.nodes()) == ["Alix", "Gus"]
 
     def test_path_return(self, db):
         a = db.create_node(["Person"], {"name": "Alix"})

@@ -27,7 +27,8 @@
 //!
 //! # Stability: Experimental
 //!
-//! New in 0.5.40. API may change before being promoted to Beta.
+//! New in 0.5.40. It may change or be removed in any release, with a
+//! CHANGELOG entry: see <https://grafeo.dev/stability/>.
 
 use std::sync::Arc;
 
@@ -85,7 +86,7 @@ impl JsResultStream {
     /// Values follow the Grafeo JSON convention: strings, numbers, booleans,
     /// and `null` map directly; temporal and complex types use the tagged
     /// form documented in `grafeo-bindings-common::json` (e.g. `{ "$date": ... }`).
-    #[napi]
+    #[napi(ts_return_type = "Promise<Record<string, unknown> | null>")]
     pub async fn next(&self) -> Result<Option<JsonValue>> {
         let iter = Arc::clone(&self.iter);
         let columns = Arc::clone(&self.columns);

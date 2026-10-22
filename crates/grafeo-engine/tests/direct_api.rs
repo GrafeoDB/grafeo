@@ -54,13 +54,13 @@ fn writes_go_to_the_selected_graph() {
             Value::from("d1"),
         ]]
     );
-    assert!(db.get_node(component).is_some());
-    assert!(db.get_edge(access).is_some());
+    assert!(db.get_node(component).unwrap().is_some());
+    assert!(db.get_edge(access).unwrap().is_some());
 
     // The default graph got none of it.
     db.set_current_graph(None).unwrap();
     assert!(ids(&db).is_empty(), "expected empty");
-    assert!(db.get_node(component).is_none());
+    assert!(db.get_node(component).unwrap().is_none());
 }
 
 #[test]
@@ -77,14 +77,14 @@ fn property_index_calls_follow_the_selected_graph() {
     db.create_property_index("id").unwrap();
     assert!(db.has_property_index("id"));
     assert_eq!(
-        db.find_nodes_by_property("id", &Value::from("x")),
+        db.find_nodes_by_property("id", &Value::from("x")).unwrap(),
         [in_model]
     );
 
     db.set_current_graph(None).unwrap();
     assert!(!db.has_property_index("id"));
     assert_eq!(
-        db.find_nodes_by_property("id", &Value::from("x")),
+        db.find_nodes_by_property("id", &Value::from("x")).unwrap(),
         [in_default]
     );
 }
@@ -205,7 +205,7 @@ fn the_size_limit_holds_without_a_schema() {
         );
     }
     assert_eq!(
-        db.get_node(alix).unwrap().get_property("bio"),
+        db.get_node(alix).unwrap().unwrap().get_property("bio"),
         Some(&Value::from("short"))
     );
 }
@@ -227,9 +227,10 @@ fn a_failing_batch_creates_nothing() {
             .batch_create_nodes_with_props("Doc", vec![row("a"), row("b"), row("a")])
             .unwrap_err();
         assert!(err.to_string().to_lowercase().contains("unique"), "{err}");
-        assert_eq!(db.node_count(), 0, "with_index: {with_index}");
+        assert_eq!(db.node_count().unwrap(), 0, "with_index: {with_index}");
         assert!(
             db.find_nodes_by_property("id", &Value::from("a"))
+                .unwrap()
                 .is_empty(),
             "with_index: {with_index}"
         );
@@ -263,7 +264,7 @@ fn missing_entities_are_errors_or_false() {
     assert!(!db.add_node_label(missing, "Person").unwrap());
     // A node that still has edges is not deleted.
     assert!(db.delete_node(alix).is_err());
-    assert!(db.get_node(alix).is_some());
+    assert!(db.get_node(alix).unwrap().is_some());
 }
 
 #[test]
@@ -286,7 +287,12 @@ fn every_write_advances_the_epoch() {
 /// or deleted after it: each direct write commits at a later epoch.
 #[test]
 fn a_pinned_epoch_does_not_see_later_writes() {
-    let db = GrafeoDB::new_in_memory();
+    // History kept: a read at an earlier epoch needs it.
+    let db = GrafeoDB::with_config(
+        grafeo_engine::Config::in_memory()
+            .with_history_retention(grafeo_engine::HistoryRetention::Forever),
+    )
+    .unwrap();
     let alix = db.create_node(&["Person"]).unwrap();
     let gus = db.create_node(&["Person"]).unwrap();
     let knows = db.create_edge(alix, gus, "KNOWS").unwrap();
@@ -296,11 +302,11 @@ fn a_pinned_epoch_does_not_see_later_writes() {
     let likes = db.create_edge(gus, vincent, "LIKES").unwrap();
     assert!(db.delete_edge(knows).unwrap());
 
-    assert!(db.get_node_at_epoch(vincent, pinned).is_none());
-    assert!(db.get_edge_at_epoch(likes, pinned).is_none());
-    assert!(db.get_edge_at_epoch(knows, pinned).is_some());
-    assert!(db.get_node_at_epoch(alix, pinned).is_some());
-    assert!(db.get_edge(knows).is_none());
+    assert!(db.get_node_at_epoch(vincent, pinned).unwrap().is_none());
+    assert!(db.get_edge_at_epoch(likes, pinned).unwrap().is_none());
+    assert!(db.get_edge_at_epoch(knows, pinned).unwrap().is_some());
+    assert!(db.get_node_at_epoch(alix, pinned).unwrap().is_some());
+    assert!(db.get_edge(knows).unwrap().is_none());
 }
 
 #[test]
@@ -311,10 +317,10 @@ fn session_writes_roll_back_with_the_transaction() {
     let alix = session
         .create_node_with_props(&["Person"], [("id", Value::from("alix"))])
         .unwrap();
-    assert!(session.get_node(alix).is_some());
+    assert!(session.get_node(alix).unwrap().is_some());
     session.rollback().unwrap();
-    assert!(db.get_node(alix).is_none());
-    assert_eq!(db.node_count(), 0);
+    assert!(db.get_node(alix).unwrap().is_none());
+    assert_eq!(db.node_count().unwrap(), 0);
 }
 
 #[cfg(feature = "cdc")]
@@ -327,7 +333,9 @@ fn a_create_event_carries_the_labels_and_properties() {
         .create_node_with_props(&["Person"], [("name", Value::from("Alix"))])
         .unwrap();
     db.execute("INSERT (:Person {name: 'Gus'})").unwrap();
-    let from_query = db.find_nodes_by_property("name", &Value::from("Gus"))[0];
+    let from_query = db
+        .find_nodes_by_property("name", &Value::from("Gus"))
+        .unwrap()[0];
 
     for node in [direct, from_query] {
         let history = db.history(node).unwrap();
@@ -354,7 +362,13 @@ fn a_direct_write_conflicts_with_an_open_transaction() {
         .create_node_with_props(&["Person"], [("city", Value::from("Amsterdam"))])
         .unwrap();
     let gus = db.create_node(&["Person"]).unwrap();
-    let city = |id| db.get_node(id).unwrap().get_property("city").cloned();
+    let city = |id| {
+        db.get_node(id)
+            .unwrap()
+            .unwrap()
+            .get_property("city")
+            .cloned()
+    };
 
     let mut session = db.session();
     session.begin_transaction().unwrap();
@@ -451,15 +465,25 @@ fn direct_writes_and_transactions_run_side_by_side() {
         count("Mark"),
         Value::Int64(i64::try_from(THREADS * ROUNDS).unwrap())
     );
-    assert!(db.get_node(hub).unwrap().get_property("by").is_some());
+    assert!(
+        db.get_node(hub)
+            .unwrap()
+            .unwrap()
+            .get_property("by")
+            .is_some()
+    );
 }
 
 /// With versioned properties and labels, a reader pinned before a direct write
 /// still sees the values and labels from before it.
-#[cfg(feature = "temporal")]
 #[test]
 fn a_pinned_epoch_sees_the_properties_and_labels_it_had() {
-    let db = GrafeoDB::new_in_memory();
+    // History kept: a read at an earlier epoch needs it.
+    let db = GrafeoDB::with_config(
+        grafeo_engine::Config::in_memory()
+            .with_history_retention(grafeo_engine::HistoryRetention::Forever),
+    )
+    .unwrap();
     let alix = db
         .create_node_with_props(&["Person"], [("city", Value::from("Amsterdam"))])
         .unwrap();
@@ -469,19 +493,21 @@ fn a_pinned_epoch_sees_the_properties_and_labels_it_had() {
     assert!(db.add_node_label(alix, "Employee").unwrap());
 
     assert_eq!(
-        db.get_node_property_at_epoch(alix, "city", pinned),
+        db.get_node_property_at_epoch(alix, "city", pinned).unwrap(),
         Some(Value::from("Amsterdam"))
     );
     assert!(
         !db.get_node_at_epoch(alix, pinned)
             .unwrap()
+            .unwrap()
             .has_label("Employee")
     );
     assert_eq!(
-        db.get_node_property_at_epoch(alix, "city", db.current_epoch()),
+        db.get_node_property_at_epoch(alix, "city", db.current_epoch())
+            .unwrap(),
         Some(Value::from("Berlin"))
     );
-    assert!(db.get_node(alix).unwrap().has_label("Employee"));
+    assert!(db.get_node(alix).unwrap().unwrap().has_label("Employee"));
 }
 
 /// Each direct write is reported to CDC at the epoch it committed at.
@@ -529,12 +555,18 @@ fn a_batch_of_edges_is_all_or_nothing() {
         ])
         .unwrap();
     assert_eq!(ids.len(), 2);
-    assert_eq!(db.get_edge(ids[0]).unwrap().edge_type.as_str(), "KNOWS");
     assert_eq!(
-        db.get_edge(ids[0]).unwrap().get_property("since"),
+        db.get_edge(ids[0]).unwrap().unwrap().edge_type.as_str(),
+        "KNOWS"
+    );
+    assert_eq!(
+        db.get_edge(ids[0]).unwrap().unwrap().get_property("since"),
         Some(&Value::from(2020_i64))
     );
-    assert_eq!(db.get_edge(ids[1]).unwrap().edge_type.as_str(), "LIKES");
+    assert_eq!(
+        db.get_edge(ids[1]).unwrap().unwrap().edge_type.as_str(),
+        "LIKES"
+    );
 
     let missing = grafeo_common::types::NodeId::new(999);
     let err = db

@@ -2,6 +2,7 @@
 
 use super::options::{BM25Config, TextIndexOptions};
 use super::tokenizer::{OptionsTokenizer, Tokenizer};
+use crate::index::ranking::by_descending_score;
 use grafeo_common::types::NodeId;
 use grafeo_common::utils::error::{Error, Result};
 use std::collections::{HashMap, HashSet};
@@ -274,7 +275,11 @@ impl InvertedIndex {
 
     /// The BM25 score of every document of a node `keep` accepts that holds a
     /// term of `query`. The corpus statistics count every document.
-    fn scores(&self, query: &str, keep: impl Fn(NodeId) -> bool) -> HashMap<NodeId, f64> {
+    pub(crate) fn scores(
+        &self,
+        query: &str,
+        keep: impl Fn(NodeId) -> bool,
+    ) -> HashMap<NodeId, f64> {
         let query_tokens = self.tokenizer.tokenize(query);
         let mut scores: HashMap<NodeId, f64> = HashMap::new();
         if query_tokens.is_empty() || self.doc_lengths.is_empty() {
@@ -301,17 +306,20 @@ impl InvertedIndex {
         scores
     }
 
-    /// The `k` best of `scores`, by descending score.
-    fn top(scores: HashMap<NodeId, f64>, k: usize) -> Vec<(NodeId, f64)> {
+    /// The `k` best of `scores`, by descending score, equal scores by
+    /// ascending node id: a cut inside a tie keeps its lowest ids.
+    pub(crate) fn top(scores: HashMap<NodeId, f64>, k: usize) -> Vec<(NodeId, f64)> {
         let mut results: Vec<(NodeId, f64)> = scores.into_iter().collect();
-        results.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        results.sort_by(by_descending_score);
         results.truncate(k);
         results
     }
 
     /// Searches the index using BM25 scoring.
     ///
-    /// Returns up to `k` results sorted by descending BM25 score.
+    /// Returns up to `k` results sorted by descending BM25 score, equal
+    /// scores by ascending node id: a cut at `k` inside a tie keeps its
+    /// lowest ids.
     pub fn search(&self, query: &str, k: usize) -> Vec<(NodeId, f64)> {
         Self::top(self.scores(query, |_| true), k)
     }
@@ -389,6 +397,43 @@ impl InvertedIndex {
         scores.retain(|_, score| *score >= threshold);
         let count = scores.len();
         Self::top(scores, count)
+    }
+
+    /// The BM25 score `text` would have against `query` as a document of
+    /// this index, with the statistics of the documents it holds now (their
+    /// number, their average length, each term's document frequency); `None`
+    /// when the text holds no term of the query, as a search leaves out such
+    /// a document. For the text of a document the index holds, it is the
+    /// score a search gives the document. A store scores this way the text a
+    /// reader sees where it differs from the one the index holds (the
+    /// row-group store).
+    pub(crate) fn score_text(&self, text: &str, query: &str) -> Option<f64> {
+        let query_tokens = self.tokenizer.tokenize(query);
+        let tokens = self.tokenizer.tokenize(text);
+        let (doc_len, term_freqs) = count_terms(tokens.iter().map(String::as_str)).ok()?;
+        if query_tokens.is_empty() || doc_len == 0 {
+            return None;
+        }
+        let dl = f64::from(doc_len);
+        // An empty index has no statistics: the text is its only document.
+        let (n, avg_dl) = if self.doc_lengths.is_empty() {
+            (1.0, dl)
+        } else {
+            let n = self.doc_lengths.len() as f64;
+            (n, self.total_length as f64 / n)
+        };
+        let mut score = None;
+        for token in &query_tokens {
+            let Some(&tf) = term_freqs.get(token.as_str()) else {
+                continue;
+            };
+            let df = self
+                .postings
+                .get(token.as_str())
+                .map_or(0, |list| list.postings.len()) as f64;
+            *score.get_or_insert(0.0) += self.bm25_term_score(df, f64::from(tf), dl, n, avg_dl);
+        }
+        score
     }
 
     /// Returns true if the given node is indexed.
@@ -620,6 +665,40 @@ mod tests {
             "{:?}",
             result.map(|(length, _)| length)
         );
+    }
+
+    /// 200 identical documents, inserted in a scrambled id order, plus one
+    /// that scores higher (node 1000): every search ranks the tie group by
+    /// ascending id, and a cut inside it keeps the lowest ids, on every
+    /// call (#619: hash order decided both).
+    #[test]
+    fn tied_scores_rank_by_ascending_node_id() {
+        let mut index = InvertedIndex::new(BM25Config::default());
+        for i in 0..200_u64 {
+            // 7 is coprime with 200: every id from 1 to 200 once.
+            index.insert(NodeId::new((i * 7) % 200 + 1), "Amsterdam canals");
+        }
+        index.insert(NodeId::new(1000), "canals canals");
+        let ids = |results: Vec<(NodeId, f64)>| -> Vec<u64> {
+            results.into_iter().map(|(id, _)| id.as_u64()).collect()
+        };
+        let best_then = |tied: std::ops::RangeInclusive<u64>| -> Vec<u64> {
+            std::iter::once(1000).chain(tied).collect()
+        };
+
+        for _ in 0..10 {
+            assert_eq!(ids(index.search("canals", 6)), best_then(1..=5));
+            assert_eq!(ids(index.search("canals", usize::MAX)), best_then(1..=200));
+            assert_eq!(
+                ids(index.search_with_threshold("canals", 0.0)),
+                best_then(1..=200)
+            );
+            let even: HashSet<NodeId> = (1..=200).filter(|i| i % 2 == 0).map(NodeId::new).collect();
+            assert_eq!(
+                ids(index.search_with_filter("canals", 4, &even)),
+                vec![2, 4, 6, 8]
+            );
+        }
     }
 
     #[test]

@@ -15,7 +15,7 @@
 //! cargo test -p grafeo-engine --all-features --test standalone_changes
 //! ```
 
-#![cfg(all(feature = "lpg", feature = "gql"))]
+#![cfg(feature = "gql")]
 
 use grafeo_common::types::Value;
 use grafeo_engine::GrafeoDB;
@@ -532,7 +532,7 @@ mod replay {
         let path = db_path(&dir);
         crash_after("indexes", &path);
         let db = open(&path);
-        let store = db.store();
+        let store = db.store().unwrap();
 
         for (property, indexed) in [
             ("email", true),

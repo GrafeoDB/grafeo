@@ -14,6 +14,7 @@
 mod check_eval;
 
 use check_eval::CheckExpression;
+use grafeo_common::types::ReadView;
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -22,9 +23,7 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use parking_lot::{Mutex, RwLock};
 
 use grafeo_common::collections::{GrafeoConcurrentMap, grafeo_concurrent_map};
-use grafeo_common::storage::catalog_record::MAX_LIST_LEVELS_PER_RECORD;
-use grafeo_common::storage::value_codec::MAX_PROPERTY_VALUE_DEPTH;
-use grafeo_common::types::{EdgeTypeId, IndexId, LabelId, PropertyKeyId, Value};
+use grafeo_common::types::{EdgeTypeId, IndexId, LabelId, PropertyKeyId, Value, exact_float};
 
 /// The database's schema dictionary - maps names to compact internal IDs.
 ///
@@ -41,6 +40,9 @@ pub struct Catalog {
     indexes: IndexCatalog,
     /// Optional schema constraints.
     schema: Option<SchemaCatalog>,
+    /// The configuration the database file stores (#551), when it stores
+    /// one: the catalog section writes it and an open reads it.
+    stored_config: RwLock<Option<grafeo_common::storage::catalog_record::StoredConfigRecord>>,
 }
 
 impl Catalog {
@@ -53,7 +55,25 @@ impl Catalog {
             edge_types: EdgeTypeCatalog::new(),
             indexes: IndexCatalog::new(),
             schema: Some(SchemaCatalog::new()),
+            stored_config: RwLock::new(None),
         }
+    }
+
+    /// The configuration the database stores, when it stores one.
+    #[must_use]
+    pub(crate) fn stored_config(
+        &self,
+    ) -> Option<grafeo_common::storage::catalog_record::StoredConfigRecord> {
+        self.stored_config.read().clone()
+    }
+
+    /// Sets (or with `None` clears) the configuration the database stores,
+    /// written at the next checkpoint; returns the one it replaced.
+    pub(crate) fn set_stored_config(
+        &self,
+        config: Option<grafeo_common::storage::catalog_record::StoredConfigRecord>,
+    ) -> Option<grafeo_common::storage::catalog_record::StoredConfigRecord> {
+        std::mem::replace(&mut *self.stored_config.write(), config)
     }
 
     /// Creates a new catalog with schema constraints enabled.
@@ -1211,223 +1231,7 @@ impl IndexCatalog {
 
 // === Type Definitions ===
 
-/// Data type for a typed property in a node or edge type definition.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-#[non_exhaustive]
-pub enum PropertyDataType {
-    /// UTF-8 string.
-    String,
-    /// 64-bit signed integer.
-    Int64,
-    /// 64-bit floating point.
-    Float64,
-    /// Boolean.
-    Bool,
-    /// Calendar date.
-    Date,
-    /// Time of day.
-    Time,
-    /// Timestamp (date + time).
-    Timestamp,
-    /// Duration / interval.
-    Duration,
-    /// Ordered list of values (untyped).
-    List,
-    /// Typed list: `LIST<element_type>` (ISO sec 4.16.9).
-    ListTyped(Box<PropertyDataType>),
-    /// Key-value map.
-    Map,
-    /// Raw bytes.
-    Bytes,
-    /// Node reference type (ISO sec 4.15.1).
-    Node,
-    /// Edge reference type (ISO sec 4.15.1).
-    Edge,
-    /// Any type (no enforcement).
-    Any,
-    // The 0.5.x catalog layouts (catalog section v1, snapshot v4) are bincode
-    // of this enum, which numbers the variants by position: new variants go
-    // here, after the existing ones.
-    /// Datetime with a fixed UTC offset (`ZONED DATETIME`), matching
-    /// [`Value::ZonedDatetime`].
-    ZonedDatetime,
-    /// Datetime without a time zone (`LOCAL DATETIME`), matching
-    /// [`Value::Timestamp`], which `local_datetime()` returns.
-    LocalDatetime,
-}
-
-impl PropertyDataType {
-    /// The most `LIST<...>` levels a property type nests: as deep as a
-    /// property value may be ([`MAX_PROPERTY_VALUE_DEPTH`], a list of scalars
-    /// being 1 deep), and as deep as the catalog records store.
-    pub const MAX_LIST_DEPTH: usize = MAX_PROPERTY_VALUE_DEPTH;
-
-    /// The most `LIST<...>` levels the property types of one node or edge
-    /// type nest in all: as many as its catalog record holds
-    /// ([`MAX_LIST_LEVELS_PER_RECORD`], 32,768, so 256 properties of the
-    /// deepest type).
-    pub const MAX_LIST_LEVELS_PER_TYPE: usize = MAX_LIST_LEVELS_PER_RECORD;
-
-    /// The `LIST<...>` levels around the type inside them, counted, not
-    /// recursed into.
-    #[must_use]
-    pub fn list_levels(&self) -> usize {
-        let mut levels = 0;
-        let mut current = self;
-        while let Self::ListTyped(inner) = current {
-            levels += 1;
-            current = inner;
-        }
-        levels
-    }
-
-    /// Parses a type name string (case-insensitive) into a `PropertyDataType`.
-    ///
-    /// Reads every spelling [`Display`](std::fmt::Display) writes, including
-    /// `ZONED DATETIME`, `LOCAL DATETIME` and nested `LIST<...>`, so the type
-    /// names of WAL records and `SHOW` output read back as the same type.
-    ///
-    /// Unknown names are [`Any`](Self::Any): type DDL refuses them (the
-    /// parsers check each name against
-    /// [`PROPERTY_TYPE_NAMES`](grafeo_adapters::query::schema::PROPERTY_TYPE_NAMES)),
-    /// so only a WAL record written by 0.5.x, which logged a type as it was
-    /// written, holds one, and 0.5.x read it as `ANY` too.
-    ///
-    /// # Errors
-    ///
-    /// [`CatalogError::PropertyTypeTooDeep`] when the name nests more than
-    /// [`MAX_LIST_DEPTH`](Self::MAX_LIST_DEPTH) `LIST<...>` levels. The levels
-    /// are counted, not recursed into, so a name of any depth is refused
-    /// without a stack overflow.
-    pub fn from_type_name(name: &str) -> Result<Self, CatalogError> {
-        let upper = name.to_uppercase();
-        let mut element = upper.as_str();
-        let mut levels = 0;
-        while let Some(inner) = element
-            .strip_prefix("LIST<")
-            .and_then(|s| s.strip_suffix('>'))
-        {
-            levels += 1;
-            if levels > Self::MAX_LIST_DEPTH {
-                return Err(CatalogError::PropertyTypeTooDeep {
-                    limit: Self::MAX_LIST_DEPTH,
-                });
-            }
-            element = inner;
-        }
-        let mut data_type = Self::from_element_name(element);
-        for _ in 0..levels {
-            data_type = Self::ListTyped(Box::new(data_type));
-        }
-        Ok(data_type)
-    }
-
-    /// The type a name without `LIST<...>` around it names (in capitals).
-    fn from_element_name(upper: &str) -> Self {
-        match upper {
-            "STRING" | "VARCHAR" | "TEXT" => Self::String,
-            "INT" | "INT64" | "INTEGER" | "BIGINT" => Self::Int64,
-            "FLOAT" | "FLOAT64" | "DOUBLE" | "REAL" => Self::Float64,
-            "BOOL" | "BOOLEAN" => Self::Bool,
-            "DATE" => Self::Date,
-            "TIME" => Self::Time,
-            "TIMESTAMP" | "DATETIME" => Self::Timestamp,
-            "ZONED DATETIME" | "ZONED_DATETIME" | "ZONEDDATETIME" => Self::ZonedDatetime,
-            "LOCAL DATETIME" | "LOCAL_DATETIME" | "LOCALDATETIME" => Self::LocalDatetime,
-            "DURATION" | "INTERVAL" => Self::Duration,
-            "LIST" | "ARRAY" => Self::List,
-            "MAP" | "RECORD" => Self::Map,
-            "BYTES" | "BINARY" | "BLOB" => Self::Bytes,
-            "NODE" => Self::Node,
-            "EDGE" | "RELATIONSHIP" => Self::Edge,
-            // `ANY`, and a name only an older WAL holds (see `from_type_name`).
-            _ => Self::Any,
-        }
-    }
-
-    /// Checks whether a value conforms to this type.
-    #[must_use]
-    pub fn matches(&self, value: &Value) -> bool {
-        match (self, value) {
-            (Self::Any, _) | (_, Value::Null) => true,
-            (Self::String, Value::String(_)) => true,
-            (Self::Int64, Value::Int64(_)) => true,
-            (Self::Float64, Value::Float64(_)) => true,
-            (Self::Bool, Value::Bool(_)) => true,
-            (Self::Date, Value::Date(_)) => true,
-            (Self::Time, Value::Time(_)) => true,
-            (Self::Timestamp | Self::LocalDatetime, Value::Timestamp(_)) => true,
-            (Self::ZonedDatetime, Value::ZonedDatetime(_)) => true,
-            (Self::Duration, Value::Duration(_)) => true,
-            (Self::List, Value::List(_)) => true,
-            (Self::ListTyped(elem_type), Value::List(items)) => {
-                items.iter().all(|item| elem_type.matches(item))
-            }
-            (Self::Map, Value::Map(_)) => true,
-            (Self::Bytes, Value::Bytes(_)) => true,
-            // Node/Edge reference types match Map values (graph elements are
-            // represented as maps with _id, _labels/_type, and properties)
-            (Self::Node | Self::Edge, Value::Map(_)) => true,
-            _ => false,
-        }
-    }
-
-    /// The value a property of this type stores for `value` when `value` is
-    /// not of the type but converts to it on assignment without losing
-    /// anything, as ISO/IEC 39075 converts between numeric types and SQL's
-    /// store assignment does:
-    ///
-    /// - an `INT64` to `FLOAT64`, when the float is exactly the integer (every
-    ///   integer up to 2^53 in magnitude, and the larger ones a float holds);
-    /// - a zoned datetime to its instant, for `TIMESTAMP` (`DATETIME`), which
-    ///   compares with zoned values as an instant in UTC;
-    /// - the items of a `LIST<...>`, each by these rules.
-    ///
-    /// A `LOCAL DATETIME` and a `ZONED DATETIME` take no other datetime: a
-    /// local datetime has no offset to be an instant by.
-    ///
-    /// `None` when `value` is of the type already, or does not convert.
-    #[must_use]
-    pub fn convert(&self, value: &Value) -> Option<Value> {
-        match (self, value) {
-            (Self::Float64, Value::Int64(int)) => exact_float(*int).map(Value::Float64),
-            (Self::Timestamp, Value::ZonedDatetime(zoned)) => {
-                Some(Value::Timestamp(zoned.as_timestamp()))
-            }
-            (Self::ListTyped(item_type), Value::List(items)) if !self.matches(value) => items
-                .iter()
-                .map(|item| {
-                    if item_type.matches(item) {
-                        Some(item.clone())
-                    } else {
-                        item_type.convert(item)
-                    }
-                })
-                .collect::<Option<Vec<Value>>>()
-                .map(|items| Value::List(items.into())),
-            _ => None,
-        }
-    }
-}
-
-/// `int` as a float, when the float is exactly `int`.
-fn exact_float(int: i64) -> Option<f64> {
-    // 2^63: the one float an i64 rounds to that is out of the i64 range
-    // (i64::MAX rounds up to it).
-    const BEYOND_I64: f64 = 9_223_372_036_854_775_808.0;
-    #[allow(
-        clippy::cast_precision_loss,
-        reason = "the cast back below checks that the float is exact"
-    )]
-    let float = int as f64;
-    #[allow(
-        clippy::cast_possible_truncation,
-        reason = "`float` came from an i64 and is below 2^63, checked first, and a whole \
-                  number (a float from an integer is), so the cast back is exact"
-    )]
-    let exact = float < BEYOND_I64 && float as i64 == int;
-    exact.then_some(float)
-}
+pub use grafeo_common::types::{PropertyDataType, PropertyTypeTooDeep};
 
 /// The error for a property value that is not of the property's type.
 fn type_mismatch(
@@ -1438,36 +1242,52 @@ fn type_mismatch(
 ) -> OperatorError {
     let detail = match (data_type, value) {
         (PropertyDataType::Float64, Value::Int64(int)) if exact_float(*int).is_none() => {
-            ", which has no exact Float64 value (an integer beyond 2^53)"
+            ", which has no exact Float64 value (an integer beyond 2^53)".to_string()
         }
-        _ => "",
+        (
+            PropertyDataType::Decimal(Some(decimal_type)),
+            Value::Int64(_) | Value::Float64(_) | Value::Decimal(_),
+        ) => format!(
+            ", which has more than {} digits before the point",
+            decimal_type.precision() - decimal_type.scale()
+        ),
+        _ => String::new(),
     };
-    OperatorError::ConstraintViolation(format!(
-        "property '{key}' on :{owner} expects {data_type:?}, got {value:?}{detail}"
+    // The type as type DDL spells it, the value as a query writes it.
+    OperatorError::schema_violation(format!(
+        "property '{key}' on :{owner} expects {data_type}, got {}{detail}",
+        value_text(value)
     ))
 }
 
-impl std::fmt::Display for PropertyDataType {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::String => write!(f, "STRING"),
-            Self::Int64 => write!(f, "INT64"),
-            Self::Float64 => write!(f, "FLOAT64"),
-            Self::Bool => write!(f, "BOOLEAN"),
-            Self::Date => write!(f, "DATE"),
-            Self::Time => write!(f, "TIME"),
-            Self::Timestamp => write!(f, "TIMESTAMP"),
-            Self::Duration => write!(f, "DURATION"),
-            Self::List => write!(f, "LIST"),
-            Self::ListTyped(elem) => write!(f, "LIST<{elem}>"),
-            Self::Map => write!(f, "MAP"),
-            Self::Bytes => write!(f, "BYTES"),
-            Self::Node => write!(f, "NODE"),
-            Self::Edge => write!(f, "EDGE"),
-            Self::Any => write!(f, "ANY"),
-            Self::ZonedDatetime => write!(f, "ZONED DATETIME"),
-            Self::LocalDatetime => write!(f, "LOCAL DATETIME"),
+/// A value as a query writes it, for an error message: `'Alix'`, `3`,
+/// `LOCAL DATETIME '2026-10-05T10:30:00'`, `[3]`.
+fn value_text(value: &Value) -> String {
+    match value {
+        Value::String(text) => format!("'{}'", text.replace('\\', "\\\\").replace('\'', "\\'")),
+        // A LOCAL DATETIME has no zone: no `Z`, and no fraction of zero.
+        Value::Timestamp(timestamp) => {
+            let text = timestamp.to_string();
+            let text = text.strip_suffix('Z').unwrap_or(&text);
+            let text = text.strip_suffix(".000000").unwrap_or(text);
+            format!("LOCAL DATETIME '{text}'")
         }
+        Value::ZonedDatetime(datetime) => format!("ZONED DATETIME '{datetime}'"),
+        Value::Date(date) => format!("DATE '{date}'"),
+        Value::Time(time) => format!("TIME '{time}'"),
+        Value::Duration(duration) => format!("DURATION '{duration}'"),
+        Value::List(items) => {
+            let items: Vec<String> = items.iter().map(value_text).collect();
+            format!("[{}]", items.join(", "))
+        }
+        Value::Map(entries) => {
+            let entries: Vec<String> = entries
+                .iter()
+                .map(|(key, value)| format!("{key}: {}", value_text(value)))
+                .collect();
+            format!("{{{}}}", entries.join(", "))
+        }
+        other => other.to_string(),
     }
 }
 
@@ -2488,6 +2308,12 @@ pub enum CatalogError {
     },
 }
 
+impl From<PropertyTypeTooDeep> for CatalogError {
+    fn from(error: PropertyTypeTooDeep) -> Self {
+        Self::PropertyTypeTooDeep { limit: error.limit }
+    }
+}
+
 impl std::fmt::Display for CatalogError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -2534,7 +2360,7 @@ pub struct CatalogConstraintValidator {
     closed_type: Option<ClosedGraphType>,
     /// Optional graph store for UNIQUE constraint enforcement via index lookup
     /// and the dimensions of vector indexes.
-    store: Option<Arc<dyn grafeo_core::graph::GraphStoreSearch>>,
+    store: Option<Arc<dyn grafeo_core::graph::GraphStore>>,
     /// Optional maximum property value size in bytes.
     max_property_size: Option<usize>,
     /// The writing transaction: its uncommitted writes count for UNIQUE.
@@ -2545,6 +2371,14 @@ pub struct CatalogConstraintValidator {
     /// The schema written in, whose node and edge types check the writes
     /// (`None`: no schema).
     schema: Option<String>,
+    /// Where the writing transaction claims the values it writes under
+    /// unique constraints, and the storage key of the graph written to
+    /// (`None`: the default graph). Without it (a write no other transaction
+    /// can overlap) nothing is claimed.
+    key_claims: Option<(
+        Arc<crate::transaction::TransactionManager>,
+        Option<Arc<str>>,
+    )>,
 }
 
 impl CatalogConstraintValidator {
@@ -2557,7 +2391,60 @@ impl CatalogConstraintValidator {
             max_property_size: None,
             transaction: None,
             schema: None,
+            key_claims: None,
         }
+    }
+
+    /// Claims each value the transaction writes under a UNIQUE, PRIMARY KEY
+    /// or NODE KEY constraint in `manager`, for the graph with storage key
+    /// `graph` (`None`: the default graph), once the check found no other
+    /// node with it: of two transactions that write the same value, the
+    /// second fails with a write conflict, even when neither sees the other's
+    /// write (see [`TransactionManager::record_key`](crate::transaction::TransactionManager::record_key)).
+    /// Needs [`with_transaction_context`](Self::with_transaction_context)
+    /// with a transaction.
+    #[must_use]
+    pub fn with_key_claims(
+        mut self,
+        manager: Arc<crate::transaction::TransactionManager>,
+        graph: Option<&str>,
+    ) -> Self {
+        self.key_claims = Some((manager, graph.map(Arc::from)));
+        self
+    }
+
+    /// Claims the values `values` of the properties `keys` of a constraint on
+    /// `label` for the writing transaction (see
+    /// [`with_key_claims`](Self::with_key_claims)).
+    fn claim_key(
+        &self,
+        label: &str,
+        keys: &[String],
+        values: &[&Value],
+    ) -> Result<(), OperatorError> {
+        let (Some((manager, graph)), Some((_, transaction))) = (&self.key_claims, self.transaction)
+        else {
+            return Ok(());
+        };
+        let key = crate::transaction::KeyClaim {
+            graph: graph.clone(),
+            label: Arc::from(label),
+            properties: keys.to_vec(),
+            values: values
+                .iter()
+                .map(|value| grafeo_common::types::HashableValue((*value).clone()))
+                .collect(),
+        };
+        manager
+            .record_key(transaction, key)
+            .map_err(|error| match error {
+                // Not a conflict: nothing commits until a reopen, which the
+                // caller must learn (a conflict reads as retryable).
+                error @ grafeo_common::utils::error::Error::Transaction(
+                    grafeo_common::utils::error::TransactionError::IncompleteCommit,
+                ) => OperatorError::Wrapped(Box::new(error)),
+                error => OperatorError::WriteConflict(error.to_string()),
+            })
     }
 
     /// Checks the writes with the node and edge types of `schema`, the schema
@@ -2615,30 +2502,34 @@ impl CatalogConstraintValidator {
     /// same transaction.
     fn nodes_with_value(
         &self,
-        store: &dyn grafeo_core::graph::GraphStoreSearch,
+        store: &dyn grafeo_core::graph::GraphStore,
         label: &str,
         key: &str,
         value: &Value,
-    ) -> Vec<grafeo_core::graph::lpg::Node> {
+    ) -> Result<Vec<grafeo_core::graph::lpg::Node>, OperatorError> {
+        // A writer without a transaction writes at once: it checks against
+        // every commit so far.
+        let view = self
+            .transaction
+            .map_or_else(ReadView::latest, |(epoch, id)| {
+                ReadView::transaction(id, epoch)
+            });
         let candidates = if store.has_property_index(key) {
-            store.find_nodes_by_property(key, value)
+            store.find_nodes_by_property(key, value, view)?
         } else {
-            store.nodes_by_label(label)
+            store.nodes_by_label(label, view)?
         };
         let key = grafeo_common::types::PropertyKey::from(key);
-        candidates
-            .into_iter()
-            .filter_map(|id| match self.transaction {
-                Some((epoch, transaction_id)) => {
-                    store.get_node_versioned(id, epoch, transaction_id)
-                }
-                None => store.get_node(id),
-            })
-            .filter(|node| {
-                node.labels.iter().any(|l| l.as_str() == label)
-                    && node.properties.get(&key) == Some(value)
-            })
-            .collect()
+        let mut found = Vec::new();
+        for id in candidates {
+            if let Some(node) = store.node(id, view)?
+                && node.labels.iter().any(|l| l.as_str() == label)
+                && node.properties.get(&key) == Some(value)
+            {
+                found.push(node);
+            }
+        }
+        Ok(found)
     }
 
     /// Checks writes to the graph with storage key `name` (`schema/graph` in
@@ -2652,7 +2543,7 @@ impl CatalogConstraintValidator {
 
     /// Attaches a graph store for UNIQUE constraint enforcement and vector
     /// index dimensions.
-    pub fn with_store(mut self, store: Arc<dyn grafeo_core::graph::GraphStoreSearch>) -> Self {
+    pub fn with_store(mut self, store: Arc<dyn grafeo_core::graph::GraphStore>) -> Self {
         self.store = Some(store);
         self
     }
@@ -2680,7 +2571,7 @@ impl ConstraintValidator for CatalogConstraintValidator {
                     continue;
                 };
                 if vector.len() != config.dimensions {
-                    return Err(OperatorError::ConstraintViolation(format!(
+                    return Err(OperatorError::limit_violation(format!(
                         "property '{key}' on :{label} has a vector index of {} dimensions, got a vector of {}",
                         config.dimensions,
                         vector.len()
@@ -2689,7 +2580,7 @@ impl ConstraintValidator for CatalogConstraintValidator {
                 if let Some((position, value)) =
                     grafeo_core::index::vector::first_non_finite(vector)
                 {
-                    return Err(OperatorError::ConstraintViolation(format!(
+                    return Err(OperatorError::limit_violation(format!(
                         "property '{key}' on :{label} has a vector index, which cannot measure \
                          {value} (at position {position})"
                     )));
@@ -2709,7 +2600,7 @@ impl ConstraintValidator for CatalogConstraintValidator {
             if let Some(typed_prop) = type_def.properties.iter().find(|p| p.name == key) {
                 // Check NOT NULL
                 if !typed_prop.nullable && *value == Value::Null {
-                    return Err(OperatorError::ConstraintViolation(format!(
+                    return Err(OperatorError::schema_violation(format!(
                         "property '{key}' on :{label} is NOT NULL, cannot set to null"
                     )));
                 }
@@ -2729,7 +2620,7 @@ impl ConstraintValidator for CatalogConstraintValidator {
                     _ => false,
                 });
             if required && value.is_null() {
-                return Err(OperatorError::ConstraintViolation(format!(
+                return Err(OperatorError::schema_violation(format!(
                     "property '{key}' on :{label} is required by a NOT NULL constraint, \
                      cannot remove it or set it to null"
                 )));
@@ -2754,7 +2645,7 @@ impl ConstraintValidator for CatalogConstraintValidator {
                         && typed_prop.default_value.is_none()
                         && !prop_names.contains(typed_prop.name.as_str())
                     {
-                        return Err(OperatorError::ConstraintViolation(format!(
+                        return Err(OperatorError::schema_violation(format!(
                             "missing required property '{}' on :{label}",
                             typed_prop.name
                         )));
@@ -2765,7 +2656,7 @@ impl ConstraintValidator for CatalogConstraintValidator {
                     match constraint {
                         TypeConstraint::NotNull(prop_name) => {
                             if !prop_names.contains(prop_name.as_str()) {
-                                return Err(OperatorError::ConstraintViolation(format!(
+                                return Err(OperatorError::schema_violation(format!(
                                     "missing required property '{prop_name}' on :{label} (NOT NULL constraint)"
                                 )));
                             }
@@ -2773,7 +2664,7 @@ impl ConstraintValidator for CatalogConstraintValidator {
                         TypeConstraint::PrimaryKey(key_props) => {
                             for pk in key_props {
                                 if !prop_names.contains(pk.as_str()) {
-                                    return Err(OperatorError::ConstraintViolation(format!(
+                                    return Err(OperatorError::schema_violation(format!(
                                         "missing primary key property '{pk}' on :{label}"
                                     )));
                                 }
@@ -2784,12 +2675,12 @@ impl ConstraintValidator for CatalogConstraintValidator {
                             match self.catalog.evaluate_check(expression, properties) {
                                 Ok(true) => {}
                                 Ok(false) => {
-                                    return Err(OperatorError::ConstraintViolation(format!(
+                                    return Err(OperatorError::schema_violation(format!(
                                         "CHECK constraint '{constraint_name}' violated on :{label}"
                                     )));
                                 }
                                 Err(err) => {
-                                    return Err(OperatorError::ConstraintViolation(format!(
+                                    return Err(OperatorError::schema_violation(format!(
                                         "CHECK constraint '{constraint_name}' on :{label} \
                                          cannot be evaluated: {err}"
                                     )));
@@ -2825,16 +2716,17 @@ impl ConstraintValidator for CatalogConstraintValidator {
                         }
                         _ => false,
                     };
-                    if is_unique
-                        && let Some(ref store) = self.store
-                        && !self
-                            .nodes_with_value(store.as_ref(), label, key, value)
+                    if is_unique && let Some(ref store) = self.store {
+                        if !self
+                            .nodes_with_value(store.as_ref(), label, key, value)?
                             .is_empty()
-                    {
-                        return Err(OperatorError::ConstraintViolation(format!(
-                            "UNIQUE constraint violation: property '{key}' \
-                             with value {value:?} already exists on :{label}"
-                        )));
+                        {
+                            return Err(OperatorError::schema_violation(format!(
+                                "UNIQUE constraint violation: property '{key}' \
+                                 with value {value:?} already exists on :{label}"
+                            )));
+                        }
+                        self.claim_key(label, &[key.to_string()], &[value])?;
                     }
                 }
             }
@@ -2880,7 +2772,7 @@ impl ConstraintValidator for CatalogConstraintValidator {
                     continue;
                 };
                 let duplicate = self
-                    .nodes_with_value(store.as_ref(), label, &keys[0], values[0])
+                    .nodes_with_value(store.as_ref(), label, &keys[0], values[0])?
                     .into_iter()
                     .filter(|other| Some(other.id) != node)
                     .any(|other| {
@@ -2892,12 +2784,13 @@ impl ConstraintValidator for CatalogConstraintValidator {
                         })
                     });
                 if duplicate {
-                    return Err(OperatorError::ConstraintViolation(format!(
+                    return Err(OperatorError::schema_violation(format!(
                         "UNIQUE constraint violation: properties ({}) with values {values:?} \
                          already exist on :{label}",
                         keys.join(", ")
                     )));
                 }
+                self.claim_key(label, keys, &values)?;
             }
         }
         Ok(())
@@ -2920,7 +2813,7 @@ impl ConstraintValidator for CatalogConstraintValidator {
         {
             // Check NOT NULL
             if !typed_prop.nullable && *value == Value::Null {
-                return Err(OperatorError::ConstraintViolation(format!(
+                return Err(OperatorError::schema_violation(format!(
                     "property '{key}' on :{edge_type} is NOT NULL, cannot set to null"
                 )));
             }
@@ -2946,7 +2839,7 @@ impl ConstraintValidator for CatalogConstraintValidator {
                     && typed_prop.default_value.is_none()
                     && !prop_names.contains(typed_prop.name.as_str())
                 {
-                    return Err(OperatorError::ConstraintViolation(format!(
+                    return Err(OperatorError::schema_violation(format!(
                         "missing required property '{}' on :{edge_type}",
                         typed_prop.name
                     )));
@@ -2959,12 +2852,12 @@ impl ConstraintValidator for CatalogConstraintValidator {
                     match self.catalog.evaluate_check(expression, properties) {
                         Ok(true) => {}
                         Ok(false) => {
-                            return Err(OperatorError::ConstraintViolation(format!(
+                            return Err(OperatorError::schema_violation(format!(
                                 "CHECK constraint '{constraint_name}' violated on :{edge_type}"
                             )));
                         }
                         Err(err) => {
-                            return Err(OperatorError::ConstraintViolation(format!(
+                            return Err(OperatorError::schema_violation(format!(
                                 "CHECK constraint '{constraint_name}' on :{edge_type} \
                                  cannot be evaluated: {err}"
                             )));
@@ -2984,14 +2877,14 @@ impl ConstraintValidator for CatalogConstraintValidator {
             return Ok(());
         };
         if labels.is_empty() {
-            return Err(OperatorError::ConstraintViolation(format!(
+            return Err(OperatorError::schema_violation(format!(
                 "a node without a label is not allowed by closed graph type '{}': \
                  give it the label of one of its node types",
                 closed.name
             )));
         }
         match labels.iter().find(|label| !node_types.contains_key(*label)) {
-            Some(label) => Err(OperatorError::ConstraintViolation(format!(
+            Some(label) => Err(OperatorError::schema_violation(format!(
                 "label '{label}' is not a node type of closed graph type '{}'",
                 closed.name
             ))),
@@ -3005,7 +2898,7 @@ impl ConstraintValidator for CatalogConstraintValidator {
         };
         match &closed.edge_types {
             Some(edge_types) if !edge_types.contains_key(edge_type) => {
-                Err(OperatorError::ConstraintViolation(format!(
+                Err(OperatorError::schema_violation(format!(
                     "edge type '{edge_type}' is not an edge type of closed graph type '{}'",
                     closed.name
                 )))
@@ -3044,7 +2937,7 @@ impl ConstraintValidator for CatalogConstraintValidator {
             .iter()
             .find(|(key, value)| !value.is_null() && !declared.iter().any(|d| d.contains(key)));
         match undeclared {
-            Some((key, _)) => Err(OperatorError::ConstraintViolation(format!(
+            Some((key, _)) => Err(OperatorError::schema_violation(format!(
                 "property '{key}' is not declared by node type {} of closed graph type '{}'",
                 labels
                     .iter()
@@ -3077,7 +2970,7 @@ impl ConstraintValidator for CatalogConstraintValidator {
             .iter()
             .find(|(key, value)| !value.is_null() && !declared.contains(key));
         match undeclared {
-            Some((key, _)) => Err(OperatorError::ConstraintViolation(format!(
+            Some((key, _)) => Err(OperatorError::schema_violation(format!(
                 "property '{key}' is not declared by edge type '{edge_type}' of closed graph \
                  type '{}'",
                 closed.name
@@ -3100,7 +2993,7 @@ impl ConstraintValidator for CatalogConstraintValidator {
                 .iter()
                 .any(|l| type_def.source_node_types.iter().any(|s| s == l));
             if !source_ok {
-                return Err(OperatorError::ConstraintViolation(format!(
+                return Err(OperatorError::schema_violation(format!(
                     "source node labels {source_labels:?} are not allowed for edge type '{edge_type}', \
                      expected one of {:?}",
                     type_def.source_node_types
@@ -3112,7 +3005,7 @@ impl ConstraintValidator for CatalogConstraintValidator {
                 .iter()
                 .any(|l| type_def.target_node_types.iter().any(|t| t == l));
             if !target_ok {
-                return Err(OperatorError::ConstraintViolation(format!(
+                return Err(OperatorError::schema_violation(format!(
                     "target node labels {target_labels:?} are not allowed for edge type '{edge_type}', \
                      expected one of {:?}",
                     type_def.target_node_types
@@ -3268,7 +3161,7 @@ fn property_size_error(key: &str, size: usize, limit: usize) -> OperatorError {
     } else {
         format!("{limit} bytes")
     };
-    OperatorError::ConstraintViolation(format!(
+    OperatorError::limit_violation(format!(
         "property '{key}' value exceeds maximum size of {limit_display} ({size} bytes); \
          raise it with Config::with_max_property_size() or disable it with \
          Config::without_max_property_size()"
@@ -3995,6 +3888,7 @@ mod tests {
                 T::Int64 => K::Integer,
                 T::Float64 => K::Float,
                 T::Bool => K::Boolean,
+                T::Decimal(decimal) => K::Decimal(decimal),
                 T::Any => K::Any,
                 _ => K::Other,
             };
@@ -4017,6 +3911,8 @@ mod tests {
             T::Any,
             T::ZonedDatetime,
             T::LocalDatetime,
+            T::Decimal(None),
+            T::Decimal(Some(grafeo_common::types::DecimalType::new(6, 2).unwrap())),
         ];
         for data_type in listed {
             assert!(
@@ -4046,7 +3942,8 @@ mod tests {
         assert_eq!(PropertyDataType::from_type_name(&nested(128)), Ok(expected));
 
         for levels in [129, 100_000] {
-            let error = PropertyDataType::from_type_name(&nested(levels)).unwrap_err();
+            let error =
+                CatalogError::from(PropertyDataType::from_type_name(&nested(levels)).unwrap_err());
             assert_eq!(
                 error,
                 CatalogError::PropertyTypeTooDeep { limit: 128 },

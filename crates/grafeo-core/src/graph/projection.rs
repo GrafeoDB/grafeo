@@ -6,7 +6,9 @@
 //! are visible. Everything else is filtered out transparently.
 //!
 //! Projections are read-only: they implement [`GraphStore`] but not
-//! [`super::GraphStoreMut`].
+//! [`super::GraphBackend`]. A projection keeps no text or vector index of
+//! its own: its text reads answer as a store without one, and its vector
+//! search measures the vectors of the nodes in it.
 //!
 //! # Example
 //!
@@ -22,12 +24,13 @@ use std::collections::HashSet;
 use std::sync::Arc;
 
 use arcstr::ArcStr;
-use grafeo_common::types::{EdgeId, EpochId, NodeId, PropertyKey, TransactionId, Value};
+use grafeo_common::types::{EdgeId, EpochId, NodeId, PropertyKey, ReadView, Value};
+use grafeo_common::utils::error::Result;
 use grafeo_common::utils::hash::FxHashMap;
 
 use super::Direction;
 use super::lpg::{CompareOp, Edge, Node};
-use super::traits::{GraphStore, GraphStoreSearch};
+use super::traits::{GraphStore, Labels};
 use crate::statistics::Statistics;
 
 /// Defines which nodes and edges are included in a projection.
@@ -77,13 +80,13 @@ impl ProjectionSpec {
 /// [`ProjectionSpec`]. Nodes without matching labels and edges without
 /// matching types are invisible.
 pub struct GraphProjection {
-    inner: Arc<dyn GraphStoreSearch>,
+    inner: Arc<dyn GraphStore>,
     spec: ProjectionSpec,
 }
 
 impl GraphProjection {
     /// Creates a new projection over the given store.
-    pub fn new(inner: Arc<dyn GraphStoreSearch>, spec: ProjectionSpec) -> Self {
+    pub fn new(inner: Arc<dyn GraphStore>, spec: ProjectionSpec) -> Self {
         Self { inner, spec }
     }
 
@@ -97,14 +100,17 @@ impl GraphProjection {
             .any(|l| self.spec.node_labels.contains(l.as_str()))
     }
 
-    /// Returns true if a node ID passes the label filter.
-    fn node_id_matches(&self, id: NodeId) -> bool {
+    /// Whether node `id` passes the label filter with the labels `view`
+    /// sees: every node passes without a filter.
+    fn node_id_matches(&self, id: NodeId, view: ReadView) -> Result<bool> {
         if !self.spec.filters_labels() {
-            return true;
+            return Ok(true);
         }
-        self.inner
-            .get_node(id)
-            .is_some_and(|n| self.node_matches(&n))
+        Ok(self.inner.node_labels(id, view)?.is_some_and(|labels| {
+            labels
+                .iter()
+                .any(|label| self.spec.node_labels.contains(label.as_str()))
+        }))
     }
 
     /// Returns true if every node with `label` is in the projection: no
@@ -121,93 +127,138 @@ impl GraphProjection {
         self.spec.edge_types.contains(edge_type)
     }
 
-    /// Returns true if an edge passes both endpoint and type filters.
-    fn edge_matches(&self, edge: &Edge) -> bool {
-        if !self.edge_type_matches(&edge.edge_type) {
-            return false;
+    /// The nodes of `ids` in the projection at `view`, in their order.
+    fn projected(&self, ids: Vec<NodeId>, view: ReadView) -> Result<Vec<NodeId>> {
+        if !self.spec.filters_labels() {
+            return Ok(ids);
         }
-        self.node_id_matches(edge.src) && self.node_id_matches(edge.dst)
+        let mut kept = Vec::with_capacity(ids.len());
+        for id in ids {
+            if self.node_id_matches(id, view)? {
+                kept.push(id);
+            }
+        }
+        Ok(kept)
+    }
+
+    /// The edge types an adjacency read of `types` asks the inner store
+    /// for: `types` within the spec's types, the spec's types for none;
+    /// `None` when no type is left.
+    fn inner_types(&self, types: &[ArcStr]) -> Option<Vec<ArcStr>> {
+        if !self.spec.filters_edge_types() {
+            return Some(types.to_vec());
+        }
+        let wanted: Vec<ArcStr> = if types.is_empty() {
+            self.spec
+                .edge_types
+                .iter()
+                .map(|name| ArcStr::from(name.as_str()))
+                .collect()
+        } else {
+            types
+                .iter()
+                .filter(|name| self.spec.edge_types.contains(name.as_str()))
+                .cloned()
+                .collect()
+        };
+        (!wanted.is_empty()).then_some(wanted)
     }
 }
 
 impl GraphStore for GraphProjection {
-    // --- Point lookups ---
+    // --- Point reads ---
 
-    fn get_node(&self, id: NodeId) -> Option<Node> {
-        self.inner.get_node(id).filter(|n| self.node_matches(n))
+    fn node(&self, id: NodeId, view: ReadView) -> Result<Option<Node>> {
+        Ok(self
+            .inner
+            .node(id, view)?
+            .filter(|node| self.node_matches(node)))
     }
 
-    fn get_edge(&self, id: EdgeId) -> Option<Edge> {
-        self.inner.get_edge(id).filter(|e| self.edge_matches(e))
+    fn edge(&self, id: EdgeId, view: ReadView) -> Result<Option<Edge>> {
+        let Some(edge) = self.inner.edge(id, view)? else {
+            return Ok(None);
+        };
+        let kept = self.edge_type_matches(&edge.edge_type)
+            && self.node_id_matches(edge.src, view)?
+            && self.node_id_matches(edge.dst, view)?;
+        Ok(kept.then_some(edge))
     }
 
-    fn get_node_versioned(
-        &self,
-        id: NodeId,
-        epoch: EpochId,
-        transaction_id: TransactionId,
-    ) -> Option<Node> {
-        self.inner
-            .get_node_versioned(id, epoch, transaction_id)
-            .filter(|n| self.node_matches(n))
+    fn is_node_visible(&self, id: NodeId, view: ReadView) -> Result<bool> {
+        Ok(self.inner.is_node_visible(id, view)? && self.node_id_matches(id, view)?)
     }
 
-    /// Returns a versioned edge if it passes projection filters.
-    ///
-    /// **Limitation**: `edge_matches` checks endpoint visibility via `get_node`
-    /// (current snapshot), not `get_node_versioned`, because `GraphProjection`
-    /// does not store epoch/transaction context. This means endpoint filtering
-    /// may reflect the current state rather than the requested version.
-    fn get_edge_versioned(
-        &self,
-        id: EdgeId,
-        epoch: EpochId,
-        transaction_id: TransactionId,
-    ) -> Option<Edge> {
-        self.inner
-            .get_edge_versioned(id, epoch, transaction_id)
-            .filter(|e| self.edge_matches(e))
+    fn is_edge_visible(&self, id: EdgeId, view: ReadView) -> Result<bool> {
+        // `edge_type` applies the type filter and, under a label filter, the
+        // endpoint filter.
+        Ok(self.edge_type(id, view)?.is_some())
     }
 
-    fn get_node_at_epoch(&self, id: NodeId, epoch: EpochId) -> Option<Node> {
-        self.inner
-            .get_node_at_epoch(id, epoch)
-            .filter(|n| self.node_matches(n))
-    }
-
-    fn get_edge_at_epoch(&self, id: EdgeId, epoch: EpochId) -> Option<Edge> {
-        self.inner
-            .get_edge_at_epoch(id, epoch)
-            .filter(|e| self.edge_matches(e))
-    }
-
-    // --- Property access ---
-
-    fn get_node_property(&self, id: NodeId, key: &PropertyKey) -> Option<Value> {
-        if !self.node_id_matches(id) {
-            return None;
+    fn node_property(&self, id: NodeId, key: &str, view: ReadView) -> Result<Option<Value>> {
+        if !self.node_id_matches(id, view)? {
+            return Ok(None);
         }
-        self.inner.get_node_property(id, key)
+        self.inner.node_property(id, key, view)
     }
 
-    fn get_edge_property(&self, id: EdgeId, key: &PropertyKey) -> Option<Value> {
-        self.inner
-            .get_edge(id)
-            .filter(|e| self.edge_matches(e))
-            .and_then(|_| self.inner.get_edge_property(id, key))
+    fn edge_property(&self, id: EdgeId, key: &str, view: ReadView) -> Result<Option<Value>> {
+        if self.edge_type(id, view)?.is_none() {
+            return Ok(None);
+        }
+        self.inner.edge_property(id, key, view)
     }
 
-    fn try_get_node_property_batch(
+    fn node_labels(&self, id: NodeId, view: ReadView) -> Result<Option<Labels>> {
+        Ok(self.inner.node_labels(id, view)?.filter(|labels| {
+            !self.spec.filters_labels()
+                || labels
+                    .iter()
+                    .any(|label| self.spec.node_labels.contains(label.as_str()))
+        }))
+    }
+
+    fn node_has_label(&self, id: NodeId, label: &str, view: ReadView) -> Result<Option<bool>> {
+        if !self.node_id_matches(id, view)? {
+            return Ok(None);
+        }
+        self.inner.node_has_label(id, label, view)
+    }
+
+    fn edge_type(&self, id: EdgeId, view: ReadView) -> Result<Option<ArcStr>> {
+        // Check type filter first (cheap: no property loading)
+        let Some(edge_type) = self.inner.edge_type(id, view)? else {
+            return Ok(None);
+        };
+        if !self.edge_type_matches(&edge_type) {
+            return Ok(None);
+        }
+        // Check endpoint visibility only if labels are filtered
+        if self.spec.filters_labels() {
+            let Some(edge) = self.inner.edge(id, view)? else {
+                return Ok(None);
+            };
+            if !self.node_id_matches(edge.src, view)? || !self.node_id_matches(edge.dst, view)? {
+                return Ok(None);
+            }
+        }
+        Ok(Some(edge_type))
+    }
+
+    // --- Batch reads ---
+
+    fn node_property_batch(
         &self,
         ids: &[NodeId],
         key: &PropertyKey,
-    ) -> grafeo_common::utils::error::Result<Vec<Option<Value>>> {
-        // The nodes in the projection read through the inner store's
-        // fallible read; the others have no value here. Which nodes are in
-        // is decided once: the inner store's labels can change between two
-        // looks, and a second look would hand the values out by a different
-        // mask than the one they were read by.
-        let included: Vec<bool> = ids.iter().map(|&id| self.node_id_matches(id)).collect();
+        view: ReadView,
+    ) -> Result<Vec<Option<Value>>> {
+        // The nodes in the projection read through the inner store's batch;
+        // the others have no value here.
+        let mut included = Vec::with_capacity(ids.len());
+        for &id in ids {
+            included.push(self.node_id_matches(id, view)?);
+        }
         let inside: Vec<NodeId> = ids
             .iter()
             .zip(&included)
@@ -215,7 +266,7 @@ impl GraphStore for GraphProjection {
             .collect();
         let mut values = self
             .inner
-            .try_get_node_property_batch(&inside, key)?
+            .node_property_batch(&inside, key, view)?
             .into_iter();
         Ok(included
             .iter()
@@ -229,71 +280,66 @@ impl GraphStore for GraphProjection {
             .collect())
     }
 
-    fn get_node_property_batch(&self, ids: &[NodeId], key: &PropertyKey) -> Vec<Option<Value>> {
-        let filtered: Vec<_> = ids
-            .iter()
-            .map(|&id| {
-                if self.node_id_matches(id) {
-                    self.inner.get_node_property(id, key)
-                } else {
-                    None
-                }
-            })
-            .collect();
-        filtered
-    }
-
-    fn get_nodes_properties_batch(&self, ids: &[NodeId]) -> Vec<FxHashMap<PropertyKey, Value>> {
+    fn node_properties_batch(
+        &self,
+        ids: &[NodeId],
+        view: ReadView,
+    ) -> Result<Vec<FxHashMap<PropertyKey, Value>>> {
         ids.iter()
             .map(|&id| {
-                if self.node_id_matches(id) {
-                    self.inner
-                        .get_nodes_properties_batch(std::slice::from_ref(&id))
+                if self.node_id_matches(id, view)? {
+                    Ok(self
+                        .inner
+                        .node_properties_batch(std::slice::from_ref(&id), view)?
                         .into_iter()
                         .next()
-                        .unwrap_or_default()
+                        .unwrap_or_default())
                 } else {
-                    FxHashMap::default()
+                    Ok(FxHashMap::default())
                 }
             })
             .collect()
     }
 
-    fn get_nodes_properties_selective_batch(
+    fn node_properties_selective_batch(
         &self,
         ids: &[NodeId],
         keys: &[PropertyKey],
-    ) -> Vec<FxHashMap<PropertyKey, Value>> {
+        view: ReadView,
+    ) -> Result<Vec<FxHashMap<PropertyKey, Value>>> {
         ids.iter()
             .map(|&id| {
-                if self.node_id_matches(id) {
-                    self.inner
-                        .get_nodes_properties_selective_batch(std::slice::from_ref(&id), keys)
+                if self.node_id_matches(id, view)? {
+                    Ok(self
+                        .inner
+                        .node_properties_selective_batch(std::slice::from_ref(&id), keys, view)?
                         .into_iter()
                         .next()
-                        .unwrap_or_default()
+                        .unwrap_or_default())
                 } else {
-                    FxHashMap::default()
+                    Ok(FxHashMap::default())
                 }
             })
             .collect()
     }
 
-    fn get_edges_properties_selective_batch(
+    fn edge_properties_selective_batch(
         &self,
         ids: &[EdgeId],
         keys: &[PropertyKey],
-    ) -> Vec<FxHashMap<PropertyKey, Value>> {
+        view: ReadView,
+    ) -> Result<Vec<FxHashMap<PropertyKey, Value>>> {
         ids.iter()
             .map(|&id| {
-                if self.get_edge(id).is_some() {
-                    self.inner
-                        .get_edges_properties_selective_batch(std::slice::from_ref(&id), keys)
+                if self.edge_type(id, view)?.is_some() {
+                    Ok(self
+                        .inner
+                        .edge_properties_selective_batch(std::slice::from_ref(&id), keys, view)?
                         .into_iter()
                         .next()
-                        .unwrap_or_default()
+                        .unwrap_or_default())
                 } else {
-                    FxHashMap::default()
+                    Ok(FxHashMap::default())
                 }
             })
             .collect()
@@ -301,42 +347,28 @@ impl GraphStore for GraphProjection {
 
     // --- Traversal ---
 
-    fn neighbors(&self, node: NodeId, direction: Direction) -> Vec<NodeId> {
-        if !self.node_id_matches(node) {
-            return Vec::new();
+    /// The inner store's edges of the types left after the spec's, whose
+    /// other end is in the projection.
+    fn edges(
+        &self,
+        node: NodeId,
+        direction: Direction,
+        types: &[ArcStr],
+        view: ReadView,
+    ) -> Result<Vec<(NodeId, EdgeId)>> {
+        if !self.node_id_matches(node, view)? {
+            return Ok(Vec::new());
         }
-        // Use edges_from (which filters by edge type and endpoint visibility)
-        // and extract the target node IDs, so neighbors connected only via
-        // excluded edge types are not returned.
-        self.edges_from(node, direction)
-            .into_iter()
-            .map(|(target, _)| target)
-            .collect()
-    }
-
-    fn edges_from(&self, node: NodeId, direction: Direction) -> Vec<(NodeId, EdgeId)> {
-        if !self.node_id_matches(node) {
-            return Vec::new();
+        let Some(types) = self.inner_types(types) else {
+            return Ok(Vec::new());
+        };
+        let mut edges = Vec::new();
+        for (other, edge) in self.inner.edges(node, direction, &types, view)? {
+            if self.node_id_matches(other, view)? {
+                edges.push((other, edge));
+            }
         }
-        self.inner
-            .edges_from(node, direction)
-            .into_iter()
-            .filter(|&(target, edge_id)| {
-                self.node_id_matches(target)
-                    && self
-                        .inner
-                        .edge_type(edge_id)
-                        .is_some_and(|t| self.edge_type_matches(&t))
-            })
-            .collect()
-    }
-
-    fn out_degree(&self, node: NodeId) -> usize {
-        self.edges_from(node, Direction::Outgoing).len()
-    }
-
-    fn in_degree(&self, node: NodeId) -> usize {
-        self.edges_from(node, Direction::Incoming).len()
+        Ok(edges)
     }
 
     fn has_backward_adjacency(&self) -> bool {
@@ -345,141 +377,114 @@ impl GraphStore for GraphProjection {
 
     // --- Scans ---
 
-    fn node_ids(&self) -> Vec<NodeId> {
-        if !self.spec.filters_labels() {
-            return self.inner.node_ids();
-        }
-        self.inner
-            .node_ids()
-            .into_iter()
-            .filter(|&id| self.node_id_matches(id))
-            .collect()
-    }
-
-    fn all_node_ids(&self) -> Vec<NodeId> {
-        if !self.spec.filters_labels() {
-            return self.inner.all_node_ids();
-        }
-        self.inner
-            .all_node_ids()
-            .into_iter()
-            .filter(|&id| self.node_id_matches(id))
-            .collect()
+    fn node_ids(&self, view: ReadView) -> Result<Vec<NodeId>> {
+        self.projected(self.inner.node_ids(view)?, view)
     }
 
     // A node with a label outside the spec is in the projection when it has
-    // a label of the spec too, and `get_node` shows it with both: the inner
+    // a label of the spec too, and `node` shows it with both: the inner
     // store's nodes with the label are filtered, in their order.
-    fn nodes_by_label(&self, label: &str) -> Vec<NodeId> {
-        let ids = self.inner.nodes_by_label(label);
+    fn nodes_by_label(&self, label: &str, view: ReadView) -> Result<Vec<NodeId>> {
+        let ids = self.inner.nodes_by_label(label, view)?;
         if self.label_is_projected(label) {
-            return ids;
+            return Ok(ids);
         }
-        ids.into_iter()
-            .filter(|&id| self.node_id_matches(id))
-            .collect()
+        self.projected(ids, view)
+    }
+
+    fn nodes_with_any_label(&self, labels: &[&str], view: ReadView) -> Result<Vec<NodeId>> {
+        let ids = self.inner.nodes_with_any_label(labels, view)?;
+        if labels.iter().all(|label| self.label_is_projected(label)) {
+            return Ok(ids);
+        }
+        self.projected(ids, view)
     }
 
     // Exact for a label outside the spec as well: `count(n)` reads it, not
     // only the planner.
-    fn nodes_by_label_count(&self, label: &str) -> usize {
+    fn nodes_by_label_count(&self, label: &str, view: ReadView) -> Result<usize> {
         if self.label_is_projected(label) {
-            return self.inner.nodes_by_label_count(label);
+            return self.inner.nodes_by_label_count(label, view);
         }
-        self.inner
-            .nodes_by_label(label)
-            .into_iter()
-            .filter(|&id| self.node_id_matches(id))
-            .count()
+        Ok(self.nodes_by_label(label, view)?.len())
     }
 
-    fn node_count(&self) -> usize {
-        self.node_ids().len()
+    fn node_count(&self, view: ReadView) -> Result<usize> {
+        if !self.spec.filters_labels() {
+            return self.inner.node_count(view);
+        }
+        Ok(self.node_ids(view)?.len())
     }
 
-    fn edge_count(&self) -> usize {
-        // Approximate: count edges whose type is in the spec
+    fn edge_count(&self, view: ReadView) -> Result<usize> {
         if !self.spec.filters_edge_types() && !self.spec.filters_labels() {
-            return self.inner.edge_count();
+            return self.inner.edge_count(view);
         }
-        // Fallback: scan all nodes and count projected edges
-        self.node_ids().iter().map(|&id| self.out_degree(id)).sum()
+        let mut count = 0;
+        for node in self.node_ids(view)? {
+            count += self.degree(node, Direction::Outgoing, view)?;
+        }
+        Ok(count)
     }
 
-    // --- Entity metadata ---
+    // --- Names ---
 
-    fn edge_type(&self, id: EdgeId) -> Option<ArcStr> {
-        // Check type filter first (cheap: no property loading)
-        let et = self.inner.edge_type(id)?;
-        if !self.edge_type_matches(&et) {
-            return None;
-        }
-        // Check endpoint visibility only if labels are filtered
+    fn all_labels(&self) -> Result<Vec<String>> {
         if self.spec.filters_labels() {
-            let edge = self.inner.get_edge(id)?;
-            if !self.node_id_matches(edge.src) || !self.node_id_matches(edge.dst) {
-                return None;
-            }
+            Ok(self.spec.node_labels.iter().cloned().collect())
+        } else {
+            self.inner.all_labels()
         }
-        Some(et)
     }
 
-    /// Returns the type of a versioned edge if it passes projection filters.
-    ///
-    /// **Limitation**: endpoint visibility is checked via `get_node` (current
-    /// snapshot), not `get_node_versioned`. See `get_edge_versioned` for details.
-    fn edge_type_versioned(
-        &self,
-        id: EdgeId,
-        epoch: EpochId,
-        transaction_id: TransactionId,
-    ) -> Option<ArcStr> {
-        let et = self.inner.edge_type_versioned(id, epoch, transaction_id)?;
-        if !self.edge_type_matches(&et) {
-            return None;
+    fn all_edge_types(&self) -> Result<Vec<String>> {
+        if self.spec.filters_edge_types() {
+            Ok(self.spec.edge_types.iter().cloned().collect())
+        } else {
+            self.inner.all_edge_types()
         }
-        if self.spec.filters_labels() {
-            let edge = self.inner.get_edge_versioned(id, epoch, transaction_id)?;
-            if !self.node_id_matches(edge.src) || !self.node_id_matches(edge.dst) {
-                return None;
-            }
-        }
-        Some(et)
     }
 
-    // --- Index introspection ---
+    fn all_property_keys(&self) -> Result<Vec<String>> {
+        self.inner.all_property_keys()
+    }
+
+    // --- Lookups: the inner store's, filtered by the spec ---
 
     fn has_property_index(&self, property: &str) -> bool {
         self.inner.has_property_index(property)
     }
 
-    // --- Filtered search ---
-
-    fn find_nodes_by_property(&self, property: &str, value: &Value) -> Vec<NodeId> {
-        self.inner
-            .find_nodes_by_property(property, value)
-            .into_iter()
-            .filter(|&id| self.node_id_matches(id))
-            .collect()
+    fn find_nodes_by_property(
+        &self,
+        property: &str,
+        value: &Value,
+        view: ReadView,
+    ) -> Result<Vec<NodeId>> {
+        self.projected(
+            self.inner.find_nodes_by_property(property, value, view)?,
+            view,
+        )
     }
 
-    fn find_nodes_by_properties(&self, conditions: &[(&str, Value)]) -> Vec<NodeId> {
-        self.inner
-            .find_nodes_by_properties(conditions)
-            .into_iter()
-            .filter(|&id| self.node_id_matches(id))
-            .collect()
+    fn find_nodes_by_properties(
+        &self,
+        conditions: &[(&str, Value)],
+        view: ReadView,
+    ) -> Result<Vec<NodeId>> {
+        self.projected(self.inner.find_nodes_by_properties(conditions, view)?, view)
     }
 
-    fn find_nodes_maybe_equal(&self, property: &str, value: &Value) -> Option<Vec<NodeId>> {
-        self.inner
-            .find_nodes_maybe_equal(property, value)
-            .map(|nodes| {
-                nodes
-                    .into_iter()
-                    .filter(|&id| self.node_id_matches(id))
-                    .collect()
-            })
+    fn find_nodes_maybe_equal(
+        &self,
+        property: &str,
+        value: &Value,
+        view: ReadView,
+    ) -> Result<Option<Vec<NodeId>>> {
+        match self.inner.find_nodes_maybe_equal(property, value, view)? {
+            Some(nodes) => Ok(Some(self.projected(nodes, view)?)),
+            None => Ok(None),
+        }
     }
 
     fn find_nodes_in_range(
@@ -489,15 +494,20 @@ impl GraphStore for GraphProjection {
         max: Option<&Value>,
         min_inclusive: bool,
         max_inclusive: bool,
-    ) -> Vec<NodeId> {
-        self.inner
-            .find_nodes_in_range(property, min, max, min_inclusive, max_inclusive)
-            .into_iter()
-            .filter(|&id| self.node_id_matches(id))
-            .collect()
+        view: ReadView,
+    ) -> Result<Vec<NodeId>> {
+        self.projected(
+            self.inner.find_nodes_in_range(
+                property,
+                min,
+                max,
+                min_inclusive,
+                max_inclusive,
+                view,
+            )?,
+            view,
+        )
     }
-
-    // --- Zone maps ---
 
     fn node_property_might_match(
         &self,
@@ -517,80 +527,85 @@ impl GraphStore for GraphProjection {
         self.inner.edge_property_might_match(property, op, value)
     }
 
-    // --- Statistics ---
+    /// The inner store's statistics, bounded by the spec: an edge type
+    /// outside it has no edges, and a label outside a label filter at most
+    /// as many nodes as the labels of the spec have. Estimates for the
+    /// planner, not answers.
+    fn committed_epoch(&self) -> EpochId {
+        self.inner.committed_epoch()
+    }
 
     fn statistics(&self) -> Arc<Statistics> {
-        self.inner.statistics()
-    }
-
-    fn estimate_label_cardinality(&self, label: &str) -> f64 {
-        if self.label_is_projected(label) {
-            return self.inner.estimate_label_cardinality(label);
+        let inner = self.inner.statistics();
+        if !self.spec.filters_labels() && !self.spec.filters_edge_types() {
+            return inner;
         }
-        // The projection's nodes with the label, as its scan finds them; an
-        // estimate, so a count beyond `u32::MAX` saturates.
-        let count = u32::try_from(self.nodes_by_label_count(label)).unwrap_or(u32::MAX);
-        f64::from(count)
-    }
-
-    fn estimate_avg_degree(&self, edge_type: &str, outgoing: bool) -> f64 {
-        if self.spec.filters_edge_types() && !self.spec.edge_types.contains(edge_type) {
-            return 0.0;
-        }
-        self.inner.estimate_avg_degree(edge_type, outgoing)
-    }
-
-    // --- Epoch ---
-
-    fn current_epoch(&self) -> EpochId {
-        self.inner.current_epoch()
-    }
-
-    // --- Visibility (no node or edge built, as the inner store checks) ---
-
-    fn is_node_visible_at_epoch(&self, id: NodeId, epoch: EpochId) -> bool {
-        self.inner.is_node_visible_at_epoch(id, epoch) && self.node_id_matches(id)
-    }
-
-    fn is_edge_visible_at_epoch(&self, id: EdgeId, epoch: EpochId) -> bool {
-        // `edge_type` applies the type filter and, under a label filter, the
-        // endpoint filter.
-        self.inner.is_edge_visible_at_epoch(id, epoch) && self.edge_type(id).is_some()
-    }
-
-    // --- Schema introspection ---
-
-    fn all_labels(&self) -> Vec<String> {
-        if self.spec.filters_labels() {
-            self.spec.node_labels.iter().cloned().collect()
-        } else {
-            self.inner.all_labels()
-        }
-    }
-
-    fn all_edge_types(&self) -> Vec<String> {
+        let mut statistics = (*inner).clone();
         if self.spec.filters_edge_types() {
-            self.spec.edge_types.iter().cloned().collect()
-        } else {
-            self.inner.all_edge_types()
+            for (name, edge_type) in &mut statistics.edge_types {
+                if !self.spec.edge_types.contains(name) {
+                    edge_type.edge_count = 0;
+                    edge_type.avg_out_degree = 0.0;
+                    edge_type.avg_in_degree = 0.0;
+                }
+            }
+            statistics.total_edges = statistics
+                .edge_types
+                .values()
+                .map(|edge_type| edge_type.edge_count)
+                .sum();
         }
+        if self.spec.filters_labels() {
+            let projected: u64 = statistics
+                .labels
+                .iter()
+                .filter(|(name, _)| self.spec.node_labels.contains(*name))
+                .map(|(_, label)| label.node_count)
+                .sum();
+            // A label outside the spec counts the projection's nodes with it,
+            // as a committed reader of the inner store's last commit finds
+            // them (the planner scans the label with the fewest); when that
+            // read fails, the inner count bounded by the projection's nodes
+            // (statistics are estimates: a plan, not a result, depends on
+            // them).
+            let now = ReadView::committed(self.inner.committed_epoch());
+            for (name, label) in &mut statistics.labels {
+                if !self.spec.node_labels.contains(name) {
+                    label.node_count = self
+                        .nodes_by_label_count(name, now)
+                        .ok()
+                        .and_then(|count| u64::try_from(count).ok())
+                        .unwrap_or_else(|| label.node_count.min(projected));
+                }
+            }
+            statistics.total_nodes = statistics.total_nodes.min(projected);
+        }
+        Arc::new(statistics)
     }
 
-    fn all_property_keys(&self) -> Vec<String> {
-        self.inner.all_property_keys()
+    // --- History: the inner store's versions that are in the projection ---
+
+    fn node_history(&self, id: NodeId) -> Result<Vec<(EpochId, Option<EpochId>, Node)>> {
+        let mut versions = self.inner.node_history(id)?;
+        versions.retain(|(_, _, node)| self.node_matches(node));
+        Ok(versions)
+    }
+
+    fn edge_history(&self, id: EdgeId) -> Result<Vec<(EpochId, Option<EpochId>, Edge)>> {
+        let mut versions = self.inner.edge_history(id)?;
+        versions.retain(|(_, _, edge)| self.edge_type_matches(&edge.edge_type));
+        Ok(versions)
     }
 }
 
-impl GraphStoreSearch for GraphProjection {}
-
 #[cfg(test)]
-#[cfg(feature = "lpg")]
 mod tests {
     use super::*;
-    use crate::graph::lpg::LpgStore;
+    use crate::graph::rowgroup::RowGroupStore;
+    use grafeo_common::types::TransactionId;
 
-    fn setup_social_graph() -> Arc<LpgStore> {
-        let store = Arc::new(LpgStore::new().unwrap());
+    fn setup_social_graph() -> Arc<RowGroupStore> {
+        let store = Arc::new(RowGroupStore::new());
         let alix = store.create_node(&["Person"]);
         let gus = store.create_node(&["Person"]);
         let amsterdam = store.create_node(&["City"]);
@@ -613,8 +628,14 @@ mod tests {
     fn unfiltered_projection_sees_everything() {
         let store = setup_social_graph();
         let proj = GraphProjection::new(store.clone(), ProjectionSpec::new());
-        assert_eq!(proj.node_count(), store.node_count());
-        assert_eq!(proj.edge_count(), store.edge_count());
+        assert_eq!(
+            proj.node_count(ReadView::latest()).unwrap(),
+            store.node_count(ReadView::latest()).unwrap()
+        );
+        assert_eq!(
+            proj.edge_count(ReadView::latest()).unwrap(),
+            store.edge_count(ReadView::latest()).unwrap()
+        );
     }
 
     #[test]
@@ -623,10 +644,25 @@ mod tests {
         let spec = ProjectionSpec::new().with_node_labels(["Person"]);
         let proj = GraphProjection::new(store, spec);
 
-        assert_eq!(proj.node_count(), 2);
-        assert_eq!(proj.nodes_by_label("Person").len(), 2);
-        assert!(proj.nodes_by_label("City").is_empty(), "expected empty");
-        assert!(proj.nodes_by_label("Software").is_empty(), "expected empty");
+        assert_eq!(proj.node_count(ReadView::latest()).unwrap(), 2);
+        assert_eq!(
+            proj.nodes_by_label("Person", ReadView::latest())
+                .unwrap()
+                .len(),
+            2
+        );
+        assert!(
+            proj.nodes_by_label("City", ReadView::latest())
+                .unwrap()
+                .is_empty(),
+            "expected empty"
+        );
+        assert!(
+            proj.nodes_by_label("Software", ReadView::latest())
+                .unwrap()
+                .is_empty(),
+            "expected empty"
+        );
     }
 
     /// A label scan of a projection holds every node in it that has the
@@ -635,7 +671,7 @@ mod tests {
     /// Vincent is an `Admin` only, outside the projection of `Person`.
     #[test]
     fn nodes_by_label_holds_the_projected_nodes_with_any_label() {
-        let store = Arc::new(LpgStore::new().unwrap());
+        let store = Arc::new(RowGroupStore::new());
         let alix = store.create_node(&["Person", "Admin"]);
         let gus = store.create_node(&["Person"]);
         let vincent = store.create_node(&["Admin"]);
@@ -644,32 +680,62 @@ mod tests {
         let spec = ProjectionSpec::new().with_node_labels(["Person", "City"]);
         let proj = GraphProjection::new(store, spec);
 
-        assert_eq!(proj.nodes_by_label("Admin"), [alix, mia, jules]);
-        assert_eq!(proj.nodes_by_label_count("Admin"), 3);
-        assert_eq!(proj.nodes_by_label("Person"), [alix, gus, mia]);
-        assert_eq!(proj.nodes_by_label("Missing"), []);
-        assert_eq!(proj.nodes_by_label_count("Missing"), 0);
-        assert!(proj.get_node(vincent).is_none(), "Vincent is outside");
+        assert_eq!(
+            proj.nodes_by_label("Admin", ReadView::latest()).unwrap(),
+            [alix, mia, jules]
+        );
+        assert_eq!(
+            proj.nodes_by_label_count("Admin", ReadView::latest())
+                .unwrap(),
+            3
+        );
+        assert_eq!(
+            proj.nodes_by_label("Person", ReadView::latest()).unwrap(),
+            [alix, gus, mia]
+        );
+        assert_eq!(
+            proj.nodes_by_label("Missing", ReadView::latest()).unwrap(),
+            []
+        );
+        assert_eq!(
+            proj.nodes_by_label_count("Missing", ReadView::latest())
+                .unwrap(),
+            0
+        );
+        assert!(
+            proj.node(vincent, ReadView::latest()).unwrap().is_none(),
+            "Vincent is outside"
+        );
         for label in ["Admin", "Person", "City", "Missing"] {
             let with_label: Vec<NodeId> = proj
-                .node_ids()
+                .node_ids(ReadView::latest())
+                .unwrap()
                 .into_iter()
                 .filter(|&id| {
-                    proj.get_node(id)
+                    proj.node(id, ReadView::latest())
+                        .unwrap()
                         .is_some_and(|node| node.labels.iter().any(|l| l.as_str() == label))
                 })
                 .collect();
-            assert_eq!(proj.nodes_by_label(label), with_label, "{label}");
             assert_eq!(
-                proj.nodes_by_label_count(label),
+                proj.nodes_by_label(label, ReadView::latest()).unwrap(),
+                with_label,
+                "{label}"
+            );
+            assert_eq!(
+                proj.nodes_by_label_count(label, ReadView::latest())
+                    .unwrap(),
                 with_label.len(),
                 "{label}"
             );
         }
-        // The estimate of a label outside the spec counts the projection's
-        // nodes with it, as the scan finds them.
-        assert!((proj.estimate_label_cardinality("Admin") - 3.0).abs() < f64::EPSILON);
-        assert!(proj.estimate_label_cardinality("Missing").abs() < f64::EPSILON);
+        // The estimate of a label outside the spec is bounded by the nodes
+        // of the spec's labels; the count reads the projection exactly.
+        let statistics = proj.statistics();
+        let projected = proj
+            .nodes_by_label_count("Admin", ReadView::latest())
+            .unwrap();
+        assert!(statistics.estimate_label_cardinality("Admin") >= projected as f64);
     }
 
     #[test]
@@ -679,8 +745,8 @@ mod tests {
         let proj = GraphProjection::new(store, spec);
 
         // All nodes visible (no label filter), but only KNOWS edges
-        assert_eq!(proj.node_count(), 4);
-        assert_eq!(proj.edge_count(), 1);
+        assert_eq!(proj.node_count(ReadView::latest()).unwrap(), 4);
+        assert_eq!(proj.edge_count(ReadView::latest()).unwrap(), 1);
     }
 
     #[test]
@@ -691,8 +757,8 @@ mod tests {
             .with_edge_types(["LIVES_IN"]);
         let proj = GraphProjection::new(store, spec);
 
-        assert_eq!(proj.node_count(), 3); // 2 Person + 1 City
-        assert_eq!(proj.edge_count(), 2); // 2 LIVES_IN edges
+        assert_eq!(proj.node_count(ReadView::latest()).unwrap(), 3); // 2 Person + 1 City
+        assert_eq!(proj.edge_count(ReadView::latest()).unwrap(), 2); // 2 LIVES_IN edges
     }
 
     #[test]
@@ -705,65 +771,72 @@ mod tests {
             .with_edge_types(["LIVES_IN"]);
         let proj = GraphProjection::new(store, spec);
 
-        assert_eq!(proj.node_count(), 2);
+        assert_eq!(proj.node_count(ReadView::latest()).unwrap(), 2);
         // LIVES_IN edges should be excluded because City endpoints are filtered out
-        assert_eq!(proj.edge_count(), 0);
+        assert_eq!(proj.edge_count(ReadView::latest()).unwrap(), 0);
     }
 
     #[test]
     fn get_node_filtered() {
         let store = setup_social_graph();
-        let all_ids = store.node_ids();
+        let all_ids = store.node_ids(ReadView::latest()).unwrap();
         let spec = ProjectionSpec::new().with_node_labels(["Person"]);
         let proj = GraphProjection::new(store.clone(), spec);
 
         // Person nodes visible
-        assert!(proj.get_node(all_ids[0]).is_some()); // Alix (Person)
-        assert!(proj.get_node(all_ids[1]).is_some()); // Gus (Person)
+        assert!(proj.node(all_ids[0], ReadView::latest()).unwrap().is_some()); // Alix (Person)
+        assert!(proj.node(all_ids[1], ReadView::latest()).unwrap().is_some()); // Gus (Person)
         // City and Software nodes hidden
-        assert!(proj.get_node(all_ids[2]).is_none()); // Amsterdam (City)
-        assert!(proj.get_node(all_ids[3]).is_none()); // Grafeo (Software)
+        assert!(proj.node(all_ids[2], ReadView::latest()).unwrap().is_none()); // Amsterdam (City)
+        assert!(proj.node(all_ids[3], ReadView::latest()).unwrap().is_none()); // Grafeo (Software)
     }
 
     #[test]
     fn neighbors_filtered() {
         let store = setup_social_graph();
-        let alix_id = store.node_ids()[0];
+        let alix_id = store.node_ids(ReadView::latest()).unwrap()[0];
 
         // Without projection: Alix has 3 outgoing neighbors (Gus, Amsterdam, Grafeo)
-        let all_neighbors: Vec<_> = store.neighbors(alix_id, Direction::Outgoing).collect();
+        let all_neighbors: Vec<_> = store
+            .neighbors(alix_id, Direction::Outgoing, ReadView::latest())
+            .unwrap();
         assert_eq!(all_neighbors.len(), 3);
 
         // With Person-only projection: Alix -> Gus only
         let spec = ProjectionSpec::new().with_node_labels(["Person"]);
         let proj = GraphProjection::new(store, spec);
-        let neighbors = proj.neighbors(alix_id, Direction::Outgoing);
+        let neighbors = proj
+            .neighbors(alix_id, Direction::Outgoing, ReadView::latest())
+            .unwrap();
         assert_eq!(neighbors.len(), 1);
     }
 
     #[test]
     fn neighbors_filtered_by_edge_type() {
         let store = setup_social_graph();
-        let alix_id = store.node_ids()[0];
+        let alix_id = store.node_ids(ReadView::latest()).unwrap()[0];
 
         // With edge-type filter: only KNOWS edges visible
         // Alix KNOWS Gus, but LIVES_IN Amsterdam and CONTRIBUTES_TO Grafeo are excluded
         let spec = ProjectionSpec::new().with_edge_types(["KNOWS"]);
         let proj = GraphProjection::new(store, spec);
-        let neighbors = proj.neighbors(alix_id, Direction::Outgoing);
+        let neighbors = proj
+            .neighbors(alix_id, Direction::Outgoing, ReadView::latest())
+            .unwrap();
         assert_eq!(neighbors.len(), 1);
     }
 
     #[test]
     fn property_access_respects_filter() {
         let store = setup_social_graph();
-        let city_id = store.node_ids()[2]; // Amsterdam
+        let city_id = store.node_ids(ReadView::latest()).unwrap()[2]; // Amsterdam
         let spec = ProjectionSpec::new().with_node_labels(["Person"]);
         let proj = GraphProjection::new(store, spec);
 
         // City node properties are inaccessible
         assert!(
-            proj.get_node_property(city_id, &PropertyKey::from("name"))
+            proj.node_property(city_id, "name", ReadView::latest())
+                .unwrap()
                 .is_none()
         );
     }
@@ -776,8 +849,12 @@ mod tests {
             .with_edge_types(["KNOWS"]);
         let proj = GraphProjection::new(store, spec);
 
-        assert_eq!(proj.estimate_label_cardinality("City"), 0.0);
-        assert_eq!(proj.estimate_avg_degree("LIVES_IN", true), 0.0);
+        let statistics = proj.statistics();
+        assert_eq!(statistics.estimate_avg_degree("LIVES_IN", true), 0.0);
+        assert!(
+            statistics.estimate_label_cardinality("City")
+                <= statistics.estimate_label_cardinality("Person")
+        );
     }
 
     #[test]
@@ -788,18 +865,18 @@ mod tests {
             .with_edge_types(["KNOWS"]);
         let proj = GraphProjection::new(store, spec);
 
-        let labels = proj.all_labels();
+        let labels = proj.all_labels().unwrap();
         assert_eq!(labels.len(), 1);
         assert!(labels.contains(&"Person".to_string()));
 
-        let edge_types = proj.all_edge_types();
+        let edge_types = proj.all_edge_types().unwrap();
         assert_eq!(edge_types.len(), 1);
         assert!(edge_types.contains(&"KNOWS".to_string()));
     }
 
     /// Helper: returns (node_ids, edge_ids) from the social graph.
-    fn setup_social_graph_with_ids() -> (Arc<LpgStore>, Vec<NodeId>, Vec<EdgeId>) {
-        let store = Arc::new(LpgStore::new().unwrap());
+    fn setup_social_graph_with_ids() -> (Arc<RowGroupStore>, Vec<NodeId>, Vec<EdgeId>) {
+        let store = Arc::new(RowGroupStore::new());
         let alix = store.create_node(&["Person"]);
         let gus = store.create_node(&["Person"]);
         let amsterdam = store.create_node(&["City"]);
@@ -834,11 +911,11 @@ mod tests {
         let proj = GraphProjection::new(store, spec);
 
         // KNOWS edge passes filter
-        assert!(proj.get_edge(edges[0]).is_some());
+        assert!(proj.edge(edges[0], ReadView::latest()).unwrap().is_some());
         // LIVES_IN edge does not pass filter
-        assert!(proj.get_edge(edges[1]).is_none());
+        assert!(proj.edge(edges[1], ReadView::latest()).unwrap().is_none());
         // CONTRIBUTES_TO edge does not pass filter
-        assert!(proj.get_edge(edges[3]).is_none());
+        assert!(proj.edge(edges[3], ReadView::latest()).unwrap().is_none());
     }
 
     #[test]
@@ -850,40 +927,54 @@ mod tests {
             .with_edge_types(["LIVES_IN"]);
         let proj = GraphProjection::new(store, spec);
 
-        assert!(proj.get_edge(edges[1]).is_none()); // Alix->Amsterdam
-        assert!(proj.get_edge(edges[2]).is_none()); // Gus->Amsterdam
+        assert!(proj.edge(edges[1], ReadView::latest()).unwrap().is_none()); // Alix->Amsterdam
+        assert!(proj.edge(edges[2], ReadView::latest()).unwrap().is_none()); // Gus->Amsterdam
     }
 
     // 2. get_node_versioned and get_edge_versioned
 
     #[test]
-    fn get_node_versioned_respects_filter() {
+    fn a_transaction_view_of_a_node_respects_the_filter() {
         let (store, nodes, _) = setup_social_graph_with_ids();
         let spec = ProjectionSpec::new().with_node_labels(["Person"]);
+        let epoch = store.current_epoch();
         let proj = GraphProjection::new(store, spec);
-
-        let epoch = EpochId(0);
         let txn = TransactionId(0);
 
         // Person node visible
-        assert!(proj.get_node_versioned(nodes[0], epoch, txn).is_some());
+        assert!(
+            proj.node(nodes[0], ReadView::transaction(txn, epoch))
+                .unwrap()
+                .is_some()
+        );
         // City node filtered out
-        assert!(proj.get_node_versioned(nodes[2], epoch, txn).is_none());
+        assert!(
+            proj.node(nodes[2], ReadView::transaction(txn, epoch))
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[test]
-    fn get_edge_versioned_respects_filter() {
+    fn a_transaction_view_of_an_edge_respects_the_filter() {
         let (store, _, edges) = setup_social_graph_with_ids();
         let spec = ProjectionSpec::new().with_edge_types(["KNOWS"]);
+        let epoch = store.current_epoch();
         let proj = GraphProjection::new(store, spec);
-
-        let epoch = EpochId(0);
         let txn = TransactionId(0);
 
         // KNOWS edge visible
-        assert!(proj.get_edge_versioned(edges[0], epoch, txn).is_some());
+        assert!(
+            proj.edge(edges[0], ReadView::transaction(txn, epoch))
+                .unwrap()
+                .is_some()
+        );
         // LIVES_IN edge filtered out
-        assert!(proj.get_edge_versioned(edges[1], epoch, txn).is_none());
+        assert!(
+            proj.edge(edges[1], ReadView::transaction(txn, epoch))
+                .unwrap()
+                .is_none()
+        );
     }
 
     // 3. get_node_at_epoch and get_edge_at_epoch
@@ -892,58 +983,198 @@ mod tests {
     fn get_node_at_epoch_respects_filter() {
         let (store, nodes, _) = setup_social_graph_with_ids();
         let spec = ProjectionSpec::new().with_node_labels(["City"]);
+        let epoch = store.current_epoch();
         let proj = GraphProjection::new(store, spec);
 
-        let epoch = EpochId(0);
-
         // Amsterdam (City) visible
-        assert!(proj.get_node_at_epoch(nodes[2], epoch).is_some());
+        assert!(
+            proj.node(nodes[2], ReadView::committed(epoch))
+                .unwrap()
+                .is_some()
+        );
         // Alix (Person) filtered out
-        assert!(proj.get_node_at_epoch(nodes[0], epoch).is_none());
+        assert!(
+            proj.node(nodes[0], ReadView::committed(epoch))
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[test]
     fn get_edge_at_epoch_respects_filter() {
         let (store, _, edges) = setup_social_graph_with_ids();
         let spec = ProjectionSpec::new().with_edge_types(["LIVES_IN"]);
+        let epoch = store.current_epoch();
         let proj = GraphProjection::new(store, spec);
 
-        let epoch = EpochId(0);
-
         // LIVES_IN edge visible
-        assert!(proj.get_edge_at_epoch(edges[1], epoch).is_some());
+        assert!(
+            proj.edge(edges[1], ReadView::committed(epoch))
+                .unwrap()
+                .is_some()
+        );
         // KNOWS edge filtered out
-        assert!(proj.get_edge_at_epoch(edges[0], epoch).is_none());
+        assert!(
+            proj.edge(edges[0], ReadView::committed(epoch))
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    /// The reads at a view go to the inner store's, filtered by the spec: a
+    /// transaction finds its own new node through every lookup, another
+    /// reader finds none of it; the label filter reads the labels at the
+    /// view, so the projection answers exactly when the inner store does.
+    #[test]
+    fn reads_at_a_view_forward_to_the_inner_store() {
+        use crate::graph::GraphStore as _;
+        use crate::graph::conformance::{Tx, people};
+        use crate::graph::rowgroup::RowGroupStore;
+
+        let store = Arc::new(RowGroupStore::new());
+        let people = people(store.as_ref()).unwrap();
+        let mut tx = Tx::begin(store.as_ref(), 10);
+        let jules = tx
+            .create_node(
+                &["Person"],
+                &[("name", Value::from("Jules")), ("age", Value::Int64(40))],
+            )
+            .unwrap();
+        tx.create_edge(jules, people.alix, "KNOWS", &[]).unwrap();
+        let own = ReadView::transaction(tx.id, tx.snapshot);
+        let committed = ReadView::committed(store.current_epoch());
+        let all = GraphProjection::new(
+            Arc::clone(&store) as Arc<dyn GraphStore>,
+            ProjectionSpec::new(),
+        );
+        let persons = GraphProjection::new(
+            Arc::clone(&store) as Arc<dyn GraphStore>,
+            ProjectionSpec::new().with_node_labels(["Person"]),
+        );
+
+        let name = Value::from("Jules");
+        let age = Value::Int64(40);
+        for proj in [&all, &persons] {
+            assert_eq!(
+                proj.nodes_by_label("Person", own).unwrap().last(),
+                Some(&jules)
+            );
+            assert!(
+                !proj
+                    .nodes_by_label("Person", committed)
+                    .unwrap()
+                    .contains(&jules)
+            );
+            assert_eq!(
+                proj.nodes_with_any_label(&["Person", "City"], own)
+                    .unwrap()
+                    .last(),
+                Some(&jules)
+            );
+            assert_eq!(
+                proj.find_nodes_by_property("name", &name, own).unwrap(),
+                [jules]
+            );
+            assert!(
+                proj.find_nodes_by_property("name", &name, committed)
+                    .unwrap()
+                    .is_empty(),
+                "another reader does not find Jules"
+            );
+            assert_eq!(
+                proj.find_nodes_by_properties(&[("name", name.clone()), ("age", age.clone())], own)
+                    .unwrap(),
+                [jules]
+            );
+            assert_eq!(
+                proj.find_nodes_in_range("age", Some(&age), None, true, false, own)
+                    .unwrap(),
+                [jules]
+            );
+            assert_eq!(
+                proj.edges(jules, Direction::Outgoing, &[], own)
+                    .unwrap()
+                    .len(),
+                1
+            );
+            assert_eq!(
+                proj.neighbors(people.alix, Direction::Incoming, own)
+                    .unwrap(),
+                [jules]
+            );
+            assert!(
+                proj.neighbors(people.alix, Direction::Incoming, committed)
+                    .unwrap()
+                    .is_empty(),
+                "another reader sees no edge to Alix"
+            );
+        }
     }
 
     #[test]
     fn visibility_at_epoch_respects_the_filters_and_deletes() {
         let (store, nodes, edges) = setup_social_graph_with_ids();
         let people = GraphProjection::new(
-            Arc::clone(&store) as Arc<dyn GraphStoreSearch>,
+            Arc::clone(&store) as Arc<dyn GraphStore>,
             ProjectionSpec::new().with_node_labels(["Person"]),
         );
         let knows = GraphProjection::new(
-            Arc::clone(&store) as Arc<dyn GraphStoreSearch>,
+            Arc::clone(&store) as Arc<dyn GraphStore>,
             ProjectionSpec::new().with_edge_types(["KNOWS"]),
         );
         let epoch = store.current_epoch();
 
-        assert!(people.is_node_visible_at_epoch(nodes[0], epoch));
-        assert!(!people.is_node_visible_at_epoch(nodes[2], epoch), "a City");
-        assert!(people.is_edge_visible_at_epoch(edges[0], epoch), "KNOWS");
         assert!(
-            !people.is_edge_visible_at_epoch(edges[1], epoch),
+            people
+                .is_node_visible(nodes[0], ReadView::committed(epoch))
+                .unwrap()
+        );
+        assert!(
+            !people
+                .is_node_visible(nodes[2], ReadView::committed(epoch))
+                .unwrap(),
+            "a City"
+        );
+        assert!(
+            people
+                .is_edge_visible(edges[0], ReadView::committed(epoch))
+                .unwrap(),
+            "KNOWS"
+        );
+        assert!(
+            !people
+                .is_edge_visible(edges[1], ReadView::committed(epoch))
+                .unwrap(),
             "to a City"
         );
-        assert!(knows.is_edge_visible_at_epoch(edges[0], epoch));
-        assert!(!knows.is_edge_visible_at_epoch(edges[1], epoch), "LIVES_IN");
+        assert!(
+            knows
+                .is_edge_visible(edges[0], ReadView::committed(epoch))
+                .unwrap()
+        );
+        assert!(
+            !knows
+                .is_edge_visible(edges[1], ReadView::committed(epoch))
+                .unwrap(),
+            "LIVES_IN"
+        );
 
         assert!(store.delete_edge(edges[0]));
+        store.delete_node_edges(nodes[1]);
         assert!(store.delete_node(nodes[1]));
         let epoch = store.current_epoch();
-        assert!(!people.is_node_visible_at_epoch(nodes[1], epoch), "deleted");
-        assert!(!knows.is_edge_visible_at_epoch(edges[0], epoch), "deleted");
+        assert!(
+            !people
+                .is_node_visible(nodes[1], ReadView::committed(epoch))
+                .unwrap(),
+            "deleted"
+        );
+        assert!(
+            !knows
+                .is_edge_visible(edges[0], ReadView::committed(epoch))
+                .unwrap(),
+            "deleted"
+        );
     }
 
     // 4. get_edge_property for edges in/out of projection
@@ -957,7 +1188,8 @@ mod tests {
         let key = PropertyKey::from("since");
         // KNOWS edge has "since" property and passes filter
         assert_eq!(
-            proj.get_edge_property(edges[0], &key),
+            proj.edge_property(edges[0], key.as_str(), ReadView::latest())
+                .unwrap(),
             Some(Value::from(2020))
         );
     }
@@ -970,54 +1202,14 @@ mod tests {
 
         let key = PropertyKey::from("since");
         // LIVES_IN edge has "since" but is filtered out
-        assert!(proj.get_edge_property(edges[1], &key).is_none());
-    }
-
-    // 5. get_node_property_batch for mixed in/out of projection nodes
-
-    #[test]
-    fn try_get_node_property_batch_mixed() {
-        let (store, nodes, _) = setup_social_graph_with_ids();
-        let spec = ProjectionSpec::new().with_node_labels(["Person"]);
-        let proj = GraphProjection::new(store, spec);
-
-        let key = PropertyKey::from("name");
-        // Alix (Person), Amsterdam (City), Gus (Person)
-        let ids = vec![nodes[0], nodes[2], nodes[1]];
-        assert_eq!(
-            proj.try_get_node_property_batch(&ids, &key).unwrap(),
-            proj.get_node_property_batch(&ids, &key)
-        );
-    }
-
-    /// The projection reads its nodes through the inner store's fallible
-    /// read: a spilled value that cannot be read is an error, not a missing
-    /// value. A node outside the projection is not read (#566 `key=`).
-    #[cfg(not(feature = "temporal"))]
-    #[test]
-    fn try_get_node_property_batch_reports_a_value_it_cannot_read() {
-        use crate::graph::lpg::test_backing::MemoryBacking;
-
-        let (store, nodes, _) = setup_social_graph_with_ids();
-        let key = PropertyKey::from("name");
-        let snapshot = store.node_property_column_entries(&key).unwrap();
-        let backing = MemoryBacking::of(&snapshot);
-        assert!(store.spill_node_property_column(&key, backing.clone(), &snapshot));
-        let spec = ProjectionSpec::new().with_node_labels(["Person"]);
-        let proj = GraphProjection::new(store, spec);
-
-        backing.fail_reads(true);
-        // Alix (Person), Amsterdam (City)
         assert!(
-            proj.try_get_node_property_batch(&[nodes[0], nodes[2]], &key)
-                .is_err()
-        );
-        assert_eq!(
-            proj.try_get_node_property_batch(&[nodes[2]], &key).unwrap(),
-            vec![None],
-            "Amsterdam is outside the projection"
+            proj.edge_property(edges[1], key.as_str(), ReadView::latest())
+                .unwrap()
+                .is_none()
         );
     }
+
+    // 5. node_property_batch for mixed in/out of projection nodes
 
     /// An inner store whose label answer for Alix changes between calls (a
     /// concurrent label write): `City` on the first read, `Person` after.
@@ -1029,7 +1221,7 @@ mod tests {
     }
 
     impl GraphStore for RelabelingStore {
-        fn get_node(&self, id: NodeId) -> Option<Node> {
+        fn node(&self, id: NodeId, _: ReadView) -> Result<Option<Node>> {
             let label = if id == self.alix {
                 let reads = self
                     .alix_reads
@@ -1038,140 +1230,60 @@ mod tests {
             } else if id == self.gus {
                 "Person"
             } else {
-                return None;
+                return Ok(None);
             };
-            Some(Node::with_labels(id, [label]))
+            Ok(Some(Node::with_labels(id, [label])))
         }
-        fn get_edge(&self, _: EdgeId) -> Option<Edge> {
-            None
+        fn edge(&self, _: EdgeId, _: ReadView) -> Result<Option<Edge>> {
+            Ok(None)
         }
-        fn get_node_versioned(&self, id: NodeId, _: EpochId, _: TransactionId) -> Option<Node> {
-            self.get_node(id)
-        }
-        fn get_edge_versioned(&self, _: EdgeId, _: EpochId, _: TransactionId) -> Option<Edge> {
-            None
-        }
-        fn get_node_at_epoch(&self, id: NodeId, _: EpochId) -> Option<Node> {
-            self.get_node(id)
-        }
-        fn get_edge_at_epoch(&self, _: EdgeId, _: EpochId) -> Option<Edge> {
-            None
-        }
-        fn get_node_property(&self, id: NodeId, _: &PropertyKey) -> Option<Value> {
-            if id == self.alix {
+        fn node_property(&self, id: NodeId, _: &str, _: ReadView) -> Result<Option<Value>> {
+            Ok(if id == self.alix {
                 Some(Value::from("Alix"))
             } else if id == self.gus {
                 Some(Value::from("Gus"))
             } else {
                 None
-            }
+            })
         }
-        fn get_edge_property(&self, _: EdgeId, _: &PropertyKey) -> Option<Value> {
-            None
-        }
-        fn get_node_property_batch(&self, ids: &[NodeId], key: &PropertyKey) -> Vec<Option<Value>> {
-            ids.iter()
-                .map(|&id| self.get_node_property(id, key))
-                .collect()
-        }
-        fn try_get_node_property_batch(
+        fn edges(
             &self,
-            ids: &[NodeId],
-            key: &PropertyKey,
-        ) -> grafeo_common::utils::error::Result<Vec<Option<Value>>> {
-            Ok(self.get_node_property_batch(ids, key))
-        }
-        fn get_nodes_properties_batch(&self, ids: &[NodeId]) -> Vec<FxHashMap<PropertyKey, Value>> {
-            vec![FxHashMap::default(); ids.len()]
-        }
-        fn get_nodes_properties_selective_batch(
-            &self,
-            ids: &[NodeId],
-            _: &[PropertyKey],
-        ) -> Vec<FxHashMap<PropertyKey, Value>> {
-            vec![FxHashMap::default(); ids.len()]
-        }
-        fn get_edges_properties_selective_batch(
-            &self,
-            ids: &[EdgeId],
-            _: &[PropertyKey],
-        ) -> Vec<FxHashMap<PropertyKey, Value>> {
-            vec![FxHashMap::default(); ids.len()]
-        }
-        fn neighbors(&self, _: NodeId, _: Direction) -> Vec<NodeId> {
-            Vec::new()
-        }
-        fn edges_from(&self, _: NodeId, _: Direction) -> Vec<(NodeId, EdgeId)> {
-            Vec::new()
-        }
-        fn out_degree(&self, _: NodeId) -> usize {
-            0
-        }
-        fn in_degree(&self, _: NodeId) -> usize {
-            0
+            _: NodeId,
+            _: Direction,
+            _: &[ArcStr],
+            _: ReadView,
+        ) -> Result<Vec<(NodeId, EdgeId)>> {
+            Ok(Vec::new())
         }
         fn has_backward_adjacency(&self) -> bool {
             false
         }
-        fn node_ids(&self) -> Vec<NodeId> {
-            vec![self.alix, self.gus]
+        fn node_ids(&self, _: ReadView) -> Result<Vec<NodeId>> {
+            Ok(vec![self.alix, self.gus])
         }
-        fn nodes_by_label(&self, _: &str) -> Vec<NodeId> {
-            Vec::new()
+        fn all_labels(&self) -> Result<Vec<String>> {
+            Ok(vec!["City".into(), "Person".into()])
         }
-        fn node_count(&self) -> usize {
-            2
+        fn all_edge_types(&self) -> Result<Vec<String>> {
+            Ok(Vec::new())
         }
-        fn edge_count(&self) -> usize {
-            0
-        }
-        fn edge_type(&self, _: EdgeId) -> Option<ArcStr> {
-            None
-        }
-        fn find_nodes_by_property(&self, _: &str, _: &Value) -> Vec<NodeId> {
-            Vec::new()
-        }
-        fn find_nodes_by_properties(&self, _: &[(&str, Value)]) -> Vec<NodeId> {
-            Vec::new()
-        }
-        fn find_nodes_in_range(
-            &self,
-            _: &str,
-            _: Option<&Value>,
-            _: Option<&Value>,
-            _: bool,
-            _: bool,
-        ) -> Vec<NodeId> {
-            Vec::new()
-        }
-        fn node_property_might_match(&self, _: &PropertyKey, _: CompareOp, _: &Value) -> bool {
-            true
-        }
-        fn edge_property_might_match(&self, _: &PropertyKey, _: CompareOp, _: &Value) -> bool {
-            true
+        fn all_property_keys(&self) -> Result<Vec<String>> {
+            Ok(vec!["name".into()])
         }
         fn statistics(&self) -> Arc<Statistics> {
             Arc::new(Statistics::default())
         }
-        fn estimate_label_cardinality(&self, _: &str) -> f64 {
-            0.0
-        }
-        fn estimate_avg_degree(&self, _: &str, _: bool) -> f64 {
-            0.0
-        }
-        fn current_epoch(&self) -> EpochId {
-            EpochId(0)
+        fn committed_epoch(&self) -> EpochId {
+            EpochId::INITIAL
         }
     }
-
-    impl GraphStoreSearch for RelabelingStore {}
 
     /// The fallible batch decides once which nodes are in the projection: a
     /// label that changes between two reads of it never hands one node's
     /// value to another. Alix is outside when the batch looks, so she has no
     /// value, and Gus keeps his own.
     #[test]
-    fn try_get_node_property_batch_never_hands_a_value_to_another_node() {
+    fn node_property_batch_never_hands_a_value_to_another_node() {
         let (alix, gus) = (NodeId(3), NodeId(19));
         let inner = Arc::new(RelabelingStore {
             alix,
@@ -1182,7 +1294,7 @@ mod tests {
         let proj = GraphProjection::new(inner, spec);
 
         let values = proj
-            .try_get_node_property_batch(&[alix, gus], &PropertyKey::from("name"))
+            .node_property_batch(&[alix, gus], &PropertyKey::from("name"), ReadView::latest())
             .unwrap();
         assert_eq!(
             values,
@@ -1192,7 +1304,7 @@ mod tests {
     }
 
     #[test]
-    fn get_node_property_batch_mixed() {
+    fn node_property_batch_mixed() {
         let (store, nodes, _) = setup_social_graph_with_ids();
         let spec = ProjectionSpec::new().with_node_labels(["Person"]);
         let proj = GraphProjection::new(store, spec);
@@ -1200,7 +1312,9 @@ mod tests {
         let key = PropertyKey::from("name");
         // Alix (Person), Amsterdam (City), Gus (Person)
         let ids = vec![nodes[0], nodes[2], nodes[1]];
-        let results = proj.get_node_property_batch(&ids, &key);
+        let results = proj
+            .node_property_batch(&ids, &key, ReadView::latest())
+            .unwrap();
 
         assert_eq!(results.len(), 3);
         assert_eq!(results[0], Some(Value::from("Alix"))); // Person: visible
@@ -1208,16 +1322,18 @@ mod tests {
         assert_eq!(results[2], Some(Value::from("Gus"))); // Person: visible
     }
 
-    // 6. get_nodes_properties_batch and selective batch
+    // 6. node_properties_batch and selective batch
 
     #[test]
-    fn get_nodes_properties_batch_filters() {
+    fn node_properties_batch_filters() {
         let (store, nodes, _) = setup_social_graph_with_ids();
         let spec = ProjectionSpec::new().with_node_labels(["Person"]);
         let proj = GraphProjection::new(store, spec);
 
         let ids = vec![nodes[0], nodes[2]]; // Alix (Person), Amsterdam (City)
-        let results = proj.get_nodes_properties_batch(&ids);
+        let results = proj
+            .node_properties_batch(&ids, ReadView::latest())
+            .unwrap();
 
         assert_eq!(results.len(), 2);
         // Alix has properties
@@ -1227,14 +1343,16 @@ mod tests {
     }
 
     #[test]
-    fn get_nodes_properties_selective_batch_filters() {
+    fn node_properties_selective_batch_filters() {
         let (store, nodes, _) = setup_social_graph_with_ids();
         let spec = ProjectionSpec::new().with_node_labels(["Person"]);
         let proj = GraphProjection::new(store, spec);
 
         let ids = vec![nodes[0], nodes[2]]; // Alix (Person), Amsterdam (City)
         let keys = vec![PropertyKey::from("name")];
-        let results = proj.get_nodes_properties_selective_batch(&ids, &keys);
+        let results = proj
+            .node_properties_selective_batch(&ids, &keys, ReadView::latest())
+            .unwrap();
 
         assert_eq!(results.len(), 2);
         assert_eq!(
@@ -1244,17 +1362,19 @@ mod tests {
         assert!(results[1].is_empty());
     }
 
-    // 7. get_edges_properties_selective_batch
+    // 7. edge_properties_selective_batch
 
     #[test]
-    fn get_edges_properties_selective_batch_filters() {
+    fn edge_properties_selective_batch_filters() {
         let (store, _, edges) = setup_social_graph_with_ids();
         let spec = ProjectionSpec::new().with_edge_types(["KNOWS"]);
         let proj = GraphProjection::new(store, spec);
 
         let ids = vec![edges[0], edges[1]]; // KNOWS, LIVES_IN
         let keys = vec![PropertyKey::from("since")];
-        let results = proj.get_edges_properties_selective_batch(&ids, &keys);
+        let results = proj
+            .edge_properties_selective_batch(&ids, &keys, ReadView::latest())
+            .unwrap();
 
         assert_eq!(results.len(), 2);
         // KNOWS edge has "since" and passes filter
@@ -1276,7 +1396,9 @@ mod tests {
 
         // Alix has outgoing KNOWS, LIVES_IN, CONTRIBUTES_TO
         // Only LIVES_IN should be visible
-        let alix_edges = proj.edges_from(nodes[0], Direction::Outgoing);
+        let alix_edges = proj
+            .edges(nodes[0], Direction::Outgoing, &[], ReadView::latest())
+            .unwrap();
         assert_eq!(alix_edges.len(), 1);
         assert_eq!(alix_edges[0].0, nodes[2]); // target is Amsterdam
     }
@@ -1288,7 +1410,9 @@ mod tests {
         let proj = GraphProjection::new(store, spec);
 
         // Amsterdam (City) is filtered out, so edges_from returns empty
-        let amsterdam_edges = proj.edges_from(nodes[2], Direction::Outgoing);
+        let amsterdam_edges = proj
+            .edges(nodes[2], Direction::Outgoing, &[], ReadView::latest())
+            .unwrap();
         assert!(amsterdam_edges.is_empty(), "{amsterdam_edges:?}");
     }
 
@@ -1303,11 +1427,35 @@ mod tests {
         let proj = GraphProjection::new(store, spec);
 
         // Alix has 1 outgoing LIVES_IN to Amsterdam
-        assert_eq!(proj.out_degree(nodes[0]), 1);
+        assert_eq!(
+            proj.degree(
+                nodes[0],
+                crate::graph::Direction::Outgoing,
+                ReadView::latest()
+            )
+            .unwrap(),
+            1
+        );
         // Gus has 1 outgoing LIVES_IN to Amsterdam
-        assert_eq!(proj.out_degree(nodes[1]), 1);
+        assert_eq!(
+            proj.degree(
+                nodes[1],
+                crate::graph::Direction::Outgoing,
+                ReadView::latest()
+            )
+            .unwrap(),
+            1
+        );
         // Amsterdam has no outgoing LIVES_IN
-        assert_eq!(proj.out_degree(nodes[2]), 0);
+        assert_eq!(
+            proj.degree(
+                nodes[2],
+                crate::graph::Direction::Outgoing,
+                ReadView::latest()
+            )
+            .unwrap(),
+            0
+        );
     }
 
     #[test]
@@ -1319,9 +1467,25 @@ mod tests {
         let proj = GraphProjection::new(store, spec);
 
         // Amsterdam has 2 incoming LIVES_IN edges
-        assert_eq!(proj.in_degree(nodes[2]), 2);
+        assert_eq!(
+            proj.degree(
+                nodes[2],
+                crate::graph::Direction::Incoming,
+                ReadView::latest()
+            )
+            .unwrap(),
+            2
+        );
         // Alix has 0 incoming LIVES_IN
-        assert_eq!(proj.in_degree(nodes[0]), 0);
+        assert_eq!(
+            proj.degree(
+                nodes[0],
+                crate::graph::Direction::Incoming,
+                ReadView::latest()
+            )
+            .unwrap(),
+            0
+        );
     }
 
     // 10. all_node_ids
@@ -1332,7 +1496,7 @@ mod tests {
         let spec = ProjectionSpec::new().with_node_labels(["Person"]);
         let proj = GraphProjection::new(store, spec);
 
-        let ids = proj.all_node_ids();
+        let ids = proj.node_ids(ReadView::latest()).unwrap();
         assert_eq!(ids.len(), 2);
         assert!(ids.contains(&nodes[0])); // Alix
         assert!(ids.contains(&nodes[1])); // Gus
@@ -1345,7 +1509,10 @@ mod tests {
         let spec = ProjectionSpec::new();
         let proj = GraphProjection::new(store.clone(), spec);
 
-        assert_eq!(proj.all_node_ids().len(), store.all_node_ids().len());
+        assert_eq!(
+            proj.node_ids(ReadView::latest()).unwrap().len(),
+            store.node_ids(ReadView::latest()).unwrap().len()
+        );
     }
 
     // 11. node_count and edge_count with various filters
@@ -1356,7 +1523,7 @@ mod tests {
         let spec = ProjectionSpec::new().with_node_labels(["City"]);
         let proj = GraphProjection::new(store, spec);
 
-        assert_eq!(proj.node_count(), 1);
+        assert_eq!(proj.node_count(ReadView::latest()).unwrap(), 1);
     }
 
     #[test]
@@ -1368,7 +1535,7 @@ mod tests {
         let proj = GraphProjection::new(store, spec);
 
         // Only KNOWS between Person nodes: Alix->Gus
-        assert_eq!(proj.edge_count(), 1);
+        assert_eq!(proj.edge_count(ReadView::latest()).unwrap(), 1);
     }
 
     #[test]
@@ -1377,7 +1544,10 @@ mod tests {
         let spec = ProjectionSpec::new();
         let proj = GraphProjection::new(store.clone(), spec);
 
-        assert_eq!(proj.edge_count(), store.edge_count());
+        assert_eq!(
+            proj.edge_count(ReadView::latest()).unwrap(),
+            store.edge_count(ReadView::latest()).unwrap()
+        );
     }
 
     // 12. find_nodes_by_property with label filter
@@ -1389,12 +1559,16 @@ mod tests {
         let proj = GraphProjection::new(store, spec);
 
         // "name" = "Alix" exists on a Person node
-        let found = proj.find_nodes_by_property("name", &Value::from("Alix"));
+        let found = proj
+            .find_nodes_by_property("name", &Value::from("Alix"), ReadView::latest())
+            .unwrap();
         assert_eq!(found.len(), 1);
         assert_eq!(found[0], nodes[0]);
 
         // "name" = "Amsterdam" exists but on a City node, which is filtered
-        let found = proj.find_nodes_by_property("name", &Value::from("Amsterdam"));
+        let found = proj
+            .find_nodes_by_property("name", &Value::from("Amsterdam"), ReadView::latest())
+            .unwrap();
         assert!(found.is_empty(), "{found:?}");
     }
 
@@ -1407,13 +1581,17 @@ mod tests {
         let proj = GraphProjection::new(store, spec);
 
         let conditions = vec![("name", Value::from("Gus"))];
-        let found = proj.find_nodes_by_properties(&conditions);
+        let found = proj
+            .find_nodes_by_properties(&conditions, ReadView::latest())
+            .unwrap();
         assert_eq!(found.len(), 1);
         assert_eq!(found[0], nodes[1]);
 
         // Search for city name, filtered out
         let conditions = vec![("name", Value::from("Amsterdam"))];
-        let found = proj.find_nodes_by_properties(&conditions);
+        let found = proj
+            .find_nodes_by_properties(&conditions, ReadView::latest())
+            .unwrap();
         assert!(found.is_empty(), "{found:?}");
     }
 
@@ -1428,7 +1606,16 @@ mod tests {
         // Age range 20..=30 should find both Alix (30) and Gus (25)
         let min = Value::from(20);
         let max = Value::from(30);
-        let found = proj.find_nodes_in_range("age", Some(&min), Some(&max), true, true);
+        let found = proj
+            .find_nodes_in_range(
+                "age",
+                Some(&min),
+                Some(&max),
+                true,
+                true,
+                ReadView::latest(),
+            )
+            .unwrap();
         assert_eq!(found.len(), 2);
         assert!(found.contains(&nodes[0])); // Alix
         assert!(found.contains(&nodes[1])); // Gus
@@ -1443,7 +1630,16 @@ mod tests {
         // City nodes don't have "age" property
         let min = Value::from(20);
         let max = Value::from(30);
-        let found = proj.find_nodes_in_range("age", Some(&min), Some(&max), true, true);
+        let found = proj
+            .find_nodes_in_range(
+                "age",
+                Some(&min),
+                Some(&max),
+                true,
+                true,
+                ReadView::latest(),
+            )
+            .unwrap();
         assert!(found.is_empty(), "{found:?}");
     }
 
@@ -1480,17 +1676,6 @@ mod tests {
         );
     }
 
-    // 16. current_epoch
-
-    #[test]
-    fn current_epoch_delegates() {
-        let (store, _, _) = setup_social_graph_with_ids();
-        let spec = ProjectionSpec::new();
-        let proj = GraphProjection::new(store.clone(), spec);
-
-        assert_eq!(proj.current_epoch(), store.current_epoch());
-    }
-
     // 17. all_property_keys
 
     #[test]
@@ -1499,8 +1684,8 @@ mod tests {
         let spec = ProjectionSpec::new().with_node_labels(["Person"]);
         let proj = GraphProjection::new(store.clone(), spec);
 
-        let proj_keys = proj.all_property_keys();
-        let store_keys = store.all_property_keys();
+        let proj_keys = proj.all_property_keys().unwrap();
+        let store_keys = store.all_property_keys().unwrap();
         // Delegates to inner, so same result
         assert_eq!(proj_keys.len(), store_keys.len());
     }
@@ -1540,7 +1725,7 @@ mod tests {
         let spec = ProjectionSpec::new();
         let proj = GraphProjection::new(store.clone(), spec);
 
-        // LpgStore default has no property indexes
+        // RowGroupStore default has no property indexes
         assert_eq!(
             proj.has_property_index("name"),
             store.has_property_index("name")

@@ -1,0 +1,83 @@
+# Rosetta: patterns from a node an OPTIONAL MATCH did not find
+#
+# A node an OPTIONAL MATCH did not find is null. A later MATCH of a pattern
+# from or to it matches nothing (0.6.0: it failed with an internal error),
+# in either direction and with a fixed or a variable length, and a later
+# OPTIONAL MATCH keeps the row. CREATE or MERGE of a relationship from or to
+# such a node fails: the node is null (22G03).
+
+meta:
+  model: lpg
+  section: rosetta
+  title: Patterns from a node an OPTIONAL MATCH did not find
+  dataset: social_network
+  requires: [cypher]
+
+tests:
+
+  # ---------------------------------------------------------------------------
+  # A later MATCH matches nothing
+  # ---------------------------------------------------------------------------
+
+  - name: an_outgoing_edge_from_a_missing_node
+    variants:
+      gql: "OPTIONAL MATCH (n:Missing) MATCH (n)-[:KNOWS]->(m) RETURN count(m) AS c"
+      cypher: "OPTIONAL MATCH (n:Missing) MATCH (n)-[:KNOWS]->(m) RETURN count(m) AS c"
+    expect:
+      rows:
+        - [0]
+
+  - name: an_incoming_edge_to_a_missing_node
+    variants:
+      gql: "OPTIONAL MATCH (n:Missing) MATCH (m)-[:KNOWS]->(n) RETURN count(m) AS c"
+      cypher: "OPTIONAL MATCH (n:Missing) MATCH (m)-[:KNOWS]->(n) RETURN count(m) AS c"
+    expect:
+      rows:
+        - [0]
+
+  - name: an_undirected_edge_of_a_missing_node
+    variants:
+      gql: "OPTIONAL MATCH (n:Missing) MATCH (n)-[:KNOWS]-(m) RETURN count(m) AS c"
+      cypher: "OPTIONAL MATCH (n:Missing) MATCH (n)-[:KNOWS]-(m) RETURN count(m) AS c"
+    expect:
+      rows:
+        - [0]
+
+  - name: a_missing_node_with_the_rest_of_the_rows_found
+    variants:
+      gql: "MATCH (p:Person {name: 'Alix'}) OPTIONAL MATCH (n:Missing) MATCH (n)-[:KNOWS]->(m) RETURN p.name AS name, m.name AS friend"
+      cypher: "MATCH (p:Person {name: 'Alix'}) OPTIONAL MATCH (n:Missing) MATCH (n)-[:KNOWS]->(m) RETURN p.name AS name, m.name AS friend"
+    expect:
+      empty: true
+
+  # ---------------------------------------------------------------------------
+  # A later OPTIONAL MATCH keeps the row
+  # ---------------------------------------------------------------------------
+
+  - name: a_later_optional_match_keeps_the_row
+    variants:
+      gql: "MATCH (p:Person {name: 'Vincent'}) OPTIONAL MATCH (n:Missing) OPTIONAL MATCH (n)-[:KNOWS]->(m) RETURN p.name AS name, n AS missing, m AS friend"
+      cypher: "MATCH (p:Person {name: 'Vincent'}) OPTIONAL MATCH (n:Missing) OPTIONAL MATCH (n)-[:KNOWS]->(m) RETURN p.name AS name, n AS missing, m AS friend"
+    expect:
+      rows:
+        - [Vincent, null, null]
+
+  # ---------------------------------------------------------------------------
+  # A relationship from or to a null node cannot be created
+  # ---------------------------------------------------------------------------
+
+  - name: creating_a_relationship_from_a_missing_node_is_an_error
+    variants:
+      gql: "OPTIONAL MATCH (n:Missing) INSERT (n)-[:R]->(:B)"
+      cypher: "OPTIONAL MATCH (n:Missing) CREATE (n)-[:R]->(:B)"
+    expect:
+      error: "the start of the created relationship"
+      gql_status: "22G03"
+
+  - name: creating_a_relationship_to_a_missing_node_is_an_error
+    variants:
+      gql: "OPTIONAL MATCH (n:Missing) INSERT (:B)-[:R]->(n)"
+      cypher: "OPTIONAL MATCH (n:Missing) CREATE (:B)-[:R]->(n)"
+    expect:
+      error: "the end of the created relationship"
+      gql_status: "22G03"

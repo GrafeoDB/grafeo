@@ -1,0 +1,139 @@
+# SQL/PGQ CAST to every SQL type
+#
+# CAST(x AS type) takes the SQL type names: BIGINT, INT and INTEGER, VARCHAR(n),
+# BOOLEAN and BOOL, FLOAT and REAL, DOUBLE PRECISION, DECIMAL, DEC and
+# NUMERIC (with a precision and scale), DATE, TIME and TIMESTAMP. A value
+# that does not convert is null, as in GQL's CAST; a type name SQL/PGQ does
+# not know is a syntax error.
+
+meta:
+  language: sql-pgq
+  model: lpg
+  section: "6.13"
+  title: CAST to SQL types
+  dataset: social_network
+
+tests:
+
+  # ---------------------------------------------------------------------------
+  # Integers
+  # ---------------------------------------------------------------------------
+
+  - name: bigint_and_int_take_text_and_numbers
+    query: |
+      SELECT * FROM GRAPH_TABLE (
+        MATCH (n:Person {name: 'Alix'})
+        COLUMNS (CAST('9000000000' AS BIGINT) AS big, CAST('42' AS INT) AS i, CAST(n.age AS BIGINT) AS age)
+      )
+    expect:
+      rows:
+        - [9000000000, 42, 30]
+
+  - name: an_integer_cast_of_text_that_is_no_number_is_null
+    query: |
+      SELECT * FROM GRAPH_TABLE (
+        MATCH (n:Person {name: 'Alix'})
+        COLUMNS (CAST('Alix' AS INTEGER) AS i, CAST(n.name AS BIGINT) AS b)
+      )
+    expect:
+      rows:
+        - [null, null]
+
+  # ---------------------------------------------------------------------------
+  # Floats and booleans
+  # ---------------------------------------------------------------------------
+
+  - name: float_and_real_give_a_float
+    query: |
+      SELECT * FROM GRAPH_TABLE (
+        MATCH (n:Person {name: 'Alix'})
+        COLUMNS (CAST('2.5' AS FLOAT) AS f, CAST(n.age AS REAL) / 4 AS quarter, CAST('0.25' AS DOUBLE PRECISION) AS d)
+      )
+    expect:
+      rows:
+        - [2.5, 7.5, 0.25]
+
+  - name: bool_is_boolean
+    query: |
+      SELECT * FROM GRAPH_TABLE (
+        MATCH (n:Person {name: 'Alix'})
+        COLUMNS (CAST('false' AS BOOL) AS b, CAST('yes please' AS BOOLEAN) AS other)
+      )
+    expect:
+      rows:
+        - [false, null]
+
+  # ---------------------------------------------------------------------------
+  # Decimals
+  # ---------------------------------------------------------------------------
+
+  - name: dec_is_decimal
+    query: |
+      SELECT * FROM GRAPH_TABLE (
+        MATCH (n:Person {name: 'Alix'})
+        COLUMNS (CAST('2.345' AS DEC(10, 2)) AS d)
+      )
+    expect:
+      rows:
+        - [2.35]
+
+  - name: a_decimal_with_too_many_integer_digits_is_null
+    query: |
+      SELECT * FROM GRAPH_TABLE (
+        MATCH (n:Person {name: 'Alix'})
+        COLUMNS (CAST(12345.6 AS DECIMAL(6, 2)) AS d, CAST(1234.5 AS DECIMAL(6, 2)) AS fits)
+      )
+    expect:
+      rows:
+        - [null, 1234.50]
+
+  # ---------------------------------------------------------------------------
+  # Temporal types
+  # ---------------------------------------------------------------------------
+
+  - name: date_and_time_take_text
+    query: |
+      SELECT * FROM GRAPH_TABLE (
+        MATCH (n:Person {name: 'Alix'})
+        COLUMNS (CAST('2024-03-15' AS DATE) = CAST('2024-03-15' AS DATE) AS same_day,
+                 CAST('2024-03-15' AS DATE) < CAST('2024-03-16' AS DATE) AS before,
+                 CAST('13:45:00' AS TIME) < CAST('14:00:00' AS TIME) AS earlier)
+      )
+    expect:
+      rows:
+        - [true, true, true]
+
+  - name: an_invalid_date_or_time_is_null
+    query: |
+      SELECT * FROM GRAPH_TABLE (
+        MATCH (n:Person {name: 'Alix'})
+        COLUMNS (CAST('2024-13-01' AS DATE) AS month, CAST('25:00:00' AS TIME) AS hour, CAST(n.name AS DATE) AS text)
+      )
+    expect:
+      rows:
+        - [null, null, null]
+
+  - name: timestamp_takes_text
+    query: |
+      SELECT * FROM GRAPH_TABLE (
+        MATCH (n:Person {name: 'Alix'})
+        COLUMNS (CAST('2024-03-15T10:00:00' AS TIMESTAMP) < CAST('2024-03-15T11:00:00' AS TIMESTAMP) AS earlier,
+                 CAST('not a time' AS TIMESTAMP) AS invalid)
+      )
+    expect:
+      rows:
+        - [true, null]
+
+  # ---------------------------------------------------------------------------
+  # Unknown types
+  # ---------------------------------------------------------------------------
+
+  - name: an_unknown_type_name_is_a_syntax_error
+    query: |
+      SELECT * FROM GRAPH_TABLE (
+        MATCH (n:Person {name: 'Alix'})
+        COLUMNS (CAST(n.age AS MONEY) AS m)
+      )
+    expect:
+      error: "Unknown data type: MONEY"
+      gql_status: "42001"

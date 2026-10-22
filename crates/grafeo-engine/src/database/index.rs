@@ -8,6 +8,7 @@
 
 #[cfg(feature = "vector-index")]
 use grafeo_common::grafeo_info;
+use grafeo_common::types::ReadView;
 #[cfg(any(feature = "vector-index", feature = "text-index"))]
 use std::sync::Arc;
 
@@ -17,9 +18,9 @@ use grafeo_common::storage::catalog_record::{
 };
 use grafeo_common::utils::error::{Error, Result};
 #[cfg(any(feature = "vector-index", feature = "text-index"))]
-use grafeo_core::graph::GraphStoreSearch;
+use grafeo_core::graph::GraphStore;
 #[cfg(any(feature = "vector-index", feature = "text-index"))]
-use grafeo_core::graph::lpg::LpgStore;
+use grafeo_core::graph::rowgroup::RowGroupStore;
 
 #[cfg(any(feature = "vector-index", feature = "text-index"))]
 use crate::transaction::BuiltIndex;
@@ -126,7 +127,7 @@ pub(super) fn quantization_name(
     reason = "the arguments of create_vector_index and the graph"
 )]
 pub(crate) fn vector_index_from_data(
-    graph: &dyn GraphStoreSearch,
+    graph: &dyn GraphStore,
     label: &str,
     property: &str,
     dimensions: Option<usize>,
@@ -135,21 +136,33 @@ pub(crate) fn vector_index_from_data(
     ef_construction: Option<usize>,
     quantization: Option<&str>,
 ) -> Result<grafeo_core::index::vector::VectorIndexKind> {
-    use grafeo_common::types::{PropertyKey, Value};
+    use grafeo_common::types::Value;
     use grafeo_core::index::vector::VectorIndexKind;
 
     let metric = vector_index_metric(metric)?;
     check_vector_index_dimensions(dimensions)?;
     let quantization = super::GrafeoDB::parse_quantization(quantization)?;
 
-    let key = PropertyKey::new(property);
+    // The index holds each node's newest vector: it reads every commit so
+    // far, and every search rechecks its candidates at the reader's view.
+    let latest = ReadView::latest();
+    let nodes = graph.nodes_by_label(label, latest)?;
+    let vector_of = |node_id| -> Result<Option<std::sync::Arc<[f32]>>> {
+        Ok(match graph.node_property(node_id, property, latest)? {
+            Some(Value::Vector(v)) => Some(v),
+            _ => None,
+        })
+    };
+    // A first pass checks the vectors and counts them, a second inserts
+    // them: no copy of every vector is held while the index is built (an
+    // open builds every vector index from the rows).
     let mut found_dims = dimensions;
-    let mut vectors: Vec<(grafeo_common::types::NodeId, Vec<f32>)> = Vec::new();
-    for node_id in graph.nodes_by_label(label) {
-        if let Some(Value::Vector(v)) = graph.get_node_property(node_id, &key) {
+    let mut count = 0;
+    for &node_id in &nodes {
+        if let Some(v) = vector_of(node_id)? {
             let expected = *found_dims.get_or_insert(v.len());
             check_vector_for_index(node_id, &v, expected)?;
-            vectors.push((node_id, v.to_vec()));
+            count += 1;
         }
     }
     let Some(dims) = found_dims else {
@@ -158,30 +171,29 @@ pub(crate) fn vector_index_from_data(
         )));
     };
 
-    let index = super::GrafeoDB::build_vector_index(
-        dims,
-        metric,
-        m,
-        ef_construction,
-        quantization,
-        vectors.len(),
-    );
+    let index =
+        super::GrafeoDB::build_vector_index(dims, metric, m, ef_construction, quantization, count);
     match &index {
         VectorIndexKind::Hnsw(_) => {
-            let accessor = grafeo_core::index::vector::PropertyVectorAccessor::new(graph, property);
-            for (node_id, vec) in &vectors {
-                index.insert(*node_id, vec, &accessor);
+            let accessor =
+                grafeo_core::index::vector::PropertyVectorAccessor::new(graph, property, latest);
+            for &node_id in &nodes {
+                if let Some(v) = vector_of(node_id)? {
+                    index.insert(node_id, &v, &accessor);
+                    accessor.check()?;
+                }
             }
         }
         VectorIndexKind::Quantized(quantized) => {
-            for (node_id, vec) in &vectors {
-                quantized.insert(*node_id, vec);
+            for &node_id in &nodes {
+                if let Some(v) = vector_of(node_id)? {
+                    quantized.insert(node_id, &v);
+                }
             }
         }
     }
     grafeo_info!(
-        "Vector index built: :{label}({property}) - {} vectors, {dims} dimensions, metric={}",
-        vectors.len(),
+        "Vector index built: :{label}({property}) - {count} vectors, {dims} dimensions, metric={}",
         metric.name()
     );
     Ok(index)
@@ -192,22 +204,23 @@ pub(crate) fn vector_index_from_data(
 /// and `CREATE INDEX ... USING TEXT`.
 #[cfg(feature = "text-index")]
 pub(crate) fn text_index_from_data(
-    graph: &dyn GraphStoreSearch,
+    graph: &dyn GraphStore,
     label: &str,
     property: &str,
     options: &grafeo_core::index::text::TextIndexOptions,
-) -> grafeo_core::index::text::InvertedIndex {
-    use grafeo_common::types::{PropertyKey, Value};
+) -> Result<grafeo_core::index::text::InvertedIndex> {
+    use grafeo_common::types::Value;
     use grafeo_core::index::text::InvertedIndex;
 
+    // The index holds each node's newest text (see `vector_index_from_data`).
+    let latest = ReadView::latest();
     let mut index = InvertedIndex::with_options(options.clone());
-    let key = PropertyKey::new(property);
-    for node_id in graph.nodes_by_label(label) {
-        if let Some(Value::String(text)) = graph.get_node_property(node_id, &key) {
+    for node_id in graph.nodes_by_label(label, latest)? {
+        if let Some(Value::String(text)) = graph.node_property(node_id, property, latest)? {
             index.insert(node_id, text.as_str());
         }
     }
-    index
+    Ok(index)
 }
 
 /// The catalog record of `index`, a vector index of `property` on the nodes
@@ -295,7 +308,10 @@ impl super::GrafeoDB {
             self.current_schema.read().as_deref(),
             self.current_graph.read().as_deref(),
         )
-        .filter(|key| self.lpg_store().graph(key).is_some())
+        .filter(|key| {
+            self.root_store()
+                .is_some_and(|root| root.graph(key).is_some())
+        })
     }
 
     /// Creates an index on a node property of the current graph, for O(1)
@@ -328,7 +344,7 @@ impl super::GrafeoDB {
     pub fn create_property_index(&self, property: &str) -> Result<()> {
         let held = self.hold_for_standalone(false)?;
         let graph = self.current_graph_key();
-        if self.current_lpg_store().has_property_index(property) {
+        if self.current_lpg_store()?.has_property_index(property) {
             return Ok(());
         }
         let mut change = StandaloneChange::new();
@@ -351,7 +367,7 @@ impl super::GrafeoDB {
     pub fn drop_property_index(&self, property: &str) -> Result<bool> {
         let held = self.hold_for_standalone(false)?;
         let graph = self.current_graph_key();
-        if !self.current_lpg_store().has_property_index(property) {
+        if !self.current_lpg_store()?.has_property_index(property) {
             return Ok(false);
         }
         let mut change = StandaloneChange::new();
@@ -377,7 +393,9 @@ impl super::GrafeoDB {
     /// Returns `true` if the property has an index in the current graph.
     #[must_use]
     pub fn has_property_index(&self, property: &str) -> bool {
-        self.current_lpg_store().has_property_index(property)
+        // A backend of its own has no index.
+        self.current_lpg_store()
+            .is_ok_and(|store| store.has_property_index(property))
     }
 
     /// Finds all nodes of the current graph that have a specific property value.
@@ -395,23 +413,23 @@ impl super::GrafeoDB {
     /// db.create_property_index("city")?;
     ///
     /// // Find all nodes where city = "Amsterdam"
-    /// let in_amsterdam = db.find_nodes_by_property("city", &Value::from("Amsterdam"));
+    /// let in_amsterdam = db.find_nodes_by_property("city", &Value::from("Amsterdam"))?;
     /// # Ok::<(), grafeo_common::utils::error::Error>(())
     /// ```
-    #[must_use]
+    ///
+    /// # Errors
+    ///
+    /// The error of a read the store cannot do (an external store's own).
     pub fn find_nodes_by_property(
         &self,
         property: &str,
         value: &grafeo_common::types::Value,
-    ) -> Vec<grafeo_common::types::NodeId> {
+    ) -> Result<Vec<grafeo_common::types::NodeId>> {
         // The index also holds nodes created by transactions that have not
         // committed yet; return only what a reader at the current epoch sees.
         let epoch = self.read_epoch();
-        let Ok(store) = self.read_store(super::direct::DirectTarget::Current) else {
-            return Vec::new();
-        };
-        let candidates = store.find_nodes_by_property(property, value);
-        store.filter_visible_node_ids(&candidates, epoch)
+        self.read_store(super::direct::DirectTarget::Current)?
+            .find_nodes_by_property(property, value, ReadView::committed(epoch))
     }
 
     // =========================================================================
@@ -492,7 +510,7 @@ impl super::GrafeoDB {
                 ef_construction,
                 quantization,
             );
-            Err(Error::Query(
+            Err(Error::from(
                 grafeo_common::utils::error::QueryError::unsupported(
                     "this build has no vector indexes (the `vector-index` feature)",
                 ),
@@ -506,15 +524,15 @@ impl super::GrafeoDB {
     fn index_target(
         &self,
         graph: Option<&str>,
-    ) -> Result<(Arc<dyn GraphStoreSearch>, Arc<LpgStore>)> {
+    ) -> Result<(Arc<dyn GraphStore>, Arc<RowGroupStore>)> {
         match graph {
-            None => Ok((self.graph_store(), self.lpg_store())),
+            None => Ok((self.graph_store(), self.lpg_store()?)),
             Some(key) => {
                 let store = self
-                    .lpg_store()
+                    .lpg_store()?
                     .graph(key)
                     .ok_or_else(|| super::direct::missing_graph(key))?;
-                Ok((Arc::clone(&store) as Arc<dyn GraphStoreSearch>, store))
+                Ok((Arc::clone(&store) as Arc<dyn GraphStore>, store))
             }
         }
     }
@@ -522,7 +540,7 @@ impl super::GrafeoDB {
     /// The store that takes an index of the graph with storage key `graph`
     /// (`None` for the default graph).
     #[cfg(any(feature = "vector-index", feature = "text-index"))]
-    fn install_target(&self, graph: Option<&str>) -> Result<Arc<LpgStore>> {
+    fn install_target(&self, graph: Option<&str>) -> Result<Arc<RowGroupStore>> {
         self.index_target(graph).map(|(_, target)| target)
     }
 
@@ -633,7 +651,11 @@ impl super::GrafeoDB {
     #[cfg(feature = "vector-index")]
     pub fn drop_vector_index(&self, label: &str, property: &str) -> Result<bool> {
         let held = self.hold_for_standalone(false)?;
-        if self.lpg_store().get_vector_index(label, property).is_none() {
+        if self
+            .lpg_store()?
+            .get_vector_index(label, property)
+            .is_none()
+        {
             return Ok(false);
         }
         let mut change = StandaloneChange::new();
@@ -648,16 +670,19 @@ impl super::GrafeoDB {
         grafeo_info!("Vector index dropped: :{label}({property})");
         // A spilled column no index reads any more comes back from its
         // cache file: nothing else would reload it (#594).
-        #[cfg(all(feature = "vector-index", not(feature = "temporal")))]
+        #[cfg(feature = "vector-index")]
         self.reload_unindexed_column(property);
         Ok(true)
     }
 
     /// Reloads the spilled column `property` when no vector index uses it any
     /// more. A column that cannot be read stays spilled (and readable).
-    #[cfg(all(feature = "vector-index", not(feature = "temporal")))]
+    #[cfg(feature = "vector-index")]
     fn reload_unindexed_column(&self, property: &str) {
-        let store = self.lpg_store();
+        // A backend of its own spills nothing of the built-in store's.
+        let Some(store) = self.root_store() else {
+            return;
+        };
         let still_indexed = store.vector_index_entries().iter().any(|(key, _)| {
             key.split_once(':')
                 .is_some_and(|(_, indexed)| indexed == property)
@@ -700,7 +725,7 @@ impl super::GrafeoDB {
     #[cfg(feature = "vector-index")]
     pub fn rebuild_vector_index(&self, label: &str, property: &str) -> Result<()> {
         // Preserve config and quantization type from existing index if available
-        let existing = self.lpg_store().get_vector_index(label, property);
+        let existing = self.lpg_store()?.get_vector_index(label, property);
 
         let (config, quantization_name) = if let Some(ref idx) = existing {
             let qt = idx.quantization_type().and_then(quantization_name);
@@ -797,7 +822,7 @@ impl super::GrafeoDB {
         options.check()?;
         self.check_index_change()?;
         let (graph, _) = self.index_target(None)?;
-        let index = text_index_from_data(&*graph, label, property, &options);
+        let index = text_index_from_data(&*graph, label, property, &options)?;
         let kind = text_index_kind(label, property, &options)?;
         let held = self.hold_for_standalone(false)?;
         let mut change = StandaloneChange::new();
@@ -814,7 +839,8 @@ impl super::GrafeoDB {
         label: &str,
         property: &str,
     ) -> Option<grafeo_core::index::text::TextIndexOptions> {
-        self.lpg_store()
+        // A backend of its own has no text index.
+        self.root_store()?
             .get_text_index(label, property)
             .map(|index| index.read().options().clone())
     }
@@ -838,7 +864,7 @@ impl super::GrafeoDB {
     ) -> Result<()> {
         self.check_index_change()?;
         let (read, _) = self.index_target(graph)?;
-        let index = text_index_from_data(&*read, label, property, options);
+        let index = text_index_from_data(&*read, label, property, options)?;
         let _held = self.hold_for_standalone(false)?;
         self.install_target(graph)?.add_text_index(
             label,
@@ -860,7 +886,7 @@ impl super::GrafeoDB {
     #[cfg(feature = "text-index")]
     pub fn drop_text_index(&self, label: &str, property: &str) -> Result<bool> {
         let held = self.hold_for_standalone(false)?;
-        if self.lpg_store().get_text_index(label, property).is_none() {
+        if self.lpg_store()?.get_text_index(label, property).is_none() {
             return Ok(false);
         }
         let mut change = StandaloneChange::new();

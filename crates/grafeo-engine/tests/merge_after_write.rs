@@ -14,7 +14,7 @@
 //! cargo test -p grafeo-engine --all-features --test merge_after_write
 //! ```
 
-#![cfg(all(feature = "lpg", feature = "gql", feature = "cypher"))]
+#![cfg(all(feature = "gql", feature = "cypher"))]
 
 use grafeo_common::types::Value;
 use grafeo_engine::{GrafeoDB, Session};
@@ -260,5 +260,123 @@ fn a_merge_after_a_write_profiles() {
             [[int(3), int(0), int(0)]],
             "{language:?} `PROFILE {query}`"
         );
+    }
+}
+
+/// The rows of the #288 chain: `from` and `to` words with the type ids of
+/// their link.
+fn word_rows(rows: &[(&str, &str, &[i64])]) -> Value {
+    use std::collections::BTreeMap;
+    use std::sync::Arc;
+
+    use grafeo_common::types::PropertyKey;
+
+    let rows: Vec<Value> = rows
+        .iter()
+        .map(|(from, to, types)| {
+            let map: BTreeMap<PropertyKey, Value> = [
+                (PropertyKey::new("from"), Value::from(*from)),
+                (PropertyKey::new("to"), Value::from(*to)),
+                (
+                    PropertyKey::new("type_ids"),
+                    Value::List(types.iter().copied().map(Value::Int64).collect()),
+                ),
+            ]
+            .into_iter()
+            .collect();
+            Value::Map(Arc::new(map))
+        })
+        .collect();
+    Value::List(rows.into())
+}
+
+/// The user's chain of #288: two node MERGEs, a relationship MERGE between
+/// them and a SET that appends the type ids the relationship does not have
+/// yet. Run twice, it keeps one node per word, one relationship per pair and
+/// each type id once, with and without a property index on `name`.
+#[test]
+fn chained_merge_upsert_appends_list_once() {
+    const CHAIN: &str = concat!(
+        "UNWIND $rows AS row ",
+        "MERGE (a:Word {name: row.from}) ",
+        "MERGE (b:Word {name: row.to}) ",
+        "MERGE (a)-[r:FORM]->(b) ",
+        "SET r.types = COALESCE(r.types, []) + ",
+        "[t IN row.type_ids WHERE NOT t IN COALESCE(r.types, [])]",
+    );
+
+    for indexed in [false, true] {
+        let db = GrafeoDB::new_in_memory();
+        if indexed {
+            db.create_property_index("name").unwrap();
+        }
+        let session = db.session();
+        let params = std::collections::HashMap::from([(
+            "rows".to_string(),
+            word_rows(&[("go", "went", &[1, 2]), ("go", "gone", &[2])]),
+        )]);
+        for _ in 0..2 {
+            session
+                .execute_cypher_with_params(CHAIN, params.clone())
+                .unwrap_or_else(|error| panic!("index: {indexed}: {error}"));
+        }
+        assert_eq!(
+            run(&session, Language::Cypher, "MATCH (w:Word) RETURN count(w)"),
+            [[int(3)]],
+            "index: {indexed}"
+        );
+        assert_eq!(
+            run(
+                &session,
+                Language::Cypher,
+                "MATCH (a:Word)-[r:FORM]->(b:Word) RETURN a.name, b.name, r.types ORDER BY b.name"
+            ),
+            [
+                vec![
+                    Value::from("go"),
+                    Value::from("gone"),
+                    Value::List(vec![int(2)].into())
+                ],
+                vec![
+                    Value::from("go"),
+                    Value::from("went"),
+                    Value::List(vec![int(1), int(2)].into())
+                ],
+            ],
+            "index: {indexed}"
+        );
+    }
+}
+
+/// `EXPLAIN` names the index a MERGE looks its node up through (#288): with
+/// a property index on `name` the plan shows `Merge (w) [index: name]`, and
+/// without one the same MERGE shows no index, in GQL and Cypher.
+#[test]
+fn explain_shows_the_index_a_merge_uses() {
+    for language in LANGUAGES {
+        for indexed in [false, true] {
+            let db = GrafeoDB::new_in_memory();
+            if indexed {
+                db.create_property_index("name").unwrap();
+            }
+            let session = db.session();
+            let plan = run(
+                &session,
+                language,
+                "EXPLAIN MERGE (w:Word {name: 'go'}) RETURN w.name",
+            );
+            let Value::String(plan) = &plan[0][0] else {
+                panic!("{language:?}: EXPLAIN returns its plan as text: {plan:?}");
+            };
+            let merge = plan
+                .lines()
+                .find(|line| line.trim_start().starts_with("Merge (w)"))
+                .unwrap_or_else(|| panic!("{language:?}: a Merge line in {plan}"));
+            assert_eq!(
+                merge.contains("[index: name]"),
+                indexed,
+                "{language:?} (index: {indexed}): {plan}"
+            );
+        }
     }
 }

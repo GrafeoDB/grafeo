@@ -150,9 +150,9 @@ public class SpecTests : IDisposable
             var expect = tc.Expect;
 
             // Error tests
-            if (expect.Error is not null)
+            if (expect.Error is not null || expect.GqlStatus is not null)
             {
-                RunErrorTest(_db, language, queries, expect.Error, parameters);
+                RunErrorTest(_db, language, queries, expect.Error, expect.GqlStatus, parameters);
                 return;
             }
 
@@ -323,9 +323,10 @@ public class SpecTests : IDisposable
     /// file, by the rule of the Rust reference runner that every runner
     /// follows: a quoted value is a string, whatever it reads like; a bare
     /// value starting with <c>[</c> or <c>{</c> is JSON; a bare decimal integer
-    /// that fits a long is a long and any other bare decimal number a double; a
-    /// bare <c>true</c> or <c>false</c> is a bool; any other bare value is a
-    /// string.
+    /// is a long, or a BigInteger past 64 bits, which the binding types (an
+    /// exact DECIMAL up to 38 digits, an error past that), and any other bare
+    /// decimal number a double; a bare <c>true</c> or <c>false</c> is a bool;
+    /// any other bare value is a string.
     /// </summary>
     internal static object? ParamValue(string text)
     {
@@ -337,11 +338,8 @@ public class SpecTests : IDisposable
             using var doc = JsonDocument.Parse(text);
             return FromJson(doc.RootElement);
         }
-        if (DecimalInteger.IsMatch(text) &&
-            long.TryParse(text, NumberStyles.AllowLeadingSign, CultureInfo.InvariantCulture, out var l))
-        {
-            return l;
-        }
+        if (DecimalInteger.IsMatch(text))
+            return Integer(text);
         if (DecimalNumber.IsMatch(text))
         {
             var d = double.Parse(text, NumberStyles.Float, CultureInfo.InvariantCulture);
@@ -387,14 +385,23 @@ public class SpecTests : IDisposable
         };
 
     /// <summary>
-    /// A JSON number by the rule of a bare one: a long when it is an integer
-    /// that fits, else a double, an error past the double range
-    /// (<c>1e400</c>, which the Rust runner refuses too).
+    /// A decimal integer: a long when it fits, else a BigInteger.
+    /// </summary>
+    private static object Integer(string text) =>
+        long.TryParse(text, NumberStyles.AllowLeadingSign, CultureInfo.InvariantCulture, out var l)
+            ? (object)l
+            : System.Numerics.BigInteger.Parse(text, NumberStyles.AllowLeadingSign, CultureInfo.InvariantCulture);
+
+    /// <summary>
+    /// A JSON number by the rule of a bare one: an integer as
+    /// <see cref="Integer"/> types it, else a double, an error past the double
+    /// range (<c>1e400</c>, which the Rust runner refuses too).
     /// </summary>
     private static object JsonNumber(JsonElement element)
     {
-        if (element.TryGetInt64(out var l))
-            return l;
+        var raw = element.GetRawText();
+        if (DecimalInteger.IsMatch(raw))
+            return Integer(raw);
         if (element.TryGetDouble(out var d) && double.IsFinite(d))
             return d;
         throw new FormatException($"parameter {element.GetRawText()} is out of the f64 range");
@@ -435,9 +442,14 @@ public class SpecTests : IDisposable
     // Error test
     // =========================================================================
 
+    /// <summary>
+    /// Runs the queries, expecting the last one to fail with an error whose
+    /// message contains <paramref name="expectedSubstring"/> and whose GQLSTATUS
+    /// is <paramref name="expectedStatus"/>, for each that is given.
+    /// </summary>
     private static void RunErrorTest(
-        GrafeoDB db, string language, List<string> queries, string expectedSubstring,
-        Dictionary<string, object?>? parameters = null)
+        GrafeoDB db, string language, List<string> queries, string? expectedSubstring,
+        string? expectedStatus, Dictionary<string, object?>? parameters = null)
     {
         // Execute all-but-last normally (with params so $param works)
         for (var i = 0; i < queries.Count - 1; i++)
@@ -446,7 +458,18 @@ public class SpecTests : IDisposable
         // Last query should fail (with params if present)
         var ex = Assert.ThrowsAny<Exception>(() =>
             ExecuteQuery(db, language, queries[^1], parameters));
-        Assert.Contains(expectedSubstring, ex.Message);
+        if (expectedSubstring is not null)
+            Assert.Contains(expectedSubstring, ex.Message);
+        if (expectedStatus is not null)
+        {
+            // An error without a status fails the case: a status the binding
+            // does not expose is a gap, not a pass.
+            var status = (ex as GrafeoException)?.GqlStatus;
+            Assert.True(status is not null,
+                $"Error '{ex.Message}' ({ex.GetType().Name}) has no GQLSTATUS");
+            Assert.True(status == expectedStatus,
+                $"Error '{ex.Message}' has GQLSTATUS {status}, expected {expectedStatus}");
+        }
     }
 
     // =========================================================================
@@ -899,10 +922,11 @@ public class ParamValueTests
     }
 
     [Fact]
-    public void AJsonIntegerPast64BitsIsADouble()
+    public void AJsonIntegerPast64BitsIsABigIntegerTheBindingTypes()
     {
         var values = Assert.IsType<List<object?>>(SpecTests.ParamValue("[9223372036854775808]"));
-        Assert.Equal(9223372036854775808.0, Assert.IsType<double>(values[0]));
+        Assert.Equal(System.Numerics.BigInteger.Pow(2, 63), Assert.IsType<System.Numerics.BigInteger>(values[0]));
+        Assert.Equal(System.Numerics.BigInteger.Pow(10, 38), SpecTests.ParamValue("1" + new string('0', 38)));
     }
 
     [Theory]

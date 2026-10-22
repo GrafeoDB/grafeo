@@ -38,7 +38,12 @@ enum GrafeoStatus {
 sealed class GrafeoException implements Exception {
   final String message;
   final GrafeoStatus status;
-  const GrafeoException(this.message, this.status);
+
+  /// The GQLSTATUS of the error: the five-character ISO GQL status of the
+  /// condition, such as `22012` (division by zero) or `42001` (syntax error).
+  /// Null for an exception the binding raises itself.
+  final String? gqlStatus;
+  const GrafeoException(this.message, this.status, {this.gqlStatus});
 
   @override
   String toString() => '$runtimeType(${status.name}): $message';
@@ -46,22 +51,22 @@ sealed class GrafeoException implements Exception {
 
 /// A query parsing or execution error (status 2).
 class QueryException extends GrafeoException {
-  const QueryException(super.message, super.status);
+  const QueryException(super.message, super.status, {super.gqlStatus});
 }
 
 /// A transaction error such as conflict or invalid state (status 3).
 class TransactionException extends GrafeoException {
-  const TransactionException(super.message, super.status);
+  const TransactionException(super.message, super.status, {super.gqlStatus});
 }
 
 /// A storage or IO error (status 4, 5).
 class StorageException extends GrafeoException {
-  const StorageException(super.message, super.status);
+  const StorageException(super.message, super.status, {super.gqlStatus});
 }
 
 /// A serialization error (status 6).
 class SerializationException extends GrafeoException {
-  const SerializationException(super.message, super.status);
+  const SerializationException(super.message, super.status, {super.gqlStatus});
 }
 
 /// A generic database error (status 1, 7, 8, 9, or unknown). A write to a
@@ -70,22 +75,25 @@ class SerializationException extends GrafeoException {
 /// [TransactionException]: no retry fixes them.
 class DatabaseException extends GrafeoException {
   /// Creates a [DatabaseException] with [message] and [status].
-  const DatabaseException(super.message, super.status);
+  const DatabaseException(super.message, super.status, {super.gqlStatus});
 }
 
 /// Map a C status code and error message to a typed Dart exception.
 ///
 /// Mirrors `grafeo-bindings-common::error::classify_error`.
-GrafeoException classifyError(int statusCode, String message) {
+GrafeoException classifyError(int statusCode, String message,
+    {String? gqlStatus}) {
   final status = GrafeoStatus.fromCode(statusCode);
   return switch (status) {
-    GrafeoStatus.query => QueryException(message, status),
-    GrafeoStatus.transaction => TransactionException(message, status),
+    GrafeoStatus.query => QueryException(message, status, gqlStatus: gqlStatus),
+    GrafeoStatus.transaction =>
+      TransactionException(message, status, gqlStatus: gqlStatus),
     GrafeoStatus.storage ||
     GrafeoStatus.io =>
-      StorageException(message, status),
-    GrafeoStatus.serialization => SerializationException(message, status),
-    _ => DatabaseException(message, status),
+      StorageException(message, status, gqlStatus: gqlStatus),
+    GrafeoStatus.serialization =>
+      SerializationException(message, status, gqlStatus: gqlStatus),
+    _ => DatabaseException(message, status, gqlStatus: gqlStatus),
   };
 }
 
@@ -100,9 +108,18 @@ String lastError(GrafeoBindings bindings) {
   return ptr.toDartString();
 }
 
+/// Read the GQLSTATUS of the last error from the grafeo-c thread-local slot,
+/// or null when there is none.
+String? lastGqlStatus(GrafeoBindings bindings) {
+  final ptr = bindings.grafeoLastErrorGqlStatus();
+  if (ptr == nullptr) return null;
+  return ptr.toDartString();
+}
+
 /// Throw a [GrafeoException] for a failed FFI call that returned a status code.
 Never throwStatus(GrafeoBindings bindings, int statusCode) {
-  throw classifyError(statusCode, lastError(bindings));
+  throw classifyError(statusCode, lastError(bindings),
+      gqlStatus: lastGqlStatus(bindings));
 }
 
 /// Throw a [GrafeoException] for a failed FFI call that returned null.
@@ -110,5 +127,6 @@ Never throwLastError(GrafeoBindings bindings) {
   throw DatabaseException(
     lastError(bindings),
     GrafeoStatus.database,
+    gqlStatus: lastGqlStatus(bindings),
   );
 }

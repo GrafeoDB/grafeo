@@ -1,0 +1,57 @@
+# ZONED DATETIME, LOCAL DATETIME and LIST<...> property types
+#
+# Type DDL takes ZONED DATETIME, LOCAL DATETIME and LIST<type> property types,
+# shows them as declared, and checks values against them: a local datetime
+# is not a zoned one, a zoned one is not local, and a list holds values of its
+# element type. A refused value is a graph type violation (G2000), and the
+# error names the type as DDL spells it and the value as a query writes it.
+
+meta:
+  language: gql
+  model: lpg
+  section: "18.2"
+  title: Temporal and list property types
+  dataset: empty
+
+tests:
+
+  - name: the_types_show_as_declared
+    setup:
+      - "CREATE NODE TYPE Event (begins ZONED DATETIME, departs LOCAL DATETIME, tags LIST<STRING>)"
+    query: "SHOW NODE TYPES"
+    expect:
+      rows:
+        - [Event, "begins ZONED DATETIME, departs LOCAL DATETIME, tags LIST<STRING>", "", ""]
+
+  - name: values_of_the_declared_types
+    setup:
+      - "CREATE NODE TYPE Event (begins ZONED DATETIME, departs LOCAL DATETIME, tags LIST<STRING>)"
+      - "INSERT (:Event {begins: zoned_datetime('2026-10-05T10:30:00+02:00'), departs: datetime('2026-10-05T10:30:00'), tags: ['Amsterdam', 'Berlin']})"
+    query: "MATCH (e:Event) RETURN e.begins = zoned_datetime('2026-10-05T08:30:00Z') AS begins, e.departs = datetime('2026-10-05T10:30:00') AS departs, e.tags AS tags"
+    expect:
+      rows:
+        - [true, true, "[Amsterdam, Berlin]"]
+
+  - name: a_local_datetime_is_not_a_zoned_one
+    setup:
+      - "CREATE NODE TYPE Event (begins ZONED DATETIME)"
+    query: "INSERT (:Event {begins: datetime('2026-10-05T10:30:00')})"
+    expect:
+      error: "property 'begins' on :Event expects ZONED DATETIME, got LOCAL DATETIME '2026-10-05T10:30:00'"
+      gql_status: "G2000"
+
+  - name: a_zoned_datetime_is_not_a_local_one
+    setup:
+      - "CREATE NODE TYPE Event (departs LOCAL DATETIME)"
+    query: "INSERT (:Event {departs: zoned_datetime('2026-10-05T10:30:00+02:00')})"
+    expect:
+      error: "property 'departs' on :Event expects LOCAL DATETIME, got ZONED DATETIME '2026-10-05T10:30:00+02:00'"
+      gql_status: "G2000"
+
+  - name: a_list_holds_its_element_type
+    setup:
+      - "CREATE NODE TYPE Event (tags LIST<STRING>)"
+    query: "INSERT (:Event {tags: [3]})"
+    expect:
+      error: "property 'tags' on :Event expects LIST<STRING>, got [3]"
+      gql_status: "G2000"

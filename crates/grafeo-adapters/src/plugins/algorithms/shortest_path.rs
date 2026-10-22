@@ -6,18 +6,19 @@
 use std::collections::BinaryHeap;
 use std::sync::OnceLock;
 
+#[cfg(test)]
+use grafeo_common::types::PropertyKey;
 use grafeo_common::types::{NodeId, Value};
 use grafeo_common::utils::error::{Error, Result};
 use grafeo_common::utils::hash::FxHashMap;
 use grafeo_core::graph::Direction;
 use grafeo_core::graph::GraphStore;
-#[cfg(all(test, feature = "lpg"))]
-use grafeo_core::graph::lpg::LpgStore;
+#[cfg(test)]
+#[cfg(test)]
+use grafeo_core::graph::rowgroup::RowGroupStore;
 
 use super::super::{AlgorithmResult, ParameterDef, ParameterType, Parameters};
-use super::traits::{
-    GraphAlgorithm, MinScored, impl_algorithm, node_id_from_param, visible_edges_from,
-};
+use super::traits::{GraphAlgorithm, MinScored, impl_algorithm, int_value, node_id_from_param};
 
 // ============================================================================
 // Edge Weight Extraction
@@ -27,12 +28,12 @@ use super::traits::{
 ///
 /// Supports Int64 and Float64 values, defaulting to 1.0 if no weight property.
 fn extract_weight(
-    store: &dyn GraphStore,
+    store: &super::traits::GraphView<'_>,
     edge_id: grafeo_common::types::EdgeId,
     weight_prop: Option<&str>,
 ) -> f64 {
     if let Some(prop_name) = weight_prop
-        && let Some(edge) = store.get_edge(edge_id)
+        && let Some(edge) = store.edge(edge_id)
         && let Some(value) = edge.get_property(prop_name)
     {
         return match value {
@@ -100,8 +101,24 @@ impl DijkstraResult {
 /// # Complexity
 ///
 /// O((V + E) log V) using a binary heap.
+///
+/// # Errors
+///
+/// The error of a read of the store that fails.
 pub fn dijkstra(
     store: &dyn GraphStore,
+    view: grafeo_common::types::ReadView,
+    source: NodeId,
+    weight_property: Option<&str>,
+) -> grafeo_common::utils::error::Result<DijkstraResult> {
+    let graph = super::traits::GraphView::new(store, view);
+    let found = dijkstra_on(&graph, source, weight_property);
+    graph.finish(found)
+}
+
+/// [`dijkstra`] on the graph a [`GraphView`](super::traits::GraphView) reads.
+pub(crate) fn dijkstra_on(
+    store: &super::traits::GraphView<'_>,
     source: NodeId,
     weight_property: Option<&str>,
 ) -> DijkstraResult {
@@ -110,7 +127,7 @@ pub fn dijkstra(
     let mut heap: BinaryHeap<MinScored<f64, NodeId>> = BinaryHeap::new();
 
     // Check if source exists
-    if store.get_node(source).is_none() {
+    if store.node(source).is_none() {
         return DijkstraResult {
             distances,
             predecessors,
@@ -129,7 +146,7 @@ pub fn dijkstra(
         }
 
         // Explore neighbors
-        for (neighbor, edge_id) in visible_edges_from(store, node, Direction::Outgoing) {
+        for (neighbor, edge_id) in store.edges(node, Direction::Outgoing) {
             let weight = extract_weight(store, edge_id, weight_property);
             let new_dist = dist + weight;
 
@@ -154,8 +171,25 @@ pub fn dijkstra(
 /// Runs Dijkstra's algorithm to find shortest path to a specific target.
 ///
 /// Early terminates when target is reached.
+///
+/// # Errors
+///
+/// The error of a read of the store that fails.
 pub fn dijkstra_path(
     store: &dyn GraphStore,
+    view: grafeo_common::types::ReadView,
+    source: NodeId,
+    target: NodeId,
+    weight_property: Option<&str>,
+) -> grafeo_common::utils::error::Result<Option<(f64, Vec<NodeId>)>> {
+    let graph = super::traits::GraphView::new(store, view);
+    let found = dijkstra_path_on(&graph, source, target, weight_property);
+    graph.finish(found)
+}
+
+/// [`dijkstra_path`] on the graph a [`GraphView`](super::traits::GraphView) reads.
+pub(crate) fn dijkstra_path_on(
+    store: &super::traits::GraphView<'_>,
     source: NodeId,
     target: NodeId,
     weight_property: Option<&str>,
@@ -165,7 +199,7 @@ pub fn dijkstra_path(
     let mut heap: BinaryHeap<MinScored<f64, NodeId>> = BinaryHeap::new();
 
     // Check if source and target exist
-    if store.get_node(source).is_none() || store.get_node(target).is_none() {
+    if store.node(source).is_none() || store.node(target).is_none() {
         return None;
     }
 
@@ -195,7 +229,7 @@ pub fn dijkstra_path(
         }
 
         // Explore neighbors
-        for (neighbor, edge_id) in visible_edges_from(store, node, Direction::Outgoing) {
+        for (neighbor, edge_id) in store.edges(node, Direction::Outgoing) {
             let weight = extract_weight(store, edge_id, weight_property);
             let new_dist = dist + weight;
 
@@ -235,8 +269,29 @@ pub fn dijkstra_path(
 /// # Complexity
 ///
 /// O(E) in the best case with a good heuristic, O((V + E) log V) in the worst case.
+///
+/// # Errors
+///
+/// The error of a read of the store that fails.
 pub fn astar<H>(
     store: &dyn GraphStore,
+    view: grafeo_common::types::ReadView,
+    source: NodeId,
+    target: NodeId,
+    weight_property: Option<&str>,
+    heuristic: H,
+) -> grafeo_common::utils::error::Result<Option<(f64, Vec<NodeId>)>>
+where
+    H: Fn(NodeId) -> f64,
+{
+    let graph = super::traits::GraphView::new(store, view);
+    let found = astar_on::<H>(&graph, source, target, weight_property, heuristic);
+    graph.finish(found)
+}
+
+/// [`astar`] on the graph a [`GraphView`](super::traits::GraphView) reads.
+pub(crate) fn astar_on<H>(
+    store: &super::traits::GraphView<'_>,
     source: NodeId,
     target: NodeId,
     weight_property: Option<&str>,
@@ -250,7 +305,7 @@ where
     let mut heap: BinaryHeap<MinScored<f64, NodeId>> = BinaryHeap::new();
 
     // Check if source and target exist
-    if store.get_node(source).is_none() || store.get_node(target).is_none() {
+    if store.node(source).is_none() || store.node(target).is_none() {
         return None;
     }
 
@@ -275,7 +330,7 @@ where
         let current_g = *g_score.get(&node).unwrap_or(&f64::INFINITY);
 
         // Explore neighbors
-        for (neighbor, edge_id) in visible_edges_from(store, node, Direction::Outgoing) {
+        for (neighbor, edge_id) in store.edges(node, Direction::Outgoing) {
             let weight = extract_weight(store, edge_id, weight_property);
             let tentative_g = current_g + weight;
 
@@ -351,8 +406,24 @@ impl BellmanFordResult {
 /// # Complexity
 ///
 /// O(V × E)
+///
+/// # Errors
+///
+/// The error of a read of the store that fails.
 pub fn bellman_ford(
     store: &dyn GraphStore,
+    view: grafeo_common::types::ReadView,
+    source: NodeId,
+    weight_property: Option<&str>,
+) -> grafeo_common::utils::error::Result<BellmanFordResult> {
+    let graph = super::traits::GraphView::new(store, view);
+    let found = bellman_ford_on(&graph, source, weight_property);
+    graph.finish(found)
+}
+
+/// [`bellman_ford`] on the graph a [`GraphView`](super::traits::GraphView) reads.
+pub(crate) fn bellman_ford_on(
+    store: &super::traits::GraphView<'_>,
     source: NodeId,
     weight_property: Option<&str>,
 ) -> BellmanFordResult {
@@ -360,7 +431,7 @@ pub fn bellman_ford(
     let mut predecessors: FxHashMap<NodeId, NodeId> = FxHashMap::default();
 
     // Check if source exists
-    if store.get_node(source).is_none() {
+    if store.node(source).is_none() {
         return BellmanFordResult {
             distances,
             predecessors,
@@ -374,7 +445,8 @@ pub fn bellman_ford(
     let edges: Vec<(NodeId, NodeId, grafeo_common::types::EdgeId)> = nodes
         .iter()
         .flat_map(|&node| {
-            visible_edges_from(store, node, Direction::Outgoing)
+            store
+                .edges(node, Direction::Outgoing)
                 .into_iter()
                 .map(move |(neighbor, edge_id)| (node, neighbor, edge_id))
         })
@@ -511,8 +583,23 @@ impl FloydWarshallResult {
 /// # Complexity
 ///
 /// O(V³)
+///
+/// # Errors
+///
+/// The error of a read of the store that fails.
 pub fn floyd_warshall(
     store: &dyn GraphStore,
+    view: grafeo_common::types::ReadView,
+    weight_property: Option<&str>,
+) -> grafeo_common::utils::error::Result<FloydWarshallResult> {
+    let graph = super::traits::GraphView::new(store, view);
+    let found = floyd_warshall_on(&graph, weight_property);
+    graph.finish(found)
+}
+
+/// [`floyd_warshall`] on the graph a [`GraphView`](super::traits::GraphView) reads.
+pub(crate) fn floyd_warshall_on(
+    store: &super::traits::GraphView<'_>,
     weight_property: Option<&str>,
 ) -> FloydWarshallResult {
     let nodes: Vec<NodeId> = store.node_ids();
@@ -535,7 +622,7 @@ pub fn floyd_warshall(
 
     // Initialize with direct edges
     for (idx, &node) in nodes.iter().enumerate() {
-        for (neighbor, edge_id) in visible_edges_from(store, node, Direction::Outgoing) {
+        for (neighbor, edge_id) in store.edges(node, Direction::Outgoing) {
             if let Some(&neighbor_idx) = node_to_index.get(&neighbor) {
                 let weight = extract_weight(store, edge_id, weight_property);
                 if weight < distances[idx][neighbor_idx] {
@@ -620,71 +707,81 @@ impl GraphAlgorithm for DijkstraAlgorithm {
 
     // reason: node IDs are sequential counters, well within i64::MAX
     #[allow(clippy::cast_possible_wrap)]
-    fn execute(&self, store: &dyn GraphStore, params: &Parameters) -> Result<AlgorithmResult> {
-        let source_id = params
-            .get_int("source")
-            .ok_or_else(|| Error::InvalidValue("source parameter required".to_string()))?;
+    fn execute(
+        &self,
+        store: &dyn GraphStore,
+        view: grafeo_common::types::ReadView,
+        params: &Parameters,
+    ) -> Result<AlgorithmResult> {
+        let graph = super::traits::GraphView::new(store, view);
+        let store = &graph;
+        let found = super::traits::evaluated(|| {
+            let source_id = params
+                .get_int("source")
+                .ok_or_else(|| Error::InvalidValue("source parameter required".to_string()))?;
 
-        let source = node_id_from_param(source_id, "source")?;
-        let weight_prop = params.get_string("weight");
+            let source = node_id_from_param(source_id, "source")?;
+            let weight_prop = params.get_string("weight");
 
-        if let Some(target_id) = params.get_int("target") {
-            // Single-pair shortest path
-            let target = node_id_from_param(target_id, "target")?;
-            match dijkstra_path(store, source, target, weight_prop) {
-                Some((distance, path)) => {
-                    let mut result = AlgorithmResult::new(vec![
-                        "source".to_string(),
-                        "target".to_string(),
-                        "distance".to_string(),
-                        "path".to_string(),
-                    ]);
+            if let Some(target_id) = params.get_int("target") {
+                // Single-pair shortest path
+                let target = node_id_from_param(target_id, "target")?;
+                match dijkstra_path_on(store, source, target, weight_prop) {
+                    Some((distance, path)) => {
+                        let mut result = AlgorithmResult::new(vec![
+                            "source".to_string(),
+                            "target".to_string(),
+                            "distance".to_string(),
+                            "path".to_string(),
+                        ]);
 
-                    let path_str: String = path
-                        .iter()
-                        .map(|n| n.0.to_string())
-                        .collect::<Vec<_>>()
-                        .join(" -> ");
+                        let path_str: String = path
+                            .iter()
+                            .map(|n| n.0.to_string())
+                            .collect::<Vec<_>>()
+                            .join(" -> ");
 
-                    result.add_row(vec![
-                        Value::Int64(source.0 as i64),
-                        Value::Int64(target.0 as i64),
-                        Value::Float64(distance),
-                        Value::String(path_str.into()),
-                    ]);
+                        result.add_row(vec![
+                            Value::Int64(source.0 as i64),
+                            Value::Int64(target.0 as i64),
+                            Value::Float64(distance),
+                            Value::String(path_str.into()),
+                        ]);
 
-                    Ok(result)
+                        Ok(result)
+                    }
+                    None => {
+                        let mut result = AlgorithmResult::new(vec![
+                            "source".to_string(),
+                            "target".to_string(),
+                            "distance".to_string(),
+                            "path".to_string(),
+                        ]);
+                        result.add_row(vec![
+                            Value::Int64(source.0 as i64),
+                            Value::Int64(target_id),
+                            Value::Null,
+                            Value::String("unreachable".into()),
+                        ]);
+                        Ok(result)
+                    }
                 }
-                None => {
-                    let mut result = AlgorithmResult::new(vec![
-                        "source".to_string(),
-                        "target".to_string(),
-                        "distance".to_string(),
-                        "path".to_string(),
-                    ]);
-                    result.add_row(vec![
-                        Value::Int64(source.0 as i64),
-                        Value::Int64(target_id),
-                        Value::Null,
-                        Value::String("unreachable".into()),
-                    ]);
-                    Ok(result)
+            } else {
+                // Single-source shortest paths
+                let dijkstra_result = dijkstra_on(store, source, weight_prop);
+
+                let mut result =
+                    AlgorithmResult::new(vec!["node_id".to_string(), "distance".to_string()]);
+
+                for (node, distance) in dijkstra_result.distances {
+                    result.add_row(vec![Value::Int64(node.0 as i64), Value::Float64(distance)]);
                 }
+
+                result.sort_by_id_columns(1);
+                Ok(result)
             }
-        } else {
-            // Single-source shortest paths
-            let dijkstra_result = dijkstra(store, source, weight_prop);
-
-            let mut result =
-                AlgorithmResult::new(vec!["node_id".to_string(), "distance".to_string()]);
-
-            for (node, distance) in dijkstra_result.distances {
-                result.add_row(vec![Value::Int64(node.0 as i64), Value::Float64(distance)]);
-            }
-
-            result.sort_by_id_columns(1);
-            Ok(result)
-        }
+        });
+        graph.finish(found)?
     }
 }
 
@@ -732,44 +829,53 @@ impl GraphAlgorithm for SsspAlgorithm {
         sssp_params()
     }
 
-    fn execute(&self, store: &dyn GraphStore, params: &Parameters) -> Result<AlgorithmResult> {
-        let source_str = params
-            .get_string("source")
-            .ok_or_else(|| Error::InvalidValue("source parameter required".to_string()))?;
+    fn execute(
+        &self,
+        store: &dyn GraphStore,
+        view: grafeo_common::types::ReadView,
+        params: &Parameters,
+    ) -> Result<AlgorithmResult> {
+        let graph = super::traits::GraphView::new(store, view);
+        let store = &graph;
+        let found = super::traits::evaluated(|| {
+            let source_str = params
+                .get_string("source")
+                .ok_or_else(|| Error::InvalidValue("source parameter required".to_string()))?;
 
-        // Resolve source: try integer parse first, then name property lookup
-        let source = if let Ok(id) = source_str.parse::<u64>() {
-            NodeId::new(id)
-        } else {
-            let candidates = store.find_nodes_by_property("name", &Value::from(source_str));
-            match candidates.len() {
-                0 => {
-                    return Err(Error::InvalidValue(format!(
-                        "No node found with name '{source_str}'"
-                    )));
+            // Resolve source: try integer parse first, then name property lookup
+            let source = if let Ok(id) = source_str.parse::<u64>() {
+                NodeId::new(id)
+            } else {
+                let candidates = store.find_nodes_by_property("name", &Value::from(source_str));
+                match candidates.len() {
+                    0 => {
+                        return Err(Error::InvalidValue(format!(
+                            "No node found with name '{source_str}'"
+                        )));
+                    }
+                    1 => candidates[0],
+                    _ => {
+                        return Err(Error::InvalidValue(format!(
+                            "Multiple nodes found with name '{source_str}', use node ID instead"
+                        )));
+                    }
                 }
-                1 => candidates[0],
-                _ => {
-                    return Err(Error::InvalidValue(format!(
-                        "Multiple nodes found with name '{source_str}', use node ID instead"
-                    )));
-                }
+            };
+
+            let weight_prop = params.get_string("weight");
+            let dijkstra_result = dijkstra_on(store, source, weight_prop);
+
+            let mut result =
+                AlgorithmResult::new(vec!["node_id".to_string(), "distance".to_string()]);
+
+            for (node, distance) in dijkstra_result.distances {
+                result.add_row(vec![int_value(node.0)?, Value::Float64(distance)]);
             }
-        };
 
-        let weight_prop = params.get_string("weight");
-        let dijkstra_result = dijkstra(store, source, weight_prop);
-
-        let mut result = AlgorithmResult::new(vec!["node_id".to_string(), "distance".to_string()]);
-
-        for (node, distance) in dijkstra_result.distances {
-            // reason: Node IDs are sequential counters, well within i64::MAX
-            #[allow(clippy::cast_possible_wrap)]
-            result.add_row(vec![Value::Int64(node.0 as i64), Value::Float64(distance)]);
-        }
-
-        result.sort_by_id_columns(1);
-        Ok(result)
+            result.sort_by_id_columns(1);
+            Ok(result)
+        });
+        graph.finish(found)?
     }
 }
 
@@ -813,7 +919,7 @@ impl_algorithm! {
         let source = node_id_from_param(source_id, "source")?;
         let weight_prop = params.get_string("weight");
 
-        let bf_result = bellman_ford(store, source, weight_prop);
+        let bf_result = bellman_ford_on(store, source, weight_prop);
 
         let mut result = AlgorithmResult::new(vec![
             "node_id".to_string(),
@@ -862,7 +968,7 @@ impl_algorithm! {
     execute(store, params) {
         let weight_prop = params.get_string("weight");
 
-        let fw_result = floyd_warshall(store, weight_prop);
+        let fw_result = floyd_warshall_on(store, weight_prop);
 
         let mut result = AlgorithmResult::new(vec![
             "source".to_string(),
@@ -894,12 +1000,13 @@ impl_algorithm! {
 // Tests
 // ============================================================================
 
-#[cfg(all(test, feature = "lpg"))]
+#[cfg(test)]
 mod tests {
     use super::*;
+    use grafeo_common::types::ReadView;
 
-    fn create_weighted_graph() -> LpgStore {
-        let store = LpgStore::new().unwrap();
+    fn create_weighted_graph() -> RowGroupStore {
+        let store = RowGroupStore::new();
 
         // Create a weighted graph:
         //   0 --2--> 1 --3--> 2
@@ -917,11 +1024,36 @@ mod tests {
         let n4 = store.create_node(&["Node"]);
 
         // Create edges with weights
-        store.create_edge_with_props(n0, n1, "EDGE", [("weight", Value::Float64(2.0))]);
-        store.create_edge_with_props(n1, n2, "EDGE", [("weight", Value::Float64(3.0))]);
-        store.create_edge_with_props(n0, n3, "EDGE", [("weight", Value::Float64(4.0))]);
-        store.create_edge_with_props(n3, n1, "EDGE", [("weight", Value::Float64(1.0))]);
-        store.create_edge_with_props(n2, n4, "EDGE", [("weight", Value::Float64(1.0))]);
+        store.create_edge_with_props(
+            n0,
+            n1,
+            "EDGE",
+            &[(PropertyKey::new("weight"), Value::Float64(2.0))],
+        );
+        store.create_edge_with_props(
+            n1,
+            n2,
+            "EDGE",
+            &[(PropertyKey::new("weight"), Value::Float64(3.0))],
+        );
+        store.create_edge_with_props(
+            n0,
+            n3,
+            "EDGE",
+            &[(PropertyKey::new("weight"), Value::Float64(4.0))],
+        );
+        store.create_edge_with_props(
+            n3,
+            n1,
+            "EDGE",
+            &[(PropertyKey::new("weight"), Value::Float64(1.0))],
+        );
+        store.create_edge_with_props(
+            n2,
+            n4,
+            "EDGE",
+            &[(PropertyKey::new("weight"), Value::Float64(1.0))],
+        );
 
         store
     }
@@ -929,7 +1061,7 @@ mod tests {
     #[test]
     fn test_dijkstra_basic() {
         let store = create_weighted_graph();
-        let result = dijkstra(&store, NodeId::new(0), Some("weight"));
+        let result = dijkstra(&store, ReadView::latest(), NodeId::new(0), Some("weight")).unwrap();
 
         // From the graph: 0->1 cost 2, 0->1->2 cost 5, 0->3 cost 4, 0->3->1 cost 5
         assert_eq!(result.distance_to(NodeId::new(0)), Some(0.0));
@@ -942,7 +1074,7 @@ mod tests {
     #[test]
     fn test_dijkstra_path() {
         let store = create_weighted_graph();
-        let result = dijkstra(&store, NodeId::new(0), Some("weight"));
+        let result = dijkstra(&store, ReadView::latest(), NodeId::new(0), Some("weight")).unwrap();
 
         let path = result.path_to(NodeId::new(0), NodeId::new(2));
         assert!(path.is_some());
@@ -955,7 +1087,14 @@ mod tests {
     #[test]
     fn test_dijkstra_single_pair() {
         let store = create_weighted_graph();
-        let result = dijkstra_path(&store, NodeId::new(0), NodeId::new(4), Some("weight"));
+        let result = dijkstra_path(
+            &store,
+            ReadView::latest(),
+            NodeId::new(0),
+            NodeId::new(4),
+            Some("weight"),
+        )
+        .unwrap();
 
         assert!(result.is_some());
         let (distance, path) = result.unwrap();
@@ -966,18 +1105,19 @@ mod tests {
 
     #[test]
     fn test_dijkstra_unreachable() {
-        let store = LpgStore::new().unwrap();
+        let store = RowGroupStore::new();
         let n0 = store.create_node(&["Node"]);
         let _n1 = store.create_node(&["Node"]); // Disconnected
 
-        let result = dijkstra_path(&store, n0, NodeId::new(1), None);
+        let result = dijkstra_path(&store, ReadView::latest(), n0, NodeId::new(1), None).unwrap();
         assert!(result.is_none());
     }
 
     #[test]
     fn test_bellman_ford_basic() {
         let store = create_weighted_graph();
-        let result = bellman_ford(&store, NodeId::new(0), Some("weight"));
+        let result =
+            bellman_ford(&store, ReadView::latest(), NodeId::new(0), Some("weight")).unwrap();
 
         assert!(!result.has_negative_cycle);
         assert!(result.distances.contains_key(&NodeId::new(0)));
@@ -990,15 +1130,25 @@ mod tests {
         //   0 --10--> 1 --(-5)--> 2
         //
         // Shortest: 0 -> 1 -> 2 = 10 + (-5) = 5
-        let store = LpgStore::new().unwrap();
+        let store = RowGroupStore::new();
         let n0 = store.create_node(&["Node"]);
         let n1 = store.create_node(&["Node"]);
         let n2 = store.create_node(&["Node"]);
 
-        store.create_edge_with_props(n0, n1, "EDGE", [("weight", Value::Float64(10.0))]);
-        store.create_edge_with_props(n1, n2, "EDGE", [("weight", Value::Float64(-5.0))]);
+        store.create_edge_with_props(
+            n0,
+            n1,
+            "EDGE",
+            &[(PropertyKey::new("weight"), Value::Float64(10.0))],
+        );
+        store.create_edge_with_props(
+            n1,
+            n2,
+            "EDGE",
+            &[(PropertyKey::new("weight"), Value::Float64(-5.0))],
+        );
 
-        let result = bellman_ford(&store, n0, Some("weight"));
+        let result = bellman_ford(&store, ReadView::latest(), n0, Some("weight")).unwrap();
 
         assert!(!result.has_negative_cycle);
         assert_eq!(*result.distances.get(&n0).unwrap(), 0.0);
@@ -1019,18 +1169,38 @@ mod tests {
         //
         // Direct: 0->1->3 = 8
         // Via negative: 0->2->3 = 3+(-4) = -1  (shorter!)
-        let store = LpgStore::new().unwrap();
+        let store = RowGroupStore::new();
         let n0 = store.create_node(&["Node"]);
         let n1 = store.create_node(&["Node"]);
         let n2 = store.create_node(&["Node"]);
         let n3 = store.create_node(&["Node"]);
 
-        store.create_edge_with_props(n0, n1, "EDGE", [("weight", Value::Float64(6.0))]);
-        store.create_edge_with_props(n1, n3, "EDGE", [("weight", Value::Float64(2.0))]);
-        store.create_edge_with_props(n0, n2, "EDGE", [("weight", Value::Float64(3.0))]);
-        store.create_edge_with_props(n2, n3, "EDGE", [("weight", Value::Float64(-4.0))]);
+        store.create_edge_with_props(
+            n0,
+            n1,
+            "EDGE",
+            &[(PropertyKey::new("weight"), Value::Float64(6.0))],
+        );
+        store.create_edge_with_props(
+            n1,
+            n3,
+            "EDGE",
+            &[(PropertyKey::new("weight"), Value::Float64(2.0))],
+        );
+        store.create_edge_with_props(
+            n0,
+            n2,
+            "EDGE",
+            &[(PropertyKey::new("weight"), Value::Float64(3.0))],
+        );
+        store.create_edge_with_props(
+            n2,
+            n3,
+            "EDGE",
+            &[(PropertyKey::new("weight"), Value::Float64(-4.0))],
+        );
 
-        let result = bellman_ford(&store, n0, Some("weight"));
+        let result = bellman_ford(&store, ReadView::latest(), n0, Some("weight")).unwrap();
 
         assert!(!result.has_negative_cycle);
         assert_eq!(*result.distances.get(&n3).unwrap(), -1.0);
@@ -1047,16 +1217,31 @@ mod tests {
         //            +--(-3)--+
         //
         // Cycle: 1 -> 2 -> 1 with total weight 1 + (-3) = -2 (negative!)
-        let store = LpgStore::new().unwrap();
+        let store = RowGroupStore::new();
         let n0 = store.create_node(&["Node"]);
         let n1 = store.create_node(&["Node"]);
         let n2 = store.create_node(&["Node"]);
 
-        store.create_edge_with_props(n0, n1, "EDGE", [("weight", Value::Float64(1.0))]);
-        store.create_edge_with_props(n1, n2, "EDGE", [("weight", Value::Float64(1.0))]);
-        store.create_edge_with_props(n2, n1, "EDGE", [("weight", Value::Float64(-3.0))]);
+        store.create_edge_with_props(
+            n0,
+            n1,
+            "EDGE",
+            &[(PropertyKey::new("weight"), Value::Float64(1.0))],
+        );
+        store.create_edge_with_props(
+            n1,
+            n2,
+            "EDGE",
+            &[(PropertyKey::new("weight"), Value::Float64(1.0))],
+        );
+        store.create_edge_with_props(
+            n2,
+            n1,
+            "EDGE",
+            &[(PropertyKey::new("weight"), Value::Float64(-3.0))],
+        );
 
-        let result = bellman_ford(&store, n0, Some("weight"));
+        let result = bellman_ford(&store, ReadView::latest(), n0, Some("weight")).unwrap();
 
         assert!(
             result.has_negative_cycle,
@@ -1067,7 +1252,7 @@ mod tests {
     #[test]
     fn test_floyd_warshall_basic() {
         let store = create_weighted_graph();
-        let result = floyd_warshall(&store, Some("weight"));
+        let result = floyd_warshall(&store, ReadView::latest(), Some("weight")).unwrap();
 
         // Self-distances should be 0
         assert_eq!(result.distance(NodeId::new(0), NodeId::new(0)), Some(0.0));
@@ -1080,7 +1265,7 @@ mod tests {
     #[test]
     fn test_floyd_warshall_path_reconstruction() {
         let store = create_weighted_graph();
-        let result = floyd_warshall(&store, Some("weight"));
+        let result = floyd_warshall(&store, ReadView::latest(), Some("weight")).unwrap();
 
         let path = result.path(NodeId::new(0), NodeId::new(2));
         assert!(path.is_some());
@@ -1099,11 +1284,13 @@ mod tests {
 
         let result = astar(
             &store,
+            ReadView::latest(),
             NodeId::new(0),
             NodeId::new(4),
             Some("weight"),
             heuristic,
-        );
+        )
+        .unwrap();
         assert!(result.is_some());
 
         let (distance, path) = result.unwrap();
@@ -1114,14 +1301,14 @@ mod tests {
 
     #[test]
     fn test_dijkstra_nonexistent_source() {
-        let store = LpgStore::new().unwrap();
-        let result = dijkstra(&store, NodeId::new(999), None);
+        let store = RowGroupStore::new();
+        let result = dijkstra(&store, ReadView::latest(), NodeId::new(999), None).unwrap();
         assert!(result.distances.is_empty());
     }
 
     #[test]
     fn test_unweighted_defaults() {
-        let store = LpgStore::new().unwrap();
+        let store = RowGroupStore::new();
         let n0 = store.create_node(&["Node"]);
         let n1 = store.create_node(&["Node"]);
         let n2 = store.create_node(&["Node"]);
@@ -1129,35 +1316,47 @@ mod tests {
         store.create_edge(n1, n2, "EDGE");
 
         // Without weight property, should default to 1.0 per edge
-        let result = dijkstra(&store, n0, None);
+        let result = dijkstra(&store, ReadView::latest(), n0, None).unwrap();
         assert_eq!(result.distance_to(n1), Some(1.0));
         assert_eq!(result.distance_to(n2), Some(2.0));
     }
 
     #[test]
     fn test_sssp_with_named_nodes() {
-        let store = LpgStore::new().unwrap();
+        let store = RowGroupStore::new();
         let n0 = store.create_node(&["Node"]);
         let n1 = store.create_node(&["Node"]);
         let n2 = store.create_node(&["Node"]);
         store.set_node_property(n0, "name", Value::from("alix"));
         store.set_node_property(n1, "name", Value::from("gus"));
         store.set_node_property(n2, "name", Value::from("harm"));
-        store.create_edge_with_props(n0, n1, "KNOWS", [("weight", Value::Float64(1.0))]);
-        store.create_edge_with_props(n1, n2, "KNOWS", [("weight", Value::Float64(2.0))]);
+        store.create_edge_with_props(
+            n0,
+            n1,
+            "KNOWS",
+            &[(PropertyKey::new("weight"), Value::Float64(1.0))],
+        );
+        store.create_edge_with_props(
+            n1,
+            n2,
+            "KNOWS",
+            &[(PropertyKey::new("weight"), Value::Float64(2.0))],
+        );
 
         let mut params = Parameters::new();
         params.set_string("source", "alix");
         params.set_string("weight", "weight");
 
-        let result = SsspAlgorithm.execute(&store, &params).unwrap();
+        let result = SsspAlgorithm
+            .execute(&store, ReadView::latest(), &params)
+            .unwrap();
         assert_eq!(result.columns, vec!["node_id", "distance"]);
         assert_eq!(result.row_count(), 3); // alix, gus, harm
     }
 
     #[test]
     fn test_sssp_with_numeric_source() {
-        let store = LpgStore::new().unwrap();
+        let store = RowGroupStore::new();
         let n0 = store.create_node(&["Node"]);
         let n1 = store.create_node(&["Node"]);
         store.create_edge(n0, n1, "EDGE");
@@ -1165,19 +1364,21 @@ mod tests {
         let mut params = Parameters::new();
         params.set_string("source", n0.0.to_string());
 
-        let result = SsspAlgorithm.execute(&store, &params).unwrap();
+        let result = SsspAlgorithm
+            .execute(&store, ReadView::latest(), &params)
+            .unwrap();
         assert_eq!(result.row_count(), 2);
     }
 
     #[test]
     fn test_sssp_nonexistent_name() {
-        let store = LpgStore::new().unwrap();
+        let store = RowGroupStore::new();
         let _n0 = store.create_node(&["Node"]);
 
         let mut params = Parameters::new();
         params.set_string("source", "nonexistent");
 
-        let result = SsspAlgorithm.execute(&store, &params);
+        let result = SsspAlgorithm.execute(&store, ReadView::latest(), &params);
         assert!(result.is_err());
     }
 }

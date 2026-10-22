@@ -11,7 +11,7 @@
 //! cargo test -p grafeo-engine --all-features --test value_hash_join
 //! ```
 
-#![cfg(all(feature = "lpg", feature = "gql", feature = "cypher"))]
+#![cfg(all(feature = "gql", feature = "cypher"))]
 
 use grafeo_common::types::Value;
 use grafeo_engine::{GrafeoDB, Session};
@@ -102,7 +102,12 @@ fn table(rows: &[&[&str]]) -> Vec<Vec<Value>> {
 /// `a.rs` at 5, Vincent in `b.rs` at '7' (a string), Jules without a path at
 /// 1, and Mia in `z.rs`, which no file has, at 5.0.
 fn files() -> GrafeoDB {
-    let db = GrafeoDB::new_in_memory();
+    // History kept: a read at an earlier epoch needs it.
+    let db = GrafeoDB::with_config(
+        grafeo_engine::Config::in_memory()
+            .with_history_retention(grafeo_engine::HistoryRetention::Forever),
+    )
+    .unwrap();
     db.execute(
         "INSERT (:File {path: 'a.rs', lines: 5.0}), (:File {path: 'b.rs', lines: 7}), \
                 (:File {path: 'c.rs', lines: 5}), (:File {lines: 1})",
@@ -754,7 +759,6 @@ fn a_subquery_beside_the_key_filters_the_joined_rows() {
 }
 
 /// A read of an earlier epoch joins the nodes and values of that epoch.
-#[cfg(feature = "temporal")]
 #[test]
 fn a_read_of_an_earlier_epoch_joins_the_values_of_then() {
     let db = files();
@@ -858,7 +862,8 @@ fn documents(indexed: bool) -> GrafeoDB {
 
 /// A vector or text predicate that an index search takes shows no
 /// `[label-first]`: the search runs instead of the scan (`PROFILE` names it).
-/// Without the indexes the label is scanned and the filter runs above it.
+/// Without the indexes the label is scanned and the filter runs above it; a
+/// text predicate then has no plan at all, since it needs its index (#308).
 #[cfg(all(feature = "vector-index", feature = "text-index"))]
 #[test]
 fn an_index_search_shows_no_label_first() {
@@ -881,6 +886,18 @@ fn an_index_search_shows_no_label_first() {
         let db = documents(indexed);
         let session = db.session();
         for (query, search) in queries {
+            if !indexed && query.contains("text_score") {
+                for run in [query.to_string(), format!("PROFILE {query}")] {
+                    let error = session
+                        .execute(&run)
+                        .expect_err("a text predicate without its index");
+                    assert!(
+                        error.to_string().contains("needs a text index on 'body'"),
+                        "`{run}`: {error}"
+                    );
+                }
+                continue;
+            }
             let plan = explain(&session, Language::Gql, query);
             let filter = lines(&plan)
                 .into_iter()
@@ -918,7 +935,9 @@ fn a_range_without_an_index_shows_the_range_scan() {
         assert!(
             lines(&profile)
                 .iter()
-                .any(|line| line.starts_with("RangeScan (t.line Gt 3)")),
+                // The scan the range scan replaces is named in its detail
+                // (#461).
+                .any(|line| line.starts_with("RangeScan (t.line Gt 3, NodeScan t:TypeDefinition)")),
             "{language:?}:\n{profile}"
         );
 

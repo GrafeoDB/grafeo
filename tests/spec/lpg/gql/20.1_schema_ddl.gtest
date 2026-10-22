@@ -103,7 +103,7 @@ tests:
       - "ALTER NODE TYPE Sensor ADD PROPERTY location STRING"
     query: "INSERT (:Sensor {id: 1, location: 5})"
     expect:
-      error: "property 'location' on :Sensor expects String"
+      error: "property 'location' on :Sensor expects STRING, got 5"
 
   # An integer written to a FLOAT64 property is stored as a float (#568):
   # GQL converts between numeric types on assignment. JavaScript sends every
@@ -698,9 +698,9 @@ tests:
       error: "'STIRNG' is not a property type"
 
   - name: unknown_inline_property_type_is_refused
-    query: "CREATE GRAPH TYPE atlas { (:Town {population DECIMAL})-[:ROAD]->(:Town) }"
+    query: "CREATE GRAPH TYPE atlas { (:Town {population INT32})-[:ROAD]->(:Town) }"
     expect:
-      error: "'DECIMAL' is not a property type"
+      error: "'INT32' is not a property type"
 
   - name: keyword_property_names_are_declared
     statements:
@@ -768,7 +768,7 @@ tests:
       - "CREATE NODE TYPE Customer (customerId STRING NOT NULL, age INT64)"
       - "INSERT (:Customer {customerId: 'c3', age: 'old'})"
     expect:
-      error: "property 'age' on :Customer expects Int64"
+      error: "property 'age' on :Customer expects INT64, got 'old'"
 
   - name: node_type_in_a_schema_checks_set
     statements:
@@ -787,7 +787,7 @@ tests:
       - "CREATE EDGE TYPE Buys (amount INT64 NOT NULL)"
       - "INSERT (:Shop)-[:Buys {amount: 'x'}]->(:Item)"
     expect:
-      error: "property 'amount' on :Buys expects Int64"
+      error: "property 'amount' on :Buys expects INT64, got 'x'"
 
   - name: edge_type_in_a_schema_requires_its_not_null_property
     statements:
@@ -844,3 +844,24 @@ tests:
     expect:
       rows:
         - [3]
+
+  # A DECIMAL(p, s) property stores what it is given as a decimal rounded to
+  # its scale, half away from zero, a float by its shortest text (#610).
+  - name: decimal_property_rounds_to_its_scale
+    setup:
+      - "CREATE NODE TYPE Item (price DECIMAL(6, 2))"
+      - "INSERT (:Item {price: 2.345}), (:Item {price: 3}), (:Item {price: 1.005e0})"
+    query: "MATCH (i:Item) RETURN i.price ORDER BY i.price"
+    expect:
+      ordered: true
+      rows:
+        - [1.01]
+        - [2.35]
+        - [3.00]
+
+  - name: decimal_property_refuses_too_many_integer_digits
+    setup:
+      - "CREATE NODE TYPE Item (price DECIMAL(6, 2))"
+    query: "INSERT (:Item {price: 12345.6})"
+    expect:
+      error: "property 'price' on :Item expects DECIMAL(6,2)"

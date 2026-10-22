@@ -10,6 +10,7 @@ import 'package:ffi/ffi.dart';
 
 import 'error.dart';
 import 'ffi/bindings.dart';
+import 'native.dart';
 import 'types.dart';
 import 'value.dart';
 
@@ -123,7 +124,8 @@ class Transaction implements Finalizable {
     _bindings.grafeoFreeTransaction(_handle);
     _handle = nullptr;
     if (status != GrafeoStatus.ok.code) {
-      throw classifyError(status, lastError(_bindings));
+      throw classifyError(status, lastError(_bindings),
+          gqlStatus: lastGqlStatus(_bindings));
     }
   }
 
@@ -136,31 +138,11 @@ class Transaction implements Finalizable {
     _bindings.grafeoFreeTransaction(_handle);
     _handle = nullptr;
     if (status != GrafeoStatus.ok.code) {
-      throw classifyError(status, lastError(_bindings));
+      throw classifyError(status, lastError(_bindings),
+          gqlStatus: lastGqlStatus(_bindings));
     }
   }
 
-  QueryResult _buildResult(Pointer<Void> resultPtr) {
-    try {
-      final jsonPtr = _bindings.grafeoResultJson(resultPtr);
-      final jsonString = jsonPtr.toDartString();
-      final executionTimeMs = _bindings.grafeoResultExecutionTimeMs(resultPtr);
-      final rowsScanned = _bindings.grafeoResultRowsScanned(resultPtr);
-
-      final rows = parseRows(jsonString);
-      final columns = extractColumns(rows);
-      final (nodes, edges) = extractEntities(rows);
-
-      return QueryResult(
-        columns: columns,
-        rows: rows,
-        nodes: nodes,
-        edges: edges,
-        executionTimeMs: executionTimeMs,
-        rowsScanned: rowsScanned,
-      );
-    } finally {
-      _bindings.grafeoFreeResult(resultPtr);
-    }
-  }
+  QueryResult _buildResult(Pointer<Void> resultPtr) =>
+      buildResult(_bindings, resultPtr);
 }

@@ -12,11 +12,13 @@ use super::{
 };
 #[cfg(feature = "algos")]
 use super::{CallProcedureOp, StaticResultOperator};
-use crate::query::plan::{PathMode, PathSelection};
+use crate::query::plan::{Callee, PathMode, PathSelection};
 use grafeo_common::utils::error::{QueryError, QueryErrorKind};
+use grafeo_core::execution::DataChunk;
 use grafeo_core::execution::operators::{
     ExecutionPathMode, ExecutionPathSelection, JoinCondition, JoinedRowCondition,
 };
+use grafeo_core::execution::operators::{FilterExpression, Volatility};
 
 impl super::Planner {
     /// Plans a CREATE NODE operator (Gremlin `addV`, a GraphQL mutation): a
@@ -251,8 +253,8 @@ impl super::Planner {
                     filter_expr,
                     variable_columns,
                     Arc::clone(&self.store),
+                    self.read_view(),
                 )
-                .with_transaction_context(self.viewing_epoch, self.transaction_id)
                 .with_session_context(self.session_context.clone());
                 let condition: Box<dyn JoinCondition> =
                     Box::new(JoinedRowCondition::new(Box::new(predicate)));
@@ -321,8 +323,8 @@ impl super::Planner {
                     }],
                     vec![LogicalType::Any],
                     Arc::clone(&self.store),
+                    self.read_view(),
                 )
-                .with_transaction_context(self.viewing_epoch, self.transaction_id)
                 .with_session_context(self.session_context.clone()),
             );
             (project_op, vec!["__list__".to_string()])
@@ -373,8 +375,8 @@ impl super::Planner {
                     proj_exprs,
                     proj_schema,
                     Arc::clone(&self.store),
+                    self.read_view(),
                 )
-                .with_transaction_context(self.viewing_epoch, self.transaction_id)
                 .with_session_context(self.session_context.clone()),
             );
             let list_col = input_columns.len();
@@ -683,23 +685,24 @@ impl super::Planner {
                 input_op,
                 source_column,
                 target_column,
-                sp.edge_types.clone(),
+                self.stored_edge_types(&sp.edge_types)?,
                 direction,
+                self.read_view(),
             ),
             None => ShortestPathOperator::from_source(
                 Arc::clone(&self.store),
                 input_op,
                 source_column,
-                sp.edge_types.clone(),
+                self.stored_edge_types(&sp.edge_types)?,
                 direction,
+                self.read_view(),
             ),
         };
         let mut operator = operator
             .with_selection(selection)
             .with_path_mode(path_mode)
             .with_hop_bounds(sp.min_hops, sp.max_hops)
-            .with_transaction_context(self.viewing_epoch, self.transaction_id)
-            .with_read_only(self.read_only)
+            .with_read_counter(self.read_counter())
             .with_memory_budget(self.path_search_budget)
             .with_path_output();
 
@@ -716,8 +719,8 @@ impl super::Planner {
                 self.convert_expression(&condition.predicate)?,
                 variable_columns,
                 Arc::clone(&self.store),
+                self.read_view(),
             )
-            .with_transaction_context(self.viewing_epoch, self.transaction_id)
             .with_session_context(self.session_context.clone());
             operator = operator.with_edge_condition(Box::new(predicate));
         }
@@ -803,8 +806,8 @@ impl super::Planner {
 
         // Look up the procedure
         let procedure = registry.get(&call.name).ok_or_else(|| {
-            grafeo_common::utils::error::Error::Query(
-                grafeo_common::utils::error::QueryError::semantic(format!(
+            grafeo_common::utils::error::Error::from(
+                grafeo_common::utils::error::QueryError::invalid_reference(format!(
                     "unknown procedure '{}'; CALL grafeo.procedures() lists the procedures",
                     call.name.join(".")
                 )),
@@ -846,8 +849,8 @@ impl super::Planner {
             params,
             yield_columns,
             canonical_columns,
+            self.read_view(),
         );
-        #[cfg(feature = "lpg")]
         if let Some(lpg_store) = self.lpg_store.as_ref() {
             op = op.with_lpg_store(Arc::clone(lpg_store));
         }
@@ -908,20 +911,22 @@ impl super::Planner {
         expression: &LogicalExpression,
     ) -> Result<Value> {
         let semantic =
-            |message: String| Error::Query(QueryError::new(QueryErrorKind::Semantic, message));
+            |message: String| Error::from(QueryError::new(QueryErrorKind::Semantic, message));
         let reads = match first_non_constant(expression, &mut Vec::new()) {
             None => None,
             Some(NonConstant::Row(variable)) => Some(format!("the variable '{variable}'")),
             Some(NonConstant::Graph) => Some("the graph (a subquery or a pattern)".to_string()),
             Some(NonConstant::Parameter(name)) => {
-                return Err(semantic(format!("Missing parameter: ${name}")));
+                return Err(Error::from(QueryError::invalid_reference(format!(
+                    "Missing parameter: ${name}"
+                ))));
             }
         };
         if let Some(reads) = reads {
-            return Err(semantic(format!(
+            return Err(Error::from(QueryError::unsupported(format!(
                 "Argument '{argument}' of {procedure} reads {reads}: a procedure argument must \
                  be a constant (a literal, a parameter or an expression of them)"
-            )));
+            ))));
         }
         if let LogicalExpression::Literal(value) = expression {
             return Ok(value.clone());
@@ -930,11 +935,12 @@ impl super::Planner {
             self.convert_expression(expression)?,
             HashMap::new(),
             Arc::clone(&self.store),
+            self.read_view(),
         )
-        .with_transaction_context(self.viewing_epoch, self.transaction_id)
         .with_session_context(self.session_context.clone());
         evaluator
             .eval_at(&grafeo_core::execution::DataChunk::empty(), 0)
+            .map_err(crate::query::executor::convert_operator_error)?
             .ok_or_else(|| {
                 semantic(format!(
                     "Argument '{argument}' of {procedure} cannot be evaluated"
@@ -949,22 +955,20 @@ impl super::Planner {
     fn procedure_store(
         &self,
         params: &grafeo_adapters::plugins::Parameters,
-    ) -> Result<Arc<dyn grafeo_core::graph::GraphStoreSearch>> {
+    ) -> Result<Arc<dyn grafeo_core::graph::GraphStore>> {
         let Some(name) = params.get_string("projection") else {
             return Ok(Arc::clone(&self.store));
         };
-        #[cfg(feature = "lpg")]
         if let Some(projection) = self
             .projections
             .as_ref()
             .and_then(|projections| projections.read().get(name).cloned())
         {
-            return Ok(projection as Arc<dyn grafeo_core::graph::GraphStoreSearch>);
+            return Ok(projection as Arc<dyn grafeo_core::graph::GraphStore>);
         }
-        Err(Error::Query(QueryError::new(
-            QueryErrorKind::Semantic,
-            format!("Projection '{name}' does not exist"),
-        )))
+        Err(Error::from(QueryError::invalid_reference(format!(
+            "Projection '{name}' does not exist"
+        ))))
     }
 
     /// Plans a static result set (e.g., from `grafeo.procedures()`).
@@ -984,8 +988,8 @@ impl super::Planner {
                     .iter()
                     .position(|c| c == &item.field_name)
                     .ok_or_else(|| {
-                        grafeo_common::utils::error::Error::Query(
-                            grafeo_common::utils::error::QueryError::semantic(format!(
+                        grafeo_common::utils::error::Error::from(
+                            grafeo_common::utils::error::QueryError::invalid_reference(format!(
                                 "YIELD column '{}' is no column of the procedure (it has: {})",
                                 item.field_name,
                                 result.columns.join(", ")
@@ -1032,7 +1036,7 @@ impl super::Planner {
 
         // Validate argument count
         if call.arguments.len() != proc_def.params.len() {
-            return Err(grafeo_common::utils::error::Error::Query(
+            return Err(grafeo_common::utils::error::Error::from(
                 grafeo_common::utils::error::QueryError::semantic(format!(
                     "procedure '{}' takes {} arguments, the call gives {}",
                     proc_def.name,
@@ -1085,8 +1089,8 @@ impl super::Planner {
                 viewing_epoch: self.viewing_epoch,
                 catalog: self.catalog.clone(),
                 write_counter: self.write_counter(),
+                read_counter: self.read_counter(),
                 recording: self.recording.clone(),
-                #[cfg(feature = "lpg")]
                 projections: self.projections.clone(),
             },
         ));
@@ -1207,7 +1211,7 @@ impl super::Planner {
                 Err(_) => {
                     // Fallback: try constant folding for complex expressions
                     // (e.g., vector([1,2,3]), date('2024-01-01')).
-                    if let Some(v) = Self::try_fold_expression(expr) {
+                    if let Some(v) = self.try_fold_expression(expr) {
                         PropertySource::Constant(v)
                     } else {
                         // Complex runtime expression (e.g., c.value + 1): add a
@@ -1254,8 +1258,8 @@ impl super::Planner {
                     projection_exprs,
                     proj_schema,
                     Arc::clone(&self.store),
+                    self.read_view(),
                 )
-                .with_transaction_context(self.viewing_epoch, self.transaction_id)
                 .with_session_context(self.session_context.clone()),
             )
         } else {
@@ -1315,7 +1319,7 @@ impl super::Planner {
         if let Ok(source) = self.expression_to_property_source(expr, action_scope_columns) {
             return Ok(source);
         }
-        if let Some(value) = Self::try_fold_expression(expr) {
+        if let Some(value) = self.try_fold_expression(expr) {
             return Ok(PropertySource::Constant(value));
         }
         let filter_expr = self.convert_expression(expr)?;
@@ -1352,7 +1356,7 @@ impl super::Planner {
             .iter()
             .map(|(name, expr)| {
                 let source = self.row_property_source(expr, columns).map_err(|e| {
-                    Error::Query(QueryError::new(
+                    Error::from(QueryError::new(
                         QueryErrorKind::Semantic,
                         format!("Cannot evaluate the value of property '{name}': {e}"),
                     ))
@@ -1370,7 +1374,7 @@ impl super::Planner {
         if let Ok(source) = self.expression_to_property_source(expr, columns) {
             return Ok(source);
         }
-        if let Some(value) = Self::try_fold_expression(expr) {
+        if let Some(value) = self.try_fold_expression(expr) {
             return Ok(PropertySource::Constant(value));
         }
         let filter_expr = self.convert_expression(expr)?;
@@ -1431,7 +1435,7 @@ impl super::Planner {
                 ))
             }
             _ => {
-                if let Some(value) = Self::try_fold_expression(expr) {
+                if let Some(value) = self.try_fold_expression(expr) {
                     Ok(PropertySource::Constant(value))
                 } else {
                     Err(Error::Internal(format!(
@@ -1445,127 +1449,54 @@ impl super::Planner {
 
     /// Tries to evaluate a constant expression at plan time.
     ///
-    /// Recursively folds literals, unary operators, lists, and known function calls
-    /// (like `vector()`) into concrete values. Returns `None` if the expression
-    /// contains non-constant parts (variables, property accesses, etc.).
-    pub(super) fn try_fold_expression(expr: &LogicalExpression) -> Option<Value> {
+    /// Recursively folds literals, unary operators, lists, maps and calls of
+    /// built-in functions that are not Volatile (`vector([1, 2])`,
+    /// `date('2026-10-17')`, `date()`) into concrete values. Returns `None` if
+    /// the expression contains non-constant parts (variables, property
+    /// accesses, `rand()`, etc.).
+    pub(super) fn try_fold_expression(&self, expr: &LogicalExpression) -> Option<Value> {
         match expr {
             LogicalExpression::Literal(v) => Some(v.clone()),
             LogicalExpression::List(items) => {
-                let values: Option<Vec<Value>> =
-                    items.iter().map(Self::try_fold_expression).collect();
+                let values: Option<Vec<Value>> = items
+                    .iter()
+                    .map(|item| self.try_fold_expression(item))
+                    .collect();
                 Some(Value::List(values?.into()))
             }
-            LogicalExpression::FunctionCall { name, args, .. } => {
-                match name.to_lowercase().as_str() {
-                    "vector" => {
-                        if args.len() != 1 {
-                            return None;
-                        }
-                        let val = Self::try_fold_expression(&args[0])?;
-                        match val {
-                            Value::List(items) => {
-                                // reason: intentional lossy f64/i64 to f32 for vector elements
-                                #[allow(clippy::cast_possible_truncation)]
-                                let floats: Vec<f32> = items
-                                    .iter()
-                                    .filter_map(|v| match v {
-                                        Value::Float64(f) => Some(*f as f32),
-                                        Value::Int64(i) => Some(*i as f32),
-                                        _ => None,
-                                    })
-                                    .collect();
-                                if floats.len() == items.len() {
-                                    Some(Value::Vector(floats.into()))
-                                } else {
-                                    None
-                                }
-                            }
-                            // Already a vector (from all-numeric list folding)
-                            Value::Vector(v) => Some(Value::Vector(v)),
-                            _ => None,
-                        }
-                    }
-                    "timestamp" => {
-                        if !args.is_empty() {
-                            return None;
-                        }
-                        Some(Value::Int64(
-                            grafeo_common::types::Timestamp::now().as_millis(),
-                        ))
-                    }
-                    "now" | "current_timestamp" | "currenttimestamp" => {
-                        if !args.is_empty() {
-                            return None;
-                        }
-                        Some(Value::Timestamp(grafeo_common::types::Timestamp::now()))
-                    }
-                    "date" | "todate" | "current_date" | "currentdate" => {
-                        if args.is_empty() {
-                            return Some(Value::Date(grafeo_common::types::Date::today()));
-                        }
-                        if args.len() != 1 {
-                            return None;
-                        }
-                        let val = Self::try_fold_expression(&args[0])?;
-                        match val {
-                            Value::String(s) => {
-                                grafeo_common::types::Date::parse(&s).map(Value::Date)
-                            }
-                            _ => None,
-                        }
-                    }
-                    "time" | "totime" | "local_time" | "current_time" | "currenttime" => {
-                        if args.is_empty() {
-                            return Some(Value::Time(grafeo_common::types::Time::now()));
-                        }
-                        if args.len() != 1 {
-                            return None;
-                        }
-                        let val = Self::try_fold_expression(&args[0])?;
-                        match val {
-                            Value::String(s) => {
-                                grafeo_common::types::Time::parse(&s).map(Value::Time)
-                            }
-                            _ => None,
-                        }
-                    }
-                    "datetime" | "localdatetime" | "local_datetime" | "todatetime" => {
-                        if args.is_empty() {
-                            return Some(Value::Timestamp(grafeo_common::types::Timestamp::now()));
-                        }
-                        if args.len() != 1 {
-                            return None;
-                        }
-                        let val = Self::try_fold_expression(&args[0])?;
-                        match val {
-                            Value::String(s) => {
-                                if let Some(d) = grafeo_common::types::Date::parse(&s) {
-                                    return Some(Value::Timestamp(d.to_timestamp()));
-                                }
-                                if let Some(pos) = s.find('T') {
-                                    let (date_part, time_part) = (&s[..pos], &s[pos + 1..]);
-                                    if let (Some(d), Some(t)) = (
-                                        grafeo_common::types::Date::parse(date_part),
-                                        grafeo_common::types::Time::parse(time_part),
-                                    ) {
-                                        return Some(Value::Timestamp(
-                                            grafeo_common::types::Timestamp::from_date_time(d, t),
-                                        ));
-                                    }
-                                }
-                                None
-                            }
-                            _ => None,
-                        }
-                    }
-                    _ => None,
-                }
+            // A call that is not Volatile, of constants: the evaluator computes
+            // it once, as it would for every row. A call it answers with no
+            // value stays a per-row expression.
+            LogicalExpression::FunctionCall {
+                callee: Callee::Builtin(function),
+                args,
+                ..
+            } if function.volatility(args.len()) != Volatility::Volatile => {
+                let args = args
+                    .iter()
+                    .map(|arg| self.try_fold_expression(arg).map(FilterExpression::Literal))
+                    .collect::<Option<Vec<_>>>()?;
+                let call = FilterExpression::FunctionCall {
+                    function: *function,
+                    args,
+                };
+                // A call that fails is left to run with the statement, which
+                // reports its error.
+                ExpressionPredicate::new(
+                    call,
+                    HashMap::new(),
+                    Arc::clone(&self.store),
+                    self.read_view(),
+                )
+                .with_session_context(self.session_context.clone())
+                .eval_at(&DataChunk::empty(), 0)
+                .ok()
+                .flatten()
             }
             LogicalExpression::Map(entries) => {
                 let folded: Option<Vec<(String, Value)>> = entries
                     .iter()
-                    .map(|(k, v)| Self::try_fold_expression(v).map(|val| (k.clone(), val)))
+                    .map(|(k, v)| self.try_fold_expression(v).map(|val| (k.clone(), val)))
                     .collect();
                 let folded = folded?;
                 let map: std::collections::BTreeMap<grafeo_common::types::PropertyKey, Value> =
@@ -1576,11 +1507,17 @@ impl super::Planner {
                 Some(Value::Map(std::sync::Arc::new(map)))
             }
             LogicalExpression::Unary { op, operand } => {
-                let value = Self::try_fold_expression(operand)?;
+                let value = self.try_fold_expression(operand)?;
                 match op {
                     UnaryOp::Neg => match value {
-                        Value::Int64(n) => Some(Value::Int64(-n)),
+                        // The smallest integer has no negation: the
+                        // evaluator fails it as out of range
+                        Value::Int64(n) => n.checked_neg().map(Value::Int64),
                         Value::Float64(f) => Some(Value::Float64(-f)),
+                        _ => None,
+                    },
+                    UnaryOp::Pos => match value {
+                        Value::Int64(_) | Value::Float64(_) | Value::Decimal(_) => Some(value),
                         _ => None,
                     },
                     UnaryOp::Not => match value {
@@ -1676,11 +1613,11 @@ fn first_non_constant(
             first_non_constant(left, local).or_else(|| first_non_constant(right, local))
         }
         LogicalExpression::Unary { operand, .. } => first_non_constant(operand, local),
-        LogicalExpression::FunctionCall { args: items, .. } | LogicalExpression::List(items) => {
-            items
-                .iter()
-                .find_map(|item| first_non_constant(item, local))
-        }
+        LogicalExpression::FunctionCall { args: items, .. }
+        | LogicalExpression::SparqlCall { args: items, .. }
+        | LogicalExpression::List(items) => items
+            .iter()
+            .find_map(|item| first_non_constant(item, local)),
         LogicalExpression::Map(entries) => entries
             .iter()
             .find_map(|(_, value)| first_non_constant(value, local)),

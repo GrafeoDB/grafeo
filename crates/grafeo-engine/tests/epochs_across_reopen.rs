@@ -18,7 +18,7 @@
 //! cargo test -p grafeo-engine --all-features --test epochs_across_reopen
 //! ```
 
-#![cfg(all(feature = "wal", feature = "grafeo-file", feature = "lpg"))]
+#![cfg(all(feature = "wal", feature = "grafeo-file"))]
 
 use std::path::{Path, PathBuf};
 
@@ -285,7 +285,7 @@ fn every_crash_and_replay_continues_the_epochs() {
 fn a_crash_during_a_checkpoint_keeps_the_epoch() {
     let mut crashes = 0;
     // More points than a checkpoint has, so the last runs complete.
-    for point in 1..=12 {
+    for point in 1..=16 {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("people.grafeo");
         let scenario = format!("checkpoint:{point}");
@@ -299,18 +299,8 @@ fn a_crash_during_a_checkpoint_keeps_the_epoch() {
         );
 
         let db = GrafeoDB::open(&path).unwrap();
-        // With `temporal`, replay also advances the epoch at the commit
-        // markers it replays over a new image that holds them already (a
-        // crash after the image, before the WAL is marked): the reopen can
-        // continue above the last committed epoch, never below it.
-        #[cfg(feature = "temporal")]
-        assert!(
-            db.current_epoch() >= reached,
-            "point {point}: the reopen continues at {}, below the last committed epoch {}",
-            db.current_epoch().as_u64(),
-            reached.as_u64()
-        );
-        #[cfg(not(feature = "temporal"))]
+        // Replay starts at the image's checkpoint LSN, so it applies no
+        // commit the image holds again.
         assert_eq!(
             db.current_epoch(),
             reached,
@@ -320,8 +310,8 @@ fn a_crash_during_a_checkpoint_keeps_the_epoch() {
         db.close().unwrap();
     }
     assert!(
-        (1..12).contains(&crashes),
-        "{crashes} of 12 runs crashed: the sweep covers every point of a checkpoint"
+        (1..16).contains(&crashes),
+        "{crashes} of 16 runs crashed: the sweep covers every point of a checkpoint"
     );
 }
 

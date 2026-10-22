@@ -1,0 +1,277 @@
+# Comparing a zoned datetime or time with a local one
+#
+# GQL reads the local value at the session time zone, as SQL does: UTC without
+# SESSION SET TIME ZONE, the offset it sets with one. Cypher keeps the types
+# apart, as openCypher defines it: a zoned and a local value are never equal,
+# and <, <=, > and >= between them are null. A property index and a range
+# lookup find the nodes the filter finds, with and without the index. A time
+# zone is a UTC offset ('+01:00', 'Z', 'UTC'); anything else is 22009.
+# Cypher's time(), like its datetime(), is zoned: it keeps its offset, +00:00
+# without one, and localtime() is the local one.
+
+meta:
+  model: lpg
+  section: rosetta
+  title: Zoned and local datetime comparison
+  dataset: empty
+  requires: [cypher]
+
+tests:
+
+  # ---------------------------------------------------------------------------
+  # GQL: the local value at the session time zone
+  # ---------------------------------------------------------------------------
+
+  - name: gql_reads_a_local_datetime_at_utc_without_a_session_zone
+    query: "RETURN zoned_datetime('2024-03-15T10:00:00+01:00') = local_datetime('2024-03-15T09:00:00') AS eq, zoned_datetime('2024-03-15T10:00:00+01:00') > local_datetime('2024-03-15T08:59:59') AS gt, local_datetime('2024-03-15T09:00:00') <= zoned_datetime('2024-03-15T09:00:00Z') AS le, local_datetime('2024-03-15T09:00:00') <> zoned_datetime('2024-03-15T09:00:00Z') AS ne"
+    expect:
+      rows:
+        - [true, true, true, false]
+
+  - name: gql_reads_a_local_datetime_at_the_session_zone
+    setup:
+      - "SESSION SET TIME ZONE '+01:00'"
+    query: "RETURN zoned_datetime('2024-03-15T10:00:00+01:00') = local_datetime('2024-03-15T10:00:00') AS at_session_zone, zoned_datetime('2024-03-15T10:00:00+01:00') = local_datetime('2024-03-15T09:00:00') AS at_utc, local_datetime('2024-03-15T10:30:00') > zoned_datetime('2024-03-15T09:00:00Z') AS later"
+    expect:
+      rows:
+        - [true, false, true]
+
+  - name: gql_reads_a_local_time_at_the_session_zone
+    setup:
+      - "SESSION SET TIME ZONE '-05:30'"
+    query: "RETURN zonedTime('10:00:00-05:30') = local_time('10:00:00') AS at_session_zone, zonedTime('15:30:00Z') = local_time('10:00:00') AS same_instant, zonedTime('10:00:00Z') < local_time('10:00:00') AS earlier"
+    expect:
+      rows:
+        - [true, true, true]
+
+  - name: gql_reads_a_local_time_at_utc_without_a_session_zone
+    query: "RETURN zonedTime('10:00:00+01:00') = local_time('09:00:00') AS eq, zonedTime('10:00:00+01:00') = local_time('10:00:00') AS other"
+    expect:
+      rows:
+        - [true, false]
+
+  - name: session_reset_time_zone_reads_at_utc_again
+    setup:
+      - "SESSION SET TIME ZONE '+01:00'"
+      - "SESSION RESET TIME ZONE"
+    query: "RETURN zoned_datetime('2024-03-15T10:00:00+01:00') = local_datetime('2024-03-15T09:00:00') AS eq"
+    expect:
+      rows:
+        - [true]
+
+  - name: a_named_time_zone_is_an_invalid_displacement
+    query: "SESSION SET TIME ZONE 'Europe/Amsterdam'"
+    expect:
+      gql_status: "22009"
+
+  - name: an_offset_past_fourteen_hours_is_an_invalid_displacement
+    query: "SESSION SET TIME ZONE '+14:30'"
+    expect:
+      gql_status: "22009"
+
+  - name: utc_with_an_hour_count_is_an_invalid_displacement
+    query: "SESSION SET TIME ZONE 'UTC+5'"
+    expect:
+      gql_status: "22009"
+
+  # ---------------------------------------------------------------------------
+  # Cypher: zoned and local values are different types
+  # ---------------------------------------------------------------------------
+
+  - name: cypher_keeps_zoned_and_local_datetimes_apart
+    variants:
+      cypher: "RETURN datetime('2024-03-15T10:00:00+01:00') = localdatetime('2024-03-15T09:00:00') AS eq, datetime('2024-03-15T10:00:00+01:00') <> localdatetime('2024-03-15T09:00:00') AS ne, datetime('2024-03-15T10:00:00+01:00') < localdatetime('2024-03-15T11:00:00') AS lt, localdatetime('2024-03-15T11:00:00') >= datetime('2024-03-15T10:00:00+01:00') AS ge"
+    expect:
+      rows:
+        - [false, true, null, null]
+
+  - name: cypher_still_compares_two_zoned_datetimes_by_their_instant
+    variants:
+      cypher: "RETURN datetime('2024-03-15T10:00:00+01:00') = datetime('2024-03-15T09:00:00Z') AS eq, datetime('2024-03-15T10:00:00+01:00') < datetime('2024-03-15T09:30:00Z') AS lt"
+    expect:
+      rows:
+        - [true, true]
+
+  - name: cypher_orders_zoned_before_local_datetimes
+    variants:
+      cypher: "UNWIND [localdatetime('2024-03-15T08:00:00'), datetime('2024-03-15T10:00:00+01:00')] AS d WITH d ORDER BY d RETURN toString(d) AS d"
+    expect:
+      ordered: true
+      rows:
+        - ["2024-03-15T10:00:00+01:00"]
+        - ["2024-03-15T08:00:00"]
+
+  # ---------------------------------------------------------------------------
+  # Stored values: a filter, a property index and a range agree
+  # ---------------------------------------------------------------------------
+
+  - name: gql_finds_a_stored_local_datetime_with_an_equal_zoned_one
+    setup:
+      - "INSERT (:Event {name: 'Amsterdam', at: local_datetime('2024-03-15T09:00:00')}), (:Event {name: 'Berlin', at: zoned_datetime('2024-03-15T09:00:00+01:00')})"
+    query: "MATCH (e:Event) WHERE e.at = zoned_datetime('2024-03-15T10:00:00+01:00') RETURN e.name AS name"
+    expect:
+      rows:
+        - [Amsterdam]
+
+  - name: gql_finds_a_stored_local_datetime_with_an_equal_zoned_one_through_an_index
+    setup:
+      - "INSERT (:Event {name: 'Amsterdam', at: local_datetime('2024-03-15T09:00:00')}), (:Event {name: 'Berlin', at: zoned_datetime('2024-03-15T09:00:00+01:00')})"
+      - "CREATE INDEX event_at FOR (e:Event) ON (e.at)"
+    query: "MATCH (e:Event) WHERE e.at = zoned_datetime('2024-03-15T10:00:00+01:00') RETURN e.name AS name"
+    expect:
+      rows:
+        - [Amsterdam]
+
+  - name: gql_finds_a_stored_zoned_datetime_with_an_equal_local_one_through_an_index
+    setup:
+      - "INSERT (:Event {name: 'Amsterdam', at: local_datetime('2024-03-15T09:00:00')}), (:Event {name: 'Berlin', at: zoned_datetime('2024-03-15T09:00:00+01:00')})"
+      - "CREATE INDEX event_at FOR (e:Event) ON (e.at)"
+    query: "MATCH (e:Event) WHERE e.at = local_datetime('2024-03-15T08:00:00') OR e.at IN [local_datetime('2024-03-15T08:00:00')] RETURN e.name AS name"
+    expect:
+      rows:
+        - [Berlin]
+
+  - name: gql_finds_stored_values_with_an_in_list_through_an_index
+    setup:
+      - "INSERT (:Event {name: 'Amsterdam', at: local_datetime('2024-03-15T09:00:00')}), (:Event {name: 'Berlin', at: zoned_datetime('2024-03-15T09:00:00+01:00')})"
+      - "CREATE INDEX event_at FOR (e:Event) ON (e.at)"
+    query: "MATCH (e:Event) WHERE e.at IN [zoned_datetime('2024-03-15T09:00:00Z'), local_datetime('2024-03-15T08:00:00')] RETURN e.name AS name"
+    expect:
+      rows:
+        - [Amsterdam]
+        - [Berlin]
+
+  - name: gql_finds_stored_values_at_the_session_zone_through_an_index
+    setup:
+      - "INSERT (:Event {name: 'Amsterdam', at: local_datetime('2024-03-15T09:00:00')}), (:Event {name: 'Berlin', at: zoned_datetime('2024-03-15T09:00:00+01:00')})"
+      - "CREATE INDEX event_at FOR (e:Event) ON (e.at)"
+      - "SESSION SET TIME ZONE '+01:00'"
+    query: "MATCH (e:Event) WHERE e.at = zoned_datetime('2024-03-15T09:00:00+01:00') RETURN e.name AS name"
+    expect:
+      rows:
+        - [Amsterdam]
+        - [Berlin]
+
+  - name: gql_ranges_over_stored_values_at_the_session_zone
+    setup:
+      - "INSERT (:Event {name: 'Amsterdam', at: local_datetime('2024-03-15T09:00:00')}), (:Event {name: 'Berlin', at: zoned_datetime('2024-03-15T09:00:00+01:00')})"
+      - "CREATE INDEX event_at FOR (e:Event) ON (e.at)"
+      - "SESSION SET TIME ZONE '+01:00'"
+    query: "MATCH (e:Event) WHERE e.at < zoned_datetime('2024-03-15T08:30:00Z') RETURN e.name AS name"
+    expect:
+      rows:
+        - [Amsterdam]
+        - [Berlin]
+
+  - name: gql_ranges_over_stored_values_at_utc
+    setup:
+      - "INSERT (:Event {name: 'Amsterdam', at: local_datetime('2024-03-15T09:00:00')}), (:Event {name: 'Berlin', at: zoned_datetime('2024-03-15T09:00:00+01:00')})"
+      - "CREATE INDEX event_at FOR (e:Event) ON (e.at)"
+    query: "MATCH (e:Event) WHERE e.at < zoned_datetime('2024-03-15T08:30:00Z') RETURN e.name AS name"
+    expect:
+      rows:
+        - [Berlin]
+
+  - name: cypher_finds_no_stored_local_datetime_with_a_zoned_one
+    setup:
+      - "INSERT (:Event {name: 'Amsterdam', at: local_datetime('2024-03-15T09:00:00')}), (:Event {name: 'Berlin', at: zoned_datetime('2024-03-15T09:00:00+01:00')})"
+    variants:
+      cypher: "MATCH (e:Event) WHERE e.at = datetime('2024-03-15T10:00:00+01:00') OR e.at = datetime('2024-03-15T08:00:00Z') RETURN e.name AS name"
+    expect:
+      rows:
+        - [Berlin]
+
+  - name: cypher_finds_no_stored_local_datetime_with_a_zoned_one_through_an_index
+    setup:
+      - "INSERT (:Event {name: 'Amsterdam', at: local_datetime('2024-03-15T09:00:00')}), (:Event {name: 'Berlin', at: zoned_datetime('2024-03-15T09:00:00+01:00')})"
+      - "CREATE INDEX event_at FOR (e:Event) ON (e.at)"
+    variants:
+      cypher: "MATCH (e:Event) WHERE e.at = datetime('2024-03-15T10:00:00+01:00') RETURN e.name AS name"
+    expect:
+      empty: true
+
+  - name: cypher_ranges_skip_stored_local_datetimes
+    setup:
+      - "INSERT (:Event {name: 'Amsterdam', at: local_datetime('2024-03-15T09:00:00')}), (:Event {name: 'Berlin', at: zoned_datetime('2024-03-15T09:00:00+01:00')})"
+      - "CREATE INDEX event_at FOR (e:Event) ON (e.at)"
+    variants:
+      cypher: "MATCH (e:Event) WHERE e.at < datetime('2024-03-15T12:00:00Z') RETURN e.name AS name"
+    expect:
+      rows:
+        - [Berlin]
+
+  # ---------------------------------------------------------------------------
+  # Cypher time() is zoned, localtime() local
+  # ---------------------------------------------------------------------------
+
+  - name: cypher_time_keeps_its_offset
+    variants:
+      cypher: "WITH time('10:00:00+01:00') AS t RETURN toString(t) AS text, t.hour AS hour, t.offset AS offset, toString(t + duration('PT30M')) AS later"
+    expect:
+      rows:
+        - ["10:00:00+01:00", 10, "+01:00", "10:30:00+01:00"]
+
+  - name: cypher_time_without_an_offset_is_at_utc
+    variants:
+      cypher: "RETURN toString(time('10:00:00')) AS t, toString(time({hour: 10, minute: 30, timezone: '-05:00'})) AS m, toString(localtime('10:00:00')) AS l"
+    expect:
+      rows:
+        - ["10:00:00Z", "10:30:00-05:00", "10:00:00"]
+
+  - name: cypher_keeps_zoned_and_local_times_apart
+    variants:
+      cypher: "RETURN time('09:00:00Z') = localtime('09:00:00') AS eq, time('09:00:00Z') < localtime('10:00:00') AS lt, time('10:00:00+01:00') = time('09:00:00Z') AS same_instant"
+    expect:
+      rows:
+        - [false, null, true]
+
+  - name: gql_zoned_time_without_an_offset_is_at_utc
+    query: "RETURN toString(zonedTime('10:00:00')) AS t, zonedTime('10:00:00') = local_time('10:00:00') AS eq"
+    expect:
+      rows:
+        - ["10:00:00Z", true]
+
+  - name: cypher_time_of_a_zoned_datetime_keeps_its_offset
+    variants:
+      cypher: "RETURN toString(time(datetime('2024-03-15T10:00:00+01:00'))) AS t"
+    expect:
+      rows:
+        - ["10:00:00+01:00"]
+
+  - name: gql_finds_stored_times_at_the_same_instant
+    setup:
+      - "INSERT (:Shift {name: 'early', at: zonedTime('09:00:00+01:00')}), (:Shift {name: 'local', at: local_time('08:00:00')})"
+    query: "MATCH (s:Shift) WHERE s.at = zonedTime('08:00:00Z') RETURN s.name AS name"
+    expect:
+      rows:
+        - [early]
+        - [local]
+
+  - name: cypher_finds_only_stored_zoned_times
+    setup:
+      - "INSERT (:Shift {name: 'early', at: zonedTime('09:00:00+01:00')}), (:Shift {name: 'local', at: local_time('08:00:00')})"
+    variants:
+      cypher: "MATCH (s:Shift) WHERE s.at = time('08:00:00Z') RETURN s.name AS name"
+    expect:
+      rows:
+        - [early]
+
+  - name: gql_finds_stored_times_at_the_same_instant_through_an_index
+    setup:
+      - "INSERT (:Shift {name: 'early', at: zonedTime('09:00:00+01:00')}), (:Shift {name: 'local', at: local_time('08:00:00')})"
+      - "CREATE INDEX shift_at FOR (s:Shift) ON (s.at)"
+    query: "MATCH (s:Shift) WHERE s.at = zonedTime('08:00:00Z') RETURN s.name AS name"
+    expect:
+      rows:
+        - [early]
+        - [local]
+
+  - name: cypher_finds_only_stored_zoned_times_through_an_index
+    setup:
+      - "INSERT (:Shift {name: 'early', at: zonedTime('09:00:00+01:00')}), (:Shift {name: 'local', at: local_time('08:00:00')})"
+      - "CREATE INDEX shift_at FOR (s:Shift) ON (s.at)"
+    variants:
+      cypher: "MATCH (s:Shift) WHERE s.at = time('08:00:00Z') RETURN s.name AS name"
+    expect:
+      rows:
+        - [early]

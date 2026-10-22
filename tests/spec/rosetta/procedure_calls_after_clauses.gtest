@@ -1,0 +1,93 @@
+# A procedure call after other clauses runs once per row of its input, in GQL
+# and Cypher (openCypher 9, CALL; ISO GQL <call procedure statement> in a
+# linear statement): the rows multiply, the row's variables stay visible, and
+# an input without rows calls nothing.
+
+meta:
+  language: gql
+  model: lpg
+  title: Procedure calls after other clauses
+  dataset: empty
+  requires: [cypher]
+
+tests:
+
+  - name: a_call_after_match_runs_once_per_row
+    # Two people, two labels: four rows.
+    setup:
+      - "INSERT (:Person {name: 'Alix'}), (:Person {name: 'Gus'}), (:City {name: 'Paris'})"
+    variants:
+      gql: "MATCH (p:Person) CALL db.labels() YIELD label RETURN count(*) AS c"
+      cypher: "MATCH (p:Person) CALL db.labels() YIELD label RETURN count(*) AS c"
+    expect:
+      rows:
+        - [4]
+
+  - name: the_row_variables_stay_visible_after_the_call
+    setup:
+      - "INSERT (:Person {name: 'Alix'}), (:City {name: 'Paris'})"
+    variants:
+      gql: "MATCH (p:Person) CALL db.labels() YIELD label RETURN p.name AS name, label ORDER BY label"
+      cypher: "MATCH (p:Person) CALL db.labels() YIELD label RETURN p.name AS name, label ORDER BY label"
+    expect:
+      ordered: true
+      rows:
+        - [Alix, City]
+        - [Alix, Person]
+
+  - name: a_call_after_unwind_runs_for_each_item
+    setup:
+      - "INSERT (:Person {name: 'Alix'})"
+    variants:
+      gql: "UNWIND [1, 2, 3] AS x CALL db.labels() YIELD label RETURN x, label ORDER BY x"
+      cypher: "UNWIND [1, 2, 3] AS x CALL db.labels() YIELD label RETURN x, label ORDER BY x"
+    expect:
+      ordered: true
+      rows:
+        - [1, Person]
+        - [2, Person]
+        - [3, Person]
+
+  - name: an_input_without_rows_calls_nothing
+    setup:
+      - "INSERT (:Person {name: 'Alix'})"
+    variants:
+      gql: "MATCH (p:Missing) CALL db.labels() YIELD label RETURN count(*) AS c"
+      cypher: "MATCH (p:Missing) CALL db.labels() YIELD label RETURN count(*) AS c"
+    expect:
+      rows:
+        - [0]
+
+  - name: a_yield_where_filters_each_row
+    setup:
+      - "INSERT (:Person {name: 'Alix'}), (:Person {name: 'Gus'}), (:City {name: 'Paris'})"
+    variants:
+      gql: "MATCH (p:Person) CALL db.labels() YIELD label WHERE label = 'City' RETURN p.name AS name, label ORDER BY name"
+      cypher: "MATCH (p:Person) CALL db.labels() YIELD label WHERE label = 'City' RETURN p.name AS name, label ORDER BY name"
+    expect:
+      ordered: true
+      rows:
+        - [Alix, City]
+        - [Gus, City]
+
+  - name: a_yield_alias_after_a_match
+    setup:
+      - "INSERT (:Person {name: 'Vincent'})-[:KNOWS]->(:Person {name: 'Jules'})"
+    variants:
+      gql: "MATCH (p:Person {name: 'Vincent'}) CALL db.relationshipTypes() YIELD relationshipType AS t RETURN p.name AS name, t"
+      cypher: "MATCH (p:Person {name: 'Vincent'}) CALL db.relationshipTypes() YIELD relationshipType AS t RETURN p.name AS name, t"
+    expect:
+      rows:
+        - [Vincent, KNOWS]
+
+  - name: an_aggregate_over_the_rows_after_the_call
+    setup:
+      - "INSERT (:Person {name: 'Alix'}), (:Person {name: 'Gus'}), (:City {name: 'Paris'})"
+    variants:
+      gql: "MATCH (p:Person) CALL db.labels() YIELD label RETURN label, count(p) AS people ORDER BY label"
+      cypher: "MATCH (p:Person) CALL db.labels() YIELD label RETURN label, count(p) AS people ORDER BY label"
+    expect:
+      ordered: true
+      rows:
+        - [City, 2]
+        - [Person, 2]

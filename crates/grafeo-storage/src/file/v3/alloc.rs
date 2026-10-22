@@ -154,6 +154,25 @@ impl PageAllocator {
         Ok(PageRun { first, count })
     }
 
+    /// Allocates `count` contiguous pages from the first gap that fits and
+    /// ends at or before page `limit`; `None`, changing nothing, when no such
+    /// gap is free (nothing is allocated at the end).
+    pub fn allocate_before(&mut self, count: u64, limit: u64) -> Option<PageRun> {
+        if count == 0 {
+            return None;
+        }
+        let (first, gap) = self
+            .free
+            .range(..limit)
+            .find(|&(&first, &gap)| gap >= count && first + count <= limit)
+            .map(|(&first, &gap)| (first, gap))?;
+        self.free.remove(&first);
+        if gap > count {
+            self.free.insert(first + count, gap - count);
+        }
+        Some(PageRun { first, count })
+    }
+
     /// Page number one past the last page in use or allocated.
     #[must_use]
     pub fn end_page(&self) -> u64 {
@@ -337,5 +356,35 @@ mod tests {
         };
         assert!(long.end().is_err(), "{long:?} ends past the last page");
         assert_eq!(long.offset().unwrap(), 12288);
+    }
+
+    #[test]
+    fn allocate_before_takes_a_gap_that_ends_by_the_limit_or_nothing() {
+        let used = [
+            PageRun { first: 3, count: 1 },
+            PageRun { first: 6, count: 1 },
+            PageRun {
+                first: 10,
+                count: 2,
+            },
+        ];
+        let mut pages = PageAllocator::from_used(used).unwrap();
+        assert_eq!(
+            pages.allocate_before(3, 6),
+            None,
+            "the gap at 4 holds two pages"
+        );
+        assert_eq!(
+            pages.allocate_before(3, 10),
+            Some(PageRun { first: 7, count: 3 })
+        );
+        assert_eq!(pages.allocate_before(1, 4), None, "no gap ends by page 4");
+        assert_eq!(
+            pages.allocate_before(2, 12),
+            Some(PageRun { first: 4, count: 2 })
+        );
+        assert_eq!(pages.allocate_before(1, 100), None, "no gap is left");
+        assert_eq!(pages.allocate_before(0, 100), None);
+        assert_eq!(pages.end_page(), 12, "nothing was taken at the end");
     }
 }

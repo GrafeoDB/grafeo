@@ -45,7 +45,7 @@ impl Transaction {
     pub async fn execute(
         &self,
         query: String,
-        params: Option<serde_json::Value>,
+        #[napi(ts_arg_type = "any | undefined | null")] params: Option<crate::types::Params>,
     ) -> Result<QueryResult> {
         self.execute_language_impl("gql", query, params).await
     }
@@ -115,15 +115,14 @@ impl Transaction {
         &self,
         language: &'static str,
         query: String,
-        params: Option<serde_json::Value>,
+        params: Option<crate::types::Params>,
     ) -> Result<QueryResult> {
         if self.state.load(Ordering::Acquire) != ACTIVE {
             return Err(
                 NodeGrafeoError::Transaction("Transaction is no longer active".into()).into(),
             );
         }
-        let param_map = grafeo_bindings_common::json::json_params_to_map(params.as_ref())
-            .map_err(|msg| napi::Error::from(NodeGrafeoError::InvalidArgument(msg)))?;
+        let param_map = params.map(crate::types::Params::into_map).transpose()?;
 
         let session = Arc::clone(&self.session);
         let mut result = tokio::task::spawn_blocking(move || -> Result<_> {
@@ -146,6 +145,7 @@ impl Transaction {
         let exec_time = result.execution_time_ms;
         let scanned = result.rows_scanned;
         let counters = result.counters;
+        let profile = result.profile.take();
 
         Ok(QueryResult::with_metrics(
             columns,
@@ -155,10 +155,21 @@ impl Transaction {
             exec_time,
             scanned,
         )
-        .with_counters(counters))
+        .with_counters(counters)
+        .with_profile(profile))
     }
 
     pub(crate) fn new(db: Arc<RwLock<GrafeoDB>>, isolation_level: Option<&str>) -> Result<Self> {
+        let session = db.read().session();
+        Self::begin(db, session, isolation_level)
+    }
+
+    /// Begins a transaction in `session`, which works in the graph it selects.
+    pub(crate) fn begin(
+        db: Arc<RwLock<GrafeoDB>>,
+        mut session: grafeo_engine::Session,
+        isolation_level: Option<&str>,
+    ) -> Result<Self> {
         // Parse isolation level string
         let level = match isolation_level {
             Some("read_committed") => {
@@ -173,11 +184,6 @@ impl Transaction {
                 ))
                 .into());
             }
-        };
-
-        let mut session = {
-            let db_guard = db.read();
-            db_guard.session()
         };
 
         // Begin the transaction with the specified isolation level
@@ -223,7 +229,7 @@ impl Transaction {
     pub async fn execute_cypher(
         &self,
         query: String,
-        params: Option<serde_json::Value>,
+        #[napi(ts_arg_type = "any | undefined | null")] params: Option<crate::types::Params>,
     ) -> Result<QueryResult> {
         self.execute_language_impl("cypher", query, params).await
     }
@@ -237,7 +243,7 @@ impl Transaction {
     pub async fn execute_sql(
         &self,
         query: String,
-        params: Option<serde_json::Value>,
+        #[napi(ts_arg_type = "any | undefined | null")] params: Option<crate::types::Params>,
     ) -> Result<QueryResult> {
         self.execute_language_impl("sql", query, params).await
     }
@@ -251,7 +257,7 @@ impl Transaction {
     pub async fn execute_gremlin(
         &self,
         query: String,
-        params: Option<serde_json::Value>,
+        #[napi(ts_arg_type = "any | undefined | null")] params: Option<crate::types::Params>,
     ) -> Result<QueryResult> {
         self.execute_language_impl("gremlin", query, params).await
     }
@@ -265,7 +271,7 @@ impl Transaction {
     pub async fn execute_graphql(
         &self,
         query: String,
-        params: Option<serde_json::Value>,
+        #[napi(ts_arg_type = "any | undefined | null")] params: Option<crate::types::Params>,
     ) -> Result<QueryResult> {
         self.execute_language_impl("graphql", query, params).await
     }
@@ -279,7 +285,7 @@ impl Transaction {
     pub async fn execute_sparql(
         &self,
         query: String,
-        params: Option<serde_json::Value>,
+        #[napi(ts_arg_type = "any | undefined | null")] params: Option<crate::types::Params>,
     ) -> Result<QueryResult> {
         self.execute_language_impl("sparql", query, params).await
     }

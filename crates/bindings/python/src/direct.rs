@@ -25,7 +25,9 @@ pub(crate) fn params(
     };
     let mut map = HashMap::with_capacity(params.len());
     for (key, value) in params.iter() {
-        map.insert(key.extract::<String>()?, PyValue::from_py(&value)?);
+        let name = key.extract::<String>()?;
+        let value = PyValue::from_py_named(&value, "parameter", &name)?;
+        map.insert(name, value);
     }
     Ok(Some(map))
 }
@@ -40,10 +42,9 @@ pub(crate) fn properties(
     properties
         .iter()
         .map(|(key, value)| {
-            Ok((
-                PropertyKey::new(key.extract::<String>()?),
-                PyValue::from_py(&value)?,
-            ))
+            let name = key.extract::<String>()?;
+            let value = PyValue::from_py_named(&value, "property", &name)?;
+            Ok((PropertyKey::new(name), value))
         })
         .collect()
 }
@@ -71,6 +72,7 @@ pub(crate) fn query_result(mut result: QueryResult) -> PyQueryResult {
     let execution_time = result.execution_time_ms;
     let rows_scanned = result.rows_scanned;
     let counters = result.counters;
+    let profile = result.profile.take();
     let mut query_result = PyQueryResult::with_metrics(
         columns,
         result.into_rows(),
@@ -80,19 +82,19 @@ pub(crate) fn query_result(mut result: QueryResult) -> PyQueryResult {
         rows_scanned,
     );
     query_result.counters = counters;
+    query_result.profile = profile;
     query_result
 }
 
-/// Runs a query in `language` in the session.
+/// Runs a query in `language` in the session, with parameters converted by
+/// [`params`]. It touches no Python object, so it runs with the GIL released.
 pub(crate) fn run(
     session: &Session,
     language: &str,
     query: &str,
-    query_params: Option<&Bound<'_, PyDict>>,
-) -> PyResult<PyQueryResult> {
-    let result = session
-        .execute_language(query, language, params(query_params)?)
-        .map_err(PyGrafeoError::from)?;
+    query_params: Option<HashMap<String, Value>>,
+) -> Result<PyQueryResult, PyGrafeoError> {
+    let result = session.execute_language(query, language, query_params)?;
     Ok(query_result(result))
 }
 
@@ -172,11 +174,11 @@ impl DirectTarget for Session {
     }
 
     fn node(&self, id: NodeId) -> grafeo_common::utils::error::Result<Option<Node>> {
-        Ok(self.get_node(id))
+        self.get_node(id)
     }
 
     fn edge(&self, id: EdgeId) -> grafeo_common::utils::error::Result<Option<Edge>> {
-        Ok(self.get_edge(id))
+        self.get_edge(id)
     }
 
     fn upsert_nodes(
@@ -219,11 +221,11 @@ impl DirectTarget for GrafeoDB {
     }
 
     fn node(&self, id: NodeId) -> grafeo_common::utils::error::Result<Option<Node>> {
-        Ok(self.get_node(id))
+        self.get_node(id)
     }
 
     fn edge(&self, id: EdgeId) -> grafeo_common::utils::error::Result<Option<Edge>> {
-        Ok(self.get_edge(id))
+        self.get_edge(id)
     }
 
     fn upsert_nodes(
@@ -293,39 +295,12 @@ impl DirectTarget for GraphHandle<'_> {
     }
 }
 
-/// Upserts rows as nodes and returns the summary as a dict.
-pub(crate) fn upsert_nodes<'py>(
-    py: Python<'py>,
-    target: &impl DirectTarget,
-    labels: &[String],
-    rows: &Bound<'_, PyList>,
-    key: &str,
-    replace: bool,
-) -> PyResult<Bound<'py, PyDict>> {
-    let labels: Vec<&str> = labels.iter().map(String::as_str).collect();
-    let summary = target
-        .upsert_nodes(&labels, key, properties_list(rows)?, replace)
-        .map_err(PyGrafeoError::from)?;
-    upsert_summary(py, &summary)
-}
-
-/// Upserts rows as edges and returns the summary as a dict.
-pub(crate) fn upsert_edges<'py>(
-    py: Python<'py>,
-    target: &impl DirectTarget,
-    edge_type: &str,
-    rows: &Bound<'_, PyList>,
-    options: &EdgeUpsertOptions,
-) -> PyResult<Bound<'py, PyDict>> {
-    let summary = target
-        .upsert_edges(edge_type, properties_list(rows)?, options)
-        .map_err(PyGrafeoError::from)?;
-    upsert_summary(py, &summary)
-}
-
 /// An upsert summary as a dict: `created`, `updated`, `skipped` and
 /// `skipped_rows`.
-fn upsert_summary<'py>(py: Python<'py>, summary: &UpsertSummary) -> PyResult<Bound<'py, PyDict>> {
+pub(crate) fn upsert_summary<'py>(
+    py: Python<'py>,
+    summary: &UpsertSummary,
+) -> PyResult<Bound<'py, PyDict>> {
     let dict = PyDict::new(py);
     dict.set_item("created", summary.created)?;
     dict.set_item("updated", summary.updated)?;
@@ -342,6 +317,45 @@ pub(crate) fn labels(value: &Bound<'_, PyAny>) -> PyResult<Vec<String>> {
     value.extract::<Vec<String>>().map_err(|_| {
         pyo3::exceptions::PyTypeError::new_err("labels must be a string or a list of strings")
     })
+}
+
+/// The direction of `get_node_edges`: `"out"`, `"in"` or `"both"`.
+pub(crate) fn direction(value: &str) -> PyResult<grafeo_engine::Direction> {
+    match value {
+        "out" | "outgoing" => Ok(grafeo_engine::Direction::Outgoing),
+        "in" | "incoming" => Ok(grafeo_engine::Direction::Incoming),
+        "both" => Ok(grafeo_engine::Direction::Both),
+        other => Err(pyo3::exceptions::PyValueError::new_err(format!(
+            "direction must be \"out\", \"in\" or \"both\", not {other:?}"
+        ))),
+    }
+}
+
+/// The edge types of `get_node_edges`: none for every type, a type, or a
+/// list or tuple of types.
+pub(crate) fn edge_types(value: Option<&Bound<'_, PyAny>>) -> PyResult<Vec<String>> {
+    match value {
+        None => Ok(Vec::new()),
+        Some(value) if value.is_none() => Ok(Vec::new()),
+        Some(value) => {
+            if let Ok(edge_type) = value.extract::<String>() {
+                return Ok(vec![edge_type]);
+            }
+            value.extract::<Vec<String>>().map_err(|_| {
+                pyo3::exceptions::PyTypeError::new_err(
+                    "edge_types must be a string or a list of strings",
+                )
+            })
+        }
+    }
+}
+
+/// `(neighbor_id, edge_id)` pairs for Python.
+pub(crate) fn edge_pairs(edges: Vec<(NodeId, EdgeId)>) -> Vec<(u64, u64)> {
+    edges
+        .into_iter()
+        .map(|(neighbor, edge)| (neighbor.as_u64(), edge.as_u64()))
+        .collect()
 }
 
 /// Edges for a batch from `(src, dst, type)` or `(src, dst, type, properties)`

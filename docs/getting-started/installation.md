@@ -154,7 +154,7 @@ Or add it manually to `Cargo.toml`:
 
 ```toml
 [dependencies]
-grafeo = "0.5"
+grafeo = "0.6"
 ```
 
 ### Feature Flags
@@ -163,30 +163,36 @@ Grafeo uses **persona-based feature profiles** that describe use cases rather th
 
 ```toml
 [dependencies]
-# Default (lpg profile): GQL + AI + algorithms + parallel
-grafeo = "0.5"
+# Default: GQL + AI + algorithms + parallel + the database file, without a write-ahead log
+grafeo = "0.6"
 
 # Add RDF/SPARQL support
-grafeo = { version = "0.5", features = ["rdf"] }
+grafeo = { version = "0.6", features = ["rdf"] }
 
 # Graph analytics
-grafeo = { version = "0.5", features = ["analytics"] }
+grafeo = { version = "0.6", features = ["analytics"] }
 
 # Full feature set
-grafeo = { version = "0.5", default-features = false, features = ["enterprise"] }
+grafeo = { version = "0.6", default-features = false, features = ["enterprise"] }
 
 # Minimal: GQL only
-grafeo = { version = "0.5", default-features = false, features = ["gql"] }
+grafeo = { version = "0.6", default-features = false, features = ["gql"] }
 
 # With ONNX embedding generation (opt-in, ~17MB)
-grafeo = { version = "0.5", features = ["embed"] }
+grafeo = { version = "0.6", features = ["embed"] }
+```
+
+`GrafeoDB::open(path)` works with the default features, but they have no write-ahead log: commits reach the file when the database checkpoints (`close()`, dropping it, or `wal_checkpoint()`), and a process that crashes loses the commits since. For commits that survive a crash, add the `wal` feature (also in the `storage` group and the `lpg` profile):
+
+```toml
+grafeo = { version = "0.6", features = ["wal"] }
 ```
 
 #### Persona Profiles
 
 | Profile | Contents | Use case |
 |---------|----------|----------|
-| `lpg` | GQL, AI, algorithms, parallel | Default for libraries and apps |
+| `lpg` | GQL, Cypher, Gremlin, SQL/PGQ, storage (write-ahead log, spill, mmap) | Graph applications |
 | `rdf` | SPARQL, triple-store, ring-index | Knowledge graphs, linked data |
 | `analytics` | Algorithms, parallel | Graph analytics pipelines |
 | `ai` | Vector, text, hybrid search, CDC | RAG, semantic search |

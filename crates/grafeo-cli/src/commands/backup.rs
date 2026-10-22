@@ -6,11 +6,12 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 use grafeo_engine::GrafeoDB;
 
-use crate::output;
+use crate::output::{self, Format};
 use crate::{BackupCommands, OutputFormat};
 
 /// Run backup commands.
-pub fn run(cmd: BackupCommands, _format: OutputFormat, quiet: bool) -> Result<()> {
+pub fn run(cmd: BackupCommands, format: OutputFormat, quiet: bool) -> Result<()> {
+    let fmt: Format = format.into();
     match cmd {
         BackupCommands::Create { path, output: out } => {
             output::status(&format!("Creating backup of {}...", path.display()), quiet);
@@ -20,6 +21,13 @@ pub fn run(cmd: BackupCommands, _format: OutputFormat, quiet: bool) -> Result<()
                 .with_context(|| format!("Failed to create backup at {}", out.display()))?;
 
             output::success(&format!("Backup created at {}", out.display()), quiet);
+            output::print_record(
+                &[
+                    ("database", path.display().to_string().into()),
+                    ("backup", out.display().to_string().into()),
+                ],
+                fmt,
+            );
         }
         BackupCommands::Restore {
             backup,
@@ -28,6 +36,13 @@ pub fn run(cmd: BackupCommands, _format: OutputFormat, quiet: bool) -> Result<()
         } => {
             restore(&backup, &path, force, quiet)?;
             output::success(&format!("Database restored to {}", path.display()), quiet);
+            output::print_record(
+                &[
+                    ("backup", backup.display().to_string().into()),
+                    ("database", path.display().to_string().into()),
+                ],
+                fmt,
+            );
         }
         BackupCommands::Full { path, output: out } => {
             output::status(
@@ -49,6 +64,7 @@ pub fn run(cmd: BackupCommands, _format: OutputFormat, quiet: bool) -> Result<()
                 ),
                 quiet,
             );
+            output::print_record(&segment_fields(&segment), fmt);
         }
         BackupCommands::Incremental { path, output: out } => {
             output::status(
@@ -71,12 +87,32 @@ pub fn run(cmd: BackupCommands, _format: OutputFormat, quiet: bool) -> Result<()
                 ),
                 quiet,
             );
+            output::print_record(&segment_fields(&segment), fmt);
         }
         BackupCommands::Status { path } => {
             let manifest = GrafeoDB::read_backup_manifest(&path)
                 .with_context(|| format!("Failed to read manifest at {}", path.display()))?;
 
             match manifest {
+                Some(m) if fmt == Format::Json => {
+                    let segments: Vec<serde_json::Value> = m
+                        .segments
+                        .iter()
+                        .map(|segment| {
+                            serde_json::Value::Object(
+                                segment_fields(segment)
+                                    .into_iter()
+                                    .map(|(key, value)| (key.to_string(), value))
+                                    .collect(),
+                            )
+                        })
+                        .collect();
+                    output::print_record(
+                        &[("version", m.version.into()), ("segments", segments.into())],
+                        fmt,
+                    );
+                }
+                None if fmt == Format::Json => println!("null"),
                 Some(m) => {
                     println!("Backup manifest (version {})", m.version);
                     println!("Segments: {}", m.segments.len());
@@ -121,10 +157,31 @@ pub fn run(cmd: BackupCommands, _format: OutputFormat, quiet: bool) -> Result<()
                 &format!("Database restored to epoch {epoch} at {}", out.display()),
                 quiet,
             );
+            output::print_record(
+                &[
+                    ("backup_dir", backup_dir.display().to_string().into()),
+                    ("epoch", epoch.into()),
+                    ("database", out.display().to_string().into()),
+                ],
+                fmt,
+            );
         }
     }
 
     Ok(())
+}
+
+/// The fields of a backup segment, as `--format json` prints them.
+fn segment_fields(
+    segment: &grafeo_engine::database::backup::BackupSegment,
+) -> Vec<(&'static str, serde_json::Value)> {
+    vec![
+        ("kind", format!("{:?}", segment.kind).to_lowercase().into()),
+        ("file", segment.filename.clone().into()),
+        ("start_epoch", segment.start_epoch.as_u64().into()),
+        ("end_epoch", segment.end_epoch.as_u64().into()),
+        ("size_bytes", segment.size_bytes.into()),
+    ]
 }
 
 /// Restores the backup at `backup` to a database at `path`, replacing the

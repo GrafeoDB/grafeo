@@ -1,13 +1,13 @@
 //! Graph algorithms read the graph visible at the store's epoch: the nodes of
 //! `node_ids` and the visible edges between them. A store's adjacency also
-//! holds edges to a node a store-level `delete_node` removed without
-//! detaching it, and edges a transaction created and has not committed (to a
-//! node only that transaction sees, or between two visible nodes); an
-//! algorithm that followed them reported nodes outside the graph, or ran on
-//! another graph. Every algorithm must give, on a store with such leftovers,
-//! exactly what it gives on the same graph without them.
+//! holds deleted nodes and edges until a collect takes them out, and edges a
+//! transaction created and has not committed (to a node only that
+//! transaction sees, or between two visible nodes); an algorithm that
+//! followed them reported nodes outside the graph, or ran on another graph.
+//! Every algorithm must give, on a store with such leftovers, exactly what it
+//! gives on the same graph without them.
 
-#![cfg(all(feature = "lpg", feature = "algos"))]
+#![cfg(feature = "algos")]
 
 use grafeo_adapters::plugins::Parameters;
 use grafeo_adapters::plugins::algorithms::{
@@ -20,8 +20,10 @@ use grafeo_adapters::plugins::algorithms::{
     StronglyConnectedComponentsAlgorithm, SubgraphIsomorphismAlgorithm, TopologicalSortAlgorithm,
     TotalTrianglesAlgorithm,
 };
+use grafeo_common::types::ReadView;
 use grafeo_common::types::{NodeId, TransactionId, Value};
-use grafeo_core::graph::lpg::LpgStore;
+use grafeo_core::graph::GraphStore as _;
+use grafeo_core::graph::rowgroup::RowGroupStore;
 
 /// The people of both stores, in creation order: their ids are equal.
 const ALIX: u64 = 0;
@@ -31,8 +33,8 @@ const JULES: u64 = 4;
 
 /// Alix -> Gus -> Vincent -> Mia, Alix -> Jules -> Vincent, Gus -> Jules,
 /// with weights. A DAG, so topological sort has an answer.
-fn people() -> LpgStore {
-    let store = LpgStore::new().unwrap();
+fn people() -> RowGroupStore {
+    let store = RowGroupStore::new();
     let ids: Vec<NodeId> = (0..5).map(|_| store.create_node(&["Person"])).collect();
     for (src, dst, weight) in [
         (0, 1, 3),
@@ -50,11 +52,11 @@ fn people() -> LpgStore {
 }
 
 /// The same people, with what the adjacency holds beyond the visible graph:
-/// Butch, deleted at the store level while his edges remain (one of them to
-/// Alix, which would make a cycle), and an open transaction's new node Django
+/// Butch, deleted with his edges (one of them to Alix, which would make a
+/// cycle) and not collected yet, and an open transaction's new node Django
 /// and its new edges, among them one from Mia back to Alix (a cycle too) and
 /// a shortcut from Alix to Mia.
-fn people_with_leftovers() -> LpgStore {
+fn people_with_leftovers() -> RowGroupStore {
     let store = people();
     let node = |id: u64| NodeId::new(id);
 
@@ -63,10 +65,8 @@ fn people_with_leftovers() -> LpgStore {
         let edge = store.create_edge(src, dst, "KNOWS");
         store.set_edge_property(edge, "weight", Value::Int64(1));
     }
-    assert!(
-        store.delete_node(butch),
-        "Butch is deleted, his edges are not"
-    );
+    store.delete_node_edges(butch);
+    assert!(store.delete_node(butch), "Butch and his edges are deleted");
 
     let open = TransactionId::new(88);
     let epoch = store.current_epoch();
@@ -77,10 +77,12 @@ fn people_with_leftovers() -> LpgStore {
         (node(ALIX), node(MIA)),
         (node(MIA), node(ALIX)),
     ] {
-        store.create_edge_versioned(src, dst, "KNOWS", epoch, open);
+        store
+            .create_edge_versioned(src, dst, "KNOWS", epoch, open)
+            .unwrap();
     }
     assert_eq!(
-        store.node_ids(),
+        store.node_ids(ReadView::latest()).unwrap(),
         (0..5).map(NodeId::new).collect::<Vec<_>>(),
         "only the five people are visible"
     );
@@ -243,9 +245,11 @@ fn every_algorithm_reads_only_the_visible_graph() {
     let dirty = people_with_leftovers();
     let mut differ = Vec::new();
     for (name, algorithm, params) in algorithms_under_test() {
-        let expected = algorithm.execute(&clean, &params).unwrap();
+        let expected = algorithm
+            .execute(&clean, ReadView::latest(), &params)
+            .unwrap();
         let actual = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            algorithm.execute(&dirty, &params)
+            algorithm.execute(&dirty, ReadView::latest(), &params)
         }));
         match actual {
             Ok(Ok(actual)) => {
@@ -272,7 +276,7 @@ fn every_algorithm_reads_only_the_visible_graph() {
 fn traversals_skip_a_deleted_node_and_uncommitted_edges() {
     let dirty = people_with_leftovers();
     let alix = NodeId::new(ALIX);
-    let layers = algorithms::bfs_layers(&dirty, alix);
+    let layers = algorithms::bfs_layers(&dirty, ReadView::latest(), alix).unwrap();
     assert_eq!(
         layers,
         vec![
@@ -283,9 +287,16 @@ fn traversals_skip_a_deleted_node_and_uncommitted_edges() {
         ],
         "Mia is three hops away, Butch and Django are not reachable"
     );
-    assert_eq!(algorithms::dfs(&dirty, alix).len(), 5);
     assert_eq!(
-        algorithms::topological_sort(&dirty).map(|order| order.len()),
+        algorithms::dfs(&dirty, ReadView::latest(), alix)
+            .unwrap()
+            .len(),
+        5
+    );
+    assert_eq!(
+        algorithms::topological_sort(&dirty, ReadView::latest())
+            .unwrap()
+            .map(|order| order.len()),
         Some(5),
         "the cycles through Butch and the uncommitted edge are not in the graph"
     );

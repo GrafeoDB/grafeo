@@ -7,7 +7,6 @@
 //! cargo test -p grafeo-engine --all-features --test grafeo_memory_support
 //! ```
 
-#[cfg(feature = "temporal")]
 use grafeo_common::types::NodeId;
 use grafeo_common::types::{PropertyKey, Value};
 use grafeo_engine::GrafeoDB;
@@ -48,7 +47,7 @@ mod batch_create_with_props {
         assert_eq!(ids.len(), 2);
 
         // Verify properties
-        let node = db.get_node(ids[0]).unwrap();
+        let node = db.get_node(ids[0]).unwrap().unwrap();
         assert_eq!(
             node.properties.get(&PropertyKey::new("text")),
             Some(&Value::String("hello".into()))
@@ -86,7 +85,7 @@ mod batch_create_with_props {
         assert_eq!(ids.len(), 2);
 
         // Verify vector property
-        let node = db.get_node(ids[0]).unwrap();
+        let node = db.get_node(ids[0]).unwrap().unwrap();
         match node.properties.get(&PropertyKey::new("embedding")) {
             Some(Value::Vector(v)) => assert_eq!(v.len(), 3),
             other => panic!("Expected Vector, got {:?}", other),
@@ -127,8 +126,8 @@ mod batch_create_with_props {
             .unwrap();
         assert_eq!(ids.len(), 2);
 
-        let n1 = db.get_node(ids[0]).unwrap();
-        let n2 = db.get_node(ids[1]).unwrap();
+        let n1 = db.get_node(ids[0]).unwrap().unwrap();
+        let n2 = db.get_node(ids[1]).unwrap().unwrap();
         assert_eq!(n1.properties.len(), 2);
         assert_eq!(n2.properties.len(), 5);
     }
@@ -334,13 +333,21 @@ mod filter_optimization {
 // Temporal property versioning API
 // =============================================================================
 
-#[cfg(feature = "temporal")]
 mod temporal_versioning {
     use super::*;
 
+    /// A database that keeps its history: the versioning API reads it.
+    fn history_db() -> GrafeoDB {
+        GrafeoDB::with_config(
+            grafeo_engine::Config::in_memory()
+                .with_history_retention(grafeo_engine::HistoryRetention::Forever),
+        )
+        .unwrap()
+    }
+
     #[test]
     fn get_node_property_at_epoch() {
-        let db = db();
+        let db = history_db();
         let s = db.session();
 
         s.execute("INSERT (:Person {name: 'Alix'})").unwrap();
@@ -351,17 +358,21 @@ mod temporal_versioning {
         let e2 = db.current_epoch();
 
         // At epoch 1, name should be Alix
-        let val = db.get_node_property_at_epoch(NodeId(0), "name", e1);
+        let val = db
+            .get_node_property_at_epoch(NodeId(0), "name", e1)
+            .unwrap();
         assert_eq!(val, Some(Value::String("Alix".into())));
 
         // At current epoch, name should be Alicia
-        let val = db.get_node_property_at_epoch(NodeId(0), "name", e2);
+        let val = db
+            .get_node_property_at_epoch(NodeId(0), "name", e2)
+            .unwrap();
         assert_eq!(val, Some(Value::String("Alicia".into())));
     }
 
     #[test]
     fn get_node_property_history() {
-        let db = db();
+        let db = history_db();
         let s = db.session();
 
         s.execute("INSERT (:Person {name: 'Alix'})").unwrap();
@@ -370,7 +381,7 @@ mod temporal_versioning {
         s.execute("MATCH (p:Person {name: 'Alicia'}) SET p.name = 'Ali'")
             .unwrap();
 
-        let history = db.get_node_property_history(NodeId(0), "name");
+        let history = db.get_node_property_history(NodeId(0), "name").unwrap();
         assert_eq!(
             history.len(),
             3,
@@ -383,7 +394,7 @@ mod temporal_versioning {
 
     #[test]
     fn get_all_node_property_history() {
-        let db = db();
+        let db = history_db();
         let s = db.session();
 
         s.execute("INSERT (:Person {name: 'Alix', age: 30})")
@@ -391,7 +402,7 @@ mod temporal_versioning {
         s.execute("MATCH (p:Person {name: 'Alix'}) SET p.age = 31")
             .unwrap();
 
-        let all_history = db.get_all_node_property_history(NodeId(0));
+        let all_history = db.get_all_node_property_history(NodeId(0)).unwrap();
         // Should have entries for 'name' (1 version) and 'age' (2 versions)
         let name_hist: Vec<_> = all_history
             .iter()
@@ -410,38 +421,42 @@ mod temporal_versioning {
 
     #[test]
     fn property_at_epoch_returns_none_for_missing() {
-        let db = db();
+        let db = history_db();
         db.session()
             .execute("INSERT (:Person {name: 'Alix'})")
             .unwrap();
         let epoch = db.current_epoch();
 
         // Property that doesn't exist
-        let val = db.get_node_property_at_epoch(NodeId(0), "nonexistent", epoch);
+        let val = db
+            .get_node_property_at_epoch(NodeId(0), "nonexistent", epoch)
+            .unwrap();
         assert_eq!(val, None);
 
         // Node that doesn't exist
-        let val = db.get_node_property_at_epoch(NodeId(999), "name", epoch);
+        let val = db
+            .get_node_property_at_epoch(NodeId(999), "name", epoch)
+            .unwrap();
         assert_eq!(val, None);
     }
 
     #[test]
     fn property_history_empty_for_nonexistent() {
-        let db = db();
-        let history = db.get_node_property_history(NodeId(999), "name");
+        let db = history_db();
+        let history = db.get_node_property_history(NodeId(999), "name").unwrap();
         assert!(history.is_empty(), "{history:?}");
     }
 
     #[test]
     fn epochs_are_ascending() {
-        let db = db();
+        let db = history_db();
         let s = db.session();
 
         s.execute("INSERT (:Counter {val: 0})").unwrap();
         s.execute("MATCH (c:Counter) SET c.val = 1").unwrap();
         s.execute("MATCH (c:Counter) SET c.val = 2").unwrap();
 
-        let history = db.get_node_property_history(NodeId(0), "val");
+        let history = db.get_node_property_history(NodeId(0), "val").unwrap();
         let epochs: Vec<u64> = history.iter().map(|(e, _)| e.as_u64()).collect();
         assert_eq!(epochs, {
             let mut sorted = epochs.clone();

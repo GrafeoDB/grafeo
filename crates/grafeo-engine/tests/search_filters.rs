@@ -8,7 +8,7 @@
 //! cargo test -p grafeo-engine --features hybrid-search,lpg,gql --test search_filters
 //! ```
 
-#![cfg(all(feature = "hybrid-search", feature = "lpg"))]
+#![cfg(feature = "hybrid-search")]
 
 use std::collections::{BTreeSet, HashMap};
 
@@ -86,7 +86,7 @@ fn documents() -> GrafeoDB {
 
 /// The string property `key` of `node`.
 fn text_of(db: &GrafeoDB, node: NodeId, key: &str) -> String {
-    let found = db.get_node(node).expect("a found node exists");
+    let found = db.get_node(node).unwrap().expect("a found node exists");
     match found.properties.get(&PropertyKey::new(key)) {
         Some(Value::String(text)) => text.to_string(),
         other => panic!("node {node:?} has {other:?} for {key}"),

@@ -35,8 +35,8 @@ tempfile.workspace = true
 serde_json = "1"
 
 [features]
-default = ["lpg", "gql", "parallel"]
-lpg = ["grafeo-core/lpg"]    # Enable LPG model (MemoryBackend)
+default = ["gql", "parallel"]
+lpg = []  # Deprecated: the LPG store is always built, so this enables nothing. Removed in 0.7.0.
 gql = []                      # GQL parser (ISO/IEC 39075:2024)
 cypher = []                   # Cypher parser (openCypher 9.0)
 sparql = []                   # SPARQL parser (W3C SPARQL 1.1)
@@ -49,7 +49,7 @@ parallel = ["rayon", "grafeo-core/parallel"]  # Parallel algorithms (rayon)
 algos = []  # Graph algorithm plugin (SSSP, PageRank, centrality, community detection, etc.)
 # Convenience groups
 languages = ["gql", "cypher", "sparql", "gremlin", "graphql", "sql-pgq"]  # All query language parsers
-full = ["lpg", "languages", "triple-store", "parallel", "algos"]
+full = ["languages", "triple-store", "parallel", "algos"]
 
 tracing = ["dep:tracing", "grafeo-common/tracing"]  # Observability spans and events
 

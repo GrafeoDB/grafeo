@@ -12,19 +12,20 @@
 //!
 //! # Stability: Experimental
 //!
-//! This module is new in 0.5.40. Signatures may change before being promoted
-//! to Beta. Use from embedded callers that want first-row latency or bounded
-//! memory; use `Session::execute` when you want a fully materialized result.
+//! This module is new in 0.5.40. It may change or be removed in any release,
+//! with a CHANGELOG entry: see <https://grafeo.dev/stability/>. Use it from
+//! embedded callers that want first-row latency or bounded memory; use
+//! `Session::execute` when you want a fully materialized result.
 
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::time::Instant;
-
+use grafeo_common::clock::Instant;
 use grafeo_common::types::{LogicalType, Value};
 use grafeo_common::utils::error::{Error, QueryError, Result};
 use grafeo_core::execution::DataChunk;
 use grafeo_core::execution::operators::Operator;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use crate::database::QueryResult;
+use crate::transaction::ReadPin;
 
 /// RAII guard that increments/decrements a session's active-stream counter.
 ///
@@ -61,6 +62,8 @@ pub struct ResultStream<'session> {
     deadline: Option<Instant>,
     exhausted: bool,
     _guard: StreamGuard<'session>,
+    /// The pin of a stream read outside a transaction, held while it lives.
+    _pin: Option<ReadPin>,
 }
 
 impl<'s> ResultStream<'s> {
@@ -75,6 +78,7 @@ impl<'s> ResultStream<'s> {
         columns: Vec<String>,
         deadline: Option<Instant>,
         guard: StreamGuard<'s>,
+        pin: Option<ReadPin>,
     ) -> Result<Self> {
         QueryResult::validate_unique_columns(&columns)?;
         let len = columns.len();
@@ -85,6 +89,7 @@ impl<'s> ResultStream<'s> {
             deadline,
             exhausted: false,
             _guard: guard,
+            _pin: pin,
         })
     }
 
@@ -106,7 +111,7 @@ impl<'s> ResultStream<'s> {
     ///
     /// # Errors
     ///
-    /// Propagates operator errors and returns `Error::Query(QueryError::Timeout)`
+    /// Propagates operator errors and returns `Error::from(QueryError::Timeout)`
     /// if the session's query deadline has passed.
     pub fn next_chunk(&mut self) -> Result<Option<DataChunk>> {
         if self.exhausted {
@@ -207,7 +212,7 @@ impl Iterator for RowIterator<'_> {
 ///
 /// Used by language bindings (Python, Node.js, WASM) where Rust lifetimes
 /// cannot be expressed at the FFI boundary. The operator tree is `'static`
-/// because operators hold `Arc<dyn GraphStoreSearch>` rather than borrows; the
+/// because operators hold `Arc<dyn GraphStore>` rather than borrows; the
 /// stores remain alive as long as the stream does.
 ///
 /// Callers that need to tie the stream's lifetime to something else (e.g.
@@ -221,6 +226,8 @@ pub struct OwnedResultStream {
     column_types: Vec<LogicalType>,
     deadline: Option<Instant>,
     exhausted: bool,
+    /// The pin of a stream read outside a transaction, held while it lives.
+    _pin: Option<ReadPin>,
 }
 
 impl std::fmt::Debug for OwnedResultStream {
@@ -246,6 +253,7 @@ impl OwnedResultStream {
         operator: Box<dyn Operator>,
         columns: Vec<String>,
         deadline: Option<Instant>,
+        pin: Option<ReadPin>,
     ) -> Result<Self> {
         QueryResult::validate_unique_columns(&columns)?;
         let len = columns.len();
@@ -255,6 +263,7 @@ impl OwnedResultStream {
             column_types: vec![LogicalType::Any; len],
             deadline,
             exhausted: false,
+            _pin: pin,
         })
     }
 
@@ -370,14 +379,11 @@ impl Iterator for OwnedRowIterator {
 // ---------------------------------------------------------------------------
 
 fn check_deadline(deadline: Option<Instant>) -> Result<()> {
-    #[cfg(not(target_arch = "wasm32"))]
     if let Some(d) = deadline
         && Instant::now() >= d
     {
-        return Err(Error::Query(QueryError::timeout()));
+        return Err(Error::from(QueryError::timeout()));
     }
-    #[cfg(target_arch = "wasm32")]
-    let _ = deadline;
     Ok(())
 }
 

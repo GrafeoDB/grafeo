@@ -13,9 +13,11 @@ Core graph storage and execution engine.
 ## Graph Storage
 
 ```rust
-use grafeo_core::graph::lpg::{LpgStore, NodeRecord, EdgeRecord};
+use grafeo_core::graph::rowgroup::RowGroupStore;
 
-let store = LpgStore::new();
+// A raw write commits at once: for tests, loaders and seeding. A database
+// writes through the store contract (`GraphBackend`), in transactions.
+let store = RowGroupStore::new();
 let node_id = store.create_node(&["Person"]);
 ```
 

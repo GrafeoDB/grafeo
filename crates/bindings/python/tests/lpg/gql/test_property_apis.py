@@ -301,6 +301,22 @@ class TestGetNodesByLabel:
         nodes = db.get_nodes_by_label("NonExistent")
         assert len(nodes) == 0
 
+    def test_lists_the_committed_nodes_only(self, populated_db):
+        """A deleted node, a removed label and an open transaction's node are
+        not listed: the nodes and their values come from one committed state.
+        """
+        db = populated_db["db"]
+        db.delete_node(populated_db["vincent"].id)
+        db.remove_node_label(populated_db["gus"].id, "Person")
+        db.set_node_property(populated_db["alix"].id, "age", 31)
+        tx = db.begin_transaction()
+        tx.execute("INSERT (:Person {name: 'Mia'})")
+        nodes = db.get_nodes_by_label("Person")
+        assert [(node_id, props["name"], props["age"]) for node_id, props in nodes] == [
+            (populated_db["alix"].id, "Alix", 31)
+        ]
+        tx.rollback()
+
 
 class TestGetPropertyBatch:
     """Test get_property_batch() method."""

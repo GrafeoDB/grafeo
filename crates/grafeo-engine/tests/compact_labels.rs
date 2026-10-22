@@ -10,8 +10,9 @@
 //! cargo test -p grafeo-engine --all-features --test compact_labels
 //! ```
 
-#![cfg(all(feature = "lpg", feature = "gql"))]
+#![cfg(feature = "gql")]
 
+use grafeo_common::types::ReadView;
 use grafeo_common::types::Value;
 use grafeo_engine::GrafeoDB;
 
@@ -197,6 +198,7 @@ fn the_direct_api_reads_each_label_of_a_compacted_node() {
     db.compact().unwrap();
     let mut labels: Vec<String> = db
         .get_node(alix)
+        .unwrap()
         .expect("Alix")
         .labels
         .iter()
@@ -204,10 +206,20 @@ fn the_direct_api_reads_each_label_of_a_compacted_node() {
         .collect();
     labels.sort();
     assert_eq!(labels, ["Employee", "Person"]);
-    let mut people = db.graph_store().nodes_by_label("Person");
+    let mut people = db
+        .snapshot()
+        .unwrap()
+        .nodes_by_label("Person", ReadView::latest())
+        .unwrap();
     people.sort_unstable();
     assert_eq!(people, [alix, gus]);
-    assert_eq!(db.graph_store().nodes_by_label("Employee"), [alix]);
+    assert_eq!(
+        db.snapshot()
+            .unwrap()
+            .nodes_by_label("Employee", ReadView::latest())
+            .unwrap(),
+        [alix]
+    );
 }
 
 /// A file keeps each label of a node through `compact()`, a close and

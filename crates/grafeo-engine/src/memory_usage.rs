@@ -8,6 +8,12 @@
 //! add fields. [`GrafeoDB::memory_usage`](crate::GrafeoDB::memory_usage)
 //! returns one; another crate that needs its own starts from
 //! `MemoryUsage::default()` and sets the fields it fills.
+//!
+//! # Stability: Experimental
+//!
+//! The call `GrafeoDB::memory_usage` is stable; the fields of these types,
+//! and what each one counts, follow the storage engine and may change in any
+//! release, with a CHANGELOG entry: see <https://grafeo.dev/stability/>.
 
 pub use grafeo_common::memory::usage::{
     IndexMemory, MvccMemory, NamedMemory, StoreMemory, StringPoolMemory,
@@ -15,6 +21,11 @@ pub use grafeo_common::memory::usage::{
 use serde::{Deserialize, Serialize};
 
 /// Hierarchical memory usage breakdown for the entire database.
+///
+/// # Stability: Experimental
+///
+/// Its fields, and what each one counts, may change in any release (see the
+/// [module documentation](crate::memory_usage)).
 ///
 /// ```
 /// use grafeo_engine::MemoryUsage;

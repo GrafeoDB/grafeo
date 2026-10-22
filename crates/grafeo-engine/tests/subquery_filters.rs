@@ -6,7 +6,7 @@
 //! cargo test -p grafeo-engine --all-features --test subquery_filters
 //! ```
 
-#![cfg(all(feature = "lpg", feature = "gql"))]
+#![cfg(feature = "gql")]
 
 use grafeo_common::types::Value;
 use grafeo_engine::GrafeoDB;

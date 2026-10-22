@@ -26,19 +26,17 @@ pub fn run(path: &Path, mode: GraphMode, format: OutputFormat, quiet: bool) -> R
     let db = GrafeoDB::with_config(config)
         .with_context(|| format!("Failed to create database at {}", path.display()))?;
 
-    let info = db.info();
+    let info = db.info()?;
 
     let fmt: Format = format.into();
     match fmt {
         Format::Json => {
-            if !quiet {
-                let output = serde_json::json!({
-                    "path": path.display().to_string(),
-                    "mode": format!("{:?}", info.mode),
-                    "wal_enabled": info.wal_enabled,
-                });
-                println!("{}", serde_json::to_string_pretty(&output)?);
-            }
+            let output = serde_json::json!({
+                "path": path.display().to_string(),
+                "mode": format!("{:?}", info.mode),
+                "wal_enabled": info.wal_enabled,
+            });
+            println!("{}", serde_json::to_string_pretty(&output)?);
         }
         Format::Table | Format::Csv => {
             output::success(

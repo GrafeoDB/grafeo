@@ -6,25 +6,32 @@
 use std::collections::{BTreeMap, VecDeque};
 use std::sync::OnceLock;
 
+#[cfg(test)]
+use grafeo_common::types::PropertyKey;
 use grafeo_common::types::{EdgeId, NodeId, Value};
 use grafeo_common::utils::error::Error;
 use grafeo_common::utils::hash::FxHashMap;
 use grafeo_core::graph::Direction;
 use grafeo_core::graph::GraphStore;
-#[cfg(all(test, feature = "lpg"))]
-use grafeo_core::graph::lpg::LpgStore;
+#[cfg(test)]
+#[cfg(test)]
+use grafeo_core::graph::rowgroup::RowGroupStore;
 
 use super::super::{AlgorithmResult, ParameterDef, ParameterType};
-use super::traits::{impl_algorithm, node_id_from_param, visible_edges_from};
+use super::traits::{impl_algorithm, node_id_from_param};
 
 // ============================================================================
 // Property Extraction
 // ============================================================================
 
 /// Extracts capacity from an edge property.
-fn extract_capacity(store: &dyn GraphStore, edge_id: EdgeId, capacity_prop: Option<&str>) -> f64 {
+fn extract_capacity(
+    store: &super::traits::GraphView<'_>,
+    edge_id: EdgeId,
+    capacity_prop: Option<&str>,
+) -> f64 {
     if let Some(prop_name) = capacity_prop
-        && let Some(edge) = store.get_edge(edge_id)
+        && let Some(edge) = store.edge(edge_id)
         && let Some(value) = edge.get_property(prop_name)
     {
         return match value {
@@ -37,9 +44,13 @@ fn extract_capacity(store: &dyn GraphStore, edge_id: EdgeId, capacity_prop: Opti
 }
 
 /// Extracts cost from an edge property.
-fn extract_cost(store: &dyn GraphStore, edge_id: EdgeId, cost_prop: Option<&str>) -> f64 {
+fn extract_cost(
+    store: &super::traits::GraphView<'_>,
+    edge_id: EdgeId,
+    cost_prop: Option<&str>,
+) -> f64 {
     if let Some(prop_name) = cost_prop
-        && let Some(edge) = store.get_edge(edge_id)
+        && let Some(edge) = store.edge(edge_id)
         && let Some(value) = edge.get_property(prop_name)
     {
         return match value {
@@ -90,14 +101,31 @@ pub struct MaxFlowResult {
 ///
 /// O(V × E × (E + V log V)): O(V × E) augmenting paths, each found by a
 /// search over the residual graph and applied through its ordered maps.
+///
+/// # Errors
+///
+/// The error of a read of the store that fails.
 pub fn max_flow(
     store: &dyn GraphStore,
+    view: grafeo_common::types::ReadView,
+    source: NodeId,
+    sink: NodeId,
+    capacity_property: Option<&str>,
+) -> grafeo_common::utils::error::Result<Option<MaxFlowResult>> {
+    let graph = super::traits::GraphView::new(store, view);
+    let found = max_flow_on(&graph, source, sink, capacity_property);
+    graph.finish(found)
+}
+
+/// [`max_flow`] on the graph a [`GraphView`](super::traits::GraphView) reads.
+pub(crate) fn max_flow_on(
+    store: &super::traits::GraphView<'_>,
     source: NodeId,
     sink: NodeId,
     capacity_property: Option<&str>,
 ) -> Option<MaxFlowResult> {
     // Verify source and sink exist
-    if store.get_node(source).is_none() || store.get_node(sink).is_none() {
+    if store.node(source).is_none() || store.node(sink).is_none() {
         return None;
     }
 
@@ -128,7 +156,7 @@ pub fn max_flow(
     let mut capacity: Vec<BTreeMap<usize, f64>> = vec![BTreeMap::new(); n];
 
     for (i, &node) in nodes.iter().enumerate() {
-        for (neighbor, edge_id) in visible_edges_from(store, node, Direction::Outgoing) {
+        for (neighbor, edge_id) in store.edges(node, Direction::Outgoing) {
             if let Some(&j) = node_to_idx.get(&neighbor) {
                 let cap = extract_capacity(store, edge_id, capacity_property);
                 *capacity[i].entry(j).or_insert(0.0) += cap;
@@ -258,15 +286,33 @@ pub struct MinCostFlowResult {
 /// # Complexity
 ///
 /// O(V² × E × max_flow)
+///
+/// # Errors
+///
+/// The error of a read of the store that fails.
 pub fn min_cost_max_flow(
     store: &dyn GraphStore,
+    view: grafeo_common::types::ReadView,
+    source: NodeId,
+    sink: NodeId,
+    capacity_property: Option<&str>,
+    cost_property: Option<&str>,
+) -> grafeo_common::utils::error::Result<Option<MinCostFlowResult>> {
+    let graph = super::traits::GraphView::new(store, view);
+    let found = min_cost_max_flow_on(&graph, source, sink, capacity_property, cost_property);
+    graph.finish(found)
+}
+
+/// [`min_cost_max_flow`] on the graph a [`GraphView`](super::traits::GraphView) reads.
+pub(crate) fn min_cost_max_flow_on(
+    store: &super::traits::GraphView<'_>,
     source: NodeId,
     sink: NodeId,
     capacity_property: Option<&str>,
     cost_property: Option<&str>,
 ) -> Option<MinCostFlowResult> {
     // Verify source and sink exist
-    if store.get_node(source).is_none() || store.get_node(sink).is_none() {
+    if store.node(source).is_none() || store.node(sink).is_none() {
         return None;
     }
 
@@ -298,7 +344,7 @@ pub fn min_cost_max_flow(
     let mut cost: Vec<BTreeMap<usize, f64>> = vec![BTreeMap::new(); n];
 
     for (i, &node) in nodes.iter().enumerate() {
-        for (neighbor, edge_id) in visible_edges_from(store, node, Direction::Outgoing) {
+        for (neighbor, edge_id) in store.edges(node, Direction::Outgoing) {
             if let Some(&j) = node_to_idx.get(&neighbor) {
                 let cap = extract_capacity(store, edge_id, capacity_property);
                 let edge_cost = extract_cost(store, edge_id, cost_property);
@@ -457,7 +503,7 @@ impl_algorithm! {
         let sink = node_id_from_param(sink_id, "sink")?;
         let capacity_prop = params.get_string("capacity");
 
-        let result = max_flow(store, source, sink, capacity_prop)
+        let result = max_flow_on(store, source, sink, capacity_prop)
             .ok_or_else(|| Error::InvalidValue("Invalid source or sink node".to_string()))?;
 
         let mut output = AlgorithmResult::new(vec![
@@ -552,7 +598,7 @@ impl_algorithm! {
         let capacity_prop = params.get_string("capacity");
         let cost_prop = params.get_string("cost");
 
-        let result = min_cost_max_flow(store, source, sink, capacity_prop, cost_prop)
+        let result = min_cost_max_flow_on(store, source, sink, capacity_prop, cost_prop)
             .ok_or_else(|| Error::InvalidValue("Invalid source or sink node".to_string()))?;
 
         let mut output = AlgorithmResult::new(vec![
@@ -586,11 +632,12 @@ impl_algorithm! {
 // Tests
 // ============================================================================
 
-#[cfg(all(test, feature = "lpg"))]
+#[cfg(test)]
 mod tests {
     use super::*;
+    use grafeo_common::types::ReadView;
 
-    fn create_simple_flow_graph() -> LpgStore {
+    fn create_simple_flow_graph() -> RowGroupStore {
         // Simple flow network:
         //   0 --[5]--> 1 --[3]--> 3
         //   |          |
@@ -598,28 +645,53 @@ mod tests {
         //   |          |
         //   v          v
         //   2 --[4]--> 3
-        let store = LpgStore::new().unwrap();
+        let store = RowGroupStore::new();
 
         let n0 = store.create_node(&["Node"]); // Source
         let n1 = store.create_node(&["Node"]);
         let n2 = store.create_node(&["Node"]);
         let n3 = store.create_node(&["Node"]); // Sink
 
-        store.create_edge_with_props(n0, n1, "EDGE", [("capacity", Value::Float64(5.0))]);
-        store.create_edge_with_props(n0, n2, "EDGE", [("capacity", Value::Float64(3.0))]);
-        store.create_edge_with_props(n1, n3, "EDGE", [("capacity", Value::Float64(3.0))]);
-        store.create_edge_with_props(n1, n2, "EDGE", [("capacity", Value::Float64(2.0))]);
-        store.create_edge_with_props(n2, n3, "EDGE", [("capacity", Value::Float64(4.0))]);
+        store.create_edge_with_props(
+            n0,
+            n1,
+            "EDGE",
+            &[(PropertyKey::new("capacity"), Value::Float64(5.0))],
+        );
+        store.create_edge_with_props(
+            n0,
+            n2,
+            "EDGE",
+            &[(PropertyKey::new("capacity"), Value::Float64(3.0))],
+        );
+        store.create_edge_with_props(
+            n1,
+            n3,
+            "EDGE",
+            &[(PropertyKey::new("capacity"), Value::Float64(3.0))],
+        );
+        store.create_edge_with_props(
+            n1,
+            n2,
+            "EDGE",
+            &[(PropertyKey::new("capacity"), Value::Float64(2.0))],
+        );
+        store.create_edge_with_props(
+            n2,
+            n3,
+            "EDGE",
+            &[(PropertyKey::new("capacity"), Value::Float64(4.0))],
+        );
 
         store
     }
 
-    fn create_cost_flow_graph() -> LpgStore {
+    fn create_cost_flow_graph() -> RowGroupStore {
         // Flow network with costs:
         //   0 --[cap:3,cost:1]--> 1 --[cap:2,cost:2]--> 2
         //   |                                           ^
         //   +--[cap:2,cost:5]---------------------------+
-        let store = LpgStore::new().unwrap();
+        let store = RowGroupStore::new();
 
         let n0 = store.create_node(&["Node"]);
         let n1 = store.create_node(&["Node"]);
@@ -629,27 +701,27 @@ mod tests {
             n0,
             n1,
             "EDGE",
-            [
-                ("capacity", Value::Float64(3.0)),
-                ("cost", Value::Float64(1.0)),
+            &[
+                (PropertyKey::new("capacity"), Value::Float64(3.0)),
+                (PropertyKey::new("cost"), Value::Float64(1.0)),
             ],
         );
         store.create_edge_with_props(
             n1,
             n2,
             "EDGE",
-            [
-                ("capacity", Value::Float64(2.0)),
-                ("cost", Value::Float64(2.0)),
+            &[
+                (PropertyKey::new("capacity"), Value::Float64(2.0)),
+                (PropertyKey::new("cost"), Value::Float64(2.0)),
             ],
         );
         store.create_edge_with_props(
             n0,
             n2,
             "EDGE",
-            [
-                ("capacity", Value::Float64(2.0)),
-                ("cost", Value::Float64(5.0)),
+            &[
+                (PropertyKey::new("capacity"), Value::Float64(2.0)),
+                (PropertyKey::new("cost"), Value::Float64(5.0)),
             ],
         );
 
@@ -659,7 +731,14 @@ mod tests {
     #[test]
     fn test_max_flow_basic() {
         let store = create_simple_flow_graph();
-        let result = max_flow(&store, NodeId::new(0), NodeId::new(3), Some("capacity"));
+        let result = max_flow(
+            &store,
+            ReadView::latest(),
+            NodeId::new(0),
+            NodeId::new(3),
+            Some("capacity"),
+        )
+        .unwrap();
 
         assert!(result.is_some());
         let result = result.unwrap();
@@ -675,7 +754,14 @@ mod tests {
     #[test]
     fn test_max_flow_same_source_sink() {
         let store = create_simple_flow_graph();
-        let result = max_flow(&store, NodeId::new(0), NodeId::new(0), Some("capacity"));
+        let result = max_flow(
+            &store,
+            ReadView::latest(),
+            NodeId::new(0),
+            NodeId::new(0),
+            Some("capacity"),
+        )
+        .unwrap();
 
         assert!(result.is_some());
         assert_eq!(result.unwrap().max_flow, 0.0);
@@ -683,21 +769,28 @@ mod tests {
 
     #[test]
     fn test_max_flow_no_path() {
-        let store = LpgStore::new().unwrap();
+        let store = RowGroupStore::new();
         let n0 = store.create_node(&["Node"]);
         let _n1 = store.create_node(&["Node"]); // Disconnected
 
-        let result = max_flow(&store, n0, NodeId::new(1), None);
+        let result = max_flow(&store, ReadView::latest(), n0, NodeId::new(1), None).unwrap();
         assert!(result.is_some());
         assert_eq!(result.unwrap().max_flow, 0.0);
     }
 
     #[test]
     fn test_max_flow_invalid_nodes() {
-        let store = LpgStore::new().unwrap();
+        let store = RowGroupStore::new();
         store.create_node(&["Node"]);
 
-        let result = max_flow(&store, NodeId::new(999), NodeId::new(0), None);
+        let result = max_flow(
+            &store,
+            ReadView::latest(),
+            NodeId::new(999),
+            NodeId::new(0),
+            None,
+        )
+        .unwrap();
         assert!(result.is_none());
     }
 
@@ -706,11 +799,13 @@ mod tests {
         let store = create_cost_flow_graph();
         let result = min_cost_max_flow(
             &store,
+            ReadView::latest(),
             NodeId::new(0),
             NodeId::new(2),
             Some("capacity"),
             Some("cost"),
-        );
+        )
+        .unwrap();
 
         assert!(result.is_some());
         let result = result.unwrap();
@@ -727,11 +822,13 @@ mod tests {
         let store = create_cost_flow_graph();
         let result = min_cost_max_flow(
             &store,
+            ReadView::latest(),
             NodeId::new(0),
             NodeId::new(2),
             Some("capacity"),
             Some("cost"),
-        );
+        )
+        .unwrap();
 
         assert!(result.is_some());
         let result = result.unwrap();
@@ -745,11 +842,12 @@ mod tests {
 
     #[test]
     fn test_min_cost_flow_no_path() {
-        let store = LpgStore::new().unwrap();
+        let store = RowGroupStore::new();
         let n0 = store.create_node(&["Node"]);
         let _n1 = store.create_node(&["Node"]);
 
-        let result = min_cost_max_flow(&store, n0, NodeId::new(1), None, None);
+        let result =
+            min_cost_max_flow(&store, ReadView::latest(), n0, NodeId::new(1), None, None).unwrap();
         assert!(result.is_some());
         assert_eq!(result.unwrap().max_flow, 0.0);
     }
@@ -757,7 +855,7 @@ mod tests {
     #[test]
     fn test_max_flow_default_capacity() {
         // Without capacity property, all edges have capacity 1.0
-        let store = LpgStore::new().unwrap();
+        let store = RowGroupStore::new();
         let n0 = store.create_node(&["Node"]);
         let n1 = store.create_node(&["Node"]);
         let n2 = store.create_node(&["Node"]);
@@ -766,7 +864,7 @@ mod tests {
         store.create_edge(n0, n2, "EDGE");
         store.create_edge(n1, n2, "EDGE");
 
-        let result = max_flow(&store, n0, n2, None);
+        let result = max_flow(&store, ReadView::latest(), n0, n2, None).unwrap();
         assert!(result.is_some());
 
         // Two paths: 0->2 (cap 1) and 0->1->2 (cap 1)
@@ -776,7 +874,15 @@ mod tests {
     #[test]
     fn test_max_flow_flow_edges_populated() {
         let store = create_simple_flow_graph();
-        let result = max_flow(&store, NodeId::new(0), NodeId::new(3), Some("capacity")).unwrap();
+        let result = max_flow(
+            &store,
+            ReadView::latest(),
+            NodeId::new(0),
+            NodeId::new(3),
+            Some("capacity"),
+        )
+        .unwrap()
+        .unwrap();
 
         // Flow edges should be non-empty if there's positive flow
         assert!(result.max_flow > 0.0);
@@ -790,47 +896,88 @@ mod tests {
 
     #[test]
     fn test_max_flow_int_capacity() {
-        let store = LpgStore::new().unwrap();
+        let store = RowGroupStore::new();
         let n0 = store.create_node(&["Node"]);
         let n1 = store.create_node(&["Node"]);
 
         // Use Int64 capacity values instead of Float64
-        store.create_edge_with_props(n0, n1, "EDGE", [("capacity", Value::Int64(5))]);
+        store.create_edge_with_props(
+            n0,
+            n1,
+            "EDGE",
+            &[(PropertyKey::new("capacity"), Value::Int64(5))],
+        );
 
-        let result = max_flow(&store, n0, n1, Some("capacity")).unwrap();
+        let result = max_flow(&store, ReadView::latest(), n0, n1, Some("capacity"))
+            .unwrap()
+            .unwrap();
         assert!((result.max_flow - 5.0).abs() < f64::EPSILON);
     }
 
     #[test]
     fn test_max_flow_parallel_paths() {
-        let store = LpgStore::new().unwrap();
+        let store = RowGroupStore::new();
         let s = store.create_node(&["Node"]);
         let a = store.create_node(&["Node"]);
         let b = store.create_node(&["Node"]);
         let t = store.create_node(&["Node"]);
 
         // Two independent paths: s->a->t and s->b->t
-        store.create_edge_with_props(s, a, "EDGE", [("capacity", Value::Float64(3.0))]);
-        store.create_edge_with_props(a, t, "EDGE", [("capacity", Value::Float64(3.0))]);
-        store.create_edge_with_props(s, b, "EDGE", [("capacity", Value::Float64(2.0))]);
-        store.create_edge_with_props(b, t, "EDGE", [("capacity", Value::Float64(2.0))]);
+        store.create_edge_with_props(
+            s,
+            a,
+            "EDGE",
+            &[(PropertyKey::new("capacity"), Value::Float64(3.0))],
+        );
+        store.create_edge_with_props(
+            a,
+            t,
+            "EDGE",
+            &[(PropertyKey::new("capacity"), Value::Float64(3.0))],
+        );
+        store.create_edge_with_props(
+            s,
+            b,
+            "EDGE",
+            &[(PropertyKey::new("capacity"), Value::Float64(2.0))],
+        );
+        store.create_edge_with_props(
+            b,
+            t,
+            "EDGE",
+            &[(PropertyKey::new("capacity"), Value::Float64(2.0))],
+        );
 
-        let result = max_flow(&store, s, t, Some("capacity")).unwrap();
+        let result = max_flow(&store, ReadView::latest(), s, t, Some("capacity"))
+            .unwrap()
+            .unwrap();
         assert!((result.max_flow - 5.0).abs() < f64::EPSILON);
     }
 
     #[test]
     fn test_max_flow_bottleneck() {
-        let store = LpgStore::new().unwrap();
+        let store = RowGroupStore::new();
         let s = store.create_node(&["Node"]);
         let mid = store.create_node(&["Node"]);
         let t = store.create_node(&["Node"]);
 
         // s -> mid has high capacity, mid -> t has low = bottleneck
-        store.create_edge_with_props(s, mid, "EDGE", [("capacity", Value::Float64(100.0))]);
-        store.create_edge_with_props(mid, t, "EDGE", [("capacity", Value::Float64(1.0))]);
+        store.create_edge_with_props(
+            s,
+            mid,
+            "EDGE",
+            &[(PropertyKey::new("capacity"), Value::Float64(100.0))],
+        );
+        store.create_edge_with_props(
+            mid,
+            t,
+            "EDGE",
+            &[(PropertyKey::new("capacity"), Value::Float64(1.0))],
+        );
 
-        let result = max_flow(&store, s, t, Some("capacity")).unwrap();
+        let result = max_flow(&store, ReadView::latest(), s, t, Some("capacity"))
+            .unwrap()
+            .unwrap();
         assert!((result.max_flow - 1.0).abs() < f64::EPSILON);
     }
 
@@ -839,11 +986,13 @@ mod tests {
         let store = create_cost_flow_graph();
         let result = min_cost_max_flow(
             &store,
+            ReadView::latest(),
             NodeId::new(0),
             NodeId::new(0),
             Some("capacity"),
             Some("cost"),
         )
+        .unwrap()
         .unwrap();
         assert_eq!(result.max_flow, 0.0);
         assert_eq!(result.total_cost, 0.0);
@@ -851,9 +1000,17 @@ mod tests {
 
     #[test]
     fn test_min_cost_flow_invalid_nodes() {
-        let store = LpgStore::new().unwrap();
+        let store = RowGroupStore::new();
         store.create_node(&["Node"]);
-        let result = min_cost_max_flow(&store, NodeId::new(999), NodeId::new(0), None, None);
+        let result = min_cost_max_flow(
+            &store,
+            ReadView::latest(),
+            NodeId::new(999),
+            NodeId::new(0),
+            None,
+            None,
+        )
+        .unwrap();
         assert!(result.is_none());
     }
 
@@ -862,11 +1019,13 @@ mod tests {
         let store = create_cost_flow_graph();
         let result = min_cost_max_flow(
             &store,
+            ReadView::latest(),
             NodeId::new(0),
             NodeId::new(2),
             Some("capacity"),
             Some("cost"),
         )
+        .unwrap()
         .unwrap();
 
         // Flow edges should have both flow and cost info
@@ -878,8 +1037,8 @@ mod tests {
     /// A source feeding a hub that fans out over 19 paths of capacity 1 to
     /// the sink; `hub_capacity` of them can carry flow. Returns the store,
     /// the source and the sink.
-    fn fan_out(hub_capacity: f64) -> (LpgStore, NodeId, NodeId) {
-        let store = LpgStore::new().unwrap();
+    fn fan_out(hub_capacity: f64) -> (RowGroupStore, NodeId, NodeId) {
+        let store = RowGroupStore::new();
         let source = store.create_node(&["Node"]);
         let hub = store.create_node(&["Node"]);
         let middles: Vec<NodeId> = (0..19).map(|_| store.create_node(&["Node"])).collect();
@@ -889,9 +1048,9 @@ mod tests {
                 from,
                 to,
                 "EDGE",
-                [
-                    ("capacity", Value::Float64(capacity)),
-                    ("cost", Value::Float64(3.0)),
+                &[
+                    (PropertyKey::new("capacity"), Value::Float64(capacity)),
+                    (PropertyKey::new("cost"), Value::Float64(3.0)),
                 ],
             );
         };
@@ -911,7 +1070,9 @@ mod tests {
     fn max_flow_edges_come_in_node_id_order_and_are_the_same_every_call() {
         for hub_capacity in [3.0, 19.0] {
             let (store, source, sink) = fan_out(hub_capacity);
-            let first = max_flow(&store, source, sink, Some("capacity")).unwrap();
+            let first = max_flow(&store, ReadView::latest(), source, sink, Some("capacity"))
+                .unwrap()
+                .unwrap();
             assert_eq!(first.max_flow.to_bits(), hub_capacity.to_bits());
             let pairs: Vec<(NodeId, NodeId)> =
                 first.flow_edges.iter().map(|&(s, t, _)| (s, t)).collect();
@@ -920,7 +1081,9 @@ mod tests {
                 "hub capacity {hub_capacity}: flow edges not in node-id order: {pairs:?}"
             );
             for _ in 0..5 {
-                let again = max_flow(&store, source, sink, Some("capacity")).unwrap();
+                let again = max_flow(&store, ReadView::latest(), source, sink, Some("capacity"))
+                    .unwrap()
+                    .unwrap();
                 let again: Vec<(NodeId, NodeId, u64)> = again
                     .flow_edges
                     .iter()
@@ -936,13 +1099,15 @@ mod tests {
         }
         let (store, source, sink) = fan_out(3.0);
         let hub = NodeId::new(source.as_u64() + 1);
-        let used: Vec<NodeId> = max_flow(&store, source, sink, Some("capacity"))
-            .unwrap()
-            .flow_edges
-            .iter()
-            .filter(|&&(s, _, _)| s == hub)
-            .map(|&(_, t, _)| t)
-            .collect();
+        let used: Vec<NodeId> =
+            max_flow(&store, ReadView::latest(), source, sink, Some("capacity"))
+                .unwrap()
+                .unwrap()
+                .flow_edges
+                .iter()
+                .filter(|&&(s, _, _)| s == hub)
+                .map(|&(_, t, _)| t)
+                .collect();
         let first_three: Vec<NodeId> = (2..5).map(|i| NodeId::new(source.as_u64() + i)).collect();
         assert_eq!(used, first_three, "the paths through the smallest node ids");
     }
@@ -954,12 +1119,20 @@ mod tests {
         for hub_capacity in [3.0, 19.0] {
             let (store, source, sink) = fan_out(hub_capacity);
             let run = || -> Vec<(NodeId, NodeId, u64, u64)> {
-                min_cost_max_flow(&store, source, sink, Some("capacity"), Some("cost"))
-                    .unwrap()
-                    .flow_edges
-                    .iter()
-                    .map(|&(s, t, flow, cost)| (s, t, flow.to_bits(), cost.to_bits()))
-                    .collect()
+                min_cost_max_flow(
+                    &store,
+                    ReadView::latest(),
+                    source,
+                    sink,
+                    Some("capacity"),
+                    Some("cost"),
+                )
+                .unwrap()
+                .unwrap()
+                .flow_edges
+                .iter()
+                .map(|&(s, t, flow, cost)| (s, t, flow.to_bits(), cost.to_bits()))
+                .collect()
             };
             let first = run();
             assert!(

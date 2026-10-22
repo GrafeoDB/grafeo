@@ -6,25 +6,32 @@
 use std::collections::BinaryHeap;
 use std::sync::OnceLock;
 
+#[cfg(test)]
+use grafeo_common::types::PropertyKey;
 use grafeo_common::types::{EdgeId, NodeId, Value};
 use grafeo_common::utils::hash::FxHashMap;
 use grafeo_core::graph::Direction;
 use grafeo_core::graph::GraphStore;
-#[cfg(all(test, feature = "lpg"))]
-use grafeo_core::graph::lpg::LpgStore;
+#[cfg(test)]
+#[cfg(test)]
+use grafeo_core::graph::rowgroup::RowGroupStore;
 
 use super::super::{AlgorithmResult, ParameterDef, ParameterType};
 use super::components::UnionFind;
-use super::traits::{MinScored, impl_algorithm, node_id_from_param, visible_edges_from};
+use super::traits::{MinScored, impl_algorithm, node_id_from_param};
 
 // ============================================================================
 // Edge Weight Extraction
 // ============================================================================
 
 /// Extracts edge weight from a property value.
-fn extract_weight(store: &dyn GraphStore, edge_id: EdgeId, weight_prop: Option<&str>) -> f64 {
+fn extract_weight(
+    store: &super::traits::GraphView<'_>,
+    edge_id: EdgeId,
+    weight_prop: Option<&str>,
+) -> f64 {
     if let Some(prop_name) = weight_prop
-        && let Some(edge) = store.get_edge(edge_id)
+        && let Some(edge) = store.edge(edge_id)
         && let Some(value) = edge.get_property(prop_name)
     {
         return match value {
@@ -85,7 +92,25 @@ impl MstResult {
 /// # Complexity
 ///
 /// O(E log E) for sorting edges
-pub fn kruskal(store: &dyn GraphStore, weight_property: Option<&str>) -> MstResult {
+///
+/// # Errors
+///
+/// The error of a read of the store that fails.
+pub fn kruskal(
+    store: &dyn GraphStore,
+    view: grafeo_common::types::ReadView,
+    weight_property: Option<&str>,
+) -> grafeo_common::utils::error::Result<MstResult> {
+    let graph = super::traits::GraphView::new(store, view);
+    let found = kruskal_on(&graph, weight_property);
+    graph.finish(found)
+}
+
+/// [`kruskal`] on the graph a [`GraphView`](super::traits::GraphView) reads.
+pub(crate) fn kruskal_on(
+    store: &super::traits::GraphView<'_>,
+    weight_property: Option<&str>,
+) -> MstResult {
     let nodes = store.node_ids();
     let n = nodes.len();
 
@@ -108,7 +133,7 @@ pub fn kruskal(store: &dyn GraphStore, weight_property: Option<&str>) -> MstResu
         std::collections::HashSet::new();
 
     for (i, &node) in nodes.iter().enumerate() {
-        for (neighbor, edge_id) in visible_edges_from(store, node, Direction::Outgoing) {
+        for (neighbor, edge_id) in store.edges(node, Direction::Outgoing) {
             if let Some(&j) = node_to_idx.get(&neighbor) {
                 // For undirected: only add each edge once
                 let key = if i < j { (i, j) } else { (j, i) };
@@ -178,8 +203,24 @@ pub fn kruskal(store: &dyn GraphStore, weight_property: Option<&str>) -> MstResu
 /// # Complexity
 ///
 /// O(E log V) using a binary heap
+///
+/// # Errors
+///
+/// The error of a read of the store that fails.
 pub fn prim(
     store: &dyn GraphStore,
+    view: grafeo_common::types::ReadView,
+    weight_property: Option<&str>,
+    start: Option<NodeId>,
+) -> grafeo_common::utils::error::Result<MstResult> {
+    let graph = super::traits::GraphView::new(store, view);
+    let found = prim_on(&graph, weight_property, start);
+    graph.finish(found)
+}
+
+/// [`prim`] on the graph a [`GraphView`](super::traits::GraphView) reads.
+pub(crate) fn prim_on(
+    store: &super::traits::GraphView<'_>,
     weight_property: Option<&str>,
     start: Option<NodeId>,
 ) -> MstResult {
@@ -197,7 +238,7 @@ pub fn prim(
     let start_node = start.unwrap_or(nodes[0]);
 
     // Verify start node exists
-    if store.get_node(start_node).is_none() {
+    if store.node(start_node).is_none() {
         return MstResult {
             edges: Vec::new(),
             total_weight: 0.0,
@@ -215,14 +256,14 @@ pub fn prim(
     in_tree.insert(start_node, true);
 
     // Add edges from start node
-    for (neighbor, edge_id) in visible_edges_from(store, start_node, Direction::Outgoing) {
+    for (neighbor, edge_id) in store.edges(start_node, Direction::Outgoing) {
         let weight = extract_weight(store, edge_id, weight_property);
         heap.push(MinScored::new(weight, (start_node, neighbor, edge_id)));
     }
 
     // Also consider incoming edges (for undirected behavior)
     for &other in &nodes {
-        for (neighbor, edge_id) in visible_edges_from(store, other, Direction::Outgoing) {
+        for (neighbor, edge_id) in store.edges(other, Direction::Outgoing) {
             if neighbor == start_node {
                 let weight = extract_weight(store, edge_id, weight_property);
                 heap.push(MinScored::new(weight, (other, start_node, edge_id)));
@@ -242,7 +283,7 @@ pub fn prim(
         total_weight += weight;
 
         // Add edges from new node
-        for (neighbor, new_edge_id) in visible_edges_from(store, dst, Direction::Outgoing) {
+        for (neighbor, new_edge_id) in store.edges(dst, Direction::Outgoing) {
             if !*in_tree.get(&neighbor).unwrap_or(&false) {
                 let new_weight = extract_weight(store, new_edge_id, weight_property);
                 heap.push(MinScored::new(new_weight, (dst, neighbor, new_edge_id)));
@@ -252,8 +293,7 @@ pub fn prim(
         // Also consider incoming edges
         for &other in &nodes {
             if !*in_tree.get(&other).unwrap_or(&false) {
-                for (neighbor, new_edge_id) in visible_edges_from(store, other, Direction::Outgoing)
-                {
+                for (neighbor, new_edge_id) in store.edges(other, Direction::Outgoing) {
                     if neighbor == dst {
                         let new_weight = extract_weight(store, new_edge_id, weight_property);
                         heap.push(MinScored::new(new_weight, (other, dst, new_edge_id)));
@@ -304,7 +344,7 @@ impl_algorithm! {
     execute(store, params) {
         let weight_prop = params.get_string("weight");
 
-        let result = kruskal(store, weight_prop);
+        let result = kruskal_on(store, weight_prop);
 
         let mut output = AlgorithmResult::new(vec![
             "source".to_string(),
@@ -364,7 +404,7 @@ impl_algorithm! {
         let weight_prop = params.get_string("weight");
         let start = params.get_int("start").map(|id| node_id_from_param(id, "start")).transpose()?;
 
-        let result = prim(store, weight_prop, start);
+        let result = prim_on(store, weight_prop, start);
 
         let mut output = AlgorithmResult::new(vec![
             "source".to_string(),
@@ -392,34 +432,65 @@ impl_algorithm! {
 // Tests
 // ============================================================================
 
-#[cfg(all(test, feature = "lpg"))]
+#[cfg(test)]
 mod tests {
     use super::*;
+    use grafeo_common::types::ReadView;
 
-    fn create_weighted_triangle() -> LpgStore {
+    fn create_weighted_triangle() -> RowGroupStore {
         // Triangle: 0-1-2 with edges
         // 0-1: weight 1
         // 1-2: weight 2
         // 0-2: weight 3
-        let store = LpgStore::new().unwrap();
+        let store = RowGroupStore::new();
 
         let n0 = store.create_node(&["Node"]);
         let n1 = store.create_node(&["Node"]);
         let n2 = store.create_node(&["Node"]);
 
-        store.create_edge_with_props(n0, n1, "EDGE", [("weight", Value::Float64(1.0))]);
-        store.create_edge_with_props(n1, n0, "EDGE", [("weight", Value::Float64(1.0))]);
-        store.create_edge_with_props(n1, n2, "EDGE", [("weight", Value::Float64(2.0))]);
-        store.create_edge_with_props(n2, n1, "EDGE", [("weight", Value::Float64(2.0))]);
-        store.create_edge_with_props(n0, n2, "EDGE", [("weight", Value::Float64(3.0))]);
-        store.create_edge_with_props(n2, n0, "EDGE", [("weight", Value::Float64(3.0))]);
+        store.create_edge_with_props(
+            n0,
+            n1,
+            "EDGE",
+            &[(PropertyKey::new("weight"), Value::Float64(1.0))],
+        );
+        store.create_edge_with_props(
+            n1,
+            n0,
+            "EDGE",
+            &[(PropertyKey::new("weight"), Value::Float64(1.0))],
+        );
+        store.create_edge_with_props(
+            n1,
+            n2,
+            "EDGE",
+            &[(PropertyKey::new("weight"), Value::Float64(2.0))],
+        );
+        store.create_edge_with_props(
+            n2,
+            n1,
+            "EDGE",
+            &[(PropertyKey::new("weight"), Value::Float64(2.0))],
+        );
+        store.create_edge_with_props(
+            n0,
+            n2,
+            "EDGE",
+            &[(PropertyKey::new("weight"), Value::Float64(3.0))],
+        );
+        store.create_edge_with_props(
+            n2,
+            n0,
+            "EDGE",
+            &[(PropertyKey::new("weight"), Value::Float64(3.0))],
+        );
 
         store
     }
 
-    fn create_simple_chain() -> LpgStore {
+    fn create_simple_chain() -> RowGroupStore {
         // Chain: 0 - 1 - 2 - 3
-        let store = LpgStore::new().unwrap();
+        let store = RowGroupStore::new();
 
         let n0 = store.create_node(&["Node"]);
         let n1 = store.create_node(&["Node"]);
@@ -439,7 +510,7 @@ mod tests {
     #[test]
     fn test_kruskal_triangle() {
         let store = create_weighted_triangle();
-        let result = kruskal(&store, Some("weight"));
+        let result = kruskal(&store, ReadView::latest(), Some("weight")).unwrap();
 
         // MST should have 2 edges for 3 nodes
         assert_eq!(result.edges.len(), 2);
@@ -451,7 +522,7 @@ mod tests {
     #[test]
     fn test_kruskal_chain() {
         let store = create_simple_chain();
-        let result = kruskal(&store, None);
+        let result = kruskal(&store, ReadView::latest(), None).unwrap();
 
         // MST should have 3 edges for 4 nodes
         assert_eq!(result.edges.len(), 3);
@@ -462,8 +533,8 @@ mod tests {
 
     #[test]
     fn test_kruskal_empty() {
-        let store = LpgStore::new().unwrap();
-        let result = kruskal(&store, None);
+        let store = RowGroupStore::new();
+        let result = kruskal(&store, ReadView::latest(), None).unwrap();
 
         assert!(result.edges.is_empty(), "{:?}", result.edges);
         assert_eq!(result.total_weight, 0.0);
@@ -471,10 +542,10 @@ mod tests {
 
     #[test]
     fn test_kruskal_single_node() {
-        let store = LpgStore::new().unwrap();
+        let store = RowGroupStore::new();
         store.create_node(&["Node"]);
 
-        let result = kruskal(&store, None);
+        let result = kruskal(&store, ReadView::latest(), None).unwrap();
 
         assert!(result.edges.is_empty(), "{:?}", result.edges);
         assert!(result.is_spanning_tree(1));
@@ -483,7 +554,7 @@ mod tests {
     #[test]
     fn test_prim_triangle() {
         let store = create_weighted_triangle();
-        let result = prim(&store, Some("weight"), None);
+        let result = prim(&store, ReadView::latest(), Some("weight"), None).unwrap();
 
         // MST should have 2 edges for 3 nodes
         assert_eq!(result.edges.len(), 2);
@@ -495,7 +566,7 @@ mod tests {
     #[test]
     fn test_prim_chain() {
         let store = create_simple_chain();
-        let result = prim(&store, None, None);
+        let result = prim(&store, ReadView::latest(), None, None).unwrap();
 
         // MST should have 3 edges for 4 nodes
         assert_eq!(result.edges.len(), 3);
@@ -504,7 +575,7 @@ mod tests {
     #[test]
     fn test_prim_with_start() {
         let store = create_simple_chain();
-        let result = prim(&store, None, Some(NodeId::new(2)));
+        let result = prim(&store, ReadView::latest(), None, Some(NodeId::new(2))).unwrap();
 
         // Should still find valid MST starting from node 2
         assert_eq!(result.edges.len(), 3);
@@ -512,8 +583,8 @@ mod tests {
 
     #[test]
     fn test_prim_empty() {
-        let store = LpgStore::new().unwrap();
-        let result = prim(&store, None, None);
+        let store = RowGroupStore::new();
+        let result = prim(&store, ReadView::latest(), None, None).unwrap();
 
         assert!(result.edges.is_empty(), "{:?}", result.edges);
     }
@@ -522,8 +593,8 @@ mod tests {
     fn test_kruskal_prim_same_weight() {
         let store = create_weighted_triangle();
 
-        let kruskal_result = kruskal(&store, Some("weight"));
-        let prim_result = prim(&store, Some("weight"), None);
+        let kruskal_result = kruskal(&store, ReadView::latest(), Some("weight")).unwrap();
+        let prim_result = prim(&store, ReadView::latest(), Some("weight"), None).unwrap();
 
         // Both should have the same total weight
         assert!((kruskal_result.total_weight - prim_result.total_weight).abs() < 0.001);
@@ -532,7 +603,7 @@ mod tests {
     #[test]
     fn test_mst_is_spanning_tree() {
         let store = create_simple_chain();
-        let result = kruskal(&store, None);
+        let result = kruskal(&store, ReadView::latest(), None).unwrap();
 
         assert!(result.is_spanning_tree(4));
     }

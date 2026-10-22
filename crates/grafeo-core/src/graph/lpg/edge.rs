@@ -1,11 +1,7 @@
-//! Edge types for the LPG model.
-//!
-//! Like nodes, edges have two forms: [`Edge`] is the user-friendly version,
-//! [`EdgeRecord`] is the compact storage format.
+//! The edge of the LPG model, as a read returns it.
 
 use arcstr::ArcStr;
-use grafeo_common::types::{EdgeId, EpochId, NodeId, PropertyKey, PropertyMap, Value};
-use serde::{Deserialize, Serialize};
+use grafeo_common::types::{EdgeId, NodeId, PropertyKey, PropertyMap, Value};
 
 /// A relationship between two nodes, with a type and optional properties.
 ///
@@ -92,92 +88,6 @@ impl Edge {
     }
 }
 
-/// The compact storage format for an edge - fits in one cache line.
-///
-/// Like [`NodeRecord`](super::NodeRecord), this is what the store keeps in memory.
-/// Properties are stored separately in columnar format.
-#[repr(C)]
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
-pub struct EdgeRecord {
-    /// Unique edge identifier.
-    pub id: EdgeId,
-    /// Source node ID.
-    pub src: NodeId,
-    /// Destination node ID.
-    pub dst: NodeId,
-    /// Edge type ID (index into type table).
-    pub type_id: u32,
-    /// Offset into the property arena.
-    pub props_offset: u32,
-    /// Not maintained (always 0): the edge's properties live in the property
-    /// store, so count those instead. Kept for the record's layout.
-    pub props_count: u16,
-    /// Flags (deleted, has_version, etc.).
-    pub flags: EdgeFlags,
-    /// Epoch this record was created in.
-    pub epoch: EpochId,
-}
-
-impl EdgeRecord {
-    /// Flag indicating the edge is deleted.
-    pub const FLAG_DELETED: u16 = 1 << 0;
-    /// Flag indicating the edge has version history.
-    pub const FLAG_HAS_VERSION: u16 = 1 << 1;
-
-    /// Creates a new edge record.
-    #[must_use]
-    pub const fn new(id: EdgeId, src: NodeId, dst: NodeId, type_id: u32, epoch: EpochId) -> Self {
-        Self {
-            id,
-            src,
-            dst,
-            type_id,
-            props_offset: 0,
-            props_count: 0,
-            flags: EdgeFlags(0),
-            epoch,
-        }
-    }
-
-    /// Checks if this edge is deleted.
-    #[must_use]
-    pub const fn is_deleted(&self) -> bool {
-        self.flags.contains(Self::FLAG_DELETED)
-    }
-
-    /// Marks this edge as deleted.
-    pub fn set_deleted(&mut self, deleted: bool) {
-        if deleted {
-            self.flags.set(Self::FLAG_DELETED);
-        } else {
-            self.flags.clear(Self::FLAG_DELETED);
-        }
-    }
-}
-
-/// Bit flags packed into an edge record.
-#[repr(transparent)]
-#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize)]
-pub struct EdgeFlags(pub u16);
-
-impl EdgeFlags {
-    /// Checks if a flag is set.
-    #[must_use]
-    pub const fn contains(&self, flag: u16) -> bool {
-        (self.0 & flag) != 0
-    }
-
-    /// Sets a flag.
-    pub fn set(&mut self, flag: u16) {
-        self.0 |= flag;
-    }
-
-    /// Clears a flag.
-    pub fn clear(&mut self, flag: u16) {
-        self.0 &= !flag;
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -216,28 +126,5 @@ mod tests {
         assert_eq!(edge.other_endpoint(NodeId::new(10)), Some(NodeId::new(20)));
         assert_eq!(edge.other_endpoint(NodeId::new(20)), Some(NodeId::new(10)));
         assert_eq!(edge.other_endpoint(NodeId::new(30)), None);
-    }
-
-    #[test]
-    fn test_edge_record_flags() {
-        let mut record = EdgeRecord::new(
-            EdgeId::new(1),
-            NodeId::new(10),
-            NodeId::new(20),
-            0,
-            EpochId::INITIAL,
-        );
-
-        assert!(!record.is_deleted());
-        record.set_deleted(true);
-        assert!(record.is_deleted());
-    }
-
-    #[test]
-    fn test_edge_record_size() {
-        // EdgeRecord should be a reasonable size for cache efficiency
-        let size = std::mem::size_of::<EdgeRecord>();
-        // Should be <= 64 bytes (one cache line)
-        assert!(size <= 64, "EdgeRecord is {} bytes", size);
     }
 }

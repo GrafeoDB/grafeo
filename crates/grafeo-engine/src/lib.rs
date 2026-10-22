@@ -32,6 +32,8 @@ pub mod database;
 pub mod embedding;
 pub mod execution;
 pub mod export;
+#[cfg(feature = "gql")]
+pub mod import;
 pub mod memory_usage;
 #[cfg(feature = "metrics")]
 pub mod metrics;
@@ -39,30 +41,31 @@ pub mod metrics;
 pub mod procedures;
 pub mod query;
 pub mod session;
+mod snapshot;
 pub mod transaction;
 #[cfg(feature = "shacl")]
 pub mod validation;
 
 pub use admin::{
-    AdminService, CompactReport, DatabaseInfo, DatabaseMode, DatabaseStats, DumpFormat, IndexInfo,
-    LpgSchemaInfo, RdfSchemaInfo, SchemaInfo, ValidationError, ValidationResult, ValidationWarning,
-    WalStatus,
+    AdminService, CheckpointStatus, CheckpointTriggers, CompactReport, DatabaseInfo, DatabaseMode,
+    DatabaseStats, DumpFormat, IndexInfo, LpgSchemaInfo, RdfSchemaInfo, SchemaInfo,
+    ValidationError, ValidationResult, ValidationWarning, WalStatus,
 };
 pub use auth::{Grant, Identity, Role, StatementKind};
 pub use catalog::{Catalog, CatalogError, IndexDefinition, IndexType};
-pub use config::{AccessMode, Config, ConfigError, DurabilityMode, GraphModel};
+pub use config::{AccessMode, Config, ConfigError, DurabilityMode, GraphModel, HistoryRetention};
 pub use database::GrafeoDB;
-#[cfg(feature = "lpg")]
 pub use database::GraphHandle;
-pub use grafeo_core::graph::{GraphStore, GraphStoreMut, ProjectionSpec};
+pub use database::{AsOfView, TimePoint};
+pub use grafeo_core::graph::{Direction, GraphStore, ProjectionSpec};
 /// The options `GrafeoDB::create_text_index_with` takes.
 #[cfg(feature = "text-index")]
 pub use grafeo_core::index::text::{TextIndexOptions, TokenizerKind};
 pub use memory_usage::MemoryUsage;
 #[cfg(feature = "metrics")]
 pub use metrics::{MetricsRegistry, MetricsSnapshot};
-#[cfg(all(feature = "gql", feature = "lpg"))]
+#[cfg(feature = "gql")]
 pub use query::executor::stream::{OwnedResultStream, OwnedRowIterator, ResultStream, RowIterator};
 pub use session::Session;
-#[cfg(feature = "lpg")]
+pub use snapshot::Snapshot;
 pub use transaction::{CommitInfo, PreparedCommit};

@@ -3,11 +3,11 @@
 
 use std::sync::Arc;
 
-use grafeo_common::types::{EpochId, LogicalType, NodeId, TransactionId, Value};
+use grafeo_common::types::{LogicalType, NodeId, ReadView, Value};
 
-use super::{ExpressionPredicate, Operator, OperatorResult};
+use super::{ExpressionPredicate, Operator, OperatorError, OperatorResult, ReadCounter};
 use crate::execution::DataChunk;
-use crate::graph::GraphStoreSearch;
+use crate::graph::GraphStore;
 
 /// What a seek key selects nodes by.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -35,15 +35,15 @@ pub enum SeekKey {
 /// [`GraphStore::find_nodes_maybe_equal`](crate::graph::GraphStore::find_nodes_maybe_equal));
 /// a store that cannot look a key up that way gives every node.
 pub struct NodeSeekOperator {
-    store: Arc<dyn GraphStoreSearch>,
+    store: Arc<dyn GraphStore>,
     input: Box<dyn Operator>,
     key: SeekKey,
     /// Evaluates the key for an input row.
     key_expression: ExpressionPredicate,
     list: bool,
     label: Option<String>,
-    viewing_epoch: Option<EpochId>,
-    transaction_id: Option<TransactionId>,
+    /// Who reads: the seek finds the nodes this view sees.
+    view: ReadView,
     chunk_capacity: usize,
     /// The input chunk being joined, its next row, and the row whose
     /// matches are being emitted.
@@ -52,18 +52,21 @@ pub struct NodeSeekOperator {
     current_row: usize,
     matches: Vec<NodeId>,
     next_match: usize,
+    /// Counts the node IDs the lookups return.
+    reads: Option<Arc<ReadCounter>>,
 }
 
 impl NodeSeekOperator {
     /// Creates a seek of `key` (evaluated by `key_expression` over the input
-    /// rows) for nodes with `label`.
+    /// rows) for nodes with `label` that `view` sees.
     #[must_use]
     pub fn new(
-        store: Arc<dyn GraphStoreSearch>,
+        store: Arc<dyn GraphStore>,
         input: Box<dyn Operator>,
         key: SeekKey,
         key_expression: ExpressionPredicate,
         label: Option<String>,
+        view: ReadView,
     ) -> Self {
         Self {
             store,
@@ -72,14 +75,14 @@ impl NodeSeekOperator {
             key_expression,
             list: false,
             label,
-            viewing_epoch: None,
-            transaction_id: None,
+            view,
             chunk_capacity: 2048,
             current_input: None,
             next_row: 0,
             current_row: 0,
             matches: Vec::new(),
             next_match: 0,
+            reads: None,
         }
     }
 
@@ -90,23 +93,19 @@ impl NodeSeekOperator {
         self
     }
 
-    /// Sets the transaction context for MVCC visibility.
+    /// Counts the node IDs the lookups return in `reads`, before the
+    /// visibility and label checks.
     #[must_use]
-    pub fn with_transaction_context(
-        mut self,
-        epoch: EpochId,
-        transaction_id: Option<TransactionId>,
-    ) -> Self {
-        self.viewing_epoch = Some(epoch);
-        self.transaction_id = transaction_id;
+    pub fn with_read_counter(mut self, reads: Arc<ReadCounter>) -> Self {
+        self.reads = Some(reads);
         self
     }
 
     /// The visible nodes with the label that the key of `row` selects, in ID
     /// order.
-    fn find(&self, chunk: &DataChunk, row: usize) -> Vec<NodeId> {
-        let Some(key) = self.key_expression.eval_at(chunk, row) else {
-            return Vec::new();
+    fn find(&self, chunk: &DataChunk, row: usize) -> Result<Vec<NodeId>, OperatorError> {
+        let Some(key) = self.key_expression.eval_at(chunk, row)? else {
+            return Ok(Vec::new());
         };
         let keys = if self.list {
             match key {
@@ -121,39 +120,42 @@ impl NodeSeekOperator {
             match &self.key {
                 SeekKey::Id => found.extend(node_ids(key)),
                 SeekKey::Property(property) => {
-                    match self.store.find_nodes_maybe_equal(property, key) {
+                    match self
+                        .store
+                        .find_nodes_maybe_equal(property, key, self.view)?
+                    {
                         Some(nodes) => found.extend(nodes),
                         // The store cannot look the key up: every node is a
                         // candidate, as for the scan the seek replaces.
-                        None => found.extend(self.store.all_node_ids()),
+                        None => found.extend(self.store.node_ids(self.view)?),
                     }
                 }
             }
         }
+        super::read_counter::count(self.reads.as_deref(), found.len());
         found.sort_unstable();
         found.dedup();
-        found.retain(|&id| self.visible_with_label(id));
-        found
+        let mut seen = Vec::with_capacity(found.len());
+        for id in found {
+            if self.visible_with_label(id)? {
+                seen.push(id);
+            }
+        }
+        Ok(seen)
     }
 
-    fn visible_with_label(&self, id: NodeId) -> bool {
-        let node = match (self.viewing_epoch, self.transaction_id) {
-            (Some(epoch), Some(transaction_id)) => {
-                self.store.get_node_versioned(id, epoch, transaction_id)
-            }
-            (Some(epoch), None) => self.store.get_node_at_epoch(id, epoch),
-            (None, _) => self.store.get_node(id),
-        };
-        node.is_some_and(|node| {
-            self.label
-                .as_deref()
-                .is_none_or(|label| node.has_label(label))
+    /// Whether the query sees node `id` with the scan's label: a label check
+    /// at the view, without building the node.
+    fn visible_with_label(&self, id: NodeId) -> Result<bool, OperatorError> {
+        Ok(match self.label.as_deref() {
+            Some(label) => self.store.node_has_label(id, label, self.view)? == Some(true),
+            None => self.store.is_node_visible(id, self.view)?,
         })
     }
 
     /// Joins rows of `chunk`, from `next_row` on, with their matches until
     /// the output is full or the chunk is done.
-    fn fill(&mut self, chunk: &DataChunk) -> Option<DataChunk> {
+    fn fill(&mut self, chunk: &DataChunk) -> Result<Option<DataChunk>, OperatorError> {
         let columns = chunk.column_count();
         let mut schema: Vec<LogicalType> = (0..columns)
             .map(|i| {
@@ -172,7 +174,7 @@ impl NodeSeekOperator {
                 }
                 self.current_row = self.next_row;
                 self.next_row += 1;
-                self.matches = self.find(chunk, self.current_row);
+                self.matches = self.find(chunk, self.current_row)?;
                 self.next_match = 0;
                 continue;
             }
@@ -189,10 +191,10 @@ impl NodeSeekOperator {
             self.next_match += 1;
             count += 1;
         }
-        (count > 0).then(|| {
+        Ok((count > 0).then(|| {
             output.set_count(count);
             output
-        })
+        }))
     }
 }
 
@@ -212,7 +214,7 @@ impl Operator for NodeSeekOperator {
                     chunk
                 }
             };
-            let output = self.fill(&chunk);
+            let output = self.fill(&chunk)?;
             let done = self.next_row >= chunk.row_count() && self.next_match >= self.matches.len();
             if !done {
                 self.current_input = Some(chunk);
@@ -242,54 +244,57 @@ impl Operator for NodeSeekOperator {
 }
 
 /// The node IDs `=` finds equal to a key, as the filter `id(n) = key`
-/// compares an ID (an integer) with it: the integer itself, a float within
-/// `f64::EPSILON` of it, or a string that parses as it.
+/// compares an ID (an integer) with it: the integer itself, a float of
+/// exactly its value, a whole decimal of its value, or a string that parses
+/// as it.
 fn node_ids(key: &Value) -> Vec<NodeId> {
-    let ids: Vec<i64> = match key {
-        Value::Int64(id) => vec![*id],
-        Value::Float64(f) => integers_near(*f),
-        Value::String(s) => s.parse::<i64>().ok().into_iter().collect(),
-        _ => Vec::new(),
+    let id = match key {
+        Value::Int64(id) => Some(*id),
+        Value::Float64(f) => exact_integer(*f),
+        Value::Decimal(d) if d.floor() == *d => d.trunc_to_i64(),
+        Value::String(s) => s.parse::<i64>().ok(),
+        _ => None,
     };
-    ids.into_iter()
-        .filter_map(|id| u64::try_from(id).ok().map(NodeId::new))
+    id.and_then(|id| u64::try_from(id).ok())
+        .map(NodeId::new)
+        .into_iter()
         .collect()
 }
 
-/// The integers `=` finds equal to a float: those within `f64::EPSILON`.
-/// Only the floor and the ceiling can be.
-fn integers_near(f: f64) -> Vec<i64> {
+/// The integer `=` finds equal to a float: the float's own value, when it is
+/// whole and within the `i64` range.
+fn exact_integer(f: f64) -> Option<i64> {
     // 2^63 as f64 is exact; every integral float in [-2^63, 2^63) fits i64.
     const LIMIT: f64 = 9_223_372_036_854_775_808.0;
-    let mut near = Vec::new();
-    for candidate in [f.floor(), f.ceil()] {
-        if (-LIMIT..LIMIT).contains(&candidate) && (candidate - f).abs() < f64::EPSILON {
-            #[allow(
-                clippy::cast_possible_truncation,
-                reason = "candidate is integral and within [-2^63, 2^63), checked above"
-            )]
-            let integer = candidate as i64;
-            if !near.contains(&integer) {
-                near.push(integer);
-            }
-        }
+    if f.fract() != 0.0 || !(-LIMIT..LIMIT).contains(&f) {
+        return None;
     }
-    near
+    #[allow(
+        clippy::cast_possible_truncation,
+        reason = "f is integral and within [-2^63, 2^63), checked above, so the cast is exact"
+    )]
+    Some(f as i64)
 }
 
-#[cfg(all(test, feature = "lpg"))]
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::execution::operators::{FilterExpression, SingleRowOperator};
-    use crate::graph::lpg::LpgStore;
+    use crate::graph::rowgroup::RowGroupStore;
     use std::collections::HashMap;
 
-    fn seek(store: &Arc<LpgStore>, key: SeekKey, value: Value, label: Option<&str>) -> Vec<NodeId> {
-        let dyn_store: Arc<dyn GraphStoreSearch> = Arc::clone(store) as Arc<dyn GraphStoreSearch>;
+    fn seek(
+        store: &Arc<RowGroupStore>,
+        key: SeekKey,
+        value: Value,
+        label: Option<&str>,
+    ) -> Vec<NodeId> {
+        let dyn_store: Arc<dyn GraphStore> = Arc::clone(store) as Arc<dyn GraphStore>;
         let key_expression = ExpressionPredicate::new(
             FilterExpression::Literal(value),
             HashMap::new(),
             Arc::clone(&dyn_store),
+            ReadView::latest(),
         );
         let mut op = NodeSeekOperator::new(
             dyn_store,
@@ -297,6 +302,7 @@ mod tests {
             key,
             key_expression,
             label.map(ToString::to_string),
+            ReadView::latest(),
         );
         let mut found = Vec::new();
         while let Some(chunk) = op.next().unwrap() {
@@ -308,7 +314,7 @@ mod tests {
 
     #[test]
     fn seeks_by_id_and_label() {
-        let store = Arc::new(LpgStore::new().unwrap());
+        let store = Arc::new(RowGroupStore::new());
         let alix = store.create_node(&["Person"]);
         let city = store.create_node(&["City"]);
         let id = |node: NodeId| Value::Int64(node.as_u64().cast_signed());
@@ -323,7 +329,7 @@ mod tests {
 
     #[test]
     fn seeks_the_equal_forms_of_a_property_value() {
-        let store = Arc::new(LpgStore::new().unwrap());
+        let store = Arc::new(RowGroupStore::new());
         store.create_property_index("id");
         let as_int = store.create_node(&["Doc"]);
         store.set_node_property(as_int, "id", Value::Int64(42));

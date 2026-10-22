@@ -16,7 +16,8 @@ Properties are key-value pairs stored on nodes and edges. Grafeo supports a rich
 |------|---------|-------------|
 | `Boolean` | `true`, `false` | True/false values |
 | `Int64` | `42`, `-100` | 64-bit signed integers |
-| `Float64` | `3.14`, `-0.5` | 64-bit floating point |
+| `Float64` | `3.14e0`, `-0.5e0` | 64-bit floating point |
+| `Decimal` | `3.14`, `1.50`, `-0.5` | Exact decimal of up to 38 digits, keeping its scale (GQL and SQL/PGQ write it with a point; Cypher with `toDecimal('3.14')`) |
 | `String` | `'hello'` | UTF-8 text |
 | `Vector` | `[0.1, 0.2, 0.3]` | f32 array for embeddings |
 | `List` | `[1, 2, 3]` | Ordered collection |

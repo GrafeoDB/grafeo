@@ -82,8 +82,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     println!(
         "Original: {} nodes, {} edges",
-        db.node_count(),
-        db.edge_count()
+        db.node_count()?,
+        db.edge_count()?
     );
 
     // Export to bytes
@@ -94,8 +94,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let restored = GrafeoDB::import_snapshot(&snapshot)?;
     println!(
         "Restored: {} nodes, {} edges",
-        restored.node_count(),
-        restored.edge_count()
+        restored.node_count()?,
+        restored.edge_count()?
     );
 
     // Verify data integrity

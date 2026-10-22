@@ -19,6 +19,7 @@
 #![deny(unsafe_code)]
 
 pub mod change;
+pub mod clock;
 pub mod collections;
 pub mod fmt;
 pub mod memory;
@@ -35,16 +36,6 @@ pub use types::{
     EdgeId, EpochId, LogicalType, NodeId, PropertyKey, Timestamp, TransactionId, Value,
 };
 pub use utils::error::{Error, Result};
-
-// Tiered storage types (feature-gated)
-#[cfg(feature = "tiered-storage")]
-pub use mvcc::{ColdVersionRef, HotVersionRef, OptionalEpochId, VersionIndex, VersionRef};
-
-// Temporal property versioning (feature-gated)
-#[cfg(feature = "temporal")]
-pub mod temporal;
-#[cfg(feature = "temporal")]
-pub use temporal::VersionLog;
 
 // Encryption at rest (feature-gated)
 #[cfg(feature = "encryption")]

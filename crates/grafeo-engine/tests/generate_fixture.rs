@@ -13,12 +13,16 @@ use grafeo_engine::GrafeoDB;
 /// Builds the canonical fixture graph used by both the generator and the
 /// golden format tests. Keep this in sync with the assertions in
 /// `golden_format.rs`.
+///
+/// # Panics
+///
+/// Never: an in-memory database has the built-in store.
 pub fn build_fixture_db() -> GrafeoDB {
     let db = GrafeoDB::new_in_memory();
     // Written straight to the store, all at epoch 0, so the export matches the
     // checked-in bytes: the database's write API commits each call and moves
     // the epoch, which the exported property versions record.
-    let store = db.store();
+    let store = db.store().unwrap();
 
     // 3 nodes with different labels and properties
     let alix = store.create_node(&["Person"]);
@@ -50,7 +54,7 @@ fn regenerate_snapshot_fixture() {
 
     let path = concat!(
         env!("CARGO_MANIFEST_DIR"),
-        "/tests/fixtures/snapshot_v4.bin"
+        "/tests/fixtures/snapshot_v5.bin"
     );
     std::fs::write(path, &bytes).unwrap();
     println!("Wrote {} bytes to {path}", bytes.len());

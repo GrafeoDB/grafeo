@@ -39,7 +39,7 @@ tests:
 
   - name: floats_and_booleans_beside_a_literal_key
     variants:
-      gql: "MATCH (p:Person) WITH p.age / 16.0 AS share, p.age > 30 AS senior RETURN 'all' AS g, collect(share) AS shares, collect(senior) AS seniors"
+      gql: "MATCH (p:Person) WITH p.age / 16.0e0 AS share, p.age > 30 AS senior RETURN 'all' AS g, collect(share) AS shares, collect(senior) AS seniors"
       cypher: "MATCH (p:Person) WITH p.age / 16.0 AS share, p.age > 30 AS senior RETURN 'all' AS g, collect(share) AS shares, collect(senior) AS seniors"
     expect:
       rows:
@@ -75,7 +75,7 @@ tests:
 
   - name: several_aggregates_over_a_computed_key
     variants:
-      gql: "MATCH (p:Person) WITH p.name AS name, p.age AS age, p.age / 16.0 AS share RETURN age % 2 AS odd, count(*) AS c, count(DISTINCT name) AS names, min(name) AS first, sum(share) AS total"
+      gql: "MATCH (p:Person) WITH p.name AS name, p.age AS age, p.age / 16.0e0 AS share RETURN age % 2 AS odd, count(*) AS c, count(DISTINCT name) AS names, min(name) AS first, sum(share) AS total"
       cypher: "MATCH (p:Person) WITH p.name AS name, p.age AS age, p.age / 16.0 AS share RETURN age % 2 AS odd, count(*) AS c, count(DISTINCT name) AS names, min(name) AS first, sum(share) AS total"
     expect:
       rows:

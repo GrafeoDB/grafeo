@@ -20,7 +20,9 @@ from dataclasses import dataclass
 GQL = ("gql",)
 CYPHER = ("cypher",)
 BOTH = ("gql", "cypher")
-LANGUAGES = frozenset(BOTH)
+# SQL/PGQ, for its own cases (`parity` compares GQL and Cypher only)
+SQL = ("sql",)
+LANGUAGES = frozenset(BOTH + SQL)
 
 
 @dataclass(frozen=True)
@@ -90,7 +92,8 @@ def empty(grafeo):
 
 
 def writes(grafeo):
-    """An empty database for the cases that write (section BR), which no other case reads."""
+    """An empty database for the cases that write (sections BR, BS and BU), which no other
+    case reads."""
     return grafeo.GrafeoDB()
 
 
@@ -198,10 +201,100 @@ def mixed(grafeo, indexed=False):
     return db
 
 
+def procedures(grafeo):
+    """Two stored procedures for section BZ: `pair(a, ab, abc)` returns its three
+    arguments, `same(x)` returns its one; Alix and Gus as `Person` nodes."""
+    db = grafeo.GrafeoDB()
+    db.execute("INSERT (:Person {name: 'Alix'}), (:Person {name: 'Gus'})")
+    db.execute(
+        "CREATE PROCEDURE pair(a STRING, ab STRING, abc STRING) "
+        "RETURNS (a STRING, ab STRING, abc STRING) AS { RETURN $abc AS abc, $a AS a, $ab AS ab }"
+    )
+    db.execute("CREATE PROCEDURE same(x ANY) RETURNS (v ANY) AS { RETURN $x AS v }")
+    return db
+
+
+def loops(grafeo):
+    """Mia KNOWS herself (since 1) and Gus (since 2), Gus KNOWS Alix (since 3), for
+    section CB."""
+    db = grafeo.GrafeoDB()
+    db.execute(
+        "INSERT (m:Person {name: 'Mia'})-[:KNOWS {since: 1}]->(m), "
+        "(m)-[:KNOWS {since: 2}]->(g:Person {name: 'Gus'}), "
+        "(g)-[:KNOWS {since: 3}]->(:Person {name: 'Alix'})"
+    )
+    return db
+
+
+def merges(grafeo):
+    """Alix, Gus and Vincent, and Alix KNOWS Gus, for section CC, whose cases write in
+    order."""
+    db = grafeo.GrafeoDB()
+    db.execute(
+        "INSERT (a:Person {name: 'Alix'}), (g:Person {name: 'Gus'}), "
+        "(:Person {name: 'Vincent'}), (a)-[:KNOWS]->(g)"
+    )
+    return db
+
+
+def weighted(grafeo):
+    """A chain 0 -> 1 -> 2 -> 3 of KNOWS edges weighing 20, 30 and 5, for sections CD and CE."""
+    db = grafeo.GrafeoDB()
+    db.execute(
+        "INSERT (:P {i: 0})-[:KNOWS {w: 20}]->(:P {i: 1})-[:KNOWS {w: 30}]->(:P {i: 2})"
+        "-[:KNOWS {w: 5}]->(:P {i: 3})"
+    )
+    return db
+
+
+def leads(grafeo):
+    """Node type `Customer (spend FLOAT64)` and two leads with an integer `spend`, for
+    section CF, whose cases add the label in order."""
+    db = grafeo.GrafeoDB()
+    db.execute("CREATE NODE TYPE Customer (spend FLOAT64)")
+    db.execute("INSERT (:Lead {id: 1, spend: 3}), (:Lead {id: 2, spend: 19})")
+    return db
+
+
+def quoted(grafeo):
+    """Alix alone, for section CK, whose cases set and remove names in backticks in
+    order."""
+    db = grafeo.GrafeoDB()
+    db.execute("INSERT (:Person {name: 'Alix'})")
+    return db
+
+
+def graphs(grafeo):
+    """Gus in the default graph; Alix, who KNOWS Paris, in the graph floria. The session
+    is back on the default graph."""
+    db = grafeo.GrafeoDB()
+    db.execute("INSERT (:Person {name: 'Gus', w: 101})")
+    db.execute("CREATE GRAPH floria")
+    db.execute("USE GRAPH floria")
+    db.execute(
+        "INSERT (:Person {name: 'Alix', w: 100})-[:KNOWS {since: 2010, w: 1}]->(:City {name: 'Paris', w: 105})"
+    )
+    db.execute("USE GRAPH default")
+    return db
+
+
 def mixed_indexed(grafeo):
     """`mixed` with a property index on `p`."""
     return mixed(grafeo, indexed=True)
 
+
+# Fixtures of their own, whose cases run in corpus order and read what the writes
+# before them left: the only fixtures a case may write to, each with the sections
+# whose cases use it. Every other fixture is built once and shared, so a write would
+# change what later cases see.
+WRITE_FIXTURES = {
+    "writes": {"BR", "BS", "BU", "CT", "DB"},
+    "merges": {"CC"},
+    "leads": {"CF"},
+    "quoted": {"CK"},
+    # CP1 runs after BB and its insert is refused, so BB reads the fixture as built
+    "typed": {"BB", "CP"},
+}
 
 FIXTURES = {
     "social": social,
@@ -215,6 +308,13 @@ FIXTURES = {
     "typed": typed,
     "mixed": mixed,
     "mixed_indexed": mixed_indexed,
+    "procedures": procedures,
+    "loops": loops,
+    "merges": merges,
+    "weighted": weighted,
+    "leads": leads,
+    "quoted": quoted,
+    "graphs": graphs,
 }
 
 CASES: list[Case] = []
@@ -742,7 +842,10 @@ for case_id, query in [
 # AG: node patterns with several labels (the label with the fewest nodes is scanned) and
 #     lookups of a labeled node by an indexed property, on skewed labels; AG101 to AG123
 #     are AG1 to AG23 with an index on `id`. AG21 to AG23: a label under NOT or OR is
-#     no requirement of the node, so the scan keeps the pattern's label
+#     no requirement of the node, so the scan keeps the pattern's label. AG24 to AG29: a
+#     label in WHERE on a node without one in the pattern (#457), scanned as that label
+#     unless NOT or an OR with another condition makes it no requirement. AG30 to AG34:
+#     an OR of labels reads the nodes of those labels, each once (t0 has both)
 for fixture, offset in [("labels", 0), ("labels_indexed", 100)]:
     for number, query, is_ordered in [
         (1, "MATCH (n:Graph:Repository) RETURN n.id AS id", False),
@@ -768,6 +871,17 @@ for fixture, offset in [("labels", 0), ("labels_indexed", 100)]:
         (21, "MATCH (n:Graph) WHERE NOT n:Repository RETURN count(n) AS c", False),
         (22, "MATCH (n:Graph) WHERE n:Repository OR n.n = 5 RETURN count(n) AS c", False),
         (23, "MATCH (n:Graph) WHERE NOT (n:Repository AND n.n = 1) RETURN count(n) AS c", False),
+        (24, "MATCH (n) WHERE n:Repository RETURN n.id AS id", False),
+        (25, "MATCH (n) WHERE 'Repository' IN labels(n) RETURN n.id AS id", False),
+        (26, "MATCH (n) WHERE n:Repository AND n.n < 2 RETURN n.id AS id", False),
+        (27, "MATCH (n) WHERE n:Graph AND n:Repository RETURN n.id AS id", False),
+        (28, "MATCH (n) WHERE NOT n:Graph RETURN count(n) AS c", False),
+        (29, "MATCH (n) WHERE n:Repository OR n.id = 't1' RETURN count(n) AS c", False),
+        (30, "MATCH (n) WHERE n:Tag OR n:Topic RETURN n.id AS id", False),
+        (31, "MATCH (n) WHERE 'Tag' IN labels(n) OR 'Topic' IN labels(n) RETURN n.id AS id", False),
+        (32, "MATCH (n) WHERE any(l IN labels(n) WHERE l IN ['Topic', 'Tag']) RETURN n.id AS id", False),
+        (33, "MATCH (n) WHERE (n:Tag OR n:Topic) AND n.id <> 't1' RETURN n.id AS id", False),
+        (34, "MATCH (n) WHERE n:Graph OR n:Repository RETURN count(n) AS c", False),
     ]:
         case(f"AG{offset + number}", query, BOTH, fixture, is_ordered)
 
@@ -947,6 +1061,8 @@ for case_id, query, languages in [
 #     that parse as it and numbers within EPSILON equal; the lookups of an index found
 #     their exact value only, and a constant key on a label scan without an index used a
 #     stricter `=` of its own. AV1 to AV8 without an index, AV9 to AV16 with one
+#     An IN list in an AND chain takes the index too (#456): AV17 and AV18 without one, AV19
+#     and AV20 with one
 for case_id, query, fixture in [
     ("AV1", "MATCH (d:Doc) WHERE d.p = 42 RETURN d.n AS n", "mixed"),
     ("AV2", "MATCH (d:Doc) WHERE d.p = 42.0 RETURN d.n AS n", "mixed"),
@@ -964,6 +1080,10 @@ for case_id, query, fixture in [
     ("AV14", "MATCH (o:Other) MATCH (d:Doc) WHERE d.p = 0.3 RETURN d.n AS n", "mixed_indexed"),
     ("AV15", "MATCH (d) WHERE d.p = 42 RETURN d.n AS n", "mixed_indexed"),
     ("AV16", "MATCH (a:Doc {n: 'int'}) MATCH (b:Doc) WHERE id(b) = toString(id(a)) RETURN b.n AS n", "mixed_indexed"),
+    ("AV17", "MATCH (d:Doc) WHERE d.p IN [42, 0.3, 'abc'] AND d.n <> 'float' RETURN d.n AS n", "mixed"),
+    ("AV18", "MATCH (d) WHERE d.n STARTS WITH 's' AND d.p IN ['42', 0.3] RETURN d.n AS n", "mixed"),
+    ("AV19", "MATCH (d:Doc) WHERE d.p IN [42, 0.3, 'abc'] AND d.n <> 'float' RETURN d.n AS n", "mixed_indexed"),
+    ("AV20", "MATCH (d) WHERE d.n STARTS WITH 's' AND d.p IN ['42', 0.3] RETURN d.n AS n", "mixed_indexed"),
 ]:
     case(case_id, query, BOTH, fixture)
 
@@ -1443,5 +1563,458 @@ for case_id, query, is_ordered in [
     ("BT8", "MATCH (p:Person) RETURN p.name AS name, count(*) + p.age AS n GROUP BY p.name", False),
 ]:
     case(case_id, query, GQL, "social", is_ordered)
+
+# BU: CREATE GRAPH ... AS COPY OF copies the source's nodes, edges, labels and properties
+#     (#423; it created an empty graph), on the `writes` fixture after the BS cases: the
+#     copy holds both people and their edge (BU6, BU7), then the session goes back to the
+#     default graph for the cases after it (BU8)
+for case_id, query in [
+    ("BU1", "CREATE GRAPH copy_src"),
+    ("BU2", "USE GRAPH copy_src"),
+    ("BU3", "INSERT (:Person {name: 'Mia', w: 106})-[:KNOWS {since: 2019, w: 6}]->(:Person {name: 'Butch', w: 107})"),
+    ("BU4", "CREATE GRAPH copy_dst AS COPY OF copy_src"),
+    ("BU5", "USE GRAPH copy_dst"),
+    ("BU6", "MATCH (p:Person) RETURN p.name, p.w"),
+    ("BU7", "MATCH (a:Person)-[k:KNOWS]->(b:Person) RETURN a.name, b.name, k.since, k.w"),
+    ("BU8", "USE GRAPH default"),
+]:
+    case(case_id, query, GQL, "writes")
+
+# BV: GQL number literals (#610). A number with a point is an exact decimal, one with an
+#     exponent or the suffix F or D a float, and the suffix M makes any number a decimal
+#     (BV1 to BV4); a decimal with an integer is a decimal, with a float a float, and
+#     division gives 16 digits (BV5, BV6); ceil keeps a decimal, sqrt gives a float (BV7);
+#     a decimal equals an integer and a numeric string of its value (BV8, BV9), also in a
+#     filter on a property (BV10); a decimal division by zero is null, a float one an
+#     infinity (BV11)
+for case_id, query in [
+    ("BV1", "RETURN 0.1 + 0.2 = 0.3 AS exact, 0.1e0 + 0.2e0 = 0.3e0 AS approximate"),
+    ("BV2", "RETURN 1.50 AS d, 1.5e0 AS f"),
+    ("BV3", "RETURN 2M AS m, 2.5F AS f, 2.5D AS d, 2.50m AS lower"),
+    ("BV4", "RETURN -0.25 AS d, 0.0 AS zero"),
+    ("BV5", "RETURN 1.5 + 1 AS di, 1.5 + 1.0e0 AS df, 1.25 * 4 AS product"),
+    ("BV6", "RETURN 1 / 3.0 AS third, 2.0 / 4 AS half"),
+    ("BV7", "RETURN ceil(2.3) AS c, floor(-2.3) AS f, round(2.5) AS r, sqrt(2.25) AS s"),
+    ("BV8", "RETURN 3.0 = 3 AS i, 1.5 = 1.5e0 AS f, 3.0 < 4 AS lt"),
+    ("BV9", "RETURN '5' = 5.0 AS s, '5.00' = 5.0 AS scale, 'five' = 5.0 AS word"),
+    ("BV10", "MATCH (p:Person) WHERE p.age = 30.0 RETURN p.name"),
+    ("BV11", "RETURN 1.0 / 0 AS d, 1.0e0 / 0.0e0 AS f"),
+]:
+    case(case_id, query, GQL)
+
+# BW: decimals by function and cast (#610). toDecimal makes a decimal of a number or a
+#     numeric string in GQL and Cypher, and with a precision and scale rounds or gives
+#     null (BW1, BW2); a GQL CAST to DECIMAL or DEC keeps the scale, to DECIMAL(p, s)
+#     rounds, to LIST<DECIMAL> converts each item (BW3 to BW5)
+for case_id, query, languages in [
+    ("BW1", "RETURN toDecimal(1.5e0) AS f, toDecimal('2.50') AS s, toDecimal(3) AS i, toDecimal('x') AS n", BOTH),
+    ("BW2", "RETURN toDecimal(1.005e0, 5, 2) AS r, toDecimal(1234.5e0, 5, 2) AS o", BOTH),
+    ("BW3", "RETURN CAST('1.50' AS DECIMAL) AS d, CAST(1.5e0 AS DEC) AS f", GQL),
+    ("BW4", "RETURN CAST(2.345 AS DECIMAL(10, 2)) AS r, CAST(123.4 AS DECIMAL(4, 2)) AS o", GQL),
+    ("BW5", "RETURN CAST([1, '2.5', 0.5e0] AS LIST<DECIMAL>) AS l", GQL),
+]:
+    case(case_id, query, languages)
+
+# BX: equal text search scores rank by ascending node id, so a cut at k inside a tie keeps
+#     the lowest id (#619; hash order decided it): 'graph database' (Amsterdam) and 'graph
+#     theory' (Paris) score the same for 'graph'
+ordered("BX1", "CALL grafeo.search.text('Doc', 'body', 'graph', 1) YIELD node_id RETURN node_id", BOTH, "search")
+ordered("BX2", "CALL grafeo.search.text('Doc', 'body', 'graph', 2) YIELD node_id RETURN node_id", BOTH, "search")
+
+# BY: numeric errors (#639). An integer result that does not fit fails the query (22003),
+#     an integer or decimal division by zero too (22012), in a RETURN and a WHERE (BY1 to
+#     BY4); a float division keeps its IEEE result and a null operand gives null (BY5); a
+#     false left side decides an AND, so a guard before the division keeps its rows out (BY6);
+#     an integer sum fails only when its final value does not fit (BY7, BY8)
+for case_id, query, languages in [
+    ("BY1", "RETURN 9223372036854775807 + 1 AS x", BOTH),
+    ("BY2", "RETURN 1 % 0 AS x", BOTH),
+    ("BY3", "MATCH (p:Person) RETURN p.name, 100 / (p.age - p.age) AS x", BOTH),
+    ("BY4", "MATCH (p:Person) WHERE 100 / (p.age - 30) > 1 RETURN p.name", BOTH),
+    ("BY5", "RETURN toFloat(1) / 0 AS f, null / 0 AS n, -9223372036854775807 - 1 AS m", BOTH),
+    ("BY6", "MATCH (p:Person) WHERE p.age <> 30 AND 100 / (p.age - 30) > 1 RETURN p.name", BOTH),
+    ("BY7", "UNWIND [9223372036854775807, 1] AS x RETURN sum(x) AS s", BOTH),
+    ("BY8", "UNWIND [9223372036854775807, 1, -1] AS x RETURN sum(x) AS s", BOTH),
+]:
+    case(case_id, query, languages)
+
+# BZ: a stored procedure's arguments are values bound to its parameters, as a statement's
+#     parameters are: a parameter that prefixes another keeps its value (BZ1), a value with
+#     a quote and query text stays a value and runs nothing (BZ2, then BZ3 counts the
+#     nodes), a float, a list and a map arrive as themselves, not as text (BZ4)
+for case_id, query in [
+    ("BZ1", "CALL pair('Alix', 'Gus', 'Mia') YIELD a, ab, abc RETURN a, ab, abc"),
+    ("BZ2", r"CALL same('it\'s\' AS v NEXT MATCH (n) DETACH DELETE n RETURN 1') YIELD v RETURN v"),
+    ("BZ3", "MATCH (p:Person) RETURN count(p) AS c"),
+    ("BZ4", "CALL same([2.5e0, [3, 'Berlin'], {city: 'Prague'}]) YIELD v RETURN v"),
+]:
+    case(case_id, query, GQL, "procedures")
+
+# CA: a procedure call inside a query runs once per incoming row, whose variables stay in
+#     scope: five people times two labels (CA1), each UNWIND value with each label (CA2), a
+#     row's own value beside the call's (CA3), a WHERE after YIELD (CA4); Cypher dropped the
+#     input and GQL did not parse a CALL ... YIELD followed by RETURN inside a query
+for case_id, query in [
+    ("CA1", "MATCH (p:Person) CALL db.labels() YIELD label RETURN count(*) AS c"),
+    ("CA2", "UNWIND [1, 2] AS x CALL db.labels() YIELD label RETURN x, label"),
+    ("CA3", "MATCH (a:Person {name: 'Alix'}) CALL db.labels() YIELD label RETURN a.name AS a, label"),
+    ("CA4", "MATCH (p:Person) CALL db.labels() YIELD label WHERE label = 'City' RETURN p.name AS name, label"),
+]:
+    case(case_id, query)
+
+# CB: an undirected pattern takes a self-loop once (openCypher TCK Match3 [11], [12]): the
+#     loop alone (CB1), every edge from both ends and the loop from its one end (CB2), a
+#     one-hop variable-length walk (CB3), a COUNT subquery (CB4); and the names the engine
+#     makes up skip the user's: an aggregate column (CB5), an anonymous edge's column (CB6)
+for case_id, query in [
+    ("CB1", "MATCH (n)-[r]-(n) RETURN n.name AS name"),
+    ("CB2", "MATCH (a)-[r]-(b) RETURN count(r) AS c"),
+    ("CB3", "MATCH (m:Person {name: 'Mia'})-[*1..1]-(x) RETURN x.name AS name"),
+    ("CB4", "MATCH (m:Person {name: 'Mia'}) RETURN COUNT { MATCH (m)-[]-(m) } AS c"),
+    ("CB5", "UNWIND [3, 19] AS _agg_0 RETURN _agg_0, count(*) > 0 AS any"),
+    ("CB6", "MATCH (_anon_edge_0:Person {name: 'Gus'}), (a)-[]->(b) RETURN _anon_edge_0.name AS n, count(*) AS c"),
+]:
+    case(case_id, query, BOTH, "loops")
+
+# CC: MERGE matches the whole pattern or creates all of it (openCypher), in GQL and Cypher:
+#     a pattern of two relationships is created, then found (CC1 to CC3, refused before), a
+#     node the pattern does not connect is not reused (CC5, CC6: a second Gus), and a node
+#     MERGE's SET n = {...} replaces the properties (CC7). Cypher reads arrows both ways as
+#     either direction (CC8), refuses CREATE without a type (CC9), and binds IN tighter than
+#     = (CC10). The cases write, in order, on a database of their own (fixture `merges`).
+for case_id, query, languages in [
+    ("CC1", "MATCH (a:Person {name: 'Alix'}), (b:Person {name: 'Gus'}) MERGE (a)-[:S]->(b)-[:T]->(n:N {id: 3}) RETURN n.id AS id", CYPHER),
+    ("CC2", "MATCH (a:Person {name: 'Alix'}), (b:Person {name: 'Gus'}) MERGE (a)-[:S]->(b)-[:T]->(n:N {id: 3}) RETURN n.id AS id", CYPHER),
+    ("CC3", "MATCH (a:Person {name: 'Alix'}), (b:Person {name: 'Gus'}) MERGE (a)-[:S2]->(b)-[:T2]->(n:N2 {id: 3}) RETURN n.id AS id", GQL),
+    ("CC4", "MATCH (n) RETURN count(n) AS c", BOTH),
+    ("CC5", "MATCH (v:Person {name: 'Vincent'}) MERGE (v)-[:KNOWS]->(g:Person {name: 'Gus'}) RETURN count(g) AS c", CYPHER),
+    ("CC6", "MATCH (p:Person {name: 'Gus'}) RETURN count(p) AS c", BOTH),
+    ("CC7", "MERGE (n:X {id: 1}) ON CREATE SET n = {fresh: 2} RETURN n.id AS id, n.fresh AS fresh", CYPHER),
+    ("CC8", "MATCH (g:Person {name: 'Gus'})<-[:KNOWS]->(b) RETURN b.name AS b", CYPHER),
+    ("CC9", "CREATE (a)-[]->(b)", CYPHER),
+    ("CC10", "RETURN 1 = 2 IN [false] AS v", CYPHER),
+]:
+    case(case_id, query, languages, "merges")
+
+# CD: a condition on a variable-length edge holds for each edge (Cypher read its inline WHERE
+#     against the edge list and returned nothing; GQL already checked each edge): alone
+#     (CD1), reading the row (CD2), with the edge list after the pattern (CD3); a pattern
+#     from a node an OPTIONAL MATCH did not find matches nothing (CD4, an internal error);
+#     collect_list is collect under its ISO GQL name (CD5)
+for case_id, query, languages in [
+    ("CD1", "MATCH (a:P {i: 0})-[e:KNOWS*1..3 WHERE e.w > 10]->(b) RETURN b.i AS i", BOTH),
+    ("CD2", "UNWIND [15, 25] AS t MATCH (a:P {i: 0})-[e:KNOWS*1..3 WHERE e.w > t]->(b) RETURN t, b.i AS i", BOTH),
+    ("CD3", "MATCH (a:P {i: 0})-[e:KNOWS*1..3 WHERE e.w > 10]->(b) RETURN size(e) AS hops", BOTH),
+    ("CD4", "OPTIONAL MATCH (n:Missing) MATCH (n)-[:KNOWS*1..3]->(m) RETURN count(m) AS c", BOTH),
+    ("CD5", "UNWIND [3, 19] AS x RETURN collect_list(x) AS l", GQL),
+]:
+    case(case_id, query, languages, "weighted")
+
+# CE: aggregate calls. An aggregate takes its number of arguments (CE1 counted the first,
+#     CE2 counted the rows); a COUNT subquery in an aggregate's argument or as a grouping key
+#     runs per row (CE3, CE4, internal errors); GQL takes HAVING before ORDER BY (CE5, a
+#     syntax error). Without GROUP BY an item with an aggregate reads only the keys (the
+#     items without one): another variable is refused (CE6, openCypher's
+#     AmbiguousAggregationExpression), and a key, also in CASE, or a CALL import reads its
+#     value (CE7 to CE9; all four returned null)
+for case_id, query, languages in [
+    ("CE1", "MATCH (p:P) RETURN count(p.i, p.i) AS c", BOTH),
+    ("CE2", "MATCH (p:P) RETURN sum() AS s", BOTH),
+    ("CE3", "UNWIND [1, 2] AS j RETURN sum(COUNT { MATCH (t:P) WHERE t.i = 3 - j }) AS s", BOTH),
+    ("CE4", "UNWIND [1, 2, 3] AS j RETURN COUNT { MATCH (t:P) WHERE t.i = 2 * j } AS found, count(*) AS c", BOTH),
+    ("CE5", "MATCH (p:P) RETURN p.i % 2 AS odd GROUP BY odd HAVING count(*) > 1 ORDER BY odd", GQL),
+    ("CE6", "MATCH (p:P) RETURN p.i % 2 AS odd, count(*) + p.i AS n", BOTH),
+    ("CE7", "MATCH (p:P) RETURN p.i AS i, count(*) + p.i AS n", BOTH),
+    ("CE8", "UNWIND [100] AS t CALL (t) { MATCH (p:P) RETURN count(*) + t AS n } RETURN n", BOTH),
+    ("CE9", "MATCH (p:P) RETURN p.i AS i, CASE WHEN count(*) > 1 THEN -1 ELSE p.i END AS c", BOTH),
+]:
+    case(case_id, query, languages, "weighted")
+
+# CF: id, elementId and properties read the node or edge any expression yields, as labels
+#     does (CF1 to CF3, null before), and properties of a map is the map (CF4, null);
+#     datetime, date and time read a zoned datetime: its instant, and its local date and time
+#     of day with the offset (CF5, null). A label added to a node converts its values to the
+#     label's types (CF6, CF7: "expects Float64" before)
+for case_id, query, languages, fixture in [
+    ("CF1", "MATCH (n:P {i: 0}) WITH n, [n] AS l RETURN properties(l[0]) AS p, id(l[0]) = id(n) AS same", BOTH, "weighted"),
+    ("CF2", "MATCH (a:P {i: 0})-[r]->() WITH r, [r] AS l RETURN properties(l[0]) AS p, elementId(l[0]) = elementId(r) AS same", BOTH, "weighted"),
+    ("CF3", "MATCH (a:P {i: 0})-[r]->() RETURN properties(startNode(r)) AS p", BOTH, "weighted"),
+    ("CF4", "RETURN properties({a: 1}) AS p", BOTH, "weighted"),
+    ("CF5", "RETURN date(zoned_datetime('2024-03-01T00:30:00+01:00')) AS d, time(zoned_datetime('2024-03-01T00:30:00+01:00')) AS t, datetime(zoned_datetime('2024-03-01T00:30:00+01:00')) AS i", BOTH, "weighted"),
+    ("CF6", "MATCH (n:Lead {id: 1}) SET n:Customer RETURN n.spend AS s", GQL, "leads"),
+    ("CF7", "MATCH (n:Lead {id: 2}) SET n:Customer RETURN n.spend AS s", CYPHER, "leads"),
+]:
+    case(case_id, query, languages, fixture)
+
+# CG: ORDER BY scope in GQL, as Cypher has it since 0.6.0-beta.1 (openCypher): after a plain
+#     WITH it reads the WITH's input (CG1, GQL: "Undefined variable"); after an aggregating
+#     RETURN a key that repeats an aggregate or a grouping key reads its column (CG2, CG3, GQL:
+#     refused and an internal error), and a dropped variable is "Undefined variable" (CG4,
+#     GQL: an internal error), also after a DISTINCT WITH (CG5). Every GQL ORDER BY puts nulls
+#     last (#571), also the ORDER BY statement (CG6, CG7: nulls first descending). With
+#     DISTINCT, ORDER BY reads only what the clause returns (CG8, it returned duplicates),
+#     an unaliased returned expression too (CG9)
+for case_id, query, languages in [
+    ("CG1", "MATCH (a:Person) WITH a.name AS name ORDER BY a.age RETURN name", BOTH),
+    ("CG2", "MATCH (a:Person)-[:LIVES_IN]->(c) RETURN c.name, max(a.age) ORDER BY max(a.age)", BOTH),
+    ("CG3", "MATCH (a:Person) RETURN a.name AS name, count(*) AS c ORDER BY a.name DESC", BOTH),
+    ("CG6", "MATCH (a:Person) WITH a.w AS w ORDER BY w DESC RETURN w", GQL),
+    ("CG7", "MATCH (a:Person) ORDER BY a.w DESC RETURN a.w AS w", GQL),
+    ("CG9", "MATCH (a:Person) RETURN DISTINCT a.age > 29 ORDER BY a.age > 29", BOTH),
+]:
+    ordered(case_id, query, languages, "social")
+for case_id, query in [
+    ("CG4", "MATCH (a:Person) RETURN count(*) AS c ORDER BY a.age"),
+    ("CG5", "MATCH (a:Person) WITH DISTINCT a.age > 29 AS old ORDER BY a.name RETURN old"),
+    ("CG8", "MATCH (a:Person) RETURN DISTINCT a.age > 29 AS old ORDER BY a.name"),
+]:
+    case(case_id, query, BOTH, "social")
+
+# CH: IS TYPED DECIMAL holds for a decimal (#610): a literal, the result of arithmetic and a
+#     list of decimals (it was false outside a LIST<...> type)
+for case_id, query in [
+    ("CH1", "RETURN 1.50 IS TYPED DECIMAL AS d, 1.50 IS TYPED DEC AS dec, 1.50 IS TYPED FLOAT64 AS f"),
+    ("CH2", "RETURN (1.50 + 1) IS TYPED DECIMAL AS d, toDecimal(2) IS TYPED DECIMAL AS t"),
+    ("CH3", "RETURN [1.5, 2.25] IS TYPED LIST<DECIMAL> AS l, 1.5e0 IS TYPED DECIMAL AS f"),
+]:
+    case(case_id, query, GQL, "empty")
+
+# CI: abs of the smallest integer fails as out of range (22003, #639), as its negation does;
+#     abs of other integers is unchanged
+for case_id, query in [
+    ("CI1", "UNWIND [-9223372036854775807 - 1] AS x RETURN abs(x) AS a"),
+    ("CI2", "UNWIND [-9223372036854775807, -3, 0] AS x RETURN abs(x) AS a"),
+]:
+    case(case_id, query, BOTH, "empty")
+
+# CJ: float = and <> are exact (IEEE 754): a float sum is not its rounded value (CJ1, CJ2), -0.0
+#     equals 0.0 and NaN equals nothing (CJ3), a value near 0 or just below 1 is not 0 or 1
+#     (CJ4), an integer equals only a float of exactly its value (CJ5), DISTINCT keeps NaN
+#     together (CJ6)
+for case_id, query, languages in [
+    ("CJ1", "RETURN 0.1e0 + 0.2e0 = 0.3e0 AS eq, 0.1e0 + 0.2e0 <> 0.3e0 AS ne", GQL),
+    ("CJ2", "RETURN 0.1 + 0.2 = 0.3 AS eq, 0.1 + 0.2 <> 0.3 AS ne", CYPHER),
+    ("CJ3", "RETURN -0.0e0 = 0.0e0 AS z, NaN = NaN AS nan, NaN <> NaN AS ne", GQL),
+    ("CJ4", "RETURN 1.0e-300 = 0 AS tiny, 0.9999999999999999e0 = 1 AS one", GQL),
+    ("CJ5", "RETURN 9007199254740993 = 9007199254740992.0e0 AS above, 9007199254740992 = 9007199254740992.0e0 AS exact", GQL),
+    ("CJ6", "UNWIND [NaN, NaN, 0.0e0, -0.0e0] AS x RETURN count(DISTINCT x) AS n", GQL),
+]:
+    case(case_id, query, languages, "empty")
+
+# CK: GQL names in backticks and doubled quotes. SET and REMOVE take the name inside the
+#     backticks (CK1 to CK3: the key and label kept their backticks, so REMOVE missed the
+#     real ones), and a doubled backtick is one (CK4). In a string literal a doubled quote is
+#     the quote (CK5, CK6: syntax errors; ISO GQL 21.2). The cases write, in order, on a
+#     database of their own (fixture `quoted`)
+for case_id, query in [
+    ("CK1", "MATCH (n:Person) SET n.`two words` = 2 RETURN n.`two words` AS v, keys(n) AS k"),
+    ("CK2", "MATCH (n:Person) SET n:`Odd Label` RETURN labels(n) AS l"),
+    ("CK3", "MATCH (n:Person) REMOVE n.`two words`, n:`Odd Label` RETURN keys(n) AS k, labels(n) AS l"),
+    ("CK4", "MATCH (n:Person) SET n.`a``b` = 1 RETURN keys(n) AS k"),
+    ("CK5", "RETURN 'O''Brien' AS s, '''' AS one_quote"),
+    ("CK6", 'RETURN "say ""hi""" AS s'),
+]:
+    case(case_id, query, GQL, "quoted")
+
+# CL: <, <=, > and >= compare an integer with a float exactly, as ORDER BY and = do: an integer
+#     above 2^53 against its nearest float (CL1, CL2), a filter over stored values (CL3), NaN
+#     is neither less nor greater than a number (CL4)
+for case_id, query in [
+    ("CL1", "RETURN 9007199254740993 > 9007199254740992.0e0 AS gt, 9007199254740993 <= 9007199254740992.0e0 AS le"),
+    ("CL2", "RETURN 9007199254740992.0e0 < 9007199254740993 AS lt, 9007199254740992 >= 9007199254740992.0e0 AS ge"),
+    ("CL3", "UNWIND [9007199254740992, 9007199254740993, 9007199254740994] AS v WITH v WHERE v > 9007199254740992.0e0 RETURN v ORDER BY v"),
+    ("CL4", "RETURN NaN < 1 AS lt, NaN > 1 AS gt, 1 >= NaN AS ge, NaN <= NaN AS le"),
+]:
+    case(case_id, query, GQL, "empty")
+
+# CM: numeric literal forms. A point with digits on one side only is a number (CM1: `.5` in
+#     both languages, exact in GQL and a float in Cypher; CM2: `5.` in GQL), `_` between digits is a separator in GQL (CM3; in
+#     Cypher it ends the number, CM4), and a float literal past the float range is an error,
+#     22003 in GQL and a syntax error in Cypher (CM5), not infinity. A range after an
+#     integer stays a range (CM6)
+for case_id, query, languages in [
+    ("CM1", "RETURN .5 = 0.5 AS a, -.25 < 0 AS b, .5e1 AS c", BOTH),
+    ("CM2", "RETURN 5. = 5 AS same, 5.e1 AS f, [5.,6.][1] AS second", GQL),
+    ("CM3", "RETURN 1_000 AS a, 0x7F_FF AS b, 0b1010_0101 AS c, 1_000.5 AS d", GQL),
+    ("CM4", "RETURN 1_000 AS a", CYPHER),
+    ("CM5", "RETURN 1e400 AS a", BOTH),
+    ("CM6", "RETURN [10, 20, 30][1..2] AS slice", BOTH),
+]:
+    case(case_id, query, languages, "empty")
+
+# CN: unary plus is the number under it and, like unary minus, null for anything else (CN1:
+#     numbers; CN2: a string and a boolean, which it passed through unchanged)
+for case_id, query in [
+    ("CN1", "RETURN +3 AS a, -(+3) AS b, +(-3) AS c, +2.5e0 AS d"),
+    ("CN2", "RETURN +'Alix' AS a, +true AS b, -'Alix' AS c"),
+]:
+    case(case_id, query, BOTH, "empty")
+
+# CO: IS TYPED. A node is of NODE and ANY, not of INT64 (CO1: it was not NODE and was INT64, its
+#     id); an edge of EDGE (CO2: it was not); nested lists and two-word types are read (CO3: a
+#     syntax error); an ISO type Grafeo has no values of is not supported (CO4: it was false)
+for case_id, query in [
+    ("CO1", "MATCH (p:Person {name: 'Alix'}) RETURN p IS TYPED NODE AS node, p IS TYPED INT64 AS int64, p IS TYPED ANY AS any"),
+    ("CO2", "MATCH (:Person {name: 'Alix'})-[k:KNOWS]->(:Person {name: 'Gus'}) RETURN k IS TYPED EDGE AS edge"),
+    ("CO3", "RETURN [[1]] IS TYPED LIST<LIST<INT64>> AS nested, [1, 'x'] IS TYPED LIST<INT64> AS mixed, zoned_datetime('2024-03-15T10:00:00Z') IS TYPED ZONED DATETIME AS zoned"),
+    ("CO4", "RETURN 3 IS TYPED INT32 AS r"),
+]:
+    case(case_id, query, GQL)
+
+# CP: a property value of another type than its node type declares names the type as DDL spells
+#     it and the value as a query writes it (CP1: "expects String, got Int64(3)")
+case("CP1", "INSERT (:City {name: 3})", GQL, "typed")
+
+# CQ: SQL/PGQ aggregates inside SELECT expressions and HAVING (ISO/IEC 9075-2): an operator over
+#     aggregates (CQ1), an aggregate as a function's argument and a CASE over one (CQ2), per GROUP
+#     BY group with a key inside the expression (CQ3), and in HAVING (CQ4); all were errors. A
+#     column outside GROUP BY and the aggregates stays an error (CQ5)
+for case_id, query in [
+    ("CQ1", "SELECT COUNT(*) + 1 AS n, -COUNT(*) AS m, SUM(age) / COUNT(*) AS mean FROM GRAPH_TABLE (MATCH (p:Person) COLUMNS (p.age AS age))"),
+    ("CQ2", "SELECT ABS(MIN(age) - MAX(age)) AS spread, CASE WHEN COUNT(*) > 2 THEN 'many' ELSE 'few' END AS size FROM GRAPH_TABLE (MATCH (p:Person) COLUMNS (p.age AS age))"),
+    ("CQ3", "SELECT age + COUNT(*) AS v FROM GRAPH_TABLE (MATCH (p:Person) COLUMNS (p.age AS age)) GROUP BY age ORDER BY v"),
+    ("CQ4", "SELECT age FROM GRAPH_TABLE (MATCH (p:Person) COLUMNS (p.age AS age)) GROUP BY age HAVING ABS(MIN(age) - 30) = 0"),
+    ("CQ5", "SELECT age + COUNT(*) AS v FROM GRAPH_TABLE (MATCH (p:Person) COLUMNS (p.name AS name, p.age AS age)) GROUP BY name"),
+]:
+    case(case_id, query, SQL)
+
+# CR: cosine_distance of one direction is exactly 0 and of opposite ones exactly 2, also for
+#     very short vectors, a zero vector is at distance 1 (CR1, CR2), cosine_similarity is 1 and
+#     -1 (CR3); HOME_SCHEMA and HOME_GRAPH name a default session's home, 'default' (CR4)
+for case_id, query, languages in [
+    ("CR1", "RETURN cosine_distance([0.3, -1.7, 2.9], [0.3, -1.7, 2.9]) AS same, cosine_distance([0.3, -1.7, 2.9], [-0.3, 1.7, -2.9]) AS opposite, cosine_distance([1.0e-10, 1.0e-10], [1.0e-10, 1.0e-10]) AS tiny", BOTH),
+    ("CR2", "RETURN cosine_distance([1.0, 2.0], [0.0, 0.0]) AS one_zero, cosine_distance([0.0, 0.0], [0.0, 0.0]) AS both_zero", BOTH),
+    ("CR3", "RETURN cosine_similarity([0.3, -1.7, 2.9], [0.3, -1.7, 2.9]) AS same, cosine_similarity([0.3, -1.7, 2.9], [-0.3, 1.7, -2.9]) AS opposite", BOTH),
+    ("CR4", "RETURN HOME_SCHEMA AS s, HOME_GRAPH AS g, HOME_PROPERTY_GRAPH AS pg", GQL),
+]:
+    case(case_id, query, languages, "empty")
+
+# CS: Cypher's datetime() is zoned and keeps its offset (CS1), +00:00 without one (CS2); a local
+#     datetime's text has no zone (CS3); a zoned datetime plus or minus a duration keeps its offset
+#     and two zoned datetimes differ by a duration (CS4); a duration times or divided by a decimal
+#     or float carries fractions down (CS5), by zero is 22012 (CS6); normalize gives NFC (CS7);
+#     LIKE wildcards match a line break (CS8)
+for case_id, query, languages in [
+    ("CS1", "WITH datetime('2024-03-15T10:00:00+01:00') AS d RETURN d.hour AS h, d.offset AS o, toString(d + duration('PT1H')) AS later", CYPHER),
+    ("CS2", "RETURN toString(datetime('2024-03-15T10:00:00')) AS d, toString(localdatetime('2024-03-15T10:00:00')) AS l", CYPHER),
+    ("CS3", "RETURN toString(datetime('2024-03-15T10:00:00')) AS l, CAST(local_datetime('2024-03-15T10:00:00.25') AS STRING) AS c", GQL),
+    ("CS4", "RETURN toString(zoned_datetime('2024-03-15T10:00:00+01:00') + DURATION 'PT1H') AS plus, toString(zoned_datetime('2024-01-31T23:30:00+01:00') + DURATION 'P1M') AS month, zoned_datetime('2024-03-15T12:00:00+01:00') - zoned_datetime('2024-03-15T10:00:00Z') = DURATION 'PT1H' AS diff", GQL),
+    ("CS5", "RETURN toString(duration('P1D') * 1.5) AS a, toString(duration('P1M') * 1.5) AS b, toString(duration('P1D') / 2) AS c", BOTH),
+    ("CS6", "RETURN duration('P1D') / 0 AS r", BOTH),
+    ("CS7", "RETURN char_length(normalize('e\u0301')) AS n, normalize('e\u0301') = '\u00e9' AS same", GQL),
+    ("CS8", "RETURN 'a\nb' LIKE 'a%' AS percent, 'a\nb' LIKE 'a_b' AS underscore", GQL),
+]:
+    case(case_id, query, languages, "empty")
+
+# CT: a zoned datetime or time against a local one. GQL reads the local value at the session time
+#     zone, UTC without one (CT1 and CT2 hold, as SQL compares them), and Cypher keeps the types
+#     apart (CT1 is false and null there, as openCypher defines it): the parity run reports CT1
+#     and CT2 on purpose. Two zoned values compare by instant in both (CT3). A named time zone
+#     is not a displacement, 22009 (CT4). Cypher's time() is zoned, at +00:00 without an offset,
+#     and localtime() local (CT5)
+for case_id, query, languages in [
+    ("CT1", "RETURN zoned_datetime('2024-03-15T10:00:00+01:00') = local_datetime('2024-03-15T09:00:00') AS eq, zoned_datetime('2024-03-15T10:00:00+01:00') < local_datetime('2024-03-15T11:00:00') AS lt", BOTH),
+    ("CT2", "RETURN zonedTime('10:00:00+01:00') = local_time('09:00:00') AS eq", BOTH),
+    ("CT3", "RETURN zoned_datetime('2024-03-15T10:00:00+01:00') = zoned_datetime('2024-03-15T09:00:00Z') AS eq", BOTH),
+    ("CT5", "RETURN toString(time('10:00:00+01:00')) AS zoned, toString(time('10:00:00')) AS utc, toString(localtime('10:00:00')) AS local", CYPHER),
+]:
+    case(case_id, query, languages, "empty")
+# A session command: on a database of its own (it fails, so it changes nothing)
+case("CT4", "SESSION SET TIME ZONE 'Europe/Amsterdam'", GQL, "writes")
+
+# CU: a unary sign takes a number or a duration: on a stored string (CU1), a boolean (CU2) or a
+#     list (CU3) it is a type error, 22G03, where it was null; on a duration it negates it (CU4),
+#     where it was null; on the smallest integer it is out of range, 22003 (CU5)
+for case_id, query, languages, fixture in [
+    ("CU1", "MATCH (n:Person {name: 'Alix'}) RETURN -n.name AS a", BOTH, "social"),
+    ("CU2", "RETURN +true AS a", BOTH, "empty"),
+    ("CU3", "RETURN -[1, 2] AS a", BOTH, "empty"),
+    ("CU4", "RETURN toString(-duration('P1DT2H')) AS minus, toString(+duration('PT5M')) AS plus", BOTH, "empty"),
+    ("CU5", "RETURN -(-9223372036854775807 - 1) AS a", BOTH, "empty"),
+]:
+    case(case_id, query, languages, fixture)
+
+# CV: SUM and AVG take numbers or durations: a string among the operands (CV1, a stored one CV2),
+#     a numeric string (CV3) and numbers mixed with durations (CV4) are 22G03, where they were
+#     skipped or summed as numbers; durations sum and average (CV5), where that was 0
+for case_id, query, languages, fixture in [
+    ("CV1", "UNWIND [1, 'Alix', 2] AS x RETURN sum(x) AS s", BOTH, "empty"),
+    ("CV2", "MATCH (p:Person) RETURN sum(p.name) AS s", BOTH, "social"),
+    ("CV3", "UNWIND ['5', '7'] AS x RETURN sum(x) AS s, avg(x) AS a", BOTH, "empty"),
+    ("CV4", "UNWIND [duration('P1D'), 3] AS x RETURN sum(x) AS s", BOTH, "empty"),
+    ("CV5", "UNWIND [duration('P1D'), duration('PT12H')] AS d RETURN toString(sum(d)) AS s, toString(avg(d)) AS a", BOTH, "empty"),
+]:
+    case(case_id, query, languages, fixture)
+
+# CW: CAST converts booleans and numbers into each other, 1 and 0 (CW1: to FLOAT64 and DECIMAL,
+#     CW2: to BOOLEAN, which was null), as DuckDB does; Cypher's toFloat(true) stays null (CW3)
+for case_id, query, languages in [
+    ("CW1", "RETURN CAST(true AS FLOAT64) AS f, CAST(false AS DECIMAL) AS d, CAST(true AS INT64) AS i", GQL),
+    ("CW2", "RETURN CAST(0 AS BOOLEAN) AS zero, CAST(2 AS BOOLEAN) AS two, CAST(0.0e0 AS BOOLEAN) AS f", GQL),
+    ("CW3", "RETURN toFloat(true) AS f, toBoolean(0) AS b", CYPHER),
+]:
+    case(case_id, query, languages, "empty")
+
+# CX: CAST trims the spaces around a text, as SQL casts a character string (CX1: to numbers, a
+#     boolean and a date, which were null), a cast to STRING keeps them (CX2), and Cypher's
+#     toInteger does not trim (CX3)
+for case_id, query, languages in [
+    ("CX1", "RETURN CAST(' 42 ' AS INT64) AS i, CAST(' 1.5 ' AS FLOAT64) AS f, CAST(' true ' AS BOOLEAN) AS b, CAST(' 2024-03-15 ' AS DATE) AS d", GQL),
+    ("CX2", "RETURN CAST(' 42 ' AS STRING) AS s", GQL),
+    ("CX3", "RETURN toInteger(' 42 ') AS i", CYPHER),
+]:
+    case(case_id, query, languages, "empty")
+
+# CY: USE g <statement> reads graph g and leaves the session on its graph (grafeo-web#55; it
+#     was refused, CY1 to CY3), the same USE may repeat on every UNION operand (CY4); USE
+#     CURRENT_GRAPH reads the session's graph (CY5); SELECT ... FROM g reads g (CY6; it read the
+#     session's graph); a missing graph is 42002 (CY7); parts on different graphs are not
+#     supported yet (CY8)
+for case_id, query in [
+    ("CY1", "USE floria MATCH (p:Person) RETURN p.name, p.w"),
+    ("CY2", "USE GRAPH floria MATCH (a)-[k:KNOWS]->(c) RETURN a.name, c.name, k.since, k.w"),
+    ("CY3", "USE floria MATCH (n) RETURN count(n) AS n"),
+    ("CY4", "USE floria MATCH (p:Person) RETURN p.name AS name UNION USE floria MATCH (c:City) RETURN c.name AS name"),
+    ("CY5", "USE CURRENT_GRAPH MATCH (p:Person) RETURN p.name"),
+    ("CY6", "SELECT p.name FROM floria MATCH (p:Person)"),
+    ("CY7", "USE nowhere MATCH (n) RETURN n"),
+    ("CY8", "USE floria MATCH (p:Person) RETURN p.name AS name UNION MATCH (p:Person) RETURN p.name AS name"),
+]:
+    case(case_id, query, GQL, "graphs")
+
+# DA: Cypher: a clause after RETURN is an error that names it (DA1 to DA3; the earlier RETURN was
+#     dropped and the rest ran), while ORDER BY, SKIP and LIMIT after RETURN belong to it (DA4)
+for case_id, query in [
+    ("DA1", "RETURN 1 AS a RETURN 2 AS b"),
+    ("DA2", "UNWIND [1, 2] AS x RETURN x MATCH (n) RETURN n"),
+    ("DA3", "RETURN 1 AS x WITH x RETURN x"),
+]:
+    case(case_id, query, CYPHER, "empty")
+ordered("DA4", "UNWIND [3, 1, 2, 5] AS x RETURN x ORDER BY x SKIP 1 LIMIT 2", CYPHER, "empty")
+
+# CZ: a node or an edge compared with a value of another kind (#180): Cypher keeps them apart
+#     (= false, <> true, ordering null) and GQL fails the comparison as not comparable (22G04),
+#     so the parity run reports CZ1 to CZ3 on purpose; a node compared with a node, and ids
+#     with ids, are unchanged (CZ4)
+for case_id, query in [
+    ("CZ1", "MATCH (a:Person {name: 'Alix'})-[r:KNOWS]->(b) RETURN startNode(r) = id(a) AS node_is_id"),
+    ("CZ2", "MATCH (a:Person {name: 'Alix'})-[r:KNOWS]->(b) RETURN a = r AS node_is_edge"),
+    ("CZ3", "MATCH (p:Person) WHERE p = 0 RETURN p.name AS name"),
+    ("CZ4", "MATCH (a:Person {name: 'Alix'})-[r:KNOWS]->(b) RETURN startNode(r) = a AS same, id(startNode(r)) = id(a) AS ids ORDER BY same"),
+]:
+    case(case_id, query, BOTH)
+
+# DB: a WITH names each column once (#371; it kept one of two items named alike, DB1 and DB2);
+#     Cypher CREATE CONSTRAINT and CREATE INDEX take no name (#344; they failed, DB3 and DB4)
+for case_id, query in [
+    ("DB1", "MATCH (p:Person) WITH p.name AS x, p.name AS x RETURN x"),
+    ("DB2", "MATCH (p:Person)-[:KNOWS]->(q) WITH p, q.name AS p RETURN p"),
+]:
+    case(case_id, query)
+for case_id, query in [
+    ("DB3", "CREATE CONSTRAINT FOR (p:Person) REQUIRE p.email IS UNIQUE"),
+    ("DB4", "CREATE INDEX FOR (p:Person) ON (p.name)"),
+]:
+    case(case_id, query, CYPHER, "writes")
 
 # fmt: on

@@ -386,6 +386,7 @@ mod tests {
                 right: Box::new(LogicalExpression::Literal(Value::Int64(4))),
             },
             LogicalExpression::FunctionCall {
+                callee: crate::query::plan::Callee::named("toString"),
                 name: "toString".to_string(),
                 args: vec![variable("i")],
                 distinct: false,
@@ -447,6 +448,7 @@ mod tests {
         });
         assert!(reads_after_the_write(&limited));
         let merged = LogicalOperator::Merge(MergeOp {
+            index_hint: None,
             variable: "t".to_string(),
             labels: vec!["P".to_string()],
             match_properties: Vec::new(),

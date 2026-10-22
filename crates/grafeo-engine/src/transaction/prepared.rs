@@ -174,7 +174,11 @@ mod tests {
 
         // The commit stamps the pending versions with its epoch, making the
         // data visible.
-        assert_eq!(db.node_count(), 1, "Node should be visible after commit");
+        assert_eq!(
+            db.node_count().unwrap(),
+            1,
+            "Node should be visible after commit"
+        );
     }
 
     #[test]
@@ -191,7 +195,7 @@ mod tests {
         session.commit().unwrap();
 
         assert_eq!(
-            db.node_count(),
+            db.node_count().unwrap(),
             2,
             "Both nodes should be visible after first commit"
         );
@@ -209,7 +213,7 @@ mod tests {
 
         // Verify everything is visible after commit.
         assert_eq!(
-            db.node_count(),
+            db.node_count().unwrap(),
             2,
             "Both nodes should be visible after commit"
         );

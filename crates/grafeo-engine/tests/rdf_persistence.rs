@@ -10,9 +10,9 @@
 //! WAL still there) before it reopens them.
 //!
 //! An engine built with the triple store and without the LPG store loaded
-//! nothing back, from the file or the WAL (#544): the `triple-store` feature
-//! now enables `lpg`. CI runs these tests with the features of the feature
-//! matrix's `rdf` engine, which name no `lpg`.
+//! nothing back, from the file or the WAL (#544): every build has the LPG
+//! store now. CI runs these tests with the features of the feature matrix's
+//! `rdf` engine.
 //!
 //! What a reopen shows is compared with a database in memory that ran the same
 //! statements: the reopened database is the one that was written.

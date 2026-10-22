@@ -5,6 +5,9 @@
 
 #![cfg(feature = "vector-index")]
 
+#[cfg(all(feature = "wal", feature = "grafeo-file"))]
+mod common;
+
 use grafeo_common::types::Value;
 use grafeo_engine::GrafeoDB;
 
@@ -290,6 +293,139 @@ fn test_set_vector_without_index_is_noop() {
         .unwrap();
 
     // Node should exist with the property
-    let node = db.get_node(n1);
+    let node = db.get_node(n1).unwrap();
     assert!(node.is_some());
+}
+
+/// Six docs in distinct directions (cosine), an index on them, and the id
+/// of the fourth, the one the #374 tests update.
+fn six_docs(
+    db: &GrafeoDB,
+) -> (
+    Vec<grafeo_common::types::NodeId>,
+    grafeo_common::types::NodeId,
+) {
+    let nodes: Vec<_> = (0..6)
+        .map(|i| {
+            let node = db.create_node(&["Doc"]).unwrap();
+            db.set_node_property(node, "emb", vec3(1.0, i as f32 * 0.1, 0.0))
+                .unwrap();
+            node
+        })
+        .collect();
+    db.create_vector_index("Doc", "emb", Some(3), Some("cosine"), None, None, None)
+        .expect("create index");
+    let target = nodes[3];
+    (nodes, target)
+}
+
+/// A search for all six from `[1, 0, 0]` finds every one of them.
+fn assert_every_doc_found(db: &GrafeoDB, nodes: &[grafeo_common::types::NodeId], stage: &str) {
+    let mut found: Vec<_> = db
+        .vector_search("Doc", "emb", &[1.0, 0.0, 0.0], nodes.len(), None, None)
+        .expect("search")
+        .into_iter()
+        .map(|(id, _)| id)
+        .collect();
+    found.sort_unstable();
+    let mut expected = nodes.to_vec();
+    expected.sort_unstable();
+    assert_eq!(found, expected, "{stage}");
+}
+
+/// #374: updates of a node's vector in a transaction that rolls back leave
+/// the index as it was: every node is found, the updated one at its old
+/// vector.
+#[test]
+fn rolled_back_vector_update_keeps_every_node_found() {
+    let db = GrafeoDB::new_in_memory();
+    let (nodes, target) = six_docs(&db);
+    let mut session = db.session();
+    session.begin_transaction().unwrap();
+    for _ in 0..3 {
+        session
+            .set_node_property(target, "emb", vec3(1.0, 0.53, 0.0))
+            .unwrap();
+    }
+    session.rollback().unwrap();
+    assert_every_doc_found(&db, &nodes, "after the rollback");
+    assert_eq!(
+        db.get_node(target)
+            .unwrap()
+            .and_then(|node| node.get_property("emb").cloned()),
+        Some(vec3(1.0, 0.3, 0.0))
+    );
+    let nearest = db
+        .vector_search("Doc", "emb", &[1.0, 0.3, 0.0], 1, None, None)
+        .unwrap();
+    assert_eq!(nearest[0].0, target, "the index keeps the old vector");
+}
+
+/// #374 through a reopen and a crash: five updates of one vector, then the
+/// file opens again (after a close, and after a crash before any
+/// checkpoint): every node is found, the updated one at its new vector.
+#[cfg(all(feature = "wal", feature = "grafeo-file"))]
+mod after_a_reopen {
+    use super::*;
+    use crate::common::replay::reopened_after_crash;
+
+    fn update(db: &GrafeoDB) -> grafeo_common::types::NodeId {
+        let (_, target) = six_docs(db);
+        for _ in 0..5 {
+            db.set_node_property(target, "emb", vec3(1.0, 0.53, 0.0))
+                .unwrap();
+        }
+        target
+    }
+
+    fn assert_updated(db: &GrafeoDB, stage: &str) {
+        let nodes: Vec<_> = db
+            .execute("MATCH (d:Doc) RETURN id(d)")
+            .unwrap()
+            .rows()
+            .iter()
+            .map(|row| match &row[0] {
+                Value::Int64(id) => grafeo_common::types::NodeId::new(u64::try_from(*id).unwrap()),
+                other => panic!("an id: {other:?}"),
+            })
+            .collect();
+        assert_eq!(nodes.len(), 6, "{stage}");
+        assert_every_doc_found(db, &nodes, stage);
+        let nearest = db
+            .vector_search("Doc", "emb", &[1.0, 0.53, 0.0], 1, None, None)
+            .unwrap();
+        assert_eq!(
+            db.get_node(nearest[0].0)
+                .unwrap()
+                .and_then(|node| node.get_property("emb").cloned()),
+            Some(vec3(1.0, 0.53, 0.0)),
+            "{stage}: the updated vector is the nearest"
+        );
+    }
+
+    #[test]
+    fn repeated_update_survives_a_reopen() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("docs.grafeo");
+        let db = GrafeoDB::open(&path).unwrap();
+        update(&db);
+        assert_updated(&db, "before the close");
+        db.close().unwrap();
+        let db = GrafeoDB::open(&path).unwrap();
+        assert_updated(&db, "after the reopen");
+        db.close().unwrap();
+    }
+
+    #[test]
+    fn repeated_update_survives_a_crash_before_any_checkpoint() {
+        let (_dir, db) = reopened_after_crash(
+            "after_a_reopen::repeated_update_survives_a_crash_before_any_checkpoint",
+            |path| GrafeoDB::open(path).unwrap(),
+            |db| {
+                update(db);
+            },
+        );
+        assert_updated(&db, "after the crash");
+        db.close().unwrap();
+    }
 }

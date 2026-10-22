@@ -268,6 +268,28 @@ pub fn manhattan_distance_simd(a: &[f32], b: &[f32]) -> f32 {
     manhattan_distance_scalar(a, b)
 }
 
+/// Turns the three sums of a cosine kernel into a distance in `[0, 2]`.
+///
+/// The product of two `f32` values is exact in `f64`, so for identical vectors
+/// (whose kernels produce the same sum three times) the similarity is exactly 1
+/// and the distance exactly 0, and for opposite vectors the distance is exactly 2.
+/// A zero vector has no direction: its distance to anything is 1.
+#[inline]
+pub(crate) fn cosine_distance_from_sums(dot: f32, norm_a: f32, norm_b: f32) -> f32 {
+    let denom = (f64::from(norm_a) * f64::from(norm_b)).sqrt();
+    if denom == 0.0 {
+        return 1.0;
+    }
+    let similarity = (f64::from(dot) / denom).clamp(-1.0, 1.0);
+    #[allow(
+        clippy::cast_possible_truncation,
+        reason = "the clamp above bounds the distance to [0, 2], so the cast only rounds"
+    )]
+    {
+        (1.0 - similarity) as f32
+    }
+}
+
 // ============================================================================
 // Scalar Implementations (Fallback)
 // ============================================================================
@@ -303,8 +325,7 @@ fn cosine_distance_scalar(a: &[f32], b: &[f32]) -> f32 {
         norm_b += b[i] * b[i];
     }
 
-    let denom = (norm_a.sqrt() * norm_b.sqrt()) + f32::EPSILON;
-    1.0 - (dot / denom)
+    cosine_distance_from_sums(dot, norm_a, norm_b)
 }
 
 #[inline]
@@ -413,8 +434,7 @@ unsafe fn cosine_distance_avx2(a: &[f32], b: &[f32]) -> f32 {
         i += 1;
     }
 
-    let denom = (norm_a.sqrt() * norm_b.sqrt()) + f32::EPSILON;
-    1.0 - (dot / denom)
+    cosine_distance_from_sums(dot, norm_a, norm_b)
 }
 
 #[cfg(target_arch = "x86_64")]
@@ -564,8 +584,7 @@ unsafe fn cosine_distance_sse(a: &[f32], b: &[f32]) -> f32 {
         i += 1;
     }
 
-    let denom = (norm_a.sqrt() * norm_b.sqrt()) + f32::EPSILON;
-    1.0 - (dot / denom)
+    cosine_distance_from_sums(dot, norm_a, norm_b)
 }
 
 #[cfg(target_arch = "x86_64")]
@@ -705,8 +724,7 @@ unsafe fn cosine_distance_neon(a: &[f32], b: &[f32]) -> f32 {
         i += 1;
     }
 
-    let denom = (norm_a.sqrt() * norm_b.sqrt()) + f32::EPSILON;
-    1.0 - (dot / denom)
+    cosine_distance_from_sums(dot, norm_a, norm_b)
 }
 
 #[cfg(target_arch = "aarch64")]
@@ -772,11 +790,25 @@ unsafe fn horizontal_sum_wasm(v: std::arch::wasm32::v128) -> f32 {
         + f32x4_extract_lane::<3>(v)
 }
 
+/// The four `f32` lanes of `values` from `at` on, as one vector: wasm's
+/// `v128.load` needs no alignment, so this is an unaligned read.
+///
+/// # Safety
+///
+/// `at + 4 <= values.len()`.
+#[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
+#[inline]
+unsafe fn load_lanes(values: &[f32], at: usize) -> std::arch::wasm32::v128 {
+    debug_assert!(at + 4 <= values.len());
+    // SAFETY: the caller keeps the 16 bytes from `at` inside `values`.
+    unsafe { std::ptr::read_unaligned(values.as_ptr().add(at).cast::<std::arch::wasm32::v128>()) }
+}
+
 #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
 unsafe fn dot_product_wasm_simd(a: &[f32], b: &[f32]) -> f32 {
     use std::arch::wasm32::*;
 
-    // SAFETY precondition: the raw `v128_load` on `b` below is bounded by
+    // SAFETY precondition: the `load_lanes` reads of `b` below are bounded by
     // `a.len()`, so mismatched lengths would read out of `b`. The public
     // `dot_product_simd` dispatcher asserts length equality in all builds
     // before dispatching here (see #311).
@@ -786,8 +818,8 @@ unsafe fn dot_product_wasm_simd(a: &[f32], b: &[f32]) -> f32 {
     let mut sum = f32x4_splat(0.0);
 
     while i + 4 <= n {
-        let va = v128_load(a.as_ptr().add(i) as *const v128);
-        let vb = v128_load(b.as_ptr().add(i) as *const v128);
+        let va = load_lanes(a, i);
+        let vb = load_lanes(b, i);
         sum = f32x4_add(sum, f32x4_mul(va, vb));
         i += 4;
     }
@@ -810,8 +842,8 @@ unsafe fn euclidean_squared_wasm_simd(a: &[f32], b: &[f32]) -> f32 {
     let mut sum = f32x4_splat(0.0);
 
     while i + 4 <= n {
-        let va = v128_load(a.as_ptr().add(i) as *const v128);
-        let vb = v128_load(b.as_ptr().add(i) as *const v128);
+        let va = load_lanes(a, i);
+        let vb = load_lanes(b, i);
         let diff = f32x4_sub(va, vb);
         sum = f32x4_add(sum, f32x4_mul(diff, diff));
         i += 4;
@@ -819,8 +851,8 @@ unsafe fn euclidean_squared_wasm_simd(a: &[f32], b: &[f32]) -> f32 {
 
     let mut result = horizontal_sum_wasm(sum);
     while i < n {
-        let d = a[i] - b[i];
-        result += d * d;
+        let diff = a[i] - b[i];
+        result += diff * diff;
         i += 1;
     }
     result
@@ -838,8 +870,8 @@ unsafe fn cosine_distance_wasm_simd(a: &[f32], b: &[f32]) -> f32 {
     let mut nb = f32x4_splat(0.0);
 
     while i + 4 <= n {
-        let va = v128_load(a.as_ptr().add(i) as *const v128);
-        let vb = v128_load(b.as_ptr().add(i) as *const v128);
+        let va = load_lanes(a, i);
+        let vb = load_lanes(b, i);
         dot = f32x4_add(dot, f32x4_mul(va, vb));
         na = f32x4_add(na, f32x4_mul(va, va));
         nb = f32x4_add(nb, f32x4_mul(vb, vb));
@@ -857,8 +889,7 @@ unsafe fn cosine_distance_wasm_simd(a: &[f32], b: &[f32]) -> f32 {
         i += 1;
     }
 
-    let denom = (na_scalar.sqrt() * nb_scalar.sqrt()) + f32::EPSILON;
-    1.0 - (dot_scalar / denom)
+    cosine_distance_from_sums(dot_scalar, na_scalar, nb_scalar)
 }
 
 #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
@@ -871,8 +902,8 @@ unsafe fn manhattan_distance_wasm_simd(a: &[f32], b: &[f32]) -> f32 {
     let mut sum = f32x4_splat(0.0);
 
     while i + 4 <= n {
-        let va = v128_load(a.as_ptr().add(i) as *const v128);
-        let vb = v128_load(b.as_ptr().add(i) as *const v128);
+        let va = load_lanes(a, i);
+        let vb = load_lanes(b, i);
         let diff = f32x4_sub(va, vb);
         sum = f32x4_add(sum, f32x4_abs(diff));
         i += 4;
@@ -953,6 +984,64 @@ mod tests {
             approx_eq(simd_result, 1.0),
             "Expected ~1.0, got: {simd_result}"
         );
+    }
+
+    /// Every cosine kernel available on this machine, by name.
+    fn cosine_kernels() -> Vec<(&'static str, fn(&[f32], &[f32]) -> f32)> {
+        let kernels: Vec<(&'static str, fn(&[f32], &[f32]) -> f32)> = vec![
+            ("scalar", cosine_distance_scalar),
+            ("dispatch", cosine_distance_simd),
+        ];
+        #[cfg(target_arch = "x86_64")]
+        let kernels = {
+            let mut kernels = kernels;
+            if has_avx2() {
+                // SAFETY: AVX2+FMA checked above; every caller passes equal lengths
+                kernels.push(("avx2", |a, b| unsafe { cosine_distance_avx2(a, b) }));
+            }
+            if has_sse() {
+                // SAFETY: SSE checked above; every caller passes equal lengths
+                kernels.push(("sse", |a, b| unsafe { cosine_distance_sse(a, b) }));
+            }
+            kernels
+        };
+        kernels
+    }
+
+    #[test]
+    fn cosine_distance_is_exact_for_identical_opposite_and_zero_vectors() {
+        let mut state: u64 = 7;
+        // Lengths 0 to 40 cover every SIMD body and tail combination.
+        for len in 0..=40 {
+            let a: Vec<f32> = (0..len)
+                .map(|_| {
+                    state = state.wrapping_mul(6364136223846793005).wrapping_add(1);
+                    ((state >> 33) as f32) / (u32::MAX as f32) - 0.5
+                })
+                .collect();
+            let opposite: Vec<f32> = a.iter().map(|x| -x).collect();
+            let doubled: Vec<f32> = a.iter().map(|x| x * 2.0).collect();
+            let zero = vec![0.0f32; len];
+            for (name, kernel) in cosine_kernels() {
+                if len > 0 {
+                    assert_eq!(kernel(&a, &a), 0.0, "{name} identical, len {len}");
+                    assert_eq!(kernel(&a, &doubled), 0.0, "{name} doubled, len {len}");
+                    assert_eq!(kernel(&a, &opposite), 2.0, "{name} opposite, len {len}");
+                }
+                assert_eq!(kernel(&a, &zero), 1.0, "{name} zero, len {len}");
+                assert_eq!(kernel(&zero, &zero), 1.0, "{name} both zero, len {len}");
+            }
+        }
+    }
+
+    #[test]
+    fn cosine_distance_from_sums_stays_in_range() {
+        // Rounding in the f32 sums can push |dot| just past norm_a * norm_b.
+        assert_eq!(cosine_distance_from_sums(1.000_000_1, 1.0, 1.0), 0.0);
+        assert_eq!(cosine_distance_from_sums(-1.000_000_1, 1.0, 1.0), 2.0);
+        assert_eq!(cosine_distance_from_sums(0.0, 4.0, 9.0), 1.0);
+        assert_eq!(cosine_distance_from_sums(3.0, 4.0, 9.0), 0.5);
+        assert!(cosine_distance_from_sums(f32::NAN, 1.0, 1.0).is_nan());
     }
 
     #[test]

@@ -1,0 +1,135 @@
+# Rosetta: where an aggregate may stand, and collect_list
+#
+# An aggregate needs a RETURN or WITH that groups rows: in the WHERE of a
+# MATCH, or of a WITH that does not aggregate, it is refused (it kept no rows
+# without an error). The WHERE after an aggregating WITH reads the aggregate's
+# column as before. collect_list is ISO GQL's name of collect: an aggregate
+# (it evaluated to null per row), with DISTINCT and grouping keys as collect.
+
+meta:
+  model: lpg
+  section: rosetta
+  title: Aggregate placement and collect_list
+  dataset: empty
+  requires: [cypher]
+
+tests:
+
+  # ---------------------------------------------------------------------------
+  # An aggregate in a WHERE that does not group
+  # ---------------------------------------------------------------------------
+
+  - name: count_in_the_where_of_a_match_is_refused
+    setup:
+      - "INSERT (:Person {name: 'Alix'}), (:Person {name: 'Gus'})"
+    variants:
+      gql: "MATCH (p:Person) WHERE count(p) > 0 RETURN p.name AS name"
+      cypher: "MATCH (p:Person) WHERE count(p) > 0 RETURN p.name AS name"
+    expect:
+      error: "Aggregate function 'count' cannot be used here"
+
+  - name: sum_in_the_where_of_a_match_is_refused
+    setup:
+      - "INSERT (:Person {name: 'Alix', age: 30})"
+    variants:
+      gql: "MATCH (p:Person) WHERE sum(p.age) > 10 RETURN p.name AS name"
+      cypher: "MATCH (p:Person) WHERE sum(p.age) > 10 RETURN p.name AS name"
+    expect:
+      error: "cannot be used here"
+
+  - name: max_inside_a_condition_of_a_match_is_refused
+    setup:
+      - "INSERT (:Person {name: 'Alix', age: 30})"
+    variants:
+      gql: "MATCH (p:Person) WHERE p.age > 3 AND max(p.age) = 30 RETURN p.name AS name"
+      cypher: "MATCH (p:Person) WHERE p.age > 3 AND max(p.age) = 30 RETURN p.name AS name"
+    expect:
+      error: "cannot be used here"
+
+  - name: count_in_the_where_of_a_with_that_does_not_aggregate_is_refused
+    setup:
+      - "INSERT (:Person {name: 'Alix'}), (:Person {name: 'Gus'})"
+    variants:
+      gql: "MATCH (p:Person) WITH p WHERE count(p) > 0 RETURN p.name AS name"
+      cypher: "MATCH (p:Person) WITH p WHERE count(p) > 0 RETURN p.name AS name"
+    expect:
+      error: "cannot be used here"
+
+  - name: the_where_after_an_aggregating_with_reads_its_column
+    setup:
+      - "INSERT (:Person {name: 'Alix', city: 'Amsterdam'}), (:Person {name: 'Gus', city: 'Amsterdam'}), (:Person {name: 'Mia', city: 'Berlin'})"
+    variants:
+      gql: "MATCH (p:Person) WITH p.city AS city, count(p) AS people WHERE people > 1 RETURN city, people"
+      cypher: "MATCH (p:Person) WITH p.city AS city, count(p) AS people WHERE people > 1 RETURN city, people"
+    expect:
+      rows:
+        - [Amsterdam, 2]
+
+  - name: an_aggregate_in_a_return_still_groups
+    setup:
+      - "INSERT (:Person {name: 'Alix'}), (:Person {name: 'Gus'})"
+    variants:
+      gql: "MATCH (p:Person) WHERE p.name <> 'Mia' RETURN count(p) AS people"
+      cypher: "MATCH (p:Person) WHERE p.name <> 'Mia' RETURN count(p) AS people"
+    expect:
+      rows:
+        - [2]
+
+  # ---------------------------------------------------------------------------
+  # collect_list
+  # ---------------------------------------------------------------------------
+
+  - name: collect_list_collects_the_rows
+    variants:
+      gql: "UNWIND [3, 19, 88] AS x RETURN collect_list(x) AS xs"
+    expect:
+      rows:
+        - [[3, 19, 88]]
+
+  - name: collect_list_is_collect
+    variants:
+      gql: "UNWIND [3, 19, 88] AS x RETURN collect_list(x) = collect(x) AS same, size(collect_list(x)) AS n"
+    expect:
+      rows:
+        - [true, 3]
+
+  - name: collect_list_skips_nulls
+    variants:
+      gql: "UNWIND [3, null, 19] AS x RETURN collect_list(x) AS xs"
+    expect:
+      rows:
+        - [[3, 19]]
+
+  - name: collect_list_of_no_rows_is_an_empty_list
+    variants:
+      gql: "MATCH (n:Nobody) RETURN collect_list(n.name) AS names"
+    expect:
+      rows:
+        - [[]]
+
+  - name: collect_list_with_distinct
+    variants:
+      gql: "UNWIND [3, 3, 19, 3] AS x RETURN size(collect_list(DISTINCT x)) AS n"
+    expect:
+      rows:
+        - [2]
+
+  - name: collect_list_per_grouping_key
+    setup:
+      - "INSERT (:Person {name: 'Alix', city: 'Amsterdam'}), (:Person {name: 'Gus', city: 'Amsterdam'}), (:Person {name: 'Mia', city: 'Berlin'})"
+    variants:
+      gql: "MATCH (p:Person) RETURN p.city AS city, size(collect_list(p.name)) AS people ORDER BY city"
+    expect:
+      ordered: true
+      rows:
+        - [Amsterdam, 2]
+        - [Berlin, 1]
+
+  - name: collect_list_after_a_with
+    setup:
+      - "INSERT (:Person {name: 'Mia', city: 'Berlin'})"
+    variants:
+      gql: "MATCH (p:Person) WITH p.city AS city, collect_list(p.name) AS names RETURN city, names"
+    expect:
+      rows:
+        - [Berlin, [Mia]]

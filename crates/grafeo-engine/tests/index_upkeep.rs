@@ -9,10 +9,12 @@ use grafeo_engine::GrafeoDB;
 fn ids(db: &GrafeoDB, nodes: impl IntoIterator<Item = NodeId>) -> Vec<i64> {
     let mut ids: Vec<i64> = nodes
         .into_iter()
-        .map(|node| match db.get_node(node).unwrap().get_property("id") {
-            Some(Value::Int64(id)) => *id,
-            other => panic!("node {node:?} has id {other:?}"),
-        })
+        .map(
+            |node| match db.get_node(node).unwrap().unwrap().get_property("id") {
+                Some(Value::Int64(id)) => *id,
+                other => panic!("node {node:?} has id {other:?}"),
+            },
+        )
         .collect();
     ids.sort_unstable();
     ids

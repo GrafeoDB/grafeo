@@ -22,6 +22,8 @@ pub enum Statement {
     SetOperation(SetOperationStatement),
     /// A `CREATE PROPERTY GRAPH` DDL statement.
     CreatePropertyGraph(CreatePropertyGraphStatement),
+    /// A `DROP PROPERTY GRAPH` DDL statement.
+    DropPropertyGraph(DropPropertyGraphStatement),
     /// A `CALL procedure(args)` statement (SQL:2003+).
     Call(CallStatement),
 }
@@ -156,15 +158,31 @@ pub enum SortDirection {
 
 // ==================== Property Graph DDL ====================
 
-/// A `CREATE PROPERTY GRAPH` statement (SQL:2023).
+/// A `CREATE [OR REPLACE] PROPERTY GRAPH [IF NOT EXISTS]` statement
+/// (SQL:2023).
 #[derive(Debug, Clone)]
 pub struct CreatePropertyGraphStatement {
     /// Graph name.
     pub name: String,
+    /// `OR REPLACE`: replace a property graph of the same name.
+    pub or_replace: bool,
+    /// `IF NOT EXISTS`: change nothing when the property graph exists.
+    pub if_not_exists: bool,
     /// Node table definitions.
     pub node_tables: Vec<NodeTableDefinition>,
     /// Edge table definitions.
     pub edge_tables: Vec<EdgeTableDefinition>,
+    /// Source span.
+    pub span: Option<SourceSpan>,
+}
+
+/// A `DROP PROPERTY GRAPH [IF EXISTS]` statement (SQL:2023).
+#[derive(Debug, Clone)]
+pub struct DropPropertyGraphStatement {
+    /// Graph name.
+    pub name: String,
+    /// `IF EXISTS`: change nothing when there is no such property graph.
+    pub if_exists: bool,
     /// Source span.
     pub span: Option<SourceSpan>,
 }
@@ -240,6 +258,13 @@ pub enum SqlDataType {
     Double,
     /// TIMESTAMP.
     Timestamp,
+    /// DECIMAL, DEC or NUMERIC: any decimal (`None`), or with a precision
+    /// and scale.
+    Decimal(Option<grafeo_common::types::DecimalType>),
+    /// DATE.
+    Date,
+    /// TIME.
+    Time,
 }
 
 impl std::fmt::Display for SqlDataType {
@@ -253,6 +278,10 @@ impl std::fmt::Display for SqlDataType {
             Self::Float => write!(f, "FLOAT"),
             Self::Double => write!(f, "DOUBLE"),
             Self::Timestamp => write!(f, "TIMESTAMP"),
+            Self::Decimal(None) => write!(f, "DECIMAL"),
+            Self::Decimal(Some(decimal_type)) => write!(f, "{decimal_type}"),
+            Self::Date => write!(f, "DATE"),
+            Self::Time => write!(f, "TIME"),
         }
     }
 }

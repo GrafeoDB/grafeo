@@ -288,7 +288,7 @@ tests:
       - "CREATE (:Person {name: 'Alix', age: 88})"
     query: "MATCH (a:Person) WITH DISTINCT a.name AS name ORDER BY a.age RETURN name"
     expect:
-      error: "Undefined variable 'a'"
+      error: "ORDER BY reads 'a', which the WITH DISTINCT does not return"
 
   - name: with_distinct_order_by_a_repeated_expression
     setup:
@@ -323,6 +323,13 @@ tests:
       rows:
         - [Gus]
         - [Alix]
+
+  - name: return_distinct_order_by_a_dropped_variable_fails
+    setup:
+      - "CREATE (:Person {name: 'Alix', age: 88}), (:Person {name: 'Alix', age: 3})"
+    query: "MATCH (a:Person) RETURN DISTINCT a.name AS name ORDER BY a.age"
+    expect:
+      error: "ORDER BY reads 'a', which the RETURN DISTINCT does not return"
 
   - name: return_distinct_order_by_a_returned_expression
     setup:

@@ -1,0 +1,135 @@
+# id, elementId and properties of a node or edge any expression yields, and
+# temporal functions on a zoned datetime, in GQL and Cypher; and a label added
+# to a node converts its values to the label's node type, as a write does.
+
+meta:
+  language: gql
+  model: lpg
+  title: Element functions on expressions, zoned temporal values, label conversion
+  dataset: empty
+  requires: [cypher]
+
+tests:
+
+  # ---------------------------------------------------------------------------
+  # Nodes and edges from expressions
+  # ---------------------------------------------------------------------------
+
+  - name: a_node_taken_from_a_list
+    setup:
+      - "INSERT (:Person {name: 'Alix'})"
+    variants:
+      gql: "MATCH (n:Person) WITH n, [n] AS l RETURN properties(l[0]) AS p, id(l[0]) = id(n) AS same_id, elementId(l[0]) = elementId(n) AS same_element"
+      cypher: "MATCH (n:Person) WITH n, [n] AS l RETURN properties(l[0]) AS p, id(l[0]) = id(n) AS same_id, elementId(l[0]) = elementId(n) AS same_element"
+    expect:
+      rows:
+        - [{name: Alix}, true, true]
+
+  - name: a_node_taken_from_a_map
+    setup:
+      - "INSERT (:Person {name: 'Gus'})"
+    variants:
+      gql: "MATCH (n:Person) WITH n, {x: n} AS m RETURN properties(m.x) AS p, id(m.x) = id(n) AS same_id"
+      cypher: "MATCH (n:Person) WITH n, {x: n} AS m RETURN properties(m.x) AS p, id(m.x) = id(n) AS same_id"
+    expect:
+      rows:
+        - [{name: Gus}, true]
+
+  - name: an_edge_taken_from_a_list
+    setup:
+      - "INSERT (:Person {name: 'Alix'})-[:KNOWS {since: 2019}]->(:Person {name: 'Gus'})"
+    variants:
+      gql: "MATCH ()-[r]->() WITH r, [r] AS l RETURN properties(l[0]) AS p, elementId(l[0]) = elementId(r) AS same"
+      cypher: "MATCH ()-[r]->() WITH r, [r] AS l RETURN properties(l[0]) AS p, elementId(l[0]) = elementId(r) AS same"
+    expect:
+      rows:
+        - [{since: 2019}, true]
+
+  - name: the_nodes_of_start_node_and_end_node
+    setup:
+      - "INSERT (:Person {name: 'Vincent'})-[:KNOWS]->(:Person {name: 'Jules'})"
+    variants:
+      gql: "MATCH ()-[r]->() RETURN properties(startNode(r)) AS start, properties(endNode(r)) AS ending"
+      cypher: "MATCH ()-[r]->() RETURN properties(startNode(r)) AS start, properties(endNode(r)) AS ending"
+    expect:
+      rows:
+        - [{name: Vincent}, {name: Jules}]
+
+  - name: properties_of_a_map_is_the_map
+    variants:
+      gql: "RETURN properties({a: 1, b: 'x'}) AS p"
+      cypher: "RETURN properties({a: 1, b: 'x'}) AS p"
+    expect:
+      rows:
+        - [{a: 1, b: x}]
+
+  - name: properties_of_null_is_null
+    variants:
+      gql: "RETURN properties(null) AS p"
+      cypher: "RETURN properties(null) AS p"
+    expect:
+      rows:
+        - [null]
+
+  # ---------------------------------------------------------------------------
+  # Temporal functions on a zoned datetime
+  # ---------------------------------------------------------------------------
+
+  - name: date_of_a_zoned_datetime_is_its_local_date
+    # Half past midnight at +01:00 is the day before in UTC.
+    variants:
+      gql: "RETURN toString(date(zoned_datetime('2024-03-01T00:30:00+01:00'))) AS d"
+      cypher: "RETURN toString(date(zoned_datetime('2024-03-01T00:30:00+01:00'))) AS d"
+    expect:
+      rows:
+        - ["2024-03-01"]
+
+  - name: time_of_a_zoned_datetime_keeps_the_offset
+    variants:
+      gql: "RETURN toString(time(zoned_datetime('2024-03-01T00:30:00+01:00'))) AS t"
+      cypher: "RETURN toString(time(zoned_datetime('2024-03-01T00:30:00+01:00'))) AS t"
+    expect:
+      rows:
+        - ["00:30:00+01:00"]
+
+  - name: datetime_of_a_zoned_datetime_is_its_instant
+    variants:
+      gql: "RETURN datetime(zoned_datetime('2024-03-01T00:30:00+01:00')) = datetime('2024-02-29T23:30:00Z') AS same"
+      cypher: "RETURN datetime(zoned_datetime('2024-03-01T00:30:00+01:00')) = datetime('2024-02-29T23:30:00Z') AS same"
+    expect:
+      rows:
+        - [true]
+
+  - name: a_zoned_datetime_west_of_utc
+    variants:
+      gql: "RETURN toString(date(zoned_datetime('2024-03-01T23:30:00-05:00'))) AS d, toString(time(zoned_datetime('2024-03-01T23:30:00-05:00'))) AS t"
+      cypher: "RETURN toString(date(zoned_datetime('2024-03-01T23:30:00-05:00'))) AS d, toString(time(zoned_datetime('2024-03-01T23:30:00-05:00'))) AS t"
+    expect:
+      rows:
+        - ["2024-03-01", "23:30:00-05:00"]
+
+  # ---------------------------------------------------------------------------
+  # A label added to a node converts its values
+  # ---------------------------------------------------------------------------
+
+  - name: adding_a_label_converts_an_integer_to_the_float_type
+    # Halving tells the float 3.0 (1.5) from the integer 3 (1).
+    setup:
+      - "CREATE NODE TYPE Customer (spend FLOAT64)"
+      - "INSERT (:Lead {name: 'Mia', spend: 3})"
+    variants:
+      gql: "MATCH (n:Lead) SET n:Customer RETURN n.spend / 2 AS half"
+      cypher: "MATCH (n:Lead) SET n:Customer RETURN n.spend / 2 AS half"
+    expect:
+      rows:
+        - [1.5]
+
+  - name: an_integer_without_an_exact_float_is_still_refused
+    setup:
+      - "CREATE NODE TYPE Customer (spend FLOAT64)"
+      - "INSERT (:Lead {name: 'Butch', spend: 9007199254740993})"
+    variants:
+      gql: "MATCH (n:Lead) SET n:Customer"
+      cypher: "MATCH (n:Lead) SET n:Customer"
+    expect:
+      error: "exact"

@@ -121,7 +121,7 @@ impl GraphQLTranslator {
                 _ => None,
             })
             .ok_or_else(|| {
-                Error::Query(QueryError::new(
+                Error::from(QueryError::new(
                     QueryErrorKind::Syntax,
                     "No operation found in document",
                 ))
@@ -152,8 +152,8 @@ impl GraphQLTranslator {
         match op.operation {
             ast::OperationType::Query => self.translate_query(op),
             ast::OperationType::Mutation => self.translate_mutation(op),
-            ast::OperationType::Subscription => Err(Error::Query(QueryError::new(
-                QueryErrorKind::Semantic,
+            ast::OperationType::Subscription => Err(Error::from(QueryError::new(
+                QueryErrorKind::Unsupported,
                 "Subscriptions are not supported",
             ))),
         }
@@ -162,7 +162,7 @@ impl GraphQLTranslator {
     fn translate_query(&self, op: &ast::OperationDefinition) -> Result<LogicalPlan> {
         let selections = &op.selection_set.selections;
         if selections.is_empty() {
-            return Err(Error::Query(QueryError::new(
+            return Err(Error::from(QueryError::new(
                 QueryErrorKind::Syntax,
                 "Empty selection set",
             )));
@@ -181,7 +181,7 @@ impl GraphQLTranslator {
             .collect();
 
         if root_fields.is_empty() {
-            return Err(Error::Query(QueryError::new(
+            return Err(Error::from(QueryError::new(
                 QueryErrorKind::Syntax,
                 "No field found in selection set",
             )));
@@ -228,7 +228,7 @@ impl GraphQLTranslator {
         } else if let Some(type_name) = name.strip_prefix("delete") {
             Ok((MutationType::Delete, type_name.to_string()))
         } else {
-            Err(Error::Query(QueryError::new(
+            Err(Error::from(QueryError::new(
                 QueryErrorKind::Semantic,
                 format!(
                     "Unknown mutation: {}. Expected createX, updateX, or deleteX",
@@ -285,7 +285,7 @@ impl GraphQLTranslator {
 
         // Need at least 2 arguments: one for filter, one for update
         if field.arguments.len() < 2 {
-            return Err(Error::Query(QueryError::new(
+            return Err(Error::from(QueryError::new(
                 QueryErrorKind::Semantic,
                 "Update mutation requires a filter argument and at least one property to update",
             )));
@@ -328,7 +328,7 @@ impl GraphQLTranslator {
             .collect();
 
         if properties.is_empty() {
-            return Err(Error::Query(QueryError::new(
+            return Err(Error::from(QueryError::new(
                 QueryErrorKind::Semantic,
                 "Update mutation requires at least one property to update",
             )));
@@ -379,7 +379,7 @@ impl GraphQLTranslator {
 
         // Need at least 1 argument for filter
         if field.arguments.is_empty() {
-            return Err(Error::Query(QueryError::new(
+            return Err(Error::from(QueryError::new(
                 QueryErrorKind::Semantic,
                 "Delete mutation requires a filter argument (id or property)",
             )));
@@ -975,7 +975,7 @@ impl GraphQLTranslator {
     /// Combines predicates with AND.
     fn combine_with_and(&self, predicates: Vec<LogicalExpression>) -> Result<LogicalExpression> {
         LogicalExpression::conjunction(predicates)
-            .ok_or_else(|| Error::Query(QueryError::new(QueryErrorKind::Semantic, "No predicates")))
+            .ok_or_else(|| Error::from(QueryError::new(QueryErrorKind::Semantic, "No predicates")))
     }
 
     fn expand_fragment(
@@ -1039,7 +1039,7 @@ impl GraphQLTranslator {
                 return Ok(field);
             }
         }
-        Err(Error::Query(QueryError::new(
+        Err(Error::from(QueryError::new(
             QueryErrorKind::Syntax,
             "No field found in selection set",
         )))

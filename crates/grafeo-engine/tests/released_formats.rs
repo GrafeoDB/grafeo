@@ -174,29 +174,28 @@ impl Fixture {
         }
     }
 
-    /// The indexes `SHOW INDEXES` lists (it leaves out vector indexes). 0.5.43 files hold
-    /// no index definitions, and today's code does not replay the index records of a WAL
-    /// (#401), so an index created in a WAL is missing.
+    /// The indexes `SHOW INDEXES` lists (it leaves out vector indexes). A 0.5.43 file holds
+    /// no index definitions, so its closed file has none and its unflushed one only the index
+    /// its WAL defines; the index records of a 0.5.x WAL are replayed (#401), so a WAL
+    /// directory has all of them.
     fn index_names(self) -> &'static [&'static str] {
         match (self.version, self.layout) {
-            ("0.5.44", Layout::Closed | Layout::Compacted) => {
-                &["doc_content", "museum_name_index", "person_name"]
-            }
-            ("0.5.44", Layout::Unflushed) => &["doc_content", "person_name"],
-            _ => &[],
+            ("0.5.43", Layout::Closed) => &[],
+            ("0.5.43", Layout::Unflushed) => &["museum_name_index"],
+            _ => &["doc_content", "museum_name_index", "person_name"],
         }
     }
 
     /// Whether the vector and text indexes of the first session are there. 0.5.43 wrote
     /// them to the file but lost them on reopen, so the checkpoint at the end of its second
-    /// session wrote the file without them; in a WAL directory they are only index records
-    /// (#401). 0.5.44's `compact()` dropped both definitions (`SHOW INDEXES` still lists the
-    /// text index's name, which its catalog kept).
+    /// session wrote the file without them; in a WAL directory they are index records, which
+    /// the migration replays (#401). 0.5.44's `compact()` dropped both definitions (`SHOW
+    /// INDEXES` still lists the text index's name, which its catalog kept).
     fn has_search_indexes(self) -> bool {
         match self.layout {
             Layout::Closed => self.version != "0.5.43",
-            Layout::Unflushed => true,
-            Layout::Directory | Layout::Compacted => false,
+            Layout::Unflushed | Layout::Directory => true,
+            Layout::Compacted => false,
         }
     }
 
@@ -401,7 +400,10 @@ fn a_0_5_database_opened_read_only_is_not_locked_once_loaded() {
             );
             file.unlock().unwrap();
         }
-        assert!(db.node_count() > 0, "{name}: the database holds the data");
+        assert!(
+            db.node_count().unwrap() > 0,
+            "{name}: the database holds the data"
+        );
         db.close().unwrap();
     });
 }
@@ -429,7 +431,10 @@ fn a_read_write_open_migrates_a_0_5_database_and_keeps_the_old_one() {
         let original_wal = with_suffix(&original, ".wal");
 
         let db = GrafeoDB::open(&path).unwrap_or_else(|error| panic!("{name}: {error}"));
-        assert!(db.node_count() > 0, "{name}: the database holds the data");
+        assert!(
+            db.node_count().unwrap() > 0,
+            "{name}: the database holds the data"
+        );
         db.close().unwrap();
         drop(db);
 
@@ -846,6 +851,46 @@ fn indexes_hold_what_was_written_read_only() {
     read_only(check_indexes);
 }
 
+/// The search indexes a migration finds (#401: in a WAL directory they are index records)
+/// are in the migrated file: after a close and a reopen they are there with the data, and
+/// they take documents written after the migration.
+#[test]
+fn search_indexes_survive_the_migration_and_a_reopen() {
+    each(FIXTURES, |fixture| {
+        if !fixture.has_search_indexes() {
+            return;
+        }
+        let name = fixture.name();
+        let (dir, db) = fixture.open();
+        db.close().unwrap();
+        let db = GrafeoDB::open(dir.path().join(fixture.file_name()))
+            .unwrap_or_else(|error| panic!("{name}: the reopen: {error}"));
+        check_indexes(fixture, &db);
+
+        db.execute(
+            "INSERT (:Document {title: 'Harbours', content: 'harbours and canals of Barcelona', \
+             embedding: vector([0.0, 0.6, 0.8])})",
+        )
+        .unwrap();
+        let harbours = rows(&db, "MATCH (d:Document {title: 'Harbours'}) RETURN id(d)");
+        let nearest: Vec<Value> = db
+            .vector_search("Document", "embedding", &[0.0, 0.6, 0.8], 1, None, None)
+            .unwrap_or_else(|error| panic!("{name}: vector search: {error}"))
+            .into_iter()
+            .map(|(node, _)| Value::Int64(i64::try_from(node.as_u64()).unwrap()))
+            .collect();
+        assert_eq!(nearest, [harbours[0][0].clone()], "{name}: the new vector");
+        let found: Vec<Value> = db
+            .text_search("Document", "content", "harbours", 3, None)
+            .unwrap_or_else(|error| panic!("{name}: text search: {error}"))
+            .into_iter()
+            .map(|(node, _)| Value::Int64(i64::try_from(node.as_u64()).unwrap()))
+            .collect();
+        assert_eq!(found, [harbours[0][0].clone()], "{name}: the new text");
+        db.close().unwrap();
+    });
+}
+
 fn check_indexes(fixture: Fixture, db: &GrafeoDB) {
     let as_value = |node: NodeId| Value::Int64(i64::try_from(node.as_u64()).unwrap());
     let name = fixture.name();
@@ -855,6 +900,28 @@ fn check_indexes(fixture: Fixture, db: &GrafeoDB) {
         fixture.index_names(),
         "{name}: indexes"
     );
+    // The property index `person_name` on `Person.name` is there as an index,
+    // not only as a name, and an equality on `name` looks it up (#638).
+    if fixture.index_names().contains(&"person_name") {
+        assert!(
+            db.has_property_index("name"),
+            "{name}: the property index on name"
+        );
+        let query = "MATCH (p:Person {name: 'Alix'}) RETURN p.name";
+        let plan = rows(db, &format!("EXPLAIN {query}"));
+        let Value::String(plan) = &plan[0][0] else {
+            panic!("{name}: EXPLAIN returns its plan as text, got {plan:?}");
+        };
+        assert!(
+            plan.contains("[index: name]"),
+            "{name}: `{query}` looks up the index: {plan}"
+        );
+        assert_eq!(
+            rows(db, query),
+            [[Value::from("Alix")]],
+            "{name}: `{query}`"
+        );
+    }
     let vector = db.vector_search("Document", "embedding", &[1.0, 0.0, 0.0], 1, None, None);
     let text = db.text_search("Document", "content", "canals", 3, None);
     if !fixture.has_search_indexes() {
@@ -881,7 +948,13 @@ fn check_indexes(fixture: Fixture, db: &GrafeoDB) {
         .into_iter()
         .map(|(node, _)| as_value(node))
         .collect();
-    let mut expected = vec![id("Canals"), id("Bridges")];
+    // The second session's Bridges went into `trips` (see
+    // `replays_into_a_named_graph`), with the WAL's other changes.
+    let mut expected = if fixture.replays_into_a_named_graph() {
+        vec![id("Canals")]
+    } else {
+        vec![id("Canals"), id("Bridges")]
+    };
     matches.sort_by_key(Value::as_int64);
     expected.sort_by_key(Value::as_int64);
     assert_eq!(matches, expected, "{name}: text search");

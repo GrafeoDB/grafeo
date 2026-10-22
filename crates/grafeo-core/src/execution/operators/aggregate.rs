@@ -10,7 +10,7 @@
 use indexmap::IndexMap;
 use std::collections::HashSet;
 
-use grafeo_common::types::{LogicalType, Value};
+use grafeo_common::types::{Decimal, Duration, LogicalType, Value};
 
 use super::accumulator::{AggregateExpr, AggregateFunction, HashableValue, RowKey};
 use super::{Operator, OperatorError, OperatorResult};
@@ -30,16 +30,25 @@ pub enum AggregateState {
     Count(i64),
     /// Count distinct state (count, seen values).
     CountDistinct(i64, HashSet<HashableValue>),
-    /// Sum state (integer sum, count of values added).
-    SumInt(i64, i64),
-    /// Sum distinct state (integer sum, count, seen values).
-    SumIntDistinct(i64, i64, HashSet<HashableValue>),
+    /// Sum state (integer sum, count of values added). The sum is kept in
+    /// 128 bits, which no count of 64-bit values reaches the end of, and
+    /// checked once at [`finalize`](Self::finalize).
+    SumInt(i128, i64),
+    /// Sum distinct state (integer sum, count, seen values), as `SumInt`.
+    SumIntDistinct(i128, i64, HashSet<HashableValue>),
     /// Sum state (float sum, count of values added).
     SumFloat(f64, f64, i64),
     /// Sum distinct state (float sum, compensation, count, seen values).
     SumFloatDistinct(f64, f64, i64, HashSet<HashableValue>),
+    /// Exact sum of decimals and integers (`None` once it needs more than
+    /// 38 digits, which fails at [`finalize`](Self::finalize)), count of
+    /// values added.
+    SumDecimal(Option<Decimal>, i64),
     /// Average state (sum, count).
     Avg(f64, i64),
+    /// Exact average of decimals and integers: their sum (`None` once it
+    /// needs more than 38 digits) and count.
+    AvgDecimal(Option<Decimal>, i64),
     /// Average distinct state (sum, count, seen values).
     AvgDistinct(f64, i64, HashSet<HashableValue>),
     /// Min state: the least value, in the order of ORDER BY (openCypher
@@ -98,6 +107,54 @@ pub enum AggregateState {
         /// The state of the aggregate itself; never another `Distinct`.
         inner: Box<AggregateState>,
     },
+    /// Sum of durations (`None` once a component overflows, which fails at
+    /// [`finalize`](Self::finalize)), count of values added.
+    SumDuration(Option<Duration>, i64),
+    /// Average of durations: their sum (`None` once it overflows) and count.
+    AvgDuration(Option<Duration>, i64),
+    /// A SUM or AVG that met an operand it does not take (a string, a
+    /// boolean, numbers mixed with durations): [`finalize`](Self::finalize)
+    /// fails with this message as a type error (22G03), as openCypher makes
+    /// it.
+    InvalidOperand(String),
+    /// SPARQL's SUM and AVG (see [`AggregateExpr::rdf_literals`]): a literal
+    /// held as text that reads as a number is that number, and any other
+    /// value that is neither a number nor a duration is skipped.
+    ReadsNumericText(Box<AggregateState>),
+}
+
+/// The decimal of a float sum that holds a whole number exactly (a sum of
+/// integers, or no value yet): integers below 2^53 are exact in a float.
+/// An integer sum as an exact decimal, `None` past 38 digits.
+fn exact_sum(sum: i128) -> Option<Decimal> {
+    Decimal::new(sum, 0).ok()
+}
+
+/// The error of a decimal sum past 38 digits.
+fn duration_sum_out_of_range() -> OperatorError {
+    OperatorError::numeric_out_of_range("sum of durations past the duration range")
+}
+
+/// `a + b`, component by component, `None` when one overflows.
+fn checked_duration_sum(a: Duration, b: Duration) -> Option<Duration> {
+    Some(Duration::new(
+        a.months().checked_add(b.months())?,
+        a.days().checked_add(b.days())?,
+        a.nanos().checked_add(b.nanos())?,
+    ))
+}
+
+fn decimal_sum_out_of_range() -> OperatorError {
+    OperatorError::numeric_out_of_range("sum of more than 38 digits")
+}
+
+fn exact_whole(sum: f64) -> Option<Decimal> {
+    const EXACT: f64 = 9_007_199_254_740_992.0;
+    if sum.fract() == 0.0 && sum.abs() < EXACT {
+        Decimal::from_f64(sum).ok()
+    } else {
+        None
+    }
 }
 
 impl AggregateState {
@@ -114,6 +171,29 @@ impl AggregateState {
         match state {
             AggregateState::Min(min) if expr.rdf_literals => AggregateState::MinOfRdfLiterals(min),
             AggregateState::Max(max) if expr.rdf_literals => AggregateState::MaxOfRdfLiterals(max),
+            // SPARQL's AVG divides by XPath's rules: the average of integers
+            // and decimals is a decimal (a double operand makes it a double).
+            AggregateState::Avg(..) if expr.rdf_literals => AggregateState::ReadsNumericText(
+                Box::new(AggregateState::AvgDecimal(Some(Decimal::from_i64(0)), 0)),
+            ),
+            AggregateState::AvgDistinct(..) if expr.rdf_literals => {
+                AggregateState::ReadsNumericText(Box::new(AggregateState::Distinct {
+                    seen: HashSet::new(),
+                    inner: Box::new(AggregateState::AvgDecimal(Some(Decimal::from_i64(0)), 0)),
+                }))
+            }
+            AggregateState::AvgDecimal(..) if expr.rdf_literals => {
+                AggregateState::ReadsNumericText(Box::new(state))
+            }
+            state
+                if expr.rdf_literals
+                    && matches!(
+                        expr.function,
+                        AggregateFunction::Sum | AggregateFunction::Avg
+                    ) =>
+            {
+                AggregateState::ReadsNumericText(Box::new(state))
+            }
             state => state,
         }
     }
@@ -252,6 +332,12 @@ impl AggregateState {
         if matches!(value, Some(Value::Null)) {
             return;
         }
+        if let Some(operand) = &value
+            && let Some(next) = self.after_a_non_numeric_operand(operand)
+        {
+            *self = next;
+            return;
+        }
         match self {
             AggregateState::Count(count) => {
                 *count += 1;
@@ -266,8 +352,11 @@ impl AggregateState {
             }
             AggregateState::SumInt(sum, count) => {
                 if let Some(Value::Int64(v)) = value {
-                    *sum += v;
+                    *sum += i128::from(v);
                     *count += 1;
+                } else if let Some(Value::Decimal(d)) = value {
+                    let total = exact_sum(*sum).and_then(|whole| whole.checked_add(&d).ok());
+                    *self = AggregateState::SumDecimal(total, *count + 1);
                 } else if let Some(Value::Float64(v)) = value {
                     // Convert to float sum, carrying count forward
                     *self = AggregateState::SumFloat(*sum as f64 + v, 0.0, *count + 1);
@@ -283,8 +372,14 @@ impl AggregateState {
                     let hashable = HashableValue::from(v);
                     if seen.insert(hashable) {
                         if let Value::Int64(i) = v {
-                            *sum += i;
+                            *sum += i128::from(*i);
                             *count += 1;
+                        } else if let Value::Decimal(d) = v {
+                            let total = exact_sum(*sum).and_then(|whole| whole.checked_add(d).ok());
+                            *self = AggregateState::Distinct {
+                                seen: std::mem::take(seen),
+                                inner: Box::new(AggregateState::SumDecimal(total, *count + 1)),
+                            };
                         } else if let Value::Float64(f) = v {
                             // Convert to float distinct: move the seen set instead of cloning
                             let moved_seen = std::mem::take(seen);
@@ -307,6 +402,24 @@ impl AggregateState {
                     }
                 }
             }
+            AggregateState::SumDecimal(total, count) => match value {
+                Some(Value::Decimal(d)) => {
+                    *total = total.and_then(|t| t.checked_add(&d).ok());
+                    *count += 1;
+                }
+                Some(Value::Int64(i)) => {
+                    *total = total.and_then(|t| t.checked_add(&Decimal::from_i64(i)).ok());
+                    *count += 1;
+                }
+                // A float (or an RDF numeric string) makes the sum a float;
+                // a sum past 38 digits stays null.
+                Some(ref v) => {
+                    if let (Some(t), Some(num)) = (*total, value_to_f64(v)) {
+                        *self = AggregateState::SumFloat(t.to_f64() + num, 0.0, *count + 1);
+                    }
+                }
+                None => {}
+            },
             AggregateState::SumFloat(sum, comp, count) => {
                 if let Some(ref v) = value {
                     // Use value_to_f64 which now handles strings
@@ -334,6 +447,35 @@ impl AggregateState {
                     }
                 }
             }
+            AggregateState::Avg(sum, count) if matches!(value, Some(Value::Decimal(_))) => {
+                // A whole sum came from integers (or no value yet): the
+                // average becomes exact.
+                if let Some(Value::Decimal(d)) = value {
+                    if let Some(whole) = exact_whole(*sum) {
+                        let total = whole.checked_add(&d).ok();
+                        *self = AggregateState::AvgDecimal(total, *count + 1);
+                    } else {
+                        *sum += d.to_f64();
+                        *count += 1;
+                    }
+                }
+            }
+            AggregateState::AvgDecimal(total, count) => match value {
+                Some(Value::Decimal(d)) => {
+                    *total = total.and_then(|t| t.checked_add(&d).ok());
+                    *count += 1;
+                }
+                Some(Value::Int64(i)) => {
+                    *total = total.and_then(|t| t.checked_add(&Decimal::from_i64(i)).ok());
+                    *count += 1;
+                }
+                Some(ref v) => {
+                    if let (Some(t), Some(num)) = (*total, value_to_f64(v)) {
+                        *self = AggregateState::Avg(t.to_f64() + num, *count + 1);
+                    }
+                }
+                None => {}
+            },
             AggregateState::Avg(sum, count) => {
                 if let Some(ref v) = value
                     && let Some(num) = value_to_f64(v)
@@ -345,7 +487,17 @@ impl AggregateState {
             AggregateState::AvgDistinct(sum, count, seen) => {
                 if let Some(ref v) = value {
                     let hashable = HashableValue::from(v);
-                    if seen.insert(hashable)
+                    if let Value::Decimal(d) = v
+                        && let Some(whole) = exact_whole(*sum)
+                    {
+                        if seen.insert(hashable) {
+                            let total = whole.checked_add(d).ok();
+                            *self = AggregateState::Distinct {
+                                seen: std::mem::take(seen),
+                                inner: Box::new(AggregateState::AvgDecimal(total, *count + 1)),
+                            };
+                        }
+                    } else if seen.insert(hashable)
                         && let Some(num) = value_to_f64(v)
                     {
                         *sum += num;
@@ -468,6 +620,87 @@ impl AggregateState {
                 }
                 None => inner.update(None),
             },
+            AggregateState::SumDuration(total, count)
+            | AggregateState::AvgDuration(total, count) => {
+                if let Some(Value::Duration(d)) = value {
+                    *total = total.and_then(|t| checked_duration_sum(t, d));
+                    *count += 1;
+                }
+            }
+            AggregateState::InvalidOperand(_) => {}
+            AggregateState::ReadsNumericText(inner) => match value {
+                Some(Value::String(ref text)) => {
+                    if let Some(number) = value_to_f64(&Value::String(text.clone())) {
+                        inner.update(Some(Value::Float64(number)));
+                    }
+                }
+                Some(
+                    Value::Int64(_) | Value::Float64(_) | Value::Decimal(_) | Value::Duration(_),
+                ) => inner.update(value),
+                Some(_) => {}
+                None => inner.update(None),
+            },
+        }
+    }
+
+    /// The state a SUM or AVG moves to on an operand that is not a number:
+    /// a sum or average of durations on the first operand, a duration, and
+    /// [`InvalidOperand`](Self::InvalidOperand) on any other value, and on
+    /// a number among durations or a duration among numbers. `None` for a
+    /// number (and a duration among durations), which the state takes, and
+    /// for the other aggregates.
+    fn after_a_non_numeric_operand(&self, operand: &Value) -> Option<AggregateState> {
+        let (function, count, seen, durations) = match self {
+            AggregateState::SumInt(_, count) | AggregateState::SumFloat(_, _, count) => {
+                ("sum", *count, None, false)
+            }
+            AggregateState::SumDecimal(_, count) => ("sum", *count, None, false),
+            AggregateState::SumIntDistinct(_, count, seen)
+            | AggregateState::SumFloatDistinct(_, _, count, seen) => {
+                ("sum", *count, Some(seen), false)
+            }
+            AggregateState::Avg(_, count) | AggregateState::AvgDecimal(_, count) => {
+                ("avg", *count, None, false)
+            }
+            AggregateState::AvgDistinct(_, count, seen) => ("avg", *count, Some(seen), false),
+            AggregateState::SumDuration(_, count) => ("sum", *count, None, true),
+            AggregateState::AvgDuration(_, count) => ("avg", *count, None, true),
+            _ => return None,
+        };
+        let number = matches!(
+            operand,
+            Value::Int64(_) | Value::Float64(_) | Value::Decimal(_)
+        );
+        match operand {
+            _ if number && !durations => None,
+            Value::Duration(_) if durations => None,
+            Value::Duration(d) if count == 0 => {
+                let first = if function == "sum" {
+                    AggregateState::SumDuration(Some(*d), 1)
+                } else {
+                    AggregateState::AvgDuration(Some(*d), 1)
+                };
+                Some(match seen {
+                    Some(seen) => {
+                        let mut seen = seen.clone();
+                        seen.insert(HashableValue::from(operand));
+                        AggregateState::Distinct {
+                            seen,
+                            inner: Box::new(first),
+                        }
+                    }
+                    None => first,
+                })
+            }
+            _ if number || matches!(operand, Value::Duration(_)) => {
+                Some(AggregateState::InvalidOperand(format!(
+                    "{function} takes numbers or durations, not both: got {operand}"
+                )))
+            }
+            other => Some(AggregateState::InvalidOperand(format!(
+                "{function} takes numbers or durations, got a {} value: {other}",
+                other.type_name()
+            ))),
         }
     }
 
@@ -519,9 +752,57 @@ impl AggregateState {
         }
     }
 
-    /// Finalizes the state and returns the result value.
-    pub fn finalize(&self) -> Value {
+    /// The result of the aggregate `expr` this state computed, as
+    /// [`finalize`](Self::finalize) gives it, except that SPARQL's `SUM` and
+    /// `AVG` of a group without values are `0` (SPARQL 1.1, 18.5.1.3 and
+    /// 18.5.1.4), where GQL and Cypher give null.
+    ///
+    /// # Errors
+    ///
+    /// As [`finalize`](Self::finalize).
+    pub fn finalize_for(&self, expr: &AggregateExpr) -> Result<Value, OperatorError> {
+        if expr.rdf_literals
+            && matches!(
+                expr.function,
+                AggregateFunction::Sum | AggregateFunction::Avg
+            )
+            && self.value_count() == Some(0)
+        {
+            return Ok(Value::Int64(0));
+        }
+        self.finalize()
+    }
+
+    /// How many values a sum or average state has taken in; `None` for the
+    /// other aggregates.
+    fn value_count(&self) -> Option<i64> {
         match self {
+            AggregateState::SumInt(_, count)
+            | AggregateState::SumIntDistinct(_, count, _)
+            | AggregateState::SumFloat(_, _, count)
+            | AggregateState::SumFloatDistinct(_, _, count, _)
+            | AggregateState::SumDecimal(_, count)
+            | AggregateState::Avg(_, count)
+            | AggregateState::AvgDecimal(_, count)
+            | AggregateState::AvgDistinct(_, count, _) => Some(*count),
+            AggregateState::SumDuration(_, count) | AggregateState::AvgDuration(_, count) => {
+                Some(*count)
+            }
+            AggregateState::Distinct { inner, .. } | AggregateState::ReadsNumericText(inner) => {
+                inner.value_count()
+            }
+            _ => None,
+        }
+    }
+
+    /// Finalizes the state and returns the result value.
+    ///
+    /// # Errors
+    ///
+    /// An integer sum outside the 64-bit range, and a decimal sum or average
+    /// whose sum needs more than 38 digits, are out of range (22003).
+    pub fn finalize(&self) -> Result<Value, OperatorError> {
+        Ok(match self {
             AggregateState::Count(count) | AggregateState::CountDistinct(count, _) => {
                 Value::Int64(*count)
             }
@@ -529,7 +810,11 @@ impl AggregateState {
                 if *count == 0 {
                     Value::Null
                 } else {
-                    Value::Int64(*sum)
+                    Value::Int64(
+                        i64::try_from(*sum).map_err(|_| {
+                            OperatorError::numeric_out_of_range(format!("sum {sum}"))
+                        })?,
+                    )
                 }
             }
             AggregateState::SumFloat(sum, _, count)
@@ -546,6 +831,35 @@ impl AggregateState {
                 } else {
                     Value::Float64(*sum / *count as f64)
                 }
+            }
+            AggregateState::SumDecimal(_, 0) | AggregateState::AvgDecimal(_, 0) => Value::Null,
+            AggregateState::SumDuration(_, 0) | AggregateState::AvgDuration(_, 0) => Value::Null,
+            AggregateState::SumDuration(total, _) => {
+                Value::Duration(total.ok_or_else(duration_sum_out_of_range)?)
+            }
+            // The average of durations: their sum divided by the count, each
+            // component's fraction carried down (see `Duration::checked_div_decimal`).
+            AggregateState::AvgDuration(total, count) => Value::Duration(
+                total
+                    .ok_or_else(duration_sum_out_of_range)?
+                    .checked_div_decimal(&Decimal::from_i64(*count))
+                    .map_err(|_| duration_sum_out_of_range())?,
+            ),
+            AggregateState::InvalidOperand(message) => {
+                return Err(OperatorError::invalid_value_type(message.clone()));
+            }
+            AggregateState::ReadsNumericText(inner) => return inner.finalize(),
+            AggregateState::SumDecimal(total, _) => {
+                Value::Decimal(total.ok_or_else(decimal_sum_out_of_range)?)
+            }
+            // The average of decimals by the rule of decimal division.
+            AggregateState::AvgDecimal(total, count) => {
+                let total = total.ok_or_else(decimal_sum_out_of_range)?;
+                Value::Decimal(
+                    total
+                        .checked_div(&Decimal::from_i64(*count))
+                        .map_err(|_| decimal_sum_out_of_range())?,
+                )
             }
             AggregateState::Min(extreme)
             | AggregateState::Max(extreme)
@@ -728,8 +1042,8 @@ impl AggregateState {
                     _ => Value::Null, // non-bivariate functions never reach here
                 }
             }
-            AggregateState::Distinct { inner, .. } => inner.finalize(),
-        }
+            AggregateState::Distinct { inner, .. } => return inner.finalize(),
+        })
     }
 
     /// Whether this state takes `(y, x)` pairs through
@@ -928,7 +1242,7 @@ impl Operator for HashAggregateOperator {
             let mut builder = DataChunkBuilder::with_capacity(&self.output_schema, 1);
 
             for agg in &self.aggregates {
-                let value = AggregateState::for_expr(agg).finalize();
+                let value = AggregateState::for_expr(agg).finalize_for(agg)?;
                 if let Some(col) = builder.column_mut(self.group_columns.len()) {
                     col.push_value(value);
                 }
@@ -955,10 +1269,10 @@ impl Operator for HashAggregateOperator {
             }
 
             // Output aggregate results
-            for (i, state) in group.states.iter().enumerate() {
+            for (i, (state, expr)) in group.states.iter().zip(&self.aggregates).enumerate() {
                 let col_idx = self.group_columns.len() + i;
                 if let Some(col) = builder.column_mut(col_idx) {
-                    col.push_value(state.finalize());
+                    col.push_value(state.finalize_for(expr)?);
                 }
             }
 
@@ -1088,9 +1402,9 @@ impl Operator for SimpleAggregateOperator {
         // Output single result row
         let mut builder = DataChunkBuilder::with_capacity(&self.output_schema, 1);
 
-        for (i, state) in self.states.iter().enumerate() {
+        for (i, (state, expr)) in self.states.iter().zip(&self.aggregates).enumerate() {
             if let Some(col) = builder.column_mut(i) {
-                col.push_value(state.finalize());
+                col.push_value(state.finalize_for(expr)?);
             }
         }
         builder.advance_row();
@@ -1286,32 +1600,35 @@ mod tests {
 
     #[test]
     fn test_sum_with_string_values() {
-        // Test SUM with string values (like RDF stores numeric literals)
-        let mut builder = DataChunkBuilder::new(&[LogicalType::String]);
-        builder.column_mut(0).unwrap().push_string("30");
-        builder.advance_row();
-        builder.column_mut(0).unwrap().push_string("25");
-        builder.advance_row();
-        builder.column_mut(0).unwrap().push_string("35");
-        builder.advance_row();
-        let chunk = builder.finish();
+        let strings = || {
+            let mut builder = DataChunkBuilder::new(&[LogicalType::String]);
+            for text in ["30", "25", "35"] {
+                builder.column_mut(0).unwrap().push_string(text);
+                builder.advance_row();
+            }
+            builder.finish()
+        };
 
-        let mock = MockOperator::new(vec![chunk]);
+        // GQL and Cypher: a string is no number, so SUM fails (22G03)
         let mut agg = SimpleAggregateOperator::new(
-            Box::new(mock),
+            Box::new(MockOperator::new(vec![strings()])),
             vec![AggregateExpr::sum(0)],
             vec![LogicalType::Float64],
         );
+        let error = agg.next().unwrap_err().to_string();
+        assert!(error.contains("sum takes numbers or durations"), "{error}");
 
+        // SPARQL reads RDF literals held as text that read as numbers
+        let mut sparql_sum = AggregateExpr::sum(0);
+        sparql_sum.rdf_literals = true;
+        let mut agg = SimpleAggregateOperator::new(
+            Box::new(MockOperator::new(vec![strings()])),
+            vec![sparql_sum],
+            vec![LogicalType::Float64],
+        );
         let result = agg.next().unwrap().unwrap();
         assert_eq!(result.row_count(), 1);
-        // Should parse strings and sum: 30 + 25 + 35 = 90
-        let sum_val = result.column(0).unwrap().get_float64(0).unwrap();
-        assert!(
-            (sum_val - 90.0).abs() < 0.001,
-            "Expected 90.0, got {}",
-            sum_val
-        );
+        assert_eq!(result.column(0).unwrap().get_float64(0), Some(90.0));
     }
 
     #[test]
@@ -1835,8 +2152,16 @@ mod tests {
                     update(&mut only_nulls, &Value::Null);
                 }
                 let case = format!("{function:?}, distinct: {distinct}");
-                assert_eq!(with_nulls.finalize(), without_nulls.finalize(), "{case}");
-                assert_eq!(only_nulls.finalize(), new_state().finalize(), "{case}");
+                assert_eq!(
+                    with_nulls.finalize().unwrap(),
+                    without_nulls.finalize().unwrap(),
+                    "{case}"
+                );
+                assert_eq!(
+                    only_nulls.finalize().unwrap(),
+                    new_state().finalize().unwrap(),
+                    "{case}"
+                );
             }
         }
     }
@@ -1877,7 +2202,7 @@ mod tests {
                         state.update(Some(Value::Int64(x)));
                     }
                 }
-                state.finalize()
+                state.finalize().unwrap()
             };
             let with_copies = [3, 3, 19, 3, 88];
             let once = [3, 19, 88];
@@ -1898,7 +2223,7 @@ mod tests {
         for (y, x) in [(19, 3), (19, 3), (88, 3), (19, 88)] {
             count.update_bivariate(Some(Value::Int64(y)), Some(Value::Int64(x)));
         }
-        assert_eq!(count.finalize(), Value::Int64(3));
+        assert_eq!(count.finalize().unwrap(), Value::Int64(3));
     }
 
     #[test]
@@ -2185,6 +2510,55 @@ mod tests {
         );
     }
 
+    /// The `[sum, avg]` of `values`, through the aggregate states and
+    /// `finalize_for`, also with DISTINCT.
+    fn sum_and_avg(values: &[Option<Value>], rdf_literals: bool, distinct: bool) -> [Value; 2] {
+        [AggregateExpr::sum(0), AggregateExpr::avg(0)].map(|mut expr| {
+            expr.rdf_literals = rdf_literals;
+            expr.distinct = distinct;
+            let mut state = AggregateState::for_expr(&expr);
+            for value in values {
+                state.update(value.clone());
+            }
+            state.finalize_for(&expr).unwrap()
+        })
+    }
+
+    /// SPARQL's SUM and AVG of no values are 0 (SPARQL 1.1, 18.5.1.3 and
+    /// 18.5.1.4), also when the only operands are unbound; GQL and Cypher give
+    /// null. With values, both finish as before.
+    #[test]
+    fn sum_and_avg_of_no_values() {
+        for distinct in [false, true] {
+            let zero = Value::Int64(0);
+            assert_eq!(
+                sum_and_avg(&[], true, distinct),
+                [zero.clone(), zero.clone()]
+            );
+            assert_eq!(
+                sum_and_avg(&[None, None], true, distinct),
+                [zero.clone(), zero]
+            );
+            assert_eq!(
+                sum_and_avg(&[], false, distinct),
+                [Value::Null, Value::Null]
+            );
+            assert_eq!(
+                sum_and_avg(&[None], false, distinct),
+                [Value::Null, Value::Null]
+            );
+            let [sum, avg] = sum_and_avg(
+                &[Some(Value::Int64(1)), Some(Value::Int64(2))],
+                true,
+                distinct,
+            );
+            assert_eq!(sum, Value::Int64(3));
+            assert_eq!(avg, Value::Decimal(Decimal::parse("1.5").unwrap()));
+            let [sum, _] = sum_and_avg(&[Some(Value::Float64(0.5))], true, distinct);
+            assert_eq!(sum, Value::Float64(0.5));
+        }
+    }
+
     /// The `[min, max]` of `values`, through the aggregate states.
     fn extremes(values: &[Value], rdf_literals: bool) -> [Value; 2] {
         [AggregateExpr::min(0), AggregateExpr::max(0)].map(|mut expr| {
@@ -2193,7 +2567,7 @@ mod tests {
             for value in values {
                 state.update(Some(value.clone()));
             }
-            state.finalize()
+            state.finalize().unwrap()
         })
     }
 
@@ -2272,9 +2646,9 @@ mod tests {
             count.update(Some(value.clone()));
             collect.update(Some(value));
         }
-        assert_eq!(count.finalize(), Value::Int64(3));
+        assert_eq!(count.finalize().unwrap(), Value::Int64(3));
         assert_eq!(
-            collect.finalize(),
+            collect.finalize().unwrap(),
             Value::List(vec![path(2), path(3), Value::Int64(3)].into())
         );
     }

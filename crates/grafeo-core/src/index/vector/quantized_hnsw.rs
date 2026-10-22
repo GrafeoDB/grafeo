@@ -465,6 +465,8 @@ impl QuantizedHnswIndex {
             })
             .collect();
 
+        // Stable: equal approximate distances keep the exact order the HNSW
+        // search gave them (nearest first, ties by id)
         scored.sort_by_key(|(_, d)| OrderedFloat(*d));
         scored.truncate(num_candidates);
 
@@ -525,6 +527,8 @@ impl QuantizedHnswIndex {
                 })
                 .collect();
 
+            // Stable: equal approximate distances keep the exact order the
+            // HNSW search gave them (nearest first, ties by id)
             scored.sort_by_key(|(_, d)| OrderedFloat(*d));
             scored.truncate(k);
 
@@ -560,7 +564,7 @@ impl QuantizedHnswIndex {
             })
             .collect();
 
-        rescored.sort_by_key(|(_, d)| OrderedFloat(*d));
+        rescored.sort_by_key(|(id, d)| (OrderedFloat(*d), *id));
         rescored.truncate(k);
         rescored
     }
@@ -613,18 +617,7 @@ impl QuantizedHnswIndex {
     /// Batch search for multiple queries in parallel.
     #[must_use]
     pub fn batch_search(&self, queries: &[Vec<f32>], k: usize) -> Vec<Vec<(NodeId, f32)>> {
-        #[cfg(feature = "parallel")]
-        {
-            use rayon::prelude::*;
-            queries
-                .par_iter()
-                .map(|query| self.search(query, k))
-                .collect()
-        }
-        #[cfg(not(feature = "parallel"))]
-        {
-            queries.iter().map(|query| self.search(query, k)).collect()
-        }
+        crate::index::vector::batch::map(queries, |query| self.search(query, k))
     }
 
     /// Searches with an allowlist filter.
@@ -672,21 +665,7 @@ impl QuantizedHnswIndex {
         k: usize,
         ef: usize,
     ) -> Vec<Vec<(NodeId, f32)>> {
-        #[cfg(feature = "parallel")]
-        {
-            use rayon::prelude::*;
-            queries
-                .par_iter()
-                .map(|query| self.search_with_ef(query, k, ef))
-                .collect()
-        }
-        #[cfg(not(feature = "parallel"))]
-        {
-            queries
-                .iter()
-                .map(|query| self.search_with_ef(query, k, ef))
-                .collect()
-        }
+        crate::index::vector::batch::map(queries, |query| self.search_with_ef(query, k, ef))
     }
 
     /// Batch search with an allowlist filter for multiple queries.
@@ -697,21 +676,9 @@ impl QuantizedHnswIndex {
         k: usize,
         allowlist: &std::collections::HashSet<NodeId>,
     ) -> Vec<Vec<(NodeId, f32)>> {
-        #[cfg(feature = "parallel")]
-        {
-            use rayon::prelude::*;
-            queries
-                .par_iter()
-                .map(|query| self.search_with_filter(query, k, allowlist))
-                .collect()
-        }
-        #[cfg(not(feature = "parallel"))]
-        {
-            queries
-                .iter()
-                .map(|query| self.search_with_filter(query, k, allowlist))
-                .collect()
-        }
+        crate::index::vector::batch::map(queries, |query| {
+            self.search_with_filter(query, k, allowlist)
+        })
     }
 
     /// Batch search with custom ef and an allowlist filter for multiple queries.
@@ -723,21 +690,9 @@ impl QuantizedHnswIndex {
         ef: usize,
         allowlist: &std::collections::HashSet<NodeId>,
     ) -> Vec<Vec<(NodeId, f32)>> {
-        #[cfg(feature = "parallel")]
-        {
-            use rayon::prelude::*;
-            queries
-                .par_iter()
-                .map(|query| self.search_with_ef_and_filter(query, k, ef, allowlist))
-                .collect()
-        }
-        #[cfg(not(feature = "parallel"))]
-        {
-            queries
-                .iter()
-                .map(|query| self.search_with_ef_and_filter(query, k, ef, allowlist))
-                .collect()
-        }
+        crate::index::vector::batch::map(queries, |query| {
+            self.search_with_ef_and_filter(query, k, ef, allowlist)
+        })
     }
 
     /// Snapshot the underlying HNSW topology for serialization.

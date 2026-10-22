@@ -194,11 +194,14 @@ Choose the query language that fits the project:
 | Language | Data Model | Style |
 |----------|------------|-------|
 | **GQL** (default) | LPG | ISO standard, declarative pattern matching |
-| **Cypher** | LPG | Neo4j-compatible, ASCII-art patterns |
+| **Cypher** | LPG | openCypher, ASCII-art patterns |
 | **Gremlin** | LPG | Apache TinkerPop, traversal-based |
 | **GraphQL** | LPG, RDF | Schema-driven, familiar to web developers |
 | **SPARQL** | RDF | W3C standard for RDF queries |
 | **SQL/PGQ** | LPG | SQL:2023 GRAPH_TABLE for SQL-native graph queries |
+
+!!! note "GQL first"
+    Grafeo is a GQL-first database: [GQL](user-guide/gql/index.md), the ISO/IEC 39075 standard, sets its semantics, and the other languages are translated onto them. Where the languages disagree, each follows its own specification wherever Grafeo's translator can tell the cases apart: [Cypher](user-guide/cypher/index.md) follows openCypher and [SQL/PGQ](user-guide/sql-pgq/index.md) follows SQL:2023. Otherwise GQL's semantics apply, also for [Gremlin](user-guide/gremlin/index.md) and [GraphQL](user-guide/graphql/index.md). On RDF data, [SPARQL](user-guide/sparql/index.md) follows SPARQL 1.1.
 
 === "GQL"
 

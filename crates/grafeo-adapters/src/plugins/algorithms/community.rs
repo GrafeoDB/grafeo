@@ -9,11 +9,12 @@ use grafeo_common::types::{NodeId, Value};
 use grafeo_common::utils::hash::{FxHashMap, FxHashSet};
 use grafeo_core::graph::Direction;
 use grafeo_core::graph::GraphStore;
-#[cfg(all(test, feature = "lpg"))]
-use grafeo_core::graph::lpg::LpgStore;
+#[cfg(test)]
+#[cfg(test)]
+use grafeo_core::graph::rowgroup::RowGroupStore;
 
 use super::super::{AlgorithmResult, ParameterDef, ParameterType};
-use super::traits::{ComponentResultBuilder, impl_algorithm, visible_edges_from};
+use super::traits::{ComponentResultBuilder, impl_algorithm};
 
 // ============================================================================
 // Label Propagation
@@ -47,10 +48,28 @@ use super::traits::{ComponentResultBuilder, impl_algorithm, visible_edges_from};
 /// # Complexity
 ///
 /// O(iterations × E)
-pub fn label_propagation(store: &dyn GraphStore, max_iterations: usize) -> FxHashMap<NodeId, u64> {
+///
+/// # Errors
+///
+/// The error of a read of the store that fails.
+pub fn label_propagation(
+    store: &dyn GraphStore,
+    view: grafeo_common::types::ReadView,
+    max_iterations: usize,
+) -> grafeo_common::utils::error::Result<FxHashMap<NodeId, u64>> {
+    let graph = super::traits::GraphView::new(store, view);
+    let found = label_propagation_on(&graph, max_iterations);
+    graph.finish(found)
+}
+
+/// [`label_propagation`] on the graph a [`GraphView`](super::traits::GraphView) reads.
+pub(crate) fn label_propagation_on(
+    store: &super::traits::GraphView<'_>,
+    max_iterations: usize,
+) -> FxHashMap<NodeId, u64> {
     let mut nodes = store.node_ids();
     nodes.sort_unstable();
-    label_propagation_in_order(store, &nodes, max_iterations)
+    label_propagation_in_order_on(store, &nodes, max_iterations)
 }
 
 /// [`label_propagation`] over `nodes`, in their order: nodes are visited in
@@ -67,8 +86,24 @@ pub fn label_propagation(store: &dyn GraphStore, max_iterations: usize) -> FxHas
 ///
 /// Panics if the internal label map is inconsistent (should not happen with a
 /// valid `GraphStore`).
+///
+/// # Errors
+///
+/// The error of a read of the store that fails.
 pub fn label_propagation_in_order(
     store: &dyn GraphStore,
+    view: grafeo_common::types::ReadView,
+    nodes: &[NodeId],
+    max_iterations: usize,
+) -> grafeo_common::utils::error::Result<FxHashMap<NodeId, u64>> {
+    let graph = super::traits::GraphView::new(store, view);
+    let found = label_propagation_in_order_on(&graph, nodes, max_iterations);
+    graph.finish(found)
+}
+
+/// [`label_propagation_in_order`] on the graph a [`GraphView`](super::traits::GraphView) reads.
+pub(crate) fn label_propagation_in_order_on(
+    store: &super::traits::GraphView<'_>,
     nodes: &[NodeId],
     max_iterations: usize,
 ) -> FxHashMap<NodeId, u64> {
@@ -100,7 +135,7 @@ pub fn label_propagation_in_order(
 
             // Consider both outgoing and incoming edges (undirected community detection)
             // Outgoing edges: node -> neighbor
-            for (neighbor, _) in visible_edges_from(store, node, Direction::Outgoing) {
+            for (neighbor, _) in store.edges(node, Direction::Outgoing) {
                 if let Some(&label) = labels.get(&neighbor) {
                     *label_counts.entry(label).or_insert(0) += 1;
                 }
@@ -108,7 +143,7 @@ pub fn label_propagation_in_order(
 
             // Incoming edges: neighbor -> node
             // Uses backward adjacency index for O(degree) instead of O(V*E)
-            for (incoming_neighbor, _) in visible_edges_from(store, node, Direction::Incoming) {
+            for (incoming_neighbor, _) in store.edges(node, Direction::Incoming) {
                 if let Some(&label) = labels.get(&incoming_neighbor) {
                     *label_counts.entry(label).or_insert(0) += 1;
                 }
@@ -209,10 +244,25 @@ pub struct LouvainResult {
 /// # Complexity
 ///
 /// O(V log V) on average for sparse graphs
-pub fn louvain(store: &dyn GraphStore, resolution: f64) -> LouvainResult {
+///
+/// # Errors
+///
+/// The error of a read of the store that fails.
+pub fn louvain(
+    store: &dyn GraphStore,
+    view: grafeo_common::types::ReadView,
+    resolution: f64,
+) -> grafeo_common::utils::error::Result<LouvainResult> {
+    let graph = super::traits::GraphView::new(store, view);
+    let found = louvain_on(&graph, resolution);
+    graph.finish(found)
+}
+
+/// [`louvain`] on the graph a [`GraphView`](super::traits::GraphView) reads.
+pub(crate) fn louvain_on(store: &super::traits::GraphView<'_>, resolution: f64) -> LouvainResult {
     let mut nodes = store.node_ids();
     nodes.sort_unstable();
-    louvain_in_order(store, &nodes, resolution)
+    louvain_in_order_on(store, &nodes, resolution)
 }
 
 /// [`louvain`] over `nodes`, in their order, at every level: nodes and
@@ -225,8 +275,24 @@ pub fn louvain(store: &dyn GraphStore, resolution: f64) -> LouvainResult {
 ///
 /// `nodes` must be the nodes of `store`, each once; an edge to a node not in
 /// `nodes` is not followed.
+///
+/// # Errors
+///
+/// The error of a read of the store that fails.
 pub fn louvain_in_order(
     store: &dyn GraphStore,
+    view: grafeo_common::types::ReadView,
+    nodes: &[NodeId],
+    resolution: f64,
+) -> grafeo_common::utils::error::Result<LouvainResult> {
+    let graph = super::traits::GraphView::new(store, view);
+    let found = louvain_in_order_on(&graph, nodes, resolution);
+    graph.finish(found)
+}
+
+/// [`louvain_in_order`] on the graph a [`GraphView`](super::traits::GraphView) reads.
+pub(crate) fn louvain_in_order_on(
+    store: &super::traits::GraphView<'_>,
     nodes: &[NodeId],
     resolution: f64,
 ) -> LouvainResult {
@@ -251,7 +317,7 @@ pub fn louvain_in_order(
     let mut adjacency: Vec<FxHashMap<usize, f64>> = vec![FxHashMap::default(); n];
     let mut total_weight = 0.0;
     for (i, &node) in nodes.iter().enumerate() {
-        for (neighbor, _edge_id) in visible_edges_from(store, node, Direction::Outgoing) {
+        for (neighbor, _edge_id) in store.edges(node, Direction::Outgoing) {
             if let Some(&j) = node_to_idx.get(&neighbor) {
                 *adjacency[i].entry(j).or_insert(0.0) += 1.0;
                 *adjacency[j].entry(i).or_insert(0.0) += 1.0;
@@ -556,8 +622,24 @@ pub struct StochasticBlockPartitionResult {
 /// # Complexity
 ///
 /// O(V * B^2) per iteration where B is the current block count.
+///
+/// # Errors
+///
+/// The error of a read of the store that fails.
 pub fn stochastic_block_partition(
     store: &dyn GraphStore,
+    view: grafeo_common::types::ReadView,
+    num_blocks: Option<usize>,
+    max_iterations: usize,
+) -> grafeo_common::utils::error::Result<StochasticBlockPartitionResult> {
+    let graph = super::traits::GraphView::new(store, view);
+    let found = stochastic_block_partition_on(&graph, num_blocks, max_iterations);
+    graph.finish(found)
+}
+
+/// [`stochastic_block_partition`] on the graph a [`GraphView`](super::traits::GraphView) reads.
+pub(crate) fn stochastic_block_partition_on(
+    store: &super::traits::GraphView<'_>,
     num_blocks: Option<usize>,
     max_iterations: usize,
 ) -> StochasticBlockPartitionResult {
@@ -569,8 +651,24 @@ pub fn stochastic_block_partition(
 ///
 /// Takes the previous partition as a warm start and refines it. Much faster
 /// than computing from scratch when only a small number of edges were added.
+///
+/// # Errors
+///
+/// The error of a read of the store that fails.
 pub fn stochastic_block_partition_incremental(
     store: &dyn GraphStore,
+    view: grafeo_common::types::ReadView,
+    prior_partition: &FxHashMap<NodeId, usize>,
+    max_iterations: usize,
+) -> grafeo_common::utils::error::Result<StochasticBlockPartitionResult> {
+    let graph = super::traits::GraphView::new(store, view);
+    let found = stochastic_block_partition_incremental_on(&graph, prior_partition, max_iterations);
+    graph.finish(found)
+}
+
+/// [`stochastic_block_partition_incremental`] on the graph a [`GraphView`](super::traits::GraphView) reads.
+pub(crate) fn stochastic_block_partition_incremental_on(
+    store: &super::traits::GraphView<'_>,
     prior_partition: &FxHashMap<NodeId, usize>,
     max_iterations: usize,
 ) -> StochasticBlockPartitionResult {
@@ -579,7 +677,7 @@ pub fn stochastic_block_partition_incremental(
 
 /// Core SBP implementation with optional warm start.
 fn stochastic_block_partition_inner(
-    store: &dyn GraphStore,
+    store: &super::traits::GraphView<'_>,
     target_blocks: Option<usize>,
     max_iterations: usize,
     warm_start: Option<&FxHashMap<NodeId, usize>>,
@@ -609,7 +707,7 @@ fn stochastic_block_partition_inner(
     let mut adj: Vec<FxHashSet<usize>> = vec![FxHashSet::default(); n];
     for &node in &nodes {
         let i = node_to_idx[&node];
-        for (neighbor, _) in visible_edges_from(store, node, Direction::Outgoing) {
+        for (neighbor, _) in store.edges(node, Direction::Outgoing) {
             if let Some(&j) = node_to_idx.get(&neighbor) {
                 adj[i].insert(j);
                 adj[j].insert(i);
@@ -929,7 +1027,7 @@ impl_algorithm! {
             None => 100,
         };
 
-        let communities = label_propagation(store, max_iter);
+        let communities = label_propagation_on(store, max_iter);
 
         let mut builder = ComponentResultBuilder::with_capacity(communities.len());
         for (node, community_id) in communities {
@@ -968,7 +1066,7 @@ impl_algorithm! {
     execute(store, params) {
         let resolution = params.get_float("resolution").unwrap_or(1.0);
 
-        let result = louvain(store, resolution);
+        let result = louvain_on(store, resolution);
 
         let mut output = AlgorithmResult::new(vec![
             "node_id".to_string(),
@@ -1054,7 +1152,7 @@ impl_algorithm! {
             None => 100,
         };
 
-        let result = stochastic_block_partition(store, num_blocks, max_iter);
+        let result = stochastic_block_partition_on(store, num_blocks, max_iter);
 
         let mut output = AlgorithmResult::new(vec![
             "node_id".to_string(),
@@ -1081,16 +1179,17 @@ impl_algorithm! {
 // Tests
 // ============================================================================
 
-#[cfg(all(test, feature = "lpg"))]
+#[cfg(test)]
 mod tests {
     use super::*;
+    use grafeo_common::types::ReadView;
 
-    fn create_two_cliques_graph() -> LpgStore {
+    fn create_two_cliques_graph() -> RowGroupStore {
         // Two cliques connected by one edge
         // Clique 1: 0-1-2-3 (fully connected)
         // Clique 2: 4-5-6-7 (fully connected)
         // Bridge: 3-4
-        let store = LpgStore::new().unwrap();
+        let store = RowGroupStore::new();
 
         let nodes: Vec<NodeId> = (0..8).map(|_| store.create_node(&["Node"])).collect();
 
@@ -1117,8 +1216,8 @@ mod tests {
         store
     }
 
-    fn create_simple_graph() -> LpgStore {
-        let store = LpgStore::new().unwrap();
+    fn create_simple_graph() -> RowGroupStore {
+        let store = RowGroupStore::new();
 
         // Simple chain: 0 -> 1 -> 2
         let n0 = store.create_node(&["Node"]);
@@ -1134,7 +1233,7 @@ mod tests {
     #[test]
     fn test_label_propagation_basic() {
         let store = create_simple_graph();
-        let communities = label_propagation(&store, 100);
+        let communities = label_propagation(&store, ReadView::latest(), 100).unwrap();
 
         assert_eq!(communities.len(), 3);
 
@@ -1147,7 +1246,7 @@ mod tests {
     #[test]
     fn test_label_propagation_cliques() {
         let store = create_two_cliques_graph();
-        let communities = label_propagation(&store, 100);
+        let communities = label_propagation(&store, ReadView::latest(), 100).unwrap();
 
         assert_eq!(communities.len(), 8);
 
@@ -1158,24 +1257,24 @@ mod tests {
 
     #[test]
     fn test_label_propagation_empty() {
-        let store = LpgStore::new().unwrap();
-        let communities = label_propagation(&store, 100);
+        let store = RowGroupStore::new();
+        let communities = label_propagation(&store, ReadView::latest(), 100).unwrap();
         assert!(communities.is_empty());
     }
 
     #[test]
     fn test_label_propagation_single_node() {
-        let store = LpgStore::new().unwrap();
+        let store = RowGroupStore::new();
         store.create_node(&["Node"]);
 
-        let communities = label_propagation(&store, 100);
+        let communities = label_propagation(&store, ReadView::latest(), 100).unwrap();
         assert_eq!(communities.len(), 1);
     }
 
     #[test]
     fn test_louvain_basic() {
         let store = create_simple_graph();
-        let result = louvain(&store, 1.0);
+        let result = louvain(&store, ReadView::latest(), 1.0).unwrap();
 
         // A three-node path is best left whole: modularity 0, against -0.125 for
         // any split.
@@ -1188,7 +1287,7 @@ mod tests {
     #[test]
     fn test_louvain_cliques() {
         let store = create_two_cliques_graph();
-        let result = louvain(&store, 1.0);
+        let result = louvain(&store, ReadView::latest(), 1.0).unwrap();
 
         // Two K4 cliques connected by a single bridge: one community each.
         let mut nodes: Vec<NodeId> = result.communities.keys().copied().collect();
@@ -1198,8 +1297,8 @@ mod tests {
 
     #[test]
     fn test_louvain_empty() {
-        let store = LpgStore::new().unwrap();
-        let result = louvain(&store, 1.0);
+        let store = RowGroupStore::new();
+        let result = louvain(&store, ReadView::latest(), 1.0).unwrap();
 
         assert!(result.communities.is_empty());
         assert_eq!(result.modularity, 0.0);
@@ -1208,12 +1307,12 @@ mod tests {
 
     #[test]
     fn test_louvain_isolated_nodes() {
-        let store = LpgStore::new().unwrap();
+        let store = RowGroupStore::new();
         store.create_node(&["Node"]);
         store.create_node(&["Node"]);
         store.create_node(&["Node"]);
 
-        let result = louvain(&store, 1.0);
+        let result = louvain(&store, ReadView::latest(), 1.0).unwrap();
 
         // Each isolated node should be its own community
         assert_eq!(result.communities.len(), 3);
@@ -1225,10 +1324,10 @@ mod tests {
         let store = create_two_cliques_graph();
 
         // Low resolution: fewer, larger communities
-        let result_low = louvain(&store, 0.5);
+        let result_low = louvain(&store, ReadView::latest(), 0.5).unwrap();
 
         // High resolution: more, smaller communities
-        let result_high = louvain(&store, 2.0);
+        let result_high = louvain(&store, ReadView::latest(), 2.0).unwrap();
 
         assert_eq!(result_low.communities.len(), 8);
         assert_eq!(result_high.communities.len(), 8);
@@ -1249,8 +1348,8 @@ mod tests {
 
     /// The graph from a downstream report: 30 nodes with edges `i -> i + 1`,
     /// `i -> i + 3` and `i -> i * 7 % 30`, where many moves tie.
-    fn create_tied_moves_graph() -> LpgStore {
-        let store = LpgStore::new().unwrap();
+    fn create_tied_moves_graph() -> RowGroupStore {
+        let store = RowGroupStore::new();
         let nodes: Vec<NodeId> = (0..30).map(|_| store.create_node(&["N"])).collect();
         for i in 0..30 {
             for j in [i + 1, i + 3, i * 7 % 30] {
@@ -1264,8 +1363,8 @@ mod tests {
 
     /// Two K4 cliques whose members interleave in id order (even and odd
     /// positions), joined by one bridge between the last two nodes.
-    fn create_interleaved_cliques_graph() -> (LpgStore, Vec<NodeId>) {
-        let store = LpgStore::new().unwrap();
+    fn create_interleaved_cliques_graph() -> (RowGroupStore, Vec<NodeId>) {
+        let store = RowGroupStore::new();
         let nodes: Vec<NodeId> = (0..8).map(|_| store.create_node(&["Node"])).collect();
         for clique in [[0, 2, 4, 6], [1, 3, 5, 7]] {
             for (position, &a) in clique.iter().enumerate() {
@@ -1281,9 +1380,9 @@ mod tests {
     #[test]
     fn test_louvain_is_deterministic() {
         let store = create_tied_moves_graph();
-        let first = louvain(&store, 1.0);
+        let first = louvain(&store, ReadView::latest(), 1.0).unwrap();
         for run in 0..20 {
-            let again = louvain(&store, 1.0);
+            let again = louvain(&store, ReadView::latest(), 1.0).unwrap();
             assert_eq!(again.communities, first.communities, "run {run}");
             assert_eq!(
                 again.modularity.to_bits(),
@@ -1298,7 +1397,7 @@ mod tests {
     fn test_louvain_community_ids_follow_smallest_node_id() {
         let (store, nodes) = create_interleaved_cliques_graph();
         for _ in 0..10 {
-            let result = louvain(&store, 1.0);
+            let result = louvain(&store, ReadView::latest(), 1.0).unwrap();
             assert_eq!(result.num_communities, 2);
             // The clique holding the smallest node id is community 0.
             for (position, node) in nodes.iter().enumerate() {
@@ -1317,7 +1416,9 @@ mod tests {
 
         let (store, nodes) = create_interleaved_cliques_graph();
         let params = super::super::super::Parameters::new();
-        let result = LouvainAlgorithm.execute(&store, &params).unwrap();
+        let result = LouvainAlgorithm
+            .execute(&store, ReadView::latest(), &params)
+            .unwrap();
         let rows: Vec<(Value, Value)> = result
             .rows
             .iter()
@@ -1337,8 +1438,8 @@ mod tests {
     }
 
     /// Builds a store with `n` nodes and one directed edge per pair in `edges`.
-    fn store_from_edges(n: usize, edges: &[(usize, usize)]) -> (LpgStore, Vec<NodeId>) {
-        let store = LpgStore::new().unwrap();
+    fn store_from_edges(n: usize, edges: &[(usize, usize)]) -> (RowGroupStore, Vec<NodeId>) {
+        let store = RowGroupStore::new();
         let nodes: Vec<NodeId> = (0..n).map(|_| store.create_node(&["Node"])).collect();
         for &(u, v) in edges {
             store.create_edge(nodes[u], nodes[v], "EDGE");
@@ -1475,7 +1576,7 @@ mod tests {
         // 0.5); merging communities level by level reaches above 0.9.
         let edges = path_edges(1000);
         let (store, nodes) = store_from_edges(1000, &edges);
-        let result = louvain(&store, 1.0);
+        let result = louvain(&store, ReadView::latest(), 1.0).unwrap();
         assert!(result.modularity > 0.9, "modularity {}", result.modularity);
         assert!(
             (10..=100).contains(&result.num_communities),
@@ -1503,7 +1604,7 @@ mod tests {
         }
         edges.push((4, 5));
         let (store, nodes) = store_from_edges(10, &edges);
-        let result = louvain(&store, 1.0);
+        let result = louvain(&store, ReadView::latest(), 1.0).unwrap();
         assert_eq!(
             partition(&result, &nodes),
             vec![0, 0, 0, 0, 0, 1, 1, 1, 1, 1]
@@ -1515,7 +1616,7 @@ mod tests {
         // The best partition of the karate club has modularity 0.4198; Louvain finds
         // 0.4188 or 0.4198 depending on the visiting order.
         let (store, nodes) = store_from_edges(34, &KARATE_CLUB);
-        let result = louvain(&store, 1.0);
+        let result = louvain(&store, ReadView::latest(), 1.0).unwrap();
         assert!(
             result.modularity > 0.418,
             "modularity {}",
@@ -1533,9 +1634,9 @@ mod tests {
     #[test]
     fn test_louvain_resolution_changes_the_partition() {
         let (store, nodes) = store_from_edges(34, &KARATE_CLUB);
-        let coarse = louvain(&store, 0.05);
-        let standard = louvain(&store, 1.0);
-        let fine = louvain(&store, 3.0);
+        let coarse = louvain(&store, ReadView::latest(), 0.05).unwrap();
+        let standard = louvain(&store, ReadView::latest(), 1.0).unwrap();
+        let fine = louvain(&store, ReadView::latest(), 3.0).unwrap();
         // A low resolution merges the connected club into one community, a high one
         // splits it further than the standard resolution does.
         assert_eq!(coarse.num_communities, 1);
@@ -1562,7 +1663,7 @@ mod tests {
         let mut edges = vec![(0, 1), (1, 2), (2, 0), (3, 4), (4, 5), (5, 3), (2, 3)];
         edges.extend((0..6).map(|v| (v, v)));
         let (store, nodes) = store_from_edges(6, &edges);
-        let result = louvain(&store, 1.0);
+        let result = louvain(&store, ReadView::latest(), 1.0).unwrap();
         let communities = partition(&result, &nodes);
         assert_eq!(communities, vec![0, 0, 0, 1, 1, 1]);
         let expected = reference_modularity(6, &edges, &communities, 1.0);
@@ -1573,7 +1674,7 @@ mod tests {
     fn test_louvain_reported_modularity_matches_its_partition() {
         let edges = path_edges(1000);
         let (store, nodes) = store_from_edges(1000, &edges);
-        let result = louvain(&store, 1.0);
+        let result = louvain(&store, ReadView::latest(), 1.0).unwrap();
         let expected = reference_modularity(1000, &edges, &partition(&result, &nodes), 1.0);
         assert!((result.modularity - expected).abs() < 1e-12);
     }
@@ -1582,9 +1683,9 @@ mod tests {
     fn test_louvain_is_deterministic_across_levels() {
         let edges = path_edges(1000);
         let (store, _) = store_from_edges(1000, &edges);
-        let first = louvain(&store, 1.0);
+        let first = louvain(&store, ReadView::latest(), 1.0).unwrap();
         for run in 0..5 {
-            let again = louvain(&store, 1.0);
+            let again = louvain(&store, ReadView::latest(), 1.0).unwrap();
             assert_eq!(again.communities, first.communities, "run {run}");
             assert_eq!(
                 again.modularity.to_bits(),
@@ -1698,17 +1799,17 @@ mod tests {
 
     #[test]
     fn test_sbp_empty_graph() {
-        let store = LpgStore::new().unwrap();
-        let result = stochastic_block_partition(&store, None, 100);
+        let store = RowGroupStore::new();
+        let result = stochastic_block_partition(&store, ReadView::latest(), None, 100).unwrap();
         assert!(result.partition.is_empty());
         assert_eq!(result.num_blocks, 0);
     }
 
     #[test]
     fn test_sbp_single_node() {
-        let store = LpgStore::new().unwrap();
+        let store = RowGroupStore::new();
         store.create_node(&["Node"]);
-        let result = stochastic_block_partition(&store, None, 100);
+        let result = stochastic_block_partition(&store, ReadView::latest(), None, 100).unwrap();
         assert_eq!(result.partition.len(), 1);
         assert_eq!(result.num_blocks, 1);
     }
@@ -1716,7 +1817,7 @@ mod tests {
     #[test]
     fn test_sbp_two_cliques() {
         let store = create_two_cliques_graph();
-        let result = stochastic_block_partition(&store, None, 100);
+        let result = stochastic_block_partition(&store, ReadView::latest(), None, 100).unwrap();
 
         // All 8 nodes should be partitioned.
         assert_eq!(result.partition.len(), 8);
@@ -1748,7 +1849,8 @@ mod tests {
                 blocks.sort_unstable();
                 blocks
             };
-            let first = stochastic_block_partition(&store, target, 100);
+            let first =
+                stochastic_block_partition(&store, ReadView::latest(), target, 100).unwrap();
             let expected = blocks_of(&first);
             // Blocks are numbered in the order of their first node.
             let mut seen = 0;
@@ -1759,7 +1861,8 @@ mod tests {
                 }
             }
             for call in 1..40 {
-                let next = stochastic_block_partition(&store, target, 100);
+                let next =
+                    stochastic_block_partition(&store, ReadView::latest(), target, 100).unwrap();
                 assert_eq!(
                     blocks_of(&next),
                     expected,
@@ -1779,7 +1882,7 @@ mod tests {
     #[test]
     fn test_sbp_target_blocks() {
         let store = create_two_cliques_graph();
-        let result = stochastic_block_partition(&store, Some(2), 100);
+        let result = stochastic_block_partition(&store, ReadView::latest(), Some(2), 100).unwrap();
 
         assert_eq!(result.partition.len(), 8);
         assert_eq!(result.num_blocks, 2);
@@ -1790,7 +1893,8 @@ mod tests {
         let store = create_two_cliques_graph();
 
         // With 8 blocks (each node alone) vs 2 blocks.
-        let result_2 = stochastic_block_partition(&store, Some(2), 100);
+        let result_2 =
+            stochastic_block_partition(&store, ReadView::latest(), Some(2), 100).unwrap();
         // Description length should be finite.
         assert!(
             result_2.description_length.is_finite(),
@@ -1801,12 +1905,12 @@ mod tests {
 
     #[test]
     fn test_sbp_isolated_nodes() {
-        let store = LpgStore::new().unwrap();
+        let store = RowGroupStore::new();
         store.create_node(&["Node"]);
         store.create_node(&["Node"]);
         store.create_node(&["Node"]);
 
-        let result = stochastic_block_partition(&store, None, 100);
+        let result = stochastic_block_partition(&store, ReadView::latest(), None, 100).unwrap();
         assert_eq!(result.partition.len(), 3);
         // Isolated nodes: each stays in its own block.
         assert_eq!(result.num_blocks, 3);
@@ -1814,7 +1918,7 @@ mod tests {
 
     #[test]
     fn test_sbp_incremental() {
-        let store = LpgStore::new().unwrap();
+        let store = RowGroupStore::new();
 
         // Phase 1: Two connected nodes.
         let n0 = store.create_node(&["Node"]);
@@ -1822,14 +1926,20 @@ mod tests {
         store.create_edge(n0, n1, "EDGE");
         store.create_edge(n1, n0, "EDGE");
 
-        let result1 = stochastic_block_partition(&store, None, 100);
+        let result1 = stochastic_block_partition(&store, ReadView::latest(), None, 100).unwrap();
 
         // Phase 2: Add a third node.
         let n2 = store.create_node(&["Node"]);
         store.create_edge(n1, n2, "EDGE");
         store.create_edge(n2, n1, "EDGE");
 
-        let result2 = stochastic_block_partition_incremental(&store, &result1.partition, 100);
+        let result2 = stochastic_block_partition_incremental(
+            &store,
+            ReadView::latest(),
+            &result1.partition,
+            100,
+        )
+        .unwrap();
 
         assert_eq!(result2.partition.len(), 3);
         // The incremental result should include the new node.
@@ -1846,7 +1956,7 @@ mod tests {
         assert_eq!(algo.name(), "stochastic_block_partition");
 
         let params = super::super::super::Parameters::new();
-        let result = algo.execute(&store, &params).unwrap();
+        let result = algo.execute(&store, ReadView::latest(), &params).unwrap();
         assert_eq!(result.columns.len(), 3);
         assert_eq!(result.row_count(), 8);
     }

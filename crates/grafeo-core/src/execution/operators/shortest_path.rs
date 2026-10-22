@@ -5,16 +5,16 @@
 //! keeps (ISO/IEC 39075:2024 16.6 `<path search prefix>`): the k shortest, or
 //! every path of the k shortest lengths, under a path mode.
 
-use super::expand::visible_edges_from;
+use super::expand::{EdgeWalk, stored_types, visible_edges_from};
 use super::variable_length_expand::{
     DEFAULT_PATH_SEARCH_BUDGET, PathMode, PathSegment, path_budget_error,
 };
-use super::{Operator, OperatorError, OperatorResult, Predicate};
+use super::{Operator, OperatorError, OperatorResult, Predicate, ReadCounter};
 use crate::execution::DataChunk;
 use crate::execution::chunk::DataChunkBuilder;
 use crate::graph::Direction;
-use crate::graph::GraphStoreSearch;
-use grafeo_common::types::{EdgeId, EpochId, LogicalType, NodeId, TransactionId, Value};
+use crate::graph::GraphStore;
+use grafeo_common::types::{ArcStr, EdgeId, LogicalType, NodeId, ReadView, Value};
 use grafeo_common::utils::hash::{FxHashMap, FxHashSet};
 use std::cell::RefCell;
 use std::collections::VecDeque;
@@ -116,7 +116,7 @@ impl PathSelection {
 /// (see [`Self::with_edge_condition`]).
 pub struct ShortestPathOperator {
     /// The graph store.
-    store: Arc<dyn GraphStoreSearch>,
+    store: Arc<dyn GraphStore>,
     /// Input operator providing source/target node pairs.
     input: Box<dyn Operator>,
     /// Column index of the source node.
@@ -124,8 +124,8 @@ pub struct ShortestPathOperator {
     /// Column index of the target node; `None` when the search binds the
     /// target, to every node it reaches (see [`Self::from_source`]).
     target_column: Option<usize>,
-    /// Edge type filter (empty means all types).
-    edge_types: Vec<String>,
+    /// The edge types to follow, as stored (every type when empty).
+    edge_types: Vec<ArcStr>,
     /// Direction of edge traversal.
     direction: Direction,
     /// The paths kept for each pair.
@@ -136,12 +136,11 @@ pub struct ShortestPathOperator {
     min_hops: u32,
     /// Maximum number of edges in a path (`None` = unbounded).
     max_hops: Option<u32>,
-    /// Transaction ID for MVCC visibility (None = use the viewing epoch).
-    transaction_id: Option<TransactionId>,
-    /// Epoch for version visibility (None = every edge in the store).
-    viewing_epoch: Option<EpochId>,
-    /// When true, skip versioned MVCC lookups (fast path for read-only queries).
-    read_only: bool,
+    /// Who reads: the search walks only the edges (and reaches only the
+    /// nodes) this view sees.
+    view: ReadView,
+    /// Counts the edges the expansion reads.
+    reads: Option<Arc<ReadCounter>>,
     /// The columns written after the length.
     outputs: PathOutputs,
     /// A condition every edge of a path meets (see [`Self::with_edge_condition`]).
@@ -205,14 +204,17 @@ impl FoundPath {
 }
 
 impl ShortestPathOperator {
-    /// Creates a new shortest path operator.
+    /// Creates a shortest-path search between the source and the target of
+    /// each input row, along the edges of `edge_types` (as stored, every
+    /// type when empty) that `view` sees.
     pub fn new(
-        store: Arc<dyn GraphStoreSearch>,
+        store: Arc<dyn GraphStore>,
         input: Box<dyn Operator>,
         source_column: usize,
         target_column: usize,
         edge_types: Vec<String>,
         direction: Direction,
+        view: ReadView,
     ) -> Self {
         Self::searching(
             store,
@@ -221,6 +223,7 @@ impl ShortestPathOperator {
             Some(target_column),
             edge_types,
             direction,
+            view,
         )
     }
 
@@ -229,37 +232,46 @@ impl ShortestPathOperator {
     /// output gets a column after the input columns for the node, the
     /// target of the row's path.
     pub fn from_source(
-        store: Arc<dyn GraphStoreSearch>,
+        store: Arc<dyn GraphStore>,
         input: Box<dyn Operator>,
         source_column: usize,
         edge_types: Vec<String>,
         direction: Direction,
+        view: ReadView,
     ) -> Self {
-        Self::searching(store, input, source_column, None, edge_types, direction)
+        Self::searching(
+            store,
+            input,
+            source_column,
+            None,
+            edge_types,
+            direction,
+            view,
+        )
     }
 
     fn searching(
-        store: Arc<dyn GraphStoreSearch>,
+        store: Arc<dyn GraphStore>,
         input: Box<dyn Operator>,
         source_column: usize,
         target_column: Option<usize>,
         edge_types: Vec<String>,
         direction: Direction,
+        view: ReadView,
     ) -> Self {
         Self {
             store,
             input,
             source_column,
             target_column,
-            edge_types,
+            edge_types: stored_types(edge_types),
             direction,
             selection: PathSelection::Shortest(1),
             path_mode: PathMode::Walk,
             min_hops: 0,
             max_hops: None,
-            transaction_id: None,
-            viewing_epoch: None,
-            read_only: false,
+            view,
+            reads: None,
             outputs: PathOutputs::default(),
             edge_condition: None,
             budget: DEFAULT_PATH_SEARCH_BUDGET,
@@ -280,22 +292,10 @@ impl ShortestPathOperator {
         self
     }
 
-    /// Sets the transaction context for MVCC visibility: the search then
-    /// walks only the edges (and reaches only the nodes) visible at `epoch`
-    /// to `transaction_id`, its own uncommitted edges included.
-    pub fn with_transaction_context(
-        mut self,
-        epoch: EpochId,
-        transaction_id: Option<TransactionId>,
-    ) -> Self {
-        self.viewing_epoch = Some(epoch);
-        self.transaction_id = transaction_id;
-        self
-    }
-
-    /// Marks this search as read-only, enabling fast-path lookups.
-    pub fn with_read_only(mut self, read_only: bool) -> Self {
-        self.read_only = read_only;
+    /// Counts the edges the expansion reads in `reads`.
+    #[must_use]
+    pub fn with_read_counter(mut self, reads: Arc<ReadCounter>) -> Self {
+        self.reads = Some(reads);
         self
     }
 
@@ -391,6 +391,7 @@ impl ShortestPathOperator {
         PathSearch {
             operator: self,
             condition_row,
+            condition_error: RefCell::new(None),
         }
     }
 }
@@ -402,6 +403,9 @@ struct PathSearch<'a> {
     operator: &'a ShortestPathOperator,
     /// The input row and, in its last column, the edge the condition checks.
     condition_row: Option<RefCell<DataChunk>>,
+    /// The first error of the edge condition or of a read of the store,
+    /// which fails the search (see [`paths`](Self::paths)).
+    condition_error: RefCell<Option<OperatorError>>,
 }
 
 /// The steps that reach each node of a layer of a search: from which node,
@@ -411,24 +415,28 @@ type Steps = FxHashMap<NodeId, Vec<(NodeId, EdgeId)>>;
 impl PathSearch<'_> {
     /// The neighbors of `node` in `direction` and the edges to them: the
     /// edges of the wanted types this query sees (see [`visible_edges_from`])
-    /// that meet the edge condition.
+    /// that meet the edge condition. A read that fails ends the search with
+    /// its error (see [`paths`](Self::paths)); a self-loop is one step, also
+    /// both ways.
     fn neighbors(&self, node: NodeId, direction: Direction) -> Vec<(NodeId, EdgeId)> {
         let op = self.operator;
-        let mut edges = visible_edges_from(
+        let found = visible_edges_from(
             op.store.as_ref(),
             node,
             direction,
-            &op.edge_types,
-            op.viewing_epoch,
-            op.transaction_id,
-            op.read_only,
+            &EdgeWalk {
+                edge_types: &op.edge_types,
+                view: op.view,
+                reads: op.reads.as_deref(),
+            },
         );
-        // Both directions list a self-loop twice, as it goes out and comes
-        // in: it is one step, which two would make two copies of a path
-        if direction == Direction::Both {
-            let mut loops = FxHashSet::default();
-            edges.retain(|&(neighbor, edge)| neighbor != node || loops.insert(edge));
-        }
+        let mut edges = match found {
+            Ok(edges) => edges,
+            Err(error) => {
+                self.condition_error.borrow_mut().get_or_insert(error);
+                return Vec::new();
+            }
+        };
         if let (Some(condition), Some(row)) = (&op.edge_condition, &self.condition_row) {
             let mut row = row.borrow_mut();
             let edge_column = row.column_count() - 1;
@@ -438,7 +446,13 @@ impl PathSearch<'_> {
                 };
                 column.clear();
                 column.push_edge_id(edge);
-                condition.evaluate(&row, 0)
+                match condition.evaluate(&row, 0) {
+                    Ok(passes) => passes,
+                    Err(error) => {
+                        self.condition_error.borrow_mut().get_or_insert(error);
+                        false
+                    }
+                }
             });
         }
         edges
@@ -449,6 +463,20 @@ impl PathSearch<'_> {
     /// target; none when no path fits. Fails when the search would hold
     /// more than the operator's budget.
     fn paths(
+        &self,
+        source: NodeId,
+        target: Option<NodeId>,
+    ) -> Result<Vec<FoundPath>, OperatorError> {
+        let found = self.search_paths(source, target);
+        match self.condition_error.borrow_mut().take() {
+            Some(error) => Err(error),
+            None => found,
+        }
+    }
+
+    /// The paths of [`paths`](Self::paths), before an error of the edge
+    /// condition is checked.
+    fn search_paths(
         &self,
         source: NodeId,
         target: Option<NodeId>,
@@ -1290,10 +1318,10 @@ impl Operator for ShortestPathOperator {
     }
 }
 
-#[cfg(all(test, feature = "lpg"))]
+#[cfg(test)]
 mod tests {
     use super::*;
-    use crate::graph::lpg::LpgStore;
+    use crate::graph::rowgroup::RowGroupStore;
 
     /// A mock operator that returns source/target node pairs, one chunk per
     /// inner vector (empty ones are skipped).
@@ -1365,18 +1393,19 @@ mod tests {
 
     /// Searches outgoing paths of any edge type for the pairs in `chunks`.
     fn search(
-        store: &Arc<LpgStore>,
+        store: &Arc<RowGroupStore>,
         chunks: Vec<Vec<(NodeId, NodeId)>>,
         all_paths: bool,
         (min_hops, max_hops): (u32, Option<u32>),
     ) -> Vec<(NodeId, NodeId, Value)> {
         let mut op = ShortestPathOperator::new(
-            Arc::clone(store) as Arc<dyn GraphStoreSearch>,
+            Arc::clone(store) as Arc<dyn GraphStore>,
             Box::new(MockPairOperator::chunks(chunks)),
             0,
             1,
             vec![],
             Direction::Outgoing,
+            ReadView::latest(),
         )
         .with_all_paths(all_paths)
         .with_hop_bounds(min_hops, max_hops);
@@ -1385,7 +1414,7 @@ mod tests {
 
     #[test]
     fn test_find_shortest_path_direct() {
-        let store = Arc::new(LpgStore::new().unwrap());
+        let store = Arc::new(RowGroupStore::new());
 
         // a -> b (1 hop)
         let a = store.create_node(&["Node"]);
@@ -1394,12 +1423,13 @@ mod tests {
 
         let input = Box::new(MockPairOperator::new(vec![(a, b)]));
         let mut op = ShortestPathOperator::new(
-            store.clone() as Arc<dyn GraphStoreSearch>,
+            store.clone() as Arc<dyn GraphStore>,
             input,
             0, // source column
             1, // target column
             vec![],
             Direction::Outgoing,
+            ReadView::latest(),
         );
 
         let chunk = op.next().unwrap().unwrap();
@@ -1413,17 +1443,18 @@ mod tests {
 
     #[test]
     fn test_find_shortest_path_same_node() {
-        let store = Arc::new(LpgStore::new().unwrap());
+        let store = Arc::new(RowGroupStore::new());
         let a = store.create_node(&["Node"]);
 
         let input = Box::new(MockPairOperator::new(vec![(a, a)]));
         let mut op = ShortestPathOperator::new(
-            store.clone() as Arc<dyn GraphStoreSearch>,
+            store.clone() as Arc<dyn GraphStore>,
             input,
             0,
             1,
             vec![],
             Direction::Outgoing,
+            ReadView::latest(),
         );
 
         let chunk = op.next().unwrap().unwrap();
@@ -1437,7 +1468,7 @@ mod tests {
 
     #[test]
     fn test_find_shortest_path_two_hops() {
-        let store = Arc::new(LpgStore::new().unwrap());
+        let store = Arc::new(RowGroupStore::new());
 
         // a -> b -> c (2 hops from a to c)
         let a = store.create_node(&["Node"]);
@@ -1448,12 +1479,13 @@ mod tests {
 
         let input = Box::new(MockPairOperator::new(vec![(a, c)]));
         let mut op = ShortestPathOperator::new(
-            store.clone() as Arc<dyn GraphStoreSearch>,
+            store.clone() as Arc<dyn GraphStore>,
             input,
             0,
             1,
             vec![],
             Direction::Outgoing,
+            ReadView::latest(),
         );
 
         let chunk = op.next().unwrap().unwrap();
@@ -1466,7 +1498,7 @@ mod tests {
 
     #[test]
     fn test_find_shortest_path_no_path() {
-        let store = Arc::new(LpgStore::new().unwrap());
+        let store = Arc::new(RowGroupStore::new());
 
         // a and b are disconnected
         let a = store.create_node(&["Node"]);
@@ -1474,12 +1506,13 @@ mod tests {
 
         let input = Box::new(MockPairOperator::new(vec![(a, b)]));
         let mut op = ShortestPathOperator::new(
-            store.clone() as Arc<dyn GraphStoreSearch>,
+            store.clone() as Arc<dyn GraphStore>,
             input,
             0,
             1,
             vec![],
             Direction::Outgoing,
+            ReadView::latest(),
         );
 
         // No path, no row: MATCH drops the pair, OPTIONAL MATCH adds the nulls
@@ -1488,7 +1521,7 @@ mod tests {
 
     #[test]
     fn test_find_shortest_path_prefers_shorter() {
-        let store = Arc::new(LpgStore::new().unwrap());
+        let store = Arc::new(RowGroupStore::new());
 
         // Create two paths: a -> d (1 hop) and a -> b -> c -> d (3 hops)
         let a = store.create_node(&["Node"]);
@@ -1506,12 +1539,13 @@ mod tests {
 
         let input = Box::new(MockPairOperator::new(vec![(a, d)]));
         let mut op = ShortestPathOperator::new(
-            store.clone() as Arc<dyn GraphStoreSearch>,
+            store.clone() as Arc<dyn GraphStore>,
             input,
             0,
             1,
             vec![],
             Direction::Outgoing,
+            ReadView::latest(),
         );
 
         let chunk = op.next().unwrap().unwrap();
@@ -1522,7 +1556,7 @@ mod tests {
 
     #[test]
     fn test_find_shortest_path_with_edge_type_filter() {
-        let store = Arc::new(LpgStore::new().unwrap());
+        let store = Arc::new(RowGroupStore::new());
 
         // a -KNOWS-> b -LIKES-> c
         let a = store.create_node(&["Node"]);
@@ -1534,12 +1568,13 @@ mod tests {
         // Path with KNOWS filter should only reach b, not c
         let input = Box::new(MockPairOperator::new(vec![(a, c)]));
         let mut op = ShortestPathOperator::new(
-            store.clone() as Arc<dyn GraphStoreSearch>,
+            store.clone() as Arc<dyn GraphStore>,
             input,
             0,
             1,
             vec!["KNOWS".to_string()],
             Direction::Outgoing,
+            ReadView::latest(),
         );
 
         assert!(op.next().unwrap().is_none()); // Can't reach c via KNOWS only
@@ -1547,7 +1582,7 @@ mod tests {
 
     #[test]
     fn test_all_shortest_paths_single_path() {
-        let store = Arc::new(LpgStore::new().unwrap());
+        let store = Arc::new(RowGroupStore::new());
 
         // a -> b (single path)
         let a = store.create_node(&["Node"]);
@@ -1556,12 +1591,13 @@ mod tests {
 
         let input = Box::new(MockPairOperator::new(vec![(a, b)]));
         let mut op = ShortestPathOperator::new(
-            store.clone() as Arc<dyn GraphStoreSearch>,
+            store.clone() as Arc<dyn GraphStore>,
             input,
             0,
             1,
             vec![],
             Direction::Outgoing,
+            ReadView::latest(),
         )
         .with_all_paths(true);
 
@@ -1571,7 +1607,7 @@ mod tests {
 
     #[test]
     fn test_all_shortest_paths_multiple_paths() {
-        let store = Arc::new(LpgStore::new().unwrap());
+        let store = Arc::new(RowGroupStore::new());
 
         // Create diamond: a -> b -> d and a -> c -> d (two paths of length 2)
         let a = store.create_node(&["Node"]);
@@ -1586,12 +1622,13 @@ mod tests {
 
         let input = Box::new(MockPairOperator::new(vec![(a, d)]));
         let mut op = ShortestPathOperator::new(
-            store.clone() as Arc<dyn GraphStoreSearch>,
+            store.clone() as Arc<dyn GraphStore>,
             input,
             0,
             1,
             vec![],
             Direction::Outgoing,
+            ReadView::latest(),
         )
         .with_all_paths(true);
 
@@ -1607,7 +1644,7 @@ mod tests {
 
     #[test]
     fn test_multiple_pairs_in_chunk() {
-        let store = Arc::new(LpgStore::new().unwrap());
+        let store = Arc::new(RowGroupStore::new());
 
         // Create: a -> b, c -> d
         let a = store.create_node(&["Node"]);
@@ -1621,12 +1658,13 @@ mod tests {
         // Test multiple pairs at once
         let input = Box::new(MockPairOperator::new(vec![(a, b), (c, d), (a, d)]));
         let mut op = ShortestPathOperator::new(
-            store.clone() as Arc<dyn GraphStoreSearch>,
+            store.clone() as Arc<dyn GraphStore>,
             input,
             0,
             1,
             vec![],
             Direction::Outgoing,
+            ReadView::latest(),
         );
 
         // a->d has no path, so it has no row
@@ -1638,19 +1676,20 @@ mod tests {
 
     #[test]
     fn test_operator_reset() {
-        let store = Arc::new(LpgStore::new().unwrap());
+        let store = Arc::new(RowGroupStore::new());
         let a = store.create_node(&["Node"]);
         let b = store.create_node(&["Node"]);
         store.create_edge(a, b, "KNOWS");
 
         let input = Box::new(MockPairOperator::new(vec![(a, b)]));
         let mut op = ShortestPathOperator::new(
-            store.clone() as Arc<dyn GraphStoreSearch>,
+            store.clone() as Arc<dyn GraphStore>,
             input,
             0,
             1,
             vec![],
             Direction::Outgoing,
+            ReadView::latest(),
         );
 
         // First iteration
@@ -1667,15 +1706,16 @@ mod tests {
 
     #[test]
     fn test_operator_name() {
-        let store = Arc::new(LpgStore::new().unwrap());
+        let store = Arc::new(RowGroupStore::new());
         let input = Box::new(MockPairOperator::new(vec![]));
         let op = ShortestPathOperator::new(
-            store.clone() as Arc<dyn GraphStoreSearch>,
+            store.clone() as Arc<dyn GraphStore>,
             input,
             0,
             1,
             vec![],
             Direction::Outgoing,
+            ReadView::latest(),
         );
 
         assert_eq!(op.name(), "ShortestPath");
@@ -1683,15 +1723,16 @@ mod tests {
 
     #[test]
     fn test_empty_input() {
-        let store = Arc::new(LpgStore::new().unwrap());
+        let store = Arc::new(RowGroupStore::new());
         let input = Box::new(MockPairOperator::new(vec![]));
         let mut op = ShortestPathOperator::new(
-            store.clone() as Arc<dyn GraphStoreSearch>,
+            store.clone() as Arc<dyn GraphStore>,
             input,
             0,
             1,
             vec![],
             Direction::Outgoing,
+            ReadView::latest(),
         );
 
         // Empty input should return None
@@ -1701,7 +1742,7 @@ mod tests {
 
     #[test]
     fn test_all_shortest_paths_no_path() {
-        let store = Arc::new(LpgStore::new().unwrap());
+        let store = Arc::new(RowGroupStore::new());
 
         // Disconnected nodes
         let a = store.create_node(&["Node"]);
@@ -1709,12 +1750,13 @@ mod tests {
 
         let input = Box::new(MockPairOperator::new(vec![(a, b)]));
         let mut op = ShortestPathOperator::new(
-            store.clone() as Arc<dyn GraphStoreSearch>,
+            store.clone() as Arc<dyn GraphStore>,
             input,
             0,
             1,
             vec![],
             Direction::Outgoing,
+            ReadView::latest(),
         )
         .with_all_paths(true);
 
@@ -1723,17 +1765,18 @@ mod tests {
 
     #[test]
     fn test_all_shortest_paths_same_node() {
-        let store = Arc::new(LpgStore::new().unwrap());
+        let store = Arc::new(RowGroupStore::new());
         let a = store.create_node(&["Node"]);
 
         let input = Box::new(MockPairOperator::new(vec![(a, a)]));
         let mut op = ShortestPathOperator::new(
-            store.clone() as Arc<dyn GraphStoreSearch>,
+            store.clone() as Arc<dyn GraphStore>,
             input,
             0,
             1,
             vec![],
             Direction::Outgoing,
+            ReadView::latest(),
         )
         .with_all_paths(true);
 
@@ -1748,7 +1791,7 @@ mod tests {
 
     #[test]
     fn test_bidirectional_bfs_long_chain() {
-        let store = Arc::new(LpgStore::new().unwrap());
+        let store = Arc::new(RowGroupStore::new());
 
         // Chain: n0 -> n1 -> n2 -> ... -> n9 (9 hops)
         let nodes: Vec<NodeId> = (0..10).map(|_| store.create_node(&["Node"])).collect();
@@ -1758,12 +1801,13 @@ mod tests {
 
         let input = Box::new(MockPairOperator::new(vec![(nodes[0], nodes[9])]));
         let mut op = ShortestPathOperator::new(
-            store.clone() as Arc<dyn GraphStoreSearch>,
+            store.clone() as Arc<dyn GraphStore>,
             input,
             0,
             1,
             vec![],
             Direction::Outgoing,
+            ReadView::latest(),
         );
 
         let chunk = op.next().unwrap().unwrap();
@@ -1773,7 +1817,7 @@ mod tests {
 
     #[test]
     fn test_bidirectional_bfs_diamond() {
-        let store = Arc::new(LpgStore::new().unwrap());
+        let store = Arc::new(RowGroupStore::new());
 
         // Diamond: a -> b -> d, a -> c -> d (two paths of length 2)
         let a = store.create_node(&["Node"]);
@@ -1788,12 +1832,13 @@ mod tests {
 
         let input = Box::new(MockPairOperator::new(vec![(a, d)]));
         let mut op = ShortestPathOperator::new(
-            store.clone() as Arc<dyn GraphStoreSearch>,
+            store.clone() as Arc<dyn GraphStore>,
             input,
             0,
             1,
             vec![],
             Direction::Outgoing,
+            ReadView::latest(),
         );
 
         let chunk = op.next().unwrap().unwrap();
@@ -1803,7 +1848,7 @@ mod tests {
 
     #[test]
     fn test_bidirectional_bfs_no_path() {
-        let store = Arc::new(LpgStore::new().unwrap());
+        let store = Arc::new(RowGroupStore::new());
 
         let a = store.create_node(&["Node"]);
         let b = store.create_node(&["Node"]);
@@ -1811,12 +1856,13 @@ mod tests {
 
         let input = Box::new(MockPairOperator::new(vec![(a, b)]));
         let mut op = ShortestPathOperator::new(
-            store.clone() as Arc<dyn GraphStoreSearch>,
+            store.clone() as Arc<dyn GraphStore>,
             input,
             0,
             1,
             vec![],
             Direction::Outgoing,
+            ReadView::latest(),
         );
 
         assert!(op.next().unwrap().is_none());
@@ -1824,17 +1870,18 @@ mod tests {
 
     #[test]
     fn test_bidirectional_bfs_same_node() {
-        let store = Arc::new(LpgStore::new().unwrap());
+        let store = Arc::new(RowGroupStore::new());
         let a = store.create_node(&["Node"]);
 
         let input = Box::new(MockPairOperator::new(vec![(a, a)]));
         let mut op = ShortestPathOperator::new(
-            store.clone() as Arc<dyn GraphStoreSearch>,
+            store.clone() as Arc<dyn GraphStore>,
             input,
             0,
             1,
             vec![],
             Direction::Outgoing,
+            ReadView::latest(),
         );
 
         let chunk = op.next().unwrap().unwrap();
@@ -1844,7 +1891,7 @@ mod tests {
 
     #[test]
     fn test_bidirectional_bfs_prefers_shorter() {
-        let store = Arc::new(LpgStore::new().unwrap());
+        let store = Arc::new(RowGroupStore::new());
 
         let a = store.create_node(&["Node"]);
         let b = store.create_node(&["Node"]);
@@ -1860,12 +1907,13 @@ mod tests {
 
         let input = Box::new(MockPairOperator::new(vec![(a, d)]));
         let mut op = ShortestPathOperator::new(
-            store.clone() as Arc<dyn GraphStoreSearch>,
+            store.clone() as Arc<dyn GraphStore>,
             input,
             0,
             1,
             vec![],
             Direction::Outgoing,
+            ReadView::latest(),
         );
 
         let chunk = op.next().unwrap().unwrap();
@@ -1875,7 +1923,7 @@ mod tests {
 
     #[test]
     fn test_bidirectional_bfs_with_edge_type_filter() {
-        let store = Arc::new(LpgStore::new().unwrap());
+        let store = Arc::new(RowGroupStore::new());
 
         // a -KNOWS-> b -LIKES-> c
         let a = store.create_node(&["Node"]);
@@ -1887,12 +1935,13 @@ mod tests {
         // Only KNOWS edges: a can reach b but not c
         let input = Box::new(MockPairOperator::new(vec![(a, c)]));
         let mut op = ShortestPathOperator::new(
-            store.clone() as Arc<dyn GraphStoreSearch>,
+            store.clone() as Arc<dyn GraphStore>,
             input,
             0,
             1,
             vec!["KNOWS".to_string()],
             Direction::Outgoing,
+            ReadView::latest(),
         );
 
         assert!(op.next().unwrap().is_none());
@@ -1901,7 +1950,7 @@ mod tests {
     #[test]
     fn test_bidirectional_bfs_has_backward_adjacency() {
         // Default store has backward adjacency enabled
-        let store = Arc::new(LpgStore::new().unwrap());
+        let store = Arc::new(RowGroupStore::new());
         assert!(store.has_backward_adjacency());
 
         let a = store.create_node(&["Node"]);
@@ -1913,12 +1962,13 @@ mod tests {
         // Bidirectional BFS should work and find shortest path
         let input = Box::new(MockPairOperator::new(vec![(a, c)]));
         let mut op = ShortestPathOperator::new(
-            store.clone() as Arc<dyn GraphStoreSearch>,
+            store.clone() as Arc<dyn GraphStore>,
             input,
             0,
             1,
             vec![],
             Direction::Outgoing,
+            ReadView::latest(),
         );
 
         let chunk = op.next().unwrap().unwrap();
@@ -1928,15 +1978,16 @@ mod tests {
 
     #[test]
     fn test_shortest_path_into_any() {
-        let store = Arc::new(LpgStore::new().unwrap());
+        let store = Arc::new(RowGroupStore::new());
         let input = Box::new(MockPairOperator::new(vec![]));
         let op = ShortestPathOperator::new(
-            store.clone() as Arc<dyn GraphStoreSearch>,
+            store.clone() as Arc<dyn GraphStore>,
             input,
             0,
             1,
             vec![],
             Direction::Outgoing,
+            ReadView::latest(),
         );
         let any = Box::new(op).into_any();
         assert!(any.downcast::<ShortestPathOperator>().is_ok());
@@ -1948,7 +1999,7 @@ mod tests {
     fn a_chunk_without_paths_does_not_end_the_output() {
         // a -> b; c is isolated. No pair in the first input chunk has a path,
         // the pair in the second one does.
-        let store = Arc::new(LpgStore::new().unwrap());
+        let store = Arc::new(RowGroupStore::new());
         let a = store.create_node(&["Node"]);
         let b = store.create_node(&["Node"]);
         let c = store.create_node(&["Node"]);
@@ -1966,7 +2017,7 @@ mod tests {
 
     #[test]
     fn zero_hop_minimum_keeps_the_zero_length_self_path() {
-        let store = Arc::new(LpgStore::new().unwrap());
+        let store = Arc::new(RowGroupStore::new());
         let a = store.create_node(&["Node"]);
 
         for all_paths in [false, true] {
@@ -1981,7 +2032,7 @@ mod tests {
     #[test]
     fn one_hop_minimum_excludes_the_zero_length_self_path() {
         // a has no edges, so no path of one or more hops leads back to it
-        let store = Arc::new(LpgStore::new().unwrap());
+        let store = Arc::new(RowGroupStore::new());
         let a = store.create_node(&["Node"]);
 
         for all_paths in [false, true] {
@@ -1996,7 +2047,7 @@ mod tests {
     #[test]
     fn one_hop_minimum_finds_the_shortest_cycle() {
         // a -> b -> a (2 hops) and a -> c -> d -> a (3 hops)
-        let store = Arc::new(LpgStore::new().unwrap());
+        let store = Arc::new(RowGroupStore::new());
         let a = store.create_node(&["Node"]);
         let b = store.create_node(&["Node"]);
         let c = store.create_node(&["Node"]);
@@ -2018,7 +2069,7 @@ mod tests {
 
     #[test]
     fn a_self_loop_is_a_one_hop_cycle() {
-        let store = Arc::new(LpgStore::new().unwrap());
+        let store = Arc::new(RowGroupStore::new());
         let a = store.create_node(&["Node"]);
         store.create_edge(a, a, "KNOWS");
 
@@ -2034,7 +2085,7 @@ mod tests {
     #[test]
     fn all_shortest_cycles_are_returned() {
         // a -> b -> d -> a and a -> c -> d -> a: two shortest cycles of 3 hops
-        let store = Arc::new(LpgStore::new().unwrap());
+        let store = Arc::new(RowGroupStore::new());
         let a = store.create_node(&["Node"]);
         let b = store.create_node(&["Node"]);
         let c = store.create_node(&["Node"]);
@@ -2059,7 +2110,7 @@ mod tests {
     fn minimum_above_the_shortest_distance() {
         // Triangle a -> b -> c -> a: b is 1 hop from a, and 4 hops when the
         // path has to go around the triangle once more.
-        let store = Arc::new(LpgStore::new().unwrap());
+        let store = Arc::new(RowGroupStore::new());
         let a = store.create_node(&["Node"]);
         let b = store.create_node(&["Node"]);
         let c = store.create_node(&["Node"]);
@@ -2090,7 +2141,7 @@ mod tests {
     #[test]
     fn maximum_drops_longer_paths() {
         // a -> b -> c
-        let store = Arc::new(LpgStore::new().unwrap());
+        let store = Arc::new(RowGroupStore::new());
         let a = store.create_node(&["Node"]);
         let b = store.create_node(&["Node"]);
         let c = store.create_node(&["Node"]);
@@ -2149,18 +2200,19 @@ mod tests {
 
     /// An operator over `pairs` that outputs paths.
     fn path_search(
-        store: &Arc<LpgStore>,
+        store: &Arc<RowGroupStore>,
         pairs: Vec<(NodeId, NodeId)>,
         all_paths: bool,
         (min_hops, max_hops): (u32, Option<u32>),
     ) -> ShortestPathOperator {
         ShortestPathOperator::new(
-            Arc::clone(store) as Arc<dyn GraphStoreSearch>,
+            Arc::clone(store) as Arc<dyn GraphStore>,
             Box::new(MockPairOperator::new(pairs)),
             0,
             1,
             vec![],
             Direction::Outgoing,
+            ReadView::latest(),
         )
         .with_all_paths(all_paths)
         .with_hop_bounds(min_hops, max_hops)
@@ -2170,7 +2222,7 @@ mod tests {
     #[test]
     fn the_shortest_path_is_written_node_by_node_and_edge_by_edge() {
         // a -> b -> c -> d and the shortcut a -> c
-        let store = Arc::new(LpgStore::new().unwrap());
+        let store = Arc::new(RowGroupStore::new());
         let a = store.create_node(&["Node"]);
         let b = store.create_node(&["Node"]);
         let c = store.create_node(&["Node"]);
@@ -2198,7 +2250,7 @@ mod tests {
     fn the_one_way_search_finds_the_same_path() {
         // a -> b -> c -> d and the shortcut a -> c. A store without backward
         // adjacency searches one way only: the same path, edge by edge.
-        let store = Arc::new(LpgStore::new().unwrap());
+        let store = Arc::new(RowGroupStore::new());
         let a = store.create_node(&["Node"]);
         let b = store.create_node(&["Node"]);
         let c = store.create_node(&["Node"]);
@@ -2232,7 +2284,7 @@ mod tests {
     #[test]
     fn all_shortest_paths_are_each_written_with_their_own_edges() {
         // Diamond a -> b -> d, a -> c -> d, and a second edge c -> d
-        let store = Arc::new(LpgStore::new().unwrap());
+        let store = Arc::new(RowGroupStore::new());
         let a = store.create_node(&["Node"]);
         let b = store.create_node(&["Node"]);
         let c = store.create_node(&["Node"]);
@@ -2262,7 +2314,7 @@ mod tests {
     fn a_path_past_a_minimum_is_written_from_its_first_steps() {
         // Triangle a -> b -> c -> a: from a to b in at least 2 hops goes round
         // once more, a -> b -> c -> a -> b
-        let store = Arc::new(LpgStore::new().unwrap());
+        let store = Arc::new(RowGroupStore::new());
         let a = store.create_node(&["Node"]);
         let b = store.create_node(&["Node"]);
         let c = store.create_node(&["Node"]);
@@ -2295,19 +2347,19 @@ mod tests {
     struct AvoidEdges(Vec<EdgeId>);
 
     impl Predicate for AvoidEdges {
-        fn evaluate(&self, chunk: &DataChunk, row: usize) -> bool {
+        fn evaluate(&self, chunk: &DataChunk, row: usize) -> Result<bool, OperatorError> {
             let edge = chunk
                 .column(chunk.column_count() - 1)
                 .and_then(|column| column.get_edge_id(row))
                 .expect("the candidate edge is in the last column");
-            !self.0.contains(&edge)
+            Ok(!self.0.contains(&edge))
         }
     }
 
     #[test]
     fn the_edge_condition_holds_for_every_edge_of_the_path() {
         // a -> b -> c -> d and the shortcut a -> c
-        let store = Arc::new(LpgStore::new().unwrap());
+        let store = Arc::new(RowGroupStore::new());
         let a = store.create_node(&["Node"]);
         let b = store.create_node(&["Node"]);
         let c = store.create_node(&["Node"]);
@@ -2335,16 +2387,16 @@ mod tests {
     struct RowEdge;
 
     impl Predicate for RowEdge {
-        fn evaluate(&self, chunk: &DataChunk, row: usize) -> bool {
+        fn evaluate(&self, chunk: &DataChunk, row: usize) -> Result<bool, OperatorError> {
             let edge = |column: usize| chunk.column(column).and_then(|c| c.get_edge_id(row));
-            edge(3).is_some() && edge(3) == edge(2)
+            Ok(edge(3).is_some() && edge(3) == edge(2))
         }
     }
 
     #[test]
     fn the_edge_condition_reads_the_input_row() {
         // Two parallel edges a -> b; each input row names one of them
-        let store = Arc::new(LpgStore::new().unwrap());
+        let store = Arc::new(RowGroupStore::new());
         let a = store.create_node(&["Node"]);
         let b = store.create_node(&["Node"]);
         let first = store.create_edge(a, b, "KNOWS");
@@ -2379,12 +2431,13 @@ mod tests {
         }
 
         let mut op = ShortestPathOperator::new(
-            Arc::clone(&store) as Arc<dyn GraphStoreSearch>,
+            Arc::clone(&store) as Arc<dyn GraphStore>,
             Box::new(RowsWithEdge(vec![(a, b, second), (a, b, first)], false)),
             0,
             1,
             vec![],
             Direction::Outgoing,
+            ReadView::latest(),
         )
         .with_hop_bounds(1, Some(1))
         .with_edge_output(false)
@@ -2406,7 +2459,7 @@ mod tests {
     #[test]
     fn the_edge_column_holds_the_list_or_the_one_edge() {
         // a -> b -> c
-        let store = Arc::new(LpgStore::new().unwrap());
+        let store = Arc::new(RowGroupStore::new());
         let a = store.create_node(&["Node"]);
         let b = store.create_node(&["Node"]);
         let c = store.create_node(&["Node"]);
@@ -2479,19 +2532,26 @@ mod tests {
     /// A search over `pairs` (from the first node of each to every node with
     /// `to_every_node`) that keeps `selection` among the paths of `mode`.
     fn selective_search(
-        store: &Arc<LpgStore>,
+        store: &Arc<RowGroupStore>,
         pairs: Vec<(NodeId, NodeId)>,
         to_every_node: bool,
         direction: Direction,
         (selection, mode): (PathSelection, PathMode),
         (min_hops, max_hops): (u32, Option<u32>),
     ) -> ShortestPathOperator {
-        let store = Arc::clone(store) as Arc<dyn GraphStoreSearch>;
+        let store = Arc::clone(store) as Arc<dyn GraphStore>;
         let input = Box::new(MockPairOperator::new(pairs));
         let op = if to_every_node {
-            ShortestPathOperator::from_source(store, input, 0, vec![], direction)
+            ShortestPathOperator::from_source(
+                store,
+                input,
+                0,
+                vec![],
+                direction,
+                ReadView::latest(),
+            )
         } else {
-            ShortestPathOperator::new(store, input, 0, 1, vec![], direction)
+            ShortestPathOperator::new(store, input, 0, 1, vec![], direction, ReadView::latest())
         };
         op.with_selection(selection)
             .with_path_mode(mode)
@@ -2512,7 +2572,7 @@ mod tests {
     #[test]
     fn shortest_k_keeps_the_k_shortest_walks_of_a_pair() {
         // a -> b -> d, a -> c -> d, and b -> c: walks a to d of 2, 2 and 3
-        let store = Arc::new(LpgStore::new().unwrap());
+        let store = Arc::new(RowGroupStore::new());
         let a = store.create_node(&["Node"]);
         let b = store.create_node(&["Node"]);
         let c = store.create_node(&["Node"]);
@@ -2560,7 +2620,7 @@ mod tests {
     #[test]
     fn a_walk_search_without_a_maximum_ends_on_a_cycle() {
         // a -> b -> c -> a: each node is reached once every three edges
-        let store = Arc::new(LpgStore::new().unwrap());
+        let store = Arc::new(RowGroupStore::new());
         let a = store.create_node(&["Node"]);
         let b = store.create_node(&["Node"]);
         let c = store.create_node(&["Node"]);
@@ -2599,7 +2659,7 @@ mod tests {
     fn a_walk_search_takes_every_step_below_the_minimum() {
         // a <-> b and b -> c: walks a to c of at least 3 edges go back and
         // forth first, 4 and 6 edges long
-        let store = Arc::new(LpgStore::new().unwrap());
+        let store = Arc::new(RowGroupStore::new());
         let a = store.create_node(&["Node"]);
         let b = store.create_node(&["Node"]);
         let c = store.create_node(&["Node"]);
@@ -2630,7 +2690,7 @@ mod tests {
     /// g - v (4 edges, two ways), and no acyclic or simple path exists.
     #[test]
     fn a_path_mode_restricts_the_paths_a_search_selects_among() {
-        let store = Arc::new(LpgStore::new().unwrap());
+        let store = Arc::new(RowGroupStore::new());
         let j = store.create_node(&["Node"]);
         let m = store.create_node(&["Node"]);
         let g = store.create_node(&["Node"]);
@@ -2686,7 +2746,7 @@ mod tests {
     fn a_simple_path_back_at_its_start_goes_no_further() {
         // Undirected triangle a - b - c - a and a - d: a, b, c, a, d is no
         // simple path, as a repeats before the end
-        let store = Arc::new(LpgStore::new().unwrap());
+        let store = Arc::new(RowGroupStore::new());
         let a = store.create_node(&["Node"]);
         let b = store.create_node(&["Node"]);
         let c = store.create_node(&["Node"]);
@@ -2720,7 +2780,7 @@ mod tests {
     #[test]
     fn a_restricted_search_to_every_node_keeps_k_per_node() {
         // Undirected square a - b - c - d - a: two acyclic paths to c
-        let store = Arc::new(LpgStore::new().unwrap());
+        let store = Arc::new(RowGroupStore::new());
         let a = store.create_node(&["Node"]);
         let b = store.create_node(&["Node"]);
         let c = store.create_node(&["Node"]);
@@ -2749,7 +2809,7 @@ mod tests {
 
     #[test]
     fn an_undirected_self_loop_is_one_step() {
-        let store = Arc::new(LpgStore::new().unwrap());
+        let store = Arc::new(RowGroupStore::new());
         let a = store.create_node(&["Node"]);
         let b = store.create_node(&["Node"]);
         let aa = store.create_edge(a, a, "KNOWS");
@@ -2768,7 +2828,7 @@ mod tests {
     #[test]
     fn a_search_from_the_source_binds_every_node_it_reaches() {
         // a -> b -> c, and d alone
-        let store = Arc::new(LpgStore::new().unwrap());
+        let store = Arc::new(RowGroupStore::new());
         let a = store.create_node(&["Node"]);
         let b = store.create_node(&["Node"]);
         let c = store.create_node(&["Node"]);
@@ -2802,8 +2862,8 @@ mod tests {
     /// `diamonds` diamonds in a row: from each joint, two edges to two nodes
     /// and from both on to the next joint, so 2^diamonds shortest paths lead
     /// from the first joint to the last. Returns the store and the joints.
-    fn diamonds(diamonds: usize) -> (Arc<LpgStore>, Vec<NodeId>) {
-        let store = Arc::new(LpgStore::new().unwrap());
+    fn diamonds(diamonds: usize) -> (Arc<RowGroupStore>, Vec<NodeId>) {
+        let store = Arc::new(RowGroupStore::new());
         let mut joints = vec![store.create_node(&["Joint"])];
         for _ in 0..diamonds {
             let from = *joints.last().unwrap();
@@ -2848,12 +2908,13 @@ mod tests {
         let ends = (joints[0], joints[20]);
         let search = |all: bool| {
             ShortestPathOperator::new(
-                Arc::clone(&store) as Arc<dyn GraphStoreSearch>,
+                Arc::clone(&store) as Arc<dyn GraphStore>,
                 Box::new(MockPairOperator::new(vec![ends])),
                 0,
                 1,
                 vec![],
                 Direction::Outgoing,
+                ReadView::latest(),
             )
             .with_all_paths(all)
             .with_memory_budget(64 * 1024)
@@ -2869,7 +2930,7 @@ mod tests {
     fn a_trail_search_over_the_budget_fails_with_an_error() {
         // Two nodes with six edges each way: the trails from one to every
         // node, which the search follows all, are 6^2 * 5^2 * ... many
-        let store = Arc::new(LpgStore::new().unwrap());
+        let store = Arc::new(RowGroupStore::new());
         let alix = store.create_node(&["Node"]);
         let gus = store.create_node(&["Node"]);
         for _ in 0..6 {
@@ -2906,12 +2967,13 @@ mod tests {
             .collect();
         let search = |budget: usize| {
             ShortestPathOperator::new(
-                Arc::clone(&store) as Arc<dyn GraphStoreSearch>,
+                Arc::clone(&store) as Arc<dyn GraphStore>,
                 Box::new(MockPairOperator::new(pairs.clone())),
                 0,
                 1,
                 vec![],
                 Direction::Outgoing,
+                ReadView::latest(),
             )
             .with_all_paths(true)
             .with_path_output()

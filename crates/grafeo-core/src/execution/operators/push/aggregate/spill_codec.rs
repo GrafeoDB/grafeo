@@ -44,6 +44,12 @@ mod tags {
     pub const DISTINCT: u8 = 24;
     pub const MIN_OF_RDF_LITERALS: u8 = 25;
     pub const MAX_OF_RDF_LITERALS: u8 = 26;
+    pub const SUM_DECIMAL: u8 = 27;
+    pub const AVG_DECIMAL: u8 = 28;
+    pub const SUM_DURATION: u8 = 29;
+    pub const AVG_DURATION: u8 = 30;
+    pub const INVALID_OPERAND: u8 = 31;
+    pub const READS_NUMERIC_TEXT: u8 = 32;
 }
 
 fn invalid(message: &str) -> std::io::Error {
@@ -65,6 +71,12 @@ fn read_i64(r: &mut dyn Read) -> std::io::Result<i64> {
     let mut bytes = [0; 8];
     r.read_exact(&mut bytes)?;
     Ok(i64::from_le_bytes(bytes))
+}
+
+fn read_i128(r: &mut dyn Read) -> std::io::Result<i128> {
+    let mut bytes = [0; 16];
+    r.read_exact(&mut bytes)?;
+    Ok(i128::from_le_bytes(bytes))
 }
 
 fn read_f64(r: &mut dyn Read) -> std::io::Result<f64> {
@@ -191,6 +203,8 @@ fn write_accumulator(w: &mut dyn Write, accumulator: &AggregateState) -> std::io
         AggregateState::SumFloat(..) => tags::SUM_FLOAT,
         AggregateState::SumFloatDistinct(..) => tags::SUM_FLOAT_DISTINCT,
         AggregateState::Avg(..) => tags::AVG,
+        AggregateState::SumDecimal(..) => tags::SUM_DECIMAL,
+        AggregateState::AvgDecimal(..) => tags::AVG_DECIMAL,
         AggregateState::AvgDistinct(..) => tags::AVG_DISTINCT,
         AggregateState::Min(_) => tags::MIN,
         AggregateState::Max(_) => tags::MAX,
@@ -211,6 +225,10 @@ fn write_accumulator(w: &mut dyn Write, accumulator: &AggregateState) -> std::io
         AggregateState::Sample(_) => tags::SAMPLE,
         AggregateState::Bivariate { .. } => tags::BIVARIATE,
         AggregateState::Distinct { .. } => tags::DISTINCT,
+        AggregateState::SumDuration(..) => tags::SUM_DURATION,
+        AggregateState::AvgDuration(..) => tags::AVG_DURATION,
+        AggregateState::InvalidOperand(_) => tags::INVALID_OPERAND,
+        AggregateState::ReadsNumericText(_) => tags::READS_NUMERIC_TEXT,
     };
     w.write_all(&[tag])?;
     match accumulator {
@@ -229,6 +247,14 @@ fn write_accumulator(w: &mut dyn Write, accumulator: &AggregateState) -> std::io
         }
         AggregateState::Avg(sum, count) | AggregateState::AvgDistinct(sum, count, _) => {
             w.write_all(&sum.to_le_bytes())?;
+            w.write_all(&count.to_le_bytes())?;
+        }
+        // The sum (absent once past 38 digits), then the count.
+        AggregateState::SumDecimal(total, count) | AggregateState::AvgDecimal(total, count) => {
+            w.write_all(&[u8::from(total.is_some())])?;
+            if let Some(total) = total {
+                serialize_value(&Value::Decimal(*total), w)?;
+            }
             w.write_all(&count.to_le_bytes())?;
         }
         AggregateState::Min(value)
@@ -294,6 +320,21 @@ fn write_accumulator(w: &mut dyn Write, accumulator: &AggregateState) -> std::io
             }
             write_accumulator(w, inner)?;
         }
+        // The sum (absent once it overflowed), then the count.
+        AggregateState::SumDuration(total, count) | AggregateState::AvgDuration(total, count) => {
+            w.write_all(&[u8::from(total.is_some())])?;
+            if let Some(total) = total {
+                serialize_value(&Value::Duration(*total), w)?;
+            }
+            w.write_all(&count.to_le_bytes())?;
+        }
+        AggregateState::InvalidOperand(message) => write_string(w, message)?,
+        AggregateState::ReadsNumericText(inner) => {
+            if matches!(**inner, AggregateState::ReadsNumericText(_)) {
+                return Err(invalid("a numeric text aggregate state wraps another"));
+            }
+            write_accumulator(w, inner)?;
+        }
     }
     match accumulator {
         AggregateState::CountDistinct(_, seen)
@@ -335,7 +376,8 @@ fn read_tagged_accumulator(r: &mut dyn Read, tag: u8) -> std::io::Result<Aggrega
         tags::COUNT => AggregateState::Count(read_i64(r)?),
         tags::COUNT_DISTINCT => AggregateState::CountDistinct(read_i64(r)?, read_seen(r)?),
         tags::SUM_INT | tags::SUM_INT_DISTINCT => {
-            let sum = read_i64(r)?;
+            // The 128-bit sum (16 bytes), as the writer writes it.
+            let sum = read_i128(r)?;
             let count = read_i64(r)?;
             if tag == tags::SUM_INT {
                 AggregateState::SumInt(sum, count)
@@ -360,6 +402,22 @@ fn read_tagged_accumulator(r: &mut dyn Read, tag: u8) -> std::io::Result<Aggrega
                 AggregateState::Avg(sum, count)
             } else {
                 AggregateState::AvgDistinct(sum, count, read_seen(r)?)
+            }
+        }
+        tags::SUM_DECIMAL | tags::AVG_DECIMAL => {
+            let total = if read_flag(r)? {
+                match deserialize_value(r)? {
+                    Value::Decimal(total) => Some(total),
+                    _ => return Err(invalid("a decimal aggregate state holds another value")),
+                }
+            } else {
+                None
+            };
+            let count = read_i64(r)?;
+            if tag == tags::SUM_DECIMAL {
+                AggregateState::SumDecimal(total, count)
+            } else {
+                AggregateState::AvgDecimal(total, count)
             }
         }
         tags::MIN
@@ -446,6 +504,30 @@ fn read_tagged_accumulator(r: &mut dyn Read, tag: u8) -> std::io::Result<Aggrega
                 seen: read_seen(r)?,
             }
         }
+        tags::SUM_DURATION | tags::AVG_DURATION => {
+            let total = if read_flag(r)? {
+                match deserialize_value(r)? {
+                    Value::Duration(total) => Some(total),
+                    _ => return Err(invalid("a duration aggregate state holds another value")),
+                }
+            } else {
+                None
+            };
+            let count = read_i64(r)?;
+            if tag == tags::SUM_DURATION {
+                AggregateState::SumDuration(total, count)
+            } else {
+                AggregateState::AvgDuration(total, count)
+            }
+        }
+        tags::INVALID_OPERAND => AggregateState::InvalidOperand(read_string(r)?),
+        tags::READS_NUMERIC_TEXT => {
+            let inner_tag = read_tag(r)?;
+            if inner_tag == tags::READS_NUMERIC_TEXT {
+                return Err(invalid("a numeric text aggregate state wraps another"));
+            }
+            AggregateState::ReadsNumericText(Box::new(read_tagged_accumulator(r, inner_tag)?))
+        }
         _ => return Err(invalid("unknown aggregate state tag")),
     })
 }
@@ -453,6 +535,74 @@ fn read_tagged_accumulator(r: &mut dyn Read, tag: u8) -> std::io::Result<Aggrega
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A duration sum or average, a failed operand and a SPARQL sum spill and
+    /// come back as they were.
+    #[test]
+    fn duration_invalid_and_numeric_text_states_round_trip() {
+        use grafeo_common::types::Duration;
+        let total = Duration::new(1, 2, 3);
+        let group = GroupState {
+            key_values: Vec::new(),
+            accumulators: vec![
+                AggregateState::SumDuration(Some(total), 3),
+                AggregateState::AvgDuration(None, 4),
+                AggregateState::InvalidOperand("sum takes numbers".to_string()),
+                AggregateState::ReadsNumericText(Box::new(AggregateState::SumInt(7, 2))),
+            ],
+        };
+        let mut bytes = Vec::new();
+        serialize_group_state(&group, &mut bytes).unwrap();
+        let back = deserialize_group_state(&mut bytes.as_slice()).unwrap();
+        let printed: Vec<String> = back
+            .accumulators
+            .iter()
+            .map(|state| format!("{:?}", state.finalize()))
+            .collect();
+        assert_eq!(
+            printed[0],
+            format!("{:?}", Ok::<_, ()>(Value::Duration(total)))
+        );
+        assert!(printed[1].contains("Err"), "{}", printed[1]);
+        assert!(printed[2].contains("sum takes numbers"), "{}", printed[2]);
+        assert_eq!(printed[3], format!("{:?}", Ok::<_, ()>(Value::Int64(7))));
+    }
+
+    /// A decimal sum or average spills and comes back with its exact sum
+    /// (scale kept) or its overflow, and its count.
+    #[test]
+    fn decimal_states_round_trip() {
+        use grafeo_common::types::Decimal;
+        let total = Decimal::parse("-12.50").unwrap();
+        let group = GroupState {
+            key_values: Vec::new(),
+            accumulators: vec![
+                AggregateState::SumDecimal(Some(total), 3),
+                AggregateState::AvgDecimal(Some(total), 4),
+                AggregateState::SumDecimal(None, 7),
+            ],
+        };
+        let mut bytes = Vec::new();
+        serialize_group_state(&group, &mut bytes).unwrap();
+        let back = deserialize_group_state(&mut bytes.as_slice()).unwrap();
+        let described: Vec<String> = back
+            .accumulators
+            .iter()
+            .map(|state| match state {
+                AggregateState::SumDecimal(total, count) => format!("sum {total:?} {count}"),
+                AggregateState::AvgDecimal(total, count) => format!("avg {total:?} {count}"),
+                other => format!("{other:?}"),
+            })
+            .collect();
+        assert_eq!(
+            described,
+            [
+                "sum Some(Decimal(-12.50)) 3",
+                "avg Some(Decimal(-12.50)) 4",
+                "sum None 7"
+            ]
+        );
+    }
 
     /// A DISTINCT state wraps the state of the aggregate itself, never
     /// another DISTINCT state: a record that claims one is refused, without

@@ -10,7 +10,6 @@ use grafeo_engine::GrafeoDB;
 use rustyline::DefaultEditor;
 use rustyline::error::ReadlineError;
 
-use crate::commands::query::format_value;
 use crate::output::{self, Format, format_duration_ms};
 use crate::{OutputFormat, QueryLanguage};
 
@@ -48,7 +47,7 @@ pub fn run(
     };
 
     if !quiet {
-        let info = db.info();
+        let info = db.info()?;
         println!(
             "Grafeo {} - {:?} mode, {} nodes, {} edges",
             info.version, info.mode, info.node_count, info.edge_count
@@ -171,14 +170,10 @@ pub fn run(
 
         match result {
             Ok(qr) => {
-                let headers = qr.columns.clone();
-                let rows: Vec<Vec<String>> = qr
-                    .rows()
-                    .iter()
-                    .map(|row| row.iter().map(format_value).collect())
-                    .collect();
-
-                output::print_result_table(&headers, &rows, settings.format, settings.quiet);
+                let rows = qr.rows();
+                if !settings.quiet {
+                    output::print_value_rows(&qr.columns, rows, settings.format, None);
+                }
 
                 if !settings.quiet {
                     let timing_str = if settings.show_timing {
@@ -262,7 +257,10 @@ fn handle_meta_command(
             MetaResult::Continue
         }
         ":schema" => {
-            let schema = db.schema();
+            let schema = match db.schema() {
+                Ok(schema) => schema,
+                Err(error) => return MetaResult::Error(error.to_string()),
+            };
             match schema {
                 grafeo_engine::SchemaInfo::Lpg(lpg) if !quiet => {
                     println!("Labels:");
@@ -289,7 +287,10 @@ fn handle_meta_command(
             MetaResult::Continue
         }
         ":info" => {
-            let info = db.info();
+            let info = match db.info() {
+                Ok(info) => info,
+                Err(error) => return MetaResult::Error(error.to_string()),
+            };
             if !quiet {
                 println!(
                     "Mode: {:?}, Nodes: {}, Edges: {}, WAL: {}, Version: {}",
@@ -299,7 +300,10 @@ fn handle_meta_command(
             MetaResult::Continue
         }
         ":stats" => {
-            let stats = db.detailed_stats();
+            let stats = match db.detailed_stats() {
+                Ok(stats) => stats,
+                Err(error) => return MetaResult::Error(error.to_string()),
+            };
             if !quiet {
                 println!("Nodes: {}, Edges: {}", stats.node_count, stats.edge_count);
                 println!(

@@ -1,0 +1,154 @@
+# SQL/PGQ: aggregates inside SELECT expressions
+#
+# ISO/IEC 9075-2 (SQL:2023) lets a <select list> item be any <value
+# expression> over <set function specification>s: an operator over
+# aggregates (COUNT(*) + 1, -COUNT(*), SUM(x) / COUNT(*)), a CASE over them, or
+# an aggregate as a function's argument (ABS(MIN(x) - MAX(x))). The parts
+# outside the aggregates are grouping keys or constants; with GROUP BY they
+# may read only its keys. HAVING takes the same expressions. Only a bare
+# aggregate worked as an item; any other expression over one was an error.
+
+meta:
+  language: sql-pgq
+  model: lpg
+  section: "7.16"
+  title: Aggregates inside SELECT expressions
+  dataset: social_network
+
+tests:
+
+  # ---------------------------------------------------------------------------
+  # Without GROUP BY: one group
+  # ---------------------------------------------------------------------------
+
+  - name: an_operator_over_an_aggregate
+    query: |
+      SELECT COUNT(*) + 1 AS n, -COUNT(*) AS negated FROM GRAPH_TABLE (
+        MATCH (p:Person) COLUMNS (p.age AS age)
+      )
+    expect:
+      rows:
+        - [4, -3]
+
+  - name: unary_plus_and_round_over_an_aggregate
+    query: |
+      SELECT +COUNT(*) AS n, ROUND(AVG(age)) AS mean, -SUM(age) AS negated FROM GRAPH_TABLE (
+        MATCH (p:Person) COLUMNS (p.age AS age)
+      )
+    expect:
+      rows:
+        - [3, 30, -90]
+
+  - name: an_unaliased_item_is_named_after_its_expression
+    query: |
+      SELECT COUNT(*) + 1 FROM GRAPH_TABLE (
+        MATCH (p:Person) COLUMNS (p.age AS age)
+      )
+    expect:
+      columns: ["count(*) + 1"]
+      rows:
+        - [4]
+
+  - name: an_operator_over_two_aggregates
+    query: |
+      SELECT SUM(age) / COUNT(*) AS mean, MAX(age) - MIN(age) AS spread FROM GRAPH_TABLE (
+        MATCH (p:Person) COLUMNS (p.age AS age)
+      )
+    expect:
+      rows:
+        - [30, 10]
+
+  - name: an_aggregate_as_a_function_argument
+    query: |
+      SELECT ABS(MIN(age) - MAX(age)) AS spread FROM GRAPH_TABLE (
+        MATCH (p:Person) COLUMNS (p.age AS age)
+      )
+    expect:
+      rows:
+        - [10]
+
+  - name: a_case_over_an_aggregate
+    query: |
+      SELECT CASE WHEN COUNT(*) > 2 THEN 'many' ELSE 'few' END AS size FROM GRAPH_TABLE (
+        MATCH (p:Person) COLUMNS (p.age AS age)
+      )
+    expect:
+      rows:
+        - [many]
+
+  - name: a_constant_beside_an_aggregate
+    query: |
+      SELECT COUNT(*) * 10 + 5 AS n, 'people' AS what FROM GRAPH_TABLE (
+        MATCH (p:Person) COLUMNS (p.age AS age)
+      )
+    expect:
+      rows:
+        - [35, people]
+
+  # ---------------------------------------------------------------------------
+  # With GROUP BY
+  # ---------------------------------------------------------------------------
+
+  - name: an_aggregate_expression_per_group
+    query: |
+      SELECT city, COUNT(*) * 10 AS tens FROM GRAPH_TABLE (
+        MATCH (p:Person) COLUMNS (p.city AS city, p.age AS age)
+      ) GROUP BY city
+    expect:
+      rows:
+        - [Amsterdam, 10]
+        - [Berlin, 10]
+        - [Paris, 10]
+
+  - name: a_key_inside_an_aggregate_expression
+    query: |
+      SELECT age + COUNT(*) AS v FROM GRAPH_TABLE (
+        MATCH (p:Person) COLUMNS (p.age AS age)
+      ) GROUP BY age
+    expect:
+      rows:
+        - [26]
+        - [31]
+        - [36]
+
+  - name: a_case_over_an_aggregate_per_group
+    query: |
+      SELECT city, CASE WHEN SUM(age) > 30 THEN 'older' ELSE 'younger' END AS kind FROM GRAPH_TABLE (
+        MATCH (p:Person) COLUMNS (p.city AS city, p.age AS age)
+      ) GROUP BY city
+    expect:
+      rows:
+        - [Amsterdam, younger]
+        - [Berlin, younger]
+        - [Paris, older]
+
+  - name: a_column_outside_group_by_and_the_aggregates_is_an_error
+    query: |
+      SELECT age + COUNT(*) AS v FROM GRAPH_TABLE (
+        MATCH (p:Person) COLUMNS (p.city AS city, p.age AS age)
+      ) GROUP BY city
+    expect:
+      error: "which is neither in GROUP BY nor in an aggregate"
+      gql_status: "42000"
+
+  # ---------------------------------------------------------------------------
+  # HAVING
+  # ---------------------------------------------------------------------------
+
+  - name: having_with_an_aggregate_as_a_function_argument
+    query: |
+      SELECT city FROM GRAPH_TABLE (
+        MATCH (p:Person) COLUMNS (p.city AS city, p.age AS age)
+      ) GROUP BY city HAVING ABS(MIN(age) - 30) = 0
+    expect:
+      rows:
+        - [Amsterdam]
+
+  - name: having_with_a_case_over_an_aggregate
+    query: |
+      SELECT city FROM GRAPH_TABLE (
+        MATCH (p:Person) COLUMNS (p.city AS city, p.age AS age)
+      ) GROUP BY city HAVING CASE WHEN MAX(age) > 30 THEN true ELSE false END
+    expect:
+      rows:
+        - [Paris]

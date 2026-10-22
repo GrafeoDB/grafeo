@@ -50,9 +50,9 @@ struct WarningOutput {
 }
 
 /// Run the validate command.
-pub fn run(path: &Path, format: OutputFormat, quiet: bool) -> Result<()> {
-    let db = super::open_existing(path)?;
-    let result = db.validate();
+pub fn run(path: &Path, format: OutputFormat) -> Result<()> {
+    let db = super::open_existing_read_only(path)?;
+    let result = db.validate()?;
 
     let output = ValidationOutput {
         valid: result.errors.is_empty(),
@@ -81,69 +81,63 @@ pub fn run(path: &Path, format: OutputFormat, quiet: bool) -> Result<()> {
     let fmt: Format = format.into();
     match fmt {
         Format::Json => {
-            if !quiet {
-                println!("{}", serde_json::to_string_pretty(&output)?);
-            }
+            println!("{}", serde_json::to_string_pretty(&output)?);
         }
         Format::Csv => {
-            if !quiet {
-                println!("severity,code,message,context");
-                for error in &output.errors {
-                    println!(
-                        "error,{},{},{}",
-                        error.code,
-                        error.message,
-                        error.context.as_deref().unwrap_or("")
-                    );
-                }
-                for warning in &output.warnings {
-                    println!(
-                        "warning,{},{},{}",
-                        warning.code,
-                        warning.message,
-                        warning.context.as_deref().unwrap_or("")
-                    );
-                }
+            println!("severity,code,message,context");
+            for error in &output.errors {
+                println!(
+                    "error,{},{},{}",
+                    error.code,
+                    error.message,
+                    error.context.as_deref().unwrap_or("")
+                );
+            }
+            for warning in &output.warnings {
+                println!(
+                    "warning,{},{},{}",
+                    warning.code,
+                    warning.message,
+                    warning.context.as_deref().unwrap_or("")
+                );
             }
         }
         Format::Table => {
-            if !quiet {
-                if output.valid {
-                    println!("{}", output::colored("Database is valid", Color::Green));
-                } else {
-                    println!("{}", output::colored("Database has errors", Color::Red));
-                }
+            if output.valid {
+                println!("{}", output::colored("Database is valid", Color::Green));
+            } else {
+                println!("{}", output::colored("Database has errors", Color::Red));
+            }
 
-                println!(
-                    "\nErrors: {}, Warnings: {}\n",
-                    output.error_count, output.warning_count
-                );
+            println!(
+                "\nErrors: {}, Warnings: {}\n",
+                output.error_count, output.warning_count
+            );
 
-                if !output.errors.is_empty() {
-                    let mut table = output::create_table();
-                    output::add_header(&mut table, &["Code", "Message", "Context"]);
-                    for error in &output.errors {
-                        table.add_row(vec![
-                            Cell::new(&error.code).fg(Color::Red),
-                            Cell::new(&error.message),
-                            Cell::new(error.context.as_deref().unwrap_or("-")),
-                        ]);
-                    }
-                    println!("Errors:\n{table}\n");
+            if !output.errors.is_empty() {
+                let mut table = output::create_table();
+                output::add_header(&mut table, &["Code", "Message", "Context"]);
+                for error in &output.errors {
+                    table.add_row(vec![
+                        Cell::new(&error.code).fg(Color::Red),
+                        Cell::new(&error.message),
+                        Cell::new(error.context.as_deref().unwrap_or("-")),
+                    ]);
                 }
+                println!("Errors:\n{table}\n");
+            }
 
-                if !output.warnings.is_empty() {
-                    let mut table = output::create_table();
-                    output::add_header(&mut table, &["Code", "Message", "Context"]);
-                    for warning in &output.warnings {
-                        table.add_row(vec![
-                            Cell::new(&warning.code).fg(Color::Yellow),
-                            Cell::new(&warning.message),
-                            Cell::new(warning.context.as_deref().unwrap_or("-")),
-                        ]);
-                    }
-                    println!("Warnings:\n{table}");
+            if !output.warnings.is_empty() {
+                let mut table = output::create_table();
+                output::add_header(&mut table, &["Code", "Message", "Context"]);
+                for warning in &output.warnings {
+                    table.add_row(vec![
+                        Cell::new(&warning.code).fg(Color::Yellow),
+                        Cell::new(&warning.message),
+                        Cell::new(warning.context.as_deref().unwrap_or("-")),
+                    ]);
                 }
+                println!("Warnings:\n{table}");
             }
         }
     }

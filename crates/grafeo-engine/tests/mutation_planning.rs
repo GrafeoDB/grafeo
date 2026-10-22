@@ -291,7 +291,7 @@ fn test_merge_creates_when_not_exists() {
 
     assert_eq!(result.rows().len(), 1);
     assert_eq!(result.rows()[0][0], Value::String("Cat".into()));
-    assert_eq!(db.node_count(), 1);
+    assert_eq!(db.node_count().unwrap(), 1);
 }
 
 #[test]
@@ -299,7 +299,7 @@ fn test_merge_matches_existing() {
     let db = create_social_network();
     let session = db.session();
 
-    let before = db.node_count();
+    let before = db.node_count().unwrap();
 
     let result = session
         .execute("MERGE (n:Person {name: 'Alix'}) RETURN n.name")
@@ -308,7 +308,7 @@ fn test_merge_matches_existing() {
     assert_eq!(result.rows().len(), 1);
     assert_eq!(result.rows()[0][0], Value::String("Alix".into()));
     // No new node created
-    assert_eq!(db.node_count(), before);
+    assert_eq!(db.node_count().unwrap(), before);
 }
 
 #[test]
@@ -389,7 +389,7 @@ fn test_create_edge_anonymous() {
     let db = create_social_network();
     let session = db.session();
 
-    let edges_before = db.edge_count();
+    let edges_before = db.edge_count().unwrap();
 
     session
         .execute_cypher(
@@ -398,7 +398,7 @@ fn test_create_edge_anonymous() {
         )
         .unwrap();
 
-    assert_eq!(db.edge_count(), edges_before + 1);
+    assert_eq!(db.edge_count().unwrap(), edges_before + 1);
 }
 
 #[test]
@@ -416,8 +416,8 @@ fn test_create_path_with_new_nodes() {
         .unwrap();
     session.create_edge(paris, france, "IN").unwrap();
 
-    assert_eq!(db.node_count(), 2);
-    assert_eq!(db.edge_count(), 1);
+    assert_eq!(db.node_count().unwrap(), 2);
+    assert_eq!(db.edge_count().unwrap(), 1);
 
     // Verify the path can be queried via GQL
     let result = session
@@ -438,21 +438,21 @@ fn test_delete_node_by_match() {
     let db = create_social_network();
     let session = db.session();
 
-    let before = db.node_count();
+    let before = db.node_count().unwrap();
 
     // Delete Harm (who has KNOWS edges)
     session
         .execute("MATCH (n:Person) WHERE n.name = 'Harm' DETACH DELETE n")
         .unwrap();
 
-    assert!(db.node_count() < before);
+    assert!(db.node_count().unwrap() < before);
 }
 
 #[test]
 fn test_delete_node_reduces_count() {
     let db = create_social_network();
 
-    let before = db.node_count();
+    let before = db.node_count().unwrap();
 
     // DETACH DELETE a single node removes it and its edges
     let session = db.session();
@@ -460,7 +460,7 @@ fn test_delete_node_reduces_count() {
         .execute("MATCH (n:Company {name: 'TechCorp'}) DETACH DELETE n")
         .unwrap();
 
-    assert_eq!(db.node_count(), before - 1);
+    assert_eq!(db.node_count().unwrap(), before - 1);
 }
 
 #[test]
@@ -470,8 +470,8 @@ fn test_detach_delete_all_nodes() {
 
     session.execute("MATCH (n) DETACH DELETE n").unwrap();
 
-    assert_eq!(db.node_count(), 0);
-    assert_eq!(db.edge_count(), 0);
+    assert_eq!(db.node_count().unwrap(), 0);
+    assert_eq!(db.edge_count().unwrap(), 0);
 }
 
 // ============================================================================
@@ -653,6 +653,89 @@ fn test_match_create_edge_no_phantom_nodes() {
         .execute_cypher("MATCH ()-[r:KNOWS]->() RETURN count(r) AS cnt")
         .unwrap();
     assert_eq!(edges.rows()[0][0], Value::Int64(1));
+}
+
+/// The nodes, the unlabeled nodes and the REL edges of `session`'s graph.
+#[cfg(feature = "cypher")]
+fn nodes_unlabeled_edges(session: &grafeo_engine::session::Session) -> Vec<Value> {
+    let counts = session
+        .execute_cypher(
+            "MATCH (n) RETURN count(n) AS nodes, \
+             count(CASE WHEN size(labels(n)) = 0 THEN 1 END) AS unlabeled",
+        )
+        .unwrap();
+    let edges = session
+        .execute_cypher("MATCH (:A {id: '1'})-[r:REL]->(:A {id: '2'}) RETURN count(r) AS edges")
+        .unwrap();
+    vec![
+        counts.rows()[0][0].clone(),
+        counts.rows()[0][1].clone(),
+        edges.rows()[0][0].clone(),
+    ]
+}
+
+/// The user's form of #181, two MATCH clauses then a CREATE: inside a
+/// transaction it links the matched nodes and creates no node, a commit
+/// keeps exactly that, and a rollback leaves nothing.
+#[test]
+#[cfg(feature = "cypher")]
+fn match_match_create_in_a_transaction_creates_no_node() {
+    const LINK: &str = "MATCH (a:A {id: '1'}) MATCH (b:A {id: '2'}) CREATE (a)-[:REL]->(b)";
+
+    let db = GrafeoDB::new_in_memory();
+    let mut session = db.session();
+    session
+        .execute_cypher("CREATE (:A {id: '1'}), (:A {id: '2'})")
+        .unwrap();
+
+    session.begin_transaction().unwrap();
+    session.execute_cypher(LINK).unwrap();
+    assert_eq!(
+        nodes_unlabeled_edges(&session),
+        [Value::Int64(2), Value::Int64(0), Value::Int64(1)],
+        "inside the transaction"
+    );
+    session.rollback().unwrap();
+    assert_eq!(
+        nodes_unlabeled_edges(&session),
+        [Value::Int64(2), Value::Int64(0), Value::Int64(0)],
+        "after the rollback"
+    );
+
+    session.begin_transaction().unwrap();
+    session.execute_cypher(LINK).unwrap();
+    session.commit().unwrap();
+    assert_eq!(
+        nodes_unlabeled_edges(&db.session()),
+        [Value::Int64(2), Value::Int64(0), Value::Int64(1)],
+        "after the commit"
+    );
+}
+
+/// The user's form of #181 on a persistent database: the reopen has the two
+/// nodes and the edge, and no other node.
+#[test]
+#[cfg(all(feature = "cypher", feature = "wal", feature = "grafeo-file"))]
+fn match_match_create_survives_a_reopen() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("phantoms.grafeo");
+    let db = GrafeoDB::open(&path).unwrap();
+    let session = db.session();
+    session
+        .execute_cypher("CREATE (:A {id: '1'}), (:A {id: '2'})")
+        .unwrap();
+    session
+        .execute_cypher("MATCH (a:A {id: '1'}) MATCH (b:A {id: '2'}) CREATE (a)-[:REL]->(b)")
+        .unwrap();
+    drop(session);
+    db.close().unwrap();
+
+    let db = GrafeoDB::open(&path).unwrap();
+    assert_eq!(
+        nodes_unlabeled_edges(&db.session()),
+        [Value::Int64(2), Value::Int64(0), Value::Int64(1)]
+    );
+    db.close().unwrap();
 }
 
 // ============================================================================
@@ -1669,13 +1752,13 @@ fn test_gql_match_detach_delete_ordered() {
     let db = create_social_network();
     let session = db.session();
 
-    let before = db.node_count();
+    let before = db.node_count().unwrap();
 
     session
         .execute("MATCH (n:Company {name: 'TechCorp'}) DETACH DELETE n")
         .unwrap();
 
-    assert_eq!(db.node_count(), before - 1);
+    assert_eq!(db.node_count().unwrap(), before - 1);
 }
 
 // ============================================================================
@@ -1710,10 +1793,10 @@ fn test_gql_ordered_create_delete() {
     session
         .execute("INSERT (:Temp {name: 'ephemeral'})")
         .unwrap();
-    assert_eq!(db.node_count(), 1);
+    assert_eq!(db.node_count().unwrap(), 1);
 
     session.execute("MATCH (n:Temp) DETACH DELETE n").unwrap();
-    assert_eq!(db.node_count(), 0);
+    assert_eq!(db.node_count().unwrap(), 0);
 }
 
 // ============================================================================
@@ -1769,7 +1852,7 @@ mod cypher_mutations {
     fn test_merge_relationship_creates() {
         let db = create_social_network();
         let session = db.session();
-        let edges_before = db.edge_count();
+        let edges_before = db.edge_count().unwrap();
 
         session
             .execute_cypher(
@@ -1778,7 +1861,7 @@ mod cypher_mutations {
             )
             .unwrap();
 
-        assert_eq!(db.edge_count(), edges_before + 1);
+        assert_eq!(db.edge_count().unwrap(), edges_before + 1);
     }
 
     #[cfg(feature = "cypher")]
@@ -1786,7 +1869,7 @@ mod cypher_mutations {
     fn test_merge_relationship_matches() {
         let db = create_social_network();
         let session = db.session();
-        let edges_before = db.edge_count();
+        let edges_before = db.edge_count().unwrap();
 
         session
             .execute_cypher(
@@ -1795,7 +1878,7 @@ mod cypher_mutations {
             )
             .unwrap();
 
-        assert_eq!(db.edge_count(), edges_before);
+        assert_eq!(db.edge_count().unwrap(), edges_before);
     }
 
     #[cfg(feature = "cypher")]

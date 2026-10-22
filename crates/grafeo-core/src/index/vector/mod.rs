@@ -87,6 +87,8 @@ pub mod storage;
 pub mod zone_map;
 
 #[cfg(feature = "vector-index")]
+pub(crate) mod batch;
+#[cfg(feature = "vector-index")]
 mod config;
 #[cfg(feature = "vector-index")]
 mod hnsw;
@@ -595,7 +597,8 @@ pub fn check_query_vector(
 ///
 /// # Returns
 ///
-/// Vector of (id, distance) pairs sorted by distance (ascending). A vector
+/// Vector of (id, distance) pairs sorted by distance (ascending), equal
+/// distances by ascending id and a NaN distance last. A vector
 /// with another number of values than `query` has no distance to it and is
 /// left out.
 ///
@@ -626,17 +629,12 @@ pub fn brute_force_knn<'a, I>(
 where
     I: Iterator<Item = (NodeId, &'a [f32])>,
 {
-    let mut results: Vec<(NodeId, f32)> = vectors
+    let results: Vec<(NodeId, f32)> = vectors
         .filter(|(_, vec)| vec.len() == query.len())
         .map(|(id, vec)| (id, compute_distance(query, vec, metric)))
         .collect();
 
-    // Sort by distance (ascending)
-    results.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
-
-    // Truncate to k
-    results.truncate(k);
-    results
+    nearest(results, k)
 }
 
 /// Performs brute-force k-nearest neighbor search with a filter predicate.
@@ -653,7 +651,8 @@ where
 ///
 /// # Returns
 ///
-/// Vector of (id, distance) pairs sorted by distance (ascending). A vector
+/// Vector of (id, distance) pairs sorted by distance (ascending), equal
+/// distances by ascending id and a NaN distance last. A vector
 /// with another number of values than `query` is left out.
 pub fn brute_force_knn_filtered<'a, I, F>(
     vectors: I,
@@ -666,82 +665,28 @@ where
     I: Iterator<Item = (NodeId, &'a [f32])>,
     F: Fn(NodeId) -> bool,
 {
-    let mut results: Vec<(NodeId, f32)> = vectors
+    let results: Vec<(NodeId, f32)> = vectors
         .filter(|(id, vec)| vec.len() == query.len() && predicate(*id))
         .map(|(id, vec)| (id, compute_distance(query, vec, metric)))
         .collect();
 
-    results.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
-    results.truncate(k);
-    results
+    nearest(results, k)
 }
 
-/// The vectors in property `property` of the nodes of `store` with `label`
-/// (of every node without one), for a scan.
-#[cfg(feature = "vector-index")]
-fn scanned_vectors(
-    store: &dyn crate::graph::GraphStore,
-    label: Option<&str>,
-    property: &str,
-) -> Vec<(NodeId, std::sync::Arc<[f32]>)> {
-    let node_ids = match label {
-        Some(label) => store.nodes_by_label(label),
-        None => store.node_ids(),
-    };
-    let key = grafeo_common::types::PropertyKey::new(property);
-    // Keeps the `Arc<[f32]>` of each `Value::Vector`: the scan only needs
-    // `&[f32]`, and the store holds the vector behind an Arc already.
-    node_ids
-        .into_iter()
-        .filter_map(|id| match store.get_node_property(id, &key) {
-            Some(grafeo_common::types::Value::Vector(vector)) => Some((id, vector)),
-            _ => None,
-        })
-        .collect()
-}
-
-/// The `k` nodes of `store` nearest to `query` by `metric`, nearest first,
-/// found by scanning the vectors in property `property` of the nodes with
-/// `label` (of every node without one): the search of a store without an
-/// index of that metric.
-#[cfg(feature = "vector-index")]
-pub(crate) fn scan_nearest(
-    store: &dyn crate::graph::GraphStore,
-    label: Option<&str>,
-    property: &str,
-    query: &[f32],
-    k: usize,
-    metric: DistanceMetric,
-) -> Vec<(NodeId, f64)> {
-    let vectors = scanned_vectors(store, label, property);
-    let candidates = vectors.iter().map(|(id, vector)| (*id, vector.as_ref()));
-    brute_force_knn(candidates, query, k, metric)
-        .into_iter()
-        .map(|(id, distance)| (id, f64::from(distance)))
-        .collect()
-}
-
-/// The nodes of `store` within `threshold` of `query` by `metric`, nearest
-/// first, found by scanning as [`scan_nearest`] does (an HNSW index has no
-/// threshold search).
-#[cfg(feature = "vector-index")]
-pub(crate) fn scan_within(
-    store: &dyn crate::graph::GraphStore,
-    label: Option<&str>,
-    property: &str,
-    query: &[f32],
-    threshold: f64,
-    metric: DistanceMetric,
-) -> Vec<(NodeId, f64)> {
-    let mut results: Vec<(NodeId, f64)> = scanned_vectors(store, label, property)
-        .into_iter()
-        .filter(|(_, vector)| vector.len() == query.len())
-        .filter_map(|(id, vector)| {
-            let distance = f64::from(compute_distance(query, &vector, metric));
-            (distance <= threshold).then_some((id, distance))
-        })
-        .collect();
-    results.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
+/// The `k` nearest of `results`, nearest first: equal distances by ascending
+/// id and a NaN distance last. The `k` are selected before they are sorted,
+/// and the order is total, so which `k` and their order do not depend on the
+/// order `results` came in.
+fn nearest(mut results: Vec<(NodeId, f32)>, k: usize) -> Vec<(NodeId, f32)> {
+    let order = crate::index::ranking::by_ascending_distance;
+    if k == 0 {
+        return Vec::new();
+    }
+    if results.len() > k {
+        results.select_nth_unstable_by(k - 1, order);
+        results.truncate(k);
+    }
+    results.sort_unstable_by(order);
     results
 }
 
@@ -785,6 +730,61 @@ mod tests {
         let euclidean = VectorConfig::euclidean(1536);
         assert_eq!(euclidean.dimensions, 1536);
         assert_eq!(euclidean.metric, DistanceMetric::Euclidean);
+    }
+
+    /// Equal distances rank by ascending id whatever order the vectors come
+    /// in, so a cut inside the tie keeps the lowest ids (#619).
+    #[test]
+    fn brute_force_ties_rank_by_ascending_node_id() {
+        let same = [1.0f32, 0.0, 0.0];
+        let nearest = [0.5f32, 0.0, 0.0];
+        // 7 is coprime with 50: every id from 1 to 50 once, scrambled.
+        let mut vectors: Vec<(NodeId, &[f32])> = (0..50_u64)
+            .map(|i| (NodeId::new((i * 7) % 50 + 1), same.as_slice()))
+            .collect();
+        vectors.push((NodeId::new(99), nearest.as_slice()));
+        let query = [0.0f32, 0.0, 0.0];
+
+        let ids = |results: Vec<(NodeId, f32)>| -> Vec<u64> {
+            results.into_iter().map(|(id, _)| id.as_u64()).collect()
+        };
+        let results = brute_force_knn(
+            vectors.iter().copied(),
+            &query,
+            5,
+            DistanceMetric::Euclidean,
+        );
+        assert_eq!(ids(results), vec![99, 1, 2, 3, 4]);
+        let filtered = brute_force_knn_filtered(
+            vectors.iter().copied(),
+            &query,
+            3,
+            DistanceMetric::Euclidean,
+            |id| id.as_u64() % 2 == 0,
+        );
+        assert_eq!(ids(filtered), vec![2, 4, 6]);
+    }
+
+    /// A vector holding a NaN is at NaN distance from every query: it ranks
+    /// after every number, not wherever the sort leaves it.
+    #[test]
+    fn brute_force_ranks_nan_distances_last() {
+        let broken = [f32::NAN, 0.0, 0.0];
+        let far = [3.0f32, 0.0, 0.0];
+        let near = [1.0f32, 0.0, 0.0];
+        let vectors: Vec<(NodeId, &[f32])> = vec![
+            (NodeId::new(1), broken.as_slice()),
+            (NodeId::new(2), far.as_slice()),
+            (NodeId::new(3), near.as_slice()),
+        ];
+        let results = brute_force_knn(
+            vectors.into_iter(),
+            &[0.0, 0.0, 0.0],
+            3,
+            DistanceMetric::Euclidean,
+        );
+        let ids: Vec<u64> = results.iter().map(|(id, _)| id.as_u64()).collect();
+        assert_eq!(ids, vec![3, 2, 1]);
     }
 
     #[test]

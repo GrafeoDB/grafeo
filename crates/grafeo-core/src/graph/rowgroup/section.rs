@@ -9,38 +9,86 @@
 //! - one column per label a node of the group has, in the node label
 //!   namespace, column id = the label's id, `true` per node that has it;
 //! - the property columns, column id = the key's id;
-//! - the adjacency chunks, outgoing then incoming (`adjacency_chunk`).
+//! - the adjacency chunks, outgoing then incoming (`adjacency_chunk`); a
+//!   store that keeps no incoming edges (`backward_edges` off) writes the
+//!   outgoing ones only.
 //!
 //! In an edge row group: the source, target and type columns as three chunks
 //! of one range in a row, then the property columns. A delete chunk (node or
 //! edge delete namespace, column 0) names rows deleted since their group was
-//! written; no writer writes one before chunk reuse (H3), every reader
-//! applies them.
+//! written; no writer writes one (a checkpoint writes a row group with
+//! deleted rows anew), every reader applies them.
 //!
-//! A checkpoint writes the committed state at the store's epoch: the rows
-//! visible then, with their values and labels as they are. A null value is
-//! not written. The metadata chunk (layout 2) holds the caps, the epoch, and
-//! per graph its name, next ids, dictionaries, whether adjacency was written
-//! and each row group's node and edge counts, which the reader checks.
+//! A checkpoint writes the committed state at an epoch E: the rows, values
+//! and labels a reader at E sees, read in place through the update chains,
+//! so nothing a transaction still open wrote and nothing committed after E
+//! is in it. A null value is not written. The metadata chunk (layout 2)
+//! holds the caps, the epoch E, and per graph its name, next ids,
+//! dictionaries, which adjacency was written (none, both directions, or the
+//! outgoing one only) and each row group's node and edge counts, which the
+//! reader checks. A reader builds the adjacency its store keeps: what the
+//! file lacks from the edge table, and the incoming lists of a file written
+//! with them are dropped by a store that keeps none (after the reader
+//! checked them).
+//!
+//! A database that keeps history (a retention window, H2c) checkpoints its
+//! history from an epoch H before E too: every row a reader at H or later
+//! sees (a row a commit in the window deleted included, with the state a
+//! reader saw last, and its edges in the adjacency), and per row group the
+//! `History` chunks of the versions a reader in the window tells apart,
+//! after the group's other chunks:
+//!
+//! - node structure, column 0, and edge structure, column 0: per row whose
+//!   create or delete a reader in the window sees differently, `[created,
+//!   deleted]` (`created` 0 for a row every reader there sees created,
+//!   `deleted` null for one not deleted by E);
+//! - node structure, column 1: per row whose labels a commit in the window
+//!   changed, the `[epoch, label ids]` of each such commit, oldest first:
+//!   the labels the row had before it;
+//! - a property column (node or edge): per row, the `[epoch, value]` of
+//!   each commit in the window that wrote the key, oldest first: the value
+//!   the row held before it, null for none.
+//!
+//! A reader rebuilds the versions and the update chains from them, so a
+//! reader at any epoch from H to E reads what it read before the
+//! checkpoint. Without history (H = E) nothing of this is written.
+//!
+//! A checkpoint writes only what changed since the image it follows (H3,
+//! #430; see `checkpoint`): a file row group without changes is the chunks
+//! of that image, reused as they are, and one whose rows did not change
+//! gets new chunks for its changed columns alone, within the chunk
+//! boundaries of that image (every column of a range still holds the same
+//! rows, though a fresh cut might have put the boundaries elsewhere), and
+//! of those only the chunks whose rows changed. The values of each file row
+//! group are gathered under the store's read lock, then encoded and written
+//! once the lock is released.
 //!
 //! A reader refuses everything a writer does not write with
 //! `Error::Corruption`, and a section of another version as such.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::sync::atomic::Ordering;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use bytes::Bytes;
+use grafeo_common::storage::value_codec::{MAX_PROPERTY_VALUE_DEPTH, nests_too_deep};
 use grafeo_common::storage::{
-    ChunkCaps, ChunkKind, ChunkMeta, ChunkNamespace, SectionSink, SectionSource,
+    ChunkCaps, ChunkKind, ChunkMeta, ChunkNamespace, ImageId, Section, SectionSink, SectionSource,
+    SectionType, legacy_bytes,
 };
-use grafeo_common::types::Value;
+use grafeo_common::types::{EpochId, Value};
 use grafeo_common::utils::error::{Error, Result};
 use grafeo_common::utils::hash::FxHashMap;
 
 use super::adjacency::{Adjacency, Adjacent};
 use super::adjacency_chunk;
-use super::{ABSENT, Inner, ROWS_PER_GROUP, Read, RowGroupStore, RowVersion, locate};
-use crate::codec::column_chunk::{ChunkCodec, decode_column_chunk_bytes};
+use super::checkpoint::{CheckpointSnapshot, GraphMarks, Marks};
+use super::{
+    ABSENT, IncomingEdges, Inner, PENDING, ROWS_PER_GROUP, Read, RowGroupStore, RowVersion, locate,
+};
+use crate::codec::column_chunk::{
+    ChunkCodec, chunk_overhead, decode_column_chunk_bytes, encode_column_chunk, value_bound,
+};
 use crate::codec::{ChunkColumn, RowsChunker};
 use crate::graph::lpg::dictionary::NameDictionary;
 
@@ -56,6 +104,10 @@ const COLUMN_EXISTS: u32 = 0;
 const COLUMN_SOURCE: u32 = 1;
 const COLUMN_TARGET: u32 = 2;
 const COLUMN_EDGE_TYPE: u32 = 3;
+/// The `History` columns of the node and edge structure: the rows'
+/// versions, and (nodes only) the label sets label writes replaced.
+const HISTORY_VERSIONS: u32 = 0;
+const HISTORY_LABELS: u32 = 1;
 
 /// An upper bound of an adjacency chunk's bytes: its header and bases, at
 /// most three bytes per row of degree and twenty per entry.
@@ -96,13 +148,58 @@ struct DictionaryMeta {
 }
 
 impl DictionaryMeta {
-    fn of(dictionary: &NameDictionary) -> Self {
+    /// The names of `dictionary` below id `next_id`, which a checkpoint took
+    /// as the dictionary's next id at its epoch: what the dictionary held
+    /// then (it only grows).
+    fn below(dictionary: &NameDictionary, next_id: u32) -> Self {
         Self {
-            next_id: dictionary.next_id(),
+            next_id,
             names: dictionary
                 .iter()
+                .filter(|(id, _)| *id < next_id)
                 .map(|(id, name)| (id, name.to_string()))
                 .collect(),
+        }
+    }
+}
+
+/// Which adjacency a graph's chunks hold: the metadata's adjacency byte.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+enum WrittenAdjacency {
+    /// None (byte 0): a reader builds it from the edge table.
+    None,
+    /// Both directions (byte 1).
+    #[default]
+    Both,
+    /// The outgoing direction only (byte 2): the store kept no incoming
+    /// edges (`backward_edges` off).
+    Outgoing,
+}
+
+impl WrittenAdjacency {
+    fn to_byte(self) -> u8 {
+        match self {
+            Self::None => 0,
+            Self::Both => 1,
+            Self::Outgoing => 2,
+        }
+    }
+
+    fn from_byte(byte: u8) -> Option<Self> {
+        match byte {
+            0 => Some(Self::None),
+            1 => Some(Self::Both),
+            2 => Some(Self::Outgoing),
+            _ => None,
+        }
+    }
+
+    /// Whether the chunks hold the direction (`outgoing`, or incoming).
+    fn holds(self, outgoing: bool) -> bool {
+        match self {
+            Self::None => false,
+            Self::Both => true,
+            Self::Outgoing => outgoing,
         }
     }
 }
@@ -117,7 +214,7 @@ struct GraphMeta {
     labels: DictionaryMeta,
     edge_types: DictionaryMeta,
     keys: DictionaryMeta,
-    adjacency_written: bool,
+    adjacency_written: WrittenAdjacency,
     /// The nodes of each file row group that has some, groups ascending.
     node_groups: Vec<(u64, u32)>,
     /// The edges of each file row group that has some.
@@ -180,7 +277,7 @@ fn encode_meta(meta: &Meta) -> Result<Vec<u8>> {
         put_dictionary(&mut out, &graph.labels)?;
         put_dictionary(&mut out, &graph.edge_types)?;
         put_dictionary(&mut out, &graph.keys)?;
-        out.push(u8::from(graph.adjacency_written));
+        out.push(graph.adjacency_written.to_byte());
         put_groups(&mut out, &graph.node_groups)?;
         put_groups(&mut out, &graph.edge_groups)?;
     }
@@ -285,7 +382,10 @@ fn decode_meta(bytes: &[u8]) -> Result<Meta> {
         .map_err(|error| reader.refuse(format!("the caps: {error}")))?;
     let epoch = reader.u64("the epoch")?;
     let next_graph_id = reader.u32("the next graph id")?;
-    let count = reader.count(60, "graphs")?;
+    // A graph takes at least 57 bytes: its id, an empty name, the next
+    // node and edge ids, three empty dictionaries, the adjacency flag and
+    // two empty row group lists (an empty root graph is that small).
+    let count = reader.count(57, "graphs")?;
     let mut graphs: Vec<GraphMeta> = Vec::with_capacity(count);
     for _ in 0..count {
         let id = reader.u32("a graph id")?;
@@ -300,10 +400,9 @@ fn decode_meta(bytes: &[u8]) -> Result<Meta> {
         let labels = reader.dictionary("labels")?;
         let edge_types = reader.dictionary("edge types")?;
         let keys = reader.dictionary("property keys")?;
-        let adjacency_written = match reader.take::<1>("the adjacency flag")?[0] {
-            0 => false,
-            1 => true,
-            other => return Err(reader.refuse(format!("adjacency flag {other}"))),
+        let flag = reader.take::<1>("the adjacency flag")?[0];
+        let Some(adjacency_written) = WrittenAdjacency::from_byte(flag) else {
+            return Err(reader.refuse(format!("adjacency flag {flag}")));
         };
         graphs.push(GraphMeta {
             id,
@@ -340,6 +439,114 @@ fn column(namespace: ChunkNamespace, column_id: u32) -> ChunkColumn {
         namespace,
         column_id,
     }
+}
+
+fn history_column(namespace: ChunkNamespace, column_id: u32) -> ChunkColumn {
+    ChunkColumn {
+        kind: ChunkKind::History,
+        namespace,
+        column_id,
+    }
+}
+
+/// Whether `stamp` is a commit epoch (not absent, not a transaction's).
+fn committed(stamp: u64) -> bool {
+    stamp != ABSENT && stamp & PENDING == 0
+}
+
+/// An epoch as the `Int64` a history cell holds; every commit epoch is
+/// below [`PENDING`], so it fits.
+fn epoch_cell(epoch: u64) -> Value {
+    Value::Int64(i64::try_from(epoch).expect("a commit epoch is below 2^63"))
+}
+
+/// A history cell: its entries, each a list.
+fn list(items: Vec<Value>) -> Value {
+    Value::List(Arc::from(items))
+}
+
+/// What a checkpoint writes of a graph's rows: the committed state at `at`,
+/// and the versions a reader at `from` (at most `at`) or later tells apart.
+#[derive(Debug, Clone, Copy)]
+struct Window {
+    at: u64,
+    from: u64,
+}
+
+impl Window {
+    /// Whether the window holds history: the versions between `from` and
+    /// `at`.
+    fn has_history(self) -> bool {
+        self.from < self.at
+    }
+
+    /// The epoch whose state the row of `version` is written in: `at`, or
+    /// the last epoch before a delete in the window; `None` for a row no
+    /// reader in the window sees.
+    fn last(self, version: RowVersion) -> Option<u64> {
+        let created = version.created;
+        if !committed(created) || created > self.at {
+            return None;
+        }
+        let deleted = version.deleted;
+        if committed(deleted) && deleted <= self.at {
+            if deleted <= self.from.max(created) {
+                return None;
+            }
+            return Some(deleted - 1);
+        }
+        Some(self.at)
+    }
+
+    /// The `[created, deleted]` history cell of a written row, `None` when
+    /// every reader in the window sees the row alike.
+    fn versions_cell(self, version: RowVersion) -> Option<Value> {
+        let created = if version.created > self.from {
+            version.created
+        } else {
+            0
+        };
+        let deleted =
+            (committed(version.deleted) && version.deleted <= self.at).then_some(version.deleted);
+        if created == 0 && deleted.is_none() {
+            return None;
+        }
+        Some(list(vec![
+            epoch_cell(created),
+            deleted.map_or(Value::Null, epoch_cell),
+        ]))
+    }
+
+    /// The history cell of what a chain kept of a row whose state is
+    /// written at `last`: the `[epoch, kept]` of each commit in the window
+    /// up to `last`, oldest first; `None` when there is none.
+    fn chain_cell<'k, T: 'k>(
+        self,
+        last: u64,
+        kept: impl Iterator<Item = (u64, &'k T)>,
+        cell: impl Fn(&T) -> Value,
+    ) -> Option<Value> {
+        let entries: Vec<Value> = kept
+            .filter(|(stamp, _)| committed(*stamp) && *stamp > self.from && *stamp <= last)
+            .map(|(stamp, kept)| list(vec![epoch_cell(stamp), cell(kept)]))
+            .collect();
+        (!entries.is_empty()).then(|| list(entries))
+    }
+}
+
+/// The history cells of one node row: its id, versions, labels and values
+/// by key.
+type NodeHistoryCells = (u64, Option<Value>, Option<Value>, FxHashMap<u32, Value>);
+
+/// A kept value as a history cell holds it: none as null (the store holds
+/// no null, #412 decision Q8).
+fn value_cell(kept: &Option<Value>) -> Value {
+    kept.clone().unwrap_or(Value::Null)
+}
+
+/// A kept label set as a history cell holds it: its label ids.
+fn labels_cell(kept: &[u32]) -> Value {
+    list(kept.iter().map(|id| Value::Int64(i64::from(*id))).collect())
 }
 
 /// An id as the `Int64` an edge column holds.
@@ -430,188 +637,1249 @@ fn write_adjacency(
 }
 
 impl Inner {
-    /// A node's edges in one direction that `read` sees, sorted.
-    fn visible_adjacency(&self, id: u64, outgoing: bool, read: Read) -> Vec<Adjacent> {
+    /// A node's edges in one direction that the window writes, sorted.
+    fn written_adjacency(&self, id: u64, outgoing: bool, window: Window) -> Vec<Adjacent> {
         let Some((group, row)) = self.node(id) else {
             return Vec::new();
         };
         let mut list: Vec<Adjacent> = group
             .adjacency(outgoing)
             .of(row)
-            .filter(|adjacent| self.edge_visible(adjacent.edge, read))
+            .filter(|adjacent| {
+                self.edge(adjacent.edge)
+                    .is_some_and(|(group, row)| window.last(group.version(row)).is_some())
+            })
             .collect();
         list.sort_unstable();
         list
     }
 
-    /// Writes one graph's tables as `read` sees them, and returns its
-    /// metadata.
-    fn write_graph(
+    /// The adjacency lists of the rows `written` of one file row group from
+    /// `group_start`, in one direction: each row with edges, ascending.
+    fn written_lists(
         &self,
-        graph: &GraphToWrite<'_>,
-        read: Read,
-        caps: ChunkCaps,
-        sink: &mut dyn SectionSink,
-    ) -> Result<GraphMeta> {
-        let max_rows = u64::from(caps.max_rows);
-        let mut meta = GraphMeta {
-            id: graph.id,
-            name: graph.name.to_string(),
-            next_node_id: graph.store.next_node_id.load(Ordering::Acquire),
-            next_edge_id: graph.store.next_edge_id.load(Ordering::Acquire),
-            labels: DictionaryMeta::of(&self.labels),
-            edge_types: DictionaryMeta::of(&self.edge_types),
-            keys: DictionaryMeta::of(&self.keys),
-            adjacency_written: true,
-            ..GraphMeta::default()
+        written: &[(u64, u64)],
+        group_start: u64,
+        outgoing: bool,
+        window: Window,
+    ) -> Vec<(u32, Vec<Adjacent>)> {
+        written
+            .iter()
+            .map(|(id, _)| {
+                (
+                    u32::try_from(id - group_start).expect("a row below the row cap"),
+                    self.written_adjacency(*id, outgoing, window),
+                )
+            })
+            .filter(|(_, list)| !list.is_empty())
+            .collect()
+    }
+
+    /// The history cells of the node rows `written`: each row's versions,
+    /// label and value chains in the window, for the rows with any.
+    fn node_history(&self, written: &[(u64, u64)], window: Window) -> History<NodeHistoryCells> {
+        let mut history = History {
+            keys: BTreeSet::new(),
+            cells: Vec::new(),
         };
-
-        // The node table, a file row group at a time.
-        let mut nodes: Vec<u64> = Vec::new();
-        for (index, group) in &self.nodes {
-            for (row, version) in group.versions.iter().enumerate() {
-                if version.visible(read) {
-                    nodes.push(index * ROWS_PER_GROUP + row as u64);
-                }
+        for &(id, last) in written {
+            let (group, row) = self.node(id).expect("a row it listed");
+            let versions = window.versions_cell(group.version(row));
+            let labels = if group.label_updates.is_empty() {
+                None
+            } else {
+                window.chain_cell(last, group.label_updates.kept_stamped(row), |kept| {
+                    labels_cell(kept)
+                })
+            };
+            let values: FxHashMap<u32, Value> = group
+                .columns
+                .keys()
+                .filter_map(|key| {
+                    Some((
+                        key,
+                        window.chain_cell(last, group.columns.kept(key, row), value_cell)?,
+                    ))
+                })
+                .collect();
+            if versions.is_some() || labels.is_some() || !values.is_empty() {
+                history.keys.extend(values.keys());
+                history.cells.push((id, versions, labels, values));
             }
         }
-        for rows in nodes.chunk_by(|a, b| a / max_rows == b / max_rows) {
-            let file_group = rows[0] / max_rows;
-            let group_start = file_group * max_rows;
-            let mut labels: BTreeSet<u32> = BTreeSet::new();
-            let mut keys: BTreeSet<u32> = BTreeSet::new();
-            let mut cells: Vec<(u64, Vec<u32>, FxHashMap<u32, Value>)> =
-                Vec::with_capacity(rows.len());
-            for &id in rows {
-                let (group, row) = self.node(id).expect("a row it listed");
-                let row_labels = group.labels_of(row);
-                let values: FxHashMap<u32, Value> = group
-                    .columns
-                    .row(row)
-                    .filter(|(_, value)| !value.is_null())
-                    .collect();
-                labels.extend(&row_labels);
-                keys.extend(values.keys());
-                cells.push((id, row_labels, values));
+        history
+    }
+
+    /// The history cells of the edge rows `written`: each row's versions and
+    /// value chains in the window, for the rows with any.
+    fn edge_history(&self, written: &[(u64, u64)], window: Window) -> History<EdgeHistoryCells> {
+        let mut history = History {
+            keys: BTreeSet::new(),
+            cells: Vec::new(),
+        };
+        for &(id, last) in written {
+            let (group, row) = self.edge(id).expect("a row it listed");
+            let versions = window.versions_cell(group.version(row));
+            let values: FxHashMap<u32, Value> = group
+                .columns
+                .keys()
+                .filter_map(|key| {
+                    Some((
+                        key,
+                        window.chain_cell(last, group.columns.kept(key, row), value_cell)?,
+                    ))
+                })
+                .collect();
+            if versions.is_some() || !values.is_empty() {
+                history.keys.extend(values.keys());
+                history.cells.push((id, versions, values));
             }
-            let columns: Vec<ChunkColumn> =
-                std::iter::once(column(ChunkNamespace::NodeStructure, COLUMN_EXISTS))
-                    .chain(
-                        labels
-                            .iter()
-                            .map(|label| column(ChunkNamespace::NodeLabels, *label)),
-                    )
-                    .chain(
-                        keys.iter()
-                            .map(|key| column(ChunkNamespace::NodeProperties, *key)),
-                    )
-                    .collect();
-            let mut chunker = RowsChunker::new(graph.id, columns, group_start, caps);
-            for (id, row_labels, mut values) in cells {
-                let row: Vec<Option<(Value, u64)>> =
-                    std::iter::once(Some((Value::Bool(true), 0)))
-                        .chain(labels.iter().map(|label| {
-                            row_labels.contains(label).then_some((Value::Bool(true), 0))
-                        }))
-                        .chain(
-                            keys.iter()
-                                .map(|key| values.remove(key).map(|value| (value, 0))),
-                        )
+        }
+        history
+    }
+
+    /// Refuses a value a file cannot hold: one that nests lists, maps and
+    /// paths deeper than [`MAX_PROPERTY_VALUE_DEPTH`], which no write takes
+    /// but a 0.5.x database can hold (the migration then fails, naming it).
+    fn refuse_too_deep<'v>(
+        &self,
+        graph: &str,
+        entity: &str,
+        id: u64,
+        values: impl IntoIterator<Item = (u32, &'v Value)>,
+    ) -> Result<()> {
+        let Some(key) = values
+            .into_iter()
+            .find(|(_, value)| nests_too_deep(value))
+            .map(|(key, _)| key)
+        else {
+            return Ok(());
+        };
+        let graph = if graph.is_empty() {
+            "the default graph".to_string()
+        } else {
+            format!("graph {graph}")
+        };
+        let key = self.keys.get_name(key).map_or("?", |name| name.as_str());
+        Err(Error::Serialization(format!(
+            "{graph}, {entity} {id}, property {key:?}: the value nests lists, maps and paths \
+             more than {MAX_PROPERTY_VALUE_DEPTH} levels deep, deeper than a database file can \
+             hold"
+        )))
+    }
+
+    /// Gathers every chunk's cells of one file row group of the node table:
+    /// the rows `written` (each with the epoch its state is written at),
+    /// their labels, values, history and adjacency.
+    fn gather_node_rows(
+        &self,
+        graph: &GraphPlan<'_>,
+        written: &[(u64, u64)],
+        group_start: u64,
+        window: Window,
+        adjacency: WrittenAdjacency,
+    ) -> Result<NodeRows> {
+        let mut rows = NodeRows {
+            labels: BTreeSet::new(),
+            keys: BTreeSet::new(),
+            cells: Vec::with_capacity(written.len()),
+            history: None,
+            adjacency: Vec::new(),
+        };
+        for &(id, last) in written {
+            let (group, row) = self.node(id).expect("a row it listed");
+            let read = Read::At(last);
+            let row_labels = group.labels_at(row, read);
+            let values: FxHashMap<u32, Value> = group
+                .columns
+                .row_at(row, read)
+                .filter(|(_, value)| !value.is_null())
+                .collect();
+            self.refuse_too_deep(
+                graph.name,
+                "node",
+                id,
+                values.iter().map(|(key, value)| (*key, value)),
+            )?;
+            rows.labels.extend(&row_labels);
+            rows.keys.extend(values.keys());
+            rows.cells.push((id, row_labels, values));
+        }
+        if window.has_history() {
+            rows.history = Some(self.node_history(written, window));
+        }
+        for (namespace, outgoing) in [
+            (ChunkNamespace::OutgoingAdjacency, true),
+            (ChunkNamespace::IncomingAdjacency, false),
+        ] {
+            if adjacency.holds(outgoing) {
+                rows.adjacency.push((
+                    namespace,
+                    self.written_lists(written, group_start, outgoing, window),
+                ));
+            }
+        }
+        Ok(rows)
+    }
+
+    /// Gathers every chunk's cells of one file row group of the edge table:
+    /// the rows `written`, their ends, type, values and history.
+    fn gather_edge_rows(
+        &self,
+        graph: &GraphPlan<'_>,
+        written: &[(u64, u64)],
+        window: Window,
+    ) -> Result<EdgeRows> {
+        let mut rows = EdgeRows {
+            keys: BTreeSet::new(),
+            cells: Vec::with_capacity(written.len()),
+            history: None,
+        };
+        for &(id, last) in written {
+            let (group, row) = self.edge(id).expect("a row it listed");
+            let values: FxHashMap<u32, Value> = group
+                .columns
+                .row_at(row, Read::At(last))
+                .filter(|(_, value)| !value.is_null())
+                .collect();
+            self.refuse_too_deep(
+                graph.name,
+                "edge",
+                id,
+                values.iter().map(|(key, value)| (*key, value)),
+            )?;
+            rows.keys.extend(values.keys());
+            rows.cells.push((id, group.ends(row), values));
+        }
+        if window.has_history() {
+            rows.history = Some(self.edge_history(written, window));
+        }
+        Ok(rows)
+    }
+
+    /// Gathers what one file row group of a table (`node_table`, or the edge
+    /// table) is written from, reusing what it can of the image the
+    /// checkpoint follows (see the `checkpoint` module), with the rows the
+    /// new image holds of it.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the row group, its marks and what the followed image holds of it"
+    )]
+    fn gather_file_group(
+        &self,
+        graph: &GraphPlan<'_>,
+        node_table: bool,
+        reusable: Option<Reusable<'_>>,
+        marks: Option<&Marks>,
+        written: &[(u64, u64)],
+        file_group: u64,
+        window: Window,
+        caps: ChunkCaps,
+        adjacency: WrittenAdjacency,
+    ) -> Result<(Gathered, u32)> {
+        let group_start = file_group * u64::from(caps.max_rows);
+        let rows = u32::try_from(written.len()).expect("rows of one group");
+        if let Some((reusable, indices, count)) =
+            reusable.and_then(|reusable| reusable.group(node_table, file_group))
+        {
+            let chunks = &reusable.previous.chunks;
+            match decide(marks, window, chunks, indices, count, written.len()) {
+                Decision::Reuse => {
+                    let count = u32::try_from(count).expect("rows of one group");
+                    return Ok((Gathered::Reuse(indices.to_vec()), count));
+                }
+                Decision::Columns(marks) => {
+                    let parts = if node_table {
+                        self.gather_node_columns(
+                            graph,
+                            chunks,
+                            indices,
+                            marks,
+                            written,
+                            group_start,
+                            window,
+                            caps,
+                            adjacency,
+                        )?
+                    } else {
+                        self.gather_edge_columns(graph, chunks, indices, marks, written, caps)?
+                    };
+                    if let Some(parts) = parts {
+                        return Ok((Gathered::Parts(parts), rows));
+                    }
+                }
+                Decision::Write => {}
+            }
+        }
+        let gathered = if node_table {
+            Gathered::Nodes(self.gather_node_rows(
+                graph,
+                written,
+                group_start,
+                window,
+                adjacency,
+            )?)
+        } else {
+            Gathered::Edges(self.gather_edge_rows(graph, written, window)?)
+        };
+        Ok((gathered, rows))
+    }
+
+    /// The marked columns of a node file row group whose rows did not change
+    /// since the followed image, within that image's chunk boundaries, with
+    /// its other chunks reused, and its adjacency gathered again in a
+    /// direction that changed; within a chunk, the column's chunk is
+    /// gathered again only when the marks name a vector of its rows. `None`
+    /// when the image's chunks of the group are not what this writer writes
+    /// or a column's new values pass the byte cap: the group is then written
+    /// whole.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the row group, its marks and what the followed image holds of it"
+    )]
+    fn gather_node_columns(
+        &self,
+        graph: &GraphPlan<'_>,
+        chunks: &[ChunkMeta],
+        indices: &[usize],
+        marks: &Marks,
+        written: &[(u64, u64)],
+        group_start: u64,
+        window: Window,
+        caps: ChunkCaps,
+        adjacency: WrittenAdjacency,
+    ) -> Result<Option<Vec<Part>>> {
+        let mut cuts: Vec<(u64, u32)> = Vec::new();
+        let mut held: FxHashMap<(u8, u32, u64), usize> = FxHashMap::default();
+        let mut labels: BTreeSet<u32> = marks.labels.ids().collect();
+        let mut keys: BTreeSet<u32> = marks.keys.ids().collect();
+        let mut adjacency_chunks: [Vec<usize>; 2] = [Vec::new(), Vec::new()];
+        for &index in indices {
+            let chunk = &chunks[index];
+            match (chunk.kind, chunk.namespace) {
+                (ChunkKind::Column, ChunkNamespace::NodeStructure)
+                    if chunk.column_id == COLUMN_EXISTS =>
+                {
+                    cuts.push((chunk.row_start, chunk.row_count));
+                }
+                (ChunkKind::Column, ChunkNamespace::NodeLabels) => {
+                    labels.insert(chunk.column_id);
+                }
+                (ChunkKind::Column, ChunkNamespace::NodeProperties) => {
+                    keys.insert(chunk.column_id);
+                }
+                (ChunkKind::Adjacency, ChunkNamespace::OutgoingAdjacency) => {
+                    adjacency_chunks[0].push(index);
+                    continue;
+                }
+                (ChunkKind::Adjacency, ChunkNamespace::IncomingAdjacency) => {
+                    adjacency_chunks[1].push(index);
+                    continue;
+                }
+                _ => return Ok(None),
+            }
+            held.insert(
+                (chunk.namespace.to_byte(), chunk.column_id, chunk.row_start),
+                index,
+            );
+        }
+        let mut parts: Vec<Part> = Vec::new();
+        let mut at = 0;
+        for (start, count) in cuts {
+            let Some(rows) = rows_of_cut(written, &mut at, start, count) else {
+                return Ok(None);
+            };
+            let exists = (
+                ChunkNamespace::NodeStructure.to_byte(),
+                COLUMN_EXISTS,
+                start,
+            );
+            parts.push(Part::Reuse(held[&exists]));
+            let in_group = rows_in_group(start, count);
+            for &label in &labels {
+                if marks.labels.touches(label, in_group.clone()) {
+                    let values: Vec<(u32, Value)> = rows
+                        .iter()
+                        .filter(|(id, last)| {
+                            self.node(*id).is_some_and(|(group, row)| {
+                                group.has_label_at(row, label, Read::At(*last))
+                            })
+                        })
+                        .map(|(id, _)| (offset_in(*id, start), Value::Bool(true)))
                         .collect();
-                chunker.push(sink, id, row)?;
+                    let cut = Cut {
+                        graph_id: graph.id,
+                        namespace: ChunkNamespace::NodeLabels,
+                        column_id: label,
+                        start,
+                        count,
+                        values,
+                    };
+                    if !cut.fits(caps) {
+                        return Ok(None);
+                    }
+                    parts.push(Part::Cut(cut));
+                } else if let Some(index) =
+                    held.get(&(ChunkNamespace::NodeLabels.to_byte(), label, start))
+                {
+                    parts.push(Part::Reuse(*index));
+                }
             }
-            chunker.finish(sink)?;
-            for (namespace, outgoing) in [
-                (ChunkNamespace::OutgoingAdjacency, true),
-                (ChunkNamespace::IncomingAdjacency, false),
-            ] {
-                let lists: Vec<(u32, Vec<Adjacent>)> = rows
-                    .iter()
-                    .map(|id| {
-                        (
-                            u32::try_from(id - group_start).expect("a row below the row cap"),
-                            self.visible_adjacency(*id, outgoing, read),
-                        )
-                    })
-                    .filter(|(_, list)| !list.is_empty())
-                    .collect();
-                write_adjacency(sink, graph.id, namespace, group_start, &lists, caps)?;
-            }
-            meta.node_groups.push((
-                file_group,
-                u32::try_from(rows.len()).expect("rows of one group"),
-            ));
-        }
-
-        // The edge table.
-        let mut edges: Vec<u64> = Vec::new();
-        for (index, group) in &self.edges {
-            for (row, version) in group.versions.iter().enumerate() {
-                if version.visible(read) {
-                    edges.push(index * ROWS_PER_GROUP + row as u64);
+            for &key in &keys {
+                if marks.keys.touches(key, in_group.clone()) {
+                    let mut values: Vec<(u32, Value)> = Vec::new();
+                    for (id, last) in rows {
+                        let Some((group, row)) = self.node(*id) else {
+                            return Ok(None);
+                        };
+                        if let Some(value) = group
+                            .columns
+                            .get_at(key, row, Read::At(*last))
+                            .filter(|value| !value.is_null())
+                        {
+                            self.refuse_too_deep(graph.name, "node", *id, [(key, &value)])?;
+                            values.push((offset_in(*id, start), value));
+                        }
+                    }
+                    let cut = Cut {
+                        graph_id: graph.id,
+                        namespace: ChunkNamespace::NodeProperties,
+                        column_id: key,
+                        start,
+                        count,
+                        values,
+                    };
+                    if !cut.fits(caps) {
+                        return Ok(None);
+                    }
+                    parts.push(Part::Cut(cut));
+                } else if let Some(index) =
+                    held.get(&(ChunkNamespace::NodeProperties.to_byte(), key, start))
+                {
+                    parts.push(Part::Reuse(*index));
                 }
             }
         }
-        for rows in edges.chunk_by(|a, b| a / max_rows == b / max_rows) {
-            let file_group = rows[0] / max_rows;
-            let mut keys: BTreeSet<u32> = BTreeSet::new();
-            let mut cells: Vec<(u64, (u64, u64, u32), FxHashMap<u32, Value>)> =
-                Vec::with_capacity(rows.len());
-            for &id in rows {
-                let (group, row) = self.edge(id).expect("a row it listed");
-                let values: FxHashMap<u32, Value> = group
-                    .columns
-                    .row(row)
-                    .filter(|(_, value)| !value.is_null())
-                    .collect();
-                keys.extend(values.keys());
-                cells.push((id, group.ends(row), values));
-            }
-            let columns: Vec<ChunkColumn> = [COLUMN_SOURCE, COLUMN_TARGET, COLUMN_EDGE_TYPE]
-                .into_iter()
-                .map(|id| column(ChunkNamespace::EdgeStructure, id))
-                .chain(
-                    keys.iter()
-                        .map(|key| column(ChunkNamespace::EdgeProperties, *key)),
-                )
-                .collect();
-            let mut chunker = RowsChunker::new(graph.id, columns, file_group * max_rows, caps);
-            for (id, (src, dst, edge_type), mut values) in cells {
-                let row: Vec<Option<(Value, u64)>> = [
-                    int(src, "source node")?,
-                    int(dst, "target node")?,
-                    Value::Int64(i64::from(edge_type)),
-                ]
-                .into_iter()
-                .map(|value| Some((value, 0)))
-                .chain(
-                    keys.iter()
-                        .map(|key| values.remove(key).map(|value| (value, 0))),
-                )
-                .collect();
-                chunker.push(sink, id, row)?;
-            }
-            chunker.finish(sink)?;
-            meta.edge_groups.push((
-                file_group,
-                u32::try_from(rows.len()).expect("rows of one group"),
-            ));
+        if at != written.len() {
+            return Ok(None);
         }
-        Ok(meta)
+        for (side, (namespace, outgoing)) in [
+            (ChunkNamespace::OutgoingAdjacency, true),
+            (ChunkNamespace::IncomingAdjacency, false),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            if !adjacency.holds(outgoing) {
+                continue;
+            }
+            let changed = if outgoing {
+                marks.outgoing
+            } else {
+                marks.incoming
+            };
+            if changed {
+                parts.push(Part::Adjacency(
+                    namespace,
+                    self.written_lists(written, group_start, outgoing, window),
+                ));
+            } else {
+                parts.extend(
+                    adjacency_chunks[side]
+                        .iter()
+                        .map(|index| Part::Reuse(*index)),
+                );
+            }
+        }
+        Ok(Some(parts))
+    }
+
+    /// [`gather_node_columns`](Self::gather_node_columns) of an edge file
+    /// row group: its ends and type are reused (they never change), its
+    /// marked property columns gathered again.
+    fn gather_edge_columns(
+        &self,
+        graph: &GraphPlan<'_>,
+        chunks: &[ChunkMeta],
+        indices: &[usize],
+        marks: &Marks,
+        written: &[(u64, u64)],
+        caps: ChunkCaps,
+    ) -> Result<Option<Vec<Part>>> {
+        let mut cuts: Vec<(u64, u32)> = Vec::new();
+        let mut held: FxHashMap<(u8, u32, u64), usize> = FxHashMap::default();
+        let mut keys: BTreeSet<u32> = marks.keys.ids().collect();
+        for &index in indices {
+            let chunk = &chunks[index];
+            match (chunk.kind, chunk.namespace) {
+                (ChunkKind::Column, ChunkNamespace::EdgeStructure) => {
+                    if chunk.column_id == COLUMN_SOURCE {
+                        cuts.push((chunk.row_start, chunk.row_count));
+                    }
+                }
+                (ChunkKind::Column, ChunkNamespace::EdgeProperties) => {
+                    keys.insert(chunk.column_id);
+                }
+                _ => return Ok(None),
+            }
+            held.insert(
+                (chunk.namespace.to_byte(), chunk.column_id, chunk.row_start),
+                index,
+            );
+        }
+        let mut parts: Vec<Part> = Vec::new();
+        let mut at = 0;
+        for (start, count) in cuts {
+            let Some(rows) = rows_of_cut(written, &mut at, start, count) else {
+                return Ok(None);
+            };
+            for column_id in [COLUMN_SOURCE, COLUMN_TARGET, COLUMN_EDGE_TYPE] {
+                let Some(index) =
+                    held.get(&(ChunkNamespace::EdgeStructure.to_byte(), column_id, start))
+                else {
+                    return Ok(None);
+                };
+                parts.push(Part::Reuse(*index));
+            }
+            let in_group = rows_in_group(start, count);
+            for &key in &keys {
+                if marks.keys.touches(key, in_group.clone()) {
+                    let mut values: Vec<(u32, Value)> = Vec::new();
+                    for (id, last) in rows {
+                        let Some((group, row)) = self.edge(*id) else {
+                            return Ok(None);
+                        };
+                        if let Some(value) = group
+                            .columns
+                            .get_at(key, row, Read::At(*last))
+                            .filter(|value| !value.is_null())
+                        {
+                            self.refuse_too_deep(graph.name, "edge", *id, [(key, &value)])?;
+                            values.push((offset_in(*id, start), value));
+                        }
+                    }
+                    let cut = Cut {
+                        graph_id: graph.id,
+                        namespace: ChunkNamespace::EdgeProperties,
+                        column_id: key,
+                        start,
+                        count,
+                        values,
+                    };
+                    if !cut.fits(caps) {
+                        return Ok(None);
+                    }
+                    parts.push(Part::Cut(cut));
+                } else if let Some(index) =
+                    held.get(&(ChunkNamespace::EdgeProperties.to_byte(), key, start))
+                {
+                    parts.push(Part::Reuse(*index));
+                }
+            }
+        }
+        Ok((at == written.len()).then_some(parts))
     }
 }
 
-/// Writes the `LPG_STORE` section, version 4, of `graphs` (ids ascending):
-/// each graph's committed state at its store's epoch.
-///
-/// # Errors
-///
-/// Returns [`Error::InvalidValue`] for caps the format refuses,
-/// [`Error::Internal`] for graphs out of id order or an id at or above
-/// `next_graph_id`, and the encoder's or the sink's errors.
-pub fn write_lpg_section(
-    graphs: &[GraphToWrite<'_>],
+/// The rows of the store's row group that the chunk of `count` rows from
+/// row `start` holds (a chunk lies in one of them, see `decide`).
+fn rows_in_group(start: u64, count: u32) -> std::ops::Range<usize> {
+    let (_, first) = locate(start);
+    first..first + count as usize
+}
+
+/// The offset of row `id` in a chunk from row `start`.
+fn offset_in(id: u64, start: u64) -> u32 {
+    u32::try_from(id - start).expect("a row of the chunk")
+}
+
+/// The rows of `written` from position `at` that lie in the chunk of
+/// `count` rows from `start`, moving `at` past them; `None` when a row
+/// before `start` comes first (it would lie in no chunk).
+fn rows_of_cut<'w>(
+    written: &'w [(u64, u64)],
+    at: &mut usize,
+    start: u64,
+    count: u32,
+) -> Option<&'w [(u64, u64)]> {
+    let end = start + u64::from(count);
+    let from = *at;
+    while *at < written.len() && written[*at].0 < end {
+        if written[*at].0 < start {
+            return None;
+        }
+        *at += 1;
+    }
+    Some(&written[from..*at])
+}
+
+/// How a checkpoint writes a file row group the followed image holds.
+enum Decision<'m> {
+    /// Every chunk as the image holds it.
+    Reuse,
+    /// The columns these marks name, within the image's chunk boundaries.
+    Columns(&'m Marks),
+    /// Every chunk anew.
+    Write,
+}
+
+/// How to write a file row group with `marks` that the followed image
+/// holds as the `count` rows of the chunks `indices`, `rows` rows now: as it
+/// is when nothing changed (with the image's row count, also when the
+/// history window moved; without history only when the rows agree and the
+/// image holds no history chunks of it, which a database that keeps none
+/// would load); only the changed columns when no row was created or
+/// deleted and nothing is history; else anew. `None` marks (a file row
+/// group across two of the store's row groups, with caps whose row count
+/// does not divide theirs) write it anew.
+fn decide<'m>(
+    marks: Option<&'m Marks>,
+    window: Window,
+    chunks: &[ChunkMeta],
+    indices: &[usize],
+    count: usize,
+    rows: usize,
+) -> Decision<'m> {
+    let Some(marks) = marks else {
+        return Decision::Write;
+    };
+    let history_held = indices
+        .iter()
+        .any(|index| chunks[*index].kind == ChunkKind::History);
+    if window.has_history() {
+        return if marks.is_empty() {
+            Decision::Reuse
+        } else {
+            Decision::Write
+        };
+    }
+    if history_held || count != rows {
+        return Decision::Write;
+    }
+    if marks.is_empty() {
+        Decision::Reuse
+    } else if marks.rows {
+        Decision::Write
+    } else {
+        Decision::Columns(marks)
+    }
+}
+
+// ── Gathered, then written ──────────────────────────────────────────
+
+/// The history cells of one file row group's rows, and the property keys
+/// they hold chains of.
+struct History<C> {
+    keys: BTreeSet<u32>,
+    cells: Vec<C>,
+}
+
+/// The history cells of one edge row: its id, versions and values by key.
+type EdgeHistoryCells = (u64, Option<Value>, FxHashMap<u32, Value>);
+
+/// What one file row group of the node table is written from: the labels
+/// and keys its rows have, each row's labels and values, the history and
+/// the adjacency lists of each direction written.
+struct NodeRows {
+    labels: BTreeSet<u32>,
+    keys: BTreeSet<u32>,
+    cells: Vec<(u64, Vec<u32>, FxHashMap<u32, Value>)>,
+    history: Option<History<NodeHistoryCells>>,
+    adjacency: Vec<(ChunkNamespace, Vec<(u32, Vec<Adjacent>)>)>,
+}
+
+/// What one file row group of the edge table is written from.
+struct EdgeRows {
+    keys: BTreeSet<u32>,
+    cells: Vec<(u64, (u64, u64, u32), FxHashMap<u32, Value>)>,
+    history: Option<History<EdgeHistoryCells>>,
+}
+
+/// The values of one column over one chunk of the followed image's
+/// boundaries, to encode.
+struct Cut {
+    graph_id: u32,
+    namespace: ChunkNamespace,
+    column_id: u32,
+    start: u64,
+    count: u32,
+    values: Vec<(u32, Value)>,
+}
+
+impl Cut {
+    /// Whether the values stay within the byte cap, or the chunk holds one
+    /// row (a writer cutting the group afresh would split a larger one).
+    fn fits(&self, caps: ChunkCaps) -> bool {
+        let bound = self
+            .values
+            .iter()
+            .map(|(_, value)| value_bound(value))
+            .fold(
+                chunk_overhead(self.count, self.values.len(), false),
+                usize::saturating_add,
+            );
+        self.count == 1 || bound <= caps.max_bytes as usize
+    }
+
+    /// Encodes and writes the chunk, unless it holds no value.
+    fn write(self, sink: &mut dyn SectionSink) -> Result<()> {
+        if self.values.is_empty() {
+            return Ok(());
+        }
+        let (codec, bytes) = encode_column_chunk(self.count, &self.values, None)?;
+        sink.write_chunk(
+            ChunkMeta::column(
+                self.graph_id,
+                self.column_id,
+                self.start,
+                self.count,
+                codec.to_byte(),
+            )
+            .in_namespace(self.namespace),
+            &bytes,
+        )
+    }
+}
+
+/// One step of a file row group written column by column.
+enum Part {
+    /// A chunk of the followed image, reused.
+    Reuse(usize),
+    /// A column's chunk over one of the image's boundaries.
+    Cut(Cut),
+    /// The adjacency lists of one direction, written anew.
+    Adjacency(ChunkNamespace, Vec<(u32, Vec<Adjacent>)>),
+}
+
+/// What one file row group is written from, gathered under the store's
+/// read lock: the cells it reads, cloned, so the chunks are encoded and
+/// handed to the file with the lock released.
+enum Gathered {
+    /// The chunks of the followed image, as they are.
+    Reuse(Vec<usize>),
+    /// The node rows, written whole.
+    Nodes(NodeRows),
+    /// The edge rows, written whole.
+    Edges(EdgeRows),
+    /// Column by column.
+    Parts(Vec<Part>),
+}
+
+impl Gathered {
+    /// Encodes the chunks of the file row group from `group_start` of graph
+    /// `graph_id` and hands them to `sink`, in the order a reader reads them.
+    fn write(
+        self,
+        graph_id: u32,
+        group_start: u64,
+        caps: ChunkCaps,
+        sink: &mut dyn SectionSink,
+    ) -> Result<()> {
+        match self {
+            Self::Reuse(indices) => {
+                for index in indices {
+                    sink.reuse_chunk(index)?;
+                }
+                Ok(())
+            }
+            Self::Nodes(rows) => write_node_rows(rows, graph_id, group_start, caps, sink),
+            Self::Edges(rows) => write_edge_rows(rows, graph_id, group_start, caps, sink),
+            Self::Parts(parts) => {
+                for part in parts {
+                    match part {
+                        Part::Reuse(index) => sink.reuse_chunk(index)?,
+                        Part::Cut(cut) => cut.write(sink)?,
+                        Part::Adjacency(namespace, lists) => {
+                            write_adjacency(sink, graph_id, namespace, group_start, &lists, caps)?;
+                        }
+                    }
+                }
+                Ok(())
+            }
+        }
+    }
+}
+
+/// Writes every chunk of one file row group of the node table: the rows'
+/// structure, labels and values, then the history, then the adjacency.
+fn write_node_rows(
+    rows: NodeRows,
+    graph_id: u32,
+    group_start: u64,
+    caps: ChunkCaps,
+    sink: &mut dyn SectionSink,
+) -> Result<()> {
+    let NodeRows {
+        labels,
+        keys,
+        cells,
+        history,
+        adjacency,
+    } = rows;
+    let columns: Vec<ChunkColumn> =
+        std::iter::once(column(ChunkNamespace::NodeStructure, COLUMN_EXISTS))
+            .chain(
+                labels
+                    .iter()
+                    .map(|label| column(ChunkNamespace::NodeLabels, *label)),
+            )
+            .chain(
+                keys.iter()
+                    .map(|key| column(ChunkNamespace::NodeProperties, *key)),
+            )
+            .collect();
+    let mut chunker = RowsChunker::new(graph_id, columns, group_start, caps);
+    for (id, row_labels, mut values) in cells {
+        let row: Vec<Option<(Value, u64)>> = std::iter::once(Some((Value::Bool(true), 0)))
+            .chain(
+                labels
+                    .iter()
+                    .map(|label| row_labels.contains(label).then_some((Value::Bool(true), 0))),
+            )
+            .chain(
+                keys.iter()
+                    .map(|key| values.remove(key).map(|value| (value, 0))),
+            )
+            .collect();
+        chunker.push(sink, id, row)?;
+    }
+    chunker.finish(sink)?;
+    if let Some(history) = history
+        && !history.cells.is_empty()
+    {
+        let columns: Vec<ChunkColumn> = [HISTORY_VERSIONS, HISTORY_LABELS]
+            .into_iter()
+            .map(|id| history_column(ChunkNamespace::NodeStructure, id))
+            .chain(
+                history
+                    .keys
+                    .iter()
+                    .map(|key| history_column(ChunkNamespace::NodeProperties, *key)),
+            )
+            .collect();
+        let mut chunker = RowsChunker::new(graph_id, columns, group_start, caps);
+        for (id, versions, labels, mut values) in history.cells {
+            let row: Vec<Option<(Value, u64)>> = [versions, labels]
+                .into_iter()
+                .map(|cell| cell.map(|cell| (cell, 0)))
+                .chain(
+                    history
+                        .keys
+                        .iter()
+                        .map(|key| values.remove(key).map(|cell| (cell, 0))),
+                )
+                .collect();
+            chunker.push(sink, id, row)?;
+        }
+        chunker.finish(sink)?;
+    }
+    for (namespace, lists) in adjacency {
+        write_adjacency(sink, graph_id, namespace, group_start, &lists, caps)?;
+    }
+    Ok(())
+}
+
+/// Writes every chunk of one file row group of the edge table: the rows'
+/// ends, type and values, then the history.
+fn write_edge_rows(
+    rows: EdgeRows,
+    graph_id: u32,
+    group_start: u64,
+    caps: ChunkCaps,
+    sink: &mut dyn SectionSink,
+) -> Result<()> {
+    let EdgeRows {
+        keys,
+        cells,
+        history,
+    } = rows;
+    let columns: Vec<ChunkColumn> = [COLUMN_SOURCE, COLUMN_TARGET, COLUMN_EDGE_TYPE]
+        .into_iter()
+        .map(|id| column(ChunkNamespace::EdgeStructure, id))
+        .chain(
+            keys.iter()
+                .map(|key| column(ChunkNamespace::EdgeProperties, *key)),
+        )
+        .collect();
+    let mut chunker = RowsChunker::new(graph_id, columns, group_start, caps);
+    for (id, (src, dst, edge_type), mut values) in cells {
+        let row: Vec<Option<(Value, u64)>> = [
+            int(src, "source node")?,
+            int(dst, "target node")?,
+            Value::Int64(i64::from(edge_type)),
+        ]
+        .into_iter()
+        .map(|value| Some((value, 0)))
+        .chain(
+            keys.iter()
+                .map(|key| values.remove(key).map(|value| (value, 0))),
+        )
+        .collect();
+        chunker.push(sink, id, row)?;
+    }
+    chunker.finish(sink)?;
+    if let Some(history) = history
+        && !history.cells.is_empty()
+    {
+        let columns: Vec<ChunkColumn> = std::iter::once(history_column(
+            ChunkNamespace::EdgeStructure,
+            HISTORY_VERSIONS,
+        ))
+        .chain(
+            history
+                .keys
+                .iter()
+                .map(|key| history_column(ChunkNamespace::EdgeProperties, *key)),
+        )
+        .collect();
+        let mut chunker = RowsChunker::new(graph_id, columns, group_start, caps);
+        for (id, versions, mut values) in history.cells {
+            let row: Vec<Option<(Value, u64)>> = std::iter::once(versions.map(|cell| (cell, 0)))
+                .chain(
+                    history
+                        .keys
+                        .iter()
+                        .map(|key| values.remove(key).map(|cell| (cell, 0))),
+                )
+                .collect();
+            chunker.push(sink, id, row)?;
+        }
+        chunker.finish(sink)?;
+    }
+    Ok(())
+}
+
+// ── Writing a section, a file row group at a time ───────────────────
+
+/// What the section needs of the image a checkpoint follows: its metadata,
+/// and where each file row group's chunks are in it.
+struct Previous {
+    image: ImageId,
+    meta: Meta,
+    chunks: Vec<ChunkMeta>,
+    /// The indices of each file row group's chunks, in their order, by
+    /// graph, table (`true`: the node table) and row group.
+    groups: FxHashMap<(u32, bool, u64), Vec<usize>>,
+}
+
+impl Previous {
+    /// What `sink` offers of the image it follows; `None` when it follows
+    /// none, or that image's section is not one of this version whose
+    /// metadata this writer reads (nothing is reused then).
+    fn of(sink: &dyn SectionSink) -> Option<Self> {
+        let (image, source) = sink.previous()?;
+        if source.section_version() != LPG_SECTION_VERSION {
+            return None;
+        }
+        let chunks = source.chunks().to_vec();
+        let last = chunks.len().checked_sub(1)?;
+        if chunks[last].kind != ChunkKind::Meta {
+            return None;
+        }
+        let meta = decode_meta(&source.fetch(last).ok()?).ok()?;
+        let max_rows = u64::from(meta.caps.max_rows);
+        let mut groups: FxHashMap<(u32, bool, u64), Vec<usize>> = FxHashMap::default();
+        for (index, chunk) in chunks[..last].iter().enumerate() {
+            let node_table = match chunk.namespace {
+                ChunkNamespace::NodeStructure
+                | ChunkNamespace::NodeProperties
+                | ChunkNamespace::NodeDeletes
+                | ChunkNamespace::NodeLabels
+                | ChunkNamespace::OutgoingAdjacency
+                | ChunkNamespace::IncomingAdjacency => true,
+                ChunkNamespace::EdgeStructure
+                | ChunkNamespace::EdgeProperties
+                | ChunkNamespace::EdgeDeletes => false,
+                _ => return None,
+            };
+            groups
+                .entry((chunk.graph_id, node_table, chunk.row_start / max_rows))
+                .or_default()
+                .push(index);
+        }
+        Some(Self {
+            image,
+            meta,
+            chunks,
+            groups,
+        })
+    }
+}
+
+/// A graph of the followed image whose chunks a checkpoint may reuse.
+#[derive(Clone, Copy)]
+struct Reusable<'p> {
+    previous: &'p Previous,
+    graph: &'p GraphMeta,
+}
+
+impl<'p> Reusable<'p> {
+    /// The followed image's chunks and rows of file row group `group` of the
+    /// node table (`node_table`) or the edge table, `None` when it holds no
+    /// row of it.
+    fn group(self, node_table: bool, group: u64) -> Option<(Self, &'p [usize], usize)> {
+        let indices = self
+            .previous
+            .groups
+            .get(&(self.graph.id, node_table, group))?;
+        let counts = if node_table {
+            &self.graph.node_groups
+        } else {
+            &self.graph.edge_groups
+        };
+        let at = counts.binary_search_by_key(&group, |(g, _)| *g).ok()?;
+        Some((self, indices, counts[at].1 as usize))
+    }
+}
+
+/// A graph a section writes: its id, name and store, and the marks a
+/// checkpoint took of it at its snapshot; without them every chunk is
+/// written and the next ids and dictionaries are read as they are.
+struct GraphPlan<'s> {
+    id: u32,
+    name: &'s str,
+    store: &'s RowGroupStore,
+    marks: Option<&'s GraphMarks>,
+}
+
+/// The marks file row group `file_group` is written with: those of the
+/// store's row group it lies in (`groups`, by row group; none listed for a
+/// group without marks), `None` for one across two of them.
+fn marks_of<'m>(
+    file_group: u64,
+    max_rows: u64,
+    groups: Option<&'m BTreeMap<u64, Marks>>,
+    unmarked: &'m Marks,
+) -> Option<&'m Marks> {
+    let first = file_group * max_rows / ROWS_PER_GROUP;
+    let last = ((file_group + 1) * max_rows - 1) / ROWS_PER_GROUP;
+    (first == last).then(|| {
+        groups
+            .and_then(|groups| groups.get(&first))
+            .unwrap_or(unmarked)
+    })
+}
+
+/// The file row groups the store's row group `index` holds rows of, from
+/// `next` on (the first not written yet), which moves past them; `None`
+/// when they were all written with an earlier group's (a file row group
+/// across two of the store's, with caps whose row count does not divide
+/// theirs, is written with the first).
+fn file_groups_of(
+    index: u64,
+    max_rows: u64,
+    next: &mut u64,
+) -> Option<std::ops::RangeInclusive<u64>> {
+    let first = (index * ROWS_PER_GROUP / max_rows).max(*next);
+    let last = ((index + 1) * ROWS_PER_GROUP - 1) / max_rows;
+    if first > last {
+        return None;
+    }
+    *next = last + 1;
+    Some(first..=last)
+}
+
+/// A table's row groups whose rows a reader of the window sees.
+trait VersionedGroup {
+    fn versions(&self) -> &super::versions::Versions;
+}
+
+impl VersionedGroup for super::NodeGroup {
+    fn versions(&self) -> &super::versions::Versions {
+        &self.versions
+    }
+}
+
+impl VersionedGroup for super::EdgeGroup {
+    fn versions(&self) -> &super::versions::Versions {
+        &self.versions
+    }
+}
+
+impl Inner {
+    /// The rows of the file row groups `file_groups` of a table (`groups`)
+    /// that the window writes, ids ascending, each with the epoch its state
+    /// is written at; they may lie in two of the store's row groups.
+    fn written_rows<G: VersionedGroup>(
+        groups: &BTreeMap<u64, G>,
+        file_groups: &std::ops::RangeInclusive<u64>,
+        max_rows: u64,
+        window: Window,
+    ) -> Vec<(u64, u64)> {
+        let start = file_groups.start() * max_rows;
+        let end = (file_groups.end() + 1) * max_rows;
+        let mut written = Vec::new();
+        for (index, group) in groups.range(start / ROWS_PER_GROUP..=(end - 1) / ROWS_PER_GROUP) {
+            let base = index * ROWS_PER_GROUP;
+            written.extend(group.versions().rows().filter_map(|(row, version)| {
+                let id = base + row as u64;
+                (start..end)
+                    .contains(&id)
+                    .then(|| window.last(version).map(|last| (id, last)))
+                    .flatten()
+            }));
+        }
+        written
+    }
+}
+
+/// Writes one table of a graph (`node_table`, or the edge table) as the
+/// window holds it, a file row group at a time: each is gathered under the
+/// store's read lock, then encoded and handed to `sink` with the lock
+/// released, so no writer waits for the file, nor for the encoding. A read
+/// pinned at the window's start keeps every version the next group reads.
+/// Returns each written file row group with the rows the image holds of it.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the table, its graph and what the followed image holds of it"
+)]
+fn write_table(
+    graph: &GraphPlan<'_>,
+    node_table: bool,
+    reusable: Option<Reusable<'_>>,
+    window: Window,
+    caps: ChunkCaps,
+    adjacency: WrittenAdjacency,
+    groups: Vec<u64>,
+    sink: &mut dyn SectionSink,
+) -> Result<Vec<(u64, u32)>> {
+    let store = graph.store;
+    let max_rows = u64::from(caps.max_rows);
+    let unmarked = Marks::default();
+    let marked = graph.marks.map(|marks| {
+        if node_table {
+            &marks.nodes
+        } else {
+            &marks.edges
+        }
+    });
+    let mut written_groups = Vec::new();
+    let mut next = 0;
+    for index in groups {
+        let Some(file_groups) = file_groups_of(index, max_rows, &mut next) else {
+            continue;
+        };
+        let written = {
+            let inner = store.inner.read();
+            if node_table {
+                Inner::written_rows(&inner.nodes, &file_groups, max_rows, window)
+            } else {
+                Inner::written_rows(&inner.edges, &file_groups, max_rows, window)
+            }
+        };
+        for rows in written.chunk_by(|a, b| a.0 / max_rows == b.0 / max_rows) {
+            let file_group = rows[0].0 / max_rows;
+            let marks = marks_of(file_group, max_rows, marked, &unmarked);
+            let (gathered, count) = store.inner.read().gather_file_group(
+                graph, node_table, reusable, marks, rows, file_group, window, caps, adjacency,
+            )?;
+            gathered.write(graph.id, file_group * max_rows, caps, sink)?;
+            written_groups.push((file_group, count));
+            grafeo_common::testing::commit_hook::run_during_checkpoint_write();
+        }
+    }
+    Ok(written_groups)
+}
+
+/// Writes one graph's tables as the window holds them (see
+/// [`write_table`]), and returns its metadata.
+fn write_graph(
+    graph: &GraphPlan<'_>,
+    previous: Option<&Previous>,
+    window: Window,
+    caps: ChunkCaps,
+    sink: &mut dyn SectionSink,
+) -> Result<GraphMeta> {
+    let store = graph.store;
+    let (mut meta, node_groups, edge_groups) = {
+        let inner = store.inner.read();
+        let (next_node_id, next_edge_id, [labels, edge_types, keys]) = match graph.marks {
+            Some(marks) => (marks.next_node_id, marks.next_edge_id, marks.next_names),
+            None => (
+                store.next_node_id.load(Ordering::Acquire),
+                store.next_edge_id.load(Ordering::Acquire),
+                [
+                    inner.labels.next_id(),
+                    inner.edge_types.next_id(),
+                    inner.keys.next_id(),
+                ],
+            ),
+        };
+        let meta = GraphMeta {
+            id: graph.id,
+            name: graph.name.to_string(),
+            next_node_id,
+            next_edge_id,
+            labels: DictionaryMeta::below(&inner.labels, labels),
+            edge_types: DictionaryMeta::below(&inner.edge_types, edge_types),
+            keys: DictionaryMeta::below(&inner.keys, keys),
+            adjacency_written: if inner.keeps_incoming() {
+                WrittenAdjacency::Both
+            } else {
+                WrittenAdjacency::Outgoing
+            },
+            ..GraphMeta::default()
+        };
+        (
+            meta,
+            inner.nodes.keys().copied().collect::<Vec<u64>>(),
+            inner.edges.keys().copied().collect::<Vec<u64>>(),
+        )
+    };
+    // Chunks are reused only from the image the graph's chunks were last
+    // written to or read from, cut with the same caps and adjacency.
+    let reusable = match (previous, graph.marks) {
+        (Some(previous), Some(marks))
+            if marks.baseline == Some(previous.image) && previous.meta.caps == caps =>
+        {
+            previous
+                .meta
+                .graphs
+                .iter()
+                .find(|old| {
+                    old.id == meta.id
+                        && old.name == meta.name
+                        && old.adjacency_written == meta.adjacency_written
+                })
+                .map(|old| Reusable {
+                    previous,
+                    graph: old,
+                })
+        }
+        _ => None,
+    };
+    let adjacency = meta.adjacency_written;
+    meta.node_groups = write_table(
+        graph,
+        true,
+        reusable,
+        window,
+        caps,
+        adjacency,
+        node_groups,
+        sink,
+    )?;
+    meta.edge_groups = write_table(
+        graph,
+        false,
+        reusable,
+        window,
+        caps,
+        adjacency,
+        edge_groups,
+        sink,
+    )?;
+    Ok(meta)
+}
+
+/// Writes the `LPG_STORE` section of `graphs` (ids ascending below
+/// `next_graph_id`) at `epoch`, with the history from `history_from`, then
+/// its metadata chunk.
+fn write_graphs(
+    graphs: &[GraphPlan<'_>],
     next_graph_id: u32,
+    epoch: EpochId,
+    history_from: Option<EpochId>,
     caps: ChunkCaps,
     sink: &mut dyn SectionSink,
 ) -> Result<()> {
@@ -626,18 +1894,116 @@ pub fn write_lpg_section(
     }
     let mut meta = Meta {
         caps,
-        epoch: 0,
+        epoch: epoch.as_u64(),
         next_graph_id,
         graphs: Vec::with_capacity(graphs.len()),
     };
+    let window = Window {
+        at: epoch.as_u64(),
+        from: history_from.map_or(epoch, |from| from.min(epoch)).as_u64(),
+    };
+    let previous = Previous::of(&*sink);
     for graph in graphs {
-        let inner = graph.store.inner.read();
-        let epoch = graph.store.epoch.load(Ordering::Acquire);
-        meta.epoch = meta.epoch.max(epoch);
         meta.graphs
-            .push(inner.write_graph(graph, Read::At(epoch), caps, sink)?);
+            .push(write_graph(graph, previous.as_ref(), window, caps, sink)?);
     }
     sink.write_chunk(ChunkMeta::meta(), &encode_meta(&meta)?)
+}
+
+/// Writes the `LPG_STORE` section, version 4, of `graphs` (ids ascending):
+/// each graph's committed state at `epoch`, as a reader at it sees the
+/// rows, their values and their labels. What a transaction still open wrote
+/// is not in it, nor what a commit after `epoch` wrote; the section's epoch
+/// is `epoch`. Every chunk is written.
+///
+/// `epoch` is at or after the epoch the graphs were last collected at (see
+/// [`RowGroupStore::collect`]): a collect drops the versions a reader before
+/// its horizon would read.
+///
+/// # Errors
+///
+/// Returns [`Error::InvalidValue`] for caps the format refuses,
+/// [`Error::Internal`] for graphs out of id order or an id at or above
+/// `next_graph_id`, and the encoder's or the sink's errors.
+pub fn write_lpg_section(
+    graphs: &[GraphToWrite<'_>],
+    next_graph_id: u32,
+    epoch: EpochId,
+    caps: ChunkCaps,
+    sink: &mut dyn SectionSink,
+) -> Result<()> {
+    write_lpg_section_with_history(graphs, next_graph_id, epoch, None, caps, sink)
+}
+
+/// Writes the `LPG_STORE` section as [`write_lpg_section`] does, and with
+/// `history_from` (an epoch H before `epoch`) the history a reader at H or
+/// later reads too: the rows such a reader sees, deleted ones included, and
+/// the `History` chunks of the versions it tells apart (see the module
+/// docs). `None`, or an epoch at or after `epoch`, writes no history.
+///
+/// H is at or after the horizon the graphs were last collected at: the
+/// versions before it are gone.
+///
+/// # Errors
+///
+/// As [`write_lpg_section`].
+pub fn write_lpg_section_with_history(
+    graphs: &[GraphToWrite<'_>],
+    next_graph_id: u32,
+    epoch: EpochId,
+    history_from: Option<EpochId>,
+    caps: ChunkCaps,
+    sink: &mut dyn SectionSink,
+) -> Result<()> {
+    let plans: Vec<GraphPlan<'_>> = graphs
+        .iter()
+        .map(|graph| GraphPlan {
+            id: graph.id,
+            name: graph.name,
+            store: graph.store,
+            marks: None,
+        })
+        .collect();
+    write_graphs(&plans, next_graph_id, epoch, history_from, caps, sink)
+}
+
+/// Writes the `LPG_STORE` section of a checkpoint's snapshot (see
+/// [`CheckpointSnapshot`]): each graph it took at the snapshot's epoch, a
+/// file row group at a time without holding writers off, and with the
+/// history from its start for a database that keeps history. A sink that
+/// follows an image ([`SectionSink::previous`]) gets only the chunks that
+/// changed since the image each graph's chunks are in; the others are
+/// reused.
+///
+/// The caller keeps a read pinned at the snapshot's history start, or its
+/// epoch, until this returns.
+///
+/// # Errors
+///
+/// As [`write_lpg_section`].
+pub fn write_lpg_snapshot(
+    snapshot: &CheckpointSnapshot,
+    caps: ChunkCaps,
+    sink: &mut dyn SectionSink,
+) -> Result<()> {
+    let plans: Vec<GraphPlan<'_>> = snapshot
+        .graphs
+        .iter()
+        .map(|graph| GraphPlan {
+            id: graph.id,
+            name: &graph.name,
+            store: &graph.store,
+            marks: Some(&graph.marks),
+        })
+        .collect();
+    write_graphs(
+        &plans,
+        snapshot.next_graph_id,
+        snapshot.epoch,
+        snapshot.history_from,
+        caps,
+        sink,
+    )
 }
 
 // ── Reading ─────────────────────────────────────────────────────────
@@ -655,6 +2021,279 @@ struct Loading {
     /// The nodes and edges read per file row group.
     node_groups: BTreeMap<u64, u32>,
     edge_groups: BTreeMap<u64, u32>,
+    /// What the `History` chunks hold, applied once every chunk is read.
+    history: LoadedHistory,
+}
+
+/// What a section's `History` chunks hold of one graph.
+#[derive(Debug, Default)]
+struct LoadedHistory {
+    /// Per node row and per edge row: who created it (0: every reader in
+    /// the window) and who deleted it ([`ABSENT`]: no one by the epoch).
+    node_versions: Vec<(u64, u64, u64)>,
+    edge_versions: Vec<(u64, u64, u64)>,
+    /// Per node row and label write: its epoch and the label ids before.
+    labels: Vec<(u64, u64, Box<[u32]>)>,
+    /// Per row, key and value write: the key, the row, the write's epoch and
+    /// the value before.
+    node_values: Vec<(u32, u64, u64, Option<Value>)>,
+    edge_values: Vec<(u32, u64, u64, Option<Value>)>,
+}
+
+impl LoadedHistory {
+    fn is_empty(&self) -> bool {
+        self.node_versions.is_empty()
+            && self.edge_versions.is_empty()
+            && self.labels.is_empty()
+            && self.node_values.is_empty()
+            && self.edge_values.is_empty()
+    }
+}
+
+/// An epoch a history cell holds, at most `epoch` (the section's).
+fn cell_epoch(value: &Value, epoch: u64) -> std::result::Result<u64, String> {
+    match value {
+        Value::Int64(at) => u64::try_from(*at)
+            .ok()
+            .filter(|at| *at <= epoch)
+            .ok_or_else(|| format!("epoch {at}, past the section's epoch {epoch}")),
+        other => Err(format!("{other:?} where an epoch is")),
+    }
+}
+
+/// The `[created, deleted]` of a versions cell, `deleted` [`ABSENT`] for
+/// null: created at most the section's epoch `epoch`, deleted after it and
+/// at most `epoch`, not both "every reader".
+fn versions_of(cell: &Value, epoch: u64) -> std::result::Result<(u64, u64), String> {
+    let Value::List(pair) = cell else {
+        return Err(format!("{cell:?} where a [created, deleted] pair is"));
+    };
+    let [created, deleted] = &pair[..] else {
+        return Err(format!("{cell:?} where a [created, deleted] pair is"));
+    };
+    let created = cell_epoch(created, epoch)?;
+    let deleted = match deleted {
+        Value::Null => ABSENT,
+        deleted => cell_epoch(deleted, epoch)?,
+    };
+    if deleted != ABSENT && deleted <= created {
+        return Err(format!(
+            "deleted at {deleted}, not after its create at {created}"
+        ));
+    }
+    if created == 0 && deleted == ABSENT {
+        return Err("a version every reader sees alike, which is not written".to_string());
+    }
+    Ok((created, deleted))
+}
+
+/// The `[epoch, kept]` entries of a chain cell: at least one, epochs from 1
+/// to the section's epoch `epoch`, ascending.
+fn chain_of(cell: &Value, epoch: u64) -> std::result::Result<Vec<(u64, Value)>, String> {
+    let shape = || format!("{cell:?} where a list of [epoch, kept] pairs is");
+    let Value::List(entries) = cell else {
+        return Err(shape());
+    };
+    if entries.is_empty() {
+        return Err(shape());
+    }
+    let mut chain: Vec<(u64, Value)> = Vec::with_capacity(entries.len());
+    for entry in entries.iter() {
+        let Value::List(pair) = entry else {
+            return Err(shape());
+        };
+        let [at, kept] = &pair[..] else {
+            return Err(shape());
+        };
+        let at = cell_epoch(at, epoch)?;
+        if at == 0 || chain.last().is_some_and(|(last, _)| *last >= at) {
+            return Err(format!(
+                "history epochs that are not ascending from 1: {cell:?}"
+            ));
+        }
+        chain.push((at, kept.clone()));
+    }
+    Ok(chain)
+}
+
+impl Loading {
+    /// Takes in the cells of a `History` chunk, after the rows they name
+    /// are read; the section's epoch is `epoch`.
+    fn read_history(
+        &mut self,
+        chunk: &ChunkMeta,
+        bytes: &Bytes,
+        epoch: u64,
+    ) -> std::result::Result<(), String> {
+        enum Kind {
+            Versions(bool),
+            Labels,
+            Values(bool),
+        }
+        let kind = match (chunk.namespace, chunk.column_id) {
+            (ChunkNamespace::NodeStructure, HISTORY_VERSIONS) => Kind::Versions(true),
+            (ChunkNamespace::EdgeStructure, HISTORY_VERSIONS) => Kind::Versions(false),
+            (ChunkNamespace::NodeStructure, HISTORY_LABELS) => Kind::Labels,
+            (ChunkNamespace::NodeProperties, key) | (ChunkNamespace::EdgeProperties, key) => {
+                if self.inner.keys.get_name(key).is_none() {
+                    return Err(format!("column {key} is no property key of the graph"));
+                }
+                Kind::Values(chunk.namespace == ChunkNamespace::NodeProperties)
+            }
+            _ => {
+                return Err("a history chunk of a column that has no history".to_string());
+            }
+        };
+        let decoded = decode_column_chunk_bytes(bytes, chunk.codec, chunk.row_count)
+            .map_err(|error| error.to_string())?;
+        if decoded.epochs.is_some() {
+            return Err("epochs, which a history chunk never carries".to_string());
+        }
+        for (offset, cell) in decoded.values {
+            let id = chunk.row_start + u64::from(offset);
+            let node = match kind {
+                Kind::Versions(node) | Kind::Values(node) => node,
+                Kind::Labels => true,
+            };
+            let exists = if node {
+                self.inner.node(id).is_some()
+            } else {
+                self.inner.edge(id).is_some()
+            };
+            if !exists {
+                return Err(format!("row {id} is no node or edge of its group"));
+            }
+            match kind {
+                Kind::Versions(node) => {
+                    let (created, deleted) = versions_of(&cell, epoch)?;
+                    let versions = if node {
+                        &mut self.history.node_versions
+                    } else {
+                        &mut self.history.edge_versions
+                    };
+                    versions.push((id, created, deleted));
+                }
+                Kind::Labels => {
+                    for (at, kept) in chain_of(&cell, epoch)? {
+                        let ids = label_ids_of(&kept, &self.inner.labels)?;
+                        self.history.labels.push((id, at, ids));
+                    }
+                }
+                Kind::Values(node) => {
+                    let values = if node {
+                        &mut self.history.node_values
+                    } else {
+                        &mut self.history.edge_values
+                    };
+                    for (at, kept) in chain_of(&cell, epoch)? {
+                        let kept = (!kept.is_null()).then_some(kept);
+                        values.push((chunk.column_id, id, at, kept));
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+impl LoadedHistory {
+    /// Rebuilds in `inner` the versions and update chains the `History`
+    /// chunks held, once every row is in, and lists the vectors they are in
+    /// for `collect`.
+    fn apply(self, inner: &mut Inner) -> std::result::Result<(), String> {
+        let history = self;
+        if history.is_empty() {
+            return Ok(());
+        }
+        for (id, created, deleted) in history.node_versions {
+            let (group, row) = inner
+                .node_mut(id)
+                .ok_or_else(|| format!("row {id} is no node of its group"))?;
+            restore_version(&mut group.versions, row, created, deleted);
+        }
+        for (id, created, deleted) in history.edge_versions {
+            let (group, row) = inner
+                .edge_mut(id)
+                .ok_or_else(|| format!("row {id} is no edge of its group"))?;
+            restore_version(&mut group.versions, row, created, deleted);
+        }
+        let mut labels: BTreeMap<u64, Vec<(usize, u64, Box<[u32]>)>> = BTreeMap::new();
+        for (id, at, kept) in history.labels {
+            let (group, row) = locate(id);
+            labels.entry(group).or_default().push((row, at, kept));
+        }
+        for (index, kept) in labels {
+            inner
+                .nodes
+                .get_mut(&index)
+                .ok_or_else(|| format!("node row group {index} holds no rows"))?
+                .label_updates
+                .load(kept);
+        }
+        for (node, values) in [(true, history.node_values), (false, history.edge_values)] {
+            let mut by_column: BTreeMap<(u64, u32), Vec<(usize, u64, Option<Value>)>> =
+                BTreeMap::new();
+            for (key, id, at, kept) in values {
+                let (group, row) = locate(id);
+                by_column
+                    .entry((group, key))
+                    .or_default()
+                    .push((row, at, kept));
+            }
+            for ((index, key), kept) in by_column {
+                let columns = if node {
+                    inner.nodes.get_mut(&index).map(|group| &mut group.columns)
+                } else {
+                    inner.edges.get_mut(&index).map(|group| &mut group.columns)
+                };
+                columns
+                    .ok_or_else(|| format!("row group {index} holds no rows"))?
+                    .load_kept(key, kept);
+            }
+        }
+        inner.relist();
+        Ok(())
+    }
+}
+
+/// Gives a loaded row the versions its history cell holds.
+fn restore_version(
+    versions: &mut super::versions::Versions,
+    row: usize,
+    created: u64,
+    deleted: u64,
+) {
+    if created != 0 {
+        versions.set_created(row, created);
+    }
+    if deleted != ABSENT {
+        versions.set_deleted(row, deleted);
+    }
+}
+
+/// The label ids a label history entry holds: ascending ids of the graph's
+/// dictionary.
+fn label_ids_of(
+    kept: &Value,
+    dictionary: &NameDictionary,
+) -> std::result::Result<Box<[u32]>, String> {
+    let Value::List(items) = kept else {
+        return Err(format!("{kept:?} where label ids are"));
+    };
+    let mut ids: Vec<u32> = Vec::with_capacity(items.len());
+    for item in items.iter() {
+        let id = match item {
+            Value::Int64(id) => u32::try_from(*id).ok(),
+            _ => None,
+        }
+        .filter(|id| dictionary.get_name(*id).is_some())
+        .ok_or_else(|| format!("{item:?} is no label of the graph"))?;
+        if ids.last().is_some_and(|last| *last >= id) {
+            return Err(format!("label ids {kept:?} are not ascending"));
+        }
+        ids.push(id);
+    }
+    Ok(ids.into_boxed_slice())
 }
 
 /// Where a chunk is, for an error.
@@ -740,11 +2379,29 @@ fn restore_dictionary(
 /// Returns [`Error::Serialization`] for a section of another version (written
 /// by another release), and [`Error::Corruption`] for everything else a
 /// writer does not write, naming the chunk.
+pub fn read_lpg_section(source: &dyn SectionSource) -> Result<(u32, Vec<LoadedGraph>)> {
+    read_lpg_section_with_backward_edges(source, true)
+}
+
+/// Reads an `LPG_STORE` section of version 4 as [`read_lpg_section`] does,
+/// into stores that keep each node's incoming edges or, with
+/// `backward_edges` false, keep none (see
+/// [`RowGroupStore::with_backward_edges`]): the reader builds the adjacency
+/// the stores keep, from the edge table where the section holds none of a
+/// direction, and checks the incoming lists a section holds before such a
+/// store drops them.
+///
+/// # Errors
+///
+/// As [`read_lpg_section`].
 #[expect(
     clippy::too_many_lines,
     reason = "one pass over the chunks, a check per kind"
 )]
-pub fn read_lpg_section(source: &dyn SectionSource) -> Result<(u32, Vec<LoadedGraph>)> {
+pub fn read_lpg_section_with_backward_edges(
+    source: &dyn SectionSource,
+    backward_edges: bool,
+) -> Result<(u32, Vec<LoadedGraph>)> {
     if source.section_version() != LPG_SECTION_VERSION {
         return Err(Error::Serialization(format!(
             "LPG section version {}, where this reader reads version {LPG_SECTION_VERSION}: written by another version",
@@ -765,7 +2422,14 @@ pub fn read_lpg_section(source: &dyn SectionSource) -> Result<(u32, Vec<LoadedGr
 
     let mut loading: Vec<Loading> = Vec::with_capacity(meta.graphs.len());
     for (meta_index, graph) in meta.graphs.iter().enumerate() {
-        let mut inner = Inner::default();
+        let mut inner = Inner {
+            incoming_edges: if backward_edges {
+                IncomingEdges::Kept
+            } else {
+                IncomingEdges::NotKept
+            },
+            ..Inner::default()
+        };
         restore_dictionary(&mut inner.labels, &graph.labels, "labels")?;
         restore_dictionary(&mut inner.edge_types, &graph.edge_types, "edge types")?;
         restore_dictionary(&mut inner.keys, &graph.keys, "property keys")?;
@@ -777,6 +2441,7 @@ pub fn read_lpg_section(source: &dyn SectionSource) -> Result<(u32, Vec<LoadedGr
             deleted_edges: Vec::new(),
             node_groups: BTreeMap::new(),
             edge_groups: BTreeMap::new(),
+            history: LoadedHistory::default(),
         });
     }
     let position: FxHashMap<u32, usize> = meta
@@ -792,10 +2457,6 @@ pub fn read_lpg_section(source: &dyn SectionSource) -> Result<(u32, Vec<LoadedGr
     // and the pieces and entries of its list so far.
     let mut pieces: FxHashMap<(u32, u8), (u64, u32, u32, usize)> = FxHashMap::default();
     let mut order = (0_usize, 0_u8, 0_u64);
-    let loaded = RowVersion {
-        created: 0,
-        deleted: ABSENT,
-    };
 
     let mut index = 0;
     while index < data.len() {
@@ -853,7 +2514,10 @@ pub fn read_lpg_section(source: &dyn SectionSource) -> Result<(u32, Vec<LoadedGr
             ChunkNamespace::OutgoingAdjacency | ChunkNamespace::IncomingAdjacency
         );
         if adjacency != (chunk.kind == ChunkKind::Adjacency)
-            || !matches!(chunk.kind, ChunkKind::Column | ChunkKind::Adjacency)
+            || !matches!(
+                chunk.kind,
+                ChunkKind::Column | ChunkKind::Adjacency | ChunkKind::History
+            )
         {
             return Err(refuse(
                 "a chunk kind its namespace does not hold".to_string(),
@@ -879,6 +2543,13 @@ pub fn read_lpg_section(source: &dyn SectionSource) -> Result<(u32, Vec<LoadedGr
             ends.insert(identity, end);
         }
         let bytes = source.fetch(index)?;
+        if chunk.kind == ChunkKind::History {
+            graph
+                .read_history(chunk, &bytes, meta.epoch)
+                .map_err(refuse)?;
+            index += 1;
+            continue;
+        }
 
         match chunk.namespace {
             ChunkNamespace::NodeStructure => {
@@ -892,7 +2563,13 @@ pub fn read_lpg_section(source: &dyn SectionSource) -> Result<(u32, Vec<LoadedGr
                     u32::try_from(rows.len()).unwrap_or(u32::MAX);
                 for id in rows {
                     let (group, row) = locate(id);
-                    *graph.inner.nodes.entry(group).or_default().version_mut(row) = loaded;
+                    graph
+                        .inner
+                        .nodes
+                        .entry(group)
+                        .or_default()
+                        .versions
+                        .set_always(row);
                 }
             }
             ChunkNamespace::NodeLabels => {
@@ -967,15 +2644,17 @@ pub fn read_lpg_section(source: &dyn SectionSource) -> Result<(u32, Vec<LoadedGr
                             .get_mut(&group)
                             .map(|group| &mut group.columns)
                     };
-                    columns
-                        .expect("the group of the rows checked above")
-                        .add_cold(
-                            chunk.column_id,
-                            first_row,
-                            chunk.row_count,
-                            chunk.codec,
-                            bytes,
-                        );
+                    // The rows were checked above: their group is there.
+                    let Some(columns) = columns else {
+                        return Err(refuse(format!("group {group} holds no rows")));
+                    };
+                    columns.add_cold(
+                        chunk.column_id,
+                        first_row,
+                        chunk.row_count,
+                        chunk.codec,
+                        bytes,
+                    );
                 }
             }
             ChunkNamespace::NodeDeletes | ChunkNamespace::EdgeDeletes => {
@@ -1060,17 +2739,29 @@ pub fn read_lpg_section(source: &dyn SectionSource) -> Result<(u32, Vec<LoadedGr
                     }
                     let (group, row) = locate(*id);
                     let group = graph.inner.edges.entry(group).or_default();
-                    *group.version_mut(row) = loaded;
+                    group.versions.set_always(row);
                     group.set_ends(row, *src, dst, edge_type);
                 }
                 index += 2;
             }
             ChunkNamespace::OutgoingAdjacency | ChunkNamespace::IncomingAdjacency => {
-                if !graph_meta.adjacency_written {
-                    return Err(refuse(
-                        "an adjacency chunk in a graph whose metadata says none was written"
-                            .to_string(),
-                    ));
+                match graph_meta.adjacency_written {
+                    WrittenAdjacency::None => {
+                        return Err(refuse(
+                            "an adjacency chunk in a graph whose metadata says none was written"
+                                .to_string(),
+                        ));
+                    }
+                    WrittenAdjacency::Outgoing
+                        if chunk.namespace == ChunkNamespace::IncomingAdjacency =>
+                    {
+                        return Err(refuse(
+                            "an incoming adjacency chunk in a graph whose metadata says only \
+                             the outgoing one was written"
+                                .to_string(),
+                        ));
+                    }
+                    WrittenAdjacency::Both | WrittenAdjacency::Outgoing => {}
                 }
                 let direction = usize::from(chunk.namespace == ChunkNamespace::IncomingAdjacency);
                 let decoded = adjacency_chunk::decode(&bytes, chunk.row_count, meta.caps.max_rows)
@@ -1092,9 +2783,10 @@ pub fn read_lpg_section(source: &dyn SectionSource) -> Result<(u32, Vec<LoadedGr
                         )));
                     }
                     let list = &decoded.lists[0];
-                    let (_, whole) = graph.adjacency[direction]
-                        .last_mut()
-                        .expect("the list's first chunk");
+                    // A piece follows its list's first chunk (checked above).
+                    let Some((_, whole)) = graph.adjacency[direction].last_mut() else {
+                        return Err(refuse("a piece without its list's first chunk".to_string()));
+                    };
                     if whole
                         .last()
                         .is_some_and(|last| list.first().is_some_and(|first| last >= first))
@@ -1168,52 +2860,68 @@ pub fn read_lpg_section(source: &dyn SectionSource) -> Result<(u32, Vec<LoadedGr
             .iter()
             .map(|(_, rows)| *rows as usize)
             .sum();
-        if graph_meta.adjacency_written {
-            for (direction, lists) in graph.adjacency.iter().enumerate() {
-                let mut entries = 0;
-                for (node, list) in lists {
-                    for adjacent in list {
-                        let ends = graph
-                            .inner
-                            .edge(adjacent.edge)
-                            .map(|(group, row)| group.ends(row));
-                        let expected = if direction == 0 {
-                            (*node, adjacent.other, adjacent.edge_type)
-                        } else {
-                            (adjacent.other, *node, adjacent.edge_type)
-                        };
-                        if ends != Some(expected) {
-                            return Err(refuse(format!(
-                                "node {node}'s adjacency names edge {} as {expected:?}, where the edge table has {ends:?}",
-                                adjacent.edge
-                            )));
-                        }
-                    }
-                    entries += list.len();
-                }
-                if entries != edge_count {
-                    return Err(refuse(format!(
-                        "its adjacency lists {entries} edges in direction {direction}, where the edge table has {edge_count}"
-                    )));
-                }
+        let written = graph_meta.adjacency_written;
+        for (direction, lists) in graph.adjacency.iter().enumerate() {
+            if !written.holds(direction == 0) {
+                continue;
             }
-            for (direction, lists) in graph.adjacency.into_iter().enumerate() {
-                let mut by_group: BTreeMap<u64, Vec<(usize, Vec<Adjacent>)>> = BTreeMap::new();
-                for (node, list) in lists {
-                    let (group, row) = locate(node);
-                    by_group.entry(group).or_default().push((row, list));
-                }
-                for (group, lists) in by_group {
-                    let group = graph
+            let mut entries = 0;
+            for (node, list) in lists {
+                for adjacent in list {
+                    let ends = graph
                         .inner
-                        .nodes
-                        .get_mut(&group)
-                        .expect("a group of its nodes");
-                    *group.adjacency_mut(direction == 0) = Adjacency::from_sorted(lists);
+                        .edge(adjacent.edge)
+                        .map(|(group, row)| group.ends(row));
+                    let expected = if direction == 0 {
+                        (*node, adjacent.other, adjacent.edge_type)
+                    } else {
+                        (adjacent.other, *node, adjacent.edge_type)
+                    };
+                    if ends != Some(expected) {
+                        return Err(refuse(format!(
+                            "node {node}'s adjacency names edge {} as {expected:?}, where the edge table has {ends:?}",
+                            adjacent.edge
+                        )));
+                    }
                 }
+                entries += list.len();
             }
-        } else {
-            // A file written without adjacency: build it from the edge table.
+            if entries != edge_count {
+                return Err(refuse(format!(
+                    "its adjacency lists {entries} edges in direction {direction}, where the edge table has {edge_count}"
+                )));
+            }
+        }
+        let keeps_incoming = graph.inner.keeps_incoming();
+        for (direction, lists) in graph.adjacency.into_iter().enumerate() {
+            // The incoming lists of a store that keeps none are dropped,
+            // once checked.
+            if direction == 1 && !keeps_incoming {
+                continue;
+            }
+            let mut by_group: BTreeMap<u64, Vec<(usize, Vec<Adjacent>)>> = BTreeMap::new();
+            for (node, list) in lists {
+                let (group, row) = locate(node);
+                by_group.entry(group).or_default().push((row, list));
+            }
+            for (group, lists) in by_group {
+                // Every list's node was checked to be a node of the graph.
+                let Some(group) = graph.inner.nodes.get_mut(&group) else {
+                    return Err(Error::corruption(format!(
+                        "LPG section: adjacency of group {group}, which holds no nodes"
+                    )));
+                };
+                *group.adjacency_mut(direction == 0) = Adjacency::from_sorted(lists);
+            }
+        }
+        // What the file lacks of the adjacency the store keeps (a file
+        // written without adjacency, or without the incoming one): built
+        // from the edge table, outgoing then incoming.
+        let build = [
+            !written.holds(true),
+            keeps_incoming && !written.holds(false),
+        ];
+        if build.contains(&true) {
             let edges: Vec<(u64, (u64, u64, u32))> = graph
                 .inner
                 .edges
@@ -1221,20 +2929,22 @@ pub fn read_lpg_section(source: &dyn SectionSource) -> Result<(u32, Vec<LoadedGr
                 .flat_map(|(index, group)| {
                     group
                         .versions
-                        .iter()
-                        .enumerate()
-                        .filter(|(_, version)| version.exists())
+                        .rows()
                         .map(move |(row, _)| (index * ROWS_PER_GROUP + row as u64, group.ends(row)))
                 })
                 .collect();
             for (edge, (src, dst, edge_type)) in edges {
                 for (node, other, outgoing) in [(src, dst, true), (dst, src, false)] {
+                    if !build[usize::from(!outgoing)] {
+                        continue;
+                    }
                     let (group, row) = locate(node);
-                    let group = graph
-                        .inner
-                        .nodes
-                        .get_mut(&group)
-                        .expect("an endpoint it checked");
+                    // Every edge's ends were checked to be nodes of the graph.
+                    let Some(group) = graph.inner.nodes.get_mut(&group) else {
+                        return Err(Error::corruption(format!(
+                            "LPG section: edge {edge} ends at node {node}, which is no node"
+                        )));
+                    };
                     group.adjacency_mut(outgoing).push(
                         row,
                         Adjacent {
@@ -1246,8 +2956,11 @@ pub fn read_lpg_section(source: &dyn SectionSource) -> Result<(u32, Vec<LoadedGr
                 }
             }
             for group in graph.inner.nodes.values_mut() {
-                group.adjacency_mut(true).merge();
-                group.adjacency_mut(false).merge();
+                for (direction, built) in build.iter().enumerate() {
+                    if *built {
+                        group.adjacency_mut(direction == 0).merge();
+                    }
+                }
             }
         }
 
@@ -1266,29 +2979,40 @@ pub fn read_lpg_section(source: &dyn SectionSource) -> Result<(u32, Vec<LoadedGr
             }
         }
 
-        // The counts of what was loaded.
+        // The versions and chains of the history, once every row is in.
+        std::mem::take(&mut graph.history)
+            .apply(&mut graph.inner)
+            .map_err(refuse)?;
+
+        // The counts of what a reader at the section's epoch sees.
+        let at = Read::At(meta.epoch);
         let mut counts = super::Counts::default();
         for group in graph.inner.nodes.values() {
-            for (row, version) in group.versions.iter().enumerate() {
-                if version.exists() {
-                    counts.nodes += 1;
-                    for label in group.labels_of(row) {
-                        counts.label(label, 1);
-                    }
+            for (row, version) in group.versions.rows() {
+                if !version.visible(at) {
+                    continue;
+                }
+                counts.nodes += 1;
+                for label in group.labels_at(row, at) {
+                    counts.label(label, 1);
                 }
             }
         }
         for group in graph.inner.edges.values() {
-            for (row, version) in group.versions.iter().enumerate() {
-                if version.exists() {
-                    counts.edges += 1;
-                    counts.edge_type(group.ends(row).2, 1);
+            for (row, version) in group.versions.rows() {
+                if !version.visible(at) {
+                    continue;
                 }
+                counts.edges += 1;
+                counts.edge_type(group.ends(row).2, 1);
             }
         }
         graph.inner.counts = counts;
 
         let store = RowGroupStore::default();
+        if !graph.inner.listed.is_empty() {
+            store.note_listed();
+        }
         *store.inner.write() = graph.inner;
         store
             .next_node_id
@@ -1306,22 +3030,189 @@ pub fn read_lpg_section(source: &dyn SectionSource) -> Result<(u32, Vec<LoadedGr
     Ok((meta.next_graph_id, graphs))
 }
 
+// ── The section of a database file ──────────────────────────────────
+
+/// The row-group store's `LPG_STORE` section (version 4) in a `.grafeo`
+/// container: it writes a
+/// root and its named graphs (see [`RowGroupStore::write_section_at`]) and
+/// reads them back into its root ([`RowGroupStore::read_section`]).
+///
+/// A checkpoint builds it with the epoch it records ([`at`](Self::at)) while
+/// it holds commits off: every commit it holds is stamped at or before that
+/// epoch, and the section holds the committed state at it, with nothing a
+/// transaction still open wrote. No committed copy and no change sets of
+/// open transactions are needed, as the writer reads each row as a reader
+/// at the epoch does.
+///
+/// The section holds data only: the indexes are the catalog's, which the
+/// loader builds from the rows once the section is read.
+pub struct RowGroupStoreSection {
+    store: Arc<RowGroupStore>,
+    /// The checkpoint's snapshot to write, which sets the epoch and the
+    /// history (see [`from_snapshot`](Self::from_snapshot)).
+    snapshot: Option<Arc<CheckpointSnapshot>>,
+    /// The epoch to write at; `None`: the latest any graph reached.
+    epoch: Option<EpochId>,
+    /// The epoch the history it writes starts at; `None`: no history.
+    history_from: Option<EpochId>,
+    caps: ChunkCaps,
+    dirty: AtomicBool,
+}
+
+impl RowGroupStoreSection {
+    /// The section of `store`, a root, writing chunks of at most
+    /// [`ChunkCaps::current`] (the caps a test set on this thread, or the
+    /// default ones) at the latest epoch any of its graphs reached.
+    #[must_use]
+    pub fn new(store: Arc<RowGroupStore>) -> Self {
+        Self::with_caps(store, ChunkCaps::current())
+    }
+
+    /// The section of `store`, a root, writing chunks of at most `caps`.
+    #[must_use]
+    pub fn with_caps(store: Arc<RowGroupStore>, caps: ChunkCaps) -> Self {
+        Self {
+            store,
+            snapshot: None,
+            epoch: None,
+            history_from: None,
+            caps,
+            dirty: AtomicBool::new(false),
+        }
+    }
+
+    /// The section a checkpoint writes from `snapshot`, which it took of
+    /// `store` and its named graphs while it held commits off (see
+    /// [`CheckpointSnapshot`] and [`write_lpg_snapshot`]), with chunks of at
+    /// most [`ChunkCaps::current`].
+    #[must_use]
+    pub fn from_snapshot(store: Arc<RowGroupStore>, snapshot: Arc<CheckpointSnapshot>) -> Self {
+        Self {
+            epoch: Some(snapshot.epoch()),
+            snapshot: Some(snapshot),
+            ..Self::new(store)
+        }
+    }
+
+    /// Writes the committed state at `epoch` (see
+    /// [`RowGroupStore::write_section_at`]).
+    #[must_use]
+    pub fn at(mut self, epoch: EpochId) -> Self {
+        self.epoch = Some(epoch);
+        self
+    }
+
+    /// Writes the history from `from` too, with the epoch [`at`](Self::at)
+    /// gave (see [`RowGroupStore::write_section_with_history`]): a
+    /// checkpoint of a database that keeps history passes the start of its
+    /// retention window.
+    #[must_use]
+    pub fn with_history_from(mut self, from: EpochId) -> Self {
+        self.history_from = Some(from);
+        self
+    }
+
+    /// The root store it writes and reads into.
+    #[must_use]
+    pub fn store(&self) -> &Arc<RowGroupStore> {
+        &self.store
+    }
+}
+
+impl Section for RowGroupStoreSection {
+    fn section_type(&self) -> SectionType {
+        SectionType::LpgStore
+    }
+
+    fn version(&self) -> u8 {
+        LPG_SECTION_VERSION
+    }
+
+    /// Version 4 has no form as one blob: it is written as chunks
+    /// ([`write_to`](Section::write_to)).
+    fn serialize(&self) -> Result<Vec<u8>> {
+        Err(Error::Internal(
+            "the row-group LPG section (version 4) is written as chunks, not as one blob"
+                .to_string(),
+        ))
+    }
+
+    /// Migrates the LPG section of 0.5.x, the block layout `data`, into the
+    /// root and its named graphs, every row through the replay writer (see
+    /// [`LoadTarget`](crate::graph::load::LoadTarget)).
+    fn deserialize(&mut self, data: &[u8]) -> Result<()> {
+        crate::graph::lpg::load_0_5_blocks(&*self.store, data)
+    }
+
+    fn write_to(&self, sink: &mut dyn SectionSink) -> Result<()> {
+        if let Some(snapshot) = &self.snapshot {
+            return write_lpg_snapshot(snapshot, self.caps, sink);
+        }
+        match self.epoch {
+            Some(epoch) => {
+                self.store
+                    .write_section_with_history(epoch, self.history_from, self.caps, sink)
+            }
+            None => self.store.write_section(self.caps, sink),
+        }
+    }
+
+    /// Reads the chunks of version 4 into the root (see
+    /// [`RowGroupStore::read_section`]), and migrates the sections earlier
+    /// releases wrote: the chunks of version 3 (0.6.0-beta.1, read by the
+    /// reader of `graph::lpg`), and the one raw chunk of 0.5.x
+    /// ([`deserialize`](Section::deserialize)). A migrated section's rows
+    /// come in through the replay writer, its dictionaries and ids as the
+    /// file holds them, and the versions they were stamped with collapse
+    /// once each graph is in, so the root holds what a section of version 4
+    /// with the same rows would load; the older versions a temporal file
+    /// keeps are dropped: the history of a migrated file starts at its
+    /// epoch.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Serialization`] for a section of another version;
+    /// [`Error::Corruption`] for chunks the reader refuses.
+    fn read_from(&mut self, source: &dyn SectionSource) -> Result<()> {
+        if let Some(bytes) = legacy_bytes(source)? {
+            return self.deserialize(&bytes);
+        }
+        if source.section_version() == crate::graph::lpg::LPG_SECTION_VERSION_3 {
+            return crate::graph::lpg::read_version_3_chunks(&*self.store, source);
+        }
+        self.store.read_section(source)
+    }
+
+    fn is_dirty(&self) -> bool {
+        self.dirty.load(Ordering::Acquire)
+    }
+
+    fn mark_clean(&self) {
+        self.dirty.store(false, Ordering::Release);
+    }
+
+    fn memory_usage(&self) -> usize {
+        self.store.heap_bytes()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use bytes::Bytes;
     use grafeo_common::storage::{
         ChunkCaps, ChunkKind, ChunkMeta, ChunkNamespace, SectionSink, SectionSource,
     };
-    use grafeo_common::types::{NodeId, Value};
+    use grafeo_common::types::ReadView;
+    use grafeo_common::types::{ArcStr, EdgeId, NodeId, Value};
     use grafeo_common::utils::error::{Error, Result};
 
     use super::{
-        GraphToWrite, LPG_SECTION_VERSION, decode_meta, encode_meta, read_lpg_section,
-        write_lpg_section,
+        GraphToWrite, LPG_SECTION_VERSION, WrittenAdjacency, decode_meta, encode_meta,
+        read_lpg_section, read_lpg_section_with_backward_edges, write_lpg_section,
     };
     use crate::codec::column_chunk::encode_column_chunk;
     use crate::graph::Direction;
-    use crate::graph::apply::ChangeTarget;
+    use crate::graph::apply::GraphBackend;
     use crate::graph::conformance::{LABELS, Rng, Tx, committed, counts, people, random_write};
     use crate::graph::rowgroup::RowGroupStore;
     use crate::graph::traits::GraphStore;
@@ -1387,7 +3278,7 @@ mod tests {
             name: "",
             store,
         }];
-        write_lpg_section(&graphs, 1, caps, &mut chunks).unwrap();
+        write_lpg_section(&graphs, 1, store.current_epoch(), caps, &mut chunks).unwrap();
         chunks
     }
 
@@ -1413,13 +3304,13 @@ mod tests {
             "{what}: the counts"
         );
         assert_eq!(
-            loaded.all_labels(),
-            store.all_labels(),
+            loaded.all_labels().unwrap(),
+            store.all_labels().unwrap(),
             "{what}: the labels"
         );
         assert_eq!(
-            loaded.all_edge_types(),
-            store.all_edge_types(),
+            loaded.all_edge_types().unwrap(),
+            store.all_edge_types().unwrap(),
             "{what}: the edge types"
         );
         assert_eq!(
@@ -1436,9 +3327,23 @@ mod tests {
         assert_eq!(next(loaded), next(store), "{what}: the next ids");
     }
 
+    /// An empty store, the root of a new database, writes the smallest
+    /// metadata a graph has (57 bytes for it), and reads back: the reader
+    /// refused it, taking a graph to need 60 bytes.
+    #[test]
+    fn an_empty_store_round_trips() {
+        let store = RowGroupStore::new();
+        let chunks = write(&store, ChunkCaps::DEFAULT);
+        assert_same(&read(&chunks), &store, "an empty store");
+    }
+
     /// A store after a seeded workload of commits and rollbacks.
     fn workload(seed: u64) -> RowGroupStore {
-        let store = RowGroupStore::new();
+        workload_on(RowGroupStore::new(), seed)
+    }
+
+    /// `store` after the seeded workload of [`workload`].
+    fn workload_on(store: RowGroupStore, seed: u64) -> RowGroupStore {
         let mut rng = Rng::new(seed);
         for transaction in 0..14_u64 {
             let mut tx = Tx::begin(&store, 100 + transaction);
@@ -1486,6 +3391,166 @@ mod tests {
         }
     }
 
+    /// The store a section of one graph loads into, keeping backward edges
+    /// or not.
+    fn read_keeping(chunks: &Chunks, backward_edges: bool) -> RowGroupStore {
+        let (next_graph_id, mut graphs) =
+            read_lpg_section_with_backward_edges(chunks, backward_edges).unwrap();
+        assert_eq!((next_graph_id, graphs.len()), (1, 1));
+        graphs.remove(0).store
+    }
+
+    /// The namespaces of a section's adjacency chunks, and its graph's
+    /// adjacency byte.
+    fn adjacency_of(chunks: &Chunks) -> (usize, usize, WrittenAdjacency) {
+        let count = |namespace: ChunkNamespace| {
+            chunks
+                .metas
+                .iter()
+                .filter(|meta| meta.namespace == namespace)
+                .count()
+        };
+        (
+            count(ChunkNamespace::OutgoingAdjacency),
+            count(ChunkNamespace::IncomingAdjacency),
+            decode_meta(chunks.bytes.last().unwrap()).unwrap().graphs[0].adjacency_written,
+        )
+    }
+
+    /// A store without backward edges (10b) checkpoints its outgoing
+    /// adjacency only, and says so in the metadata (byte 2); the section
+    /// reads back into such a store as the committed state, every incoming
+    /// read included (the image checks them), with no incoming adjacency,
+    /// and the loaded store writes the same chunks again. At the default
+    /// caps and at caps that cut the tables into many row groups.
+    #[test]
+    fn a_store_without_backward_edges_checkpoints_no_incoming_adjacency() {
+        for caps in [
+            ChunkCaps::DEFAULT,
+            ChunkCaps {
+                max_rows: 3,
+                max_bytes: 4_096,
+            },
+        ] {
+            for seed in 1..=6 {
+                let store = workload_on(RowGroupStore::with_backward_edges(false), seed);
+                let chunks = write(&store, caps);
+                let what = format!("seed {seed}, caps {caps:?}");
+                let (outgoing, incoming, written) = adjacency_of(&chunks);
+                assert_eq!(
+                    outgoing > 0,
+                    !committed(&store).edges.is_empty(),
+                    "{what}: the outgoing adjacency is written"
+                );
+                assert_eq!(
+                    (incoming, written),
+                    (0, WrittenAdjacency::Outgoing),
+                    "{what}"
+                );
+                let loaded = read_keeping(&chunks, false);
+                assert!(!loaded.keeps_backward_edges(), "{what}");
+                let again = write(&loaded, caps);
+                assert_same(&loaded, &store, &what);
+                assert_eq!(loaded.memory().incoming_bytes, 0, "{what}");
+                assert!(
+                    again.metas == chunks.metas && again.bytes == chunks.bytes,
+                    "{what}: the loaded store writes the same chunks"
+                );
+            }
+        }
+    }
+
+    /// The store decides the adjacency a section loads into (10b ruling): a
+    /// section written with incoming adjacency loads into a store without
+    /// backward edges with its incoming lists checked and dropped; one
+    /// written without it loads into a store with backward edges with them
+    /// built from the edge table, which then writes what a store that
+    /// always kept them writes.
+    #[test]
+    fn the_store_decides_the_adjacency_a_section_loads() {
+        for seed in 1..=6 {
+            let what = format!("seed {seed}");
+            let kept = workload(seed);
+            let scanned = workload_on(RowGroupStore::with_backward_edges(false), seed);
+            let (with_incoming, without_incoming) = (
+                write(&kept, ChunkCaps::DEFAULT),
+                write(&scanned, ChunkCaps::DEFAULT),
+            );
+            assert_eq!(adjacency_of(&with_incoming).2, WrittenAdjacency::Both);
+
+            let dropped = read_keeping(&with_incoming, false);
+            assert!(!dropped.keeps_backward_edges());
+            let rewritten = write(&dropped, ChunkCaps::DEFAULT);
+            assert_same(&dropped, &kept, &what);
+            assert_eq!(dropped.memory().incoming_bytes, 0, "{what}: dropped");
+            assert!(
+                rewritten.metas == without_incoming.metas
+                    && rewritten.bytes == without_incoming.bytes,
+                "{what}: it writes what a store without backward edges writes"
+            );
+
+            let built = read_keeping(&without_incoming, true);
+            assert!(built.keeps_backward_edges());
+            let rewritten = write(&built, ChunkCaps::DEFAULT);
+            // `assert_same` took an id of `kept`: compared with its twin.
+            assert_same(&built, &scanned, &what);
+            // The writer reads the incoming lists from the built adjacency.
+            assert!(
+                rewritten.metas == with_incoming.metas && rewritten.bytes == with_incoming.bytes,
+                "{what}: it writes what a store that kept them writes"
+            );
+        }
+    }
+
+    /// The adjacency byte names none, both directions or the outgoing one
+    /// only; any other byte is no adjacency the format knows.
+    #[test]
+    fn the_adjacency_byte_names_what_was_written() {
+        for written in [
+            WrittenAdjacency::None,
+            WrittenAdjacency::Both,
+            WrittenAdjacency::Outgoing,
+        ] {
+            assert_eq!(
+                WrittenAdjacency::from_byte(written.to_byte()),
+                Some(written)
+            );
+        }
+        assert_eq!(
+            [0, 1, 2]
+                .map(|byte| WrittenAdjacency::from_byte(byte)
+                    .map(|w| (w.holds(true), w.holds(false)))),
+            [
+                Some((false, false)),
+                Some((true, true)),
+                Some((true, false))
+            ]
+        );
+        assert_eq!(WrittenAdjacency::from_byte(3), None);
+    }
+
+    /// After `collect` at the store's epoch, with no transaction open, the
+    /// version info costs what a store loaded from its checkpoint holds: one
+    /// bit per row, no stamps.
+    #[test]
+    fn after_collect_the_versions_cost_what_a_loaded_stores_do() {
+        for seed in 1..=10 {
+            let store = workload(seed);
+            let flat = read(&write(&store, ChunkCaps::DEFAULT)).version_bytes();
+            assert!(
+                store.stamped_vectors() > 0,
+                "seed {seed}: the workload stamped its vectors"
+            );
+            store.collect(store.current_epoch());
+            assert_eq!(store.version_bytes(), flat, "seed {seed}");
+            assert_same(
+                &read(&write(&store, ChunkCaps::DEFAULT)),
+                &store,
+                "after it",
+            );
+        }
+    }
+
     /// A checkpoint writes the committed state: what an open transaction
     /// created is not in it, and what it deleted still is.
     #[test]
@@ -1504,6 +3569,185 @@ mod tests {
         let found = committed(&loaded);
         found.consistent("the loaded store").unwrap();
         assert_eq!((&found.nodes, &found.edges), (&before.nodes, &before.edges));
+    }
+
+    /// The labels and property keys of the section's label and property
+    /// columns, by name.
+    fn written_names(chunks: &Chunks) -> (Vec<String>, Vec<String>) {
+        let meta = decode_meta(chunks.bytes.last().unwrap()).unwrap();
+        let name = |names: &[(u32, String)], id: u32| {
+            names
+                .iter()
+                .find(|(named, _)| *named == id)
+                .map(|(_, name)| name.clone())
+                .unwrap()
+        };
+        let mut labels = Vec::new();
+        let mut keys = Vec::new();
+        for chunk in &chunks.metas {
+            match chunk.namespace {
+                ChunkNamespace::NodeLabels => {
+                    labels.push(name(&meta.graphs[0].labels.names, chunk.column_id));
+                }
+                ChunkNamespace::NodeProperties | ChunkNamespace::EdgeProperties => {
+                    keys.push(name(&meta.graphs[0].keys.names, chunk.column_id));
+                }
+                _ => {}
+            }
+        }
+        labels.sort();
+        labels.dedup();
+        keys.sort();
+        keys.dedup();
+        (labels, keys)
+    }
+
+    /// A checkpoint during an open write writes values and labels as they
+    /// were committed: what the open transaction set, removed, added or took
+    /// away is not in the section, on nodes and edges, nor a label or key
+    /// only it wrote; after its commit the next checkpoint holds it all.
+    #[test]
+    fn an_open_transactions_values_and_labels_are_not_in_the_section() {
+        let (store, [alix, gus, mia, vincent]) = four_people();
+        let before = committed(&store);
+        let mut tx = Tx::begin(&store, 20);
+        tx.set_node(alix, "age", Value::Int64(88)).unwrap();
+        tx.set_node(vincent, "nickname", Value::from("Vince"))
+            .unwrap();
+        tx.remove_node_value(gus, "name").unwrap();
+        tx.add_label(mia, "Traveller").unwrap();
+        tx.remove_label(gus, "Employee").unwrap();
+        tx.set_edge(EdgeId::new(0), "since", Value::Int64(2030))
+            .unwrap();
+        tx.remove_edge_value(EdgeId::new(1), "since").unwrap();
+
+        let chunks = write(&store, ChunkCaps::DEFAULT);
+        let loaded = read(&chunks);
+        let found = committed(&loaded);
+        found.consistent("the loaded store").unwrap();
+        assert_eq!((&found.nodes, &found.edges), (&before.nodes, &before.edges));
+        let (labels, keys) = written_names(&chunks);
+        assert_eq!(labels, ["Employee", "Person"], "no Traveller column");
+        assert_eq!(keys, ["age", "city", "name", "since"], "no nickname column");
+        assert_eq!(
+            counts(&loaded, &LABELS),
+            counts(&store, &LABELS),
+            "the counts of the committed state"
+        );
+
+        tx.commit().unwrap();
+        assert_same(
+            &read(&write(&store, ChunkCaps::DEFAULT)),
+            &store,
+            "after the commit",
+        );
+    }
+
+    /// A checkpoint at an epoch before the last commit writes what a reader
+    /// at that epoch sees: the creates, deletes, values and labels of the
+    /// later commit are not in it, though its versions are still chained.
+    #[test]
+    fn a_checkpoint_at_an_earlier_epoch_writes_what_a_reader_then_saw() {
+        use crate::graph::conformance::{Reader, image};
+
+        let (store, [alix, gus, mia, _]) = four_people();
+        let earlier = store.current_epoch();
+        let then = image(&store, Reader::At(earlier));
+        let mut tx = Tx::begin(&store, 20);
+        tx.set_node(alix, "age", Value::Int64(88)).unwrap();
+        tx.add_label(alix, "Traveller").unwrap();
+        tx.remove_label(gus, "Employee").unwrap();
+        tx.delete_edge(EdgeId::new(1)).unwrap();
+        tx.delete_node(mia).unwrap();
+        let jules = tx
+            .create_node(&["Person"], &[("name", Value::from("Jules"))])
+            .unwrap();
+        tx.create_edge(jules, alix, "KNOWS", &[]).unwrap();
+        tx.commit().unwrap();
+        assert!(
+            store.update_nodes() > 0,
+            "the commit's versions are chained"
+        );
+
+        let mut chunks = Chunks {
+            version: LPG_SECTION_VERSION,
+            ..Chunks::default()
+        };
+        let graphs = [GraphToWrite {
+            id: 0,
+            name: "",
+            store: &store,
+        }];
+        write_lpg_section(&graphs, 1, earlier, ChunkCaps::DEFAULT, &mut chunks).unwrap();
+        let loaded = read(&chunks);
+        let found = committed(&loaded);
+        found.consistent("the loaded store").unwrap();
+        assert_eq!((&found.nodes, &found.edges), (&then.nodes, &then.edges));
+        assert_eq!(loaded.current_epoch(), earlier, "the section's epoch");
+        assert_eq!(
+            (
+                loaded.node_count(ReadView::latest()).unwrap(),
+                loaded.edge_count(ReadView::latest()).unwrap()
+            ),
+            (then.nodes.len(), then.edges.len())
+        );
+    }
+
+    /// The section of a database file writes its root at the epoch it was
+    /// given, as the container holds sections, and reads it back into a
+    /// root; it refuses bytes that are no 0.5.x section and has no form as
+    /// one blob.
+    #[test]
+    fn the_file_section_writes_at_its_epoch_and_reads_into_a_root() {
+        use std::sync::Arc;
+
+        use grafeo_common::storage::{ImageSource, MemoryImage, Section, SectionType};
+        use grafeo_common::types::ReadView;
+
+        use super::RowGroupStoreSection;
+
+        let (store, [alix, ..]) = four_people();
+        let store = Arc::new(store);
+        let earlier = store.current_epoch();
+        let mut tx = Tx::begin(&*store, 20);
+        tx.set_node(alix, "age", Value::Int64(88)).unwrap();
+        tx.commit().unwrap();
+
+        let section =
+            RowGroupStoreSection::with_caps(Arc::clone(&store), ChunkCaps::DEFAULT).at(earlier);
+        assert_eq!(
+            (section.section_type(), section.version()),
+            (SectionType::LpgStore, LPG_SECTION_VERSION)
+        );
+        let mut image = MemoryImage::new();
+        image
+            .begin_section(section.section_type(), section.version())
+            .unwrap();
+        section.write_to(&mut image).unwrap();
+        let root = Arc::new(RowGroupStore::new());
+        RowGroupStoreSection::new(Arc::clone(&root))
+            .read_from(&*image.section_source(SectionType::LpgStore).unwrap())
+            .unwrap();
+        assert_eq!(root.current_epoch(), earlier);
+        assert_eq!(
+            root.node_property(alix, "age", ReadView::committed(earlier))
+                .unwrap(),
+            Some(Value::Int64(19)),
+            "Alix's age before the later commit"
+        );
+        assert_eq!(root.node_count(ReadView::latest()).unwrap(), 4);
+
+        // A 0.5.x blob is migrated (see `load`); bytes that are none are
+        // refused as damage, and load nothing.
+        let legacy =
+            MemoryImage::from_raw(vec![(SectionType::LpgStore, vec![1, 9, 8, 8])]).unwrap();
+        let empty = Arc::new(RowGroupStore::new());
+        let error = RowGroupStoreSection::new(Arc::clone(&empty))
+            .read_from(&*legacy.section_source(SectionType::LpgStore).unwrap())
+            .unwrap_err();
+        assert!(matches!(error, Error::Corruption(_)), "{error}");
+        assert_eq!(empty.node_count(ReadView::latest()).unwrap(), 0);
+        assert!(section.serialize().is_err(), "no blob form");
     }
 
     /// A node whose list fills a chunk alone is written in pieces with
@@ -1545,10 +3789,22 @@ mod tests {
         assert_eq!(pieces, numbered, "numbered from 0");
         let loaded = read(&chunks);
         assert_same(&loaded, &store, "pieces");
-        assert_eq!(loaded.edges_from(hub, Direction::Incoming).len(), 480);
         assert_eq!(
             loaded
-                .edges_of_type(hub, Direction::Incoming, "KNOWS")
+                .edges(hub, Direction::Incoming, &[], ReadView::latest())
+                .unwrap()
+                .len(),
+            480
+        );
+        assert_eq!(
+            loaded
+                .edges(
+                    hub,
+                    Direction::Incoming,
+                    &[ArcStr::from("KNOWS")],
+                    ReadView::latest()
+                )
+                .unwrap()
                 .len(),
             240
         );
@@ -1569,14 +3825,14 @@ mod tests {
         }
         let last = chunks.bytes.len() - 1;
         let mut meta = decode_meta(&chunks.bytes[last]).unwrap();
-        meta.graphs[0].adjacency_written = false;
+        meta.graphs[0].adjacency_written = WrittenAdjacency::None;
         chunks.bytes[last] = Bytes::from(encode_meta(&meta).unwrap());
         assert_same(&read(&chunks), &store, "rebuilt adjacency");
     }
 
     /// A loaded store keeps its property columns as the file's chunks until
-    /// their first use: a read decodes its own column only, and a write to a
-    /// cold column keeps the column's other rows.
+    /// a write or a read of a complex value needs decoding. Scalar reads
+    /// stay encoded, and writes preserve the column's other rows.
     #[test]
     fn loaded_columns_stay_encoded_until_their_first_use() {
         use grafeo_common::change::DataOp;
@@ -1588,9 +3844,27 @@ mod tests {
         let loaded = read(&write(&store, ChunkCaps::DEFAULT));
         // The nodes' name, age and city, and the edges' since.
         assert_eq!(loaded.cold_columns(), 4, "nothing is decoded by the load");
-        assert_eq!((loaded.node_count(), loaded.edge_count()), (4, 2));
-        assert_eq!(loaded.nodes_by_label("Person").len(), 4);
-        assert_eq!(loaded.edges_from(gus, Direction::Outgoing).len(), 1);
+        assert_eq!(
+            (
+                loaded.node_count(ReadView::latest()).unwrap(),
+                loaded.edge_count(ReadView::latest()).unwrap()
+            ),
+            (4, 2)
+        );
+        assert_eq!(
+            loaded
+                .nodes_by_label("Person", ReadView::latest())
+                .unwrap()
+                .len(),
+            4
+        );
+        assert_eq!(
+            loaded
+                .edges(gus, Direction::Outgoing, &[], ReadView::latest())
+                .unwrap()
+                .len(),
+            1
+        );
         assert_eq!(
             loaded.cold_columns(),
             4,
@@ -1598,9 +3872,20 @@ mod tests {
         );
         let cold_bytes = loaded.heap_bytes();
 
+        assert_eq!(
+            loaded
+                .node_property(gus, "age", ReadView::latest())
+                .unwrap(),
+            Some(Value::Int64(3))
+        );
+        assert_eq!(loaded.cold_columns(), 4, "a scalar read stays encoded");
+        assert_eq!(loaded.heap_bytes(), cold_bytes);
+
         let name = PropertyKey::new("name");
         assert_eq!(
-            loaded.get_node_property(mia, &name),
+            loaded
+                .node_property(mia, name.as_str(), ReadView::latest())
+                .unwrap(),
             Some(Value::from("Mia"))
         );
         assert_eq!(
@@ -1627,21 +3912,90 @@ mod tests {
             .unwrap();
         assert_eq!(loaded.cold_columns(), 2);
         let age = PropertyKey::new("age");
-        assert_eq!(loaded.get_node_property(alix, &age), Some(Value::Int64(88)));
-        assert_eq!(loaded.get_node_property(gus, &age), Some(Value::Int64(3)));
+        assert_eq!(
+            loaded
+                .node_property(alix, age.as_str(), ReadView::latest())
+                .unwrap(),
+            Some(Value::Int64(88))
+        );
+        assert_eq!(
+            loaded
+                .node_property(gus, age.as_str(), ReadView::latest())
+                .unwrap(),
+            Some(Value::Int64(3))
+        );
 
-        // A whole node reads every column of its group.
-        assert!(loaded.get_node(alix).is_some());
+        // Whole entities use the same scalar path; the city string decodes.
+        assert!(loaded.node(alix, ReadView::latest()).unwrap().is_some());
         assert!(
             loaded
-                .get_edge(grafeo_common::types::EdgeId::new(0))
+                .edge(grafeo_common::types::EdgeId::new(0), ReadView::latest())
+                .unwrap()
                 .is_some()
         );
-        assert_eq!(loaded.cold_columns(), 0);
+        assert_eq!(
+            loaded.cold_columns(),
+            1,
+            "the edge's scalar column stays encoded"
+        );
         assert!(
             loaded.heap_bytes() != cold_bytes,
             "the decoded columns are counted"
         );
+    }
+
+    /// A transaction's write to a cold column thaws it (#412 decision Q9)
+    /// and keeps the loaded value for every other reader until its commit,
+    /// and for readers before the commit until a collect at its epoch.
+    #[test]
+    fn a_write_to_a_cold_column_keeps_the_loaded_value_for_other_readers() {
+        use grafeo_common::types::{PropertyKey, ReadView};
+
+        let (store, [alix, gus, ..]) = four_people();
+        let age = PropertyKey::new("age");
+        let (alix_age, gus_age) = (
+            store
+                .node_property(alix, age.as_str(), ReadView::latest())
+                .unwrap(),
+            store
+                .node_property(gus, age.as_str(), ReadView::latest())
+                .unwrap(),
+        );
+        assert!(alix_age.is_some());
+        let loaded = read(&write(&store, ChunkCaps::DEFAULT));
+        let before = ReadView::committed(loaded.current_epoch());
+        let cold = loaded.cold_columns();
+
+        let mut tx = Tx::begin(&loaded, 20);
+        tx.set_node(alix, "age", Value::Int64(88)).unwrap();
+        assert_eq!(
+            loaded.cold_columns(),
+            cold - 1,
+            "the write thawed the column"
+        );
+        let own = ReadView::transaction(tx.id, tx.snapshot);
+        assert_eq!(
+            loaded.node_property(alix, "age", own).unwrap(),
+            Some(Value::Int64(88))
+        );
+        assert_eq!(loaded.node_property(alix, "age", before).unwrap(), alix_age);
+        assert_eq!(loaded.node_property(gus, "age", before).unwrap(), gus_age);
+
+        let epoch = tx.commit().unwrap();
+        let after = ReadView::committed(epoch);
+        assert_eq!(loaded.node_property(alix, "age", before).unwrap(), alix_age);
+        assert_eq!(
+            loaded.node_property(alix, "age", after).unwrap(),
+            Some(Value::Int64(88))
+        );
+        assert_eq!(loaded.update_nodes(), 1);
+        loaded.collect(epoch);
+        assert_eq!(loaded.update_nodes(), 0);
+        assert_eq!(
+            loaded.node_property(alix, "age", after).unwrap(),
+            Some(Value::Int64(88))
+        );
+        assert_eq!(loaded.node_property(gus, "age", after).unwrap(), gus_age);
     }
 
     /// A bitmap chunk of `rows` (ids) in `namespace`, column `column`.
@@ -1682,6 +4036,7 @@ mod tests {
     fn delete_chunks_take_their_rows_out() {
         let (store, [alix, gus, _, vincent]) = four_people();
         let mut chunks = write(&store, ChunkCaps::DEFAULT);
+        let flat = read(&chunks).version_bytes();
         let at = first_edge_chunk(&chunks);
         let (meta, bytes) = bitmap(ChunkNamespace::NodeDeletes, 0, &[vincent.as_u64()]);
         chunks.insert(at, meta, bytes);
@@ -1694,9 +4049,30 @@ mod tests {
         found.consistent("after the delete chunks").unwrap();
         assert!(!found.nodes.contains_key(&vincent.as_u64()) && found.nodes.len() == 3);
         assert_eq!(found.edges.keys().copied().collect::<Vec<_>>(), [1]);
-        assert_eq!(loaded.edges_from(alix, Direction::Outgoing), Vec::new());
-        assert_eq!(loaded.edges_from(gus, Direction::Incoming), Vec::new());
-        assert_eq!((loaded.node_count(), loaded.edge_count()), (3, 1));
+        assert_eq!(
+            loaded
+                .edges(alix, Direction::Outgoing, &[], ReadView::latest())
+                .unwrap(),
+            Vec::new()
+        );
+        assert_eq!(
+            loaded
+                .edges(gus, Direction::Incoming, &[], ReadView::latest())
+                .unwrap(),
+            Vec::new()
+        );
+        assert_eq!(
+            (
+                loaded.node_count(ReadView::latest()).unwrap(),
+                loaded.edge_count(ReadView::latest()).unwrap()
+            ),
+            (3, 1)
+        );
+        assert_eq!(
+            loaded.version_bytes(),
+            flat,
+            "the deleted rows leave every vector flat, with one bit per row"
+        );
     }
 
     /// Every section a writer does not write is refused as corruption,
@@ -1793,8 +4169,18 @@ mod tests {
             ),
             (
                 "adjacency chunks in a graph that wrote none",
-                with_meta(|meta| meta.graphs[0].adjacency_written = false),
+                with_meta(|meta| meta.graphs[0].adjacency_written = WrittenAdjacency::None),
                 "says none was written",
+            ),
+            (
+                "incoming adjacency chunks in a graph that wrote the outgoing only",
+                with_meta(|meta| meta.graphs[0].adjacency_written = WrittenAdjacency::Outgoing),
+                "says only the outgoing one was written",
+            ),
+            (
+                "an incoming adjacency chunk missing",
+                without(first(ChunkNamespace::IncomingAdjacency)),
+                "adjacency lists 0 edges in direction 1",
             ),
             (
                 "a node count the chunks do not hold",

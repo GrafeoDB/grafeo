@@ -7,12 +7,12 @@ public sealed class PersistenceTests
 {
     private static string TempDbPath(string name)
     {
-        var dir = Path.Combine(Path.GetTempPath(), $"grafeo-csharp-{Guid.NewGuid():N}");
+        var dir = Path.Join(Path.GetTempPath(), $"grafeo-csharp-{Guid.NewGuid():N}");
         Directory.CreateDirectory(dir);
         var fileName = Path.GetFileName(name);
         if (string.IsNullOrEmpty(fileName))
             fileName = "db.grafeo";
-        return Path.Combine(dir, fileName);
+        return Path.Join(dir, fileName);
     }
 
     private static void Cleanup(string dbPath)
@@ -27,6 +27,50 @@ public sealed class PersistenceTests
         {
             // Best-effort cleanup in tests: ignore permission issues when deleting the temp directory.
         }
+    }
+
+    [Fact]
+    public void DetachDeleteNodeRemovesItsEdges()
+    {
+        using var db = GrafeoDB.Memory();
+        var alix = db.CreateNode(["Person"]);
+        var gus = db.CreateNode(["Person"]);
+        db.CreateEdge(alix, gus, "KNOWS");
+        Assert.True(db.DetachDeleteNode(gus));
+        Assert.Equal(1L, db.NodeCount);
+        Assert.Equal(0L, db.EdgeCount);
+        Assert.False(db.DetachDeleteNode(gus));
+    }
+
+    [Fact]
+    public void CheckpointTriggersReadBack()
+    {
+        var dbPath = TempDbPath("triggers.grafeo");
+        try
+        {
+            using var db = GrafeoDB.Open(dbPath);
+            db.SetCheckpointTriggers(TimeSpan.FromMilliseconds(300), 64UL << 20);
+            var status = db.CheckpointStatus();
+            Assert.Equal(300L, Convert.ToInt64(status["interval_ms"]));
+            Assert.Equal(64L << 20, Convert.ToInt64(status["wal_bytes"]));
+            Assert.Equal(0L, Convert.ToInt64(status["failures"]));
+
+            db.SetCheckpointTriggers();
+            status = db.CheckpointStatus();
+            Assert.Null(status["interval_ms"]);
+            Assert.Null(status["wal_bytes"]);
+        }
+        finally
+        {
+            Cleanup(dbPath);
+        }
+    }
+
+    [Fact]
+    public void CheckpointTriggersRefusedInMemory()
+    {
+        using var db = GrafeoDB.Memory();
+        Assert.ThrowsAny<GrafeoException>(() => db.SetCheckpointTriggers(walBytes: 1024));
     }
 
     [Fact]

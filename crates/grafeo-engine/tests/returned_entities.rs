@@ -9,7 +9,7 @@
 //! cargo test -p grafeo-engine --all-features --test returned_entities
 //! ```
 
-#![cfg(all(feature = "lpg", feature = "gql"))]
+#![cfg(feature = "gql")]
 
 use grafeo_common::types::{PropertyKey, Value};
 use grafeo_engine::{Config, GrafeoDB};
@@ -443,5 +443,65 @@ fn an_edge_and_a_node_from_one_union_step_are_both_records() {
             [["K w=Int64(1)"], ["n=Int64(2)"]],
             "{query}"
         );
+    }
+}
+
+/// A returned edge names its stored endpoints (#268: `RETURN a, r, b` gave
+/// `r` as an integer): `_source` is the id of the node it leaves and
+/// `_target` of the node it enters, also when the pattern reads it from its
+/// target (`(b)<-[r]-(a)`), in GQL and Cypher, with its type and properties.
+#[test]
+fn edge_records_name_their_endpoints() {
+    let db = GrafeoDB::new_in_memory();
+    db.execute("INSERT (:Person {name: 'Alix'})-[:KNOWS {since: 2020}]->(:Person {name: 'Gus'})")
+        .unwrap();
+    let id_of = |name: &str| {
+        db.execute(&format!("MATCH (p:Person {{name: '{name}'}}) RETURN id(p)"))
+            .unwrap()
+            .rows()[0][0]
+            .clone()
+    };
+    let (alix, gus) = (id_of("Alix"), id_of("Gus"));
+    for (language, query) in [
+        ("gql", "MATCH (a)-[r:KNOWS]->(b) RETURN a, r, b"),
+        ("gql", "MATCH (b)<-[r:KNOWS]-(a) RETURN a, r, b"),
+        ("cypher", "MATCH (a)-[r:KNOWS]->(b) RETURN a, r, b"),
+        ("cypher", "MATCH (b)<-[r:KNOWS]-(a) RETURN a, r, b"),
+    ] {
+        let result = match language {
+            "gql" => db.execute(query),
+            _ => db.execute_cypher(query),
+        }
+        .unwrap_or_else(|error| panic!("{language}: {query}: {error}"));
+        let row = &result.rows()[0];
+        let Value::Map(edge) = &row[1] else {
+            panic!(
+                "{language}: {query}: the edge is a record, got {:?}",
+                row[1]
+            );
+        };
+        let get = |key: &str| edge.get(&PropertyKey::new(key)).cloned();
+        assert_eq!(get("_source"), Some(alix.clone()), "{language}: {query}");
+        assert_eq!(get("_target"), Some(gus.clone()), "{language}: {query}");
+        assert_eq!(
+            get("_type"),
+            Some(Value::from("KNOWS")),
+            "{language}: {query}"
+        );
+        assert_eq!(
+            get("since"),
+            Some(Value::Int64(2020)),
+            "{language}: {query}"
+        );
+        for (index, name) in [(0, "Alix"), (2, "Gus")] {
+            let Value::Map(node) = &row[index] else {
+                panic!("{language}: {query}: node {index} is a record");
+            };
+            assert_eq!(
+                node.get(&PropertyKey::new("name")),
+                Some(&Value::from(name)),
+                "{language}: {query}"
+            );
+        }
     }
 }

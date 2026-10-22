@@ -2,7 +2,7 @@
 //! row, also when the key comes from the row (`UNWIND`, an earlier `MATCH`):
 //! the results are those of a scan, only without scanning.
 
-#![cfg(all(feature = "lpg", feature = "gql"))]
+#![cfg(feature = "gql")]
 
 use std::collections::HashMap;
 
@@ -170,8 +170,7 @@ fn a_labeled_point_lookup_does_not_grow_with_the_label() {
     use std::time::{Duration, Instant};
 
     let db = GrafeoDB::new_in_memory();
-    // In batches: with the `tiered-storage` feature one transaction can create
-    // about 20,000 nodes until tiered storage is wired in (#433).
+    // In batches of 15,000 nodes, one statement each.
     for start in (0..60_000).step_by(15_000) {
         db.execute(&format!(
             "UNWIND range({start}, {}) AS i INSERT (:Graph:File {{id: 'n' + toString(i)}})",
@@ -274,7 +273,7 @@ fn a_clock_key_is_not_looked_up() {
         "p + toString(zoneddatetime())",
         "p + toString(current_date())",
         "p + toString(timestamp())",
-        "p + toString(randomUUID())",
+        "p + toString(rand())",
     ] {
         let plan = lookup(changing);
         assert!(!plan.contains("[index"), "{changing}: {plan}");
@@ -287,6 +286,25 @@ fn a_clock_key_is_not_looked_up() {
     ] {
         let plan = lookup(fixed);
         assert!(plan.contains("[index: id]"), "{fixed}: {plan}");
+    }
+}
+
+/// A key that reads an entity's labels or id is looked up: an entity function
+/// returns the same value for the same entity within a statement.
+#[test]
+fn a_key_from_an_entity_function_is_looked_up() {
+    let from_labels = "MATCH (a:Doc {n: 3}) MATCH (b:Doc {id: 'd' + toString(a.n + size(labels(a)))}) RETURN b.id";
+    for indexed in [false, true] {
+        let db = docs(indexed);
+        assert_eq!(rows(&db, from_labels, &[]), vec![vec![Value::from("d4")]]);
+    }
+    let db = docs(true);
+    for query in [
+        from_labels,
+        "MATCH (a:Doc {n: 3}) MATCH (b:Doc {id: toString(id(a))}) RETURN b.id",
+    ] {
+        let plan = plan(&db, query);
+        assert!(plan.contains("[index: id]"), "{query}: {plan}");
     }
 }
 

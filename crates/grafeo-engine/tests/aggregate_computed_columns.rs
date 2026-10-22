@@ -10,7 +10,7 @@
 //! cargo test -p grafeo-engine --all-features --test aggregate_computed_columns
 //! ```
 
-#![cfg(all(feature = "lpg", feature = "gql"))]
+#![cfg(feature = "gql")]
 
 use grafeo_common::types::{PropertyKey, Value};
 use grafeo_engine::GrafeoDB;
@@ -20,6 +20,7 @@ const LANGUAGES: &[&str] = &["gql", "cypher"];
 #[cfg(not(feature = "cypher"))]
 const LANGUAGES: &[&str] = &["gql"];
 
+/// Floats in the scores (`3.5e0`: in GQL `3.5` is a decimal).
 /// Alix (age 3, score 3.5, active, tags [Amsterdam], nick Al), Gus (age 19,
 /// score 19.25, not active, tags [Berlin, Paris], no nick) and Mia (age 88,
 /// score 88.5, active, no tags, no nick); Alix knows Gus (w 3) and Gus knows
@@ -27,11 +28,11 @@ const LANGUAGES: &[&str] = &["gql"];
 fn people() -> GrafeoDB {
     let db = GrafeoDB::new_in_memory();
     db.execute(
-        "INSERT (alix:Person {name: 'Alix', age: 3, score: 3.5, active: true, \
+        "INSERT (alix:Person {name: 'Alix', age: 3, score: 3.5e0, active: true, \
          tags: ['Amsterdam'], nick: 'Al'}), \
-         (gus:Person {name: 'Gus', age: 19, score: 19.25, active: false, \
+         (gus:Person {name: 'Gus', age: 19, score: 19.25e0, active: false, \
          tags: ['Berlin', 'Paris']}), \
-         (mia:Person {name: 'Mia', age: 88, score: 88.5, active: true, tags: []}), \
+         (mia:Person {name: 'Mia', age: 88, score: 88.5e0, active: true, tags: []}), \
          (alix)-[:KNOWS {w: 3}]->(gus), (gus)-[:KNOWS {w: 19}]->(mia)",
     )
     .unwrap();
@@ -151,7 +152,7 @@ fn a_literal_group_key_keeps_floats_booleans_lists_and_maps() {
 fn a_constant_group_key_over_unwound_floats_keeps_the_floats() {
     check(
         &people(),
-        "UNWIND [2.5, 3.5] AS x RETURN 0 AS g, collect(x) AS xs, sum(x) AS total",
+        "UNWIND [2.5e0, 3.5e0] AS x RETURN 0 AS g, collect(x) AS xs, sum(x) AS total",
         &[&["0", "[2.5, 3.5]", "6.0"]],
     );
 }

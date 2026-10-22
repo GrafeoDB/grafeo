@@ -30,13 +30,17 @@ console.log(results); // [{name: "Alix", age: 30}, {name: "Gus", age: 25}]
 
 ```javascript
 const db = new Database();   // in-memory (all WASM databases are in-memory)
+const kept = new Database({ historyRetention: 60 * 60 * 1000 });  // keeps an hour of history
 ```
+
+`historyRetention` is `'off'` (the default), `'forever'` or a number of milliseconds: how much history the
+database keeps for [time-travel reads](#time-travel).
 
 ## Query Methods
 
 ```javascript
 db.execute(gql);                              // GQL: returns array of row objects
-db.executeRaw(gql);                          // GQL: returns {columns, rows, executionTimeMs}
+db.executeRaw(gql);                          // GQL: returns {columns, rows, executionTimeMs, counters}, and profile for PROFILE
 db.executeWithParams(gql, params);           // GQL with parameter binding
 db.executeWithLanguage(query, language);     // "gql", "cypher", "graphql", etc.
 db.executeWithLanguageAndParams(query, language, params);  // language + params
@@ -50,13 +54,46 @@ db.executeRawWithParams(gql, params);        // raw result with parameter bindin
 db.executeRawWithLanguageAndParams(query, language, params);  // raw result, language + params
 ```
 
+A raw result's `counters` tell what a write changed: `nodesCreated`, `nodesDeleted`, `edgesCreated`,
+`edgesDeleted`, `propertiesSet`, `labelsAdded` and `labelsRemoved` (all zero for a read).
+
+## Time Travel
+
+A point in time is a `bigint` (an epoch), a `Date` (the last commit at or before it) or `{ ago: milliseconds }`. A
+plain `number` throws a `TypeError`: it could be either an epoch or a time. A point before the history the database
+keeps throws ("not retained").
+
+```javascript
+const then = db.currentEpoch();                           // a bigint
+const view = db.asOf({ ago: 5 * 60 * 1000 });            // read-only, as five minutes ago
+view.execute("MATCH (p:Person) RETURN count(p) AS n");   // also executeWithParams and executeRaw
+view.close();                                             // releases the history it keeps
+db.executeAsOf("MATCH (p:Person) RETURN p.name", then);  // one query, optional params
+db.epochAsOf(new Date("2026-03-01T12:00:00+01:00"));     // the epoch a point reads at
+```
+
+A query that writes through a view throws.
+
 ## Properties
 
 ```javascript
+db.getNodeEdges(id, { direction: "out", edgeTypes: ["KNOWS"] });  // [[neighborId, edgeId], ...]
 db.nodeCount();   // number of nodes
 db.edgeCount();   // number of edges
 db.schema();      // database schema as JSON
 Database.version(); // Grafeo version string
+```
+
+## Decimals
+
+An exact decimal (GQL `1.50`, `CAST(x AS DECIMAL(10, 2))`, SPARQL
+`xsd:decimal`) comes back as `{ $decimal: '1.50' }`, its text with its scale,
+and such an object passed as a parameter is a decimal. With other keys beside
+`$decimal`, the object is a map.
+
+```javascript
+db.execute("RETURN 0.1 + 0.2 AS x");      // [{ x: { $decimal: '0.3' } }]
+db.executeWithParams("RETURN $p * 3 AS x", { p: { $decimal: '0.10' } });  // { $decimal: '0.30' }
 ```
 
 ## Text Search
@@ -85,8 +122,8 @@ Combine BM25 text scores with HNSW vector similarity:
 
 ```javascript
 // Create indexes via GQL queries
-db.execute("CREATE TEXT INDEX ON Document(content)");
-db.execute("CREATE VECTOR INDEX ON Document(embedding) OPTIONS {dimensions: 384}");
+db.execute("CREATE INDEX document_content FOR (d:Document) ON (d.content) USING TEXT");
+db.execute("CREATE VECTOR INDEX document_embedding ON :Document(embedding) DIMENSION 384");
 
 const results = db.hybridSearch(
     "Document",
@@ -124,6 +161,45 @@ console.log(result); // { nodes: 2, edges: 1 }
 
 Edge `source` and `target` are zero-based indexes into the `nodes` array from the same call.
 
+### Batches and Upserts
+
+The batches, upserts and graph handles (below) need the `direct-api` feature, which the `lpg` and
+`full` builds include (`@grafeo-db/wasm`); the lite `edge` build leaves them out to keep its size.
+
+```javascript
+// One transaction each; IDs in input order
+const ids = db.batchCreateNodesWithProps(["Person"], [{ name: "Alix" }, { name: "Gus" }]);
+db.batchCreateEdges([{ src: ids[0], dst: ids[1], type: "KNOWS", properties: { since: 2020 } }]);
+
+// Create or update by a key property: {created, updated, skipped, skippedRows}
+db.upsertNodes(["File"], [{ path: "a.rs", size: 3 }], { key: "path" });
+db.upsertEdges("IMPORTS", [{ id: "a-b", src: "a.rs", dst: "b.rs" }],
+    { endpointKey: "path", endpointLabels: ["File"] });
+```
+
+An edge to a missing node fails the edge batch and writes nothing. A node row without the key is
+skipped, and so is an edge row whose endpoint matches no node or several; endpoints are never
+created. The upsert options are `key` and `replace`, and for edges also `endpointKey`,
+`endpointLabels`, `srcField` and `dstField`. Upserts run in the open transaction when there is one;
+the batches commit on their own, so they throw while a transaction is open.
+
+With the `vector-index` feature, `db.batchVectorSearch(label, property, queries, k, { ef, filters })`
+searches several query vectors at once and returns one `[{id, distance}]` array per query.
+
+### Named Graphs
+
+With the `direct-api` feature, `db.graph(name)` returns a `GraphHandle` that works in one named graph without switching the current
+graph: the `execute*` and `executeRaw*` methods, `batchCreateNodesWithProps`, `batchCreateEdges`,
+`upsertNodes`, `upsertEdges`, and its `name`. Each call runs on its own, so a call throws while the
+database has a transaction open, once the graph is dropped, and after `db.close()`.
+
+```javascript
+db.execute("CREATE GRAPH trips");
+const trips = db.graph("trips");
+trips.execute("INSERT (:City {name: 'Prague'})");
+trips.execute("MATCH (c:City) RETURN c.name");  // the default graph stays empty
+```
+
 ### RDF Import
 
 Requires the `rdf` feature flag.
@@ -155,7 +231,7 @@ Objects can be a plain string (treated as IRI), or a structured literal with `va
 
 ## Compact Store
 
-`compact()` drops the old versions no open transaction can see any more and returns what it did: `{ checkpointed, versions_collected, duration_ms }` (a database in memory, as every WASM database is, writes no checkpoint). Since 0.6.0 it no longer builds a separate columnar store. See the [Compact Store guide](../../user-guide/compact-store.md).
+`compact()` drops the old versions no open transaction can see any more, compresses the property values held decoded in memory and returns what it did: `{ checkpointed, versions_collected, rows_compressed, duration_ms }` (a database in memory, as every WASM database is, writes no checkpoint). Since 0.6.0 it no longer builds a separate columnar store. See the [Compact Store guide](../../user-guide/compact-store.md).
 
 ```javascript
 const report = db.compact();

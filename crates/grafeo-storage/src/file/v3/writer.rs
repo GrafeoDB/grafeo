@@ -3,16 +3,50 @@
 //! Streams the chunks of each section into free pages (copy-on-write: the
 //! allocator never hands out a page the active image uses), then writes the
 //! chained directory.
+//!
+//! A writer that follows an image (see [`CheckpointWriter::following`]) lets
+//! each section put chunks of that image into the new one as they are
+//! ([`SectionSink::reuse_chunk`]): the new directory points at the pages the
+//! image stores them in, so a checkpoint writes only the chunks that changed
+//! (#430). Those pages are the active image's, which the allocator never
+//! hands out, and they become the new image's too.
 
 use std::fs::File;
 
-use grafeo_common::storage::{ChunkIdentities, ChunkMeta, SectionSink, SectionType};
+use grafeo_common::storage::{
+    ChunkIdentities, ChunkMeta, ImageId, SectionSink, SectionSource, SectionType,
+};
 use grafeo_common::utils::error::{Error, Result};
 
 use super::alloc::{PageAllocator, PageRun};
 use super::cipher::{ChunkCipher, ENCRYPTION_OVERHEAD, chunk_aad_for};
 use super::directory::{DirectoryEntry, ENTRY_SIZE, encode_blocks_raw};
 use super::header::{BlockRef, PAGE_SIZE};
+use super::reader::{ImageReader, SectionChunks};
+
+/// What a checkpoint wrote: the chunks it stored and the bytes they take,
+/// and the chunks it took over from the image it follows, which cost no
+/// write.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct CheckpointStats {
+    /// Chunks whose bytes the checkpoint wrote (chunks without bytes
+    /// included).
+    pub chunks_written: usize,
+    /// The bytes those chunks are stored in (an encrypted chunk with its
+    /// nonce and tag); directory blocks are not counted.
+    pub bytes_written: u64,
+    /// Chunks of the image it follows that the new image points at as they
+    /// are.
+    pub chunks_reused: usize,
+    /// The bytes those chunks are stored in.
+    pub bytes_reused: u64,
+    /// Of the reused chunks, those copied as they are stored into free pages
+    /// nearer the start of the file, so the file can shrink (see
+    /// [`CheckpointWriter::following`]).
+    pub chunks_moved: usize,
+    /// The bytes those chunks are stored in.
+    pub bytes_moved: u64,
+}
 
 /// Where a stored chunk lies: offset, stored length and CRC of the stored
 /// bytes.
@@ -84,12 +118,19 @@ fn write_at(file: &File, offset: u64, bytes: &[u8]) -> Result<()> {
 
 /// Writes the chunks of one checkpoint into pages the active header does not reach.
 pub struct CheckpointWriter<'a> {
-    file: &'a mut File,
+    file: &'a File,
     pages: PageAllocator,
     cipher: Option<&'a ChunkCipher>,
     entries: Vec<DirectoryEntry>,
     runs: Vec<PageRun>,
     current: Option<(SectionType, u8)>,
+    /// The image the checkpoint follows, whose chunks a section may reuse.
+    following: Option<(ImageId, &'a ImageReader<'a>)>,
+    /// That image's chunks of the current section.
+    previous: Option<SectionChunks<'a>>,
+    /// Whether a reused chunk moves into a free run before it.
+    relocate: bool,
+    stats: CheckpointStats,
     /// Section types begun so far, in order.
     begun: Vec<SectionType>,
     /// The identities the current section has used.
@@ -104,7 +145,7 @@ impl<'a> CheckpointWriter<'a> {
     /// Creates a writer allocating from `pages`; `cipher` is `None` for a
     /// plain image. Encrypted blocks get a random nonce each, because a
     /// retried checkpoint reuses the same offsets under the same key.
-    pub fn new(file: &'a mut File, pages: PageAllocator, cipher: Option<&'a ChunkCipher>) -> Self {
+    pub fn new(file: &'a File, pages: PageAllocator, cipher: Option<&'a ChunkCipher>) -> Self {
         Self {
             file,
             pages,
@@ -112,11 +153,49 @@ impl<'a> CheckpointWriter<'a> {
             entries: Vec::new(),
             runs: Vec::new(),
             current: None,
+            following: None,
+            previous: None,
+            relocate: false,
+            stats: CheckpointStats::default(),
             begun: Vec::new(),
             identities: ChunkIdentities::default(),
             #[cfg(test)]
             foreign: Vec::new(),
         }
+    }
+
+    /// The same writer following `image`, the image `reader` reads: each
+    /// section is offered that image's chunks of it
+    /// ([`SectionSink::previous`]) and may reuse them. Every page of
+    /// `reader`'s image must be among those the allocator spares (the active
+    /// image's are), so no chunk is written over a reused one.
+    ///
+    /// A reused chunk stays where it is, unless at least half of the pages
+    /// the image spans are free: then a reused chunk that fits a free run
+    /// before it is copied there as it is stored (its bytes, CRC and, for an
+    /// encrypted file, nonce stay valid: a chunk's associated data does not
+    /// name its offset), so the new image packs towards the start of the file
+    /// and the file is cut after it. A file whose data shrank then shrinks
+    /// too, instead of keeping its reused chunks where its end was.
+    #[must_use]
+    pub fn following(mut self, image: ImageId, reader: &'a ImageReader<'a>) -> Self {
+        let runs = reader.used_runs();
+        let used: u64 = runs.iter().map(|run| run.count).sum();
+        let end = runs
+            .iter()
+            .map(|run| run.first + run.count)
+            .max()
+            .unwrap_or(super::header::DATA_START_PAGE);
+        let span = end.saturating_sub(super::header::DATA_START_PAGE);
+        self.relocate = span.saturating_sub(used) >= used;
+        self.following = Some((image, reader));
+        self
+    }
+
+    /// What the writer wrote and reused so far.
+    #[must_use]
+    pub fn stats(&self) -> CheckpointStats {
+        self.stats
     }
 
     /// Starts a section; the chunks written next belong to it, and their
@@ -140,6 +219,9 @@ impl<'a> CheckpointWriter<'a> {
         self.begun.push(section_type);
         self.current = Some((section_type, version));
         self.identities = ChunkIdentities::default();
+        self.previous = self
+            .following
+            .and_then(|(_, reader)| reader.section(section_type));
         Ok(())
     }
 
@@ -247,6 +329,7 @@ impl<'a> CheckpointWriter<'a> {
         let crc = crc32fast::hash(stored);
         write_at(self.file, offset, stored)?;
         self.runs.push(run);
+        self.stats.bytes_written += stored_length;
         Ok(Stored {
             offset,
             length: stored_length,
@@ -332,6 +415,78 @@ impl SectionSink for CheckpointWriter<'_> {
             crc: stored.crc,
             flags: DirectoryEntry::flags_for(section_type, meta.kind),
         });
+        self.stats.chunks_written += 1;
+        Ok(())
+    }
+
+    fn previous(&self) -> Option<(ImageId, &dyn SectionSource)> {
+        let (image, _) = self.following?;
+        let previous = self.previous.as_ref()?;
+        Some((image, previous as &dyn SectionSource))
+    }
+
+    /// Points the new image at the pages chunk `index` of the followed
+    /// image's section is stored in, with its directory entry as it was.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Internal`] when no section is current, the writer
+    /// follows no image or the image has no chunk `index` of the section, or
+    /// the chunk carries another section version than the current section;
+    /// the error of a repeated identity. A refused chunk changes nothing.
+    fn reuse_chunk(&mut self, index: usize) -> Result<()> {
+        let (section_type, section_version) = self
+            .current
+            .ok_or_else(|| Error::Internal("chunk reused before a section began".to_string()))?;
+        let entry = self
+            .previous
+            .as_ref()
+            .and_then(|previous| previous.entry(index))
+            .copied()
+            .ok_or_else(|| {
+                Error::Internal(format!(
+                    "section {section_type:?}: the image this checkpoint follows has no chunk \
+                     {index} to reuse"
+                ))
+            })?;
+        if entry.section_version != section_version {
+            return Err(Error::Internal(format!(
+                "section {section_type:?}: chunk {index} of the image this checkpoint follows is \
+                 of version {}, the section is written as version {section_version}",
+                entry.section_version
+            )));
+        }
+        self.identities.insert(section_type, &entry.meta)?;
+        let mut offset = entry.offset;
+        if entry.length > 0 {
+            let run = entry.run();
+            match self
+                .relocate
+                .then(|| self.pages.allocate_before(run.count, run.first))
+                .flatten()
+            {
+                Some(target) => {
+                    let stored = self
+                        .previous
+                        .as_ref()
+                        .expect("the entry came from it")
+                        .stored_bytes(index)?;
+                    offset = target.offset()?;
+                    write_at(self.file, offset, &stored)?;
+                    self.runs.push(target);
+                    self.stats.chunks_moved += 1;
+                    self.stats.bytes_moved += entry.length;
+                }
+                None => self.runs.push(run),
+            }
+        }
+        self.stats.chunks_reused += 1;
+        self.stats.bytes_reused += entry.length;
+        self.entries.push(DirectoryEntry {
+            flags: DirectoryEntry::flags_for(section_type, entry.meta.kind),
+            offset,
+            ..entry
+        });
         Ok(())
     }
 }
@@ -362,7 +517,7 @@ mod tests {
         use grafeo_common::storage::{ChunkMeta, SectionSink, SectionType};
 
         let dir = tempfile::tempdir().unwrap();
-        let mut file = open(&dir);
+        let file = open(&dir);
         // Every page up to the last whole page of the offset range is in use.
         let last = u64::MAX / PAGE_SIZE;
         let pages = PageAllocator::from_used([PageRun {
@@ -371,7 +526,7 @@ mod tests {
         }])
         .unwrap();
         assert!(pages.free_runs().is_empty() && pages.end_page() == last);
-        let mut writer = CheckpointWriter::new(&mut file, pages, None);
+        let mut writer = CheckpointWriter::new(&file, pages, None);
         writer.begin_section(SectionType::LpgStore, 1).unwrap();
         let error = writer
             .write_chunk(ChunkMeta::raw(), b"Gus")
@@ -392,9 +547,8 @@ mod tests {
         use grafeo_common::storage::{ChunkMeta, SectionSink, SectionSource, SectionType};
 
         let dir = tempfile::tempdir().unwrap();
-        let mut file = open(&dir);
-        let mut writer =
-            CheckpointWriter::new(&mut file, PageAllocator::from_used([]).unwrap(), None);
+        let file = open(&dir);
+        let mut writer = CheckpointWriter::new(&file, PageAllocator::from_used([]).unwrap(), None);
         writer.begin_section(SectionType::LpgStore, 3).unwrap();
         writer
             .write_chunk(ChunkMeta::column(0, 16, 0, 3, 7), b"Alix")
@@ -429,7 +583,7 @@ mod tests {
             !bytes.windows(3).any(|window| window == b"Gus"),
             "the refused chunk's bytes were not written"
         );
-        let reader = ImageReader::open(&mut file, root, None).unwrap();
+        let reader = ImageReader::open(&file, root, None).unwrap();
         let store = reader.section(SectionType::LpgStore).unwrap();
         assert_eq!(store.chunks(), [ChunkMeta::column(0, 16, 0, 3, 7)]);
         assert_eq!(
@@ -448,9 +602,8 @@ mod tests {
         use grafeo_common::storage::{ChunkMeta, SectionSink, SectionType};
 
         let dir = tempfile::tempdir().unwrap();
-        let mut file = open(&dir);
-        let mut writer =
-            CheckpointWriter::new(&mut file, PageAllocator::from_used([]).unwrap(), None);
+        let file = open(&dir);
+        let mut writer = CheckpointWriter::new(&file, PageAllocator::from_used([]).unwrap(), None);
         writer.begin_section(SectionType::LpgStore, 3).unwrap();
         writer.write_chunk(ChunkMeta::meta(), b"").unwrap();
         let error = writer
@@ -467,8 +620,8 @@ mod tests {
             1,
             "the directory block only: chunks without bytes take no page"
         );
-        let reader = ImageReader::open(&mut file, root, None)
-            .expect("every image the writer finishes opens");
+        let reader =
+            ImageReader::open(&file, root, None).expect("every image the writer finishes opens");
         assert_eq!(
             reader.entries().len(),
             1,
@@ -479,8 +632,8 @@ mod tests {
     #[test]
     fn an_image_without_chunks_still_has_one_directory_block() {
         let dir = tempfile::tempdir().unwrap();
-        let mut file = open(&dir);
-        let writer = CheckpointWriter::new(&mut file, PageAllocator::from_used([]).unwrap(), None);
+        let file = open(&dir);
+        let writer = CheckpointWriter::new(&file, PageAllocator::from_used([]).unwrap(), None);
         let (root, runs) = writer.finish().unwrap();
         assert_eq!(
             runs,
@@ -497,7 +650,7 @@ mod tests {
             root.offset + u64::from(root.length),
             "the block is on disk"
         );
-        let reader = ImageReader::open(&mut file, root, None).unwrap();
+        let reader = ImageReader::open(&file, root, None).unwrap();
         assert_eq!(reader.entries(), [], "no chunks");
         assert_eq!(reader.used_runs(), runs);
     }
@@ -509,21 +662,18 @@ mod tests {
         let alix = PageEncryptor::new(&[3u8; 32]);
         let gus = PageEncryptor::new(&[19u8; 32]);
         let dir = tempfile::tempdir().unwrap();
-        let mut file = open(&dir);
-        let writer = CheckpointWriter::new(
-            &mut file,
-            PageAllocator::from_used([]).unwrap(),
-            Some(&alix),
-        );
+        let file = open(&dir);
+        let writer =
+            CheckpointWriter::new(&file, PageAllocator::from_used([]).unwrap(), Some(&alix));
         let (root, _) = writer.finish().unwrap();
         assert_eq!(
-            ImageReader::open(&mut file, root, Some(&alix))
+            ImageReader::open(&file, root, Some(&alix))
                 .unwrap()
                 .entries(),
             [],
             "the right key reads the empty directory"
         );
-        let wrong = ImageReader::open(&mut file, root, Some(&gus))
+        let wrong = ImageReader::open(&file, root, Some(&gus))
             .map(|_| ())
             .unwrap_err()
             .to_string();

@@ -45,17 +45,23 @@ func (db *Database) CreateNode(labels []string, properties map[string]any) (*Nod
 	return &Node{ID: id, Labels: labels, Properties: properties}, nil
 }
 
-// GetNode retrieves a node by ID. Returns nil if not found.
+// GetNode retrieves a node by ID: ErrNotFound when it does not exist, and
+// another error for a read that fails.
 func (db *Database) GetNode(id uint64) (*Node, error) {
 	var cNode *C.GrafeoNode
-	runtime.LockOSThread()
-	status := C.grafeo_get_node(db.handle, C.uint64_t(id), &cNode)
-	if status != C.GRAFEO_OK {
-		err := statusToError(status)
-		runtime.UnlockOSThread()
+	if err := lockAndCheckStatus(func() C.GrafeoStatus {
+		return C.grafeo_get_node(db.handle, C.uint64_t(id), &cNode)
+	}); err != nil {
 		return nil, err
 	}
-	runtime.UnlockOSThread()
+	if cNode == nil {
+		return nil, notFound("node", id)
+	}
+	return nodeFromC(cNode), nil
+}
+
+// nodeFromC copies and frees a node a C call handed out.
+func nodeFromC(cNode *C.GrafeoNode) *Node {
 	defer C.grafeo_free_node(cNode)
 
 	nodeID := uint64(C.grafeo_node_id(cNode))
@@ -75,13 +81,27 @@ func (db *Database) GetNode(id uint64) (*Node, error) {
 		props = make(map[string]any)
 	}
 
-	return &Node{ID: nodeID, Labels: labels, Properties: props}, nil
+	return &Node{ID: nodeID, Labels: labels, Properties: props}
 }
 
 // DeleteNode deletes a node by ID. Returns true if the node existed.
 func (db *Database) DeleteNode(id uint64) (bool, error) {
 	runtime.LockOSThread()
 	result := int(C.grafeo_delete_node(db.handle, C.uint64_t(id)))
+	if result < 0 {
+		err := lastError()
+		runtime.UnlockOSThread()
+		return false, err
+	}
+	runtime.UnlockOSThread()
+	return result == 1, nil
+}
+
+// DetachDeleteNode deletes a node with all its edges, as DETACH DELETE does.
+// Returns true if the node existed; the node and its edges are one change.
+func (db *Database) DetachDeleteNode(id uint64) (bool, error) {
+	runtime.LockOSThread()
+	result := int(C.grafeo_detach_delete_node(db.handle, C.uint64_t(id)))
 	if result < 0 {
 		err := lastError()
 		runtime.UnlockOSThread()
@@ -154,20 +174,15 @@ func (db *Database) RemoveNodeLabel(id uint64, label string) (bool, error) {
 // GetNodeLabels returns all labels for a node. Returns (nil, nil) if the node
 // does not exist.
 func (db *Database) GetNodeLabels(id uint64) ([]string, error) {
-	runtime.LockOSThread()
-	C.grafeo_clear_error()
-	cLabels := C.grafeo_get_node_labels(db.handle, C.uint64_t(id))
+	var cLabels *C.char
+	if err := lockAndCheckStatus(func() C.GrafeoStatus {
+		return C.grafeo_get_node_labels(db.handle, C.uint64_t(id), &cLabels)
+	}); err != nil {
+		return nil, err
+	}
 	if cLabels == nil {
-		// Distinguish "not found" (no error set) from a real error.
-		if C.grafeo_last_error() != nil {
-			err := lastError()
-			runtime.UnlockOSThread()
-			return nil, err
-		}
-		runtime.UnlockOSThread()
 		return nil, nil
 	}
-	runtime.UnlockOSThread()
 	defer C.grafeo_free_string(cLabels)
 	var labels []string
 	_ = json.Unmarshal([]byte(C.GoString(cLabels)), &labels)

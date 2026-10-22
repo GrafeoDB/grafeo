@@ -82,7 +82,7 @@ impl GrafeoDB {
                 return Ok(());
             }
             let Some(ref fm) = db.file_manager else {
-                return Err(Error::Query(
+                return Err(Error::from(
                     grafeo_common::utils::error::QueryError::unsupported(
                         "a snapshot write needs a persistent database",
                     ),
@@ -153,7 +153,7 @@ mod tests {
         db.async_write_snapshot()
             .await
             .expect("async_write_snapshot on read-only should be a no-op");
-        assert_eq!(db.node_count(), 1);
+        assert_eq!(db.node_count().unwrap(), 1);
     }
 
     /// The snapshot itself must reach the file: the roundtrip test below

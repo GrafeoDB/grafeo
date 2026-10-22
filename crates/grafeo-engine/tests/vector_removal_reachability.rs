@@ -3,7 +3,7 @@
 //! takes it out. Each removal path of the issue, then a search for more
 //! nodes than the index holds returns every remaining node.
 
-#![cfg(all(feature = "vector-index", feature = "lpg", feature = "gql"))]
+#![cfg(all(feature = "vector-index", feature = "gql"))]
 
 use std::collections::HashMap;
 

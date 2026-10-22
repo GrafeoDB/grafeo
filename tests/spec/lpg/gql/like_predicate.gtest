@@ -1,0 +1,67 @@
+# LIKE patterns
+#
+# `s LIKE p` as SQL defines it: `%` matches any sequence of characters and `_`
+# any one character, a line break included; a backslash makes the next `%` or
+# `_` literal; every other character, a dot included, matches itself; a null
+# operand gives null.
+
+meta:
+  language: gql
+  model: lpg
+  section: "19.11"
+  title: LIKE patterns
+  dataset: empty
+
+tests:
+
+  - name: percent_matches_any_sequence
+    query: "RETURN 'Alix' LIKE 'A%' AS prefix, 'Alix' LIKE '%x' AS suffix, 'Alix' LIKE '%' AS all, '' LIKE '%' AS empty"
+    expect:
+      rows:
+        - [true, true, true, true]
+
+  - name: underscore_matches_one_character
+    query: "RETURN 'Alix' LIKE 'A_ix' AS one, 'Alix' LIKE 'A_x' AS too_few"
+    expect:
+      rows:
+        - [true, false]
+
+  - name: a_dot_is_a_literal
+    query: "RETURN 'abc' LIKE 'a.c' AS other, 'a.c' LIKE 'a.c' AS itself"
+    expect:
+      rows:
+        - [false, true]
+
+  - name: a_backslash_escapes_a_wildcard
+    query: |
+      RETURN '50%' LIKE '50\%' AS percent, '5x' LIKE '5\_' AS underscore
+    expect:
+      rows:
+        - [true, false]
+
+  - name: a_null_operand_gives_null
+    query: "RETURN null LIKE 'a%' AS r"
+    expect:
+      rows:
+        - [null]
+
+  - name: percent_matches_a_line_break
+    query: |
+      RETURN 'a\nb' LIKE 'a%' AS r
+    expect:
+      rows:
+        - [true]
+
+  - name: underscore_matches_a_line_break
+    query: |
+      RETURN 'a\nb' LIKE 'a_b' AS r
+    expect:
+      rows:
+        - [true]
+
+  - name: wildcards_match_line_breaks_inside_a_pattern
+    query: |
+      RETURN 'Alix\n Gus' LIKE 'Alix__Gus' AS two, 'Alix\nGus\n' LIKE '%Gus%' AS around, 'Alix\nGus' LIKE 'Alix%' AS rest, 'Alix\n' LIKE 'Alix' AS exact
+    expect:
+      rows:
+        - [true, true, true, false]

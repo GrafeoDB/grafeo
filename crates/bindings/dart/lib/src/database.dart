@@ -9,10 +9,15 @@ import 'dart:ffi';
 
 import 'package:ffi/ffi.dart';
 
+import 'batch.dart';
 import 'error.dart';
 import 'ffi/bindings.dart';
 import 'ffi/loader.dart';
+import 'graph.dart';
+import 'native.dart' hide upsertEdges, upsertNodes;
+import 'native.dart' as native show upsertEdges, upsertNodes;
 import 'stream.dart';
+import 'time_travel.dart';
 import 'transaction.dart';
 import 'types.dart';
 import 'value.dart';
@@ -43,19 +48,29 @@ class GrafeoDB implements Finalizable {
   // Lifecycle
   // ===========================================================================
 
-  /// Create a new in-memory database.
-  static GrafeoDB memory({String? libraryPath}) {
+  /// Create a new in-memory database, keeping [historyRetention] for
+  /// time-travel reads (none by default).
+  static GrafeoDB memory(
+      {String? libraryPath, HistoryRetention? historyRetention}) {
     final lib = loadNativeLibrary(libraryPath);
     final bindings = GrafeoBindings(lib);
+    if (historyRetention != null) {
+      return _openWithHistory(bindings, null, historyRetention);
+    }
     final ptr = bindings.grafeoOpenMemory();
     if (ptr == nullptr) throwLastError(bindings);
     return GrafeoDB._(ptr, bindings);
   }
 
-  /// Open a persistent database at [path].
-  static GrafeoDB open(String path, {String? libraryPath}) {
+  /// Open a persistent database at [path]. A [historyRetention] sets how much
+  /// history it keeps for time-travel reads; the file stores the setting.
+  static GrafeoDB open(String path,
+      {String? libraryPath, HistoryRetention? historyRetention}) {
     final lib = loadNativeLibrary(libraryPath);
     final bindings = GrafeoBindings(lib);
+    if (historyRetention != null) {
+      return _openWithHistory(bindings, path, historyRetention);
+    }
     final pathPtr = path.toNativeUtf8(allocator: malloc);
     try {
       final ptr = bindings.grafeoOpen(pathPtr);
@@ -65,6 +80,15 @@ class GrafeoDB implements Finalizable {
       malloc.free(pathPtr);
     }
   }
+
+  static GrafeoDB _openWithHistory(
+          GrafeoBindings bindings, String? path, HistoryRetention history) =>
+      withNativeStrings([path], (p) {
+        final ptr = bindings.grafeoOpenWithHistory(
+            p[0], history.kind, history.durationMs);
+        if (ptr == nullptr) throwLastError(bindings);
+        return GrafeoDB._(ptr, bindings);
+      });
 
   /// Open or create a persistent database at [path] (a single file).
   ///
@@ -105,7 +129,8 @@ class GrafeoDB implements Finalizable {
     _bindings.grafeoFreeDatabase(_handle);
     _handle = nullptr;
     if (status != GrafeoStatus.ok.code) {
-      throw classifyError(status, lastError(_bindings));
+      throw classifyError(status, lastError(_bindings),
+          gqlStatus: lastGqlStatus(_bindings));
     }
   }
 
@@ -323,16 +348,32 @@ class GrafeoDB implements Finalizable {
   // Statistics and info
   // ===========================================================================
 
-  /// Get the number of nodes in the database (O(1), synchronous).
+  /// Get the number of nodes in the database (O(1), synchronous); throws
+  /// when the read fails.
   int get nodeCount {
     _checkOpen();
-    return _bindings.grafeoNodeCount(_handle);
+    final out = malloc<IntPtr>();
+    try {
+      final status = _bindings.grafeoNodeCount(_handle, out);
+      if (status != GrafeoStatus.ok.code) throwStatus(_bindings, status);
+      return out.value;
+    } finally {
+      malloc.free(out);
+    }
   }
 
-  /// Get the number of edges in the database (O(1), synchronous).
+  /// Get the number of edges in the database (O(1), synchronous); throws
+  /// when the read fails.
   int get edgeCount {
     _checkOpen();
-    return _bindings.grafeoEdgeCount(_handle);
+    final out = malloc<IntPtr>();
+    try {
+      final status = _bindings.grafeoEdgeCount(_handle, out);
+      if (status != GrafeoStatus.ok.code) throwStatus(_bindings, status);
+      return out.value;
+    } finally {
+      malloc.free(out);
+    }
   }
 
   /// Get database info as a parsed JSON map.
@@ -383,12 +424,9 @@ class GrafeoDB implements Finalizable {
   String? currentSchema() {
     _checkOpen();
     final ptr = _bindings.grafeoCurrentSchema(_handle);
-    if (ptr == nullptr) return null;
-    try {
-      return ptr.toDartString();
-    } finally {
-      _bindings.grafeoFreeString(ptr);
-    }
+    // The C layer owns this string (valid until its next schema call), so it
+    // is copied here and never freed.
+    return ptr == nullptr ? null : ptr.toDartString();
   }
 
   // ===========================================================================
@@ -435,44 +473,33 @@ class GrafeoDB implements Finalizable {
     }
   }
 
-  /// Get a node by [id]. Returns a [Node] or throws on error.
-  Node getNode(int id) {
+  /// Get a node by [id], or null when it does not exist; throws when the
+  /// read fails.
+  Node? getNode(int id) {
     _checkOpen();
-    final outPtr = malloc<Pointer<Void>>();
-    try {
-      final status = _bindings.grafeoGetNode(_handle, id, outPtr);
-      if (status != GrafeoStatus.ok.code) throwStatus(_bindings, status);
-      final nodePtr = outPtr.value;
-      try {
-        final nodeId = _bindings.grafeoNodeId(nodePtr);
-        final labelsJson =
-            _bindings.grafeoNodeLabelsJson(nodePtr).toDartString();
-        final propsJson =
-            _bindings.grafeoNodePropertiesJson(nodePtr).toDartString();
-        return Node(
-          nodeId,
-          parseStringArray(labelsJson),
-          parseObject(propsJson),
-        );
-      } finally {
-        _bindings.grafeoFreeNode(nodePtr);
-      }
-    } finally {
-      malloc.free(outPtr);
-    }
+    return takeNodeOrNull(
+        _bindings, (out) => _bindings.grafeoGetNode(_handle, id, out));
   }
 
-  /// Return the labels of node [id] without fetching the full node.
+  /// Return the labels of node [id] without fetching the full node, or null
+  /// when it does not exist; throws when the read fails.
   ///
   /// More efficient than [getNode] when only labels are needed.
-  List<String> getNodeLabels(int id) {
+  List<String>? getNodeLabels(int id) {
     _checkOpen();
-    final ptr = _bindings.grafeoGetNodeLabels(_handle, id);
-    if (ptr == nullptr) throwLastError(_bindings);
+    final out = malloc<Pointer<Utf8>>();
     try {
-      return parseStringArray(ptr.toDartString());
+      final status = _bindings.grafeoGetNodeLabels(_handle, id, out);
+      if (status != GrafeoStatus.ok.code) throwStatus(_bindings, status);
+      final ptr = out.value;
+      if (ptr == nullptr) return null;
+      try {
+        return parseStringArray(ptr.toDartString());
+      } finally {
+        _bindings.grafeoFreeString(ptr);
+      }
     } finally {
-      _bindings.grafeoFreeString(ptr);
+      malloc.free(out);
     }
   }
 
@@ -480,6 +507,15 @@ class GrafeoDB implements Finalizable {
   bool deleteNode(int id) {
     _checkOpen();
     final result = _bindings.grafeoDeleteNode(_handle, id);
+    if (result < 0) throwLastError(_bindings);
+    return result == 1;
+  }
+
+  /// Delete node [id] with all its edges, as `DETACH DELETE` does. Returns
+  /// true if the node existed; the node and its edges are one change.
+  bool detachDeleteNode(int id) {
+    _checkOpen();
+    final result = _bindings.grafeoDetachDeleteNode(_handle, id);
     if (result < 0) throwLastError(_bindings);
     return result == 1;
   }
@@ -572,34 +608,28 @@ class GrafeoDB implements Finalizable {
     }
   }
 
-  /// Get an edge by [id]. Returns an [Edge] or throws on error.
-  Edge getEdge(int id) {
+  /// Get an edge by [id], or null when it does not exist; throws when the
+  /// read fails.
+  Edge? getEdge(int id) {
     _checkOpen();
-    final outPtr = malloc<Pointer<Void>>();
-    try {
-      final status = _bindings.grafeoGetEdge(_handle, id, outPtr);
-      if (status != GrafeoStatus.ok.code) throwStatus(_bindings, status);
-      final edgePtr = outPtr.value;
-      try {
-        final edgeId = _bindings.grafeoEdgeId(edgePtr);
-        final sourceId = _bindings.grafeoEdgeSourceId(edgePtr);
-        final targetId = _bindings.grafeoEdgeTargetId(edgePtr);
-        final edgeType = _bindings.grafeoEdgeType(edgePtr).toDartString();
-        final propsJson =
-            _bindings.grafeoEdgePropertiesJson(edgePtr).toDartString();
-        return Edge(
-          edgeId,
-          edgeType,
-          sourceId,
-          targetId,
-          parseObject(propsJson),
-        );
-      } finally {
-        _bindings.grafeoFreeEdge(edgePtr);
-      }
-    } finally {
-      malloc.free(outPtr);
-    }
+    return takeEdgeOrNull(
+        _bindings, (out) => _bindings.grafeoGetEdge(_handle, id, out));
+  }
+
+  /// The committed edges of node [id] in [direction], without a query: only
+  /// those of [edgeTypes] when given. [Direction.both] lists a self-loop once;
+  /// a node that does not exist has none.
+  List<NodeEdge> getNodeEdges(
+    int id, {
+    Direction direction = Direction.out,
+    List<String>? edgeTypes,
+  }) {
+    _checkOpen();
+    return nodeEdges(
+        _bindings,
+        edgeTypes,
+        (types, neighbors, edges, count) => _bindings.grafeoGetNodeEdges(
+            _handle, id, direction.code, types, neighbors, edges, count));
   }
 
   /// Delete an edge by [id]. Returns true on success.
@@ -640,6 +670,198 @@ class GrafeoDB implements Finalizable {
     } finally {
       malloc.free(keyPtr);
     }
+  }
+
+  // ===========================================================================
+  // Batch writes and upserts
+  // ===========================================================================
+
+  /// Create one node per row, each with [labels] and the row's properties, in
+  /// one transaction. Returns the node IDs in row order.
+  List<int> batchCreateNodesWithProps(
+    List<String> labels,
+    List<Map<String, dynamic>> rows,
+  ) {
+    _checkOpen();
+    return batchNodes(
+        _bindings,
+        labels,
+        rows,
+        (labels, rows, ids, count) => _bindings.grafeoBatchCreateNodesWithProps(
+            _handle, labels, rows, ids, count));
+  }
+
+  /// Create the [edges] in one transaction: an edge to a missing node fails
+  /// the batch and writes nothing. Returns the edge IDs in input order.
+  List<int> batchCreateEdges(List<BatchEdge> edges) {
+    _checkOpen();
+    return batchEdges(
+        _bindings,
+        edges,
+        (edges, ids, count) =>
+            _bindings.grafeoBatchCreateEdges(_handle, edges, ids, count));
+  }
+
+  /// Create or update one node per row, matched by the [key] property
+  /// (default `id`) and all of [labels], in one statement: a row the schema
+  /// refuses fails the call and writes nothing. A row without the key is
+  /// skipped. With [replace] a node's properties become exactly the row's,
+  /// without the row's are merged in.
+  UpsertSummary upsertNodes(
+    List<String> labels,
+    List<Map<String, dynamic>> rows, {
+    String? key,
+    bool replace = false,
+  }) {
+    _checkOpen();
+    return native.upsertNodes(
+        _bindings,
+        labels,
+        rows,
+        key,
+        replace,
+        (labels, rows, options, json) =>
+            _bindings.grafeoUpsertNodes(_handle, labels, rows, options, json));
+  }
+
+  /// Create or update one edge per row; each row names its endpoints in the
+  /// [sourceField] and [targetField] (default `src` and `dst`), which hold the
+  /// [endpointKey] property (default `id`) of nodes with [endpointLabels], and
+  /// holds the edge [key] (default `id`). A row whose endpoint matches no
+  /// node or several is skipped; endpoints are never created.
+  UpsertSummary upsertEdges(
+    String edgeType,
+    List<Map<String, dynamic>> rows, {
+    String? key,
+    String? endpointKey,
+    List<String>? endpointLabels,
+    String? sourceField,
+    String? targetField,
+    bool replace = false,
+  }) {
+    _checkOpen();
+    return native.upsertEdges(
+        _bindings,
+        edgeType,
+        rows,
+        {
+          'key': key,
+          'endpoint_key': endpointKey,
+          'endpoint_labels': endpointLabels,
+          'src_field': sourceField,
+          'dst_field': targetField,
+          'replace': replace,
+        },
+        (edgeType, rows, options, json) => _bindings.grafeoUpsertEdges(
+            _handle, edgeType, rows, options, json));
+  }
+
+  // ===========================================================================
+  // Time travel
+  // ===========================================================================
+
+  /// The epoch of the last commit.
+  int get currentEpoch {
+    _checkOpen();
+    return _bindings.grafeoCurrentEpoch(_handle);
+  }
+
+  /// The epoch [point] names: the last commit at or before it. Throws for a
+  /// point before the history the database keeps.
+  int epochAsOf(TimePoint point) {
+    _checkOpen();
+    final out = malloc<Uint64>();
+    try {
+      final status =
+          _bindings.grafeoEpochAsOf(_handle, point.kind, point.value, out);
+      if (status != GrafeoStatus.ok.code) throwStatus(_bindings, status);
+      return out.value;
+    } finally {
+      malloc.free(out);
+    }
+  }
+
+  /// A read-only view of the database as it was at [point]. It keeps the
+  /// history of its epoch until closed. Throws for a point before the history
+  /// the database keeps.
+  AsOfView asOf(TimePoint point) {
+    _checkOpen();
+    final ptr = _bindings.grafeoAsOf(_handle, point.kind, point.value);
+    if (ptr == nullptr) throwLastError(_bindings);
+    return AsOfView(ptr, _bindings);
+  }
+
+  /// Execute one GQL query, with optional [params], as the database was at
+  /// [point]; a query that writes throws.
+  QueryResult executeAsOf(String query, TimePoint point,
+      {Map<String, dynamic>? params}) {
+    _checkOpen();
+    return withNativeStrings(
+        [query, params == null ? null : encodeParams(params)], (p) {
+      final resultPtr = _bindings.grafeoExecuteAsOf(
+          _handle, p[0], p[1], point.kind, point.value);
+      if (resultPtr == nullptr) throwLastError(_bindings);
+      return buildResult(_bindings, resultPtr);
+    });
+  }
+
+  // ===========================================================================
+  // Graph handles
+  // ===========================================================================
+
+  /// A handle on named graph [name] of the current schema, to work in it
+  /// without switching the current graph. Throws when it does not exist.
+  GrafeoGraph graph(String name) {
+    _checkOpen();
+    return withNativeStrings([name], (p) {
+      final ptr = _bindings.grafeoGraph(_handle, p[0]);
+      if (ptr == nullptr) throwLastError(_bindings);
+      return GrafeoGraph(ptr, _bindings);
+    });
+  }
+
+  // ===========================================================================
+  // Change data capture
+  // ===========================================================================
+
+  /// Whether change data capture records changes.
+  bool get cdcEnabled {
+    _checkOpen();
+    return _bindings.grafeoIsCdcEnabled(_handle);
+  }
+
+  /// Turn change data capture on or off.
+  set cdcEnabled(bool enabled) {
+    _checkOpen();
+    _bindings.grafeoSetCdcEnabled(_handle, enabled);
+  }
+
+  /// Every recorded change of node [id], oldest first.
+  List<ChangeEvent> nodeHistory(int id) {
+    _checkOpen();
+    return parseEvents(
+        takeString(_bindings, _bindings.grafeoNodeHistory(_handle, id)));
+  }
+
+  /// Every recorded change of edge [id], oldest first.
+  List<ChangeEvent> edgeHistory(int id) {
+    _checkOpen();
+    return parseEvents(
+        takeString(_bindings, _bindings.grafeoEdgeHistory(_handle, id)));
+  }
+
+  /// The changes of node [id] from epoch [sinceEpoch] on.
+  List<ChangeEvent> nodeHistorySince(int id, int sinceEpoch) {
+    _checkOpen();
+    return parseEvents(takeString(
+        _bindings, _bindings.grafeoNodeHistorySince(_handle, id, sinceEpoch)));
+  }
+
+  /// Every change in epochs [startEpoch] to [endEpoch], in commit order.
+  List<ChangeEvent> changesBetween(int startEpoch, int endEpoch) {
+    _checkOpen();
+    return parseEvents(takeString(_bindings,
+        _bindings.grafeoChangesBetween(_handle, startEpoch, endEpoch)));
   }
 
   // ===========================================================================
@@ -912,6 +1134,41 @@ class GrafeoDB implements Finalizable {
     }
   }
 
+  /// Search several query vectors of one dimension at once. [filters] keeps
+  /// only nodes whose properties equal the given values. Returns one list per
+  /// query, nearest first; [ef] 0 uses the index default.
+  List<List<VectorResult>> batchVectorSearch(
+    String label,
+    String property,
+    List<List<double>> queries, {
+    required int k,
+    int ef = 0,
+    Map<String, dynamic>? filters,
+  }) {
+    _checkOpen();
+    final dimensions = queries.isEmpty ? 0 : queries.first.length;
+    if (queries.any((q) => q.length != dimensions)) {
+      throw ArgumentError.value(
+          queries, 'queries', 'every query needs the same dimension');
+    }
+    final flat = malloc<Float>(queries.length * dimensions + 1);
+    for (var i = 0; i < queries.length; i++) {
+      for (var j = 0; j < dimensions; j++) {
+        flat[i * dimensions + j] = queries[i][j];
+      }
+    }
+    try {
+      return withNativeStrings(
+          [label, property, filters == null ? null : encodeParams(filters)],
+          (p) => parseVectorResults(takeJson(
+              _bindings,
+              (json) => _bindings.grafeoBatchVectorSearch(_handle, p[0], p[1],
+                  flat, queries.length, dimensions, k, ef, p[2], json))));
+    } finally {
+      malloc.free(flat);
+    }
+  }
+
   /// Perform an MMR (Maximal Marginal Relevance) vector search.
   List<VectorResult> mmrSearch(
     String label,
@@ -994,33 +1251,42 @@ class GrafeoDB implements Finalizable {
     if (status != GrafeoStatus.ok.code) throwStatus(_bindings, status);
   }
 
+  /// Set when the database checkpoints by itself: every [interval], and once
+  /// the WAL holds [walBytes] bytes since the last checkpoint. Leave both out
+  /// to turn automatic checkpoints off (the default). For this open only.
+  void setCheckpointTriggers({Duration? interval, int? walBytes}) {
+    _checkOpen();
+    if (interval != null && interval <= Duration.zero) {
+      throw ArgumentError.value(interval, 'interval', 'must be positive');
+    }
+    if (walBytes != null && walBytes <= 0) {
+      throw ArgumentError.value(walBytes, 'walBytes', 'must be positive');
+    }
+    final status = _bindings.grafeoSetCheckpointTriggers(
+        _handle, interval?.inMilliseconds ?? 0, walBytes ?? 0);
+    if (status != GrafeoStatus.ok.code) throwStatus(_bindings, status);
+  }
+
+  /// How the automatic checkpoints fare: `interval_ms` and `wal_bytes` (the
+  /// triggers, null when off), `last_checkpoint` (Unix seconds), `failures`
+  /// (automatic ones that failed since the last that succeeded),
+  /// `last_error`, `last_failure` and `stopped`.
+  Map<String, dynamic> checkpointStatus() {
+    _checkOpen();
+    final ptr = _bindings.grafeoCheckpointStatus(_handle);
+    if (ptr == nullptr) throwLastError(_bindings);
+    try {
+      return parseObject(ptr.toDartString());
+    } finally {
+      _bindings.grafeoFreeString(ptr);
+    }
+  }
+
   // ===========================================================================
   // Internal helpers
   // ===========================================================================
 
   /// Extract a [QueryResult] from a native result pointer, then free it.
-  QueryResult _buildResult(Pointer<Void> resultPtr) {
-    try {
-      final jsonPtr = _bindings.grafeoResultJson(resultPtr);
-      final jsonString = jsonPtr.toDartString();
-      final executionTimeMs = _bindings.grafeoResultExecutionTimeMs(resultPtr);
-      final rowsScanned = _bindings.grafeoResultRowsScanned(resultPtr);
-
-      final rows = parseRows(jsonString);
-      final columns = extractColumns(rows);
-      final (nodes, edges) = extractEntities(rows);
-
-      return QueryResult(
-        columns: columns,
-        rows: rows,
-        nodes: nodes,
-        edges: edges,
-        executionTimeMs: executionTimeMs,
-        rowsScanned: rowsScanned,
-      );
-    } finally {
-      _bindings.grafeoFreeResult(resultPtr);
-    }
-  }
-
+  QueryResult _buildResult(Pointer<Void> resultPtr) =>
+      buildResult(_bindings, resultPtr);
 }

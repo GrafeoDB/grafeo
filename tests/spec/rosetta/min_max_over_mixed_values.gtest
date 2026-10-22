@@ -63,7 +63,7 @@ tests:
 
   - name: nan_after_every_other_number
     variants:
-      gql: "UNWIND [3, 0.0 / 0.0, 19] AS x RETURN min(x) AS lo, max(x) AS hi"
+      gql: "UNWIND [3, 0.0e0 / 0.0e0, 19] AS x RETURN min(x) AS lo, max(x) AS hi"
       cypher: "UNWIND [3, 0.0 / 0.0, 19] AS x RETURN min(x) AS lo, max(x) AS hi"
     expect:
       rows:

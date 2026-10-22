@@ -1,0 +1,125 @@
+# Rosetta: the ordering operators across numeric types, in GQL and Cypher
+#
+# <, <=, > and >= compare an integer with a float exactly, as ORDER BY and =
+# do: 9007199254740993 is greater than the float 9007199254740992.0 (2^53),
+# which converting the integer to a float would make equal. A filter, a
+# property index and a zone map agree. NaN is neither less nor greater than
+# anything; -0.0 equals 0.0; the infinities bound every integer.
+
+meta:
+  model: lpg
+  section: rosetta
+  title: Numeric ordering cross-language equivalence
+  dataset: empty
+  requires: [cypher]
+
+tests:
+
+  # ---------------------------------------------------------------------------
+  # Literals
+  # ---------------------------------------------------------------------------
+
+  - name: an_integer_above_2_53_against_its_nearest_float
+    variants:
+      gql: "RETURN 9007199254740993 > 9007199254740992.0e0 AS gt, 9007199254740993 >= 9007199254740992.0e0 AS ge, 9007199254740993 < 9007199254740992.0e0 AS lt, 9007199254740993 <= 9007199254740992.0e0 AS le"
+      cypher: "RETURN 9007199254740993 > 9007199254740992.0 AS gt, 9007199254740993 >= 9007199254740992.0 AS ge, 9007199254740993 < 9007199254740992.0 AS lt, 9007199254740993 <= 9007199254740992.0 AS le"
+    expect:
+      rows:
+        - [true, true, false, false]
+
+  - name: a_float_against_an_integer_above_2_53
+    variants:
+      gql: "RETURN 9007199254740992.0e0 < 9007199254740993 AS lt, 9007199254740992.0e0 >= 9007199254740993 AS ge"
+      cypher: "RETURN 9007199254740992.0 < 9007199254740993 AS lt, 9007199254740992.0 >= 9007199254740993 AS ge"
+    expect:
+      rows:
+        - [true, false]
+
+  - name: an_integer_equal_to_a_float
+    variants:
+      gql: "RETURN 9007199254740992 >= 9007199254740992.0e0 AS ge, 9007199254740992 > 9007199254740992.0e0 AS gt, 3 <= 3.0e0 AS small"
+      cypher: "RETURN 9007199254740992 >= 9007199254740992.0 AS ge, 9007199254740992 > 9007199254740992.0 AS gt, 3 <= 3.0 AS small"
+    expect:
+      rows:
+        - [true, false, true]
+
+  - name: the_infinities_bound_every_integer
+    variants:
+      gql: "RETURN 9223372036854775807 < Infinity AS top, -9223372036854775807 - 1 > -Infinity AS bottom, 9223372036854775807 < 9.3e18 AS beyond"
+      cypher: "RETURN 9223372036854775807 < Infinity AS top, -9223372036854775807 - 1 > -Infinity AS bottom, 9223372036854775807 < 9.3e18 AS beyond"
+    expect:
+      rows:
+        - [true, true, true]
+
+  - name: nan_is_neither_less_nor_greater
+    variants:
+      gql: "RETURN NaN < 1 AS lt, NaN > 1 AS gt, NaN <= NaN AS le, 1 >= NaN AS ge"
+      cypher: "RETURN NaN < 1 AS lt, NaN > 1 AS gt, NaN <= NaN AS le, 1 >= NaN AS ge"
+    expect:
+      rows:
+        - [false, false, false, false]
+
+  - name: negative_zero_is_not_below_zero
+    variants:
+      gql: "RETURN -0.0e0 < 0.0e0 AS float, -0.0e0 < 0 AS int, -0.0e0 <= 0 AS le"
+      cypher: "RETURN -0.0 < 0.0 AS float, -0.0 < 0 AS int, -0.0 <= 0 AS le"
+    expect:
+      rows:
+        - [false, false, true]
+
+  - name: decimals_order_against_integers_and_floats
+    variants:
+      gql: "RETURN toDecimal('1.5') < 2 AS int, toDecimal('1.5') > 1.25e0 AS float, toDecimal('0.1') < 0.1e0 AS shortest_text"
+      cypher: "RETURN toDecimal('1.5') < 2 AS int, toDecimal('1.5') > 1.25 AS float, toDecimal('0.1') < 0.1 AS shortest_text"
+    expect:
+      rows:
+        - [true, true, false]
+
+  # ---------------------------------------------------------------------------
+  # Stored values: a filter, a property index and a zone map agree
+  # ---------------------------------------------------------------------------
+
+  - name: a_range_filter_on_large_integers_without_an_index
+    setup:
+      - "INSERT (:N {name: 'Alix', v: 9007199254740992}), (:N {name: 'Gus', v: 9007199254740993}), (:N {name: 'Mia', v: 9007199254740994})"
+    variants:
+      gql: "MATCH (n:N) WHERE n.v > 9007199254740992.0e0 RETURN n.name"
+      cypher: "MATCH (n:N) WHERE n.v > 9007199254740992.0 RETURN n.name"
+    expect:
+      rows:
+        - [Gus]
+        - [Mia]
+
+  - name: a_range_filter_on_large_integers_through_an_index
+    setup:
+      - "CREATE INDEX n_v FOR (n:N) ON (n.v)"
+      - "INSERT (:N {name: 'Alix', v: 9007199254740992}), (:N {name: 'Gus', v: 9007199254740993}), (:N {name: 'Mia', v: 9007199254740994})"
+    variants:
+      gql: "MATCH (n:N) WHERE n.v > 9007199254740992.0e0 RETURN n.name"
+      cypher: "MATCH (n:N) WHERE n.v > 9007199254740992.0 RETURN n.name"
+    expect:
+      rows:
+        - [Gus]
+        - [Mia]
+
+  - name: a_range_on_floats_against_an_integer_bound
+    setup:
+      - "CREATE INDEX n_v FOR (n:N) ON (n.v)"
+      - "INSERT (:N {name: 'Alix', v: 9007199254740992.0e0}), (:N {name: 'Gus', v: 1.5e0}), (:N {name: 'Mia', v: 2.5e0})"
+    variants:
+      gql: "MATCH (n:N) WHERE n.v >= 2 AND n.v < 9007199254740993 RETURN n.name"
+      cypher: "MATCH (n:N) WHERE n.v >= 2 AND n.v < 9007199254740993 RETURN n.name"
+    expect:
+      rows:
+        - [Alix]
+        - [Mia]
+
+  - name: order_by_and_the_comparison_agree
+    setup:
+      - "INSERT (:N {name: 'Alix', v: 9007199254740993}), (:N {name: 'Gus', v: 9007199254740992.0e0})"
+    variants:
+      gql: "MATCH (a:N), (b:N) WHERE a.v > b.v RETURN a.name, b.name"
+      cypher: "MATCH (a:N), (b:N) WHERE a.v > b.v RETURN a.name, b.name"
+    expect:
+      rows:
+        - [Alix, Gus]

@@ -1,10 +1,10 @@
 //! Regression test for issue #308 — `text_match` returns nothing when the
 //! database is file-backed (`grafeo-file`). The WAL / CDC store wrappers
-//! had empty `GraphStoreSearch` impls, so `has_text_index` / `score_text`
+//! had empty `GraphStore` impls, so `has_text_index` / `score_text`
 //! fell through to the trait's no-op defaults: pushdown was skipped and
 //! per-row evaluation returned null, filtering every row out.
 
-#![cfg(all(feature = "text-index", feature = "gql", feature = "lpg"))]
+#![cfg(all(feature = "text-index", feature = "gql"))]
 
 use grafeo_common::types::Value;
 use grafeo_engine::GrafeoDB;

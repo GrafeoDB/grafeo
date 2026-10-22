@@ -1,0 +1,219 @@
+# SPARQL numeric type promotion (SPARQL 1.1 sec 17.3, XPath op:numeric-*)
+#
+# Covers (#610): a bare 1.5 is an xsd:decimal; an integer divided by an
+# integer is a decimal; integer arithmetic past the 64-bit range goes on as
+# decimals; a decimal with an integer gives a decimal, a double makes a
+# double; ABS, CEIL, FLOOR, ROUND keep a decimal; the XPath casts; stored
+# numeric literals read as numbers of their type; a decimal written into the
+# store keeps its scale; division by zero.
+
+meta:
+  language: sparql
+  model: rdf
+  section: "17.3"
+  title: Numeric type promotion
+  dataset: empty
+  requires: [sparql, rdf]
+
+tests:
+
+  # ---------------------------------------------------------------------------
+  # Promotion
+  # ---------------------------------------------------------------------------
+
+  - name: point_one_plus_point_two_is_point_three
+    query: "SELECT (0.1 + 0.2 AS ?s) (0.1 + 0.2 = 0.3 AS ?exact) WHERE {}"
+    expect:
+      rows:
+        - [0.3, true]
+
+  - name: an_integer_divided_by_an_integer_is_a_decimal
+    query: |
+      PREFIX xsd: <http://www.w3.org/2001/XMLSchema#>
+      SELECT (5 / 2 = 2.5 AS ?half) (DATATYPE(5 / 2) = xsd:decimal AS ?decimal) WHERE {}
+    expect:
+      rows:
+        - [true, true]
+
+  - name: two_integers_give_an_integer
+    query: |
+      PREFIX xsd: <http://www.w3.org/2001/XMLSchema#>
+      SELECT (2 * 3 AS ?p) (DATATYPE(2 * 3) = xsd:integer AS ?integer) WHERE {}
+    expect:
+      rows:
+        - [6, true]
+
+  - name: integer_arithmetic_past_64_bits_goes_on_as_a_decimal
+    query: |
+      PREFIX xsd: <http://www.w3.org/2001/XMLSchema#>
+      SELECT (9223372036854775807 + 1 AS ?big) (DATATYPE(9223372036854775807 + 1) = xsd:decimal AS ?decimal) WHERE {}
+    expect:
+      rows:
+        - [9223372036854775808, true]
+
+  - name: a_decimal_with_an_integer_gives_a_decimal
+    query: |
+      PREFIX xsd: <http://www.w3.org/2001/XMLSchema#>
+      SELECT (1.50 + 1 AS ?s) (DATATYPE(1.5 + 1) = xsd:decimal AS ?decimal) WHERE {}
+    expect:
+      rows:
+        - [2.50, true]
+
+  - name: a_double_makes_a_double
+    query: |
+      PREFIX xsd: <http://www.w3.org/2001/XMLSchema#>
+      SELECT (1.5 + 1.0e0 AS ?s) (DATATYPE(1.5 + 1.0e0) = xsd:double AS ?double) WHERE {}
+    expect:
+      rows:
+        - [2.5, true]
+
+  # ---------------------------------------------------------------------------
+  # Functions
+  # ---------------------------------------------------------------------------
+
+  - name: abs_ceil_and_floor_keep_a_decimal
+    query: "SELECT (ABS(-1.50) AS ?a) (CEIL(1.25) = 2 AS ?c) (FLOOR(-1.25) = -2 AS ?f) WHERE {}"
+    expect:
+      rows:
+        - [1.50, true, true]
+
+  # XPath integers are unbounded: ABS of the smallest 64-bit integer goes on
+  # as a decimal.
+  - name: abs_of_the_smallest_integer_goes_on_as_a_decimal
+    query: |
+      PREFIX xsd: <http://www.w3.org/2001/XMLSchema#>
+      SELECT (ABS(-9223372036854775807 - 1) AS ?a) (ABS(-9223372036854775807 - 1) = 9223372036854775808 AS ?exact) WHERE {}
+    expect:
+      rows:
+        - [9223372036854775808, true]
+
+  # fn:round: of two equally near integers, the one nearer positive infinity.
+  - name: round_takes_a_half_towards_positive_infinity
+    query: "SELECT (ROUND(2.5) = 3 AS ?up) (ROUND(-2.5) = -2 AS ?down) (ROUND(-2.6) = -3 AS ?near) WHERE {}"
+    expect:
+      rows:
+        - [true, true, true]
+
+  - name: round_of_a_double_takes_a_half_towards_positive_infinity
+    query: "SELECT (ROUND(2.5e0) AS ?up) (ROUND(-2.5e0) AS ?down) (ROUND(-2.6e0) AS ?near) WHERE {}"
+    expect:
+      rows:
+        - [3, -2, -3]
+
+  - name: datatype_of_a_decimal
+    query: |
+      PREFIX xsd: <http://www.w3.org/2001/XMLSchema#>
+      SELECT (DATATYPE(1.5) = xsd:decimal AS ?d) (DATATYPE(ABS(-1.5)) = xsd:decimal AS ?abs) WHERE {}
+    expect:
+      rows:
+        - [true, true]
+
+  # ---------------------------------------------------------------------------
+  # XPath casts
+  # ---------------------------------------------------------------------------
+
+  - name: xpath_casts_convert
+    query: |
+      PREFIX xsd: <http://www.w3.org/2001/XMLSchema#>
+      SELECT (xsd:decimal("1.50") AS ?d) (xsd:integer("19") AS ?i) (xsd:double("1.5") AS ?f)
+             (xsd:boolean("1") AS ?b) (xsd:string(19) AS ?s)
+      WHERE {}
+    expect:
+      rows:
+        - [1.50, 19, 1.5, true, "19"]
+
+  - name: a_cast_to_integer_truncates
+    query: |
+      PREFIX xsd: <http://www.w3.org/2001/XMLSchema#>
+      SELECT (xsd:integer(2.7) AS ?t) (xsd:integer(-2.7) AS ?n) WHERE {}
+    expect:
+      rows:
+        - [2, -2]
+
+  - name: a_cast_that_fails_leaves_the_variable_unbound
+    query: |
+      PREFIX xsd: <http://www.w3.org/2001/XMLSchema#>
+      SELECT (xsd:integer("Alix") AS ?bad) WHERE {}
+    expect:
+      rows:
+        - [null]
+
+  # ---------------------------------------------------------------------------
+  # Stored literals
+  # ---------------------------------------------------------------------------
+
+  - name: stored_numeric_literals_read_as_numbers_of_their_type
+    setup:
+      - |
+        PREFIX xsd: <http://www.w3.org/2001/XMLSchema#>
+        INSERT DATA {
+          <http://ex.org/alix> <http://ex.org/age> "30"^^xsd:integer .
+          <http://ex.org/alix> <http://ex.org/price> "2.50"^^xsd:decimal .
+          <http://ex.org/alix> <http://ex.org/weight> "1.5"^^xsd:double .
+        }
+    query: |
+      SELECT (?age + 1 AS ?next) ?price (?weight * 2 AS ?double) WHERE {
+        <http://ex.org/alix> <http://ex.org/age> ?age ;
+                             <http://ex.org/price> ?price ;
+                             <http://ex.org/weight> ?weight .
+      }
+    expect:
+      rows:
+        - [31, 2.50, 3]
+
+  - name: plain_and_ill_typed_literals_stay_text
+    setup:
+      - |
+        PREFIX xsd: <http://www.w3.org/2001/XMLSchema#>
+        INSERT DATA {
+          <http://ex.org/gus> <http://ex.org/code> "42" .
+          <http://ex.org/gus> <http://ex.org/bad> "Amsterdam"^^xsd:integer .
+        }
+    query: |
+      SELECT ?code ?bad WHERE {
+        <http://ex.org/gus> <http://ex.org/code> ?code ;
+                            <http://ex.org/bad> ?bad .
+      }
+    expect:
+      rows:
+        - ["42", Amsterdam]
+
+  - name: a_stored_decimal_matches_an_equal_number
+    setup:
+      - |
+        PREFIX xsd: <http://www.w3.org/2001/XMLSchema#>
+        INSERT DATA { <http://ex.org/mia> <http://ex.org/price> "2.50"^^xsd:decimal . }
+    query: |
+      SELECT ?p WHERE { <http://ex.org/mia> <http://ex.org/price> ?p FILTER(?p = 2.5) }
+    expect:
+      rows:
+        - [2.50]
+
+  - name: a_decimal_written_into_the_store_keeps_its_scale
+    setup:
+      - "INSERT { <http://ex.org/vincent> <http://ex.org/v> ?v } WHERE { BIND(1.50 AS ?v) }"
+    query: |
+      PREFIX xsd: <http://www.w3.org/2001/XMLSchema#>
+      SELECT ?v (STR(?v) AS ?text) (DATATYPE(?v) = xsd:decimal AS ?decimal) WHERE {
+        <http://ex.org/vincent> <http://ex.org/v> ?v
+      }
+    expect:
+      rows:
+        - [1.50, "1.50", true]
+
+  # ---------------------------------------------------------------------------
+  # Division by zero
+  # ---------------------------------------------------------------------------
+
+  - name: integer_and_decimal_division_by_zero_leave_the_variable_unbound
+    query: "SELECT (1 / 0 AS ?i) (1.5 / 0 AS ?d) WHERE {}"
+    expect:
+      rows:
+        - [null, null]
+
+  # op:numeric-divide on doubles follows IEEE 754: INF, -INF or NaN.
+  - name: double_division_by_zero_is_infinity
+    query: "SELECT (1.0e0 / 0 AS ?pos) (-1.0e0 / 0 AS ?neg) WHERE {}"
+    expect:
+      rows:
+        - [Infinity, -Infinity]

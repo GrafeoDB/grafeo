@@ -7,16 +7,17 @@
 use std::collections::HashSet;
 
 use super::common::{
-    VarGen, check_branch_columns, combine_with_and, has_all_labels, is_aggregate_function,
-    is_binary_set_function, to_aggregate_function, wrap_filter, wrap_limit, wrap_return, wrap_skip,
-    wrap_sort,
+    HavingScope, VarGen, check_branch_columns, collect_expression_variables, combine_with_and,
+    has_all_labels, is_aggregate_function, is_binary_set_function, wrap_filter, wrap_limit,
+    wrap_return, wrap_skip, wrap_sort,
 };
+use crate::query::functions::resolve_call;
 use crate::query::plan::{
-    AggregateExpr, AggregateFunction, AggregateOp, BinaryOp, CallProcedureOp,
-    CreatePropertyGraphOp, DistinctOp, ExceptOp, ExpandDirection, ExpandOp, IntersectOp,
-    LeftJoinOp, ListPredicateKind, LogicalExpression, LogicalOperator, LogicalPlan, NodeScanOp,
-    PathMode, ProcedureYield, PropertyGraphEdgeTable, PropertyGraphNodeTable, ReturnItem, SortKey,
-    SortOrder, UnaryOp, UnionOp,
+    AggregateExpr, AggregateFunction, AggregateOp, BinaryOp, BuiltinFunction, CallProcedureOp,
+    CreatePropertyGraphOp, DistinctOp, DropPropertyGraphOp, ExceptOp, ExpandDirection, ExpandOp,
+    IntersectOp, LeftJoinOp, ListPredicateKind, LogicalExpression, LogicalOperator, LogicalPlan,
+    NodeScanOp, PathMode, ProcedureYield, PropertyGraphColumn, PropertyGraphEdgeTable,
+    PropertyGraphNodeTable, ReturnItem, SortKey, SortOrder, UnaryOp, UnionOp,
 };
 use grafeo_adapters::query::sql_pgq::{self, ast};
 use grafeo_common::types::Value;
@@ -60,7 +61,34 @@ pub fn translate(query: &str) -> Result<LogicalPlan> {
     let mut plan = crate::query::limits::check_plan_depth(plan)?;
     plan.explain = explain;
     plan.profile = profile;
+    plan.graph = statement_graph(&statement)?;
     Ok(plan)
+}
+
+/// The graph a statement's `GRAPH_TABLE` names (`GRAPH_TABLE (g MATCH ...)`),
+/// which it reads in place of the session's current graph: `None` when it
+/// names none.
+///
+/// # Errors
+///
+/// Unsupported when the two sides of a set operation read different graphs.
+fn statement_graph(statement: &ast::Statement) -> Result<Option<String>> {
+    match statement {
+        ast::Statement::Select(select) => Ok(select.graph_table.graph_name.clone()),
+        ast::Statement::SetOperation(set_op) => {
+            let left = &set_op.left.graph_table.graph_name;
+            let right = &set_op.right.graph_table.graph_name;
+            if left != right {
+                return Err(Error::from(QueryError::unsupported(
+                    "a set operation reads one graph: the GRAPH_TABLE of each side names another graph",
+                )));
+            }
+            Ok(left.clone())
+        }
+        ast::Statement::CreatePropertyGraph(_)
+        | ast::Statement::DropPropertyGraph(_)
+        | ast::Statement::Call(_) => Ok(None),
+    }
 }
 
 /// SQL/PGQ AST to logical plan translator.
@@ -81,7 +109,9 @@ impl SqlPgqTranslator {
                 select_names(&set_op.left, &mut named);
                 select_names(&set_op.right, &mut named);
             }
-            ast::Statement::CreatePropertyGraph(_) | ast::Statement::Call(_) => {}
+            ast::Statement::CreatePropertyGraph(_)
+            | ast::Statement::DropPropertyGraph(_)
+            | ast::Statement::Call(_) => {}
         }
         Self {
             anonymous: VarGen::new(),
@@ -104,6 +134,12 @@ impl SqlPgqTranslator {
             ast::Statement::Select(select) => self.translate_select(select),
             ast::Statement::SetOperation(set_op) => self.translate_set_operation(set_op),
             ast::Statement::CreatePropertyGraph(cpg) => self.translate_create_property_graph(cpg),
+            ast::Statement::DropPropertyGraph(drop) => Ok(LogicalPlan::new(
+                LogicalOperator::DropPropertyGraph(DropPropertyGraphOp {
+                    name: drop.name.clone(),
+                    if_exists: drop.if_exists,
+                }),
+            )),
             ast::Statement::Call(call) => self.translate_call(call),
         }
     }
@@ -174,16 +210,14 @@ impl SqlPgqTranslator {
         // For aggregate queries, ORDER BY is deferred to after the Aggregate operator
         // so that aggregate output aliases (e.g., `cnt`) are available for sorting.
 
-        // Detect whether the outer SELECT has aggregates (needed to defer ORDER BY)
+        // Detect whether the outer SELECT has aggregates (needed to defer
+        // ORDER BY), also inside an item's expression (`COUNT(*) + 1`).
         let is_aggregate_query = match &select.select_list {
             ast::SelectList::Columns(items) => {
-                items.iter().any(|item| {
-                    matches!(
-                        &item.expression,
-                        ast::Expression::FunctionCall { name, .. }
-                        if is_aggregate_function(name)
-                    )
-                }) || select.group_by.is_some()
+                items
+                    .iter()
+                    .any(|item| first_aggregate(&item.expression).is_some())
+                    || select.group_by.is_some()
             }
             ast::SelectList::All => select.group_by.is_some(),
         };
@@ -251,19 +285,16 @@ impl SqlPgqTranslator {
         }
 
         // 6-7. Translate COLUMNS + outer SELECT list into a single projection.
+        Self::reject_column_aggregates(&select.graph_table.columns)?;
         //
         // The outer SELECT may contain aggregates, computed expressions (CASE),
         // column subsets, or just `SELECT *`. We merge the outer SELECT with
         // COLUMNS so that the planner sees a single Return operating on
         // graph-level variables, avoiding double-Return scalar/node confusion.
         if let ast::SelectList::Columns(items) = &select.select_list {
-            let has_aggregates = items.iter().any(|item| {
-                matches!(
-                    &item.expression,
-                    ast::Expression::FunctionCall { name, .. }
-                    if is_aggregate_function(name)
-                )
-            });
+            let has_aggregates = items
+                .iter()
+                .any(|item| first_aggregate(&item.expression).is_some());
 
             if has_aggregates || select.group_by.is_some() {
                 // Aggregate path: first project COLUMNS, then aggregate on top.
@@ -292,12 +323,48 @@ impl SqlPgqTranslator {
                         );
                     }
                 }
+                // The keys the GROUP BY lists: what a non-aggregate SELECT
+                // item may read (a part of it that is a key reads the key).
+                let grouping_scope = HavingScope::new(&group_by, None);
+                let grouping_keys: HashSet<String> = group_by
+                    .iter()
+                    .map(crate::query::planner::common::expression_to_string)
+                    .collect();
 
                 // The Aggregate outputs each key in a column named after its
                 // expression and each aggregate in a column named after its
                 // alias (or its text): the Return above it reads those and
                 // names them after the SELECT alias, or else the column's name
                 // (`gender` for `g.gender`, `count(*)` for `COUNT(*)`).
+                // A grouping key a SELECT item reads (an item, or a part of
+                // one outside its aggregates). With an explicit GROUP BY it
+                // reads grouping keys only (ISO/IEC 9075-2: it is
+                // functionally dependent on them), a key itself, an
+                // expression of keys or a constant; reading another column,
+                // it would split the groups the GROUP BY makes.
+                let check_key = |key: &LogicalExpression| -> Result<()> {
+                    if select.group_by.is_none() {
+                        return Ok(());
+                    }
+                    let mut read = HashSet::new();
+                    collect_expression_variables(&grouping_scope.resolve(key.clone()), &mut read);
+                    match read
+                        .iter()
+                        .filter(|name| !grouping_keys.contains(*name))
+                        .min()
+                    {
+                        Some(column) => Err(Error::from(QueryError::new(
+                            QueryErrorKind::Semantic,
+                            format!(
+                                "SELECT item {} reads {column}, which is neither \
+                                 in GROUP BY nor in an aggregate: add it to GROUP \
+                                 BY or aggregate it",
+                                crate::query::planner::common::expression_to_string(key)
+                            ),
+                        ))),
+                        None => Ok(()),
+                    }
+                };
                 let mut return_items = Vec::with_capacity(items.len());
                 for item in items {
                     let column = match &item.expression {
@@ -306,7 +373,7 @@ impl SqlPgqTranslator {
                             args,
                             distinct,
                         } if is_aggregate_function(name) => {
-                            let agg_fn = to_aggregate_function(name).expect(
+                            let agg_fn = AggregateFunction::from_name(name).expect(
                                 "aggregate function validated by is_aggregate_function guard",
                             );
                             let mut aggregate = self.translate_aggregate(
@@ -324,13 +391,43 @@ impl SqlPgqTranslator {
                             aggregates.push(aggregate);
                             column
                         }
-                        // A non-aggregate SELECT item is a grouping key. With
-                        // an explicit GROUP BY it should be listed there, but
-                        // it is added anyway so no column is dropped.
-                        _ => add_key(
-                            &mut group_by,
-                            self.translate_expression(&item.expression, table_alias)?,
-                        ),
+                        // An expression over aggregates (`COUNT(*) + 1`,
+                        // `ABS(MIN(x))`, a CASE over them): its aggregates
+                        // join the Aggregate under their text, and every
+                        // other part of it is a grouping key or a constant.
+                        expression if first_aggregate(expression).is_some() => {
+                            let over = self.translate_over_aggregates(
+                                expression,
+                                table_alias,
+                                &mut aggregates,
+                                &|aggregate, _| {
+                                    crate::query::planner::common::aggregate_column_name(aggregate)
+                                },
+                                &mut |part| {
+                                    let key = self.translate_expression(part, table_alias)?;
+                                    let mut read = HashSet::new();
+                                    collect_expression_variables(&key, &mut read);
+                                    if read.is_empty() {
+                                        return Ok(key);
+                                    }
+                                    check_key(&key)?;
+                                    Ok(LogicalExpression::Variable(add_key(&mut group_by, key)))
+                                },
+                            )?;
+                            let name = crate::query::planner::common::expression_to_string(&over);
+                            return_items.push(ReturnItem {
+                                expression: over,
+                                alias: Some(item.alias.clone().unwrap_or(name)),
+                            });
+                            continue;
+                        }
+                        // A non-aggregate SELECT item is a grouping key (see
+                        // `check_key`).
+                        _ => {
+                            let key = self.translate_expression(&item.expression, table_alias)?;
+                            check_key(&key)?;
+                            add_key(&mut group_by, key)
+                        }
                     };
                     return_items.push(ReturnItem {
                         expression: LogicalExpression::Variable(column.clone()),
@@ -342,10 +439,12 @@ impl SqlPgqTranslator {
                 // calls (e.g. COUNT(*) > 0) into the aggregates list so the
                 // Aggregate operator can evaluate them.
                 let having = if let Some(having_expr) = &select.having {
-                    Some(self.translate_having_expression(
+                    Some(self.translate_over_aggregates(
                         having_expr,
                         table_alias,
                         &mut aggregates,
+                        &|_, index| format!("_having_agg_{index}"),
+                        &mut |part| self.translate_expression(part, table_alias),
                     )?)
                 } else {
                     None
@@ -544,7 +643,7 @@ impl SqlPgqTranslator {
         }
 
         plan.ok_or_else(|| {
-            Error::Query(QueryError::new(
+            Error::from(QueryError::new(
                 QueryErrorKind::Semantic,
                 "Empty MATCH pattern",
             ))
@@ -561,7 +660,7 @@ impl SqlPgqTranslator {
             ast::Pattern::Path(path) => self.translate_path_pattern(path, input),
             ast::Pattern::Quantified { .. }
             | ast::Pattern::Union(_)
-            | ast::Pattern::MultisetUnion(_) => Err(Error::Query(QueryError::new(
+            | ast::Pattern::MultisetUnion(_) => Err(Error::from(QueryError::new(
                 QueryErrorKind::Semantic,
                 "SQL/PGQ does not support quantified or union patterns",
             ))),
@@ -709,15 +808,36 @@ impl SqlPgqTranslator {
 
     // ==================== COLUMNS Translation ====================
 
-    /// Translates the COLUMNS of `GRAPH_TABLE`: one row per match of its
-    /// pattern.
+    /// Refuses an aggregate in a column of COLUMNS: COLUMNS gives a row per
+    /// match and cannot aggregate them, which the outer SELECT does (`SELECT
+    /// COUNT(*) FROM GRAPH_TABLE (...)`). Checked before the outer SELECT is
+    /// translated, as a SELECT that names columns merges COLUMNS into its own
+    /// projection (where the aggregate got the GQL hint about RETURN and
+    /// WITH); a column with an aggregate returned null on every row before.
     ///
     /// # Errors
     ///
-    /// Returns a semantic error for an aggregate in a column: COLUMNS gives a
-    /// row per match and cannot aggregate them, which the outer SELECT does
-    /// (`SELECT COUNT(*) FROM GRAPH_TABLE (...)`). A column with an aggregate
-    /// returned null on every row.
+    /// A semantic error (42000) that names the aggregate and the column.
+    fn reject_column_aggregates(columns: &ast::ColumnsClause) -> Result<()> {
+        for col in &columns.items {
+            if let Some(aggregate) = first_aggregate(&col.expression) {
+                return Err(Error::from(QueryError::new(
+                    QueryErrorKind::Semantic,
+                    format!(
+                        "aggregate {aggregate} in the COLUMNS of GRAPH_TABLE (column \
+                         '{}'): COLUMNS gives one row per match and cannot aggregate the \
+                         matches; aggregate in the outer SELECT instead, as in \
+                         SELECT {aggregate}(...) FROM GRAPH_TABLE (...)",
+                        col.alias
+                    ),
+                )));
+            }
+        }
+        Ok(())
+    }
+
+    /// Translates the COLUMNS of `GRAPH_TABLE`: one row per match of its
+    /// pattern (the caller ran [`Self::reject_column_aggregates`]).
     fn translate_columns(
         &self,
         columns: &ast::ColumnsClause,
@@ -727,18 +847,6 @@ impl SqlPgqTranslator {
             .items
             .iter()
             .map(|col| {
-                if let Some(aggregate) = first_aggregate(&col.expression) {
-                    return Err(Error::Query(QueryError::new(
-                        QueryErrorKind::Semantic,
-                        format!(
-                            "aggregate {aggregate} in the COLUMNS of GRAPH_TABLE (column \
-                             '{}'): COLUMNS gives one row per match and cannot aggregate the \
-                             matches; aggregate in the outer SELECT instead, as in \
-                             SELECT {aggregate}(...) FROM GRAPH_TABLE (...)",
-                            col.alias
-                        ),
-                    )));
-                }
                 Ok(ReturnItem {
                     expression: self.translate_expression(&col.expression, None)?,
                     alias: Some(col.alias.clone()),
@@ -768,6 +876,7 @@ impl SqlPgqTranslator {
         alias: Option<String>,
         table_alias: Option<&str>,
     ) -> Result<AggregateExpr> {
+        crate::query::functions::check_aggregate_call(name, function, args.len())?;
         let expression = match args.first() {
             None => None,
             Some(ast::Expression::Variable(v)) if v == "*" => None, // COUNT(*)
@@ -793,6 +902,7 @@ impl SqlPgqTranslator {
         )
         .then(|| match second {
             Some(ast::Expression::Literal(ast::Literal::Float(p))) => p.clamp(0.0, 1.0),
+            Some(ast::Expression::Literal(ast::Literal::Decimal(p))) => p.to_f64().clamp(0.0, 1.0),
             Some(ast::Expression::Literal(ast::Literal::Integer(p))) => (*p as f64).clamp(0.0, 1.0),
             _ => 0.5,
         });
@@ -818,66 +928,151 @@ impl SqlPgqTranslator {
         })
     }
 
-    /// Translates a HAVING expression, extracting inline aggregate calls into the
-    /// aggregates list and replacing them with variable references.
+    /// Translates `expr`, which may call aggregates anywhere inside it (under
+    /// an operator, as a function's argument, in a CASE or a list), for the
+    /// rows the Aggregate gives (ISO/IEC 9075-2: a <value expression> over
+    /// <set function specification>s, in the select list and in HAVING).
+    /// Each aggregate call joins `aggregates` under the column `name` gives
+    /// it (a call already there under that name is reused) and reads that
+    /// column; a part without an aggregate is translated by `leaf`.
     ///
-    /// For example, `COUNT(*) > 0` becomes `Variable("_having_agg_0") > Literal(0)`
-    /// and a new `AggregateExpr` for `COUNT(*)` with alias `_having_agg_0` is appended
-    /// to `aggregates`. The rest reads the output of the Aggregate: its keys,
-    /// named after the COLUMNS they are (`gender` or `g.gender`), and its
-    /// aggregates, named after their aliases (`cnt`).
-    fn translate_having_expression(
+    /// For HAVING, `COUNT(*) > 0` becomes `Variable("_having_agg_0") > 0`, and
+    /// the rest reads the output of the Aggregate: its keys, named after the
+    /// COLUMNS they are (`gender` or `g.gender`), and its aggregates, named
+    /// after their aliases (`cnt`). It extracted aggregates under operators
+    /// only, and so refused `ABS(MIN(x))` and a CASE over aggregates.
+    fn translate_over_aggregates(
         &self,
         expr: &ast::Expression,
         table_alias: Option<&str>,
         aggregates: &mut Vec<AggregateExpr>,
+        name: &dyn Fn(&AggregateExpr, usize) -> String,
+        leaf: &mut dyn FnMut(&ast::Expression) -> Result<LogicalExpression>,
     ) -> Result<LogicalExpression> {
+        if first_aggregate(expr).is_none() {
+            return leaf(expr);
+        }
         match expr {
             ast::Expression::FunctionCall {
-                name,
+                name: function,
                 args,
                 distinct,
-            } if is_aggregate_function(name) => {
-                // This is an inline aggregate: extract it.
-                let agg_fn =
-                    to_aggregate_function(name).expect("validated by is_aggregate_function");
-                let alias = format!("_having_agg_{}", aggregates.len());
-                aggregates.push(self.translate_aggregate(
-                    name,
-                    agg_fn,
-                    args,
-                    *distinct,
-                    Some(alias.clone()),
-                    table_alias,
-                )?);
-                Ok(LogicalExpression::Variable(alias))
+            } if is_aggregate_function(function) => {
+                let agg_fn = AggregateFunction::from_name(function)
+                    .expect("validated by is_aggregate_function");
+                let mut aggregate =
+                    self.translate_aggregate(function, agg_fn, args, *distinct, None, table_alias)?;
+                let column = name(&aggregate, aggregates.len());
+                if !aggregates
+                    .iter()
+                    .any(|known| known.alias.as_deref() == Some(column.as_str()))
+                {
+                    aggregate.alias = Some(column.clone());
+                    aggregates.push(aggregate);
+                }
+                Ok(LogicalExpression::Variable(column))
+            }
+            ast::Expression::FunctionCall {
+                name: function,
+                args,
+                distinct,
+            } => {
+                let mut translated = Vec::with_capacity(args.len());
+                for arg in args {
+                    translated.push(self.translate_over_aggregates(
+                        arg,
+                        table_alias,
+                        aggregates,
+                        name,
+                        leaf,
+                    )?);
+                }
+                resolve_call(function, translated, *distinct)
             }
             ast::Expression::Binary { left, op, right } => {
-                let left_expr = self.translate_having_expression(left, table_alias, aggregates)?;
-                let right_expr =
-                    self.translate_having_expression(right, table_alias, aggregates)?;
-                let binary_op = self.translate_binary_op(*op)?;
+                let left =
+                    self.translate_over_aggregates(left, table_alias, aggregates, name, leaf)?;
+                let right =
+                    self.translate_over_aggregates(right, table_alias, aggregates, name, leaf)?;
                 Ok(LogicalExpression::Binary {
-                    left: Box::new(left_expr),
-                    op: binary_op,
-                    right: Box::new(right_expr),
+                    left: Box::new(left),
+                    op: self.translate_binary_op(*op)?,
+                    right: Box::new(right),
                 })
             }
             ast::Expression::Unary { op, operand } => {
-                let operand_expr =
-                    self.translate_having_expression(operand, table_alias, aggregates)?;
-                if *op == ast::UnaryOp::Pos {
-                    return Ok(operand_expr);
-                }
-                let unary_op = self.translate_unary_op(*op)?;
+                let operand =
+                    self.translate_over_aggregates(operand, table_alias, aggregates, name, leaf)?;
                 Ok(LogicalExpression::Unary {
-                    op: unary_op,
-                    operand: Box::new(operand_expr),
+                    op: self.translate_unary_op(*op)?,
+                    operand: Box::new(operand),
                 })
             }
-            // Anything else (columns, literals) reads the Aggregate's output
-            // (no aggregates expected).
-            _ => self.translate_expression(expr, table_alias),
+            ast::Expression::Case {
+                input,
+                whens,
+                else_clause,
+            } => {
+                let operand = match input {
+                    Some(input) => Some(Box::new(self.translate_over_aggregates(
+                        input,
+                        table_alias,
+                        aggregates,
+                        name,
+                        leaf,
+                    )?)),
+                    None => None,
+                };
+                let mut when_clauses = Vec::with_capacity(whens.len());
+                for (condition, result) in whens {
+                    when_clauses.push((
+                        self.translate_over_aggregates(
+                            condition,
+                            table_alias,
+                            aggregates,
+                            name,
+                            leaf,
+                        )?,
+                        self.translate_over_aggregates(
+                            result,
+                            table_alias,
+                            aggregates,
+                            name,
+                            leaf,
+                        )?,
+                    ));
+                }
+                let else_clause = match else_clause {
+                    Some(otherwise) => Some(Box::new(self.translate_over_aggregates(
+                        otherwise,
+                        table_alias,
+                        aggregates,
+                        name,
+                        leaf,
+                    )?)),
+                    None => None,
+                };
+                Ok(LogicalExpression::Case {
+                    operand,
+                    when_clauses,
+                    else_clause,
+                })
+            }
+            ast::Expression::List(items) => {
+                let mut translated = Vec::with_capacity(items.len());
+                for item in items {
+                    translated.push(self.translate_over_aggregates(
+                        item,
+                        table_alias,
+                        aggregates,
+                        name,
+                        leaf,
+                    )?);
+                }
+                Ok(LogicalExpression::List(translated))
+            }
+            // `first_aggregate` finds aggregates in the kinds above only.
+            _ => leaf(expr),
         }
     }
 
@@ -931,10 +1126,6 @@ impl SqlPgqTranslator {
             ast::Expression::Unary { op, operand } => {
                 let operand_expr =
                     self.translate_sql_expression(operand, table_alias, column_map)?;
-                // Unary positive is identity: just return the operand
-                if *op == ast::UnaryOp::Pos {
-                    return Ok(operand_expr);
-                }
                 let unary_op = self.translate_unary_op(*op)?;
                 Ok(LogicalExpression::Unary {
                     op: unary_op,
@@ -950,23 +1141,16 @@ impl SqlPgqTranslator {
                 if args.len() == 1
                     && let ast::Expression::Variable(var_name) = &args[0]
                 {
-                    match name.to_uppercase().as_str() {
-                        "LENGTH" => {
-                            return Ok(LogicalExpression::Variable(format!(
-                                "_path_length_{var_name}"
-                            )));
-                        }
-                        "NODES" => {
-                            return Ok(LogicalExpression::Variable(format!(
-                                "_path_nodes_{var_name}"
-                            )));
-                        }
-                        "EDGES" => {
-                            return Ok(LogicalExpression::Variable(format!(
-                                "_path_edges_{var_name}"
-                            )));
-                        }
-                        _ => {}
+                    let column = match BuiltinFunction::from_name(name) {
+                        Some(BuiltinFunction::Size) => Some("length"),
+                        Some(BuiltinFunction::Nodes) => Some("nodes"),
+                        Some(BuiltinFunction::Edges) => Some("edges"),
+                        _ => None,
+                    };
+                    if let Some(column) = column {
+                        return Ok(LogicalExpression::Variable(format!(
+                            "_path_{column}_{var_name}"
+                        )));
                     }
                 }
 
@@ -974,11 +1158,7 @@ impl SqlPgqTranslator {
                     .iter()
                     .map(|a| self.translate_sql_expression(a, table_alias, column_map))
                     .collect::<Result<_>>()?;
-                Ok(LogicalExpression::FunctionCall {
-                    name: name.clone(),
-                    args: translated_args,
-                    distinct: *distinct,
-                })
+                resolve_call(name, translated_args, *distinct)
             }
             ast::Expression::Case {
                 input,
@@ -1055,10 +1235,6 @@ impl SqlPgqTranslator {
             }
             ast::Expression::Unary { op, operand } => {
                 let operand_expr = self.translate_expression(operand, table_alias)?;
-                // Unary positive is identity: just return the operand
-                if *op == ast::UnaryOp::Pos {
-                    return Ok(operand_expr);
-                }
                 let unary_op = self.translate_unary_op(*op)?;
 
                 Ok(LogicalExpression::Unary {
@@ -1076,23 +1252,16 @@ impl SqlPgqTranslator {
                 if args.len() == 1
                     && let ast::Expression::Variable(var_name) = &args[0]
                 {
-                    match name.to_uppercase().as_str() {
-                        "LENGTH" => {
-                            return Ok(LogicalExpression::Variable(format!(
-                                "_path_length_{var_name}"
-                            )));
-                        }
-                        "NODES" => {
-                            return Ok(LogicalExpression::Variable(format!(
-                                "_path_nodes_{var_name}"
-                            )));
-                        }
-                        "EDGES" => {
-                            return Ok(LogicalExpression::Variable(format!(
-                                "_path_edges_{var_name}"
-                            )));
-                        }
-                        _ => {}
+                    let column = match BuiltinFunction::from_name(name) {
+                        Some(BuiltinFunction::Size) => Some("length"),
+                        Some(BuiltinFunction::Nodes) => Some("nodes"),
+                        Some(BuiltinFunction::Edges) => Some("edges"),
+                        _ => None,
+                    };
+                    if let Some(column) = column {
+                        return Ok(LogicalExpression::Variable(format!(
+                            "_path_{column}_{var_name}"
+                        )));
                     }
                 }
 
@@ -1101,11 +1270,7 @@ impl SqlPgqTranslator {
                     .map(|a| self.translate_expression(a, table_alias))
                     .collect::<Result<_>>()?;
 
-                Ok(LogicalExpression::FunctionCall {
-                    name: name.clone(),
-                    args: translated_args,
-                    distinct: *distinct,
-                })
+                resolve_call(name, translated_args, *distinct)
             }
             ast::Expression::List(items) => {
                 let translated: Vec<LogicalExpression> = items
@@ -1155,16 +1320,16 @@ impl SqlPgqTranslator {
                     .collect::<Result<Vec<_>>>()?;
                 Ok(LogicalExpression::Map(entries))
             }
-            ast::Expression::ExistsSubquery { .. } => Err(Error::Query(QueryError::new(
-                QueryErrorKind::Semantic,
+            ast::Expression::ExistsSubquery { .. } => Err(Error::from(QueryError::new(
+                QueryErrorKind::Unsupported,
                 "EXISTS subquery not supported in SQL/PGQ",
             ))),
-            ast::Expression::CountSubquery { .. } => Err(Error::Query(QueryError::new(
-                QueryErrorKind::Semantic,
+            ast::Expression::CountSubquery { .. } => Err(Error::from(QueryError::new(
+                QueryErrorKind::Unsupported,
                 "COUNT subquery not supported in SQL/PGQ",
             ))),
-            ast::Expression::ValueSubquery { .. } => Err(Error::Query(QueryError::new(
-                QueryErrorKind::Semantic,
+            ast::Expression::ValueSubquery { .. } => Err(Error::from(QueryError::new(
+                QueryErrorKind::Unsupported,
                 "VALUE subquery not supported in SQL/PGQ",
             ))),
             ast::Expression::IndexAccess { base, index } => {
@@ -1199,8 +1364,8 @@ impl SqlPgqTranslator {
             ast::Expression::LetIn { .. }
             | ast::Expression::ListComprehension { .. }
             | ast::Expression::ListPredicate { .. }
-            | ast::Expression::Reduce { .. } => Err(Error::Query(QueryError::new(
-                QueryErrorKind::Semantic,
+            | ast::Expression::Reduce { .. } => Err(Error::from(QueryError::new(
+                QueryErrorKind::Unsupported,
                 "This expression type is not supported in SQL/PGQ",
             ))),
         }
@@ -1212,6 +1377,7 @@ impl SqlPgqTranslator {
             ast::Literal::Bool(b) => Value::Bool(*b),
             ast::Literal::Integer(i) => Value::Int64(*i),
             ast::Literal::Float(f) => Value::Float64(*f),
+            ast::Literal::Decimal(d) => Value::Decimal(*d),
             ast::Literal::String(s) => Value::from(s.as_str()),
             ast::Literal::Date(s) => grafeo_common::types::Date::parse(s)
                 .map_or_else(|| Value::from(s.as_str()), Value::Date),
@@ -1280,8 +1446,7 @@ impl SqlPgqTranslator {
         Ok(match op {
             ast::UnaryOp::Not => UnaryOp::Not,
             ast::UnaryOp::Neg => UnaryOp::Neg,
-            // Pos is handled as a no-op at the call site; this arm is unreachable.
-            ast::UnaryOp::Pos => UnaryOp::Not,
+            ast::UnaryOp::Pos => UnaryOp::Pos,
             ast::UnaryOp::IsNull => UnaryOp::IsNull,
             ast::UnaryOp::IsNotNull => UnaryOp::IsNotNull,
         })
@@ -1289,74 +1454,121 @@ impl SqlPgqTranslator {
 
     // ==================== DDL Translation ====================
 
+    /// A node table becomes a node type, an edge table an edge type between
+    /// the node types its two `REFERENCES` columns name; the session declares
+    /// them, a closed graph type of them and the graph.
     fn translate_create_property_graph(
         &self,
         cpg: &ast::CreatePropertyGraphStatement,
     ) -> Result<LogicalPlan> {
-        // Validate: edge table references must point to defined node tables
-        let node_table_names: hashbrown::HashSet<&str> =
-            cpg.node_tables.iter().map(|t| t.name.as_str()).collect();
-
-        for edge_table in &cpg.edge_tables {
-            if !edge_table.source_table.is_empty()
-                && !node_table_names.contains(edge_table.source_table.as_str())
-            {
-                return Err(Error::Query(QueryError::new(
-                    QueryErrorKind::Semantic,
-                    format!(
-                        "Edge table '{}' references unknown source table '{}'",
-                        edge_table.name, edge_table.source_table
-                    ),
-                )));
-            }
-            if !edge_table.target_table.is_empty()
-                && !node_table_names.contains(edge_table.target_table.as_str())
-            {
-                return Err(Error::Query(QueryError::new(
-                    QueryErrorKind::Semantic,
-                    format!(
-                        "Edge table '{}' references unknown target table '{}'",
-                        edge_table.name, edge_table.target_table
-                    ),
+        let semantic =
+            |message: String| Error::from(QueryError::new(QueryErrorKind::Semantic, message));
+        let mut tables: HashSet<&str> = HashSet::new();
+        for name in cpg
+            .node_tables
+            .iter()
+            .map(|t| t.name.as_str())
+            .chain(cpg.edge_tables.iter().map(|t| t.name.as_str()))
+        {
+            if !tables.insert(name) {
+                return Err(semantic(format!(
+                    "Table '{name}' is defined twice in property graph '{}'",
+                    cpg.name
                 )));
             }
         }
+        let columns = |table: &str, columns: &[ast::ColumnDefinition]| {
+            let mut names = HashSet::new();
+            columns
+                .iter()
+                .map(|column| {
+                    if !names.insert(column.name.as_str()) {
+                        return Err(semantic(format!(
+                            "Column '{}' is defined twice in table '{table}'",
+                            column.name
+                        )));
+                    }
+                    Ok(PropertyGraphColumn {
+                        name: column.name.clone(),
+                        data_type: property_type(&column.data_type),
+                        primary_key: column.primary_key,
+                        references: column.references.is_some(),
+                    })
+                })
+                .collect::<Result<Vec<_>>>()
+        };
 
-        let node_tables = cpg
-            .node_tables
-            .iter()
-            .map(|nt| PropertyGraphNodeTable {
-                name: nt.name.clone(),
-                columns: nt
-                    .columns
-                    .iter()
-                    .map(|c| (c.name.clone(), c.data_type.to_string()))
-                    .collect(),
-            })
-            .collect();
+        let mut node_tables = Vec::new();
+        for table in &cpg.node_tables {
+            if let Some(column) = table.columns.iter().find(|c| c.references.is_some()) {
+                return Err(semantic(format!(
+                    "Node table '{}': column '{}' references a table, which only the source \
+                     and the target of an edge table do",
+                    table.name, column.name
+                )));
+            }
+            node_tables.push(PropertyGraphNodeTable {
+                name: table.name.clone(),
+                columns: columns(&table.name, &table.columns)?,
+            });
+        }
 
-        let edge_tables = cpg
-            .edge_tables
-            .iter()
-            .map(|et| PropertyGraphEdgeTable {
-                name: et.name.clone(),
-                columns: et
-                    .columns
-                    .iter()
-                    .map(|c| (c.name.clone(), c.data_type.to_string()))
-                    .collect(),
-                source_table: et.source_table.clone(),
-                target_table: et.target_table.clone(),
-            })
-            .collect();
+        let node_table = |name: &str| cpg.node_tables.iter().find(|t| t.name == name);
+        let mut edge_tables = Vec::new();
+        for table in &cpg.edge_tables {
+            let references: Vec<_> = table
+                .columns
+                .iter()
+                .filter_map(|c| c.references.as_ref().map(|r| (c, r)))
+                .collect();
+            if references.len() != 2 {
+                return Err(semantic(format!(
+                    "Edge table '{}' needs two columns that reference node tables, its source \
+                     and its target (REFERENCES table(column)); it has {}",
+                    table.name,
+                    references.len()
+                )));
+            }
+            for (column, reference) in &references {
+                let Some(target) = node_table(&reference.table) else {
+                    return Err(Error::from(QueryError::invalid_reference(format!(
+                        "Edge table '{}': column '{}' references '{}', which is no node table \
+                         of property graph '{}'",
+                        table.name, column.name, reference.table, cpg.name
+                    ))));
+                };
+                if !target.columns.iter().any(|c| c.name == reference.column) {
+                    return Err(Error::from(QueryError::invalid_reference(format!(
+                        "Edge table '{}': column '{}' references '{}({})', a column node table \
+                         '{}' does not have",
+                        table.name, column.name, reference.table, reference.column, reference.table
+                    ))));
+                }
+            }
+            if let Some(column) = table.columns.iter().find(|c| c.primary_key) {
+                return Err(Error::from(QueryError::unsupported(format!(
+                    "Edge table '{}': a PRIMARY KEY on an edge table (column '{}') is not \
+                     supported; an edge is identified by its endpoints",
+                    table.name, column.name
+                ))));
+            }
+            edge_tables.push(PropertyGraphEdgeTable {
+                name: table.name.clone(),
+                columns: columns(&table.name, &table.columns)?,
+                source_table: references[0].1.table.clone(),
+                target_table: references[1].1.table.clone(),
+            });
+        }
 
-        let op = LogicalOperator::CreatePropertyGraph(CreatePropertyGraphOp {
-            name: cpg.name.clone(),
-            node_tables,
-            edge_tables,
-        });
-
-        Ok(LogicalPlan::new(op))
+        Ok(LogicalPlan::new(LogicalOperator::CreatePropertyGraph(
+            CreatePropertyGraphOp {
+                name: cpg.name.clone(),
+                or_replace: cpg.or_replace,
+                if_not_exists: cpg.if_not_exists,
+                node_tables,
+                edge_tables,
+            },
+        )))
     }
 
     // ==================== Helpers ====================
@@ -1391,11 +1603,28 @@ impl SqlPgqTranslator {
             LogicalOperator::Expand(expand) => Ok(expand.to_variable.clone()),
             LogicalOperator::Filter(filter) => Self::get_last_variable(&filter.input),
             LogicalOperator::Project(project) => Self::get_last_variable(&project.input),
-            _ => Err(Error::Query(QueryError::new(
-                QueryErrorKind::Semantic,
-                "Cannot get variable from operator",
-            ))),
+            _ => Err(Error::Internal(
+                "Cannot get variable from operator".to_string(),
+            )),
         }
+    }
+}
+
+/// The property type of a column of SQL type `data_type`. Grafeo has one
+/// integer, one float and an unbounded string, so `INT` is an `INT64`,
+/// `FLOAT` a `FLOAT64` and `VARCHAR(n)` a `STRING`, its length not checked.
+fn property_type(data_type: &ast::SqlDataType) -> crate::catalog::PropertyDataType {
+    use crate::catalog::PropertyDataType;
+
+    match data_type {
+        ast::SqlDataType::Bigint | ast::SqlDataType::Int => PropertyDataType::Int64,
+        ast::SqlDataType::Varchar(_) => PropertyDataType::String,
+        ast::SqlDataType::Boolean => PropertyDataType::Bool,
+        ast::SqlDataType::Float | ast::SqlDataType::Double => PropertyDataType::Float64,
+        ast::SqlDataType::Timestamp => PropertyDataType::Timestamp,
+        ast::SqlDataType::Decimal(decimal_type) => PropertyDataType::Decimal(*decimal_type),
+        ast::SqlDataType::Date => PropertyDataType::Date,
+        ast::SqlDataType::Time => PropertyDataType::Time,
     }
 }
 
@@ -1431,7 +1660,7 @@ fn wrap_offset_and_limit(
 ) -> Result<LogicalOperator> {
     let count = |value: u64, clause: &str| {
         usize::try_from(value).map_err(|_| {
-            Error::Query(QueryError::new(
+            Error::from(QueryError::new(
                 QueryErrorKind::Semantic,
                 format!("{clause} {value} is larger than this platform can count"),
             ))

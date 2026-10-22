@@ -38,9 +38,26 @@ internal static class ValueConverter
             bool b => JsonValue.Create(b),
             int i => JsonValue.Create((long)i),
             long l => JsonValue.Create(l),
+            // Every integer goes as a JSON number with its exact digits: one
+            // past 64 bits arrives as an exact decimal up to 38 digits, and
+            // one past that is an error naming the parameter.
+            sbyte i => JsonValue.Create((long)i),
+            byte i => JsonValue.Create((long)i),
+            short i => JsonValue.Create((long)i),
+            ushort i => JsonValue.Create((long)i),
+            uint i => JsonValue.Create((long)i),
+            ulong u => JsonValue.Create(u),
+            Int128 i => IntegerNumber(i.ToString(System.Globalization.CultureInfo.InvariantCulture)),
+            UInt128 u => IntegerNumber(u.ToString(System.Globalization.CultureInfo.InvariantCulture)),
+            System.Numerics.BigInteger b => IntegerNumber(b.ToString(System.Globalization.CultureInfo.InvariantCulture)),
             float f => JsonValue.Create((double)f),
             double d => JsonValue.Create(d),
             string s => JsonValue.Create(s),
+            GrafeoDecimal g => new JsonObject { ["$decimal"] = g.Text },
+            decimal m => new JsonObject
+            {
+                ["$decimal"] = m.ToString(System.Globalization.CultureInfo.InvariantCulture)
+            },
             DateTime dt => new JsonObject
             {
                 ["$timestamp_us"] = new DateTimeOffset(dt.ToUniversalTime())
@@ -69,6 +86,9 @@ internal static class ValueConverter
             IDictionary<string, object?> dict => DictToJsonObject(dict),
             _ => JsonValue.Create(value.ToString()),
         };
+
+    /// <summary>A JSON number of an integer's decimal digits, written as they are.</summary>
+    private static JsonNode IntegerNumber(string digits) => JsonNode.Parse(digits)!;
 
     private static JsonArray VectorToJsonArray(ReadOnlySpan<float> vector)
     {
@@ -190,6 +210,14 @@ internal static class ValueConverter
 
     private static object? ParseJsonObject(JsonElement element)
     {
+        // An exact decimal: the "$decimal" tag as the object's only key
+        if (element.TryGetProperty("$decimal", out var decimalElement)
+            && element.EnumerateObject().Count() == 1
+            && decimalElement.ValueKind == JsonValueKind.String)
+        {
+            return new GrafeoDecimal(decimalElement.GetString()!);
+        }
+
         // Check for temporal markers from grafeo-bindings-common
         if (element.TryGetProperty("$timestamp_us", out var tsElement))
         {
@@ -254,7 +282,7 @@ internal static class ValueConverter
                         var labels = map.TryGetValue("_labels", out var labelsObj) && labelsObj is List<object?> labelList
                             ? labelList.OfType<string>().ToList()
                             : new List<string>();
-                        var props = ExtractProperties(map);
+                        var props = ExtractProperties(map, NodeKeys);
                         nodes.Add(new Node(id, labels, props));
                     }
                     else if (map.ContainsKey("_type"))
@@ -264,7 +292,7 @@ internal static class ValueConverter
                         var edgeType = map.TryGetValue("_type", out var typeObj) && typeObj is string t ? t : "";
                         var sourceId = map.TryGetValue("_source", out var srcObj) && srcObj is long src ? src : 0;
                         var targetId = map.TryGetValue("_target", out var tgtObj) && tgtObj is long tgt ? tgt : 0;
-                        var props = ExtractProperties(map);
+                        var props = ExtractProperties(map, EdgeKeys);
                         edges.Add(new Edge(id, edgeType, sourceId, targetId, props));
                     }
                 }
@@ -274,14 +302,23 @@ internal static class ValueConverter
         return (nodes, edges);
     }
 
-    /// <summary>Extract user properties, stripping internal _-prefixed keys.</summary>
+    /// <summary>The structural keys of a node map: its id and labels.</summary>
+    private static readonly string[] NodeKeys = ["_id", "_labels"];
+
+    /// <summary>The structural keys of an edge map: its id, type and ends.</summary>
+    private static readonly string[] EdgeKeys = ["_id", "_type", "_source", "_target"];
+
+    /// <summary>
+    /// Extract user properties: every key but the <paramref name="structural"/> ones, also a
+    /// property whose name starts with <c>_</c> (#254).
+    /// </summary>
     private static IReadOnlyDictionary<string, object?> ExtractProperties(
-        Dictionary<string, object?> map)
+        Dictionary<string, object?> map, string[] structural)
     {
         var props = new Dictionary<string, object?>();
         foreach (var (key, value) in map)
         {
-            if (!key.StartsWith('_'))
+            if (!structural.Contains(key))
                 props[key] = value;
         }
         return props;

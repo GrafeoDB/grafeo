@@ -91,10 +91,10 @@ mod tests {
     use grafeo_common::types::Value;
 
     use super::*;
+    use crate::graph::GraphStore;
     use crate::graph::load::testing::assert_same_rows;
     use crate::graph::rowgroup::RowGroupStore;
     use crate::graph::rowgroup::section::RowGroupStoreSection;
-    use crate::graph::{GraphStore, GraphStoreMut};
 
     /// The LPG section of [`sample_store`] in the 0.5.x block layout, as
     /// `LpgStore` wrote it (`tests/fixtures/lpg-v3/README.md`).

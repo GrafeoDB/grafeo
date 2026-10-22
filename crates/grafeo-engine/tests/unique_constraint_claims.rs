@@ -270,9 +270,9 @@ fn a_transaction_may_delete_and_reinsert_its_key() {
 }
 
 /// A transaction may set the key of a node it created to the value the
-/// node already holds.
+/// node already holds: by a plain SET, a map SET and a MERGE's ON MATCH SET.
+/// A second node with that key is still refused.
 #[test]
-#[ignore = "the UNIQUE check of a SET reads the node's committed value: a node the transaction created is refused its own value"]
 fn a_new_node_may_be_set_to_its_own_key() {
     let db = db();
     let mut session = db.session();
@@ -283,12 +283,22 @@ fn a_new_node_may_be_set_to_its_own_key() {
     session
         .execute("MATCH (m:Memory {key: 'ssi'}) SET m.key = 'ssi'")
         .unwrap();
+    session
+        .execute("MATCH (m:Memory {key: 'ssi'}) SET m += {key: 'ssi', other: 1}")
+        .unwrap();
+    session
+        .execute("MERGE (m:Memory {key: 'ssi'}) ON MATCH SET m.key = 'ssi'")
+        .unwrap();
+    let error = session
+        .execute("INSERT (:Memory {key: 'ssi'})")
+        .expect_err("a second node with the key");
+    assert!(is_violation(&error), "{error}");
     session.commit().unwrap();
     assert_eq!(
-        db.execute("MATCH (m:Memory) RETURN m.key, m.n")
+        db.execute("MATCH (m:Memory) RETURN m.key, m.n, m.other")
             .unwrap()
             .rows(),
-        [[Value::from("ssi"), Value::Int64(2)]]
+        [[Value::from("ssi"), Value::Int64(2), Value::Int64(1)]]
     );
 }
 

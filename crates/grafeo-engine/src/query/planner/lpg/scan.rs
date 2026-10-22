@@ -492,7 +492,6 @@ mod tests {
     use crate::query::plan::UnaryOp;
     use crate::transaction::TransactionManager;
     use grafeo_common::types::{EpochId, TransactionId};
-    use grafeo_core::graph::GraphStoreMut as _;
     use grafeo_core::graph::rowgroup::RowGroupStore;
 
     /// 19 `Big` nodes, three of them also `Small`, and three `Same` nodes.

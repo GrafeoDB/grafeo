@@ -338,175 +338,200 @@ fn a_rollback_leaves_the_text_index_as_committed() {
     assert_eq!(found("bridges"), 0, "the rolled-back label took nothing in");
 }
 
-/// On a database built on an external store, which has no undo, a rollback
-/// undoes what it can, aborts the transaction and fails naming the graph
-/// whose store keeps the writes; it does not poison the database. A
-/// rollback to a savepoint after such writes is refused before it changes
-/// anything.
+/// A database built on a backend of one's own (`with_store`) runs its
+/// transactions in the backend: the engine opens one transaction per
+/// transaction that writes, before its first write, and ends it with the
+/// commit at its epoch or a rollback; a savepoint and a failed statement
+/// roll back to their position and the transaction goes on. Another
+/// session sees nothing before the commit. The backend gets the recorded
+/// changes, in order, and every ended transaction was opened.
 #[test]
-fn a_rollback_names_the_external_store_that_keeps_its_writes() {
-    // An external store without undo: a user's own store, which writes in
-    // place and keeps no versions (see `in_place`).
-    use grafeo_common::types::ReadView;
-    use grafeo_core::graph::{GraphStore, GraphStoreMut};
+fn a_backend_of_ones_own_runs_the_transactions() {
+    use backend::{Call, Logged};
 
-    let store = Arc::new(in_place::InPlace::default());
+    let store = Arc::new(Logged::default());
     let db = GrafeoDB::with_store(
-        Arc::clone(&store) as Arc<dyn GraphStoreMut>,
+        Arc::clone(&store) as Arc<dyn grafeo_core::graph::GraphBackend>,
         grafeo_engine::Config::in_memory(),
     )
     .unwrap();
-    let kept = |error: &Error| {
-        let message = error.to_string();
-        message.contains("graph 'default'") && message.contains("keeps")
-    };
+    let people =
+        |session: &Session| column(session, "MATCH (p:Person) RETURN p.name ORDER BY p.name");
 
+    // A rollback to a savepoint undoes what came after it.
     let mut session = db.session();
     session.begin_transaction().unwrap();
-    session.savepoint("start").unwrap();
     session.execute("INSERT (:Person {name: 'Alix'})").unwrap();
-    let refused = session.rollback_to_savepoint("start").unwrap_err();
-    assert!(kept(&refused), "{refused}");
-    assert_eq!(
-        column(&session, "MATCH (p:Person) RETURN p.name"),
-        ["Alix"],
-        "a refused rollback to a savepoint changes nothing"
-    );
-    assert!(
-        session.rollback_to_savepoint("start").is_err(),
-        "the savepoint stays, and is refused again"
-    );
-
-    let error = session.rollback().unwrap_err();
-    assert!(kept(&error), "{error}");
-    assert!(!session.in_transaction(), "the transaction is aborted");
-    assert_eq!(
-        store.node_ids(ReadView::latest()).unwrap().len(),
-        1,
-        "the store keeps the write"
-    );
-
-    // Not poisoned: another transaction commits.
-    session.begin_transaction().unwrap();
+    session.savepoint("after_alix").unwrap();
     session.execute("INSERT (:Person {name: 'Gus'})").unwrap();
-    session.commit().unwrap();
-
-    // A statement that fails after a write says the store keeps it, with
-    // its own error first: in a transaction, and on its own.
-    session.execute("CREATE NODE TYPE Doc (id INT64)").unwrap();
-    let partial = "UNWIND [3, 'x'] AS v INSERT (:Doc {id: v})";
-    session.begin_transaction().unwrap();
-    let error = session.execute(partial).unwrap_err().to_string();
-    assert!(
-        error.contains("not all undone") && error.contains("graph 'default'"),
-        "{error}"
+    assert_eq!(
+        people(&session),
+        ["Alix", "Gus"],
+        "a transaction sees its own writes"
     );
-    // The statement reported what the store keeps: nothing is left to undo.
+    assert!(
+        people(&db.session()).is_empty(),
+        "another session sees nothing yet"
+    );
+    session.rollback_to_savepoint("after_alix").unwrap();
+    assert_eq!(people(&session), ["Alix"]);
+
+    // A failed statement inside the transaction undoes its own writes.
+    session.execute("CREATE NODE TYPE Doc (id INT64)").unwrap();
+    let error = session
+        .execute("UNWIND [3, 'x'] AS v INSERT (:Doc {id: v})")
+        .unwrap_err();
+    assert!(
+        !error.to_string().contains("rolled back"),
+        "the rollback worked: {error}"
+    );
+    assert_eq!(
+        column(&session, "MATCH (d:Doc) RETURN d.id"),
+        Vec::<String>::new(),
+        "the failed statement's first row is gone"
+    );
+    session.commit().unwrap();
+    assert_eq!(
+        people(&db.session()),
+        ["Alix"],
+        "committed: everyone sees it"
+    );
+
+    // A rollback leaves the backend as the commit left it.
+    session.begin_transaction().unwrap();
+    session
+        .execute("MATCH (p:Person) SET p.name = 'Mia'")
+        .unwrap();
+    session
+        .execute("INSERT (:Person {name: 'Vincent'})")
+        .unwrap();
     session.rollback().unwrap();
-    let error = session.execute(partial).unwrap_err().to_string();
-    assert!(error.contains("not all undone"), "{error}");
+    assert_eq!(people(&db.session()), ["Alix"]);
+
+    // A statement outside a transaction commits in one of its own.
+    db.execute("INSERT (:Person {name: 'Jules'})").unwrap();
+    assert_eq!(people(&db.session()), ["Alix", "Jules"]);
+
+    // The backend saw each transaction open once, before its writes, and
+    // end once: with the recorded changes, the savepoint and the failed
+    // statement as rollbacks to a position.
+    let calls = store.calls();
+    let opened: Vec<_> = calls
+        .iter()
+        .filter_map(|call| match call {
+            Call::Begin(id) => Some(*id),
+            _ => None,
+        })
+        .collect();
+    let ended: Vec<_> = calls
+        .iter()
+        .filter_map(|call| match call {
+            Call::Commit(id, _) | Call::Rollback(id, _) => Some(*id),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(opened.len(), 3, "three transactions wrote: {calls:?}");
+    assert_eq!(opened, ended, "each ended once, in order: {calls:?}");
+    let shapes: Vec<String> = calls.iter().map(Call::shape).collect();
+    assert_eq!(
+        shapes,
+        [
+            "begin",
+            "apply",
+            "apply",
+            "rollback_to 1",
+            "apply",
+            "rollback_to 1",
+            "commit 1",
+            "begin",
+            "apply",
+            "apply",
+            "rollback 2",
+            "begin",
+            "apply",
+            "commit 1",
+        ],
+        "{calls:?}"
+    );
 }
 
-/// A user's own store as a database built on an external store meets it:
-/// every write in place, at once, and every read of now, whatever epoch or
-/// transaction it names (a store without versions). It keeps its rows in
-/// a row-group store, through that store's immediate writes and reads.
-mod in_place {
+/// A backend of one's own for [`a_backend_of_ones_own_runs_the_transactions`]:
+/// the row-group store behind the contract, logging every call of its write
+/// side.
+mod backend {
     use std::sync::Arc;
 
     use arcstr::ArcStr;
-    use grafeo_common::types::{
-        EdgeId, EpochId, NodeId, PropertyKey, ReadView, TransactionId, Value,
-    };
+    use grafeo_common::change::{Change, ChangeMark, DataOp};
+    use grafeo_common::types::{EdgeId, EpochId, NodeId, ReadView, TransactionId};
     use grafeo_common::utils::error::Result;
-    use grafeo_common::utils::hash::FxHashMap;
-    use grafeo_core::graph::lpg::{CompareOp, Edge, Node};
+    use grafeo_core::graph::apply::{Applied, ApplyError, BackendTransaction, Writer};
+    use grafeo_core::graph::lpg::{Edge, Node};
     use grafeo_core::graph::rowgroup::RowGroupStore;
-    use grafeo_core::graph::{Direction, GraphStore, GraphStoreMut, Labels};
+    use grafeo_core::graph::{Direction, GraphBackend, GraphStore};
     use grafeo_core::statistics::Statistics;
+    use parking_lot::Mutex;
 
-    #[derive(Default)]
-    pub struct InPlace {
-        rows: RowGroupStore,
+    /// A call of the write side, with the number of changes it was handed.
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub enum Call {
+        Begin(TransactionId),
+        Apply,
+        Commit(TransactionId, usize),
+        Rollback(TransactionId, usize),
+        RollbackTo(TransactionId, usize),
     }
 
-    /// Every read is of now, whatever view it names: the store keeps no
-    /// versions.
-    const NOW: ReadView = ReadView::latest();
+    impl Call {
+        /// The call without its transaction, for comparing sequences.
+        pub fn shape(&self) -> String {
+            match self {
+                Self::Begin(_) => "begin".to_string(),
+                Self::Apply => "apply".to_string(),
+                Self::Commit(_, changes) => format!("commit {changes}"),
+                Self::Rollback(_, changes) => format!("rollback {changes}"),
+                Self::RollbackTo(_, changes) => format!("rollback_to {changes}"),
+            }
+        }
+    }
 
-    impl GraphStore for InPlace {
-        fn node(&self, id: NodeId, _: ReadView) -> Result<Option<Node>> {
-            self.rows.node(id, NOW)
+    #[derive(Default)]
+    pub struct Logged {
+        rows: RowGroupStore,
+        calls: Mutex<Vec<Call>>,
+    }
+
+    impl Logged {
+        pub fn calls(&self) -> Vec<Call> {
+            self.calls.lock().clone()
         }
-        fn edge(&self, id: EdgeId, _: ReadView) -> Result<Option<Edge>> {
-            self.rows.edge(id, NOW)
+
+        fn log(&self, call: Call) {
+            self.calls.lock().push(call);
         }
-        fn node_property(&self, id: NodeId, key: &str, _: ReadView) -> Result<Option<Value>> {
-            self.rows.node_property(id, key, NOW)
+    }
+
+    impl GraphStore for Logged {
+        fn node(&self, id: NodeId, view: ReadView) -> Result<Option<Node>> {
+            self.rows.node(id, view)
         }
-        fn edge_property(&self, id: EdgeId, key: &str, _: ReadView) -> Result<Option<Value>> {
-            self.rows.edge_property(id, key, NOW)
-        }
-        fn node_labels(&self, id: NodeId, _: ReadView) -> Result<Option<Labels>> {
-            self.rows.node_labels(id, NOW)
-        }
-        fn edge_type(&self, id: EdgeId, _: ReadView) -> Result<Option<ArcStr>> {
-            self.rows.edge_type(id, NOW)
-        }
-        fn node_property_batch(
-            &self,
-            ids: &[NodeId],
-            key: &PropertyKey,
-            _: ReadView,
-        ) -> Result<Vec<Option<Value>>> {
-            self.rows.node_property_batch(ids, key, NOW)
-        }
-        fn node_properties_batch(
-            &self,
-            ids: &[NodeId],
-            _: ReadView,
-        ) -> Result<Vec<FxHashMap<PropertyKey, Value>>> {
-            self.rows.node_properties_batch(ids, NOW)
-        }
-        fn node_properties_selective_batch(
-            &self,
-            ids: &[NodeId],
-            keys: &[PropertyKey],
-            _: ReadView,
-        ) -> Result<Vec<FxHashMap<PropertyKey, Value>>> {
-            self.rows.node_properties_selective_batch(ids, keys, NOW)
-        }
-        fn edge_properties_selective_batch(
-            &self,
-            ids: &[EdgeId],
-            keys: &[PropertyKey],
-            _: ReadView,
-        ) -> Result<Vec<FxHashMap<PropertyKey, Value>>> {
-            self.rows.edge_properties_selective_batch(ids, keys, NOW)
+        fn edge(&self, id: EdgeId, view: ReadView) -> Result<Option<Edge>> {
+            self.rows.edge(id, view)
         }
         fn edges(
             &self,
             node: NodeId,
             direction: Direction,
             types: &[ArcStr],
-            _: ReadView,
+            view: ReadView,
         ) -> Result<Vec<(NodeId, EdgeId)>> {
-            self.rows.edges(node, direction, types, NOW)
+            self.rows.edges(node, direction, types, view)
         }
         fn has_backward_adjacency(&self) -> bool {
             self.rows.has_backward_adjacency()
         }
-        fn node_ids(&self, _: ReadView) -> Result<Vec<NodeId>> {
-            self.rows.node_ids(NOW)
-        }
-        fn nodes_by_label(&self, label: &str, _: ReadView) -> Result<Vec<NodeId>> {
-            self.rows.nodes_by_label(label, NOW)
-        }
-        fn node_count(&self, _: ReadView) -> Result<usize> {
-            self.rows.node_count(NOW)
-        }
-        fn edge_count(&self, _: ReadView) -> Result<usize> {
-            self.rows.edge_count(NOW)
+        fn node_ids(&self, view: ReadView) -> Result<Vec<NodeId>> {
+            self.rows.node_ids(view)
         }
         fn all_labels(&self) -> Result<Vec<String>> {
             self.rows.all_labels()
@@ -517,49 +542,6 @@ mod in_place {
         fn all_property_keys(&self) -> Result<Vec<String>> {
             self.rows.all_property_keys()
         }
-        fn find_nodes_by_property(
-            &self,
-            property: &str,
-            value: &Value,
-            _: ReadView,
-        ) -> Result<Vec<NodeId>> {
-            self.rows.find_nodes_by_property(property, value, NOW)
-        }
-        fn find_nodes_by_properties(
-            &self,
-            conditions: &[(&str, Value)],
-            _: ReadView,
-        ) -> Result<Vec<NodeId>> {
-            self.rows.find_nodes_by_properties(conditions, NOW)
-        }
-        fn find_nodes_in_range(
-            &self,
-            property: &str,
-            min: Option<&Value>,
-            max: Option<&Value>,
-            min_inclusive: bool,
-            max_inclusive: bool,
-            _: ReadView,
-        ) -> Result<Vec<NodeId>> {
-            self.rows
-                .find_nodes_in_range(property, min, max, min_inclusive, max_inclusive, NOW)
-        }
-        fn node_property_might_match(
-            &self,
-            property: &PropertyKey,
-            op: CompareOp,
-            value: &Value,
-        ) -> bool {
-            self.rows.node_property_might_match(property, op, value)
-        }
-        fn edge_property_might_match(
-            &self,
-            property: &PropertyKey,
-            op: CompareOp,
-            value: &Value,
-        ) -> bool {
-            self.rows.edge_property_might_match(property, op, value)
-        }
         fn statistics(&self) -> Arc<Statistics> {
             self.rows.statistics()
         }
@@ -568,61 +550,64 @@ mod in_place {
         }
     }
 
-    impl GraphStoreMut for InPlace {
-        fn create_node(&self, labels: &[&str]) -> NodeId {
-            self.rows.create_node(labels)
-        }
-        fn create_node_versioned(&self, labels: &[&str], _: EpochId, _: TransactionId) -> NodeId {
-            self.rows.create_node(labels)
-        }
-        fn create_edge(&self, src: NodeId, dst: NodeId, edge_type: &str) -> EdgeId {
-            self.rows.create_edge(src, dst, edge_type)
-        }
-        fn create_edge_versioned(
+    impl GraphBackend for Logged {
+        fn reserve_node_ids(
             &self,
-            src: NodeId,
-            dst: NodeId,
-            edge_type: &str,
-            _: EpochId,
-            _: TransactionId,
-        ) -> Result<EdgeId> {
-            Ok(self.rows.create_edge(src, dst, edge_type))
+            count: u64,
+        ) -> std::result::Result<std::ops::Range<u64>, ApplyError> {
+            self.rows.reserve_node_ids(count)
         }
-        fn batch_create_edges(&self, edges: &[(NodeId, NodeId, &str)]) -> Vec<EdgeId> {
-            self.rows.batch_create_edges(edges)
+        fn reserve_edge_ids(
+            &self,
+            count: u64,
+        ) -> std::result::Result<std::ops::Range<u64>, ApplyError> {
+            self.rows.reserve_edge_ids(count)
         }
-        fn delete_node(&self, id: NodeId) -> bool {
-            self.rows.delete_node(id)
+        fn begin(
+            &self,
+            transaction: TransactionId,
+            snapshot: EpochId,
+        ) -> std::result::Result<BackendTransaction, ApplyError> {
+            self.log(Call::Begin(transaction));
+            self.rows.begin(transaction, snapshot)
         }
-        fn delete_node_versioned(&self, id: NodeId, _: EpochId, _: TransactionId) -> Result<bool> {
-            Ok(self.rows.delete_node(id))
+        fn apply(&self, op: &DataOp, writer: Writer) -> std::result::Result<Applied, ApplyError> {
+            self.log(Call::Apply);
+            self.rows.apply(op, writer)
         }
-        fn delete_node_edges(&self, node_id: NodeId) {
-            self.rows.delete_node_edges(node_id);
+        fn commit(
+            &self,
+            transaction: BackendTransaction,
+            changes: &mut dyn Iterator<Item = &Change>,
+            epoch: EpochId,
+        ) -> std::result::Result<(), ApplyError> {
+            let changes: Vec<&Change> = changes.collect();
+            self.log(Call::Commit(transaction.id(), changes.len()));
+            self.rows
+                .commit(transaction, &mut changes.into_iter(), epoch)
         }
-        fn delete_edge(&self, id: EdgeId) -> bool {
-            self.rows.delete_edge(id)
+        fn rollback(
+            &self,
+            transaction: BackendTransaction,
+            changes: &mut dyn DoubleEndedIterator<Item = &Change>,
+        ) -> std::result::Result<(), ApplyError> {
+            let changes: Vec<&Change> = changes.collect();
+            self.log(Call::Rollback(transaction.id(), changes.len()));
+            self.rows.rollback(transaction, &mut changes.into_iter())
         }
-        fn delete_edge_versioned(&self, id: EdgeId, _: EpochId, _: TransactionId) -> bool {
-            self.rows.delete_edge(id)
+        fn rollback_to(
+            &self,
+            transaction: BackendTransaction,
+            savepoint: ChangeMark,
+            changes_since: &mut dyn DoubleEndedIterator<Item = &Change>,
+        ) -> std::result::Result<(), ApplyError> {
+            let changes: Vec<&Change> = changes_since.collect();
+            self.log(Call::RollbackTo(transaction.id(), changes.len()));
+            self.rows
+                .rollback_to(transaction, savepoint, &mut changes.into_iter())
         }
-        fn set_node_property(&self, id: NodeId, key: &str, value: Value) {
-            self.rows.set_node_property(id, key, value);
-        }
-        fn set_edge_property(&self, id: EdgeId, key: &str, value: Value) {
-            self.rows.set_edge_property(id, key, value);
-        }
-        fn remove_node_property(&self, id: NodeId, key: &str) -> Result<Option<Value>> {
-            self.rows.remove_node_property(id, key)
-        }
-        fn remove_edge_property(&self, id: EdgeId, key: &str) -> Result<Option<Value>> {
-            self.rows.remove_edge_property(id, key)
-        }
-        fn add_label(&self, node_id: NodeId, label: &str) -> bool {
-            self.rows.add_label(node_id, label)
-        }
-        fn remove_label(&self, node_id: NodeId, label: &str) -> bool {
-            self.rows.remove_label(node_id, label)
+        fn collect(&self, horizon: EpochId) {
+            GraphBackend::collect(&self.rows, horizon);
         }
     }
 }
@@ -751,8 +736,8 @@ mod crash {
 /// writer of a node fails with a write conflict and changes nothing.
 #[test]
 fn query_processors_in_transactions_claim_what_they_write() {
+    use grafeo_core::graph::GraphStore as _;
     use grafeo_core::graph::rowgroup::RowGroupStore;
-    use grafeo_core::graph::{GraphStore as _, GraphStoreMut as _};
     use grafeo_engine::query::{QueryLanguage, QueryProcessor};
     use grafeo_engine::transaction::TransactionManager;
 

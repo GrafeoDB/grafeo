@@ -27,11 +27,12 @@ use grafeo_common::types::{EdgeId, NodeId};
 use grafeo_common::types::{EpochId, PropertyKey, ReadView, TransactionId, Value};
 use grafeo_common::utils::error::Result;
 use grafeo_core::graph::Direction;
+use grafeo_core::graph::GraphBackend;
+use grafeo_core::graph::GraphStore;
 use grafeo_core::graph::lpg::{Edge, Node};
 #[cfg(feature = "triple-store")]
 use grafeo_core::graph::rdf::RdfStore;
 use grafeo_core::graph::rowgroup::RowGroupStore;
-use grafeo_core::graph::{GraphStore, GraphStoreMut};
 
 use crate::catalog::{Catalog, CatalogConstraintValidator};
 use crate::config::GraphModel;
@@ -243,18 +244,16 @@ pub(crate) struct SessionConfig {
 /// tracks its own transaction state, so you can have multiple concurrent
 /// sessions without them interfering.
 pub struct Session {
-    /// The underlying store. Read it through
+    /// The built-in store, which holds the named graphs, their indexes and
+    /// the search indexes; `None` for a session on a backend of one's own
+    /// (`GrafeoDB::with_store`), which has none of them. Read it through
     /// [`root_store`](Self::root_store).
-    store: Arc<RowGroupStore>,
-    /// Classifies the role of `store` for the active backend.
-    /// Search procedures (CALL grafeo.search.*) only reach into `store` when
-    /// this is `Active`. External-store sessions keep `store` as a placeholder
-    /// and must not expose it: it has no indexes or data.
-    lpg_backend: LpgBackend,
-    /// Graph store trait object for pluggable storage backends (read path).
+    store: Option<Arc<RowGroupStore>>,
+    /// The default graph's store, as its reads read it.
     graph_store: Arc<dyn GraphStore>,
-    /// Writable graph store (None for read-only databases).
-    graph_store_mut: Option<Arc<dyn GraphStoreMut>>,
+    /// The default graph's backend, which its writes apply in (`None` for a
+    /// read-only one).
+    graph_store_mut: Option<Arc<dyn GraphBackend>>,
     /// Schema and metadata catalog shared across sessions.
     catalog: Arc<Catalog>,
     /// RDF triple store (if RDF feature is enabled).
@@ -335,11 +334,6 @@ pub struct Session {
     /// writers record into it, and its commit, rollback and savepoints work
     /// from it.
     changes: parking_lot::Mutex<Option<Arc<crate::transaction::TransactionChanges>>>,
-    /// The external store a session on one writes through, as the change
-    /// set writes it (`None` on the built-in store, or a read-only external
-    /// store): one handle for the session, so a transaction's writes in it
-    /// are stamped and undone through the store they were applied to.
-    external_target: Option<Arc<grafeo_core::graph::apply::ExternalTarget>>,
     /// Count of active `ResultStream`s pinned to this session. Commit and
     /// rollback block while any streams are outstanding so mid-iteration
     /// snapshots are not invalidated.
@@ -359,18 +353,6 @@ pub struct Session {
     >,
 }
 
-/// Role of the session's internal row-group store.
-#[derive(Clone, Copy)]
-enum LpgBackend {
-    /// The internal store is the session's active backing store. Search
-    /// procedures can reach its HNSW/BM25 indexes.
-    Active,
-    /// The internal store is an empty placeholder because the session is
-    /// backed by an external `GraphStore` implementation. Search
-    /// procedures must not use it.
-    Placeholder,
-}
-
 /// A savepoint: its name, and how far the transaction's changes reached
 /// when it was taken, in every graph at once.
 #[derive(Clone)]
@@ -386,10 +368,9 @@ impl Session {
     #[cfg(not(feature = "triple-store"))]
     pub(crate) fn with_store(store: Arc<RowGroupStore>, cfg: SessionConfig) -> Self {
         let graph_store = Arc::clone(&store) as Arc<dyn GraphStore>;
-        let graph_store_mut = Some(Arc::clone(&store) as Arc<dyn GraphStoreMut>);
+        let graph_store_mut = Some(Arc::clone(&store) as Arc<dyn GraphBackend>);
         Self {
-            store,
-            lpg_backend: LpgBackend::Active,
+            store: Some(store),
             graph_store,
             graph_store_mut,
             catalog: cfg.catalog,
@@ -432,7 +413,6 @@ impl Session {
             savepoints: parking_lot::Mutex::new(Vec::new()),
             transaction_nesting_depth: parking_lot::Mutex::new(0),
             changes: parking_lot::Mutex::new(None),
-            external_target: None,
             active_streams: AtomicUsize::new(0),
             #[cfg(feature = "metrics")]
             metrics: None,
@@ -443,10 +423,33 @@ impl Session {
         }
     }
 
-    /// The session's own row-group store: the default graph's store, which holds
-    /// the named graphs and on which its transactions commit and roll back.
-    fn root_store(&self) -> Arc<RowGroupStore> {
-        Arc::clone(&self.store)
+    /// The session's built-in store: the default graph's store, which holds
+    /// the named graphs; `None` on a backend of one's own.
+    fn root_store(&self) -> Option<Arc<RowGroupStore>> {
+        self.store.as_ref().map(Arc::clone)
+    }
+
+    /// The named graph with storage key `key`: `None` when there is none, as
+    /// on a backend of one's own, which holds no named graphs.
+    fn named_graph(&self, key: &str) -> Option<Arc<RowGroupStore>> {
+        self.store.as_ref().and_then(|store| store.graph(key))
+    }
+
+    /// The built-in store, for a feature only it has (`what`): an error on
+    /// a backend of one's own.
+    ///
+    /// # Errors
+    ///
+    /// On a session on a backend of one's own.
+    #[cfg(query_language)]
+    fn require_root_store(&self, what: &str) -> Result<Arc<RowGroupStore>> {
+        self.root_store().ok_or_else(|| {
+            grafeo_common::utils::error::Error::from(
+                grafeo_common::utils::error::QueryError::unsupported(format!(
+                    "{what} needs the built-in store: a database on a backend of its own has none"
+                )),
+            )
+        })
     }
 
     /// The session's WAL, if it logs its writes.
@@ -524,27 +527,22 @@ impl Session {
         self.metrics = Some(metrics);
     }
 
-    /// Creates a session backed by an external graph store.
-    ///
-    /// The external store handles all data operations. Transaction management
-    /// (begin/commit/rollback) is not supported for external stores.
+    /// Creates a session on a backend of one's own (`GrafeoDB::with_store`,
+    /// `with_read_store`): its reads read `read_store`, its writes apply in
+    /// `write_store` through the store contract, in transactions the
+    /// backend opens, commits and rolls back. It has no named graphs and no
+    /// indexes of the built-in store.
     ///
     /// # Errors
     ///
     /// Returns an error if the internal arena allocation fails (out of memory).
     pub(crate) fn with_external_store(
         read_store: Arc<dyn GraphStore>,
-        write_store: Option<Arc<dyn GraphStoreMut>>,
+        write_store: Option<Arc<dyn GraphBackend>>,
         cfg: SessionConfig,
     ) -> Result<Self> {
-        let external_target = write_store.as_ref().map(|store| {
-            Arc::new(grafeo_core::graph::apply::ExternalTarget::new(Arc::clone(
-                store,
-            )))
-        });
         Ok(Self {
-            store: Arc::new(RowGroupStore::new()),
-            lpg_backend: LpgBackend::Placeholder,
+            store: None,
             graph_store: read_store,
             graph_store_mut: write_store,
             catalog: cfg.catalog,
@@ -589,7 +587,6 @@ impl Session {
             savepoints: parking_lot::Mutex::new(Vec::new()),
             transaction_nesting_depth: parking_lot::Mutex::new(0),
             changes: parking_lot::Mutex::new(None),
-            external_target,
             active_streams: AtomicUsize::new(0),
             #[cfg(feature = "metrics")]
             metrics: None,
@@ -677,11 +674,10 @@ impl Session {
     /// Syntax Rule 6). The binding a dropped graph left behind does not count.
     #[cfg(any(feature = "gql", feature = "sql-pgq"))]
     fn graph_typed_by(&self, graph_type: &str) -> Option<String> {
-        let store = self.root_store();
         self.catalog
             .all_graph_type_bindings()
             .into_iter()
-            .filter(|(graph, bound)| bound == graph_type && store.graph(graph).is_some())
+            .filter(|(graph, bound)| bound == graph_type && self.named_graph(graph).is_some())
             .map(|(graph, _)| graph)
             .min()
     }
@@ -747,12 +743,7 @@ impl Session {
                 ),
             )));
         }
-        if !default
-            && self
-                .root_store()
-                .graph(&self.effective_graph_key(name))
-                .is_none()
-        {
+        if !default && self.named_graph(&self.effective_graph_key(name)).is_none() {
             return Err(Error::from(QueryError::invalid_reference(format!(
                 "Graph '{name}' does not exist"
             ))));
@@ -778,7 +769,7 @@ impl Session {
     fn store_for_key(&self, key: Option<&str>) -> Arc<dyn GraphStore> {
         match key {
             None => Arc::clone(&self.graph_store),
-            Some(name) => match self.root_store().graph(name) {
+            Some(name) => match self.named_graph(name) {
                 Some(named_store) => named_store as Arc<dyn GraphStore>,
                 // Dropped meanwhile: no data, never the default graph's (the
                 // graph check before a statement reports the drop).
@@ -791,32 +782,29 @@ impl Session {
     ///
     /// Returns `None` for read-only databases.
     #[cfg(query_language)]
-    fn active_write_store(&self) -> Option<Arc<dyn GraphStoreMut>> {
+    fn active_write_store(&self) -> Option<Arc<dyn GraphBackend>> {
         self.write_store_for_key(self.active_graph_storage_key().as_deref())
     }
 
     /// The writable store for the graph with storage key `key` (see
     /// [`active_write_store`](Self::active_write_store)).
-    fn write_store_for_key(&self, key: Option<&str>) -> Option<Arc<dyn GraphStoreMut>> {
+    fn write_store_for_key(&self, key: Option<&str>) -> Option<Arc<dyn GraphBackend>> {
         match key {
             None => self.graph_store_mut.as_ref().map(Arc::clone),
             Some(name) => self
-                .root_store()
-                .graph(name)
+                .named_graph(name)
                 // Dropped meanwhile: nothing to write to, never the default
                 // graph (see `store_for_key`).
-                .map(|named_store| named_store as Arc<dyn GraphStoreMut>),
+                .map(|named_store| named_store as Arc<dyn GraphBackend>),
         }
     }
 
-    /// Returns the concrete row-group store for the currently active graph.
-    ///
-    /// Used by direct CRUD methods that need the concrete store type
-    /// for versioned operations.
-    fn active_lpg_store(&self) -> Arc<RowGroupStore> {
+    /// The built-in store of the currently active graph (`None` on a
+    /// backend of one's own): its indexes answer the index checks.
+    fn active_lpg_store(&self) -> Option<Arc<RowGroupStore>> {
         self.active_lpg_graph_key()
-            .and_then(|name| self.root_store().graph(&name))
-            .unwrap_or_else(|| self.root_store())
+            .and_then(|name| self.named_graph(&name))
+            .or_else(|| self.root_store())
     }
 
     /// The storage key of the graph [`active_lpg_store`](Self::active_lpg_store)
@@ -824,19 +812,18 @@ impl Session {
     /// graph of that name exists, which is where writes then go.
     fn active_lpg_graph_key(&self) -> Option<String> {
         self.active_graph_storage_key()
-            .filter(|name| self.root_store().graph(name).is_some())
+            .filter(|name| self.named_graph(name).is_some())
     }
 
-    /// Resolves a graph name to a concrete row-group store.
-    /// `None` and `"default"` resolve to the session's root store.
-    fn resolve_store(&self, graph_name: &Option<String>) -> Arc<RowGroupStore> {
+    /// Resolves a graph name to a built-in store: `None` and `"default"`
+    /// (and a name no graph has) resolve to the session's root store; `None`
+    /// on a backend of one's own.
+    fn resolve_store(&self, graph_name: &Option<String>) -> Option<Arc<RowGroupStore>> {
         match graph_name {
-            None => self.root_store(),
-            Some(name) if name.eq_ignore_ascii_case("default") => self.root_store(),
-            Some(name) => self
-                .root_store()
-                .graph(name)
-                .unwrap_or_else(|| self.root_store()),
+            Some(name) if !name.eq_ignore_ascii_case("default") => {
+                self.named_graph(name).or_else(|| self.root_store())
+            }
+            _ => self.root_store(),
         }
     }
 
@@ -854,24 +841,11 @@ impl Session {
         &self,
         key: Option<&str>,
     ) -> Result<Option<grafeo_core::execution::operators::Recording>> {
-        use grafeo_core::execution::operators::WriteTarget;
-
         let Some(changes) = self.changes.lock().clone() else {
             return Ok(None);
         };
-        let target = match &self.external_target {
-            Some(external) => WriteTarget::External(Arc::clone(external)),
-            None if self.searches_own_store() => {
-                let store = match key {
-                    None => self.root_store(),
-                    Some(name) => match self.root_store().graph(name) {
-                        Some(store) => store,
-                        None => return Ok(None),
-                    },
-                };
-                WriteTarget::Store(store as Arc<dyn grafeo_core::graph::apply::ChangeTarget>)
-            }
-            None => return Ok(None),
+        let Some(target) = self.write_store_for_key(key) else {
+            return Ok(None);
         };
         changes
             .recording(&self.transaction_manager, key, target)
@@ -1142,7 +1116,7 @@ impl Session {
                 // Validate source graph exists for LIKE / AS COPY OF
                 if let Some(ref src) = like_graph {
                     let src_key = self.effective_graph_key(src);
-                    if self.root_store().graph(&src_key).is_none() {
+                    if self.named_graph(&src_key).is_none() {
                         return Err(Error::from(QueryError::new(
                             QueryErrorKind::InvalidReference,
                             format!("Source graph '{src}' does not exist"),
@@ -1151,7 +1125,7 @@ impl Session {
                 }
                 if let Some(ref src) = copy_of {
                     let src_key = self.effective_graph_key(src);
-                    if self.root_store().graph(&src_key).is_none() {
+                    if self.named_graph(&src_key).is_none() {
                         return Err(Error::from(QueryError::new(
                             QueryErrorKind::InvalidReference,
                             format!("Source graph '{src}' does not exist"),
@@ -1159,7 +1133,7 @@ impl Session {
                     }
                 }
 
-                if self.root_store().graph(&storage_key).is_some() {
+                if self.named_graph(&storage_key).is_some() {
                     if if_not_exists {
                         return Ok(QueryResult::empty());
                     }
@@ -1216,7 +1190,7 @@ impl Session {
                 // and applied with the graph's creation (#423).
                 if let Some(ref src) = copy_of {
                     let src_key = self.effective_graph_key(src);
-                    let source = self.root_store().graph(&src_key).ok_or_else(|| {
+                    let source = self.named_graph(&src_key).ok_or_else(|| {
                         Error::from(QueryError::new(
                             QueryErrorKind::InvalidReference,
                             format!("Source graph '{src}' does not exist"),
@@ -1227,7 +1201,7 @@ impl Session {
                         &held,
                         #[cfg(feature = "wal")]
                         self.wal().map(|wal| &**wal),
-                        &self.root_store(),
+                        &self.require_root_store("CREATE GRAPH ... AS COPY OF")?,
                         &self.catalog,
                         &self.transaction_manager,
                         (&source, &storage_key),
@@ -1243,7 +1217,7 @@ impl Session {
                 // A drop also keeps the writes of open transactions out
                 // while it checks them (see `GrafeoDB::drop_graph`).
                 let held = self.hold_for_standalone(true)?;
-                if self.root_store().graph(&storage_key).is_none() {
+                if self.named_graph(&storage_key).is_none() {
                     if if_exists {
                         return Ok(QueryResult::empty());
                     }
@@ -1290,7 +1264,7 @@ impl Session {
                 // Verify graph exists (resolve within current schema)
                 let effective_key = self.effective_graph_key(&name);
                 if !name.eq_ignore_ascii_case("default")
-                    && self.root_store().graph(&effective_key).is_none()
+                    && self.named_graph(&effective_key).is_none()
                 {
                     return Err(Error::from(QueryError::new(
                         QueryErrorKind::InvalidReference,
@@ -1319,7 +1293,7 @@ impl Session {
                 }
                 let effective_key = self.effective_graph_key(&name);
                 if !name.eq_ignore_ascii_case("default")
-                    && self.root_store().graph(&effective_key).is_none()
+                    && self.named_graph(&effective_key).is_none()
                 {
                     return Err(Error::from(QueryError::new(
                         QueryErrorKind::InvalidReference,
@@ -1502,7 +1476,7 @@ impl Session {
             held,
             #[cfg(feature = "wal")]
             self.wal().map(|wal| &**wal),
-            &self.root_store(),
+            self.store.as_ref(),
             &self.catalog,
             &self.transaction_manager,
         )
@@ -1536,7 +1510,7 @@ impl Session {
             )));
         }
         let key = self.effective_graph_key(name);
-        if self.root_store().graph(&key).is_some() {
+        if self.named_graph(&key).is_some() {
             return Ok(self.store_for_key(Some(&key)));
         }
         Err(Error::from(QueryError::invalid_reference(format!(
@@ -1594,7 +1568,7 @@ impl Session {
         // A replaced graph is dropped: open writes to it are refused first.
         let held = self.hold_for_standalone(op.or_replace)?;
 
-        let graph_exists = self.root_store().graph(&graph_key).is_some();
+        let graph_exists = self.named_graph(&graph_key).is_some();
         let old_type = self.catalog.get_graph_type_def(&type_key);
         if (graph_exists || old_type.is_some()) && op.if_not_exists {
             return Ok(Self::ddl_status("No change".to_string()));
@@ -1765,7 +1739,7 @@ impl Session {
         let graph_key = self.effective_graph_key(&op.name);
         let type_key = self.effective_type_key(&op.name);
         let held = self.hold_for_standalone(true)?;
-        let graph_exists = self.root_store().graph(&graph_key).is_some();
+        let graph_exists = self.named_graph(&graph_key).is_some();
         let graph_type = self.catalog.get_graph_type_def(&type_key);
         if !graph_exists && graph_type.is_none() {
             if op.if_exists {
@@ -2111,7 +2085,9 @@ impl Session {
                 )));
                 if let Some(def) = self.catalog.get_index(index_id)
                     && let Some(prop_name) = self.catalog.get_property_key_name(def.property_key)
-                    && self.active_lpg_store().has_property_index(&prop_name)
+                    && self
+                        .active_lpg_store()
+                        .is_some_and(|store| store.has_property_index(&prop_name))
                 {
                     change.push(crate::database::index::drop_index(
                         self.active_lpg_graph_key().as_deref(),
@@ -2418,7 +2394,7 @@ impl Session {
                 // The schema's default graph partition, so that SESSION SET
                 // SCHEMA + queries work without an explicit graph.
                 let default_key = format!("{name}/{SCHEMA_DEFAULT_GRAPH}");
-                if self.root_store().graph(&default_key).is_none() {
+                if self.named_graph(&default_key).is_none() {
                     change.push(StandaloneOp::CreateGraph { name: default_key });
                 }
                 done(QueryResult::status(format!("Created schema '{name}'")))
@@ -2430,7 +2406,8 @@ impl Session {
                 let default_graph_key = format!("{name}/{SCHEMA_DEFAULT_GRAPH}");
                 let has_graphs = self
                     .root_store()
-                    .graph_names()
+                    .map(|store| store.graph_names())
+                    .unwrap_or_default()
                     .iter()
                     .any(|g| g.starts_with(&prefix) && *g != default_graph_key);
                 let has_types = self
@@ -2463,7 +2440,7 @@ impl Session {
                 }
                 change.push(StandaloneOp::DropCatalog(CatalogKey::Schema(name.clone())));
                 // The auto-created default graph partition goes with it.
-                if self.root_store().graph(&default_graph_key).is_some() {
+                if self.named_graph(&default_graph_key).is_some() {
                     crate::database::standalone::refuse_drop_with_open_changes(
                         &self.transaction_manager,
                         held,
@@ -2668,7 +2645,9 @@ impl Session {
         #[cfg(feature = "vector-index")]
         {
             let graph = self.active_lpg_graph_key();
-            let store = self.active_lpg_store();
+            let store = self
+                .active_lpg_store()
+                .map_or_else(|| self.require_root_store("a vector index"), Ok)?;
             let index = crate::database::index::vector_index_from_data(
                 &*store, label, property, dimensions, metric, None, None, None,
             )?;
@@ -2722,7 +2701,9 @@ impl Session {
                 options.stop_words.as_deref(),
             )?;
             let graph = self.active_lpg_graph_key();
-            let store = self.active_lpg_store();
+            let store = self
+                .active_lpg_store()
+                .map_or_else(|| self.require_root_store("a text index"), Ok)?;
             let index =
                 crate::database::index::text_index_from_data(&*store, label, property, &options)?;
             change.push_built(
@@ -2984,7 +2965,10 @@ impl Session {
     #[cfg(query_language)]
     fn execute_show_graphs(&self) -> Result<QueryResult> {
         let schema = self.current_schema.lock().clone();
-        let all_names = self.root_store().graph_names();
+        let all_names = self
+            .root_store()
+            .map(|store| store.graph_names())
+            .unwrap_or_default();
 
         let mut names: Vec<String> = match &schema {
             Some(s) => {
@@ -4621,13 +4605,14 @@ impl Session {
         // In the commit's turn, after every commit below it is published:
         // what must follow the epochs.
         let published = publish.complete_with(|| {
-            // Stamp the changes with the commit epoch, per graph through the
-            // store each was applied to: the pending versions become visible
-            // at the epoch once it is published, and the stores' counters and
-            // epochs follow. A store that fails leaves the commit half
-            // stamped: it is not published, which poisons the database.
+            // Commit the changes at the commit epoch, per graph through the
+            // backend each was applied to: the row-group store's pending
+            // versions become visible at the epoch once it is published, and
+            // its counters and epoch follow. A backend that fails leaves the
+            // commit half done: it is not published, which poisons the
+            // database.
             if let Some(changes) = &changes
-                && let Err(error) = changes.stamp(commit_epoch)
+                && let Err(error) = changes.commit(commit_epoch)
             {
                 return Err(grafeo_common::utils::error::Error::Internal(format!(
                     "the commit of transaction {transaction_id:?} could not stamp its changes: \
@@ -4669,7 +4654,9 @@ impl Session {
             // complete. The database has one epoch: the root store follows
             // every commit, also one that only wrote named graphs (a
             // checkpoint saves the root's epoch for all of them).
-            self.root_store().sync_epoch(commit_epoch);
+            if let Some(root) = self.root_store() {
+                root.sync_epoch(commit_epoch);
+            }
             Ok(())
         });
         #[cfg(feature = "wal")]
@@ -4690,13 +4677,24 @@ impl Session {
             #[cfg(feature = "metrics")]
             let gc_start = Instant::now();
 
-            let root = self.root_store();
+            // The root (the built-in store, or the backend a database was
+            // built on) and the named graphs the commit wrote.
+            let root: Option<Arc<dyn GraphBackend>> = match self.root_store() {
+                Some(root) => Some(root as Arc<dyn GraphBackend>),
+                None => self.graph_store_mut.as_ref().map(Arc::clone),
+            };
             let written_stores: Vec<Arc<RowGroupStore>> = written
                 .iter()
-                .map(|graph_name| self.resolve_store(graph_name))
+                .filter_map(|graph_name| self.resolve_store(graph_name))
                 .collect();
-            let stores: Vec<&RowGroupStore> = std::iter::once(&*root)
-                .chain(written_stores.iter().map(|store| &**store))
+            let stores: Vec<&dyn GraphBackend> = root
+                .iter()
+                .map(|root| &**root)
+                .chain(
+                    written_stores
+                        .iter()
+                        .map(|store| &**store as &dyn GraphBackend),
+                )
                 .collect();
             after.run(&self.transaction_manager, &stores);
 
@@ -4799,10 +4797,8 @@ impl Session {
     ///
     /// # Errors
     ///
-    /// When it wrote a graph whose store has no undo (a store the database
-    /// was built on), the error names the graph: everything else is undone
-    /// and the transaction is aborted, but that store keeps its writes. A
-    /// store that fails to undo poisons the database.
+    /// A backend that fails to roll back poisons the database; the
+    /// transaction is aborted either way.
     fn abort_transaction(
         &self,
         transaction_id: TransactionId,
@@ -4810,15 +4806,15 @@ impl Session {
     ) -> Result<()> {
         *self.read_only_tx.lock() = self.db_read_only;
 
-        // Undo the transaction's changes in every graph it wrote, as a store
+        // Roll the transaction back in every graph it wrote, as a store
         // change in progress: a checkpoint never reads the store or the
-        // change sets halfway through the undo.
+        // change sets halfway through it.
         let undone = match changes {
             Some(changes) => {
                 let _writing = self.transaction_manager.write_in_progress();
-                changes.undo_after(changes.start(), false)
+                changes.rollback()
             }
-            None => Ok(None),
+            None => Ok(()),
         };
 
         self.savepoints.lock().clear();
@@ -4826,33 +4822,23 @@ impl Session {
         let result = self.transaction_manager.abort(transaction_id);
 
         match undone {
-            Ok(None) => result,
-            Ok(Some(graph)) => Err(crate::transaction::kept_by_external_store(&graph)),
-            Err(failure) => Err(self.undo_failed(transaction_id, failure)),
+            Ok(()) => result,
+            Err(failure) => Err(self.rollback_failed(transaction_id, &failure)),
         }
     }
 
-    /// The error of an undo that did not restore everything: a store kept
-    /// writes it has no undo for (named), or a store failed to undo, which
-    /// poisons the database.
-    fn undo_failed(
+    /// The error of a backend that failed to roll back, a broken invariant:
+    /// it poisons the database.
+    fn rollback_failed(
         &self,
         transaction_id: TransactionId,
-        failure: crate::transaction::UndoFailure,
+        failure: &grafeo_core::graph::apply::ApplyError,
     ) -> grafeo_common::utils::error::Error {
-        match failure {
-            crate::transaction::UndoFailure::External(graph) => {
-                crate::transaction::kept_by_external_store(&graph)
-            }
-            crate::transaction::UndoFailure::Broken(error) => {
-                let message = format!(
-                    "the rollback of transaction {transaction_id:?} could not undo its changes: \
-                     {error}"
-                );
-                self.transaction_manager.poison(&message);
-                grafeo_common::utils::error::Error::Internal(message)
-            }
-        }
+        let message = format!(
+            "the rollback of transaction {transaction_id:?} could not undo its changes: {failure}"
+        );
+        self.transaction_manager.poison(&message);
+        grafeo_common::utils::error::Error::Internal(message)
     }
 
     /// Creates a named savepoint within the current transaction.
@@ -4924,49 +4910,35 @@ impl Session {
 
         let sp_state = savepoints[pos].clone();
 
-        // Undo first: a rollback that is refused (writes to a store without
-        // undo after the savepoint) changes nothing, the savepoints included.
-        self.restore_savepoint(transaction_id, &sp_state, true)?;
+        self.restore_savepoint(transaction_id, &sp_state)?;
         // Remove this savepoint and all later ones
         savepoints.truncate(pos);
         Ok(())
     }
 
     /// Undoes what transaction `transaction_id` did after `sp_state` was
-    /// captured: its changes in every graph, its RDF triples included.
+    /// captured: its changes in every graph, its RDF triples included, each
+    /// backend rolling back to the savepoint; the transaction goes on.
     ///
     /// # Errors
     ///
-    /// When writes after the savepoint went to a store without undo (a store
-    /// the database was built on), the error names its graph: with
-    /// `refuse_external` nothing is undone (a rollback to a savepoint);
-    /// without, everything else is undone and that store keeps its writes (a
-    /// failed statement). A store that fails to undo poisons the database.
+    /// A backend that fails to roll back poisons the database.
     fn restore_savepoint(
         &self,
         transaction_id: TransactionId,
         sp_state: &SavepointState,
-        refuse_external: bool,
     ) -> Result<()> {
         let changes = self.changes.lock().clone();
-        // The undo is a store change in progress: a checkpoint never reads
-        // the store or the change sets halfway through it.
+        // A store change in progress: a checkpoint never reads the store or
+        // the change sets halfway through it.
         let undone = match &changes {
             Some(changes) => {
                 let _writing = self.transaction_manager.write_in_progress();
-                changes.undo_after(sp_state.mark, refuse_external)
+                changes.rollback_to(sp_state.mark)
             }
-            None => Ok(None),
+            None => Ok(()),
         };
-        if let Err(crate::transaction::UndoFailure::External(graph)) = &undone {
-            return Err(crate::transaction::kept_by_external_store(graph));
-        }
-
-        match undone {
-            Ok(None) => Ok(()),
-            Ok(Some(graph)) => Err(crate::transaction::kept_by_external_store(&graph)),
-            Err(failure) => Err(self.undo_failed(transaction_id, failure)),
-        }
+        undone.map_err(|failure| self.rollback_failed(transaction_id, &failure))
     }
 
     /// Releases (removes) a named savepoint without rolling back.
@@ -5290,7 +5262,7 @@ impl Session {
                     self.commit_inner()?;
                     Ok(result)
                 }
-                Err(e) => Err(with_kept_writes(e, self.rollback_inner())),
+                Err(e) => Err(with_failed_rollback(e, self.rollback_inner())),
             }
         } else {
             // Inside an open transaction a failed statement undoes its own
@@ -5307,9 +5279,9 @@ impl Session {
                 .filter(|_| has_mutations)
                 .map(|tx| (tx, self.capture_savepoint("statement")));
             match (body(), &start) {
-                (Err(error), Some((tx, start))) => Err(with_kept_writes(
+                (Err(error), Some((tx, start))) => Err(with_failed_rollback(
                     error,
-                    self.restore_savepoint(*tx, start, false),
+                    self.restore_savepoint(*tx, start),
                 )),
                 (result, _) => result,
             }
@@ -5334,7 +5306,7 @@ impl Session {
             Err(error) => {
                 // The body's error is the one to report, as in
                 // `with_auto_commit`.
-                Err(with_kept_writes(error, self.rollback_inner()))
+                Err(with_failed_rollback(error, self.rollback_inner()))
             }
         }
     }
@@ -5409,7 +5381,7 @@ impl Session {
     /// the default graph.
     fn check_active_graph(&self) -> Result<()> {
         match self.active_graph_storage_key() {
-            Some(key) if self.root_store().graph(&key).is_none() => {
+            Some(key) if self.named_graph(&key).is_none() => {
                 let name = self
                     .effective_graph()
                     .unwrap_or_else(|| "default".to_string());
@@ -5673,12 +5645,10 @@ impl Session {
                 planner.with_recording(self.recording_for(self.active_lpg_graph_key().as_deref())?);
         }
 
-        // Attach the LPG store so CALL grafeo.search.* procedures can reach
-        // HNSW / BM25 indexes. Skip when the session is backed by an external
-        // store — `self.store` is an empty placeholder in that case and would
-        // make search procedures see a store with no data or indexes.
-        if self.searches_own_store() {
-            planner = planner.with_lpg_store(self.root_store());
+        // Attach the built-in store so CALL grafeo.search.* procedures can
+        // reach its HNSW / BM25 indexes; a backend of one's own has none.
+        if let Some(root) = self.root_store() {
+            planner = planner.with_lpg_store(root);
         }
 
         {
@@ -5693,13 +5663,6 @@ impl Session {
         )));
 
         Ok(planner)
-    }
-
-    /// Whether search procedures reach the session's own store: the
-    /// database's built-in store, not the empty placeholder of a session on
-    /// an external store.
-    fn searches_own_store(&self) -> bool {
-        matches!(self.lpg_backend, LpgBackend::Active)
     }
 
     /// The checks for writes to `store`, the active graph's: the catalog's
@@ -5756,22 +5719,26 @@ impl Session {
                 ),
             )?;
             let (epoch, transaction_id) = self.get_transaction_context();
-            let mut writer = GraphWriter::new(store, ReadView::new(epoch, transaction_id))
-                .with_validator(Arc::new(self.constraint_validator(
+            // The graph the writes land in: the active one, or the default
+            // graph when no graph of that name exists. The auto-commit opened
+            // a transaction when none was open.
+            let graph = key
+                .as_deref()
+                .filter(|name| self.named_graph(name).is_some());
+            let recording = self.recording_for(graph)?.ok_or_else(|| {
+                grafeo_common::utils::error::Error::Transaction(
+                    grafeo_common::utils::error::TransactionError::InvalidState(
+                        "a direct write runs in a transaction, and none is open".to_string(),
+                    ),
+                )
+            })?;
+            let writer = GraphWriter::new(store, recording).with_validator(Arc::new(
+                self.constraint_validator(
                     self.store_for_key(key.as_deref()),
                     epoch,
                     transaction_id,
-                )));
-            if transaction_id.is_some() {
-                // The graph the writes land in: the active one, or the
-                // default graph when no graph of that name exists.
-                let graph = key
-                    .as_deref()
-                    .filter(|name| self.root_store().graph(name).is_some());
-                if let Some(recording) = self.recording_for(graph)? {
-                    writer = writer.with_recording(recording);
-                }
-            }
+                ),
+            ));
             write(&writer).map_err(crate::query::executor::convert_operator_error)
         })
     }
@@ -6077,7 +6044,10 @@ impl Session {
     /// complete.
     pub fn create_property_index(&self, property: &str) -> Result<()> {
         let held = self.hold_for_standalone(false)?;
-        if self.active_lpg_store().has_property_index(property) {
+        if self
+            .active_lpg_store()
+            .is_some_and(|store| store.has_property_index(property))
+        {
             return Ok(());
         }
         let mut change = crate::transaction::StandaloneChange::new();
@@ -6098,7 +6068,10 @@ impl Session {
     /// As [`create_property_index`](Self::create_property_index).
     pub fn drop_property_index(&self, property: &str) -> Result<bool> {
         let held = self.hold_for_standalone(false)?;
-        if !self.active_lpg_store().has_property_index(property) {
+        if !self
+            .active_lpg_store()
+            .is_some_and(|store| store.has_property_index(property))
+        {
             return Ok(false);
         }
         let mut change = crate::transaction::StandaloneChange::new();
@@ -6115,7 +6088,8 @@ impl Session {
     /// Returns whether a node property of the session's graph has an index.
     #[must_use]
     pub fn has_property_index(&self, property: &str) -> bool {
-        self.active_lpg_store().has_property_index(property)
+        self.active_lpg_store()
+            .is_some_and(|store| store.has_property_index(property))
     }
 
     // =========================================================================
@@ -6416,20 +6390,19 @@ impl Session {
     }
 }
 
-/// `error`, the error of a statement whose writes were undone by `undo`,
-/// telling also that a store without undo keeps some of them when the
-/// undo says so. The statement's error is the one to report either way.
-fn with_kept_writes(
+/// `error`, the error of a statement whose writes were rolled back by
+/// `rollback`, telling also that the rollback failed (which poisoned the
+/// database) when it did. The statement's error is the one to report either
+/// way.
+fn with_failed_rollback(
     error: grafeo_common::utils::error::Error,
-    undo: Result<()>,
+    rollback: Result<()>,
 ) -> grafeo_common::utils::error::Error {
-    match undo {
-        Err(kept) if crate::transaction::is_kept_by_external_store(&kept) => {
-            grafeo_common::utils::error::Error::Internal(format!(
-                "{error}; the statement's writes were not all undone: {kept}"
-            ))
-        }
-        _ => error,
+    match rollback {
+        Err(failed) => grafeo_common::utils::error::Error::Internal(format!(
+            "{error}; the statement's writes could not be rolled back: {failed}"
+        )),
+        Ok(()) => error,
     }
 }
 
@@ -7501,12 +7474,11 @@ mod tests {
     #[cfg(feature = "gql")]
     #[test]
     fn test_external_store_session() {
-        use grafeo_core::graph::GraphStoreMut;
         use std::sync::Arc;
 
         let config = crate::config::Config::in_memory();
-        let store =
-            Arc::new(grafeo_core::graph::rowgroup::RowGroupStore::new()) as Arc<dyn GraphStoreMut>;
+        let store = Arc::new(grafeo_core::graph::rowgroup::RowGroupStore::new())
+            as Arc<dyn grafeo_core::graph::GraphBackend>;
         let db = GrafeoDB::with_store(store, config).unwrap();
 
         let mut session = db.session();
@@ -8047,9 +8019,7 @@ mod tests {
             key: PropertyKey::new("country"),
             value: Value::from("CZ"),
         };
-        let grafeo_core::execution::operators::WriteTarget::Store(store) = &recording.target else {
-            panic!("the built-in store");
-        };
+        let store = &recording.target;
         let refused = store
             .apply(&write, recording.recorder.writer())
             .unwrap_err();

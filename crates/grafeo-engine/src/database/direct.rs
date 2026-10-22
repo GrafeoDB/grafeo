@@ -48,12 +48,12 @@ use grafeo_common::types::{
 use grafeo_common::utils::error::{Error, QueryError, QueryErrorKind, Result};
 use grafeo_core::execution::operators::{
     ChangeRecorder, GraphWriter, NewEdge, OperatorError, Recording, WriteClaim, WriteClaims,
-    WriteInProgress, WriteTarget,
+    WriteInProgress,
 };
-use grafeo_core::graph::apply::{ChangeTarget, Writer};
+use grafeo_core::graph::apply::{GraphBackend, Writer};
 use grafeo_core::graph::lpg::{Edge, Node};
 use grafeo_core::graph::rowgroup::RowGroupStore;
-use grafeo_core::graph::{Direction, GraphStore, GraphStoreMut};
+use grafeo_core::graph::{Direction, GraphStore};
 
 use super::GrafeoDB;
 use crate::catalog::CatalogConstraintValidator;
@@ -375,7 +375,7 @@ impl GrafeoDB {
             graph,
             (epoch, None),
             Recording {
-                target: WriteTarget::Store(Arc::clone(store) as Arc<dyn ChangeTarget>),
+                target: Arc::clone(store) as Arc<dyn GraphBackend>,
                 recorder: Arc::clone(recorder) as Arc<dyn ChangeRecorder>,
             },
         );
@@ -498,12 +498,8 @@ impl GrafeoDB {
         if let Some(graph) = graph {
             validator = validator.with_graph_name(graph);
         }
-        GraphWriter::new(
-            Arc::clone(store) as Arc<dyn GraphStoreMut>,
-            ReadView::new(context.0, context.1),
-        )
-        .with_validator(Arc::new(validator))
-        .with_recording(recording)
+        GraphWriter::new(Arc::clone(store) as Arc<dyn GraphStore>, recording)
+            .with_validator(Arc::new(validator))
     }
 
     /// Whether a commit of the direct API reads what its writes did after
@@ -537,7 +533,10 @@ impl GrafeoDB {
     /// [`AfterWrite`](crate::database::collect::AfterWrite)).
     fn prune_versions(&self, root: &Arc<RowGroupStore>, store: &Arc<RowGroupStore>) {
         crate::database::collect::AfterWrite::next(&self.commit_counter, self.config.gc_interval())
-            .run(&self.transaction_manager, &[&**root, &**store]);
+            .run(
+                &self.transaction_manager,
+                &[&**root as &dyn GraphBackend, &**store],
+            );
     }
 
     /// Runs one direct call on `store` (the graph with storage key `graph`)
@@ -584,7 +583,7 @@ impl GrafeoDB {
         let recording = match changes.recording(
             &self.transaction_manager,
             graph,
-            WriteTarget::Store(Arc::clone(store) as Arc<dyn ChangeTarget>),
+            Arc::clone(store) as Arc<dyn GraphBackend>,
         ) {
             Ok(recording) => recording,
             Err(error) => {
@@ -676,7 +675,7 @@ impl GrafeoDB {
         let published = publish.complete_with(|| {
             // A store that fails to stamp leaves the commit half done: it is
             // not published, which poisons the database.
-            changes.stamp(epoch).map_err(|error| {
+            changes.commit(epoch).map_err(|error| {
                 Error::Internal(format!(
                     "the commit of a direct write could not stamp its changes: {error}"
                 ))
@@ -715,15 +714,14 @@ impl GrafeoDB {
     ) -> Result<()> {
         let undone = {
             let _writing = self.transaction_manager.write_in_progress();
-            changes.undo_after(changes.start(), false)
+            changes.rollback()
         };
         let _ = self.transaction_manager.abort(transaction);
         match undone {
-            Ok(_) => Ok(()),
+            Ok(()) => Ok(()),
             Err(failure) => {
-                let message = format!(
-                    "the rollback of a direct write could not undo its changes: {failure:?}"
-                );
+                let message =
+                    format!("the rollback of a direct write could not undo its changes: {failure}");
                 self.transaction_manager.poison(&message);
                 Err(Error::Internal(message))
             }

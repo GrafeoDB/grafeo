@@ -22,8 +22,8 @@ use grafeo_adapters::plugins::algorithms::{
 };
 use grafeo_common::types::ReadView;
 use grafeo_common::types::{NodeId, TransactionId, Value};
+use grafeo_core::graph::GraphStore as _;
 use grafeo_core::graph::rowgroup::RowGroupStore;
-use grafeo_core::graph::{GraphStore as _, GraphStoreMut as _};
 
 /// The people of both stores, in creation order: their ids are equal.
 const ALIX: u64 = 0;

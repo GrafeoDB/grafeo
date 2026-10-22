@@ -43,7 +43,7 @@ use grafeo_common::change::{DataOp, Labels, Table};
 use grafeo_common::types::{ArcStr, EdgeId, EpochId, NodeId};
 use grafeo_common::utils::error::{Error, Result};
 use grafeo_common::utils::hash::FxHashMap;
-use grafeo_core::graph::apply::ChangeTarget;
+use grafeo_core::graph::apply::GraphBackend;
 
 use crate::transaction::StreamingChanges;
 
@@ -218,7 +218,7 @@ impl super::GrafeoDB {
         })?;
 
         let held = self.hold_commits_for_import()?;
-        let store: Arc<dyn ChangeTarget> = self.lpg_store();
+        let store: Arc<dyn GraphBackend> = self.lpg_store();
         let mut changes = self.streaming_changes(&held, true);
         let nodes = changes.reserve(&store, Table::Nodes, rows.len())?;
         let labels: Labels = std::iter::once(ArcStr::from("_Imported")).collect();

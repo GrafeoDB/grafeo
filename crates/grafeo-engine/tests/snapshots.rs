@@ -136,7 +136,6 @@ fn a_snapshot_of_an_earlier_epoch_outlives_its_view() {
 /// it cannot check the store's edges for dangling ends.
 #[test]
 fn validate_of_an_external_store_says_what_it_does_not_check() {
-    use grafeo_core::graph::GraphStoreMut as _;
     use grafeo_core::graph::rowgroup::RowGroupStore;
     use std::sync::Arc;
 

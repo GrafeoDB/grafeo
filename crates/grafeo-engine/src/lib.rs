@@ -57,7 +57,7 @@ pub use config::{AccessMode, Config, ConfigError, DurabilityMode, GraphModel, Hi
 pub use database::GrafeoDB;
 pub use database::GraphHandle;
 pub use database::{AsOfView, TimePoint};
-pub use grafeo_core::graph::{Direction, GraphStore, GraphStoreMut, ProjectionSpec};
+pub use grafeo_core::graph::{Direction, GraphStore, ProjectionSpec};
 /// The options `GrafeoDB::create_text_index_with` takes.
 #[cfg(feature = "text-index")]
 pub use grafeo_core::index::text::{TextIndexOptions, TokenizerKind};

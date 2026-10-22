@@ -954,7 +954,6 @@ mod tests {
     /// one never held does not; a key without a column always might.
     #[test]
     fn hot_zone_maps_cover_every_value_a_column_held() {
-        use crate::graph::GraphStoreMut;
         use crate::graph::lpg::CompareOp;
 
         let store = RowGroupStore::new();
@@ -997,7 +996,6 @@ mod tests {
     /// index (#610 on the row-group store).
     #[test]
     fn decimals_are_found_by_value_and_in_a_range() {
-        use crate::graph::GraphStoreMut;
         use grafeo_common::types::Decimal;
 
         let decimal = |text: &str| Value::Decimal(Decimal::parse(text).unwrap());

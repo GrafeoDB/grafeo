@@ -104,7 +104,13 @@ impl LegacyIndexes {
             });
             let put = super::index::put_index(index.graph.as_deref(), kind);
             for op in std::iter::once(put).chain(named) {
-                standalone::apply(&op, None, store, catalog, &mut Applying::Replay { unbuilt })?;
+                standalone::apply(
+                    &op,
+                    None,
+                    Some(store),
+                    catalog,
+                    &mut Applying::Replay { unbuilt },
+                )?;
             }
         }
         Ok(())

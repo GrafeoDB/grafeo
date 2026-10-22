@@ -6,7 +6,7 @@
 //! are visible. Everything else is filtered out transparently.
 //!
 //! Projections are read-only: they implement [`GraphStore`] but not
-//! [`super::GraphStoreMut`]. A projection keeps no text or vector index of
+//! [`super::GraphBackend`]. A projection keeps no text or vector index of
 //! its own: its text reads answer as a store without one, and its vector
 //! search measures the vectors of the nodes in it.
 //!
@@ -601,7 +601,6 @@ impl GraphStore for GraphProjection {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::graph::GraphStoreMut as _;
     use crate::graph::rowgroup::RowGroupStore;
     use grafeo_common::types::TransactionId;
 

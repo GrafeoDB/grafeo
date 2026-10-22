@@ -9,10 +9,10 @@ use std::sync::Arc;
 use grafeo_common::storage::{ImageSource, MemoryImage};
 use grafeo_common::types::{EpochId, NodeId, TransactionId, Value};
 use grafeo_common::utils::error::{Error, Result};
-use grafeo_core::execution::operators::{GraphWriter, WriteTarget};
-use grafeo_core::graph::apply::ChangeTarget;
+use grafeo_core::execution::operators::GraphWriter;
+use grafeo_core::graph::apply::GraphBackend;
 use grafeo_core::graph::rowgroup::RowGroupStore;
-use grafeo_core::graph::{Direction, GraphStore, GraphStoreMut};
+use grafeo_core::graph::{Direction, GraphStore};
 
 use super::super::sections::CheckpointSources;
 use super::{
@@ -94,11 +94,10 @@ impl Database {
             .recording(
                 &self.transaction_manager,
                 graph,
-                WriteTarget::Store(Arc::clone(&store) as Arc<dyn ChangeTarget>),
+                Arc::clone(&store) as Arc<dyn GraphBackend>,
             )
             .unwrap();
-        let writer = GraphWriter::new(store as Arc<dyn GraphStoreMut>, ReadView::latest())
-            .with_recording(recording);
+        let writer = GraphWriter::new(store as Arc<dyn GraphStore>, recording);
         Open {
             transaction,
             changes,
@@ -140,7 +139,7 @@ impl Database {
             .written()
             .complete_with(|| {
                 changes
-                    .stamp(epoch)
+                    .commit(epoch)
                     .map_err(|error| Error::Internal(error.to_string()))?;
                 self.root.sync_epoch(epoch);
                 Ok(())

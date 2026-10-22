@@ -1307,14 +1307,13 @@ mod tests {
     use super::*;
     use crate::execution::DataChunk;
     use crate::execution::chunk::DataChunkBuilder;
-    use crate::graph::GraphStoreMut;
     use crate::graph::rowgroup::RowGroupStore;
     use grafeo_common::types::ReadView;
     use grafeo_common::types::{EpochId, TransactionId};
 
     // ── Helpers ────────────────────────────────────────────────────
 
-    fn create_test_store() -> Arc<dyn GraphStoreMut> {
+    fn create_test_store() -> Arc<RowGroupStore> {
         Arc::new(RowGroupStore::new())
     }
 
@@ -2106,8 +2105,7 @@ mod tests {
 
         // Valid property should succeed
         let mut op = CreateNodeOperator::new(
-            GraphWriter::new(Arc::clone(&store), ReadView::latest())
-                .with_validator(Arc::new(RejectAgeValidator)),
+            GraphWriter::immediate(Arc::clone(&store)).with_validator(Arc::new(RejectAgeValidator)),
             None,
             vec!["Thing".to_string()],
             vec![(
@@ -2123,8 +2121,7 @@ mod tests {
 
         // Forbidden property should fail
         let mut op = CreateNodeOperator::new(
-            GraphWriter::new(Arc::clone(&store), ReadView::latest())
-                .with_validator(Arc::new(RejectAgeValidator)),
+            GraphWriter::immediate(Arc::clone(&store)).with_validator(Arc::new(RejectAgeValidator)),
             None,
             vec!["Thing".to_string()],
             vec![(
@@ -2423,7 +2420,7 @@ mod tests {
 
     #[test]
     fn test_property_source_column() {
-        let writer = GraphWriter::new(create_test_store(), ReadView::latest());
+        let writer = GraphWriter::immediate(create_test_store());
         let mut builder = DataChunkBuilder::new(&[LogicalType::Int64]);
         builder.column_mut(0).unwrap().push_int64(42);
         builder.advance_row();
@@ -2435,7 +2432,7 @@ mod tests {
 
     #[test]
     fn test_property_source_constant() {
-        let writer = GraphWriter::new(create_test_store(), ReadView::latest());
+        let writer = GraphWriter::immediate(create_test_store());
         let chunk = DataChunk::empty();
 
         let src = PropertySource::Constant(Value::String("hello".into()));
@@ -2447,7 +2444,7 @@ mod tests {
 
     #[test]
     fn test_property_source_column_out_of_bounds() {
-        let writer = GraphWriter::new(create_test_store(), ReadView::latest());
+        let writer = GraphWriter::immediate(create_test_store());
         let chunk = DataChunk::empty();
 
         let src = PropertySource::Column(99);
@@ -2456,7 +2453,7 @@ mod tests {
 
     #[test]
     fn test_property_source_property_access_from_map() {
-        let writer = GraphWriter::new(create_test_store(), ReadView::latest());
+        let writer = GraphWriter::immediate(create_test_store());
         let mut map = std::collections::BTreeMap::new();
         map.insert(PropertyKey::new("age"), Value::Int64(30));
 
@@ -2477,7 +2474,7 @@ mod tests {
 
     #[test]
     fn test_property_source_property_access_missing_column() {
-        let writer = GraphWriter::new(create_test_store(), ReadView::latest());
+        let writer = GraphWriter::immediate(create_test_store());
         let chunk = DataChunk::empty();
 
         let src = PropertySource::PropertyAccess {
@@ -2492,10 +2489,8 @@ mod tests {
     #[test]
     fn a_property_access_reads_what_its_transaction_wrote() {
         let store = create_test_store();
-        let writer = GraphWriter::new(
-            Arc::clone(&store),
-            ReadView::new(EpochId::INITIAL, Some(TransactionId::new(3))),
-        );
+        let writer =
+            GraphWriter::pending(Arc::clone(&store), TransactionId::new(3), EpochId::INITIAL);
         let alix = writer
             .create_node(
                 &["Person".to_string()],

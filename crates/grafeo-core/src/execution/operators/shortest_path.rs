@@ -1321,7 +1321,6 @@ impl Operator for ShortestPathOperator {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::graph::GraphStoreMut as _;
     use crate::graph::rowgroup::RowGroupStore;
 
     /// A mock operator that returns source/target node pairs, one chunk per

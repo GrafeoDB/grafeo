@@ -42,8 +42,9 @@ pub mod compact;
 #[cfg(feature = "triple-store")]
 pub mod rdf;
 
+pub use apply::{BackendTransaction, GraphBackend};
 pub use projection::{GraphProjection, ProjectionSpec};
-pub use traits::{GraphStore, GraphStoreMut, Labels, NullGraphStore, list_self_loops_once};
+pub use traits::{GraphStore, Labels, NullGraphStore, list_self_loops_once};
 
 /// Controls which edges to follow during traversal.
 ///

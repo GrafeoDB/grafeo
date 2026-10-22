@@ -36,7 +36,6 @@ use grafeo_core::execution::{
     Pipeline, PushOperator, Sink, ValueVector,
 };
 use grafeo_core::graph::GraphStore;
-use grafeo_core::graph::GraphStoreMut as _;
 use grafeo_core::graph::rowgroup::RowGroupStore;
 
 const CITIES: [&str; 5] = ["Amsterdam", "Berlin", "Paris", "Prague", "Barcelona"];

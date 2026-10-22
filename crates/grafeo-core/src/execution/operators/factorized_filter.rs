@@ -703,7 +703,6 @@ mod tests {
     use crate::execution::factorized_chunk::FactorizationLevel;
     use crate::execution::factorized_vector::FactorizedVector;
     use crate::execution::vector::ValueVector;
-    use crate::graph::GraphStoreMut as _;
     use crate::graph::rowgroup::RowGroupStore;
     use grafeo_common::types::LogicalType;
 

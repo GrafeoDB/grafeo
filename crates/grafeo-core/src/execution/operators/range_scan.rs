@@ -246,7 +246,6 @@ impl Operator for RangeScanOperator {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::graph::GraphStoreMut as _;
     use crate::graph::rowgroup::RowGroupStore;
 
     /// A store holding, per `(label, property, values)`, one node with that

@@ -543,7 +543,7 @@ mod tests {
     use grafeo_common::types::{ArcStr, EpochId, NodeId, PropertyKey, ReadView, Value};
 
     use super::{Updates, VECTOR_ROWS};
-    use crate::graph::apply::{Applied, ChangeTarget, Writer};
+    use crate::graph::apply::{Applied, GraphBackend, Writer};
     use crate::graph::conformance::{Rng, Tx, apply_all, labels, next_epoch, properties};
     use crate::graph::rowgroup::{PENDING, Read, RowGroupStore};
     use crate::graph::traits::GraphStore;

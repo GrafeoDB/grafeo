@@ -26,7 +26,7 @@ use grafeo_common::types::{ArcStr, EdgeId, EpochId, NodeId, PropertyKey, ReadVie
 use grafeo_common::utils::error::{Error, Result};
 
 use super::RowGroupStore;
-use crate::graph::apply::{ApplyError, ChangeTarget, Writer};
+use crate::graph::apply::{ApplyError, GraphBackend, Writer};
 use crate::graph::load::{LoadTarget, LoadedNames};
 
 /// The crate's error for a load the store refused.
@@ -325,7 +325,7 @@ mod tests {
     use super::super::section::RowGroupStoreSection;
     use crate::graph::load::testing::{assert_same_rows, fixture_bytes, version_3_fixture};
     use crate::graph::load::{LoadTarget, LoadedNames};
-    use crate::graph::traits::{GraphStore, GraphStoreMut};
+    use crate::graph::traits::GraphStore;
 
     /// What the `beta` fixtures hold (written by `LpgStore` with the
     /// writes below, see `tests/fixtures/lpg-v3/README.md`): nodes of 0, 1

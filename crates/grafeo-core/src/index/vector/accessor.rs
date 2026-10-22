@@ -165,7 +165,6 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::graph::GraphStoreMut as _;
     use crate::graph::rowgroup::RowGroupStore;
 
     #[test]
@@ -209,7 +208,6 @@ mod tests {
 #[cfg(test)]
 mod borrowed_read_tests {
     use super::*;
-    use crate::graph::GraphStoreMut as _;
     use crate::graph::rowgroup::RowGroupStore;
 
     #[test]

@@ -210,10 +210,7 @@ mod prepared;
 mod rdf;
 
 pub(crate) use changes::{BuiltIndex, StandaloneChange};
-pub(crate) use changes::{
-    StreamingChanges, TransactionChanges, UndoFailure, is_kept_by_external_store,
-    kept_by_external_store,
-};
+pub(crate) use changes::{StreamingChanges, TransactionChanges};
 pub(crate) use history::HistoryImage;
 #[cfg(feature = "wal")]
 pub(crate) use manager::CommitGuard;

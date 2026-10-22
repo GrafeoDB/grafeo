@@ -903,7 +903,7 @@ mod tests {
         ChunkKind, ChunkMeta, MemoryImage, SectionSink, SectionSource, ServedOnce,
     };
     use grafeo_common::types::ReadView;
-    use grafeo_core::graph::{GraphStore as _, GraphStoreMut as _};
+    use grafeo_core::graph::GraphStore as _;
 
     /// The sections of a 0.5.x file reach their `deserialize` through raw
     /// chunks. The LPG section of this release is written as chunks only

@@ -280,7 +280,6 @@ fn exact_integer(f: f64) -> Option<i64> {
 mod tests {
     use super::*;
     use crate::execution::operators::{FilterExpression, SingleRowOperator};
-    use crate::graph::GraphStoreMut as _;
     use crate::graph::rowgroup::RowGroupStore;
     use std::collections::HashMap;
 

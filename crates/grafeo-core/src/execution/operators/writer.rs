@@ -10,7 +10,7 @@
 //! which waits for a checkpoint.
 //!
 //! A writer given a [`Recording`] writes through the graph's change target
-//! ([`ChangeTarget::apply`]) instead of the store's versioned methods, and
+//! ([`GraphBackend::apply`]) instead of the store's versioned methods, and
 //! records each write that changed something in the transaction's change
 //! set ([`ChangeRecorder::record`]): the op with its after-image, what it
 //! replaced, and what it did to the transaction's pending version. A write
@@ -25,10 +25,10 @@ use std::borrow::Cow;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use grafeo_common::change::{Before, DataOp, Labels, Properties, Table};
+use grafeo_common::change::{Before, DataOp, Labels, PendingVersion, Properties, Table};
 use grafeo_common::storage::value_codec::{MAX_PROPERTY_VALUE_DEPTH, nests_too_deep};
 use grafeo_common::types::{
-    ArcStr, EdgeId, EpochId, NodeId, PropertyKey, PropertyMap, ReadView, TransactionId, Value,
+    ArcStr, EdgeId, NodeId, PropertyKey, PropertyMap, ReadView, TransactionId, Value,
 };
 use grafeo_common::utils::hash::FxHashSet;
 
@@ -36,9 +36,10 @@ use super::{
     BulkRows, ChangeRecorder, ConstraintValidator, OperatorError, WriteClaim, WriteClaims,
     WriteInProgress,
 };
-use crate::graph::apply::{Applied, ApplyError, ChangeTarget, ExternalTarget, Writer};
+use crate::graph::apply::{Applied, ApplyError, GraphBackend, Writer};
 use crate::graph::lpg::{Edge, Node};
-use crate::graph::{Direction, GraphStoreMut};
+use crate::graph::rowgroup::RowGroupStore;
+use crate::graph::{Direction, GraphStore};
 
 /// The property name of a map assignment: `SET n = {...}` or `SET n += {...}`
 /// arrive as one `("*", map)` pair.
@@ -112,31 +113,16 @@ impl WriteCounter {
     }
 }
 
-/// The store of one graph as a recording writer changes it.
-#[derive(Clone)]
-pub enum WriteTarget {
-    /// A store that creates at ids reserved from it (the built-in store).
-    Store(Arc<dyn ChangeTarget>),
-    /// A store a database was built on, which gives the ids of what it
-    /// creates itself (see [`ExternalTarget::create_node`]).
-    External(Arc<ExternalTarget>),
-}
-
-impl WriteTarget {
-    /// Applies `op` as `writer` (see [`ChangeTarget::apply`]).
-    fn apply(&self, op: &DataOp, writer: Writer) -> Result<Applied, ApplyError> {
-        match self {
-            Self::Store(target) => target.apply(op, writer),
-            Self::External(target) => target.apply(op, writer),
-        }
-    }
-}
-
-impl std::fmt::Debug for WriteTarget {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Store(_) => f.write_str("WriteTarget::Store"),
-            Self::External(_) => f.write_str("WriteTarget::External"),
+impl Recording {
+    /// The recording of writes that each commit at once on `store`, at the
+    /// store's next epoch, as its raw writes do: it claims nothing and
+    /// keeps no changes. For tests, loaders and seeding (see
+    /// [`GraphWriter::immediate`]).
+    #[must_use]
+    pub fn immediate(store: Arc<RowGroupStore>) -> Self {
+        Self {
+            target: Arc::clone(&store) as Arc<dyn GraphBackend>,
+            recorder: Arc::new(ImmediateWrites { store }),
         }
     }
 }
@@ -175,89 +161,72 @@ fn op_values(op: &DataOp) -> usize {
     }
 }
 
-/// What a recording writer writes through and records in (see
-/// [`GraphWriter::with_recording`]): one graph's store and one
-/// transaction's changes in that graph.
+/// What a writer writes through and records in (see [`GraphWriter::new`]):
+/// one graph's backend and one transaction's changes in that graph.
 #[derive(Clone)]
 pub struct Recording {
-    /// The graph's store.
-    pub target: WriteTarget,
+    /// The graph's backend.
+    pub target: Arc<dyn GraphBackend>,
     /// The transaction's changes in the graph, with its claims and the write
     /// freeze.
     pub recorder: Arc<dyn ChangeRecorder>,
 }
 
 /// Writes to a graph store for one statement or direct call: validated,
-/// tracked for write conflicts and versioned by the transaction.
+/// tracked for write conflicts, applied through the graph's backend and
+/// recorded in the transaction's changes.
 #[derive(Clone)]
 pub struct GraphWriter {
-    store: Arc<dyn GraphStoreMut>,
+    /// The store the writer reads: the graph as its writes see it.
+    store: Arc<dyn GraphStore>,
     /// Who the writer reads as: its transaction at its snapshot, or a
     /// committed reader at the epoch of an immediate write.
     view: ReadView,
     validator: Option<Arc<dyn ConstraintValidator>>,
     counter: Option<Arc<WriteCounter>>,
-    /// Where the writes go and are recorded; `None` to write through the
-    /// store's versioned methods.
-    recording: Option<Recording>,
-    /// The claims of a writer without a recording that writes as a
-    /// transaction through the store's versioned methods.
-    claims: Option<Arc<dyn WriteClaims>>,
+    /// Where the writes go and are recorded.
+    recording: Recording,
 }
 
-impl From<Arc<dyn GraphStoreMut>> for GraphWriter {
-    /// A writer without a transaction, validator or write tracker: its
-    /// writes commit at once, and it reads what every commit so far left
-    /// (an immediate write reads the newest committed state).
-    fn from(store: Arc<dyn GraphStoreMut>) -> Self {
-        Self::new(store, ReadView::latest())
+impl From<Arc<RowGroupStore>> for GraphWriter {
+    /// [`GraphWriter::immediate`]: a writer whose writes commit at once.
+    fn from(store: Arc<RowGroupStore>) -> Self {
+        Self::immediate(store)
     }
 }
 
 impl GraphWriter {
-    /// Creates a writer without a validator or write tracker that reads as
-    /// `view`, and writes as its transaction when it has one.
-    pub fn new(store: Arc<dyn GraphStoreMut>, view: ReadView) -> Self {
+    /// A writer that reads `store` and writes through `recording`'s backend,
+    /// recording each write that changed something in its recorder, which
+    /// also takes the claims and holds the write freeze, as the recorder's
+    /// writer: a transaction reads at its snapshot, its own writes included;
+    /// an immediate write reads at its epoch, as the system.
+    #[must_use]
+    pub fn new(store: Arc<dyn GraphStore>, recording: Recording) -> Self {
+        let view = match recording.recorder.writer() {
+            Writer::Transaction { id, snapshot } => ReadView::transaction(id, snapshot),
+            Writer::Immediate { epoch, .. } => ReadView::committed(epoch),
+            Writer::Replay { epoch } => ReadView::committed(epoch),
+        };
         Self {
             store,
             view,
             validator: None,
             counter: None,
-            recording: None,
-            claims: None,
+            recording,
         }
     }
 
-    /// Claims what each write changes through `claims`, and holds its write
-    /// freeze, for a writer without a recording that writes as a transaction
-    /// through the store's versioned methods (its view names the
-    /// transaction, see [`new`](Self::new)). A recording claims through its
-    /// own recorder instead.
+    /// A writer whose writes each commit at once on `store`, at the store's
+    /// next epoch, as its raw writes do, and that reads the newest committed
+    /// state: for tests, loaders and seeding. It claims nothing and keeps no
+    /// changes.
     #[must_use]
-    pub fn with_claims(mut self, claims: Arc<dyn WriteClaims>) -> Self {
-        self.claims = Some(claims);
-        self
-    }
-
-    /// Writes through `recording`'s target and records each write that
-    /// changed something in its recorder, which also takes the claims and
-    /// holds the write freeze, as the recorder's writer: a transaction reads
-    /// at its snapshot, its own writes included; an immediate write reads at
-    /// its epoch, as the system. The store this writer was made with stays
-    /// the one it reads.
-    #[must_use]
-    pub fn with_recording(mut self, recording: Recording) -> Self {
-        match recording.recorder.writer() {
-            Writer::Transaction { id, snapshot } => {
-                self.view = ReadView::transaction(id, snapshot);
-            }
-            Writer::Immediate { epoch, .. } => {
-                self.view = ReadView::committed(epoch);
-            }
-            Writer::Replay { .. } => {}
-        }
-        self.recording = Some(recording);
-        self
+    pub fn immediate(store: Arc<RowGroupStore>) -> Self {
+        let recording = Recording::immediate(Arc::clone(&store));
+        let mut writer = Self::new(store, recording);
+        writer.view = ReadView::latest();
+        writer
     }
 
     /// Checks every write against the schema and constraints.
@@ -283,9 +252,30 @@ impl GraphWriter {
         }
     }
 
-    /// The store written to.
+    /// A writer whose writes are pending writes of transaction
+    /// `transaction`, which reads at `snapshot`: it sees them, no other
+    /// reader does, and nothing commits them.
+    #[cfg(test)]
+    pub(crate) fn pending(
+        store: Arc<RowGroupStore>,
+        transaction: TransactionId,
+        snapshot: grafeo_common::types::EpochId,
+    ) -> Self {
+        let recording = Recording {
+            target: Arc::clone(&store) as Arc<dyn GraphBackend>,
+            recorder: Arc::new(PendingWrites {
+                writer: Writer::Transaction {
+                    id: transaction,
+                    snapshot,
+                },
+            }),
+        };
+        Self::new(store, recording)
+    }
+
+    /// The store the writer reads.
     #[must_use]
-    pub fn store(&self) -> &Arc<dyn GraphStoreMut> {
+    pub fn store(&self) -> &Arc<dyn GraphStore> {
         &self.store
     }
 
@@ -299,11 +289,6 @@ impl GraphWriter {
     #[must_use]
     pub fn transaction_id(&self) -> Option<TransactionId> {
         self.view.transaction
-    }
-
-    /// The epoch the writer reads at.
-    fn epoch(&self) -> EpochId {
-        self.view.epoch
     }
 
     /// The node as this writer's transaction sees it, its own writes included.
@@ -372,40 +357,33 @@ impl GraphWriter {
     }
 
     /// Claims what the next store change writes, for write-conflict
-    /// detection, through the recording's recorder or the writer's claims; a
-    /// writer without either claims nothing. An edge's endpoints are claimed
-    /// once the edge passed its checks, right before it is written: an edge
-    /// refused claims nothing, so it holds off no delete. The delete of a
-    /// node also conflicts with an edge another transaction creates to it.
+    /// detection, through the recording's recorder. An edge's endpoints are
+    /// claimed once the edge passed its checks, right before it is written:
+    /// an edge refused claims nothing, so it holds off no delete. The delete
+    /// of a node also conflicts with an edge another transaction creates to
+    /// it.
     fn claim(&self, claim: WriteClaim) -> Result<(), OperatorError> {
-        match (&self.recording, &self.claims) {
-            (Some(recording), _) => recording.recorder.claim(claim),
-            (None, Some(claims)) => claims.claim(claim),
-            (None, None) => Ok(()),
-        }
+        self.recording.recorder.claim(claim)
     }
 
     /// Marks this writer's store changes as in progress while the guard
     /// lives (see [`WriteClaims::write_in_progress`]): a checkpoint or a
     /// copy of the store waits for them, and they wait for one. `None` for
-    /// a writer without a recording or claims.
+    /// a recorder whose writes hold checkpoints off themselves.
     ///
     /// Each public write method takes it once, right before its first store
     /// change; the methods it calls never take it again (it is not
     /// reentrant), and the expressions a `derive` of
     /// [`create_node_with`](Self::create_node_with) evaluates run without it.
     fn write_in_progress(&self) -> Option<WriteInProgress<'_>> {
-        match (&self.recording, &self.claims) {
-            (Some(recording), _) => recording.recorder.write_in_progress(),
-            (None, Some(claims)) => claims.write_in_progress(),
-            (None, None) => None,
-        }
+        self.recording.recorder.write_in_progress()
     }
 
-    /// Applies `op` through the recording's target and records it when it
+    /// Applies `op` through the recording's backend and records it when it
     /// changed something; whether it did. A write the store refuses changes
     /// nothing and records nothing. Called with the write freeze held.
-    fn apply_op(&self, recording: &Recording, op: DataOp) -> Result<bool, OperatorError> {
+    fn apply_op(&self, op: DataOp) -> Result<bool, OperatorError> {
+        let recording = &self.recording;
         let applied = recording
             .target
             .apply(&op, recording.recorder.writer())
@@ -599,19 +577,10 @@ impl GraphWriter {
         let _writing = self.write_in_progress();
         let mut added = 0;
         for label in labels {
-            let new = match (&self.recording, self.view.transaction) {
-                (Some(recording), _) => self.apply_op(
-                    recording,
-                    DataOp::AddNodeLabel {
-                        id,
-                        label: ArcStr::from(label.as_str()),
-                    },
-                )?,
-                (None, Some(transaction_id)) => {
-                    self.store.add_label_versioned(id, label, transaction_id)
-                }
-                (None, None) => self.store.add_label(id, label),
-            };
+            let new = self.apply_op(DataOp::AddNodeLabel {
+                id,
+                label: ArcStr::from(label.as_str()),
+            })?;
             added += usize::from(new);
         }
         self.write_values(Entity::Node(id), &converted)?;
@@ -634,19 +603,10 @@ impl GraphWriter {
         let _writing = self.write_in_progress();
         let mut removed = 0;
         for label in labels {
-            let had = match (&self.recording, self.view.transaction) {
-                (Some(recording), _) => self.apply_op(
-                    recording,
-                    DataOp::RemoveNodeLabel {
-                        id,
-                        label: ArcStr::from(label.as_str()),
-                    },
-                )?,
-                (None, Some(transaction_id)) => {
-                    self.store.remove_label_versioned(id, label, transaction_id)
-                }
-                (None, None) => self.store.remove_label(id, label),
-            };
+            let had = self.apply_op(DataOp::RemoveNodeLabel {
+                id,
+                label: ArcStr::from(label.as_str()),
+            })?;
             removed += usize::from(had);
         }
         self.count(|c| &c.labels_removed, removed);
@@ -677,14 +637,7 @@ impl GraphWriter {
                 )));
             }
         }
-        let deleted = match (&self.recording, self.view.transaction) {
-            (Some(recording), _) => self.apply_op(recording, DataOp::DeleteNode { id })?,
-            (None, Some(transaction_id)) => self
-                .store
-                .delete_node_versioned(id, self.epoch(), transaction_id)
-                .map_err(refused)?,
-            (None, None) => self.store.delete_node(id),
-        };
+        let deleted = self.apply_op(DataOp::DeleteNode { id })?;
         self.count(|c| &c.nodes_deleted, usize::from(deleted));
         Ok(deleted)
     }
@@ -1073,16 +1026,12 @@ impl GraphWriter {
         Ok(created)
     }
 
-    /// The recording, store and row handling of a bulk write: `Some` when
-    /// the writer records into a recorder that takes bulk writes, through a
-    /// store that creates at ids reserved from it.
-    fn bulk(&self) -> Option<(&Recording, &Arc<dyn ChangeTarget>, BulkRows)> {
-        let recording = self.recording.as_ref()?;
-        let WriteTarget::Store(target) = &recording.target else {
-            return None;
-        };
+    /// The recording, backend and row handling of a bulk write: `Some` when
+    /// the writer records into a recorder that takes bulk writes.
+    fn bulk(&self) -> Option<(&Recording, &Arc<dyn GraphBackend>, BulkRows)> {
+        let recording = &self.recording;
         let keep = recording.recorder.bulk()?;
-        Some((recording, target, keep))
+        Some((recording, &recording.target, keep))
     }
 
     /// [`delete_edge`](Self::delete_edge), for a caller whose write is
@@ -1092,33 +1041,23 @@ impl GraphWriter {
     /// capture.
     fn remove_edge(&self, id: EdgeId, deleted_with: Option<NodeId>) -> Result<bool, OperatorError> {
         self.claim(WriteClaim::Edge(id))?;
-        let deleted = match &self.recording {
-            Some(recording) => {
-                let op = DataOp::DeleteEdge { id };
-                let mut applied = recording
-                    .target
-                    .apply(&op, recording.recorder.writer())
-                    .map_err(store_refused)?;
-                if let (
-                    Some(node),
-                    Applied::Changed {
-                        before: Before::Edge(image),
-                        ..
-                    },
-                ) = (deleted_with, &mut applied)
-                {
-                    image.deleted_with = Some(node);
-                }
-                record_applied(recording, op, applied)?
-            }
-            None => match self.view.transaction {
-                Some(transaction_id) => {
-                    self.store
-                        .delete_edge_versioned(id, self.epoch(), transaction_id)
-                }
-                None => self.store.delete_edge(id),
+        let recording = &self.recording;
+        let op = DataOp::DeleteEdge { id };
+        let mut applied = recording
+            .target
+            .apply(&op, recording.recorder.writer())
+            .map_err(store_refused)?;
+        if let (
+            Some(node),
+            Applied::Changed {
+                before: Before::Edge(image),
+                ..
             },
-        };
+        ) = (deleted_with, &mut applied)
+        {
+            image.deleted_with = Some(node);
+        }
+        let deleted = record_applied(recording, op, applied)?;
         self.count(|c| &c.edges_deleted, usize::from(deleted));
         Ok(deleted)
     }
@@ -1224,71 +1163,29 @@ impl GraphWriter {
 
     // === Store writes ===
 
-    /// Creates a node with `labels` and `properties` (checked already); a
-    /// null value is no property.
+    /// Creates a node through the recording's backend as one change, with
+    /// its labels and every value of `properties` that is not null (checked
+    /// already), at an id reserved from the backend. It claims nothing: no
+    /// other transaction knows the new id before this one commits.
     fn insert_node(
         &self,
         labels: &[String],
         properties: &[(String, Value)],
     ) -> Result<NodeId, OperatorError> {
-        if let Some(recording) = &self.recording {
-            return self.create_recorded_node(recording, labels, properties);
-        }
-        let label_refs: Vec<&str> = labels.iter().map(String::as_str).collect();
-        let id = match self.view.transaction {
-            Some(transaction_id) => {
-                self.store
-                    .create_node_versioned(&label_refs, self.epoch(), transaction_id)
-            }
-            None => self.store.create_node(&label_refs),
-        };
-        self.claim(WriteClaim::Node(id))?;
-        self.count(|c| &c.nodes_created, 1);
-        // `(:A:A)` gives the node one label.
-        let distinct: std::collections::BTreeSet<&str> = label_refs.into_iter().collect();
-        self.count(|c| &c.labels_added, distinct.len());
-        self.write_values(Entity::Node(id), properties)?;
-        Ok(id)
-    }
-
-    /// Creates a node through the recording's target as one entry, with its
-    /// labels and every value of `properties` that is not null: at an id
-    /// reserved from the store, or the one an external store gives. It
-    /// claims nothing: no other transaction knows the new id before this one
-    /// commits.
-    fn create_recorded_node(
-        &self,
-        recording: &Recording,
-        labels: &[String],
-        properties: &[(String, Value)],
-    ) -> Result<NodeId, OperatorError> {
+        let recording = &self.recording;
         let labels = distinct_labels(labels);
         let values = present_values(properties);
         let (label_count, value_count) = (labels.len(), values.len());
-        let writer = recording.recorder.writer();
-        let (id, op, applied) = match &recording.target {
-            WriteTarget::Store(target) => {
-                let id = NodeId::new(target.reserve_node_ids(1).map_err(store_refused)?.start);
-                let op = DataOp::CreateNode {
-                    id,
-                    labels,
-                    properties: values,
-                };
-                let applied = target.apply(&op, writer).map_err(store_refused)?;
-                (id, op, applied)
-            }
-            WriteTarget::External(target) => {
-                let (op, applied) = target
-                    .create_node(labels, values, writer)
-                    .map_err(store_refused)?;
-                let DataOp::CreateNode { id, .. } = op else {
-                    return Err(OperatorError::Internal(
-                        "an external store's node create gave another op".to_string(),
-                    ));
-                };
-                (id, op, applied)
-            }
+        let target = &recording.target;
+        let id = NodeId::new(target.reserve_node_ids(1).map_err(store_refused)?.start);
+        let op = DataOp::CreateNode {
+            id,
+            labels,
+            properties: values,
         };
+        let applied = target
+            .apply(&op, recording.recorder.writer())
+            .map_err(store_refused)?;
         if !record_applied(recording, op, applied)? {
             return Err(OperatorError::Internal(format!(
                 "the store created no node {}",
@@ -1301,8 +1198,11 @@ impl GraphWriter {
         Ok(id)
     }
 
-    /// Creates an edge (checked already, its endpoints claimed) with
-    /// `properties`; a null value is no property.
+    /// Creates an edge (checked already, its endpoints claimed) through the
+    /// recording's backend as one change, with every value of `properties`
+    /// that is not null: at an id reserved from the backend and claimed
+    /// before the store changes (a concurrent `DETACH DELETE` of an endpoint
+    /// lists the edge).
     fn insert_edge(
         &self,
         src: NodeId,
@@ -1310,73 +1210,27 @@ impl GraphWriter {
         edge_type: &str,
         properties: &[(String, Value)],
     ) -> Result<EdgeId, OperatorError> {
-        if let Some(recording) = &self.recording {
-            return self.create_recorded_edge(recording, src, dst, edge_type, properties);
-        }
-        let id = match self.view.transaction {
-            Some(transaction_id) => self
-                .store
-                .create_edge_versioned(src, dst, edge_type, self.epoch(), transaction_id)
-                .map_err(conflict_or_refused)?,
-            None => self.store.create_edge(src, dst, edge_type),
-        };
-        self.claim(WriteClaim::Edge(id))?;
-        self.count(|c| &c.edges_created, 1);
-        self.write_values(Entity::Edge(id), properties)?;
-        Ok(id)
-    }
-
-    /// Creates an edge through the recording's target as one entry, with
-    /// every value of `properties` that is not null: at an id reserved from
-    /// the store and claimed before the store changes (a concurrent
-    /// `DETACH DELETE` of an endpoint lists the edge), or at the id an
-    /// external store gives, claimed once it is known.
-    fn create_recorded_edge(
-        &self,
-        recording: &Recording,
-        src: NodeId,
-        dst: NodeId,
-        edge_type: &str,
-        properties: &[(String, Value)],
-    ) -> Result<EdgeId, OperatorError> {
+        let recording = &self.recording;
         let values = present_values(properties);
         let value_count = values.len();
-        let edge_type = ArcStr::from(edge_type);
-        let writer = recording.recorder.writer();
-        let (id, op, applied) = match &recording.target {
-            WriteTarget::Store(target) => {
-                let id = EdgeId::new(target.reserve_edge_ids(1).map_err(store_refused)?.start);
-                self.claim(WriteClaim::Edge(id))?;
-                let op = DataOp::CreateEdge {
-                    id,
-                    src,
-                    dst,
-                    edge_type,
-                    properties: values,
-                };
-                let applied = target.apply(&op, writer).map_err(store_refused)?;
-                (id, op, applied)
-            }
-            WriteTarget::External(target) => {
-                let (op, applied) = target
-                    .create_edge(src, dst, edge_type, values, writer)
-                    .map_err(store_refused)?;
-                let DataOp::CreateEdge { id, .. } = op else {
-                    return Err(OperatorError::Internal(
-                        "an external store's edge create gave another op".to_string(),
-                    ));
-                };
-                (id, op, applied)
-            }
+        let target = &recording.target;
+        let id = EdgeId::new(target.reserve_edge_ids(1).map_err(store_refused)?.start);
+        self.claim(WriteClaim::Edge(id))?;
+        let op = DataOp::CreateEdge {
+            id,
+            src,
+            dst,
+            edge_type: ArcStr::from(edge_type),
+            properties: values,
         };
+        let applied = target
+            .apply(&op, recording.recorder.writer())
+            .map_err(store_refused)?;
         if !record_applied(recording, op, applied)? {
             return Err(OperatorError::Internal(format!(
                 "the store created no edge {}",
                 id.as_u64()
             )));
-        }
-        if matches!(recording.target, WriteTarget::External(_)) {
-            self.claim(WriteClaim::Edge(id))?;
         }
         self.count(|c| &c.edges_created, 1);
         self.count(|c| &c.properties_set, value_count);
@@ -1400,57 +1254,24 @@ impl GraphWriter {
         if value.is_null() {
             return self.remove_value(entity, key);
         }
-        if let Some(recording) = &self.recording {
-            let key = PropertyKey::new(key);
-            let op = match entity {
-                Entity::Node(id) => DataOp::SetNodeProperty { id, key, value },
-                Entity::Edge(id) => DataOp::SetEdgeProperty { id, key, value },
-            };
-            let changed = self.apply_op(recording, op)?;
-            self.count(|c| &c.properties_set, usize::from(changed));
-            return Ok(());
-        }
-        match (entity, self.view.transaction) {
-            (Entity::Node(id), Some(transaction_id)) => {
-                self.store
-                    .set_node_property_versioned(id, key, value, transaction_id)
-                    .map_err(refused)?;
-            }
-            (Entity::Node(id), None) => self.store.set_node_property(id, key, value),
-            (Entity::Edge(id), Some(transaction_id)) => {
-                self.store
-                    .set_edge_property_versioned(id, key, value, transaction_id);
-            }
-            (Entity::Edge(id), None) => self.store.set_edge_property(id, key, value),
-        }
-        self.count(|c| &c.properties_set, 1);
+        let key = PropertyKey::new(key);
+        let op = match entity {
+            Entity::Node(id) => DataOp::SetNodeProperty { id, key, value },
+            Entity::Edge(id) => DataOp::SetEdgeProperty { id, key, value },
+        };
+        let changed = self.apply_op(op)?;
+        self.count(|c| &c.properties_set, usize::from(changed));
         Ok(())
     }
 
     fn remove_value(&self, entity: Entity, key: &str) -> Result<(), OperatorError> {
-        if let Some(recording) = &self.recording {
-            let key = PropertyKey::new(key);
-            let op = match entity {
-                Entity::Node(id) => DataOp::RemoveNodeProperty { id, key },
-                Entity::Edge(id) => DataOp::RemoveEdgeProperty { id, key },
-            };
-            let removed = self.apply_op(recording, op)?;
-            self.count(|c| &c.properties_set, usize::from(removed));
-            return Ok(());
-        }
-        let removed =
-            match (entity, self.view.transaction) {
-                (Entity::Node(id), Some(transaction_id)) => self
-                    .store
-                    .remove_node_property_versioned(id, key, transaction_id),
-                (Entity::Node(id), None) => self.store.remove_node_property(id, key),
-                (Entity::Edge(id), Some(transaction_id)) => self
-                    .store
-                    .remove_edge_property_versioned(id, key, transaction_id),
-                (Entity::Edge(id), None) => self.store.remove_edge_property(id, key),
-            }
-            .map_err(refused)?;
-        self.count(|c| &c.properties_set, usize::from(removed.is_some()));
+        let key = PropertyKey::new(key);
+        let op = match entity {
+            Entity::Node(id) => DataOp::RemoveNodeProperty { id, key },
+            Entity::Edge(id) => DataOp::RemoveEdgeProperty { id, key },
+        };
+        let removed = self.apply_op(op)?;
+        self.count(|c| &c.properties_set, usize::from(removed));
         Ok(())
     }
 
@@ -1503,26 +1324,6 @@ impl GraphWriter {
     }
 }
 
-/// The statement error of a write the store refused, such as a spilled
-/// property value whose file cannot be read, which a rollback would lose.
-fn refused(error: grafeo_common::utils::error::Error) -> OperatorError {
-    OperatorError::from(error)
-}
-
-/// A write the store refused: a write conflict stays one (a compacted store
-/// refuses an edge to a node another transaction deleted), anything else is
-/// [`refused`].
-fn conflict_or_refused(error: grafeo_common::utils::error::Error) -> OperatorError {
-    use grafeo_common::utils::error::{Error, TransactionError};
-
-    match error {
-        Error::Transaction(TransactionError::WriteConflict(message)) => {
-            OperatorError::WriteConflict(message)
-        }
-        other => refused(other),
-    }
-}
-
 /// Records in `recording` what the store reported it applied for `op`;
 /// whether the write changed something. A write that changed nothing
 /// records nothing.
@@ -1543,10 +1344,10 @@ fn record_applied(
     }
 }
 
-/// The statement error of a write the store's change target refused: a
-/// node delete while the node has edges is the constraint a user sees,
-/// anything else (a spilled value that cannot be read, a store limit) an
-/// execution error, as [`refused`].
+/// The statement error of a write the graph's backend refused: a node
+/// delete while the node has edges is the constraint a user sees, anything
+/// else (a spilled value that cannot be read, a store limit) an execution
+/// error.
 fn store_refused(error: ApplyError) -> OperatorError {
     match error {
         ApplyError::HasEdges(id) => OperatorError::edges_still_exist(format!(
@@ -1554,6 +1355,74 @@ fn store_refused(error: ApplyError) -> OperatorError {
             id.as_u64()
         )),
         other => OperatorError::Execution(other.to_string()),
+    }
+}
+
+/// The recorder of [`GraphWriter::pending`]: each write is a pending write
+/// of one transaction, which no change set records, so nothing commits it.
+#[cfg(test)]
+struct PendingWrites {
+    writer: Writer,
+}
+
+#[cfg(test)]
+impl WriteClaims for PendingWrites {
+    fn claim(&self, _claim: WriteClaim) -> Result<(), OperatorError> {
+        Ok(())
+    }
+
+    fn write_in_progress(&self) -> Option<WriteInProgress<'_>> {
+        None
+    }
+}
+
+#[cfg(test)]
+impl ChangeRecorder for PendingWrites {
+    fn writer(&self) -> Writer {
+        self.writer
+    }
+
+    fn record(
+        &self,
+        _op: DataOp,
+        _before: Before,
+        _version: PendingVersion,
+    ) -> Result<(), OperatorError> {
+        Ok(())
+    }
+}
+
+/// The recorder of [`GraphWriter::immediate`]: each write commits at once
+/// at the store's next epoch, claims nothing and keeps nothing.
+struct ImmediateWrites {
+    store: Arc<RowGroupStore>,
+}
+
+impl WriteClaims for ImmediateWrites {
+    fn claim(&self, _claim: WriteClaim) -> Result<(), OperatorError> {
+        Ok(())
+    }
+
+    fn write_in_progress(&self) -> Option<WriteInProgress<'_>> {
+        None
+    }
+}
+
+impl ChangeRecorder for ImmediateWrites {
+    fn writer(&self) -> Writer {
+        Writer::Immediate {
+            epoch: self.store.current_epoch().next(),
+            before_images: false,
+        }
+    }
+
+    fn record(
+        &self,
+        _op: DataOp,
+        _before: Before,
+        _version: PendingVersion,
+    ) -> Result<(), OperatorError> {
+        Ok(())
     }
 }
 
@@ -1743,7 +1612,6 @@ mod tests {
 
     use super::{GraphWriter, OperatorError};
     use crate::graph::GraphStore as _;
-    use crate::graph::GraphStoreMut;
     use crate::graph::rowgroup::RowGroupStore;
 
     /// A string inside `depth` lists.
@@ -1757,8 +1625,7 @@ mod tests {
 
     fn writer() -> (Arc<RowGroupStore>, GraphWriter) {
         let store = Arc::new(RowGroupStore::new());
-        let target: Arc<dyn GraphStoreMut> = Arc::clone(&store) as Arc<dyn GraphStoreMut>;
-        (store, GraphWriter::new(target, ReadView::latest()))
+        (Arc::clone(&store), GraphWriter::immediate(store))
     }
 
     pub(super) fn labels(names: &[&str]) -> Vec<String> {

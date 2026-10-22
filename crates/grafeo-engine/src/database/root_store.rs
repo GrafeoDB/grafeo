@@ -11,14 +11,14 @@
 use grafeo_common::change::DataOp;
 #[cfg(any(query_language, feature = "wal", feature = "grafeo-file"))]
 use grafeo_common::types::EpochId;
-use grafeo_core::graph::apply::ChangeTarget;
+use grafeo_core::graph::apply::GraphBackend;
 use grafeo_core::graph::load::LoadTarget;
 use grafeo_core::graph::rowgroup::RowGroupStore;
 
 use super::catalog_section::CatalogStore;
 
 /// See the module docs.
-pub(crate) trait RootStore: CatalogStore + LoadTarget + ChangeTarget {
+pub(crate) trait RootStore: CatalogStore + LoadTarget + GraphBackend {
     /// Drops the named graph `name`; `false` when there is none.
     fn drop_graph(&self, name: &str) -> bool;
 

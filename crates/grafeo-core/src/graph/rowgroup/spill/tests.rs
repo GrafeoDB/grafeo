@@ -11,7 +11,7 @@ use grafeo_common::types::{NodeId, PropertyKey, ReadView, Value};
 use grafeo_common::utils::error::{Error, Result};
 
 use super::{ColumnSpill, ColumnSpillReport};
-use crate::graph::apply::{ChangeTarget, Writer};
+use crate::graph::apply::{GraphBackend, Writer};
 use crate::graph::conformance::{
     Reader, Tx, apply_all, committed, image, labels, next_epoch, properties,
 };

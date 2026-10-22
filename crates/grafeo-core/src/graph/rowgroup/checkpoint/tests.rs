@@ -13,7 +13,7 @@ use grafeo_common::types::{ArcStr, EdgeId, EpochId, NodeId, PropertyKey, Value};
 use grafeo_common::utils::error::Result;
 
 use super::CheckpointSnapshot;
-use crate::graph::apply::{ChangeTarget, Writer};
+use crate::graph::apply::{GraphBackend, Writer};
 use crate::graph::conformance::{
     Reader, Rng, Tx, committed, image, labels, next_epoch, people, properties, random_write,
 };

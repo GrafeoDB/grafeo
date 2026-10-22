@@ -140,7 +140,6 @@ pub fn order_by_key(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use grafeo_core::graph::GraphStoreMut as _;
     use grafeo_core::graph::rowgroup::RowGroupStore;
 
     fn store_with(keys: &[Option<Value>]) -> (RowGroupStore, Vec<NodeId>) {

@@ -213,9 +213,9 @@ mod tests {
     use grafeo_common::types::{PropertyKey, Value};
 
     use super::*;
+    use crate::graph::GraphStore;
     use crate::graph::rowgroup::RowGroupStore;
     use crate::graph::rowgroup::section::RowGroupStoreSection;
-    use crate::graph::{GraphStore, GraphStoreMut};
 
     const BASE: &[u8] = include_bytes!(concat!(
         env!("CARGO_MANIFEST_DIR"),

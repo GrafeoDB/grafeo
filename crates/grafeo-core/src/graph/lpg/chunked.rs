@@ -1255,9 +1255,9 @@ mod tests {
         COLUMN_EDGE_TYPE, COLUMN_LABELS, COLUMN_SOURCE, COLUMN_TARGET, DictionaryMeta, GraphMeta,
         LPG_SECTION_VERSION, LpgMeta, decode_lpg_meta, encode_lpg_meta, read_lpg_chunks,
     };
+    use crate::graph::GraphStore;
     use crate::graph::load::testing::version_3_fixture;
     use crate::graph::rowgroup::RowGroupStore;
-    use crate::graph::{GraphStore, GraphStoreMut};
 
     // ── Sections 0.6.0-beta.1 wrote (fixtures) ──────────────────────────
 

@@ -31,7 +31,7 @@
 //! write puts the newest value in place and keeps the one it replaced in an
 //! undo node of its vector, stamped as a create is, so a reader that does
 //! not see the write reads the kept value (#412, DuckDB's update chains).
-//! Writes go through [`ChangeTarget`](crate::graph::apply::ChangeTarget) (`apply`), the read
+//! Writes go through [`GraphBackend`] (`apply`), the read
 //! traits read; one lock guards the store (H1a).
 //!
 //! A store is also a root of named graphs, each a store of its own

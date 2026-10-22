@@ -6,19 +6,21 @@
 //! [`GraphWriter`](grafeo_core::execution::operators::GraphWriter) that
 //! applies it to the graph's store and records it here, one entry per
 //! change ([`GraphRecorder`]). The set is then all a commit, a rollback, a
-//! rollback to a savepoint and a checkpoint need: the commit stamps each
-//! graph's entries with the commit epoch ([`TransactionChanges::stamp`]),
-//! logs them and reports them to change data capture; a rollback undoes
-//! them, last to first, through the same stores
-//! ([`TransactionChanges::undo_after`]); a checkpoint reads the committed
-//! state of what open transactions changed from their entries
-//! ([`TransactionChanges::index`]). Stores keep nothing per transaction.
+//! rollback to a savepoint and a checkpoint need: the commit hands each
+//! graph's entries to its backend's commit at the commit epoch
+//! ([`TransactionChanges::commit`]), logs them and reports them to change
+//! data capture; a rollback hands them to the backend's rollback
+//! ([`TransactionChanges::rollback`], [`TransactionChanges::rollback_to`]);
+//! a checkpoint reads the committed state of what open transactions changed
+//! from their entries ([`TransactionChanges::index`]). This is the one log:
+//! backends keep no log of their own.
 //!
-//! The store of each graph is resolved once, at the transaction's first
-//! write in that graph, and kept with the set: the commit and the undo use
-//! that handle and never look the graph up by name again, so a graph dropped
-//! and created again under its name meanwhile is never stamped or undone
-//! with ids that mean other entities there.
+//! The backend of each graph is resolved once, at the transaction's first
+//! write in that graph, which opens the backend's transaction there
+//! ([`GraphBackend::begin`]); both are kept with the set: the commit and the
+//! rollbacks use them and never look the graph up by name again, so a graph
+//! dropped and created again under its name meanwhile is never committed or
+//! rolled back with ids that mean other entities there.
 //!
 //! A batch call is a bulk write: its ids are one reserved range per table,
 //! one entry however many rows, which the commit stamps and a rollback
@@ -46,9 +48,8 @@ use grafeo_common::types::{ArcStr, EpochId, TransactionId};
 use grafeo_common::utils::error::{Error, Result, TransactionError};
 use grafeo_core::execution::operators::{
     BulkRows, ChangeRecorder, OperatorError, Recording, WriteClaim, WriteClaims, WriteInProgress,
-    WriteTarget,
 };
-use grafeo_core::graph::apply::{ApplyError, ChangeTarget, UndoSupport, Writer};
+use grafeo_core::graph::apply::{ApplyError, BackendTransaction, GraphBackend, Writer};
 use parking_lot::Mutex;
 
 use super::{GraphEntity, TransactionManager};
@@ -73,9 +74,10 @@ pub(crate) struct TransactionChanges {
 struct State {
     /// The entries, in the order they were applied.
     set: ChangeSet,
-    /// Per slot index: the slot and its graph's store; `None` for an RDF
-    /// graph, whose entries apply at commit and are never stamped or undone.
-    targets: Vec<Option<(GraphSlot, Arc<dyn ChangeTarget>)>>,
+    /// Per slot index: the slot, its graph's backend and the transaction
+    /// open in it; `None` for an RDF graph, whose entries apply at commit
+    /// and are never committed or rolled back through a backend.
+    targets: Vec<Option<Bound>>,
     /// The position before the first entry, which a rollback undoes to.
     start: ChangeMark,
     /// The net effect of the RDF entries, which the transaction's reads lay
@@ -84,16 +86,12 @@ struct State {
     triples: super::rdf::PendingTriples,
 }
 
-/// Why an undo did not restore everything.
-#[derive(Debug)]
-pub(crate) enum UndoFailure {
-    /// The entries to undo include writes to a graph whose store has no
-    /// undo (a store the database was built on); the error names the graph.
-    /// A rollback to a savepoint is refused before anything is undone.
-    External(String),
-    /// A store failed to undo an entry: a broken invariant. The database
-    /// must not commit anything afterwards.
-    Broken(ApplyError),
+/// A graph a transaction writes: its slot, its backend and the backend's
+/// transaction, opened at the first write there.
+struct Bound {
+    slot: GraphSlot,
+    backend: Arc<dyn GraphBackend>,
+    transaction: BackendTransaction,
 }
 
 impl TransactionChanges {
@@ -116,6 +114,7 @@ impl TransactionChanges {
     }
 
     /// The transaction.
+    #[cfg(test)]
     pub(crate) fn id(&self) -> TransactionId {
         self.id
     }
@@ -151,19 +150,20 @@ impl TransactionChanges {
     }
 
     /// The slot of the labeled property graph with storage key `key` (`None`
-    /// for the default graph), whose store is `target`: the first call for
-    /// a graph keeps `target` as the store its entries are stamped and
-    /// undone through.
+    /// for the default graph), whose backend is `target`: the first call for
+    /// a graph opens the transaction in `target` and keeps both, the backend
+    /// its entries are committed and rolled back through.
     ///
     /// # Errors
     ///
-    /// Fails when the transaction wrote the graph through another store: the
-    /// graph was dropped and created again since its first write.
+    /// Fails when the transaction wrote the graph through another store (the
+    /// graph was dropped and created again since its first write), or when
+    /// the backend cannot open the transaction.
     pub(crate) fn bind(
         &self,
         key: Option<&str>,
-        target: Arc<dyn ChangeTarget>,
-    ) -> Result<GraphSlot> {
+        target: Arc<dyn GraphBackend>,
+    ) -> Result<(GraphSlot, BackendTransaction)> {
         let mut state = self.state.lock();
         let slot = state.set.slot(GraphRef {
             model: DataModel::Lpg,
@@ -174,16 +174,26 @@ impl TransactionChanges {
             state.targets.resize_with(at + 1, || None);
         }
         match &state.targets[at] {
-            None => state.targets[at] = Some((slot, target)),
-            Some((_, bound)) if same_store(bound, &target) => {}
-            Some(_) => {
-                return Err(Error::Transaction(TransactionError::InvalidState(format!(
-                    "graph '{}' was dropped and created again while this transaction wrote it",
-                    graph_name(key)
-                ))));
+            None => {
+                let transaction = target.begin(self.id, self.snapshot).map_err(|error| {
+                    Error::Transaction(TransactionError::InvalidState(format!(
+                        "graph '{}' could not open the transaction: {error}",
+                        graph_name(key)
+                    )))
+                })?;
+                state.targets[at] = Some(Bound {
+                    slot,
+                    backend: target,
+                    transaction,
+                });
+                Ok((slot, transaction))
             }
+            Some(bound) if same_store(&bound.backend, &target) => Ok((slot, bound.transaction)),
+            Some(_) => Err(Error::Transaction(TransactionError::InvalidState(format!(
+                "graph '{}' was dropped and created again while this transaction wrote it",
+                graph_name(key)
+            )))),
         }
-        Ok(slot)
     }
 
     /// A recording of this transaction's writes to the graph with storage
@@ -196,17 +206,14 @@ impl TransactionChanges {
         self: &Arc<Self>,
         manager: &Arc<TransactionManager>,
         key: Option<&str>,
-        target: WriteTarget,
+        target: Arc<dyn GraphBackend>,
     ) -> Result<Recording> {
-        let store: Arc<dyn ChangeTarget> = match &target {
-            WriteTarget::Store(store) => Arc::clone(store),
-            WriteTarget::External(store) => Arc::clone(store) as Arc<dyn ChangeTarget>,
-        };
-        let slot = self.bind(key, store)?;
+        let (slot, transaction) = self.bind(key, Arc::clone(&target))?;
         let recorder = GraphRecorder {
             changes: Arc::clone(self),
             claims: TransactionClaims::new(Arc::clone(manager), self.id, key),
             slot,
+            transaction,
         };
         Ok(Recording {
             target,
@@ -230,96 +237,98 @@ impl TransactionChanges {
         self.state.lock().set.mark()
     }
 
-    /// The position before the first entry: a rollback undoes to it.
-    pub(crate) fn start(&self) -> ChangeMark {
-        self.state.lock().start
-    }
-
     /// Whether the transaction changed nothing (that is still recorded).
     #[cfg(feature = "wal")]
     pub(crate) fn is_empty(&self) -> bool {
         self.state.lock().set.is_empty()
     }
 
-    /// Undoes the entries recorded after `mark`, last to first, per graph
-    /// through the store kept for it, and drops them from the set. Entries
-    /// in a graph whose store has no undo are dropped and the graph is
-    /// returned: its store keeps those writes. With `refuse_external`, such
-    /// entries refuse the whole undo instead, before anything changes (a
-    /// rollback to a savepoint). The caller holds the write freeze.
+    /// Rolls the transaction back: every entry goes, and each graph's
+    /// backend rolls its transaction back with the graph's entries, which
+    /// ends it there: a second rollback (the transaction manager's abort
+    /// after a session's) asks no backend again. The caller holds the write
+    /// freeze.
     ///
     /// # Errors
     ///
-    /// [`UndoFailure::External`] with `refuse_external`;
-    /// [`UndoFailure::Broken`] when a store fails to undo an entry (the
-    /// entries are dropped either way).
-    pub(crate) fn undo_after(
-        &self,
-        mark: ChangeMark,
-        refuse_external: bool,
-    ) -> std::result::Result<Option<String>, UndoFailure> {
+    /// The first backend that fails: a broken invariant, after which the
+    /// database must not commit anything (the caller poisons it). Every
+    /// backend is asked either way, and the entries are dropped.
+    pub(crate) fn rollback(&self) -> std::result::Result<(), ApplyError> {
         let mut state = self.state.lock();
-        let without_undo = Self::graph_without_undo(&state, mark);
-        if refuse_external && let Some(graph) = without_undo {
-            return Err(UndoFailure::External(graph));
+        let start = state.start;
+        let all = state.set.split_off(start);
+        Self::forget_triples(&mut state, &all);
+        let mut failure = None;
+        for bound in std::mem::take(&mut state.targets).iter().flatten() {
+            let mut entries = all.iter().filter(|change| change.graph() == bound.slot);
+            if let Err(error) = bound.backend.rollback(bound.transaction, &mut entries) {
+                failure.get_or_insert(error);
+            }
         }
+        failure.map_or(Ok(()), Err)
+    }
+
+    /// Rolls the transaction back to `mark` (a savepoint, or the position
+    /// before a statement that failed): the entries recorded after it go,
+    /// and each graph's backend rolls them back; the transaction stays open.
+    /// The caller holds the write freeze.
+    ///
+    /// # Errors
+    ///
+    /// As [`rollback`](Self::rollback).
+    pub(crate) fn rollback_to(&self, mark: ChangeMark) -> std::result::Result<(), ApplyError> {
+        let mut state = self.state.lock();
         let tail = state.set.split_off(mark);
         if tail.is_empty() {
-            return Ok(None);
+            return Ok(());
         }
-        #[cfg(feature = "triple-store")]
-        if tail
+        Self::forget_triples(&mut state, &tail);
+        let mut failure = None;
+        for bound in state.targets.iter().flatten() {
+            let mut entries = tail.iter().filter(|change| change.graph() == bound.slot);
+            if let Err(error) = bound
+                .backend
+                .rollback_to(bound.transaction, mark, &mut entries)
+            {
+                failure.get_or_insert(error);
+            }
+        }
+        failure.map_or(Ok(()), Err)
+    }
+
+    /// Recomputes the pending triples when `dropped` held RDF entries.
+    #[cfg(feature = "triple-store")]
+    fn forget_triples(state: &mut State, dropped: &[Change]) {
+        if dropped
             .iter()
             .any(|change| matches!(change, Change::Data { op, .. } if op.model() == DataModel::Rdf))
         {
             state.triples = super::rdf::PendingTriples::of(&state.set);
         }
-        let mut failure = None;
-        for (slot, target) in state.targets.iter().flatten() {
-            if target.undo_support() != UndoSupport::Exact {
-                continue;
-            }
-            let mut entries = tail.iter().filter(|change| change.graph() == *slot);
-            if let Err(error) = target.undo(self.id, &mut entries) {
-                failure.get_or_insert(error);
-            }
-        }
-        match failure {
-            Some(error) => Err(UndoFailure::Broken(error)),
-            None => Ok(without_undo),
-        }
     }
 
-    /// The name of a graph without undo that has entries after `mark`.
-    fn graph_without_undo(state: &State, mark: ChangeMark) -> Option<String> {
-        let after = state.set.after(mark);
-        state.targets.iter().flatten().find_map(|(slot, target)| {
-            (target.undo_support() == UndoSupport::None
-                && after.iter().any(|change| change.graph() == *slot))
-            .then(|| {
-                graph_name(
-                    state
-                        .set
-                        .graph(*slot)
-                        .and_then(|graph| graph.key.as_deref()),
-                )
-            })
-        })
-    }
+    /// Without the triple store no entry is of RDF: nothing to recompute.
+    #[cfg(not(feature = "triple-store"))]
+    fn forget_triples(_state: &mut State, _dropped: &[Change]) {}
 
-    /// Commits the entries at `epoch`, per graph through the store kept for
-    /// it: their pending versions get the epoch, and the stores' counters
-    /// and epochs follow.
+    /// Commits the entries at `epoch`: each graph's backend commits its
+    /// transaction with the graph's entries (the row-group store gives
+    /// their pending versions the epoch, and its counters and epoch follow).
     ///
     /// # Errors
     ///
-    /// The first store that fails: a broken invariant, after which the
+    /// The first backend that fails: a broken invariant, after which the
     /// commit must not complete (the caller drops its commit guard, which
     /// poisons the database).
-    pub(crate) fn stamp(&self, epoch: EpochId) -> std::result::Result<(), ApplyError> {
+    pub(crate) fn commit(&self, epoch: EpochId) -> std::result::Result<(), ApplyError> {
         let state = self.state.lock();
-        for (slot, target) in state.targets.iter().flatten() {
-            target.stamp(self.id, &mut state.set.in_graph(*slot), epoch)?;
+        for bound in state.targets.iter().flatten() {
+            bound.backend.commit(
+                bound.transaction,
+                &mut state.set.in_graph(bound.slot),
+                epoch,
+            )?;
         }
         Ok(())
     }
@@ -490,8 +499,8 @@ impl TransactionChanges {
             .targets
             .iter()
             .flatten()
-            .filter(|(slot, _)| state.set.in_graph(*slot).next().is_some())
-            .filter_map(|(slot, _)| state.set.graph(*slot))
+            .filter(|bound| state.set.in_graph(bound.slot).next().is_some())
+            .filter_map(|bound| state.set.graph(bound.slot))
             .map(|graph| graph.key.as_ref().map(ToString::to_string))
             .collect()
     }
@@ -556,34 +565,13 @@ impl TransactionChanges {
 }
 
 /// Whether two handles are the same store.
-fn same_store(a: &Arc<dyn ChangeTarget>, b: &Arc<dyn ChangeTarget>) -> bool {
+fn same_store(a: &Arc<dyn GraphBackend>, b: &Arc<dyn GraphBackend>) -> bool {
     std::ptr::addr_eq(Arc::as_ptr(a), Arc::as_ptr(b))
 }
 
 /// How errors name a graph by its storage key.
 fn graph_name(key: Option<&str>) -> String {
     key.unwrap_or("default").to_string()
-}
-
-/// What the error of [`kept_by_external_store`] says after the graph.
-const KEPT_BY_EXTERNAL_STORE: &str =
-    "is a store the database was built on, which has no undo: it keeps this transaction's writes";
-
-/// The error for writes a store without undo keeps: a rollback undid the
-/// transaction's other writes, and the graph's store keeps these.
-pub(crate) fn kept_by_external_store(graph: &str) -> Error {
-    Error::Transaction(TransactionError::InvalidState(format!(
-        "graph '{graph}' {KEPT_BY_EXTERNAL_STORE}"
-    )))
-}
-
-/// Whether `error` is one of [`kept_by_external_store`].
-pub(crate) fn is_kept_by_external_store(error: &Error) -> bool {
-    matches!(
-        error,
-        Error::Transaction(TransactionError::InvalidState(message))
-            if message.ends_with(KEPT_BY_EXTERNAL_STORE)
-    )
 }
 
 /// The claims of a transaction's writes to one graph, through the
@@ -648,6 +636,9 @@ struct GraphRecorder {
     claims: TransactionClaims,
     /// The graph's slot in the set.
     slot: GraphSlot,
+    /// The transaction open in the graph's backend, whose writer the writes
+    /// apply as.
+    transaction: BackendTransaction,
 }
 
 impl WriteClaims for GraphRecorder {
@@ -675,10 +666,7 @@ impl GraphRecorder {
 
 impl ChangeRecorder for GraphRecorder {
     fn writer(&self) -> Writer {
-        Writer::Transaction {
-            id: self.changes.id(),
-            snapshot: self.changes.snapshot(),
-        }
+        self.transaction.writer()
     }
 
     fn record(
@@ -744,9 +732,9 @@ pub(crate) struct StreamingChanges<'wal> {
     snapshot: EpochId,
     /// Its ranges: one entry each.
     set: ChangeSet,
-    /// The store its ranges are in, with the graph's slot, once it reserved
-    /// one.
-    target: Option<(GraphSlot, Arc<dyn ChangeTarget>)>,
+    /// The backend its ranges are in, with the graph's slot and the
+    /// transaction opened there, once it reserved one.
+    target: Option<Bound>,
     /// The WAL and the group it writes.
     #[cfg(feature = "wal")]
     log: Option<StreamedLog<'wal>>,
@@ -820,12 +808,12 @@ impl StreamingChanges<'_> {
     /// another store before.
     pub(crate) fn reserve(
         &mut self,
-        target: &Arc<dyn ChangeTarget>,
+        target: &Arc<dyn GraphBackend>,
         table: Table,
         count: usize,
     ) -> Result<Range<u64>> {
         let slot = match &self.target {
-            Some((slot, bound)) if same_store(bound, target) => *slot,
+            Some(bound) if same_store(&bound.backend, target) => bound.slot,
             Some(_) => {
                 return Err(Error::Internal(
                     "a bulk write reserves its ids in one store".to_string(),
@@ -836,7 +824,14 @@ impl StreamingChanges<'_> {
                     model: DataModel::Lpg,
                     key: None,
                 })?;
-                self.target = Some((slot, Arc::clone(target)));
+                let transaction = target
+                    .begin(self.transaction, self.snapshot)
+                    .map_err(|error| Error::Internal(error.to_string()))?;
+                self.target = Some(Bound {
+                    slot,
+                    backend: Arc::clone(target),
+                    transaction,
+                });
                 slot
             }
         };
@@ -857,7 +852,7 @@ impl StreamingChanges<'_> {
 
     /// Applies `op`, a create at an id of a range it reserved, as a pending
     /// version of its transaction (see
-    /// [`ChangeTarget::apply_bulk_row`]: an edge's endpoints are the
+    /// [`GraphBackend::apply_bulk_row`]: an edge's endpoints are the
     /// caller's to have created), and logs it.
     ///
     /// # Errors
@@ -865,17 +860,14 @@ impl StreamingChanges<'_> {
     /// Fails when the store refuses the row (nothing of it applied), or
     /// the WAL write of a frame fails.
     pub(crate) fn apply(&mut self, op: DataOp) -> Result<()> {
-        let Some((_, target)) = &self.target else {
+        let Some(bound) = &self.target else {
             return Err(Error::Internal(
                 "a bulk write's row before it reserved ids".to_string(),
             ));
         };
-        let writer = Writer::Transaction {
-            id: self.transaction,
-            snapshot: self.snapshot,
-        };
-        target
-            .apply_bulk_row(&op, writer)
+        bound
+            .backend
+            .apply_bulk_row(&op, bound.transaction.writer())
             .map_err(|error| Error::Internal(error.to_string()))?;
         #[cfg(feature = "wal")]
         if let Some(log) = &mut self.log {
@@ -959,14 +951,15 @@ impl StreamingChanges<'_> {
             }
         }
         self.finished = true;
-        if let Some((slot, target)) = &self.target {
+        if let Some(bound) = &self.target {
             let Some(epoch) = epoch else {
                 let message = "a bulk write with ranges committed without an epoch".to_string();
                 self.manager.poison(&message);
                 return Err(Error::Internal(message));
             };
-            target
-                .stamp(self.transaction, &mut self.set.in_graph(*slot), epoch)
+            bound
+                .backend
+                .commit(bound.transaction, &mut self.set.in_graph(bound.slot), epoch)
                 .map_err(|error| {
                     let message =
                         format!("the commit of a bulk write could not stamp its ranges: {error}");
@@ -991,9 +984,9 @@ impl StreamingChanges<'_> {
         if let Some(log) = &mut self.log {
             drop(log.group.take());
         }
-        if let Some((slot, target)) = &self.target {
-            let mut entries = self.set.in_graph(*slot);
-            if let Err(error) = target.undo(self.transaction, &mut entries) {
+        if let Some(bound) = &self.target {
+            let mut entries = self.set.in_graph(bound.slot);
+            if let Err(error) = bound.backend.rollback(bound.transaction, &mut entries) {
                 let message = format!("a bulk write that failed could not undo its rows: {error}");
                 self.manager.poison(&message);
                 return Err(Error::Internal(message));
@@ -1092,7 +1085,6 @@ impl StandaloneChange {
     }
 
     /// The ops, in the order they apply.
-    #[cfg(feature = "wal")]
     pub(crate) fn ops(&self) -> impl Iterator<Item = &StandaloneOp> {
         self.ops.iter().map(|(op, _)| op)
     }

@@ -6,9 +6,10 @@
 use grafeo_common::clock::Instant;
 use grafeo_common::types::Value;
 use grafeo_common::utils::error::Result;
+use grafeo_core::graph::GraphBackend;
+use grafeo_core::graph::GraphStore;
 use grafeo_core::graph::rdf::RdfStore;
 use grafeo_core::graph::rowgroup::RowGroupStore;
-use grafeo_core::graph::{GraphStore, GraphStoreMut};
 use std::sync::Arc;
 use std::sync::atomic::AtomicUsize;
 
@@ -43,10 +44,9 @@ impl Session {
         cfg: SessionConfig,
     ) -> Self {
         let graph_store = Arc::clone(&store) as Arc<dyn GraphStore>;
-        let graph_store_mut = Some(Arc::clone(&store) as Arc<dyn GraphStoreMut>);
+        let graph_store_mut = Some(Arc::clone(&store) as Arc<dyn GraphBackend>);
         Self {
-            store,
-            lpg_backend: super::LpgBackend::Active,
+            store: Some(store),
             graph_store,
             graph_store_mut,
             catalog: cfg.catalog,
@@ -91,7 +91,6 @@ impl Session {
             savepoints: parking_lot::Mutex::new(Vec::new()),
             transaction_nesting_depth: parking_lot::Mutex::new(0),
             changes: parking_lot::Mutex::new(None),
-            external_target: None,
             #[cfg(feature = "metrics")]
             metrics: None,
             #[cfg(feature = "metrics")]

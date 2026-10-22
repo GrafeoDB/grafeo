@@ -186,6 +186,26 @@ def test_d5_no_new_store_wrappers(repo: Path) -> None:
     ]
 
 
+def test_d5_leaves_test_module_files_alone(repo: Path) -> None:
+    write(
+        repo,
+        "crates/grafeo-core/src/execution/operators/writer_recording_tests.rs",
+        "impl GraphBackend for Refusing {}\nimpl GraphStore for Refusing {}\n",
+    )
+    write(
+        repo,
+        "crates/grafeo-engine/src/database/row_group_sections/tests.rs",
+        "impl GraphStore for Fake {}\n",
+    )
+    write(
+        repo,
+        "crates/grafeo-engine/src/database/contests.rs",
+        "impl GraphBackend for Logged {}\n",
+    )
+    result = policy(repo, "diff", "--base", "HEAD")
+    assert found(result) == ["D5 crates/grafeo-engine/src/database/contests.rs:1"]
+
+
 def test_d5_matches_the_store_trait_not_a_mention(repo: Path) -> None:
     write(
         repo,

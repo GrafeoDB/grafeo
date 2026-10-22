@@ -1,5 +1,5 @@
 //! The cases: each checks one guarantee of a store behind the change set,
-//! through `ChangeTarget` and the read traits only.
+//! through `GraphBackend` and the read traits only.
 
 use grafeo_common::change::{Before, DataOp, Table};
 use grafeo_common::types::{ArcStr, EdgeId, EpochId, NodeId, PropertyKey, Value};

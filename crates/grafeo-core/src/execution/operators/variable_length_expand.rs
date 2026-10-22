@@ -1100,7 +1100,6 @@ fn edge_id_list(edges: &[EdgeId]) -> Result<Vec<grafeo_common::types::Value>, Op
 mod tests {
     use super::*;
     use crate::execution::operators::ScanOperator;
-    use crate::graph::GraphStoreMut as _;
     use crate::graph::rowgroup::RowGroupStore;
 
     #[test]

@@ -5934,10 +5934,9 @@ mod tests {
 
     #[test]
     fn test_expression_predicate_with_labels_function() {
-        use crate::graph::GraphStoreMut;
-
         // Test the labels() function in predicates
-        let store: Arc<dyn GraphStoreMut> = Arc::new(crate::graph::rowgroup::RowGroupStore::new());
+        let store: Arc<crate::graph::rowgroup::RowGroupStore> =
+            Arc::new(crate::graph::rowgroup::RowGroupStore::new());
 
         // Create a node with a label
         let node_id = store.create_node(&["Person", "Employee"]);
@@ -7450,7 +7449,6 @@ mod text_fn_tests {
     use super::*;
     use crate::execution::chunk::DataChunkBuilder;
     use crate::graph::GraphStore;
-    use crate::graph::GraphStoreMut as _;
     use crate::graph::rowgroup::RowGroupStore;
     use crate::index::text::{BM25Config, InvertedIndex};
     use grafeo_common::types::LogicalType;

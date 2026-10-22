@@ -814,7 +814,6 @@ fn entity_id(value: Value) -> Value {
 mod tests {
     use super::*;
     use crate::execution::chunk::DataChunkBuilder;
-    use crate::graph::GraphStoreMut as _;
     use crate::graph::rowgroup::RowGroupStore;
     use grafeo_common::types::Value;
 

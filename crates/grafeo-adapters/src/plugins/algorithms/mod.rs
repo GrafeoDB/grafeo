@@ -20,7 +20,6 @@
 //! # {
 //! use grafeo_adapters::plugins::algorithms::{bfs, connected_components, dijkstra};
 //! use grafeo_common::types::ReadView;
-//! use grafeo_core::graph::GraphStoreMut;
 //! use grafeo_core::graph::rowgroup::RowGroupStore;
 //!
 //! let store = RowGroupStore::new();

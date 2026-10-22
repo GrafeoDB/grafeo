@@ -8,21 +8,20 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use grafeo_common::change::{
-    Before, BulkRange, Change, ChangeSet, DataModel, DataOp, GraphRef, GraphSlot, PendingVersion,
-    Table,
+    Before, BulkRange, Change, ChangeMark, ChangeSet, DataModel, DataOp, GraphRef, GraphSlot,
+    PendingVersion, Table,
 };
 use grafeo_common::storage::value_codec::MAX_PROPERTY_VALUE_DEPTH;
-use grafeo_common::types::{ArcStr, EdgeId, EpochId, NodeId, PropertyKey, TransactionId, Value};
+use grafeo_common::types::{ArcStr, EdgeId, EpochId, NodeId, TransactionId, Value};
 use parking_lot::{Mutex, RwLock};
 
 use super::tests::{BRIEFLY, CustomRules, every_write, labels, nested, pairs, people_store};
 use super::{
     BulkRows, ChangeRecorder, GraphWriter, NewEdge, OperatorError, Recording, WriteClaim,
-    WriteClaims, WriteInProgress, WriteTarget, node_labels, property_list,
+    WriteClaims, WriteInProgress, node_labels, property_list,
 };
-use crate::graph::GraphStore as _;
-use crate::graph::GraphStoreMut;
-use crate::graph::apply::{Applied, ApplyError, ChangeTarget, ExternalTarget, Writer};
+use crate::graph::GraphStore;
+use crate::graph::apply::{Applied, ApplyError, BackendTransaction, GraphBackend, Writer};
 use crate::graph::lpg::{Edge, Node};
 use crate::graph::rowgroup::RowGroupStore;
 
@@ -229,27 +228,27 @@ impl WriteClaims for Recorder {
 /// recording in `recorder`.
 fn writer_through(
     store: &Arc<RowGroupStore>,
-    target: WriteTarget,
+    target: Arc<dyn GraphBackend>,
     recorder: &Arc<Recorder>,
 ) -> GraphWriter {
     GraphWriter::new(
-        Arc::clone(store) as Arc<dyn GraphStoreMut>,
-        ReadView::latest(),
+        Arc::clone(store) as Arc<dyn GraphStore>,
+        Recording {
+            target,
+            recorder: Arc::clone(recorder) as Arc<dyn ChangeRecorder>,
+        },
     )
-    .with_recording(Recording {
-        target,
-        recorder: Arc::clone(recorder) as Arc<dyn ChangeRecorder>,
-    })
+}
+
+/// The backend transaction of [`TRANSACTION`], which the tests roll back.
+fn transaction() -> BackendTransaction {
+    BackendTransaction::new(TransactionId::new(TRANSACTION), EpochId::INITIAL)
 }
 
 /// A writer of transaction [`TRANSACTION`] in `store`, through the store's
 /// own change target.
 fn recording_writer(store: &Arc<RowGroupStore>, recorder: &Arc<Recorder>) -> GraphWriter {
-    writer_through(
-        store,
-        WriteTarget::Store(Arc::clone(store) as Arc<dyn ChangeTarget>),
-        recorder,
-    )
+    writer_through(store, Arc::clone(store) as Arc<dyn GraphBackend>, recorder)
 }
 
 /// A node's labels and properties, sorted.
@@ -360,10 +359,7 @@ fn every_writer_method_records_exactly_what_it_applied() {
                 .unwrap_or_else(|error| panic!("{name}: replay of {op:?}: {error}"));
             assert_eq!(applied, Applied::Committed, "{name}");
         }
-        let reader = GraphWriter::new(
-            Arc::clone(&replayed) as Arc<dyn GraphStoreMut>,
-            ReadView::latest(),
-        );
+        let reader = GraphWriter::immediate(Arc::clone(&replayed));
         assert_eq!(
             dump(&replayed, &reader),
             after,
@@ -371,7 +367,7 @@ fn every_writer_method_records_exactly_what_it_applied() {
         );
 
         store
-            .undo(TransactionId::new(TRANSACTION), &mut entries.iter())
+            .rollback(transaction(), &mut entries.iter())
             .unwrap_or_else(|error| panic!("{name}: undo: {error}"));
         assert_eq!(
             dump(&store, &writer),
@@ -387,7 +383,7 @@ struct Refusing {
     kind: &'static str,
 }
 
-impl ChangeTarget for Refusing {
+impl GraphBackend for Refusing {
     fn reserve_node_ids(&self, count: u64) -> Result<std::ops::Range<u64>, ApplyError> {
         self.store.reserve_node_ids(count)
     }
@@ -409,21 +405,99 @@ impl ChangeTarget for Refusing {
         self.store.apply(op, writer)
     }
 
-    fn stamp(
+    fn begin(
         &self,
         transaction: TransactionId,
+        snapshot: EpochId,
+    ) -> Result<BackendTransaction, ApplyError> {
+        self.store.begin(transaction, snapshot)
+    }
+
+    fn commit(
+        &self,
+        transaction: BackendTransaction,
         entries: &mut dyn Iterator<Item = &Change>,
         epoch: EpochId,
     ) -> Result<(), ApplyError> {
-        self.store.stamp(transaction, entries, epoch)
+        self.store.commit(transaction, entries, epoch)
     }
 
-    fn undo(
+    fn rollback(
         &self,
-        transaction: TransactionId,
+        transaction: BackendTransaction,
         entries: &mut dyn DoubleEndedIterator<Item = &Change>,
     ) -> Result<(), ApplyError> {
-        self.store.undo(transaction, entries)
+        self.store.rollback(transaction, entries)
+    }
+
+    fn rollback_to(
+        &self,
+        transaction: BackendTransaction,
+        savepoint: ChangeMark,
+        entries: &mut dyn DoubleEndedIterator<Item = &Change>,
+    ) -> Result<(), ApplyError> {
+        self.store.rollback_to(transaction, savepoint, entries)
+    }
+
+    fn collect(&self, horizon: EpochId) {
+        GraphBackend::collect(&*self.store, horizon);
+    }
+}
+
+/// The read side of [`Refusing`]: the row-group store's.
+impl GraphStore for Refusing {
+    fn node(
+        &self,
+        id: NodeId,
+        view: ReadView,
+    ) -> grafeo_common::utils::error::Result<Option<Node>> {
+        self.store.node(id, view)
+    }
+
+    fn edge(
+        &self,
+        id: EdgeId,
+        view: ReadView,
+    ) -> grafeo_common::utils::error::Result<Option<Edge>> {
+        self.store.edge(id, view)
+    }
+
+    fn edges(
+        &self,
+        node: NodeId,
+        direction: crate::graph::Direction,
+        types: &[ArcStr],
+        view: ReadView,
+    ) -> grafeo_common::utils::error::Result<Vec<(NodeId, EdgeId)>> {
+        self.store.edges(node, direction, types, view)
+    }
+
+    fn has_backward_adjacency(&self) -> bool {
+        self.store.has_backward_adjacency()
+    }
+
+    fn node_ids(&self, view: ReadView) -> grafeo_common::utils::error::Result<Vec<NodeId>> {
+        self.store.node_ids(view)
+    }
+
+    fn all_labels(&self) -> grafeo_common::utils::error::Result<Vec<String>> {
+        self.store.all_labels()
+    }
+
+    fn all_edge_types(&self) -> grafeo_common::utils::error::Result<Vec<String>> {
+        self.store.all_edge_types()
+    }
+
+    fn all_property_keys(&self) -> grafeo_common::utils::error::Result<Vec<String>> {
+        self.store.all_property_keys()
+    }
+
+    fn statistics(&self) -> Arc<crate::statistics::Statistics> {
+        self.store.statistics()
+    }
+
+    fn committed_epoch(&self) -> EpochId {
+        self.store.committed_epoch()
     }
 }
 
@@ -452,7 +526,7 @@ fn a_refused_write_records_nothing() {
                 store: Arc::clone(&store),
                 kind: refused,
             };
-            let writer = writer_through(&store, WriteTarget::Store(Arc::new(target)), &recorder);
+            let writer = writer_through(&store, Arc::new(target), &recorder);
             let before = dump(&store, &writer);
             let error = write(&writer, &people).expect_err(name);
             assert!(
@@ -465,10 +539,7 @@ fn a_refused_write_records_nothing() {
                 "{name} refused at {refused}: only what applied is recorded"
             );
             store
-                .undo(
-                    TransactionId::new(TRANSACTION),
-                    &mut recorder.entries().iter(),
-                )
+                .rollback(transaction(), &mut recorder.entries().iter())
                 .unwrap();
             assert_eq!(dump(&store, &writer), before, "{name} refused at {refused}");
         }
@@ -633,112 +704,6 @@ fn the_claim_precedes_the_store_change() {
             assert!(checked > 0, "{name}: no write was checked");
         }
     }
-}
-
-/// An external store creates at the ids it gives itself: the writer records
-/// the op with that id, as a create that replaced nothing, and claims the
-/// new edge once its id is known. The transaction sees what it created.
-#[test]
-fn an_external_target_creates_at_the_ids_the_store_gives() {
-    let (store, people) = people_store();
-    let external = Arc::new(ExternalTarget::new(
-        Arc::clone(&store) as Arc<dyn GraphStoreMut>
-    ));
-    let recorder = Recorder::new(&store);
-    let writer = writer_through(
-        &store,
-        WriteTarget::External(Arc::clone(&external)),
-        &recorder,
-    );
-
-    let (next_node, next_edge) = (store.next_node_id(), store.next_edge_id());
-    let mia = writer
-        .create_node(
-            &labels(&["Person", "Person"]),
-            pairs("name", &Value::from("Mia")),
-        )
-        .unwrap();
-    let likes = writer
-        .create_edge(people.alix, mia, "LIKES", pairs("since", &Value::Int64(88)))
-        .unwrap();
-    assert_eq!(
-        (mia.as_u64(), likes.as_u64()),
-        (next_node, next_edge),
-        "the store's own next ids"
-    );
-    let person = || ArcStr::from("Person");
-    assert_eq!(
-        recorder.entries(),
-        [
-            Change::Data {
-                graph: slot_zero(),
-                op: DataOp::CreateNode {
-                    id: mia,
-                    labels: [person()].into_iter().collect(),
-                    properties: vec![(PropertyKey::new("name"), Value::from("Mia"))],
-                },
-                before: Before::Absent,
-                version: PendingVersion::Created,
-            },
-            Change::Data {
-                graph: slot_zero(),
-                op: DataOp::CreateEdge {
-                    id: likes,
-                    src: people.alix,
-                    dst: mia,
-                    edge_type: ArcStr::from("LIKES"),
-                    properties: vec![(PropertyKey::new("since"), Value::Int64(88))],
-                },
-                before: Before::Absent,
-                version: PendingVersion::Created,
-            },
-        ]
-    );
-    let claims: Vec<WriteClaim> = recorder
-        .events
-        .lock()
-        .iter()
-        .filter_map(|event| match event {
-            Event::Claim(claim, _) => Some(*claim),
-            Event::Record(..) => None,
-        })
-        .collect();
-    assert_eq!(
-        claims,
-        [
-            WriteClaim::Endpoints(people.alix, mia),
-            WriteClaim::Edge(likes)
-        ]
-    );
-    assert_eq!(
-        writer.node(mia).unwrap().map(|node| describe_node(&node)),
-        Some((
-            vec!["Person".to_string()],
-            vec![("name".to_string(), Value::from("Mia"))]
-        ))
-    );
-    assert!(
-        store.node(mia, ReadView::latest()).unwrap().is_none(),
-        "others do not see it yet"
-    );
-
-    // An endpoint the writer does not see: nothing is created.
-    let edges = store.next_edge_id();
-    assert_eq!(
-        external
-            .create_edge(
-                people.alix,
-                NodeId::new(388),
-                ArcStr::from("LIKES"),
-                Vec::new(),
-                recorder.writer(),
-            )
-            .map(|(op, _)| op),
-        Err(ApplyError::Missing(grafeo_common::change::Entity::Node(
-            NodeId::new(388)
-        )))
-    );
-    assert_eq!(store.next_edge_id(), edges);
 }
 
 /// Every recorded write waits while the store is frozen (a checkpoint holds
@@ -1000,10 +965,7 @@ fn a_bulk_create_writes_what_one_create_per_row_writes_as_one_entry() {
         }
 
         store
-            .undo(
-                TransactionId::new(TRANSACTION),
-                &mut recorder.entries().iter(),
-            )
+            .rollback(transaction(), &mut recorder.entries().iter())
             .unwrap();
         assert_eq!(
             dump(&store, &writer),
@@ -1107,9 +1069,7 @@ fn a_refused_row_stops_a_bulk_create_and_its_range_undoes_the_rows_before_it() {
             recorder.ops().is_empty(),
             "{what}: a refused call keeps no row"
         );
-        store
-            .undo(TransactionId::new(TRANSACTION), &mut entries.iter())
-            .unwrap();
+        store.rollback(transaction(), &mut entries.iter()).unwrap();
         assert_eq!(dump(&store, &writer), before, "{what}: the range undoes it");
     }
 }

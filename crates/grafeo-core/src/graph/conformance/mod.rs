@@ -1,6 +1,6 @@
 //! The conformance suite of the stores behind the change set.
 //!
-//! Every case writes a store through [`ChangeTarget`] as the engine does: a
+//! Every case writes a store through [`GraphBackend`] as the engine does: a
 //! transaction's writes recorded in a [`ChangeSet`], then stamped at commit
 //! or undone at rollback and savepoints; a direct call as an immediate
 //! write; recovery as replay. It checks what readers see through the read
@@ -30,13 +30,13 @@ use grafeo_common::types::{
 use grafeo_common::utils::hash::FxHashMap;
 
 use crate::graph::Direction;
-use crate::graph::apply::{Applied, ApplyError, ChangeTarget, Writer};
+use crate::graph::apply::{Applied, ApplyError, BackendTransaction, GraphBackend, Writer};
 use crate::graph::rowgroup::RowGroupStore;
 use crate::graph::traits::GraphStore;
 
 /// A store the suite can run: written through the change target, read
 /// through the read trait.
-pub(crate) trait Store: GraphStore + ChangeTarget {
+pub(crate) trait Store: GraphStore + GraphBackend {
     /// The latest epoch the store committed at: a case's next commit lands
     /// after it, and a committed reader at it sees every commit so far.
     fn epoch(&self) -> EpochId;
@@ -177,37 +177,44 @@ fn lpg_slot(set: &mut ChangeSet) -> GraphSlot {
     .expect("a new change set takes a slot")
 }
 
-/// A transaction on one store, as the engine runs one: each write that
-/// changed something recorded in its change set, which commit stamps and
-/// rollback undoes.
+/// A transaction on one store, as the engine runs one: opened in the
+/// backend, each write that changed something recorded in its change set,
+/// which commit and rollback hand to the backend.
 pub(crate) struct Tx<'s, S: Store> {
     store: &'s S,
     pub id: TransactionId,
     pub snapshot: EpochId,
+    handle: BackendTransaction,
     set: ChangeSet,
     slot: GraphSlot,
 }
 
 impl<'s, S: Store> Tx<'s, S> {
     /// Begins transaction `id` at the store's current epoch.
+    ///
+    /// # Panics
+    ///
+    /// When the backend refuses to open it: every case needs one.
     pub fn begin(store: &'s S, id: u64) -> Self {
         let mut set = ChangeSet::new();
         let slot = lpg_slot(&mut set);
+        let (id, snapshot) = (TransactionId::new(id), store.epoch());
+        let handle = store
+            .begin(id, snapshot)
+            .unwrap_or_else(|error| panic!("begin transaction {id:?}: {error:?}"));
         Self {
             store,
-            id: TransactionId::new(id),
-            snapshot: store.epoch(),
+            id,
+            snapshot,
+            handle,
             set,
             slot,
         }
     }
 
-    /// The transaction's writer.
+    /// The transaction's writer: the backend's handle's.
     pub fn writer(&self) -> Writer {
-        Writer::Transaction {
-            id: self.id,
-            snapshot: self.snapshot,
-        }
+        self.handle.writer()
     }
 
     /// Applies `op` and records it when it changed something.
@@ -358,8 +365,8 @@ impl<'s, S: Store> Tx<'s, S> {
     pub fn roll_back_to(&mut self, mark: ChangeMark) -> Outcome {
         let tail = self.set.split_off(mark);
         self.store
-            .undo(self.id, &mut tail.iter())
-            .map_err(|error| format!("undo to a savepoint: {error:?}"))
+            .rollback_to(self.handle, mark, &mut tail.iter())
+            .map_err(|error| format!("rollback to a savepoint: {error:?}"))
     }
 
     /// The ops recorded so far, in write order: what the log holds.
@@ -393,16 +400,16 @@ impl<'s, S: Store> Tx<'s, S> {
     pub fn commit(self) -> Result<EpochId, String> {
         let epoch = next_epoch(self.store);
         self.store
-            .stamp(self.id, &mut self.set.entries().iter(), epoch)
-            .map_err(|error| format!("stamp: {error:?}"))?;
+            .commit(self.handle, &mut self.set.entries().iter(), epoch)
+            .map_err(|error| format!("commit: {error:?}"))?;
         Ok(epoch)
     }
 
     /// Rolls the whole transaction back.
     pub fn roll_back(self) -> Outcome {
         self.store
-            .undo(self.id, &mut self.set.entries().iter())
-            .map_err(|error| format!("undo: {error:?}"))
+            .rollback(self.handle, &mut self.set.entries().iter())
+            .map_err(|error| format!("rollback: {error:?}"))
     }
 }
 

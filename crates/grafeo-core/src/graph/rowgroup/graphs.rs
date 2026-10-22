@@ -5,7 +5,7 @@
 //! its own with the id it was created with. Ids only grow, so a dropped
 //! graph's id is never given again, and a graph created again under a
 //! dropped name is a new store with a new id. A dropped graph's store
-//! refuses every write through its [`ChangeTarget`](crate::graph::apply::ChangeTarget),
+//! refuses every write through its [`GraphBackend`],
 //! so a writer that resolved it before the drop changes nothing a commit
 //! would log for it.
 //!
@@ -135,7 +135,7 @@ impl RowGroupStore {
     /// a new one.
     ///
     /// The dropped graph's store refuses every write through its
-    /// [`ChangeTarget`](crate::graph::apply::ChangeTarget) from now on (see
+    /// [`GraphBackend`](crate::graph::GraphBackend) from now on (see
     /// [`is_dropped`](Self::is_dropped)).
     pub fn drop_graph(&self, name: &str) -> bool {
         let removed = self.graphs.named.write().remove(name);
@@ -439,7 +439,7 @@ mod tests {
     use grafeo_common::types::{EpochId, Value};
     use grafeo_common::utils::error::Error;
 
-    use crate::graph::apply::ChangeTarget;
+    use crate::graph::apply::GraphBackend;
     use crate::graph::conformance::{Tx, committed, people};
     use crate::graph::rowgroup::RowGroupStore;
     use crate::graph::rowgroup::section::{GraphToWrite, LPG_SECTION_VERSION, write_lpg_section};

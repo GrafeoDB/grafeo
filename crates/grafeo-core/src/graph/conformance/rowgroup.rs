@@ -353,7 +353,7 @@ fn collect_between_transactions_keeps_the_committed_image() {
 fn a_vector_filled_by_one_transaction_holds_one_constant_stamp() {
     use grafeo_common::change::{DataOp, Table};
 
-    use crate::graph::apply::ChangeTarget;
+    use crate::graph::apply::GraphBackend;
     use crate::graph::rowgroup::VECTOR_ROWS;
 
     /// A stamp per row of a vector.
@@ -472,7 +472,7 @@ fn a_transactions_next_write_of_a_value_replaces_its_version() {
     use grafeo_common::change::{DataOp, PendingVersion};
     use grafeo_common::types::{ArcStr, PropertyKey};
 
-    use crate::graph::apply::{Applied, ChangeTarget, Writer};
+    use crate::graph::apply::{Applied, GraphBackend, Writer};
 
     let store = RowGroupStore::new();
     let people = people(&store).unwrap();
@@ -1045,12 +1045,10 @@ fn incoming_reads_agree_with_and_without_backward_edges() {
 /// and the delete then goes through; Alix keeps her edge to Gus.
 #[test]
 fn a_detach_delete_finds_the_incoming_edges_without_backward_edges() {
-    use crate::graph::traits::GraphStoreMut;
-
     let store = RowGroupStore::with_backward_edges(false);
     let people = people(&store).unwrap();
     assert!(
-        !GraphStoreMut::delete_node(&store, people.mia),
+        !RowGroupStore::delete_node(&store, people.mia),
         "Gus's edge points to Mia"
     );
     assert_eq!(
@@ -1089,7 +1087,7 @@ fn a_detach_delete_finds_the_incoming_edges_without_backward_edges() {
             .unwrap(),
         0
     );
-    assert!(GraphStoreMut::delete_node(&store, people.mia));
+    assert!(RowGroupStore::delete_node(&store, people.mia));
     assert_eq!(
         store
             .edges(people.gus, Direction::Both, &[], ReadView::latest())

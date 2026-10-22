@@ -308,7 +308,6 @@ impl Operator for ExpandOperator {
 mod tests {
     use super::*;
     use crate::execution::operators::ScanOperator;
-    use crate::graph::GraphStoreMut as _;
     use crate::graph::rowgroup::RowGroupStore;
 
     /// Creates a new `RowGroupStore` wrapped in an `Arc` and returns both the

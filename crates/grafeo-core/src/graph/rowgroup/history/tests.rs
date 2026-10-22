@@ -8,7 +8,7 @@ use grafeo_common::storage::{ChunkCaps, ChunkKind, ChunkMeta, SectionSink, Secti
 use grafeo_common::types::{ArcStr, EpochId, PropertyKey, ReadView, Value};
 use grafeo_common::utils::error::{Error, Result};
 
-use crate::graph::apply::{ChangeTarget, Writer};
+use crate::graph::apply::{GraphBackend, Writer};
 use crate::graph::conformance::{
     Reader, Rng, Tx, apply_all, committed, image, next_epoch, people, random_write,
 };

@@ -518,7 +518,7 @@ mod tests {
     use grafeo_common::change::{ChangeMark, DataOp, Table};
     use grafeo_common::types::{ArcStr, EdgeId, EpochId, NodeId, PropertyKey, ReadView, Value};
 
-    use crate::graph::apply::{Applied, ChangeTarget, Writer};
+    use crate::graph::apply::{Applied, GraphBackend, Writer};
     use crate::graph::conformance::{
         Image, Reader, Rng, Tx, apply_all, image, labels, next_epoch, properties,
     };

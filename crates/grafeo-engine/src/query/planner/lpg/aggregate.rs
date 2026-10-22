@@ -572,8 +572,8 @@ mod tests {
         Projection,
     };
     use crate::transaction::TransactionManager;
+    use grafeo_core::graph::GraphStore;
     use grafeo_core::graph::rowgroup::RowGroupStore;
-    use grafeo_core::graph::{GraphStore, GraphStoreMut};
     use std::sync::Arc;
 
     /// A one-hop expand from `from` to `to` along `edge_type` over `input`.
@@ -612,14 +612,12 @@ mod tests {
             .recording(
                 &transaction_manager,
                 None,
-                grafeo_core::execution::operators::WriteTarget::Store(
-                    Arc::clone(&store) as Arc<dyn grafeo_core::graph::apply::ChangeTarget>
-                ),
+                Arc::clone(&store) as Arc<dyn grafeo_core::graph::apply::GraphBackend>,
             )
             .unwrap();
         let planner = Planner::with_context(
             Arc::clone(&store) as Arc<dyn GraphStore>,
-            Some(Arc::clone(&store) as Arc<dyn GraphStoreMut>),
+            Some(Arc::clone(&store) as Arc<dyn grafeo_core::graph::GraphBackend>),
             Arc::clone(&transaction_manager),
             Some(transaction_id),
             epoch,

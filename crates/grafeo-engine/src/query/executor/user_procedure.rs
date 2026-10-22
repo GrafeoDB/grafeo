@@ -13,7 +13,8 @@ use grafeo_core::execution::DataChunk;
 use grafeo_core::execution::operators::{
     Operator, OperatorError, OperatorResult, ReadCounter, Recording, WriteCounter,
 };
-use grafeo_core::graph::{GraphStore, GraphStoreMut};
+use grafeo_core::graph::GraphBackend;
+use grafeo_core::graph::GraphStore;
 
 use crate::catalog::Catalog;
 use crate::database::QueryResult;
@@ -66,7 +67,7 @@ pub struct ProcedureContext {
     /// Store for sub-query execution (read path).
     pub store: Arc<dyn GraphStore>,
     /// Writable store for sub-query mutations (None for read-only).
-    pub store_mut: Option<Arc<dyn GraphStoreMut>>,
+    pub store_mut: Option<Arc<dyn GraphBackend>>,
     /// Transaction manager for sub-query coordination.
     pub transaction_manager: Option<Arc<TransactionManager>>,
     /// Current transaction ID.
@@ -104,7 +105,7 @@ pub struct UserProcedureOperator {
     /// Store for sub-query execution (read path).
     store: Arc<dyn GraphStore>,
     /// Writable store for sub-query mutations (None for read-only).
-    store_mut: Option<Arc<dyn GraphStoreMut>>,
+    store_mut: Option<Arc<dyn GraphBackend>>,
     /// Transaction manager for sub-query.
     transaction_manager: Option<Arc<TransactionManager>>,
     /// Current transaction ID.

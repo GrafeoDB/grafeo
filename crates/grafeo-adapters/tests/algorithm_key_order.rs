@@ -13,8 +13,8 @@ use grafeo_adapters::plugins::algorithms::{
     pagerank, pagerank_in_order,
 };
 use grafeo_common::types::{NodeId, PropertyKey, Value};
+use grafeo_core::graph::GraphStore as _;
 use grafeo_core::graph::rowgroup::RowGroupStore;
-use grafeo_core::graph::{GraphStore as _, GraphStoreMut as _};
 
 /// A seeded graph shaped like a code base (modules of files of functions that
 /// call each other, with a few shared hubs), as node count and edge list.

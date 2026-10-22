@@ -1039,7 +1039,6 @@ pub fn procedures_result(registry: &BuiltinProcedures) -> AlgorithmResult {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use grafeo_core::graph::GraphStoreMut as _;
 
     #[test]
     fn test_registry_has_all_algorithms() {

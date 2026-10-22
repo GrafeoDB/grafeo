@@ -803,7 +803,6 @@ impl Source for PartitionedNodeScanSource {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::graph::GraphStoreMut;
     use crate::graph::rowgroup::RowGroupStore;
 
     #[test]
@@ -983,7 +982,7 @@ mod tests {
 
     #[test]
     fn test_parallel_node_scan_source() {
-        let store: Arc<dyn GraphStoreMut> = Arc::new(RowGroupStore::new());
+        let store: Arc<RowGroupStore> = Arc::new(RowGroupStore::new());
 
         // Add some nodes with labels
         for i in 0..100 {
@@ -1024,7 +1023,7 @@ mod tests {
 
     #[test]
     fn test_parallel_node_scan_partition() {
-        let store: Arc<dyn GraphStoreMut> = Arc::new(RowGroupStore::new());
+        let store: Arc<RowGroupStore> = Arc::new(RowGroupStore::new());
 
         // Add 100 nodes
         for _ in 0..100 {
@@ -1051,7 +1050,7 @@ mod tests {
 
     #[test]
     fn test_parallel_node_scan_morsels() {
-        let store: Arc<dyn GraphStoreMut> = Arc::new(RowGroupStore::new());
+        let store: Arc<RowGroupStore> = Arc::new(RowGroupStore::new());
 
         // Add 1000 nodes
         for _ in 0..1000 {

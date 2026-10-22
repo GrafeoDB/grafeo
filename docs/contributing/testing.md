@@ -78,7 +78,7 @@ Crate names here match the workspace member paths used by `cargo test -p <name>`
 mod tests {
     use grafeo_common::types::ReadView;
     use grafeo_core::graph::rowgroup::RowGroupStore;
-    use grafeo_core::graph::{GraphStore, GraphStoreMut};
+    use grafeo_core::graph::GraphStore;
 
     #[test]
     fn test_node_creation() {

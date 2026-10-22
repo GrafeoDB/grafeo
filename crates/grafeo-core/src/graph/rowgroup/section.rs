@@ -3212,7 +3212,7 @@ mod tests {
     };
     use crate::codec::column_chunk::encode_column_chunk;
     use crate::graph::Direction;
-    use crate::graph::apply::ChangeTarget;
+    use crate::graph::apply::GraphBackend;
     use crate::graph::conformance::{LABELS, Rng, Tx, committed, counts, people, random_write};
     use crate::graph::rowgroup::RowGroupStore;
     use crate::graph::traits::GraphStore;

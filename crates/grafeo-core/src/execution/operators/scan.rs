@@ -139,12 +139,11 @@ impl Operator for ScanOperator {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::graph::GraphStoreMut;
     use crate::graph::rowgroup::RowGroupStore;
 
     #[test]
     fn test_scan_by_label() {
-        let store: Arc<dyn GraphStoreMut> = Arc::new(RowGroupStore::new());
+        let store: Arc<RowGroupStore> = Arc::new(RowGroupStore::new());
 
         store.create_node(&["Person"]);
         store.create_node(&["Person"]);
@@ -168,7 +167,7 @@ mod tests {
     /// with both labels once, a node with neither not at all.
     #[test]
     fn a_scan_of_several_labels_returns_each_node_once() {
-        let store: Arc<dyn GraphStoreMut> = Arc::new(RowGroupStore::new());
+        let store: Arc<RowGroupStore> = Arc::new(RowGroupStore::new());
         let director = store.create_node(&["Director"]);
         store.create_node(&["City"]);
         let both = store.create_node(&["Person", "Director"]);
@@ -194,7 +193,7 @@ mod tests {
 
     #[test]
     fn test_scan_reset() {
-        let store: Arc<dyn GraphStoreMut> = Arc::new(RowGroupStore::new());
+        let store: Arc<RowGroupStore> = Arc::new(RowGroupStore::new());
         store.create_node(&["Person"]);
 
         let mut scan = ScanOperator::with_label(
@@ -217,7 +216,7 @@ mod tests {
 
     #[test]
     fn test_full_scan() {
-        let store: Arc<dyn GraphStoreMut> = Arc::new(RowGroupStore::new());
+        let store: Arc<RowGroupStore> = Arc::new(RowGroupStore::new());
 
         // Create nodes with different labels
         store.create_node(&["Person"]);
@@ -278,7 +277,7 @@ mod tests {
 
     #[test]
     fn test_scan_into_any() {
-        let store: Arc<dyn GraphStoreMut> = Arc::new(RowGroupStore::new());
+        let store: Arc<RowGroupStore> = Arc::new(RowGroupStore::new());
         let op = ScanOperator::with_label(
             store.clone() as Arc<dyn GraphStore>,
             "Person",

@@ -8,7 +8,6 @@
 //! fails without a version bump, fix the regression instead of regenerating.
 
 use grafeo_common::types::Value;
-use grafeo_core::graph::GraphStoreMut as _;
 use grafeo_engine::GrafeoDB;
 
 /// Builds the canonical fixture graph used by both the generator and the

@@ -14,7 +14,6 @@ use grafeo_common::utils::hash::FxHashMap;
 use grafeo_core::graph::Direction;
 use grafeo_core::graph::GraphStore;
 #[cfg(test)]
-use grafeo_core::graph::GraphStoreMut as _;
 #[cfg(test)]
 use grafeo_core::graph::rowgroup::RowGroupStore;
 

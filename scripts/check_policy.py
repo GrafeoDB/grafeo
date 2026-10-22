@@ -23,8 +23,9 @@ Add `--json` for machine-readable output. Exit code 1 when an error is found.
     D2  no em or en dashes in added Markdown lines or code comments
     D3  no added references to private planning notes; no internal phase wording in docs
     D4  no added #[ignore] on crash-injection tests (they must run in CI)
-    D5  no new GraphStore, GraphStoreMut or GraphStoreSearch wrapper in library code (the
-        stores themselves, STORES, implement the traits)
+    D5  no new GraphStore, GraphStoreMut, GraphStoreSearch or GraphBackend wrapper in library
+        code (the stores themselves, STORES, implement the traits; test modules are not library
+        code)
     D6  no `let _ =` in WAL, replay and recovery code (errors must propagate)
     W1  warning: new feature cfg in grafeo-core or grafeo-engine (features add modules)
     P1  pull requests target release/*; main only receives release branches
@@ -74,7 +75,7 @@ IGNORE_ATTRIBUTE = re.compile(r"#\[\s*ignore\b")
 # An impl of a store trait itself (`impl<S> GraphStoreMut for X`), not an impl
 # that only mentions one (`impl From<Arc<dyn GraphStoreMut>> for X`).
 STORE_IMPL = re.compile(
-    r"^impl\b(?:\s*<[^{]*?>)?\s+(?:[\w:]+::)?(GraphStore|GraphStoreMut|GraphStoreSearch)\s+for\s+([\w:]+)"
+    r"^impl\b(?:\s*<[^{]*?>)?\s+(?:[\w:]+::)?(GraphStore|GraphStoreMut|GraphStoreSearch|GraphBackend)\s+for\s+([\w:]+)"
 )
 # The stores themselves, which implement the store traits without being
 # wrappers; any other type that does is one. A new store is added here only
@@ -86,6 +87,8 @@ REPLAY_PATH = re.compile(
 )
 FEATURE_CFG = re.compile(r"#!?\[\s*cfg(_attr)?\s*\(.*\bfeature\s*=")
 LIBRARY_SOURCE = re.compile(r"^crates/(bindings/)?[^/]+/src/")
+# A file that is only a test module (`tests.rs`, `*_tests.rs`), compiled under `#[cfg(test)]`.
+TEST_MODULE_FILE = re.compile(r"(^|/)(\w+_)?tests\.rs$")
 AI_TRAILER = re.compile(
     r"^\s*co-authored-by:.*(claude|anthropic|openai|chatgpt|codex|copilot|gemini|mistral|devin|"
     r"aider|cursoragent|cursor agent|jules\[bot\]|google-labs-jules)",
@@ -535,7 +538,11 @@ def diff_findings(
         suffix = Path(path).suffix
         content = read(path) or ""
         post_image = content.splitlines()
-        library = bool(LIBRARY_SOURCE.match(path)) and "/tests/" not in path
+        library = (
+            bool(LIBRARY_SOURCE.match(path))
+            and "/tests/" not in path
+            and not TEST_MODULE_FILE.search(path)
+        )
         feature_cfgs: list[int] = []
         for number, text in lines:
             if suffix == ".rs" and ALLOW_ATTRIBUTE.search(text):

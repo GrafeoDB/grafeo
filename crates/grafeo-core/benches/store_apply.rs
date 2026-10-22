@@ -1,5 +1,5 @@
 //! What the store costs on the write and read paths, per store, through the
-//! interfaces the engine uses: `ChangeTarget::apply` (and `stamp`) for
+//! interfaces the engine uses: `GraphBackend::apply` (and `stamp`) for
 //! writes, the read traits for reads.
 //!
 //! The direct-call question (an immediate call costs about 470 ns, a private
@@ -30,12 +30,12 @@ use grafeo_common::types::{
     ArcStr, EdgeId, EpochId, NodeId, PropertyKey, ReadView, TransactionId, Value,
 };
 use grafeo_common::utils::error::Result;
-use grafeo_core::graph::apply::{Applied, ChangeTarget, Writer};
+use grafeo_core::graph::apply::{Applied, GraphBackend, Writer};
 use grafeo_core::graph::rowgroup::RowGroupStore;
 use grafeo_core::graph::rowgroup::section::{
     GraphToWrite, LPG_SECTION_VERSION, read_lpg_section, write_lpg_section,
 };
-use grafeo_core::graph::{Direction, GraphStore, GraphStoreMut};
+use grafeo_core::graph::{Direction, GraphStore};
 
 /// The people in the graph each case starts from.
 const PEOPLE: u64 = 10_000;
@@ -48,7 +48,7 @@ const PEOPLE: u64 = 10_000;
 const COLLECT_EVERY: u32 = 1_024;
 
 /// A store the cases run on.
-trait Store: GraphStoreMut + ChangeTarget {
+trait Store: GraphBackend {
     /// The latest epoch the store committed at.
     fn epoch(&self) -> EpochId;
 }
@@ -255,10 +255,8 @@ fn cases<S: Indexed + 'static>(
             row = (row + 1) % ids.len();
             transaction += 1;
             let id = TransactionId::new(transaction);
-            let writer = Writer::Transaction {
-                id,
-                snapshot: store.epoch(),
-            };
+            let handle = store.begin(id, store.epoch()).expect("a transaction");
+            let writer = handle.writer();
             let op = DataOp::SetNodeProperty {
                 id: ids[row],
                 key: PropertyKey::new("age"),
@@ -277,8 +275,8 @@ fn cases<S: Indexed + 'static>(
                 set.push(slot, op, before, version).expect("the entry");
             }
             store
-                .stamp(id, &mut set.entries().iter(), next_epoch(&store))
-                .expect("the stamp");
+                .commit(handle, &mut set.entries().iter(), next_epoch(&store))
+                .expect("the commit");
             collect(&store);
         });
     });
@@ -294,10 +292,8 @@ fn cases<S: Indexed + 'static>(
             row = (row + 1) % ids.len();
             transaction += 1;
             let id = TransactionId::new(transaction);
-            let writer = Writer::Transaction {
-                id,
-                snapshot: store.epoch(),
-            };
+            let handle = store.begin(id, store.epoch()).expect("a transaction");
+            let writer = handle.writer();
             let op = DataOp::SetNodeProperty {
                 id: ids[row],
                 key: PropertyKey::new("age"),
@@ -316,8 +312,8 @@ fn cases<S: Indexed + 'static>(
                 set.push(slot, op, before, version).expect("the entry");
             }
             store
-                .stamp(id, &mut set.entries().iter(), next_epoch(&store))
-                .expect("the stamp");
+                .commit(handle, &mut set.entries().iter(), next_epoch(&store))
+                .expect("the commit");
             collect(&store);
         });
     });

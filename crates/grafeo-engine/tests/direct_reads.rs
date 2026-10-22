@@ -11,7 +11,6 @@ use std::sync::Arc;
 
 use grafeo_common::types::{NodeId, Value};
 use grafeo_core::graph::rowgroup::RowGroupStore;
-use grafeo_core::graph::traits::GraphStoreMut;
 use grafeo_engine::{Config, GrafeoDB};
 
 fn name(db: &GrafeoDB, id: NodeId) -> Option<Value> {
@@ -184,7 +183,7 @@ fn direct_reads_on_an_external_store() {
         store.new_epoch();
     }
     let db = GrafeoDB::with_store(
-        Arc::clone(&store) as Arc<dyn GraphStoreMut>,
+        Arc::clone(&store) as Arc<dyn grafeo_core::graph::GraphBackend>,
         Config::default(),
     )
     .unwrap();

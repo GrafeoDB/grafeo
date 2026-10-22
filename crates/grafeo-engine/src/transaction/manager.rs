@@ -1171,7 +1171,7 @@ impl TransactionManager {
         if let Some(changes) = changes {
             // A store that fails leaves the commit half stamped: the guard,
             // dropped uncompleted, poisons the manager.
-            changes.stamp(epoch).map_err(|error| {
+            changes.commit(epoch).map_err(|error| {
                 Error::Internal(format!(
                     "the commit of transaction {transaction_id:?} could not stamp its changes: \
                      {error}"
@@ -1491,12 +1491,12 @@ impl TransactionManager {
                 // A store change in progress: a checkpoint never reads the
                 // store or the change set halfway through the undo.
                 let _writing = self.write_in_progress();
-                changes.undo_after(changes.start(), false)
+                changes.rollback()
             }
-            None => Ok(None),
+            None => Ok(()),
         };
         let undo_error = match undone {
-            Err(super::UndoFailure::Broken(error)) => {
+            Err(error) => {
                 let message = format!(
                     "the abort of transaction {transaction_id:?} could not undo its changes: \
                      {error}"
@@ -1504,8 +1504,7 @@ impl TransactionManager {
                 self.poison(&message);
                 Some(Error::Internal(message))
             }
-            // A store without undo keeps its writes: the caller chose it.
-            Ok(_) | Err(super::UndoFailure::External(_)) => None,
+            Ok(()) => None,
         };
         self.abort_registered(transaction_id)?;
         undo_error.map_or(Ok(()), Err)

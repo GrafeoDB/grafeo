@@ -9,9 +9,9 @@ use std::sync::Arc;
 
 use grafeo_common::change::{ChangeSet, DataModel, DataOp, GraphRef};
 use grafeo_common::types::{EpochId, NodeId, TransactionId, Value};
-use grafeo_core::graph::apply::{Applied, ChangeTarget, Writer};
+use grafeo_core::graph::GraphStore as _;
+use grafeo_core::graph::apply::{Applied, BackendTransaction, GraphBackend, Writer};
 use grafeo_core::graph::rowgroup::RowGroupStore;
-use grafeo_core::graph::{GraphStore as _, GraphStoreMut as _};
 use grafeo_engine::{
     GrafeoDB,
     transaction::{TransactionManager, TransactionState},
@@ -174,7 +174,11 @@ fn test_committed_writes_visible_to_new_transactions() {
     let node_id = create_recorded(&store, &mut changes, (epoch1, tx1), "Committed");
     let commit_epoch = tx_manager.commit(tx1).unwrap();
     store
-        .stamp(tx1, &mut changes.entries().iter(), commit_epoch)
+        .commit(
+            BackendTransaction::new(tx1, epoch1),
+            &mut changes.entries().iter(),
+            commit_epoch,
+        )
         .unwrap();
 
     // T2 starts after commit
@@ -326,7 +330,12 @@ fn test_rollback_makes_writes_invisible() {
 
     // Abort T1, undoing its change set
     tx_manager.abort(tx1).unwrap();
-    store.undo(tx1, &mut changes.entries().iter()).unwrap();
+    store
+        .rollback(
+            BackendTransaction::new(tx1, epoch),
+            &mut changes.entries().iter(),
+        )
+        .unwrap();
 
     // New transaction should not see the aborted node
     let tx2 = tx_manager.begin();

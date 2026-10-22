@@ -477,13 +477,12 @@ impl Operator for VectorJoinOperator {
 mod tests {
     use super::*;
     use crate::execution::operators::single_row::NodeListOperator;
-    use crate::graph::GraphStoreMut;
     use crate::graph::rowgroup::RowGroupStore;
     use std::sync::Arc as StdArc;
 
     #[test]
     fn test_vector_join_static_query() {
-        let store: StdArc<dyn GraphStoreMut> = StdArc::new(RowGroupStore::new());
+        let store: StdArc<RowGroupStore> = StdArc::new(RowGroupStore::new());
 
         // Create nodes with vector embeddings
         let n1 = store.create_node(&["Item"]);
@@ -520,7 +519,7 @@ mod tests {
 
     #[test]
     fn test_vector_join_entity_to_entity() {
-        let store: StdArc<dyn GraphStoreMut> = StdArc::new(RowGroupStore::new());
+        let store: StdArc<RowGroupStore> = StdArc::new(RowGroupStore::new());
 
         // Create source nodes
         let src1 = store.create_node(&["Source"]);
@@ -565,7 +564,7 @@ mod tests {
 
     #[test]
     fn test_vector_join_with_distance_filter() {
-        let store: StdArc<dyn GraphStoreMut> = StdArc::new(RowGroupStore::new());
+        let store: StdArc<RowGroupStore> = StdArc::new(RowGroupStore::new());
 
         // Create nodes with embeddings
         let n1 = store.create_node(&["Item"]);
@@ -602,7 +601,7 @@ mod tests {
 
     #[test]
     fn test_vector_join_name() {
-        let store: StdArc<dyn GraphStoreMut> = StdArc::new(RowGroupStore::new());
+        let store: StdArc<RowGroupStore> = StdArc::new(RowGroupStore::new());
         let left = Box::new(NodeListOperator::new(vec![], 1024));
 
         let join = VectorJoinOperator::with_static_query(
@@ -620,7 +619,7 @@ mod tests {
 
     #[test]
     fn test_vector_join_into_any() {
-        let store: StdArc<dyn GraphStoreMut> = StdArc::new(RowGroupStore::new());
+        let store: StdArc<RowGroupStore> = StdArc::new(RowGroupStore::new());
         let left = Box::new(NodeListOperator::new(vec![], 1024));
 
         let op = VectorJoinOperator::with_static_query(

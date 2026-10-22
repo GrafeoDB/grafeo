@@ -1,5 +1,5 @@
-//! The row-group store's side of the change set: `apply`, `stamp` and
-//! `undo` (change target, sections 3 and 6).
+//! The row-group store's side of the store contract: `apply`, `commit`
+//! (`stamp` here) and the rollbacks (`undo`) (sections 3 and 6).
 //!
 //! A transaction's create writes a row stamped with the transaction; its
 //! delete marks the row the same way; `stamp` overwrites those marks with
@@ -26,7 +26,8 @@ use std::ops::Range;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use grafeo_common::change::{
-    Before, BulkRange, Change, DataOp, Entity, Labels, PendingVersion, Properties, Table,
+    Before, BulkRange, Change, ChangeMark, DataOp, Entity, Labels, PendingVersion, Properties,
+    Table,
 };
 use grafeo_common::types::{ArcStr, EdgeId, EpochId, NodeId, PropertyKey, TransactionId, Value};
 
@@ -36,7 +37,7 @@ use super::versions::VECTOR_ROWS;
 use super::{
     ABSENT, Adjacent, Inner, PENDING, ROWS_PER_GROUP, Read, RowGroupStore, label_ids, locate,
 };
-use crate::graph::apply::{Applied, ApplyError, ChangeTarget, Writer};
+use crate::graph::apply::{Applied, ApplyError, BackendTransaction, GraphBackend, Writer};
 
 /// How a write is applied.
 #[derive(Debug, Clone, Copy)]
@@ -481,7 +482,7 @@ impl Inner {
     }
 }
 
-impl ChangeTarget for RowGroupStore {
+impl GraphBackend for RowGroupStore {
     fn reserve_node_ids(&self, count: u64) -> Result<Range<u64>, ApplyError> {
         reserve(&self.next_node_id, count, "node")
     }
@@ -539,13 +540,26 @@ impl ChangeTarget for RowGroupStore {
         Ok(applied)
     }
 
-    fn stamp(
+    /// The row-group store's pending versions need no opening: the handle
+    /// names them.
+    fn begin(
         &self,
         transaction: TransactionId,
+        snapshot: EpochId,
+    ) -> Result<BackendTransaction, ApplyError> {
+        pending_stamp(transaction)?;
+        Ok(BackendTransaction::new(transaction, snapshot))
+    }
+
+    /// Stamps the pending versions the changes name with `epoch`; the
+    /// statistics counters and dirty marks take the changes.
+    fn commit(
+        &self,
+        transaction: BackendTransaction,
         entries: &mut dyn Iterator<Item = &Change>,
         epoch: EpochId,
     ) -> Result<(), ApplyError> {
-        let pending = pending_stamp(transaction)?;
+        let pending = pending_stamp(transaction.id())?;
         let at = epoch.as_u64();
         {
             let mut inner = self.inner.write();
@@ -579,6 +593,36 @@ impl ChangeTarget for RowGroupStore {
         Ok(())
     }
 
+    fn rollback(
+        &self,
+        transaction: BackendTransaction,
+        entries: &mut dyn DoubleEndedIterator<Item = &Change>,
+    ) -> Result<(), ApplyError> {
+        self.undo(transaction.id(), entries)
+    }
+
+    /// Undoes the changes since the savepoint, as a rollback does; the
+    /// pending versions before it stay the transaction's.
+    fn rollback_to(
+        &self,
+        transaction: BackendTransaction,
+        _savepoint: ChangeMark,
+        changes_since: &mut dyn DoubleEndedIterator<Item = &Change>,
+    ) -> Result<(), ApplyError> {
+        self.undo(transaction.id(), changes_since)
+    }
+
+    /// Collects the row groups the writes since the last collect listed,
+    /// in the root and every named graph.
+    fn collect(&self, horizon: EpochId) {
+        self.gc_versions_after_write(horizon);
+    }
+}
+
+impl RowGroupStore {
+    /// Undoes `transaction`'s `entries`, last to first: drops the version an
+    /// entry created, writes the before-image back into one it replaced; a
+    /// bulk range drops its pending ids.
     fn undo(
         &self,
         transaction: TransactionId,

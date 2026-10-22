@@ -16,8 +16,8 @@ use grafeo_adapters::plugins::algorithms::{
 };
 use grafeo_common::types::ReadView;
 use grafeo_common::types::{NodeId, Value};
+use grafeo_core::graph::GraphStore as _;
 use grafeo_core::graph::rowgroup::RowGroupStore;
-use grafeo_core::graph::{GraphStore as _, GraphStoreMut as _};
 
 /// A seeded graph shaped like a code base: a repository holds modules, modules
 /// hold files, files hold functions, and functions call each other, mostly

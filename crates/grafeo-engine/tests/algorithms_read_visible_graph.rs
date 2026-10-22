@@ -8,7 +8,6 @@
 use std::collections::BTreeMap;
 
 use grafeo_common::types::{NodeId, Value};
-use grafeo_core::graph::GraphStoreMut as _;
 use grafeo_engine::GrafeoDB;
 use grafeo_engine::session::Session;
 

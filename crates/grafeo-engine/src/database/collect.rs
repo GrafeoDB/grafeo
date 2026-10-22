@@ -17,6 +17,8 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use grafeo_core::graph::rowgroup::RowGroupStore;
 
+use grafeo_core::graph::GraphBackend;
+
 use crate::transaction::TransactionManager;
 
 /// What runs after the `count`th immediate call or commit.
@@ -56,7 +58,7 @@ impl AfterWrite {
     /// among them, so that its collect also covers what every named graph
     /// lists once the root is a row-group store (its
     /// `gc_versions_after_write` does). A store named twice collects once.
-    pub(crate) fn run(self, manager: &TransactionManager, stores: &[&RowGroupStore]) {
+    pub(crate) fn run(self, manager: &TransactionManager, stores: &[&dyn GraphBackend]) {
         if self.collect {
             // The read horizon, or the start of the retention window when
             // that is older (H2c).
@@ -64,9 +66,9 @@ impl AfterWrite {
             for (index, store) in stores.iter().enumerate() {
                 if !stores[..index]
                     .iter()
-                    .any(|earlier| std::ptr::eq(*earlier, *store))
+                    .any(|earlier| std::ptr::addr_eq(*earlier, *store))
                 {
-                    store.gc_versions_after_write(horizon);
+                    store.collect(horizon);
                 }
             }
         }

@@ -3,7 +3,7 @@
 use grafeo_common::change::DataOp;
 use grafeo_common::types::{NodeId, PropertyKey, Value};
 
-use crate::graph::apply::{ChangeTarget, Writer};
+use crate::graph::apply::{GraphBackend, Writer};
 use crate::graph::conformance::{Reader, Tx, committed, image, labels, next_epoch, properties};
 use crate::graph::rowgroup::RowGroupStore;
 

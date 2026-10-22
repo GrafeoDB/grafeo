@@ -25,7 +25,7 @@ use grafeo_common::storage::catalog_record::{
 #[cfg(feature = "wal")]
 #[cfg(query_language)]
 use grafeo_common::types::EpochId;
-use grafeo_common::utils::error::{Error, Result};
+use grafeo_common::utils::error::{Error, QueryError, Result};
 
 use super::catalog_records::{
     constraint_definition, edge_type_definition, graph_indexes, graph_type_definition, index_name,
@@ -185,12 +185,24 @@ pub(crate) fn commit<S: RootStore>(
     change: StandaloneChange,
     _held: &CommitsHeld<'_>,
     #[cfg(feature = "wal")] wal: Option<&grafeo_storage::wal::Wal>,
-    store: &Arc<S>,
+    store: Option<&Arc<S>>,
     catalog: &Catalog,
     manager: &TransactionManager,
 ) -> Result<()> {
     if change.is_empty() {
         return Ok(());
+    }
+    // A database on a backend of its own has a catalog, and no named graphs
+    // and indexes of the built-in store: such an op is refused before
+    // anything is logged or applied.
+    if store.is_none()
+        && let Some(op) = change.ops().find(|op| !catalog_only(op))
+    {
+        return Err(Error::from(QueryError::unsupported(format!(
+            "{} needs the built-in store: a database on a backend of its own has no named \
+             graphs and no indexes",
+            describe(op)
+        ))));
     }
     #[cfg(feature = "wal")]
     if let Some(wal) = wal {
@@ -203,6 +215,34 @@ pub(crate) fn commit<S: RootStore>(
         }
     }
     Ok(())
+}
+
+/// Whether `op` changes nothing but the catalog (a schema, a type, a graph
+/// type or its binding, a constraint, a procedure, the stored configuration),
+/// so a database without the built-in store applies it.
+fn catalog_only(op: &StandaloneOp) -> bool {
+    match op {
+        StandaloneOp::PutCatalog(record) => !matches!(record, CatalogRecord::Index(_)),
+        StandaloneOp::DropCatalog(key) => !matches!(key, CatalogKey::Index { .. }),
+        StandaloneOp::CreateGraph { .. }
+        | StandaloneOp::DropGraph { .. }
+        | StandaloneOp::RdfGraph(_) => false,
+    }
+}
+
+/// The built-in store an op of the named graphs or the indexes applies to.
+///
+/// # Errors
+///
+/// Without one (a database on a backend of its own): [`commit`] refuses
+/// such an op before it is logged, so this is a broken invariant.
+fn built_in<'s, S: RootStore>(store: Option<&'s Arc<S>>, op: &StandaloneOp) -> Result<&'s Arc<S>> {
+    store.ok_or_else(|| {
+        not_applied(
+            op,
+            "a database on a backend of its own has no built-in store",
+        )
+    })
 }
 
 /// Commits a graph copy (`CREATE GRAPH dest AS COPY OF ...`): `change`
@@ -236,7 +276,7 @@ pub(crate) fn commit_copy<S: RootStore>(
         log_copy(wal, &change, manager, epoch, (source, dest))?;
     }
     for (op, built) in change.into_ops() {
-        if let Err(error) = apply(&op, built, store, catalog, &mut Applying::Live) {
+        if let Err(error) = apply(&op, built, Some(store), catalog, &mut Applying::Live) {
             manager.poison(&format!("a logged change did not apply: {error}"));
             return Err(error);
         }
@@ -354,13 +394,13 @@ fn log(
 pub(crate) fn apply<S: RootStore>(
     op: &StandaloneOp,
     built: Option<BuiltIndex>,
-    store: &Arc<S>,
+    store: Option<&Arc<S>>,
     catalog: &Catalog,
     applying: &mut Applying<'_>,
 ) -> Result<()> {
     match op {
         StandaloneOp::CreateGraph { name } => {
-            if store.create_graph(name)? {
+            if built_in(store, op)?.create_graph(name)? {
                 Ok(())
             } else {
                 applying.missing(op, "the graph exists")
@@ -370,7 +410,7 @@ pub(crate) fn apply<S: RootStore>(
             if let Applying::Replay { unbuilt } = applying {
                 unbuilt.retain(|graph| graph.graph.as_deref() != Some(name.as_str()));
             }
-            if store.drop_graph(name) {
+            if built_in(store, op)?.drop_graph(name) {
                 Ok(())
             } else {
                 applying.missing(op, "the graph does not exist")
@@ -453,7 +493,7 @@ fn put<S: RootStore>(
     op: &StandaloneOp,
     record: &CatalogRecord,
     built: Option<BuiltIndex>,
-    store: &Arc<S>,
+    store: Option<&Arc<S>>,
     catalog: &Catalog,
     applying: &mut Applying<'_>,
 ) -> Result<()> {
@@ -502,7 +542,9 @@ fn put<S: RootStore>(
             let outcome = catalog.create_constraint(def);
             applying.catalog(op, outcome)
         }
-        CatalogRecord::Index(record) => put_index(op, record, built, store, applying),
+        CatalogRecord::Index(record) => {
+            put_index(op, record, built, built_in(store, op)?, applying)
+        }
         CatalogRecord::IndexName(record) => {
             if !has_index_name(catalog, record) {
                 let name = index_name(record.clone());
@@ -684,7 +726,7 @@ fn forget_unbuilt(unbuilt: &mut Vec<GraphIndexes>, graph: Option<&str>, key: &In
 fn drop_entry<S: RootStore>(
     op: &StandaloneOp,
     key: &CatalogKey,
-    store: &Arc<S>,
+    store: Option<&Arc<S>>,
     catalog: &Catalog,
     applying: &mut Applying<'_>,
 ) -> Result<()> {
@@ -724,7 +766,7 @@ fn drop_entry<S: RootStore>(
             if let Applying::Replay { unbuilt } = applying {
                 forget_unbuilt(unbuilt, graph.as_deref(), index);
             }
-            match graph_store(store, graph.as_deref()) {
+            match graph_store(built_in(store, op)?, graph.as_deref()) {
                 Some(target) if remove_index(&*target, index) => Ok(()),
                 Some(_) => applying.missing(op, "there is no such index"),
                 None => applying.missing(op, "the graph does not exist"),
@@ -801,7 +843,13 @@ pub(crate) fn replay<S: RootStore>(
                 ));
             }
         } else {
-            apply(&op, None, store, catalog, &mut Applying::Replay { unbuilt })
+            apply(
+                &op,
+                None,
+                Some(store),
+                catalog,
+                &mut Applying::Replay { unbuilt },
+            )
         };
         applied.map_err(|error| failed(error.to_string()))?;
     }

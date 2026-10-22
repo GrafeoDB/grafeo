@@ -4,7 +4,7 @@
 //! `checkpoint_lsn`; the log holds the groups after it. Replay scans the log
 //! from there and applies each complete group, in log order, at the epoch its
 //! [`GroupBegin`] names, through the functions the live writes use: a data
-//! record through [`ChangeTarget::apply`] as a [`Writer::Replay`] (strict: a
+//! record through [`GraphBackend::apply`] as a [`Writer::Replay`] (strict: a
 //! record that does not fit the store fails the open), a triple through the
 //! RDF store's own insert and remove, a standalone op through
 //! [`standalone::apply`] or [`standalone::apply_rdf`]. A group the scan finds
@@ -16,7 +16,7 @@
 //! its epoch: a crash keeps the history the log holds (H2c).
 //!
 //! [`GroupBegin`]: grafeo_common::storage::log_record::GroupBegin
-//! [`ChangeTarget::apply`]: grafeo_core::graph::apply::ChangeTarget::apply
+//! [`GraphBackend::apply`]: grafeo_core::graph::apply::GraphBackend::apply
 //! [`Writer::Replay`]: grafeo_core::graph::apply::Writer::Replay
 
 use std::path::Path;
@@ -204,7 +204,7 @@ fn apply_standalone<S: RootStore>(op: &StandaloneOp, targets: &mut Targets<'_, S
     standalone::apply(
         op,
         None,
-        targets.store,
+        Some(targets.store),
         targets.catalog,
         &mut Applying::Replay {
             unbuilt: targets.unbuilt,

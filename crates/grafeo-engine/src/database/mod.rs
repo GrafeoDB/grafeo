@@ -99,10 +99,11 @@ use parking_lot::RwLock;
 
 use grafeo_common::memory::buffer::{BufferManager, BufferManagerConfig};
 use grafeo_common::utils::error::{Error, QueryError, QueryErrorKind, Result};
+use grafeo_core::graph::GraphBackend;
+use grafeo_core::graph::GraphStore;
 #[cfg(feature = "triple-store")]
 use grafeo_core::graph::rdf::RdfStore;
 use grafeo_core::graph::rowgroup::RowGroupStore;
-use grafeo_core::graph::{GraphStore, GraphStoreMut};
 #[cfg(feature = "grafeo-file")]
 use grafeo_storage::file::GrafeoFileManager;
 #[cfg(feature = "grafeo-file")]
@@ -211,7 +212,7 @@ pub struct GrafeoDB {
     pub(super) external_read_store: Option<Arc<dyn GraphStore>>,
     /// External writable graph store (when using with_store()).
     /// None for read-only databases created via with_read_store().
-    pub(super) external_write_store: Option<Arc<dyn GraphStoreMut>>,
+    pub(super) external_write_store: Option<Arc<dyn GraphBackend>>,
     /// Metrics registry shared across all sessions.
     #[cfg(feature = "metrics")]
     pub(crate) metrics: Option<Arc<crate::metrics::MetricsRegistry>>,
@@ -1020,24 +1021,28 @@ impl GrafeoDB {
         Ok(db)
     }
 
-    /// Creates a database backed by a custom [`GraphStoreMut`] implementation.
+    /// Creates a database on a backend of one's own: a [`GraphBackend`],
+    /// the store contract's write side over its read side
+    /// ([`GraphStore`]).
     ///
-    /// The external store handles all data persistence. WAL, CDC, and index
-    /// management are the responsibility of the store implementation.
-    ///
-    /// Query execution (all 6 languages, optimizer, planner) works through the
-    /// provided store. Admin operations (schema introspection, persistence,
-    /// vector/text indexes) are not available on external stores.
+    /// Queries in every language, the optimizer and the planner read the
+    /// backend, and every write applies in a transaction the backend opens
+    /// ([`GraphBackend::begin`]) and the engine commits or rolls back through
+    /// it, also a rollback to a savepoint and the rollback of a failed
+    /// statement. The engine reserves the ids of what a write creates. The
+    /// built-in store's features are not there: named graphs, property,
+    /// vector and text indexes, and persistence to a `.grafeo` file.
     ///
     /// # Examples
     ///
     /// ```no_run
     /// use std::sync::Arc;
-    /// use grafeo_engine::{GrafeoDB, Config};
-    /// use grafeo_core::graph::GraphStoreMut;
+    /// use grafeo_core::graph::GraphBackend;
+    /// use grafeo_engine::{Config, GrafeoDB};
     ///
-    /// fn example(store: Arc<dyn GraphStoreMut>) -> grafeo_common::utils::error::Result<()> {
+    /// fn example(store: Arc<dyn GraphBackend>) -> grafeo_common::utils::error::Result<()> {
     ///     let db = GrafeoDB::with_store(store, Config::in_memory())?;
+    ///     db.execute("INSERT (:Person {name: 'Alix'})")?;
     ///     let result = db.execute("MATCH (n) RETURN count(n)")?;
     ///     Ok(())
     /// }
@@ -1047,8 +1052,10 @@ impl GrafeoDB {
     ///
     /// Returns an error if config validation fails.
     ///
-    /// [`GraphStoreMut`]: grafeo_core::graph::GraphStoreMut
-    pub fn with_store(store: Arc<dyn GraphStoreMut>, config: Config) -> Result<Self> {
+    /// # Stability: Experimental
+    ///
+    /// Implementing [`GraphBackend`] is experimental through 0.6.x.
+    pub fn with_store(store: Arc<dyn GraphBackend>, config: Config) -> Result<Self> {
         config.validate().map_err(config_error)?;
 
         // Commits continue from the epoch the store is at.
@@ -1474,7 +1481,7 @@ impl GrafeoDB {
                     standalone::apply(
                         &op,
                         None,
-                        store,
+                        Some(store),
                         catalog,
                         &mut Applying::Replay { unbuilt },
                     )?;
@@ -1484,7 +1491,7 @@ impl GrafeoDB {
                     standalone::apply(
                         &op,
                         None,
-                        store,
+                        Some(store),
                         catalog,
                         &mut Applying::Replay { unbuilt },
                     )?;
@@ -2525,19 +2532,6 @@ impl GrafeoDB {
         }
     }
 
-    /// Returns the writable graph store, if available.
-    ///
-    /// Returns `None` for read-only databases created via
-    /// [`with_read_store()`](Self::with_read_store).
-    #[must_use]
-    pub fn graph_store_mut(&self) -> Option<Arc<dyn GraphStoreMut>> {
-        if self.external_read_store.is_some() {
-            self.external_write_store.as_ref().map(Arc::clone)
-        } else {
-            Some(self.lpg_store() as Arc<dyn GraphStoreMut>)
-        }
-    }
-
     /// Garbage collects old MVCC versions that are no longer visible.
     ///
     /// Determines the minimum epoch required by active transactions and prunes
@@ -2925,7 +2919,7 @@ impl GrafeoDB {
             held,
             #[cfg(feature = "wal")]
             self.wal.as_deref(),
-            &self.lpg_store(),
+            self.store.as_ref(),
             &self.catalog,
             &self.transaction_manager,
         )
@@ -4409,7 +4403,7 @@ mod tests {
         external.set_node_property(n1, "name", grafeo_common::types::Value::from("Alix"));
 
         let db = GrafeoDB::with_store(
-            Arc::clone(&external) as Arc<dyn GraphStoreMut>,
+            Arc::clone(&external) as Arc<dyn GraphBackend>,
             Config::in_memory(),
         )
         .unwrap();
@@ -4653,7 +4647,7 @@ mod tests {
         let n1 = store.create_node(&["Person"]);
         store.set_node_property(n1, "name", "Alix".into());
 
-        let graph_store = Arc::clone(&store) as Arc<dyn GraphStoreMut>;
+        let graph_store = Arc::clone(&store) as Arc<dyn GraphBackend>;
         let db = GrafeoDB::with_store(graph_store, Config::in_memory()).unwrap();
 
         let result = db.execute("MATCH (n:Person) RETURN n.name").unwrap();
@@ -4665,7 +4659,7 @@ mod tests {
         use grafeo_core::graph::rowgroup::RowGroupStore;
 
         let store = Arc::new(RowGroupStore::new());
-        let graph_store = Arc::clone(&store) as Arc<dyn GraphStoreMut>;
+        let graph_store = Arc::clone(&store) as Arc<dyn GraphBackend>;
         let db = GrafeoDB::with_store(graph_store, Config::in_memory()).unwrap();
 
         let session = db.session();
@@ -4678,7 +4672,7 @@ mod tests {
         use grafeo_core::graph::rowgroup::RowGroupStore;
 
         let store = Arc::new(RowGroupStore::new());
-        let graph_store = Arc::clone(&store) as Arc<dyn GraphStoreMut>;
+        let graph_store = Arc::clone(&store) as Arc<dyn GraphBackend>;
         let db = GrafeoDB::with_store(graph_store, Config::in_memory()).unwrap();
 
         let mut session = db.session();
@@ -5060,12 +5054,6 @@ mod tests {
     }
 
     #[test]
-    fn test_graph_store_mut_returns_some_by_default() {
-        let db = GrafeoDB::new_in_memory();
-        assert!(db.graph_store_mut().is_some());
-    }
-
-    #[test]
     fn test_with_read_store() {
         use grafeo_core::graph::rowgroup::RowGroupStore;
 
@@ -5076,7 +5064,6 @@ mod tests {
         let db = GrafeoDB::with_read_store(read_store, Config::in_memory()).unwrap();
 
         assert!(db.is_read_only());
-        assert!(db.graph_store_mut().is_none());
 
         // Read queries should work
         let snapshot = db.snapshot().unwrap();
@@ -5091,13 +5078,12 @@ mod tests {
         store.create_node(&["Person"]);
 
         let db = GrafeoDB::with_store(
-            Arc::clone(&store) as Arc<dyn GraphStoreMut>,
+            Arc::clone(&store) as Arc<dyn GraphBackend>,
             Config::in_memory(),
         )
         .unwrap();
 
         assert!(!db.is_read_only());
-        assert!(db.graph_store_mut().is_some());
         let snapshot = db.snapshot().unwrap();
         assert_eq!(snapshot.node_count(snapshot.view()).unwrap(), 1);
     }

@@ -246,7 +246,6 @@ impl Operator for VectorScanOperator {
 #[cfg(all(test, feature = "vector-index"))]
 mod tests {
     use super::*;
-    use crate::graph::GraphStoreMut as _;
     use crate::graph::rowgroup::RowGroupStore;
     use grafeo_common::types::Value;
 

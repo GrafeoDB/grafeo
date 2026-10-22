@@ -674,7 +674,6 @@ impl Operator for LazyFactorizedChainOperator {
 mod tests {
     use super::*;
     use crate::execution::operators::ScanOperator;
-    use crate::graph::GraphStoreMut as _;
     use crate::graph::rowgroup::RowGroupStore;
 
     #[test]

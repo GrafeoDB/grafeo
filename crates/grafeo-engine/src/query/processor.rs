@@ -12,10 +12,10 @@ use std::sync::Arc;
 use grafeo_common::grafeo_debug_span;
 use grafeo_common::types::{EpochId, TransactionId, Value};
 use grafeo_common::utils::error::{Error, Result};
-use grafeo_core::execution::operators::{Recording, WriteTarget};
-use grafeo_core::graph::apply::{ChangeTarget, ExternalTarget};
+use grafeo_core::execution::operators::Recording;
+use grafeo_core::graph::GraphStore;
+use grafeo_core::graph::apply::GraphBackend;
 use grafeo_core::graph::rowgroup::RowGroupStore;
-use grafeo_core::graph::{GraphStore, GraphStoreMut};
 
 use crate::catalog::Catalog;
 use crate::database::QueryResult;
@@ -101,15 +101,16 @@ pub type QueryParams = HashMap<String, Value>;
 /// # }
 /// ```
 pub struct QueryProcessor {
-    /// LPG store for property graph queries.
-    lpg_store: Arc<RowGroupStore>,
-    /// Graph store trait object for pluggable storage backends (read path).
+    /// The built-in store, when the processor runs on one (`None` on a
+    /// backend of one's own).
+    lpg_store: Option<Arc<RowGroupStore>>,
+    /// The store its reads read.
     graph_store: Arc<dyn GraphStore>,
-    /// Writable graph store (None when read-only).
-    write_store: Option<Arc<dyn GraphStoreMut>>,
-    /// The write store as a transaction's writes change it and record their
-    /// changes (see [`with_transaction_context`](Self::with_transaction_context)).
-    write_target: Option<WriteTarget>,
+    /// The backend a transaction's writes apply in and record their changes
+    /// against (see
+    /// [`with_transaction_context`](Self::with_transaction_context)); `None`
+    /// when read-only.
+    write_store: Option<Arc<dyn GraphBackend>>,
     /// Transaction manager for MVCC operations.
     transaction_manager: Arc<TransactionManager>,
     /// Catalog for schema and index metadata.
@@ -139,15 +140,11 @@ impl QueryProcessor {
     pub fn for_lpg(store: Arc<RowGroupStore>) -> Self {
         let optimizer = Optimizer::from_graph_store(&*store);
         let graph_store = Arc::clone(&store) as Arc<dyn GraphStore>;
-        let write_store = Some(Arc::clone(&store) as Arc<dyn GraphStoreMut>);
-        let write_target = Some(WriteTarget::Store(
-            Arc::clone(&store) as Arc<dyn ChangeTarget>
-        ));
+        let write_store = Some(Arc::clone(&store) as Arc<dyn GraphBackend>);
         Self {
-            lpg_store: store,
+            lpg_store: Some(store),
             graph_store,
             write_store,
-            write_target,
             transaction_manager: Arc::new(TransactionManager::new()),
             catalog: Arc::new(Catalog::new()),
             optimizer,
@@ -167,15 +164,11 @@ impl QueryProcessor {
     ) -> Self {
         let optimizer = Optimizer::from_graph_store(&*store);
         let graph_store = Arc::clone(&store) as Arc<dyn GraphStore>;
-        let write_store = Some(Arc::clone(&store) as Arc<dyn GraphStoreMut>);
-        let write_target = Some(WriteTarget::Store(
-            Arc::clone(&store) as Arc<dyn ChangeTarget>
-        ));
+        let write_store = Some(Arc::clone(&store) as Arc<dyn GraphBackend>);
         Self {
-            lpg_store: store,
+            lpg_store: Some(store),
             graph_store,
             write_store,
-            write_target,
             transaction_manager,
             catalog: Arc::new(Catalog::new()),
             optimizer,
@@ -187,25 +180,21 @@ impl QueryProcessor {
         }
     }
 
-    /// Creates a query processor backed by any `GraphStoreMut` implementation.
+    /// Creates a query processor on a backend of one's own ([`GraphBackend`]).
     ///
     /// # Errors
     ///
     /// Returns an error if the internal arena allocation fails (out of memory).
     pub fn for_graph_store_with_transaction(
-        store: Arc<dyn GraphStoreMut>,
+        store: Arc<dyn GraphBackend>,
         transaction_manager: Arc<TransactionManager>,
     ) -> Result<Self> {
         let optimizer = Optimizer::from_graph_store(&*store);
         let read_store = Arc::clone(&store) as Arc<dyn GraphStore>;
-        let write_target = Some(WriteTarget::External(Arc::new(ExternalTarget::new(
-            Arc::clone(&store),
-        ))));
         Ok(Self {
-            lpg_store: Arc::new(RowGroupStore::new()),
+            lpg_store: None,
             graph_store: read_store,
             write_store: Some(store),
-            write_target,
             transaction_manager,
             catalog: Arc::new(Catalog::new()),
             optimizer,
@@ -224,18 +213,14 @@ impl QueryProcessor {
     /// Returns an error if the internal arena allocation fails (out of memory).
     pub fn for_stores_with_transaction(
         read_store: Arc<dyn GraphStore>,
-        write_store: Option<Arc<dyn GraphStoreMut>>,
+        write_store: Option<Arc<dyn GraphBackend>>,
         transaction_manager: Arc<TransactionManager>,
     ) -> Result<Self> {
         let optimizer = Optimizer::from_graph_store(&*read_store);
-        let write_target = write_store
-            .as_ref()
-            .map(|store| WriteTarget::External(Arc::new(ExternalTarget::new(Arc::clone(store)))));
         Ok(Self {
-            lpg_store: Arc::new(RowGroupStore::new()),
+            lpg_store: None,
             graph_store: read_store,
             write_store,
-            write_target,
             transaction_manager,
             catalog: Arc::new(Catalog::new()),
             optimizer,
@@ -374,9 +359,11 @@ impl QueryProcessor {
         // A processor with its own transaction manager reads what the
         // store's direct writes stamped (each at an epoch of its own) outside
         // a transaction: its manager follows the store's epoch.
-        if self.follows_store_epoch && self.transaction_context.is_none() {
-            self.transaction_manager
-                .sync_epoch(self.lpg_store.current_epoch());
+        if self.follows_store_epoch
+            && self.transaction_context.is_none()
+            && let Some(store) = &self.lpg_store
+        {
+            self.transaction_manager.sync_epoch(store.current_epoch());
         }
 
         // 4a. EXPLAIN: annotate pushdown hints and return the plan tree
@@ -386,18 +373,53 @@ impl QueryProcessor {
             return Ok(explain_result(&plan));
         }
 
+        // A write outside a transaction runs in one of its own, which
+        // commits when the statement succeeds and rolls back when it fails:
+        // its writes apply in the backend's transaction like any other.
+        if self.transaction_context.is_none()
+            && optimized_plan.root.has_mutations()
+            && self.write_store.is_some()
+        {
+            let transaction = self.transaction_manager.begin();
+            let epoch = self
+                .transaction_manager
+                .start_epoch(transaction)
+                .unwrap_or_else(|| self.transaction_manager.current_epoch());
+            return match self.run_plan(&optimized_plan, Some((epoch, transaction)), start_time) {
+                Ok(result) => {
+                    self.transaction_manager.commit(transaction)?;
+                    Ok(result)
+                }
+                Err(error) => {
+                    // The statement's error is the one to report; a failed
+                    // rollback poisons the manager, which the next write
+                    // reports.
+                    let _aborted = self.transaction_manager.abort(transaction);
+                    Err(error)
+                }
+            };
+        }
+        self.run_plan(&optimized_plan, self.transaction_context, start_time)
+    }
+
+    /// Plans and runs `optimized_plan` in `context` (its epoch and
+    /// transaction), or outside a transaction.
+    fn run_plan(
+        &self,
+        optimized_plan: &LogicalPlan,
+        context: Option<(EpochId, TransactionId)>,
+        start_time: grafeo_common::clock::Instant,
+    ) -> Result<QueryResult> {
         // 5. Convert to physical plan with transaction context
         // Read-only fast path: safe when no mutations AND no active transaction
         // (an active transaction may have prior uncommitted writes from earlier statements)
-        let is_read_only =
-            !optimized_plan.root.has_mutations() && self.transaction_context.is_none();
+        let is_read_only = !optimized_plan.root.has_mutations() && context.is_none();
         // Outside a transaction the statement reads at the published epoch,
         // pinned for its run (#412 decision Q6); dropped when it returns.
-        let _pin = self
-            .transaction_context
+        let _pin = context
             .is_none()
             .then(|| self.transaction_manager.pin_read());
-        let planner = if let Some((epoch, transaction_id)) = self.transaction_context {
+        let planner = if let Some((epoch, transaction_id)) = context {
             Planner::with_context(
                 Arc::clone(&self.graph_store),
                 self.write_store.as_ref().map(Arc::clone),
@@ -416,7 +438,7 @@ impl QueryProcessor {
             )
         }
         .with_read_only(is_read_only);
-        let mut physical_plan = planner.plan(&optimized_plan)?;
+        let mut physical_plan = planner.plan(optimized_plan)?;
 
         // 6. Execute and collect results
         let executor = Executor::with_columns(physical_plan.columns.clone())
@@ -441,7 +463,7 @@ impl QueryProcessor {
     ///
     /// Fails when the transaction wrote the graph through another store.
     fn recording(&self, transaction_id: TransactionId) -> Result<Option<Recording>> {
-        let Some(target) = &self.write_target else {
+        let Some(target) = &self.write_store else {
             return Ok(None);
         };
         let Some(changes) = self.transaction_manager.changes(transaction_id) else {
@@ -451,7 +473,7 @@ impl QueryProcessor {
             .recording(
                 &self.transaction_manager,
                 self.graph.as_deref(),
-                target.clone(),
+                Arc::clone(target),
             )
             .map(Some)
     }
@@ -494,10 +516,10 @@ impl QueryProcessor {
         }
     }
 
-    /// Returns a reference to the LPG store.
+    /// The built-in store, when the processor runs on one.
     #[must_use]
-    pub fn lpg_store(&self) -> &Arc<RowGroupStore> {
-        &self.lpg_store
+    pub fn lpg_store(&self) -> Option<&Arc<RowGroupStore>> {
+        self.lpg_store.as_ref()
     }
 
     /// Returns a reference to the catalog.
@@ -535,15 +557,11 @@ impl QueryProcessor {
     ) -> Self {
         let optimizer = Optimizer::from_graph_store(&*lpg_store);
         let graph_store = Arc::clone(&lpg_store) as Arc<dyn GraphStore>;
-        let write_store = Some(Arc::clone(&lpg_store) as Arc<dyn GraphStoreMut>);
-        let write_target = Some(WriteTarget::Store(
-            Arc::clone(&lpg_store) as Arc<dyn ChangeTarget>
-        ));
+        let write_store = Some(Arc::clone(&lpg_store) as Arc<dyn GraphBackend>);
         Self {
-            lpg_store,
+            lpg_store: Some(lpg_store),
             graph_store,
             write_store,
-            write_target,
             transaction_manager: Arc::new(TransactionManager::new()),
             catalog: Arc::new(Catalog::new()),
             optimizer,
@@ -1301,7 +1319,7 @@ mod tests {
     use super::*;
     use grafeo_common::types::ReadView;
     use grafeo_common::types::{NodeId, PropertyKey};
-    use grafeo_core::graph::{GraphStore, GraphStoreMut};
+    use grafeo_core::graph::GraphStore;
 
     /// A node with `labels` and the values `properties`.
     fn with_props<const N: usize>(
@@ -1333,6 +1351,7 @@ mod tests {
         assert_eq!(
             processor
                 .lpg_store()
+                .expect("a processor on the built-in store")
                 .node_count(ReadView::latest())
                 .unwrap(),
             0

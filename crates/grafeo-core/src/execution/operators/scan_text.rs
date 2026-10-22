@@ -208,7 +208,6 @@ impl Operator for TextScanOperator {
 #[cfg(all(test, feature = "text-index"))]
 mod tests {
     use super::*;
-    use crate::graph::GraphStoreMut as _;
     use crate::graph::rowgroup::RowGroupStore;
     use crate::graph::traits::GraphStore;
     use crate::index::text::{BM25Config, InvertedIndex};

@@ -499,7 +499,6 @@ mod text_extract_tests {
         Arc, BinaryOp, FilterOp, GraphStore, LogicalExpression, LogicalOperator, NodeScanOp,
         Planner, Value,
     };
-    use grafeo_core::graph::GraphStoreMut as _;
     use grafeo_core::graph::rowgroup::RowGroupStore;
 
     fn test_planner() -> Planner {
@@ -886,7 +885,6 @@ mod compound_hybrid_tests {
         Arc, BinaryOp, FilterOp, GraphStore, LogicalExpression, LogicalOperator, NodeScanOp,
         Planner, Value,
     };
-    use grafeo_core::graph::GraphStoreMut as _;
     use grafeo_core::graph::rowgroup::RowGroupStore;
 
     fn planner_with_article() -> Planner {

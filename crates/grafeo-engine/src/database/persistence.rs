@@ -147,7 +147,7 @@ pub(super) fn apply_catalog_records<S: super::root_store::RootStore>(
         apply(
             &StandaloneOp::PutCatalog(record),
             None,
-            store,
+            Some(store),
             catalog,
             &mut Applying::Replay {
                 unbuilt: &mut unbuilt,

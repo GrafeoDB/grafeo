@@ -142,7 +142,8 @@ use grafeo_core::execution::operators::{
     ShortestPathOperator, SimpleAggregateOperator, SortDirection, SortKey as PhysicalSortKey,
     SortOperator, UnwindOperator, VariableLengthExpandOperator,
 };
-use grafeo_core::graph::{Direction, GraphStore, GraphStoreMut};
+use grafeo_core::graph::GraphBackend;
+use grafeo_core::graph::{Direction, GraphStore};
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -198,7 +199,7 @@ pub struct Planner {
     /// The graph store (read-only operations).
     pub(super) store: Arc<dyn GraphStore>,
     /// Writable graph store (None for read-only databases).
-    pub(super) write_store: Option<Arc<dyn GraphStoreMut>>,
+    pub(super) write_store: Option<Arc<dyn GraphBackend>>,
     /// Transaction manager for MVCC operations.
     pub(super) transaction_manager: Option<Arc<TransactionManager>>,
     /// Current transaction ID (if in a transaction).
@@ -368,7 +369,7 @@ impl Planner {
     #[must_use]
     pub fn with_context(
         store: Arc<dyn GraphStore>,
-        write_store: Option<Arc<dyn GraphStoreMut>>,
+        write_store: Option<Arc<dyn GraphBackend>>,
         transaction_manager: Arc<TransactionManager>,
         transaction_id: Option<TransactionId>,
         viewing_epoch: EpochId,
@@ -432,7 +433,7 @@ impl Planner {
     }
 
     /// Returns the writable store, or `TransactionError::ReadOnly` if unavailable.
-    fn write_store(&self) -> Result<Arc<dyn GraphStoreMut>> {
+    fn write_store(&self) -> Result<Arc<dyn GraphBackend>> {
         self.write_store
             .as_ref()
             .map(Arc::clone)
@@ -447,27 +448,26 @@ impl Planner {
     ///
     /// # Errors
     ///
-    /// Fails without a writable store, and in a transaction without its
-    /// recording (the transaction is no longer open): a write there would
-    /// be neither claimed nor recorded, so no commit could publish it and no
-    /// rollback undo it.
+    /// Fails without a writable store, and without the transaction's
+    /// recording (outside a transaction, or in one no longer open): a write
+    /// there would be neither claimed nor recorded, so no commit could
+    /// publish it and no rollback undo it.
     fn graph_writer(&self) -> Result<grafeo_core::execution::operators::GraphWriter> {
-        let mut writer = grafeo_core::execution::operators::GraphWriter::new(
-            self.write_store()?,
-            self.read_view(),
-        );
-        match (&self.recording, self.transaction_id) {
-            (Some(recording), _) => writer = writer.with_recording(recording.clone()),
-            (None, Some(transaction)) => {
-                return Err(Error::Transaction(
-                    grafeo_common::utils::error::TransactionError::InvalidState(format!(
-                        "transaction {} is not open: it cannot write",
-                        transaction.as_u64()
-                    )),
-                ));
-            }
-            (None, None) => {}
-        }
+        let store = self.write_store()?;
+        let Some(recording) = &self.recording else {
+            let message = match self.transaction_id {
+                Some(transaction) => format!(
+                    "transaction {} is not open: it cannot write",
+                    transaction.as_u64()
+                ),
+                None => "a write runs in a transaction, and this statement has none".to_string(),
+            };
+            return Err(Error::Transaction(
+                grafeo_common::utils::error::TransactionError::InvalidState(message),
+            ));
+        };
+        let mut writer =
+            grafeo_core::execution::operators::GraphWriter::new(store, recording.clone());
         if let Some(ref validator) = self.validator {
             writer = writer.with_validator(Arc::clone(validator));
         }
@@ -1414,7 +1414,6 @@ mod tests {
     };
     use grafeo_common::types::Value;
     use grafeo_core::execution::operators::AggregateFunction as PhysicalAggregateFunction;
-    use grafeo_core::graph::GraphStoreMut;
     use grafeo_core::graph::rowgroup::RowGroupStore;
 
     fn create_test_store() -> Arc<RowGroupStore> {
@@ -2479,7 +2478,10 @@ mod tests {
             Arc::clone(store) as Arc<dyn GraphStore>,
             grafeo_common::types::EpochId::LATEST,
         );
-        p.write_store = Some(Arc::clone(store) as Arc<dyn GraphStoreMut>);
+        p.write_store = Some(Arc::clone(store) as Arc<dyn GraphBackend>);
+        p.recording = Some(grafeo_core::execution::operators::Recording::immediate(
+            Arc::clone(store),
+        ));
         p
     }
 
@@ -2863,7 +2865,7 @@ mod tests {
 
         let planner = Planner::with_context(
             Arc::clone(&store) as Arc<dyn GraphStore>,
-            Some(Arc::clone(&store) as Arc<dyn GraphStoreMut>),
+            Some(Arc::clone(&store) as Arc<dyn GraphBackend>),
             Arc::clone(&transaction_manager),
             Some(transaction_id),
             epoch,

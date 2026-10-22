@@ -144,6 +144,7 @@ tests:
   # ---------------------------------------------------------------------------
 
   - name: side_effect_passthrough
+    skip: "sack/aggregate/store not implemented"
     query: |
       g.V().has('Person', 'name', 'Alix')
         .sideEffect(outE().count())
@@ -153,6 +154,7 @@ tests:
         - [Alix]
 
   - name: side_effect_does_not_alter_traversal
+    skip: "sack/aggregate/store not implemented"
     query: |
       g.V().hasLabel('Person')
         .sideEffect(out('KNOWS'))

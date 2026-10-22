@@ -67,8 +67,8 @@ use std::fs::File;
 use std::io::{self, BufReader, Read};
 use std::path::{Path, PathBuf};
 
-use super::root_store::RootStore;
 use grafeo_common::types::{NodeId, PropertyKey, Value};
+use grafeo_core::graph::lpg::LpgStore;
 
 const MAGIC: [u8; 8] = *b"GRAFVEC1";
 const HEADER_BYTES: usize = 64;
@@ -380,13 +380,13 @@ pub(crate) struct Folded {
 /// not an old spill file or is shorter than its header says, its dimensions
 /// differ from the index's, or records of nodes without the index's label
 /// were left out.
-pub(crate) fn fold_in<S: RootStore>(store: &S, files: &[LegacyVectorFile]) -> Folded {
+pub(crate) fn fold_in(store: &LpgStore, files: &[LegacyVectorFile]) -> Folded {
     fold_in_batches(store, files, BATCH_BYTES)
 }
 
 /// [`fold_in`], reading at most `batch_bytes` of records at a time.
-pub(crate) fn fold_in_batches<S: RootStore>(
-    store: &S,
+pub(crate) fn fold_in_batches(
+    store: &LpgStore,
     files: &[LegacyVectorFile],
     batch_bytes: usize,
 ) -> Folded {
@@ -483,8 +483,8 @@ struct FileFold {
 /// at a time, and counts the records left out only because their node lacks
 /// the label: after the fill, a node that exists without a value has no
 /// label to take one (a node of the label would have been filled).
-fn fill_from<S: RootStore>(
-    store: &S,
+fn fill_from(
+    store: &LpgStore,
     file: &LegacyVectorFile,
     old: &mut OldFile,
     batch_bytes: usize,
@@ -511,8 +511,7 @@ fn fill_from<S: RootStore>(
             &file.property,
             batch
                 .into_iter()
-                .map(|(id, vector)| (id, Value::Vector(vector.into())))
-                .collect(),
+                .map(|(id, vector)| (id, Value::Vector(vector.into()))),
         ) {
             Ok(filled) => read.filled += filled,
             Err(error) => {
@@ -520,18 +519,13 @@ fn fill_from<S: RootStore>(
                 return read;
             }
         }
-        let view = store.load_view();
         for id in ids {
-            let found = store
-                .node_property(id, file.property.as_str(), view)
-                .and_then(|value| Ok((value, store.node_has_label(id, &file.label, view)?)));
-            match found {
-                Ok((None, Some(false))) => read.without_label.add(id),
-                Ok(_) => {}
-                Err(error) => {
-                    read.stopped = Some(io::Error::other(error.to_string()));
-                    return read;
-                }
+            if store.get_node_property(id, &file.property).is_none()
+                && store
+                    .get_node(id)
+                    .is_some_and(|node| !node.has_label(&file.label))
+            {
+                read.without_label.add(id);
             }
         }
     }
@@ -541,27 +535,18 @@ fn fill_from<S: RootStore>(
 /// its configuration: a topology saved while the column was spilled was kept
 /// with vectors it could not read, so it can miss a node whose embedding
 /// changed then, or name one that has none.
-///
-/// # Errors
-///
-/// Returns the error of a read the store cannot do.
-fn rebuild_index<S: RootStore>(
-    store: &S,
-    label: &str,
-    property: &str,
-) -> grafeo_common::utils::error::Result<()> {
+fn rebuild_index(store: &LpgStore, label: &str, property: &str) {
     use grafeo_core::index::vector::{
         PropertyVectorAccessor, QuantizationType, VectorAccessor, VectorIndexKind,
     };
 
     let Some(old) = store.get_vector_index(label, property) else {
-        return Ok(());
+        return;
     };
     let config = old.config().clone();
-    let view = store.load_view();
-    let accessor = PropertyVectorAccessor::new(store, property, view);
+    let accessor = PropertyVectorAccessor::new(store, property);
     let vectors: Vec<(NodeId, std::sync::Arc<[f32]>)> = store
-        .nodes_by_label(label, view)?
+        .nodes_by_label(label)
         .into_iter()
         .filter_map(|id| {
             accessor
@@ -570,7 +555,6 @@ fn rebuild_index<S: RootStore>(
                 .map(|vector| (id, vector))
         })
         .collect();
-    accessor.check()?;
     let index = super::GrafeoDB::build_vector_index(
         config.dimensions,
         config.metric,
@@ -583,7 +567,6 @@ fn rebuild_index<S: RootStore>(
         VectorIndexKind::Hnsw(_) => {
             for (id, vector) in &vectors {
                 index.insert(*id, vector, &accessor);
-                accessor.check()?;
             }
         }
         VectorIndexKind::Quantized(quantized) => {
@@ -593,7 +576,6 @@ fn rebuild_index<S: RootStore>(
         }
     }
     store.add_vector_index(label, property, std::sync::Arc::new(index));
-    Ok(())
 }
 
 /// Every record of the old spill file at `path`.
@@ -699,7 +681,7 @@ fn move_to_kept(path: &Path) -> io::Result<PathBuf> {
 }
 
 /// The `(label, property)` of every vector index of `store`.
-fn every_vector_index<S: RootStore>(store: &S) -> BTreeSet<(String, String)> {
+fn every_vector_index(store: &LpgStore) -> BTreeSet<(String, String)> {
     store
         .vector_index_entries()
         .into_iter()
@@ -738,10 +720,10 @@ impl super::GrafeoDB {
         if files.is_empty() && !rebuild_every_index {
             return Ok(());
         }
-        let folded = fold_in(&*self.lpg_store()?, &files);
+        let folded = fold_in(&self.lpg_store(), &files);
         let mut rebuilt = folded.indexes.clone();
         if rebuild_every_index {
-            rebuilt.extend(every_vector_index(&*self.lpg_store()?));
+            rebuilt.extend(every_vector_index(&self.lpg_store()));
         }
         for (label, property) in &rebuilt {
             // A crash point where the rebuild is to be made durable: a
@@ -750,7 +732,7 @@ impl super::GrafeoDB {
             if !self.read_only {
                 grafeo_common::testing::crash::maybe_crash("legacy_spill:rebuild");
             }
-            rebuild_index(&*self.lpg_store()?, label, property)?;
+            rebuild_index(&self.lpg_store(), label, property);
         }
         let shared: Vec<String> = folded
             .files
@@ -832,8 +814,6 @@ impl super::GrafeoDB {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use grafeo_common::types::ReadView;
-    use grafeo_core::graph::GraphStore as _;
 
     /// Writes an old spill file with `records`, as `MmapStorage` did.
     fn write_old(path: &Path, dimensions: usize, records: &[(u64, Vec<f32>)]) {
@@ -1017,12 +997,12 @@ mod tests {
             .unwrap();
         db.create_vector_index("Item", "embedding", Some(2), None, None, None, None)
             .unwrap();
-        let store = db.lpg_store().unwrap();
+        let store = db.lpg_store();
 
         for dimensions in [0, 3] {
             let vector: Vec<f32> = [3.0, 19.0, 88.0].into_iter().take(dimensions).collect();
             write_old(&path, dimensions, &[(alix.as_u64(), vector)]);
-            let folded = fold_in(&*store, &find(dir.path(), true));
+            let folded = fold_in(&store, &find(dir.path(), true));
             assert!(folded.files.is_empty(), "{dimensions} dimensions");
             assert_eq!(folded.filled, 0);
             assert_eq!(folded.kept.len(), 1, "{dimensions} dimensions");
@@ -1041,9 +1021,7 @@ mod tests {
                     .contains(&("Item".into(), "embedding".into()))
             );
             assert_eq!(
-                store
-                    .node_property(alix, "embedding", ReadView::latest())
-                    .unwrap(),
+                store.get_node_property(alix, &PropertyKey::new("embedding")),
                 None
             );
         }
@@ -1073,7 +1051,7 @@ mod tests {
             ],
         );
 
-        let folded = fold_in(&*db.lpg_store().unwrap(), &find(dir.path(), true));
+        let folded = fold_in(&db.lpg_store(), &find(dir.path(), true));
         assert_eq!(folded.filled, 1, "Alix");
         assert!(folded.files.is_empty(), "not deleted");
         assert_eq!(folded.kept.len(), 1);
@@ -1088,13 +1066,7 @@ mod tests {
             folded.kept[0].because
         );
         let key = PropertyKey::new("embedding");
-        assert_eq!(
-            db.lpg_store()
-                .unwrap()
-                .node_property(butch, key.as_str(), ReadView::latest())
-                .unwrap(),
-            None
-        );
+        assert_eq!(db.lpg_store().get_node_property(butch, &key), None);
     }
 
     /// A warning about a kept file names the file, how many records it left
@@ -1137,7 +1109,7 @@ mod tests {
         let found = find(dir.path(), true);
         std::fs::remove_file(&path).unwrap();
 
-        let folded = fold_in(&*db.lpg_store().unwrap(), &found);
+        let folded = fold_in(&db.lpg_store(), &found);
         assert!(folded.files.is_empty(), "not deleted");
         assert!(folded.kept.is_empty(), "not kept: {:?}", folded.kept);
         assert!(
@@ -1205,7 +1177,7 @@ mod tests {
         std::fs::write(&path, &bytes).unwrap();
 
         assert!(read(&path).is_err(), "longer than its header says");
-        let folded = fold_in(&*db.lpg_store().unwrap(), &find(dir.path(), true));
+        let folded = fold_in(&db.lpg_store(), &find(dir.path(), true));
         assert!(folded.files.is_empty(), "the file is to be deleted");
         assert_eq!(folded.kept.len(), 1);
         assert!(
@@ -1214,6 +1186,42 @@ mod tests {
             folded.kept[0].because
         );
         assert_eq!(folded.filled, 0);
+    }
+
+    /// A stored value the fold cannot read (a spilled value whose file cannot
+    /// be read) stops the file's read and keeps the file: the old value is
+    /// not filled over it (#594).
+    #[cfg(not(feature = "temporal"))]
+    #[test]
+    fn a_stored_value_the_fold_cannot_read_keeps_the_file() {
+        use std::sync::Arc;
+
+        let dir = tempfile::tempdir().unwrap();
+        let (db, ids) = items(1);
+        let alix = ids[0];
+        db.set_node_property(alix, "embedding", Value::Vector(vec![19.0, 88.0].into()))
+            .unwrap();
+        let store = db.lpg_store();
+        super::super::test_backing::spill(
+            &store,
+            "embedding",
+            Arc::new(super::super::test_backing::Unreadable(alix)),
+        );
+        write_old(
+            &dir.path().join("vectors_Item%3Aembedding.bin"),
+            2,
+            &[(alix.as_u64(), vec![3.0, 19.0])],
+        );
+
+        let folded = fold_in(&store, &find(dir.path(), true));
+        assert!(folded.files.is_empty(), "the file is to be deleted");
+        assert!(folded.kept.is_empty());
+        assert_eq!(folded.filled, 0);
+        assert_eq!(
+            store.node_property_column_ids(&PropertyKey::new("embedding")),
+            vec![alix],
+            "the stored value is still there"
+        );
     }
 
     /// The fold reads a file in batches of bounded size: five records of 16
@@ -1233,7 +1241,7 @@ mod tests {
             &records,
         );
 
-        let folded = fold_in_batches(&*db.lpg_store().unwrap(), &find(dir.path(), true), 40);
+        let folded = fold_in_batches(&db.lpg_store(), &find(dir.path(), true), 40);
         assert_eq!((folded.batches, folded.filled), (3, 5));
         assert_eq!(folded.files.len(), 1);
     }
@@ -1259,7 +1267,7 @@ mod tests {
             .unwrap()
             .set_len(HEADER_BYTES as u64 + 16 * 319)
             .unwrap();
-        let read = fill_from(&*db.lpg_store().unwrap(), &file, &mut old, 16);
+        let read = fill_from(&db.lpg_store(), &file, &mut old, 16);
         assert!(read.stopped.is_some(), "the read stops");
         assert!(
             read.filled > 0 && read.filled < 1988,
@@ -1290,9 +1298,9 @@ mod tests {
             db.create_vector_index("Item", property, Some(2), None, None, None, None)
                 .unwrap();
         }
-        let store = db.lpg_store().unwrap();
+        let store = db.lpg_store();
 
-        let folded = fold_in(&*store, &find(dir.path(), true));
+        let folded = fold_in(&store, &find(dir.path(), true));
         let paths: Vec<&PathBuf> = folded.files.iter().map(|file| &file.path).collect();
         assert_eq!(paths, vec![&good]);
         assert_eq!(folded.kept.len(), 1);
@@ -1306,9 +1314,7 @@ mod tests {
         assert_eq!(folded.filled, 1);
         let key = PropertyKey::new("embedding");
         assert_eq!(
-            store
-                .node_property(alix, key.as_str(), ReadView::latest())
-                .unwrap(),
+            store.get_node_property(alix, &key),
             Some(Value::Vector(vec![3.0, 19.0].into()))
         );
         let hits = db

@@ -269,30 +269,18 @@ RETURN row.name
 
 Create and manage indexes and constraints:
 
-The name after `INDEX` or `CONSTRAINT` is optional. Without one, an index is named after its label and
-properties (`Person_name_index`) and a constraint after its label, properties and kind
-(`Person_email_unique`), the names `SHOW` lists and `DROP` takes.
-
 ```cypher
--- Create index (named Person_name_index)
+-- Create index
 CREATE INDEX FOR (p:Person) ON (p.name)
 
--- Create a named index
-CREATE INDEX person_name FOR (p:Person) ON (p.name)
+-- Create vector index
+CREATE INDEX FOR (n:Document) ON (n.embedding) USING VECTOR
 
--- Create vector index, with its options
-CREATE INDEX FOR (n:Document) ON (n.embedding) USING VECTOR {dimensions: 384, metric: 'cosine'}
-
--- Create text index (BM25), optionally with k1, b, tokenizer and stop_words
+-- Create text index
 CREATE INDEX FOR (n:Article) ON (n.content) USING TEXT
-CREATE INDEX FOR (n:Article) ON (n.content) USING TEXT {k1: 1.2, b: 0.75}
 
--- Create B-tree index for range lookups
-CREATE INDEX FOR (p:Person) ON (p.age) USING BTREE
-
--- Create constraint (named Person_email_unique)
+-- Create constraint
 CREATE CONSTRAINT FOR (p:Person) REQUIRE p.email IS UNIQUE
-CREATE CONSTRAINT FOR (p:Person) REQUIRE p.name IS NOT NULL
 
 -- List indexes and constraints
 SHOW INDEXES

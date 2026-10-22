@@ -69,9 +69,6 @@ Convert a value to a different type with `CAST(expr AS type)`:
 -- Numeric conversions
 RETURN CAST('42' AS INT)        -- 42
 RETURN CAST(42 AS FLOAT)        -- 42.0
-RETURN CAST('1.50' AS DECIMAL)  -- 1.50, exact with its scale
-RETURN CAST(2.345 AS DECIMAL(10, 2))  -- 2.35, rounded half away from zero
-RETURN CAST(123.4 AS DEC(4, 2)) -- NULL: more integer digits than DEC(4, 2) holds
 RETURN CAST(42 AS STRING)       -- '42'
 RETURN CAST('true' AS BOOLEAN)  -- true
 
@@ -89,7 +86,7 @@ RETURN CAST('14:30:00+05:30' AS ZONED TIME)
 RETURN CAST(42 AS LIST)         -- [42]
 ```
 
-Supported target types: `INT`/`INTEGER`, `FLOAT`, `DECIMAL`/`DEC` (bare, or with a precision from 1 to 38 and a scale up to it: `DECIMAL(10, 2)`, `DEC(5)`), `STRING`, `BOOLEAN`, `DATE`, `TIME`, `DATETIME`, `DURATION`, `ZONED DATETIME`, `ZONED TIME`, `LIST`, `LIST<type>`.
+Supported target types: `INT`/`INTEGER`, `FLOAT`, `STRING`, `BOOLEAN`, `DATE`, `TIME`, `DATETIME`, `DURATION`, `ZONED DATETIME`, `ZONED TIME`, `LIST`.
 
 ## Dynamic Parameters
 

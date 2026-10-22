@@ -1,50 +1,8 @@
 import 'dart:convert';
-import 'package:grafeo/src/types.dart';
 import 'package:grafeo/src/value.dart';
 import 'package:test/test.dart';
 
 void main() {
-  group('Decimal', () {
-    test('encodes as the tagged text with its scale', () {
-      expect(
-          encodeValue(GrafeoDecimal('1.50')), equals(r'{"$decimal":"1.50"}'));
-    });
-
-    test('decodes the tag alone as a GrafeoDecimal', () {
-      final rows = parseRows(jsonEncode([
-        {
-          'total': {r'$decimal': '0.30'}
-        }
-      ]));
-      final total = rows[0]['total'];
-      expect(total, isA<GrafeoDecimal>());
-      expect(total.toString(), equals('0.30'));
-      expect((total as GrafeoDecimal).toDouble(), closeTo(0.3, 1e-12));
-    });
-
-    test('keeps a map with other keys a map', () {
-      final rows = parseRows(jsonEncode([
-        {
-          'm': {r'$decimal': '1', 'other': 2}
-        }
-      ]));
-      expect(rows[0]['m'], equals({r'$decimal': '1', 'other': 2}));
-    });
-
-    test('compares by value whatever the scale', () {
-      expect(GrafeoDecimal('1.50'), equals(GrafeoDecimal('1.5')));
-      expect(GrafeoDecimal('1.50').hashCode,
-          equals(GrafeoDecimal('1.5').hashCode));
-      expect(GrafeoDecimal('-0.00'), equals(GrafeoDecimal('0')));
-      expect(GrafeoDecimal('1.5'), isNot(equals(GrafeoDecimal('1.05'))));
-    });
-
-    test('refuses text that is not a decimal', () {
-      expect(() => GrafeoDecimal('1.2.3'), throwsFormatException);
-      expect(() => GrafeoDecimal('1e5'), throwsFormatException);
-    });
-  });
-
   group('Duration decoding', () {
     // Durations are returned as ISO 8601 strings because Dart's Duration type
     // cannot represent calendar components (years, months, days).

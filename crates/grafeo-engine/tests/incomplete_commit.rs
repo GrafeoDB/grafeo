@@ -17,9 +17,11 @@
 //! its WAL records were written; after them, the WAL holds the whole commit,
 //! and a reopen replays it whole.
 //!
-//! Property values, labels and deletes are versioned (#412): no query or
-//! direct read sees a value, a label or a delete of a commit that is not
-//! complete, or never completes.
+//! What these tests do not cover: without the `temporal` feature, property
+//! values and labels have no versions and a deletion takes effect at once, so
+//! a query or a direct read can see the property values and labels written,
+//! and miss what was deleted, by a commit that is not complete, or never
+//! completes (#412); the property assertions below need `temporal`.
 //!
 //! These tests panic inside a commit, or run reads from another thread inside
 //! one, with the `testing-statement-injection` commit hook:
@@ -28,13 +30,15 @@
 //! cargo test -p grafeo-engine --all-features --test incomplete_commit
 //! ```
 
-#![cfg(all(feature = "testing-statement-injection", feature = "gql"))]
+#![cfg(all(
+    feature = "testing-statement-injection",
+    feature = "lpg",
+    feature = "gql"
+))]
 
 use std::sync::{Arc, mpsc};
 
-use grafeo_common::testing::commit_hook::{
-    after_next_commit_epoch, after_next_commit_logged, after_next_commit_stamped,
-};
+use grafeo_common::testing::commit_hook::{after_next_commit_logged, after_next_commit_stamped};
 use grafeo_common::types::{EdgeId, EpochId, NodeId, Value};
 use grafeo_engine::GrafeoDB;
 
@@ -88,7 +92,7 @@ struct Seen {
     epoch: EpochId,
     gus: bool,
     knows: bool,
-    /// Alix's city.
+    /// Alix's city, with `temporal` (property values have versions).
     city: Option<Value>,
     /// The nodes and edges `iter_nodes` and `iter_edges` return.
     iterated: (usize, usize),
@@ -97,24 +101,22 @@ struct Seen {
 }
 
 fn seen(db: &GrafeoDB, alix: NodeId, gus: NodeId, knows: EdgeId) -> Seen {
-    let city = db
-        .get_node(alix)
-        .unwrap()
-        .and_then(|node| node.get_property("city").cloned());
+    let city = if cfg!(feature = "temporal") {
+        db.get_node(alix)
+            .and_then(|node| node.get_property("city").cloned())
+    } else {
+        None
+    };
     Seen {
-        nodes: db.node_count().unwrap(),
-        edges: db.edge_count().unwrap(),
+        nodes: db.node_count(),
+        edges: db.edge_count(),
         epoch: db.current_epoch(),
-        gus: db.get_node(gus).unwrap().is_some(),
-        knows: db.get_edge(knows).unwrap().is_some(),
+        gus: db.get_node(gus).is_some(),
+        knows: db.get_edge(knows).is_some(),
         city,
-        iterated: (
-            db.iter_nodes().unwrap().count(),
-            db.iter_edges().unwrap().count(),
-        ),
+        iterated: (db.iter_nodes().count(), db.iter_edges().count()),
         no_edges_warning: db
             .validate()
-            .unwrap()
             .warnings
             .iter()
             .any(|warning| warning.code == "NO_EDGES"),
@@ -135,7 +137,9 @@ fn after_a_commit_that_does_not_complete_no_commit_publishes_part_of_it() {
         [Value::from("Alix")],
         "the failed commit's write is not visible"
     );
-    assert_eq!(city_of_alix(&db), Value::Null, "nor its property value");
+    if cfg!(feature = "temporal") {
+        assert_eq!(city_of_alix(&db), Value::Null, "nor its property value");
+    }
     assert_eq!(
         seen(&db, alix, gus, knows),
         Seen {
@@ -435,11 +439,11 @@ fn an_import_waiting_for_a_commit_that_fails_refuses() {
                 }
             }
         }
-        if db.node_count().unwrap() != 1 || db.edge_count().unwrap() != 0 {
+        if db.node_count() != 1 || db.edge_count() != 0 {
             failures.push(format!(
                 "{name}: the import added {} nodes and {} edges",
-                db.node_count().unwrap() - 1,
-                db.edge_count().unwrap()
+                db.node_count() - 1,
+                db.edge_count()
             ));
         }
         #[cfg(feature = "triple-store")]
@@ -575,7 +579,7 @@ fn a_memory_pressure_merge_never_folds_a_failed_commit_into_the_base() {
         [Value::from("Alix")],
         "the merge did not fold the failed commit into the base"
     );
-    assert_eq!(db.node_count().unwrap(), 1);
+    assert_eq!(db.node_count(), 1);
 }
 
 /// Direct reads from another thread inside a commit, once its versions are
@@ -635,7 +639,7 @@ fn direct_reads_see_a_commit_only_once_it_is_complete() {
             epoch: after.epoch,
             gus: true,
             knows: true,
-            city: Some(Value::from("Paris")),
+            city: cfg!(feature = "temporal").then(|| Value::from("Paris")),
             iterated: (2, 1),
             no_edges_warning: false,
         },
@@ -647,10 +651,8 @@ fn direct_reads_see_a_commit_only_once_it_is_complete() {
 /// store, which holds the commit's stamped part: every checkpoint, save,
 /// backup and copy fails with the error of the failed commit and leaves the
 /// file as it was. `close()` fails the same way, keeps the WAL and releases
-/// the file; a reopen shows the database with what the WAL holds, and
-/// commits again. The failed commit wrote its group to the WAL before it
-/// stamped its versions, so the WAL holds it whole: the reopen has it, as
-/// for any commit whose outcome a failure left open (#498).
+/// the file; a reopen shows the database without the failed commit, with
+/// what the WAL holds, and commits again.
 #[cfg(all(feature = "wal", feature = "grafeo-file"))]
 #[test]
 fn a_failed_commit_is_never_checkpointed_saved_or_copied() {
@@ -734,32 +736,15 @@ fn a_failed_commit_is_never_checkpointed_saved_or_copied() {
     let db = GrafeoDB::open(&path).unwrap();
     assert_eq!(
         people(&db),
-        [
-            Value::from("Alix"),
-            Value::from("Gus"),
-            Value::from("Vincent")
-        ],
-        "the reopened database has the WAL's commits, the failed one included"
+        [Value::from("Alix"), Value::from("Vincent")],
+        "the reopened database has the WAL's commits and nothing of the failed one"
     );
-    assert_eq!(
-        city_of_alix(&db),
-        Value::from("Paris"),
-        "the failed commit is there whole: Alix moved to Paris"
-    );
-    assert_eq!(
-        db.execute("MATCH (:Person {name: 'Alix'})-[:KNOWS]->(p) RETURN p.name")
-            .unwrap()
-            .rows()
-            .to_vec(),
-        vec![vec![Value::from("Gus")]],
-        "and knows Gus"
-    );
+    assert_eq!(city_of_alix(&db), Value::Null, "Alix never moved to Paris");
     db.execute("INSERT (:Person {name: 'Mia'})").unwrap();
     assert_eq!(
         people(&db),
         [
             Value::from("Alix"),
-            Value::from("Gus"),
             Value::from("Mia"),
             Value::from("Vincent")
         ],
@@ -814,69 +799,4 @@ fn the_checkpoint_timer_stops_after_a_failed_commit() {
         "the timer stops after its first failed attempt, it made {since}"
     );
     assert!(db.close().is_err(), "close reports the failed commit");
-}
-
-/// A panic after the commit epoch is assigned, before the WAL group is
-/// written, leaves no group to replay: nothing of the commit is published,
-/// `close()` reports it and keeps the last checkpoint, and the reopen holds
-/// none of it. Ported from PR #614 (temporaryfix).
-#[cfg(all(feature = "wal", feature = "grafeo-file"))]
-#[test]
-fn a_commit_failing_before_its_wal_records_is_not_replayed_on_reopen() {
-    let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("vienna.grafeo");
-    let alix = {
-        let db = GrafeoDB::open(&path).unwrap();
-        let alix = db
-            .create_node_with_props(&["Person"], [("name", Value::from("Alix"))])
-            .unwrap();
-        db.close().unwrap();
-        alix
-    };
-    let checkpointed = std::fs::read(&path).unwrap();
-    let db = GrafeoDB::open(&path).unwrap();
-    let before = db.current_epoch();
-    let mut session = db.session();
-    session.begin_transaction().unwrap();
-    session
-        .set_node_property(alix, "city", Value::from("Paris"))
-        .unwrap();
-    let gus = session
-        .create_node_with_props(&["Person"], [("name", Value::from("Gus"))])
-        .unwrap();
-    let knows = session.create_edge(alix, gus, "KNOWS").unwrap();
-    after_next_commit_epoch(|| panic!("injected: the commit stops before its WAL records"));
-    let unwound = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| session.commit()));
-    assert!(unwound.is_err(), "the commit panicked");
-    assert_eq!(people(&db), [Value::from("Alix")], "not published");
-    assert_eq!(db.current_epoch(), before, "no commit epoch was published");
-    assert!(
-        db.get_node(gus).unwrap().is_none(),
-        "Gus remains unpublished"
-    );
-    assert!(
-        db.get_edge(knows).unwrap().is_none(),
-        "the edge remains unpublished"
-    );
-    assert_eq!(
-        city_of_alix(&db),
-        Value::Null,
-        "Alix's city of the failed commit is not read"
-    );
-    drop(session);
-    let error = db.close().expect_err("close reports the failed commit");
-    assert_eq!(error.error_code().as_str(), "GRAFEO-T008");
-    drop(db);
-    assert_eq!(
-        std::fs::read(&path).unwrap(),
-        checkpointed,
-        "close preserved the checkpoint"
-    );
-
-    let db = GrafeoDB::open(&path).unwrap();
-    assert_eq!(people(&db), [Value::from("Alix")], "nothing was replayed");
-    assert_eq!(city_of_alix(&db), Value::Null, "Alix never moved to Paris");
-    assert_eq!(db.node_count().unwrap(), 1);
-    assert_eq!(db.edge_count().unwrap(), 0);
-    db.close().unwrap();
 }

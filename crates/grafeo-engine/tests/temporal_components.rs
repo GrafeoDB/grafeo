@@ -13,7 +13,7 @@
 //! cargo test -p grafeo-engine --all-features --test temporal_components
 //! ```
 
-#![cfg(all(feature = "gql", feature = "cypher"))]
+#![cfg(all(feature = "lpg", feature = "gql", feature = "cypher"))]
 
 use grafeo_common::types::{Timestamp, Value};
 use grafeo_engine::{GrafeoDB, Session};
@@ -79,12 +79,9 @@ fn datetime_from_epoch_millis_is_that_instant() {
             Timestamp::from_micros(3_000_019),
         ),
     ] {
-        // openCypher's datetime() is zoned: an epoch names an instant at +00:00
         assert_eq!(
             cypher(&session, &format!("RETURN {expression} AS d")),
-            [vec![Value::ZonedDatetime(
-                grafeo_common::types::ZonedDatetime::from_timestamp_offset(expected, 0)
-            )]],
+            [vec![Value::Timestamp(expected)]],
             "{expression}"
         );
     }

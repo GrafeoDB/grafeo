@@ -184,34 +184,25 @@ pub enum Error {
     /// A label was not found.
     LabelNotFound(String),
 
-    /// Type mismatch error. Boxed so the error stays small; build one with
-    /// [`Error::type_mismatch`].
-    TypeMismatch(Box<TypeMismatch>),
+    /// Type mismatch error.
+    TypeMismatch {
+        /// The expected type.
+        expected: String,
+        /// The actual type found.
+        found: String,
+    },
 
     /// Invalid value error.
     InvalidValue(String),
 
-    /// A write the graph's schema or a database rule refuses (see
-    /// [`ConstraintKind`]); displayed as an invalid value, with its own
-    /// GQLSTATUS.
-    Constraint {
-        /// What the write breaks, which decides the GQLSTATUS.
-        kind: ConstraintKind,
-        /// What was refused and why (a boxed `str`, so the error stays
-        /// small).
-        message: Box<str>,
-    },
-
     /// Transaction error.
     Transaction(TransactionError),
 
-    /// Storage error. Boxed so the error stays small: build one with
-    /// `Error::from(storage_error)`.
-    Storage(Box<StorageError>),
+    /// Storage error.
+    Storage(StorageError),
 
-    /// Query error. Boxed so the error stays small: build one with
-    /// `Error::from(query_error)` (or `?` on a `Result<_, QueryError>`).
-    Query(Box<QueryError>),
+    /// Query error.
+    Query(QueryError),
 
     /// Serialization error: input that does not decode as expected (query
     /// parameters, JSON, imports, snapshots), or a value a file cannot hold.
@@ -227,24 +218,6 @@ pub enum Error {
 
     /// Internal error (should not happen in normal operation).
     Internal(String),
-}
-
-// Every `Result` the engine, the stores and the bindings return carries an
-// `Error`: its large payloads are boxed so a `Result` of a small value stays
-// small (32 bytes on 64-bit targets, so a read's `Result<Option<Value>>`
-// is no larger than the value itself needs).
-const _: () = assert!(
-    std::mem::size_of::<Error>() <= 32,
-    "Error grew past 32 bytes: box the payload that grew it"
-);
-
-/// The types of a [`Error::TypeMismatch`].
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct TypeMismatch {
-    /// The expected type.
-    pub expected: String,
-    /// The actual type found.
-    pub found: String,
 }
 
 /// What is damaged in a file Grafeo wrote, and where (see
@@ -295,15 +268,6 @@ impl fmt::Display for Corruption {
 }
 
 impl Error {
-    /// A [`TypeMismatch`]: `expected` was wanted, `found` was given.
-    #[must_use]
-    pub fn type_mismatch(expected: impl Into<String>, found: impl Into<String>) -> Self {
-        Self::TypeMismatch(Box::new(TypeMismatch {
-            expected: expected.into(),
-            found: found.into(),
-        }))
-    }
-
     /// A [`Corruption`] described by `what`.
     #[must_use]
     pub fn corruption(what: impl Into<String>) -> Self {
@@ -371,8 +335,8 @@ impl Error {
             Error::EdgeNotFound(_) => ErrorCode::EdgeNotFound,
             Error::PropertyNotFound(_) => ErrorCode::PropertyNotFound,
             Error::LabelNotFound(_) => ErrorCode::LabelNotFound,
-            Error::TypeMismatch(_) => ErrorCode::TypeMismatch,
-            Error::InvalidValue(_) | Error::Constraint { .. } => ErrorCode::InvalidInput,
+            Error::TypeMismatch { .. } => ErrorCode::TypeMismatch,
+            Error::InvalidValue(_) => ErrorCode::InvalidInput,
             Error::Transaction(e) => e.error_code(),
             Error::Storage(e) => e.error_code(),
             Error::Query(e) => e.error_code(),
@@ -392,17 +356,13 @@ impl fmt::Display for Error {
             Error::EdgeNotFound(id) => write!(f, "{code}: Edge not found: {id}"),
             Error::PropertyNotFound(key) => write!(f, "{code}: Property not found: {key}"),
             Error::LabelNotFound(label) => write!(f, "{code}: Label not found: {label}"),
-            Error::TypeMismatch(mismatch) => {
+            Error::TypeMismatch { expected, found } => {
                 write!(
                     f,
-                    "{code}: Type mismatch: expected {}, found {}",
-                    mismatch.expected, mismatch.found
+                    "{code}: Type mismatch: expected {expected}, found {found}"
                 )
             }
             Error::InvalidValue(msg) => write!(f, "{code}: Invalid value: {msg}"),
-            Error::Constraint { message, .. } => {
-                write!(f, "{code}: Invalid value: Constraint violation: {message}")
-            }
             Error::Transaction(e) => write!(f, "{code}: {e}"),
             Error::Storage(e) => write!(f, "{code}: {e}"),
             Error::Query(e) => write!(f, "{code}: {e}"),
@@ -424,12 +384,11 @@ impl Clone for Error {
             Error::EdgeNotFound(id) => Error::EdgeNotFound(*id),
             Error::PropertyNotFound(key) => Error::PropertyNotFound(key.clone()),
             Error::LabelNotFound(label) => Error::LabelNotFound(label.clone()),
-            Error::TypeMismatch(mismatch) => Error::TypeMismatch(mismatch.clone()),
-            Error::InvalidValue(message) => Error::InvalidValue(message.clone()),
-            Error::Constraint { kind, message } => Error::Constraint {
-                kind: *kind,
-                message: message.clone(),
+            Error::TypeMismatch { expected, found } => Error::TypeMismatch {
+                expected: expected.clone(),
+                found: found.clone(),
             },
+            Error::InvalidValue(message) => Error::InvalidValue(message.clone()),
             Error::Transaction(error) => Error::Transaction(error.clone()),
             Error::Storage(error) => Error::Storage(error.clone()),
             Error::Query(error) => Error::Query(error.clone()),
@@ -446,8 +405,8 @@ impl std::error::Error for Error {
         match self {
             Error::Io(e) => Some(e),
             Error::Transaction(e) => Some(e),
-            Error::Storage(e) => Some(&**e),
-            Error::Query(e) => Some(&**e),
+            Error::Storage(e) => Some(e),
+            Error::Query(e) => Some(e),
             _ => None,
         }
     }
@@ -635,7 +594,7 @@ impl std::error::Error for StorageError {}
 
 impl From<StorageError> for Error {
     fn from(e: StorageError) -> Self {
-        Error::Storage(Box::new(e))
+        Error::Storage(e)
     }
 }
 
@@ -670,20 +629,11 @@ impl QueryError {
         }
     }
 
-    /// A semantic error (`GRAFEO-Q002`, GQLSTATUS 42000): the query text
-    /// breaks a rule beyond the grammar, such as a call with another number
-    /// of arguments.
+    /// A semantic error (`GRAFEO-Q002`): the query text itself is wrong, such
+    /// as an unknown procedure or a call with another number of arguments.
     #[must_use]
     pub fn semantic(message: impl Into<String>) -> Self {
         Self::new(QueryErrorKind::Semantic, message)
-    }
-
-    /// An invalid reference (`GRAFEO-Q002`, GQLSTATUS 42002): a name that
-    /// resolves to nothing, such as an undefined variable or an unknown
-    /// procedure.
-    #[must_use]
-    pub fn invalid_reference(message: impl Into<String>) -> Self {
-        Self::new(QueryErrorKind::InvalidReference, message)
     }
 
     /// The database or the build cannot run the statement
@@ -723,15 +673,9 @@ impl QueryError {
     pub const fn error_code(&self) -> ErrorCode {
         match self.kind {
             QueryErrorKind::Lexer | QueryErrorKind::Syntax => ErrorCode::QuerySyntax,
-            QueryErrorKind::Semantic | QueryErrorKind::InvalidReference => ErrorCode::QuerySemantic,
+            QueryErrorKind::Semantic => ErrorCode::QuerySemantic,
             QueryErrorKind::Optimization => ErrorCode::QueryOptimization,
-            QueryErrorKind::Execution
-            | QueryErrorKind::NumericOutOfRange
-            | QueryErrorKind::DivisionByZero
-            | QueryErrorKind::NegativeLimit
-            | QueryErrorKind::InvalidValueType
-            | QueryErrorKind::InvalidTimeZoneDisplacement
-            | QueryErrorKind::ValuesNotComparable => ErrorCode::QueryExecution,
+            QueryErrorKind::Execution => ErrorCode::QueryExecution,
             QueryErrorKind::Timeout => ErrorCode::QueryTimeout,
             QueryErrorKind::Unsupported => ErrorCode::QueryUnsupported,
         }
@@ -794,29 +738,8 @@ impl std::error::Error for QueryError {}
 
 impl From<QueryError> for Error {
     fn from(e: QueryError) -> Self {
-        Error::Query(Box::new(e))
+        Error::Query(e)
     }
-}
-
-/// What a refused write breaks (see [`Error::Constraint`]), which decides
-/// its GQLSTATUS.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[non_exhaustive]
-pub enum ConstraintKind {
-    /// The data does not conform to the graph's schema: its graph type (a
-    /// property of another type, a missing NOT NULL property, a label, edge
-    /// type, property or endpoint a closed graph type does not allow) or a
-    /// constraint on its labels (NOT NULL, UNIQUE, PRIMARY KEY, CHECK).
-    /// GQLSTATUS G2000, graph type violation.
-    Schema,
-    /// A node to delete without DETACH still has edges. GQLSTATUS G1001,
-    /// dependent object error: edges still exist.
-    EdgesStillExist,
-    /// A value past a limit of the database rather than of the schema: a
-    /// vector of another size than its index, a property value too large or
-    /// nested too deep. GQLSTATUS 22000, data exception; the engine reports
-    /// it as the [`Error::InvalidValue`] it is.
-    Limit,
 }
 
 /// The kind of query error.
@@ -827,16 +750,8 @@ pub enum QueryErrorKind {
     Lexer,
     /// Syntax error (parse failure).
     Syntax,
-    /// The statement breaks a rule beyond the grammar: an aggregate where
-    /// none may stand, a wrong number of arguments, a pattern MERGE or
-    /// CREATE cannot take, a name declared twice (GQLSTATUS 42000, the code
-    /// ISO/IEC 39075 gives a violated syntax or access rule that names no
-    /// condition of its own).
+    /// Semantic error (type mismatch, unknown identifier, etc.).
     Semantic,
-    /// A name that resolves to nothing: an undefined or out-of-scope
-    /// variable, or an unknown function, procedure, parameter, graph, type,
-    /// index or constraint (GQLSTATUS 42002, invalid reference).
-    InvalidReference,
     /// Optimization error.
     Optimization,
     /// Execution error.
@@ -846,22 +761,6 @@ pub enum QueryErrorKind {
     /// The database or the build cannot run the statement: a feature not
     /// built in, or a language of another graph model.
     Unsupported,
-    /// A computation left the range of its type: an integer overflow, or a
-    /// decimal of more than 38 digits (GQLSTATUS 22003).
-    NumericOutOfRange,
-    /// An integer or decimal division or modulo by zero (GQLSTATUS 22012).
-    DivisionByZero,
-    /// A negative `SKIP`, `OFFSET` or `LIMIT` value (GQLSTATUS 22G02).
-    NegativeLimit,
-    /// A value of another type than the statement needs where it is used,
-    /// such as a parameter or a procedure argument (GQLSTATUS 22G03).
-    InvalidValueType,
-    /// A time zone that is not a UTC offset (`+01:00`, `Z`, `UTC`), or one
-    /// past 14 hours (GQLSTATUS 22009).
-    InvalidTimeZoneDisplacement,
-    /// Two values a comparison cannot compare, such as a node and a number
-    /// in GQL (GQLSTATUS 22G04).
-    ValuesNotComparable,
 }
 
 impl fmt::Display for QueryErrorKind {
@@ -869,21 +768,11 @@ impl fmt::Display for QueryErrorKind {
         match self {
             QueryErrorKind::Lexer => write!(f, "lexer error"),
             QueryErrorKind::Syntax => write!(f, "syntax error"),
-            QueryErrorKind::Semantic | QueryErrorKind::InvalidReference => {
-                write!(f, "semantic error")
-            }
+            QueryErrorKind::Semantic => write!(f, "semantic error"),
             QueryErrorKind::Optimization => write!(f, "optimization error"),
             QueryErrorKind::Execution => write!(f, "execution error"),
             QueryErrorKind::Timeout => write!(f, "timeout error"),
             QueryErrorKind::Unsupported => write!(f, "unsupported"),
-            QueryErrorKind::NumericOutOfRange => write!(f, "numeric value out of range"),
-            QueryErrorKind::DivisionByZero => write!(f, "division by zero"),
-            QueryErrorKind::NegativeLimit => write!(f, "negative limit value"),
-            QueryErrorKind::InvalidValueType => write!(f, "invalid value type"),
-            QueryErrorKind::InvalidTimeZoneDisplacement => {
-                write!(f, "invalid time zone displacement value")
-            }
-            QueryErrorKind::ValuesNotComparable => write!(f, "values not comparable"),
         }
     }
 }
@@ -925,7 +814,10 @@ mod tests {
         let err = Error::NodeNotFound(crate::types::NodeId::new(42));
         assert_eq!(err.to_string(), "GRAFEO-V002: Node not found: 42");
 
-        let err = Error::type_mismatch("INT64", "STRING");
+        let err = Error::TypeMismatch {
+            expected: "INT64".to_string(),
+            found: "STRING".to_string(),
+        };
         assert_eq!(
             err.to_string(),
             "GRAFEO-V006: Type mismatch: expected INT64, found STRING"

@@ -56,7 +56,7 @@ pub fn run(opts: QueryRunOptions<'_>) -> Result<()> {
     // Parse parameters
     let param_map = parse_params(params)?;
 
-    let db = open_for(path, &query_str, lang)?;
+    let db = super::open_existing(path)?;
     let session = db.session();
 
     let result = if param_map.is_empty() {
@@ -67,8 +67,19 @@ pub fn run(opts: QueryRunOptions<'_>) -> Result<()> {
 
     let fmt: Format = format.into();
 
-    let rows = result.rows();
-    output::print_value_rows(&result.columns, rows, fmt, max_width);
+    // Format rows as strings, applying max_width truncation
+    let headers = result.columns.clone();
+    let rows: Vec<Vec<String>> = result
+        .rows()
+        .iter()
+        .map(|row| {
+            row.iter()
+                .map(|v| truncate_value(format_value(v), max_width))
+                .collect()
+        })
+        .collect();
+
+    output::print_result_table(&headers, &rows, fmt, quiet);
 
     // Print row count + optional timing footer
     if !quiet && fmt == Format::Table {
@@ -79,7 +90,7 @@ pub fn run(opts: QueryRunOptions<'_>) -> Result<()> {
         } else {
             String::new()
         };
-        eprintln!(
+        println!(
             "{} row{}{}",
             rows.len(),
             if rows.len() == 1 { "" } else { "s" },
@@ -88,45 +99,6 @@ pub fn run(opts: QueryRunOptions<'_>) -> Result<()> {
     }
 
     Ok(())
-}
-
-/// Opens the database read-only when the statement only reads, and
-/// read-write when it writes (`Session::statement_writes`), so a query leaves
-/// the file as it was and does not migrate a 0.5.x database.
-fn open_for(path: &Path, query: &str, lang: QueryLanguage) -> Result<grafeo_engine::GrafeoDB> {
-    let db = super::open_existing_read_only(path)?;
-    // A language this build lacks fails when it runs, with its own message.
-    let Some(language) = engine_language(lang) else {
-        return Ok(db);
-    };
-    if db
-        .session()
-        .statement_writes(query, language)
-        .context("Query execution failed")?
-    {
-        drop(db);
-        return super::open_existing(path);
-    }
-    Ok(db)
-}
-
-/// The engine's name of `lang`, when this build has it.
-fn engine_language(lang: QueryLanguage) -> Option<&'static str> {
-    match lang {
-        QueryLanguage::Gql => Some("gql"),
-        #[cfg(feature = "cypher")]
-        QueryLanguage::Cypher => Some("cypher"),
-        #[cfg(feature = "sparql")]
-        QueryLanguage::Sparql => Some("sparql"),
-        #[cfg(feature = "sql-pgq")]
-        QueryLanguage::Sql => Some("sql"),
-        #[cfg(not(feature = "cypher"))]
-        QueryLanguage::Cypher => None,
-        #[cfg(not(feature = "sparql"))]
-        QueryLanguage::Sparql => None,
-        #[cfg(not(feature = "sql-pgq"))]
-        QueryLanguage::Sql => None,
-    }
 }
 
 /// Execute a query without parameters.
@@ -168,8 +140,9 @@ fn execute_query_with_params(
 ) -> Result<grafeo_engine::database::QueryResult> {
     let result = match lang {
         QueryLanguage::Gql => session.execute_with_params(query, params),
+        // Cypher with params falls back to GQL execute_with_params
         #[cfg(feature = "cypher")]
-        QueryLanguage::Cypher => session.execute_cypher_with_params(query, params),
+        QueryLanguage::Cypher => session.execute_with_params(query, params),
         #[cfg(not(feature = "cypher"))]
         QueryLanguage::Cypher => {
             anyhow::bail!("Cypher support not enabled (compile with --features cypher)")
@@ -225,9 +198,80 @@ fn parse_value(s: &str) -> Value {
     Value::from(s)
 }
 
+/// Truncate a string to `max_width` characters, appending `...` if truncated.
+fn truncate_value(s: String, max_width: Option<usize>) -> String {
+    match max_width {
+        Some(w) if s.len() > w && w > 3 => {
+            let mut truncated = s;
+            truncated.truncate(w - 3);
+            truncated.push_str("...");
+            truncated
+        }
+        _ => s,
+    }
+}
+
+/// Format a Value for display.
+pub fn format_value(v: &Value) -> String {
+    match v {
+        Value::Null => "null".to_string(),
+        Value::Bool(b) => b.to_string(),
+        Value::Int64(i) => i.to_string(),
+        Value::Float64(f) => format!("{f}"),
+        Value::String(s) => format!("\"{s}\""),
+        Value::List(items) => {
+            let inner: Vec<String> = items.iter().map(format_value).collect();
+            format!("[{}]", inner.join(", "))
+        }
+        Value::Map(entries) => {
+            let inner: Vec<String> = entries
+                .iter()
+                .map(|(k, v)| format!("{}: {}", k, format_value(v)))
+                .collect();
+            format!("{{{}}}", inner.join(", "))
+        }
+        Value::Bytes(b) => format!("<{} bytes>", b.len()),
+        other => format!("{other:?}"),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // --- truncate_value ---
+
+    #[test]
+    fn test_truncate_none_returns_original() {
+        assert_eq!(truncate_value("hello world".into(), None), "hello world");
+    }
+
+    #[test]
+    fn test_truncate_short_string_unchanged() {
+        assert_eq!(truncate_value("hi".into(), Some(10)), "hi");
+    }
+
+    #[test]
+    fn test_truncate_exact_width_unchanged() {
+        assert_eq!(truncate_value("12345".into(), Some(5)), "12345");
+    }
+
+    #[test]
+    fn test_truncate_long_string() {
+        assert_eq!(truncate_value("hello world".into(), Some(8)), "hello...");
+    }
+
+    #[test]
+    fn test_truncate_width_too_small_returns_original() {
+        // When max_width <= 3, can't fit "...", so return original
+        assert_eq!(truncate_value("hello".into(), Some(3)), "hello");
+        assert_eq!(truncate_value("hello".into(), Some(2)), "hello");
+    }
+
+    #[test]
+    fn test_truncate_width_4() {
+        assert_eq!(truncate_value("hello".into(), Some(4)), "h...");
+    }
 
     // --- parse_value ---
 
@@ -295,5 +339,48 @@ mod tests {
             Some(Value::String(s)) => assert_eq!(s.as_str(), "a=b"),
             other => panic!("expected String(\"a=b\"), got {other:?}"),
         }
+    }
+
+    // --- format_value ---
+
+    #[test]
+    fn test_format_value_null() {
+        assert_eq!(format_value(&Value::Null), "null");
+    }
+
+    #[test]
+    fn test_format_value_bool() {
+        assert_eq!(format_value(&Value::Bool(true)), "true");
+        assert_eq!(format_value(&Value::Bool(false)), "false");
+    }
+
+    #[test]
+    fn test_format_value_int() {
+        assert_eq!(format_value(&Value::Int64(42)), "42");
+        assert_eq!(format_value(&Value::Int64(-1)), "-1");
+    }
+
+    #[test]
+    fn test_format_value_float() {
+        assert_eq!(format_value(&Value::Float64(1.5)), "1.5");
+    }
+
+    #[test]
+    fn test_format_value_string() {
+        assert_eq!(format_value(&Value::from("hello")), "\"hello\"");
+    }
+
+    #[test]
+    fn test_format_value_list() {
+        let list = Value::List(vec![Value::Int64(1), Value::Int64(2), Value::Int64(3)].into());
+        assert_eq!(format_value(&list), "[1, 2, 3]");
+    }
+
+    #[test]
+    fn test_format_value_bytes() {
+        assert_eq!(
+            format_value(&Value::Bytes(vec![0, 1, 2, 3, 4].into())),
+            "<5 bytes>"
+        );
     }
 }

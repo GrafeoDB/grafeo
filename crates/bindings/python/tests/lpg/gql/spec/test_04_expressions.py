@@ -5,7 +5,6 @@ CASE, NULLIF, COALESCE, CAST, LET IN END, list comprehensions, reduce,
 literals, parameters, property access, SESSION_USER.
 """
 
-from decimal import Decimal
 
 # =============================================================================
 # Operators (sec 20)
@@ -221,11 +220,10 @@ class TestLiterals:
         result = list(db.execute("MATCH (n:N) RETURN 0o77 AS r"))
         assert result[0]["r"] == 63
 
-    def test_decimal_literal(self, db):
-        # A number with a point is an exact decimal in GQL (#610).
+    def test_float_decimal(self, db):
         db.create_node(["N"], {"v": 1})
         result = list(db.execute("MATCH (n:N) RETURN 3.14 AS r"))
-        assert result[0]["r"] == Decimal("3.14")
+        assert abs(result[0]["r"] - 3.14) < 0.001
 
     def test_float_scientific(self, db):
         db.create_node(["N"], {"v": 1})

@@ -50,7 +50,12 @@ impl Timestamp {
     /// Returns the current time as a timestamp.
     #[must_use]
     pub fn now() -> Self {
-        Self::from_micros(crate::clock::unix_micros())
+        let duration = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or(StdDuration::ZERO);
+        // reason: current wall-clock micros since epoch fit i64 for ~292,000 years
+        #[allow(clippy::cast_possible_truncation)]
+        Self::from_micros(duration.as_micros() as i64)
     }
 
     /// Returns the timestamp as microseconds since the Unix epoch.
@@ -200,27 +205,6 @@ impl Timestamp {
 impl fmt::Debug for Timestamp {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "Timestamp({}μs)", self.0)
-    }
-}
-
-impl Timestamp {
-    /// The date and time of day as a LOCAL DATETIME writes them, without a
-    /// zone: `2024-03-15T10:00:00`, with the fraction of a second only when
-    /// there is one (`2024-03-15T10:00:00.25`).
-    #[must_use]
-    pub fn to_local_text(&self) -> String {
-        let date = self.to_date();
-        let time = self.to_time();
-        let (year, month, day) = (date.year(), date.month(), date.day());
-        let (h, m, s) = (time.hour(), time.minute(), time.second());
-        let text = format!("{year:04}-{month:02}-{day:02}T{h:02}:{m:02}:{s:02}");
-        match self.0.rem_euclid(1_000_000) {
-            0 => text,
-            micros => {
-                let fraction = format!("{micros:06}");
-                format!("{text}.{}", fraction.trim_end_matches('0'))
-            }
-        }
     }
 }
 

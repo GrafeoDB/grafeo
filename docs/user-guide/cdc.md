@@ -85,9 +85,6 @@ Once CDC is enabled, every mutation records a `ChangeEvent` with:
 | `edge_type`     | Edges: the type, on create and delete                                       |
 | `src_id`        | Edges: the source node, on create and delete                                |
 | `dst_id`        | Edges: the destination node, on create and delete                           |
-| `deleted_with`  | Edges: on a delete by `DETACH DELETE` or `detach_delete_node`, the node deleted with it |
-
-A node deleted with its edges is one change: its commit reports a Delete event for each edge, naming the node in `deleted_with`, followed by the node's own Delete event. An edge deleted on its own has no `deleted_with`. `changes_between` returns events in commit order: by epoch, and within a commit in the order its writes were applied.
 
 A field that does not apply is `None` (Rust, Python) or `null` (Node.js). Adding
 or removing a label is an `Update` event with `labels` and `before_labels`.
@@ -179,5 +176,5 @@ profiles include it. The `edge` (WASM) profile does not.
 
 ```toml
 [dependencies]
-grafeo = { version = "0.6", features = ["ai"] }  # includes cdc
+grafeo = { version = "0.5", features = ["ai"] }  # includes cdc
 ```

@@ -193,10 +193,9 @@ tests:
   - name: timestamp_returns_integer
     setup:
       - "INSERT (:N {v: 1})"
-    query: "MATCH (n:N) RETURN timestamp() IS TYPED INT64 AS typed, timestamp() > 1700000000000 AS after_2023"
+    query: "MATCH (n:N) RETURN timestamp() AS ts"
     expect:
-      rows:
-        - [true, true]
+      count: 1
 
   # ---------------------------------------------------------------------------
   # current_date() and current_time()

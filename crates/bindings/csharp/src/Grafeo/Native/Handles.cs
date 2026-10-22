@@ -61,37 +61,3 @@ internal sealed class ResultHandle : SafeHandle
         return true;
     }
 }
-
-/// <summary>
-/// Safe handle wrapping a <c>GrafeoGraph*</c>.
-/// Frees the handle on release.
-/// </summary>
-internal sealed class GraphHandle : SafeHandle
-{
-    public GraphHandle() : base(nint.Zero, ownsHandle: true) { }
-
-    public override bool IsInvalid => handle == nint.Zero;
-
-    protected override bool ReleaseHandle()
-    {
-        NativeMethods.grafeo_free_graph(handle);
-        return true;
-    }
-}
-
-/// <summary>
-/// Safe handle wrapping a <c>GrafeoAsOf*</c> view.
-/// Frees the view on release.
-/// </summary>
-internal sealed class AsOfHandle : SafeHandle
-{
-    public AsOfHandle() : base(nint.Zero, ownsHandle: true) { }
-
-    public override bool IsInvalid => handle == nint.Zero;
-
-    protected override bool ReleaseHandle()
-    {
-        NativeMethods.grafeo_free_as_of(handle);
-        return true;
-    }
-}

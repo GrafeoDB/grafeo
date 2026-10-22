@@ -4,20 +4,19 @@
 
 #[cfg(feature = "algos")]
 pub mod procedure_call;
-#[cfg(feature = "gql")]
+#[cfg(all(feature = "gql", feature = "lpg"))]
 pub mod stream;
 #[cfg(all(feature = "algos", feature = "gql"))]
 pub mod user_procedure;
 
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use crate::database::QueryResult;
-use grafeo_common::clock::Instant;
 use grafeo_common::grafeo_debug_span;
 use grafeo_common::types::{LogicalType, Value};
-use grafeo_common::utils::error::{ConstraintKind, Error, QueryError, Result};
-use grafeo_core::execution::operators::{Operator, OperatorError, ReadCounter, WriteCounter};
+use grafeo_common::utils::error::{Error, QueryError, Result};
+use grafeo_core::execution::operators::{Operator, OperatorError, WriteCounter};
 use grafeo_core::execution::{DataChunk, Pipeline};
 
 /// Executes a physical operator tree and collects results.
@@ -32,8 +31,6 @@ pub struct Executor {
     query_timeout: Option<Duration>,
     /// Counts the statement's writes, for the result's counters.
     write_counter: Option<Arc<WriteCounter>>,
-    /// Counts the rows the statement reads, for the result's `rows_scanned`.
-    read_counter: Option<Arc<ReadCounter>>,
 }
 
 impl Executor {
@@ -46,7 +43,6 @@ impl Executor {
             deadline: None,
             query_timeout: None,
             write_counter: None,
-            read_counter: None,
         }
     }
 
@@ -60,7 +56,6 @@ impl Executor {
             deadline: None,
             query_timeout: None,
             write_counter: None,
-            read_counter: None,
         }
     }
 
@@ -73,7 +68,6 @@ impl Executor {
             deadline: None,
             query_timeout: None,
             write_counter: None,
-            read_counter: None,
         }
     }
 
@@ -98,27 +92,17 @@ impl Executor {
         self
     }
 
-    /// Reports the rows `counter` counts as the result's `rows_scanned`.
-    #[must_use]
-    pub fn with_read_counter(mut self, counter: Arc<ReadCounter>) -> Self {
-        self.read_counter = Some(counter);
-        self
-    }
-
-    /// The result, with the counters of the writes it made and the rows it
-    /// read.
+    /// The result, with the counters of the writes it made.
     fn with_counters(&self, mut result: QueryResult) -> QueryResult {
         if let Some(counter) = &self.write_counter {
             result.counters = counter.counters();
-        }
-        if let Some(counter) = &self.read_counter {
-            result.rows_scanned = Some(counter.get());
         }
         result
     }
 
     /// Checks whether the deadline has been exceeded.
     fn check_deadline(&self) -> Result<()> {
+        #[cfg(not(target_arch = "wasm32"))]
         if let Some(deadline) = self.deadline
             && Instant::now() >= deadline
         {
@@ -130,7 +114,7 @@ impl Executor {
     /// The error of a query that ran past its deadline, naming the limit
     /// when the executor knows it.
     fn timeout_error(&self) -> Error {
-        Error::from(match self.query_timeout {
+        Error::Query(match self.query_timeout {
             Some(d) => QueryError::timeout_with_limit(d),
             None => QueryError::timeout(),
         })
@@ -346,34 +330,28 @@ impl Default for Executor {
 /// an internal error, and an error raised below the operator keeps its own.
 pub(crate) fn convert_operator_error(err: OperatorError) -> Error {
     match err {
-        OperatorError::TypeMismatch { expected, found } => Error::type_mismatch(expected, found),
+        OperatorError::TypeMismatch { expected, found } => Error::TypeMismatch { expected, found },
         // A column an operator expects and its input lacks: the planner
         // and the operator disagree, a bug.
         OperatorError::ColumnNotFound(name) => Error::Internal(format!("Column not found: {name}")),
-        OperatorError::Execution(msg) => Error::from(QueryError::new(
+        OperatorError::Execution(msg) => Error::Query(QueryError::new(
             grafeo_common::utils::error::QueryErrorKind::Execution,
             msg,
         )),
         OperatorError::Internal(msg) => Error::Internal(msg),
         OperatorError::Wrapped(error) => *error,
-        // A value past a limit stays the invalid value it was; a write the
-        // schema refuses carries its kind to its GQLSTATUS.
-        OperatorError::ConstraintViolation(ConstraintKind::Limit, message) => {
-            Error::InvalidValue(format!("Constraint violation: {message}"))
+        OperatorError::ConstraintViolation(msg) => {
+            Error::InvalidValue(format!("Constraint violation: {msg}"))
         }
-        OperatorError::ConstraintViolation(kind, message) => Error::Constraint {
-            kind,
-            message: message.into(),
-        },
         OperatorError::InvalidValue(msg) => Error::InvalidValue(msg),
         OperatorError::WriteConflict(msg) => {
             Error::Transaction(grafeo_common::utils::error::TransactionError::WriteConflict(msg))
         }
-        OperatorError::LimitExceeded(msg) => Error::from(QueryError::new(
+        OperatorError::LimitExceeded(msg) => Error::Query(QueryError::new(
             grafeo_common::utils::error::QueryErrorKind::Execution,
             msg,
         )),
-        OperatorError::Timeout => Error::from(QueryError::timeout()),
+        OperatorError::Timeout => Error::Query(QueryError::timeout()),
         _ => Error::Internal(format!("{err}")),
     }
 }
@@ -674,13 +652,7 @@ mod tests {
             expected: "Int64".to_string(),
             found: "String".to_string(),
         });
-        let Error::TypeMismatch(mismatch) = &err else {
-            panic!("a type mismatch, got {err:?}");
-        };
-        assert_eq!(
-            (mismatch.expected.as_str(), mismatch.found.as_str()),
-            ("Int64", "String")
-        );
+        assert!(matches!(err, Error::TypeMismatch { .. }));
 
         let err = convert_operator_error(OperatorError::ColumnNotFound("col_x".to_string()));
         assert!(matches!(err, Error::Internal(_)));
@@ -700,29 +672,9 @@ mod tests {
             "kept as it is: {err}"
         );
 
-        // A constraint keeps its code and the text it had as an invalid
-        // value; its kind decides the GQLSTATUS, and a limit stays an
-        // invalid value.
-        for (kind, status) in [
-            (ConstraintKind::Schema, "G2000"),
-            (ConstraintKind::EdgesStillExist, "G1001"),
-            (ConstraintKind::Limit, "22000"),
-        ] {
-            let err = convert_operator_error(OperatorError::ConstraintViolation(
-                kind,
-                "unique".to_string(),
-            ));
-            if kind == ConstraintKind::Limit {
-                assert!(matches!(err, Error::InvalidValue(_)));
-            } else {
-                assert!(matches!(err, Error::Constraint { kind: k, .. } if k == kind));
-            }
-            assert_eq!(
-                err.to_string(),
-                "GRAFEO-V001: Invalid value: Constraint violation: unique"
-            );
-            assert_eq!(grafeo_common::utils::GqlStatus::from(&err).as_str(), status);
-        }
+        let err = convert_operator_error(OperatorError::ConstraintViolation("unique".to_string()));
+        assert!(matches!(err, Error::InvalidValue(_)));
+        assert!(err.to_string().contains("unique"));
 
         let err =
             convert_operator_error(OperatorError::WriteConflict("concurrent write".to_string()));

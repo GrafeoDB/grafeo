@@ -1,9 +1,12 @@
-//! Integration tests for versioned property reads.
+//! Integration tests for temporal (versioned) property storage.
 //!
-//! A database that keeps history (a retention window, here forever) answers
-//! `get_node_at_epoch()` and `execute_at_epoch()` with the values of the
-//! epoch asked for, not just the current ones, in every build (the
-//! `temporal` feature is a no-op since 0.6.0).
+//! These tests validate that when the `temporal` feature is enabled,
+//! `get_node_at_epoch()` and `execute_at_epoch()` return correct
+//! historical property values, not just current ones.
+//!
+//! When `temporal` is disabled, these tests are skipped.
+
+#![cfg(feature = "temporal")]
 
 use grafeo_common::types::Value;
 use grafeo_engine::GrafeoDB;
@@ -12,13 +15,8 @@ use grafeo_engine::GrafeoDB;
 // Helpers
 // ---------------------------------------------------------------------------
 
-/// A database that keeps its history.
 fn setup_db() -> GrafeoDB {
-    GrafeoDB::with_config(
-        grafeo_engine::Config::in_memory()
-            .with_history_retention(grafeo_engine::HistoryRetention::Forever),
-    )
-    .unwrap()
+    GrafeoDB::new_in_memory()
 }
 
 // ---------------------------------------------------------------------------
@@ -199,9 +197,7 @@ fn test_temporal_node_history_distinct_properties() {
     session.commit().unwrap();
 
     // get_node_history should return versions with distinct property snapshots
-    let history = db
-        .get_node_history(grafeo_common::types::NodeId::new(0))
-        .unwrap();
+    let history = db.get_node_history(grafeo_common::types::NodeId::new(0));
     assert!(!history.is_empty(), "node should have history");
 }
 
@@ -276,21 +272,24 @@ fn test_temporal_snapshot_roundtrip() {
 
     // Current state preserved (via direct API since GQL match-pattern
     // property filtering with temporal snapshots is a known limitation)
-    let node = db2
-        .get_node_at_epoch(grafeo_common::types::NodeId::new(0), db2.current_epoch())
-        .unwrap();
+    let node = db2.get_node_at_epoch(grafeo_common::types::NodeId::new(0), db2.current_epoch());
     assert!(node.is_some(), "node should exist after snapshot import");
     let status = node.unwrap().get_property("status").cloned();
     assert_eq!(status, Some(Value::String("degraded".into())));
 
-    // A snapshot holds each value once, as of the export: the import keeps
-    // no history, continues at the export's epoch, and refuses a read of an
-    // earlier one instead of answering it with the values of now.
-    assert!(db2.current_epoch() >= db.current_epoch());
-    let refused = session2
+    // Historical state preserved
+    let result = session2
         .execute_at_epoch("MATCH (s:Server) RETURN s.status", epoch_v1)
-        .unwrap_err();
-    assert!(refused.to_string().contains("not retained"), "{refused}");
+        .unwrap();
+    // At epoch_v1, node was imported with its full version history,
+    // so status should be 'healthy'
+    if !result.rows().is_empty() {
+        assert_eq!(
+            result.rows()[0][0],
+            Value::String("healthy".into()),
+            "snapshot roundtrip should preserve temporal property history"
+        );
+    }
 }
 
 #[test]
@@ -322,24 +321,18 @@ fn test_temporal_snapshot_query_roundtrip() {
         .unwrap();
     assert_eq!(result.rows()[0][0], Value::String("degraded".into()));
 
-    // The history stays with the database, not the snapshot (see
-    // `test_temporal_snapshot_roundtrip`); the source still answers.
-    assert!(
-        session2
-            .execute_at_epoch(
-                "MATCH (s:Server {name: 'web-01'}) RETURN s.status",
-                epoch_v1,
-            )
-            .is_err()
-    );
-    let result = db
-        .session()
+    // Historical state preserved
+    let result = session2
         .execute_at_epoch(
             "MATCH (s:Server {name: 'web-01'}) RETURN s.status",
             epoch_v1,
         )
         .unwrap();
-    assert_eq!(result.rows()[0][0], Value::String("healthy".into()));
+    assert_eq!(
+        result.rows()[0][0],
+        Value::String("healthy".into()),
+        "snapshot roundtrip should preserve temporal property history"
+    );
 }
 
 #[test]

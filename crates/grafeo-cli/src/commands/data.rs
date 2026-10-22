@@ -12,12 +12,11 @@ use grafeo_common::utils::hash::FxHashMap;
 use grafeo_engine::{GrafeoDB, Session};
 
 use self::format::Record;
-use crate::output::{self, Format};
+use crate::output;
 use crate::{DataCommands, OutputFormat};
 
 /// Run data commands.
-pub fn run(cmd: DataCommands, format: OutputFormat, quiet: bool) -> Result<()> {
-    let fmt: Format = format.into();
+pub fn run(cmd: DataCommands, _format: OutputFormat, quiet: bool) -> Result<()> {
     match cmd {
         DataCommands::Dump {
             path,
@@ -26,7 +25,7 @@ pub fn run(cmd: DataCommands, format: OutputFormat, quiet: bool) -> Result<()> {
         } => {
             let format_name = export_format.as_deref().unwrap_or("json");
 
-            let (nodes, edges) = match format_name {
+            match format_name {
                 "json" | "jsonl" => dump_jsonl(&path, &out, quiet)?,
                 "arrow" | "arrow-ipc" | "ipc" => dump_arrow(&path, &out, quiet)?,
                 "gexf" => dump_gexf(&path, &out, quiet)?,
@@ -37,27 +36,9 @@ pub fn run(cmd: DataCommands, format: OutputFormat, quiet: bool) -> Result<()> {
                          Supported formats: json, arrow, gexf, graphml"
                     );
                 }
-            };
-            output::print_record(
-                &[
-                    ("output", out.display().to_string().into()),
-                    ("nodes", nodes.into()),
-                    ("edges", edges.into()),
-                ],
-                fmt,
-            );
+            }
         }
-        DataCommands::Load { input, path } => {
-            let (nodes, edges) = load_jsonl(&input, &path, quiet)?;
-            output::print_record(
-                &[
-                    ("database", path.display().to_string().into()),
-                    ("nodes", nodes.into()),
-                    ("edges", edges.into()),
-                ],
-                fmt,
-            );
-        }
+        DataCommands::Load { input, path } => load_jsonl(&input, &path, quiet)?,
     }
 
     Ok(())
@@ -80,8 +61,7 @@ pub fn run(cmd: DataCommands, format: OutputFormat, quiet: bool) -> Result<()> {
 /// commits, its transaction also holds its own bookkeeping and the log
 /// records of everything it wrote, which is about as much again as the
 /// values it loads (measured in `load_holds_the_file_one_line_at_a_time`).
-/// Loads `input` into the database at `path`: the nodes and edges added.
-fn load_jsonl(input: &Path, path: &Path, quiet: bool) -> Result<(usize, usize)> {
+fn load_jsonl(input: &Path, path: &Path, quiet: bool) -> Result<()> {
     let checked = check_file(input)?;
     let db = if path.exists() {
         super::open_existing(path)?
@@ -97,7 +77,7 @@ fn load_jsonl(input: &Path, path: &Path, quiet: bool) -> Result<(usize, usize)> 
         ),
         quiet,
     );
-    Ok((nodes, edges))
+    Ok(())
 }
 
 /// What [`check_file`] learned about a file.
@@ -333,18 +313,14 @@ fn for_each_record(input: &Path, mut each: impl FnMut(u64, Record) -> Result<()>
     }
 }
 
-fn dump_jsonl(
-    path: &std::path::Path,
-    out: &std::path::Path,
-    quiet: bool,
-) -> Result<(usize, usize)> {
-    let db = super::open_existing_read_only(path)?;
+fn dump_jsonl(path: &std::path::Path, out: &std::path::Path, quiet: bool) -> Result<()> {
+    let db = super::open_existing(path)?;
     let file = std::fs::File::create(out)
         .with_context(|| format!("Failed to create output file: {}", out.display()))?;
     let mut writer = std::io::BufWriter::new(file);
 
     let mut node_count = 0usize;
-    for node in db.iter_nodes()? {
+    for node in db.iter_nodes() {
         let labels: Vec<String> = node.labels.iter().map(|s| s.to_string()).collect();
         let properties = format::write_properties(&node.properties.to_btree_map())
             .map_err(|reason| anyhow!("node {}: {reason}", node.id.0))?;
@@ -360,7 +336,7 @@ fn dump_jsonl(
     }
 
     let mut edge_count = 0usize;
-    for edge in db.iter_edges()? {
+    for edge in db.iter_edges() {
         let properties = format::write_properties(&edge.properties.to_btree_map())
             .map_err(|reason| anyhow!("edge {}: {reason}", edge.id.0))?;
         let record = serde_json::json!({
@@ -386,53 +362,27 @@ fn dump_jsonl(
         ),
         quiet,
     );
-    Ok((node_count, edge_count))
-}
-
-/// The structural columns of the Arrow dump's nodes, before their properties.
-#[cfg(feature = "arrow-export")]
-const NODE_COLUMNS: &[&str] = &["_id", "_labels"];
-
-/// The structural columns of the Arrow dump's edges, before their properties.
-#[cfg(feature = "arrow-export")]
-const EDGE_COLUMNS: &[&str] = &["_id", "_source", "_target", "_type"];
-
-/// The property columns of the Arrow dump, sorted: every key in `keys` but
-/// the `structural` columns, which a property of the same name would repeat
-/// (#254; the engine's Arrow export leaves them out the same way).
-#[cfg(feature = "arrow-export")]
-fn property_columns<'a>(
-    keys: impl Iterator<Item = &'a grafeo_common::types::PropertyKey>,
-    structural: &[&str],
-) -> std::collections::BTreeSet<grafeo_common::types::PropertyKey> {
-    keys.filter(|key| !structural.contains(&key.as_str()))
-        .cloned()
-        .collect()
+    Ok(())
 }
 
 #[cfg(feature = "arrow-export")]
-fn dump_arrow(
-    path: &std::path::Path,
-    out: &std::path::Path,
-    quiet: bool,
-) -> Result<(usize, usize)> {
+fn dump_arrow(path: &std::path::Path, out: &std::path::Path, quiet: bool) -> Result<()> {
     use grafeo_common::LogicalType;
     use grafeo_common::types::Value;
 
-    let db = super::open_existing_read_only(path)?;
+    let db = super::open_existing(path)?;
 
     // Build nodes RecordBatch
-    let nodes: Vec<_> = db.iter_nodes()?.collect();
-    let property_keys = property_columns(
-        nodes
-            .iter()
-            .flat_map(|node| node.properties.iter().map(|(key, _)| key)),
-        NODE_COLUMNS,
-    );
+    let nodes: Vec<_> = db.iter_nodes().collect();
+    let mut property_keys = std::collections::BTreeSet::new();
+    for node in &nodes {
+        for (key, _) in node.properties.iter() {
+            property_keys.insert(key.clone());
+        }
+    }
 
-    let node_columns: Vec<String> = NODE_COLUMNS
-        .iter()
-        .map(|s| (*s).to_string())
+    let node_columns: Vec<String> = std::iter::once("_id".to_string())
+        .chain(std::iter::once("_labels".to_string()))
         .chain(property_keys.iter().map(|k| k.as_str().to_string()))
         .collect();
 
@@ -458,15 +408,15 @@ fn dump_arrow(
         .collect();
 
     // Build edges RecordBatch
-    let edges: Vec<_> = db.iter_edges()?.collect();
-    let edge_prop_keys = property_columns(
-        edges
-            .iter()
-            .flat_map(|edge| edge.properties.iter().map(|(key, _)| key)),
-        EDGE_COLUMNS,
-    );
+    let edges: Vec<_> = db.iter_edges().collect();
+    let mut edge_prop_keys = std::collections::BTreeSet::new();
+    for edge in &edges {
+        for (key, _) in edge.properties.iter() {
+            edge_prop_keys.insert(key.clone());
+        }
+    }
 
-    let edge_columns: Vec<String> = EDGE_COLUMNS
+    let edge_columns: Vec<String> = ["_id", "_source", "_target", "_type"]
         .iter()
         .map(|s| (*s).to_string())
         .chain(edge_prop_keys.iter().map(|k| k.as_str().to_string()))
@@ -548,25 +498,21 @@ fn dump_arrow(
         ),
         quiet,
     );
-    Ok((node_count, edge_count))
+    Ok(())
 }
 
 #[cfg(not(feature = "arrow-export"))]
-fn dump_arrow(
-    _path: &std::path::Path,
-    _out: &std::path::Path,
-    _quiet: bool,
-) -> Result<(usize, usize)> {
+fn dump_arrow(_path: &std::path::Path, _out: &std::path::Path, _quiet: bool) -> Result<()> {
     anyhow::bail!(
         "Arrow export is not enabled.\n\
          Rebuild with --features arrow-export to enable Arrow IPC export."
     )
 }
 
-fn dump_gexf(path: &std::path::Path, out: &std::path::Path, quiet: bool) -> Result<(usize, usize)> {
-    let db = super::open_existing_read_only(path)?;
-    let nodes: Vec<_> = db.iter_nodes()?.collect();
-    let edges: Vec<_> = db.iter_edges()?.collect();
+fn dump_gexf(path: &std::path::Path, out: &std::path::Path, quiet: bool) -> Result<()> {
+    let db = super::open_existing(path)?;
+    let nodes: Vec<_> = db.iter_nodes().collect();
+    let edges: Vec<_> = db.iter_edges().collect();
 
     let file = std::fs::File::create(out)
         .with_context(|| format!("Failed to create output file: {}", out.display()))?;
@@ -585,17 +531,13 @@ fn dump_gexf(path: &std::path::Path, out: &std::path::Path, quiet: bool) -> Resu
         ),
         quiet,
     );
-    Ok((nodes.len(), edges.len()))
+    Ok(())
 }
 
-fn dump_graphml(
-    path: &std::path::Path,
-    out: &std::path::Path,
-    quiet: bool,
-) -> Result<(usize, usize)> {
-    let db = super::open_existing_read_only(path)?;
-    let nodes: Vec<_> = db.iter_nodes()?.collect();
-    let edges: Vec<_> = db.iter_edges()?.collect();
+fn dump_graphml(path: &std::path::Path, out: &std::path::Path, quiet: bool) -> Result<()> {
+    let db = super::open_existing(path)?;
+    let nodes: Vec<_> = db.iter_nodes().collect();
+    let edges: Vec<_> = db.iter_edges().collect();
 
     let file = std::fs::File::create(out)
         .with_context(|| format!("Failed to create output file: {}", out.display()))?;
@@ -614,7 +556,7 @@ fn dump_graphml(
         ),
         quiet,
     );
-    Ok((nodes.len(), edges.len()))
+    Ok(())
 }
 
 #[cfg(test)]
@@ -622,27 +564,6 @@ mod tests {
     use super::*;
     use grafeo_common::types::Value;
     use tempfile::TempDir;
-
-    /// A property named like a structural column is no column of its own
-    /// (it would repeat `_id`, #254); one that merely starts with `_` is.
-    #[cfg(feature = "arrow-export")]
-    #[test]
-    fn arrow_property_columns_leave_out_the_structural_names() {
-        use grafeo_common::types::PropertyKey;
-
-        let keys: Vec<PropertyKey> = ["_id", "name", "_labels", "_created", "_source", "id"]
-            .into_iter()
-            .map(PropertyKey::new)
-            .collect();
-        let names = |structural| -> Vec<String> {
-            property_columns(keys.iter(), structural)
-                .iter()
-                .map(|key| key.as_str().to_string())
-                .collect()
-        };
-        assert_eq!(names(NODE_COLUMNS), ["_created", "_source", "id", "name"]);
-        assert_eq!(names(EDGE_COLUMNS), ["_created", "_labels", "id", "name"]);
-    }
 
     fn create_test_db(dir: &std::path::Path) -> grafeo_engine::GrafeoDB {
         let db = grafeo_engine::GrafeoDB::open(dir).expect("create db");
@@ -699,7 +620,7 @@ mod tests {
 
         // Verify loaded data
         let loaded = grafeo_engine::GrafeoDB::open(&target_path).unwrap();
-        let info = loaded.info().unwrap();
+        let info = loaded.info();
         assert_eq!(info.node_count, 2);
         assert_eq!(info.edge_count, 1);
     }
@@ -818,7 +739,7 @@ mod tests {
         .expect("should handle empty lines");
 
         let db = grafeo_engine::GrafeoDB::open(&db_path).unwrap();
-        assert_eq!(db.info().unwrap().node_count, 1);
+        assert_eq!(db.info().node_count, 1);
     }
 
     #[test]
@@ -947,7 +868,7 @@ mod tests {
         .expect("load into existing db should succeed");
 
         let db = grafeo_engine::GrafeoDB::open(&db_path).unwrap();
-        assert_eq!(db.info().unwrap().node_count, 2);
+        assert_eq!(db.info().node_count, 2);
     }
 
     #[test]
@@ -1153,7 +1074,7 @@ mod tests {
         .expect("load node without labels should succeed");
 
         let db = grafeo_engine::GrafeoDB::open(&db_path).unwrap();
-        assert_eq!(db.info().unwrap().node_count, 1);
+        assert_eq!(db.info().node_count, 1);
     }
 
     #[test]
@@ -1177,7 +1098,7 @@ mod tests {
         .expect("load node without properties should succeed");
 
         let db = grafeo_engine::GrafeoDB::open(&db_path).unwrap();
-        assert_eq!(db.info().unwrap().node_count, 1);
+        assert_eq!(db.info().node_count, 1);
     }
 
     #[test]
@@ -1273,7 +1194,7 @@ mod tests {
         .expect("whitespace-only lines should be skipped");
 
         let db = grafeo_engine::GrafeoDB::open(&db_path).unwrap();
-        assert_eq!(db.info().unwrap().node_count, 1);
+        assert_eq!(db.info().node_count, 1);
     }
 
     #[test]
@@ -1627,7 +1548,7 @@ this is not json\n";
         .expect("load node with empty labels should succeed");
 
         let db = grafeo_engine::GrafeoDB::open(&db_path).unwrap();
-        assert_eq!(db.info().unwrap().node_count, 1);
+        assert_eq!(db.info().node_count, 1);
     }
 
     #[test]
@@ -1687,9 +1608,7 @@ this is not json\n";
     use std::path::Path;
     use std::sync::Arc;
 
-    use grafeo_common::types::{
-        Date, Decimal, Duration, PropertyKey, Time, Timestamp, ZonedDatetime,
-    };
+    use grafeo_common::types::{Date, Duration, PropertyKey, Time, Timestamp, ZonedDatetime};
     use grafeo_engine::GrafeoDB;
 
     /// Runs `grafeo data load input db_path`.
@@ -1731,7 +1650,7 @@ this is not json\n";
     /// the same edges between them, whatever their IDs.
     fn contents(db: &GrafeoDB) -> (Vec<NodeContent>, Vec<EdgeContent>) {
         let mut nodes = HashMap::new();
-        for node in db.iter_nodes().unwrap() {
+        for node in db.iter_nodes() {
             let mut labels: Vec<String> = node.labels.iter().map(ToString::to_string).collect();
             labels.sort();
             let properties = node
@@ -1744,7 +1663,6 @@ this is not json\n";
         }
         let mut edges: Vec<EdgeContent> = db
             .iter_edges()
-            .unwrap()
             .map(|edge| {
                 let properties = edge
                     .properties
@@ -1848,61 +1766,7 @@ this is not json\n";
             ),
             ("big", Value::Int64(i64::MAX)),
             ("small", Value::Int64(i64::MIN)),
-            ("price", decimal("1.50")),
-            ("wide", decimal("18446744073709551616")),
-            ("widest", decimal(&format!("-{}", "9".repeat(38)))),
         ]
-    }
-
-    fn decimal(text: &str) -> Value {
-        Value::Decimal(Decimal::parse(text).expect("a decimal"))
-    }
-
-    /// Plain JSON integers past 64 bits load as exact decimals, and a dump of
-    /// that database loads back to the same values: a dump writes a DECIMAL
-    /// tagged, with its text and scale, and the load reads the tag.
-    #[test]
-    fn wide_integers_survive_a_load_and_a_dump() {
-        let temp = TempDir::new().unwrap();
-        let input = temp.path().join("input.jsonl");
-        let first = temp.path().join("first.grafeo");
-        let file = temp.path().join("dump.jsonl");
-        let second = temp.path().join("second.grafeo");
-        let widest = "9".repeat(38);
-        std::fs::write(
-            &input,
-            format!(
-                r#"{{"type":"node","id":1,"labels":["N"],"properties":{{"wide":18446744073709551616,"widest":-{widest},"fits":9223372036854775807,"list":[3,9223372036854775808]}}}}"#
-            ),
-        )
-        .unwrap();
-        load(&input, &first).expect("load the plain JSON");
-        let expected = contents_at(&first);
-        let property = |name: &str| {
-            expected.0[0]
-                .1
-                .iter()
-                .find(|(key, _)| key == name)
-                .map(|(_, value)| value.clone())
-        };
-        assert_eq!(property("wide"), Some(decimal("18446744073709551616")));
-        assert_eq!(property("widest"), Some(decimal(&format!("-{widest}"))));
-        assert_eq!(property("fits"), Some(Value::Int64(i64::MAX)));
-        assert_eq!(
-            property("list"),
-            Some(Value::List(
-                vec![Value::Int64(3), decimal("9223372036854775808")].into()
-            ))
-        );
-
-        dump(&first, &file);
-        let text = std::fs::read_to_string(&file).unwrap();
-        assert!(
-            text.contains(r#""wide":{"Decimal":"18446744073709551616"}"#),
-            "{text}"
-        );
-        load(&file, &second).expect("load the dump");
-        assert_eq!(contents_at(&second), expected);
     }
 
     /// Builds the source graph of the round trips at `path`. Its IDs do not
@@ -2257,7 +2121,7 @@ this is not json\n";
         load(&file, &target).expect("load");
 
         let db = GrafeoDB::open(&target).unwrap();
-        let node = db.iter_nodes().unwrap().next().expect("the node");
+        let node = db.iter_nodes().next().expect("the node");
         let get = |key: &str| {
             node.properties
                 .get(&PropertyKey::new(key))
@@ -2355,10 +2219,7 @@ this is not json\n";
             (r#"{"Int64":"nineteen"}"#, "a tagged integer that is text"),
             (r#"{"Float64":null}"#, "a float a dump before 0.6.0 lost"),
             (r#"{"Date":"someday"}"#, "a tagged date that is not one"),
-            (
-                "100000000000000000000000000000000000000",
-                "an integer past 38 digits",
-            ),
+            ("18446744073709551615", "an integer beyond INT64"),
             (r#"{"List":[3]}"#, "an untagged value in a tagged list"),
         ] {
             let error = load_fails_and_changes_nothing(&format!(
@@ -2605,11 +2466,7 @@ this is not json\n";
         let error = write_file(&db, &file, &checked).expect_err("the edge is gone");
 
         assert!(error.to_string().contains("changed"), "{error}");
-        assert_eq!(
-            db.node_count().unwrap(),
-            0,
-            "the nodes it wrote rolled back"
-        );
+        assert_eq!(db.node_count(), 0, "the nodes it wrote rolled back");
     }
 
     // --- Memory -----------------------------------------------------------------

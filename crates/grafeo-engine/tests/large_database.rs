@@ -33,7 +33,7 @@
 //! set at each step (on Windows and Linux), and where each section of each
 //! image lies.
 
-#![cfg(all(feature = "grafeo-file", feature = "wal"))]
+#![cfg(all(feature = "lpg", feature = "grafeo-file", feature = "wal"))]
 
 use std::collections::BTreeMap;
 use std::fs::File;
@@ -389,29 +389,21 @@ fn assert_edge(
 /// `round`, the large values byte for byte.
 fn check(db: &GrafeoDB, ids: &Ids, round: Round, what: &str) {
     let changed = usize::from(round == Round::Changed);
-    assert_eq!(db.node_count().unwrap(), NODES + changed, "{what}: nodes");
-    assert_eq!(
-        db.edge_count().unwrap(),
-        NODES - 1 - changed,
-        "{what}: edges"
-    );
+    assert_eq!(db.node_count(), NODES + changed, "{what}: nodes");
+    assert_eq!(db.edge_count(), NODES - 1 - changed, "{what}: edges");
     for (i, &id) in ids.nodes.iter().enumerate() {
         assert_node(
-            db.get_node(id).unwrap(),
+            db.get_node(id),
             node(i, round),
             &format!("{what}: node {i}"),
         );
     }
     if round == Round::Changed {
         let added = ids.added.expect("the added node");
-        assert_node(
-            db.get_node(added).unwrap(),
-            added_node(),
-            &format!("{what}: Mia"),
-        );
+        assert_node(db.get_node(added), added_node(), &format!("{what}: Mia"));
     }
     for (k, &id) in ids.knows.iter().enumerate() {
-        let edge = db.get_edge(id).unwrap();
+        let edge = db.get_edge(id);
         let what = format!("{what}: KNOWS edge {k}");
         if round == Round::Changed && k == DELETED_EDGE {
             assert!(edge.is_none(), "{what} was deleted");
@@ -459,7 +451,6 @@ fn topology(db: &GrafeoDB) -> Topology {
 
     let index = db
         .store()
-        .unwrap()
         .get_vector_index("Person", "embedding")
         .expect("the vector index");
     match &*index {
@@ -538,8 +529,8 @@ fn image_layout(path: &Path, what: &str) -> BTreeMap<String, Placement> {
     let stats = manager.image_stats().unwrap();
     let root = manager.active_header().root;
     // The manager's shared lock keeps writers out while this handle reads.
-    let file = File::open(path).unwrap();
-    let reader = ImageReader::open(&file, root, None)
+    let mut file = File::open(path).unwrap();
+    let reader = ImageReader::open(&mut file, root, None)
         .unwrap_or_else(|error| panic!("{what}: the directory reads: {error}"));
 
     let mut layout: BTreeMap<String, Placement> = BTreeMap::new();

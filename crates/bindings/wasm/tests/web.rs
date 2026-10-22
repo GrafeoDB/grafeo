@@ -8,41 +8,11 @@ use wasm_bindgen_test::*;
 
 use grafeo_wasm::Database;
 
-/// A JS value as JavaScript code writes it: `JSON.parse` of its JSON text, so
-/// objects are plain objects and numbers JS numbers (serializing a
-/// `serde_json::Value` with `serde_wasm_bindgen` gives `Map`s, and, with the
-/// `arbitrary_precision` numbers the workspace reads JSON with, wrapped
-/// numbers, neither of which a caller passes).
-fn to_js<T: serde::Serialize>(value: &T) -> Result<wasm_bindgen::JsValue, wasm_bindgen::JsValue> {
-    let text = serde_json::to_string(value).map_err(|e| e.to_string())?;
-    js_sys::JSON::parse(&text)
-}
-
 #[wasm_bindgen_test]
 fn test_database_creation() {
     let db = Database::new().expect("should create in-memory database");
-    assert_eq!(db.node_count().unwrap(), 0);
-    assert_eq!(db.edge_count().unwrap(), 0);
-}
-
-/// A decimal parameter `{ "$decimal": "0.10" }` comes back from arithmetic as
-/// a tagged object with its scale.
-#[wasm_bindgen_test]
-fn test_decimals_round_trip_as_tagged_objects() {
-    let db = Database::new().expect("create db");
-    let params = to_js(&serde_json::json!({
-        "a": { "$decimal": "0.10" },
-        "b": { "$decimal": "0.2" },
-    }))
-    .unwrap();
-    let rows = db
-        .execute_with_params("RETURN $a + $b AS total", params)
-        .expect("query");
-    let rows: serde_json::Value = serde_wasm_bindgen::from_value(rows).unwrap();
-    assert_eq!(
-        rows,
-        serde_json::json!([{ "total": { "$decimal": "0.30" } }])
-    );
+    assert_eq!(db.node_count(), 0);
+    assert_eq!(db.edge_count(), 0);
 }
 
 #[wasm_bindgen_test]
@@ -51,7 +21,7 @@ fn test_insert_and_query() {
 
     db.execute("CREATE (:Person {name: 'Alix', age: 30})")
         .expect("create node");
-    assert_eq!(db.node_count().unwrap(), 1);
+    assert_eq!(db.node_count(), 1);
 
     let result = db
         .execute("MATCH (n:Person) RETURN n.name, n.age")
@@ -104,15 +74,15 @@ fn test_snapshot_roundtrip() {
 
     db.execute("CREATE (:Person {name: 'Alix'})")
         .expect("create");
-    assert_eq!(db.node_count().unwrap(), 1);
+    assert_eq!(db.node_count(), 1);
 
     // Export snapshot
     let snapshot = db.export_snapshot().expect("export");
-    assert!(!snapshot.is_empty(), "a snapshot holds the node");
+    assert!(!snapshot.is_empty());
 
     // Import into new database
     let restored = Database::import_snapshot(&snapshot).expect("import");
-    assert_eq!(restored.node_count().unwrap(), 1);
+    assert_eq!(restored.node_count(), 1);
 }
 
 #[wasm_bindgen_test]
@@ -130,7 +100,7 @@ fn test_schema() {
 #[wasm_bindgen_test]
 fn test_version() {
     let v = Database::version();
-    assert!(!v.is_empty(), "the version is set");
+    assert!(!v.is_empty());
 }
 
 // ---------------------------------------------------------------------------
@@ -138,18 +108,22 @@ fn test_version() {
 // ---------------------------------------------------------------------------
 
 fn lpg_result_counts(result: &wasm_bindgen::JsValue) -> (u32, u32) {
-    let count = |key: &str| -> u32 {
-        let value = js_sys::Reflect::get(result, &wasm_bindgen::JsValue::from_str(key)).unwrap();
-        serde_wasm_bindgen::from_value(value).expect("a count is a whole number")
-    };
-    (count("nodes"), count("edges"))
+    let nodes = js_sys::Reflect::get(result, &wasm_bindgen::JsValue::from_str("nodes"))
+        .unwrap()
+        .as_f64()
+        .unwrap() as u32;
+    let edges = js_sys::Reflect::get(result, &wasm_bindgen::JsValue::from_str("edges"))
+        .unwrap()
+        .as_f64()
+        .unwrap() as u32;
+    (nodes, edges)
 }
 
 #[wasm_bindgen_test]
 fn test_import_lpg_basic() {
     let db = Database::new().expect("create db");
 
-    let data = to_js(&serde_json::json!({
+    let data = serde_wasm_bindgen::to_value(&serde_json::json!({
         "nodes": [
             { "labels": ["Person"], "properties": { "name": "Alix", "age": 30 } },
             { "labels": ["Person"], "properties": { "name": "Gus", "age": 25 } }
@@ -164,15 +138,15 @@ fn test_import_lpg_basic() {
     let (nodes, edges) = lpg_result_counts(&result);
     assert_eq!(nodes, 2);
     assert_eq!(edges, 1);
-    assert_eq!(db.node_count().unwrap(), 2);
-    assert_eq!(db.edge_count().unwrap(), 1);
+    assert_eq!(db.node_count(), 2);
+    assert_eq!(db.edge_count(), 1);
 }
 
 #[wasm_bindgen_test]
 fn test_import_lpg_nodes_only() {
     let db = Database::new().expect("create db");
 
-    let data = to_js(&serde_json::json!({
+    let data = serde_wasm_bindgen::to_value(&serde_json::json!({
         "nodes": [
             { "labels": ["Tag"], "properties": { "name": "rust" } },
             { "labels": ["Tag"], "properties": { "name": "wasm" } },
@@ -185,14 +159,14 @@ fn test_import_lpg_nodes_only() {
     let (nodes, edges) = lpg_result_counts(&result);
     assert_eq!(nodes, 3);
     assert_eq!(edges, 0);
-    assert_eq!(db.node_count().unwrap(), 3);
+    assert_eq!(db.node_count(), 3);
 }
 
 #[wasm_bindgen_test]
 fn test_import_lpg_empty() {
     let db = Database::new().expect("create db");
 
-    let data = to_js(&serde_json::json!({
+    let data = serde_wasm_bindgen::to_value(&serde_json::json!({
         "nodes": []
     }))
     .unwrap();
@@ -207,7 +181,7 @@ fn test_import_lpg_empty() {
 fn test_import_lpg_no_properties() {
     let db = Database::new().expect("create db");
 
-    let data = to_js(&serde_json::json!({
+    let data = serde_wasm_bindgen::to_value(&serde_json::json!({
         "nodes": [
             { "labels": ["A"] },
             { "labels": ["B"] }
@@ -228,7 +202,7 @@ fn test_import_lpg_no_properties() {
 fn test_import_lpg_multiple_labels() {
     let db = Database::new().expect("create db");
 
-    let data = to_js(&serde_json::json!({
+    let data = serde_wasm_bindgen::to_value(&serde_json::json!({
         "nodes": [
             { "labels": ["Person", "Employee", "Developer"], "properties": { "name": "Alix" } }
         ]
@@ -238,14 +212,14 @@ fn test_import_lpg_multiple_labels() {
     let result = db.import_lpg(data).expect("import");
     let (nodes, _) = lpg_result_counts(&result);
     assert_eq!(nodes, 1);
-    assert_eq!(db.node_count().unwrap(), 1);
+    assert_eq!(db.node_count(), 1);
 }
 
 #[wasm_bindgen_test]
 fn test_import_lpg_self_loop() {
     let db = Database::new().expect("create db");
 
-    let data = to_js(&serde_json::json!({
+    let data = serde_wasm_bindgen::to_value(&serde_json::json!({
         "nodes": [{ "labels": ["Node"] }],
         "edges": [{ "source": 0, "target": 0, "type": "SELF" }]
     }))
@@ -261,7 +235,7 @@ fn test_import_lpg_self_loop() {
 fn test_import_lpg_multiple_edges_same_pair() {
     let db = Database::new().expect("create db");
 
-    let data = to_js(&serde_json::json!({
+    let data = serde_wasm_bindgen::to_value(&serde_json::json!({
         "nodes": [
             { "labels": ["Person"], "properties": { "name": "Alix" } },
             { "labels": ["Person"], "properties": { "name": "Gus" } }
@@ -277,14 +251,14 @@ fn test_import_lpg_multiple_edges_same_pair() {
     let result = db.import_lpg(data).expect("import");
     let (_, edges) = lpg_result_counts(&result);
     assert_eq!(edges, 3);
-    assert_eq!(db.edge_count().unwrap(), 3);
+    assert_eq!(db.edge_count(), 3);
 }
 
 #[wasm_bindgen_test]
 fn test_import_lpg_edge_source_out_of_bounds() {
     let db = Database::new().expect("create db");
 
-    let data = to_js(&serde_json::json!({
+    let data = serde_wasm_bindgen::to_value(&serde_json::json!({
         "nodes": [{ "labels": ["A"] }],
         "edges": [{ "source": 5, "target": 0, "type": "BAD" }]
     }))
@@ -302,7 +276,7 @@ fn test_import_lpg_edge_source_out_of_bounds() {
 fn test_import_lpg_edge_target_out_of_bounds() {
     let db = Database::new().expect("create db");
 
-    let data = to_js(&serde_json::json!({
+    let data = serde_wasm_bindgen::to_value(&serde_json::json!({
         "nodes": [{ "labels": ["A"] }],
         "edges": [{ "source": 0, "target": 99, "type": "BAD" }]
     }))
@@ -321,7 +295,7 @@ fn test_import_lpg_invalid_shape() {
     let db = Database::new().expect("create db");
 
     // Missing required 'nodes' field
-    let data = to_js(&serde_json::json!({
+    let data = serde_wasm_bindgen::to_value(&serde_json::json!({
         "edges": []
     }))
     .unwrap();
@@ -335,7 +309,7 @@ fn test_import_lpg_invalid_shape() {
 fn test_import_lpg_queryable_after_import() {
     let db = Database::new().expect("create db");
 
-    let data = to_js(&serde_json::json!({
+    let data = serde_wasm_bindgen::to_value(&serde_json::json!({
         "nodes": [
             { "labels": ["City"], "properties": { "name": "Amsterdam", "population": 905234 } },
             { "labels": ["City"], "properties": { "name": "Berlin", "population": 3748148 } }
@@ -365,13 +339,13 @@ fn test_import_lpg_queryable_after_import() {
 fn test_import_lpg_mixed_property_types() {
     let db = Database::new().expect("create db");
 
-    let data = to_js(&serde_json::json!({
+    let data = serde_wasm_bindgen::to_value(&serde_json::json!({
         "nodes": [{
             "labels": ["Thing"],
             "properties": {
                 "str_val": "hello",
                 "int_val": 42,
-                "float_val": 2.5,
+                "float_val": 3.14,
                 "bool_val": true,
                 "null_val": null,
                 "list_val": [1, 2, 3]
@@ -390,31 +364,31 @@ fn test_import_lpg_incremental() {
     let db = Database::new().expect("create db");
 
     // First batch
-    let data1 = to_js(&serde_json::json!({
+    let data1 = serde_wasm_bindgen::to_value(&serde_json::json!({
         "nodes": [
             { "labels": ["Person"], "properties": { "name": "Alix" } }
         ]
     }))
     .unwrap();
     db.import_lpg(data1).expect("import 1");
-    assert_eq!(db.node_count().unwrap(), 1);
+    assert_eq!(db.node_count(), 1);
 
     // Second batch
-    let data2 = to_js(&serde_json::json!({
+    let data2 = serde_wasm_bindgen::to_value(&serde_json::json!({
         "nodes": [
             { "labels": ["Person"], "properties": { "name": "Gus" } }
         ]
     }))
     .unwrap();
     db.import_lpg(data2).expect("import 2");
-    assert_eq!(db.node_count().unwrap(), 2);
+    assert_eq!(db.node_count(), 2);
 }
 
 #[wasm_bindgen_test]
 fn test_import_lpg_snapshot_roundtrip() {
     let db = Database::new().expect("create db");
 
-    let data = to_js(&serde_json::json!({
+    let data = serde_wasm_bindgen::to_value(&serde_json::json!({
         "nodes": [
             { "labels": ["Person"], "properties": { "name": "Alix" } },
             { "labels": ["Person"], "properties": { "name": "Gus" } }
@@ -431,8 +405,8 @@ fn test_import_lpg_snapshot_roundtrip() {
     let snapshot = db.export_snapshot().expect("export");
     let restored = Database::import_snapshot(&snapshot).expect("restore");
 
-    assert_eq!(restored.node_count().unwrap(), 2);
-    assert_eq!(restored.edge_count().unwrap(), 1);
+    assert_eq!(restored.node_count(), 2);
+    assert_eq!(restored.edge_count(), 1);
 }
 
 // ==========================================================================
@@ -447,14 +421,14 @@ fn test_begin_commit_transaction_persists_writes() {
 
     db.execute("CREATE (:T {x: 1})").expect("insert in tx");
     assert_eq!(
-        db.node_count().unwrap(),
+        db.node_count(),
         0,
         "commit not yet called: count should be 0"
     );
 
     db.commit_transaction().expect("commit");
     assert!(!db.is_transaction_active());
-    assert_eq!(db.node_count().unwrap(), 1, "writes visible after commit");
+    assert_eq!(db.node_count(), 1, "writes visible after commit");
 }
 
 #[wasm_bindgen_test]
@@ -465,7 +439,7 @@ fn test_rollback_transaction_discards_writes() {
 
     db.rollback_transaction().expect("rollback");
     assert!(!db.is_transaction_active());
-    assert_eq!(db.node_count().unwrap(), 0, "rollback discards writes");
+    assert_eq!(db.node_count(), 0, "rollback discards writes");
 }
 
 #[wasm_bindgen_test]
@@ -557,7 +531,7 @@ fn test_signed_snapshot_roundtrip() {
     assert_eq!(&signed[..4], b"GSN1");
 
     let restored = Database::import_snapshot_signed(&signed, key).expect("restore");
-    assert_eq!(restored.node_count().unwrap(), 2);
+    assert_eq!(restored.node_count(), 2);
 }
 
 #[wasm_bindgen_test]
@@ -608,8 +582,10 @@ fn test_export_signed_requires_key() {
 }
 
 /// The message of an error a database method returned.
-fn error_message(error: impl Into<wasm_bindgen::JsValue>) -> String {
-    js_sys::Error::from(error.into()).message().into()
+fn error_message(error: wasm_bindgen::JsError) -> String {
+    js_sys::Error::from(wasm_bindgen::JsValue::from(error))
+        .message()
+        .into()
 }
 
 /// The statements of #573: a stack overflow used to trap the module, and
@@ -628,7 +604,7 @@ fn test_very_large_statements_run_or_fail_with_the_limit_and_the_module_keeps_wo
     );
     db.execute(&insert)
         .expect("an INSERT of 10,000 patterns runs");
-    assert_eq!(db.node_count().unwrap(), 10_000);
+    assert_eq!(db.node_count(), 10_000);
     let or_chain = format!(
         "MATCH (n:Person) WHERE {} RETURN n.v",
         (0..10_000)
@@ -808,790 +784,5 @@ fn text_index_options_and_text_search_filters() {
             db.create_text_index("Note", "body", Some(options)).is_err(),
             "{invalid} is refused"
         );
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Batches, upserts, write counters and graph handles
-// ---------------------------------------------------------------------------
-
-#[cfg(any(feature = "direct-api", feature = "vector-index"))]
-fn js(value: serde_json::Value) -> wasm_bindgen::JsValue {
-    to_js(&value).unwrap()
-}
-
-fn json(value: &wasm_bindgen::JsValue) -> serde_json::Value {
-    serde_wasm_bindgen::from_value(value.clone()).unwrap()
-}
-
-#[cfg(feature = "direct-api")]
-fn error_text<E: Into<wasm_bindgen::JsValue>>(result: Result<wasm_bindgen::JsValue, E>) -> String {
-    let error: wasm_bindgen::JsValue = result.expect_err("expected an error").into();
-    js_sys::Error::from(error).message().into()
-}
-
-#[cfg(feature = "direct-api")]
-#[wasm_bindgen_test]
-fn test_batch_create_nodes_and_edges() {
-    let db = Database::new().unwrap();
-    let ids = db
-        .batch_create_nodes_with_props(
-            js(serde_json::json!(["Person", "Employee"])),
-            js(serde_json::json!([{ "name": "Alix" }, { "name": "Gus" }])),
-        )
-        .unwrap();
-    let ids: Vec<u64> = serde_wasm_bindgen::from_value(ids).unwrap();
-    assert_eq!(ids.len(), 2);
-    let edge_ids = db
-        .batch_create_edges(js(serde_json::json!([
-            { "src": ids[0], "dst": ids[1], "type": "KNOWS", "properties": { "since": 2020 } },
-            { "src": ids[1], "dst": ids[0], "type": "KNOWS" }
-        ])))
-        .unwrap();
-    assert_eq!(json(&edge_ids).as_array().unwrap().len(), 2);
-    let rows = db
-        .execute(
-            "MATCH (a:Employee {name: 'Alix'})-[k:KNOWS]->(b) RETURN b.name AS b, k.since AS since",
-        )
-        .unwrap();
-    assert_eq!(
-        json(&rows),
-        serde_json::json!([{ "b": "Gus", "since": 2020 }])
-    );
-
-    let missing = db.batch_create_edges(js(serde_json::json!([
-        { "src": ids[0], "dst": 88888, "type": "KNOWS" }
-    ])));
-    assert!(missing.is_err());
-    assert_eq!(db.edge_count().unwrap(), 2);
-    let fractional = db.batch_create_edges(js(serde_json::json!([
-        { "src": 0.5, "dst": 1, "type": "KNOWS" }
-    ])));
-    assert!(fractional.is_err());
-}
-
-#[cfg(feature = "direct-api")]
-#[wasm_bindgen_test]
-fn test_batches_refuse_an_open_transaction_and_upserts_join_it() {
-    let db = Database::new().unwrap();
-    db.begin_transaction().unwrap();
-    let message = error_text(db.batch_create_nodes_with_props(
-        js(serde_json::json!("Person")),
-        js(serde_json::json!([{ "name": "Vincent" }])),
-    ));
-    assert!(message.contains("commit or roll back"), "{message}");
-
-    let summary = db
-        .upsert_nodes(
-            js(serde_json::json!(["Person"])),
-            js(serde_json::json!([{ "id": "v", "name": "Vincent" }])),
-            wasm_bindgen::JsValue::UNDEFINED,
-        )
-        .unwrap();
-    assert_eq!(json(&summary)["created"], 1);
-    db.rollback_transaction().unwrap();
-    assert_eq!(db.node_count().unwrap(), 0);
-}
-
-#[cfg(feature = "direct-api")]
-#[wasm_bindgen_test]
-fn test_upserts_create_update_and_skip() {
-    let db = Database::new().unwrap();
-    let created = db
-        .upsert_nodes(
-            js(serde_json::json!(["File"])),
-            js(serde_json::json!([{ "path": "a.rs", "size": 3 }, { "path": "b.rs" }, { "size": 1 }])),
-            js(serde_json::json!({ "key": "path" })),
-        )
-        .unwrap();
-    assert_eq!(
-        json(&created),
-        serde_json::json!({ "created": 2, "updated": 0, "skipped": 1, "skippedRows": [2] })
-    );
-    let updated = db
-        .upsert_nodes(
-            js(serde_json::json!("File")),
-            js(serde_json::json!([{ "path": "a.rs", "size": 19 }])),
-            js(serde_json::json!({ "key": "path" })),
-        )
-        .unwrap();
-    assert_eq!(json(&updated)["updated"], 1);
-    assert_eq!(db.node_count().unwrap(), 2);
-
-    let edges = db
-        .upsert_edges(
-            "IMPORTS",
-            js(serde_json::json!([
-                { "id": "a-b", "from": "a.rs", "to": "b.rs" },
-                { "id": "a-x", "from": "a.rs", "to": "x.rs" }
-            ])),
-            js(serde_json::json!({
-                "endpointKey": "path", "endpointLabels": ["File"], "srcField": "from", "dstField": "to"
-            })),
-        )
-        .unwrap();
-    assert_eq!(json(&edges)["created"], 1);
-    assert_eq!(json(&edges)["skippedRows"], serde_json::json!([1]));
-    assert_eq!(db.edge_count().unwrap(), 1);
-}
-
-#[wasm_bindgen_test]
-fn test_raw_results_count_writes() {
-    let db = Database::new().unwrap();
-    let write = db
-        .execute_raw("INSERT (:Person {name: 'Mia'})-[:KNOWS]->(:Person {name: 'Jules'})")
-        .unwrap();
-    assert_eq!(
-        json(&write)["counters"],
-        serde_json::json!({
-            "nodesCreated": 2, "nodesDeleted": 0, "edgesCreated": 1, "edgesDeleted": 0,
-            "propertiesSet": 2, "labelsAdded": 2, "labelsRemoved": 0
-        })
-    );
-    let read = db.execute_raw("MATCH (p:Person) RETURN p.name").unwrap();
-    assert_eq!(json(&read)["counters"]["nodesCreated"], 0);
-}
-
-#[cfg(feature = "direct-api")]
-#[wasm_bindgen_test]
-fn test_graph_handle_works_in_its_graph() {
-    let db = Database::new().unwrap();
-    db.execute("CREATE GRAPH trips").unwrap();
-    assert!(db.graph("nowhere").is_err());
-
-    let trips = db.graph("trips").unwrap();
-    assert_eq!(trips.name(), "trips");
-    trips
-        .execute("INSERT (:City {name: 'Prague'})-[:ROUTE {km: 350}]->(:City {name: 'Berlin'})")
-        .unwrap();
-    let rows = trips
-        .execute_with_params(
-            "MATCH (c:City {name: $name})-[r:ROUTE]->(d) RETURN d.name AS d, r.km AS km",
-            js(serde_json::json!({ "name": "Prague" })),
-        )
-        .unwrap();
-    assert_eq!(
-        json(&rows),
-        serde_json::json!([{ "d": "Berlin", "km": 350 }])
-    );
-    assert_eq!(db.node_count().unwrap(), 0);
-
-    let ids = trips
-        .batch_create_nodes_with_props(
-            js(serde_json::json!("City")),
-            js(serde_json::json!([{ "name": "Paris" }, { "name": "Amsterdam" }])),
-        )
-        .unwrap();
-    let ids: Vec<u64> = serde_wasm_bindgen::from_value(ids).unwrap();
-    trips
-        .batch_create_edges(js(
-            serde_json::json!([{ "src": ids[0], "dst": ids[1], "type": "ROUTE" }]),
-        ))
-        .unwrap();
-    let upsert = trips
-        .upsert_nodes(
-            js(serde_json::json!(["City"])),
-            js(serde_json::json!([{ "name": "Prague", "country": "CZ" }])),
-            js(serde_json::json!({ "key": "name" })),
-        )
-        .unwrap();
-    assert_eq!(json(&upsert)["updated"], 1);
-    let raw = trips
-        .execute_raw("MATCH (c:City) RETURN count(c) AS n")
-        .unwrap();
-    assert_eq!(json(&raw)["rows"], serde_json::json!([[4]]));
-
-    db.begin_transaction().unwrap();
-    let message = error_text(trips.execute("MATCH (c:City) RETURN c"));
-    assert!(message.contains("commit or roll back"), "{message}");
-    db.rollback_transaction().unwrap();
-
-    db.execute("DROP GRAPH trips").unwrap();
-    assert!(trips.execute("RETURN 1").is_err());
-    db.close();
-    let message = error_text(trips.execute("RETURN 1"));
-    assert!(message.contains("closed"), "{message}");
-}
-
-#[cfg(feature = "vector-index")]
-#[wasm_bindgen_test]
-fn test_batch_vector_search_answers_each_query() {
-    let db = Database::new().unwrap();
-    db.execute("INSERT (:Doc {topic: 'a', e: vector([1.0, 0.0])}), (:Doc {topic: 'b', e: vector([0.0, 1.0])})")
-        .unwrap();
-    db.create_vector_index(
-        "Doc",
-        "e",
-        js(serde_json::json!({ "dimensions": 2, "metric": "cosine" })),
-    )
-    .unwrap();
-    let topic = |hit: &serde_json::Value| {
-        let rows = db
-            .execute_with_params(
-                "MATCH (d:Doc) WHERE id(d) = $id RETURN d.topic AS t",
-                js(serde_json::json!({ "id": hit["id"] })),
-            )
-            .unwrap();
-        json(&rows)[0]["t"].clone()
-    };
-
-    let results = db
-        .batch_vector_search(
-            "Doc",
-            "e",
-            js(serde_json::json!([[1.0, 0.0], [0.0, 1.0]])),
-            1,
-            wasm_bindgen::JsValue::UNDEFINED,
-        )
-        .unwrap();
-    let results = json(&results);
-    assert_eq!(results.as_array().unwrap().len(), 2);
-    assert_eq!(topic(&results[0][0]), "a");
-    assert_eq!(topic(&results[1][0]), "b");
-
-    let filtered = db
-        .batch_vector_search(
-            "Doc",
-            "e",
-            js(serde_json::json!([[1.0, 0.0]])),
-            2,
-            js(serde_json::json!({ "filters": { "topic": "b" } })),
-        )
-        .unwrap();
-    let filtered = json(&filtered);
-    assert_eq!(filtered[0].as_array().unwrap().len(), 1);
-    assert_eq!(topic(&filtered[0][0]), "b");
-}
-
-#[cfg(feature = "lpg-model")]
-#[wasm_bindgen_test]
-fn test_get_node_edges_by_direction_type_and_transaction() {
-    let db = Database::new().unwrap();
-    db.execute(
-        "INSERT (a:Person {name: 'Alix'})-[:KNOWS]->(g:Person {name: 'Gus'}), \
-         (g)-[:WORKS_WITH]->(a), (a)-[:NOTE]->(a)",
-    )
-    .unwrap();
-    let id_of = |name: &str| {
-        let rows = db
-            .execute(&format!(
-                "MATCH (p:Person {{name: '{name}'}}) RETURN id(p) AS id"
-            ))
-            .unwrap();
-        json(&rows)[0]["id"].as_u64().unwrap()
-    };
-    let (alix, gus) = (id_of("Alix"), id_of("Gus"));
-    let neighbors = |id: u64, options: serde_json::Value| -> Vec<u64> {
-        let mut found: Vec<u64> = json(
-            &db.get_node_edges(id as f64, to_js(&options).unwrap())
-                .unwrap(),
-        )
-        .as_array()
-        .unwrap()
-        .iter()
-        .map(|pair| pair[0].as_u64().unwrap())
-        .collect();
-        found.sort_unstable();
-        found
-    };
-
-    assert_eq!(neighbors(alix, serde_json::json!(null)), {
-        let mut v = vec![gus, alix];
-        v.sort_unstable();
-        v
-    });
-    assert_eq!(neighbors(alix, serde_json::json!({ "direction": "in" })), {
-        let mut v = vec![gus, alix];
-        v.sort_unstable();
-        v
-    });
-    // Both directions list the self-loop once.
-    assert_eq!(
-        neighbors(alix, serde_json::json!({ "direction": "both" })).len(),
-        3
-    );
-    assert_eq!(
-        neighbors(
-            alix,
-            serde_json::json!({ "direction": "both", "edgeTypes": ["KNOWS"] })
-        ),
-        vec![gus]
-    );
-    assert!(
-        db.get_node_edges(
-            alix as f64,
-            to_js(&serde_json::json!({ "direction": "up" })).unwrap()
-        )
-        .is_err()
-    );
-    assert!(
-        db.get_node_edges(0.5, wasm_bindgen::JsValue::UNDEFINED)
-            .is_err()
-    );
-
-    db.begin_transaction().unwrap();
-    db.execute("MATCH (g:Person {name: 'Gus'}) INSERT (g)-[:KNOWS]->(:Person {name: 'Mia'})")
-        .unwrap();
-    assert_eq!(
-        neighbors(gus, serde_json::json!({ "edgeTypes": ["KNOWS"] })).len(),
-        1
-    );
-    db.rollback_transaction().unwrap();
-    assert_eq!(
-        neighbors(gus, serde_json::json!({ "edgeTypes": ["KNOWS"] })),
-        Vec::<u64>::new()
-    );
-}
-
-/// A database error carries its GQLSTATUS as `gqlStatus` next to its message
-/// (#639): `22012` for a division by zero, `22003` for a value out of range,
-/// `42001` for a syntax error.
-#[wasm_bindgen_test]
-fn test_errors_carry_their_gql_status() {
-    use wasm_bindgen::JsCast;
-
-    let db = Database::new().expect("create db");
-    for (query, status, message) in [
-        ("RETURN 1 / 0 AS x", "22012", "division by zero: 1 / 0"),
-        (
-            "RETURN 9223372036854775807 + 1 AS x",
-            "22003",
-            "numeric value out of range: 9223372036854775807 + 1",
-        ),
-        (
-            "UNWIND [9223372036854775807, 1] AS x RETURN sum(x) AS s",
-            "22003",
-            "numeric value out of range: sum",
-        ),
-        ("MATCH (n RETURN n", "42001", "GRAFEO-Q001"),
-    ] {
-        let error = db.execute(query).unwrap_err();
-        let get = |name: &str| {
-            js_sys::Reflect::get(&error, &wasm_bindgen::JsValue::from_str(name))
-                .unwrap()
-                .as_string()
-        };
-        assert_eq!(get("gqlStatus").as_deref(), Some(status), "{query}");
-        let text = get("message").unwrap_or_default();
-        assert!(text.contains(message), "{query}: {text}");
-        assert!(error.is_instance_of::<js_sys::Error>(), "{query}");
-    }
-}
-
-/// `executeRaw` of a `PROFILE` statement has `profile`, the operator tree
-/// (#461); other statements have none.
-#[wasm_bindgen_test]
-fn test_execute_raw_profile_tree() {
-    let db = Database::new().expect("create db");
-    db.execute("INSERT (:Person {age: 30}), (:Person {age: 25}), (:Person {age: 35})")
-        .expect("insert");
-
-    let raw = db
-        .execute_raw("PROFILE MATCH (p:Person) WHERE p.age > 28 RETURN p.age")
-        .expect("profile");
-    let profile = field(&raw, "profile");
-    assert!(profile.is_object(), "PROFILE has a profile");
-    assert!(field(&profile, "totalTimeMs").as_f64().is_some());
-    let root = field(&profile, "root");
-    assert_eq!(field(&root, "rows").as_f64(), Some(2.0));
-    assert!(
-        field(&root, "operator")
-            .as_string()
-            .is_some_and(|op| !op.is_empty())
-    );
-    for key in ["detail", "calls", "selfTimeMs", "timeMs"] {
-        assert!(!field(&root, key).is_undefined(), "{key}");
-    }
-    assert!(js_sys::Array::is_array(&field(&root, "children")));
-
-    let plain = db
-        .execute_raw("MATCH (p:Person) RETURN p.age")
-        .expect("query");
-    assert!(field(&plain, "profile").is_undefined());
-}
-
-/// The engine has no clock on wasm32: the binding times every raw call (#461).
-#[wasm_bindgen_test]
-fn test_execute_raw_has_a_time() {
-    let db = Database::new().expect("create db");
-    db.execute("INSERT (:Person {age: 30})").expect("insert");
-    let raw = db
-        .execute_raw("MATCH (p:Person) RETURN p.age")
-        .expect("gql");
-    assert!(
-        field(&raw, "executionTimeMs")
-            .as_f64()
-            .is_some_and(|ms| ms >= 0.0)
-    );
-    let raw = db
-        .execute_raw_with_language("MATCH (p:Person) RETURN p.age", "gql")
-        .expect("with language");
-    assert!(
-        field(&raw, "executionTimeMs")
-            .as_f64()
-            .is_some_and(|ms| ms >= 0.0)
-    );
-}
-
-/// An import is one transaction: an edge whose index is out of bounds fails
-/// the call, and none of the nodes before it is kept.
-#[wasm_bindgen_test]
-fn test_import_lpg_failure_keeps_nothing() {
-    let db = Database::new().expect("create db");
-    let data = to_js(&serde_json::json!({
-        "nodes": [
-            { "labels": ["Person"], "properties": { "name": "Alix" } },
-            { "labels": ["Person"], "properties": { "name": "Gus" } }
-        ],
-        "edges": [
-            { "source": 0, "target": 1, "type": "KNOWS" },
-            { "source": 0, "target": 7, "type": "KNOWS" }
-        ]
-    }))
-    .unwrap();
-    assert!(db.import_lpg(data).is_err());
-    assert_eq!((db.node_count().unwrap(), db.edge_count().unwrap()), (0, 0));
-}
-
-/// The same for `importRows`: a row without its target column fails the
-/// call, and the rows before it are not kept.
-#[wasm_bindgen_test]
-fn test_import_rows_failure_keeps_nothing() {
-    let db = Database::new().expect("create db");
-    let nodes = to_js(&serde_json::json!([{ "name": "Alix" }, { "name": "Gus" }])).unwrap();
-    let options = to_js(&serde_json::json!({ "mode": "nodes", "label": "Person" })).unwrap();
-    assert_eq!(db.import_rows(nodes, options).expect("nodes"), 2);
-    let edges = to_js(&serde_json::json!([
-        { "source": 0, "target": 1 },
-        { "source": 1 }
-    ]))
-    .unwrap();
-    let options = to_js(&serde_json::json!({ "mode": "edges", "edgeType": "KNOWS" })).unwrap();
-    assert!(db.import_rows(edges, options).is_err());
-    assert_eq!((db.node_count().unwrap(), db.edge_count().unwrap()), (2, 0));
-}
-
-/// setSchema makes the check a query makes (#245): a schema that does not
-/// exist is refused, and the current schema stays as it was.
-#[wasm_bindgen_test]
-fn test_set_schema_of_a_missing_schema_fails_and_keeps_the_schema() {
-    let db = Database::new().expect("create db");
-    assert!(db.set_schema("missing").is_err());
-    assert_eq!(db.current_schema(), None);
-}
-
-/// A `BigInt` from its decimal text.
-fn bigint(text: &str) -> wasm_bindgen::JsValue {
-    js_sys::BigInt::new(&wasm_bindgen::JsValue::from_str(text))
-        .expect("a BigInt")
-        .into()
-}
-
-/// A plain object of `entries`.
-fn object(entries: &[(&str, wasm_bindgen::JsValue)]) -> wasm_bindgen::JsValue {
-    let object = js_sys::Object::new();
-    for (key, value) in entries {
-        js_sys::Reflect::set(&object, &(*key).into(), value).unwrap();
-    }
-    object.into()
-}
-
-/// The INT64, DECIMAL and FLOAT64 type tests of `$x`, and `$x`.
-fn typed(db: &Database, x: wasm_bindgen::JsValue) -> serde_json::Value {
-    let rows = db
-        .execute_with_params(
-            "RETURN $x AS x, $x IS TYPED INT64 AS int, $x IS TYPED DECIMAL AS decimal, \
-             $x IS TYPED FLOAT64 AS float",
-            object(&[("x", x)]),
-        )
-        .expect("query");
-    json(&rows)[0].clone()
-}
-
-/// A `BigInt` parameter past 64 bits is an exact DECIMAL up to 38 digits (it
-/// used to be an error past u64 and a float within it), one that fits 64 bits
-/// an INT64, and one past 38 digits an error naming the parameter.
-#[wasm_bindgen_test]
-fn test_a_bigint_parameter_follows_the_integer_rule() {
-    let db = Database::new().expect("create db");
-    let largest = "9".repeat(38);
-    for text in [
-        "9223372036854775808",
-        "18446744073709551616",
-        "-9223372036854775809",
-        largest.as_str(),
-    ] {
-        assert_eq!(
-            typed(&db, bigint(text)),
-            serde_json::json!({ "x": { "$decimal": text }, "int": false, "decimal": true, "float": false }),
-            "{text}"
-        );
-    }
-    let fits = typed(&db, bigint("9223372036854775807"));
-    assert_eq!(
-        (&fits["int"], &fits["decimal"]),
-        (&serde_json::json!(true), &serde_json::json!(false))
-    );
-    let too_wide = format!("1{}", "0".repeat(38));
-    let error = db
-        .execute_with_params("RETURN $x AS x", object(&[("x", bigint(&too_wide))]))
-        .expect_err("past 38 digits");
-    let message = js_sys::Reflect::get(&error, &"message".into())
-        .ok()
-        .and_then(|m| m.as_string())
-        .or_else(|| error.as_string())
-        .unwrap_or_default();
-    assert!(
-        message.contains("parameter 'x'")
-            && message.contains(&too_wide)
-            && message.contains("38 digits"),
-        "{message}"
-    );
-}
-
-/// A whole number is an INT64 and any other a FLOAT64 with its value, and a
-/// tagged object, a `Date`, a list and a `Map` keep their types.
-#[wasm_bindgen_test]
-fn test_parameters_convert_from_the_javascript_value() {
-    let db = Database::new().expect("create db");
-    for whole in [3.0, 5_000_000_000.0, -5_000_000_000.0] {
-        assert_eq!(
-            typed(&db, whole.into())["int"],
-            serde_json::json!(true),
-            "{whole}"
-        );
-    }
-    for float in [1.5, -0.25, 1e300] {
-        let row = typed(&db, float.into());
-        assert_eq!(
-            (row["x"].as_f64(), &row["float"]),
-            (Some(float), &serde_json::json!(true))
-        );
-    }
-    let list = js_sys::Array::of2(&3.0.into(), &bigint("18446744073709551616"));
-    let rows = db
-        .execute_with_params(
-            "UNWIND $xs AS v RETURN v IS TYPED DECIMAL AS decimal",
-            object(&[("xs", list.into())]),
-        )
-        .unwrap();
-    assert_eq!(
-        json(&rows),
-        serde_json::json!([{ "decimal": false }, { "decimal": true }])
-    );
-    let rows = db
-        .execute_with_params(
-            "RETURN $d IS TYPED DATE AS date, $t IS TYPED TIMESTAMP AS ts, $n AS n",
-            object(&[
-                ("d", object(&[("$date", "2024-01-15".into())])),
-                ("t", js_sys::Date::new(&1_700_000_000_000.0.into()).into()),
-                ("n", object(&[("$decimal", "1.50".into())])),
-            ]),
-        )
-        .unwrap();
-    assert_eq!(
-        json(&rows),
-        serde_json::json!([{ "date": true, "ts": true, "n": { "$decimal": "1.50" } }])
-    );
-    let map = js_sys::Map::new();
-    map.set(&"x".into(), &bigint("18446744073709551616"));
-    let rows = db
-        .execute_with_params("RETURN $x IS TYPED DECIMAL AS decimal", map.into())
-        .unwrap();
-    assert_eq!(json(&rows), serde_json::json!([{ "decimal": true }]));
-    assert!(
-        db.execute_with_params("RETURN 1", js_sys::Array::new().into())
-            .is_err()
-    );
-}
-
-/// An invalid `Date` (its time is NaN) is refused, never read as the epoch.
-#[wasm_bindgen_test]
-fn test_an_invalid_date_parameter_is_refused() {
-    let db = Database::new().expect("create db");
-    let invalid = js_sys::Date::new(&f64::NAN.into());
-    let error = db
-        .execute_with_params("RETURN $t AS t", object(&[("t", invalid.into())]))
-        .expect_err("an invalid Date");
-    assert!(
-        format!("{error:?}").contains("an invalid Date"),
-        "{error:?}"
-    );
-}
-
-/// The INT64 and DECIMAL type tests of `n.v` over the `:N` nodes, by `n.i`.
-fn kinds_of_v(db: &Database) -> serde_json::Value {
-    let rows = db
-        .execute(
-            "MATCH (n:N) RETURN n.v IS TYPED INT64 AS int, n.v IS TYPED DECIMAL AS decimal \
-             ORDER BY n.i",
-        )
-        .expect("query");
-    json(&rows)
-}
-
-/// `importRows` and `importLpg` read their rows and properties from the
-/// JavaScript value, as a property is: a `BigInt` follows the integer rule
-/// (through JSON one past u64 was an error) and an error names the row, the
-/// node or edge, and the property.
-#[wasm_bindgen_test]
-fn test_imports_follow_the_integer_rule() {
-    let db = Database::new().expect("create db");
-    let rows = js_sys::Array::of2(
-        &object(&[("i", 1.0.into()), ("v", bigint("18446744073709551616"))]),
-        &object(&[("i", 2.0.into()), ("v", 5_000_000_000.0.into())]),
-    );
-    let options = object(&[("mode", "nodes".into()), ("label", "N".into())]);
-    assert_eq!(
-        db.import_rows(rows.into(), options).expect("import rows"),
-        2
-    );
-    let edges = js_sys::Array::of1(&object(&[
-        ("source", bigint("0")),
-        ("target", 1.0.into()),
-        ("w", bigint("-9223372036854775809")),
-    ]));
-    let options = object(&[("mode", "edges".into()), ("edgeType", "R".into())]);
-    assert_eq!(
-        db.import_rows(edges.into(), options).expect("import edges"),
-        1
-    );
-    let lpg = object(&[(
-        "nodes",
-        js_sys::Array::of1(&object(&[
-            ("labels", js_sys::Array::of1(&"N".into()).into()),
-            (
-                "properties",
-                object(&[("i", 3.0.into()), ("v", bigint(&"9".repeat(38)))]),
-            ),
-        ]))
-        .into(),
-    )]);
-    db.import_lpg(lpg).expect("import lpg");
-    assert_eq!(
-        kinds_of_v(&db),
-        serde_json::json!([
-            { "int": false, "decimal": true },
-            { "int": true, "decimal": false },
-            { "int": false, "decimal": true }
-        ])
-    );
-    let rows = db.execute("MATCH ()-[r:R]->() RETURN r.w AS w").unwrap();
-    assert_eq!(
-        json(&rows),
-        serde_json::json!([{ "w": { "$decimal": "-9223372036854775809" } }])
-    );
-
-    let too_wide = format!("1{}", "0".repeat(38));
-    let rows = js_sys::Array::of2(
-        &object(&[("v", 1.0.into())]),
-        &object(&[("v", bigint(&too_wide))]),
-    );
-    let options = object(&[("mode", "nodes".into()), ("label", "N".into())]);
-    let message = error_message(db.import_rows(rows.into(), options).expect_err("too wide"));
-    assert!(
-        message.contains("rows[1]: property 'v'") && message.contains(&too_wide),
-        "{message}"
-    );
-    let lpg = object(&[(
-        "nodes",
-        js_sys::Array::of2(
-            &object(&[("labels", js_sys::Array::new().into())]),
-            &object(&[
-                ("labels", js_sys::Array::new().into()),
-                ("properties", object(&[("v", bigint(&too_wide))])),
-            ]),
-        )
-        .into(),
-    )]);
-    let message = error_message(db.import_lpg(lpg).expect_err("too wide"));
-    assert!(
-        message.contains("nodes[1]: property 'v'") && message.contains("38 digits"),
-        "{message}"
-    );
-    assert_eq!(db.node_count().unwrap(), 3, "a failed import keeps nothing");
-}
-
-/// Batch writes and upserts read their rows and edge properties from the
-/// JavaScript value too, with the row in the error.
-#[cfg(feature = "direct-api")]
-#[wasm_bindgen_test]
-fn test_batches_and_upserts_follow_the_integer_rule() {
-    let db = Database::new().unwrap();
-    let rows = js_sys::Array::of2(
-        &object(&[("i", 1.0.into()), ("v", bigint("18446744073709551616"))]),
-        &object(&[("i", 2.0.into()), ("v", 5_000_000_000.0.into())]),
-    );
-    let ids = db
-        .batch_create_nodes_with_props("N".into(), rows.into())
-        .unwrap();
-    let ids = js_sys::Array::from(&ids);
-    let edges = js_sys::Array::of1(&object(&[
-        ("src", ids.get(0)),
-        ("dst", ids.get(1)),
-        ("type", "R".into()),
-        ("properties", object(&[("w", bigint(&"9".repeat(38)))])),
-    ]));
-    db.batch_create_edges(edges.into()).unwrap();
-    let upsert = js_sys::Array::of1(&object(&[
-        ("i", 3.0.into()),
-        ("v", bigint("9223372036854775808")),
-    ]));
-    db.upsert_nodes(
-        js_sys::Array::of1(&"N".into()).into(),
-        upsert.into(),
-        object(&[("key", "i".into())]),
-    )
-    .unwrap();
-    assert_eq!(
-        kinds_of_v(&db),
-        serde_json::json!([
-            { "int": false, "decimal": true },
-            { "int": true, "decimal": false },
-            { "int": false, "decimal": true }
-        ])
-    );
-    let rows = db.execute("MATCH ()-[r:R]->() RETURN r.w AS w").unwrap();
-    assert_eq!(
-        json(&rows),
-        serde_json::json!([{ "w": { "$decimal": "9".repeat(38) } }])
-    );
-
-    let too_wide = format!("1{}", "0".repeat(38));
-    let rows = js_sys::Array::of2(
-        &object(&[("v", 1.0.into())]),
-        &object(&[("v", bigint(&too_wide))]),
-    );
-    let message = error_text(db.batch_create_nodes_with_props("N".into(), rows.into()));
-    assert!(
-        message.contains("rows[1]: property 'v'") && message.contains(&too_wide),
-        "{message}"
-    );
-    assert_eq!(db.node_count().unwrap(), 3, "a failed batch keeps nothing");
-}
-
-/// A search's `filters` are read from the JavaScript value: a `BigInt`
-/// filter finds the node whose property is that exact decimal.
-#[cfg(feature = "text-index")]
-#[wasm_bindgen_test]
-fn test_a_search_filter_follows_the_integer_rule() {
-    let db = Database::new().unwrap();
-    db.execute(
-        "INSERT (:Doc {body: 'graph canals', v: 1}), (:Doc {body: 'graph canals', v: 5000000000})",
-    )
-    .unwrap();
-    let rows = js_sys::Array::of1(&object(&[
-        ("body", "graph canals".into()),
-        ("v", bigint("18446744073709551616")),
-    ]));
-    let options = object(&[("mode", "nodes".into()), ("label", "Doc".into())]);
-    db.import_rows(rows.into(), options).unwrap();
-    db.create_text_index("Doc", "body", None).unwrap();
-    for v in [5_000_000_000.0.into(), bigint("18446744073709551616")] {
-        let options = object(&[("filters", object(&[("v", v)]))]);
-        let hits = db
-            .text_search("Doc", "body", "canals", 10, Some(options))
-            .unwrap();
-        assert_eq!(js_sys::Array::from(&hits).length(), 1);
     }
 }

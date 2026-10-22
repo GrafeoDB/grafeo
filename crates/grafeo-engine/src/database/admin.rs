@@ -2,10 +2,10 @@
 
 use std::path::Path;
 
-use grafeo_common::types::{ArcStr, EdgeId};
+use grafeo_common::types::{ArcStr, EdgeId, EpochId};
 use grafeo_common::utils::error::Result;
 use grafeo_common::utils::hash::FxHashMap;
-use grafeo_core::graph::{Direction, GraphStore};
+use grafeo_core::graph::{Direction, GraphStoreSearch};
 
 impl super::GrafeoDB {
     // =========================================================================
@@ -14,52 +14,64 @@ impl super::GrafeoDB {
 
     /// Returns the number of nodes in the database, as of the current epoch
     /// (see [`current_epoch`](Self::current_epoch)).
-    ///
-    /// # Errors
-    ///
-    /// The error of a read the store cannot do (an external store's own).
-    pub fn node_count(&self) -> Result<usize> {
-        let snapshot = self.default_snapshot();
-        snapshot.store().node_count(snapshot.view())
+    #[must_use]
+    pub fn node_count(&self) -> usize {
+        let epoch = self.read_epoch();
+        let store = self.graph_store();
+        counted_at_own_epoch(&*store, epoch, || store.node_count()).unwrap_or_else(|| {
+            store
+                .filter_visible_node_ids(&store.all_node_ids(), epoch)
+                .len()
+        })
     }
 
     /// Returns the number of edges in the database, as of the current epoch
     /// (see [`current_epoch`](Self::current_epoch)).
-    ///
-    /// # Errors
-    ///
-    /// As [`node_count`](Self::node_count).
-    pub fn edge_count(&self) -> Result<usize> {
-        let snapshot = self.default_snapshot();
-        snapshot.store().edge_count(snapshot.view())
+    #[must_use]
+    pub fn edge_count(&self) -> usize {
+        let epoch = self.read_epoch();
+        let store = self.graph_store();
+        counted_at_own_epoch(&*store, epoch, || store.edge_count())
+            .unwrap_or_else(|| self.edge_count_at(&*store, epoch))
+    }
+
+    /// The edges of `store` visible at `epoch`. The database's own store
+    /// numbers its edges densely, so each is looked up; another store's
+    /// edges are found through the nodes that have them, which misses an
+    /// edge that a commit not complete yet deleted (its adjacency entry is
+    /// gone at once).
+    fn edge_count_at(&self, store: &dyn GraphStoreSearch, epoch: EpochId) -> usize {
+        if self.external_read_store.is_none() {
+            let lpg = self.lpg_store();
+            return (0..lpg.next_edge_id())
+                .filter(|&id| lpg.is_edge_visible_at_epoch(EdgeId::new(id), epoch))
+                .count();
+        }
+        store
+            .all_node_ids()
+            .into_iter()
+            .flat_map(|node| store.edges_from(node, Direction::Outgoing))
+            .filter(|&(_, edge)| store.is_edge_visible_at_epoch(edge, epoch))
+            .count()
     }
 
     /// Returns the number of distinct labels in the database.
-    ///
-    /// # Errors
-    ///
-    /// As [`node_count`](Self::node_count).
-    pub fn label_count(&self) -> Result<usize> {
-        Ok(self.graph_store().all_labels()?.len())
+    #[must_use]
+    pub fn label_count(&self) -> usize {
+        self.graph_store().all_labels().len()
     }
 
     /// Returns the number of distinct property keys in the database, of
     /// nodes and edges together.
-    ///
-    /// # Errors
-    ///
-    /// As [`node_count`](Self::node_count).
-    pub fn property_key_count(&self) -> Result<usize> {
-        Ok(self.graph_store().all_property_keys()?.len())
+    #[must_use]
+    pub fn property_key_count(&self) -> usize {
+        self.graph_store().all_property_keys().len()
     }
 
     /// Returns the number of distinct edge types in the database.
-    ///
-    /// # Errors
-    ///
-    /// As [`node_count`](Self::node_count).
-    pub fn edge_type_count(&self) -> Result<usize> {
-        Ok(self.graph_store().all_edge_types()?.len())
+    #[must_use]
+    pub fn edge_type_count(&self) -> usize {
+        self.graph_store().all_edge_types().len()
     }
 
     // =========================================================================
@@ -71,7 +83,7 @@ impl super::GrafeoDB {
     /// In-memory databases return false.
     #[must_use]
     pub fn is_persistent(&self) -> bool {
-        self.config.path().is_some()
+        self.config.path.is_some()
     }
 
     /// Returns the database file path, if persistent.
@@ -79,27 +91,21 @@ impl super::GrafeoDB {
     /// In-memory databases return None.
     #[must_use]
     pub fn path(&self) -> Option<&Path> {
-        self.config.path()
+        self.config.path.as_deref()
     }
 
     /// Returns high-level database information.
     ///
     /// Includes node/edge counts, persistence status, and mode (LPG/RDF).
-    ///
-    /// # Errors
-    ///
-    /// As [`node_count`](Self::node_count).
-    pub fn info(&self) -> Result<crate::admin::DatabaseInfo> {
-        // One pinned state for both counts.
-        let snapshot = self.default_snapshot();
-        let (store, view) = (snapshot.store(), snapshot.view());
-        Ok(crate::admin::DatabaseInfo {
+    #[must_use]
+    pub fn info(&self) -> crate::admin::DatabaseInfo {
+        crate::admin::DatabaseInfo {
             mode: crate::admin::DatabaseMode::Lpg,
-            node_count: store.node_count(view)?,
-            edge_count: store.edge_count(view)?,
+            node_count: self.node_count(),
+            edge_count: self.edge_count(),
             is_persistent: self.is_persistent(),
-            path: self.config.path().map(Path::to_path_buf),
-            wal_enabled: self.config.wal_enabled(),
+            path: self.config.path.clone(),
+            wal_enabled: self.config.wal_enabled,
             version: env!("CARGO_PKG_VERSION").to_string(),
             features: {
                 let mut f = vec!["gql".into()];
@@ -138,26 +144,20 @@ impl super::GrafeoDB {
                 }
                 f
             },
-        })
+        }
     }
 
     /// Returns a hierarchical memory usage breakdown.
     ///
     /// Walks all internal structures (store, indexes, MVCC chains, caches,
     /// string pools, buffer manager) and returns estimated heap bytes for each.
-    /// Safe to call concurrently with queries. On a database on a backend of
-    /// its own the store, its indexes and its versions are the backend's,
-    /// which the engine does not measure: they count as zero, and the rest
-    /// (caches, buffers, the catalog) is the engine's own.
+    /// Safe to call concurrently with queries.
     #[must_use]
     pub fn memory_usage(&self) -> crate::memory_usage::MemoryUsage {
         use crate::memory_usage::{BufferManagerMemory, CacheMemory, MemoryUsage};
         use grafeo_common::memory::MemoryRegion;
 
-        let (store, indexes, mvcc, string_pool) = self
-            .root_store()
-            .map(|store| store.memory_breakdown())
-            .unwrap_or_default();
+        let (store, indexes, mvcc, string_pool) = self.lpg_store().memory_breakdown();
 
         let (parsed_bytes, optimized_bytes, cached_plan_count) =
             self.query_cache.heap_memory_bytes();
@@ -228,13 +228,10 @@ impl super::GrafeoDB {
     /// Returns detailed database statistics.
     ///
     /// Includes counts, memory usage, and index information.
-    ///
-    /// # Errors
-    ///
-    /// As [`node_count`](Self::node_count).
-    pub fn detailed_stats(&self) -> Result<crate::admin::DatabaseStats> {
+    #[must_use]
+    pub fn detailed_stats(&self) -> crate::admin::DatabaseStats {
         #[cfg(feature = "wal")]
-        let disk_bytes = self.config.path().as_ref().and_then(|p| {
+        let disk_bytes = self.config.path.as_ref().and_then(|p| {
             // The spelling the files are named after: the caller's (`db/`)
             // no longer exists once a migrated directory became a file.
             let path = super::normalize_path(p).ok()?;
@@ -247,19 +244,16 @@ impl super::GrafeoDB {
         #[cfg(not(feature = "wal"))]
         let disk_bytes: Option<usize> = None;
 
-        // One pinned state for every count.
-        let snapshot = self.default_snapshot();
-        let (store, view) = (snapshot.store(), snapshot.view());
-        Ok(crate::admin::DatabaseStats {
-            node_count: store.node_count(view)?,
-            edge_count: store.edge_count(view)?,
-            label_count: store.all_labels()?.len(),
-            edge_type_count: store.all_edge_types()?.len(),
-            property_key_count: store.all_property_keys()?.len(),
+        crate::admin::DatabaseStats {
+            node_count: self.node_count(),
+            edge_count: self.edge_count(),
+            label_count: self.label_count(),
+            edge_type_count: self.edge_type_count(),
+            property_key_count: self.property_key_count(),
             index_count: self.catalog.index_count(),
             memory_bytes: self.memory_usage().total_bytes,
             disk_bytes,
-        })
+        }
     }
 
     /// Calculates the disk usage of the database at `path`: its file and its
@@ -289,9 +283,7 @@ impl super::GrafeoDB {
         if dir.is_dir() {
             for entry in std::fs::read_dir(dir)? {
                 let entry = entry?;
-                // From the file itself: on Windows a listing's size is stale
-                // while the file is open (the active WAL segment).
-                let metadata = std::fs::metadata(entry.path())?;
+                let metadata = entry.metadata()?;
                 if metadata.is_file() {
                     total = total.saturating_add(Self::file_size(&entry.path(), &metadata)?);
                 } else if metadata.is_dir() {
@@ -318,35 +310,43 @@ impl super::GrafeoDB {
     ///
     /// For LPG mode, returns label and edge type information.
     /// For RDF mode, returns predicate and named graph information.
-    ///
-    /// # Errors
-    ///
-    /// As [`node_count`](Self::node_count).
-    pub fn schema(&self) -> Result<crate::admin::SchemaInfo> {
-        // The nodes that have each label as a committed reader at the
-        // current epoch sees them, without building them (#546), all of the
-        // report in one pinned state.
-        let snapshot = self.default_snapshot();
-        let (store, view) = (snapshot.store(), snapshot.view());
-        let mut labels = Vec::new();
-        for name in store.all_labels()? {
-            labels.push(crate::admin::LabelInfo {
-                count: store.nodes_by_label_count(&name, view)?,
+    #[must_use]
+    pub fn schema(&self) -> crate::admin::SchemaInfo {
+        let store = self.graph_store();
+        // The label index holds every node with the label, also those of a
+        // transaction that has not committed: count the nodes that have the
+        // label at the current epoch.
+        let epoch = self.read_epoch();
+        let labels = store
+            .all_labels()
+            .into_iter()
+            .map(|name| crate::admin::LabelInfo {
+                count: store
+                    .nodes_by_label(&name)
+                    .into_iter()
+                    .filter(|&id| {
+                        store
+                            .get_node_at_epoch(id, epoch)
+                            .is_some_and(|node| node.has_label(&name))
+                    })
+                    .count(),
                 name,
-            });
-        }
+            })
+            .collect();
 
         // One pass over the edges counts every type, at the current epoch.
         let mut edges_per_type: FxHashMap<ArcStr, usize> = FxHashMap::default();
-        for node in store.node_ids(view)? {
-            for (_, edge) in store.edges(node, Direction::Outgoing, &[], view)? {
-                if let Some(edge_type) = store.edge_type(edge, view)? {
+        for node in store.all_node_ids() {
+            for (_, edge) in store.edges_from(node, Direction::Outgoing) {
+                if store.is_edge_visible_at_epoch(edge, epoch)
+                    && let Some(edge_type) = store.edge_type(edge)
+                {
                     *edges_per_type.entry(edge_type).or_default() += 1;
                 }
             }
         }
         let edge_types = store
-            .all_edge_types()?
+            .all_edge_types()
             .into_iter()
             .map(|name| crate::admin::EdgeTypeInfo {
                 count: edges_per_type.get(name.as_str()).copied().unwrap_or(0),
@@ -354,13 +354,13 @@ impl super::GrafeoDB {
             })
             .collect();
 
-        let property_keys = store.all_property_keys()?;
+        let property_keys = store.all_property_keys();
 
-        Ok(crate::admin::SchemaInfo::Lpg(crate::admin::LpgSchemaInfo {
+        crate::admin::SchemaInfo::Lpg(crate::admin::LpgSchemaInfo {
             labels,
             edge_types,
             property_keys,
-        }))
+        })
     }
 
     /// Returns detailed information about all indexes.
@@ -379,8 +379,7 @@ impl super::GrafeoDB {
                     .get_property_key_name(def.property_key)
                     .unwrap_or_else(|| "?".into());
                 crate::admin::IndexInfo {
-                    // The name `CREATE INDEX` gave it, as `SHOW INDEXES` lists it.
-                    name: def.name,
+                    name: format!("idx_{}_{}", label_name, prop_name),
                     index_type: format!("{:?}", def.index_type),
                     target: format!("{}:{}", label_name, prop_name),
                     unique: false,
@@ -399,60 +398,39 @@ impl super::GrafeoDB {
     ///
     /// Returns a list of errors and warnings. Empty errors = valid. Reads
     /// the database as of the current epoch.
-    ///
-    /// # Errors
-    ///
-    /// As [`node_count`](Self::node_count): a read that fails is an error,
-    /// not a finding.
-    pub fn validate(&self) -> Result<crate::admin::ValidationResult> {
+    #[must_use]
+    pub fn validate(&self) -> crate::admin::ValidationResult {
         let mut result = crate::admin::ValidationResult::default();
-        // The graph as queries see it at the current epoch, one pinned state
-        // for every check.
-        let snapshot = self.default_snapshot();
-        let (store, view) = (snapshot.store(), snapshot.view());
+        // Nodes as queries see them, at the current epoch.
+        let epoch = self.read_epoch();
+        let store = self.graph_store();
 
-        // Check for dangling edge references: every edge row of the built-in
-        // store the view sees, against the nodes it sees. An external store's
-        // reads list only the edges whose ends it sees, so its edges cannot
-        // be checked this way: the report says so.
-        match self.root_store() {
-            Some(root) => {
-                for id in 0..root.next_edge_id() {
-                    let Some(edge) = root.edge(EdgeId::new(id), view)? else {
-                        continue;
-                    };
-                    if !store.is_node_visible(edge.src, view)? {
-                        result.errors.push(crate::admin::ValidationError {
-                            code: "DANGLING_SRC".to_string(),
-                            message: format!(
-                                "Edge {} references non-existent source node {}",
-                                edge.id.0, edge.src.0
-                            ),
-                            context: Some(format!("edge:{}", edge.id.0)),
-                        });
-                    }
-                    if !store.is_node_visible(edge.dst, view)? {
-                        result.errors.push(crate::admin::ValidationError {
-                            code: "DANGLING_DST".to_string(),
-                            message: format!(
-                                "Edge {} references non-existent destination node {}",
-                                edge.id.0, edge.dst.0
-                            ),
-                            context: Some(format!("edge:{}", edge.id.0)),
-                        });
-                    }
-                }
+        // Check for dangling edge references
+        for edge in self.iter_edges() {
+            if store.get_node_at_epoch(edge.src, epoch).is_none() {
+                result.errors.push(crate::admin::ValidationError {
+                    code: "DANGLING_SRC".to_string(),
+                    message: format!(
+                        "Edge {} references non-existent source node {}",
+                        edge.id.0, edge.src.0
+                    ),
+                    context: Some(format!("edge:{}", edge.id.0)),
+                });
             }
-            None => result.warnings.push(crate::admin::ValidationWarning {
-                code: "EXTERNAL_EDGES_UNCHECKED".to_string(),
-                message: "the edges of an external store are not checked for dangling ends: its reads list only the edges whose ends it sees"
-                    .to_string(),
-                context: None,
-            }),
+            if store.get_node_at_epoch(edge.dst, epoch).is_none() {
+                result.errors.push(crate::admin::ValidationError {
+                    code: "DANGLING_DST".to_string(),
+                    message: format!(
+                        "Edge {} references non-existent destination node {}",
+                        edge.id.0, edge.dst.0
+                    ),
+                    context: Some(format!("edge:{}", edge.id.0)),
+                });
+            }
         }
 
         // Add warnings for potential issues
-        if store.node_count(view)? > 0 && store.edge_count(view)? == 0 {
+        if self.node_count() > 0 && self.edge_count() == 0 {
             result.warnings.push(crate::admin::ValidationWarning {
                 code: "NO_EDGES".to_string(),
                 message: "Database has nodes but no edges".to_string(),
@@ -460,89 +438,7 @@ impl super::GrafeoDB {
             });
         }
 
-        Ok(result)
-    }
-
-    /// When the file's last checkpoint was written, in seconds since the Unix
-    /// epoch; `None` before the first one, and without a file.
-    fn last_checkpoint_seconds(&self) -> Option<u64> {
-        #[cfg(feature = "grafeo-file")]
-        {
-            let header = self.file_manager.as_ref()?.active_header();
-            (header.iteration > 0).then_some(header.timestamp_ms / 1000)
-        }
-        #[cfg(not(feature = "grafeo-file"))]
-        None
-    }
-
-    /// Changes when this database checkpoints by itself (#426): when the
-    /// interval has passed since its last automatic checkpoint, or once the
-    /// WAL holds the given bytes since the last checkpoint. The new triggers
-    /// replace the ones in force (from
-    /// [`Config::with_checkpoint_interval`](crate::Config::with_checkpoint_interval)
-    /// and [`Config::with_checkpoint_wal_size`](crate::Config::with_checkpoint_wal_size),
-    /// or an earlier call), until the database closes; the file does not
-    /// store them. [`CheckpointTriggers::none`](crate::admin::CheckpointTriggers::none)
-    /// turns automatic checkpoints off.
-    ///
-    /// # Errors
-    ///
-    /// A zero interval or size, a database without a file (in memory) or
-    /// opened read-only, which never checkpoints, and the database-closed
-    /// error after `close()`.
-    pub fn set_checkpoint_triggers(
-        &self,
-        triggers: crate::admin::CheckpointTriggers,
-    ) -> Result<()> {
-        if triggers.interval.is_some_and(|interval| interval.is_zero())
-            || triggers.wal_bytes == Some(0)
-        {
-            return Err(grafeo_common::utils::error::Error::InvalidValue(
-                "a checkpoint trigger of zero would checkpoint without pause: leave it unset \
-                 to turn it off"
-                    .to_string(),
-            ));
-        }
-        let _open = self.hold_open()?;
-        if self.read_only {
-            return Err(grafeo_common::utils::error::Error::Transaction(
-                grafeo_common::utils::error::TransactionError::ReadOnly,
-            ));
-        }
-        #[cfg(feature = "grafeo-file")]
-        if self.file_manager.is_some() {
-            *self.checkpoint_triggers.lock() = triggers;
-            self.restart_checkpoint_timer();
-            return Ok(());
-        }
-        Err(grafeo_common::utils::error::Error::InvalidValue(
-            "a database without a file has nothing to checkpoint".to_string(),
-        ))
-    }
-
-    /// How the automatic checkpoints fare: the triggers in force, the last
-    /// checkpoint of any kind, and the automatic ones that failed since the
-    /// last that succeeded, with the last error. A failed automatic
-    /// checkpoint is also logged as a warning, and retried after a pause.
-    #[must_use]
-    pub fn checkpoint_status(&self) -> crate::admin::CheckpointStatus {
-        let status = crate::admin::CheckpointStatus {
-            last_checkpoint: self.last_checkpoint_seconds(),
-            ..crate::admin::CheckpointStatus::default()
-        };
-        #[cfg(feature = "grafeo-file")]
-        let status = {
-            let failures = self.checkpoint_failures.snapshot();
-            crate::admin::CheckpointStatus {
-                triggers: *self.checkpoint_triggers.lock(),
-                failures: failures.failures,
-                last_error: failures.last_error,
-                last_failure: failures.last_failure,
-                stopped: failures.stopped,
-                ..status
-            }
-        };
-        status
+        result
     }
 
     /// Returns WAL (Write-Ahead Log) status.
@@ -556,17 +452,11 @@ impl super::GrafeoDB {
                 enabled: true,
                 // The sidecar WAL of the database file, `<path>.wal/`.
                 path: Some(wal.dir().to_path_buf()),
-                // The log after the last checkpoint: what a reopen replays.
-                size_bytes: usize::try_from(wal.end_lsn().saturating_sub(self.checkpoint_lsn()))
-                    .unwrap_or(usize::MAX),
-                record_count: usize::try_from(
-                    wal.records_written().saturating_sub(
-                        self.wal_records_at_checkpoint
-                            .load(std::sync::atomic::Ordering::Acquire),
-                    ),
-                )
-                .unwrap_or(usize::MAX),
-                last_checkpoint: self.last_checkpoint_seconds(),
+                size_bytes: wal.size_bytes(),
+                // reason: WAL record count fits usize on 64-bit targets
+                #[allow(clippy::cast_possible_truncation)]
+                record_count: wal.record_count() as usize,
+                last_checkpoint: wal.last_checkpoint_timestamp(),
                 current_epoch: self.read_epoch().as_u64(),
             };
         }
@@ -613,17 +503,6 @@ impl super::GrafeoDB {
         }
         // The store holds the stamped part of a commit that did not complete.
         self.transaction_manager.check_no_incomplete_commit()?;
-
-        // A database on a backend of its own checkpoints through the backend,
-        // and drops the log the backend holds durably.
-        #[cfg(feature = "wal")]
-        if let Some(backend) = self.external_write_store.as_ref() {
-            if self.wal.is_none() {
-                return Ok(false);
-            }
-            self.checkpoint_backend(backend)?;
-            return Ok(true);
-        }
 
         // Flush all sections to the .grafeo file. The flush marks and truncates
         // the WAL only once the file is durable (#417).
@@ -710,4 +589,22 @@ impl super::GrafeoDB {
         let end_epoch = end_epoch.min(self.read_epoch());
         Ok(self.cdc_log.changes_between(start_epoch, end_epoch))
     }
+}
+
+/// `count`, which counts at the store's own epoch, when that is the count at
+/// `epoch`: the store's epoch is not ahead of `epoch` (no version is newer
+/// than the store's epoch) and does not move during the count. `None` when
+/// it is ahead: a commit has stamped its versions and is not complete (or
+/// never completes).
+fn counted_at_own_epoch(
+    store: &dyn GraphStoreSearch,
+    epoch: EpochId,
+    count: impl FnOnce() -> usize,
+) -> Option<usize> {
+    let store_epoch = store.current_epoch();
+    if store_epoch > epoch {
+        return None;
+    }
+    let counted = count();
+    (store.current_epoch() == store_epoch).then_some(counted)
 }

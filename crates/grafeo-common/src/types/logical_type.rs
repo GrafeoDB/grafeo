@@ -98,11 +98,6 @@ pub enum LogicalType {
     /// The usize parameter is the dimension (e.g., 384, 768, 1536).
     /// Common embedding sizes: 384 (MiniLM), 768 (BERT), 1536 (OpenAI).
     Vector(usize),
-
-    /// A dictionary-encoded RDF term: an id into the term dictionary of the
-    /// SPARQL query that produced it. Stored as an integer; meaningless
-    /// outside that query.
-    RdfTermId,
 }
 
 impl LogicalType {
@@ -324,7 +319,6 @@ impl fmt::Display for LogicalType {
             LogicalType::Edge => write!(f, "EDGE"),
             LogicalType::Path => write!(f, "PATH"),
             LogicalType::Vector(dim) => write!(f, "VECTOR({dim})"),
-            LogicalType::RdfTermId => write!(f, "RDF TERM ID"),
         }
     }
 }
@@ -454,14 +448,5 @@ mod tests {
         assert!(!v384.is_numeric());
         assert!(!v384.is_integer());
         assert!(!v384.is_float());
-    }
-
-    #[test]
-    fn rdf_term_id_is_its_own_type() {
-        let id = LogicalType::RdfTermId;
-        assert_eq!(id.to_string(), "RDF TERM ID");
-        assert!(!id.is_numeric());
-        assert!(!id.is_integer());
-        assert_ne!(id, LogicalType::Int64);
     }
 }

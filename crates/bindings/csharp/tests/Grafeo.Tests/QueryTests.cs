@@ -104,23 +104,18 @@ public sealed class QueryTests : IDisposable
                 name: 'Beatrix',
                 age: 35,
                 active: true,
-                score: 9.5e0,
-                balance: 9.50
+                score: 9.5
             })
         """);
 
         var result = _db.Execute(
-            "MATCH (p:Person) WHERE p.name = 'Beatrix' " +
-            "RETURN p.name, p.age, p.active, p.score, p.balance");
+            "MATCH (p:Person) WHERE p.name = 'Beatrix' RETURN p.name, p.age, p.active, p.score");
 
         Assert.Single(result.Rows);
         var row = result.Rows[0];
         Assert.Equal("Beatrix", row["p.name"]);
         Assert.Equal(35L, row["p.age"]);
         Assert.Equal(true, row["p.active"]);
-        // A number with an exponent is a float, one with a point an exact decimal.
         Assert.Equal(9.5, row["p.score"]);
-        var balance = Assert.IsType<GrafeoDecimal>(row["p.balance"]);
-        Assert.Equal("9.50", balance.Text);
     }
 }

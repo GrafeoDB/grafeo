@@ -107,21 +107,6 @@ result.nodes();          // extracted nodes
 result.edges();          // extracted edges
 ```
 
-### Errors
-
-A call that fails throws, or rejects its promise with, an `Error`. An error from the database also has `gqlStatus`,
-its ISO GQL status: `22012` for a division by zero, `22003` for a value out of range, `42001` for a syntax error.
-
-```typescript
-import type { GrafeoError } from '@grafeo-db/js';
-
-try {
-  await db.execute('RETURN 1 / 0');
-} catch (error) {
-  console.log((error as GrafeoError).gqlStatus); // '22012'
-}
-```
-
 ### Graph Projections
 
 ```typescript
@@ -173,7 +158,6 @@ const results = await db.vectorSearch('Document', 'embedding', queryVector, 10);
 ## Links
 
 - [Documentation](https://grafeo.dev)
-- [API Stability](https://grafeo.dev/stability/): which calls are stable and which are experimental; a call here has the level of the Rust call it wraps
 - [GitHub](https://github.com/GrafeoDB/grafeo)
 - [Python Package](https://pypi.org/project/grafeo/)
 - [WASM Package](https://www.npmjs.com/package/@grafeo-db/wasm)

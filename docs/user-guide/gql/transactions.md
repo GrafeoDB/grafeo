@@ -151,22 +151,10 @@ SESSION SET GRAPH my_graph
 ### Time Zone
 
 ```sql
--- Set the session time zone: a UTC offset
-SESSION SET TIME ZONE '+01:00'
-SESSION SET TIME ZONE '-05:30'
+-- Set session time zone
 SESSION SET TIME ZONE 'UTC'
+SESSION SET TIME ZONE 'America/New_York'
 ```
-
-The time zone is a time zone displacement, as ISO GQL defines it: a UTC offset of at most 14 hours, `Z` or
-`UTC`. Any other text, such as a named zone (`Europe/Amsterdam`), fails with GQLSTATUS 22009 (invalid time zone
-displacement value). Named zones may come later ([#651](https://github.com/GrafeoDB/grafeo/issues/651)).
-
-GQL and SQL/PGQ compare a local datetime or time with a zoned one by reading the local value at the session
-time zone, as SQL does: with `'+01:00'`, `local_datetime('2024-03-15T10:00:00')` equals
-`zoned_datetime('2024-03-15T10:00:00+01:00')`; without a session time zone the local value is read at UTC.
-Cypher keeps the two apart, as openCypher defines it: a zoned and a local value are never equal, and `<` or
-`>` between them is null. The time zone carries over to the next call of a database's `execute`, as the graph
-and the schema do, and `SESSION RESET TIME ZONE` clears it.
 
 ### Schema
 

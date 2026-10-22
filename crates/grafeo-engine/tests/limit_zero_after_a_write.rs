@@ -14,7 +14,7 @@
 //! cargo test -p grafeo-engine --all-features --test limit_zero_after_a_write
 //! ```
 
-#![cfg(all(feature = "gql", feature = "cypher"))]
+#![cfg(all(feature = "lpg", feature = "gql", feature = "cypher"))]
 
 use grafeo_common::types::Value;
 use grafeo_engine::{GrafeoDB, Session};

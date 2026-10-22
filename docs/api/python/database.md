@@ -17,9 +17,7 @@ GrafeoDB(
     path: Optional[str] = None,
     *,
     cdc: bool = False,
-    shuffle_unordered: bool = False,
-    wal_salvage: bool = False,
-    history_retention: Optional[Union[str, timedelta]] = None
+    shuffle_unordered: bool = False
 )
 ```
 
@@ -30,8 +28,6 @@ GrafeoDB(
 | `path` | `str` | `None` | Database file path (None for in-memory) |
 | `cdc` | `bool` | `False` | Enable change data capture (keyword-only). When `True`, mutations are tracked and queryable via `node_history()` / `edge_history()`. |
 | `shuffle_unordered` | `bool` | `False` | Return the rows of every query without `ORDER BY` in random order (keyword-only). For tests: without `ORDER BY` the row order is unspecified, and this finds code that relies on it. |
-| `wal_salvage` | `bool` | `False` | Open a database whose write-ahead log has damage before its end with the commits before the damage (keyword-only). Without it the open fails with `GRAFEO-S002`, naming the file and offset. What is not replayed is kept in `<path>.wal.damaged`. For this open only. |
-| `history_retention` | `str` or `timedelta` | `None` | How much history the database keeps for time-travel reads ([`as_of()`](#as_of), keyword-only): `"off"` (the default for a new database), `"forever"`, or a `timedelta`, how far back it reaches. A database file stores the setting; `None` keeps the stored one. |
 
 ### Examples
 
@@ -184,42 +180,6 @@ def execute_at_epoch(self, query: str, epoch: int, params: Optional[Dict] = None
 result = db.execute_at_epoch("MATCH (n:Server) RETURN n.status", epoch=5)
 ```
 
-### as_of()
-
-A read-only view of the database at a point in time: an `int` (an epoch), a timezone-aware `datetime` (the last
-commit at or before it) or a `timedelta` (that long ago). A naive `datetime` raises `ValueError`, another type
-`TypeError`; a point before the history the database keeps raises `GrafeoError` ("not retained"). The view keeps the
-history of its epoch until it is closed: use it in a `with` block or call `close()`.
-
-```python
-def as_of(self, point: Union[int, datetime, timedelta]) -> AsOfView
-```
-
-```python
-with db.as_of(timedelta(minutes=5)) as view:
-    print(view.epoch, view.execute("MATCH (p:Person) RETURN count(p)").scalar())
-```
-
-An `AsOfView` has `epoch`, `execute(query, params=None)`, `get_node(id)`, `get_edge(id)`,
-`get_node_property(id, key)` and `close()`. A query that writes through it raises `GrafeoError`.
-
-### execute_as_of()
-
-Execute one GQL query at a point in time (as for [`as_of()`](#as_of)), without keeping a view.
-
-```python
-def execute_as_of(self, query: str, point: Union[int, datetime, timedelta], params: Optional[Dict] = None) -> QueryResult
-```
-
-### epoch_as_of()
-
-The epoch a point in time reads at: the epoch itself (the current one for a later one), or the last commit at or
-before a time.
-
-```python
-def epoch_as_of(self, point: Union[int, datetime, timedelta]) -> int
-```
-
 ## Node Operations
 
 ### create_node()
@@ -244,16 +204,6 @@ Delete a node by ID. Returns `True` if the node existed and was deleted.
 
 ```python
 def delete_node(self, id: int) -> bool
-```
-
-A node that still has edges raises: delete them first, or use `detach_delete_node()`.
-
-### detach_delete_node()
-
-Delete a node with all its edges, as `DETACH DELETE` does. Returns `True` if the node existed. The node and its edges are one change: they commit and roll back together, and change data capture names the node in each edge's `deleted_with`.
-
-```python
-def detach_delete_node(self, id: int) -> bool
 ```
 
 ### add_node_label()
@@ -357,27 +307,6 @@ Get an edge by ID. Returns `None` if the edge does not exist.
 
 ```python
 def get_edge(self, id: int) -> Optional[Edge]
-```
-
-### get_node_edges()
-
-The edges of a node as `(neighbor_id, edge_id)` tuples, without a query. `direction` is `"out"`
-(the default), `"in"` or `"both"`, which lists a self-loop once; `edge_types` keeps only edges of
-those types (a type or a list of types). A node that does not exist has none. A graph handle
-(`db.graph(name)`) has the same method for its graph.
-
-```python
-def get_node_edges(
-    self,
-    node_id: int,
-    direction: str = "out",
-    edge_types: Optional[Union[str, Sequence[str]]] = None,
-) -> List[Tuple[int, int]]
-```
-
-```python
-for neighbor_id, edge_id in db.get_node_edges(alix.id, "out", ["KNOWS"]):
-    print(db.get_node(neighbor_id))
 ```
 
 ### delete_edge()
@@ -1153,26 +1082,6 @@ wal = db.wal_status()
 print(f"WAL size: {wal['size_bytes']} bytes")
 ```
 
-### set_checkpoint_triggers()
-
-Let the database checkpoint by itself: every `interval_secs` seconds, and once the WAL holds `wal_bytes` bytes since the last checkpoint. Call it without arguments to turn automatic checkpoints off (the default). For this open only; an in-memory or read-only database raises.
-
-```python
-def set_checkpoint_triggers(self, interval_secs: Optional[float] = None, wal_bytes: Optional[int] = None) -> None
-```
-
-```python
-db.set_checkpoint_triggers(interval_secs=300, wal_bytes=64 * 1024 * 1024)
-```
-
-### checkpoint_status()
-
-How the automatic checkpoints fare. Returns a dict with keys: `interval_secs` and `wal_bytes` (the triggers, `None` when off), `last_checkpoint` (Unix seconds of the last checkpoint of any kind), `failures` (automatic checkpoints that failed since the last that succeeded), `last_error`, `last_failure` and `stopped` (no automatic checkpoint can succeed until a reopen). A failed automatic checkpoint is also logged and retried after a pause.
-
-```python
-def checkpoint_status(self) -> Dict[str, Any]
-```
-
 ### save()
 
 Save the database to a file path. For in-memory databases, creates a new persistent copy. For file-backed databases, creates a copy at the new path. The copy is a single file, whatever the extension of the path, and `save()` fails if the path already exists. The original database remains unchanged.
@@ -1202,7 +1111,7 @@ test_db = file_db.to_memory()  # safe copy for experiments, indexes included
 
 ### compact()
 
-Compacts the database: writes a checkpoint of a persistent database (an in-memory or read-only one writes none), drops the old versions no open transaction can see any more, compresses the property values held decoded in memory, and returns what it did as a dict: `checkpointed`, `versions_collected`, `rows_compressed` and `duration_ms`. Since 0.6.0 the database keeps one store: `compact()` no longer builds a separate columnar one (see [Compact Store](../../user-guide/compact-store.md)). Raises if the checkpoint fails, or after `close()`.
+Compacts the database: writes a checkpoint of a persistent database (an in-memory or read-only one writes none), drops the old versions no open transaction can see any more, and returns what it did as a dict: `checkpointed`, `versions_collected` and `duration_ms`. Since 0.6.0 the database keeps one store: `compact()` no longer builds a separate columnar one (see [Compact Store](../../user-guide/compact-store.md)). Raises if the checkpoint fails, or after `close()`.
 
 ```python
 def compact(self) -> dict
@@ -1213,7 +1122,7 @@ db = grafeo.GrafeoDB()
 db.execute("INSERT (:Person {name: 'Alix', age: 30})")
 db.execute("INSERT (:Person {name: 'Gus', age: 25})")
 
-report = db.compact()  # {'checkpointed': False, 'versions_collected': 0, 'rows_compressed': 2, 'duration_ms': 0}
+report = db.compact()  # {'checkpointed': False, 'versions_collected': 0, 'duration_ms': 0}
 
 result = db.execute("MATCH (p:Person) RETURN p.name")
 db.execute("INSERT (:Person {name: 'Vincent'})")
@@ -1248,7 +1157,7 @@ def clear_plan_cache(self) -> None
 
 ### get_node_at_epoch()
 
-Get a node as it existed at a specific historical epoch. Returns `None` if the node did not exist at that epoch, and raises `GrafeoError` for an epoch older than the history the database keeps.
+Get a node as it existed at a specific historical epoch. Returns `None` if the node did not exist at that epoch.
 
 ```python
 def get_node_at_epoch(self, id: int, epoch: int) -> Optional[Node]
@@ -1256,7 +1165,7 @@ def get_node_at_epoch(self, id: int, epoch: int) -> Optional[Node]
 
 ### get_edge_at_epoch()
 
-Get an edge as it existed at a specific historical epoch. Returns `None` if the edge did not exist at that epoch, and raises `GrafeoError` for an epoch older than the history the database keeps.
+Get an edge as it existed at a specific historical epoch. Returns `None` if the edge did not exist at that epoch.
 
 ```python
 def get_edge_at_epoch(self, id: int, epoch: int) -> Optional[Edge]
@@ -1280,7 +1189,7 @@ def get_edge_history(self, id: int) -> List[Tuple[int, Optional[int], Edge]]
 
 ### get_node_property_at_epoch()
 
-Returns a property value as it existed at a specific epoch, or `None` if the property did not exist then. Raises `GrafeoError` for an epoch older than the history the database keeps.
+Returns a property value as it existed at a specific epoch. Requires the `temporal` feature.
 
 ```python
 def get_node_property_at_epoch(self, id: int, key: str, epoch: int) -> Optional[Any]
@@ -1289,6 +1198,7 @@ def get_node_property_at_epoch(self, id: int, key: str, epoch: int) -> Optional[
 ### get_node_property_history()
 
 Returns the full version timeline for a single property: list of (epoch, value) tuples.
+Requires the `temporal` feature.
 
 ```python
 def get_node_property_history(self, id: int, key: str) -> List[Tuple[int, Any]]
@@ -1297,7 +1207,7 @@ def get_node_property_history(self, id: int, key: str) -> List[Tuple[int, Any]]
 ### get_all_node_property_history()
 
 Returns version history for all properties: dict mapping property names to lists of
-(epoch, value) tuples, within the history the database keeps.
+(epoch, value) tuples. Requires the `temporal` feature.
 
 ```python
 def get_all_node_property_history(self, id: int) -> Dict[str, List[Tuple[int, Any]]]

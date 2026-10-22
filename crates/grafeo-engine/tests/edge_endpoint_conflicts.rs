@@ -15,7 +15,7 @@
 //! cargo test -p grafeo-engine --all-features --test edge_endpoint_conflicts
 //! ```
 
-#![cfg(feature = "gql")]
+#![cfg(all(feature = "lpg", feature = "gql"))]
 
 use grafeo_common::types::{NodeId, Value};
 use grafeo_common::utils::error::Error;
@@ -72,12 +72,7 @@ fn state(db: &GrafeoDB) -> (Vec<String>, Vec<(String, String)>, usize, usize) {
         .iter()
         .map(|row| (text(&row[0]), text(&row[1])))
         .collect();
-    (
-        people,
-        knows,
-        db.node_count().unwrap(),
-        db.edge_count().unwrap(),
-    )
+    (people, knows, db.node_count(), db.edge_count())
 }
 
 /// The state once Gus is gone: no edge is left, none points at him.

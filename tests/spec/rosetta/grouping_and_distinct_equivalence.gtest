@@ -89,7 +89,7 @@ tests:
 
   - name: nan_values_are_one_group
     variants:
-      gql: "UNWIND [0.0e0 / 0.0e0, 3, 0.0e0 / 0.0e0] AS x WITH x, count(*) AS c RETURN x, c"
+      gql: "UNWIND [0.0 / 0.0, 3, 0.0 / 0.0] AS x WITH x, count(*) AS c RETURN x, c"
       cypher: "UNWIND [0.0 / 0.0, 3, 0.0 / 0.0] AS x WITH x, count(*) AS c RETURN x, c"
     expect:
       rows:
@@ -266,7 +266,7 @@ tests:
 
   - name: distinct_takes_nan_once
     variants:
-      gql: "UNWIND [0.0e0 / 0.0e0, 0.0e0 / 0.0e0, 3] AS x RETURN count(DISTINCT x) AS d"
+      gql: "UNWIND [0.0 / 0.0, 0.0 / 0.0, 3] AS x RETURN count(DISTINCT x) AS d"
       cypher: "UNWIND [0.0 / 0.0, 0.0 / 0.0, 3] AS x RETURN count(DISTINCT x) AS d"
     expect:
       rows:

@@ -30,7 +30,7 @@ GQL uses pattern matching to query and manipulate graph data. The syntax is very
 | Call procedure | `CALL name(args) YIELD field` |
 | Call subquery | `CALL { MATCH ... RETURN ... }` |
 | Create type | `CREATE NODE TYPE Name (...)` |
-| Create index | `CREATE INDEX name FOR (n:Label) ON (n.prop)` |
+| Create index | `CREATE INDEX FOR (n:Label) ON (n.prop)` |
 | Transaction | `START TRANSACTION READ ONLY` |
 
 ## Learn More

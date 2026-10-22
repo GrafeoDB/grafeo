@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { GrafeoDB } from '../grafeo.js'
+import { GrafeoDB } from '../index.js'
 
 function seedPeople() {
   const db = GrafeoDB.create()

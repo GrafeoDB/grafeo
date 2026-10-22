@@ -44,11 +44,8 @@ mod tests {
         );
 
         let db = GrafeoDB::with_config(config()).unwrap();
-        assert_eq!(db.node_count().unwrap(), 2);
-        assert_eq!(
-            db.get_node(node).unwrap().unwrap().labels.len(),
-            labels.len()
-        );
+        assert_eq!(db.node_count(), 2);
+        assert_eq!(db.get_node(node).unwrap().labels.len(), labels.len());
         let wide = db
             .session()
             .execute("MATCH (n:L65535) RETURN count(n) AS c")
@@ -132,7 +129,6 @@ mod tests {
         let db = GrafeoDB::open(&path).unwrap();
         let trips = db
             .get_node(NodeId::new(0))
-            .unwrap()
             .unwrap()
             .properties
             .to_btree_map()

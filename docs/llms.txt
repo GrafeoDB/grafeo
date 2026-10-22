@@ -30,7 +30,7 @@ Grafeo supports two graph data models:
 | Language | Data Model | Description |
 |----------|------------|-------------|
 | GQL | LPG | ISO standard, declarative pattern matching (default) |
-| Cypher | LPG | openCypher syntax |
+| Cypher | LPG | Neo4j-compatible syntax |
 | Gremlin | LPG | Apache TinkerPop traversal-based |
 | GraphQL | LPG/RDF | Schema-driven queries |
 | SPARQL | RDF | W3C standard for RDF |

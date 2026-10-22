@@ -7,7 +7,7 @@
 use std::sync::Arc;
 
 use grafeo_common::types::{EpochId, TransactionId, Value};
-use grafeo_core::graph::rowgroup::RowGroupStore;
+use grafeo_core::graph::lpg::LpgStore;
 
 use crate::GrafeoDB;
 use crate::query::{QueryLanguage, QueryProcessor};
@@ -16,7 +16,7 @@ use crate::query::{QueryLanguage, QueryProcessor};
 /// `transaction` of `db`'s transaction manager, which reads at `epoch`.
 fn processor(
     db: &GrafeoDB,
-    store: Arc<RowGroupStore>,
+    store: Arc<LpgStore>,
     graph: Option<&str>,
     (epoch, transaction): (EpochId, TransactionId),
 ) -> QueryProcessor {
@@ -66,7 +66,7 @@ fn visits(session: &crate::Session) -> Value {
 #[test]
 fn a_processor_conflicts_with_a_session_on_a_node_of_the_graph_it_writes() {
     let db = two_graphs();
-    let trips = db.lpg_store().unwrap().graph("trips").unwrap();
+    let trips = db.lpg_store().graph("trips").unwrap();
     let mut session = db.session();
     session.use_graph("trips");
     session.begin_transaction().unwrap();
@@ -88,7 +88,7 @@ fn a_processor_conflicts_with_a_session_on_a_node_of_the_graph_it_writes() {
 #[test]
 fn a_processor_does_not_conflict_with_the_same_id_in_another_graph() {
     let db = two_graphs();
-    let trips = db.lpg_store().unwrap().graph("trips").unwrap();
+    let trips = db.lpg_store().graph("trips").unwrap();
     // The session writes Amsterdam, node 0 of the default graph.
     let mut session = db.session();
     session.begin_transaction().unwrap();
@@ -117,7 +117,7 @@ fn a_processor_does_not_conflict_with_the_same_id_in_another_graph() {
 #[test]
 fn a_processor_transaction_aborted_by_the_manager_leaves_nothing() {
     let db = two_graphs();
-    let root = db.lpg_store().unwrap();
+    let root = db.lpg_store();
     let transaction = begin(&db);
     let processor = processor(&db, root, None, transaction);
     processor

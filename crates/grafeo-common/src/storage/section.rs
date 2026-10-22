@@ -34,7 +34,7 @@ use crate::memory::buffer::SpillError;
 use crate::storage::page_fetcher::PageFetcher;
 use crate::utils::error::{Error, Result};
 
-// â”€â”€ Section Type â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// ── Section Type ────────────────────────────────────────────────────
 
 /// Identifies a section type in the container directory.
 ///
@@ -62,10 +62,6 @@ pub enum SectionType {
     /// previously-deleted base node does not reappear after reload
     /// when the next compact has not yet run.
     OverlayDeletions = 5,
-    /// The history's time index (time travel): when each commit in the
-    /// retention window happened, and the oldest epoch a read may ask for.
-    /// Written only by a database that keeps history.
-    TimeIndex = 6,
 
     /// Vector embeddings, HNSW topology, quantization data.
     VectorStore = 10,
@@ -100,7 +96,6 @@ impl SectionType {
             Self::RdfStore => 3,
             Self::CompactStore => 4,
             Self::OverlayDeletions => 5,
-            Self::TimeIndex => 6,
             Self::VectorStore => 10,
             Self::TextIndex => 11,
             Self::RdfRing => 12,
@@ -125,7 +120,6 @@ impl SectionType {
             | Self::RdfStore
             | Self::CompactStore
             | Self::OverlayDeletions
-            | Self::TimeIndex
             | Self::VectorStore
             | Self::TextIndex
             | Self::RdfRing
@@ -142,7 +136,6 @@ impl SectionType {
             3 => Some(Self::RdfStore),
             4 => Some(Self::CompactStore),
             5 => Some(Self::OverlayDeletions),
-            6 => Some(Self::TimeIndex),
             10 => Some(Self::VectorStore),
             11 => Some(Self::TextIndex),
             12 => Some(Self::RdfRing),
@@ -152,7 +145,7 @@ impl SectionType {
     }
 }
 
-// â”€â”€ Section Flags â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// ── Section Flags ───────────────────────────────────────────────────
 
 /// Flags for a section entry in the container directory.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -209,12 +202,6 @@ impl SectionType {
                 required: true,
                 mmap_able: true,
             },
-            Self::TimeIndex => SectionFlags {
-                // History is data: a reader that does not know it must not
-                // open the file and answer reads at a time without it.
-                required: true,
-                mmap_able: false,
-            },
             Self::OverlayDeletions => SectionFlags {
                 // Marked non-required so older readers that don't know about
                 // it can skip rather than refuse to open. Functionally the
@@ -234,7 +221,7 @@ impl SectionType {
     }
 }
 
-// â”€â”€ Section Directory Entry â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// ── Section Directory Entry ─────────────────────────────────────────
 
 /// A single entry in the container's section directory.
 ///
@@ -271,7 +258,7 @@ impl SectionDirectoryEntry {
     pub const SIZE: usize = 32;
 }
 
-// â”€â”€ Streaming Chunks â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// ── Streaming Chunks ────────────────────────────────────────────────
 
 /// What a chunk holds within its section.
 ///
@@ -537,18 +524,6 @@ impl ChunkMeta {
     }
 }
 
-/// Which image of a database file: the file's database id and the
-/// iteration of the database header that names the image. A checkpoint's
-/// new image gets the next iteration, so no two images of one file share
-/// an id.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct ImageId {
-    /// The database id of the file's header.
-    pub database_id: u128,
-    /// The iteration of the database header that names the image.
-    pub iteration: u64,
-}
-
 /// Receives the chunks of a section as it streams out.
 pub trait SectionSink {
     /// Appends one chunk.
@@ -557,38 +532,6 @@ pub trait SectionSink {
     ///
     /// Returns an error if the chunk cannot be stored.
     fn write_chunk(&mut self, meta: ChunkMeta, bytes: &[u8]) -> Result<()>;
-
-    /// The image a checkpoint follows, with its chunks of the section being
-    /// written: the active image of the file the sink writes into. `None`
-    /// when there is none to point at: a new file, a copy, a sink in
-    /// memory, or an image without the section.
-    ///
-    /// A section may put any of these chunks into the new image with
-    /// [`reuse_chunk`](Self::reuse_chunk) instead of writing its bytes again,
-    /// so a checkpoint writes only what changed since that image (#430). The
-    /// section decides what is unchanged: the chunks hold what they held
-    /// when that image was written.
-    fn previous(&self) -> Option<(ImageId, &dyn SectionSource)> {
-        None
-    }
-
-    /// Appends chunk `index` of [`previous`](Self::previous) as it is: the
-    /// new image's directory points at the pages the previous image stores
-    /// it in, and no byte is written. Its identity
-    /// ([`ChunkMeta::identity`]) counts against the section's as a written
-    /// chunk's does.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`Error::Internal`] when the sink has no previous image (the
-    /// default), `index` is out of range or the chunk is of another section
-    /// version than the one being written, and the error of a repeated
-    /// identity.
-    fn reuse_chunk(&mut self, index: usize) -> Result<()> {
-        Err(Error::Internal(format!(
-            "cannot reuse chunk {index}: this sink has no previous image"
-        )))
-    }
 }
 
 /// Serves the chunks of a section as it streams in.
@@ -722,7 +665,7 @@ pub fn read_raw(section: &mut dyn Section, source: &dyn SectionSource) -> Result
     }
 }
 
-// â”€â”€ Section Trait â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// ── Section Trait ───────────────────────────────────────────────────
 
 /// A section of the `.grafeo` container.
 ///
@@ -841,7 +784,7 @@ pub trait Section: Send + Sync {
     }
 }
 
-// â”€â”€ Tier Override â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// ── Tier Override ───────────────────────────────────────────────────
 
 /// Controls whether a section stays in RAM, on disk, or is auto-managed.
 ///
@@ -896,7 +839,6 @@ mod tests {
             SectionType::RdfStore,
             SectionType::CompactStore,
             SectionType::OverlayDeletions,
-            SectionType::TimeIndex,
             SectionType::VectorStore,
             SectionType::TextIndex,
             SectionType::RdfRing,
@@ -905,19 +847,18 @@ mod tests {
             let byte = u8::try_from(section_type as u32).unwrap();
             assert_eq!(SectionType::from_u8(byte), Some(section_type));
         }
-        for byte in [0u8, 7, 9, 13, 19, 21, 250] {
+        for byte in [0u8, 6, 9, 13, 19, 21, 250] {
             assert_eq!(SectionType::from_u8(byte), None, "byte {byte}");
         }
     }
 
     /// Every section type, in declaration order.
-    const EVERY_SECTION_TYPE: [SectionType; 10] = [
+    const EVERY_SECTION_TYPE: [SectionType; 9] = [
         SectionType::Catalog,
         SectionType::LpgStore,
         SectionType::RdfStore,
         SectionType::CompactStore,
         SectionType::OverlayDeletions,
-        SectionType::TimeIndex,
         SectionType::VectorStore,
         SectionType::TextIndex,
         SectionType::RdfRing,
@@ -933,11 +874,10 @@ mod tests {
             SectionType::RdfStore => 2,
             SectionType::CompactStore => 3,
             SectionType::OverlayDeletions => 4,
-            SectionType::TimeIndex => 5,
-            SectionType::VectorStore => 6,
-            SectionType::TextIndex => 7,
-            SectionType::RdfRing => 8,
-            SectionType::PropertyIndex => 9,
+            SectionType::VectorStore => 5,
+            SectionType::TextIndex => 6,
+            SectionType::RdfRing => 7,
+            SectionType::PropertyIndex => 8,
         }
     }
 
@@ -993,8 +933,6 @@ mod tests {
 
     #[test]
     fn section_type_classification() {
-        assert!(SectionType::TimeIndex.is_data_section());
-        assert!(SectionType::TimeIndex.default_flags().required);
         assert!(SectionType::Catalog.is_data_section());
         assert!(SectionType::LpgStore.is_data_section());
         assert!(SectionType::RdfStore.is_data_section());

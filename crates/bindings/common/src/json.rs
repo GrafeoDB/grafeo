@@ -11,21 +11,20 @@ use grafeo_common::types::{PropertyKey, Value};
 
 /// Convert a `serde_json::Value` to a Grafeo [`Value`].
 ///
-/// A number follows [`Value::from_number_text`] on its source text (the
-/// workspace reads JSON with `arbitrary_precision`): an integer is an `Int64`
-/// when it fits 64 bits, else an exact `Decimal` up to 38 digits; any other
-/// number is a `Float64`. A tagged object (see [`tagged_value`]) is the value
-/// it stands for.
-///
-/// # Errors
-///
-/// An integer with more than 38 digits or a float past the `Float64` range.
-pub fn json_to_value(v: &serde_json::Value) -> Result<Value, String> {
-    Ok(match v {
+/// Numbers are parsed as `Int64` when they fit, otherwise `Float64`.
+/// Objects with a `$timestamp_us` key are decoded as timestamps.
+pub fn json_to_value(v: &serde_json::Value) -> Value {
+    match v {
         serde_json::Value::Null => Value::Null,
         serde_json::Value::Bool(b) => Value::Bool(*b),
         serde_json::Value::Number(n) => {
-            Value::from_number_text(n.as_str()).map_err(|error| error.to_string())?
+            if let Some(i) = n.as_i64() {
+                Value::Int64(i)
+            } else if let Some(f) = n.as_f64() {
+                Value::Float64(f)
+            } else {
+                Value::Null
+            }
         }
         serde_json::Value::String(s) => match s.as_str() {
             "Infinity" => Value::Float64(f64::INFINITY),
@@ -34,61 +33,52 @@ pub fn json_to_value(v: &serde_json::Value) -> Result<Value, String> {
             _ => Value::String(s.as_str().into()),
         },
         serde_json::Value::Array(arr) => {
-            let items = arr
-                .iter()
-                .map(json_to_value)
-                .collect::<Result<Vec<_>, _>>()?;
+            let items: Vec<Value> = arr.iter().map(json_to_value).collect();
             Value::List(items.into())
         }
         serde_json::Value::Object(obj) => {
+            // Check for special $timestamp_us encoding (used by C binding).
+            if let Some(ts) = obj.get("$timestamp_us").and_then(serde_json::Value::as_i64) {
+                return Value::Timestamp(grafeo_common::types::Timestamp::from_micros(ts));
+            }
+            // Check for $date encoding
+            if let Some(s) = obj.get("$date").and_then(serde_json::Value::as_str)
+                && let Some(d) = grafeo_common::types::Date::parse(s)
+            {
+                return Value::Date(d);
+            }
+            // Check for $time encoding
+            if let Some(s) = obj.get("$time").and_then(serde_json::Value::as_str)
+                && let Some(t) = grafeo_common::types::Time::parse(s)
+            {
+                return Value::Time(t);
+            }
+            // Check for $duration encoding
+            if let Some(s) = obj.get("$duration").and_then(serde_json::Value::as_str)
+                && let Some(d) = grafeo_common::types::Duration::parse(s)
+            {
+                return Value::Duration(d);
+            }
+            // Check for $zoned_datetime encoding
+            if let Some(s) = obj
+                .get("$zoned_datetime")
+                .and_then(serde_json::Value::as_str)
+                && let Some(zdt) = grafeo_common::types::ZonedDatetime::parse(s)
+            {
+                return Value::ZonedDatetime(zdt);
+            }
             let mut map = BTreeMap::new();
             for (k, v) in obj {
-                map.insert(PropertyKey::new(k.clone()), json_to_value(v)?);
+                map.insert(PropertyKey::new(k.clone()), json_to_value(v));
             }
-            tagged_value(&map).unwrap_or_else(|| Value::Map(Arc::new(map)))
+            Value::Map(Arc::new(map))
         }
-    })
-}
-
-/// The value a tagged map stands for, the encoding JSON and JavaScript use
-/// for the types they have no literal for: `{ "$timestamp_us": 1700000000000000 }`
-/// (used by the C binding), `{ "$date": "2024-01-15" }`, `{ "$time": ... }`,
-/// `{ "$duration": ... }`, `{ "$zoned_datetime": ... }`, and
-/// `{ "$decimal": "1.50" }` as the map's only key (with other keys it is a
-/// map). `None` when the map is none of these, or its text does not parse.
-#[must_use]
-pub fn tagged_value(map: &BTreeMap<PropertyKey, Value>) -> Option<Value> {
-    let text = |key: &str| map.get(&PropertyKey::new(key)).and_then(Value::as_str);
-    if let Some(Value::Int64(micros)) = map.get(&PropertyKey::new("$timestamp_us")) {
-        return Some(Value::Timestamp(
-            grafeo_common::types::Timestamp::from_micros(*micros),
-        ));
     }
-    if let Some(d) = text("$date").and_then(grafeo_common::types::Date::parse) {
-        return Some(Value::Date(d));
-    }
-    if let Some(t) = text("$time").and_then(grafeo_common::types::Time::parse) {
-        return Some(Value::Time(t));
-    }
-    if let Some(d) = text("$duration").and_then(grafeo_common::types::Duration::parse) {
-        return Some(Value::Duration(d));
-    }
-    if map.len() == 1
-        && let Some(Ok(d)) = text("$decimal").map(grafeo_common::types::Decimal::parse)
-    {
-        return Some(Value::Decimal(d));
-    }
-    if let Some(zdt) = text("$zoned_datetime").and_then(grafeo_common::types::ZonedDatetime::parse)
-    {
-        return Some(Value::ZonedDatetime(zdt));
-    }
-    None
 }
 
 /// Convert a Grafeo [`Value`] to a `serde_json::Value`.
 ///
-/// Timestamps are encoded as `{ "$timestamp_us": <micros> }`, decimals as
-/// `{ "$decimal": "1.50" }` (the text with its scale).
+/// Timestamps are encoded as `{ "$timestamp_us": <micros> }`.
 /// Bytes are encoded as a JSON array of integers for lossless roundtrip.
 /// Vectors are encoded as a JSON array of floats.
 pub fn value_to_json(v: &Value) -> serde_json::Value {
@@ -121,7 +111,6 @@ pub fn value_to_json(v: &Value) -> serde_json::Value {
         Value::Time(t) => serde_json::json!({ "$time": t.to_string() }),
         Value::Duration(d) => serde_json::json!({ "$duration": d.to_string() }),
         Value::ZonedDatetime(zdt) => serde_json::json!({ "$zoned_datetime": zdt.to_string() }),
-        Value::Decimal(d) => serde_json::json!({ "$decimal": d.to_string() }),
         Value::List(items) => serde_json::Value::Array(items.iter().map(value_to_json).collect()),
         Value::Map(map) => {
             let obj: serde_json::Map<String, serde_json::Value> = map
@@ -175,9 +164,7 @@ pub fn value_to_json(v: &Value) -> serde_json::Value {
 ///
 /// # Errors
 ///
-/// Returns `Err` if `params` is `Some` but the contained value is not a JSON
-/// object, or a parameter has no value (see [`json_to_value`]); the error
-/// names the parameter.
+/// Returns `Err` if `params` is `Some` but the contained value is not a JSON object.
 pub fn json_params_to_map(
     params: Option<&serde_json::Value>,
 ) -> Result<Option<std::collections::HashMap<String, Value>>, String> {
@@ -189,109 +176,16 @@ pub fn json_params_to_map(
     };
     let mut map = std::collections::HashMap::with_capacity(obj.len());
     for (key, value) in obj {
-        let value = json_to_value(value).map_err(|error| format!("parameter '{key}': {error}"))?;
-        map.insert(key.clone(), value);
+        map.insert(key.clone(), json_to_value(value));
     }
     Ok(Some(map))
 }
 
 #[cfg(test)]
 mod tests {
-    use grafeo_common::types::{Decimal, Timestamp};
+    use grafeo_common::types::Timestamp;
 
     use super::*;
-
-    /// [`super::json_to_value`] for a value that has one.
-    fn json_to_value(v: &serde_json::Value) -> Value {
-        super::json_to_value(v).unwrap()
-    }
-
-    /// JSON text read as the C binding and LOAD DATA read it.
-    fn parsed(text: &str) -> serde_json::Value {
-        serde_json::from_str(text).unwrap()
-    }
-
-    /// An integer past 64 bits is an exact decimal up to 38 digits, read from
-    /// its source text; past 38 digits it is an error naming the parameter.
-    #[test]
-    fn integers_past_64_bits_are_exact_decimals() {
-        let decimal = |text: &str| Value::Decimal(Decimal::parse(text).unwrap());
-        let largest = "9".repeat(38);
-        for text in [
-            "9223372036854775808",
-            "18446744073709551616",
-            "-9223372036854775809",
-            largest.as_str(),
-        ] {
-            assert_eq!(json_to_value(&parsed(text)), decimal(text), "{text}");
-        }
-        assert_eq!(
-            json_to_value(&parsed("9223372036854775807")),
-            Value::Int64(i64::MAX)
-        );
-        let nested = json_to_value(&parsed(
-            r#"{"m": {"big": 18446744073709551616}, "l": [3, 9223372036854775808]}"#,
-        ));
-        let Value::Map(map) = nested else {
-            panic!("{nested:?}")
-        };
-        assert_eq!(
-            map.get(&PropertyKey::new("l")),
-            Some(&Value::List(
-                vec![Value::Int64(3), decimal("9223372036854775808")].into()
-            ))
-        );
-        let too_wide = format!("1{}", "0".repeat(38));
-        let error = json_params_to_map(Some(&parsed(&format!(
-            r#"{{"x": 1, "big": [{too_wide}]}}"#
-        ))))
-        .unwrap_err();
-        assert_eq!(
-            error,
-            format!("parameter 'big': the integer {too_wide} has more than 38 digits")
-        );
-        assert!(super::json_to_value(&parsed("1e400")).is_err());
-    }
-
-    /// A float keeps its value whatever its text: `1.50` is the float 1.5,
-    /// and a value written back is the same JSON number.
-    #[test]
-    fn floats_keep_their_value_and_type() {
-        for (text, float) in [
-            ("1.50", 1.5),
-            ("-0.25", -0.25),
-            ("1e300", 1e300),
-            ("2.0", 2.0),
-        ] {
-            assert_eq!(
-                json_to_value(&parsed(text)),
-                Value::Float64(float),
-                "{text}"
-            );
-        }
-        assert_eq!(value_to_json(&Value::Float64(1.5)), parsed("1.5"));
-        assert_eq!(value_to_json(&Value::Int64(7)), parsed("7"));
-    }
-
-    /// A decimal travels as `{"$decimal": "1.50"}` both ways and keeps its
-    /// scale; a tag that is not a decimal stays a map.
-    #[test]
-    fn decimals_round_trip_as_tagged_text() {
-        let decimal = Value::Decimal(grafeo_common::types::Decimal::parse("-1.50").unwrap());
-        let json = value_to_json(&decimal);
-        assert_eq!(json, serde_json::json!({ "$decimal": "-1.50" }));
-        match json_to_value(&json) {
-            Value::Decimal(back) => assert_eq!(back.to_string(), "-1.50"),
-            other => panic!("came back as {other:?}"),
-        }
-        let not_a_decimal = json_to_value(&serde_json::json!({ "$decimal": "1.2.3" }));
-        assert!(matches!(not_a_decimal, Value::Map(_)), "{not_a_decimal:?}");
-        // With other keys the object is a map, all of its keys kept.
-        let map = json_to_value(&serde_json::json!({ "$decimal": "1", "other": 2 }));
-        assert!(matches!(&map, Value::Map(m) if m.len() == 2), "{map:?}");
-        // A plain JSON number stays a float.
-        assert_eq!(json_to_value(&serde_json::json!(1.5)), Value::Float64(1.5));
-    }
 
     #[test]
     fn roundtrip_primitives() {

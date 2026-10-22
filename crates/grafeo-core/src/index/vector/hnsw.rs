@@ -352,185 +352,6 @@ pub struct HnswIndex {
     max_level: RwLock<usize>,
     /// Random number generator for level selection.
     rng: RwLock<rand::rngs::StdRng>,
-    /// The exact duplicates of the graph's vectors (see [`Duplicates`]).
-    /// Locked after the topology, entry point and level.
-    duplicates: RwLock<Duplicates>,
-}
-
-/// The exact duplicates of the graph's vectors: a vector equal, value for
-/// value, to one already in the graph is an alias of that node (its
-/// representative), not a node of its own. A search returns a
-/// representative's aliases at its distance. More duplicates than a
-/// neighbor list holds crowded each other, and the vectors inserted after
-/// them, out of the graph: the neighbor heuristic never counts a vector at
-/// distance 0 as covered, so every list filled with the first of them.
-///
-/// The graph's nodes are kept by the hash of their vector's bits, so an
-/// insert finds a duplicate without a search; the vectors themselves are
-/// compared through the accessor.
-#[derive(Default)]
-struct Duplicates {
-    /// The representative of each alias.
-    representative: HashMap<NodeId, NodeId>,
-    /// The aliases of each representative, ascending.
-    aliases: HashMap<NodeId, Vec<NodeId>>,
-    /// The graph's nodes by the hash of their vector.
-    by_hash: HashMap<u64, Vec<NodeId>>,
-    /// The hash of each graph node's vector.
-    hash_of: HashMap<NodeId, u64>,
-}
-
-impl Duplicates {
-    /// The graph node whose vector equals `vector` value for value, other
-    /// than `id`.
-    fn find(
-        &self,
-        hash: u64,
-        vector: &[f32],
-        id: NodeId,
-        accessor: &impl VectorAccessor,
-    ) -> Option<NodeId> {
-        self.by_hash.get(&hash)?.iter().copied().find(|&node| {
-            node != id
-                && accessor
-                    .get_vector(node)
-                    .is_some_and(|stored| same_values(&stored, vector))
-        })
-    }
-
-    /// Records graph node `id`, whose vector has `hash`.
-    fn index_node(&mut self, id: NodeId, hash: u64) {
-        self.by_hash.entry(hash).or_default().push(id);
-        self.hash_of.insert(id, hash);
-    }
-
-    /// Forgets graph node `id`.
-    fn unindex_node(&mut self, id: NodeId) {
-        if let Some(hash) = self.hash_of.remove(&id)
-            && let Some(nodes) = self.by_hash.get_mut(&hash)
-        {
-            nodes.retain(|&node| node != id);
-            if nodes.is_empty() {
-                self.by_hash.remove(&hash);
-            }
-        }
-    }
-
-    /// Makes `id` an alias of graph node `representative`.
-    fn add_alias(&mut self, representative: NodeId, id: NodeId) {
-        let aliases = self.aliases.entry(representative).or_default();
-        let at = aliases.partition_point(|&alias| alias < id);
-        aliases.insert(at, id);
-        self.representative.insert(id, representative);
-    }
-
-    /// Takes alias `id` out; false when it is no alias.
-    fn remove_alias(&mut self, id: NodeId) -> bool {
-        let Some(representative) = self.representative.remove(&id) else {
-            return false;
-        };
-        if let Some(aliases) = self.aliases.get_mut(&representative) {
-            aliases.retain(|&alias| alias != id);
-            if aliases.is_empty() {
-                self.aliases.remove(&representative);
-            }
-        }
-        true
-    }
-
-    /// When graph node `id` has aliases, makes the first of them the
-    /// representative of the others in its place and returns it.
-    fn promote(&mut self, id: NodeId) -> Option<NodeId> {
-        let mut aliases = self.aliases.remove(&id)?;
-        let successor = aliases.remove(0);
-        self.representative.remove(&successor);
-        for &alias in &aliases {
-            self.representative.insert(alias, successor);
-        }
-        if !aliases.is_empty() {
-            self.aliases.insert(successor, aliases);
-        }
-        if let Some(hash) = self.hash_of.remove(&id) {
-            self.hash_of.insert(successor, hash);
-            if let Some(nodes) = self.by_hash.get_mut(&hash) {
-                for node in nodes.iter_mut().filter(|node| **node == id) {
-                    *node = successor;
-                }
-            }
-        }
-        Some(successor)
-    }
-
-    /// `results` (graph nodes, nearest first) with each one's aliases at
-    /// its distance, by distance and then id.
-    fn expand(&self, results: Vec<(NodeId, f32)>) -> Vec<(NodeId, f32)> {
-        if self.aliases.is_empty() {
-            return results;
-        }
-        let mut all: Vec<(NodeId, f32)> = Vec::with_capacity(results.len());
-        for (id, distance) in results {
-            all.push((id, distance));
-            if let Some(aliases) = self.aliases.get(&id) {
-                all.extend(aliases.iter().map(|&alias| (alias, distance)));
-            }
-        }
-        all.sort_by(|a, b| {
-            OrderedFloat(a.1)
-                .cmp(&OrderedFloat(b.1))
-                .then(a.0.cmp(&b.0))
-        });
-        all
-    }
-
-    /// Estimated heap bytes of the four maps and their id lists.
-    fn heap_memory_bytes(&self) -> usize {
-        let id = std::mem::size_of::<NodeId>();
-        let lists = self.aliases.values().chain(self.by_hash.values());
-        self.representative.capacity() * (2 * id + 1)
-            + self.aliases.capacity() * (id + std::mem::size_of::<Vec<NodeId>>() + 1)
-            + self.by_hash.capacity() * (8 + std::mem::size_of::<Vec<NodeId>>() + 1)
-            + self.hash_of.capacity() * (id + 8 + 1)
-            + lists.map(|list| list.capacity() * id).sum::<usize>()
-    }
-}
-
-/// The hash of a vector's bits (FNV-1a over each value's bits).
-fn vector_hash(vector: &[f32]) -> u64 {
-    vector
-        .iter()
-        .fold(0xcbf2_9ce4_8422_2325_u64, |hash, value| {
-            (hash ^ u64::from(value.to_bits())).wrapping_mul(0x0000_0100_0000_01b3)
-        })
-}
-
-/// Whether two vectors are equal value for value (bit for bit, so `-0.0`
-/// and `0.0` differ).
-fn same_values(a: &[f32], b: &[f32]) -> bool {
-    a.len() == b.len() && a.iter().zip(b).all(|(x, y)| x.to_bits() == y.to_bits())
-}
-
-/// Puts `successor` in node `id`'s place in the topology: its lists, every
-/// link to it, and the entry point. `successor` has the same vector, so the
-/// graph stays as it was.
-fn rename_node(
-    nodes_map: &mut HashMap<NodeId, HnswNode>,
-    entry_point: &mut Option<NodeId>,
-    id: NodeId,
-    successor: NodeId,
-) {
-    if let Some(node) = nodes_map.remove(&id) {
-        nodes_map.insert(successor, node);
-    }
-    for node in nodes_map.values_mut() {
-        for layer in &mut node.neighbors {
-            for neighbor in layer.iter_mut().filter(|neighbor| **neighbor == id) {
-                *neighbor = successor;
-            }
-        }
-    }
-    if *entry_point == Some(id) {
-        *entry_point = Some(successor);
-    }
 }
 
 /// Picks a new entry point after the old one was removed: the node on the
@@ -558,21 +379,17 @@ fn reset_entry_point(
     }
 }
 
-/// The seed of the generator that draws node levels, unless an index is
-/// built [`with_seed`](HnswIndex::with_seed): a fixed one, as hnswlib's
-/// default (100), so that a rebuild gives the same graph.
-const DEFAULT_SEED: u64 = 100;
-
 impl HnswIndex {
     /// Creates a new empty HNSW index with the given configuration.
-    ///
-    /// Node levels are drawn from a generator with a fixed seed (100, as
-    /// hnswlib's default), so the same vectors inserted in the same order
-    /// build the same graph: an index built again from a database's data (as
-    /// an open does) answers a search as before, ties included (#619).
     #[must_use]
     pub fn new(config: HnswConfig) -> Self {
-        Self::with_seed(config, DEFAULT_SEED)
+        Self {
+            config,
+            nodes: RwLock::new(TopologyBackend::new_heap()),
+            entry_point: RwLock::new(None),
+            max_level: RwLock::new(0),
+            rng: RwLock::new(rand::rngs::StdRng::from_rng(&mut rand::rng())),
+        }
     }
 
     /// Creates a new HNSW index with pre-allocated capacity.
@@ -586,8 +403,7 @@ impl HnswIndex {
             nodes: RwLock::new(TopologyBackend::with_capacity(capacity)),
             entry_point: RwLock::new(None),
             max_level: RwLock::new(0),
-            rng: RwLock::new(rand::rngs::StdRng::seed_from_u64(DEFAULT_SEED)),
-            duplicates: RwLock::new(Duplicates::default()),
+            rng: RwLock::new(rand::rngs::StdRng::from_rng(&mut rand::rng())),
         }
     }
 
@@ -600,7 +416,6 @@ impl HnswIndex {
             entry_point: RwLock::new(None),
             max_level: RwLock::new(0),
             rng: RwLock::new(rand::rngs::StdRng::seed_from_u64(seed)),
-            duplicates: RwLock::new(Duplicates::default()),
         }
     }
 
@@ -610,12 +425,10 @@ impl HnswIndex {
         &self.config
     }
 
-    /// Returns the number of vectors in the index, exact duplicates (see
-    /// [`insert`](Self::insert)) included.
+    /// Returns the number of vectors in the index.
     #[must_use]
     pub fn len(&self) -> usize {
-        let nodes = self.nodes.read();
-        nodes.len() + self.duplicates.read().representative.len()
+        self.nodes.read().len()
     }
 
     /// Returns true if the index is empty.
@@ -675,9 +488,6 @@ impl HnswIndex {
         *backend = TopologyBackend::Heap(fresh);
         *self.entry_point.write() = entry_point;
         *self.max_level.write() = max_level;
-        // A topology holds no duplicates: inserts after a restore find none
-        // of the restored vectors' duplicates either.
-        *self.duplicates.write() = Duplicates::default();
     }
 
     /// Hands the topology to `visitor`: the header, then every node in
@@ -745,7 +555,6 @@ impl HnswIndex {
         *backend = TopologyBackend::with_capacity(node_count.min(MAX_RESTORE_CAPACITY));
         *self.entry_point.write() = entry_point;
         *self.max_level.write() = max_level;
-        *self.duplicates.write() = Duplicates::default();
     }
 
     /// Restores node `id` with its neighbor lists (layer 0 first), replacing
@@ -831,7 +640,6 @@ impl HnswIndex {
         *backend = TopologyBackend::Mmap(topo);
         *self.entry_point.write() = entry_point;
         *self.max_level.write() = max_level;
-        *self.duplicates.write() = Duplicates::default();
     }
 
     /// Returns true if the backend is currently mmap-backed.
@@ -840,40 +648,34 @@ impl HnswIndex {
         matches!(*self.nodes.read(), TopologyBackend::Mmap(_))
     }
 
-    /// Returns estimated heap memory in bytes for the HNSW topology and its
-    /// exact duplicates.
+    /// Returns estimated heap memory in bytes for the HNSW topology.
     ///
     /// In mmap mode, returns only the small struct overhead — the
     /// neighbor data lives in the mmap.
     #[must_use]
     pub fn heap_memory_bytes(&self) -> usize {
         let nodes = self.nodes.read();
-        self.duplicates.read().heap_memory_bytes()
-            + match &*nodes {
-                TopologyBackend::Heap(map) => {
-                    let map_overhead = map.capacity()
-                        * (std::mem::size_of::<NodeId>() + std::mem::size_of::<HnswNode>() + 1);
-                    let mut node_bytes = 0usize;
-                    for node in map.values() {
-                        node_bytes +=
-                            node.neighbors.capacity() * std::mem::size_of::<Vec<NodeId>>();
-                        for layer in &node.neighbors {
-                            node_bytes += layer.capacity() * std::mem::size_of::<NodeId>();
-                        }
+        match &*nodes {
+            TopologyBackend::Heap(map) => {
+                let map_overhead = map.capacity()
+                    * (std::mem::size_of::<NodeId>() + std::mem::size_of::<HnswNode>() + 1);
+                let mut node_bytes = 0usize;
+                for node in map.values() {
+                    node_bytes += node.neighbors.capacity() * std::mem::size_of::<Vec<NodeId>>();
+                    for layer in &node.neighbors {
+                        node_bytes += layer.capacity() * std::mem::size_of::<NodeId>();
                     }
-                    map_overhead + node_bytes
                 }
-                TopologyBackend::Mmap(_) => std::mem::size_of::<TopologyBackend>(),
+                map_overhead + node_bytes
             }
+            TopologyBackend::Mmap(_) => std::mem::size_of::<TopologyBackend>(),
+        }
     }
 
     /// Inserts a vector with the given ID into the index.
     ///
     /// The vector is used during insertion to find neighbors and build
-    /// the graph topology, but is **not** stored in the index. A vector equal,
-    /// value for value, to one already in the graph becomes an alias of that
-    /// node instead of a node of its own: a search returns it at that node's
-    /// distance.
+    /// the graph topology, but is **not** stored in the index.
     ///
     /// # Panics
     ///
@@ -887,36 +689,26 @@ impl HnswIndex {
             vector.len()
         );
 
-        let mut nodes = self.nodes.write();
-        let mut entry_point = self.entry_point.write();
-        let mut max_level = self.max_level.write();
-        let mut duplicates = self.duplicates.write();
-
-        // Updating an existing vector (#374): take the old entry out first,
-        // under the same locks, so searches never see its neighbor lists reset.
-        self.take_out_entry(
-            nodes.as_heap_mut(),
-            &mut entry_point,
-            &mut max_level,
-            &mut duplicates,
-            id,
-            accessor,
-        );
-
-        let hash = vector_hash(vector);
-        if let Some(representative) = duplicates.find(hash, vector, id, accessor) {
-            duplicates.add_alias(representative, id);
-            return;
-        }
-        duplicates.index_node(id, hash);
-        drop(duplicates);
-
         let level = self.random_level();
 
         // Create the new node (topology only)
         let node = HnswNode {
             neighbors: vec![Vec::new(); level + 1],
         };
+
+        let mut nodes = self.nodes.write();
+        let mut entry_point = self.entry_point.write();
+        let mut max_level = self.max_level.write();
+
+        // Updating an existing vector (#374): take the old entry out first,
+        // under the same locks, so searches never see its neighbor lists reset.
+        self.take_out(
+            nodes.as_heap_mut(),
+            &mut entry_point,
+            &mut max_level,
+            id,
+            accessor,
+        );
 
         // Insert path always operates on the heap backend; calling
         // `as_heap_mut` panics if the topology is mmap-backed. Reload
@@ -1060,31 +852,6 @@ impl HnswIndex {
             *entry_point = Some(id);
             *max_level = level;
         }
-    }
-
-    /// Takes `id` out of the index: an alias leaves its representative's
-    /// aliases; a representative with aliases gives its place in the graph
-    /// to the first of them (which has the same vector); any other node
-    /// leaves the graph (see [`take_out`](Self::take_out)). Returns false
-    /// when `id` is not in the index. Callers hold the locks.
-    fn take_out_entry(
-        &self,
-        nodes_map: &mut HashMap<NodeId, HnswNode>,
-        entry_point: &mut Option<NodeId>,
-        max_level: &mut usize,
-        duplicates: &mut Duplicates,
-        id: NodeId,
-        accessor: &impl VectorAccessor,
-    ) -> bool {
-        if duplicates.remove_alias(id) {
-            return true;
-        }
-        if let Some(successor) = duplicates.promote(id) {
-            rename_node(nodes_map, entry_point, id, successor);
-            return true;
-        }
-        duplicates.unindex_node(id);
-        self.take_out(nodes_map, entry_point, max_level, id, accessor)
     }
 
     /// Takes `id` out of the topology and mends the lists that led to it, so
@@ -1384,16 +1151,12 @@ impl HnswIndex {
         let ef_search = ef.max(k);
         let candidates = self.search_layer(&nodes, accessor, query, current_ep, ef_search, 0);
 
-        // Return top k, each node's exact duplicates with it: the results
-        // hold only nodes with a vector (#594)
-        let found = candidates
+        // Return top k: the results hold only nodes with a vector (#594)
+        candidates
             .into_iter()
             .take(k)
             .map(|n| (n.id, n.distance))
-            .collect();
-        let mut found = self.duplicates.read().expand(found);
-        found.truncate(k);
-        found
+            .collect()
     }
 
     /// Searches for the k nearest neighbors with an allowlist filter.
@@ -1467,33 +1230,17 @@ impl HnswIndex {
             current_ep = self.search_layer_single(&nodes, accessor, query, current_ep, lc);
         }
 
-        // An allowed duplicate is found through its representative, which
-        // the search then takes as allowed too.
-        let duplicates = self.duplicates.read();
-        let widened: HashSet<NodeId>;
-        let searched = if duplicates.representative.is_empty() {
-            allowlist
-        } else {
-            widened = allowlist
-                .iter()
-                .map(|id| duplicates.representative.get(id).copied().unwrap_or(*id))
-                .chain(allowlist.iter().copied())
-                .collect();
-            &widened
-        };
-
         // Filtered beam search at layer 0
         let ef_search = ef.max(k);
-        let candidates =
-            self.search_layer_filtered(&nodes, accessor, query, current_ep, ef_search, 0, searched);
+        let candidates = self
+            .search_layer_filtered(&nodes, accessor, query, current_ep, ef_search, 0, allowlist);
 
-        // Return top k allowed, each node's exact duplicates with it: the
-        // results hold only nodes with a vector (#594)
-        let found = candidates.into_iter().map(|n| (n.id, n.distance)).collect();
-        let mut found = duplicates.expand(found);
-        found.retain(|(id, _)| allowlist.contains(id));
-        found.truncate(k);
-        found
+        // Return top k: the results hold only nodes with a vector (#594)
+        candidates
+            .into_iter()
+            .take(k)
+            .map(|n| (n.id, n.distance))
+            .collect()
     }
 
     /// Removes a vector from the index.
@@ -1513,12 +1260,10 @@ impl HnswIndex {
         let mut nodes = self.nodes.write();
         let mut entry_point = self.entry_point.write();
         let mut max_level = self.max_level.write();
-        let mut duplicates = self.duplicates.write();
-        self.take_out_entry(
+        self.take_out(
             nodes.as_heap_mut(),
             &mut entry_point,
             &mut max_level,
-            &mut duplicates,
             id,
             accessor,
         )
@@ -1527,8 +1272,7 @@ impl HnswIndex {
     /// Returns true if the index contains a vector with the given ID.
     #[must_use]
     pub fn contains(&self, id: NodeId) -> bool {
-        let nodes = self.nodes.read();
-        nodes.contains(id) || self.duplicates.read().representative.contains_key(&id)
+        self.nodes.read().contains(id)
     }
 
     /// Generates a random level for a new node.
@@ -1666,8 +1410,7 @@ impl HnswIndex {
                 distance: fc.distance,
             })
             .collect();
-        // Equal distances by ascending id, not in the heap's order
-        result_vec.sort_by_key(|a| (OrderedFloat(a.distance), a.id));
+        result_vec.sort_by_key(|a| OrderedFloat(a.distance));
         result_vec
     }
 
@@ -1782,8 +1525,7 @@ impl HnswIndex {
                 distance: fc.distance,
             })
             .collect();
-        // Equal distances by ascending id, not in the heap's order
-        result_vec.sort_by_key(|a| (OrderedFloat(a.distance), a.id));
+        result_vec.sort_by_key(|a| OrderedFloat(a.distance));
         result_vec
     }
 
@@ -1971,7 +1713,21 @@ impl HnswIndex {
         k: usize,
         accessor: &impl VectorAccessor,
     ) -> Vec<Vec<(NodeId, f32)>> {
-        crate::index::vector::batch::map(queries, |query| self.search(query, k, accessor))
+        #[cfg(feature = "parallel")]
+        {
+            use rayon::prelude::*;
+            queries
+                .par_iter()
+                .map(|query| self.search(query, k, accessor))
+                .collect()
+        }
+        #[cfg(not(feature = "parallel"))]
+        {
+            queries
+                .iter()
+                .map(|query| self.search(query, k, accessor))
+                .collect()
+        }
     }
 
     /// Searches for k nearest neighbors for multiple queries in parallel.
@@ -1984,7 +1740,21 @@ impl HnswIndex {
         k: usize,
         accessor: &impl VectorAccessor,
     ) -> Vec<Vec<(NodeId, f32)>> {
-        crate::index::vector::batch::map(queries, |query| self.search(query, k, accessor))
+        #[cfg(feature = "parallel")]
+        {
+            use rayon::prelude::*;
+            queries
+                .par_iter()
+                .map(|query| self.search(query, k, accessor))
+                .collect()
+        }
+        #[cfg(not(feature = "parallel"))]
+        {
+            queries
+                .iter()
+                .map(|query| self.search(query, k, accessor))
+                .collect()
+        }
     }
 
     /// Searches with custom ef parameter for multiple queries in parallel.
@@ -1998,9 +1768,21 @@ impl HnswIndex {
         ef: usize,
         accessor: &impl VectorAccessor,
     ) -> Vec<Vec<(NodeId, f32)>> {
-        crate::index::vector::batch::map(queries, |query| {
-            self.search_with_ef(query, k, ef, accessor)
-        })
+        #[cfg(feature = "parallel")]
+        {
+            use rayon::prelude::*;
+            queries
+                .par_iter()
+                .map(|query| self.search_with_ef(query, k, ef, accessor))
+                .collect()
+        }
+        #[cfg(not(feature = "parallel"))]
+        {
+            queries
+                .iter()
+                .map(|query| self.search_with_ef(query, k, ef, accessor))
+                .collect()
+        }
     }
 
     /// Searches for k nearest neighbors for multiple queries with an allowlist filter.
@@ -2014,9 +1796,21 @@ impl HnswIndex {
         allowlist: &HashSet<NodeId>,
         accessor: &impl VectorAccessor,
     ) -> Vec<Vec<(NodeId, f32)>> {
-        crate::index::vector::batch::map(queries, |query| {
-            self.search_with_filter(query, k, allowlist, accessor)
-        })
+        #[cfg(feature = "parallel")]
+        {
+            use rayon::prelude::*;
+            queries
+                .par_iter()
+                .map(|query| self.search_with_filter(query, k, allowlist, accessor))
+                .collect()
+        }
+        #[cfg(not(feature = "parallel"))]
+        {
+            queries
+                .iter()
+                .map(|query| self.search_with_filter(query, k, allowlist, accessor))
+                .collect()
+        }
     }
 
     /// Searches with custom ef for multiple queries with an allowlist filter.
@@ -2029,9 +1823,21 @@ impl HnswIndex {
         allowlist: &HashSet<NodeId>,
         accessor: &impl VectorAccessor,
     ) -> Vec<Vec<(NodeId, f32)>> {
-        crate::index::vector::batch::map(queries, |query| {
-            self.search_with_ef_and_filter(query, k, ef, allowlist, accessor)
-        })
+        #[cfg(feature = "parallel")]
+        {
+            use rayon::prelude::*;
+            queries
+                .par_iter()
+                .map(|query| self.search_with_ef_and_filter(query, k, ef, allowlist, accessor))
+                .collect()
+        }
+        #[cfg(not(feature = "parallel"))]
+        {
+            queries
+                .iter()
+                .map(|query| self.search_with_ef_and_filter(query, k, ef, allowlist, accessor))
+                .collect()
+        }
     }
 }
 
@@ -2743,39 +2549,6 @@ mod tests {
         assert_eq!(results.len(), 2);
     }
 
-    /// Nodes at the same distance rank by ascending id, with and without a
-    /// filter, so a cut inside the tie keeps the lowest ids of the beam
-    /// (#619: the order the result heap gave them decided it).
-    #[test]
-    fn tied_distances_rank_by_ascending_node_id() {
-        let config = HnswConfig::new(2, DistanceMetric::Euclidean);
-        let index = HnswIndex::with_seed(config, 42);
-        let mut map: HashMap<NodeId, Arc<[f32]>> = HashMap::new();
-        // 7 is coprime with 30: every id from 1 to 30 once, scrambled.
-        let ids: Vec<NodeId> = (0..30_u64).map(|i| NodeId::new((i * 7) % 30 + 1)).collect();
-        for id in &ids {
-            map.insert(*id, vec![1.0, 0.0].into());
-        }
-        let accessor = make_accessor(&map);
-        for id in &ids {
-            index.insert(*id, &[1.0, 0.0], &accessor);
-        }
-
-        let found = |results: Vec<(NodeId, f32)>| -> Vec<u64> {
-            results.into_iter().map(|(id, _)| id.as_u64()).collect()
-        };
-        // ef 64 holds all 30 nodes, so the beam holds the whole tie.
-        let results = index.search_with_ef(&[0.0, 0.0], 5, 64, &accessor);
-        assert_eq!(found(results), vec![1, 2, 3, 4, 5]);
-        let even: HashSet<NodeId> = ids
-            .iter()
-            .copied()
-            .filter(|id| id.as_u64() % 2 == 0)
-            .collect();
-        let results = index.search_with_ef_and_filter(&[0.0, 0.0], 3, 64, &even, &accessor);
-        assert_eq!(found(results), vec![2, 4, 6]);
-    }
-
     #[test]
     fn test_empty_index_search() {
         let config = HnswConfig::new(3, DistanceMetric::Euclidean);
@@ -3185,185 +2958,6 @@ mod tests {
         let (index, map) = build_index(config, 3, &vectors);
         let recall = recall_at(&index, &map, &queries, 10, 64);
         assert!(recall >= 0.95, "recall@10 at ef=64 is {recall:.3}");
-    }
-
-    /// A cluster, then vectors far from it: `count` vectors within 0.01 of
-    /// the origin (or the origin itself when `exact`), then 20 vectors near
-    /// `[100; 8]`, spread 5 apart. Node ids from 0, in that order.
-    fn cluster_then_distant(count: usize, exact: bool, seed: u64) -> Vec<Vec<f32>> {
-        let mut state = seed;
-        let mut vectors: Vec<Vec<f32>> = (0..count)
-            .map(|_| {
-                (0..8)
-                    .map(|_| {
-                        if exact {
-                            0.0
-                        } else {
-                            next_unit(&mut state) * 0.01
-                        }
-                    })
-                    .collect()
-            })
-            .collect();
-        vectors.extend((0..20).map(|_| {
-            (0..8)
-                .map(|_| 100.0 + next_unit(&mut state) * 5.0)
-                .collect()
-        }));
-        vectors
-    }
-
-    /// #391, the reporter's shape: a whole cluster first, more vectors than
-    /// a neighbor list holds (`m = 48`, so 96 links at level 0), then 20
-    /// vectors far from it. Every insert stays reachable, and a search near
-    /// the distant vectors finds exactly those 20.
-    #[test]
-    fn inserts_after_a_cluster_larger_than_a_list_stay_reachable() {
-        for seed in 0..5u64 {
-            let vectors = cluster_then_distant(200, false, seed);
-            let config = HnswConfig::new(8, DistanceMetric::Euclidean).with_m(48);
-            let (index, map) = build_index(config, seed, &vectors);
-            let query = vec![100.0; 8];
-            assert_eq!(
-                unreachable_from(&index, &map, &query),
-                Vec::<NodeId>::new(),
-                "seed {seed}"
-            );
-            let mut found: Vec<u64> = index
-                .search_with_ef(&query, 20, 160, &make_accessor(&map))
-                .into_iter()
-                .map(|(id, _)| id.as_u64())
-                .collect();
-            found.sort_unstable();
-            assert_eq!(found, (200..220).collect::<Vec<u64>>(), "seed {seed}");
-        }
-    }
-
-    /// Exact duplicates of more vectors than a neighbor list holds (200 at
-    /// `m = 8`), then vectors far from them: every insert stays reachable.
-    /// The duplicates crowded each other and the later inserts out of the
-    /// graph (203 of 220 unreachable); now they are aliases of one node.
-    #[test]
-    fn inserts_after_more_exact_duplicates_than_a_list_holds_stay_reachable() {
-        for seed in 0..5u64 {
-            let vectors = cluster_then_distant(200, true, seed);
-            let config = HnswConfig::new(8, DistanceMetric::Euclidean).with_m(8);
-            let (index, map) = build_index(config, seed, &vectors);
-            for query in [vec![0.0; 8], vec![100.0; 8]] {
-                assert_eq!(
-                    unreachable_from(&index, &map, &query),
-                    Vec::<NodeId>::new(),
-                    "seed {seed}, query {query:?}"
-                );
-            }
-        }
-    }
-
-    /// An index over 200 exact duplicates at the origin (ids 0 to 199) and
-    /// 20 vectors near `[100; 8]` (ids 200 to 219), at `m = 8`.
-    fn duplicates_index() -> (HnswIndex, HashMap<NodeId, Arc<[f32]>>) {
-        let vectors = cluster_then_distant(200, true, 19);
-        let config = HnswConfig::new(8, DistanceMetric::Euclidean).with_m(8);
-        build_index(config, 19, &vectors)
-    }
-
-    fn ids(results: &[(NodeId, f32)]) -> Vec<u64> {
-        results.iter().map(|(id, _)| id.as_u64()).collect()
-    }
-
-    /// The duplicates are aliases of one graph node: the index holds every
-    /// vector, the graph one node for the 200, and a search returns them at
-    /// their distance, counting toward k, the lowest ids first.
-    #[test]
-    fn exact_duplicates_count_toward_k_in_id_order() {
-        let (index, map) = duplicates_index();
-        let accessor = make_accessor(&map);
-        assert_eq!(index.len(), 220);
-        assert_eq!(
-            index.snapshot_topology().2.len(),
-            21,
-            "one graph node for the duplicates"
-        );
-        assert!((0..220).all(|id| index.contains(NodeId::new(id))));
-
-        let origin = vec![0.0; 8];
-        let five = index.search_with_ef(&origin, 5, 64, &accessor);
-        assert_eq!(ids(&five), vec![0, 1, 2, 3, 4]);
-        assert!(five.iter().all(|(_, distance)| *distance == 0.0));
-        let all = index.search_with_ef(&origin, 205, 64, &accessor);
-        assert_eq!(ids(&all[..200]), (0..200).collect::<Vec<u64>>());
-        assert!(all[200..].iter().all(|(id, _)| id.as_u64() >= 200));
-        assert_eq!(all.len(), 205);
-    }
-
-    /// Removing the representative gives its place in the graph to the next
-    /// duplicate: every other vector stays found, and the last duplicate
-    /// removed leaves only the distant vectors.
-    #[test]
-    fn removing_a_representative_promotes_a_duplicate() {
-        let (index, map) = duplicates_index();
-        let accessor = make_accessor(&map);
-        let origin = vec![0.0; 8];
-        assert!(index.remove(NodeId::new(0), &accessor));
-        assert!(!index.contains(NodeId::new(0)));
-        assert_eq!(index.len(), 219);
-        assert_eq!(
-            ids(&index.search_with_ef(&origin, 3, 64, &accessor)),
-            vec![1, 2, 3]
-        );
-        assert_eq!(
-            unreachable_from(&index, &map, &[100.0; 8]),
-            vec![NodeId::new(0)]
-        );
-
-        for id in 1..200 {
-            assert!(index.remove(NodeId::new(id), &accessor), "{id}");
-        }
-        assert_eq!(index.len(), 20);
-        let left = index.search_with_ef(&origin, 20, 64, &accessor);
-        assert_eq!(ids(&left).into_iter().min(), Some(200));
-        assert_eq!(left.len(), 20);
-        assert!(index.remove(NodeId::new(200), &accessor));
-        assert!(!index.remove(NodeId::new(0), &accessor), "removed already");
-    }
-
-    /// A duplicate whose vector changes leaves the duplicates and joins the
-    /// graph at its new vector; a representative whose vector changes gives
-    /// its place to the next duplicate first.
-    #[test]
-    fn updating_a_duplicate_moves_it_out() {
-        let (index, mut map) = duplicates_index();
-        let elsewhere: Arc<[f32]> = vec![-50.0; 8].into();
-        for id in [3, 0] {
-            map.insert(NodeId::new(id), Arc::clone(&elsewhere));
-            index.insert(NodeId::new(id), &elsewhere, &make_accessor(&map));
-        }
-        let accessor = make_accessor(&map);
-        assert_eq!(index.len(), 220);
-        assert_eq!(
-            ids(&index.search_with_ef(&elsewhere, 2, 64, &accessor)),
-            vec![0, 3],
-            "both moved, and are duplicates of each other now"
-        );
-        assert_eq!(
-            ids(&index.search_with_ef(&[0.0; 8], 3, 64, &accessor)),
-            vec![1, 2, 4]
-        );
-        for query in [vec![0.0; 8], vec![100.0; 8], vec![-50.0; 8]] {
-            assert_eq!(unreachable_from(&index, &map, &query), Vec::<NodeId>::new());
-        }
-    }
-
-    /// A filter that allows a duplicate but not its representative finds it.
-    #[test]
-    fn a_filter_finds_an_allowed_duplicate() {
-        let (index, map) = duplicates_index();
-        let accessor = make_accessor(&map);
-        let allowed: HashSet<NodeId> = [NodeId::new(150), NodeId::new(7), NodeId::new(210)]
-            .into_iter()
-            .collect();
-        let found = index.search_with_ef_and_filter(&[0.0; 8], 3, 64, &allowed, &accessor);
-        assert_eq!(ids(&found), vec![7, 150, 210]);
     }
 
     /// #600: the vectors of the issue, on a line. The heuristic links each
@@ -3959,10 +3553,9 @@ mod tests {
         let config = HnswConfig::new(8, DistanceMetric::Euclidean);
         let heap_index = HnswIndex::with_seed(config.clone(), 42);
 
-        // Distinct vectors: exact duplicates would share one graph node.
         let map: HashMap<NodeId, Arc<[f32]>> = (1..=50u64)
             .map(|i| {
-                let v: Arc<[f32]> = vec![i as f32 * 0.1; 8].into();
+                let v: Arc<[f32]> = vec![0.1; 8].into();
                 (NodeId::new(i), v)
             })
             .collect();

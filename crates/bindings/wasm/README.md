@@ -72,7 +72,6 @@ const result = db.execute(`MATCH (n:Person) RETURN n.name`);
 ## Links
 
 - [Documentation](https://grafeo.dev)
-- [API Stability](https://grafeo.dev/stability/): which calls are stable and which are experimental; a call here has the level of the Rust call it wraps
 - [GitHub](https://github.com/GrafeoDB/grafeo)
 - [Roadmap](https://github.com/GrafeoDB/grafeo/blob/main/docs/roadmap.md)
 

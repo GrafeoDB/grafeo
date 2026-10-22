@@ -11,32 +11,14 @@ use std::time::Duration;
 use grafeo::{Config, DurabilityMode, StorageFormat};
 
 #[test]
-fn history_retention_comes_from_the_facade() {
-    use grafeo::HistoryRetention;
-
-    let config = Config::in_memory().with_history_retention(HistoryRetention::Forever);
-    assert_eq!(config.history_retention(), HistoryRetention::Forever);
-}
-
-#[test]
-fn a_time_travel_view_comes_from_the_facade() {
-    use grafeo::{AsOfView, GrafeoDB, TimePoint};
-
-    let db = GrafeoDB::new_in_memory();
-    let epoch = db.current_epoch();
-    let view: AsOfView = db.as_of(TimePoint::Epoch(epoch)).unwrap();
-    assert_eq!(view.epoch(), epoch);
-}
-
-#[test]
 fn storage_format_and_durability_come_from_the_facade() {
     let config = Config::persistent("amsterdam.grafeo")
         .with_storage_format(StorageFormat::Auto)
         .with_wal_durability(DurabilityMode::batch(Duration::from_millis(19), 88));
-    assert_eq!(config.storage_format(), StorageFormat::Auto);
+    assert_eq!(config.storage_format, StorageFormat::Auto);
     assert!(
         matches!(
-            config.wal_durability(),
+            config.wal_durability,
             DurabilityMode::Batch {
                 max_delay_ms: 19,
                 max_records: 88,
@@ -44,7 +26,7 @@ fn storage_format_and_durability_come_from_the_facade() {
             }
         ),
         "{:?}",
-        config.wal_durability()
+        config.wal_durability
     );
     assert_eq!(config.validate(), Ok(()));
 
@@ -52,14 +34,14 @@ fn storage_format_and_durability_come_from_the_facade() {
         .with_wal_durability(DurabilityMode::adaptive(Duration::from_millis(3)));
     assert!(
         matches!(
-            config.wal_durability(),
+            config.wal_durability,
             DurabilityMode::Adaptive {
                 target_interval_ms: 3,
                 ..
             }
         ),
         "{:?}",
-        config.wal_durability()
+        config.wal_durability
     );
 }
 
@@ -73,8 +55,8 @@ fn cdc_retention_comes_from_the_facade() {
         .with_cdc_retention(CdcRetentionConfig::unlimited().with_max_events(88));
     assert_eq!(
         (
-            config.cdc_retention().max_epochs,
-            config.cdc_retention().max_events
+            config.cdc_retention.max_epochs,
+            config.cdc_retention.max_events
         ),
         (None, Some(88))
     );
@@ -110,7 +92,7 @@ fn an_encrypted_database_is_configured_through_the_facade() {
     );
 
     let db = GrafeoDB::with_config(Config::persistent(&path).with_encryption(key())).unwrap();
-    assert_eq!(db.node_count().unwrap(), 1, "the key opens the database");
+    assert_eq!(db.node_count(), 1, "the key opens the database");
     db.close().unwrap();
     drop(db);
     let _ = std::fs::remove_dir_all(&dir);
@@ -157,11 +139,7 @@ fn a_passphrase_key_is_derived_through_the_facade() {
         Config::persistent(&path).with_encryption(key("Mia and Vincent dance")),
     )
     .unwrap();
-    assert_eq!(
-        db.node_count().unwrap(),
-        1,
-        "the passphrase opens the database"
-    );
+    assert_eq!(db.node_count(), 1, "the passphrase opens the database");
     db.close().unwrap();
     drop(db);
     let _ = std::fs::remove_dir_all(&dir);

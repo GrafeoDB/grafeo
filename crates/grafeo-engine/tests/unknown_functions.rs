@@ -8,7 +8,7 @@
 //! cargo test -p grafeo-engine --all-features --test unknown_functions
 //! ```
 
-#![cfg(feature = "gql")]
+#![cfg(all(feature = "lpg", feature = "gql"))]
 
 use grafeo_common::types::Value;
 use grafeo_common::utils::error::Result;

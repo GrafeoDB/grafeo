@@ -2,7 +2,12 @@
 //! GQL statement on a file database created and removed `<file>.spill/query_<n>`
 //! (about 0.25 ms each) and left `<file>.spill` next to the database.
 
-#![cfg(all(feature = "gql", feature = "grafeo-file", feature = "spill"))]
+#![cfg(all(
+    feature = "lpg",
+    feature = "gql",
+    feature = "grafeo-file",
+    feature = "spill"
+))]
 
 use std::collections::HashMap;
 

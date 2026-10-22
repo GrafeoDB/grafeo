@@ -123,8 +123,8 @@ Export all nodes as an Arrow Table and query them directly in DuckDB:
 nodes = db.nodes_to_arrow()
 
 print(nodes.schema)
-# _id: uint64
-# _labels: list<item: string>
+# id: uint64
+# labels: list<item: string>
 # name: string
 # age: int64
 # city: string
@@ -138,7 +138,7 @@ DuckDB can query Arrow Tables in place, with no data copying:
 result = duckdb.sql("""
     SELECT city, COUNT(*) AS count, ROUND(AVG(age), 1) AS avg_age
     FROM nodes
-    WHERE list_contains(_labels, 'Person')
+    WHERE list_contains(labels, 'Person')
     GROUP BY city
     ORDER BY count DESC
 """)
@@ -161,7 +161,7 @@ print(result)
 ```python
 result = duckdb.sql("""
     SELECT
-        unnest(_labels) AS label,
+        unnest(labels) AS label,
         COUNT(*) AS count
     FROM nodes
     GROUP BY label
@@ -188,10 +188,10 @@ Export edges and register both tables in a DuckDB connection for joins:
 edges = db.edges_to_arrow()
 
 print(edges.schema)
-# _id: uint64
-# _type: string
-# _source: uint64
-# _target: uint64
+# id: uint64
+# type: string
+# source: uint64
+# target: uint64
 # since: int64
 # role: string
 # started: int64
@@ -210,19 +210,19 @@ Count outgoing and incoming KNOWS relationships per person:
 ```python
 result = conn.sql("""
     WITH connections AS (
-        SELECT _source AS node_id, COUNT(*) AS out_degree
+        SELECT source AS node_id, COUNT(*) AS out_degree
         FROM edges
-        WHERE _type = 'KNOWS'
-        GROUP BY _source
+        WHERE type = 'KNOWS'
+        GROUP BY source
         UNION ALL
-        SELECT _target AS node_id, COUNT(*) AS out_degree
+        SELECT target AS node_id, COUNT(*) AS out_degree
         FROM edges
-        WHERE _type = 'KNOWS'
-        GROUP BY _target
+        WHERE type = 'KNOWS'
+        GROUP BY target
     )
     SELECT n.name, SUM(c.out_degree) AS total_connections
     FROM connections c
-    JOIN nodes n ON c.node_id = n._id
+    JOIN nodes n ON c.node_id = n.id
     GROUP BY n.name
     ORDER BY total_connections DESC
     LIMIT 5
@@ -253,9 +253,9 @@ result = conn.sql("""
         COUNT(*) AS employees,
         ROUND(AVG(p.age), 1) AS avg_employee_age
     FROM edges e
-    JOIN nodes p ON e._source = p._id
-    JOIN nodes c ON e._target = c._id
-    WHERE e._type = 'WORKS_AT'
+    JOIN nodes p ON e.source = p.id
+    JOIN nodes c ON e.target = c.id
+    WHERE e.type = 'WORKS_AT'
     GROUP BY c.name, c.industry
     ORDER BY employees DESC
 """)
@@ -386,10 +386,10 @@ conn.register("edges", db.edges_to_arrow())
 # Export a summary table to Parquet
 conn.sql("""
     COPY (
-        SELECT n.name, n.city, n.age, COUNT(e._id) AS connections
+        SELECT n.name, n.city, n.age, COUNT(e.id) AS connections
         FROM nodes n
-        LEFT JOIN edges e ON n._id = e._source AND e._type = 'KNOWS'
-        WHERE list_contains(n._labels, 'Person')
+        LEFT JOIN edges e ON n.id = e.source AND e.type = 'KNOWS'
+        WHERE list_contains(n.labels, 'Person')
         GROUP BY n.name, n.city, n.age
         ORDER BY connections DESC
     ) TO 'people_connections.parquet' (FORMAT PARQUET)

@@ -11,7 +11,7 @@
 //! cargo test -p grafeo-engine --all-features --test unit_call_rows
 //! ```
 
-#![cfg(all(feature = "gql", feature = "cypher"))]
+#![cfg(all(feature = "lpg", feature = "gql", feature = "cypher"))]
 
 use grafeo_common::types::Value;
 use grafeo_engine::{Config, GrafeoDB, Session};

@@ -10,12 +10,12 @@
 use std::sync::Arc;
 
 use grafeo_common::types::{NodeId, Value};
-use grafeo_core::graph::rowgroup::RowGroupStore;
+use grafeo_core::graph::lpg::LpgStore;
+use grafeo_core::graph::traits::GraphStoreMut;
 use grafeo_engine::{Config, GrafeoDB};
 
 fn name(db: &GrafeoDB, id: NodeId) -> Option<Value> {
     db.get_node(id)
-        .unwrap()
         .and_then(|node| node.get_property("name").cloned())
 }
 
@@ -36,17 +36,13 @@ fn direct_reads_see_the_compacted_data() {
     assert_eq!(name(&db, alix), Some(Value::from("Alix")));
     assert_eq!(name(&db, vincent), Some(Value::from("Vincent")));
     assert_eq!(
-        db.get_edge(knows).unwrap().map(|edge| (edge.src, edge.dst)),
+        db.get_edge(knows).map(|edge| (edge.src, edge.dst)),
         Some((alix, gus))
     );
+    assert_eq!(db.get_node_labels(gus), Some(vec!["Person".to_string()]));
+    assert_eq!((db.node_count(), db.edge_count()), (3, 1));
     assert_eq!(
-        db.get_node_labels(gus).unwrap(),
-        Some(vec!["Person".to_string()])
-    );
-    assert_eq!((db.node_count().unwrap(), db.edge_count().unwrap()), (3, 1));
-    assert_eq!(
-        db.find_nodes_by_property("name", &Value::from("Alix"))
-            .unwrap(),
+        db.find_nodes_by_property("name", &Value::from("Alix")),
         vec![alix]
     );
     let handle = db.graph("default").unwrap();
@@ -62,13 +58,10 @@ fn direct_reads_see_the_compacted_data() {
     // The admin views count the same, and an edge from a compacted node to a
     // new one is not dangling.
     db.create_edge(alix, vincent, "KNOWS").unwrap();
-    assert_eq!(
-        (db.info().unwrap().node_count, db.info().unwrap().edge_count),
-        (3, 2)
-    );
-    let stats = db.detailed_stats().unwrap();
+    assert_eq!((db.info().node_count, db.info().edge_count), (3, 2));
+    let stats = db.detailed_stats();
     assert_eq!((stats.node_count, stats.edge_count), (3, 2));
-    let validation = db.validate().unwrap();
+    let validation = db.validate();
     assert!(validation.errors.is_empty(), "{:?}", validation.errors);
 }
 
@@ -92,13 +85,13 @@ fn schema_views_see_the_compacted_data() {
     // Person and City, LIVES_IN and KNOWS, name, population and since.
     assert_eq!(
         (
-            db.label_count().unwrap(),
-            db.edge_type_count().unwrap(),
-            db.property_key_count().unwrap()
+            db.label_count(),
+            db.edge_type_count(),
+            db.property_key_count()
         ),
         (2, 2, 3)
     );
-    let stats = db.detailed_stats().unwrap();
+    let stats = db.detailed_stats();
     assert_eq!(
         (
             stats.label_count,
@@ -108,7 +101,7 @@ fn schema_views_see_the_compacted_data() {
         (2, 2, 3)
     );
 
-    let SchemaInfo::Lpg(schema) = db.schema().unwrap() else {
+    let SchemaInfo::Lpg(schema) = db.schema() else {
         panic!("expected an LPG schema");
     };
     let mut labels: Vec<_> = schema
@@ -141,7 +134,7 @@ fn schema_counts_committed_data_only() {
     db.execute("INSERT (:Person {name: 'Alix'})-[:KNOWS]->(:Person {name: 'Gus'})")
         .unwrap();
     let counts = |db: &GrafeoDB| {
-        let SchemaInfo::Lpg(schema) = db.schema().unwrap() else {
+        let SchemaInfo::Lpg(schema) = db.schema() else {
             panic!("expected an LPG schema");
         };
         let people = schema
@@ -154,7 +147,7 @@ fn schema_counts_committed_data_only() {
             .iter()
             .find(|edge_type| edge_type.name == "KNOWS")
             .map_or(0, |edge_type| edge_type.count);
-        let stats = db.detailed_stats().unwrap();
+        let stats = db.detailed_stats();
         (people, knows, stats.node_count, stats.edge_count)
     };
     let insert = "MATCH (a:Person {name: 'Alix'}) INSERT (a)-[:KNOWS]->(:Person {name: 'Django'})";
@@ -174,7 +167,7 @@ fn schema_counts_committed_data_only() {
 
 #[test]
 fn direct_reads_on_an_external_store() {
-    let store = Arc::new(RowGroupStore::new());
+    let store = Arc::new(LpgStore::new().unwrap());
     let alix = store.create_node(&["Person"]);
     store.set_node_property(alix, "name", Value::from("Alix"));
     let gus = store.create_node(&["Person"]);
@@ -183,22 +176,19 @@ fn direct_reads_on_an_external_store() {
         store.new_epoch();
     }
     let db = GrafeoDB::with_store(
-        Arc::clone(&store) as Arc<dyn grafeo_core::graph::GraphBackend>,
+        Arc::clone(&store) as Arc<dyn GraphStoreMut>,
         Config::default(),
     )
     .unwrap();
 
     assert_eq!(name(&db, alix), Some(Value::from("Alix")));
-    assert_eq!(db.get_edge(knows).unwrap().map(|edge| edge.dst), Some(gus));
-    assert_eq!(
-        db.get_node_labels(alix).unwrap(),
-        Some(vec!["Person".to_string()])
-    );
+    assert_eq!(db.get_edge(knows).map(|edge| edge.dst), Some(gus));
+    assert_eq!(db.get_node_labels(alix), Some(vec!["Person".to_string()]));
     assert_eq!(
         (
-            db.label_count().unwrap(),
-            db.edge_type_count().unwrap(),
-            db.property_key_count().unwrap()
+            db.label_count(),
+            db.edge_type_count(),
+            db.property_key_count()
         ),
         (1, 1, 1)
     );
@@ -222,10 +212,9 @@ fn direct_reads_on_an_external_store() {
 }
 
 /// A graph selected with `set_current_graph` and then dropped elsewhere:
-/// reads fail with the graph's absence instead of reading the default
-/// graph's node with the same id.
+/// reads find nothing instead of the default graph's node with the same id.
 #[test]
-fn reads_of_a_dropped_selected_graph_fail() {
+fn reads_of_a_dropped_selected_graph_find_nothing() {
     let db = GrafeoDB::new_in_memory();
     let alix = person(&db, "Alix");
     db.create_graph("model").unwrap();
@@ -237,85 +226,14 @@ fn reads_of_a_dropped_selected_graph_fail() {
     assert_eq!(component, alix);
     db.session().execute("DROP GRAPH model").unwrap();
 
-    // Not the default graph's node with the same id, and not an empty
-    // answer either: the graph the reads name is gone.
-    let gone = |what: &str, error: grafeo_common::utils::error::Error| {
-        assert!(
-            error.to_string().contains("Graph 'model' does not exist"),
-            "{what}: {error}"
-        );
-    };
-    gone("get_node", db.get_node(component).unwrap_err());
-    gone(
-        "get_node_labels",
-        db.get_node_labels(component).unwrap_err(),
-    );
-    gone(
-        "find_nodes_by_property",
+    assert!(db.get_node(component).is_none());
+    assert!(db.get_node_labels(component).is_none());
+    assert!(
         db.find_nodes_by_property("name", &Value::from("Alix"))
-            .unwrap_err(),
+            .is_empty(),
+        "expected no nodes"
     );
 
     db.set_current_graph(None).unwrap();
     assert_eq!(name(&db, alix), Some(Value::from("Alix")));
-}
-
-/// A view as of the current epoch keeps the graph it reads while it lives,
-/// in a database that keeps no history: reads of the store at its read view
-/// see one state, across later commits and a collect. The bindings read
-/// through it where they make several store calls for one answer.
-#[test]
-fn reads_at_a_view_of_now_see_one_state_while_it_lives() {
-    use grafeo_core::graph::{Direction, GraphStore};
-
-    let db = GrafeoDB::new_in_memory();
-    let alix = person(&db, "Alix");
-    let gus = person(&db, "Gus");
-    db.create_edge(alix, gus, "KNOWS").unwrap();
-    let store = db.store().unwrap();
-
-    let now = db.as_of(db.current_epoch()).unwrap();
-    let view = now.read_view();
-    db.execute("MATCH (p:Person {name: 'Gus'}) DETACH DELETE p")
-        .unwrap();
-    db.execute("MATCH (p:Person {name: 'Alix'}) SET p.name = 'Mia'")
-        .unwrap();
-    db.gc();
-    assert_eq!(
-        store.nodes_by_label("Person", view).unwrap(),
-        vec![alix, gus]
-    );
-    assert_eq!(
-        store.node_property(alix, "name", view).unwrap(),
-        Some(Value::from("Alix")),
-        "the pinned view keeps the value it read"
-    );
-    assert_eq!(
-        store
-            .edges(alix, Direction::Outgoing, &[], view)
-            .unwrap()
-            .len(),
-        1,
-        "and the edge the delete took"
-    );
-
-    drop(now);
-    db.gc();
-    let later = db.as_of(db.current_epoch()).unwrap();
-    assert_eq!(
-        store.nodes_by_label("Person", later.read_view()).unwrap(),
-        vec![alix]
-    );
-    assert_eq!(
-        store
-            .node_property(alix, "name", later.read_view())
-            .unwrap(),
-        Some(Value::from("Mia"))
-    );
-    assert_eq!(
-        store
-            .edges(alix, Direction::Outgoing, &[], later.read_view())
-            .unwrap(),
-        Vec::<(NodeId, grafeo_common::types::EdgeId)>::new()
-    );
 }

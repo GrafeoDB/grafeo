@@ -21,7 +21,7 @@ dependencies:
 dart pub get
 ```
 
-The package requires the `grafeo_c` shared library at runtime. Place `libgrafeo_c.so` (Linux), `libgrafeo_c.dylib` (macOS) or `grafeo_c.dll` (Windows) in a location visible to your application. You can also pass a custom path via the `libraryPath` parameter on factory constructors. Every GitHub release has the library for each desktop platform, in a `default` and an `all` features variant (see [prebuilt libraries](../c/index.md#prebuilt-libraries)).
+The package requires the `grafeo_c` shared library at runtime. Place `libgrafeo_c.so` (Linux), `libgrafeo_c.dylib` (macOS) or `grafeo_c.dll` (Windows) in a location visible to your application. You can also pass a custom path via the `libraryPath` parameter on factory constructors.
 
 ## Quick Start
 
@@ -387,14 +387,6 @@ Delete a node by ID. Returns `true` if the node existed.
 bool deleteNode(int id)
 ```
 
-#### detachDeleteNode()
-
-Delete a node with all its edges, as `DETACH DELETE` does. Returns `true` if the node existed; the node and its edges are one change.
-
-```dart
-bool detachDeleteNode(int id)
-```
-
 #### setNodeProperty()
 
 Set a property on a node.
@@ -462,17 +454,6 @@ final edge = db.getEdge(0);
 print(edge.type);     // 'KNOWS'
 print(edge.sourceId); // 0
 print(edge.targetId); // 1
-```
-
-#### getNodeEdges()
-
-A node's edges without a query, as `NodeEdge(neighborId, edgeId)`. `direction` is `Direction.out`
-(the default), `Direction.incoming` or `Direction.both` (which lists a self-loop once); `edgeTypes`
-keeps only edges of those types. A node that does not exist has none; a `GrafeoGraph` has the same
-method for its graph.
-
-```dart
-List<NodeEdge> getNodeEdges(int id, {Direction direction = Direction.out, List<String>? edgeTypes})
 ```
 
 #### deleteEdge()
@@ -624,22 +605,6 @@ print(ids); // [0, 1, 2]
     `batchCreateNodes` is only available when grafeo-c is built with
     `--features vector-index` (included in the `ai` and `analytics` profiles).
 
-#### batchVectorSearch()
-
-Search several query vectors of one dimension at once, with optional property
-filters. Returns one list per query, nearest first.
-
-```dart
-List<List<VectorResult>> batchVectorSearch(
-  String label,
-  String property,
-  List<List<double>> queries, {
-  required int k,
-  int ef = 0,
-  Map<String, dynamic>? filters,
-})
-```
-
 #### mmrSearch()
 
 Perform a Maximal Marginal Relevance (MMR) vector search for diverse nearest neighbors.
@@ -690,74 +655,6 @@ Rebuild a vector index by rescanning all matching nodes.
 void rebuildVectorIndex(String label, String property)
 ```
 
-### Batches and Upserts
-
-```dart
-// One transaction each; IDs in input order
-final ids = db.batchCreateNodesWithProps(['Person'], [
-  {'name': 'Alix'},
-  {'name': 'Gus'},
-]);
-final edgeIds = db.batchCreateEdges([BatchEdge(ids[0], ids[1], 'KNOWS')]);
-
-// Create or update by a key property: created, updated and skipped rows
-final summary = db.upsertNodes(['File'], [{'path': 'a.rs'}], key: 'path');
-db.upsertEdges('IMPORTS', [{'id': 'a-b', 'src': 'a.rs', 'dst': 'b.rs'}],
-    endpointKey: 'path', endpointLabels: ['File']);
-```
-
-An edge to a missing node fails the edge batch and writes nothing. A node row
-without the key is skipped, and so is an edge row whose endpoint matches no node
-or several; endpoints are never created.
-
-### Named Graphs
-
-`db.graph(name)` returns a `GrafeoGraph` that works in one named graph without
-switching the current graph: `execute`, `executeWithParams`, `executeLanguage`,
-the node and edge methods, the batches and the upserts. Once the graph is
-dropped, every call throws. `close()` frees it.
-
-```dart
-final trips = db.graph('trips');
-final prague = trips.createNode(['City'], {'name': 'Prague'});
-final result = trips.execute('MATCH (c:City) RETURN c.name');
-trips.close();
-```
-
-### Time Travel
-
-Reads of the database as it was at an earlier epoch or time. The `historyRetention` option of `GrafeoDB.memory` and
-`GrafeoDB.open` sets how much history it keeps: `HistoryRetention.off` (the default), `HistoryRetention.forever` or
-`HistoryRetention.duration(Duration)`; a database file stores the setting. A point is a `TimePoint`:
-`TimePoint.epoch(int)`, `TimePoint.at(DateTime)` (the last commit at or before it; a local and a UTC `DateTime` name
-one instant) or `TimePoint.ago(Duration)`. A point before the history the database keeps throws ("not retained").
-A view keeps the history of its epoch until `close()`; besides `execute` it has `getNode`, `getEdge` and
-`getNodeProperty`, which give null when the entity or the property did not exist then.
-
-```dart
-final db = GrafeoDB.memory(
-    historyRetention: HistoryRetention.duration(const Duration(days: 7)));
-final then = db.currentEpoch;
-final view = db.asOf(TimePoint.ago(const Duration(minutes: 5)));
-final result = view.execute('MATCH (p:Person) RETURN count(p) AS n');
-view.close();
-db.executeAsOf('MATCH (p:Person) RETURN count(p) AS n', TimePoint.epoch(then));
-db.epochAsOf(TimePoint.at(DateTime.utc(2026, 3, 1, 11)));
-```
-
-### Change History
-
-With `db.cdcEnabled = true`, every committed change is recorded as a
-`ChangeEvent` (kind, epoch, properties before and after, labels, the endpoints
-of an edge, and `deletedWith` on an edge a detach delete removed).
-
-```dart
-final events = db.nodeHistory(id);
-db.edgeHistory(edgeId);
-db.nodeHistorySince(id, epoch);
-db.changesBetween(startEpoch, endEpoch);
-```
-
 ### Admin
 
 #### save()
@@ -778,22 +675,6 @@ Force a write-ahead log checkpoint, flushing buffered writes to the main data fi
 
 ```dart
 void walCheckpoint()
-```
-
-#### setCheckpointTriggers()
-
-Let the database checkpoint by itself: every `interval`, and once the WAL holds `walBytes` bytes since the last checkpoint. Leave both out to turn automatic checkpoints off (the default). For this open only; an in-memory or read-only database refuses them.
-
-```dart
-void setCheckpointTriggers({Duration? interval, int? walBytes})
-```
-
-#### checkpointStatus()
-
-How the automatic checkpoints fare: `interval_ms` and `wal_bytes` (the triggers, null when off), `last_checkpoint`, `failures` (automatic checkpoints that failed since the last that succeeded), `last_error`, `last_failure` and `stopped`.
-
-```dart
-Map<String, dynamic> checkpointStatus()
 ```
 
 ## Transaction
@@ -887,20 +768,6 @@ enum IsolationLevel {
 
 ## Data Types
 
-### GrafeoDecimal
-
-An exact decimal from Grafeo (GQL `1.50`, `CAST(x AS DECIMAL(10, 2))`, SPARQL
-`xsd:decimal`): up to 38 digits, kept as its `text` with its scale. Equal
-values are equal whatever their scale (`1.50` equals `1.5`). Dart has no
-decimal type of its own: `toDouble()` gives the nearest double, and
-`GrafeoDecimal('1.50')` passed as a parameter goes in exactly.
-
-```dart
-final result = db.execute('RETURN 19.99 AS price');
-final price = result.rows.first['price'] as GrafeoDecimal;
-print(price.text);  // 19.99
-```
-
 ### Node
 
 A graph node with an ID, labels and properties.
@@ -943,7 +810,6 @@ class QueryResult {
   final List<Edge> edges;
   final double executionTimeMs;
   final int rowsScanned;
-  final WriteCounters counters;
 }
 ```
 
@@ -955,7 +821,6 @@ class QueryResult {
 | `edges` | Deduplicated `Edge` entities found in the result rows |
 | `executionTimeMs` | Query execution time in milliseconds |
 | `rowsScanned` | Number of rows scanned during execution |
-| `counters` | What a write changed: `nodesCreated`, `nodesDeleted`, `edgesCreated`, `edgesDeleted`, `propertiesSet`, `labelsAdded`, `labelsRemoved` (all zero for a read) |
 
 ### VectorResult
 
@@ -970,7 +835,7 @@ class VectorResult {
 
 ## Exception Hierarchy
 
-All Grafeo errors extend the `sealed` base class `GrafeoException`, which carries the error's GQLSTATUS in `gqlStatus` (`'22012'` for a division by zero, see [Error Codes](../../user-guide/error-codes.md#gqlstatus); null for an exception the binding raises itself). Use pattern matching to handle specific error types:
+All Grafeo errors extend the `sealed` base class `GrafeoException`. Use pattern matching to handle specific error types:
 
 ```dart
 try {
@@ -1023,7 +888,6 @@ enum GrafeoStatus {
 | `null` | Null | |
 | `bool` | Bool | |
 | `int` | Int64 | |
-| `BigInt` | Int64, or Decimal past 64 bits | Exact up to 38 digits (scale 0); past that an error naming the parameter |
 | `double` | Float64 | |
 | `String` | String | |
 | `DateTime` | Timestamp | Encoded as `$timestamp_us` (microseconds, UTC) |

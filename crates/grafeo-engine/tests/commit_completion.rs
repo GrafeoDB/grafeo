@@ -1,14 +1,10 @@
-//! A commit completes before anything that comes after it (#548), and work
-//! that starts while it is in progress sees none of it.
+//! A commit completes before anything that comes after it (#548).
 //!
-//! A commit assigns its epoch and writes its WAL group, then stamps its
-//! versions, reports its CDC events and publishes its epoch, in epoch order.
-//! These tests run work on another thread from inside a commit, right after
-//! its epoch is assigned or once its versions are stamped (the
-//! `testing-statement-injection` commit hooks): the work does not wait for
-//! the commit, reads at the published epoch, which holds none of it, and
-//! conflicts on what the commit wrote; work that starts after `commit()`
-//! returns sees it. The WAL tests crash a child process (it exits without
+//! A commit assigns its epoch, then writes its versions, CDC events and WAL
+//! records. These tests run work on another thread from inside a commit,
+//! right after its epoch is assigned or once its versions are stamped (the
+//! `testing-statement-injection` commit hooks), and check that the work lands
+//! after the commit, never in the middle of it. The WAL tests crash a child process (it exits without
 //! `close()`, so nothing is checkpointed) and reopen, so the WAL is replayed.
 //!
 //! ```bash
@@ -112,7 +108,7 @@ fn during_next_commit<T: Send + 'static>(
 }
 
 fn by(db: &GrafeoDB, node: NodeId) -> Option<Value> {
-    db.get_node(node).unwrap()?.get_property("by").cloned()
+    db.get_node(node)?.get_property("by").cloned()
 }
 
 /// A transaction that sets `by` on `hub` and starts `work` (given the
@@ -135,67 +131,48 @@ fn commit_with<T: Send + 'static>(
     during.join()
 }
 
-/// A direct write that arrives while a transaction commits, to what the
-/// commit wrote, conflicts (`GRAFEO-T001`, retryable) and changes nothing;
-/// once `commit()` returned, the same write lands after the commit: the
-/// committed value holds at the commit's epoch and the direct write's value
-/// is the latest.
+/// A direct write that arrives while a transaction commits lands after the
+/// commit: the committed value holds at the commit's epoch and the direct
+/// write's value is the latest.
+#[cfg(feature = "temporal")]
 #[test]
-fn a_direct_write_during_a_commit_conflicts_and_after_it_lands() {
-    // History kept: the test reads the commit's epoch after a later write.
-    let db = Arc::new(
-        GrafeoDB::with_config(
-            grafeo_engine::Config::in_memory()
-                .with_history_retention(grafeo_engine::HistoryRetention::Forever),
-        )
-        .unwrap(),
-    );
+fn a_direct_write_during_a_commit_lands_after_it() {
+    let db = Arc::new(GrafeoDB::new_in_memory());
     let hub = db.create_node(&["Hub"]).unwrap();
     let commit_epoch = grafeo_common::types::EpochId::new(db.current_epoch().as_u64() + 1);
-    let during = commit_with(&db, hub, |db, hub| {
+    commit_with(&db, hub, |db, hub| {
         db.set_node_property(hub, "by", Value::from("direct"))
-            .map_err(|error| error.to_string())
-    });
-    let error = during.unwrap_err();
-    assert!(error.contains("GRAFEO-T001"), "{error}");
-    assert_eq!(by(&db, hub), Some(Value::from("transaction")));
+    })
+    .unwrap();
 
-    db.set_node_property(hub, "by", Value::from("direct"))
-        .unwrap();
     assert_eq!(
-        db.get_node_property_at_epoch(hub, "by", commit_epoch)
-            .unwrap(),
+        db.get_node_property_at_epoch(hub, "by", commit_epoch),
         Some(Value::from("transaction"))
     );
     assert_eq!(by(&db, hub), Some(Value::from("direct")));
 }
 
-/// A transaction that begins while another commits does not wait for it and
-/// does not see it (it reads at the published epoch); one that begins once
-/// `commit()` returned sees what the commit created.
+/// A transaction that begins while another commits sees what that commit
+/// created.
 #[test]
-fn a_transaction_during_a_commit_does_not_see_it_and_one_after_it_does() {
+fn a_transaction_that_begins_during_a_commit_sees_it() {
     let db = Arc::new(GrafeoDB::new_in_memory());
     let mut session = db.session();
     session.begin_transaction().unwrap();
     let doc = session.create_node(&["Doc"]).unwrap();
-    let sees = move |db: &GrafeoDB| {
-        let mut reader = db.session();
-        reader.begin_transaction().unwrap();
-        let seen = reader.get_node(doc).unwrap().is_some();
-        // A commit, even of nothing, takes the next epoch and so waits for
-        // the commit in progress: a read rolls back.
-        reader.rollback().unwrap();
-        seen
-    };
     let reader = {
         let db = Arc::clone(&db);
-        during_next_commit_at(Moment::Stamped, Wait::UntilDone, move || sees(&db))
+        during_next_commit(move || {
+            let mut reader = db.session();
+            reader.begin_transaction().unwrap();
+            let seen = reader.get_node(doc).is_some();
+            reader.commit().unwrap();
+            seen
+        })
     };
     session.commit().unwrap();
 
-    assert!(!reader.join(), "a transaction during the commit saw it");
-    assert!(sees(&db), "a transaction after the commit did not see it");
+    assert!(reader.join(), "the new transaction did not see the commit");
 }
 
 /// A read outside a transaction does not see a commit before it is complete,
@@ -257,9 +234,9 @@ mod wal {
     }
 
     /// Runs `scenario` in a child process that exits without closing the
-    /// database, then reopens it and returns the `by` of the hub and of the
-    /// other node (the scenario creates both first).
-    fn by_after_crash(scenario: &str, path: &Path) -> (Option<Value>, Option<Value>) {
+    /// database, then reopens it and returns the hub's `by` (the hub is the
+    /// first node the scenario creates).
+    fn by_after_crash(scenario: &str, path: &Path) -> Option<Value> {
         let status = child_process::run(
             std::process::Command::new(std::env::current_exe().unwrap())
                 .args(["--exact", "wal::crash_child", "--nocapture"])
@@ -269,18 +246,11 @@ mod wal {
         .unwrap();
         assert!(status.success(), "scenario {scenario} failed");
         let db = open(path);
-        let by_of = |label: &str| {
-            let id = db
-                .execute(&format!("MATCH (n:{label}) RETURN id(n)"))
-                .unwrap()
-                .rows()[0][0]
-                .clone();
-            let Value::Int64(id) = id else {
-                panic!("no {label}: {id:?}");
-            };
-            by(&db, NodeId::new(u64::try_from(id).unwrap()))
+        let hub = db.execute("MATCH (h:Hub) RETURN id(h)").unwrap().rows()[0][0].clone();
+        let Value::Int64(hub) = hub else {
+            panic!("no hub: {hub:?}");
         };
-        (by_of("Hub"), by_of("Other"))
+        by(&db, NodeId::new(u64::try_from(hub).unwrap()))
     }
 
     /// Child-process entry for [`by_after_crash`]; a no-op when run directly.
@@ -292,20 +262,19 @@ mod wal {
         let path = PathBuf::from(std::env::var_os(PATH_VAR).unwrap());
         let db = Arc::new(open(&path));
         let hub = db.create_node(&["Hub"]).unwrap();
-        let other = db.create_node(&["Other"]).unwrap();
         match scenario.as_str() {
             "direct_write" => {
-                commit_with(&db, hub, move |db, _| {
-                    db.set_node_property(other, "by", Value::from("later"))
+                commit_with(&db, hub, |db, hub| {
+                    db.set_node_property(hub, "by", Value::from("later"))
                 })
                 .unwrap();
             }
             "transaction" => {
-                commit_with(&db, hub, move |db, _| {
+                commit_with(&db, hub, |db, hub| {
                     let mut later = db.session();
                     later.begin_transaction().unwrap();
                     later
-                        .set_node_property(other, "by", Value::from("later"))
+                        .set_node_property(hub, "by", Value::from("later"))
                         .unwrap();
                     later.commit().unwrap();
                 });
@@ -316,25 +285,25 @@ mod wal {
         std::process::exit(0);
     }
 
-    /// A direct write that commits while a transaction commits (another
-    /// node) is logged as its own group, so replay has both.
+    /// A direct write that arrives while a transaction commits is logged
+    /// after the commit, so replay ends with the direct write's value.
     #[test]
-    fn a_direct_write_during_a_commit_is_replayed_with_it() {
+    fn a_direct_write_during_a_commit_is_replayed_after_it() {
         let dir = tempfile::tempdir().unwrap();
         assert_eq!(
             by_after_crash("direct_write", &dir.path().join("single.grafeo")),
-            (Some(Value::from("transaction")), Some(Value::from("later")))
+            Some(Value::from("later"))
         );
     }
 
     /// A transaction that begins and commits while another commits is
-    /// logged after it, so replay has both.
+    /// logged after it, so replay ends with its value.
     #[test]
-    fn a_transaction_during_a_commit_is_replayed_with_it() {
+    fn a_transaction_during_a_commit_is_replayed_after_it() {
         let dir = tempfile::tempdir().unwrap();
         assert_eq!(
             by_after_crash("transaction", &dir.path().join("single.grafeo")),
-            (Some(Value::from("transaction")), Some(Value::from("later")))
+            Some(Value::from("later"))
         );
     }
 }

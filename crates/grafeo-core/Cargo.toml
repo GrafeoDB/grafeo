@@ -26,7 +26,7 @@ foldhash.workspace = true
 
 # Serialization
 serde.workspace = true
-serde_json = { version = "1", optional = true, features = ["arbitrary_precision"] }
+serde_json = { version = "1", optional = true }
 byteorder.workspace = true
 bytes.workspace = true
 bincode.workspace = true
@@ -53,20 +53,19 @@ crc32fast.workspace = true
 
 [dev-dependencies]
 criterion.workspace = true
-grafeo-common = { workspace = true, features = ["testing-rdf-terms"] }
 serde_json = "1"
 tempfile.workspace = true
 
 [features]
-default = ["parallel", "spill", "mmap", "regex"]
-lpg = []  # Deprecated: the LPG store is always built, so this enables nothing. Removed in 0.7.0.
+default = ["lpg", "parallel", "spill", "mmap", "regex"]
+lpg = []  # Enable LPG (labeled property graph) model
 parallel = ["rayon", "crossbeam"]  # Morsel-driven parallelism (rayon, crossbeam work-stealing)
 spill = []                         # Disk spilling for out-of-core execution (sync only, async in grafeo-engine)
 mmap = []                          # File-backed vector storage (MmapStorage)
 triple-store = []  # Enable RDF triple store model
 rdf = ["triple-store"]  # Deprecated: use triple-store
-tiered-storage = []  # Deprecated since 0.6.0: enables nothing (the row-group store replaced LpgStore, which it shaped); removed in 0.7.0
-temporal = []  # Deprecated since 0.6.0: enables nothing (a database's history retention, Config::with_history_retention, replaces it); removed in 0.7.0
+tiered-storage = ["grafeo-common/tiered-storage"]  # Enable tiered hot/cold storage
+temporal = ["grafeo-common/temporal"]  # Enable append-only versioned properties
 succinct-indexes = []  # Enable succinct data structures (rank/select bitvectors, Elias-Fano, wavelet trees)
 compact-store = []  # Deprecated since 0.6.0: enables nothing (a build that opens files reads a compacted 0.5.x one); removed in 0.7.0
 ring-index = ["succinct-indexes", "triple-store"]  # Ring Index for RDF (3x space reduction, requires succinct-indexes and triple-store)
@@ -81,9 +80,6 @@ parquet-import = ["parquet"]  # Apache Parquet file import (LOAD DATA ... FORMAT
 
 # Convenience groups
 ai = ["vector-index", "text-index", "hybrid-search"]  # All AI/RAG search features
-
-# The conformance suite of the store contract, for a store of one's own (graph::conformance)
-conformance = []
 
 # Testing utilities (zero overhead when disabled)
 testing-crash-injection = ["grafeo-common/testing-crash-injection"]  # Deterministic crash injection for recovery testing
@@ -103,6 +99,7 @@ harness = false
 [[bench]]
 name = "store_apply"
 harness = false
+required-features = ["lpg"]
 
 [[bench]]
 name = "morsel_pipeline"

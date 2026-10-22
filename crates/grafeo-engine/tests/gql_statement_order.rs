@@ -18,7 +18,7 @@
 //! cargo test -p grafeo-engine --all-features --test gql_statement_order
 //! ```
 
-#![cfg(feature = "gql")]
+#![cfg(all(feature = "lpg", feature = "gql"))]
 
 use grafeo_common::types::Value;
 use grafeo_engine::GrafeoDB;

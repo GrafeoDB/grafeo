@@ -3,7 +3,7 @@
 //! These tests validate features that were discovered to be fully working
 //! during codebase exploration, plus newly implemented features.
 
-use grafeo_common::types::{Decimal, Value};
+use grafeo_common::types::Value;
 use grafeo_engine::GrafeoDB;
 
 /// Creates 3 Person nodes (Alix age 30, Gus age 25, Vincent age 35) with 2 KNOWS edges.
@@ -858,15 +858,14 @@ fn test_enhanced_numeric_functions() {
     assert_eq!(result.rows().len(), 1);
     let row = &result.rows()[0];
     assert_eq!(row[0], Value::Int64(5)); // abs(-5)
-    // ceil, floor and round of an exact number are exact
-    assert_eq!(row[1], Value::Decimal(Decimal::from_i64(3))); // ceil(2.3)
-    assert_eq!(row[2], Value::Decimal(Decimal::from_i64(2))); // floor(2.7)
+    assert_eq!(row[1], Value::Float64(3.0)); // ceil(2.3)
+    assert_eq!(row[2], Value::Float64(2.0)); // floor(2.7)
     assert_eq!(row[3], Value::Int64(-1)); // sign(-42)
     match &row[4] {
         Value::Float64(f) => assert!((f - 4.0).abs() < 1e-9),
         other => panic!("Expected Float64 for sqrt, got {:?}", other),
     }
-    assert_eq!(row[5], Value::Decimal(Decimal::from_i64(3))); // round(2.5)
+    assert_eq!(row[5], Value::Float64(3.0)); // round(2.5)
 }
 
 // ISO: GF03

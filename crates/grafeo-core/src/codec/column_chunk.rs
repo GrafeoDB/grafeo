@@ -31,17 +31,15 @@
 //! | 5 `RawI64` | `Int64` | count u32, i64 |
 //! | 6 `Float32Vector` | `Vector`s of one dimension count | dimensions u16, component count u32, f32 bits |
 //! | 7 `Values` | any | count u32, values in the value codec of `grafeo_common::storage::value_codec` |
-//! | 8 `Decimal64` | `Decimal`s of one scale whose mantissas fit an `i64` | scale u8, count u32, i64 mantissas |
 //!
 //! [`choose_codec`] picks a typed codec only when every value has its kind,
 //! so every value round trips exactly: an `Int64` next to a `Float64` stays
-//! an `Int64`, and decimals of several scales go into a `Values` chunk, each
-//! keeping its own. The bodies of codecs 1 to 6 are those the compact store's
+//! an `Int64`. The bodies of codecs 1 to 6 are those the compact store's
 //! `ColumnCodec` writes after its discriminant, through the same functions.
 //!
 //! The zone map of an `Int64`, `Float64` (NaN left out, and no zone map when
-//! every value is NaN), `Bool` or `Decimal64` chunk is its minimum and
-//! maximum, two values in the value codec. Every `String` chunk has a [`StringZoneMap`], by the
+//! every value is NaN) or `Bool` chunk is its minimum and maximum, two values
+//! in the value codec. Every `String` chunk has a [`StringZoneMap`], by the
 //! strings' UTF-8 bytes (the order of `str`):
 //!
 //! | Field | Size | Meaning |
@@ -65,16 +63,11 @@ use arcstr::ArcStr;
 use bytes::Bytes;
 use grafeo_common::storage::ChunkCaps;
 use grafeo_common::storage::value_codec::{decode_value, encode_value, encoded_len};
-use grafeo_common::types::{Decimal, Value};
+use grafeo_common::types::Value;
 use grafeo_common::utils::error::{Error, Result};
 
 use super::limits::{checked_u16, checked_u32};
 use super::{BitPackedInts, BitVector, DictionaryBuilder, DictionaryEncoding};
-
-// Point views read one row of an encoded chunk: only the row-group store
-// reads them.
-mod point;
-pub(crate) use point::PointView;
 
 /// The most bytes of each bound of a [`StringZoneMap`]: longer strings are
 /// cut to this many.
@@ -124,8 +117,6 @@ pub enum ChunkCodec {
     Float32Vector = 6,
     /// Values of any kind, each in the lossless value codec.
     Values = 7,
-    /// `Decimal` values of one scale, by their mantissas as `i64`s.
-    Decimal64 = 8,
 }
 
 impl ChunkCodec {
@@ -146,7 +137,6 @@ impl ChunkCodec {
             5 => Some(Self::RawI64),
             6 => Some(Self::Float32Vector),
             7 => Some(Self::Values),
-            8 => Some(Self::Decimal64),
             _ => None,
         }
     }
@@ -276,14 +266,6 @@ pub fn choose_codec<'v>(values: impl Iterator<Item = &'v Value> + Clone) -> Chun
                 ) =>
         {
             ChunkCodec::Float32Vector
-        }
-        Some(Value::Decimal(first))
-            if every(&|value| {
-                matches!(value, Value::Decimal(other)
-                    if other.scale() == first.scale() && i64::try_from(other.mantissa()).is_ok())
-            }) =>
-        {
-            ChunkCodec::Decimal64
         }
         _ => ChunkCodec::Values,
     }
@@ -967,24 +949,6 @@ fn read_values(
                 })
                 .collect())
         }
-        ChunkCodec::Decimal64 => {
-            let scale = *data.get(*pos).ok_or_else(|| body(&"truncated scale"))?;
-            *pos += 1;
-            let words = read_le_words_body(data, pos).map_err(|error| body(&error))?;
-            if words.len() / 8 != value_count {
-                return Err(count_error(words.len() / 8));
-            }
-            words
-                .as_chunks::<8>()
-                .0
-                .iter()
-                .map(|&word| {
-                    Decimal::new(i128::from(i64::from_le_bytes(word)), scale)
-                        .map(Value::Decimal)
-                        .map_err(|error| body(&format!("a decimal of scale {scale}: {error}")))
-                })
-                .collect()
-        }
         ChunkCodec::Values => {
             let bytes = data.as_ref();
             let count = read_u32(bytes, pos).map_err(|error| body(&error))? as usize;
@@ -1075,24 +1039,6 @@ fn write_values(codec: ChunkCodec, values: &[(u32, Value)], out: &mut Vec<u8>) -
             }
             Ok(())
         }
-        ChunkCodec::Decimal64 => {
-            let scale = match values.first() {
-                Some((_, Value::Decimal(first))) => first.scale(),
-                _ => 0,
-            };
-            let mut words = Vec::with_capacity(values.len() * 8);
-            for (_, value) in values {
-                let mantissa = match value {
-                    Value::Decimal(decimal) if decimal.scale() == scale => {
-                        i64::try_from(decimal.mantissa()).map_err(|_| other_kind(value))?
-                    }
-                    _ => return Err(other_kind(value)),
-                };
-                words.extend_from_slice(&mantissa.to_le_bytes());
-            }
-            out.push(scale);
-            write_le_words_body(&words, out)
-        }
     }
 }
 
@@ -1125,8 +1071,6 @@ fn zone_map<'v>(
         ChunkCodec::Dict => {
             StringZoneMap::of(values.filter_map(Value::as_str))?.map(ZoneMap::Strings)
         }
-        ChunkCodec::Decimal64 => min_max(values.filter_map(Value::as_decimal), Decimal::cmp)
-            .map(|(min, max)| ZoneMap::Values(Value::Decimal(min), Value::Decimal(max))),
         ChunkCodec::Float32Vector | ChunkCodec::Values => None,
     })
 }
@@ -1334,10 +1278,6 @@ mod tests {
     fn same(a: &Value, b: &Value) -> bool {
         match (a, b) {
             (Value::Float64(x), Value::Float64(y)) => x.to_bits() == y.to_bits(),
-            // A decimal with its scale: `1.50` is not the same as `1.5`.
-            (Value::Decimal(x), Value::Decimal(y)) => {
-                x.scale() == y.scale() && x.mantissa() == y.mantissa()
-            }
             (Value::Vector(x), Value::Vector(y)) => {
                 x.len() == y.len()
                     && x.iter()
@@ -1540,98 +1480,6 @@ mod tests {
         let widest = vector(&vec![0.5; 65_535]);
         assert_eq!(pick(vec![widest.clone()]), ChunkCodec::Float32Vector);
         round_trip(1, &[(0, widest)], None);
-    }
-
-    fn decimal(text: &str) -> Value {
-        Value::Decimal(grafeo_common::types::Decimal::parse(text).unwrap())
-    }
-
-    /// Decimals of one scale whose mantissas fit an `i64` are that scale and
-    /// 8 bytes each, with their bounds as the zone map; they keep their scale.
-    #[test]
-    fn decimals_of_one_scale_take_eight_bytes_each() {
-        let values = dense(vec![
-            decimal("2.50"),
-            decimal("-19.99"),
-            decimal("0.00"),
-            decimal("88.10"),
-        ]);
-        let (codec, bytes, back) = round_trip(4, &values, None);
-        assert_eq!(codec, ChunkCodec::Decimal64);
-        assert_eq!(
-            back.zone_map,
-            Some(ZoneMap::Values(decimal("-19.99"), decimal("88.10")))
-        );
-        // The header, the zone map's two values, the scale, the count and
-        // four i64 mantissas.
-        let zone_map = encoded(&decimal("-19.99")).len() + encoded(&decimal("88.10")).len();
-        assert_eq!(bytes.len(), HEADER_LEN + zone_map + 1 + 4 + 4 * 8);
-        assert_eq!(format!("{:?}", back.values[2].1), "Decimal(0.00)");
-    }
-
-    /// Decimals of several scales, a mantissa past an `i64` and a decimal
-    /// beside another kind go into a `Values` chunk, each with its own scale.
-    #[test]
-    fn other_decimals_keep_their_own_scale_in_a_values_chunk() {
-        let pick = |values: Vec<Value>| choose_codec(values.iter());
-        for values in [
-            vec![decimal("1.5"), decimal("1.50")],
-            vec![decimal("12345678901234567890"), decimal("1")],
-            vec![decimal("1.5"), Value::Int64(2)],
-        ] {
-            assert_eq!(pick(values.clone()), ChunkCodec::Values, "{values:?}");
-        }
-        let values = dense(vec![decimal("1.5"), decimal("1.50"), decimal("-0.125")]);
-        let (codec, _, back) = round_trip(3, &values, None);
-        assert_eq!(codec, ChunkCodec::Values);
-        assert_eq!(format!("{:?}", back.values[1].1), "Decimal(1.50)");
-    }
-
-    /// RDF terms (a SPARQL result stored as a property) go into a `Values`
-    /// chunk, without a zone map, and come back as the same terms: kind,
-    /// text, language tag and datatype.
-    #[test]
-    fn rdf_terms_round_trip_through_a_values_chunk() {
-        use grafeo_common::types::rdf::{Term, testing::unusual_terms};
-        let terms: Vec<Value> = unusual_terms()
-            .into_iter()
-            .chain([Term::typed_literal(
-                "2026-01-15",
-                "http://www.w3.org/2001/XMLSchema#date",
-            )])
-            .map(|term| Value::RdfTerm(Arc::new(term)))
-            .collect();
-        let row_count = u32::try_from(terms.len()).unwrap();
-        let values = dense(terms);
-        let (codec, _, back) = round_trip(row_count, &values, None);
-        assert_eq!(codec, ChunkCodec::Values);
-        assert_eq!(back.zone_map, None);
-        assert_eq!(back.values, values);
-    }
-
-    /// A decimal body with a scale past 38, or a zone map other than its
-    /// values' bounds, is refused.
-    #[test]
-    fn a_decimal_chunk_is_checked() {
-        let mut body = Vec::new();
-        body.extend_from_slice(&encoded(&decimal("0.5")));
-        body.extend_from_slice(&encoded(&decimal("0.5")));
-        body.push(39);
-        body.extend_from_slice(&1u32.to_le_bytes());
-        body.extend_from_slice(&5i64.to_le_bytes());
-        let bytes = crafted(ChunkCodec::Decimal64, FLAG_ZONE_MAP, 1, 1, &body);
-        let error = error_of(&bytes, ChunkCodec::Decimal64, 1);
-        assert!(error.contains("scale"), "{error}");
-
-        let mut body = Vec::new();
-        body.extend_from_slice(&encoded(&decimal("0.4")));
-        body.extend_from_slice(&encoded(&decimal("0.4")));
-        body.push(1);
-        body.extend_from_slice(&1u32.to_le_bytes());
-        body.extend_from_slice(&5i64.to_le_bytes());
-        let bytes = crafted(ChunkCodec::Decimal64, FLAG_ZONE_MAP, 1, 1, &body);
-        let error = error_of(&bytes, ChunkCodec::Decimal64, 1);
-        assert!(error.contains("zone map"), "{error}");
     }
 
     #[test]
@@ -2372,23 +2220,13 @@ mod tests {
             ChunkCodec::RawI64,
             ChunkCodec::Float32Vector,
             ChunkCodec::Values,
-            ChunkCodec::Decimal64,
         ];
         for (codec, byte) in codecs.into_iter().zip(1u8..) {
             assert_eq!(codec.to_byte(), byte);
             assert_eq!(ChunkCodec::from_byte(byte), Some(codec));
         }
         assert_eq!(ChunkCodec::from_byte(0), None);
-        assert_eq!(ChunkCodec::from_byte(9), None);
-        // A decimal chunk: the header with the zone map flag, the bounds in
-        // the value codec, then the scale, the count and the mantissas.
-        let (codec, bytes) = encode_column_chunk(1, &[(0, decimal("0.5"))], None).unwrap();
-        assert_eq!(codec, ChunkCodec::Decimal64);
-        let mut expected = vec![8, 2, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0];
-        expected.extend_from_slice(&encoded(&decimal("0.5")));
-        expected.extend_from_slice(&encoded(&decimal("0.5")));
-        expected.extend_from_slice(&[1, 1, 0, 0, 0, 5, 0, 0, 0, 0, 0, 0, 0]);
-        assert_eq!(bytes, expected);
+        assert_eq!(ChunkCodec::from_byte(8), None);
     }
 
     #[test]

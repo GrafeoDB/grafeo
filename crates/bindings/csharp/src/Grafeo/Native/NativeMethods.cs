@@ -109,34 +109,6 @@ internal static partial class NativeMethods
     [LibraryImport(LibName)]
     internal static partial ulong grafeo_result_rows_scanned(nint result);
 
-    /// <summary>Write counter: nodes created.</summary>
-    [LibraryImport(LibName)]
-    internal static partial ulong grafeo_result_nodes_created(nint result);
-
-    /// <summary>Write counter: nodes deleted.</summary>
-    [LibraryImport(LibName)]
-    internal static partial ulong grafeo_result_nodes_deleted(nint result);
-
-    /// <summary>Write counter: edges created.</summary>
-    [LibraryImport(LibName)]
-    internal static partial ulong grafeo_result_edges_created(nint result);
-
-    /// <summary>Write counter: edges deleted.</summary>
-    [LibraryImport(LibName)]
-    internal static partial ulong grafeo_result_edges_deleted(nint result);
-
-    /// <summary>Write counter: properties set.</summary>
-    [LibraryImport(LibName)]
-    internal static partial ulong grafeo_result_properties_set(nint result);
-
-    /// <summary>Write counter: labels added.</summary>
-    [LibraryImport(LibName)]
-    internal static partial ulong grafeo_result_labels_added(nint result);
-
-    /// <summary>Write counter: labels removed.</summary>
-    [LibraryImport(LibName)]
-    internal static partial ulong grafeo_result_labels_removed(nint result);
-
     /// <summary>Get pre-extracted nodes as JSON. Valid until grafeo_free_result.</summary>
     [LibraryImport(LibName)]
     internal static partial nint grafeo_result_nodes_json(nint result);
@@ -204,10 +176,6 @@ internal static partial class NativeMethods
     [LibraryImport(LibName)]
     internal static partial int grafeo_delete_node(nint db, ulong id);
 
-    /// <summary>Delete a node with its edges. Returns 1 if deleted, 0 if not found, -1 on error.</summary>
-    [LibraryImport(LibName)]
-    internal static partial int grafeo_detach_delete_node(nint db, ulong id);
-
     /// <summary>Set a property on a node.</summary>
     [LibraryImport(LibName, StringMarshalling = StringMarshalling.Utf8)]
     internal static partial int grafeo_set_node_property(nint db, ulong id, string key, string valueJson);
@@ -263,12 +231,6 @@ internal static partial class NativeMethods
     /// <summary>Remove a property from an edge. Returns 1 if removed, 0 if not found.</summary>
     [LibraryImport(LibName, StringMarshalling = StringMarshalling.Utf8)]
     internal static partial int grafeo_remove_edge_property(nint db, ulong id, string key);
-
-    /// <summary>A node's edges as two id arrays of outCount ids each (free each with grafeo_free_node_ids).</summary>
-    [LibraryImport(LibName, StringMarshalling = StringMarshalling.Utf8)]
-    internal static partial int grafeo_get_node_edges(
-        nint db, ulong nodeId, int direction, string? edgeTypesJson,
-        out nint outNeighbors, out nint outEdges, out nuint outCount);
 
     /// <summary>Free a GrafeoEdge.</summary>
     [LibraryImport(LibName)]
@@ -368,48 +330,17 @@ internal static partial class NativeMethods
         float* vectors, nuint vectorCount, nuint dimensions,
         out nint outIds, out nuint outCount);
 
-    /// <summary>Batch create nodes from a JSON array of property objects. Free the ids with grafeo_free_node_ids.</summary>
-    [LibraryImport(LibName, StringMarshalling = StringMarshalling.Utf8)]
-    internal static partial int grafeo_batch_create_nodes_with_props(
-        nint db, string labelsJson, string rowsJson, out nint outIds, out nuint outCount);
-
-    /// <summary>Batch create edges from a JSON array of {src, dst, type, properties}. Free the ids with grafeo_free_node_ids.</summary>
-    [LibraryImport(LibName, StringMarshalling = StringMarshalling.Utf8)]
-    internal static partial int grafeo_batch_create_edges(
-        nint db, string edgesJson, out nint outIds, out nuint outCount);
-
-    /// <summary>Search several query vectors at once; results as JSON. Free with grafeo_free_string.</summary>
-    [LibraryImport(LibName, StringMarshalling = StringMarshalling.Utf8)]
-    internal static unsafe partial int grafeo_batch_vector_search(
-        nint db, string label, string property,
-        float* queries, nuint queryCount, nuint dimensions, nuint k, nuint ef,
-        string? filtersJson, out nint outJson);
-
-    // =========================================================================
-    // Upserts
-    // =========================================================================
-
-    /// <summary>Create or update nodes by a key property; summary as JSON. Free with grafeo_free_string.</summary>
-    [LibraryImport(LibName, StringMarshalling = StringMarshalling.Utf8)]
-    internal static partial int grafeo_upsert_nodes(
-        nint db, string labelsJson, string rowsJson, string? optionsJson, out nint outJson);
-
-    /// <summary>Create or update edges by a key property; summary as JSON. Free with grafeo_free_string.</summary>
-    [LibraryImport(LibName, StringMarshalling = StringMarshalling.Utf8)]
-    internal static partial int grafeo_upsert_edges(
-        nint db, string edgeType, string rowsJson, string? optionsJson, out nint outJson);
-
     // =========================================================================
     // Admin
     // =========================================================================
 
-    /// <summary>Get the number of nodes into <paramref name="count"/>; a status.</summary>
+    /// <summary>Get the number of nodes.</summary>
     [LibraryImport(LibName)]
-    internal static partial int grafeo_node_count(nint db, out nuint count);
+    internal static partial nuint grafeo_node_count(nint db);
 
-    /// <summary>Get the number of edges into <paramref name="count"/>; a status.</summary>
+    /// <summary>Get the number of edges.</summary>
     [LibraryImport(LibName)]
-    internal static partial int grafeo_edge_count(nint db, out nuint count);
+    internal static partial nuint grafeo_edge_count(nint db);
 
     /// <summary>Get database info as JSON. Caller must free with grafeo_free_string.</summary>
     [LibraryImport(LibName)]
@@ -422,14 +353,6 @@ internal static partial class NativeMethods
     /// <summary>Checkpoint the WAL.</summary>
     [LibraryImport(LibName)]
     internal static partial int grafeo_wal_checkpoint(nint db);
-
-    /// <summary>Set the automatic checkpoint triggers (0 turns one off).</summary>
-    [LibraryImport(LibName)]
-    internal static partial int grafeo_set_checkpoint_triggers(nint db, ulong intervalMs, ulong walBytes);
-
-    /// <summary>Automatic checkpoint status as JSON. Caller must free with grafeo_free_string.</summary>
-    [LibraryImport(LibName)]
-    internal static partial nint grafeo_checkpoint_status(nint db);
 
     /// <summary>Clear all cached query plans.</summary>
     [LibraryImport(LibName)]
@@ -494,139 +417,6 @@ internal static partial class NativeMethods
     [return: MarshalAs(UnmanagedType.U1)]
     internal static partial bool grafeo_is_cdc_enabled(nint db);
 
-    /// <summary>A node's changes as JSON, or null on error. Free with grafeo_free_string.</summary>
-    [LibraryImport(LibName)]
-    internal static partial nint grafeo_node_history(nint db, ulong id);
-
-    /// <summary>An edge's changes as JSON, or null on error. Free with grafeo_free_string.</summary>
-    [LibraryImport(LibName)]
-    internal static partial nint grafeo_edge_history(nint db, ulong id);
-
-    /// <summary>A node's changes from an epoch on as JSON, or null on error. Free with grafeo_free_string.</summary>
-    [LibraryImport(LibName)]
-    internal static partial nint grafeo_node_history_since(nint db, ulong id, ulong sinceEpoch);
-
-    /// <summary>Every change in an epoch range as JSON, or null on error. Free with grafeo_free_string.</summary>
-    [LibraryImport(LibName)]
-    internal static partial nint grafeo_changes_between(nint db, ulong startEpoch, ulong endEpoch);
-
-    // =========================================================================
-    // Time travel (a point is a kind, GRAFEO_POINT_*, and a value)
-    // =========================================================================
-
-    /// <summary>Open a database with a history retention; a null path opens one in memory. Returns null on error.</summary>
-    [LibraryImport(LibName, StringMarshalling = StringMarshalling.Utf8)]
-    internal static partial nint grafeo_open_with_history(string? path, int historyKind, ulong durationMs);
-
-    [LibraryImport(LibName)]
-    internal static partial ulong grafeo_current_epoch(nint db);
-
-    [LibraryImport(LibName)]
-    internal static partial int grafeo_epoch_as_of(nint db, int pointKind, long pointValue, out ulong epochOut);
-
-    [LibraryImport(LibName, StringMarshalling = StringMarshalling.Utf8)]
-    internal static partial nint grafeo_execute_as_of(nint db, string query, string? paramsJson, int pointKind, long pointValue);
-
-    /// <summary>A read-only view at a point, or null on error. Free with grafeo_free_as_of.</summary>
-    [LibraryImport(LibName)]
-    internal static partial nint grafeo_as_of(nint db, int pointKind, long pointValue);
-
-    [LibraryImport(LibName)]
-    internal static partial ulong grafeo_as_of_epoch(nint view);
-
-    [LibraryImport(LibName, StringMarshalling = StringMarshalling.Utf8)]
-    internal static partial nint grafeo_as_of_execute(nint view, string query, string? paramsJson);
-
-    [LibraryImport(LibName)]
-    internal static partial int grafeo_as_of_get_node(nint view, ulong id, out nint nodeOut);
-
-    [LibraryImport(LibName)]
-    internal static partial int grafeo_as_of_get_edge(nint view, ulong id, out nint edgeOut);
-
-    /// <summary>A property value as JSON into <paramref name="json"/>, zero when there was none; a status. Free with grafeo_free_string.</summary>
-    [LibraryImport(LibName, StringMarshalling = StringMarshalling.Utf8)]
-    internal static partial int grafeo_as_of_get_node_property(nint view, ulong id, string key, out nint json);
-
-    [LibraryImport(LibName)]
-    internal static partial void grafeo_free_as_of(nint view);
-
-    // =========================================================================
-    // Graph handles (the grafeo_graph_* calls work as their database counterparts)
-    // =========================================================================
-
-    /// <summary>A handle on a named graph, or null when it does not exist. Free with grafeo_free_graph.</summary>
-    [LibraryImport(LibName, StringMarshalling = StringMarshalling.Utf8)]
-    internal static partial nint grafeo_graph(nint db, string name);
-
-    /// <summary>Free a graph handle.</summary>
-    [LibraryImport(LibName)]
-    internal static partial void grafeo_free_graph(nint graph);
-
-    [LibraryImport(LibName, StringMarshalling = StringMarshalling.Utf8)]
-    internal static partial nint grafeo_graph_execute(nint graph, string query);
-
-    [LibraryImport(LibName, StringMarshalling = StringMarshalling.Utf8)]
-    internal static partial nint grafeo_graph_execute_with_params(nint graph, string query, string paramsJson);
-
-    [LibraryImport(LibName, StringMarshalling = StringMarshalling.Utf8)]
-    internal static partial nint grafeo_graph_execute_language(nint graph, string language, string query, string? paramsJson);
-
-    [LibraryImport(LibName, StringMarshalling = StringMarshalling.Utf8)]
-    internal static partial ulong grafeo_graph_create_node(nint graph, string labelsJson, string? propertiesJson);
-
-    [LibraryImport(LibName, StringMarshalling = StringMarshalling.Utf8)]
-    internal static partial ulong grafeo_graph_create_edge(nint graph, ulong sourceId, ulong targetId, string edgeType, string? propertiesJson);
-
-    [LibraryImport(LibName)]
-    internal static partial int grafeo_graph_get_node(nint graph, ulong id, out nint nodeOut);
-
-    [LibraryImport(LibName)]
-    internal static partial int grafeo_graph_get_edge(nint graph, ulong id, out nint edgeOut);
-
-    [LibraryImport(LibName, StringMarshalling = StringMarshalling.Utf8)]
-    internal static partial int grafeo_graph_get_node_edges(
-        nint graph, ulong nodeId, int direction, string? edgeTypesJson,
-        out nint outNeighbors, out nint outEdges, out nuint outCount);
-
-    [LibraryImport(LibName, StringMarshalling = StringMarshalling.Utf8)]
-    internal static partial int grafeo_graph_set_node_property(nint graph, ulong id, string key, string valueJson);
-
-    [LibraryImport(LibName, StringMarshalling = StringMarshalling.Utf8)]
-    internal static partial int grafeo_graph_set_edge_property(nint graph, ulong id, string key, string valueJson);
-
-    [LibraryImport(LibName, StringMarshalling = StringMarshalling.Utf8)]
-    internal static partial int grafeo_graph_remove_node_property(nint graph, ulong id, string key);
-
-    [LibraryImport(LibName, StringMarshalling = StringMarshalling.Utf8)]
-    internal static partial int grafeo_graph_remove_edge_property(nint graph, ulong id, string key);
-
-    [LibraryImport(LibName, StringMarshalling = StringMarshalling.Utf8)]
-    internal static partial int grafeo_graph_add_node_label(nint graph, ulong id, string label);
-
-    [LibraryImport(LibName, StringMarshalling = StringMarshalling.Utf8)]
-    internal static partial int grafeo_graph_remove_node_label(nint graph, ulong id, string label);
-
-    [LibraryImport(LibName)]
-    internal static partial int grafeo_graph_delete_node(nint graph, ulong id);
-
-    [LibraryImport(LibName)]
-    internal static partial int grafeo_graph_detach_delete_node(nint graph, ulong id);
-
-    [LibraryImport(LibName)]
-    internal static partial int grafeo_graph_delete_edge(nint graph, ulong id);
-
-    [LibraryImport(LibName, StringMarshalling = StringMarshalling.Utf8)]
-    internal static partial int grafeo_graph_batch_create_nodes_with_props(nint graph, string labelsJson, string rowsJson, out nint outIds, out nuint outCount);
-
-    [LibraryImport(LibName, StringMarshalling = StringMarshalling.Utf8)]
-    internal static partial int grafeo_graph_batch_create_edges(nint graph, string edgesJson, out nint outIds, out nuint outCount);
-
-    [LibraryImport(LibName, StringMarshalling = StringMarshalling.Utf8)]
-    internal static partial int grafeo_graph_upsert_nodes(nint graph, string labelsJson, string rowsJson, string? optionsJson, out nint outJson);
-
-    [LibraryImport(LibName, StringMarshalling = StringMarshalling.Utf8)]
-    internal static partial int grafeo_graph_upsert_edges(nint graph, string edgeType, string rowsJson, string? optionsJson, out nint outJson);
-
     // =========================================================================
     // Transactions
     // =========================================================================
@@ -670,10 +460,6 @@ internal static partial class NativeMethods
     /// <summary>Get the last error message. Valid until next FFI call on this thread. Do NOT free.</summary>
     [LibraryImport(LibName)]
     internal static partial nint grafeo_last_error();
-
-    /// <summary>Get the GQLSTATUS of the last error (five characters such as "22012"), or zero if none. Valid until next FFI call on this thread. Do NOT free.</summary>
-    [LibraryImport(LibName)]
-    internal static partial nint grafeo_last_error_gql_status();
 
     /// <summary>Clear the last error.</summary>
     [LibraryImport(LibName)]

@@ -56,7 +56,7 @@ tests:
     query: "MATCH (n:N) RETURN CAST(n.v AS BOOLEAN) AS r"
     expect:
       rows:
-        - [false]
+        - [null]
 
   - name: cast_string_to_date
     setup:

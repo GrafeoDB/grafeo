@@ -30,13 +30,8 @@ mod tests {
 
     /// Node and edge state as `(labels, n.v, n.w, n.x, r.weight, r.note)`.
     fn state(db: &GrafeoDB) -> Vec<Value> {
-        state_of(&db.session())
-    }
-
-    /// The state as `session` reads it (its open transaction's writes
-    /// included).
-    fn state_of(session: &grafeo_engine::session::Session) -> Vec<Value> {
-        let result = session
+        let result = db
+            .session()
             .execute(
                 "MATCH (n:Person {name: 'Alix'})-[r:KNOWS]->() \
                  RETURN labels(n), n.v, n.w, n.x, r.weight, r.note",
@@ -174,14 +169,9 @@ mod tests {
             session.begin_transaction().unwrap();
             change_everything(&session);
             assert_ne!(
-                state_of(&session),
-                before,
-                "{name}: changes are applied in the transaction"
-            );
-            assert_eq!(
                 state(&db),
                 before,
-                "{name}: no other session sees them before the commit"
+                "{name}: changes are applied in the transaction"
             );
             session.rollback().unwrap();
 

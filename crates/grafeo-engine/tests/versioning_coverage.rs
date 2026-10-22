@@ -4,7 +4,7 @@
 //! These tests exercise edge cases and interleaved operations that the existing
 //! test files do not cover, focusing on real-world transaction bugs.
 
-use grafeo_common::types::{Decimal, Value};
+use grafeo_common::types::Value;
 use grafeo_engine::GrafeoDB;
 
 // ============================================================================
@@ -1065,7 +1065,7 @@ fn rollback_preserves_boolean_and_float_property_types() {
     );
     assert_eq!(
         result.rows()[0][1],
-        Value::Decimal(Decimal::parse("21.5").unwrap()),
+        Value::Float64(21.5),
         "reading should revert to 21.5"
     );
 }

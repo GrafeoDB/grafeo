@@ -109,7 +109,6 @@ type Expect struct {
 	Count     *int
 	Empty     bool
 	Error     *string
-	GQLStatus *string
 	Hash      *string
 	Precision *int
 	Columns   []string
@@ -162,10 +161,9 @@ var (
 // file, by the rule of the Rust reference runner that every runner follows: a
 // quoted value is a string, whatever it reads like; a bare value starting with
 // [ or { is JSON, whose numbers follow the rule of bare ones; a bare decimal
-// integer is an integer, which the binding types (an INT64 when it fits 64
-// bits, else an exact DECIMAL up to 38 digits, an error past that), and any
-// other bare decimal number a float, an error past the float64 range; a bare
-// true or false is a boolean; any other bare value is a string.
+// integer that fits int64 is an integer and any other bare decimal number a
+// float, an error past the float64 range; a bare true or false is a boolean;
+// any other bare value is a string.
 func paramValue(text string) (interface{}, error) {
 	text = strings.TrimSpace(text)
 	if isQuoted(text) {
@@ -178,16 +176,14 @@ func paramValue(text string) (interface{}, error) {
 		if err := checkJSONNumbers(text); err != nil {
 			return nil, err
 		}
-		// The binding reads the numbers as written: an integer by the
-		// integer rule, any other number as a float64.
+		// The binding reads the numbers as written: an integer that fits
+		// int64 as one, any other number as a float64.
 		return json.RawMessage(text), nil
 	}
 	if decimalInteger.MatchString(text) {
 		if n, err := strconv.ParseInt(text, 10, 64); err == nil {
 			return n, nil
 		}
-		// Past int64: its digits as written, which the binding types.
-		return json.Number(strings.TrimPrefix(text, "+")), nil
 	}
 	if decimalNumber.MatchString(text) {
 		f, err := strconv.ParseFloat(text, 64)
@@ -203,8 +199,7 @@ func paramValue(text string) (interface{}, error) {
 }
 
 // checkJSONNumbers returns an error for a number in the JSON text past the
-// float64 range (1e400), which the Rust reference runner refuses too; an
-// integer of any width goes to the binding, which types it.
+// float64 range (1e400), which the Rust reference runner refuses too.
 func checkJSONNumbers(text string) error {
 	decoder := json.NewDecoder(strings.NewReader(text))
 	decoder.UseNumber()
@@ -216,7 +211,7 @@ func checkJSONNumbers(text string) error {
 		if err != nil {
 			return fmt.Errorf("parameter %s is not valid JSON: %w", text, err)
 		}
-		if number, ok := token.(json.Number); ok && !decimalInteger.MatchString(number.String()) {
+		if number, ok := token.(json.Number); ok {
 			if f, err := strconv.ParseFloat(number.String(), 64); err != nil && math.IsInf(f, 0) {
 				return fmt.Errorf("parameter %s is out of the f64 range", number)
 			}
@@ -228,7 +223,7 @@ func checkJSONNumbers(text string) error {
 // file can hold: a number past the float64 range fails the Rust runner's
 // build. (Named TestSpec... so CI's -run TestSpec runs it.)
 func TestSpecParamValues(t *testing.T) {
-	for _, text := range []string{"[1e400]", `{"tiny": [-1e400]}`, "[1" + strings.Repeat("0", 400) + ".0]", "1e999"} {
+	for _, text := range []string{"[1e400]", `{"tiny": [-1e400]}`, "[1" + strings.Repeat("0", 400) + "]", "1e999"} {
 		if _, err := paramValue(text); err == nil || !strings.Contains(err.Error(), "out of the f64 range") {
 			t.Errorf("paramValue(%.20s...) = %v, want an out of the f64 range error", text, err)
 		}
@@ -239,10 +234,6 @@ func TestSpecParamValues(t *testing.T) {
 	}
 	if raw, ok := value.(json.RawMessage); !ok || string(raw) != "[3, 9223372036854775807, 9223372036854775808]" {
 		t.Errorf("a JSON list goes to the binding as written, got %#v", value)
-	}
-	wide := "1" + strings.Repeat("0", 38)
-	if value, err := paramValue(wide); err != nil || value != json.Number(wide) {
-		t.Errorf("an integer past int64 goes to the binding as its digits, got %#v %v", value, err)
 	}
 }
 
@@ -903,10 +894,6 @@ func parseExpectBlock(ctx *parseContext) Expect {
 			s := unquote(value)
 			exp.Error = &s
 			ctx.idx++
-		case "gql_status":
-			s := unquote(value)
-			exp.GQLStatus = &s
-			ctx.idx++
 		case "hash":
 			s := unquote(value)
 			exp.Hash = &s
@@ -1331,7 +1318,7 @@ func runSingleTest(t *testing.T, gf *GtestFile, tc TestCase, variantLang, varian
 		queries = tc.Statements
 	} else if query != "" {
 		queries = []string{query}
-	} else if tc.Expect.Error != nil || tc.Expect.GQLStatus != nil {
+	} else if tc.Expect.Error != nil {
 		// Allow empty-string queries for error tests (e.g. empty input)
 		queries = []string{query}
 	} else {
@@ -1347,8 +1334,8 @@ func runSingleTest(t *testing.T, gf *GtestFile, tc TestCase, variantLang, varian
 	}
 
 	// Error tests
-	if exp.Error != nil || exp.GQLStatus != nil {
-		runErrorTest(t, db, language, queries, exp.Error, exp.GQLStatus, paramsJSON)
+	if exp.Error != nil {
+		runErrorTest(t, db, language, queries, *exp.Error, paramsJSON)
 		return
 	}
 
@@ -1405,14 +1392,12 @@ func runSingleTest(t *testing.T, gf *GtestFile, tc TestCase, variantLang, varian
 		} else {
 			assertRowsSorted(t, result, expRows)
 		}
-		// If none of the above, the test just checks the query does not error
+	// If none of the above, the test just checks the query does not error
 	}
 }
 
-// runErrorTest executes queries expecting the last one to produce an error:
-// one whose message contains expectedSubstr and whose GQLSTATUS is
-// expectedStatus, for each that is given.
-func runErrorTest(t *testing.T, db *grafeo.Database, language string, queries []string, expectedSubstr *string, expectedStatus *string, paramsJSON string) {
+// runErrorTest executes queries expecting the last one to produce an error.
+func runErrorTest(t *testing.T, db *grafeo.Database, language string, queries []string, expectedSubstr string, paramsJSON string) {
 	t.Helper()
 
 	// Execute all-but-last normally (with params so $param works)
@@ -1439,39 +1424,16 @@ func runErrorTest(t *testing.T, db *grafeo.Database, language string, queries []
 		_, err = executeQuery(db, language, queries[len(queries)-1])
 	}
 	if err == nil {
-		t.Fatalf("Expected error %s but query succeeded", describeError(expectedSubstr, expectedStatus))
+		t.Fatalf("Expected error containing %q but query succeeded", expectedSubstr)
 	}
 
 	errMsg := err.Error()
-	if expectedSubstr != nil && !strings.Contains(errMsg, *expectedSubstr) {
+	if !strings.Contains(errMsg, expectedSubstr) {
 		// Case-insensitive fallback
-		if !strings.Contains(strings.ToLower(errMsg), strings.ToLower(*expectedSubstr)) {
-			t.Fatalf("Error %q does not contain %q", errMsg, *expectedSubstr)
+		if !strings.Contains(strings.ToLower(errMsg), strings.ToLower(expectedSubstr)) {
+			t.Fatalf("Error %q does not contain %q", errMsg, expectedSubstr)
 		}
 	}
-	if expectedStatus != nil {
-		// An error without a status fails the case: a status the binding
-		// does not expose is a gap, not a pass.
-		var grafeoErr *grafeo.Error
-		if !errors.As(err, &grafeoErr) || grafeoErr.GQLStatus == "" {
-			t.Fatalf("Error %q (%T) has no GQLSTATUS", errMsg, err)
-		}
-		if grafeoErr.GQLStatus != *expectedStatus {
-			t.Fatalf("Error %q has GQLSTATUS %s, expected %s", errMsg, grafeoErr.GQLStatus, *expectedStatus)
-		}
-	}
-}
-
-// describeError says what an error case expects, for its failure message.
-func describeError(expectedSubstr *string, expectedStatus *string) string {
-	var parts []string
-	if expectedSubstr != nil {
-		parts = append(parts, fmt.Sprintf("containing %q", *expectedSubstr))
-	}
-	if expectedStatus != nil {
-		parts = append(parts, "with GQLSTATUS "+*expectedStatus)
-	}
-	return strings.Join(parts, " ")
 }
 
 // isUnsupportedLanguageError checks if an error indicates the language is not

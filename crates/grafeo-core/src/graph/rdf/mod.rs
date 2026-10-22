@@ -38,18 +38,10 @@ mod chunked;
 mod dictionary;
 mod graph_store_adapter;
 pub mod nquads;
-pub(crate) mod path_budget;
 pub mod section;
 pub mod sink;
 mod store;
-/// The RDF term types live in grafeo-common, so `Value` can hold them; this
-/// module keeps the `term` paths the rest of the RDF model uses.
-mod term {
-    pub use grafeo_common::types::rdf::{BlankNode, Iri, Literal, Term, TermParseError};
-
-    #[cfg(test)]
-    pub(crate) use grafeo_common::types::rdf::testing::unusual_terms;
-}
+mod term;
 mod triple;
 pub mod turtle;
 

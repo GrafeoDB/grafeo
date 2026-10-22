@@ -24,16 +24,13 @@ const db = GrafeoDB.open('./my_graph.db');
 
 // For tests: rows of queries without ORDER BY in random order
 const db = GrafeoDB.create(undefined, { shuffleUnordered: true });
-
-// Keep a week of history for time-travel reads
-const db = GrafeoDB.create('./my_graph.db', { historyRetention: 7 * 24 * 3600 * 1000 });
 ```
 
 ### Parameters
 
 | Method | Parameters | Description |
 |--------|-----------|-------------|
-| `create(path?, options?)` | `path: string \| undefined`, `options: { shuffleUnordered?: boolean, historyRetention?: 'off' \| 'forever' \| number }` | Create a database (in-memory if no path). `shuffleUnordered` returns the rows of every query without `ORDER BY` in random order, to find code that relies on an order that is unspecified. `historyRetention` sets how much history the database keeps for [time-travel reads](#time-travel): `'off'` (the default), `'forever'` or a number of milliseconds; a database file stores it |
+| `create(path?, options?)` | `path: string \| undefined`, `options: { shuffleUnordered?: boolean }` | Create a database (in-memory if no path). `shuffleUnordered` returns the rows of every query without `ORDER BY` in random order, to find code that relies on an order that is unspecified |
 | `open(path)` | `path: string` | Open an existing database |
 
 ## Query Methods
@@ -125,32 +122,12 @@ Get a node by ID. Returns `null` if not found.
 getNode(id: number): JsNode | null
 ```
 
-### getNodeEdges()
-
-The edges of a node as `[neighborId, edgeId]` pairs, without a query. `direction` is `'out'` (the
-default), `'in'` or `'both'`, which lists a self-loop once; `edgeTypes` keeps only edges of those
-types. A node that does not exist has none. A `GraphHandle` has the same method for its graph.
-
-```typescript
-getNodeEdges(id: number, options?: { direction?: 'out' | 'in' | 'both'; edgeTypes?: string[] }): number[][]
-```
-
 ### deleteNode()
 
 Delete a node by ID. Returns `true` if the node existed.
 
 ```typescript
 deleteNode(id: number): boolean
-```
-
-A node that still has edges throws: delete them first, or use `detachDeleteNode()`.
-
-### detachDeleteNode()
-
-Delete a node with all its edges, as `DETACH DELETE` does. Returns `true` if the node existed; the node and its edges are one change.
-
-```typescript
-detachDeleteNode(id: number): boolean
 ```
 
 ### setNodeProperty()
@@ -265,65 +242,6 @@ Isolation levels: `"read_committed"`, `"snapshot"` (default), `"serializable"`.
 const tx = db.beginTransaction();
 const tx = db.beginTransaction('serializable');
 ```
-
-## Named Graphs
-
-### graph()
-
-A handle on a named graph of the current schema, to work in it without switching the current
-graph. Throws when the graph does not exist; once it is dropped, every call through the handle
-throws.
-
-```typescript
-graph(name: string): GraphHandle
-```
-
-A `GraphHandle` has the query and direct API of `GrafeoDB`, working in its graph: `execute()`,
-`executeLanguage()`, `beginTransaction()`, the node and edge operations above,
-`batchCreateNodesWithProps()`, `batchCreateEdges()`, `upsertNodes()` and `upsertEdges()`, and its
-`name`. Each call is its own transaction; `beginTransaction()` groups several.
-
-```typescript
-await db.execute('CREATE GRAPH trips');
-const trips = db.graph('trips');
-const prague = trips.createNode(['City'], { name: 'Prague' });
-const result = await trips.execute('MATCH (c:City) RETURN c.name');
-```
-
-## Time Travel
-
-A point in time is a `bigint` (an epoch), a `Date` (the last commit at or before it) or `{ ago: milliseconds }`. A
-plain `number` throws a `TypeError`: it could be either an epoch or a time. A point before the history the database
-keeps throws ("not retained").
-
-### asOf()
-
-A read-only view of the database at a point in time. It keeps the history of its epoch until `close()`.
-
-```typescript
-asOf(point: bigint | Date | { ago: number }): AsOfView
-```
-
-An `AsOfView` has `epoch` (a `bigint`), `execute(query, params?)` (a `Promise<QueryResult>`), `getNode(id)`,
-`getEdge(id)`, `getNodeProperty(id, key)` and `close()`. A query that writes through it is rejected.
-
-```typescript
-const view = db.asOf({ ago: 5 * 60 * 1000 });
-const result = await view.execute('MATCH (p:Person) RETURN count(p) AS n');
-view.close();
-```
-
-### executeAsOf()
-
-Run one GQL query at a point in time, without keeping a view.
-
-```typescript
-executeAsOf(query: string, point: bigint | Date | { ago: number }, params?: object): Promise<QueryResult>
-```
-
-### epochAsOf() / currentEpoch()
-
-`epochAsOf(point)` is the epoch a point reads at, `currentEpoch()` the epoch of the last commit, both as a `bigint`.
 
 ## Vector Search
 
@@ -676,10 +594,10 @@ version(): string
 
 ### compact()
 
-Compacts the database: writes a checkpoint of a persistent database (an in-memory or read-only one writes none), drops the old versions no open transaction can see any more, compresses the property values held decoded in memory, and returns what it did: `{ checkpointed, versions_collected, rows_compressed, duration_ms }`. Since 0.6.0 the database keeps one store: `compact()` no longer builds a separate columnar one (see [Compact Store](../../user-guide/compact-store.md)). Throws if the checkpoint fails, or after `close()`.
+Compacts the database: writes a checkpoint of a persistent database (an in-memory or read-only one writes none), drops the old versions no open transaction can see any more, and returns what it did: `{ checkpointed, versions_collected, duration_ms }`. Since 0.6.0 the database keeps one store: `compact()` no longer builds a separate columnar one (see [Compact Store](../../user-guide/compact-store.md)). Throws if the checkpoint fails, or after `close()`.
 
 ```typescript
-compact(): { checkpointed: boolean, versions_collected: number, rows_compressed: number, duration_ms: number }
+compact(): { checkpointed: boolean, versions_collected: number, duration_ms: number }
 ```
 
 ```typescript

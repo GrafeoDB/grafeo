@@ -117,8 +117,6 @@ struct Expect {
     count: Option<usize>,
     empty: bool,
     error: Option<String>,
-    /// The GQLSTATUS the error must have (`22012`), alone or next to `error`.
-    gql_status: Option<String>,
     hash: Option<String>,
     precision: Option<u32>,
     columns: Vec<String>,
@@ -389,10 +387,6 @@ fn parse_expect(lines: &[&str], idx: &mut usize) -> Result<Expect, String> {
                 }
                 "error" => {
                     expect.error = Some(unquote(value));
-                    *idx += 1;
-                }
-                "gql_status" => {
-                    expect.gql_status = Some(unquote(value));
                     *idx += 1;
                 }
                 "hash" => {
@@ -795,9 +789,18 @@ fn generate_tests(
         .any(|r| r == "text-index" || r == "vector-index");
 
     for tc in &file.tests {
-        // A case with `skip:` is generated in full and ignored with its
-        // reason (see `generate_single_test`): `--include-ignored` runs it,
-        // so it shows whether the reason still holds.
+        // Skip tests with skip field
+        if tc.skip.is_some() {
+            writeln!(
+                output,
+                "    #[test]\n    #[ignore = \"skipped in .gtest\"]\n    fn {}() {{}}\n",
+                sanitize_test_name(&tc.name)
+            )
+            .unwrap();
+            count += 1;
+            continue;
+        }
+
         let case_needs_persistent = file_needs_persistent
             || tc
                 .requires
@@ -978,9 +981,6 @@ fn generate_single_test(output: &mut String, spec: &TestSpec<'_>) {
     }
 
     writeln!(output, "    #[test]").unwrap();
-    if let Some(reason) = &tc.skip {
-        writeln!(output, "    #[ignore = {reason:?}]").unwrap();
-    }
     writeln!(output, "    fn {fn_name}() {{").unwrap();
 
     // Create DB and load dataset. The persistent variant exercises the
@@ -1068,7 +1068,7 @@ fn generate_single_test(output: &mut String, spec: &TestSpec<'_>) {
             if has_params {
                 writeln!(
                     output,
-                    "        execute_query_result_with_params(&db, \"{}\", \"{}\", \"{}\", params.as_ref().expect(\"params\").clone()).expect(\"setup statement failed\");",
+                    "        execute_query_result_with_params(&db, \"{}\", \"{}\", \"{}\", params.clone()).expect(\"setup statement failed\");",
                     escape_rust_string(language),
                     escape_rust_string(model),
                     escape_rust_string(q),
@@ -1094,14 +1094,8 @@ fn generate_single_test(output: &mut String, spec: &TestSpec<'_>) {
     writeln!(output).unwrap();
 }
 
-/// Emits `params`: the test's parameters, or the error a binding gives for
-/// one it cannot type (an integer past 38 digits, see [`param_value_code`]).
 fn generate_params_hashmap(output: &mut String, tc: &TestCase) {
-    writeln!(
-        output,
-        "        fn params() -> grafeo_common::utils::error::Result<std::collections::HashMap<String, grafeo_common::types::Value>> {{"
-    )
-    .unwrap();
+    writeln!(output, "        let params = {{").unwrap();
     writeln!(
         output,
         "            let mut m = std::collections::HashMap::new();"
@@ -1112,24 +1106,22 @@ fn generate_params_hashmap(output: &mut String, tc: &TestCase) {
             .unwrap_or_else(|e| panic!("test '{}', param '{key}': {e}", tc.name));
         writeln!(
             output,
-            "            {{ let param = \"{0}\"; m.insert(param.to_string(), {code}); }}",
+            "            m.insert(\"{}\".to_string(), {code});",
             escape_rust_string(key)
         )
         .unwrap();
     }
-    writeln!(output, "            Ok(m)").unwrap();
-    writeln!(output, "        }}").unwrap();
-    writeln!(output, "        let params = params();").unwrap();
+    writeln!(output, "            m").unwrap();
+    writeln!(output, "        }};").unwrap();
 }
 
 /// Rust code that builds the `Value` for a parameter, by the rule every runner
 /// follows (this runner is the reference): a quoted value is a string, whatever
 /// it reads like; a bare value starting with `[` or `{` is JSON; a bare decimal
-/// integer is an `Int64` when it fits `i64`, else an exact decimal up to 38
-/// digits and an error past that (see [`integer_code`]), and any other bare
-/// decimal number a `Float64`; a bare `true` or `false` is a `Bool`; any other
-/// bare value is a string. `inf`, `NaN`, `0x1F` and `1_000` are strings: none
-/// of them is a decimal number.
+/// integer that fits `i64` is an `Int64` and any other bare decimal number a
+/// `Float64`; a bare `true` or `false` is a `Bool`; any other bare value is a
+/// string. `inf`, `NaN`, `0x1F` and `1_000` are strings: none of them is a
+/// decimal number.
 fn param_value_code(param: &ParamText) -> Result<String, String> {
     const VALUE: &str = "grafeo_common::types::Value";
     let text = match param {
@@ -1144,8 +1136,10 @@ fn param_value_code(param: &ParamText) -> Result<String, String> {
     if text.starts_with('[') || text.starts_with('{') {
         return json_param_to_value_code(text);
     }
-    if is_decimal_integer(text) {
-        return Ok(integer_code(text));
+    if is_decimal_integer(text)
+        && let Ok(n) = text.parse::<i64>()
+    {
+        return Ok(format!("{VALUE}::Int64({n})"));
     }
     if is_decimal_number(text) {
         let f: f64 = text
@@ -1163,17 +1157,6 @@ fn param_value_code(param: &ParamText) -> Result<String, String> {
         "{VALUE}::String(\"{}\".into())",
         escape_rust_string(text)
     ))
-}
-
-/// Rust code for the `Value` of a decimal integer, by the rule every binding
-/// types one: an `Int64` when it fits `i64`, else `wide_integer_param`, an
-/// exact decimal up to 38 digits and the error a binding gives past that
-/// (`?` in the generated `params()`, whose `param` names the parameter).
-fn integer_code(text: &str) -> String {
-    match text.parse::<i64>() {
-        Ok(n) => format!("grafeo_common::types::Value::Int64({n})"),
-        Err(_) => format!("wide_integer_param(param, \"{text}\")?"),
-    }
 }
 
 /// `[+-]?[0-9]+`: an integer as every runner reads it (no `_`, no hex prefix).
@@ -1309,8 +1292,8 @@ fn json_value_code(chars: &[char], pos: &mut usize) -> Result<String, String> {
                 "true" | "false" => Ok(format!("{VALUE}::Bool({word})")),
                 "null" => Ok(format!("{VALUE}::Null")),
                 _ if is_json_number(&word) => {
-                    if is_decimal_integer(&word) {
-                        Ok(integer_code(&word))
+                    if let Ok(n) = word.parse::<i64>() {
+                        Ok(format!("{VALUE}::Int64({n})"))
                     } else {
                         match word.parse::<f64>() {
                             Ok(f) if f.is_finite() => Ok(format!("{VALUE}::Float64({f:?}_f64)")),
@@ -1442,12 +1425,12 @@ fn generate_execute_and_assert(
         generate_params_hashmap(output, tc);
     }
 
-    // Error case: a message to contain, a GQLSTATUS to have, or both
-    if expect.error.is_some() || expect.gql_status.is_some() {
+    // Error case
+    if let Some(err_substr) = &expect.error {
         if has_params {
             writeln!(
                 output,
-                "        let result = params.and_then(|params| execute_query_result_with_params(&db, \"{}\", \"{}\", \"{}\", params));",
+                "        let result = execute_query_result_with_params(&db, \"{}\", \"{}\", \"{}\", params);",
                 escape_rust_string(language),
                 escape_rust_string(model),
                 escape_rust_string(query)
@@ -1463,15 +1446,22 @@ fn generate_execute_and_assert(
             )
             .unwrap();
         }
-        let option = |value: &Option<String>| match value {
-            Some(text) => format!("Some(\"{}\")", escape_rust_string(text)),
-            None => "None".to_string(),
-        };
         writeln!(
             output,
-            "        assert_error(result, {}, {});",
-            option(&expect.error),
-            option(&expect.gql_status)
+            "        assert!(result.is_err(), \"Expected error containing '{}' but query succeeded\");",
+            escape_rust_string(err_substr)
+        )
+        .unwrap();
+        writeln!(
+            output,
+            "        let err_msg = format!(\"{{}}\", result.unwrap_err());",
+        )
+        .unwrap();
+        writeln!(
+            output,
+            "        assert!(err_msg.contains(\"{}\"), \"Error '{{}}' does not contain '{}'\", err_msg);",
+            escape_rust_string(err_substr),
+            escape_rust_string(err_substr)
         )
         .unwrap();
         return;
@@ -1481,7 +1471,7 @@ fn generate_execute_and_assert(
     if has_params {
         writeln!(
             output,
-            "        let result = execute_query_result_with_params(&db, \"{}\", \"{}\", \"{}\", params.expect(\"params\")).expect(\"query failed\");",
+            "        let result = execute_query_result_with_params(&db, \"{}\", \"{}\", \"{}\", params).expect(\"query failed\");",
             escape_rust_string(language),
             escape_rust_string(model),
             escape_rust_string(query)

@@ -104,7 +104,7 @@ tests:
     query: "RETURN toString(date('2024-01-15')) AS d, toString(datetime('2024-01-15T14:30:00')) AS dt, toString(duration('P1DT2H')) AS du"
     expect:
       rows:
-        - ["2024-01-15", "2024-01-15T14:30:00", "P1DT2H"]
+        - ["2024-01-15", "2024-01-15T14:30:00.000000Z", "P1DT2H"]
 
   - name: to_string_from_time
     query: "RETURN toString(time('14:30:00')) AS t"

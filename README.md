@@ -450,7 +450,7 @@ grafeo info ./mydb --format table # Human-readable table (default)
 
 ## Documentation
 
-Full documentation is available at [grafeo.dev](https://grafeo.dev). [API Stability](https://grafeo.dev/stability/) says which APIs are stable and which are experimental, and the [upgrade guides](https://grafeo.dev/upgrading/) list what to change between versions.
+Full documentation is available at [grafeo.dev](https://grafeo.dev).
 
 ## Contributing
 

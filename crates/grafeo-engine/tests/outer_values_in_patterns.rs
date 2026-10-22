@@ -10,7 +10,7 @@
 //! cargo test -p grafeo-engine --all-features --test outer_values_in_patterns
 //! ```
 
-#![cfg(all(feature = "gql", feature = "cypher"))]
+#![cfg(all(feature = "lpg", feature = "gql", feature = "cypher"))]
 
 use grafeo_common::types::Value;
 use grafeo_engine::GrafeoDB;

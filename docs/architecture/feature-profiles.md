@@ -32,16 +32,16 @@ Examples:
 
 ```toml
 # AI memory developer
-grafeo = { version = "0.6", default-features = false, features = ["lpg", "ai"] }
+grafeo = { version = "0.5", default-features = false, features = ["lpg", "ai"] }
 
 # Semantic data scientist
-grafeo = { version = "0.6", default-features = false, features = ["rdf", "analytics"] }
+grafeo = { version = "0.5", default-features = false, features = ["rdf", "analytics"] }
 
 # Browser app
-grafeo = { version = "0.6", default-features = false, features = ["edge"] }
+grafeo = { version = "0.5", default-features = false, features = ["edge"] }
 
 # Power user: just Cypher and vector search with persistence
-grafeo = { version = "0.6", default-features = false, features = ["cypher", "vector-index", "wal"] }
+grafeo = { version = "0.5", default-features = false, features = ["cypher", "vector-index", "wal"] }
 
 # Full production stack (grafeo-server)
 # grafeo-server = { features = ["lpg", "rdf", "ai", "enterprise"] }
@@ -54,7 +54,7 @@ As defined in the `grafeo` facade crate:
 ### LPG
 
 ```toml
-lpg = ["gql", "cypher", "gremlin", "sql-pgq", "storage", "regex"]
+lpg = ["grafeo-engine/lpg", "gql", "cypher", "gremlin", "sql-pgq", "storage", "regex"]
 ```
 
 All labeled property graph query languages plus persistence. The default choice for application developers working with nodes, edges, labels and properties.
@@ -62,10 +62,10 @@ All labeled property graph query languages plus persistence. The default choice 
 ### RDF
 
 ```toml
-rdf = ["triple-store", "gql", "sparql", "graphql", "storage", "regex", "shacl"]
+rdf = ["triple-store", "grafeo-engine/lpg", "gql", "sparql", "graphql", "storage", "regex", "shacl"]
 ```
 
-RDF triple store with SPARQL, GraphQL, SHACL validation and persistence, for knowledge engineers working with ontologies and linked data. Every build has the LPG store, which sessions, persistence and recovery need ([#544](https://github.com/GrafeoDB/grafeo/issues/544): a build with the triple store but without it lost its triples on reopen). Add the `ring-index` atom for compact RDF indexing (it pulls in `succinct-indexes`).
+RDF triple store with SPARQL, GraphQL, SHACL validation and persistence, for knowledge engineers working with ontologies and linked data. The triple store comes with the LPG store, which sessions, persistence and recovery need: the engine's `triple-store` feature enables `lpg`, so every database build with the triple store has it ([#544](https://github.com/GrafeoDB/grafeo/issues/544); such a build lost its triples on reopen). Add the `ring-index` atom for compact RDF indexing (it pulls in `succinct-indexes`).
 
 > **Note:** in the lower-level crates (`grafeo-core`, `grafeo-adapters`, `grafeo-engine`), `rdf` is a deprecated alias for the `triple-store` atom only. The profile above applies to the facade and binding crates.
 
@@ -83,14 +83,14 @@ analytics = ["algos", "vector-index", "text-index", "hybrid-search", "jsonl-impo
 ai = ["vector-index", "text-index", "hybrid-search", "cdc"]
 ```
 
-Structured memory for LLMs, agents and RAG pipelines: vector and text retrieval plus change feeds. Point-in-time queries need no feature: a database keeps its history for the retention window it is configured with (`Config::with_history_retention`).
+Structured memory for LLMs, agents and RAG pipelines: vector and text retrieval plus change feeds. Point-in-time queries (`temporal`) are an opt-in atom today.
 
 > **Note:** `embed` (in-process ONNX embedding generation, about 17 MB) is deliberately not part of this profile. Most AI memory use cases bring embeddings through an API. Opt in explicitly with `features = ["ai", "embed"]`.
 
 ### Edge
 
 ```toml
-edge = ["gql", "regex-lite"]
+edge = ["grafeo-engine/lpg", "gql", "regex-lite"]
 ```
 
 Minimal profile for browsers, mobile and other constrained environments, with the smallest possible binary.
@@ -217,7 +217,7 @@ The individual feature flags (Layer 2) that profiles are composed from. "(standa
 
 | Atom | Profile | Description | Status |
 | --- | --- | --- | --- |
-| `triple-store` | RDF | RDF triple store with 6-way indexing | Implemented |
+| `triple-store` | RDF | RDF triple store with 6-way indexing; enables `lpg` | Implemented |
 | `shacl` | RDF | SHACL validation (core and SPARQL-based constraints) | Implemented |
 | `ring-index` | (standalone) | Space-efficient RDF index (pulls in succinct-indexes) | Implemented |
 | `succinct-indexes` | (pulled in by ring-index) | Rank/select bitvectors, Elias-Fano, wavelet trees | Implemented |
@@ -238,7 +238,7 @@ The individual feature flags (Layer 2) that profiles are composed from. "(standa
 
 | Atom | Profile | Description | Status |
 | --- | --- | --- | --- |
-| `temporal` | (standalone) | Deprecated since 0.6.0, enables nothing: history is a per-database setting (`Config::with_history_retention`); removed in 0.7.0 | Deprecated |
+| `temporal` | (standalone) | Append-only versioned properties, point-in-time queries | Implemented |
 | `cdc` | AI | Change data capture with history API | Implemented |
 
 ### Import and Export
@@ -254,7 +254,7 @@ The individual feature flags (Layer 2) that profiles are composed from. "(standa
 | Atom | Profile | Description | Status |
 | --- | --- | --- | --- |
 | `parallel` | (standalone); in `embedded` | Multi-core batch vector search and graph algorithms (rayon); a query runs on one thread | Implemented |
-| `tiered-storage` | (standalone) | Deprecated since 0.6.0, enables nothing (the store it shaped is gone); removed in 0.7.0 | Deprecated |
+| `tiered-storage` | (standalone) | Hot/cold version storage with epochs | Implemented |
 
 ### Operations
 

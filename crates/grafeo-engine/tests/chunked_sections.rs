@@ -13,9 +13,13 @@
 //! cargo test -p grafeo-engine --all-features --test chunked_sections
 //! ```
 
-#![cfg(all(feature = "gql", feature = "grafeo-file", feature = "wal"))]
+#![cfg(all(
+    feature = "lpg",
+    feature = "gql",
+    feature = "grafeo-file",
+    feature = "wal"
+))]
 
-use grafeo_common::types::ReadView;
 use std::collections::{BTreeMap, HashMap};
 use std::fmt::Write as _;
 use std::sync::Arc;
@@ -26,8 +30,7 @@ use grafeo_common::testing::chunk_caps::with_chunk_caps;
 use grafeo_common::types::{
     Date, Duration, EdgeId, NodeId, PropertyKey, Time, Timestamp, Value, ZonedDatetime,
 };
-use grafeo_core::graph::GraphStore as _;
-use grafeo_core::graph::rowgroup::RowGroupStore;
+use grafeo_core::graph::lpg::LpgStore;
 use grafeo_engine::{Config, GrafeoDB};
 use grafeo_storage::file::v3::directory::ENTRIES_PER_BLOCK;
 use proptest::prelude::*;
@@ -56,7 +59,7 @@ const CITIES: [&str; 4] = ["Amsterdam", "Berlin", "Paris", "Prague"];
 /// lists after a 0.5.x load).
 fn dump(db: &GrafeoDB) -> Vec<String> {
     let mut lines = Vec::new();
-    let store = db.store().unwrap();
+    let store = db.store();
     dump_graph(&mut lines, "default graph", &store);
     let mut names = db.list_graphs();
     names.sort();
@@ -71,10 +74,10 @@ fn dump(db: &GrafeoDB) -> Vec<String> {
     lines
 }
 
-fn dump_graph(lines: &mut Vec<String>, title: &str, store: &RowGroupStore) {
+fn dump_graph(lines: &mut Vec<String>, title: &str, store: &LpgStore) {
     lines.push(title.to_string());
-    for id in store.node_ids(ReadView::latest()).unwrap() {
-        let Some(node) = store.node(id, ReadView::latest()).unwrap() else {
+    for id in store.all_node_ids() {
+        let Some(node) = store.get_node(id) else {
             continue;
         };
         let mut labels: Vec<&str> = node.labels.iter().map(|label| label.as_str()).collect();
@@ -83,7 +86,7 @@ fn dump_graph(lines: &mut Vec<String>, title: &str, store: &RowGroupStore) {
         push_properties(lines, node.properties.iter());
     }
     for raw in 0..store.next_edge_id() {
-        let Some(edge) = store.edge(EdgeId::new(raw), ReadView::latest()).unwrap() else {
+        let Some(edge) = store.get_edge(EdgeId::new(raw)) else {
             continue;
         };
         lines.push(format!(
@@ -373,7 +376,7 @@ fn repeated_checkpoints_of_a_multi_chunk_image_reuse_space() {
         db.close().unwrap();
     });
     let db = GrafeoDB::open_read_only(&path).unwrap();
-    assert_eq!(db.node_count().unwrap(), 600);
+    assert_eq!(db.node_count(), 600);
 }
 
 /// An empty database and one whose only content is an empty named graph are
@@ -395,7 +398,7 @@ fn an_empty_database_and_an_empty_named_graph_survive_a_reopen() {
     });
 
     let db = GrafeoDB::open(&empty).unwrap();
-    assert_eq!((db.node_count().unwrap(), db.edge_count().unwrap()), (0, 0));
+    assert_eq!((db.node_count(), db.edge_count()), (0, 0));
     assert_eq!(db.list_graphs(), Vec::<String>::new());
     db.close().unwrap();
 
@@ -467,7 +470,7 @@ fn sub_millisecond_timestamps_and_counters_survive_a_reopen() {
     };
 
     let db = GrafeoDB::open(&path).unwrap();
-    let node = db.get_node(alix).unwrap().expect("Alix is back");
+    let node = db.get_node(alix).expect("Alix is back");
     for (key, value) in &values {
         let back = node.properties.get(&PropertyKey::new(*key));
         assert_eq!(
@@ -526,18 +529,13 @@ fn ids_of_deleted_nodes_and_edges_are_not_reused_after_a_reopen() {
     );
 }
 
-/// A database that keeps history reads each epoch's value after a reopen
-/// (the file stores the retention, and its history chunks the versions).
+#[cfg(feature = "temporal")]
 #[test]
 fn point_in_time_reads_survive_a_reopen() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("history.grafeo");
     let (alix, epochs) = {
-        let db = GrafeoDB::with_config(
-            Config::persistent(&path)
-                .with_history_retention(grafeo_engine::HistoryRetention::Forever),
-        )
-        .unwrap();
+        let db = GrafeoDB::with_config(Config::persistent(&path)).unwrap();
         let alix = db.create_node(&["Person"]).unwrap();
         let epochs: Vec<_> = CITIES[..3]
             .iter()
@@ -558,7 +556,7 @@ fn point_in_time_reads_survive_a_reopen() {
     let db = GrafeoDB::open(&path).unwrap();
     for (epoch, city) in epochs.iter().zip(CITIES) {
         assert_eq!(
-            db.get_node_property_at_epoch(alix, "city", *epoch).unwrap(),
+            db.get_node_property_at_epoch(alix, "city", *epoch),
             Some(Value::from(city)),
             "the city at {epoch:?}"
         );
@@ -590,13 +588,15 @@ fn every_section_kind_in_one_database_survives_a_reopen_in_small_chunks() {
 
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("every.grafeo");
-    let (vincent, epochs) = with_chunk_caps(TINY, || {
-        // History kept: the test reads Vincent's city at earlier epochs.
-        let mut db = GrafeoDB::with_config(
-            Config::persistent(&path)
-                .with_history_retention(grafeo_engine::HistoryRetention::Forever),
+    #[cfg_attr(
+        not(feature = "temporal"),
+        expect(
+            unused_variables,
+            reason = "only temporal builds keep property history"
         )
-        .unwrap();
+    )]
+    let (vincent, epochs) = with_chunk_caps(TINY, || {
+        let mut db = GrafeoDB::with_config(Config::persistent(&path)).unwrap();
         db.execute("CREATE CONSTRAINT person_email FOR (p:Person) ON (p.email) UNIQUE")
             .unwrap();
         db.execute(
@@ -732,10 +732,10 @@ fn every_section_kind_in_one_database_survives_a_reopen_in_small_chunks() {
             [Value::from("person_email")],
             "{what}: the constraint"
         );
+        #[cfg(feature = "temporal")]
         for (epoch, city) in epochs.iter().zip(["Amsterdam", "Berlin", "Prague"]) {
             assert_eq!(
-                db.get_node_property_at_epoch(vincent, "city", *epoch)
-                    .unwrap(),
+                db.get_node_property_at_epoch(vincent, "city", *epoch),
                 Some(Value::from(city)),
                 "{what}: Vincent's city at {epoch:?}"
             );
@@ -744,7 +744,14 @@ fn every_section_kind_in_one_database_survives_a_reopen_in_small_chunks() {
 
     let db = GrafeoDB::with_config(Config::persistent(&path)).unwrap();
     let counts = chunk_counts(&db);
-    for section in ["Catalog", "LpgStore", "RdfStore", "RdfRing"] {
+    for section in [
+        "Catalog",
+        "LpgStore",
+        "RdfStore",
+        "VectorStore",
+        "TextIndex",
+        "RdfRing",
+    ] {
         let chunks = counts.get(section).copied().unwrap_or(0);
         // Every section is a metadata chunk and its data (the catalog's
         // records: the constraint and the index definitions).
@@ -1165,10 +1172,9 @@ mod crash_during_close {
 
     /// The crash points of `close()` with the WAL turned off, in order (the
     /// `WAL_DISABLED_CLOSE_POINTS` of `crash_injection_single_file.rs`).
-    const CLOSE_POINTS: [&str; 9] = [
+    const CLOSE_POINTS: [&str; 8] = [
         "flush:before_serialize",
         "flush:after_rotate",
-        "flush:after_snapshot",
         "checkpoint:after_chunks",
         "checkpoint:after_data_sync",
         "checkpoint:after_header",
@@ -1179,7 +1185,7 @@ mod crash_during_close {
 
     /// The first of [`CLOSE_POINTS`] (1-based) at which the new image's database
     /// header is on disk: `checkpoint:after_header`.
-    const HEADER_WRITTEN: u64 = 6;
+    const HEADER_WRITTEN: u64 = 5;
 
     const CHILD_POINT_VAR: &str = "GRAFEO_CHUNKED_CRASH_POINT";
     const CHILD_PATH_VAR: &str = "GRAFEO_CHUNKED_CRASH_PATH";
@@ -1242,7 +1248,7 @@ mod crash_during_close {
             let expected = if point < HEADER_WRITTEN { 300 } else { 600 };
             let db = GrafeoDB::with_config(wal_disabled_config(&path)).unwrap();
             assert_eq!(
-                db.node_count().unwrap(),
+                db.node_count(),
                 expected,
                 "{name}: the image the reopen finds"
             );
@@ -1261,11 +1267,7 @@ mod crash_during_close {
             }
             db.close().unwrap();
             let db = GrafeoDB::with_config(wal_disabled_config(&path)).unwrap();
-            assert_eq!(
-                db.node_count().unwrap(),
-                expected,
-                "{name}: after the checkpoint"
-            );
+            assert_eq!(db.node_count(), expected, "{name}: after the checkpoint");
             db.close().unwrap();
         }
     }
@@ -1386,12 +1388,12 @@ mod moved_chunks {
         let (slot, header) = active_header(slots).unwrap().expect("a database");
         let copy = path.with_extension("copy");
         std::fs::copy(path, &copy).unwrap();
-        let file = std::fs::OpenOptions::new()
+        let mut file = std::fs::OpenOptions::new()
             .read(true)
             .write(true)
             .open(&copy)
             .unwrap();
-        let reader = ImageReader::open(&file, header.root, cipher).unwrap();
+        let reader = ImageReader::open(&mut file, header.root, cipher).unwrap();
         let (entries, runs) = (reader.entries().to_vec(), reader.directory_runs().to_vec());
         (slot, header, entries, runs)
     }
@@ -1542,7 +1544,7 @@ mod moved_chunks {
         let header = active_image(&path, Some(&cipher)).1;
         let db = GrafeoDB::with_config(with_key(Config::read_only(&path), &chain)).unwrap();
         assert_eq!(
-            db.node_count().unwrap(),
+            db.node_count(),
             30,
             "the rewritten directory reads as before"
         );
@@ -1599,9 +1601,9 @@ mod moved_chunks {
             .expect("a node property chunk");
         // Fetches the LPG chunk `meta` describes through the active directory.
         let fetch = |meta: ChunkMeta| {
-            let file = std::fs::File::open(&path).unwrap();
+            let mut file = std::fs::File::open(&path).unwrap();
             let root = active_image(&path, Some(&cipher)).1.root;
-            let reader = ImageReader::open(&file, root, Some(&cipher)).unwrap();
+            let reader = ImageReader::open(&mut file, root, Some(&cipher)).unwrap();
             let section = reader.section(SectionType::LpgStore).unwrap();
             let index = section
                 .chunks()

@@ -10,7 +10,7 @@
 //! cargo test -p grafeo-engine --all-features --test delete_of_an_unbound_variable
 //! ```
 
-#![cfg(all(feature = "gql", feature = "cypher"))]
+#![cfg(all(feature = "lpg", feature = "gql", feature = "cypher"))]
 
 use std::collections::HashMap;
 
@@ -33,14 +33,13 @@ fn graph(db: &GrafeoDB) -> Vec<Value> {
         .collect()
 }
 
-/// Asserts that `result` is an invalid reference (an undefined variable,
-/// GQLSTATUS 42002) whose message contains `names`.
+/// Asserts that `result` is a semantic error whose message contains `names`.
 fn assert_refused(result: Result<QueryResult>, names: &str, what: &str) {
     match result {
         Err(Error::Query(error)) => {
             assert_eq!(
                 error.kind,
-                QueryErrorKind::InvalidReference,
+                QueryErrorKind::Semantic,
                 "{what}: {}",
                 error.message
             );

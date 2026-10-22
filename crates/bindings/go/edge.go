@@ -47,23 +47,17 @@ func (db *Database) CreateEdge(sourceID, targetID uint64, edgeType string, prope
 	}, nil
 }
 
-// GetEdge retrieves an edge by ID: ErrNotFound when it does not exist, and
-// another error for a read that fails.
+// GetEdge retrieves an edge by ID. Returns nil if not found.
 func (db *Database) GetEdge(id uint64) (*Edge, error) {
 	var cEdge *C.GrafeoEdge
-	if err := lockAndCheckStatus(func() C.GrafeoStatus {
-		return C.grafeo_get_edge(db.handle, C.uint64_t(id), &cEdge)
-	}); err != nil {
+	runtime.LockOSThread()
+	status := C.grafeo_get_edge(db.handle, C.uint64_t(id), &cEdge)
+	if status != C.GRAFEO_OK {
+		err := statusToError(status)
+		runtime.UnlockOSThread()
 		return nil, err
 	}
-	if cEdge == nil {
-		return nil, notFound("edge", id)
-	}
-	return edgeFromC(cEdge), nil
-}
-
-// edgeFromC copies and frees an edge a C call handed out.
-func edgeFromC(cEdge *C.GrafeoEdge) *Edge {
+	runtime.UnlockOSThread()
 	defer C.grafeo_free_edge(cEdge)
 
 	edgeID := uint64(C.grafeo_edge_id(cEdge))
@@ -86,7 +80,7 @@ func edgeFromC(cEdge *C.GrafeoEdge) *Edge {
 		TargetID:   dstID,
 		Type:       edgeType,
 		Properties: props,
-	}
+	}, nil
 }
 
 // DeleteEdge deletes an edge by ID. Returns true if the edge existed.

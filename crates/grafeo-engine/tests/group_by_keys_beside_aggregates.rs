@@ -366,7 +366,7 @@ fn keys() -> Vec<(&'static str, usize, Option<Value>)> {
     vec![
         ("p.birthday > 1950", 2, Some(Value::Bool(true))),
         ("p.id % 2", 2, Some(Value::Int64(1))),
-        ("p.id % 2 + 0.5e0", 2, Some(Value::Float64(1.5))),
+        ("p.id % 2 + 0.5", 2, Some(Value::Float64(1.5))),
         ("p.gender", 2, Some(text("female"))),
         ("p.browserUsed", 3, Some(Value::Null)),
         (

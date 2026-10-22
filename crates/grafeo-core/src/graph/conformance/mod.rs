@@ -1,65 +1,39 @@
-//! The conformance suite of the store contract.
+//! The conformance suite of the stores behind the change set.
 //!
-//! Every case writes a store through [`GraphBackend`] as the engine does: a
-//! transaction's writes recorded in a
-//! [`ChangeSet`](grafeo_common::change::ChangeSet), then committed or rolled
-//! back, also to a savepoint; a direct call as an immediate write; recovery
-//! as replay. It checks what readers see through the read trait only, so any
-//! store passes the same cases.
+//! Every case writes a store through [`ChangeTarget`] as the engine does: a
+//! transaction's writes recorded in a [`ChangeSet`], then stamped at commit
+//! or undone at rollback and savepoints; a direct call as an immediate
+//! write; recovery as replay. It checks what readers see through the read
+//! traits only, so any store passes the same cases: `LpgStore` now, the
+//! row-group store from its first cluster on (workstream H).
 //!
 //! A store lists the cases it is known to fail, each with its reason (a
-//! [`KnownGap`](crate::graph::conformance::KnownGap)). Such a case must keep
-//! failing: once it passes, its test
+//! [`KnownGap`]). Such a case must keep failing: once it passes, its test
 //! fails too and asks to drop the gap, so the list says exactly where a
 //! store stands.
-//!
-//! A store of one's own runs the suite with the `conformance` feature and
-//! [`conformance_suite!`](crate::conformance_suite), one test per case; any
-//! store that implements [`GraphStore`] and [`GraphBackend`] can. The cases
-//! of the row-group store's own parts (named graphs, indexes, search,
-//! collect) run in this crate's tests only.
-//!
-//! # Stability: Experimental
-//!
-//! The cases follow the contract, which is experimental to implement through
-//! 0.6.x: a release may add a case.
 
 mod cases;
-#[cfg(test)]
-mod epochs;
-#[cfg(test)]
-mod graphs;
-#[cfg(test)]
-mod indexes;
-#[cfg(test)]
+mod lpg;
 mod rowgroup;
-#[cfg(all(test, any(feature = "text-index", feature = "vector-index")))]
-mod searches;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::panic::{AssertUnwindSafe, catch_unwind};
 
 use grafeo_common::change::{ChangeMark, ChangeSet, DataModel, DataOp, GraphRef, GraphSlot};
-use grafeo_common::types::{
-    ArcStr, EdgeId, EpochId, NodeId, PropertyKey, ReadView, TransactionId, Value,
-};
-use grafeo_common::utils::hash::FxHashMap;
+use grafeo_common::types::{ArcStr, EdgeId, EpochId, NodeId, PropertyKey, TransactionId, Value};
 
 use crate::graph::Direction;
-use crate::graph::apply::{Applied, ApplyError, BackendTransaction, GraphBackend, Writer};
-use crate::graph::traits::GraphStore;
+use crate::graph::apply::{Applied, ApplyError, ChangeTarget, Writer};
+use crate::graph::traits::GraphStoreMut;
 
-/// A store the suite can run: written through [`GraphBackend`], read through
-/// [`GraphStore`]. A case's next commit lands after the store's
-/// [`committed_epoch`](GraphStore::committed_epoch), and a committed reader
-/// at it sees every commit so far.
-pub trait Store: GraphStore + GraphBackend {}
+/// A store the suite can run: written through the change target, read
+/// through the read traits.
+pub(crate) trait Store: GraphStoreMut + ChangeTarget {}
 
-impl<T: GraphStore + GraphBackend + ?Sized> Store for T {}
+impl<T: GraphStoreMut + ChangeTarget> Store for T {}
 
 /// A case a store is known to fail, and why.
-#[derive(Clone, Copy, Debug)]
-pub struct KnownGap {
+pub(crate) struct KnownGap {
     /// The case's name.
     pub case: &'static str,
     /// Why the store fails it (an issue or an inbox note).
@@ -100,36 +74,11 @@ pub(crate) fn run<S: Store>(
     }
 }
 
-/// One test per case of the suite for the store `$store`, each on stores
-/// from `$make` (a `fn() -> $store`), with the store's known gaps `$gaps`
-/// (a `&[KnownGap]`): a case fails its test unless it holds, and a known gap
-/// fails it once it holds, so the list says exactly where the store stands.
-///
-/// ```
-/// use grafeo_core::graph::conformance::KnownGap;
-/// use grafeo_core::graph::rowgroup::RowGroupStore;
-///
-/// /// The cases the store is known to fail, each with its reason.
-/// const GAPS: &[KnownGap] = &[];
-///
-/// grafeo_core::conformance_suite!(RowGroupStore, RowGroupStore::new, GAPS);
-/// # fn main() {}
-/// ```
-#[macro_export]
+/// Instantiates every case for a store: `conformance_suite!(Store, make,
+/// GAPS)` in a test module gives one test per case.
 macro_rules! conformance_suite {
-    ($store:ty, $make:expr, $gaps:expr $(,)?) => {
-        $crate::__conformance_cases!(tests($store, $make, $gaps));
-    };
-}
-
-/// The names of the suite's cases, in one list: one test per case
-/// ([`conformance_suite!`](crate::conformance_suite)), or the case of a name
-/// ([`run_named`]).
-#[doc(hidden)]
-#[macro_export]
-macro_rules! __conformance_cases {
-    ($mode:ident $args:tt) => {
-        $crate::__conformance_cases! { @each $mode $args;
+    ($store:ty, $make:expr, $gaps:expr) => {
+        $crate::graph::conformance::conformance_suite!(@cases $store, $make, $gaps;
             each_op_is_seen_by_its_transaction_and_committed_by_stamp,
             undo_restores_the_committed_state,
             a_savepoint_rollback_restores_each_tail,
@@ -144,7 +93,6 @@ macro_rules! __conformance_cases {
             immediate_writes_and_replay_agree,
             reserved_ids_are_never_given_out_again,
             bulk_ranges_are_stamped_and_undone_by_range,
-            a_bulk_range_across_row_groups_commits_each_row,
             counts_move_at_commit_only,
             every_access_path_agrees,
             a_node_with_edges_cannot_be_deleted,
@@ -155,50 +103,23 @@ macro_rules! __conformance_cases {
             a_reader_at_an_earlier_epoch_keeps_its_values_and_labels,
             a_reader_at_an_earlier_epoch_keeps_deleted_entities,
             a_delete_is_marked_at_its_commit_epoch,
-            every_read_path_sees_the_transactions_own_writes,
-            every_read_path_hides_an_open_transactions_creates_and_deletes,
-            every_read_path_hides_an_open_transactions_values_and_labels,
-            every_read_path_at_an_earlier_epoch_keeps_creates_and_deletes,
-            every_read_path_at_an_earlier_epoch_keeps_values_and_labels,
-            every_read_path_at_the_commit_epoch_sees_the_commit,
-            an_immediate_write_is_seen_at_its_epoch_through_every_read_path,
-            an_immediate_write_keeps_the_old_value_for_an_older_reader,
-            a_property_set_to_null_is_removed,
-        }
+        );
     };
-    (@each tests($store:ty, $make:expr, $gaps:expr); $($case:ident),* $(,)?) => {
+    (@cases $store:ty, $make:expr, $gaps:expr; $($case:ident),* $(,)?) => {
         $(
             #[test]
             fn $case() {
-                $crate::graph::conformance::run_named::<$store>(stringify!($case), $make, $gaps);
+                $crate::graph::conformance::run::<$store>(
+                    stringify!($case),
+                    $crate::graph::conformance::cases::$case::<$store>,
+                    $make,
+                    $gaps,
+                );
             }
         )*
     };
-    (@each lookup($store:ty, $name:expr); $($case:ident),* $(,)?) => {
-        match $name {
-            $(name if name == stringify!($case) => Some(cases::$case::<$store> as Case<$store>),)*
-            _ => None,
-        }
-    };
 }
-
-/// A case of the suite: `Err` names the first guarantee that did not hold
-/// on stores from the maker it takes.
-type Case<S> = fn(&dyn Fn() -> S) -> Outcome;
-
-/// Runs the case `name` of the suite on stores from `make`, against the
-/// store's known gaps `gaps`; [`conformance_suite!`](crate::conformance_suite)
-/// gives a test per case that calls it.
-///
-/// # Panics
-///
-/// Panics when no case has that name, when the case fails and is not a
-/// known gap, and when a known gap passes.
-pub fn run_named<S: Store>(name: &str, make: fn() -> S, gaps: &[KnownGap]) {
-    let case = crate::__conformance_cases!(lookup(S, name))
-        .unwrap_or_else(|| panic!("the conformance suite has no case {name}"));
-    run(name, case, make, gaps);
-}
+pub(crate) use conformance_suite;
 
 // ── Writing ─────────────────────────────────────────────────────────
 
@@ -217,7 +138,7 @@ pub(crate) fn properties(pairs: &[(&str, Value)]) -> grafeo_common::change::Prop
 
 /// The epoch after the store's current one: where the next commit lands.
 pub(crate) fn next_epoch<S: Store + ?Sized>(store: &S) -> EpochId {
-    EpochId::new(store.committed_epoch().as_u64() + 1)
+    EpochId::new(store.current_epoch().as_u64() + 1)
 }
 
 /// A change set's slot for the default graph.
@@ -229,44 +150,37 @@ fn lpg_slot(set: &mut ChangeSet) -> GraphSlot {
     .expect("a new change set takes a slot")
 }
 
-/// A transaction on one store, as the engine runs one: opened in the
-/// backend, each write that changed something recorded in its change set,
-/// which commit and rollback hand to the backend.
+/// A transaction on one store, as the engine runs one: each write that
+/// changed something recorded in its change set, which commit stamps and
+/// rollback undoes.
 pub(crate) struct Tx<'s, S: Store> {
     store: &'s S,
     pub id: TransactionId,
     pub snapshot: EpochId,
-    handle: BackendTransaction,
     set: ChangeSet,
     slot: GraphSlot,
 }
 
 impl<'s, S: Store> Tx<'s, S> {
     /// Begins transaction `id` at the store's current epoch.
-    ///
-    /// # Panics
-    ///
-    /// When the backend refuses to open it: every case needs one.
     pub fn begin(store: &'s S, id: u64) -> Self {
         let mut set = ChangeSet::new();
         let slot = lpg_slot(&mut set);
-        let (id, snapshot) = (TransactionId::new(id), store.committed_epoch());
-        let handle = store
-            .begin(id, snapshot)
-            .unwrap_or_else(|error| panic!("begin transaction {id:?}: {error:?}"));
         Self {
             store,
-            id,
-            snapshot,
-            handle,
+            id: TransactionId::new(id),
+            snapshot: store.current_epoch(),
             set,
             slot,
         }
     }
 
-    /// The transaction's writer: the backend's handle's.
+    /// The transaction's writer.
     pub fn writer(&self) -> Writer {
-        self.handle.writer()
+        Writer::Transaction {
+            id: self.id,
+            snapshot: self.snapshot,
+        }
     }
 
     /// Applies `op` and records it when it changed something.
@@ -417,8 +331,8 @@ impl<'s, S: Store> Tx<'s, S> {
     pub fn roll_back_to(&mut self, mark: ChangeMark) -> Outcome {
         let tail = self.set.split_off(mark);
         self.store
-            .rollback_to(self.handle, mark, &mut tail.iter())
-            .map_err(|error| format!("rollback to a savepoint: {error:?}"))
+            .undo(self.id, &mut tail.iter())
+            .map_err(|error| format!("undo to a savepoint: {error:?}"))
     }
 
     /// The ops recorded so far, in write order: what the log holds.
@@ -452,16 +366,16 @@ impl<'s, S: Store> Tx<'s, S> {
     pub fn commit(self) -> Result<EpochId, String> {
         let epoch = next_epoch(self.store);
         self.store
-            .commit(self.handle, &mut self.set.entries().iter(), epoch)
-            .map_err(|error| format!("commit: {error:?}"))?;
+            .stamp(self.id, &mut self.set.entries().iter(), epoch)
+            .map_err(|error| format!("stamp: {error:?}"))?;
         Ok(epoch)
     }
 
     /// Rolls the whole transaction back.
     pub fn roll_back(self) -> Outcome {
         self.store
-            .rollback(self.handle, &mut self.set.entries().iter())
-            .map_err(|error| format!("rollback: {error:?}"))
+            .undo(self.id, &mut self.set.entries().iter())
+            .map_err(|error| format!("undo: {error:?}"))
     }
 }
 
@@ -506,13 +420,6 @@ pub(crate) enum Reader {
     Transaction(TransactionId, EpochId),
     /// A committed reader at an epoch.
     At(EpochId),
-}
-
-/// The answer of a read, which must not fail: a case reads stores that
-/// can read everything they hold, so an error fails the case (`run` turns
-/// the panic into its failure).
-pub(crate) fn ok<T>(read: grafeo_common::utils::error::Result<T>, what: &str) -> T {
-    read.unwrap_or_else(|error| panic!("{what} failed: {error}"))
 }
 
 /// What a reader sees of a store, and every access path that disagrees
@@ -598,14 +505,24 @@ fn sorted_values(values: &grafeo_common::types::PropertyMap) -> Vec<(String, Val
 }
 
 fn node_view<S: Store + ?Sized>(store: &S, reader: Reader, id: NodeId) -> Option<NodeView> {
-    let node = ok(store.node(id, read_view(reader)), "node")?;
+    let node = match reader {
+        Reader::Transaction(transaction, snapshot) => {
+            store.get_node_versioned(id, snapshot, transaction)
+        }
+        Reader::At(epoch) => store.get_node_at_epoch(id, epoch),
+    }?;
     let mut names: Vec<String> = node.labels.iter().map(ToString::to_string).collect();
     names.sort();
     Some((names, sorted_values(&node.properties)))
 }
 
 fn edge_view<S: Store + ?Sized>(store: &S, reader: Reader, id: EdgeId) -> Option<EdgeView> {
-    let edge = ok(store.edge(id, read_view(reader)), "edge")?;
+    let edge = match reader {
+        Reader::Transaction(transaction, snapshot) => {
+            store.get_edge_versioned(id, snapshot, transaction)
+        }
+        Reader::At(epoch) => store.get_edge_at_epoch(id, epoch),
+    }?;
     Some((
         edge.src.as_u64(),
         edge.dst.as_u64(),
@@ -614,48 +531,34 @@ fn edge_view<S: Store + ?Sized>(store: &S, reader: Reader, id: EdgeId) -> Option
     ))
 }
 
-/// What `reader` sees of `store`: the nodes its scan lists, the edges of
-/// their outgoing adjacency, each read at the reader's view; then the other
-/// access paths checked against them.
+/// What `reader` sees of `store`: the nodes the store lists, the edges of
+/// their outgoing adjacency, each read at the reader's snapshot; then the
+/// other access paths checked against them.
 pub(crate) fn image<S: Store + ?Sized>(store: &S, reader: Reader) -> Image {
-    let view = read_view(reader);
     let mut problems = Vec::new();
     let mut nodes = BTreeMap::new();
-    for id in ok(store.node_ids(view), "node_ids") {
-        match node_view(store, reader, id) {
-            Some(node) => {
-                nodes.insert(id.as_u64(), node);
-            }
-            None => problems.push(format!(
-                "the scan lists node {}, which a point read does not see",
-                id.as_u64()
-            )),
+    for id in store.all_node_ids() {
+        if let Some(view) = node_view(store, reader, id) {
+            nodes.insert(id.as_u64(), view);
         }
     }
 
     let mut edges = BTreeMap::new();
     for &node in nodes.keys() {
-        for (target, edge) in ok(
-            store.edges(NodeId::new(node), Direction::Outgoing, &[], view),
-            "edges",
-        ) {
-            let Some(found) = edge_view(store, reader, edge) else {
-                problems.push(format!(
-                    "node {node}'s outgoing edges list {}, which a point read does not see",
-                    edge.as_u64()
-                ));
+        for (target, edge) in store.edges_from(NodeId::new(node), Direction::Outgoing) {
+            let Some(view) = edge_view(store, reader, edge) else {
                 continue;
             };
-            if found.0 != node || found.1 != target.as_u64() {
+            if view.0 != node || view.1 != target.as_u64() {
                 problems.push(format!(
                     "edge {} is in node {node}'s outgoing adjacency to {} but runs {} to {}",
                     edge.as_u64(),
                     target.as_u64(),
-                    found.0,
-                    found.1
+                    view.0,
+                    view.1
                 ));
             }
-            if edges.insert(edge.as_u64(), found).is_some() {
+            if edges.insert(edge.as_u64(), view).is_some() {
                 problems.push(format!("edge {} is listed twice", edge.as_u64()));
             }
         }
@@ -668,39 +571,37 @@ pub(crate) fn image<S: Store + ?Sized>(store: &S, reader: Reader) -> Image {
         }
     }
 
-    // Incoming edges: from the incoming adjacency, or by a scan of a store
-    // that keeps none; either way every edge into the node.
-    for &node in nodes.keys() {
-        let incoming: BTreeSet<u64> = ok(
-            store.edges(NodeId::new(node), Direction::Incoming, &[], view),
-            "edges",
-        )
-        .into_iter()
-        .map(|(_, edge)| edge.as_u64())
-        .collect();
-        let expected: BTreeSet<u64> = edges
-            .iter()
-            .filter(|(_, (_, dst, _, _))| *dst == node)
-            .map(|(edge, _)| *edge)
-            .collect();
-        if incoming != expected {
-            problems.push(format!(
-                "node {node}'s incoming adjacency lists {incoming:?}, its edges are {expected:?}"
-            ));
+    if store.has_backward_adjacency() {
+        for &node in nodes.keys() {
+            let incoming: BTreeSet<u64> = store
+                .edges_from(NodeId::new(node), Direction::Incoming)
+                .into_iter()
+                .filter(|(_, edge)| edge_view(store, reader, *edge).is_some())
+                .map(|(_, edge)| edge.as_u64())
+                .collect();
+            let expected: BTreeSet<u64> = edges
+                .iter()
+                .filter(|(_, (_, dst, _, _))| *dst == node)
+                .map(|(edge, _)| *edge)
+                .collect();
+            if incoming != expected {
+                problems.push(format!(
+                    "node {node}'s incoming adjacency lists {incoming:?}, its edges are {expected:?}"
+                ));
+            }
         }
     }
 
-    let mut label_names: BTreeSet<String> =
-        ok(store.all_labels(), "all_labels").into_iter().collect();
+    let mut label_names: BTreeSet<String> = store.all_labels().into_iter().collect();
     for (names, _) in nodes.values() {
         label_names.extend(names.iter().cloned());
     }
     for label in label_names {
-        // At the reader's view: the labels a scan finds are those of the
-        // view, as the point reads' are.
-        let scanned: BTreeSet<u64> = ok(store.nodes_by_label(&label, view), "nodes_by_label")
+        let scanned: BTreeSet<u64> = store
+            .nodes_by_label(&label)
             .into_iter()
             .map(|id| id.as_u64())
+            .filter(|id| nodes.contains_key(id))
             .collect();
         let expected: BTreeSet<u64> = nodes
             .iter()
@@ -730,10 +631,7 @@ pub(crate) fn image<S: Store + ?Sized>(store: &S, reader: Reader) -> Image {
             }
         }
         for (value, expected) in by_name {
-            match ok(
-                store.find_nodes_maybe_equal("name", value, view),
-                "find_nodes_maybe_equal",
-            ) {
+            match store.find_nodes_maybe_equal("name", value) {
                 None => problems.push(format!("the name index gives no answer for {value:?}")),
                 Some(found) => {
                     let found: BTreeSet<u64> = found.into_iter().map(|id| id.as_u64()).collect();
@@ -753,31 +651,20 @@ pub(crate) fn image<S: Store + ?Sized>(store: &S, reader: Reader) -> Image {
     }
 }
 
-/// The view of a committed reader at the epoch the store last committed at.
-pub(crate) fn committed_view<S: Store + ?Sized>(store: &S) -> ReadView {
-    ReadView::committed(store.committed_epoch())
-}
-
 /// The committed state now, as a reader at the store's epoch sees it.
 pub(crate) fn committed<S: Store + ?Sized>(store: &S) -> Image {
-    image(store, Reader::At(store.committed_epoch()))
+    image(store, Reader::At(store.current_epoch()))
 }
 
-/// The counts of the committed state now, as a reader at the store's epoch
-/// reads them: nodes, edges, and nodes per label of `labels`.
+/// The counts the store keeps of its committed state: nodes, edges, and
+/// nodes per label of `labels`.
 pub(crate) fn counts<S: Store + ?Sized>(store: &S, labels: &[&str]) -> (usize, usize, Vec<usize>) {
-    let view = committed_view(store);
     (
-        ok(store.node_count(view), "node_count"),
-        ok(store.edge_count(view), "edge_count"),
+        store.node_count(),
+        store.edge_count(),
         labels
             .iter()
-            .map(|label| {
-                ok(
-                    store.nodes_by_label_count(label, view),
-                    "nodes_by_label_count",
-                )
-            })
+            .map(|label| store.nodes_by_label_count(label))
             .collect(),
     )
 }
@@ -799,612 +686,6 @@ pub(crate) fn counts_of(image: &Image, labels: &[&str]) -> (usize, usize, Vec<us
             })
             .collect(),
     )
-}
-
-// ── Reading at a view ───────────────────────────────────────────────
-
-/// The keys the reads at a view probe.
-const KEYS: [&str; 3] = ["name", "age", "city"];
-
-/// The label sets the label unions read.
-const UNIONS: [&[&str]; 3] = [&["Employee", "Traveller"], &["Person", "City"], &LABELS];
-
-/// The edge type sets the typed adjacency reads read.
-const TYPES: [&[&str]; 4] = [
-    &["KNOWS"],
-    &["LIVES_IN"],
-    &["KNOWS", "LIVES_IN"],
-    &["MISSING"],
-];
-
-/// The ranges of `age` the range lookups read: (min, max, min inclusive,
-/// max inclusive).
-const AGE_RANGES: [(Option<i64>, Option<i64>, bool, bool); 4] = [
-    (Some(10), Some(50), true, false),
-    (None, Some(19), false, true),
-    (Some(3), None, true, true),
-    (Some(3), Some(88), false, false),
-];
-
-/// The view of `reader`.
-pub(crate) fn read_view(reader: Reader) -> ReadView {
-    match reader {
-        Reader::Transaction(transaction, snapshot) => ReadView::transaction(transaction, snapshot),
-        Reader::At(epoch) => ReadView::committed(epoch),
-    }
-}
-
-impl Image {
-    /// Gives node `id` the value `value` of `key` (`None`: no value).
-    pub fn set_value(&mut self, id: NodeId, key: &str, value: Option<Value>) {
-        if let Some((_, values)) = self.nodes.get_mut(&id.as_u64()) {
-            set_sorted(values, key, value);
-        }
-    }
-
-    /// Gives node `id` exactly the labels `names`.
-    pub fn set_labels(&mut self, id: NodeId, names: &[&str]) {
-        if let Some((labels, _)) = self.nodes.get_mut(&id.as_u64()) {
-            *labels = names.iter().map(|name| (*name).to_string()).collect();
-            labels.sort();
-        }
-    }
-
-    /// Gives edge `id` the value `value` of `key` (`None`: no value).
-    pub fn set_edge_value(&mut self, id: EdgeId, key: &str, value: Option<Value>) {
-        if let Some((_, _, _, values)) = self.edges.get_mut(&id.as_u64()) {
-            set_sorted(values, key, value);
-        }
-    }
-}
-
-/// Sets `key` to `value` in a list of values sorted by key.
-fn set_sorted(values: &mut Vec<(String, Value)>, key: &str, value: Option<Value>) {
-    values.retain(|(name, _)| name != key);
-    if let Some(value) = value {
-        values.push((key.to_string(), value));
-        values.sort_by(|a, b| a.0.cmp(&b.0));
-    }
-}
-
-/// The node ids of an answer, as a set, with a problem when one repeats.
-fn id_set(ids: &[NodeId], what: &str, problems: &mut Vec<String>) -> BTreeSet<u64> {
-    let set: BTreeSet<u64> = ids.iter().map(|id| id.as_u64()).collect();
-    if set.len() != ids.len() {
-        problems.push(format!("{what} lists a node twice: {ids:?}"));
-    }
-    set
-}
-
-/// The values of a batch read, sorted by key.
-fn sorted_map(map: &FxHashMap<PropertyKey, Value>) -> Vec<(String, Value)> {
-    let mut values: Vec<(String, Value)> = map
-        .iter()
-        .map(|(key, value)| (key.as_str().to_string(), value.clone()))
-        .collect();
-    values.sort_by(|a, b| a.0.cmp(&b.0));
-    values
-}
-
-/// The edges of node `raw` in `direction` of one of `types` (any for
-/// none) that `expected` holds, as (other node, edge), sorted: `Both` lists
-/// a self-loop once.
-fn expected_edges(
-    expected: &Image,
-    raw: u64,
-    direction: Direction,
-    types: &[&str],
-) -> Vec<(u64, u64)> {
-    let mut wanted: Vec<(u64, u64)> = expected
-        .edges
-        .iter()
-        .filter(|(_, (_, _, edge_type, _))| types.is_empty() || types.contains(&edge_type.as_str()))
-        .flat_map(|(edge, (src, dst, _, _))| {
-            let out = (*src == raw && direction != Direction::Incoming).then_some((*dst, *edge));
-            let into = (*dst == raw
-                && direction != Direction::Outgoing
-                && !(direction == Direction::Both && *src == raw))
-                .then_some((*src, *edge));
-            out.into_iter().chain(into)
-        })
-        .collect();
-    wanted.sort_unstable();
-    wanted
-}
-
-/// Every read of `store` at `reader`'s view, each checked against
-/// `expected`, what the reader must see: point reads of nodes and edges
-/// (whole, one value, visibility, the edge type), labels and label checks,
-/// the batch and selective batch reads, adjacency each way and by type, the
-/// degrees, the counts, label scans and unions, equality lookups (one key,
-/// two keys, maybe-equal through an index) and range lookups. The lookups
-/// probe the values of `expected` and of `others` (images the reader must
-/// not see), so a value written by someone the reader does not see finds
-/// nothing.
-///
-/// # Errors
-///
-/// Every read that disagrees with `expected`, one per line.
-pub(crate) fn paths_at<S: Store + ?Sized>(
-    store: &S,
-    reader: Reader,
-    expected: &Image,
-    others: &[&Image],
-) -> Outcome {
-    let view = read_view(reader);
-    let mut problems = Vec::new();
-    let mut node_ids: BTreeSet<u64> = ok(store.node_ids(view), "node_ids")
-        .into_iter()
-        .map(|id| id.as_u64())
-        .collect();
-    let mut edge_ids: BTreeSet<u64> = BTreeSet::new();
-    for image in std::iter::once(expected).chain(others.iter().copied()) {
-        node_ids.extend(image.nodes.keys().copied());
-        edge_ids.extend(image.edges.keys().copied());
-    }
-    let nodes: Vec<NodeId> = node_ids.iter().map(|id| NodeId::new(*id)).collect();
-    let edges: Vec<EdgeId> = edge_ids.iter().map(|id| EdgeId::new(*id)).collect();
-
-    // Nodes, one at a time.
-    for &node in &nodes {
-        let raw = node.as_u64();
-        let want = expected.nodes.get(&raw);
-        if ok(store.is_node_visible(node, view), "is_node_visible") != want.is_some() {
-            problems.push(format!(
-                "is_node_visible({raw}) is {}, expected {}",
-                want.is_none(),
-                want.is_some()
-            ));
-        }
-        let found = ok(store.node(node, view), "node").map(|node| {
-            let mut names: Vec<String> = node.labels.iter().map(ToString::to_string).collect();
-            names.sort();
-            (names, sorted_values(&node.properties))
-        });
-        if found.as_ref() != want {
-            problems.push(format!("node({raw}) is {found:?}, expected {want:?}"));
-        }
-        let labels = ok(store.node_labels(node, view), "node_labels").map(|labels| {
-            let mut names: Vec<String> = labels.iter().map(ToString::to_string).collect();
-            names.sort();
-            names
-        });
-        if labels.as_ref() != want.map(|(names, _)| names) {
-            problems.push(format!(
-                "node_labels({raw}) is {labels:?}, expected {:?}",
-                want.map(|(names, _)| names)
-            ));
-        }
-        for label in LABELS {
-            let has = ok(store.node_has_label(node, label, view), "node_has_label");
-            let expected_has = want.map(|(names, _)| names.iter().any(|name| name == label));
-            if has != expected_has {
-                problems.push(format!(
-                    "node_has_label({raw}, {label}) is {has:?}, expected {expected_has:?}"
-                ));
-            }
-        }
-        for key in KEYS {
-            let value = ok(store.node_property(node, key, view), "node_property");
-            let expected_value = want.and_then(|(_, values)| {
-                values
-                    .iter()
-                    .find(|(name, _)| name == key)
-                    .map(|(_, value)| value.clone())
-            });
-            if value != expected_value {
-                problems.push(format!(
-                    "node_property({raw}, {key}) is {value:?}, expected {expected_value:?}"
-                ));
-            }
-        }
-    }
-    let seen: Vec<u64> = ok(store.filter_visible_node_ids(&nodes, view), "filter")
-        .into_iter()
-        .map(|id| id.as_u64())
-        .collect();
-    let wanted: Vec<u64> = expected.nodes.keys().copied().collect();
-    if seen != wanted {
-        problems.push(format!(
-            "filter_visible_node_ids is {seen:?}, expected {wanted:?}"
-        ));
-    }
-
-    // Nodes, in batches.
-    let expected_values = |node: &NodeId, keys: Option<&[&str]>| -> Vec<(String, Value)> {
-        expected
-            .nodes
-            .get(&node.as_u64())
-            .map(|(_, values)| {
-                values
-                    .iter()
-                    .filter(|(key, _)| keys.is_none_or(|keys| keys.contains(&key.as_str())))
-                    .cloned()
-                    .collect()
-            })
-            .unwrap_or_default()
-    };
-    for key in KEYS {
-        let found = ok(
-            store.node_property_batch(&nodes, &PropertyKey::new(key), view),
-            "node_property_batch",
-        );
-        for (node, value) in nodes.iter().zip(&found) {
-            let expected_value = expected_values(node, Some(&[key])).pop().map(|(_, v)| v);
-            if *value != expected_value {
-                problems.push(format!(
-                    "node_property_batch: node {}'s {key} is {value:?}, expected {expected_value:?}",
-                    node.as_u64()
-                ));
-            }
-        }
-    }
-    let all = ok(
-        store.node_properties_batch(&nodes, view),
-        "node_properties_batch",
-    );
-    let selected = ok(
-        store.node_properties_selective_batch(
-            &nodes,
-            &[PropertyKey::new("name"), PropertyKey::new("age")],
-            view,
-        ),
-        "node_properties_selective_batch",
-    );
-    for (index, node) in nodes.iter().enumerate() {
-        let (found, wanted) = (
-            all.get(index).map(sorted_map),
-            Some(expected_values(node, None)),
-        );
-        if found != wanted {
-            problems.push(format!(
-                "node_properties_batch: node {} has {found:?}, expected {wanted:?}",
-                node.as_u64()
-            ));
-        }
-        let (found, wanted) = (
-            selected.get(index).map(sorted_map),
-            Some(expected_values(node, Some(&["name", "age"]))),
-        );
-        if found != wanted {
-            problems.push(format!(
-                "node_properties_selective_batch: node {} has {found:?}, expected {wanted:?}",
-                node.as_u64()
-            ));
-        }
-    }
-
-    // Edges.
-    for &edge in &edges {
-        let raw = edge.as_u64();
-        let want = expected.edges.get(&raw);
-        if ok(store.is_edge_visible(edge, view), "is_edge_visible") != want.is_some() {
-            problems.push(format!(
-                "is_edge_visible({raw}) is {}, expected {}",
-                want.is_none(),
-                want.is_some()
-            ));
-        }
-        let found = ok(store.edge(edge, view), "edge").map(|edge| {
-            (
-                edge.src.as_u64(),
-                edge.dst.as_u64(),
-                edge.edge_type.to_string(),
-                sorted_values(&edge.properties),
-            )
-        });
-        if found.as_ref() != want {
-            problems.push(format!("edge({raw}) is {found:?}, expected {want:?}"));
-        }
-        let edge_type = ok(store.edge_type(edge, view), "edge_type").map(|t| t.to_string());
-        let expected_type = want.map(|(_, _, edge_type, _)| edge_type.clone());
-        if edge_type != expected_type {
-            problems.push(format!(
-                "edge_type({raw}) is {edge_type:?}, expected {expected_type:?}"
-            ));
-        }
-        let since = ok(store.edge_property(edge, "since", view), "edge_property");
-        let expected_since = want.and_then(|(_, _, _, values)| {
-            values
-                .iter()
-                .find(|(key, _)| key == "since")
-                .map(|(_, value)| value.clone())
-        });
-        if since != expected_since {
-            problems.push(format!(
-                "edge_property({raw}, since) is {since:?}, expected {expected_since:?}"
-            ));
-        }
-    }
-    let found = ok(
-        store.edge_properties_selective_batch(&edges, &[PropertyKey::new("since")], view),
-        "edge_properties_selective_batch",
-    );
-    for (index, edge) in edges.iter().enumerate() {
-        let wanted: Vec<(String, Value)> = expected
-            .edges
-            .get(&edge.as_u64())
-            .map(|(_, _, _, values)| {
-                values
-                    .iter()
-                    .filter(|(key, _)| key == "since")
-                    .cloned()
-                    .collect()
-            })
-            .unwrap_or_default();
-        let found = found.get(index).map(sorted_map);
-        if found.as_ref() != Some(&wanted) {
-            problems.push(format!(
-                "edge_properties_selective_batch: edge {} has {found:?}, expected {wanted:?}",
-                edge.as_u64()
-            ));
-        }
-    }
-
-    // Adjacency, every direction (also on a store that keeps no incoming
-    // edges), of every type and by type; a node the view does not see has
-    // none.
-    let directions = [Direction::Outgoing, Direction::Incoming, Direction::Both];
-    for &node in &nodes {
-        let raw = node.as_u64();
-        let seen = expected.nodes.contains_key(&raw);
-        for &direction in &directions {
-            let wanted = if seen {
-                expected_edges(expected, raw, direction, &[])
-            } else {
-                Vec::new()
-            };
-            let mut found: Vec<(u64, u64)> = ok(store.edges(node, direction, &[], view), "edges")
-                .into_iter()
-                .map(|(other, edge)| (other.as_u64(), edge.as_u64()))
-                .collect();
-            found.sort_unstable();
-            if found != wanted {
-                problems.push(format!(
-                    "edges({raw}, {direction:?}) is {found:?}, expected {wanted:?}"
-                ));
-            }
-            let degree = ok(store.degree(node, direction, view), "degree");
-            if degree != wanted.len() {
-                problems.push(format!(
-                    "degree({raw}, {direction:?}) is {degree}, expected {}",
-                    wanted.len()
-                ));
-            }
-            let mut neighbors: Vec<u64> = ok(store.neighbors(node, direction, view), "neighbors")
-                .into_iter()
-                .map(|id| id.as_u64())
-                .collect();
-            neighbors.sort_unstable();
-            let mut wanted_neighbors: Vec<u64> = wanted.iter().map(|(other, _)| *other).collect();
-            wanted_neighbors.sort_unstable();
-            if neighbors != wanted_neighbors {
-                problems.push(format!(
-                    "neighbors({raw}, {direction:?}) is {neighbors:?}, expected {wanted_neighbors:?}"
-                ));
-            }
-            for types in TYPES {
-                let wanted = if seen {
-                    expected_edges(expected, raw, direction, types)
-                } else {
-                    Vec::new()
-                };
-                let names: Vec<ArcStr> = types.iter().map(|name| ArcStr::from(*name)).collect();
-                let mut found: Vec<(u64, u64)> =
-                    ok(store.edges(node, direction, &names, view), "edges")
-                        .into_iter()
-                        .map(|(other, edge)| (other.as_u64(), edge.as_u64()))
-                        .collect();
-                found.sort_unstable();
-                if found != wanted {
-                    problems.push(format!(
-                        "edges({raw}, {direction:?}, {types:?}) is {found:?}, expected {wanted:?}"
-                    ));
-                }
-            }
-        }
-    }
-
-    // Label scans, unions and counts.
-    let with_any = |labels: &[&str]| -> BTreeSet<u64> {
-        expected
-            .nodes
-            .iter()
-            .filter(|(_, (names, _))| names.iter().any(|name| labels.contains(&name.as_str())))
-            .map(|(id, _)| *id)
-            .collect()
-    };
-    let mut label_names: BTreeSet<String> =
-        ok(store.all_labels(), "all_labels").into_iter().collect();
-    label_names.extend(LABELS.iter().map(|label| (*label).to_string()));
-    for label in &label_names {
-        let what = format!("nodes_by_label({label})");
-        let found = id_set(
-            &ok(store.nodes_by_label(label, view), "nodes_by_label"),
-            &what,
-            &mut problems,
-        );
-        let wanted = with_any(&[label.as_str()]);
-        if found != wanted {
-            problems.push(format!("{what} is {found:?}, expected {wanted:?}"));
-        }
-        let count = ok(
-            store.nodes_by_label_count(label, view),
-            "nodes_by_label_count",
-        );
-        if count != wanted.len() {
-            problems.push(format!(
-                "nodes_by_label_count({label}) is {count}, expected {}",
-                wanted.len()
-            ));
-        }
-    }
-    for labels in UNIONS {
-        let what = format!("nodes_with_any_label({labels:?})");
-        let found = id_set(
-            &ok(
-                store.nodes_with_any_label(labels, view),
-                "nodes_with_any_label",
-            ),
-            &what,
-            &mut problems,
-        );
-        let wanted = with_any(labels);
-        if found != wanted {
-            problems.push(format!("{what} is {found:?}, expected {wanted:?}"));
-        }
-    }
-    let (node_count, edge_count) = (
-        ok(store.node_count(view), "node_count"),
-        ok(store.edge_count(view), "edge_count"),
-    );
-    if (node_count, edge_count) != (expected.nodes.len(), expected.edges.len()) {
-        problems.push(format!(
-            "node_count and edge_count are ({node_count}, {edge_count}), expected ({}, {})",
-            expected.nodes.len(),
-            expected.edges.len()
-        ));
-    }
-
-    // Equality lookups, probing every value of the images.
-    let mut probes: Vec<(&str, Value)> = Vec::new();
-    for image in std::iter::once(expected).chain(others.iter().copied()) {
-        for (_, values) in image.nodes.values() {
-            for (key, value) in values {
-                if let Some(key) = KEYS.iter().find(|name| **name == key.as_str())
-                    && !probes.iter().any(|(k, v)| k == key && v == value)
-                {
-                    probes.push((key, value.clone()));
-                }
-            }
-        }
-    }
-    let equal = |key: &str, value: &Value| -> BTreeSet<u64> {
-        expected
-            .nodes
-            .iter()
-            .filter(|(_, (_, values))| values.iter().any(|(k, v)| k == key && v == value))
-            .map(|(id, _)| *id)
-            .collect()
-    };
-    for (key, value) in &probes {
-        let what = format!("find_nodes_by_property({key}, {value:?})");
-        let found = id_set(
-            &ok(
-                store.find_nodes_by_property(key, value, view),
-                "find_nodes_by_property",
-            ),
-            &what,
-            &mut problems,
-        );
-        let wanted = equal(key, value);
-        if found != wanted {
-            problems.push(format!("{what} is {found:?}, expected {wanted:?}"));
-        }
-        match ok(
-            store.find_nodes_maybe_equal(key, value, view),
-            "find_nodes_maybe_equal",
-        ) {
-            None if store.has_property_index(key) => problems.push(format!(
-                "find_nodes_maybe_equal({key}, {value:?}) gives no answer with an index"
-            )),
-            None => {}
-            Some(found) => {
-                let what = format!("find_nodes_maybe_equal({key}, {value:?})");
-                let found = id_set(&found, &what, &mut problems);
-                let missed: Vec<&u64> = wanted.difference(&found).collect();
-                let unseen: Vec<&u64> = found
-                    .iter()
-                    .filter(|id| !expected.nodes.contains_key(id))
-                    .collect();
-                if !missed.is_empty() || !unseen.is_empty() {
-                    problems.push(format!(
-                        "{what} misses {missed:?} and lists {unseen:?}, which the view does not see"
-                    ));
-                }
-            }
-        }
-    }
-    let names: Vec<&Value> = probes
-        .iter()
-        .filter(|(key, _)| *key == "name")
-        .map(|(_, value)| value)
-        .collect();
-    let ages: Vec<&Value> = probes
-        .iter()
-        .filter(|(key, _)| *key == "age")
-        .map(|(_, value)| value)
-        .collect();
-    for name in &names {
-        for age in &ages {
-            let conditions = [("name", (*name).clone()), ("age", (*age).clone())];
-            let what = format!("find_nodes_by_properties({conditions:?})");
-            let found = id_set(
-                &ok(
-                    store.find_nodes_by_properties(&conditions, view),
-                    "find_nodes_by_properties",
-                ),
-                &what,
-                &mut problems,
-            );
-            let wanted: BTreeSet<u64> = equal("name", name)
-                .intersection(&equal("age", age))
-                .copied()
-                .collect();
-            if found != wanted {
-                problems.push(format!("{what} is {found:?}, expected {wanted:?}"));
-            }
-        }
-    }
-
-    // Range lookups of `age`.
-    for (min, max, min_inclusive, max_inclusive) in AGE_RANGES {
-        let (min, max) = (min.map(Value::Int64), max.map(Value::Int64));
-        let wanted: BTreeSet<u64> = expected
-            .nodes
-            .iter()
-            .filter(|(_, (_, values))| {
-                values.iter().any(|(key, value)| {
-                    key == "age"
-                        && matches!(value, Value::Int64(age)
-                        if min.as_ref().is_none_or(|min| match min {
-                            Value::Int64(min) => if min_inclusive { age >= min } else { age > min },
-                            _ => false,
-                        })
-                        && max.as_ref().is_none_or(|max| match max {
-                            Value::Int64(max) => if max_inclusive { age <= max } else { age < max },
-                            _ => false,
-                        }))
-                })
-            })
-            .map(|(id, _)| *id)
-            .collect();
-        let what = format!("find_nodes_in_range(age, {min:?}, {max:?})");
-        let found = id_set(
-            &ok(
-                store.find_nodes_in_range(
-                    "age",
-                    min.as_ref(),
-                    max.as_ref(),
-                    min_inclusive,
-                    max_inclusive,
-                    view,
-                ),
-                "find_nodes_in_range",
-            ),
-            &what,
-            &mut problems,
-        );
-        if found != wanted {
-            problems.push(format!("{what} is {found:?}, expected {wanted:?}"));
-        }
-    }
-
-    if problems.is_empty() {
-        Ok(())
-    } else {
-        Err(format!("at {reader:?}:\n  {}", problems.join("\n  ")))
-    }
 }
 
 // ── Data ─────────────────────────────────────────────────────────────

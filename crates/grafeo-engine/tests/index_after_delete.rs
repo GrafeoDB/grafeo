@@ -15,9 +15,7 @@ use grafeo_common::types::{NodeId, Value};
 use grafeo_engine::GrafeoDB;
 
 fn find(db: &GrafeoDB, value: &str) -> Vec<NodeId> {
-    let mut ids = db
-        .find_nodes_by_property("id", &Value::from(value))
-        .unwrap();
+    let mut ids = db.find_nodes_by_property("id", &Value::from(value));
     ids.sort_unstable();
     ids
 }

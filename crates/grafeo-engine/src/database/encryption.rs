@@ -6,11 +6,8 @@
 //!
 //! - `"grafeo-container"` encrypts the chunks and directory blocks of the
 //!   `.grafeo` file;
-//! - `"grafeo-wal"` encrypts the records of its sidecar WAL as 0.5.x and
-//!   0.6.0-beta.1 wrote it (and of the WAL a restore of their backups writes);
-//! - `"grafeo-wal-segment"` encrypts the frames of a WAL segment, one key per
-//!   segment: the component id is the database id followed by the segment's
-//!   salt (32 bytes, from its header).
+//! - `"grafeo-wal"` encrypts the records of its sidecar WAL (and of the WAL a
+//!   restore writes next to a restored file).
 //!
 //! Two databases configured with one key chain therefore have different keys,
 //! and so does a copy written by `save` or a migration, which gets a new
@@ -25,12 +22,9 @@ use crate::config::Config;
 /// Context of the key that encrypts the `.grafeo` file.
 const CONTAINER_CONTEXT: &str = "grafeo-container";
 
-/// Context of the key that encrypts the sidecar WAL of the first log format.
+/// Context of the key that encrypts the sidecar WAL.
 #[cfg(feature = "wal")]
 const WAL_CONTEXT: &str = "grafeo-wal";
-/// Context of the keys that encrypt WAL segments, one per segment salt.
-#[cfg(all(feature = "wal", feature = "encryption"))]
-const WAL_SEGMENT_CONTEXT: &str = "grafeo-wal-segment";
 
 /// The key chain of an encrypted database.
 #[cfg(feature = "encryption")]
@@ -52,7 +46,7 @@ impl DatabaseKeys {
     /// The keys `config` asks for.
     pub(crate) fn from_config(config: &Config) -> Self {
         #[cfg(feature = "encryption")]
-        if let Some(encryption) = &config.encryption() {
+        if let Some(encryption) = &config.encryption {
             return Self::from_encryption(encryption);
         }
         #[cfg(not(feature = "encryption"))]
@@ -93,31 +87,6 @@ impl DatabaseKeys {
         self.key_chain
             .as_ref()
             .map(|chain| derive(chain, WAL_CONTEXT, database_id))
-    }
-
-    /// The ciphers of the WAL segments of the database `database_id`, one per
-    /// segment salt, or `None` for a database without a key.
-    #[cfg(feature = "wal")]
-    pub(crate) fn wal_segment_ciphers(
-        &self,
-        database_id: u128,
-    ) -> Option<grafeo_storage::wal::CipherForSalt> {
-        #[cfg(feature = "encryption")]
-        {
-            let chain = std::sync::Arc::clone(self.key_chain.as_ref()?);
-            Some(std::sync::Arc::new(
-                move |salt: &[u8; grafeo_storage::wal::SALT_BYTES]| {
-                    let mut component = database_id.to_le_bytes().to_vec();
-                    component.extend_from_slice(salt);
-                    chain.encryptor_for(WAL_SEGMENT_CONTEXT, &component)
-                },
-            ))
-        }
-        #[cfg(not(feature = "encryption"))]
-        {
-            let _ = database_id;
-            self.key_chain.as_ref().map(|chain| match *chain {})
-        }
     }
 }
 

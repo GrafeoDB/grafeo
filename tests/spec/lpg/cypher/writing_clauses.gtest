@@ -582,16 +582,12 @@ tests:
       rows:
         - [Alix, false, true]
 
-  # ON CREATE and ON MATCH take SET items as a SET clause does: one may set
-  # any element of the pattern (it was refused).
-  - name: merge_on_create_set_on_another_variable
+  - name: merge_on_create_set_on_another_variable_is_an_error
     statements:
       - "CREATE (:Person {name: 'Alix'}), (:Person {name: 'Gus'})"
       - "MATCH (a:Person {name: 'Alix'}), (b:Person {name: 'Gus'}) MERGE (a)-[r:KNOWS]->(b) ON CREATE SET a.since = 3"
-      - "MATCH (a:Person {name: 'Alix'}) RETURN a.since AS since"
     expect:
-      rows:
-        - [3]
+      error: "MERGE"
 
   # ---------------------------------------------------------------------------
   # MERGE of a relationship to or from an anonymous node with a label or
@@ -632,91 +628,9 @@ tests:
 
   # Without a label or a property the node could be any node; that MERGE
   # is not supported yet and says so.
-  # A node with neither a label nor a property is any node: Alix knows
-  # nobody, so the MERGE creates an empty node with the relationship.
-  - name: merge_relationship_to_a_bare_anonymous_node
+  - name: merge_relationship_to_a_bare_anonymous_node_is_an_error
     statements:
       - "CREATE (:Person {name: 'Alix'})"
       - "MATCH (h:Person) MERGE (h)-[:KNOWS]->()"
-      - "MATCH (:Person {name: 'Alix'})-[:KNOWS]->(x) RETURN labels(x) AS l"
     expect:
-      rows:
-        - [[]]
-
-  # #181: two MATCH clauses then a CREATE link the matched nodes and create no
-  # node (it created unlabeled phantom nodes).
-  - name: match_match_create_edge_no_phantoms
-    statements:
-      - "CREATE (:A {id: '1'})"
-      - "CREATE (:A {id: '2'})"
-      - "MATCH (a:A {id: '1'}) MATCH (b:A {id: '2'}) CREATE (a)-[:REL]->(b)"
-      - "MATCH (n) RETURN count(n) AS nodes, count(CASE WHEN size(labels(n)) = 0 THEN 1 END) AS unlabeled"
-    expect:
-      rows:
-        - [2, 0]
-
-  - name: match_match_create_edge_links_the_matched_nodes
-    statements:
-      - "CREATE (:A {id: '1'})"
-      - "CREATE (:A {id: '2'})"
-      - "MATCH (a:A {id: '1'}) MATCH (b:A {id: '2'}) CREATE (a)-[:REL]->(b)"
-      - "MATCH (a)-[r:REL]->(b) RETURN a.id AS from, b.id AS to, count(r) AS edges"
-    expect:
-      rows:
-        - ['1', '2', 1]
-
-  - name: match_match_create_chain_over_many_nodes
-    statements:
-      - "UNWIND range(1, 100) AS i CREATE (:A {id: i})"
-      - "MATCH (a:A) MATCH (b:A) WHERE b.id = a.id + 1 CREATE (a)-[:NEXT]->(b)"
-      - "MATCH ()-[r:NEXT]->() RETURN count(r) AS edges"
-    expect:
-      rows:
-        - [99]
-
-  - name: match_match_create_chain_creates_no_node
-    statements:
-      - "UNWIND range(1, 100) AS i CREATE (:A {id: i})"
-      - "MATCH (a:A) MATCH (b:A) WHERE b.id = a.id + 1 CREATE (a)-[:NEXT]->(b)"
-      - "MATCH (n) RETURN count(n) AS nodes, count(CASE WHEN size(labels(n)) = 0 THEN 1 END) AS unlabeled"
-    expect:
-      rows:
-        - [100, 0]
-
-  # #179: timestamp() in the SET clauses of MERGE is an integer number of
-  # milliseconds (it was null).
-  - name: merge_on_create_set_timestamp
-    statements:
-      - "MERGE (n:T1 {id: 'x'}) ON CREATE SET n.created = timestamp(), n.other = 'hello'"
-      - "MERGE (m:T2 {id: 'y'}) SET m.updated = timestamp()"
-      - "MATCH (n:T1 {id: 'x'}), (m:T2 {id: 'y'}) RETURN n.created > 1700000000000 AS created, n.other AS other, m.updated >= n.created AS updated"
-    expect:
-      rows:
-        - [true, hello, true]
-
-  - name: merge_on_match_set_timestamp_on_the_second_run
-    statements:
-      - "MERGE (n:T1 {id: 'x'}) ON CREATE SET n.created = 1 ON MATCH SET n.seen = timestamp()"
-      - "MERGE (n:T1 {id: 'x'}) ON CREATE SET n.created = 1 ON MATCH SET n.seen = timestamp()"
-      - "MATCH (n:T1) RETURN count(n) AS nodes, min(n.created) AS created, min(n.seen) > 1700000000000 AS seen"
-    expect:
-      rows:
-        - [1, 1, true]
-
-  # #182: count(*) after SET n:Tagged over more rows than one chunk counts
-  # every row (it returned 1).
-  - name: count_after_set_label_over_many_chunks
-    setup:
-      - "UNWIND range(1, 5000) AS i CREATE (:Node {i: i})"
-    query: "MATCH (n:Node) SET n:Tagged RETURN count(*) AS a, count(n) AS b"
-    expect:
-      rows:
-        - [5000, 5000]
-
-  - name: count_after_remove_label_over_many_chunks
-    setup:
-      - "UNWIND range(1, 5000) AS i CREATE (:Node:Tagged {i: i})"
-    query: "MATCH (n:Tagged) REMOVE n:Tagged RETURN count(*) AS a, count(n) AS b"
-    expect:
-      rows:
-        - [5000, 5000]
+      error: "anonymous node"

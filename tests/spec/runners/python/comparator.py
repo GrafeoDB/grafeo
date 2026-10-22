@@ -8,7 +8,8 @@ from __future__ import annotations
 
 import hashlib
 import math
-from typing import Any
+from typing import Any, Dict, List, Optional
+
 
 # ---------------------------------------------------------------------------
 # Value to canonical string
@@ -101,7 +102,7 @@ def _duration_to_iso(total_months: int, days: int, nanos: int) -> str:
 # ---------------------------------------------------------------------------
 
 
-def result_to_rows(result, columns: list[str] | None = None) -> list[list[str]]:
+def result_to_rows(result, columns: Optional[List[str]] = None) -> List[List[str]]:
     """Convert a grafeo QueryResult into rows of canonical strings.
 
     Each row is obtained by iterating the result (which yields dicts keyed by
@@ -111,12 +112,12 @@ def result_to_rows(result, columns: list[str] | None = None) -> list[list[str]]:
     the column order from ``result.columns`` is used.
     """
     cols = columns or list(result.columns)
-    rows: list[list[str]] = []
+    rows: List[List[str]] = []
 
     # result[i] returns a dict for row i
     for i in range(len(result)):
-        row_dict: dict[str, Any] = result[i]
-        row: list[str] = []
+        row_dict: Dict[str, Any] = result[i]
+        row: List[str] = []
         for col in cols:
             row.append(value_to_string(row_dict.get(col)))
         rows.append(row)
@@ -131,8 +132,8 @@ def result_to_rows(result, columns: list[str] | None = None) -> list[list[str]]:
 
 def assert_rows_sorted(
     result,
-    expected: list[list[str]],
-    columns: list[str] | None = None,
+    expected: List[List[str]],
+    columns: Optional[List[str]] = None,
 ) -> None:
     """Assert that result rows match *expected* after sorting both sides."""
     actual = result_to_rows(result, columns)
@@ -164,8 +165,8 @@ def assert_rows_sorted(
 
 def assert_rows_ordered(
     result,
-    expected: list[list[str]],
-    columns: list[str] | None = None,
+    expected: List[List[str]],
+    columns: Optional[List[str]] = None,
 ) -> None:
     """Assert that result rows match *expected* in exact order."""
     actual = result_to_rows(result, columns)
@@ -213,21 +214,7 @@ def assert_error(exc: Exception, expected_substr: str) -> None:
     assert expected_substr in msg, f"Error '{msg}' does not contain '{expected_substr}'"
 
 
-def assert_gql_status(exc: Exception, expected_status: str) -> None:
-    """Assert that the exception carries the GQLSTATUS *expected_status*.
-
-    An exception without one (not a GrafeoError, or one the binding gave no
-    status) fails the case: a status the binding does not expose is a gap,
-    not a pass.
-    """
-    status = getattr(exc, "gql_status", None)
-    assert status is not None, f"Error '{exc}' ({type(exc).__name__}) has no GQLSTATUS"
-    assert str(status) == expected_status, (
-        f"Error '{exc}' has GQLSTATUS {status}, expected {expected_status}"
-    )
-
-
-def assert_columns(result, expected_columns: list[str]) -> None:
+def assert_columns(result, expected_columns: List[str]) -> None:
     """Assert that result column names match *expected_columns* exactly."""
     actual = list(result.columns)
     assert actual == expected_columns, (
@@ -237,9 +224,9 @@ def assert_columns(result, expected_columns: list[str]) -> None:
 
 def assert_rows_with_precision(
     result,
-    expected: list[list[str]],
+    expected: List[List[str]],
     precision: int,
-    columns: list[str] | None = None,
+    columns: Optional[List[str]] = None,
 ) -> None:
     """Assert rows match with floating-point tolerance.
 
@@ -274,7 +261,7 @@ def assert_rows_with_precision(
 def assert_hash(
     result,
     expected_hash: str,
-    columns: list[str] | None = None,
+    columns: Optional[List[str]] = None,
 ) -> None:
     """Assert that the MD5 hash of sorted, pipe-delimited rows matches.
 

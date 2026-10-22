@@ -31,19 +31,6 @@ impl Bitset {
         }
     }
 
-    /// Sets the rows of `bits` in word `index`, rows `[64 * index, 64 *
-    /// (index + 1))`: what [`set`](Self::set) of each does, the bitset
-    /// growing alike (not at all for no rows).
-    pub(super) fn set_word(&mut self, index: usize, bits: u64) {
-        if bits == 0 {
-            return;
-        }
-        if index >= self.words.len() {
-            self.words.resize(index + 1, 0);
-        }
-        self.words[index] |= bits;
-    }
-
     /// Sets `row` to `value`.
     pub(super) fn put(&mut self, row: usize, value: bool) {
         if value {
@@ -56,36 +43,6 @@ impl Bitset {
     /// Whether no row is set.
     pub(super) fn is_empty(&self) -> bool {
         self.words.iter().all(|word| *word == 0)
-    }
-
-    /// The word of rows `[64 * index, 64 * (index + 1))`, one bit per row.
-    pub(super) fn word(&self, index: usize) -> u64 {
-        self.words.get(index).copied().unwrap_or(0)
-    }
-
-    /// The words, rows `[64 * i, 64 * (i + 1))` in word `i`.
-    pub(super) fn words(&self) -> &[u64] {
-        &self.words
-    }
-
-    /// How many rows of `rows` are set.
-    pub(super) fn count_in(&self, rows: std::ops::Range<usize>) -> usize {
-        if rows.is_empty() {
-            return 0;
-        }
-        let (first, last) = (rows.start / 64, (rows.end - 1) / 64);
-        let mut count = 0;
-        for (index, word) in self.words.iter().enumerate().take(last + 1).skip(first) {
-            let mut bits = *word;
-            if index == first {
-                bits &= u64::MAX << (rows.start % 64);
-            }
-            if index == last {
-                bits &= u64::MAX >> (63 - (rows.end - 1) % 64);
-            }
-            count += bits.count_ones() as usize;
-        }
-        count
     }
 
     /// The rows set, ascending.
@@ -127,28 +84,5 @@ mod tests {
         bits.put(130, false);
         bits.put(3, true);
         assert_eq!(bits.rows().collect::<Vec<_>>(), [0, 3, 64, 65_535]);
-    }
-
-    #[test]
-    fn rows_in_a_range_are_counted_across_words() {
-        let mut bits = Bitset::default();
-        for row in [0, 3, 63, 64, 127, 128, 200] {
-            bits.set(row);
-        }
-        for (rows, expected) in [
-            (0..0, 0),
-            (0..1, 1),
-            (1..3, 0),
-            (3..4, 1),
-            (0..64, 3),
-            (63..65, 2),
-            (64..128, 2),
-            (0..201, 7),
-            (129..200, 0),
-            (200..100_000, 1),
-            (1_000..2_000, 0),
-        ] {
-            assert_eq!(bits.count_in(rows.clone()), expected, "{rows:?}");
-        }
     }
 }

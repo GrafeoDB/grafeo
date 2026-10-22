@@ -22,24 +22,6 @@ db = grafeo.GrafeoDB()
 db.execute("INSERT (:Person {name: 'Alix'})")
 ```
 
-## Decimals
-
-An exact decimal (GQL and SQL/PGQ `1.50`, `CAST(x AS DECIMAL(10, 2))`, SPARQL
-`xsd:decimal`) comes back as a `decimal.Decimal` with its scale, and a
-`decimal.Decimal` parameter or property goes in exactly:
-
-```python
-from decimal import Decimal
-
-db.execute("INSERT (:Item {price: 19.99})")
-db.execute("MATCH (i:Item) RETURN i.price")[0]["i.price"]  # Decimal('19.99')
-db.execute("RETURN $p * 3 AS total", {"p": Decimal("0.10")})  # Decimal('0.30')
-```
-
-A float stays a `float`. NaN, the infinities and a `Decimal` of more than 38
-digits are refused with a `TypeError`. `to_pandas()` and `to_polars()` keep
-the `Decimal` objects.
-
 ## Classes
 
 | Class | Description |

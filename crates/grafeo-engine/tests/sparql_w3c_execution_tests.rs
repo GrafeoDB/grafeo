@@ -357,32 +357,6 @@ mod tests {
         assert_eq!(r.row_count(), 1, "AVG should return 1 row");
     }
 
-    /// A `HAVING` that compares a `GROUP_CONCAT` of the projection reads that
-    /// aggregate's value for the group.
-    #[test]
-    fn sec11_group_concat_in_having() {
-        let db = rdf_db();
-        insert_foaf_data(&db);
-
-        let r = db
-            .execute_sparql(
-                r#"SELECT ?type (GROUP_CONCAT(?name; SEPARATOR=",") AS ?names)
-                WHERE {
-                    ?s <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> ?type .
-                    ?s <http://xmlns.com/foaf/0.1/name> ?name
-                }
-                GROUP BY ?type
-                HAVING (GROUP_CONCAT(?name; SEPARATOR=",") != "Amsterdam")"#,
-            )
-            .unwrap();
-        assert_eq!(r.row_count(), 1, "the City group is only Amsterdam");
-        let row = &r.rows()[0];
-        assert!(
-            row[0].to_string().contains("foaf/0.1/Person"),
-            "the group is Person, got: {row:?}"
-        );
-    }
-
     #[test]
     fn sec11_group_concat_aggregate() {
         let db = rdf_db();

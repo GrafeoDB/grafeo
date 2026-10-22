@@ -340,7 +340,6 @@ impl From<Value> for HashableValue {
     fn from(value: Value) -> Self {
         let representative = match value {
             Value::Float64(float) => representative_float(float),
-            Value::Decimal(decimal) => representative_decimal(decimal),
             Value::Vector(_)
             | Value::ZonedDatetime(_)
             | Value::Time(_)
@@ -424,7 +423,6 @@ impl RowKey {
 fn representative(value: &Value) -> Value {
     match value {
         Value::Float64(float) => representative_float(*float),
-        Value::Decimal(decimal) => representative_decimal(*decimal),
         Value::Vector(items) => {
             Value::Vector(items.iter().map(|&x| representative_f32(x)).collect())
         }
@@ -467,26 +465,6 @@ fn representative_float(float: f64) -> Value {
         return Value::Int64(integer);
     }
     Value::Float64(float)
-}
-
-/// A decimal's representative, as `=` compares it with the other numbers:
-/// the integer it equals when it is whole and fits an `i64` (`3.0` is `3`),
-/// the float whose shortest text it is (`1.5` is the float `1.5`), else the
-/// decimal with trailing fractional zeros removed, so scale aliases also
-/// serialize to the same identity bytes.
-fn representative_decimal(decimal: grafeo_common::types::Decimal) -> Value {
-    if decimal.floor() == decimal
-        && let Some(integer) = decimal.trunc_to_i64()
-    {
-        return Value::Int64(integer);
-    }
-    let float = decimal.to_f64();
-    if grafeo_common::types::Decimal::from_f64(float).is_ok_and(|back| back == decimal) {
-        return representative_float(float);
-    }
-    // Equality ignores trailing zeros after the point, the value codec keeps
-    // them: only the identity drops them, the first value stays as it was.
-    Value::Decimal(decimal.normalize())
 }
 
 /// A vector item's representative: one NaN for every NaN, and `0.0` for
@@ -704,78 +682,5 @@ mod tests {
             RowKey::of(&[Value::Float64(3.0)]).representatives(),
             [Value::Int64(3)]
         );
-    }
-
-    /// Scale aliases must also share serialized partition keys when neither
-    /// value has an exact floating-point identity. Raw values keep their scale.
-    #[cfg(feature = "spill")]
-    #[test]
-    fn precise_decimal_scale_aliases_serialize_one_identity() {
-        use crate::execution::spill::serialize_value;
-        use grafeo_common::types::Decimal;
-
-        let raw_bytes = |value: &Value| {
-            let mut bytes = Vec::new();
-            serialize_value(value, &mut bytes).unwrap();
-            bytes
-        };
-        let identity_bytes = |value: &Value| raw_bytes(HashableValue::from(value).representative());
-        for (short, scaled) in [
-            (
-                "0.1234567890123456789012345678",
-                "0.12345678901234567890123456780",
-            ),
-            (
-                "-0.1234567890123456789012345678",
-                "-0.12345678901234567890123456780",
-            ),
-        ] {
-            let precise = Decimal::parse(short).unwrap();
-            let original = Decimal::parse(scaled).unwrap();
-            let a = Value::Decimal(precise);
-            let b = Value::Decimal(original);
-            assert_ne!(
-                raw_bytes(&a),
-                raw_bytes(&b),
-                "value codec preserves literal scale"
-            );
-            assert_eq!(identity_bytes(&a), identity_bytes(&b));
-            assert_eq!(
-                raw_bytes(HashableValue::from(&b).representative()),
-                raw_bytes(&a)
-            );
-            assert_ne!(
-                identity_bytes(&a),
-                identity_bytes(&Value::Float64(precise.to_f64()))
-            );
-            for (left, right) in [
-                (list(vec![a.clone()]), list(vec![b.clone()])),
-                (
-                    path(vec![list(vec![a.clone()])], vec![]),
-                    path(vec![list(vec![b.clone()])], vec![]),
-                ),
-            ] {
-                assert_eq!(
-                    RowKey::of(std::slice::from_ref(&left)),
-                    RowKey::of(std::slice::from_ref(&right))
-                );
-                assert_eq!(identity_bytes(&left), identity_bytes(&right));
-            }
-            // Borrowed identity construction does not rewrite the output value.
-            assert_eq!(original.to_string(), scaled);
-            assert_eq!(b.as_decimal().unwrap().scale(), original.scale());
-        }
-        for (text, number) in [
-            ("0.000", Value::Int64(0)),
-            ("3.000", Value::Int64(3)),
-            ("1.500", Value::Float64(1.5)),
-        ] {
-            let decimal = Value::Decimal(Decimal::parse(text).unwrap());
-            assert_eq!(identity_bytes(&decimal), identity_bytes(&number));
-            assert_eq!(
-                identity_bytes(&list(vec![decimal])),
-                identity_bytes(&list(vec![number]))
-            );
-        }
     }
 }

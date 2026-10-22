@@ -11,7 +11,7 @@
 //!     --test post_compact_overlay_visibility
 //! ```
 
-#![cfg(feature = "gql")]
+#![cfg(all(feature = "lpg", feature = "gql"))]
 
 use grafeo_common::types::Value;
 use grafeo_engine::GrafeoDB;

@@ -7,7 +7,7 @@
 //! cargo test -p grafeo-engine --all-features --test entity_lists
 //! ```
 
-#![cfg(feature = "gql")]
+#![cfg(all(feature = "lpg", feature = "gql"))]
 
 use grafeo_common::types::{PropertyKey, Value};
 use grafeo_engine::GrafeoDB;

@@ -15,7 +15,12 @@
 //!
 //! The named-graph epoch test needs `temporal` (CI runs every feature).
 
-#![cfg(all(feature = "gql", feature = "wal", feature = "grafeo-file"))]
+#![cfg(all(
+    feature = "lpg",
+    feature = "gql",
+    feature = "wal",
+    feature = "grafeo-file"
+))]
 
 use std::path::{Path, PathBuf};
 
@@ -206,6 +211,7 @@ fn a_0_5_directory_whose_wal_rotated_loads_every_file() {
 /// named graph `trips` without a switch back to the default graph (0.5.43
 /// never logged one). In `trips`, node 1 is named Paris, later Amsterdam, and
 /// node 3 (Berlin) comes last.
+#[cfg(feature = "temporal")]
 fn write_0_5_43_named_graph_directory(path: &Path) {
     let wal = WalManager::open(path.join("wal")).unwrap();
     let mut transaction = 0;
@@ -265,6 +271,7 @@ fn write_0_5_43_named_graph_directory(path: &Path) {
 
 /// What an open of the named-graph directory shows: the database's epoch,
 /// the cities in `trips`, and the name history of node 1 there.
+#[cfg(feature = "temporal")]
 fn named_graph_view(
     db: &GrafeoDB,
 ) -> (
@@ -282,9 +289,7 @@ fn named_graph_view(
         .map(|row| row[0].clone())
         .collect();
     db.set_current_graph(Some("trips")).unwrap();
-    let history = db
-        .get_node_property_history(NodeId::new(1), "name")
-        .unwrap();
+    let history = db.get_node_property_history(NodeId::new(1), "name");
     db.set_current_graph(None).unwrap();
     (db.current_epoch(), cities, history)
 }
@@ -292,10 +297,11 @@ fn named_graph_view(
 /// A 0.5.43 directory whose last commits all went to a named graph is read at
 /// one epoch, the highest any graph reached during the replay: every open (read
 /// only, `open_in_memory`, the migration, a reopen of the migrated file) shows
-/// the latest values, at the same epoch, and a new commit continues above it.
-/// Replay advances the epoch of the graph a commit lands in, and 0.5.43 never
-/// switched back to the default graph, so a read at the default graph's epoch
-/// would show a stale name and miss Berlin.
+/// the latest values with their whole history, at the same epoch, and a new
+/// commit continues above it. Replay advances the epoch of the graph a commit
+/// lands in, and 0.5.43 never switched back to the default graph, so a read at
+/// the default graph's epoch would show a stale name and miss Berlin.
+#[cfg(feature = "temporal")]
 #[test]
 fn a_0_5_43_directory_is_read_at_the_epoch_its_named_graphs_reached() {
     let dir = tempfile::tempdir().unwrap();
@@ -318,13 +324,11 @@ fn a_0_5_43_directory_is_read_at_the_epoch_its_named_graphs_reached() {
         ],
         "read-only: every city with its latest name"
     );
-    // The 0.5.x versions are not carried over (a database's history starts
-    // where it was read or migrated): the latest name only.
     let names: Vec<&Value> = history.iter().map(|(_, value)| value).collect();
     assert_eq!(
         names,
-        [&Value::from("Amsterdam")],
-        "read-only: the latest name of node 1"
+        [&Value::from("Paris"), &Value::from("Amsterdam")],
+        "read-only: the whole name history of node 1"
     );
     assert!(
         history.windows(2).all(|pair| pair[0].0 < pair[1].0)
@@ -397,7 +401,6 @@ fn a_0_5_directory_read_in_place_reports_its_size() {
     let db = GrafeoDB::open_read_only(&path).unwrap();
     assert_eq!(
         db.detailed_stats()
-            .unwrap()
             .disk_bytes
             .map(|bytes| u64::try_from(bytes).unwrap()),
         Some(expected),
@@ -440,15 +443,11 @@ fn second_batch_crud_does_not_deadlock() {
         db.set_node_property(id, "index", Value::Int64(i)).unwrap();
     }
 
-    assert_eq!(db.node_count().unwrap(), 20);
+    assert_eq!(db.node_count(), 20);
     db.close().expect("close");
 
     // Verify data survives reopen
     let db = GrafeoDB::with_config(Config::persistent(&path)).expect("reopen");
-    assert_eq!(
-        db.node_count().unwrap(),
-        20,
-        "all nodes should survive reopen"
-    );
+    assert_eq!(db.node_count(), 20, "all nodes should survive reopen");
     db.close().expect("close");
 }

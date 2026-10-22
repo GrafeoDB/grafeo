@@ -166,8 +166,6 @@ INSERT (:TestNode {index: i, value: rand()})
 |----------|-------------|
 | `toInteger(expr)` / `toInt(expr)` | Convert to integer |
 | `toFloat(expr)` | Convert to float |
-| `toDecimal(expr)` | Convert to an exact decimal: an integer or decimal exactly, a float by its shortest text, a numeric string as written |
-| `toDecimal(expr, precision, scale)` | The same, rounded to `scale` digits after the point; `NULL` when it has more than `precision - scale` before it |
 | `toString(expr)` | Convert to string |
 | `toBoolean(expr)` | Convert to boolean |
 | `toList(expr)` | Wrap scalar in a list |
@@ -175,8 +173,6 @@ INSERT (:TestNode {index: i, value: rand()})
 ```sql
 RETURN toInteger('42')      -- 42
 RETURN toFloat('3.14')      -- 3.14
-RETURN toDecimal('2.50')    -- 2.50
-RETURN toDecimal(1.005e0, 5, 2)  -- 1.01
 RETURN toString(42)         -- '42'
 RETURN toBoolean('true')    -- true
 RETURN toList(42)           -- [42]

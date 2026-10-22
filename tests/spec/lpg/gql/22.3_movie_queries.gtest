@@ -41,7 +41,7 @@ tests:
       rows:
         - [Berlin Express, 8.7]
         - [The Heist, 8.2]
-        - [The Algorithm, 8.0]
+        - [The Algorithm, 8]
 
   - name: total_box_office_per_director
     query: |

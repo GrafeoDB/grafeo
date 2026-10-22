@@ -8,7 +8,7 @@
 //! cargo test -p grafeo-engine --features full --test schema_wal_replay
 //! ```
 
-#![cfg(all(feature = "wal", feature = "grafeo-file"))]
+#![cfg(all(feature = "wal", feature = "grafeo-file", feature = "lpg"))]
 
 use grafeo_engine::GrafeoDB;
 

@@ -37,10 +37,6 @@ my_graph.db         # The database: its state as of the last checkpoint
 my_graph.db.wal/    # Write-ahead log, while the database is open
 ```
 
-Once a backup has been taken, `close()` keeps the part of the write-ahead log written since the last backup, with the backup's position in it, so the next incremental backup after a restart has it (see [Backups](../python/database.md#backup-and-restore)). A database that never takes a backup removes its write-ahead log at `close()`.
-
-In Rust the write-ahead log needs the `wal` feature, which the `lpg` profile and the `storage` group include and the default features do not. Without it, `GrafeoDB::open` works the same, but commits reach the file only at a checkpoint (`close()`, dropping the database, or `wal_checkpoint()`), and a process that crashes loses the commits since. The Python, Node.js, C, Go, C# and Dart packages include it.
-
 A path with a trailing separator (`./data/`) names the same database as `./data`, and `path()` (`db.path` in Python) returns the path as you gave it.
 
 The database also writes next to its path: its WAL (`<path>.wal/`), spill files under memory pressure (`<path>.spill/`, while open for writing; a read-only open spills to a directory of its own in the system temp directory). A configured spill path (`Config::spill_path` in Rust) replaces both: a read-write and a read-only open then spill there and, while the database is created, short-lived files (`<path>.creating`, `<path>.migrate.lock`). The directory that holds the path must therefore be writable, not only the database file.
@@ -65,8 +61,6 @@ The sync mode decides when the WAL is flushed to disk (`fsync`). Every mode hand
 | `DurabilityMode::NoSync` | never; the operating system writes it back | commits not yet written back |
 
 `Batch` checks its limits when a commit is written. The last commit before an idle period is therefore synced by the next write or by `close()`, not when the delay passes.
-
-A commit becomes visible to other sessions once the WAL holds it as the mode promises: in `Sync` mode after its sync. Commits of several sessions that wait for the disk at the same time share one sync. A transaction or direct call that starts while another commit is still in progress does not wait for it: it reads the last published commit, and a write to something that commit wrote fails with `GRAFEO-T001`, which can be retried. Work that starts after `commit()` returned sees the commit.
 
 The sync mode is set through the Rust `Config` builder; the Python constructor uses the default. Build the modes with settings with `DurabilityMode::batch(max_delay, max_records)` and `DurabilityMode::adaptive(interval)`, in whole milliseconds.
 
@@ -104,7 +98,6 @@ Features:
 - Checkpoints are copy-on-write: a checkpoint writes the new state into space in the file that the last good state does not use, and switches the database header to it only once it is on disk. A checkpoint that fails or is cut off by a crash (for example on a full disk) leaves the last good state readable. A checkpoint needs free disk space for a second copy of the data while it runs; the next checkpoint reuses the space of the older copy.
 - A checkpoint writes the data in chunks of at most 1 MiB as it goes, without first encoding whole sections in memory. While it writes a vector or text index, changes to that index (inserting, updating or removing a node's vector or text) wait until the index is written, and so do searches of that index that arrive after a waiting change.
 - A checkpoint writes the committed state, also while transactions are open: what an open transaction deleted or changed is written as it was committed, and nothing it created is written. A checkpoint taken while an open transaction has changed the default graph leaves out the vector and text indexes, and the next open builds them from the data. `save()`, `to_memory()`, `export_snapshot()` and the backups copy the committed state in the same way.
-- Copies and full backups are online: `save()`, `to_memory()`, `export_snapshot()` and `backup_full()` hold commits off only while they take their snapshot and copy the schema and the RDF data, and write the graphs as of that moment while commits go on. The copy holds exactly the commits before it, and leaves the database's next checkpoint as incremental as it would have been. `save()` and `backup_full()` write to `<target>.partial` and rename it to the target once it is complete, so a crash never leaves a partial copy under the target's name.
 - Exclusive file locking prevents multiple processes from opening the same file simultaneously
 
 ### Storage Format Setting (Rust)
@@ -154,32 +147,6 @@ db = grafeo.GrafeoDB(path="my_graph.db")
 result = db.execute("MATCH (p:Person) RETURN p.name")
 # Returns 'Alix'
 ```
-
-### Stored Configuration
-
-A database file stores the settings it was created with that define or protect it: the graph model, backward edges, schema constraints, whether the WAL is on and its sync mode, the memory limit, the section tier overrides, and the spill path when it lies in the database's directory. The thread count and other paths belong to the machine and are not stored.
-
-`GrafeoDB::open(path)` and `Config::read_only(path)` apply the stored values to every setting they do not set themselves. A value set for an open, with a `Config` builder, applies to that open only: the file keeps its stored value. The graph model and the backward edges are fixed when the database is created, so an open that sets another value fails. `db.config()` reports the configuration the database opened with.
-
-```rust
-use grafeo::{Config, DurabilityMode, GrafeoDB};
-
-let db = GrafeoDB::with_config(
-    Config::persistent("berlin.grafeo")
-        .with_memory_limit(512 * 1024 * 1024)
-        .with_wal_durability(DurabilityMode::Sync),
-)?;
-db.close()?;
-
-// Reopened with the memory limit and the sync mode it was created with.
-let db = GrafeoDB::open("berlin.grafeo")?;
-assert_eq!(db.config().memory_limit(), Some(512 * 1024 * 1024));
-
-// Changes what the file stores, for the next open.
-db.set_stored_config(&Config::in_memory().with_memory_limit(1024 * 1024 * 1024))?;
-```
-
-A database written before 0.6.0 stores no configuration and opens with the defaults, as before.
 
 ## Snapshots
 

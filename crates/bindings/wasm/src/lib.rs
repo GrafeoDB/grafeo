@@ -17,48 +17,20 @@
 // On 64-bit (clippy host), these are flagged but the code only runs on WASM.
 #![allow(clippy::cast_possible_truncation)]
 
-#[cfg(feature = "direct-api")]
-mod graph_handle;
 mod signed_snapshot;
-mod time_travel;
 mod types;
 mod utils;
-#[cfg(feature = "direct-api")]
-mod writes;
 
-#[cfg(feature = "direct-api")]
-pub use graph_handle::GraphHandle;
-pub use time_travel::AsOfView;
-
-use std::cell::{Cell, Ref, RefCell};
+use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
-use std::rc::Rc;
 
 use js_sys::Array;
 use wasm_bindgen::prelude::*;
 
+use grafeo_bindings_common::json::{json_params_to_map, json_to_value};
 use grafeo_common::types::{PropertyKey, Value};
 use grafeo_engine::GrafeoDB;
 use grafeo_engine::session::Session;
-
-/// A JS `Error` with `message`, for an error the binding raises itself.
-pub(crate) fn js_error(message: &str) -> JsValue {
-    JsError::new(message).into()
-}
-
-/// The JS `Error` of a database error: its message, and its GQLSTATUS as
-/// `gqlStatus` (`22012` for a division by zero, `42001` for a syntax error).
-pub(crate) fn database_error(error: grafeo_common::utils::Error) -> JsValue {
-    let js = js_sys::Error::new(&error.to_string());
-    let status = grafeo_common::utils::GqlStatus::from(&error);
-    // Setting a property of a new, ordinary Error object cannot fail.
-    let _ = js_sys::Reflect::set(
-        &js,
-        &JsValue::from_str("gqlStatus"),
-        &JsValue::from_str(status.as_str()),
-    );
-    js.into()
-}
 
 /// A Grafeo graph database instance running in WebAssembly.
 ///
@@ -67,56 +39,31 @@ pub(crate) fn database_error(error: grafeo_common::utils::Error) -> JsValue {
 /// the higher-level `@grafeo-db/web` package.
 #[wasm_bindgen]
 pub struct Database {
-    inner: Rc<RefCell<GrafeoDB>>,
+    inner: GrafeoDB,
     /// Active transaction session, set by `beginTransaction()` and cleared by
     /// `commitTransaction()` / `rollbackTransaction()` / `close()`.
     /// When present, `execute*` methods route through this session so
     /// uncommitted writes are visible only to the transaction.
-    tx: Rc<RefCell<Option<Session>>>,
+    tx: RefCell<Option<Session>>,
     /// Once set by `close()`, every subsequent method call errors.
-    closed: Rc<Cell<bool>>,
-}
-
-impl Database {
-    /// Creates a new in-memory database, as `new Database()` does.
-    ///
-    /// # Errors
-    ///
-    /// Returns `JsError` if the database fails to initialise.
-    pub fn new() -> Result<Database, JsValue> {
-        Self::create(None)
-    }
+    closed: Cell<bool>,
 }
 
 #[wasm_bindgen]
 impl Database {
-    /// Creates a new in-memory database. `options.historyRetention` sets
-    /// how much history it keeps for time-travel reads (`asOf`): `'off'`
-    /// (the default), `'forever'` or a number of milliseconds.
-    ///
-    /// ```js
-    /// const db = new Database({ historyRetention: 60 * 60 * 1000 });
-    /// ```
+    /// Creates a new in-memory database.
     ///
     /// # Errors
     ///
-    /// Returns `JsError` for another `historyRetention`, or if the database
-    /// fails to initialise.
+    /// Returns `JsError` if the database fails to initialise.
     #[wasm_bindgen(constructor)]
-    pub fn create(options: Option<js_sys::Object>) -> Result<Database, JsValue> {
+    pub fn new() -> Result<Database, JsError> {
         utils::set_panic_hook();
-        let retention = match &options {
-            Some(options) => time_travel::history_retention(options)?,
-            None => None,
-        };
-        let db = match retention {
-            Some(retention) => GrafeoDB::with_config(
-                grafeo_engine::Config::in_memory().with_history_retention(retention),
-            )
-            .map_err(database_error)?,
-            None => GrafeoDB::new_in_memory(),
-        };
-        Ok(Database::from_engine(db))
+        Ok(Database {
+            inner: GrafeoDB::new_in_memory(),
+            tx: RefCell::new(None),
+            closed: Cell::new(false),
+        })
     }
 
     /// Begins a new transaction.
@@ -136,15 +83,17 @@ impl Database {
     /// Returns `JsError` if the database is closed, a transaction is already
     /// active, or the engine fails to start one.
     #[wasm_bindgen(js_name = "beginTransaction")]
-    pub fn begin_transaction(&self) -> Result<(), JsValue> {
+    pub fn begin_transaction(&self) -> Result<(), JsError> {
         self.check_open()?;
         if self.tx.borrow().is_some() {
-            return Err(js_error(
+            return Err(JsError::new(
                 "Transaction already active. Commit or rollback before starting a new one.",
             ));
         }
-        let mut session = self.db().session();
-        session.begin_transaction().map_err(database_error)?;
+        let mut session = self.inner.session();
+        session
+            .begin_transaction()
+            .map_err(|e| JsError::new(&e.to_string()))?;
         *self.tx.borrow_mut() = Some(session);
         Ok(())
     }
@@ -156,13 +105,13 @@ impl Database {
     /// Returns `JsError` if the database is closed, no transaction is active,
     /// or the commit fails (e.g., serializable-isolation conflict).
     #[wasm_bindgen(js_name = "commitTransaction")]
-    pub fn commit_transaction(&self) -> Result<(), JsValue> {
+    pub fn commit_transaction(&self) -> Result<(), JsError> {
         self.check_open()?;
         let mut tx_slot = self.tx.borrow_mut();
         let session = tx_slot
             .as_mut()
             .ok_or_else(|| JsError::new("No active transaction to commit."))?;
-        session.commit().map_err(database_error)?;
+        session.commit().map_err(|e| JsError::new(&e.to_string()))?;
         *tx_slot = None;
         Ok(())
     }
@@ -174,13 +123,15 @@ impl Database {
     /// Returns `JsError` if the database is closed, no transaction is active,
     /// or the rollback fails.
     #[wasm_bindgen(js_name = "rollbackTransaction")]
-    pub fn rollback_transaction(&self) -> Result<(), JsValue> {
+    pub fn rollback_transaction(&self) -> Result<(), JsError> {
         self.check_open()?;
         let mut tx_slot = self.tx.borrow_mut();
         let session = tx_slot
             .as_mut()
             .ok_or_else(|| JsError::new("No active transaction to roll back."))?;
-        session.rollback().map_err(database_error)?;
+        session
+            .rollback()
+            .map_err(|e| JsError::new(&e.to_string()))?;
         *tx_slot = None;
         Ok(())
     }
@@ -205,13 +156,13 @@ impl Database {
         if let Some(mut session) = self.tx.borrow_mut().take() {
             let _ = session.rollback();
         }
-        self.db().clear_plan_cache();
+        self.inner.clear_plan_cache();
         self.closed.set(true);
     }
 
-    fn check_open(&self) -> Result<(), JsValue> {
+    fn check_open(&self) -> Result<(), JsError> {
         if self.closed.get() {
-            return Err(js_error(
+            return Err(JsError::new(
                 "Database is closed. Create a new instance with `new Database()` or \
                  `Database.importSnapshot()` to continue.",
             ));
@@ -221,13 +172,17 @@ impl Database {
 
     /// Runs a GQL query, routing through the active transaction session when
     /// one exists so uncommitted writes remain visible to the caller.
-    fn run_query(&self, query: &str) -> Result<grafeo_engine::database::QueryResult, JsValue> {
+    fn run_query(&self, query: &str) -> Result<grafeo_engine::database::QueryResult, JsError> {
         let tx_slot = self.tx.borrow();
         if let Some(session) = tx_slot.as_ref() {
-            session.execute(query).map_err(database_error)
+            session
+                .execute(query)
+                .map_err(|e| JsError::new(&e.to_string()))
         } else {
             drop(tx_slot);
-            self.db().execute(query).map_err(database_error)
+            self.inner
+                .execute(query)
+                .map_err(|e| JsError::new(&e.to_string()))
         }
     }
 
@@ -238,17 +193,17 @@ impl Database {
         query: &str,
         language: &str,
         params: Option<HashMap<String, Value>>,
-    ) -> Result<grafeo_engine::database::QueryResult, JsValue> {
+    ) -> Result<grafeo_engine::database::QueryResult, JsError> {
         let tx_slot = self.tx.borrow();
         if let Some(session) = tx_slot.as_ref() {
             session
                 .execute_language(query, language, params)
-                .map_err(database_error)
+                .map_err(|e| JsError::new(&e.to_string()))
         } else {
             drop(tx_slot);
-            self.db()
+            self.inner
                 .execute_language(query, language, params)
-                .map_err(database_error)
+                .map_err(|e| JsError::new(&e.to_string()))
         }
     }
 
@@ -264,104 +219,42 @@ impl Database {
     /// # Errors
     ///
     /// Returns `JsError` if the query fails to parse or execute.
-    pub fn execute(&self, query: &str) -> Result<JsValue, JsValue> {
+    pub fn execute(&self, query: &str) -> Result<JsValue, JsError> {
         self.check_open()?;
         let result = self.run_query(query)?;
 
-        Ok(rows_to_js(&result))
+        let rows = Array::new_with_length(result.rows().len() as u32);
+        for (i, row) in result.rows().iter().enumerate() {
+            rows.set(i as u32, types::row_to_js_object(&result.columns, row));
+        }
+        Ok(rows.into())
     }
 
     /// Executes a GQL query and returns raw columns, rows, and metadata.
     ///
-    /// Returns `{ columns: string[], rows: any[][], executionTimeMs?: number,
-    /// counters, profile? }`, `profile` for a `PROFILE` statement only.
-    ///
-    /// # Stability: Experimental
-    ///
-    /// The `profile` key only: new in 0.6.0, its operators and keys may still
-    /// change. The rest is stable. See <https://grafeo.dev/stability/>.
+    /// Returns `{ columns: string[], rows: any[][], executionTimeMs?: number }`.
     ///
     /// # Errors
     ///
     /// Returns `JsError` if the query fails to parse or execute.
     #[wasm_bindgen(js_name = "executeRaw")]
-    pub fn execute_raw(&self, query: &str) -> Result<JsValue, JsValue> {
+    pub fn execute_raw(&self, query: &str) -> Result<JsValue, JsError> {
         self.check_open()?;
         let result = self.run_query(query)?;
 
         Ok(raw_result_to_js(&result))
     }
 
-    /// The edges of a node as `[neighborId, edgeId]` pairs, without a query:
-    /// `options.direction` is `"out"` (default), `"in"` or `"both"` (which
-    /// lists a self-loop once), and `options.edgeTypes` keeps only those
-    /// types. Reads through the open transaction when there is one; a node
-    /// that does not exist has none.
-    ///
-    /// ```js
-    /// for (const [neighbor, edge] of db.getNodeEdges(alix, { edgeTypes: ["KNOWS"] })) { }
-    /// ```
-    ///
-    /// # Errors
-    ///
-    /// Returns `JsError` if the database is closed, the ID is not a whole
-    /// number, or the options are malformed.
-    #[cfg(feature = "lpg-model")]
-    #[wasm_bindgen(js_name = "getNodeEdges")]
-    pub fn get_node_edges(&self, id: f64, options: JsValue) -> Result<JsValue, JsValue> {
-        self.check_open()?;
-        let node = node_id(id)?;
-        let options: NodeEdgesOptions = if options.is_undefined() || options.is_null() {
-            NodeEdgesOptions::default()
-        } else {
-            serde_wasm_bindgen::from_value(options)
-                .map_err(|e| JsError::new(&format!("Invalid options: {e}")))?
-        };
-        let direction = match options.direction.as_deref() {
-            None | Some("out" | "outgoing") => grafeo_engine::Direction::Outgoing,
-            Some("in" | "incoming") => grafeo_engine::Direction::Incoming,
-            Some("both") => grafeo_engine::Direction::Both,
-            Some(other) => {
-                return Err(js_error(&format!(
-                    "direction must be 'out', 'in' or 'both', not '{other}'"
-                )));
-            }
-        };
-        let edge_types = options.edge_types.unwrap_or_default();
-        let edge_types: Vec<&str> = edge_types.iter().map(String::as_str).collect();
-        let edges = match self.tx.borrow().as_ref() {
-            Some(session) => session.get_node_edges(node, direction, &edge_types),
-            None => self.db().get_node_edges(node, direction, &edge_types),
-        }
-        .map_err(database_error)?;
-        let array = Array::new_with_length(edges.len() as u32);
-        for (i, (neighbor, edge)) in edges.iter().enumerate() {
-            let pair = Array::new_with_length(2);
-            pair.set(0, id_to_js(neighbor.as_u64())?);
-            pair.set(1, id_to_js(edge.as_u64())?);
-            array.set(i as u32, pair.into());
-        }
-        Ok(array.into())
-    }
-
     /// Returns the number of nodes in the database.
-    ///
-    /// # Errors
-    ///
-    /// Throws the error of a read the store cannot do.
     #[wasm_bindgen(js_name = "nodeCount")]
-    pub fn node_count(&self) -> Result<usize, JsValue> {
-        self.db().node_count().map_err(database_error)
+    pub fn node_count(&self) -> usize {
+        self.inner.node_count()
     }
 
     /// Returns the number of edges in the database.
-    ///
-    /// # Errors
-    ///
-    /// Throws the error of a read the store cannot do.
     #[wasm_bindgen(js_name = "edgeCount")]
-    pub fn edge_count(&self) -> Result<usize, JsValue> {
-        self.db().edge_count().map_err(database_error)
+    pub fn edge_count(&self) -> usize {
+        self.inner.edge_count()
     }
 
     /// Clears all cached query plans.
@@ -369,7 +262,7 @@ impl Database {
     /// Forces re-parsing and re-optimization on next execution.
     #[wasm_bindgen(js_name = "clearPlanCache")]
     pub fn clear_plan_cache(&self) {
-        self.db().clear_plan_cache();
+        self.inner.clear_plan_cache();
     }
 
     /// Executes a query using a specific query language.
@@ -388,7 +281,7 @@ impl Database {
     ///
     /// Returns `JsError` if the language is unsupported or the query fails to parse or execute.
     #[wasm_bindgen(js_name = "executeWithLanguage")]
-    pub fn execute_with_language(&self, query: &str, language: &str) -> Result<JsValue, JsValue> {
+    pub fn execute_with_language(&self, query: &str, language: &str) -> Result<JsValue, JsError> {
         self.execute_language_impl(query, language, None)
     }
 
@@ -406,9 +299,11 @@ impl Database {
     ///
     /// Returns `JsError` if snapshot serialisation fails.
     #[wasm_bindgen(js_name = "exportSnapshot")]
-    pub fn export_snapshot(&self) -> Result<Vec<u8>, JsValue> {
+    pub fn export_snapshot(&self) -> Result<Vec<u8>, JsError> {
         self.check_open()?;
-        self.db().export_snapshot().map_err(database_error)
+        self.inner
+            .export_snapshot()
+            .map_err(|e| JsError::new(&e.to_string()))
     }
 
     /// Exports the database to a tamper-evident binary snapshot.
@@ -438,14 +333,17 @@ impl Database {
     ///
     /// Returns `JsError` if the key is empty or snapshot serialisation fails.
     #[wasm_bindgen(js_name = "exportSnapshotSigned")]
-    pub fn export_snapshot_signed(&self, key: &[u8]) -> Result<Vec<u8>, JsValue> {
+    pub fn export_snapshot_signed(&self, key: &[u8]) -> Result<Vec<u8>, JsError> {
         self.check_open()?;
         if key.is_empty() {
-            return Err(js_error(
+            return Err(JsError::new(
                 "exportSnapshotSigned: key must not be empty (recommended: 32 random bytes)",
             ));
         }
-        let payload = self.db().export_snapshot().map_err(database_error)?;
+        let payload = self
+            .inner
+            .export_snapshot()
+            .map_err(|e| JsError::new(&e.to_string()))?;
         Ok(signed_snapshot::wrap(key, &payload))
     }
 
@@ -461,22 +359,26 @@ impl Database {
     ///
     /// Returns `JsError` if `data` is not a valid snapshot or deserialisation fails.
     #[wasm_bindgen(js_name = "importSnapshot")]
-    pub fn import_snapshot(data: &[u8]) -> Result<Database, JsValue> {
+    pub fn import_snapshot(data: &[u8]) -> Result<Database, JsError> {
         utils::set_panic_hook();
         if data.len() > signed_snapshot::MAX_SNAPSHOT_BYTES {
-            return Err(js_error(&format!(
+            return Err(JsError::new(&format!(
                 "importSnapshot: snapshot exceeds {} MiB limit",
                 signed_snapshot::MAX_SNAPSHOT_BYTES / (1024 * 1024)
             )));
         }
         if signed_snapshot::looks_signed(data) {
-            return Err(js_error(
+            return Err(JsError::new(
                 "importSnapshot: this snapshot was produced by exportSnapshotSigned. \
                  Use importSnapshotSigned(data, key) to verify and restore it.",
             ));
         }
-        let inner = GrafeoDB::import_snapshot(data).map_err(database_error)?;
-        Ok(Database::from_engine(inner))
+        let inner = GrafeoDB::import_snapshot(data).map_err(|e| JsError::new(&e.to_string()))?;
+        Ok(Database {
+            inner,
+            tx: RefCell::new(None),
+            closed: Cell::new(false),
+        })
     }
 
     /// Creates a database from a tamper-evident binary snapshot.
@@ -495,20 +397,24 @@ impl Database {
     /// limit, the header is missing, the MAC does not verify, or
     /// deserialisation fails.
     #[wasm_bindgen(js_name = "importSnapshotSigned")]
-    pub fn import_snapshot_signed(data: &[u8], key: &[u8]) -> Result<Database, JsValue> {
+    pub fn import_snapshot_signed(data: &[u8], key: &[u8]) -> Result<Database, JsError> {
         utils::set_panic_hook();
         if key.is_empty() {
-            return Err(js_error("importSnapshotSigned: key must not be empty"));
+            return Err(JsError::new("importSnapshotSigned: key must not be empty"));
         }
         if data.len() > signed_snapshot::MAX_SNAPSHOT_BYTES {
-            return Err(js_error(&format!(
+            return Err(JsError::new(&format!(
                 "importSnapshotSigned: snapshot exceeds {} MiB limit",
                 signed_snapshot::MAX_SNAPSHOT_BYTES / (1024 * 1024)
             )));
         }
         let payload = signed_snapshot::unwrap(key, data).map_err(|msg| JsError::new(&msg))?;
-        let inner = GrafeoDB::import_snapshot(payload).map_err(database_error)?;
-        Ok(Database::from_engine(inner))
+        let inner = GrafeoDB::import_snapshot(payload).map_err(|e| JsError::new(&e.to_string()))?;
+        Ok(Database {
+            inner,
+            tx: RefCell::new(None),
+            closed: Cell::new(false),
+        })
     }
 
     /// Returns schema information about the database.
@@ -522,11 +428,10 @@ impl Database {
     ///
     /// # Errors
     ///
-    /// Returns `JsError` if the schema info cannot be serialised to a JS value,
-    /// and the error of a read the store cannot do.
-    pub fn schema(&self) -> Result<JsValue, JsValue> {
-        let info = self.db().schema().map_err(database_error)?;
-        serde_wasm_bindgen::to_value(&info).map_err(|e| js_error(&e.to_string()))
+    /// Returns `JsError` if the schema info cannot be serialised to a JS value.
+    pub fn schema(&self) -> Result<JsValue, JsError> {
+        let info = self.inner.schema();
+        serde_wasm_bindgen::to_value(&info).map_err(|e| JsError::new(&e.to_string()))
     }
 
     /// Creates a text index on a label+property pair for full-text (BM25) search.
@@ -553,7 +458,7 @@ impl Database {
         label: &str,
         property: &str,
         options: Option<JsValue>,
-    ) -> Result<(), JsValue> {
+    ) -> Result<(), JsError> {
         let opts: TextIndexOptionsJs = match options {
             Some(options) if !options.is_undefined() && !options.is_null() => {
                 serde_wasm_bindgen::from_value(options)
@@ -567,10 +472,10 @@ impl Database {
             opts.tokenizer.as_deref(),
             opts.stop_words.as_deref(),
         )
-        .map_err(database_error)?;
-        self.db()
+        .map_err(|e| JsError::new(&e.to_string()))?;
+        self.inner
             .create_text_index_with(label, property, options)
-            .map_err(database_error)
+            .map_err(|e| JsError::new(&e.to_string()))
     }
 
     /// Drops a text index on a label+property pair.
@@ -582,10 +487,10 @@ impl Database {
     /// Returns `JsError` if the index cannot be dropped.
     #[cfg(feature = "text-index")]
     #[wasm_bindgen(js_name = "dropTextIndex")]
-    pub fn drop_text_index(&self, label: &str, property: &str) -> Result<bool, JsValue> {
-        self.db()
+    pub fn drop_text_index(&self, label: &str, property: &str) -> Result<bool, JsError> {
+        self.inner
             .drop_text_index(label, property)
-            .map_err(database_error)
+            .map_err(|e| JsError::new(&e.to_string()))
     }
 
     /// Rebuilds a text index by re-scanning all matching nodes.
@@ -597,10 +502,10 @@ impl Database {
     /// Returns `JsError` if no text index exists for the given label and property, or if rebuilding fails.
     #[cfg(feature = "text-index")]
     #[wasm_bindgen(js_name = "rebuildTextIndex")]
-    pub fn rebuild_text_index(&self, label: &str, property: &str) -> Result<(), JsValue> {
-        self.db()
+    pub fn rebuild_text_index(&self, label: &str, property: &str) -> Result<(), JsError> {
+        self.inner
             .rebuild_text_index(label, property)
-            .map_err(database_error)
+            .map_err(|e| JsError::new(&e.to_string()))
     }
 
     /// Performs full-text search using BM25 ranking.
@@ -631,13 +536,23 @@ impl Database {
         query: &str,
         k: usize,
         options: Option<JsValue>,
-    ) -> Result<JsValue, JsValue> {
-        let raw_options = options.unwrap_or(JsValue::UNDEFINED);
-        let filters = search_filters(&raw_options)?;
+    ) -> Result<JsValue, JsError> {
+        let opts: SearchFilterOptions = match options {
+            Some(options) if !options.is_undefined() && !options.is_null() => {
+                serde_wasm_bindgen::from_value(options)
+                    .map_err(|e| JsError::new(&format!("Invalid options: {e}")))?
+            }
+            _ => SearchFilterOptions::default(),
+        };
+        let filters = opts.filters.as_ref().map(|f| {
+            f.iter()
+                .map(|(k, v)| (k.clone(), json_to_value(v)))
+                .collect::<HashMap<String, Value>>()
+        });
         let results = self
-            .db()
+            .inner
             .text_search(label, property, query, k, filters.as_ref())
-            .map_err(database_error)?;
+            .map_err(|e| JsError::new(&e.to_string()))?;
 
         let arr = Array::new_with_length(results.len() as u32);
         for (i, (id, score)) in results.iter().enumerate() {
@@ -685,12 +600,22 @@ impl Database {
         query_text: &str,
         k: usize,
         options: Option<JsValue>,
-    ) -> Result<JsValue, JsValue> {
-        let raw_options = options.unwrap_or(JsValue::UNDEFINED);
-        let filters = search_filters(&raw_options)?;
+    ) -> Result<JsValue, JsError> {
+        let opts: SearchFilterOptions = match options {
+            Some(options) if !options.is_undefined() && !options.is_null() => {
+                serde_wasm_bindgen::from_value(options)
+                    .map_err(|e| JsError::new(&format!("Invalid options: {e}")))?
+            }
+            _ => SearchFilterOptions::default(),
+        };
+        let filters = opts.filters.as_ref().map(|f| {
+            f.iter()
+                .map(|(k, v)| (k.clone(), json_to_value(v)))
+                .collect::<HashMap<String, Value>>()
+        });
 
         let results = self
-            .db()
+            .inner
             .hybrid_search(
                 label,
                 text_property,
@@ -701,7 +626,7 @@ impl Database {
                 None,
                 filters.as_ref(),
             )
-            .map_err(database_error)?;
+            .map_err(|e| JsError::new(&e.to_string()))?;
 
         let arr = Array::new_with_length(results.len() as u32);
         for (i, (id, score)) in results.iter().enumerate() {
@@ -746,7 +671,7 @@ impl Database {
         label: &str,
         property: &str,
         options: JsValue,
-    ) -> Result<(), JsValue> {
+    ) -> Result<(), JsError> {
         let opts: VectorIndexOptions = if options.is_undefined() || options.is_null() {
             VectorIndexOptions::default()
         } else {
@@ -754,7 +679,7 @@ impl Database {
                 .map_err(|e| JsError::new(&format!("Invalid options: {e}")))?
         };
 
-        self.db()
+        self.inner
             .create_vector_index(
                 label,
                 property,
@@ -764,7 +689,7 @@ impl Database {
                 opts.ef_construction,
                 opts.quantization.as_deref(),
             )
-            .map_err(database_error)
+            .map_err(|e| JsError::new(&e.to_string()))
     }
 
     /// Drops a vector index on a label+property pair.
@@ -776,10 +701,10 @@ impl Database {
     /// Returns `JsError` if the index cannot be dropped.
     #[cfg(feature = "vector-index")]
     #[wasm_bindgen(js_name = "dropVectorIndex")]
-    pub fn drop_vector_index(&self, label: &str, property: &str) -> Result<bool, JsValue> {
-        self.db()
+    pub fn drop_vector_index(&self, label: &str, property: &str) -> Result<bool, JsError> {
+        self.inner
             .drop_vector_index(label, property)
-            .map_err(database_error)
+            .map_err(|e| JsError::new(&e.to_string()))
     }
 
     /// Rebuilds a vector index by re-scanning all matching nodes.
@@ -792,10 +717,10 @@ impl Database {
     /// Returns `JsError` if no vector index exists for the given label and property, or if rebuilding fails.
     #[cfg(feature = "vector-index")]
     #[wasm_bindgen(js_name = "rebuildVectorIndex")]
-    pub fn rebuild_vector_index(&self, label: &str, property: &str) -> Result<(), JsValue> {
-        self.db()
+    pub fn rebuild_vector_index(&self, label: &str, property: &str) -> Result<(), JsError> {
+        self.inner
             .rebuild_vector_index(label, property)
-            .map_err(database_error)
+            .map_err(|e| JsError::new(&e.to_string()))
     }
 
     /// Performs k-nearest-neighbor vector search.
@@ -821,8 +746,7 @@ impl Database {
         query: &[f32],
         k: usize,
         options: JsValue,
-    ) -> Result<JsValue, JsValue> {
-        let raw_options = options.clone();
+    ) -> Result<JsValue, JsError> {
         let opts: VectorSearchOptions = if options.is_undefined() || options.is_null() {
             VectorSearchOptions::default()
         } else {
@@ -830,60 +754,18 @@ impl Database {
                 .map_err(|e| JsError::new(&format!("Invalid options: {e}")))?
         };
 
-        let filters = search_filters(&raw_options)?;
+        let filters = opts.filters.as_ref().map(|f| {
+            f.iter()
+                .map(|(k, v)| (k.clone(), json_to_value(v)))
+                .collect::<HashMap<String, Value>>()
+        });
 
         let results = self
-            .db()
+            .inner
             .vector_search(label, property, query, k, opts.ef, filters.as_ref())
-            .map_err(database_error)?;
+            .map_err(|e| JsError::new(&e.to_string()))?;
 
         Ok(vector_results_to_js(&results))
-    }
-
-    /// Searches several query vectors of one dimension at once.
-    /// `options.ef` sets the search width (default: the index's) and
-    /// `options.filters` keeps only nodes whose properties equal the given
-    /// values. Returns one `[{id, distance}]` array per query, nearest first.
-    ///
-    /// ```js
-    /// const results = db.batchVectorSearch("Doc", "embedding", [[1, 0], [0, 1]], 5);
-    /// ```
-    ///
-    /// # Errors
-    ///
-    /// Returns `JsError` if the arguments are malformed, no vector index
-    /// exists, or the search fails.
-    #[cfg(feature = "vector-index")]
-    #[wasm_bindgen(js_name = "batchVectorSearch")]
-    pub fn batch_vector_search(
-        &self,
-        label: &str,
-        property: &str,
-        queries: JsValue,
-        k: usize,
-        options: JsValue,
-    ) -> Result<JsValue, JsValue> {
-        self.check_open()?;
-        let queries: Vec<Vec<f32>> = serde_wasm_bindgen::from_value(queries).map_err(|e| {
-            JsError::new(&format!("queries must be an array of number arrays: {e}"))
-        })?;
-        let raw_options = options.clone();
-        let options: BatchSearchOptions = if options.is_undefined() || options.is_null() {
-            BatchSearchOptions::default()
-        } else {
-            serde_wasm_bindgen::from_value(options)
-                .map_err(|e| JsError::new(&format!("Invalid options: {e}")))?
-        };
-        let filters = search_filters(&raw_options)?;
-        let results = self
-            .db()
-            .batch_vector_search(label, property, &queries, k, options.ef, filters.as_ref())
-            .map_err(database_error)?;
-        let array = Array::new_with_length(results.len() as u32);
-        for (i, hits) in results.iter().enumerate() {
-            array.set(i as u32, vector_results_to_js(hits));
-        }
-        Ok(array.into())
     }
 
     /// Performs Maximal Marginal Relevance search for diverse results.
@@ -909,8 +791,7 @@ impl Database {
         query: &[f32],
         k: usize,
         options: JsValue,
-    ) -> Result<JsValue, JsValue> {
-        let raw_options = options.clone();
+    ) -> Result<JsValue, JsError> {
         let opts: MmrSearchOptions = if options.is_undefined() || options.is_null() {
             MmrSearchOptions::default()
         } else {
@@ -918,10 +799,14 @@ impl Database {
                 .map_err(|e| JsError::new(&format!("Invalid options: {e}")))?
         };
 
-        let filters = search_filters(&raw_options)?;
+        let filters = opts.filters.as_ref().map(|f| {
+            f.iter()
+                .map(|(k, v)| (k.clone(), json_to_value(v)))
+                .collect::<HashMap<String, Value>>()
+        });
 
         let results = self
-            .db()
+            .inner
             .mmr_search(
                 label,
                 property,
@@ -932,7 +817,7 @@ impl Database {
                 opts.ef,
                 filters.as_ref(),
             )
-            .map_err(database_error)?;
+            .map_err(|e| JsError::new(&e.to_string()))?;
 
         Ok(vector_results_to_js(&results))
     }
@@ -953,7 +838,7 @@ impl Database {
     ///
     /// Returns `JsError` if `params` is not a valid object, or if the query fails to parse or execute.
     #[wasm_bindgen(js_name = "executeWithParams")]
-    pub fn execute_with_params(&self, query: &str, params: JsValue) -> Result<JsValue, JsValue> {
+    pub fn execute_with_params(&self, query: &str, params: JsValue) -> Result<JsValue, JsError> {
         self.execute_language_impl(query, "gql", Some(params))
     }
 
@@ -978,7 +863,7 @@ impl Database {
         query: &str,
         language: &str,
         params: JsValue,
-    ) -> Result<JsValue, JsValue> {
+    ) -> Result<JsValue, JsError> {
         self.execute_language_impl(query, language, Some(params))
     }
 
@@ -995,7 +880,7 @@ impl Database {
     /// Returns `JsError` if the Cypher query fails to parse or execute.
     #[cfg(feature = "cypher")]
     #[wasm_bindgen(js_name = "executeCypher")]
-    pub fn execute_cypher(&self, query: &str) -> Result<JsValue, JsValue> {
+    pub fn execute_cypher(&self, query: &str) -> Result<JsValue, JsError> {
         self.execute_language_impl(query, "cypher", None)
     }
 
@@ -1012,7 +897,7 @@ impl Database {
     /// Returns `JsError` if the Gremlin query fails to parse or execute.
     #[cfg(feature = "gremlin")]
     #[wasm_bindgen(js_name = "executeGremlin")]
-    pub fn execute_gremlin(&self, query: &str) -> Result<JsValue, JsValue> {
+    pub fn execute_gremlin(&self, query: &str) -> Result<JsValue, JsError> {
         self.execute_language_impl(query, "gremlin", None)
     }
 
@@ -1029,7 +914,7 @@ impl Database {
     /// Returns `JsError` if the GraphQL query fails to parse or execute.
     #[cfg(feature = "graphql")]
     #[wasm_bindgen(js_name = "executeGraphql")]
-    pub fn execute_graphql(&self, query: &str) -> Result<JsValue, JsValue> {
+    pub fn execute_graphql(&self, query: &str) -> Result<JsValue, JsError> {
         self.execute_language_impl(query, "graphql", None)
     }
 
@@ -1046,7 +931,7 @@ impl Database {
     /// Returns `JsError` if the SPARQL query fails to parse or execute.
     #[cfg(feature = "sparql")]
     #[wasm_bindgen(js_name = "executeSparql")]
-    pub fn execute_sparql(&self, query: &str) -> Result<JsValue, JsValue> {
+    pub fn execute_sparql(&self, query: &str) -> Result<JsValue, JsError> {
         self.execute_language_impl(query, "sparql", None)
     }
 
@@ -1063,7 +948,7 @@ impl Database {
     /// Returns `JsError` if the SQL/PGQ query fails to parse or execute.
     #[cfg(feature = "sql-pgq")]
     #[wasm_bindgen(js_name = "executeSql")]
-    pub fn execute_sql(&self, query: &str) -> Result<JsValue, JsValue> {
+    pub fn execute_sql(&self, query: &str) -> Result<JsValue, JsError> {
         self.execute_language_impl(query, "sql", None)
     }
 
@@ -1085,7 +970,7 @@ impl Database {
         &self,
         query: &str,
         language: &str,
-    ) -> Result<JsValue, JsValue> {
+    ) -> Result<JsValue, JsError> {
         self.check_open()?;
         // In the open transaction, if there is one, like the other execute methods.
         let result = self.run_language_query(query, language, None)?;
@@ -1108,7 +993,7 @@ impl Database {
         &self,
         query: &str,
         params: JsValue,
-    ) -> Result<JsValue, JsValue> {
+    ) -> Result<JsValue, JsError> {
         self.execute_raw_with_language_and_params(query, "gql", params)
     }
 
@@ -1132,7 +1017,7 @@ impl Database {
         query: &str,
         language: &str,
         params: JsValue,
-    ) -> Result<JsValue, JsValue> {
+    ) -> Result<JsValue, JsError> {
         self.check_open()?;
         let param_map = Self::convert_params(Some(params))?;
         let result = self.run_language_query(query, language, param_map)?;
@@ -1164,54 +1049,34 @@ impl Database {
     /// # Errors
     ///
     /// Returns `JsError` if `data` cannot be deserialised or if an edge references an out-of-bounds node index.
-    /// The import is one transaction: after an error nothing of it is kept.
     #[wasm_bindgen(js_name = "importLpg")]
-    pub fn import_lpg(&self, data: JsValue) -> Result<JsValue, JsValue> {
-        let import: LpgImport = serde_wasm_bindgen::from_value(data.clone())
+    pub fn import_lpg(&self, data: JsValue) -> Result<JsValue, JsError> {
+        let import: LpgImport = serde_wasm_bindgen::from_value(data)
             .map_err(|e| JsError::new(&format!("Invalid LPG data: {e}")))?;
-        // The properties straight from the JavaScript value, as a property is
-        // (through JSON a BigInt past u64 would not convert).
-        let array = |key: &str| {
-            let items = types::js_field(&data, key);
-            if Array::is_array(&items) {
-                Array::from(&items)
-            } else {
-                Array::new()
-            }
-        };
-        let raw_nodes = array("nodes");
-        let raw_edges = array("edges");
-        let properties = |items: &Array, i: u32, what: &str| {
-            types::js_properties(&types::js_field(&items.get(i), "properties"))
-                .map(|entries| {
-                    entries
-                        .into_iter()
-                        .map(|(key, value)| (PropertyKey::new(key), value))
-                        .collect::<Vec<_>>()
-                })
-                .map_err(|error| js_error(&format!("{what}[{i}]: {error}")))
-        };
-
-        // One transaction: a node or edge that fails, or an edge index out of
-        // bounds, rolls back everything before it (the session's drop rolls
-        // back).
-        let mut session = self.db().session();
-        session.begin_transaction().map_err(database_error)?;
 
         // Phase 1: create all nodes, collecting their IDs
         let mut node_ids = Vec::with_capacity(import.nodes.len());
-        for (i, node) in (0..).zip(&import.nodes) {
+        for node in &import.nodes {
             let labels: Vec<&str> = node.labels.iter().map(String::as_str).collect();
-            let props = properties(&raw_nodes, i, "nodes")?;
-            let id = session
+            let props: Vec<(PropertyKey, Value)> = node
+                .properties
+                .as_ref()
+                .map(|p| {
+                    p.iter()
+                        .map(|(k, v)| (PropertyKey::new(k.as_str()), json_to_value(v)))
+                        .collect()
+                })
+                .unwrap_or_default();
+            let id = self
+                .inner
                 .create_node_with_props(&labels, props)
-                .map_err(database_error)?;
+                .map_err(|e| JsError::new(&e.to_string()))?;
             node_ids.push(id);
         }
 
         // Phase 2: create edges using index-relative source/target
         let mut edge_count: u32 = 0;
-        for (i, edge) in (0..).zip(&import.edges) {
+        for (i, edge) in import.edges.iter().enumerate() {
             let src = *node_ids.get(edge.source).ok_or_else(|| {
                 JsError::new(&format!(
                     "edges[{i}].source index {} out of bounds (0..{})",
@@ -1226,13 +1091,20 @@ impl Database {
                     node_ids.len()
                 ))
             })?;
-            let props = properties(&raw_edges, i, "edges")?;
-            session
+            let props: Vec<(PropertyKey, Value)> = edge
+                .properties
+                .as_ref()
+                .map(|p| {
+                    p.iter()
+                        .map(|(k, v)| (PropertyKey::new(k.as_str()), json_to_value(v)))
+                        .collect()
+                })
+                .unwrap_or_default();
+            self.inner
                 .create_edge_with_props(src, dst, &edge.edge_type, props)
-                .map_err(database_error)?;
+                .map_err(|e| JsError::new(&e.to_string()))?;
             edge_count += 1;
         }
-        session.commit().map_err(database_error)?;
 
         let result = js_sys::Object::new();
         let _ = js_sys::Reflect::set(
@@ -1284,7 +1156,7 @@ impl Database {
     /// Returns `JsError` if `data` cannot be deserialised as an RDF import payload.
     #[cfg(feature = "rdf")]
     #[wasm_bindgen(js_name = "importRdf")]
-    pub fn import_rdf(&self, data: JsValue) -> Result<JsValue, JsValue> {
+    pub fn import_rdf(&self, data: JsValue) -> Result<JsValue, JsError> {
         use grafeo_core::graph::rdf::Term;
 
         let import: RdfImport = serde_wasm_bindgen::from_value(data)
@@ -1313,9 +1185,9 @@ impl Database {
         });
 
         let inserted = self
-            .db()
+            .inner
             .batch_insert_rdf(triples)
-            .map_err(database_error)?;
+            .map_err(|e| JsError::new(&e.to_string()))?;
 
         let result = js_sys::Object::new();
         let _ = js_sys::Reflect::set(
@@ -1339,43 +1211,40 @@ impl Database {
     /// console.log(`Indexes: ${usage.indexes.total_bytes} bytes`);
     /// ```
     ///
-    /// # Stability: Experimental
-    ///
-    /// The call is stable; the keys and what each one counts follow the
-    /// storage engine and may change in any release. See <https://grafeo.dev/stability/>.
-    ///
     /// # Errors
     ///
     /// Returns `JsError` if the memory usage data cannot be serialised to a JS value.
     #[wasm_bindgen(js_name = "memoryUsage")]
-    pub fn memory_usage(&self) -> Result<JsValue, JsValue> {
-        let usage = self.db().memory_usage();
-        serde_wasm_bindgen::to_value(&usage).map_err(|e| js_error(&e.to_string()))
+    pub fn memory_usage(&self) -> Result<JsValue, JsError> {
+        let usage = self.inner.memory_usage();
+        serde_wasm_bindgen::to_value(&usage).map_err(|e| JsError::new(&e.to_string()))
     }
 
     /// Returns high-level database information (counts, mode, features).
     ///
     /// # Errors
     ///
-    /// Returns `JsError` if the info data cannot be serialised to a JS value,
-    /// and the error of a read the store cannot do.
-    pub fn info(&self) -> Result<JsValue, JsValue> {
-        let info = self.db().info().map_err(database_error)?;
-        serde_wasm_bindgen::to_value(&info).map_err(|e| js_error(&e.to_string()))
+    /// Returns `JsError` if the info data cannot be serialised to a JS value.
+    pub fn info(&self) -> Result<JsValue, JsError> {
+        let info = self.inner.info();
+        serde_wasm_bindgen::to_value(&info).map_err(|e| JsError::new(&e.to_string()))
     }
 
     /// Compacts the database: drops the old versions no open transaction can
     /// see any more (a database in memory, as every WASM database is, writes
     /// no checkpoint), and returns what it did:
-    /// `{checkpointed, versions_collected, rows_compressed, duration_ms}`. `compact()` no
+    /// `{checkpointed, versions_collected, duration_ms}`. `compact()` no
     /// longer builds a separate columnar store.
     ///
     /// # Errors
     ///
     /// Returns `JsError` after a commit that did not complete.
-    pub fn compact(&self) -> Result<JsValue, JsValue> {
-        let report = self.inner.borrow_mut().compact().map_err(database_error)?;
-        serde_wasm_bindgen::to_value(&report).map_err(|e| js_error(&e.to_string()))
+    pub fn compact(&mut self) -> Result<JsValue, JsError> {
+        let report = self
+            .inner
+            .compact()
+            .map_err(|e| JsError::new(&e.to_string()))?;
+        serde_wasm_bindgen::to_value(&report).map_err(|e| JsError::new(&e.to_string()))
     }
 
     /// Bulk-imports rows (array of objects) as nodes or edges.
@@ -1420,19 +1289,14 @@ impl Database {
     /// - `rows` is not an array of objects.
     /// - A required column (`label`, `edgeType`, `source`, `target`) is missing.
     /// - A source/target value is not a valid non-negative integer.
-    ///
-    /// The rows go in as one transaction: after an error none of them is kept.
     #[wasm_bindgen(js_name = "importRows")]
-    pub fn import_rows(&self, rows: JsValue, options: JsValue) -> Result<u32, JsValue> {
+    pub fn import_rows(&self, rows: JsValue, options: JsValue) -> Result<u32, JsError> {
         let opts: ImportRowsOptions = serde_wasm_bindgen::from_value(options)
             .map_err(|e| JsError::new(&format!("Invalid options: {e}")))?;
-        // Each row straight from the JavaScript value, as a property is.
-        let data = types::js_rows(&rows).map_err(|error| js_error(&error))?;
+        let data: Vec<serde_json::Map<String, serde_json::Value>> =
+            serde_wasm_bindgen::from_value(rows)
+                .map_err(|e| JsError::new(&format!("rows must be an array of objects: {e}")))?;
 
-        // One transaction: a row that fails rolls back every row before it
-        // (the session's drop rolls back).
-        let mut session = self.db().session();
-        session.begin_transaction().map_err(database_error)?;
         let mut count: u32 = 0;
 
         match opts.mode.as_str() {
@@ -1440,13 +1304,13 @@ impl Database {
                 let labels = opts.labels()?;
                 let label_refs: Vec<&str> = labels.iter().map(String::as_str).collect();
 
-                for row in data {
+                for row in &data {
                     let props: Vec<(PropertyKey, Value)> = row
-                        .into_iter()
+                        .iter()
                         .filter(|(_, v)| !v.is_null())
-                        .map(|(k, v)| (PropertyKey::new(k), v))
+                        .map(|(k, v)| (PropertyKey::new(k.as_str()), json_to_value(v)))
                         .collect();
-                    session
+                    self.inner
                         .create_node_with_props(&label_refs, props)
                         .map_err(|e| JsError::new(&format!("rows[{count}]: {e}")))?;
                     count += 1;
@@ -1460,38 +1324,38 @@ impl Database {
                 let source_col = opts.source.as_deref().unwrap_or("source");
                 let target_col = opts.target.as_deref().unwrap_or("target");
 
-                for (i, row) in data.into_iter().enumerate() {
-                    let column = |name: &str| {
-                        row.iter()
-                            .find(|(key, _)| key == name)
-                            .map(|(_, value)| value)
-                            .ok_or_else(|| {
-                                JsError::new(&format!("rows[{i}]: missing '{name}' column"))
-                            })
-                    };
-                    let src_id = value_to_node_id(column(source_col)?, source_col, i)?;
-                    let dst_id = value_to_node_id(column(target_col)?, target_col, i)?;
+                for (i, row) in data.iter().enumerate() {
+                    let src_val = row.get(source_col).ok_or_else(|| {
+                        JsError::new(&format!("rows[{i}]: missing '{source_col}' column"))
+                    })?;
+                    let dst_val = row.get(target_col).ok_or_else(|| {
+                        JsError::new(&format!("rows[{i}]: missing '{target_col}' column"))
+                    })?;
+
+                    let src_id = json_to_node_id(src_val, source_col, i)?;
+                    let dst_id = json_to_node_id(dst_val, target_col, i)?;
 
                     let props: Vec<(PropertyKey, Value)> = row
-                        .into_iter()
-                        .filter(|(k, v)| k != source_col && k != target_col && !v.is_null())
-                        .map(|(k, v)| (PropertyKey::new(k), v))
+                        .iter()
+                        .filter(|(k, v)| {
+                            k.as_str() != source_col && k.as_str() != target_col && !v.is_null()
+                        })
+                        .map(|(k, v)| (PropertyKey::new(k.as_str()), json_to_value(v)))
                         .collect();
 
-                    session
+                    self.inner
                         .create_edge_with_props(src_id, dst_id, edge_type, props)
                         .map_err(|e| JsError::new(&format!("rows[{i}]: {e}")))?;
                     count += 1;
                 }
             }
             other => {
-                return Err(js_error(&format!(
+                return Err(JsError::new(&format!(
                     "mode must be 'nodes' or 'edges', got '{other}'"
                 )));
             }
         }
 
-        session.commit().map_err(database_error)?;
         Ok(count)
     }
 
@@ -1517,7 +1381,7 @@ impl Database {
     /// ```
     #[wasm_bindgen(js_name = "setSchema")]
     pub fn set_schema(&self, name: &str) -> Result<(), JsValue> {
-        self.db()
+        self.inner
             .set_current_schema(Some(name))
             .map_err(|e| JsError::new(&e.to_string()).into())
     }
@@ -1527,13 +1391,13 @@ impl Database {
     /// Subsequent `execute()` calls will use the default (no-schema) namespace.
     #[wasm_bindgen(js_name = "resetSchema")]
     pub fn reset_schema(&self) {
-        let _ = self.db().set_current_schema(None);
+        let _ = self.inner.set_current_schema(None);
     }
 
     /// Returns the current schema name, or `undefined` if no schema is set.
     #[wasm_bindgen(js_name = "currentSchema")]
     pub fn current_schema(&self) -> Option<String> {
-        self.db().current_schema()
+        self.inner.current_schema()
     }
 
     // ── Graph projections ───────────────────────────────────────────────
@@ -1554,7 +1418,7 @@ impl Database {
         name: &str,
         node_labels: Option<Vec<String>>,
         edge_types: Option<Vec<String>>,
-    ) -> Result<bool, JsValue> {
+    ) -> Result<bool, JsError> {
         use grafeo_engine::ProjectionSpec;
 
         let mut spec = ProjectionSpec::new();
@@ -1564,21 +1428,21 @@ impl Database {
         if let Some(types) = edge_types.filter(|t| !t.is_empty()) {
             spec = spec.with_edge_types(types);
         }
-        self.db()
+        self.inner
             .create_projection(name, spec)
-            .map_err(database_error)
+            .map_err(|e| JsError::new(&e.to_string()))
     }
 
     /// Drops a named graph projection. Returns `true` if it existed.
     #[wasm_bindgen(js_name = "dropProjection")]
     pub fn drop_projection(&self, name: &str) -> bool {
-        self.db().drop_projection(name)
+        self.inner.drop_projection(name)
     }
 
     /// Returns the names of all graph projections.
     #[wasm_bindgen(js_name = "listProjections")]
     pub fn list_projections(&self) -> Vec<String> {
-        self.db().list_projections()
+        self.inner.list_projections()
     }
 }
 
@@ -1587,20 +1451,6 @@ impl Database {
 // ---------------------------------------------------------------------------
 
 impl Database {
-    /// A database around an engine, with no transaction open.
-    fn from_engine(db: GrafeoDB) -> Database {
-        Database {
-            inner: Rc::new(RefCell::new(db)),
-            tx: Rc::new(RefCell::new(None)),
-            closed: Rc::new(Cell::new(false)),
-        }
-    }
-
-    /// The engine, borrowed for one call.
-    fn db(&self) -> Ref<'_, GrafeoDB> {
-        self.inner.borrow()
-    }
-
     /// Shared implementation for all language-specific execute methods.
     ///
     /// Converts an optional JS params object to the internal
@@ -1611,123 +1461,35 @@ impl Database {
         query: &str,
         language: &str,
         params: Option<JsValue>,
-    ) -> Result<JsValue, JsValue> {
+    ) -> Result<JsValue, JsError> {
         self.check_open()?;
         let param_map = Self::convert_params(params)?;
         let result = self.run_language_query(query, language, param_map)?;
 
-        Ok(rows_to_js(&result))
+        let rows = Array::new_with_length(result.rows().len() as u32);
+        for (i, row) in result.rows().iter().enumerate() {
+            rows.set(i as u32, types::row_to_js_object(&result.columns, row));
+        }
+        Ok(rows.into())
     }
 
     /// Converts a JS params value (object or null/undefined) to an optional
     /// `HashMap<String, Value>` suitable for `execute_language`.
-    fn convert_params(params: Option<JsValue>) -> Result<Option<HashMap<String, Value>>, JsValue> {
+    fn convert_params(params: Option<JsValue>) -> Result<Option<HashMap<String, Value>>, JsError> {
         let Some(js_val) = params else {
             return Ok(None);
         };
         if js_val.is_null() || js_val.is_undefined() {
             return Ok(None);
         }
-        // Straight from the JavaScript value, as a property is: through JSON a
-        // BigInt past 64 bits would not convert and 2^53 would be a float.
-        let entries = types::js_entries(&js_val)
-            .ok_or_else(|| js_error("params must be an object"))?
-            .map_err(|error| js_error(&error))?;
-        let mut map = HashMap::with_capacity(entries.len());
-        for (name, value) in entries {
-            let value = types::js_to_value(&value)
-                .map_err(|error| js_error(&format!("parameter '{name}': {error}")))?;
-            map.insert(name, value);
-        }
-        Ok(Some(map))
+        let json_val: serde_json::Value =
+            serde_wasm_bindgen::from_value(js_val).map_err(|e| JsError::new(&e.to_string()))?;
+        json_params_to_map(Some(&json_val)).map_err(|e| JsError::new(&e))
     }
 }
 
-/// The `filters` of a search's options, converted from the JavaScript value
-/// as a property is; none when the options or the filters are absent.
-#[cfg(any(
-    feature = "text-index",
-    feature = "hybrid-search",
-    feature = "vector-index"
-))]
-fn search_filters(options: &JsValue) -> Result<Option<HashMap<String, Value>>, JsValue> {
-    if options.is_undefined() || options.is_null() {
-        return Ok(None);
-    }
-    let filters = types::js_field(options, "filters");
-    if filters.is_undefined() || filters.is_null() {
-        return Ok(None);
-    }
-    types::js_properties(&filters)
-        .map(|entries| Some(entries.into_iter().collect()))
-        .map_err(|error| js_error(&format!("filters: {error}")))
-}
-
-/// A `PROFILE` operator as `{operator, detail, rows, calls, selfTimeMs, timeMs, children}`.
-fn operator_profile_to_js(operator: &grafeo_engine::database::OperatorProfile) -> JsValue {
-    let obj = js_sys::Object::new();
-    let set = |key: &str, value: &JsValue| {
-        let _ = js_sys::Reflect::set(&obj, &JsValue::from_str(key), value);
-    };
-    set("operator", &JsValue::from_str(&operator.operator));
-    set("detail", &JsValue::from_str(&operator.detail));
-    #[allow(
-        clippy::cast_precision_loss,
-        reason = "wasm32 memory is at most 4 GiB, so an operator produces fewer than 2^32 rows and calls"
-    )]
-    {
-        set("rows", &JsValue::from_f64(operator.rows as f64));
-        set("calls", &JsValue::from_f64(operator.calls as f64));
-    }
-    set("selfTimeMs", &JsValue::from_f64(operator.self_time_ms));
-    set("timeMs", &JsValue::from_f64(operator.time_ms));
-    let children = Array::new();
-    for child in &operator.children {
-        children.push(&operator_profile_to_js(child));
-    }
-    set("children", &children);
-    obj.into()
-}
-
-/// A query result's rows as an array of objects keyed by column name, the
-/// shape of the `execute*` methods.
-fn rows_to_js(result: &grafeo_engine::database::QueryResult) -> JsValue {
-    let rows = Array::new_with_length(result.rows().len() as u32);
-    for (i, row) in result.rows().iter().enumerate() {
-        rows.set(i as u32, types::row_to_js_object(&result.columns, row));
-    }
-    rows.into()
-}
-
-/// What a write statement changed, as `{nodesCreated, nodesDeleted,
-/// edgesCreated, edgesDeleted, propertiesSet, labelsAdded, labelsRemoved}`.
-fn counters_to_js(counters: &grafeo_engine::database::WriteCounters) -> JsValue {
-    let obj = js_sys::Object::new();
-    for (name, count) in [
-        ("nodesCreated", counters.nodes_created),
-        ("nodesDeleted", counters.nodes_deleted),
-        ("edgesCreated", counters.edges_created),
-        ("edgesDeleted", counters.edges_deleted),
-        ("propertiesSet", counters.properties_set),
-        ("labelsAdded", counters.labels_added),
-        ("labelsRemoved", counters.labels_removed),
-    ] {
-        #[allow(
-            clippy::cast_precision_loss,
-            reason = "wasm32 memory is at most 4 GiB, so a statement changes fewer than 2^32 entities"
-        )]
-        let _ = js_sys::Reflect::set(
-            &obj,
-            &JsValue::from_str(name),
-            &JsValue::from_f64(count as f64),
-        );
-    }
-    obj.into()
-}
-
-/// Converts a query result to `{ columns: string[], rows: any[][], executionTimeMs?: number,
-/// counters, profile? }`, the shape of the `executeRaw*` methods (`profile` for a `PROFILE`
-/// statement only).
+/// Converts a query result to `{ columns: string[], rows: any[][], executionTimeMs?: number }`,
+/// the shape of the `executeRaw*` methods.
 fn raw_result_to_js(result: &grafeo_engine::database::QueryResult) -> JsValue {
     let obj = js_sys::Object::new();
 
@@ -1758,28 +1520,6 @@ fn raw_result_to_js(result: &grafeo_engine::database::QueryResult) -> JsValue {
         );
     }
 
-    let _ = js_sys::Reflect::set(
-        &obj,
-        &JsValue::from_str("counters"),
-        &counters_to_js(&result.counters),
-    );
-
-    // profile?: {root, totalTimeMs}, for a PROFILE statement
-    if let Some(profile) = result.profile() {
-        let js_profile = js_sys::Object::new();
-        let _ = js_sys::Reflect::set(
-            &js_profile,
-            &JsValue::from_str("root"),
-            &operator_profile_to_js(&profile.root),
-        );
-        let _ = js_sys::Reflect::set(
-            &js_profile,
-            &JsValue::from_str("totalTimeMs"),
-            &JsValue::from_f64(profile.total_time_ms),
-        );
-        let _ = js_sys::Reflect::set(&obj, &JsValue::from_str("profile"), &js_profile);
-    }
-
     obj.into()
 }
 
@@ -1805,56 +1545,7 @@ struct VectorIndexOptions {
 #[serde(rename_all = "camelCase")]
 struct VectorSearchOptions {
     ef: Option<usize>,
-}
-
-/// Options of `batchVectorSearch`.
-#[cfg(feature = "vector-index")]
-#[derive(Default, serde::Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct BatchSearchOptions {
-    ef: Option<usize>,
-}
-
-/// Options for `getNodeEdges()`.
-#[cfg(feature = "lpg-model")]
-#[derive(Default, serde::Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct NodeEdgesOptions {
-    direction: Option<String>,
-    edge_types: Option<Vec<String>>,
-}
-
-/// The largest integer a JS number holds exactly, 2^53 - 1.
-#[cfg(feature = "lpg-model")]
-const MAX_SAFE_ID: u64 = (1 << 53) - 1;
-
-/// A node ID from a JS number: whole and at least 0.
-#[cfg(feature = "lpg-model")]
-fn node_id(id: f64) -> Result<grafeo_common::types::NodeId, JsValue> {
-    if id.fract() != 0.0 || !(0.0..=9_007_199_254_740_991.0).contains(&id) {
-        return Err(js_error(&format!("{id} is not a node ID")));
-    }
-    #[allow(
-        clippy::cast_possible_truncation,
-        clippy::cast_sign_loss,
-        reason = "checked above to be a whole number from 0 to 2^53 - 1"
-    )]
-    Ok(grafeo_common::types::NodeId::new(id as u64))
-}
-
-/// An ID as a JS number; an error for one a number cannot hold exactly.
-#[cfg(feature = "lpg-model")]
-fn id_to_js(id: u64) -> Result<JsValue, JsValue> {
-    if id > MAX_SAFE_ID {
-        return Err(js_error(&format!(
-            "ID {id} is larger than a JS number holds exactly"
-        )));
-    }
-    #[allow(
-        clippy::cast_precision_loss,
-        reason = "checked above to be at most 2^53 - 1, which an f64 holds exactly"
-    )]
-    Ok(JsValue::from_f64(id as f64))
+    filters: Option<HashMap<String, serde_json::Value>>,
 }
 
 /// Options for `mmrSearch()`.
@@ -1865,6 +1556,15 @@ struct MmrSearchOptions {
     fetch_k: Option<usize>,
     lambda: Option<f32>,
     ef: Option<usize>,
+    filters: Option<HashMap<String, serde_json::Value>>,
+}
+
+/// Options for `textSearch()` and `hybridSearch()`.
+#[cfg(any(feature = "text-index", feature = "hybrid-search"))]
+#[derive(Default, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SearchFilterOptions {
+    filters: Option<HashMap<String, serde_json::Value>>,
 }
 
 /// Options for `createTextIndex()`.
@@ -1930,41 +1630,41 @@ enum ImportLabel {
 }
 
 impl ImportRowsOptions {
-    fn labels(&self) -> Result<Vec<String>, JsValue> {
+    fn labels(&self) -> Result<Vec<String>, JsError> {
         match &self.label {
             Some(ImportLabel::Single(s)) => Ok(vec![s.clone()]),
             Some(ImportLabel::Multiple(v)) => Ok(v.clone()),
-            None => Err(js_error("label is required for mode 'nodes'")),
+            None => Err(JsError::new("label is required for mode 'nodes'")),
         }
     }
 }
 
-/// A node ID from a row's column: a non-negative whole number, an `Int64`
-/// or a whole `Float64` up to 2^53.
-pub(crate) fn value_to_node_id(
-    value: &Value,
+/// Extracts a `NodeId` from a JSON number value.
+fn json_to_node_id(
+    val: &serde_json::Value,
     col_name: &str,
     row_idx: usize,
-) -> Result<grafeo_common::types::NodeId, JsValue> {
-    let id = match value {
-        Value::Int64(n) => u64::try_from(*n).ok(),
-        Value::Float64(f) if (0.0..=9_007_199_254_740_991.0).contains(f) && f.fract() == 0.0 =>
-        {
-            #[allow(
-                clippy::cast_possible_truncation,
-                clippy::cast_sign_loss,
-                reason = "the range check above keeps f whole and in [0, 2^53]"
-            )]
-            Some(*f as u64)
-        }
-        _ => None,
-    };
-    id.map(grafeo_common::types::NodeId::new).ok_or_else(|| {
-        JsError::new(&format!(
-            "rows[{row_idx}].{col_name}: expected a non-negative integer, got {value:?}"
-        ))
-        .into()
-    })
+) -> Result<grafeo_common::types::NodeId, JsError> {
+    let n = val
+        .as_u64()
+        .or_else(|| {
+            val.as_f64().and_then(|f| {
+                // reason: Reject negative, NaN, Infinity, fractional, and out-of-range values
+                if (0.0..=9_007_199_254_740_991.0).contains(&f) && f.fract() == 0.0 {
+                    // reason: range check above rejects negative values
+                    #[allow(clippy::cast_sign_loss)]
+                    Some(f as u64)
+                } else {
+                    None
+                }
+            })
+        })
+        .ok_or_else(|| {
+            JsError::new(&format!(
+                "rows[{row_idx}].{col_name}: expected a non-negative integer, got {val}"
+            ))
+        })?;
+    Ok(grafeo_common::types::NodeId::new(n))
 }
 
 /// LPG batch import payload.
@@ -1979,6 +1679,8 @@ struct LpgImport {
 #[derive(serde::Deserialize)]
 struct LpgNodeSpec {
     labels: Vec<String>,
+    #[serde(default)]
+    properties: Option<serde_json::Map<String, serde_json::Value>>,
 }
 
 /// A single edge in an LPG import. `source` and `target` are zero-based
@@ -1989,6 +1691,8 @@ struct LpgEdgeSpec {
     target: usize,
     #[serde(rename = "type")]
     edge_type: String,
+    #[serde(default)]
+    properties: Option<serde_json::Map<String, serde_json::Value>>,
 }
 
 /// RDF batch import payload.
@@ -2042,7 +1746,6 @@ fn string_to_rdf_term(s: &str) -> grafeo_core::graph::rdf::Term {
 
 #[cfg(test)]
 mod tests {
-    use grafeo_bindings_common::json::json_to_value;
     use serde_json::json;
 
     use super::*;
@@ -2086,8 +1789,9 @@ mod tests {
                 "filters": { "category": "science" }
             }))
             .unwrap();
-            // The filters are read from the JavaScript value (search_filters).
             assert_eq!(opts.ef, Some(200));
+            assert!(opts.filters.is_some());
+            assert_eq!(opts.filters.unwrap()["category"], json!("science"));
         }
 
         #[test]
@@ -2097,6 +1801,7 @@ mod tests {
             assert_eq!(opts.fetch_k, Some(20));
             assert_eq!(opts.lambda, Some(0.7));
             assert!(opts.ef.is_none());
+            assert!(opts.filters.is_none());
         }
 
         // vector_results_to_js requires a JS runtime, tested via wasm-bindgen-test
@@ -2233,7 +1938,7 @@ mod tests {
             "nodes": [{ "labels": ["Tag"] }]
         });
         let import: LpgImport = serde_json::from_value(input).unwrap();
-        assert_eq!(import.nodes[0].labels, vec!["Tag"]);
+        assert!(import.nodes[0].properties.is_none());
     }
 
     #[test]
@@ -2246,6 +1951,32 @@ mod tests {
             import.nodes[0].labels,
             vec!["Person", "Employee", "Developer"]
         );
+    }
+
+    #[test]
+    fn lpg_import_mixed_property_types() {
+        let input = json!({
+            "nodes": [{
+                "labels": ["Thing"],
+                "properties": {
+                    "name": "test",
+                    "count": 42,
+                    "ratio": 1.23,
+                    "active": true,
+                    "tags": ["a", "b"],
+                    "meta": null
+                }
+            }]
+        });
+        let import: LpgImport = serde_json::from_value(input).unwrap();
+        let props = import.nodes[0].properties.as_ref().unwrap();
+        assert_eq!(props.len(), 6);
+        assert_eq!(props["name"], json!("test"));
+        assert_eq!(props["count"], json!(42));
+        assert_eq!(props["ratio"], json!(1.23));
+        assert_eq!(props["active"], json!(true));
+        assert_eq!(props["tags"], json!(["a", "b"]));
+        assert!(props["meta"].is_null());
     }
 
     #[test]
@@ -2266,7 +1997,7 @@ mod tests {
             "edges": [{ "source": 0, "target": 1, "type": "LINKED" }]
         });
         let import: LpgImport = serde_json::from_value(input).unwrap();
-        assert_eq!(import.edges[0].edge_type, "LINKED");
+        assert!(import.edges[0].properties.is_none());
     }
 
     #[test]
@@ -2377,17 +2108,25 @@ mod tests {
     }
 
     #[test]
-    fn value_to_node_id_integer() {
-        let val = Value::Int64(42);
-        let id = value_to_node_id(&val, "source", 0).unwrap();
+    fn json_to_node_id_integer() {
+        let val = json!(42);
+        let id = json_to_node_id(&val, "source", 0).unwrap();
         assert_eq!(id, grafeo_common::types::NodeId::new(42));
     }
 
     #[test]
-    fn value_to_node_id_whole_float() {
-        let val = Value::Float64(7.0);
-        let id = value_to_node_id(&val, "target", 0).unwrap();
+    fn json_to_node_id_float_truncates() {
+        let val = json!(7.0);
+        let id = json_to_node_id(&val, "target", 0).unwrap();
         assert_eq!(id, grafeo_common::types::NodeId::new(7));
+    }
+
+    #[test]
+    fn json_to_node_id_string_is_not_u64() {
+        let val = json!("not_a_number");
+        // as_u64 and as_f64 both return None for strings
+        assert!(val.as_u64().is_none());
+        assert!(val.as_f64().is_none());
     }
 
     // === Engine-level importRows tests ===
@@ -2406,12 +2145,12 @@ mod tests {
             let props: Vec<(PropertyKey, Value)> = row
                 .iter()
                 .filter(|(_, v)| !v.is_null())
-                .map(|(k, v)| (PropertyKey::new(k.as_str()), json_to_value(v).unwrap()))
+                .map(|(k, v)| (PropertyKey::new(k.as_str()), json_to_value(v)))
                 .collect();
             db.create_node_with_props(&label_refs, props).unwrap();
         }
 
-        assert_eq!(db.node_count().unwrap(), 2);
+        assert_eq!(db.node_count(), 2);
         let session = db.session();
         let result = session
             .execute("MATCH (p:Person) RETURN p.name ORDER BY p.name")
@@ -2441,19 +2180,17 @@ mod tests {
         .unwrap();
 
         for row in &rows {
-            let src =
-                value_to_node_id(&json_to_value(&row["source"]).unwrap(), "source", 0).unwrap();
-            let dst =
-                value_to_node_id(&json_to_value(&row["target"]).unwrap(), "target", 0).unwrap();
+            let src = json_to_node_id(&row["source"], "source", 0).unwrap();
+            let dst = json_to_node_id(&row["target"], "target", 0).unwrap();
             let props: Vec<(PropertyKey, Value)> = row
                 .iter()
                 .filter(|(k, v)| k.as_str() != "source" && k.as_str() != "target" && !v.is_null())
-                .map(|(k, v)| (PropertyKey::new(k.as_str()), json_to_value(v).unwrap()))
+                .map(|(k, v)| (PropertyKey::new(k.as_str()), json_to_value(v)))
                 .collect();
             db.create_edge_with_props(src, dst, "KNOWS", props).unwrap();
         }
 
-        assert_eq!(db.edge_count().unwrap(), 1);
+        assert_eq!(db.edge_count(), 1);
     }
 
     #[test]
@@ -2468,12 +2205,12 @@ mod tests {
             let props: Vec<(PropertyKey, Value)> = row
                 .iter()
                 .filter(|(_, v)| !v.is_null())
-                .map(|(k, v)| (PropertyKey::new(k.as_str()), json_to_value(v).unwrap()))
+                .map(|(k, v)| (PropertyKey::new(k.as_str()), json_to_value(v)))
                 .collect();
             db.create_node_with_props(&["Person"], props).unwrap();
         }
 
-        assert_eq!(db.node_count().unwrap(), 1);
+        assert_eq!(db.node_count(), 1);
         let session = db.session();
         let result = session
             .execute("MATCH (p:Person) RETURN p.nickname")
@@ -2495,34 +2232,20 @@ mod tests {
         for row in &rows {
             let props: Vec<(PropertyKey, Value)> = row
                 .iter()
-                .map(|(k, v)| (PropertyKey::new(k.as_str()), json_to_value(v).unwrap()))
+                .map(|(k, v)| (PropertyKey::new(k.as_str()), json_to_value(v)))
                 .collect();
             db.create_node_with_props(&["Item"], props).unwrap();
         }
 
-        assert_eq!(db.node_count().unwrap(), 500);
+        assert_eq!(db.node_count(), 500);
     }
 
     // === Engine-level LPG batch tests ===
 
-    /// The properties of a node or edge of an import's JSON, as the browser
-    /// binding reads them from the JavaScript value.
-    fn json_properties(item: &serde_json::Value) -> Vec<(PropertyKey, Value)> {
-        item.get("properties")
-            .and_then(serde_json::Value::as_object)
-            .map(|properties| {
-                properties
-                    .iter()
-                    .map(|(k, v)| (PropertyKey::new(k.as_str()), json_to_value(v).unwrap()))
-                    .collect()
-            })
-            .unwrap_or_default()
-    }
-
     #[test]
     fn import_lpg_creates_nodes_and_edges() {
         let db = GrafeoDB::new_in_memory();
-        let raw = json!({
+        let input: LpgImport = serde_json::from_value(json!({
             "nodes": [
                 { "labels": ["Person"], "properties": { "name": "Alix", "age": 30 } },
                 { "labels": ["Person"], "properties": { "name": "Gus", "age": 25 } },
@@ -2532,13 +2255,21 @@ mod tests {
                 { "source": 0, "target": 1, "type": "KNOWS" },
                 { "source": 0, "target": 2, "type": "LIVES_IN" }
             ]
-        });
-        let input: LpgImport = serde_json::from_value(raw.clone()).unwrap();
+        }))
+        .unwrap();
 
         let mut node_ids = Vec::with_capacity(input.nodes.len());
-        for (node, raw_node) in input.nodes.iter().zip(raw["nodes"].as_array().unwrap()) {
+        for node in &input.nodes {
             let labels: Vec<&str> = node.labels.iter().map(String::as_str).collect();
-            let props = json_properties(raw_node);
+            let props: Vec<(PropertyKey, Value)> = node
+                .properties
+                .as_ref()
+                .map(|p| {
+                    p.iter()
+                        .map(|(k, v)| (PropertyKey::new(k.as_str()), json_to_value(v)))
+                        .collect()
+                })
+                .unwrap_or_default();
             let id = db.create_node_with_props(&labels, props).unwrap();
             node_ids.push(id);
         }
@@ -2555,8 +2286,8 @@ mod tests {
             .unwrap();
         }
 
-        assert_eq!(db.node_count().unwrap(), 3);
-        assert_eq!(db.edge_count().unwrap(), 2);
+        assert_eq!(db.node_count(), 3);
+        assert_eq!(db.edge_count(), 2);
 
         // Verify data via query
         let session = db.session();
@@ -2572,7 +2303,7 @@ mod tests {
         let input: LpgImport = serde_json::from_value(json!({ "nodes": [] })).unwrap();
         assert!(input.nodes.is_empty());
         assert!(input.edges.is_empty());
-        assert_eq!(db.node_count().unwrap(), 0);
+        assert_eq!(db.node_count(), 0);
     }
 
     #[test]
@@ -2581,7 +2312,7 @@ mod tests {
         let node_spec: LpgNodeSpec = serde_json::from_value(json!({ "labels": ["Tag"] })).unwrap();
         let labels: Vec<&str> = node_spec.labels.iter().map(String::as_str).collect();
         db.create_node(&labels).unwrap();
-        assert_eq!(db.node_count().unwrap(), 1);
+        assert_eq!(db.node_count(), 1);
     }
 
     #[test]
@@ -2589,7 +2320,7 @@ mod tests {
         let db = GrafeoDB::new_in_memory();
         let id = db.create_node(&["Node"]).unwrap();
         db.create_edge(id, id, "SELF_REF").unwrap();
-        assert_eq!(db.edge_count().unwrap(), 1);
+        assert_eq!(db.edge_count(), 1);
 
         let session = db.session();
         let result = session
@@ -2617,7 +2348,7 @@ mod tests {
         db.create_edge(alix, gus, "WORKS_WITH").unwrap();
         db.create_edge(gus, alix, "KNOWS").unwrap();
 
-        assert_eq!(db.edge_count().unwrap(), 3);
+        assert_eq!(db.edge_count(), 3);
     }
 
     #[test]
@@ -2630,16 +2361,23 @@ mod tests {
                 "properties": { "index": i }
             }));
         }
-        let raw = json!({ "nodes": nodes });
-        let input: LpgImport = serde_json::from_value(raw.clone()).unwrap();
+        let input: LpgImport = serde_json::from_value(json!({ "nodes": nodes })).unwrap();
 
-        for (node, raw_node) in input.nodes.iter().zip(raw["nodes"].as_array().unwrap()) {
+        for node in &input.nodes {
             let labels: Vec<&str> = node.labels.iter().map(String::as_str).collect();
-            let props = json_properties(raw_node);
+            let props: Vec<(PropertyKey, Value)> = node
+                .properties
+                .as_ref()
+                .map(|p| {
+                    p.iter()
+                        .map(|(k, v)| (PropertyKey::new(k.as_str()), json_to_value(v)))
+                        .collect()
+                })
+                .unwrap_or_default();
             db.create_node_with_props(&labels, props).unwrap();
         }
 
-        assert_eq!(db.node_count().unwrap(), 500);
+        assert_eq!(db.node_count(), 500);
     }
 
     #[test]

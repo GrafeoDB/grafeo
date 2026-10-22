@@ -562,14 +562,6 @@ fn hash_key(key: &[Value]) -> u64 {
                 pos.len().hash(&mut hasher);
                 neg.len().hash(&mut hasher);
             }
-            Value::Decimal(decimal) => {
-                17u8.hash(&mut hasher);
-                decimal.hash(&mut hasher);
-            }
-            Value::RdfTerm(term) => {
-                18u8.hash(&mut hasher);
-                term.hash(&mut hasher);
-            }
             _ => {
                 255u8.hash(&mut hasher);
             }
@@ -890,23 +882,5 @@ mod tests {
 
         // Verify update
         assert_eq!(state.get(&key(&[1])).unwrap(), Some(&200));
-    }
-
-    #[test]
-    fn hash_key_tells_rdf_terms_and_decimals_apart() {
-        use grafeo_common::types::Decimal;
-        use grafeo_common::types::rdf::Term;
-        let term = |term: Term| hash_key(&[Value::RdfTerm(Arc::new(term))]);
-        assert_eq!(
-            term(Term::iri("http://example.org/a")),
-            term(Term::iri("http://example.org/a"))
-        );
-        assert_ne!(
-            term(Term::iri("http://example.org/a")),
-            term(Term::iri("http://example.org/b"))
-        );
-        let decimal = |text: &str| hash_key(&[Value::Decimal(Decimal::parse(text).unwrap())]);
-        assert_eq!(decimal("1.50"), decimal("1.5"));
-        assert_ne!(decimal("1.5"), decimal("2.5"));
     }
 }

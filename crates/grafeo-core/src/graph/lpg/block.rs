@@ -1,6 +1,7 @@
-//! The block layout of the LPG section of 0.5.x, which this release reads to
-//! migrate a 0.5.x file. Its writer is kept for the tests only: they build
-//! the sections the reader must take and refuse.
+//! Block-based binary format for LPG data sections (v2).
+//!
+//! Replaces the full-bincode serialization with a structured layout that
+//! supports mmap, per-block CRC verification, and incremental writes.
 //!
 //! # Layout
 //!
@@ -21,7 +22,6 @@
 
 use std::collections::BTreeMap;
 
-#[cfg(test)]
 use crate::codec::limits::{checked_u16, checked_u32};
 use grafeo_common::types::{EdgeId, EpochId, NodeId, Value};
 use grafeo_common::utils::error::{Error, Result};
@@ -56,7 +56,6 @@ pub enum BlockType {
 
 // ── Value type tags ────────────────────────────────────────────────
 
-#[cfg(test)]
 /// Type tags for property value encoding within property columns.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
@@ -113,7 +112,6 @@ impl BlockDirEntry {
         start..start.saturating_add(self.length as usize)
     }
 
-    #[cfg(test)]
     fn write_to(&self, buf: &mut Vec<u8>) {
         buf.push(self.block_type);
         buf.extend_from_slice(&self._reserved);
@@ -145,26 +143,19 @@ impl BlockDirEntry {
 /// Fixed 64-byte header at the start of a block-based LPG section.
 const HEADER_SIZE: usize = 64;
 
-/// The header's fields. The reader checks the magic and reads the counts and
-/// the epoch; the flags and the named graph count only the writer of the
-/// tests sets (the named graphs are counted by their blocks).
 struct SectionHeader {
-    #[cfg(test)]
     magic: [u8; 4],
     version: u8,
-    #[cfg(test)]
     flags: u8,
     block_count: u16,
     node_count: u64,
     edge_count: u64,
     epoch: u64,
-    #[cfg(test)]
     named_graph_count: u32,
     _reserved: [u8; 28],
 }
 
 impl SectionHeader {
-    #[cfg(test)]
     fn write_to(&self, buf: &mut Vec<u8>) {
         let start = buf.len();
         buf.extend_from_slice(&self.magic); // 4
@@ -188,16 +179,13 @@ impl SectionHeader {
             return None;
         }
         Some(Self {
-            #[cfg(test)]
             magic,
             version: data[4],
-            #[cfg(test)]
             flags: data[5],
             block_count: u16::from_le_bytes(data[6..8].try_into().ok()?),
             node_count: u64::from_le_bytes(data[8..16].try_into().ok()?),
             edge_count: u64::from_le_bytes(data[16..24].try_into().ok()?),
             epoch: u64::from_le_bytes(data[24..32].try_into().ok()?),
-            #[cfg(test)]
             named_graph_count: u32::from_le_bytes(data[32..36].try_into().ok()?),
             _reserved: {
                 let mut r = [0u8; 28];
@@ -210,14 +198,12 @@ impl SectionHeader {
 
 // ── String table ───────────────────────────────────────────────────
 
-#[cfg(test)]
 /// Builds a deduplicated string table and maps strings to indices.
 struct StringTableBuilder {
     strings: Vec<String>,
     index: hashbrown::HashMap<String, u32>,
 }
 
-#[cfg(test)]
 impl StringTableBuilder {
     fn new() -> Self {
         Self {
@@ -317,7 +303,6 @@ impl<'a> StringTableReader<'a> {
 
 // ── Value encoding ─────────────────────────────────────────────────
 
-#[cfg(test)]
 /// Encodes a `Value` into the binary format used in property columns.
 ///
 /// Format: [tag:u8] [payload:variable]
@@ -636,7 +621,6 @@ pub(crate) struct BlockNamedGraph {
     pub edges: Vec<BlockEdge>,
 }
 
-#[cfg(test)]
 /// Serializes LPG data into the block-based binary format.
 pub(crate) fn write_blocks(
     nodes: &[BlockNode],
@@ -809,14 +793,12 @@ pub(crate) fn write_blocks(
     Ok(output)
 }
 
-#[cfg(test)]
 fn intern_values_strings(entries: &[(EpochId, Value)], strings: &mut StringTableBuilder) {
     for (_, value) in entries {
         intern_value_strings(value, strings);
     }
 }
 
-#[cfg(test)]
 fn intern_value_strings(value: &Value, strings: &mut StringTableBuilder) {
     match value {
         Value::String(s) => {
@@ -845,7 +827,6 @@ fn intern_value_strings(value: &Value, strings: &mut StringTableBuilder) {
     }
 }
 
-#[cfg(test)]
 fn collect_property_keys<'a>(
     props: impl Iterator<Item = &'a (String, Vec<(EpochId, Value)>)>,
 ) -> Vec<String> {
@@ -855,7 +836,6 @@ fn collect_property_keys<'a>(
     keys
 }
 
-#[cfg(test)]
 /// Writes a property column for node properties.
 ///
 /// Format: [entry_count:u32] for each entry [entity_id:u64][version_count:u16]
@@ -894,7 +874,6 @@ fn write_property_column<'a>(
     Ok(buf)
 }
 
-#[cfg(test)]
 /// Writes a property column for edge properties.
 fn write_property_column_edges<'a>(
     key: &str,

@@ -11,7 +11,7 @@
 //! cargo test -p grafeo-engine --all-features --test foreach_rows
 //! ```
 
-#![cfg(feature = "cypher")]
+#![cfg(all(feature = "lpg", feature = "cypher"))]
 
 use grafeo_common::types::Value;
 use grafeo_engine::{GrafeoDB, Session};

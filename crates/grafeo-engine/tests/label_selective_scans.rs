@@ -8,7 +8,7 @@
 //! cargo test -p grafeo-engine --all-features --test label_selective_scans
 //! ```
 
-#![cfg(all(feature = "gql", feature = "cypher"))]
+#![cfg(all(feature = "lpg", feature = "gql", feature = "cypher"))]
 
 use std::collections::HashMap;
 
@@ -28,12 +28,7 @@ const BOTH: usize = 3;
 /// edge to `g<i>`. `Tag` and `Topic` have three nodes each, one of them shared
 /// (`t0`). With `indexed`, a property index on `id`.
 fn skewed(indexed: bool) -> GrafeoDB {
-    // History kept: a read at an earlier epoch needs it.
-    let db = GrafeoDB::with_config(
-        grafeo_engine::Config::in_memory()
-            .with_history_retention(grafeo_engine::HistoryRetention::Forever),
-    )
-    .unwrap();
+    let db = GrafeoDB::new_in_memory();
     if indexed {
         db.create_property_index("id").unwrap();
     }
@@ -632,6 +627,7 @@ fn a_label_with_a_vector_index_for_the_filter_stays_scanned() {
 /// A read of a past epoch finds the nodes that had the labels at the epoch,
 /// whichever label has the fewest nodes now: `r1` lost `Repository` after it.
 /// It scans the label as written, and `EXPLAIN` shows that.
+#[cfg(feature = "temporal")]
 #[test]
 fn a_read_of_a_past_epoch_sees_the_labels_of_the_epoch() {
     let db = skewed(false);
@@ -666,11 +662,9 @@ fn a_read_of_a_past_epoch_sees_the_labels_of_the_epoch() {
             ids(&["r0", "r1", "r2"]),
             "{language:?} at the epoch before"
         );
-        // The store answers label scans at a view, so the read at the
-        // earlier epoch scans the smallest label too.
         assert_eq!(
             scans(&then_plan),
-            ["NodeScan (n:Repository)"],
+            ["NodeScan (n:Graph)"],
             "{language:?} at the epoch before:\n{then_plan}"
         );
     }
@@ -826,11 +820,8 @@ fn a_projection_finds_the_nodes_of_a_label_outside_its_spec() {
         db.create_projection("people", ProjectionSpec::new().with_node_labels(["Person"]))
             .unwrap()
     );
-    let view = GrafeoDB::with_read_store(
-        db.projection("people").unwrap().shared(),
-        Config::in_memory(),
-    )
-    .unwrap();
+    let view =
+        GrafeoDB::with_read_store(db.projection("people").unwrap(), Config::in_memory()).unwrap();
     let session = view.session();
     let alix = ids(&["Alix"]);
     let one = vec![vec![Value::Int64(1)]];
@@ -883,270 +874,4 @@ fn a_projection_finds_the_nodes_of_a_label_outside_its_spec() {
         vec![vec![Value::Int64(4)]],
         "the graph itself has four Admin nodes"
     );
-}
-
-/// A label in `WHERE` (`n:Repository`, `'Repository' IN labels(n)`), alone or
-/// in an `AND` chain, scans that label instead of every node; of several, the
-/// one with the fewest nodes. The rows are those of the label in the pattern.
-#[test]
-fn a_label_in_where_scans_the_label() {
-    let db = skewed(false);
-    let session = db.session();
-    for language in LANGUAGES {
-        for (query, same_as, scanned) in [
-            (
-                "MATCH (n) WHERE n:Repository RETURN n.id",
-                "MATCH (n:Repository) RETURN n.id",
-                "NodeScan (n:Repository)",
-            ),
-            (
-                "MATCH (n) WHERE 'Repository' IN labels(n) RETURN n.id",
-                "MATCH (n:Repository) RETURN n.id",
-                "NodeScan (n:Repository)",
-            ),
-            (
-                "MATCH (n) WHERE n:Repository AND n.n < 2 RETURN n.id",
-                "MATCH (n:Repository) WHERE n.n < 2 RETURN n.id",
-                "NodeScan (n:Repository)",
-            ),
-            (
-                "MATCH (n) WHERE n.n < 2 AND n:Repository RETURN n.id",
-                "MATCH (n:Repository) WHERE n.n < 2 RETURN n.id",
-                "NodeScan (n:Repository)",
-            ),
-            (
-                "MATCH (n) WHERE n:Graph AND n:Repository RETURN n.id",
-                "MATCH (n:Graph:Repository) RETURN n.id",
-                "NodeScan (n:Repository)",
-            ),
-            (
-                "MATCH (n) WHERE n:Missing RETURN n.id",
-                "MATCH (n:Missing) RETURN n.id",
-                "NodeScan (n:Missing)",
-            ),
-        ] {
-            assert_eq!(
-                sorted(&session, language, query, &[]),
-                sorted(&session, language, same_as, &[]),
-                "{language:?} `{query}`"
-            );
-            let plan = plan_text(&session, language, &format!("EXPLAIN {query}"));
-            assert_eq!(scans(&plan), [scanned], "{language:?} `{query}`:\n{plan}");
-        }
-        let profile = plan_text(
-            &session,
-            language,
-            "PROFILE MATCH (n) WHERE n:Repository RETURN n.id",
-        );
-        let scan = scans(&profile);
-        assert!(
-            scan.len() == 1
-                && scan[0].starts_with("Scan (n:Repository)")
-                && scan[0].contains(&format!("rows={} ", REPOSITORY_ONLY + BOTH)),
-            "{language:?} reads the {} Repository nodes, not every node:\n{profile}",
-            REPOSITORY_ONLY + BOTH,
-        );
-    }
-}
-
-/// A label the predicate does not require of every row keeps the scan of
-/// every node: under `NOT`, or in an `OR` with a branch that is not a label.
-#[test]
-fn a_label_the_predicate_does_not_require_keeps_the_full_scan() {
-    let db = skewed(false);
-    let session = db.session();
-    for language in LANGUAGES {
-        for query in [
-            "MATCH (n) WHERE NOT n:Graph RETURN n.id",
-            "MATCH (n) WHERE n:Repository OR n.id = 't1' RETURN n.id",
-        ] {
-            let plan = plan_text(&session, language, &format!("EXPLAIN {query}"));
-            assert_eq!(
-                scans(&plan),
-                ["NodeScan (n:*)"],
-                "{language:?} `{query}`:\n{plan}"
-            );
-        }
-        assert_eq!(
-            sorted(
-                &session,
-                language,
-                "MATCH (n) WHERE n:Repository OR n.id = 't1' RETURN n.id",
-                &[]
-            )
-            .len(),
-            REPOSITORY_ONLY + BOTH + 1,
-            "{language:?}"
-        );
-    }
-}
-
-/// A read of a past epoch scans the label in `WHERE` too (the store answers
-/// label scans at a view), and finds the nodes that had the label then: `r1`
-/// lost `Repository` after it.
-#[test]
-fn a_past_epoch_scans_a_label_in_where_too() {
-    let db = skewed(false);
-    let mut session = db.session();
-    session.begin_transaction().unwrap();
-    session.commit().unwrap();
-    let before = db.current_epoch();
-    session.begin_transaction().unwrap();
-    session
-        .execute_cypher("MATCH (n {id: 'r1'}) REMOVE n:Repository")
-        .unwrap();
-    session.commit().unwrap();
-    for language in LANGUAGES {
-        let query = "MATCH (n) WHERE n:Graph AND n:Repository RETURN n.id";
-        assert_eq!(
-            sorted(&session, language, query, &[]),
-            ids(&["r0", "r2"]),
-            "{language:?} now"
-        );
-        session.set_viewing_epoch(before);
-        let then = sorted(&session, language, query, &[]);
-        let then_plan = plan_text(&session, language, &format!("EXPLAIN {query}"));
-        session.clear_viewing_epoch();
-        assert_eq!(
-            then,
-            ids(&["r0", "r1", "r2"]),
-            "{language:?} at the epoch before"
-        );
-        // The store answers label scans at a view: the label in WHERE is
-        // scanned at the earlier epoch too.
-        assert_eq!(
-            scans(&then_plan),
-            ["NodeScan (n:Repository)"],
-            "{language:?} at the epoch before:\n{then_plan}"
-        );
-        session.set_viewing_epoch(before);
-        let or_plan = plan_text(
-            &session,
-            language,
-            "EXPLAIN MATCH (n) WHERE n:Tag OR n:Topic RETURN n.id",
-        );
-        session.clear_viewing_epoch();
-        assert!(
-            or_plan.contains("[labels:"),
-            "{language:?} an OR of labels at the epoch before reads those labels:\n{or_plan}"
-        );
-    }
-}
-
-/// An `OR` of labels in `WHERE` (`n:Tag OR n:Topic`, `'Tag' IN labels(n) OR
-/// ...`, `any(l IN labels(n) WHERE l IN [...])`) reads the nodes of those
-/// labels, each once (`t0` has both), and `EXPLAIN` shows the labels. The rows
-/// are those of the predicate.
-#[test]
-fn an_or_of_labels_reads_the_nodes_of_those_labels() {
-    let db = skewed(false);
-    let session = db.session();
-    let tags_and_topics = ids(&["t0", "t1", "t2", "u1", "u2"]);
-    for language in LANGUAGES {
-        for (query, expected, hint) in [
-            (
-                "MATCH (n) WHERE n:Tag OR n:Topic RETURN n.id",
-                tags_and_topics.clone(),
-                "[labels: Tag|Topic]",
-            ),
-            (
-                "MATCH (n) WHERE 'Tag' IN labels(n) OR 'Topic' IN labels(n) RETURN n.id",
-                tags_and_topics.clone(),
-                "[labels: Tag|Topic]",
-            ),
-            (
-                "MATCH (n) WHERE any(l IN labels(n) WHERE l IN ['Topic', 'Tag']) RETURN n.id",
-                tags_and_topics.clone(),
-                "[labels: Topic|Tag]",
-            ),
-            (
-                "MATCH (n) WHERE (n:Tag OR n:Topic) AND n.id <> 't1' RETURN n.id",
-                ids(&["t0", "t2", "u1", "u2"]),
-                "[labels: Tag|Topic]",
-            ),
-            (
-                "MATCH (n) WHERE n:Tag OR n:Missing OR n:Tag RETURN n.id",
-                ids(&["t0", "t1", "t2"]),
-                "[labels: Tag|Missing]",
-            ),
-        ] {
-            assert_eq!(
-                sorted(&session, language, query, &[]),
-                expected,
-                "{language:?} `{query}`"
-            );
-            let plan = plan_text(&session, language, &format!("EXPLAIN {query}"));
-            assert!(plan.contains(hint), "{language:?} `{query}`:\n{plan}");
-        }
-        assert_eq!(
-            sorted(
-                &session,
-                language,
-                "MATCH (n) WHERE n:Repository OR n:Tag RETURN n.id",
-                &[]
-            )
-            .len(),
-            REPOSITORY_ONLY + BOTH + 3,
-            "{language:?}"
-        );
-        let profile = plan_text(
-            &session,
-            language,
-            "PROFILE MATCH (n) WHERE n:Tag OR n:Topic RETURN n.id",
-        );
-        let scan = scans(&profile);
-        assert!(
-            scan.len() == 1
-                && scan[0].starts_with("Scan (n:Tag|Topic)")
-                && scan[0].contains("rows=5 "),
-            "{language:?} reads the five Tag and Topic nodes, not every node:
-{profile}"
-        );
-    }
-}
-
-/// An `OR` of labels that hold more than half the nodes reads every node: a
-/// scan of all of them is cheaper than the labels' lists.
-#[test]
-fn an_or_of_large_labels_keeps_the_full_scan() {
-    let db = skewed(false);
-    let session = db.session();
-    for language in LANGUAGES {
-        let query = "MATCH (n) WHERE n:Graph OR n:Repository RETURN count(n)";
-        let plan = plan_text(&session, language, &format!("EXPLAIN {query}"));
-        assert!(!plan.contains("[labels:"), "{language:?}:\n{plan}");
-        assert_eq!(
-            run(&session, language, query, &[]),
-            [[Value::Int64(
-                i64::try_from(GRAPH_ONLY + BOTH + REPOSITORY_ONLY).unwrap()
-            )]],
-            "{language:?}"
-        );
-    }
-}
-
-/// An open transaction reads the labels it changed through an `OR` of labels:
-/// a node it gave `Tag` is found, one it took `Topic` from is not.
-#[test]
-fn an_or_of_labels_sees_the_labels_a_transaction_changed() {
-    let db = skewed(false);
-    for language in LANGUAGES {
-        let mut session = db.session();
-        session.begin_transaction().unwrap();
-        session.execute("INSERT (:Tag {id: 'new'})").unwrap();
-        session
-            .execute_cypher("MATCH (n {id: 'u1'}) REMOVE n:Topic")
-            .unwrap();
-        assert_eq!(
-            sorted(
-                &session,
-                language,
-                "MATCH (n) WHERE n:Tag OR n:Topic RETURN n.id",
-                &[]
-            ),
-            ids(&["new", "t0", "t1", "t2", "u2"]),
-            "{language:?}"
-        );
-        session.rollback().unwrap();
-    }
 }

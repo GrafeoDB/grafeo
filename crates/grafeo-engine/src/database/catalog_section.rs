@@ -32,6 +32,7 @@
 
 use std::collections::HashSet;
 use std::fmt;
+use std::io::Write as _;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -49,7 +50,7 @@ use grafeo_common::storage::section::{
     legacy_bytes,
 };
 use grafeo_common::utils::error::{Error, Result};
-use grafeo_core::graph::rowgroup::RowGroupStore;
+use grafeo_core::graph::lpg::LpgStore;
 use grafeo_core::index::text::TextIndexOptions;
 use grafeo_core::index::vector::{DistanceMetric, QuantizationType};
 
@@ -130,87 +131,6 @@ struct IndexExtension {
     names: Vec<IndexName>,
 }
 
-/// What the catalog section reads of a store and writes to it: the named
-/// graphs (a schema's default graph is created as its record is read) and
-/// the definitions of each graph's indexes: what the section needs of the
-/// row-group store, which answers it by its inherent methods of the same
-/// names.
-pub(crate) trait CatalogStore: Send + Sync + 'static {
-    /// The names of the named graphs, in no promised order.
-    fn graph_names(&self) -> Vec<String>;
-
-    /// The named graph `name`.
-    fn graph(&self, name: &str) -> Option<Arc<Self>>;
-
-    /// Creates the named graph `name`; `false` when it exists.
-    ///
-    /// # Errors
-    ///
-    /// When every graph id was given out.
-    fn create_graph(&self, name: &str) -> Result<bool>;
-
-    /// The keys of the property indexes.
-    fn property_index_keys(&self) -> Vec<String>;
-
-    /// The vector indexes, keyed `label:property`.
-    #[cfg(feature = "vector-index")]
-    fn vector_index_entries(
-        &self,
-    ) -> Vec<(String, Arc<grafeo_core::index::vector::VectorIndexKind>)>;
-
-    /// The text indexes, keyed `label:property`.
-    #[cfg(feature = "text-index")]
-    fn text_index_entries(
-        &self,
-    ) -> Vec<(
-        String,
-        Arc<parking_lot::RwLock<grafeo_core::index::text::InvertedIndex>>,
-    )>;
-}
-
-/// Implements [`CatalogStore`] for a store by its inherent methods of the
-/// same names.
-macro_rules! catalog_store {
-    ($store:ty) => {
-        impl CatalogStore for $store {
-            fn graph_names(&self) -> Vec<String> {
-                <$store>::graph_names(self)
-            }
-
-            fn graph(&self, name: &str) -> Option<Arc<Self>> {
-                <$store>::graph(self, name)
-            }
-
-            fn create_graph(&self, name: &str) -> Result<bool> {
-                Ok(<$store>::create_graph(self, name)?)
-            }
-
-            fn property_index_keys(&self) -> Vec<String> {
-                <$store>::property_index_keys(self)
-            }
-
-            #[cfg(feature = "vector-index")]
-            fn vector_index_entries(
-                &self,
-            ) -> Vec<(String, Arc<grafeo_core::index::vector::VectorIndexKind>)> {
-                <$store>::vector_index_entries(self)
-            }
-
-            #[cfg(feature = "text-index")]
-            fn text_index_entries(
-                &self,
-            ) -> Vec<(
-                String,
-                Arc<parking_lot::RwLock<grafeo_core::index::text::InvertedIndex>>,
-            )> {
-                <$store>::text_index_entries(self)
-            }
-        }
-    };
-}
-
-catalog_store!(RowGroupStore);
-
 /// The indexes of one graph, as a checkpoint saves them: definitions only.
 /// Loading builds the indexes from the data, or restores the default graph's
 /// vector and text indexes from their own sections.
@@ -228,7 +148,7 @@ pub(crate) struct GraphIndexes {
 
 impl GraphIndexes {
     /// The indexes of `store`, the graph `graph`.
-    fn of<S: CatalogStore>(store: &S, graph: Option<String>) -> Self {
+    fn of(store: &LpgStore, graph: Option<String>) -> Self {
         let mut property = store.property_index_keys();
         property.sort();
 
@@ -425,12 +345,9 @@ struct SnapshotTextIndex {
 /// Writes and reads the schema and the index definitions and names (see the
 /// module documentation). The catalog is always small (typically < 10 KB)
 /// and always kept in RAM.
-///
-/// `S` is the store whose named graphs and index definitions it reads and
-/// whose schema graphs it creates: the row-group store.
-pub struct CatalogSection<S: CatalogStore = RowGroupStore> {
+pub struct CatalogSection {
     catalog: Arc<Catalog>,
-    store: Arc<S>,
+    store: Arc<LpgStore>,
     epoch_fn: Box<dyn Fn() -> u64 + Send + Sync>,
     dirty: AtomicBool,
     /// The index definitions the last load read.
@@ -442,7 +359,7 @@ pub struct CatalogSection<S: CatalogStore = RowGroupStore> {
     caps: ChunkCaps,
 }
 
-impl<S: CatalogStore> CatalogSection<S> {
+impl CatalogSection {
     /// Create a new catalog section, which writes with the chunk caps of
     /// this moment ([`ChunkCaps::current`]).
     ///
@@ -450,7 +367,7 @@ impl<S: CatalogStore> CatalogSection<S> {
     /// dependency on `TransactionManager` which lives in the engine layer.
     pub fn new(
         catalog: Arc<Catalog>,
-        store: Arc<S>,
+        store: Arc<LpgStore>,
         epoch_fn: impl Fn() -> u64 + Send + Sync + 'static,
     ) -> Self {
         Self {
@@ -497,12 +414,12 @@ impl<S: CatalogStore> CatalogSection<S> {
 
     /// The indexes of the default graph and of each named graph that has any.
     fn collect_graph_indexes(&self) -> Vec<GraphIndexes> {
-        let mut graphs = vec![GraphIndexes::of(&*self.store, None)];
+        let mut graphs = vec![GraphIndexes::of(&self.store, None)];
         let mut names = self.store.graph_names();
         names.sort();
         for name in names {
             if let Some(graph) = self.store.graph(&name) {
-                let indexes = GraphIndexes::of(&*graph, Some(name));
+                let indexes = GraphIndexes::of(&graph, Some(name));
                 if !indexes.is_empty() {
                     graphs.push(indexes);
                 }
@@ -534,19 +451,6 @@ impl<S: CatalogStore> CatalogSection<S> {
         names
     }
 
-    /// The catalog's records as a snapshot holds them (version 5): framed,
-    /// in the order of the section, without the stored configuration, which
-    /// belongs to the database file.
-    ///
-    /// # Errors
-    ///
-    /// The error of a record that does not encode.
-    pub(crate) fn snapshot_records(&self) -> Result<Vec<u8>> {
-        let mut bytes = Vec::new();
-        self.write_records(&mut bytes, false)?;
-        Ok(bytes)
-    }
-
     /// Registers the index names of a version 1 catalog in the catalog
     /// again, each name once.
     fn restore_index_names(&self, names: Vec<IndexName>) {
@@ -569,15 +473,68 @@ impl<S: CatalogStore> CatalogSection<S> {
     /// Returns [`Error::Io`] when the stream refuses a write (its own error
     /// is the one its `finish` returns), or the error of a record that does
     /// not encode, with the section and the entry named.
-    fn write_records(&self, stream: &mut dyn std::io::Write, with_config: bool) -> Result<()> {
+    fn write_records(&self, stream: &mut ChunkStreamWriter<'_>) -> Result<()> {
+        // The constraint names and the node types that enforce them, from
+        // one moment, as version 1 reads them.
+        let (mut schema, constraints) = self
+            .catalog
+            .with_constraints(|constraints| (self.collect_schema(), constraints));
         let indexes = index_records(&self.collect_graph_indexes()).map_err(in_section)?;
         let index_names = self.collect_index_names();
+
+        schema.schemas.sort();
+        schema.node_types.sort_by(|a, b| a.name.cmp(&b.name));
+        schema.edge_types.sort_by(|a, b| a.name.cmp(&b.name));
+        schema.graph_types.sort_by(|a, b| a.name.cmp(&b.name));
+        schema.graph_type_bindings.sort();
+        schema.procedures.sort_by(|a, b| a.name.cmp(&b.name));
+        // `DROP GRAPH TYPE` leaves the bindings to the type, which then bind
+        // nothing (and a version 1 load dropped them, as binding them
+        // failed). They are left out, so every binding written names a graph
+        // type written, which the reader requires.
+        let graph_types: HashSet<&str> = schema
+            .graph_types
+            .iter()
+            .map(|def| def.name.as_str())
+            .collect();
+        schema
+            .graph_type_bindings
+            .retain(|(_, graph_type)| graph_types.contains(graph_type.as_str()));
+
         let mut writer = RecordWriter {
             stream,
             buffer: Vec::new(),
         };
-        for record in catalog_records(&self.catalog, indexes, &index_names, with_config)? {
-            writer.write(&record)?;
+        for name in schema.schemas {
+            writer.write(&CatalogRecord::Schema(SchemaRecord { name }))?;
+        }
+        for def in &schema.node_types {
+            writer.write(&CatalogRecord::NodeType(node_type_record(def)))?;
+        }
+        for def in &schema.edge_types {
+            let record = edge_type_record(def).map_err(in_section)?;
+            writer.write(&CatalogRecord::EdgeType(record))?;
+        }
+        for def in &schema.graph_types {
+            writer.write(&CatalogRecord::GraphType(graph_type_record(def)))?;
+        }
+        for (graph, graph_type) in schema.graph_type_bindings {
+            writer.write(&CatalogRecord::GraphBinding(GraphBindingRecord {
+                graph,
+                graph_type,
+            }))?;
+        }
+        for def in &constraints {
+            writer.write(&CatalogRecord::Constraint(constraint_record(def)))?;
+        }
+        for record in indexes {
+            writer.write(&CatalogRecord::Index(record))?;
+        }
+        for name in &index_names {
+            writer.write(&CatalogRecord::IndexName(index_name_record(name)))?;
+        }
+        for def in &schema.procedures {
+            writer.write(&CatalogRecord::Procedure(procedure_record(def)))?;
         }
         Ok(())
     }
@@ -628,9 +585,6 @@ impl<S: CatalogStore> CatalogSection<S> {
                 .catalog
                 .replace_procedure(procedure_definition(record))
                 .map_err(refused)?,
-            CatalogRecord::StoredConfig(record) => {
-                self.catalog.set_stored_config(Some(record));
-            }
         }
         Ok(())
     }
@@ -657,34 +611,6 @@ impl<S: CatalogStore> CatalogSection<S> {
     }
 }
 
-/// The stored configuration a catalog section holds (see
-/// `database::stored_config`), read without loading the catalog: `None` for
-/// a section that stores none (0.5.x bytes, or written before 0.6.0).
-///
-/// # Errors
-///
-/// The errors of reading the section's records.
-#[cfg(feature = "grafeo-file")]
-pub(crate) fn read_stored_config(
-    source: &dyn SectionSource,
-) -> Result<Option<grafeo_common::storage::catalog_record::StoredConfigRecord>> {
-    if legacy_bytes(source).map_err(in_section)?.is_some() {
-        return Ok(None);
-    }
-    check_version(SectionType::Catalog, source, CATALOG_SECTION_VERSION)?;
-    read_meta(source)?;
-    let mut reader = ChunkStreamReader::new(source, 0, CATALOG_STREAM);
-    let mut stored = None;
-    read_catalog_records(&mut reader, &mut |record| {
-        if let CatalogRecord::StoredConfig(config) = record {
-            stored = Some(config);
-        }
-        Ok(())
-    })
-    .map_err(in_section)?;
-    Ok(stored)
-}
-
 /// What a load of a version 2 section keeps between records: the key of the
 /// last record of each kind, which the next one must follow, and the records
 /// applied once all are read.
@@ -700,7 +626,6 @@ struct Loading {
     index: Option<IndexKey>,
     index_name: Option<(String, String, String, u8)>,
     procedure: Option<String>,
-    stored_config: Option<()>,
     constraints: Vec<ConstraintDefinition>,
     indexes: Vec<IndexRecord>,
     index_names: Vec<IndexName>,
@@ -753,7 +678,6 @@ impl Loading {
             CatalogRecord::Procedure(record) => {
                 follow(&mut self.procedure, record.name.clone(), name)
             }
-            CatalogRecord::StoredConfig(_) => follow(&mut self.stored_config, (), name),
         }
     }
 }
@@ -792,102 +716,13 @@ fn index_key(record: &IndexRecord) -> IndexKey {
 }
 
 /// Frames records into the record stream, one at a time.
-/// The records of `catalog`, in the order of the module documentation, with
-/// `indexes` and the names `CREATE INDEX` gave them, and the stored
-/// configuration when `with_config`: what a catalog section holds, and what
-/// the checkpoint of a database on a backend of its own writes as the first
-/// group of its new log (no indexes, no configuration).
-///
-/// # Errors
-///
-/// The error of an edge type whose endpoints do not encode, with the section
-/// and the entry named.
-pub(crate) fn catalog_records(
-    catalog: &Catalog,
-    indexes: Vec<IndexRecord>,
-    index_names: &[IndexName],
-    with_config: bool,
-) -> Result<Vec<CatalogRecord>> {
-    // The constraint names and the node types that enforce them, from one
-    // moment, as version 1 reads them.
-    let (mut schema, constraints) = catalog.with_constraints(|constraints| {
-        (
-            SnapshotSchema {
-                node_types: catalog.all_node_type_defs(),
-                edge_types: catalog.all_edge_type_defs(),
-                graph_types: catalog.all_graph_type_defs(),
-                procedures: catalog.all_procedure_defs(),
-                schemas: catalog.schema_names(),
-                graph_type_bindings: catalog.all_graph_type_bindings(),
-            },
-            constraints,
-        )
-    });
-    schema.schemas.sort();
-    schema.node_types.sort_by(|a, b| a.name.cmp(&b.name));
-    schema.edge_types.sort_by(|a, b| a.name.cmp(&b.name));
-    schema.graph_types.sort_by(|a, b| a.name.cmp(&b.name));
-    schema.graph_type_bindings.sort();
-    schema.procedures.sort_by(|a, b| a.name.cmp(&b.name));
-    // `DROP GRAPH TYPE` leaves the bindings to the type, which then bind
-    // nothing (and a version 1 load dropped them, as binding them failed).
-    // They are left out, so every binding written names a graph type
-    // written, which the reader requires.
-    let graph_types: HashSet<&str> = schema
-        .graph_types
-        .iter()
-        .map(|def| def.name.as_str())
-        .collect();
-    schema
-        .graph_type_bindings
-        .retain(|(_, graph_type)| graph_types.contains(graph_type.as_str()));
-
-    let mut records = Vec::new();
-    for name in schema.schemas {
-        records.push(CatalogRecord::Schema(SchemaRecord { name }));
-    }
-    for def in &schema.node_types {
-        records.push(CatalogRecord::NodeType(node_type_record(def)));
-    }
-    for def in &schema.edge_types {
-        records.push(CatalogRecord::EdgeType(
-            edge_type_record(def).map_err(in_section)?,
-        ));
-    }
-    for def in &schema.graph_types {
-        records.push(CatalogRecord::GraphType(graph_type_record(def)));
-    }
-    for (graph, graph_type) in schema.graph_type_bindings {
-        records.push(CatalogRecord::GraphBinding(GraphBindingRecord {
-            graph,
-            graph_type,
-        }));
-    }
-    for def in &constraints {
-        records.push(CatalogRecord::Constraint(constraint_record(def)));
-    }
-    for record in indexes {
-        records.push(CatalogRecord::Index(record));
-    }
-    for name in index_names {
-        records.push(CatalogRecord::IndexName(index_name_record(name)));
-    }
-    for def in &schema.procedures {
-        records.push(CatalogRecord::Procedure(procedure_record(def)));
-    }
-    if with_config && let Some(config) = catalog.stored_config() {
-        records.push(CatalogRecord::StoredConfig(config));
-    }
-    Ok(records)
-}
-
-struct RecordWriter<'w> {
-    stream: &'w mut dyn std::io::Write,
+struct RecordWriter<'w, 's> {
+    stream: &'w mut ChunkStreamWriter<'s>,
     /// The record being written, framed.
     buffer: Vec<u8>,
 }
 
-impl RecordWriter<'_> {
+impl RecordWriter<'_, '_> {
     /// Frames `record` and writes it into the stream.
     ///
     /// # Errors
@@ -1008,7 +843,7 @@ impl fmt::Display for ChunkDescription<'_> {
     }
 }
 
-impl<S: CatalogStore> Section for CatalogSection<S> {
+impl Section for CatalogSection {
     fn section_type(&self) -> SectionType {
         SectionType::Catalog
     }
@@ -1136,7 +971,7 @@ impl<S: CatalogStore> Section for CatalogSection<S> {
             })?;
         sink.write_chunk(ChunkMeta::meta(), &meta)?;
         let mut stream = ChunkStreamWriter::new(sink, 0, CATALOG_STREAM, self.caps);
-        match self.write_records(&mut stream, true) {
+        match self.write_records(&mut stream) {
             Ok(()) => stream.finish().map(drop),
             // Every I/O error comes from the stream, which keeps the sink's
             // own error for `finish` to return.
@@ -1188,7 +1023,7 @@ mod tests {
 
     fn make_section() -> CatalogSection {
         let catalog = Arc::new(Catalog::new());
-        let store = Arc::new(grafeo_core::graph::rowgroup::RowGroupStore::new());
+        let store = Arc::new(grafeo_core::graph::lpg::LpgStore::new().unwrap());
         CatalogSection::new(catalog, store, || 42)
     }
 
@@ -1199,7 +1034,7 @@ mod tests {
         assert!(!bytes.is_empty(), "bytes is empty");
 
         let catalog2 = Arc::new(Catalog::new());
-        let store2 = Arc::new(grafeo_core::graph::rowgroup::RowGroupStore::new());
+        let store2 = Arc::new(grafeo_core::graph::lpg::LpgStore::new().unwrap());
         let mut section2 = CatalogSection::new(catalog2, store2, || 0);
         section2
             .deserialize(&bytes)
@@ -1232,7 +1067,7 @@ mod tests {
         assert!(read < bytes.len(), "the names follow the snapshot");
 
         let catalog = Arc::new(Catalog::new());
-        let store = Arc::new(grafeo_core::graph::rowgroup::RowGroupStore::new());
+        let store = Arc::new(grafeo_core::graph::lpg::LpgStore::new().unwrap());
         let mut reopened = CatalogSection::new(Arc::clone(&catalog), store, || 0);
         reopened.deserialize(&bytes).unwrap();
         assert_eq!(catalog.constraints(), vec![city_name]);
@@ -1323,7 +1158,7 @@ mod tests {
         let bytes = section.serialize().unwrap();
 
         let catalog2 = Arc::new(Catalog::new());
-        let store2 = Arc::new(grafeo_core::graph::rowgroup::RowGroupStore::new());
+        let store2 = Arc::new(grafeo_core::graph::lpg::LpgStore::new().unwrap());
         let mut section2 = CatalogSection::new(catalog2, store2, || 0);
         section2.deserialize(&bytes).unwrap();
 
@@ -1350,7 +1185,7 @@ mod tests {
         let bytes = section.serialize().unwrap();
 
         let catalog2 = Arc::new(Catalog::new());
-        let store2 = Arc::new(grafeo_core::graph::rowgroup::RowGroupStore::new());
+        let store2 = Arc::new(grafeo_core::graph::lpg::LpgStore::new().unwrap());
         let mut section2 = CatalogSection::new(catalog2, store2, || 0);
         section2.deserialize(&bytes).unwrap();
 
@@ -1436,7 +1271,7 @@ mod tests {
         let bytes = section.serialize().unwrap();
 
         let catalog = Arc::new(Catalog::new());
-        let store = Arc::new(RowGroupStore::new());
+        let store = Arc::new(LpgStore::new().unwrap());
         let mut loaded = CatalogSection::new(Arc::clone(&catalog), store, || 0);
         loaded.deserialize(&bytes).unwrap();
         assert_eq!(
@@ -2137,7 +1972,7 @@ mod tests {
         .unwrap();
         let section = CatalogSection::new(
             Arc::clone(&db.catalog),
-            Arc::new(RowGroupStore::new()),
+            Arc::new(LpgStore::new().unwrap()),
             || 0,
         );
         let loaded = load(&MemoryImage::from_sections(&[&section]).unwrap()).unwrap();

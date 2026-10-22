@@ -26,7 +26,7 @@
 //! cargo test -p grafeo-engine --all-features --test statement_without_a_result
 //! ```
 
-#![cfg(all(feature = "gql", feature = "cypher"))]
+#![cfg(all(feature = "lpg", feature = "gql", feature = "cypher"))]
 
 use std::collections::HashMap;
 

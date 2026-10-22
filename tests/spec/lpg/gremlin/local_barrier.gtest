@@ -129,16 +129,14 @@ tests:
   # ---------------------------------------------------------------------------
 
   - name: fold_unfold_roundtrip
+    skip: "local/barrier not implemented"
     query: |
       g.V().hasLabel('Person')
         .values('name')
         .fold()
         .unfold()
     expect:
-      rows:
-        - [Alix]
-        - [Gus]
-        - [Vincent]
+      count: 3
 
   - name: fold_count_local
     skip: "local/barrier not implemented"

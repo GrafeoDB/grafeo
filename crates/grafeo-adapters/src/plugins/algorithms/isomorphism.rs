@@ -8,17 +8,16 @@
 
 use std::sync::OnceLock;
 
-use grafeo_common::types::{NodeId, ReadView, Value};
+use grafeo_common::types::{NodeId, Value};
 use grafeo_common::utils::error::Result;
 use grafeo_common::utils::hash::{FxHashMap, FxHashSet};
 use grafeo_core::graph::Direction;
 use grafeo_core::graph::GraphStore;
-#[cfg(test)]
-#[cfg(test)]
-use grafeo_core::graph::rowgroup::RowGroupStore;
+#[cfg(all(test, feature = "lpg"))]
+use grafeo_core::graph::lpg::LpgStore;
 
 use super::super::{AlgorithmResult, ParameterDef, ParameterType, Parameters};
-use super::traits::{GraphAlgorithm, GraphView};
+use super::traits::{GraphAlgorithm, visible_edges_from};
 
 /// Counts all subgraph isomorphisms of `pattern` in `target`.
 ///
@@ -33,23 +32,9 @@ use super::traits::{GraphAlgorithm, GraphView};
 ///
 /// O(n^k) worst case where n = |V_target|, k = |V_pattern|. Much better with
 /// feasibility pruning on real graphs.
-///
-/// # Errors
-///
-/// Returns the error of a read either store cannot do.
-pub fn subgraph_isomorphism_count(
-    target: &dyn GraphStore,
-    target_view: ReadView,
-    pattern: &dyn GraphStore,
-    pattern_view: ReadView,
-) -> Result<u64> {
-    let (target, pattern) = (
-        GraphView::new(target, target_view),
-        GraphView::new(pattern, pattern_view),
-    );
-    let count = VF2State::new(&target, &pattern).count_all();
-    let count = pattern.finish(count)?;
-    target.finish(count)
+pub fn subgraph_isomorphism_count(target: &dyn GraphStore, pattern: &dyn GraphStore) -> u64 {
+    let mut state = VF2State::new(target, pattern);
+    state.count_all()
 }
 
 /// Enumerates subgraph isomorphisms (up to a limit).
@@ -61,24 +46,13 @@ pub fn subgraph_isomorphism_count(
 /// * `target` - The graph to search in.
 /// * `pattern` - The subgraph pattern to find.
 /// * `limit` - Maximum number of mappings to return (None for all).
-///
-/// # Errors
-///
-/// Returns the error of a read either store cannot do.
 pub fn subgraph_isomorphism(
     target: &dyn GraphStore,
-    target_view: ReadView,
     pattern: &dyn GraphStore,
-    pattern_view: ReadView,
     limit: Option<usize>,
-) -> Result<Vec<Vec<(NodeId, NodeId)>>> {
-    let (target, pattern) = (
-        GraphView::new(target, target_view),
-        GraphView::new(pattern, pattern_view),
-    );
-    let mappings = VF2State::new(&target, &pattern).enumerate(limit);
-    let mappings = pattern.finish(mappings)?;
-    target.finish(mappings)
+) -> Vec<Vec<(NodeId, NodeId)>> {
+    let mut state = VF2State::new(target, pattern);
+    state.enumerate(limit)
 }
 
 /// Counts subgraph isomorphisms using an edge list to define the pattern.
@@ -92,25 +66,8 @@ pub fn subgraph_isomorphism(
 /// * `pattern_edges` - Edges of the pattern graph as (source_idx, target_idx) pairs
 ///   where indices are 0-based.
 /// * `pattern_node_count` - Number of nodes in the pattern.
-///
-/// # Errors
-///
-/// Returns the error of a read the store cannot do.
 pub fn subgraph_isomorphism_count_from_edges(
     target: &dyn GraphStore,
-    view: ReadView,
-    pattern_edges: &[(usize, usize)],
-    pattern_node_count: usize,
-) -> Result<u64> {
-    let target = GraphView::new(target, view);
-    let count = count_from_edges_on(&target, pattern_edges, pattern_node_count);
-    target.finish(count)
-}
-
-/// [`subgraph_isomorphism_count_from_edges`] on the graph a [`GraphView`]
-/// reads.
-fn count_from_edges_on(
-    target: &GraphView<'_>,
     pattern_edges: &[(usize, usize)],
     pattern_node_count: usize,
 ) -> u64 {
@@ -124,7 +81,7 @@ fn count_from_edges_on(
 // ============================================================================
 
 /// VF2 backtracking state for subgraph isomorphism.
-struct VF2State {
+struct VF2State<'a> {
     target_nodes: Vec<NodeId>,
     target_adj: FxHashMap<NodeId, FxHashSet<NodeId>>,
     pattern_nodes: Vec<NodeId>,
@@ -133,10 +90,11 @@ struct VF2State {
     mapping: FxHashMap<NodeId, NodeId>,
     /// Reverse mapping: target_node -> pattern_node (for quick membership checks).
     reverse_mapping: FxHashSet<NodeId>,
+    _target: &'a dyn GraphStore,
 }
 
-impl VF2State {
-    fn new(target: &GraphView<'_>, pattern: &GraphView<'_>) -> Self {
+impl<'a> VF2State<'a> {
+    fn new(target: &'a dyn GraphStore, pattern: &'a dyn GraphStore) -> Self {
         let target_nodes = target.node_ids();
         let pattern_nodes = pattern.node_ids();
 
@@ -150,6 +108,7 @@ impl VF2State {
             pattern_adj,
             mapping: FxHashMap::default(),
             reverse_mapping: FxHashSet::default(),
+            _target: target,
         }
     }
 
@@ -286,7 +245,7 @@ impl VF2State {
 // ============================================================================
 
 /// VF2 state using a pre-built adjacency matrix for the pattern.
-struct VF2StateFromAdj {
+struct VF2StateFromAdj<'a> {
     target_nodes: Vec<NodeId>,
     target_adj: FxHashMap<NodeId, FxHashSet<NodeId>>,
     pattern_adj: Vec<FxHashSet<usize>>,
@@ -295,11 +254,12 @@ struct VF2StateFromAdj {
     mapping: Vec<Option<NodeId>>,
     /// Set of mapped target nodes.
     mapped_targets: FxHashSet<NodeId>,
+    _target: &'a dyn GraphStore,
 }
 
-impl VF2StateFromAdj {
+impl<'a> VF2StateFromAdj<'a> {
     fn new(
-        target: &GraphView<'_>,
+        target: &'a dyn GraphStore,
         pattern_adj: &[FxHashSet<usize>],
         pattern_node_count: usize,
     ) -> Self {
@@ -313,6 +273,7 @@ impl VF2StateFromAdj {
             pattern_node_count,
             mapping: vec![None; pattern_node_count],
             mapped_targets: FxHashSet::default(),
+            _target: target,
         }
     }
 
@@ -380,14 +341,14 @@ impl VF2StateFromAdj {
 // Helpers
 // ============================================================================
 
-fn build_undirected_adj(store: &GraphView<'_>) -> FxHashMap<NodeId, FxHashSet<NodeId>> {
+fn build_undirected_adj(store: &dyn GraphStore) -> FxHashMap<NodeId, FxHashSet<NodeId>> {
     let nodes = store.node_ids();
     let mut adj: FxHashMap<NodeId, FxHashSet<NodeId>> = FxHashMap::default();
     for &node in &nodes {
         adj.insert(node, FxHashSet::default());
     }
     for &node in &nodes {
-        for (neighbor, _) in store.edges(node, Direction::Outgoing) {
+        for (neighbor, _) in visible_edges_from(store, node, Direction::Outgoing) {
             if let Some(set) = adj.get_mut(&node) {
                 set.insert(neighbor);
             }
@@ -453,39 +414,28 @@ impl GraphAlgorithm for SubgraphIsomorphismAlgorithm {
         subgraph_iso_params()
     }
 
-    fn execute(
-        &self,
-        store: &dyn GraphStore,
-        view: grafeo_common::types::ReadView,
-        params: &Parameters,
-    ) -> Result<AlgorithmResult> {
-        let graph = super::traits::GraphView::new(store, view);
-        let store = &graph;
-        let found = super::traits::evaluated(|| {
-            let edges_str = params.get_string("pattern_edges").unwrap_or("");
-            let node_count =
-                usize::try_from(params.get_int("pattern_nodes").unwrap_or(0)).unwrap_or(0);
+    fn execute(&self, store: &dyn GraphStore, params: &Parameters) -> Result<AlgorithmResult> {
+        let edges_str = params.get_string("pattern_edges").unwrap_or("");
+        let node_count = usize::try_from(params.get_int("pattern_nodes").unwrap_or(0)).unwrap_or(0);
 
-            let edges: Vec<(usize, usize)> = edges_str
-                .split(',')
-                .filter(|s| !s.is_empty())
-                .filter_map(|s| {
-                    let parts: Vec<&str> = s.split('-').collect();
-                    if parts.len() == 2 {
-                        Some((parts[0].parse().ok()?, parts[1].parse().ok()?))
-                    } else {
-                        None
-                    }
-                })
-                .collect();
+        let edges: Vec<(usize, usize)> = edges_str
+            .split(',')
+            .filter(|s| !s.is_empty())
+            .filter_map(|s| {
+                let parts: Vec<&str> = s.split('-').collect();
+                if parts.len() == 2 {
+                    Some((parts[0].parse().ok()?, parts[1].parse().ok()?))
+                } else {
+                    None
+                }
+            })
+            .collect();
 
-            let count = count_from_edges_on(store, &edges, node_count);
+        let count = subgraph_isomorphism_count_from_edges(store, &edges, node_count);
 
-            let mut output = AlgorithmResult::new(vec!["count".to_string()]);
-            output.add_row(vec![Value::Int64(i64::try_from(count).unwrap_or(i64::MAX))]);
-            Ok(output)
-        });
-        graph.finish(found)?
+        let mut output = AlgorithmResult::new(vec!["count".to_string()]);
+        output.add_row(vec![Value::Int64(i64::try_from(count).unwrap_or(i64::MAX))]);
+        Ok(output)
     }
 }
 
@@ -493,12 +443,12 @@ impl GraphAlgorithm for SubgraphIsomorphismAlgorithm {
 // Tests
 // ============================================================================
 
-#[cfg(test)]
+#[cfg(all(test, feature = "lpg"))]
 mod tests {
     use super::*;
 
-    fn create_triangle() -> RowGroupStore {
-        let store = RowGroupStore::new();
+    fn create_triangle() -> LpgStore {
+        let store = LpgStore::new().unwrap();
         let n0 = store.create_node(&["Node"]);
         let n1 = store.create_node(&["Node"]);
         let n2 = store.create_node(&["Node"]);
@@ -513,8 +463,8 @@ mod tests {
         store
     }
 
-    fn create_k4() -> RowGroupStore {
-        let store = RowGroupStore::new();
+    fn create_k4() -> LpgStore {
+        let store = LpgStore::new().unwrap();
         let nodes: Vec<NodeId> = (0..4).map(|_| store.create_node(&["Node"])).collect();
         for i in 0..4 {
             for j in (i + 1)..4 {
@@ -532,9 +482,7 @@ mod tests {
 
         // A triangle has 6 automorphisms (3! = 6), so counting all
         // isomorphisms of a triangle in a triangle gives 6.
-        let count =
-            subgraph_isomorphism_count(&target, ReadView::latest(), &pattern, ReadView::latest())
-                .unwrap();
+        let count = subgraph_isomorphism_count(&target, &pattern);
         assert_eq!(count, 6, "Triangle in triangle should have 6 mappings (3!)");
     }
 
@@ -545,16 +493,14 @@ mod tests {
 
         // K_4 has C(4,3) = 4 triangles. Each has 3! = 6 automorphisms.
         // Total mappings = 4 * 6 = 24.
-        let count =
-            subgraph_isomorphism_count(&target, ReadView::latest(), &pattern, ReadView::latest())
-                .unwrap();
+        let count = subgraph_isomorphism_count(&target, &pattern);
         assert_eq!(count, 24, "K_4 should have 24 triangle mappings (4 * 3!)");
     }
 
     #[test]
     fn test_edge_in_k4() {
         // Pattern: single edge (2 nodes)
-        let pattern = RowGroupStore::new();
+        let pattern = LpgStore::new().unwrap();
         let p0 = pattern.create_node(&["Node"]);
         let p1 = pattern.create_node(&["Node"]);
         pattern.create_edge(p0, p1, "E");
@@ -564,9 +510,7 @@ mod tests {
 
         // K_4 has 6 edges. Each edge has 2! = 2 automorphisms.
         // Total = 6 * 2 = 12.
-        let count =
-            subgraph_isomorphism_count(&target, ReadView::latest(), &pattern, ReadView::latest())
-                .unwrap();
+        let count = subgraph_isomorphism_count(&target, &pattern);
         assert_eq!(count, 12, "K_4 should have 12 edge mappings (6 * 2!)");
     }
 
@@ -576,9 +520,7 @@ mod tests {
 
         // Triangle pattern as edge list.
         let pattern_edges = [(0, 1), (1, 2), (2, 0)];
-        let count =
-            subgraph_isomorphism_count_from_edges(&target, ReadView::latest(), &pattern_edges, 3)
-                .unwrap();
+        let count = subgraph_isomorphism_count_from_edges(&target, &pattern_edges, 3);
 
         assert_eq!(count, 24, "Edge-list triangle in K_4 should give 24");
     }
@@ -589,9 +531,7 @@ mod tests {
         let pattern = create_k4();
 
         // K_4 in K_4: 4! = 24 automorphisms.
-        let count =
-            subgraph_isomorphism_count(&target, ReadView::latest(), &pattern, ReadView::latest())
-                .unwrap();
+        let count = subgraph_isomorphism_count(&target, &pattern);
         assert_eq!(count, 24, "K_4 in K_4 should have 24 mappings (4!)");
     }
 
@@ -600,14 +540,7 @@ mod tests {
         let target = create_triangle();
         let pattern = create_triangle();
 
-        let mappings = subgraph_isomorphism(
-            &target,
-            ReadView::latest(),
-            &pattern,
-            ReadView::latest(),
-            None,
-        )
-        .unwrap();
+        let mappings = subgraph_isomorphism(&target, &pattern, None);
         assert_eq!(mappings.len(), 6);
 
         // Each mapping should have 3 entries.
@@ -621,21 +554,14 @@ mod tests {
         let target = create_k4();
         let pattern = create_triangle();
 
-        let mappings = subgraph_isomorphism(
-            &target,
-            ReadView::latest(),
-            &pattern,
-            ReadView::latest(),
-            Some(3),
-        )
-        .unwrap();
+        let mappings = subgraph_isomorphism(&target, &pattern, Some(3));
         assert_eq!(mappings.len(), 3);
     }
 
     #[test]
     fn test_no_match() {
         // Target is a path (no triangles), pattern is a triangle.
-        let target = RowGroupStore::new();
+        let target = LpgStore::new().unwrap();
         let n0 = target.create_node(&["Node"]);
         let n1 = target.create_node(&["Node"]);
         let n2 = target.create_node(&["Node"]);
@@ -646,31 +572,25 @@ mod tests {
         // No edge between n0 and n2: not a triangle.
 
         let pattern = create_triangle();
-        let count =
-            subgraph_isomorphism_count(&target, ReadView::latest(), &pattern, ReadView::latest())
-                .unwrap();
+        let count = subgraph_isomorphism_count(&target, &pattern);
         assert_eq!(count, 0, "Path graph should have 0 triangle isomorphisms");
     }
 
     #[test]
     fn test_empty_pattern() {
         let target = create_k4();
-        let pattern = RowGroupStore::new();
+        let pattern = LpgStore::new().unwrap();
 
-        let count =
-            subgraph_isomorphism_count(&target, ReadView::latest(), &pattern, ReadView::latest())
-                .unwrap();
+        let count = subgraph_isomorphism_count(&target, &pattern);
         assert_eq!(count, 1, "Empty pattern should have 1 mapping (empty)");
     }
 
     #[test]
     fn test_empty_target() {
-        let target = RowGroupStore::new();
+        let target = LpgStore::new().unwrap();
         let pattern = create_triangle();
 
-        let count =
-            subgraph_isomorphism_count(&target, ReadView::latest(), &pattern, ReadView::latest())
-                .unwrap();
+        let count = subgraph_isomorphism_count(&target, &pattern);
         assert_eq!(count, 0, "Empty target should have 0 mappings");
     }
 
@@ -685,7 +605,7 @@ mod tests {
         params.set_string("pattern_edges", "0-1,1-2,2-0");
         params.set_int("pattern_nodes", 3);
 
-        let result = algo.execute(&store, ReadView::latest(), &params).unwrap();
+        let result = algo.execute(&store, &params).unwrap();
         assert_eq!(result.row_count(), 1);
         assert_eq!(result.rows[0][0], Value::Int64(24));
     }

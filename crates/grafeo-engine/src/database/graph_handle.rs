@@ -1,10 +1,11 @@
 //! Handles on one named graph, for working in several graphs at once.
 
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use grafeo_common::types::{EdgeId, NodeId, PropertyKey, Value};
 use grafeo_common::utils::error::Result;
-use grafeo_core::graph::Direction;
+use grafeo_core::graph::GraphStoreSearch;
 use grafeo_core::graph::lpg::{Edge, Node};
 
 use super::direct::{BatchEdge, DirectCalls, DirectTarget, missing_graph};
@@ -96,21 +97,16 @@ impl GraphHandle<'_> {
         self.schema.as_deref()
     }
 
-    /// A [`Snapshot`](crate::Snapshot) of the graph, as a committed reader at
-    /// the current epoch sees it, pinned while it lives: for reads such as
-    /// graph algorithms.
+    /// The graph's store, for reads such as graph algorithms.
     ///
     /// # Errors
     ///
     /// Returns an error if the graph no longer exists.
-    pub fn snapshot(&self) -> Result<crate::Snapshot> {
-        let pin = self.db.transaction_manager.pin_read();
-        let store = self.db.read_store(DirectTarget::Named {
+    pub fn graph_store(&self) -> Result<Arc<dyn GraphStoreSearch>> {
+        self.db.read_store(DirectTarget::Named {
             schema: self.schema.as_deref(),
             name: &self.name,
-        })?;
-        let view = grafeo_common::types::ReadView::committed(pin.epoch());
-        Ok(crate::Snapshot::pinned(store, view, pin))
+        })
     }
 
     /// Opens a session working in this graph.
@@ -120,11 +116,12 @@ impl GraphHandle<'_> {
     /// Returns an error if the graph no longer exists.
     pub fn session(&self) -> Result<Session> {
         self.check_exists()?;
-        let mut session = self.db.session();
-        // The session starts in the handle's graph, its home, where SESSION RESET returns
-        session.set_home(self.schema.clone(), Some(self.name.clone()));
-        session.reset_schema();
-        session.reset_graph();
+        let session = self.db.session();
+        match &self.schema {
+            Some(schema) => session.set_schema(schema),
+            None => session.reset_schema(),
+        }
+        session.use_graph(&self.name);
         Ok(session)
     }
 
@@ -319,20 +316,6 @@ impl GraphHandle<'_> {
         self.direct().delete_node(id)
     }
 
-    /// Deletes a node with all its edges, as `DETACH DELETE` does, and
-    /// returns whether the node existed: one change of the write, so the
-    /// node and its edges commit, roll back and replay together. Change data
-    /// capture reports a Delete event per edge, each naming the node in
-    /// `deleted_with`, then the node's.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the graph no longer exists, and a write conflict
-    /// with a transaction that writes the node or one of its edges.
-    pub fn detach_delete_node(&self, id: NodeId) -> Result<bool> {
-        self.direct().detach_delete_node(id)
-    }
-
     /// Deletes an edge; whether it existed.
     ///
     /// # Errors
@@ -397,20 +380,6 @@ impl GraphHandle<'_> {
     /// error; nothing of the batch is created then.
     pub fn batch_create_edges(&self, edges: Vec<BatchEdge>) -> Result<Vec<EdgeId>> {
         self.direct().batch_create_edges(edges)
-    }
-
-    /// The edges of a node of this graph, like [`GrafeoDB::get_node_edges`].
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the graph no longer exists.
-    pub fn get_node_edges(
-        &self,
-        node: NodeId,
-        direction: Direction,
-        edge_types: &[&str],
-    ) -> Result<Vec<(NodeId, EdgeId)>> {
-        self.direct().get_node_edges(node, direction, edge_types)
     }
 
     /// Gets a node of this graph.

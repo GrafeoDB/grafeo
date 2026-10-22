@@ -416,11 +416,6 @@ pub struct EdgeImage {
     pub edge_type: ArcStr,
     /// Its properties.
     pub properties: Properties,
-    /// For a delete, the node whose detach delete removed the edge
-    /// (`DETACH DELETE`, `detach_delete_node`), which change data capture
-    /// reports; `None` for every other write. Not logged: replay deletes the
-    /// edge the same either way.
-    pub deleted_with: Option<NodeId>,
 }
 
 /// The ids a bulk write reserved in one table of a graph: one entry however
@@ -1083,7 +1078,6 @@ fn payload_address(value: &Value) -> Option<usize> {
         Value::Vector(items) => Some(items.as_ptr().addr()),
         Value::Map(map) => Some(Arc::as_ptr(map).addr()),
         Value::GCounter(counts) => Some(Arc::as_ptr(counts).addr()),
-        Value::RdfTerm(term) => Some(Arc::as_ptr(term).addr()),
         Value::Path { .. }
         | Value::OnCounter { .. }
         | Value::Null
@@ -1094,8 +1088,7 @@ fn payload_address(value: &Value) -> Option<usize> {
         | Value::Date(_)
         | Value::Time(_)
         | Value::Duration(_)
-        | Value::ZonedDatetime(_)
-        | Value::Decimal(_) => None,
+        | Value::ZonedDatetime(_) => None,
     }
 }
 
@@ -1161,7 +1154,6 @@ mod tests {
             dst: NodeId::new(dst),
             edge_type: edge_type.into(),
             properties,
-            deleted_with: None,
         }))
     }
 

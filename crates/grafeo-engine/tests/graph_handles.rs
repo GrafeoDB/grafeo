@@ -2,6 +2,8 @@
 //! current graph: handles on different graphs can be used side by side and
 //! from several threads, and a handle never falls back to another graph.
 
+#![cfg(feature = "lpg")]
+
 use grafeo_common::types::Value;
 use grafeo_engine::GrafeoDB;
 
@@ -64,13 +66,12 @@ fn handles_interleave_without_switching() {
             .unwrap()
             .get_node(file)
             .unwrap()
-            .unwrap()
             .properties
             .get(&"size".into()),
         Some(&Value::from(3_i64))
     );
     // The default graph is empty, so it has no node with that id.
-    assert!(db.get_node(file).unwrap().is_none());
+    assert!(db.get_node(file).is_none());
 }
 
 #[test]
@@ -186,9 +187,7 @@ fn property_indexes_and_lookups_are_per_graph() {
     assert!(!extraction.session().unwrap().has_property_index("id"));
     assert!(!db.has_property_index("id"));
     assert_eq!(
-        model_session
-            .find_nodes_by_property("id", &Value::from("x"))
-            .unwrap(),
+        model_session.find_nodes_by_property("id", &Value::from("x")),
         [component]
     );
 }
@@ -336,7 +335,7 @@ fn direct_calls_on_a_handle_stay_in_its_graph() {
         "expected empty"
     );
     assert!(
-        db.get_node(billing).unwrap().is_none(),
+        db.get_node(billing).is_none(),
         "the default graph got nothing"
     );
 

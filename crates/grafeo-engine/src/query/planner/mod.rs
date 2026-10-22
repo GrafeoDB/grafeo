@@ -100,7 +100,6 @@ pub fn convert_unary_op(op: UnaryOp) -> Result<UnaryFilterOp> {
         UnaryOp::IsNull => Ok(UnaryFilterOp::IsNull),
         UnaryOp::IsNotNull => Ok(UnaryFilterOp::IsNotNull),
         UnaryOp::Neg => Ok(UnaryFilterOp::Neg),
-        UnaryOp::Pos => Ok(UnaryFilterOp::Pos),
     }
 }
 
@@ -171,13 +170,12 @@ pub fn convert_filter_expression(expr: &LogicalExpression) -> Result<FilterExpre
                 operand: Box::new(operand_expr),
             })
         }
-        LogicalExpression::FunctionCall { name, args, .. }
-        | LogicalExpression::SparqlCall { name, args } => {
+        LogicalExpression::FunctionCall { name, args, .. } => {
             let filter_args: Vec<FilterExpression> = args
                 .iter()
                 .map(convert_filter_expression)
                 .collect::<Result<Vec<_>>>()?;
-            Ok(FilterExpression::SparqlCall {
+            Ok(FilterExpression::FunctionCall {
                 name: name.clone(),
                 args: filter_args,
             })
@@ -335,7 +333,7 @@ pub fn convert_filter_expression(expr: &LogicalExpression) -> Result<FilterExpre
                     }
                     crate::query::plan::MapProjectionEntry::AllProperties => Ok((
                         "*".to_string(),
-                        FilterExpression::SparqlCall {
+                        FilterExpression::FunctionCall {
                             name: "properties".to_string(),
                             args: vec![FilterExpression::Variable(base.clone())],
                         },
@@ -359,7 +357,7 @@ pub fn convert_filter_expression(expr: &LogicalExpression) -> Result<FilterExpre
         }),
         LogicalExpression::PatternComprehension { projection, .. } => {
             let proj = convert_filter_expression(projection)?;
-            Ok(FilterExpression::SparqlCall {
+            Ok(FilterExpression::FunctionCall {
                 name: "collect".to_string(),
                 args: vec![proj],
             })

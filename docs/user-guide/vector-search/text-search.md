@@ -102,8 +102,8 @@ RETURN a.title
 ```
 
 See [filter-expression hybrid search](filter-expressions.md) for the full
-syntax, AND/OR composition with vector predicates, and what happens without
-an index (the text functions need one).
+syntax, AND/OR composition with vector predicates, and index-missing fallback
+behavior.
 
 ## Auto-Sync Behavior
 

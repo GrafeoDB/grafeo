@@ -4,7 +4,7 @@
 //! `manhattan_distance`, and `dot_product` are all reachable from WHERE /
 //! ORDER BY / projection contexts and produce correct values.
 
-#![cfg(feature = "gql")]
+#![cfg(all(feature = "lpg", feature = "gql"))]
 
 use grafeo_common::types::Value;
 use grafeo_engine::GrafeoDB;

@@ -1,5 +1,4 @@
 # Reviewed differences between 0.5.44 and 0.6.0: case key, fingerprint of the reviewed result, why it changed.
-# A `~` before the fingerprint: the case's result in 0.5.44 varies from run to run, so it may also not differ.
 AM10|gql f3c6308779 A later MATCH part that reuses a node or edge bound before goes on from it; it matched any node, so every row came back with every match.
 AM11|cypher 8442578b89 A later MATCH part that reuses a node or edge bound before goes on from it; it matched any node, so every row came back with every match.
 AM11|gql 8442578b89 A later MATCH part that reuses a node or edge bound before goes on from it; it matched any node, so every row came back with every match.
@@ -67,11 +66,11 @@ J7|gql 24270a78b4 Values beside a computed group key keep their kind; strings, f
 J8|cypher 57e2bbf68a A string group key beside a computed operand keeps its groups; the names became 0 and every group merged into one.
 J8|gql 57e2bbf68a A string group key beside a computed operand keeps its groups; the names became 0 and every group merged into one.
 J9|cypher 52df54130a Floats, booleans, lists and maps beside a literal group key keep their values; they became 0.
-J9|gql 207833cf9c Floats, booleans, lists and maps beside a literal group key keep their values; they became 0. a.age / 16.0 is a decimal division now, with 16 digits (#610); the values are the same.
+J9|gql 52df54130a Floats, booleans, lists and maps beside a literal group key keep their values; they became 0.
 J10|cypher d3f3f0f0d0 Values beside a computed aggregate operand keep their kind; count(DISTINCT name) counted one 0 and max(name) returned 0.
 J10|gql d3f3f0f0d0 Values beside a computed aggregate operand keep their kind; count(DISTINCT name) counted one 0 and max(name) returned 0.
 J11|cypher d6c3ec3163 Unwound floats beside a literal group key keep their values; collect and sum saw 0.
-J11|gql f8e821f604 Unwound floats beside a literal group key keep their values; collect and sum saw 0. Its GQL literals with a point are exact decimals now (#610); the values are the same.
+J11|gql d6c3ec3163 Unwound floats beside a literal group key keep their values; collect and sum saw 0.
 J12|cypher 24270a78b4 Values beside a computed key in an aggregating WITH keep their kind; the names became 0.
 J12|gql 24270a78b4 Values beside a computed key in an aggregating WITH keep their kind; the names became 0.
 AR1|cypher 8f576002e2 A path variable over two edge patterns holds the whole path; it held the last hop only.
@@ -150,7 +149,7 @@ AV11|gql 8473a132e5 With a property index, = finds the rows it finds without one
 AV12|cypher 50685503bb With a property index, IN finds the rows it finds without one (#535).
 AV12|gql 50685503bb With a property index, IN finds the rows it finds without one (#535).
 AV13|cypher 3d229beed7 With a property index, a key from the row finds every value = finds equal: '042', '42.0' and 0.1 + 0.2 were missed (#535).
-AV13|gql 93dbb3268e With a property index, a key from the row finds every value = finds equal: '042', '42.0' and 0.1 + 0.2 were missed (#535). The GQL literals 42.0 and 0.3 are exact decimals now (#610); the same rows match.
+AV13|gql 3d229beed7 With a property index, a key from the row finds every value = finds equal: '042', '42.0' and 0.1 + 0.2 were missed (#535).
 AV14|cypher 1faa763b50 With a property index, a constant key after a clause finds 0.1 + 0.2 for 0.3, as without one (#535).
 AV14|gql 1faa763b50 With a property index, a constant key after a clause finds 0.1 + 0.2 for 0.3, as without one (#535).
 AV15|cypher 5e7601f6ff With a property index, = finds the rows it finds without one; the lookup found the exact value only (#535).
@@ -220,7 +219,7 @@ BG13|cypher 662fd3d326 An aggregate in the ORDER BY of a RETURN that does not ag
 BG14|cypher f17b1e6cb7 After an aggregating RETURN, ORDER BY max(...) sorts by the returned aggregate; it sorted as if the key were not there.
 BG15|cypher 17b4de4b6b After an aggregating RETURN, a key that repeats a returned expression reads its column; it failed with an internal error.
 BH1|cypher b5c77d5148 A float grouping key keeps its value after a WITH; it came back as the integer of its bits.
-BH1|gql 424c6fff4a A float grouping key keeps its value after a WITH; it came back as the integer of its bits. Its GQL literals with a point are exact decimals now (#610); the values are the same.
+BH1|gql b5c77d5148 A float grouping key keeps its value after a WITH; it came back as the integer of its bits.
 BH2|cypher b5c77d5148 A float grouping key keeps its value; Cypher returned the integer of its bits.
 BH3|cypher 8d04bcd940 3 and 3.0 are one group, which keeps its first value; they were two groups.
 BH3|gql 8d04bcd940 3 and 3.0 are one group, which keeps its first value; they were two groups.
@@ -279,11 +278,11 @@ BK3|cypher 79f40f49e6 DFS depth is the depth in the DFS tree; it was the finish 
 BK3|gql 79f40f49e6 DFS depth is the depth in the DFS tree; it was the finish order.
 BK4|cypher f137fd2ed7 DFS reports depth, discovery and finish; depth was the finish order.
 BK4|gql f137fd2ed7 DFS reports depth, discovery and finish; depth was the finish order.
-BK5|cypher a18d149ec5 A procedure argument whose evaluation fails fails the call with that error: 1 / 0 is a division by zero (22012, #639); it ran with the default.
-BK5|gql a18d149ec5 A procedure argument whose evaluation fails fails the call with that error: 1 / 0 is a division by zero (22012, #639); it ran with the default.
-BK6|cypher a3d97228ce A procedure argument read from a row is an error that names it; it failed as a missing start parameter. The error starts with its code (#588), unsupported: a procedure argument must be a constant.
-BK7|cypher 824aec52bd A procedure argument of the wrong type is an error, an invalid value type (22G03); it ran with the default. The error starts with its code (#588).
-BK7|gql 824aec52bd A procedure argument of the wrong type is an error, an invalid value type (22G03); it ran with the default. The error starts with its code (#588).
+BK5|cypher 880f1ecd08 A procedure argument without a value is an error; it ran with the default. The error starts with its code (#588).
+BK5|gql 880f1ecd08 A procedure argument without a value is an error; it ran with the default. The error starts with its code (#588).
+BK6|cypher 92e11daab5 A procedure argument read from a row is an error that names it; it failed as a missing start parameter. The error starts with its code (#588).
+BK7|cypher ba288c8f3e A procedure argument of the wrong type is an error; it ran with the default. The error starts with its code (#588).
+BK7|gql ba288c8f3e A procedure argument of the wrong type is an error; it ran with the default. The error starts with its code (#588).
 BK9|cypher 79f40f49e6 A constant expression in a required procedure argument runs; it failed as a missing start parameter.
 BK9|gql 79f40f49e6 A constant expression in a required procedure argument runs; it failed as a missing start parameter.
 BM1|cypher 1737c2301d A list literal keeps a null item for a property of an unmatched OPTIONAL MATCH variable; it was [] (size 0).
@@ -334,8 +333,8 @@ AU3|cypher 380f2c9d23 A call with a number of arguments the function does not ta
 AU3|gql 380f2c9d23 A call with a number of arguments the function does not take fails; it returned null. The error starts with its code (#588).
 AU4|cypher 7d3617d7d7 path_length(p) is the number of edges of p; it returned null.
 AU4|gql 7d3617d7d7 path_length(p) is the number of edges of p; it returned null.
-G2|gql 3f627ce469 GQL sorts nulls last by default in both directions; descending put them first. Its GQL literals with a point are exact decimals now (#610); the values are the same.
-L2|gql 349678c87b GQL sorts nulls last by default in both directions; descending put them first. Its GQL literals with a point are exact decimals now (#610); the values are the same.
+G2|gql 6dbd77cf15 GQL sorts nulls last by default in both directions; descending put them first.
+L2|gql d80e3904a1 GQL sorts nulls last by default in both directions; descending put them first.
 L4|gql 16a470385a GQL sorts nulls last by default in both directions; descending put them first.
 L13|gql 1d7265c1b1 GQL sorts nulls last by default in both directions; a descending top-K kept the nulls.
 L19|gql 71201aa33f GQL sorts nulls last by default in both directions; descending put them first.
@@ -417,8 +416,8 @@ AH8|cypher 1f3fd599f8 A WITH * WHERE on variables of an OPTIONAL MATCH is checke
 AH14|cypher eb149d8bc8 A condition on a variable a WITH renamed no longer filters a later OPTIONAL MATCH variable of that name (#455); it came back with nulls.
 AH15|cypher ba3edbdb7b A condition on a variable a WITH renamed no longer filters a later OPTIONAL MATCH variable of that name (#455); it came back with nulls.
 AH17|cypher def6255edd A condition without variables filters the row; it failed with "Internal error: Empty plan".
-AJ6|cypher ~2f8172869a A later MATCH joined to an earlier one by a computed property value is joined, not scanned once per earlier row (#455); it timed out when the machine was busy (about 26 s of the 30 s limit).
-AJ6|gql ~2f8172869a A later MATCH joined to an earlier one by a computed property value is joined, not scanned once per earlier row (#455); it timed out when the machine was busy (about 26 s of the 30 s limit).
+AJ6|cypher 2f8172869a A later MATCH joined to an earlier one by a computed property value is joined, not scanned once per earlier row (#455); it timed out.
+AJ6|gql 2f8172869a A later MATCH joined to an earlier one by a computed property value is joined, not scanned once per earlier row (#455); it timed out.
 AO1|cypher ee2e439430 An aggregate without MATCH aggregates the one row a query starts from; it failed with "Internal error: Empty plan".
 AO1|gql ee2e439430 An aggregate without MATCH aggregates the one row a query starts from; it failed with "Internal error: Empty plan".
 AO2|cypher 238fe1bd37 An aggregate without MATCH aggregates the one row a query starts from; it failed with "Internal error: Empty plan".
@@ -434,8 +433,8 @@ BP15|gql 2ea289b2c7 The error starts with its code, GRAFEO-Q002 (#588); the mess
 BS1|cypher e7055daa61 An unknown procedure is a semantic error that names it (#588); it was GRAFEO-X001.
 BS1|gql e7055daa61 An unknown procedure is a semantic error that names it (#588); it was GRAFEO-X001.
 BS2|gql f8f0f8a302 An unknown YIELD column is a semantic error that names the procedure's columns (#588); it was GRAFEO-X001.
-BS3|cypher dfd84e4596 A function called with too few arguments is a semantic error that names the function and the arguments it takes (#588, #540); it was GRAFEO-X001.
-BS3|gql dfd84e4596 A function called with too few arguments is a semantic error that names the function and the arguments it takes (#588, #540); it was GRAFEO-X001.
+BS3|cypher bd2e73aba0 A function called with too few arguments is a semantic error (#588); it was GRAFEO-X001.
+BS3|gql bd2e73aba0 A function called with too few arguments is a semantic error (#588); it was GRAFEO-X001.
 BS4|cypher 0a88e3eae7 A Cypher DELETE of a variable nothing binds names that variable (#588); it said only "DELETE requires input".
 P3|cypher 36c8f2cf63 The error starts with its code, GRAFEO-Q002 (#588); the message is unchanged.
 P3|gql 36c8f2cf63 The error starts with its code, GRAFEO-Q002 (#588); the message is unchanged.
@@ -449,236 +448,3 @@ P7|gql 4417410084 The error starts with its code, GRAFEO-Q002 (#588); the messag
 U1|cypher 3656e82c97 The error starts with its code, GRAFEO-Q002 (#588); the message is unchanged.
 U2|cypher df7c1f11d9 The error starts with its code, GRAFEO-Q002 (#588); the message is unchanged.
 V8|cypher e67908eb16 The error starts with its code, GRAFEO-Q002 (#588); the message is unchanged.
-AJ3|gql 1dc401e7f1 The GQL literal 100.0 is an exact decimal now (#610); the same rows match.
-AV5|gql 93dbb3268e The GQL literals 42.0 and 0.3 are exact decimals now (#610); the same rows match.
-BH2|gql 424c6fff4a Its GQL literals with a point are exact decimals now (#610); the values are the same.
-G1|gql 16514f4784 Its GQL literals with a point are exact decimals now (#610); the values are the same.
-G4|gql 14d27eb2c3 Its GQL literals with a point are exact decimals now (#610); the values are the same.
-L1|gql 57b189c00e Its GQL literals with a point are exact decimals now (#610); the values are the same.
-G12|gql 2868c5c0cb i * 1.5 is an exact decimal now (#610); the values are the same.
-L10|gql 280b9423de 0.0 / 0.0 is a decimal division by zero, an error (22012, #639); 1.0e0 / 0.0e0 gives the infinity.
-BV2|gql bc673ff0a9 1.50 is an exact decimal with its two digits (#610); it was the float 1.5.
-BV3|gql 960ece87e2 The ISO GQL suffixes M, F and D are read (#610); they were a syntax error.
-BV4|gql c22bedaa55 Literals with a point are exact decimals (#610); they were floats.
-BV5|gql 118ed67a07 A decimal with an integer is a decimal, with a float a float (#610); all were floats.
-BV6|gql cda598c773 A decimal division gives 16 digits (#610); it was a float division.
-BV7|gql ae96677ab7 ceil, floor and round keep a decimal, sqrt gives a float (#610); all were floats.
-BV11|gql 0744ddf766 1.0 / 0 is a decimal division by zero, an error (22012, #639); it was a float infinity.
-BW1|cypher d9cb9415ca toDecimal is a new function (#610); it was an unknown function.
-BW1|gql d9cb9415ca toDecimal is a new function (#610); it was an unknown function.
-BW2|cypher d00603bc87 toDecimal is a new function (#610); it was an unknown function.
-BW2|gql d00603bc87 toDecimal is a new function (#610); it was an unknown function.
-BW3|gql b0e004afd3 CAST to DECIMAL and DEC is new (#610); it was an unsupported CAST type.
-BW4|gql 0b8496a49f CAST to DECIMAL and DEC is new (#610); it was an unsupported CAST type.
-BW5|gql 8d69e57bee CAST to DECIMAL and DEC is new (#610); it was an unsupported CAST type.
-BY1|cypher 0d56f2402c An integer result past the 64-bit range fails the query (22003, #639); it was null.
-BY1|gql 0d56f2402c An integer result past the 64-bit range fails the query (22003, #639); it was null.
-BY2|cypher d18daed33c An integer remainder by zero fails the query (22012, #639); it was null.
-BY2|gql d18daed33c An integer remainder by zero fails the query (22012, #639); it was null.
-BY3|cypher d1d652c243 An integer division by zero in a RETURN fails the query (22012, #639); it was null.
-BY3|gql d1d652c243 An integer division by zero in a RETURN fails the query (22012, #639); it was null.
-BY4|cypher d1d652c243 An integer division by zero in a WHERE fails the query (22012, #639); the row was dropped as for a null.
-BY4|gql d1d652c243 An integer division by zero in a WHERE fails the query (22012, #639); the row was dropped as for a null.
-BY7|cypher 1c462b1c0a An integer sum past the 64-bit range fails the query (22003, #639); it wrapped around to -9223372036854775808.
-BY7|gql 1c462b1c0a An integer sum past the 64-bit range fails the query (22003, #639); it wrapped around to -9223372036854775808.
-BU3|gql 0197c21812 A GQL statement of one INSERT returns no rows and no columns, as ISO GQL defines it (#580); it returned the last node it created in a column `_anon_209`.
-BU6|gql af570eb864 CREATE GRAPH ... AS COPY OF copies the source's nodes with their labels and properties (#423); the copy was an empty graph.
-BU7|gql 35d071d9a8 CREATE GRAPH ... AS COPY OF copies the source's edges with their properties (#423); the copy was an empty graph.
-BX1|cypher ~dbc78da38d A text search breaks a score tie by the lowest node id (#619); it broke it in hash order, so the result changed from run to run.
-BX1|gql ~dbc78da38d A text search breaks a score tie by the lowest node id (#619); it broke it in hash order, so the result changed from run to run.
-BX2|cypher ~72f863649b A text search breaks a score tie by the lowest node id (#619); it broke it in hash order, so the result changed from run to run.
-BX2|gql ~72f863649b A text search breaks a score tie by the lowest node id (#619); it broke it in hash order, so the result changed from run to run.
-BZ1|gql ~e4ac8a6af8 A stored procedure's arguments are values bound to its parameters; they were put into the body's text in hash-map order, so `$a` could replace the start of `$ab` and the body failed to parse.
-BZ2|gql d62b1885ec A stored procedure's argument holding a quote and query text is a value; put into the body's text, it ended the string and the body failed to parse.
-BZ4|gql c71d67736e A stored procedure takes a list or map argument as a value; the call refused it as not constant.
-CA1|cypher a7c82952ef A procedure call after other clauses runs once per incoming row, whose variables stay in scope; Cypher dropped the input (one row per procedure row).
-CA1|gql a7c82952ef A procedure call after other clauses runs once per incoming row; GQL did not parse a CALL ... YIELD followed by RETURN inside a query.
-CA2|cypher 48324b27df A procedure call after other clauses runs once per incoming row, whose variables stay in scope; Cypher dropped the input and refused its variables.
-CA2|gql 48324b27df A procedure call after other clauses runs once per incoming row; GQL did not parse a CALL ... YIELD followed by RETURN inside a query.
-CA3|cypher a17e8c38d9 A procedure call after other clauses runs once per incoming row, whose variables stay in scope; Cypher dropped the input and refused its variables.
-CA3|gql a17e8c38d9 A procedure call after other clauses runs once per incoming row; GQL did not parse a CALL ... YIELD followed by RETURN inside a query.
-CA4|cypher 631dcf4c67 A procedure call after other clauses runs once per incoming row, whose variables stay in scope; Cypher dropped the input and refused its variables.
-CA4|gql 631dcf4c67 A procedure call after other clauses runs once per incoming row; GQL did not parse a CALL ... YIELD followed by RETURN inside a query.
-CB1|cypher 3386dc5066 An undirected pattern takes a self-loop once (openCypher TCK Match3 [11], [12]); it is in both adjacency lists of its node, and the walk returned it twice.
-CB1|gql 3386dc5066 An undirected pattern takes a self-loop once (openCypher TCK Match3 [11], [12]); it is in both adjacency lists of its node, and the walk returned it twice.
-CB2|cypher c3a135fc82 An undirected pattern takes a self-loop once (openCypher TCK Match3 [11], [12]); it is in both adjacency lists of its node, and the count took the loop twice (6, not 5).
-CB2|gql c3a135fc82 An undirected pattern takes a self-loop once (openCypher TCK Match3 [11], [12]); it is in both adjacency lists of its node, and the count took the loop twice (6, not 5).
-CB3|cypher 5e50249ce5 An undirected pattern takes a self-loop once (openCypher TCK Match3 [11], [12]); it is in both adjacency lists of its node, and the one-hop walk reached Mia twice.
-CB3|gql 5e50249ce5 An undirected pattern takes a self-loop once (openCypher TCK Match3 [11], [12]); it is in both adjacency lists of its node, and the one-hop walk reached Mia twice.
-CB4|cypher ee2e439430 An undirected pattern takes a self-loop once (openCypher TCK Match3 [11], [12]); it is in both adjacency lists of its node, and COUNT counted it twice.
-CB4|gql ee2e439430 An undirected pattern takes a self-loop once (openCypher TCK Match3 [11], [12]); it is in both adjacency lists of its node, and COUNT counted it twice.
-CB5|cypher 1f58d9d0a7 A variable named like an aggregate column keeps its values: the column is named after a name the statement does not spell; the variable read the count (1).
-CB5|gql 1f58d9d0a7 A variable named like an aggregate column keeps its values: the column is named after a name the statement does not spell; the variable read the count (1).
-CB6|cypher 18b7553fe9 A variable named like an anonymous edge's column keeps its node: the planner names that column after a name the plan does not bind; the variable read the edge (null name).
-CB6|gql 18b7553fe9 A variable named like an anonymous edge's column keeps its node: the planner names that column after a name the plan does not bind; the variable read the edge (null name).
-CC1|cypher cec15ca8f1 MERGE matches the whole pattern or creates all of it (openCypher); a pattern of two relationships was refused (its variable then undefined).
-CC2|cypher cec15ca8f1 MERGE matches the whole pattern or creates all of it (openCypher); the second MERGE finds the pattern the first created; it was refused.
-CC3|gql cec15ca8f1 MERGE matches the whole pattern or creates all of it (openCypher); a pattern of two relationships was refused (its variable then undefined).
-CC4|cypher c3a135fc82 MERGE matches the whole pattern or creates all of it (openCypher); the two-relationship MERGEs created their N and N2 nodes (5, not 3).
-CC4|gql c3a135fc82 MERGE matches the whole pattern or creates all of it (openCypher); the two-relationship MERGEs created their N and N2 nodes (5, not 3).
-CC6|cypher 5d966be177 MERGE matches the whole pattern or creates all of it (openCypher); Vincent did not know a Gus, so the MERGE created one with the relationship; it reused the existing Gus.
-CC6|gql 5d966be177 MERGE matches the whole pattern or creates all of it (openCypher); Vincent did not know a Gus, so the MERGE created one with the relationship; it reused the existing Gus.
-CC7|cypher 6128a541a6 A node MERGE's ON CREATE SET n = {...} replaces the properties, the merged key too, as SET n = {...} does; it added the map's keys.
-CC8|cypher 390328ca99 Arrows both ways (<-[:KNOWS]->) match either direction, as openCypher reads them; they matched outgoing only.
-CC9|cypher 9da9ef3f24 CREATE of a relationship without a type is an error (openCypher); it created one of type RELATED.
-CC10|cypher 2886b8064e IN binds tighter than = (openCypher 9): 1 = (2 IN [false]) is false; it read (1 = 2) IN [false].
-CD1|cypher ebe7440d0e An inline WHERE on a variable-length edge holds for each edge of the path; it was checked against the list of the path's edges, so nothing matched.
-CD1|gql ebe7440d0e An inline WHERE on a variable-length edge holds for each edge of the path; it was checked against the list of the path's edges, so nothing matched.
-CD2|cypher c7ba799c2e An inline WHERE on a variable-length edge holds for each edge of the path; it was checked against the list of the path's edges, so nothing matched (here reading the row's t).
-CD2|gql c7ba799c2e An inline WHERE on a variable-length edge holds for each edge of the path; it was checked against the list of the path's edges, so nothing matched (here reading the row's t).
-CD3|cypher 1adebb7e6d An inline WHERE on a variable-length edge holds for each edge of the path; it was checked against the list of the path's edges, so nothing matched; after the pattern e is the list of the edges.
-CD3|gql 1adebb7e6d An inline WHERE on a variable-length edge holds for each edge of the path; it was checked against the list of the path's edges, so nothing matched; after the pattern e is the list of the edges.
-CD4|cypher 8133434ea5 A pattern from a node an OPTIONAL MATCH did not find matches nothing; it failed with an internal error.
-CD4|gql 8133434ea5 A pattern from a node an OPTIONAL MATCH did not find matches nothing; it failed with an internal error.
-CD5|gql 987a8578f3 collect_list is collect under its ISO GQL name; it evaluated to null per row.
-CE1|cypher 3f326aae44 An aggregate takes its number of arguments: count(a, b) is refused; it counted a and dropped b.
-CE1|gql 3f326aae44 An aggregate takes its number of arguments: count(a, b) is refused; it counted a and dropped b.
-CE2|cypher 370f0115da An aggregate takes its number of arguments: sum() is refused; it was built like a count of the rows and returned null.
-CE2|gql 370f0115da An aggregate takes its number of arguments: sum() is refused; it was built like a count of the rows and returned null.
-CE3|cypher f2c193efb5 A COUNT subquery in an aggregate's argument runs per row; it failed with an internal error.
-CE3|gql f2c193efb5 A COUNT subquery in an aggregate's argument runs per row; it failed with an internal error.
-CE4|cypher c0ec3421ef A COUNT subquery as a grouping key runs per row; it failed with an internal error.
-CE4|gql c0ec3421ef A COUNT subquery as a grouping key runs per row; it failed with an internal error.
-CE5|gql d7742a9773 GQL takes HAVING right after GROUP BY, before ORDER BY; it was a syntax error.
-CE6|cypher 6c609b5a99 Without GROUP BY an item with an aggregate reads only the grouping keys; one that reads another variable is refused (openCypher AmbiguousAggregationExpression), it returned null.
-CE6|gql 6c609b5a99 Without GROUP BY an item with an aggregate reads only the grouping keys; one that reads another variable is refused (openCypher AmbiguousAggregationExpression), it returned null.
-CE7|cypher 061de0e349 Without GROUP BY a part of an item with an aggregate that is a grouping key reads the key; it returned null.
-CE7|gql 061de0e349 Without GROUP BY a part of an item with an aggregate that is a grouping key reads the key; it returned null.
-CE8|cypher 06255368a4 An item with an aggregate in a CALL body reads the body's import, which has one value per call; it returned null.
-CE8|gql 06255368a4 An item with an aggregate in a CALL body reads the body's import, which has one value per call; it returned null.
-CE9|cypher ab8f1a1655 Without GROUP BY a grouping key inside a CASE with an aggregate reads the key; it returned null.
-CE9|gql ab8f1a1655 Without GROUP BY a grouping key inside a CASE with an aggregate reads the key; it returned null.
-CF1|cypher b4f6764c26 id and properties read a node an expression yields (here an item of a list), as labels does; they read only a variable and returned null.
-CF1|gql b4f6764c26 id and properties read a node an expression yields (here an item of a list), as labels does; they read only a variable and returned null.
-CF2|cypher 341ff5d5bf elementId and properties read an edge an expression yields (here an item of a list), as labels does; they returned null.
-CF2|gql 341ff5d5bf elementId and properties read an edge an expression yields (here an item of a list), as labels does; they returned null.
-CF3|cypher 062dcc1245 properties reads the node startNode(r) yields; it returned null.
-CF3|gql 062dcc1245 properties reads the node startNode(r) yields; it returned null.
-CF4|cypher cb62d95ce2 properties of a map is the map (openCypher); it returned null.
-CF4|gql cb62d95ce2 properties of a map is the map (openCypher); it returned null.
-CF5|cypher 228db5664a date, time and datetime read a zoned datetime: its local date and its local time of day with its offset (an aware datetime.time in Python); Cypher's datetime is zoned, so it keeps the offset (an aware datetime). All three returned null.
-CF5|gql f31b54ca7c date, time and datetime read a zoned datetime: its local date, its local time of day with its offset (an aware datetime.time in Python) and its instant; they returned null.
-CF6|gql fcd746ade6 A label added to a node converts its values to the types of the label's node type, as a write does; an integer of a FLOAT64 property failed with expects Float64.
-CF7|cypher d465c9b19b A label added to a node converts its values to the types of the label's node type, as a write does; an integer of a FLOAT64 property failed with expects Float64.
-CG1|cypher 2c0519a916 After a WITH that neither aggregates nor is DISTINCT, ORDER BY reads the WITH's input as well (openCypher); GQL failed with Undefined variable, and 0.5.44's Cypher too.
-CG1|gql 2c0519a916 After a WITH that neither aggregates nor is DISTINCT, ORDER BY reads the WITH's input as well (openCypher); GQL failed with Undefined variable, and 0.5.44's Cypher too.
-CG2|cypher 2fe70f102d After an aggregating RETURN, a key that repeats a returned aggregate reads its column; it was ignored (0.5.44) or refused in GQL.
-CG2|gql 2fe70f102d After an aggregating RETURN, a key that repeats a returned aggregate reads its column; it was ignored (0.5.44) or refused in GQL.
-CG3|cypher d38dc1ed52 After an aggregating RETURN, a key that repeats a grouping key (a.name AS name) reads its column; it failed with an internal error.
-CG3|gql d38dc1ed52 After an aggregating RETURN, a key that repeats a grouping key (a.name AS name) reads its column; it failed with an internal error.
-CG4|cypher 48f063d96f After an aggregating RETURN, a key that reads a variable the RETURN drops is Undefined variable; it was an internal error.
-CG4|gql 48f063d96f After an aggregating RETURN, a key that reads a variable the RETURN drops is Undefined variable; it was an internal error.
-CG6|gql 1b610399e9 GQL's ORDER BY statement after a WITH sorts nulls last (#571), as a RETURN's ORDER BY does; 0.5.44 had no ORDER BY statement after WITH.
-CG7|gql 1b610399e9 GQL's ORDER BY statement sorts nulls last (#571), as a RETURN's ORDER BY does; 0.5.44 had no ORDER BY statement before RETURN.
-CG5|cypher 2d8a50291b With DISTINCT, ORDER BY reads only what the WITH returns (openCypher, SQL); the error now names the variable and says why. GQL had no ORDER BY after WITH.
-CG5|gql 2d8a50291b With DISTINCT, ORDER BY reads only what the WITH returns (openCypher, SQL); the error now names the variable and says why. GQL had no ORDER BY after WITH.
-CG8|cypher 0007e81c96 With DISTINCT, ORDER BY reads only what the RETURN returns (openCypher TCK ReturnOrderBy2, SQL): it added the sort key to the distinct row and returned duplicates.
-CG8|gql 0007e81c96 With DISTINCT, ORDER BY reads only what the RETURN returns (openCypher TCK ReturnOrderBy2, SQL): it added the sort key to the distinct row and returned duplicates.
-CH1|gql 14f508d351 IS TYPED DECIMAL and DEC hold for a decimal (#610); 1.50 was the float 1.5.
-CH2|gql fcff68cb42 IS TYPED DECIMAL holds for the result of decimal arithmetic and toDecimal (#610); they were a float and null.
-CH3|gql 54ffe9a53f IS TYPED LIST<DECIMAL> holds for a list of decimals (#610); 1.5 was a float.
-CI1|cypher a5336ae099 abs of the smallest integer fails as out of range (22003, #639); it returned the negative number itself.
-CI1|gql a5336ae099 abs of the smallest integer fails as out of range (22003, #639); it returned the negative number itself.
-BV1|gql 1833f3e5c6 Float = is exact (IEEE 754); 0.1e0 + 0.2e0 = 0.3e0 was true within f64::EPSILON.
-CJ1|gql 2974ef3846 Float = and <> are exact (IEEE 754); 0.1e0 + 0.2e0 was equal to 0.3e0 within f64::EPSILON.
-CJ2|cypher 2974ef3846 Float = and <> are exact (IEEE 754); 0.1 + 0.2 was equal to 0.3 within f64::EPSILON.
-CJ4|gql 2c1063fb01 Float = is exact (IEEE 754); 1.0e-300 equalled 0 and 0.9999999999999999e0 equalled 1 within f64::EPSILON.
-CJ5|gql 3fedd5fe3a An integer equals only a float of exactly its value; 2^53 + 1 equalled the float 2^53.
-CJ6|gql 251a434f71 DISTINCT keeps NaN together and -0.0 with 0.0 (openCypher equivalence); each NaN was its own value.
-CK1|gql 8fbd540786 A name in backticks in SET is the name inside them; the key was stored with its backticks.
-CK2|gql d04b66d83c A label in backticks in SET is the label inside them; it was stored with its backticks.
-CK4|gql d55a61715a A doubled backtick inside a backticked name is one backtick; the key kept both backticks and the quotes.
-CK5|gql 40275f3876 In a GQL string literal a doubled quote is the quote (ISO GQL 21.2); it was a syntax error.
-CK6|gql 588bb3cb19 In a double-quoted GQL string literal a doubled double quote is the quote (ISO GQL 21.2); it was a syntax error.
-CL1|gql 4c62bf5377 An integer above 2^53 compares exactly with a float; it was converted to the float, so 2^53 + 1 > 2^53 was false.
-CL2|gql 18908d5658 A float compares exactly with an integer above 2^53; 2^53 < 2^53 + 1 was false.
-CL3|gql 4c61684e6f A filter on an integer above 2^53 against a float bound keeps the integer that passes it exactly; it was dropped.
-CL4|gql 8de3da8e40 A comparison of NaN with a number is false (IEEE); it was null, and NaN <= NaN was true.
-CM1|cypher c17edcb39c A float with no digit before its point (.5, .5e1) is a number, as openCypher writes it; it was a syntax error.
-CM1|gql c17edcb39c A number with no digit before its point (.5 exact, .5e1 approximate) is a number, as ISO GQL writes it; it was a syntax error.
-CM2|gql 081b084f0e A number with no digit after its point (5., 5.e1) is a number, as ISO GQL writes it; it was a syntax error.
-CM3|gql e527573b6a An underscore between two digits is a separator, in every radix and in a decimal, as ISO GQL defines it; it was a syntax error.
-CM4|cypher 904fecd430 The error starts with its code, GRAFEO-Q001 (#588); openCypher has no digit separators, so the message is unchanged.
-CM5|cypher e52ba6d736 A float literal past the float range is a syntax error, as openCypher refuses it; it was infinity.
-CM5|gql ab08f300db A float literal past the FLOAT64 range is a data exception (22003), as ISO GQL defines it; it was infinity.
-CN2|cypher 205d6d42a0 A unary sign on a string or a boolean is a type error (22G03), as on any value that is neither a number nor a duration; unary plus passed them through unchanged.
-CN2|gql 205d6d42a0 A unary sign on a string or a boolean is a type error (22G03), as on any value that is neither a number nor a duration; unary plus passed them through unchanged.
-AJ9|cypher ~784ee734f1 A later MATCH joined to an earlier one by a computed property value is joined, not scanned once per earlier row (#455); 0.5.44 timed out when the machine was busy, so its result varies.
-CO1|gql 38ffdf57dc IS TYPED NODE and ANY are true for a node, and IS TYPED INT64 is false for it: a node was of INT64 by its id, and not of NODE or ANY.
-CO2|gql 8cd5e3b518 IS TYPED EDGE is true for an edge; it was false.
-CO3|gql 4bc06e9b38 IS TYPED reads nested LIST<...> and two-word types such as ZONED DATETIME, and checks every item of a list; they were a syntax error.
-CO4|gql 79d2d06896 IS TYPED with an ISO type it cannot decide yet, such as INT32, is an error (42000), not a silent false.
-CP1|gql d6c34ad4fa A property value of another type than its node type declares names the type as DDL spells it and the value as a query writes it (expects STRING, got 3); it printed internal names (expects String, got Int64(3)).
-AJ9|gql ~784ee734f1 A later MATCH joined to an earlier one by a computed property value is joined, not scanned once per earlier row (#455); 0.5.44 timed out when the machine was busy, so its result varies.
-CQ1|sql 8d41de096e SQL/PGQ: an operator over aggregates in a SELECT item aggregates the rows; it gave one row per match, with nulls.
-CQ2|sql dbc0504ff3 SQL/PGQ: an aggregate as a function's argument and a CASE over one aggregate the rows; they gave one row per match, with nulls and the CASE's ELSE.
-CQ3|sql adeaeb086c SQL/PGQ: an expression of a GROUP BY key and an aggregate is computed per group; it failed with Undefined variable.
-CQ4|sql f112534558 SQL/PGQ: HAVING takes an aggregate as a function's argument; it kept no group.
-CQ5|sql 24155c527a SQL/PGQ: a SELECT item that reads a column outside GROUP BY and the aggregates is refused, naming the column; it failed with Undefined variable.
-CR1|cypher 43a0b674a9 cosine_distance of one direction is exactly 0 and of opposite ones 2; an epsilon in the denominator gave -1.19e-07 for identical vectors and 1 for two very short ones.
-CR1|gql 43a0b674a9 cosine_distance of one direction is exactly 0 and of opposite ones 2; an epsilon in the denominator gave -1.19e-07 for identical vectors and 1 for two very short ones.
-CR3|cypher dc2525bcc3 cosine_similarity of identical vectors is exactly 1; it was 1.000000119, outside [-1, 1].
-CR3|gql dc2525bcc3 cosine_similarity of identical vectors is exactly 1; it was 1.000000119, outside [-1, 1].
-CR4|gql f516844c53 HOME_SCHEMA and HOME_GRAPH name the session's home, 'default' in a new session; they returned null.
-CS1|cypher be000ea9ea Cypher's datetime() is zoned and keeps its offset, also after adding a duration; it was the UTC instant as a local datetime, without hour or offset components.
-CS2|cypher 8abd43876d Cypher's datetime() without an offset is at +00:00 and writes Z; localdatetime() is local and its text has no zone (it ended in .000000Z).
-CS3|gql e7fff6b187 The text of a LOCAL DATETIME has no zone and a fraction only when there is one; it ended in .000000Z as if at UTC.
-CS4|gql a2ccd6a9fc Arithmetic on a zoned datetime keeps its offset, a month moves the local date, and two zoned datetimes differ by a duration; all three were null.
-CS5|cypher a70f6f6229 A duration times or divided by a number carries fractions down (a month as 30.436875 days, openCypher's rule); a decimal or float factor gave null and P1D / 2 was PT0S.
-CS5|gql a70f6f6229 A duration times or divided by a number carries fractions down (a month as 30.436875 days, openCypher's rule); a decimal or float factor gave null and P1D / 2 was PT0S.
-CS6|cypher ca047fb78e A duration divided by zero is a division by zero (22012); it was null.
-CS6|gql ca047fb78e A duration divided by zero is a division by zero (22012); it was null.
-CS7|gql 291307aea6 normalize puts a string in NFC, as ISO GQL defines it; it returned the string unchanged.
-CS8|gql e7f516d45f LIKE wildcards match a line break, as SQL's LIKE does; % and _ skipped it.
-CT1|gql 7df1f205be GQL reads a local datetime at the session time zone, UTC without one, as SQL compares a TIMESTAMP with a TIMESTAMP WITH TIME ZONE; a zoned and a local datetime at the same instant were not equal, and < between them was null.
-CT2|gql 160b12822c GQL reads a local time at the session time zone, UTC without one: a zoned and a local time at the same instant are equal; they were not.
-CT4|gql e00542b911 SESSION SET TIME ZONE takes a UTC offset ('+01:00', 'Z', 'UTC'), ISO GQL's time zone displacement; a named zone fails with 22009, where it was stored and never used.
-CT5|cypher e09ddcadbb Cypher's time() is zoned, at +00:00 without an offset, as openCypher defines it, and localtime() is the local one; time() without an offset was local and localtime() did not exist.
-CU1|cypher c7fd978402 A unary sign on a string is a type error (22G03), as ISO GQL makes it a data exception; it was null.
-CU1|gql c7fd978402 A unary sign on a string is a type error (22G03), as ISO GQL makes it a data exception; it was null.
-CU2|cypher 04434985da A unary sign on a boolean is a type error (22G03); unary plus passed it through unchanged.
-CU2|gql 04434985da A unary sign on a boolean is a type error (22G03); unary plus passed it through unchanged.
-CU3|cypher 3c84b7cf32 A unary sign on a list is a type error (22G03); it was null.
-CU3|gql 3c84b7cf32 A unary sign on a list is a type error (22G03); it was null.
-CU4|cypher 32f5c87566 Unary minus negates a duration; it was null.
-CU4|gql 32f5c87566 Unary minus negates a duration; it was null.
-CU5|cypher 08c2adc46b The negation of the smallest integer is out of range (22003); it was null.
-CU5|gql 08c2adc46b The negation of the smallest integer is out of range (22003); it was null.
-CV1|cypher 688f96eae6 SUM of a string among numbers is a type error (22G03), as openCypher defines it; the string was skipped.
-CV1|gql 688f96eae6 SUM of a string among numbers is a type error (22G03), as openCypher defines it; the string was skipped.
-CV2|cypher 688f96eae6 SUM of stored strings is a type error (22G03); it was null.
-CV2|gql 688f96eae6 SUM of stored strings is a type error (22G03); it was null.
-CV3|cypher cd47817ee5 SUM and AVG of numeric strings are a type error (22G03); the strings were summed as numbers.
-CV3|gql cd47817ee5 SUM and AVG of numeric strings are a type error (22G03); the strings were summed as numbers.
-CV4|cypher c285fc1e54 SUM of numbers mixed with durations is a type error (22G03); the duration was skipped.
-CV4|gql c285fc1e54 SUM of numbers mixed with durations is a type error (22G03); the duration was skipped.
-CV5|cypher 69333180aa SUM and AVG of durations add them and divide the sum, as openCypher defines them; both were null.
-CV5|gql 69333180aa SUM and AVG of durations add them and divide the sum, as openCypher defines them; both were null.
-CW1|gql 1fed328d7b CAST of a boolean to FLOAT64 and DECIMAL is 1 or 0, as to INT64 (DuckDB's rule); CAST AS DECIMAL did not parse in 0.5.44 and CAST(true AS FLOAT64) was null.
-CW2|gql 6de4a5360c CAST of a number to BOOLEAN is true unless the number is 0 (DuckDB's rule); it was null.
-CX1|gql 8ee82b4577 CAST trims the spaces around a text before converting it, as SQL casts a character string; padded text was null.
-CY1|gql 35e5e1d8e4 USE g in front of a statement reads graph g (grafeo-web#55); it was a syntax error.
-CY2|gql a30e971429 USE GRAPH g in front of a statement reads graph g (grafeo-web#55); the statement after it was refused.
-CY3|gql 251a434f71 USE g in front of a statement reads graph g (grafeo-web#55); it was a syntax error.
-CY4|gql 956e1cf8f7 Every UNION operand may repeat the same USE g and reads g; it was a syntax error.
-CY5|gql 8ffe23c0d3 USE CURRENT_GRAPH reads the session's graph; it was a syntax error.
-CY6|gql e5fb251992 SELECT ... FROM g reads graph g; the graph name was left unused and the session's graph read.
-CY7|gql 3ddd997a75 USE of a graph that does not exist is 42002, Graph 'g' does not exist; it was a syntax error.
-CY8|gql c27bd4ce58 Parts of one statement on different graphs are not supported yet, with an error that says so; it was a syntax error.
-DA1|cypher 5931a31f88 A clause after RETURN is a syntax error that names it; the earlier RETURN was dropped and the last one answered.
-DA2|cypher 54fd389148 A clause after RETURN is a syntax error that names it; the earlier RETURN was dropped and the MATCH after it ran.
-DA3|cypher 8766abf286 A clause after RETURN is a syntax error that names it, WITH too; the earlier RETURN was dropped.
-CZ1|cypher b992cdc0e9 A node compared with an integer is false in Cypher, as openCypher keeps a node and a number apart; startNode(r) = id(a) compared the node's id and was true.
-CZ1|gql c69250cac6 A node compared with an integer is 22G04 (values not comparable) in GQL, as ISO GQL makes a node and a number; it compared the node's id and was true.
-CZ2|cypher 52b6a18503 A node compared with an edge is false in Cypher; node 0 = edge 0 compared the ids and was true.
-CZ2|gql 8cf11bd3cc A node compared with an edge is 22G04 (values not comparable) in GQL; node 0 = edge 0 compared the ids and was true.
-CZ3|cypher f0c845b50c WHERE p = 0 on a node keeps no row in Cypher; it kept the node with id 0.
-CZ3|gql c69250cac6 WHERE p = 0 on a node is 22G04 (values not comparable) in GQL; it kept the node with id 0.
-CZ4|cypher 8b50ea7401 startNode(r) = a is true and id(startNode(r)) gives the node's id; id(startNode(r)) was null.
-CZ4|gql 8b50ea7401 startNode(r) = a is true and id(startNode(r)) gives the node's id; id(startNode(r)) was null.
-DB1|cypher a64a99b28e A WITH with two items named alike is an error that names the column (#371); it kept one of them.
-DB1|gql a64a99b28e A WITH with two items named alike is an error that names the column (#371); it kept one of them.
-DB2|cypher 943f1a33b7 A WITH whose alias repeats a passed-on variable is an error (#371); the alias replaced the node.
-DB2|gql 943f1a33b7 A WITH whose alias repeats a passed-on variable is an error (#371); the alias replaced the node.
-DB3|cypher 0197c21812 Cypher CREATE CONSTRAINT takes no name and gets GQL's default (#344); it was a syntax error.
-DB4|cypher 0197c21812 Cypher CREATE INDEX takes no name and gets Label_property_index (#344); it was a syntax error.

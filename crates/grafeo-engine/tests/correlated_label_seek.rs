@@ -11,7 +11,7 @@
 //! cargo test -p grafeo-engine --all-features --test correlated_label_seek
 //! ```
 
-#![cfg(all(feature = "gql", feature = "cypher"))]
+#![cfg(all(feature = "lpg", feature = "gql", feature = "cypher"))]
 
 use std::collections::HashMap;
 
@@ -533,8 +533,7 @@ fn the_seek_takes_over_an_element_where() {
     }
 }
 
-/// `PROFILE` shows the seek that runs, and the checks it took over in the
-/// detail of the filter that runs them (#461).
+/// `PROFILE` shows the seek that runs, and the checks it took over.
 #[test]
 fn profile_shows_the_seek_and_its_checks() {
     let db = files(true, None);
@@ -560,7 +559,7 @@ fn profile_shows_the_seek_and_its_checks() {
             assert!(
                 operators
                     .iter()
-                    .any(|line| line.contains(", Filter hasLabel(t, ")),
+                    .any(|line| line.starts_with("Filter (hasLabel(t, ")),
                 "{language:?} `{query}`:\n{profile}"
             );
         }

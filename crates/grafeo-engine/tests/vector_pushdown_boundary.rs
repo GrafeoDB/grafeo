@@ -23,7 +23,7 @@
 //!     --test vector_pushdown_boundary
 //! ```
 
-#![cfg(all(feature = "gql", feature = "vector-index"))]
+#![cfg(all(feature = "lpg", feature = "gql", feature = "vector-index"))]
 
 use grafeo_common::types::Value;
 use grafeo_engine::GrafeoDB;

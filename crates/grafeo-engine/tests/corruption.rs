@@ -3,7 +3,7 @@
 //! section that does not decode. A read-only open and a read-write open
 //! report it alike, and neither writes to the file.
 
-#![cfg(all(feature = "grafeo-file", feature = "gql"))]
+#![cfg(all(feature = "grafeo-file", feature = "lpg", feature = "gql"))]
 
 use std::path::Path;
 
@@ -124,14 +124,12 @@ fn a_section_that_does_not_decode_is_a_corruption_naming_the_file() {
     write_database(&path);
     rewrite(&path, |section_type, chunks| {
         if section_type == SectionType::LpgStore {
-            // The metadata chunk comes last: its layout byte, the caps, the
-            // epoch and the next graph id take 21 bytes, then the count of
-            // graphs, made larger than the chunk can hold.
+            // The metadata chunk comes last; its first byte is the layout.
             let (_, meta) = chunks.last_mut().expect("a metadata chunk");
-            meta[21..25].copy_from_slice(&u32::MAX.to_le_bytes());
+            meta[0] = 19;
         }
     });
-    assert_both_opens_report(&path, None, "LPG metadata chunk, byte 25");
+    assert_both_opens_report(&path, None, "LPG metadata chunk, byte 0");
 }
 
 /// A section written back chunk for chunk, as it was read.

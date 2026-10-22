@@ -7,35 +7,13 @@
 //! cargo test -p grafeo-engine --features full --test backup_restore
 //! ```
 
-#![cfg(all(feature = "wal", feature = "grafeo-file"))]
+#![cfg(all(feature = "wal", feature = "grafeo-file", feature = "lpg"))]
 
 use std::path::{Path, PathBuf};
 
 use grafeo_common::types::{EpochId, Value};
 use grafeo_engine::GrafeoDB;
 use grafeo_engine::database::backup::BackupKind;
-
-/// The names of the people in the database restored from `backups` to
-/// `epoch`.
-fn restored_people(backups: &Path, epoch: EpochId) -> Vec<Value> {
-    let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("restored.grafeo");
-    GrafeoDB::restore_to_epoch(backups, epoch, &path).unwrap();
-    let db = GrafeoDB::open(&path).unwrap();
-    let names = db
-        .execute("MATCH (p:Person) RETURN p.name AS name ORDER BY name")
-        .unwrap()
-        .rows()
-        .iter()
-        .map(|row| row[0].clone())
-        .collect();
-    db.close().unwrap();
-    names
-}
-
-fn names(values: &[&str]) -> Vec<Value> {
-    values.iter().map(|value| Value::from(*value)).collect()
-}
 
 // ── Full backup roundtrip ─────────────────────────────────────────
 
@@ -74,11 +52,7 @@ fn full_backup_and_restore_to_epoch() {
 
     // Verify restored data
     let restored = GrafeoDB::open(&restore_path).expect("open restored");
-    assert_eq!(
-        restored.node_count().unwrap(),
-        2,
-        "restored should have 2 nodes"
-    );
+    assert_eq!(restored.node_count(), 2, "restored should have 2 nodes");
     let session = restored.session();
     let result = session
         .execute("MATCH (n:Person) RETURN n.name ORDER BY n.name")
@@ -260,16 +234,8 @@ fn backup_full_on_read_only_database() {
         .expect("restore should succeed");
 
     let restored = GrafeoDB::open(&restore_path).expect("open restored");
-    assert_eq!(
-        restored.node_count().unwrap(),
-        2,
-        "restored should have 2 nodes"
-    );
+    assert_eq!(restored.node_count(), 2, "restored should have 2 nodes");
     restored.close().expect("close");
-    assert_eq!(
-        restored_people(&backup_dir, segment.end_epoch),
-        names(&["Alix", "Gus"])
-    );
 }
 
 /// Regression: backup_full() must work on Windows where the .grafeo file
@@ -309,16 +275,8 @@ fn backup_full_works_while_database_is_open() {
         .expect("restore should succeed");
 
     let restored = GrafeoDB::open(&restore_path).expect("open restored");
-    assert_eq!(
-        restored.node_count().unwrap(),
-        2,
-        "restored should have 2 nodes"
-    );
+    assert_eq!(restored.node_count(), 2, "restored should have 2 nodes");
     restored.close().expect("close");
-    assert_eq!(
-        restored_people(&backup_dir, segment.end_epoch),
-        names(&["Alix", "Gus"])
-    );
 }
 
 /// Two full backups into the same directory produce two distinct segments
@@ -358,16 +316,8 @@ fn backup_full_twice_produces_two_segments() {
         .expect("restore should succeed");
 
     let restored = GrafeoDB::open(&restore_path).expect("open restored");
-    assert_eq!(restored.node_count().unwrap(), 2);
+    assert_eq!(restored.node_count(), 2);
     restored.close().expect("close");
-    assert_eq!(
-        restored_people(&backup_dir, seg1.end_epoch),
-        names(&["Alix"])
-    );
-    assert_eq!(
-        restored_people(&backup_dir, seg2.end_epoch),
-        names(&["Alix", "Gus"])
-    );
 
     db.close().expect("close");
 }
@@ -409,52 +359,6 @@ fn incremental_backup_works_without_manual_rotation() {
     assert!(incr.start_epoch > full.end_epoch);
 
     db.close().expect("close");
-
-    // Each backup restores the people of its epoch.
-    assert_eq!(
-        restored_people(&backup_dir, full.end_epoch),
-        names(&["Alix"])
-    );
-    assert_eq!(
-        restored_people(&backup_dir, incr.end_epoch),
-        names(&["Alix", "Gus", "Vincent"])
-    );
-}
-
-/// An incremental backup of a database opened read-only is refused: the
-/// open has no WAL of its own to take the records from. The backup
-/// directory keeps its one full backup, which restores as before.
-#[test]
-fn incremental_backup_of_a_read_only_database_is_refused() {
-    let dir = tempfile::tempdir().expect("create temp dir");
-    let db_path = dir.path().join("readonly_incremental.grafeo");
-    let backup_dir = dir.path().join("backups");
-    let full = {
-        let db = GrafeoDB::open(&db_path).expect("open");
-        db.execute("INSERT (:Person {name: 'Alix'})").unwrap();
-        let full = db.backup_full(&backup_dir).unwrap();
-        db.execute("INSERT (:Person {name: 'Gus'})").unwrap();
-        db.close().expect("close");
-        full
-    };
-    let db = GrafeoDB::open_read_only(&db_path).expect("open read-only");
-    let error = db
-        .backup_incremental(&backup_dir)
-        .expect_err("a read-only database takes no incremental backup")
-        .to_string();
-    assert!(
-        error.contains("an incremental backup needs a database with a WAL"),
-        "{error}"
-    );
-    db.close().unwrap();
-    let manifest = GrafeoDB::read_backup_manifest(&backup_dir)
-        .unwrap()
-        .unwrap();
-    assert_eq!(manifest.segments.len(), 1, "only the full backup");
-    assert_eq!(
-        restored_people(&backup_dir, full.end_epoch),
-        names(&["Alix"])
-    );
 }
 
 /// An incremental backup with nothing new to back up fails without touching
@@ -754,30 +658,6 @@ fn a_backup_chain_taken_by_0_5_44_still_restores() {
             vec![knows("Mia", "Alix", 1988), knows("Alix", "Gus", 2019)]
         ),
         "with both incremental backups"
-    );
-}
-
-/// Damage in an incremental backup of 0.5.44 fails the restore, never
-/// replaying the commits after it on top of the missing ones (#425): the
-/// checksum of the backup file catches it before its records are read.
-#[test]
-fn a_damaged_incremental_backup_of_0_5_44_fails_the_restore() {
-    let dir = tempfile::tempdir().expect("create temp dir");
-    let backups = backups_of_0_5_44(dir.path());
-    let first = backups.join("backup_incr_0001.wal");
-    let mut bytes = std::fs::read(&first).expect("read the incremental backup");
-    // A byte of the first record (a 32-byte header, then the frames).
-    bytes[32 + 6] ^= 0x01;
-    std::fs::write(&first, bytes).expect("damage the incremental backup");
-
-    let path = dir.path().join("restored.grafeo");
-    let result = GrafeoDB::restore_to_epoch(&backups, EpochId::new(7), &path);
-    let Err(error) = result else {
-        panic!("the restore of a damaged backup succeeded");
-    };
-    assert!(
-        error.to_string().contains("backup_incr_0001.wal"),
-        "{error}"
     );
 }
 

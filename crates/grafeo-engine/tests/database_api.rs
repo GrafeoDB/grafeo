@@ -27,7 +27,7 @@ fn test_create_edge_with_props() {
         )
         .unwrap();
 
-    let edge = db.get_edge(eid).unwrap().expect("edge should exist");
+    let edge = db.get_edge(eid).expect("edge should exist");
     assert_eq!(edge.edge_type.as_str(), "KNOWS");
     assert_eq!(edge.src, alix);
     assert_eq!(edge.dst, gus);
@@ -38,7 +38,6 @@ fn test_get_edge_returns_none_for_invalid_id() {
     let db = GrafeoDB::new_in_memory();
     assert!(
         db.get_edge(grafeo_common::types::EdgeId::new(999))
-            .unwrap()
             .is_none()
     );
 }
@@ -52,7 +51,7 @@ fn test_set_and_remove_edge_property() {
 
     db.set_edge_property(eid, "weight", Value::Float64(1.5))
         .unwrap();
-    let edge = db.get_edge(eid).unwrap().unwrap();
+    let edge = db.get_edge(eid).unwrap();
     assert_eq!(
         edge.properties
             .get(&grafeo_common::types::PropertyKey::new("weight")),
@@ -61,7 +60,7 @@ fn test_set_and_remove_edge_property() {
 
     // Remove
     assert!(db.remove_edge_property(eid, "weight").unwrap());
-    let edge = db.get_edge(eid).unwrap().unwrap();
+    let edge = db.get_edge(eid).unwrap();
     assert!(
         !edge
             .properties
@@ -79,9 +78,9 @@ fn test_delete_edge() {
     let b = db.create_node(&["N"]).unwrap();
     let eid = db.create_edge(a, b, "R").unwrap();
 
-    assert_eq!(db.edge_count().unwrap(), 1);
+    assert_eq!(db.edge_count(), 1);
     assert!(db.delete_edge(eid).unwrap());
-    assert_eq!(db.edge_count().unwrap(), 0);
+    assert_eq!(db.edge_count(), 0);
     assert!(!db.delete_edge(eid).unwrap()); // second delete returns false
 }
 
@@ -94,7 +93,7 @@ fn test_add_and_remove_node_label() {
 
     // Add label
     assert!(db.add_node_label(n, "Employee").unwrap());
-    let labels = db.get_node_labels(n).unwrap().unwrap();
+    let labels = db.get_node_labels(n).unwrap();
     assert!(labels.contains(&"Person".to_string()));
     assert!(labels.contains(&"Employee".to_string()));
 
@@ -103,7 +102,7 @@ fn test_add_and_remove_node_label() {
 
     // Remove label
     assert!(db.remove_node_label(n, "Employee").unwrap());
-    let labels = db.get_node_labels(n).unwrap().unwrap();
+    let labels = db.get_node_labels(n).unwrap();
     assert!(!labels.contains(&"Employee".to_string()));
     assert!(labels.contains(&"Person".to_string()));
 
@@ -116,7 +115,6 @@ fn test_get_node_labels_returns_none_for_invalid_id() {
     let db = GrafeoDB::new_in_memory();
     assert!(
         db.get_node_labels(grafeo_common::types::NodeId::new(999))
-            .unwrap()
             .is_none()
     );
 }
@@ -131,7 +129,7 @@ fn test_remove_node_property() {
         .unwrap();
 
     assert!(db.remove_node_property(n, "name").unwrap());
-    let node = db.get_node(n).unwrap().unwrap();
+    let node = db.get_node(n).unwrap();
     assert!(
         !node
             .properties
@@ -167,23 +165,17 @@ fn test_property_index_lifecycle() {
         .unwrap();
 
     // Find by property
-    let results = db
-        .find_nodes_by_property("name", &Value::String("Alix".into()))
-        .unwrap();
+    let results = db.find_nodes_by_property("name", &Value::String("Alix".into()));
     assert_eq!(results.len(), 2);
     assert!(results.contains(&n1));
     assert!(results.contains(&n3));
 
-    let results = db
-        .find_nodes_by_property("name", &Value::String("Gus".into()))
-        .unwrap();
+    let results = db.find_nodes_by_property("name", &Value::String("Gus".into()));
     assert_eq!(results.len(), 1);
     assert!(results.contains(&n2));
 
     // No matches
-    let results = db
-        .find_nodes_by_property("name", &Value::String("Harm".into()))
-        .unwrap();
+    let results = db.find_nodes_by_property("name", &Value::String("Harm".into()));
     assert!(results.is_empty(), "{results:?}");
 
     // Drop index
@@ -201,7 +193,7 @@ fn test_iter_nodes() {
     let _n2 = db.create_node(&["Company"]).unwrap();
     let _n3 = db.create_node(&["Person"]).unwrap();
 
-    let nodes: Vec<_> = db.iter_nodes().unwrap().collect();
+    let nodes: Vec<_> = db.iter_nodes().collect();
     assert_eq!(nodes.len(), 3);
 }
 
@@ -215,15 +207,15 @@ fn test_iter_edges() {
     let _e1 = db.create_edge(a, b, "R").unwrap();
     let _e2 = db.create_edge(b, c, "S").unwrap();
 
-    let edges: Vec<_> = db.iter_edges().unwrap().collect();
+    let edges: Vec<_> = db.iter_edges().collect();
     assert_eq!(edges.len(), 2);
 }
 
 #[test]
 fn test_iter_empty_database() {
     let db = GrafeoDB::new_in_memory();
-    assert_eq!(db.iter_nodes().unwrap().count(), 0);
-    assert_eq!(db.iter_edges().unwrap().count(), 0);
+    assert_eq!(db.iter_nodes().count(), 0);
+    assert_eq!(db.iter_edges().count(), 0);
 }
 
 // ── Validation ───────────────────────────────────────────────────
@@ -235,14 +227,14 @@ fn test_validate_healthy_database() {
     let b = db.create_node(&["Person"]).unwrap();
     db.create_edge(a, b, "KNOWS").unwrap();
 
-    let result = db.validate().unwrap();
+    let result = db.validate();
     assert!(result.is_valid(), "healthy database should validate");
 }
 
 #[test]
 fn test_validate_empty_database() {
     let db = GrafeoDB::new_in_memory();
-    let result = db.validate().unwrap();
+    let result = db.validate();
     assert!(result.is_valid());
 }
 
@@ -255,7 +247,7 @@ fn test_info() {
     db.set_node_property(_n, "name", Value::String("Alix".into()))
         .unwrap();
 
-    let info = db.info().unwrap();
+    let info = db.info();
     assert_eq!(info.node_count, 1);
     assert_eq!(info.edge_count, 0);
     assert!(!info.is_persistent);
@@ -273,7 +265,7 @@ fn test_detailed_stats() {
         .unwrap();
     db.create_edge(a, b, "WORKS_AT").unwrap();
 
-    let stats = db.detailed_stats().unwrap();
+    let stats = db.detailed_stats();
     assert_eq!(stats.node_count, 2);
     assert_eq!(stats.edge_count, 1);
     assert_eq!(stats.label_count, 2); // Person, Company
@@ -309,13 +301,13 @@ fn test_to_memory_clones_data() {
     db.create_edge(a, b, "KNOWS").unwrap();
 
     let clone = db.to_memory().expect("to_memory should succeed");
-    assert_eq!(clone.node_count().unwrap(), 2);
-    assert_eq!(clone.edge_count().unwrap(), 1);
+    assert_eq!(clone.node_count(), 2);
+    assert_eq!(clone.edge_count(), 1);
 
     // Original unaffected by clone modifications
     clone.create_node(&["Extra"]).unwrap();
-    assert_eq!(db.node_count().unwrap(), 2); // original unchanged
-    assert_eq!(clone.node_count().unwrap(), 3);
+    assert_eq!(db.node_count(), 2); // original unchanged
+    assert_eq!(clone.node_count(), 3);
 }
 
 // ── Snapshot export/import roundtrip ─────────────────────────────
@@ -338,8 +330,8 @@ fn test_snapshot_export_import_roundtrip() {
 
     // Import into a new database
     let restored = GrafeoDB::import_snapshot(&snapshot).expect("import should succeed");
-    assert_eq!(restored.node_count().unwrap(), 2);
-    assert_eq!(restored.edge_count().unwrap(), 1);
+    assert_eq!(restored.node_count(), 2);
+    assert_eq!(restored.edge_count(), 1);
 
     // Verify data integrity
     let session = restored.session();
@@ -373,7 +365,7 @@ fn test_schema_returns_labels_and_edge_types() {
     db.create_edge(a, b, "WORKS_AT").unwrap();
     db.create_edge(a, b, "LIKES").unwrap();
 
-    let schema = db.schema().unwrap();
+    let schema = db.schema();
     match schema {
         SchemaInfo::Lpg(lpg) => {
             assert!(
@@ -400,10 +392,10 @@ fn test_label_and_type_counts() {
     let b = db.create_node(&["Company"]).unwrap();
     db.create_edge(a, b, "WORKS_AT").unwrap();
 
-    assert!(db.label_count().unwrap() >= 2);
-    assert!(db.edge_type_count().unwrap() >= 1);
-    assert_eq!(db.node_count().unwrap(), 2);
-    assert_eq!(db.edge_count().unwrap(), 1);
+    assert!(db.label_count() >= 2);
+    assert!(db.edge_type_count() >= 1);
+    assert_eq!(db.node_count(), 2);
+    assert_eq!(db.edge_count(), 1);
 }
 
 // ── Persistence flag ────────────────────────────────────────────
@@ -477,7 +469,7 @@ fn test_execute_with_params() {
 #[test]
 fn test_info_updates_after_operations() {
     let db = GrafeoDB::new_in_memory();
-    let info0 = db.info().unwrap();
+    let info0 = db.info();
     assert_eq!(info0.node_count, 0);
     assert_eq!(info0.edge_count, 0);
 
@@ -485,7 +477,7 @@ fn test_info_updates_after_operations() {
     let b = db.create_node(&["Company"]).unwrap();
     db.create_edge(a, b, "WORKS_AT").unwrap();
 
-    let info1 = db.info().unwrap();
+    let info1 = db.info();
     assert_eq!(info1.node_count, 2);
     assert_eq!(info1.edge_count, 1);
 }
@@ -511,15 +503,15 @@ fn test_complex_graph_with_multiple_edge_types() {
     db.create_edge(alix, acme, "WORKS_AT").unwrap();
     db.create_edge(gus, acme, "WORKS_AT").unwrap();
 
-    assert_eq!(db.node_count().unwrap(), 3);
-    assert_eq!(db.edge_count().unwrap(), 3);
+    assert_eq!(db.node_count(), 3);
+    assert_eq!(db.edge_count(), 3);
 
     // Validate integrity
-    let result = db.validate().unwrap();
+    let result = db.validate();
     assert!(result.is_valid());
 
     // Stats reflect structure
-    let stats = db.detailed_stats().unwrap();
+    let stats = db.detailed_stats();
     assert_eq!(stats.label_count, 2);
     assert_eq!(stats.edge_type_count, 2);
 }

@@ -14,7 +14,7 @@
 pub mod cardinality;
 pub mod cost;
 mod cycles;
-pub(crate) use cycles::{close_cycles, plan_names};
+pub(crate) use cycles::close_cycles;
 pub mod join_order;
 
 pub use cardinality::{
@@ -23,7 +23,6 @@ pub use cardinality::{
 pub use cost::{Cost, CostModel};
 pub use join_order::{BitSet, DPccp, JoinGraph, JoinGraphBuilder, JoinPlan};
 
-use crate::query::plan::Callee;
 use crate::query::plan::{
     BinaryOp, ExpandDirection, ExpandOp, FilterOp, JoinCondition, JoinType, LogicalExpression,
     LogicalOperator, LogicalPlan, MultiWayJoinOp, NodeScanOp,
@@ -31,7 +30,6 @@ use crate::query::plan::{
 use crate::query::planner::lpg::seek;
 use grafeo_common::grafeo_debug_span;
 use grafeo_common::utils::error::Result;
-use grafeo_core::execution::operators::Volatility;
 use std::collections::HashSet;
 
 /// Information about a join condition for join reordering.
@@ -123,20 +121,34 @@ impl Optimizer {
         }
     }
 
-    /// Creates an optimizer from any GraphStore implementation, the
-    /// database's own row-group store among them: cardinality estimates
-    /// from the store's [`statistics()`](grafeo_core::graph::GraphStore::statistics)
-    /// (per-label row counts, edge type fanout and degrees, graph totals,
-    /// which the store keeps current at each commit), the properties with a
-    /// property index, and whether the store keeps backward adjacency.
-    /// The names are planning input, not an answer: a store that cannot list
-    /// them leaves the plan without index hints.
+    /// Creates an optimizer with cardinality estimates from the store's statistics.
+    ///
+    /// Pre-populates the cardinality estimator with per-label row counts and
+    /// edge type fanout. Feeds per-edge-type degree stats, label cardinalities,
+    /// and graph totals into the cost model for accurate estimation.
+    #[cfg(feature = "lpg")]
+    #[must_use]
+    pub fn from_store(store: &grafeo_core::graph::lpg::LpgStore) -> Self {
+        store.ensure_statistics_fresh();
+        let stats = store.statistics();
+        Self {
+            indexed_properties: store.property_index_keys().into_iter().collect(),
+            incoming_edges: IncomingEdges::of(store),
+            ..Self::from_statistics(&stats)
+        }
+    }
+
+    /// Creates an optimizer from any GraphStore implementation.
+    ///
+    /// Unlike [`from_store`](Self::from_store), this does not call
+    /// `ensure_statistics_fresh()` since external stores manage their own
+    /// statistics. The store's [`statistics()`](grafeo_core::graph::GraphStore::statistics) method
+    /// is called directly.
     #[must_use]
     pub fn from_graph_store(store: &dyn grafeo_core::graph::GraphStore) -> Self {
         let stats = store.statistics();
         let indexed_properties = store
             .all_property_keys()
-            .unwrap_or_default()
             .into_iter()
             .filter(|key| store.has_property_index(key))
             .collect();
@@ -309,8 +321,6 @@ impl Optimizer {
             explain: plan.explain,
             profile: plan.profile,
             default_params: plan.default_params,
-            graph: plan.graph,
-            result_kind: plan.result_kind,
         })
     }
 
@@ -1582,9 +1592,9 @@ impl Optimizer {
     ///
     /// The expand is a single hop without a named path (a path, or the list
     /// of a quantified edge, would come out reversed). Its source is a scan
-    /// without a label (a label scan answers at the query's view too, so a
-    /// labelled source could turn as well; the rule predates that). The
-    /// checks move above the turned expand,
+    /// without a label: a label scan finds the nodes that have the label
+    /// now, while a check would read the labels of a past epoch (see
+    /// `may_choose_scan_label`). The checks move above the turned expand,
     /// so they read only the source and the scan's input, and may move (see
     /// [`movable_variables`]). The scan's input, whose rows the turned plan
     /// scans the target for, binds none of the expand's variables and does
@@ -1714,17 +1724,6 @@ impl Optimizer {
                 Self::collect_output_variables_recursive(&distinct.input, vars);
             }
             #[cfg(feature = "triple-store")]
-            LogicalOperator::PropertyPath(path) => {
-                for component in [Some(&path.subject), Some(&path.object), path.graph.as_ref()]
-                    .into_iter()
-                    .flatten()
-                {
-                    if let Some(v) = component.as_variable() {
-                        vars.insert(v.to_string());
-                    }
-                }
-            }
-            #[cfg(feature = "triple-store")]
             LogicalOperator::TripleScan(scan) => {
                 if let Some(v) = scan.subject.as_variable() {
                     vars.insert(v.to_string());
@@ -1768,8 +1767,7 @@ impl Optimizer {
             LogicalExpression::Unary { operand, .. } => {
                 Self::collect_variables(operand, vars);
             }
-            LogicalExpression::FunctionCall { args, .. }
-            | LogicalExpression::SparqlCall { args, .. } => {
+            LogicalExpression::FunctionCall { args, .. } => {
                 for arg in args {
                     Self::collect_variables(arg, vars);
                 }
@@ -1895,14 +1893,9 @@ fn stays_in_place(expr: &LogicalExpression) -> bool {
         | LogicalExpression::CountSubquery(_)
         | LogicalExpression::ValueSubquery(_)
         | LogicalExpression::PatternComprehension { .. } => true,
-        LogicalExpression::FunctionCall { callee, args, .. } => {
-            matches!(callee, Callee::Builtin(function)
-                if function.volatility(args.len()) == Volatility::Volatile)
-                || any(args)
+        LogicalExpression::FunctionCall { name, args, .. } => {
+            name.eq_ignore_ascii_case("rand") || name.eq_ignore_ascii_case("random") || any(args)
         }
-        // SPARQL's own functions are out of #540's scope: its RAND stays in
-        // place by name, as before.
-        LogicalExpression::SparqlCall { name, args } => name.eq_ignore_ascii_case("rand") || any(args),
         LogicalExpression::Binary { left, right, .. } => {
             stays_in_place(left) || stays_in_place(right)
         }
@@ -2739,7 +2732,6 @@ mod tests {
     fn test_extract_variables_from_function_call() {
         let optimizer = Optimizer::new();
         let expr = LogicalExpression::FunctionCall {
-            callee: crate::query::plan::Callee::named("length"),
             name: "length".to_string(),
             args: vec![
                 LogicalExpression::Variable("a".to_string()),
@@ -3375,7 +3367,6 @@ mod tests {
             );
             let random = compare(
                 LogicalExpression::FunctionCall {
-                    callee: crate::query::plan::Callee::named("rand"),
                     name: "rand".to_string(),
                     args: vec![],
                     distinct: false,
@@ -3958,7 +3949,6 @@ mod tests {
 
         fn has_label(variable: &str, label: &str) -> LogicalExpression {
             LogicalExpression::FunctionCall {
-                callee: crate::query::plan::Callee::named("hasLabel"),
                 name: "hasLabel".to_string(),
                 args: vec![
                     LogicalExpression::Variable(variable.to_string()),
@@ -4099,7 +4089,6 @@ mod tests {
             );
             let random = compare(
                 LogicalExpression::FunctionCall {
-                    callee: crate::query::plan::Callee::named("rand"),
                     name: "rand".to_string(),
                     args: Vec::new(),
                     distinct: false,
@@ -4264,25 +4253,6 @@ mod tests {
             assert_eq!(
                 optimized_by(&optimizer, written(ExpandDirection::Incoming)),
                 expected.explain_tree()
-            );
-        }
-
-        /// A row-group store built without backward edges (10b) tells the
-        /// planner so: an optimizer from it plans as one without incoming
-        /// edges, and from one with them as one with them.
-        #[test]
-        fn a_row_group_store_without_backward_edges_plans_without_them() {
-            use grafeo_core::graph::rowgroup::RowGroupStore;
-
-            let kept = RowGroupStore::new();
-            let scanned = RowGroupStore::with_backward_edges(false);
-            assert_eq!(
-                Optimizer::from_graph_store(&kept).incoming_edges,
-                IncomingEdges::Kept
-            );
-            assert_eq!(
-                Optimizer::from_graph_store(&scanned).incoming_edges,
-                IncomingEdges::NotKept
             );
         }
 

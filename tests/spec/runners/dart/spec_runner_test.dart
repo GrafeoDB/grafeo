@@ -106,71 +106,29 @@ final _decimalInteger = RegExp(r'^[+-]?[0-9]+$');
 final _decimalNumber =
     RegExp(r'^[+-]?([0-9]+(\.[0-9]*)?|\.[0-9]+)([eE][+-]?[0-9]+)?$');
 
-/// The prefix of a JSON string that stands for an integer past 64 bits (a NUL,
-/// which a JSON string can only hold escaped, so no parameter text has it).
-const _wideMark = '\u0000wide:';
-
-/// [json] with each integer past 64 bits outside a string written as a string
-/// of [_wideMark] and its digits.
-String _markWideIntegers(String json) {
-  final out = StringBuffer();
-  var i = 0;
-  while (i < json.length) {
-    final c = json[i];
-    if (c == '"') {
-      final start = i;
-      i++;
-      while (i < json.length && json[i] != '"') {
-        i += json[i] == r'\' ? 2 : 1;
-      }
-      i++;
-      out.write(json.substring(start, i.clamp(0, json.length)));
-    } else if (c == '-' || RegExp(r'[0-9]').hasMatch(c)) {
-      final match =
-          RegExp(r'-?[0-9]+([.eE][-+0-9.eE]*)?').matchAsPrefix(json, i)!;
-      final token = match.group(0)!;
-      if (match.group(1) == null && int.tryParse(token) == null) {
-        out.write(jsonEncode('$_wideMark$token'));
-      } else {
-        out.write(token);
-      }
-      i = match.end;
-    } else {
-      out.write(c);
-      i++;
-    }
-  }
-  return out.toString();
-}
-
 /// The value of a parameter written as [text] in a .gtest file, by the rule of
 /// the Rust reference runner that every runner follows: a quoted value is a
 /// string, whatever it reads like; a bare value starting with `[` or `{` is
 /// JSON, whose numbers follow the rule of bare ones; a bare decimal integer
-/// is an int, or a BigInt past 64 bits, which the binding types (an exact
-/// DECIMAL up to 38 digits, an error past that), and any other bare decimal
-/// number a double, an error past the f64 range; a bare `true` or `false` is
-/// a bool; any other bare value is a string.
+/// that fits 64 bits is an int and any other bare decimal number a double, an
+/// error past the f64 range; a bare `true` or `false` is a bool; any other bare
+/// value is a string.
 dynamic _paramValue(String text) {
   text = text.trim();
   if (_isQuoted(text)) return _unquote(text);
   if (text.startsWith('[') || text.startsWith('{')) {
-    // jsonDecode makes an integer past 64 bits a double, so those are marked
-    // first and come back as BigInts; a number past the f64 range (1e400)
-    // decodes as infinity, which is an error.
-    final value = jsonDecode(_markWideIntegers(text), reviver: (key, value) {
-      if (value is String && value.startsWith(_wideMark)) {
-        return BigInt.parse(value.substring(_wideMark.length));
-      }
-      return value;
-    });
+    // jsonDecode makes an integer past 64 bits a double already, and a
+    // number past the f64 range (1e400) infinity, which is an error.
+    final value = jsonDecode(text);
     if (_hasInfinity(value)) {
       throw FormatException('a number in parameter $text is out of the f64 range');
     }
     return value;
   }
   if (_decimalInteger.hasMatch(text)) {
-    return int.tryParse(text) ?? BigInt.parse(text);
+    // null past the 64-bit range: then it is a double, as in Rust.
+    final integer = int.tryParse(text);
+    if (integer != null) return integer;
   }
   if (_decimalNumber.hasMatch(text)) {
     final number = double.parse(text);
@@ -480,7 +438,6 @@ class _Expect {
   int? count;
   bool empty;
   String? error;
-  String? gqlStatus;
   String? hash;
   int? precision;
   List<String> columns;
@@ -491,7 +448,6 @@ class _Expect {
     this.count,
     this.empty = false,
     this.error,
-    this.gqlStatus,
     this.hash,
     this.precision,
     List<String>? columns,
@@ -736,9 +692,6 @@ _Expect _parseExpectBlock(_ParseContext ctx) {
         ctx.idx++;
       case 'error':
         e.error = _unquote(value);
-        ctx.idx++;
-      case 'gql_status':
-        e.gqlStatus = _unquote(value);
         ctx.idx++;
       case 'hash':
         e.hash = _unquote(value);
@@ -1059,8 +1012,8 @@ void _runTestCase(GrafeoDB db, _TestCase tc, String language,
   }
 
   // Error case
-  if (exp.error != null || exp.gqlStatus != null) {
-    _runErrorTest(db, language, queries, exp.error, exp.gqlStatus,
+  if (exp.error != null) {
+    _runErrorTest(db, language, queries, exp.error!,
         params: tc.params.isNotEmpty ? tc.params : null);
     return;
   }
@@ -1112,15 +1065,11 @@ void _runTestCase(GrafeoDB db, _TestCase tc, String language,
 }
 
 /// Run the error test path: execute queries expecting the last to throw.
-/// Runs [queries], expecting the last one to fail with an error whose message
-/// contains [expectedSubstring] and whose GQLSTATUS is [expectedStatus], for
-/// each that is given.
 void _runErrorTest(
   GrafeoDB db,
   String language,
   List<String> queries,
-  String? expectedSubstring,
-  String? expectedStatus, {
+  String expectedSubstring, {
   Map<String, String>? params,
 }) {
   // Execute all-but-last normally
@@ -1129,28 +1078,13 @@ void _runErrorTest(
   }
 
   // Last query should fail
-  final expected = [
-    if (expectedSubstring != null) "containing '$expectedSubstring'",
-    if (expectedStatus != null) 'with GQLSTATUS $expectedStatus',
-  ].join(' ');
   try {
     _executeQuery(db, language, queries.last, params: params);
-    fail('Expected error $expected but query succeeded');
+    fail("Expected error containing '$expectedSubstring' but query succeeded");
   } on GrafeoException catch (e) {
-    if (expectedSubstring != null) {
-      expect(e.message, contains(expectedSubstring),
-          reason:
-              "Error '${e.message}' does not contain '$expectedSubstring'");
-    }
-    if (expectedStatus != null) {
-      // An error without a status fails the case: a status the binding does
-      // not expose is a gap, not a pass.
-      expect(e.gqlStatus, isNotNull,
-          reason: "Error '${e.message}' has no GQLSTATUS");
-      expect(e.gqlStatus, equals(expectedStatus),
-          reason: "Error '${e.message}' has GQLSTATUS ${e.gqlStatus}, "
-              'expected $expectedStatus');
-    }
+    expect(e.message, contains(expectedSubstring),
+        reason:
+            "Error '${e.message}' does not contain '$expectedSubstring'");
   }
 }
 
@@ -1166,16 +1100,8 @@ void main() {
       expect(_paramValue('[3, -5000000000, 9223372036854775807]'),
           [3, -5000000000, 9223372036854775807]);
     });
-    test('a JSON integer past 64 bits is a BigInt, which the binding types', () {
-      expect(
-          _paramValue(
-              '[9223372036854775808, {"big": -9223372036854775809}, "1e999 99999999999999999999"]'),
-          equals([
-            BigInt.parse('9223372036854775808'),
-            {'big': BigInt.parse('-9223372036854775809')},
-            '1e999 99999999999999999999',
-          ]));
-      expect(_paramValue('1${'0' * 38}'), equals(BigInt.from(10).pow(38)));
+    test('a JSON integer past 64 bits is a double', () {
+      expect(_paramValue('[9223372036854775808]').single, isA<double>());
     });
     test('a number past the f64 range is an error', () {
       for (final text in ['[1e400]', '{"tiny": [-1e400]}', '1e999']) {

@@ -11,7 +11,7 @@
 //! cargo test -p grafeo-engine --all-features --test text_index_options
 //! ```
 
-#![cfg(all(feature = "text-index", feature = "gql"))]
+#![cfg(all(feature = "text-index", feature = "lpg", feature = "gql"))]
 
 use grafeo_common::types::{NodeId, PropertyKey, Value};
 use grafeo_engine::{GrafeoDB, TextIndexOptions, TokenizerKind};
@@ -46,7 +46,7 @@ fn insert_notes(db: &GrafeoDB) {
 }
 
 fn owner(db: &GrafeoDB, node: NodeId) -> String {
-    let found = db.get_node(node).unwrap().expect("a found note exists");
+    let found = db.get_node(node).expect("a found note exists");
     match found.properties.get(&PropertyKey::new("owner")) {
         Some(Value::String(owner)) => owner.to_string(),
         other => panic!("note {node:?} has the owner {other:?}"),

@@ -307,105 +307,6 @@ pub struct IndexOptions {
     pub stop_words: Option<Vec<String>>,
 }
 
-impl IndexKind {
-    /// The kind `USING name` selects (TEXT, VECTOR or BTREE, in any case).
-    #[must_use]
-    pub fn from_using_name(name: &str) -> Option<Self> {
-        match name.to_uppercase().as_str() {
-            "TEXT" => Some(Self::Text),
-            "VECTOR" => Some(Self::Vector),
-            "BTREE" => Some(Self::BTree),
-            _ => None,
-        }
-    }
-}
-
-/// The value written for one option in `USING kind {name: value, ...}`, as
-/// each parser reads it, before [`IndexOptions::set`] checks it.
-#[derive(Debug, Clone, PartialEq)]
-pub enum IndexOptionValue {
-    /// An integer literal.
-    Integer(i64),
-    /// A float or decimal literal.
-    Float(f64),
-    /// A string literal, without its quotes.
-    String(String),
-    /// A list literal.
-    List(Vec<IndexOptionValue>),
-    /// Anything else, such as a bare name.
-    Other,
-}
-
-impl IndexOptions {
-    /// Sets the option `name` (in any case) of an index of `kind` to
-    /// `value`. GQL and Cypher both read the options of `CREATE INDEX ...
-    /// USING kind {...}` through this, so they take the same options.
-    ///
-    /// # Errors
-    ///
-    /// The message for the parse error: an option `kind` does not take, or
-    /// a value of the wrong type.
-    pub fn set(
-        &mut self,
-        kind: IndexKind,
-        name: &str,
-        value: IndexOptionValue,
-    ) -> std::result::Result<(), String> {
-        // BM25 parameters are small: an integer past the i32 range is no
-        // value the index takes.
-        let number = |value: IndexOptionValue, option: &str| match value {
-            IndexOptionValue::Integer(n) => i32::try_from(n)
-                .map(f64::from)
-                .map_err(|_| format!("Invalid number for {option}")),
-            IndexOptionValue::Float(f) => Ok(f),
-            _ => Err(format!("Expected a number for {option}")),
-        };
-        match (kind, name.to_uppercase().as_str()) {
-            (IndexKind::Vector, "DIMENSIONS" | "DIMENSION") => {
-                let IndexOptionValue::Integer(n) = value else {
-                    return Err("Expected integer for dimensions".to_string());
-                };
-                self.dimensions =
-                    Some(usize::try_from(n).map_err(|_| "Invalid dimension value".to_string())?);
-            }
-            (IndexKind::Vector, "METRIC") => {
-                let IndexOptionValue::String(metric) = value else {
-                    return Err("Expected string for metric".to_string());
-                };
-                self.metric = Some(metric);
-            }
-            (IndexKind::Text, "K1") => self.k1 = Some(number(value, "k1")?),
-            (IndexKind::Text, "B") => self.b = Some(number(value, "b")?),
-            (IndexKind::Text, "TOKENIZER") => {
-                let IndexOptionValue::String(tokenizer) = value else {
-                    return Err("Expected string for tokenizer".to_string());
-                };
-                self.tokenizer = Some(tokenizer);
-            }
-            (IndexKind::Text, "STOP_WORDS") => {
-                let IndexOptionValue::List(items) = value else {
-                    return Err("Expected a list of strings for stop_words".to_string());
-                };
-                let words = items
-                    .into_iter()
-                    .map(|item| match item {
-                        IndexOptionValue::String(word) => Ok(word),
-                        _ => Err("Expected string in stop_words".to_string()),
-                    })
-                    .collect::<std::result::Result<Vec<_>, _>>()?;
-                self.stop_words = Some(words);
-            }
-            (IndexKind::Text, _) => {
-                return Err(format!(
-                    "Unknown text index option '{name}'. Use: k1, b, tokenizer, stop_words"
-                ));
-            }
-            _ => return Err(format!("Unknown index option '{name}'")),
-        }
-        Ok(())
-    }
-}
-
 /// A CREATE CONSTRAINT statement.
 ///
 /// # Syntax
@@ -471,9 +372,6 @@ pub enum PropertyTypeKind {
     Float,
     /// `BOOLEAN`: `TRUE` or `FALSE`.
     Boolean,
-    /// `DECIMAL`, any decimal (`None`), or `DECIMAL(p, s)`: a decimal or an
-    /// integer literal the type holds, rounded to its scale.
-    Decimal(Option<grafeo_common::types::DecimalType>),
     /// `ANY`: any literal.
     Any,
     /// The temporal types, lists, maps, bytes, nodes and edges: no literal a
@@ -503,8 +401,6 @@ pub const PROPERTY_TYPE_NAMES: &[(&str, PropertyTypeKind)] = &[
     ("REAL", PropertyTypeKind::Float),
     ("BOOLEAN", PropertyTypeKind::Boolean),
     ("BOOL", PropertyTypeKind::Boolean),
-    ("DECIMAL", PropertyTypeKind::Decimal(None)),
-    ("DEC", PropertyTypeKind::Decimal(None)),
     ("DATE", PropertyTypeKind::Other),
     ("TIME", PropertyTypeKind::Other),
     ("TIMESTAMP", PropertyTypeKind::Other),
@@ -531,14 +427,10 @@ pub const PROPERTY_TYPE_NAMES: &[(&str, PropertyTypeKind)] = &[
 ];
 
 /// The kind of the property type called `name` (any case; `LIST<...>`
-/// excluded: its kind is [`PropertyTypeKind::Other`]; `DECIMAL(p, s)` read
-/// with its precision and scale), or `None` when `name` is not a property
-/// type Grafeo supports.
+/// excluded: its kind is [`PropertyTypeKind::Other`]), or `None` when
+/// `name` is not a property type Grafeo supports.
 #[must_use]
 pub fn property_type_kind(name: &str) -> Option<PropertyTypeKind> {
-    if let Some(decimal) = grafeo_common::types::DecimalType::from_name(name) {
-        return Some(PropertyTypeKind::Decimal(decimal));
-    }
     PROPERTY_TYPE_NAMES
         .iter()
         .find(|(known, _)| known.eq_ignore_ascii_case(name))
@@ -550,8 +442,8 @@ pub fn property_type_kind(name: &str) -> Option<PropertyTypeKind> {
 #[must_use]
 pub fn unknown_property_type(name: &str) -> String {
     format!(
-        "'{name}' is not a property type: use STRING, INT64, FLOAT64, BOOLEAN, DECIMAL, \
-         DECIMAL(p, s), DATE, TIME, TIMESTAMP, ZONED DATETIME, LOCAL DATETIME, DURATION, LIST, LIST<type>, MAP, BYTES, \
+        "'{name}' is not a property type: use STRING, INT64, FLOAT64, BOOLEAN, DATE, TIME, \
+         TIMESTAMP, ZONED DATETIME, LOCAL DATETIME, DURATION, LIST, LIST<type>, MAP, BYTES, \
          NODE, EDGE or ANY"
     )
 }

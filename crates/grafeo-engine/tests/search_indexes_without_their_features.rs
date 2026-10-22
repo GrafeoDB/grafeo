@@ -23,7 +23,7 @@
 //! cargo test -p grafeo-engine --all-features --test search_indexes_without_their_features
 //! ```
 
-#![cfg(all(feature = "gql", feature = "grafeo-file", not(miri)))]
+#![cfg(all(feature = "lpg", feature = "gql", feature = "grafeo-file", not(miri)))]
 
 #[cfg(not(all(feature = "vector-index", feature = "text-index")))]
 #[path = "common/legacy_file.rs"]
@@ -145,8 +145,7 @@ fn assert_indexed(db: &GrafeoDB) {
         "the nearest document"
     );
     let config = db
-        .snapshot()
-        .unwrap()
+        .graph_store()
         .vector_index_config("Document", "embedding")
         .expect("the vector index of the documents");
     assert_eq!(
@@ -173,7 +172,7 @@ fn assert_indexed(db: &GrafeoDB) {
     assert!(
         db.graph("trips")
             .unwrap()
-            .snapshot()
+            .graph_store()
             .unwrap()
             .has_vector_index("Stop", "position"),
         "the vector index of the named graph"

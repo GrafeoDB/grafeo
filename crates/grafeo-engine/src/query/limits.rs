@@ -64,7 +64,7 @@ pub(crate) fn check_partial_plan_depth(plan: &mut LogicalOperator) -> Result<()>
 /// The error of a statement whose plan nests deeper than
 /// [`MAX_PLAN_DEPTH`].
 pub(crate) fn plan_depth_error() -> Error {
-    Error::from(QueryError::new(
+    Error::Query(QueryError::new(
         QueryErrorKind::Semantic,
         format!(
             "the statement nests deeper than the plan depth limit of {MAX_PLAN_DEPTH} levels: \
@@ -216,7 +216,6 @@ fn operator_expressions<'a>(
         | LogicalOperator::RemoveLabel(_)
         | LogicalOperator::Empty
         | LogicalOperator::TripleScan(_)
-        | LogicalOperator::PropertyPath(_)
         | LogicalOperator::Union(_)
         | LogicalOperator::AntiJoin(_)
         | LogicalOperator::Construct(_)
@@ -238,7 +237,6 @@ fn operator_expressions<'a>(
         | LogicalOperator::Apply(_)
         | LogicalOperator::ParameterScan(_)
         | LogicalOperator::CreatePropertyGraph(_)
-        | LogicalOperator::DropPropertyGraph(_)
         | LogicalOperator::LoadData(_) => {}
     }
 }
@@ -256,9 +254,7 @@ fn expression_children<'a>(expression: &'a LogicalExpression, visit: &mut impl F
             expressions(&mut [&**left, &**right].into_iter());
         }
         LogicalExpression::Unary { operand, .. } => expressions(&mut std::iter::once(&**operand)),
-        LogicalExpression::FunctionCall { args, .. }
-        | LogicalExpression::SparqlCall { args, .. }
-        | LogicalExpression::List(args) => {
+        LogicalExpression::FunctionCall { args, .. } | LogicalExpression::List(args) => {
             expressions(&mut args.iter());
         }
         LogicalExpression::Map(entries) => expressions(&mut entries.iter().map(|(_, e)| e)),
@@ -411,7 +407,6 @@ fn take_operator_expressions(op: &mut LogicalOperator, out: &mut Vec<LogicalExpr
         | LogicalOperator::RemoveLabel(_)
         | LogicalOperator::Empty
         | LogicalOperator::TripleScan(_)
-        | LogicalOperator::PropertyPath(_)
         | LogicalOperator::Union(_)
         | LogicalOperator::AntiJoin(_)
         | LogicalOperator::Construct(_)
@@ -433,7 +428,6 @@ fn take_operator_expressions(op: &mut LogicalOperator, out: &mut Vec<LogicalExpr
         | LogicalOperator::Apply(_)
         | LogicalOperator::ParameterScan(_)
         | LogicalOperator::CreatePropertyGraph(_)
-        | LogicalOperator::DropPropertyGraph(_)
         | LogicalOperator::LoadData(_) => {}
     }
 }
@@ -458,9 +452,7 @@ fn take_expression_children(
             take(right);
         }
         LogicalExpression::Unary { operand, .. } => take(operand),
-        LogicalExpression::FunctionCall { args, .. }
-        | LogicalExpression::SparqlCall { args, .. }
-        | LogicalExpression::List(args) => {
+        LogicalExpression::FunctionCall { args, .. } | LogicalExpression::List(args) => {
             args.iter_mut().for_each(&mut take);
         }
         LogicalExpression::Map(entries) => entries.iter_mut().for_each(|(_, e)| take(e)),

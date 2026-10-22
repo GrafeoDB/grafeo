@@ -25,13 +25,6 @@ final class GrafeoBindings {
     'grafeo_last_error',
   );
 
-  /// Returns the GQLSTATUS of the last error (thread-local), or null. Do NOT
-  /// free the pointer.
-  late final grafeoLastErrorGqlStatus = library
-      .lookupFunction<Pointer<Utf8> Function(), Pointer<Utf8> Function()>(
-    'grafeo_last_error_gql_status',
-  );
-
   /// Clears the thread-local error state.
   late final grafeoClearError =
       library.lookupFunction<Void Function(), void Function()>(
@@ -178,41 +171,6 @@ final class GrafeoBindings {
       Uint64 Function(Pointer<Void>),
       int Function(Pointer<Void>)>('grafeo_result_rows_scanned');
 
-  /// Write counter: nodes created.
-  late final grafeoResultNodesCreated = library.lookupFunction<
-      Uint64 Function(Pointer<Void>),
-      int Function(Pointer<Void>)>('grafeo_result_nodes_created');
-
-  /// Write counter: nodes deleted.
-  late final grafeoResultNodesDeleted = library.lookupFunction<
-      Uint64 Function(Pointer<Void>),
-      int Function(Pointer<Void>)>('grafeo_result_nodes_deleted');
-
-  /// Write counter: edges created.
-  late final grafeoResultEdgesCreated = library.lookupFunction<
-      Uint64 Function(Pointer<Void>),
-      int Function(Pointer<Void>)>('grafeo_result_edges_created');
-
-  /// Write counter: edges deleted.
-  late final grafeoResultEdgesDeleted = library.lookupFunction<
-      Uint64 Function(Pointer<Void>),
-      int Function(Pointer<Void>)>('grafeo_result_edges_deleted');
-
-  /// Write counter: properties set.
-  late final grafeoResultPropertiesSet = library.lookupFunction<
-      Uint64 Function(Pointer<Void>),
-      int Function(Pointer<Void>)>('grafeo_result_properties_set');
-
-  /// Write counter: labels added.
-  late final grafeoResultLabelsAdded = library.lookupFunction<
-      Uint64 Function(Pointer<Void>),
-      int Function(Pointer<Void>)>('grafeo_result_labels_added');
-
-  /// Write counter: labels removed.
-  late final grafeoResultLabelsRemoved = library.lookupFunction<
-      Uint64 Function(Pointer<Void>),
-      int Function(Pointer<Void>)>('grafeo_result_labels_removed');
-
   /// Free a result handle.
   late final grafeoFreeResult = library.lookupFunction<
       Void Function(Pointer<Void>),
@@ -288,12 +246,6 @@ final class GrafeoBindings {
       Int32 Function(Pointer<Void>, Uint64),
       int Function(Pointer<Void>, int)>('grafeo_delete_node');
 
-  /// Delete a node with all its edges. Returns 1 if deleted, 0 if not found,
-  /// -1 on error.
-  late final grafeoDetachDeleteNode = library.lookupFunction<
-      Int32 Function(Pointer<Void>, Uint64),
-      int Function(Pointer<Void>, int)>('grafeo_detach_delete_node');
-
   /// Set a property on a node. Returns GrafeoStatus.
   late final grafeoSetNodeProperty = library.lookupFunction<
           Int32 Function(
@@ -322,12 +274,10 @@ final class GrafeoBindings {
       int Function(
           Pointer<Void>, int, Pointer<Utf8>)>('grafeo_remove_node_label');
 
-  /// Get labels for a node as JSON into the out pointer (null when the node
-  /// does not exist); a status. Caller must free with grafeoFreeString.
+  /// Get labels for a node as JSON. Caller must free with grafeoFreeString.
   late final grafeoGetNodeLabels = library.lookupFunction<
-      Int32 Function(Pointer<Void>, Uint64, Pointer<Pointer<Utf8>>),
-      int Function(Pointer<Void>, int,
-          Pointer<Pointer<Utf8>>)>('grafeo_get_node_labels');
+      Pointer<Utf8> Function(Pointer<Void>, Uint64),
+      Pointer<Utf8> Function(Pointer<Void>, int)>('grafeo_get_node_labels');
 
   /// Get node ID from an opaque node pointer.
   late final grafeoNodeId = library.lookupFunction<
@@ -459,33 +409,6 @@ final class GrafeoBindings {
         Pointer<Pointer<Uint64>>,
         Pointer<IntPtr>,
       )>('grafeo_find_nodes_by_property');
-
-  /// A node's edges as neighbor and edge id arrays of the same length (free
-  /// each with grafeoFreeNodeIds).
-  late final grafeoGetNodeEdges = library.lookupFunction<
-      Int32 Function(Pointer<Void>, Uint64, Int32, Pointer<Utf8>,
-          Pointer<Pointer<Uint64>>, Pointer<Pointer<Uint64>>, Pointer<IntPtr>),
-      int Function(
-          Pointer<Void>,
-          int,
-          int,
-          Pointer<Utf8>,
-          Pointer<Pointer<Uint64>>,
-          Pointer<Pointer<Uint64>>,
-          Pointer<IntPtr>)>('grafeo_get_node_edges');
-
-  /// `grafeo_graph_get_node_edges`.
-  late final grafeoGraphGetNodeEdges = library.lookupFunction<
-      Int32 Function(Pointer<Void>, Uint64, Int32, Pointer<Utf8>,
-          Pointer<Pointer<Uint64>>, Pointer<Pointer<Uint64>>, Pointer<IntPtr>),
-      int Function(
-          Pointer<Void>,
-          int,
-          int,
-          Pointer<Utf8>,
-          Pointer<Pointer<Uint64>>,
-          Pointer<Pointer<Uint64>>,
-          Pointer<IntPtr>)>('grafeo_graph_get_node_edges');
 
   /// Free a node ID array returned by grafeoFindNodesByProperty.
   late final grafeoFreeNodeIds = library.lookupFunction<
@@ -621,15 +544,15 @@ final class GrafeoBindings {
   // Statistics
   // ===========================================================================
 
-  /// Get the number of nodes into the out pointer; a status.
+  /// Get the number of nodes.
   late final grafeoNodeCount = library.lookupFunction<
-      Int32 Function(Pointer<Void>, Pointer<IntPtr>),
-      int Function(Pointer<Void>, Pointer<IntPtr>)>('grafeo_node_count');
+      IntPtr Function(Pointer<Void>),
+      int Function(Pointer<Void>)>('grafeo_node_count');
 
-  /// Get the number of edges into the out pointer; a status.
+  /// Get the number of edges.
   late final grafeoEdgeCount = library.lookupFunction<
-      Int32 Function(Pointer<Void>, Pointer<IntPtr>),
-      int Function(Pointer<Void>, Pointer<IntPtr>)>('grafeo_edge_count');
+      IntPtr Function(Pointer<Void>),
+      int Function(Pointer<Void>)>('grafeo_edge_count');
 
   // ===========================================================================
   // Transactions
@@ -682,314 +605,6 @@ final class GrafeoBindings {
       void Function(Pointer<Void>)>('grafeo_free_transaction');
 
   // ===========================================================================
-  // Batch writes and upserts
-  // ===========================================================================
-
-  /// Batch create nodes from a JSON array of property objects. Free the ids with grafeoFreeNodeIds.
-  late final grafeoBatchCreateNodesWithProps = library.lookupFunction<
-      Int32 Function(Pointer<Void>, Pointer<Utf8>, Pointer<Utf8>,
-          Pointer<Pointer<Uint64>>, Pointer<IntPtr>),
-      int Function(
-          Pointer<Void>,
-          Pointer<Utf8>,
-          Pointer<Utf8>,
-          Pointer<Pointer<Uint64>>,
-          Pointer<IntPtr>)>('grafeo_batch_create_nodes_with_props');
-
-  /// Batch create edges from a JSON array of {src, dst, type, properties}.
-  late final grafeoBatchCreateEdges = library.lookupFunction<
-      Int32 Function(Pointer<Void>, Pointer<Utf8>, Pointer<Pointer<Uint64>>,
-          Pointer<IntPtr>),
-      int Function(Pointer<Void>, Pointer<Utf8>, Pointer<Pointer<Uint64>>,
-          Pointer<IntPtr>)>('grafeo_batch_create_edges');
-
-  /// Search several query vectors at once; results as JSON (free with grafeoFreeString).
-  late final grafeoBatchVectorSearch = library.lookupFunction<
-      Int32 Function(
-          Pointer<Void>,
-          Pointer<Utf8>,
-          Pointer<Utf8>,
-          Pointer<Float>,
-          IntPtr,
-          IntPtr,
-          IntPtr,
-          IntPtr,
-          Pointer<Utf8>,
-          Pointer<Pointer<Utf8>>),
-      int Function(
-          Pointer<Void>,
-          Pointer<Utf8>,
-          Pointer<Utf8>,
-          Pointer<Float>,
-          int,
-          int,
-          int,
-          int,
-          Pointer<Utf8>,
-          Pointer<Pointer<Utf8>>)>('grafeo_batch_vector_search');
-
-  /// Create or update nodes by a key property; summary as JSON (free with grafeoFreeString).
-  late final grafeoUpsertNodes = library.lookupFunction<
-      Int32 Function(Pointer<Void>, Pointer<Utf8>, Pointer<Utf8>, Pointer<Utf8>,
-          Pointer<Pointer<Utf8>>),
-      int Function(Pointer<Void>, Pointer<Utf8>, Pointer<Utf8>, Pointer<Utf8>,
-          Pointer<Pointer<Utf8>>)>('grafeo_upsert_nodes');
-
-  /// Create or update edges by a key property; summary as JSON (free with grafeoFreeString).
-  late final grafeoUpsertEdges = library.lookupFunction<
-      Int32 Function(Pointer<Void>, Pointer<Utf8>, Pointer<Utf8>, Pointer<Utf8>,
-          Pointer<Pointer<Utf8>>),
-      int Function(Pointer<Void>, Pointer<Utf8>, Pointer<Utf8>, Pointer<Utf8>,
-          Pointer<Pointer<Utf8>>)>('grafeo_upsert_edges');
-
-  // ===========================================================================
-  // Change data capture
-  // ===========================================================================
-
-  /// Turn change data capture on or off.
-  late final grafeoSetCdcEnabled = library.lookupFunction<
-      Void Function(Pointer<Void>, Bool),
-      void Function(Pointer<Void>, bool)>('grafeo_set_cdc_enabled');
-
-  /// Whether change data capture is on.
-  late final grafeoIsCdcEnabled = library.lookupFunction<
-      Bool Function(Pointer<Void>),
-      bool Function(Pointer<Void>)>('grafeo_is_cdc_enabled');
-
-  /// A node's changes as JSON, null on error.
-  late final grafeoNodeHistory = library.lookupFunction<
-      Pointer<Utf8> Function(Pointer<Void>, Uint64),
-      Pointer<Utf8> Function(Pointer<Void>, int)>('grafeo_node_history');
-
-  /// An edge's changes as JSON, null on error.
-  late final grafeoEdgeHistory = library.lookupFunction<
-      Pointer<Utf8> Function(Pointer<Void>, Uint64),
-      Pointer<Utf8> Function(Pointer<Void>, int)>('grafeo_edge_history');
-
-  /// A node's changes from an epoch on as JSON, null on error.
-  late final grafeoNodeHistorySince = library.lookupFunction<
-      Pointer<Utf8> Function(Pointer<Void>, Uint64, Uint64),
-      Pointer<Utf8> Function(
-          Pointer<Void>, int, int)>('grafeo_node_history_since');
-
-  /// Every change in an epoch range as JSON, null on error.
-  late final grafeoChangesBetween = library.lookupFunction<
-      Pointer<Utf8> Function(Pointer<Void>, Uint64, Uint64),
-      Pointer<Utf8> Function(
-          Pointer<Void>, int, int)>('grafeo_changes_between');
-
-  // ===========================================================================
-  // Time travel (a point is a kind, GRAFEO_POINT_*, and a value)
-  // ===========================================================================
-
-  /// Open a database with a history retention; a null path opens one in
-  /// memory. Returns null on error.
-  late final grafeoOpenWithHistory = library.lookupFunction<
-      Pointer<Void> Function(Pointer<Utf8>, Int32, Uint64),
-      Pointer<Void> Function(
-          Pointer<Utf8>, int, int)>('grafeo_open_with_history');
-
-  /// The epoch of the last commit.
-  late final grafeoCurrentEpoch = library.lookupFunction<
-      Uint64 Function(Pointer<Void>),
-      int Function(Pointer<Void>)>('grafeo_current_epoch');
-
-  /// The epoch a point names, into the out pointer.
-  late final grafeoEpochAsOf = library.lookupFunction<
-      Int32 Function(Pointer<Void>, Int32, Int64, Pointer<Uint64>),
-      int Function(
-          Pointer<Void>, int, int, Pointer<Uint64>)>('grafeo_epoch_as_of');
-
-  /// One query at a point; the params JSON may be null. Null on error.
-  late final grafeoExecuteAsOf = library.lookupFunction<
-      Pointer<Void> Function(
-          Pointer<Void>, Pointer<Utf8>, Pointer<Utf8>, Int32, Int64),
-      Pointer<Void> Function(Pointer<Void>, Pointer<Utf8>, Pointer<Utf8>, int,
-          int)>('grafeo_execute_as_of');
-
-  /// A read-only view at a point, null on error. Free with grafeoFreeAsOf.
-  late final grafeoAsOf = library.lookupFunction<
-      Pointer<Void> Function(Pointer<Void>, Int32, Int64),
-      Pointer<Void> Function(Pointer<Void>, int, int)>('grafeo_as_of');
-
-  /// The epoch a view reads at.
-  late final grafeoAsOfEpoch = library.lookupFunction<
-      Uint64 Function(Pointer<Void>),
-      int Function(Pointer<Void>)>('grafeo_as_of_epoch');
-
-  /// A query through a view; the params JSON may be null. Null on error.
-  late final grafeoAsOfExecute = library.lookupFunction<
-      Pointer<Void> Function(Pointer<Void>, Pointer<Utf8>, Pointer<Utf8>),
-      Pointer<Void> Function(
-          Pointer<Void>, Pointer<Utf8>, Pointer<Utf8>)>('grafeo_as_of_execute');
-
-  /// The node as it was at a view's epoch, into the out pointer.
-  late final grafeoAsOfGetNode = library.lookupFunction<
-      Int32 Function(Pointer<Void>, Uint64, Pointer<Pointer<Void>>),
-      int Function(
-          Pointer<Void>, int, Pointer<Pointer<Void>>)>('grafeo_as_of_get_node');
-
-  /// The edge as it was at a view's epoch, into the out pointer.
-  late final grafeoAsOfGetEdge = library.lookupFunction<
-      Int32 Function(Pointer<Void>, Uint64, Pointer<Pointer<Void>>),
-      int Function(
-          Pointer<Void>, int, Pointer<Pointer<Void>>)>('grafeo_as_of_get_edge');
-
-  /// A node's property value at a view's epoch as JSON into the out pointer,
-  /// null when there was none; a status. Free with grafeoFreeString.
-  late final grafeoAsOfGetNodeProperty = library.lookupFunction<
-      Int32 Function(
-          Pointer<Void>, Uint64, Pointer<Utf8>, Pointer<Pointer<Utf8>>),
-      int Function(Pointer<Void>, int, Pointer<Utf8>,
-          Pointer<Pointer<Utf8>>)>('grafeo_as_of_get_node_property');
-
-  /// Free a view.
-  late final grafeoFreeAsOf = library.lookupFunction<
-      Void Function(Pointer<Void>),
-      void Function(Pointer<Void>)>('grafeo_free_as_of');
-
-  // ===========================================================================
-  // Graph handles (the grafeo_graph_* calls work as their database counterparts)
-  // ===========================================================================
-
-  /// A handle on a named graph, null when it does not exist.
-  late final grafeoGraph = library.lookupFunction<
-      Pointer<Void> Function(Pointer<Void>, Pointer<Utf8>),
-      Pointer<Void> Function(Pointer<Void>, Pointer<Utf8>)>('grafeo_graph');
-
-  /// Free a graph handle.
-  late final grafeoFreeGraph = library.lookupFunction<
-      Void Function(Pointer<Void>),
-      void Function(Pointer<Void>)>('grafeo_free_graph');
-
-  /// `grafeo_graph_execute`.
-  late final grafeoGraphExecute = library.lookupFunction<
-      Pointer<Void> Function(Pointer<Void>, Pointer<Utf8>),
-      Pointer<Void> Function(
-          Pointer<Void>, Pointer<Utf8>)>('grafeo_graph_execute');
-
-  /// `grafeo_graph_execute_with_params`.
-  late final grafeoGraphExecuteWithParams = library.lookupFunction<
-      Pointer<Void> Function(Pointer<Void>, Pointer<Utf8>, Pointer<Utf8>),
-      Pointer<Void> Function(Pointer<Void>, Pointer<Utf8>,
-          Pointer<Utf8>)>('grafeo_graph_execute_with_params');
-
-  /// `grafeo_graph_execute_language`.
-  late final grafeoGraphExecuteLanguage = library.lookupFunction<
-      Pointer<Void> Function(
-          Pointer<Void>, Pointer<Utf8>, Pointer<Utf8>, Pointer<Utf8>),
-      Pointer<Void> Function(Pointer<Void>, Pointer<Utf8>, Pointer<Utf8>,
-          Pointer<Utf8>)>('grafeo_graph_execute_language');
-
-  /// `grafeo_graph_create_node`.
-  late final grafeoGraphCreateNode = library.lookupFunction<
-      Uint64 Function(Pointer<Void>, Pointer<Utf8>, Pointer<Utf8>),
-      int Function(Pointer<Void>, Pointer<Utf8>,
-          Pointer<Utf8>)>('grafeo_graph_create_node');
-
-  /// `grafeo_graph_create_edge`.
-  late final grafeoGraphCreateEdge = library.lookupFunction<
-      Uint64 Function(
-          Pointer<Void>, Uint64, Uint64, Pointer<Utf8>, Pointer<Utf8>),
-      int Function(Pointer<Void>, int, int, Pointer<Utf8>,
-          Pointer<Utf8>)>('grafeo_graph_create_edge');
-
-  /// `grafeo_graph_get_node`.
-  late final grafeoGraphGetNode = library.lookupFunction<
-      Int32 Function(Pointer<Void>, Uint64, Pointer<Pointer<Void>>),
-      int Function(
-          Pointer<Void>, int, Pointer<Pointer<Void>>)>('grafeo_graph_get_node');
-
-  /// `grafeo_graph_get_edge`.
-  late final grafeoGraphGetEdge = library.lookupFunction<
-      Int32 Function(Pointer<Void>, Uint64, Pointer<Pointer<Void>>),
-      int Function(
-          Pointer<Void>, int, Pointer<Pointer<Void>>)>('grafeo_graph_get_edge');
-
-  /// `grafeo_graph_set_node_property`.
-  late final grafeoGraphSetNodeProperty = library.lookupFunction<
-      Int32 Function(Pointer<Void>, Uint64, Pointer<Utf8>, Pointer<Utf8>),
-      int Function(Pointer<Void>, int, Pointer<Utf8>,
-          Pointer<Utf8>)>('grafeo_graph_set_node_property');
-
-  /// `grafeo_graph_set_edge_property`.
-  late final grafeoGraphSetEdgeProperty = library.lookupFunction<
-      Int32 Function(Pointer<Void>, Uint64, Pointer<Utf8>, Pointer<Utf8>),
-      int Function(Pointer<Void>, int, Pointer<Utf8>,
-          Pointer<Utf8>)>('grafeo_graph_set_edge_property');
-
-  /// `grafeo_graph_remove_node_property`.
-  late final grafeoGraphRemoveNodeProperty = library.lookupFunction<
-      Int32 Function(Pointer<Void>, Uint64, Pointer<Utf8>),
-      int Function(Pointer<Void>, int,
-          Pointer<Utf8>)>('grafeo_graph_remove_node_property');
-
-  /// `grafeo_graph_remove_edge_property`.
-  late final grafeoGraphRemoveEdgeProperty = library.lookupFunction<
-      Int32 Function(Pointer<Void>, Uint64, Pointer<Utf8>),
-      int Function(Pointer<Void>, int,
-          Pointer<Utf8>)>('grafeo_graph_remove_edge_property');
-
-  /// `grafeo_graph_add_node_label`.
-  late final grafeoGraphAddNodeLabel = library.lookupFunction<
-      Int32 Function(Pointer<Void>, Uint64, Pointer<Utf8>),
-      int Function(
-          Pointer<Void>, int, Pointer<Utf8>)>('grafeo_graph_add_node_label');
-
-  /// `grafeo_graph_remove_node_label`.
-  late final grafeoGraphRemoveNodeLabel = library.lookupFunction<
-      Int32 Function(Pointer<Void>, Uint64, Pointer<Utf8>),
-      int Function(
-          Pointer<Void>, int, Pointer<Utf8>)>('grafeo_graph_remove_node_label');
-
-  /// `grafeo_graph_delete_node`.
-  late final grafeoGraphDeleteNode = library.lookupFunction<
-      Int32 Function(Pointer<Void>, Uint64),
-      int Function(Pointer<Void>, int)>('grafeo_graph_delete_node');
-
-  /// `grafeo_graph_detach_delete_node`.
-  late final grafeoGraphDetachDeleteNode = library.lookupFunction<
-      Int32 Function(Pointer<Void>, Uint64),
-      int Function(Pointer<Void>, int)>('grafeo_graph_detach_delete_node');
-
-  /// `grafeo_graph_delete_edge`.
-  late final grafeoGraphDeleteEdge = library.lookupFunction<
-      Int32 Function(Pointer<Void>, Uint64),
-      int Function(Pointer<Void>, int)>('grafeo_graph_delete_edge');
-
-  /// `grafeo_graph_batch_create_nodes_with_props`.
-  late final grafeoGraphBatchCreateNodesWithProps = library.lookupFunction<
-      Int32 Function(Pointer<Void>, Pointer<Utf8>, Pointer<Utf8>,
-          Pointer<Pointer<Uint64>>, Pointer<IntPtr>),
-      int Function(
-          Pointer<Void>,
-          Pointer<Utf8>,
-          Pointer<Utf8>,
-          Pointer<Pointer<Uint64>>,
-          Pointer<IntPtr>)>('grafeo_graph_batch_create_nodes_with_props');
-
-  /// `grafeo_graph_batch_create_edges`.
-  late final grafeoGraphBatchCreateEdges = library.lookupFunction<
-      Int32 Function(Pointer<Void>, Pointer<Utf8>, Pointer<Pointer<Uint64>>,
-          Pointer<IntPtr>),
-      int Function(Pointer<Void>, Pointer<Utf8>, Pointer<Pointer<Uint64>>,
-          Pointer<IntPtr>)>('grafeo_graph_batch_create_edges');
-
-  /// `grafeo_graph_upsert_nodes`.
-  late final grafeoGraphUpsertNodes = library.lookupFunction<
-      Int32 Function(Pointer<Void>, Pointer<Utf8>, Pointer<Utf8>, Pointer<Utf8>,
-          Pointer<Pointer<Utf8>>),
-      int Function(Pointer<Void>, Pointer<Utf8>, Pointer<Utf8>, Pointer<Utf8>,
-          Pointer<Pointer<Utf8>>)>('grafeo_graph_upsert_nodes');
-
-  /// `grafeo_graph_upsert_edges`.
-  late final grafeoGraphUpsertEdges = library.lookupFunction<
-      Int32 Function(Pointer<Void>, Pointer<Utf8>, Pointer<Utf8>, Pointer<Utf8>,
-          Pointer<Pointer<Utf8>>),
-      int Function(Pointer<Void>, Pointer<Utf8>, Pointer<Utf8>, Pointer<Utf8>,
-          Pointer<Pointer<Utf8>>)>('grafeo_graph_upsert_edges');
-
-  // ===========================================================================
   // Admin
   // ===========================================================================
 
@@ -1007,14 +622,4 @@ final class GrafeoBindings {
   late final grafeoWalCheckpoint = library.lookupFunction<
       Int32 Function(Pointer<Void>),
       int Function(Pointer<Void>)>('grafeo_wal_checkpoint');
-
-  /// Set the automatic checkpoint triggers (0 turns one off). Returns GrafeoStatus.
-  late final grafeoSetCheckpointTriggers = library.lookupFunction<
-      Int32 Function(Pointer<Void>, Uint64, Uint64),
-      int Function(Pointer<Void>, int, int)>('grafeo_set_checkpoint_triggers');
-
-  /// Automatic checkpoint status as JSON. Caller must free with grafeoFreeString.
-  late final grafeoCheckpointStatus = library.lookupFunction<
-      Pointer<Utf8> Function(Pointer<Void>),
-      Pointer<Utf8> Function(Pointer<Void>)>('grafeo_checkpoint_status');
 }

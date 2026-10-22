@@ -22,7 +22,7 @@
 
 use std::sync::Arc;
 
-use grafeo_common::types::{NodeId, PropertyKey, ReadView, Value};
+use grafeo_common::types::{NodeId, PropertyKey, Value};
 
 use crate::graph::GraphStore;
 
@@ -54,75 +54,32 @@ pub trait VectorAccessor: Send + Sync {
 /// This is the primary accessor used by the engine when performing vector
 /// operations. It reads directly from the property store, avoiding any
 /// duplication.
-///
-/// A vector index reads through [`VectorAccessor`], which has no error
-/// channel: a read the store cannot do is kept, the vector counts as absent
-/// for the index, and [`check`](Self::check) returns the error after the
-/// index operation, which the caller fails with.
 pub struct PropertyVectorAccessor<'a> {
     store: &'a dyn GraphStore,
     property: PropertyKey,
-    view: ReadView,
-    failure: parking_lot::Mutex<Option<grafeo_common::utils::error::Error>>,
 }
 
 impl<'a> PropertyVectorAccessor<'a> {
-    /// Creates an accessor of the vectors in `property` as `view` sees the
-    /// nodes.
+    /// Creates a new accessor for the given store and property key.
     #[must_use]
-    pub fn new(
-        store: &'a dyn GraphStore,
-        property: impl Into<PropertyKey>,
-        view: ReadView,
-    ) -> Self {
+    pub fn new(store: &'a dyn GraphStore, property: impl Into<PropertyKey>) -> Self {
         Self {
             store,
             property: property.into(),
-            view,
-            failure: parking_lot::Mutex::new(None),
         }
-    }
-
-    /// The first read the store could not do since the last check: an index
-    /// operation through this accessor saw that vector as absent, so its
-    /// answer does not count.
-    ///
-    /// # Errors
-    ///
-    /// The store's error of that read.
-    pub fn check(&self) -> grafeo_common::utils::error::Result<()> {
-        self.failure.lock().take().map_or(Ok(()), Err)
-    }
-
-    /// The answer of `read`, or `otherwise` after keeping its error for
-    /// [`check`](Self::check).
-    fn seen<T>(&self, read: grafeo_common::utils::error::Result<T>, otherwise: T) -> T {
-        read.unwrap_or_else(|error| {
-            self.failure.lock().get_or_insert(error);
-            otherwise
-        })
     }
 }
 
 impl VectorAccessor for PropertyVectorAccessor<'_> {
     fn get_vector(&self, id: NodeId) -> Option<Arc<[f32]>> {
-        let value = self.seen(
-            self.store
-                .node_property(id, self.property.as_str(), self.view),
-            None,
-        );
-        match value {
+        match self.store.get_node_property(id, &self.property) {
             Some(Value::Vector(v)) => Some(v),
             _ => None,
         }
     }
 
     fn with_vector(&self, id: NodeId, f: &mut dyn FnMut(&[f32])) -> bool {
-        self.seen(
-            self.store
-                .with_node_vector(id, self.property.as_str(), self.view, f),
-            false,
-        )
+        self.store.with_node_vector(id, &self.property, f)
     }
 }
 
@@ -162,10 +119,10 @@ where
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "lpg"))]
 mod tests {
     use super::*;
-    use crate::graph::rowgroup::RowGroupStore;
+    use crate::graph::lpg::LpgStore;
 
     #[test]
     fn test_closure_accessor() {
@@ -185,12 +142,12 @@ mod tests {
 
     #[test]
     fn test_property_vector_accessor() {
-        let store = RowGroupStore::new();
+        let store = LpgStore::new().unwrap();
         let id = store.create_node(&["Test"]);
         let vec_data: Arc<[f32]> = vec![1.0, 2.0, 3.0].into();
         store.set_node_property(id, "embedding", Value::Vector(vec_data.clone()));
 
-        let accessor = PropertyVectorAccessor::new(&store, "embedding", ReadView::latest());
+        let accessor = PropertyVectorAccessor::new(&store, "embedding");
         let result = accessor.get_vector(id);
         assert!(result.is_some());
         assert_eq!(result.unwrap().as_ref(), vec_data.as_ref());
@@ -200,48 +157,81 @@ mod tests {
 
         // Wrong property type
         store.set_node_property(id, "name", Value::from("hello"));
-        let name_accessor = PropertyVectorAccessor::new(&store, "name", ReadView::latest());
+        let name_accessor = PropertyVectorAccessor::new(&store, "name");
         assert!(name_accessor.get_vector(id).is_none());
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "lpg", not(feature = "temporal")))]
 mod borrowed_read_tests {
     use super::*;
-    use crate::graph::rowgroup::RowGroupStore;
+    use crate::graph::lpg::LpgStore;
 
     #[test]
     fn accessor_kind_property_dispatches() {
-        let store = RowGroupStore::new();
+        let store = LpgStore::new().unwrap();
         let jules_id = store.create_node(&["Person"]);
         let vec_data: Arc<[f32]> = vec![0.7, 0.8, 0.9].into();
         store.set_node_property(jules_id, "embedding", Value::Vector(vec_data.clone()));
 
-        let accessor = VectorAccessorKind::Property(PropertyVectorAccessor::new(
-            &store,
-            "embedding",
-            ReadView::latest(),
-        ));
+        let accessor =
+            VectorAccessorKind::Property(PropertyVectorAccessor::new(&store, "embedding"));
         let result = accessor.get_vector(jules_id);
         assert!(result.is_some());
         assert_eq!(result.unwrap().as_ref(), vec_data.as_ref());
         assert!(accessor.get_vector(NodeId::new(999)).is_none());
     }
 
+    /// A search over a spilled column reads every vector in place: the
+    /// backing never copies one out (ruling (d) of #594).
+    #[cfg(feature = "vector-index")]
+    #[test]
+    fn search_reads_spilled_vectors_without_copying_them() {
+        use crate::graph::lpg::test_backing::MemoryBacking;
+        use crate::index::vector::{DistanceMetric, HnswConfig, HnswIndex};
+        use std::sync::atomic::Ordering;
+
+        let store = LpgStore::new().unwrap();
+        let key = PropertyKey::new("embedding");
+        let vectors = [[3.0, 19.0], [19.0, 88.0], [88.0, 3.0], [3.19, 19.88]];
+        let ids: Vec<NodeId> = vectors
+            .iter()
+            .map(|vector| {
+                store.create_node_with_props(
+                    &["Item"],
+                    [("embedding", Value::Vector(vector.to_vec().into()))],
+                )
+            })
+            .collect();
+        let accessor = PropertyVectorAccessor::new(&store, "embedding");
+        let index = HnswIndex::new(HnswConfig::new(2, DistanceMetric::Euclidean));
+        for (id, vector) in ids.iter().zip(vectors) {
+            index.insert(*id, &vector, &accessor);
+        }
+        let snapshot = store.node_property_column_entries(&key).unwrap();
+        let backing = MemoryBacking::of(&snapshot);
+        assert!(store.spill_node_property_column(&key, backing.clone(), &snapshot));
+
+        let hits = index.search(&[3.0, 19.0], 2, &accessor);
+        assert_eq!(hits.first().map(|hit| hit.0), Some(ids[0]));
+        assert_eq!(
+            backing.copies.load(Ordering::Relaxed),
+            0,
+            "a vector was copied"
+        );
+    }
+
     /// The borrowed read hands out the stored vector, and nothing for a
     /// node without one or a value that is not a vector.
     #[test]
     fn with_vector_lends_the_stored_vector() {
-        let store = RowGroupStore::new();
+        let store = LpgStore::new().unwrap();
         let mia = store.create_node(&["Person"]);
         let butch = store.create_node(&["Person"]);
         store.set_node_property(mia, "embedding", Value::Vector(vec![3.0, 19.0].into()));
         store.set_node_property(butch, "embedding", Value::from("not a vector"));
-        let accessor = VectorAccessorKind::Property(PropertyVectorAccessor::new(
-            &store,
-            "embedding",
-            ReadView::latest(),
-        ));
+        let accessor =
+            VectorAccessorKind::Property(PropertyVectorAccessor::new(&store, "embedding"));
 
         let mut seen = Vec::new();
         assert!(accessor.with_vector(mia, &mut |v| seen.extend_from_slice(v)));

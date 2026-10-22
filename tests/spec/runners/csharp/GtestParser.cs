@@ -203,8 +203,6 @@ public static class GtestParser
                     expect.Empty = value == "true"; ctx.Idx++; break;
                 case "error":
                     expect.Error = Unquote(value); ctx.Idx++; break;
-                case "gql_status":
-                    expect.GqlStatus = Unquote(value); ctx.Idx++; break;
                 case "hash":
                     expect.Hash = Unquote(value); ctx.Idx++; break;
                 case "precision":

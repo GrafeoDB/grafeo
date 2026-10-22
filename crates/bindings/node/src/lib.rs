@@ -22,7 +22,6 @@ mod error;
 mod graph;
 mod query;
 mod stream;
-mod time_travel;
 mod transaction;
 mod types;
 

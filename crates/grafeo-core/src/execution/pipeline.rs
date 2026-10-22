@@ -4,7 +4,7 @@
 //! forward through operators via `push()` calls, enabling better parallelism
 //! and cache utilization compared to pull-based execution.
 
-use grafeo_common::clock::Instant;
+use std::time::Instant;
 
 use super::chunk::DataChunk;
 use super::operators::OperatorError;
@@ -179,7 +179,10 @@ impl Pipeline {
     }
 
     /// Checks whether the deadline has been exceeded.
+    ///
+    /// On WASM targets this is a no-op because `Instant` is not available.
     fn check_deadline(&self) -> Result<(), OperatorError> {
+        #[cfg(not(target_arch = "wasm32"))]
         if let Some(deadline) = self.deadline
             && Instant::now() >= deadline
         {

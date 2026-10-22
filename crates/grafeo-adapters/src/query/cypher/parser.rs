@@ -7,7 +7,6 @@ use super::ast::*;
 use super::lexer::{Lexer, Token, TokenKind};
 use crate::query::keywords::unescape_string;
 use crate::query::limits::{Chain, Nesting, nesting_error_message};
-use crate::query::schema::IndexOptionValue;
 use grafeo_common::utils::error::{QueryError, QueryErrorKind, Result};
 
 /// Cypher query parser.
@@ -224,7 +223,6 @@ impl<'a> Parser<'a> {
         let mut clauses = Vec::new();
 
         loop {
-            self.reject_clause_after_return(&clauses)?;
             match self.current.kind {
                 TokenKind::Match => {
                     clauses.push(Clause::Match(self.parse_match_clause()?));
@@ -297,44 +295,6 @@ impl<'a> Parser<'a> {
             clauses,
             span: None,
         }))
-    }
-
-    /// Fails when the current token starts a clause other than `ORDER BY`,
-    /// `SKIP` or `LIMIT` after a `RETURN` in `clauses`: in openCypher a
-    /// `RETURN` ends its query part (a `WITH` passes rows on), and a clause
-    /// after it would otherwise replace it.
-    fn reject_clause_after_return(&self, clauses: &[Clause]) -> Result<()> {
-        if !clauses
-            .iter()
-            .any(|clause| matches!(clause, Clause::Return(_)))
-        {
-            return Ok(());
-        }
-        let starts_clause = matches!(
-            self.current.kind,
-            TokenKind::Match
-                | TokenKind::Optional
-                | TokenKind::Where
-                | TokenKind::With
-                | TokenKind::Return
-                | TokenKind::Unwind
-                | TokenKind::Create
-                | TokenKind::Merge
-                | TokenKind::Delete
-                | TokenKind::Detach
-                | TokenKind::Set
-                | TokenKind::Remove
-                | TokenKind::Call
-        ) || (self.can_be_identifier()
-            && self.get_identifier_text().eq_ignore_ascii_case("FOREACH"))
-            || self.is_contextual("LOAD");
-        if !starts_clause {
-            return Ok(());
-        }
-        Err(self.error(&format!(
-            "{} after RETURN: RETURN must be the last clause of a query (pass rows on with WITH)",
-            self.current.text.to_uppercase()
-        )))
     }
 
     /// Parses `CALL [(scope)] { subquery [UNION [ALL] subquery]* }` or a
@@ -525,7 +485,6 @@ impl<'a> Parser<'a> {
     fn parse_subquery_body(&mut self) -> Result<Query> {
         let mut clauses = Vec::new();
         while self.current.kind != TokenKind::RBrace && self.current.kind != TokenKind::Eof {
-            self.reject_clause_after_return(&clauses)?;
             match self.current.kind {
                 TokenKind::Match => {
                     clauses.push(Clause::Match(self.parse_match_clause()?));
@@ -1128,18 +1087,9 @@ impl<'a> Parser<'a> {
                     // <-[...]- (incoming with bracket details)
                     (Direction::Incoming, true)
                 } else if self.current.kind == TokenKind::Minus {
-                    // <-- (anonymous incoming shorthand), or <--> (either way)
+                    // <-- (anonymous incoming shorthand)
                     self.advance();
-                    if self.current.kind == TokenKind::Gt {
-                        self.advance();
-                        (Direction::Undirected, false)
-                    } else {
-                        (Direction::Incoming, false)
-                    }
-                } else if self.current.kind == TokenKind::Arrow {
-                    // <-> (either way)
-                    self.advance();
-                    (Direction::Undirected, false)
+                    (Direction::Incoming, false)
                 } else {
                     (Direction::Incoming, false)
                 }
@@ -1231,15 +1181,10 @@ impl<'a> Parser<'a> {
 
                 self.expect(TokenKind::RBracket)?;
 
-                // Determine direction from closing symbol: `<-[...]->` points
-                // both ways, which openCypher reads as either direction.
+                // Determine direction from closing symbol
                 let dir = if self.current.kind == TokenKind::Arrow {
                     self.advance();
-                    if direction == Direction::Incoming {
-                        Direction::Undirected
-                    } else {
-                        Direction::Outgoing
-                    }
+                    Direction::Outgoing
                 } else if self.current.kind == TokenKind::Minus {
                     self.advance();
                     if direction == Direction::Incoming {
@@ -1447,81 +1392,79 @@ impl<'a> Parser<'a> {
     }
 
     /// The operands and operators of a chain of comparisons, each operator
-    /// nesting one level (see [`Self::parse_comparison_expression`]). Each
-    /// operand is a predicate expression: `1 = 2 IN [false]` compares 1 with
-    /// `2 IN [false]`.
+    /// nesting one level (see [`Self::parse_comparison_expression`]).
     fn parse_comparison_chain(&mut self) -> Result<Expression> {
-        let mut left = self.parse_predicate_expression()?;
+        let mut left = self.parse_additive_expression()?;
         // The right operand of the comparison `left` ends with, kept when the
         // next operator is a comparison too, which compares it again.
         let mut chained_operand: Option<Expression> = None;
 
-        while let Some(op) = comparison_op(self.current.kind) {
-            self.advance();
-            let right = self.parse_predicate_expression()?;
-            let middle = chained_operand.take();
-            if comparison_op(self.current.kind).is_some() {
-                chained_operand = Some(right.clone());
-            }
-            left = match middle {
-                // `a < b <= c` reads `a < b AND b <= c`.
-                Some(middle) => Expression::Binary {
-                    left: Box::new(left),
-                    op: BinaryOp::And,
-                    right: Box::new(Expression::Binary {
-                        left: Box::new(middle),
+        loop {
+            if let Some(op) = comparison_op(self.current.kind) {
+                self.advance();
+                let right = self.parse_additive_expression()?;
+                let middle = chained_operand.take();
+                if comparison_op(self.current.kind).is_some() {
+                    chained_operand = Some(right.clone());
+                }
+                left = match middle {
+                    // `a < b <= c` reads `a < b AND b <= c`.
+                    Some(middle) => Expression::Binary {
+                        left: Box::new(left),
+                        op: BinaryOp::And,
+                        right: Box::new(Expression::Binary {
+                            left: Box::new(middle),
+                            op,
+                            right: Box::new(right),
+                        }),
+                    },
+                    None => Expression::Binary {
+                        left: Box::new(left),
                         op,
                         right: Box::new(right),
-                    }),
-                },
-                None => Expression::Binary {
-                    left: Box::new(left),
-                    op,
-                    right: Box::new(right),
-                },
-            };
-        }
+                    },
+                };
+                continue;
+            }
 
-        Ok(left)
-    }
-
-    /// The string, list and null predicates (`IN`, `STARTS WITH`, `ENDS
-    /// WITH`, `CONTAINS`, `=~`, `IS [NOT] NULL`), left to right. They bind
-    /// tighter than the comparisons, as in openCypher 9: `x IN l = true` is
-    /// `(x IN l) = true`.
-    fn parse_predicate_expression(&mut self) -> Result<Expression> {
-        let chain = self.begin_chain();
-        let predicate = self.parse_predicate_chain();
-        self.end_chain(chain);
-        predicate
-    }
-
-    fn parse_predicate_chain(&mut self) -> Result<Expression> {
-        let mut left = self.parse_additive_expression()?;
-        loop {
             let op = match self.current.kind {
-                TokenKind::In => {
-                    self.advance();
-                    BinaryOp::In
-                }
-                TokenKind::Starts | TokenKind::Ends => {
-                    let op = if self.current.kind == TokenKind::Starts {
-                        BinaryOp::StartsWith
-                    } else {
-                        BinaryOp::EndsWith
-                    };
+                TokenKind::In => BinaryOp::In,
+                TokenKind::Starts => {
                     self.advance();
                     self.expect(TokenKind::With)?;
-                    op
+                    let right = self.parse_additive_expression()?;
+                    self.link_chain()?;
+                    left = Expression::Binary {
+                        left: Box::new(left),
+                        op: BinaryOp::StartsWith,
+                        right: Box::new(right),
+                    };
+                    continue;
+                }
+                TokenKind::Ends => {
+                    self.advance();
+                    self.expect(TokenKind::With)?;
+                    let right = self.parse_additive_expression()?;
+                    self.link_chain()?;
+                    left = Expression::Binary {
+                        left: Box::new(left),
+                        op: BinaryOp::EndsWith,
+                        right: Box::new(right),
+                    };
+                    continue;
                 }
                 TokenKind::Contains => {
                     self.advance();
-                    BinaryOp::Contains
+                    let right = self.parse_additive_expression()?;
+                    self.link_chain()?;
+                    left = Expression::Binary {
+                        left: Box::new(left),
+                        op: BinaryOp::Contains,
+                        right: Box::new(right),
+                    };
+                    continue;
                 }
-                TokenKind::RegexMatch => {
-                    self.advance();
-                    BinaryOp::RegexMatch
-                }
+                TokenKind::RegexMatch => BinaryOp::RegexMatch,
                 TokenKind::Is => {
                     self.advance();
                     let not = self.current.kind == TokenKind::Not;
@@ -1540,8 +1483,10 @@ impl<'a> Parser<'a> {
                     };
                     continue;
                 }
-                _ => return Ok(left),
+                _ => break,
             };
+
+            self.advance();
             let right = self.parse_additive_expression()?;
             self.link_chain()?;
             left = Expression::Binary {
@@ -1550,6 +1495,8 @@ impl<'a> Parser<'a> {
                 right: Box::new(right),
             };
         }
+
+        Ok(left)
     }
 
     fn parse_additive_expression(&mut self) -> Result<Expression> {
@@ -1636,9 +1583,11 @@ impl<'a> Parser<'a> {
                     }
                 }
                 if self.current.kind == TokenKind::Float {
-                    let value = self.float_literal()?;
-                    self.advance();
-                    return Ok(Expression::Literal(Literal::Float(-value)));
+                    let text = &self.current.text;
+                    if let Ok(val) = format!("-{text}").parse::<f64>() {
+                        self.advance();
+                        return Ok(Expression::Literal(Literal::Float(val)));
+                    }
                 }
                 self.enter_nesting()?;
                 let operand = self.parse_unary_expression();
@@ -1990,7 +1939,10 @@ impl<'a> Parser<'a> {
                 Ok(Expression::Literal(Literal::Integer(value)))
             }
             TokenKind::Float => {
-                let value = self.float_literal()?;
+                let text = &self.current.text;
+                let value = text.parse().map_err(|_: std::num::ParseFloatError| {
+                    self.error(&format!("Invalid float literal: '{}'", text))
+                })?;
                 self.advance();
                 Ok(Expression::Literal(Literal::Float(value)))
             }
@@ -2462,11 +2414,9 @@ impl<'a> Parser<'a> {
         }
     }
 
-    /// CREATE INDEX [name] [IF NOT EXISTS] FOR (n:Label) ON (n.property)
-    /// [USING TEXT|VECTOR|BTREE [{options}]]: an index without a name is
-    /// named `Label_property_index`.
+    /// CREATE INDEX name [IF NOT EXISTS] FOR (n:Label) ON (n.property)
     fn parse_create_index(&mut self) -> Result<Statement> {
-        let name = self.parse_optional_schema_name()?;
+        let name = self.expect_identifier()?;
         let if_not_exists = self.parse_if_not_exists();
 
         self.expect_contextual("FOR")?;
@@ -2489,74 +2439,24 @@ impl<'a> Parser<'a> {
             self.advance();
         }
         self.expect(TokenKind::RParen)?;
-        let (index_kind, options) = self.parse_index_using()?;
-        let name = name.unwrap_or_else(|| format!("{label}_{}_index", properties.join("_")));
 
         use crate::query::schema as gql;
         Ok(Statement::Schema(gql::SchemaStatement::CreateIndex(
             gql::CreateIndexStatement {
                 name,
-                index_kind,
+                index_kind: gql::IndexKind::Property,
                 label,
                 properties,
-                options,
+                options: gql::IndexOptions::default(),
                 if_not_exists,
                 span: None,
             },
         )))
     }
 
-    /// `USING TEXT|VECTOR|BTREE [{name: value, ...}]` after CREATE INDEX, as
-    /// in GQL: the kind and its options, which [`IndexOptions::set`] checks
-    /// for both languages. Without USING, a property index.
-    ///
-    /// [`IndexOptions::set`]: crate::query::schema::IndexOptions::set
-    fn parse_index_using(
-        &mut self,
-    ) -> Result<(
-        crate::query::schema::IndexKind,
-        crate::query::schema::IndexOptions,
-    )> {
-        use crate::query::schema::{IndexKind, IndexOptions};
-
-        let mut options = IndexOptions::default();
-        if !self.is_contextual("USING") {
-            return Ok((IndexKind::Property, options));
-        }
-        self.advance();
-        let kind_text = self
-            .expect_identifier()
-            .map_err(|_| self.error("Expected TEXT, VECTOR, or BTREE after USING"))?;
-        let kind = IndexKind::from_using_name(&kind_text)
-            .ok_or_else(|| self.error(&format!("Unknown index type '{kind_text}'")))?;
-        if matches!(kind, IndexKind::Text | IndexKind::Vector)
-            && self.current.kind == TokenKind::LBrace
-        {
-            self.advance();
-            while self.current.kind != TokenKind::RBrace {
-                let name = self
-                    .expect_identifier()
-                    .map_err(|_| self.error("Expected option name"))?;
-                self.expect(TokenKind::Colon)?;
-                let value = index_option_value(self.parse_expression()?);
-                options
-                    .set(kind, &name, value)
-                    .map_err(|message| self.error(&message))?;
-                if self.current.kind != TokenKind::Comma {
-                    break;
-                }
-                self.advance();
-            }
-            self.expect(TokenKind::RBrace)?;
-        }
-        Ok((kind, options))
-    }
-
-    /// CREATE CONSTRAINT [name] [IF NOT EXISTS] FOR (n:Label) REQUIRE n.property
-    /// IS UNIQUE: a constraint without a name gets the default name GQL gives
-    /// one (`Label_property_unique`).
+    /// CREATE CONSTRAINT name [IF NOT EXISTS] FOR (n:Label) REQUIRE n.property IS UNIQUE
     fn parse_create_constraint(&mut self) -> Result<Statement> {
-        let name = self.parse_optional_schema_name()?;
+        let name = self.expect_identifier()?;
         let if_not_exists = self.parse_if_not_exists();
 
         self.expect_contextual("FOR")?;
@@ -2618,7 +2518,7 @@ impl<'a> Parser<'a> {
 
         Ok(Statement::Schema(gql::SchemaStatement::CreateConstraint(
             gql::CreateConstraintStatement {
-                name,
+                name: Some(name),
                 constraint_kind,
                 label,
                 properties,
@@ -2626,17 +2526,6 @@ impl<'a> Parser<'a> {
                 span: None,
             },
         )))
-    }
-
-    /// The name of a `CREATE INDEX` or `CREATE CONSTRAINT`, which may be left
-    /// out: none when `FOR` or `IF NOT EXISTS` follows.
-    fn parse_optional_schema_name(&mut self) -> Result<Option<String>> {
-        let unnamed = self.is_contextual("FOR")
-            || (self.is_contextual("IF") && self.peek_kind() == TokenKind::Not);
-        if unnamed {
-            return Ok(None);
-        }
-        self.expect_identifier().map(Some)
     }
 
     /// DROP INDEX name [IF EXISTS] / DROP CONSTRAINT name [IF EXISTS]
@@ -2971,31 +2860,9 @@ impl<'a> Parser<'a> {
 
             // A type Grafeo supports, as in GQL's type DDL: any other name
             // used to declare an `ANY` property.
-            let mut data_type = self.expect_identifier()?;
+            let data_type = self.expect_identifier()?;
             if crate::query::schema::property_type_kind(&data_type).is_none() {
                 return Err(self.error(&crate::query::schema::unknown_property_type(&data_type)));
-            }
-            // DECIMAL(precision[, scale]), spelled as the catalog prints it
-            if self.current.kind == TokenKind::LParen
-                && grafeo_common::types::DecimalType::from_name(&data_type) == Some(None)
-            {
-                let mut written = format!("{data_type}(");
-                self.advance();
-                while !matches!(self.current.kind, TokenKind::RParen | TokenKind::Eof) {
-                    written.push_str(&self.current.text);
-                    self.advance();
-                }
-                self.expect(TokenKind::RParen)?;
-                written.push(')');
-                data_type = match grafeo_common::types::DecimalType::from_name(&written) {
-                    Some(Some(decimal)) => decimal.to_string(),
-                    _ => {
-                        return Err(self.error(&format!(
-                            "{written}: {}",
-                            grafeo_common::types::DecimalError::InvalidPrecision
-                        )));
-                    }
-                };
             }
 
             // Optional NOT NULL
@@ -3030,24 +2897,6 @@ impl<'a> Parser<'a> {
             .with_source(self.source.to_string())
             .into()
     }
-
-    /// The value of the float literal at the current token. openCypher
-    /// refuses a literal outside the FLOAT range, as `1e400`, when it parses
-    /// the query ("floating point number is too large"), so it is no
-    /// infinity.
-    fn float_literal(&self) -> Result<f64> {
-        let text = &self.current.text;
-        let value: f64 = text.parse().map_err(|_: std::num::ParseFloatError| {
-            self.error(&format!("Invalid float literal: '{text}'"))
-        })?;
-        if value.is_finite() {
-            Ok(value)
-        } else {
-            Err(self.error(&format!(
-                "Float literal '{text}' is too large: it is outside the FLOAT range"
-            )))
-        }
-    }
 }
 
 /// The comparison a token stands for (`=`, `<>`, `<`, `<=`, `>`, `>=`): the
@@ -3061,32 +2910,6 @@ fn comparison_op(kind: TokenKind) -> Option<BinaryOp> {
         TokenKind::Gt => Some(BinaryOp::Gt),
         TokenKind::Ge => Some(BinaryOp::Ge),
         _ => None,
-    }
-}
-
-/// The value written for an index option: a literal, a negated number or a
-/// list of them; anything else is [`IndexOptionValue::Other`], which
-/// `IndexOptions::set` refuses with the type the option wants.
-fn index_option_value(expression: Expression) -> IndexOptionValue {
-    match expression {
-        Expression::Literal(Literal::Integer(n)) => IndexOptionValue::Integer(n),
-        Expression::Literal(Literal::Float(f)) => IndexOptionValue::Float(f),
-        Expression::Literal(Literal::String(s)) => IndexOptionValue::String(s),
-        Expression::Unary {
-            op: UnaryOp::Neg,
-            operand,
-            ..
-        } => match index_option_value(*operand) {
-            IndexOptionValue::Integer(n) => n
-                .checked_neg()
-                .map_or(IndexOptionValue::Other, IndexOptionValue::Integer),
-            IndexOptionValue::Float(f) => IndexOptionValue::Float(-f),
-            _ => IndexOptionValue::Other,
-        },
-        Expression::List(items) => {
-            IndexOptionValue::List(items.into_iter().map(index_option_value).collect())
-        }
-        _ => IndexOptionValue::Other,
     }
 }
 
@@ -4293,44 +4116,6 @@ mod tests {
         assert!(err.contains("Expected end of query"), "{err}");
     }
 
-    /// A RETURN ends its query part: a clause after it is an error that names
-    /// the clause, where it replaced the RETURN; ORDER BY, SKIP and LIMIT
-    /// belong to it, and UNION and WITH go on as before.
-    #[test]
-    fn a_clause_after_return_is_rejected() {
-        for (query, clause) in [
-            ("RETURN 1 AS a RETURN 2 AS b", "RETURN"),
-            ("MATCH (n) RETURN n RETURN 1", "RETURN"),
-            ("MATCH (n) RETURN n.name MATCH (m) RETURN m", "MATCH"),
-            ("MATCH (n) RETURN n OPTIONAL MATCH (m) RETURN m", "OPTIONAL"),
-            ("RETURN 1 AS x WITH x RETURN x", "WITH"),
-            ("RETURN 1 UNWIND [1] AS x RETURN x", "UNWIND"),
-            ("RETURN 1 CREATE (:Person)", "CREATE"),
-            ("RETURN 1 MERGE (:Person)", "MERGE"),
-            ("MATCH (n) RETURN n DETACH DELETE n", "DETACH"),
-            ("MATCH (n) RETURN n SET n.x = 1", "SET"),
-            ("MATCH (n) RETURN n REMOVE n.x", "REMOVE"),
-            ("MATCH (n) RETURN n WHERE n.x = 1", "WHERE"),
-            ("MATCH (n) RETURN n ORDER BY n.x LIMIT 1 RETURN 1", "RETURN"),
-            ("RETURN 1 CALL db.labels()", "CALL"),
-            ("RETURN 1 FOREACH (x IN [1] | CREATE (:Person))", "FOREACH"),
-            ("CALL { RETURN 1 AS a RETURN 2 AS b } RETURN b", "RETURN"),
-        ] {
-            let err = parse_error_message(query);
-            assert!(
-                err.contains(&format!(
-                    "{clause} after RETURN: RETURN must be the last clause"
-                )),
-                "{query}: {err}"
-            );
-        }
-        parse_ok("UNWIND [3, 1, 2] AS x RETURN x ORDER BY x SKIP 1 LIMIT 1");
-        parse_ok("RETURN 1 AS x UNION RETURN 2 AS x");
-        parse_ok("RETURN 1 AS x;");
-        parse_ok("MATCH (n) WITH n RETURN n");
-        parse_ok("CALL { RETURN 1 AS a } RETURN a");
-    }
-
     #[test]
     fn test_statements_separated_by_semicolon_are_rejected() {
         let err = parse_error_message("RETURN 1; RETURN 2");
@@ -4436,103 +4221,6 @@ mod tests {
     fn test_parse_create_index_if_not_exists() {
         let stmt = parse_ok("CREATE INDEX idx_name IF NOT EXISTS FOR (n:Person) ON (n.name)");
         assert!(matches!(stmt, Statement::Schema(_)));
-    }
-
-    fn create_index(query: &str) -> crate::query::schema::CreateIndexStatement {
-        match parse_ok(query) {
-            Statement::Schema(crate::query::schema::SchemaStatement::CreateIndex(stmt)) => stmt,
-            other => panic!("{query}: {other:?}"),
-        }
-    }
-
-    #[test]
-    fn unnamed_index_gets_the_label_and_properties_as_its_name() {
-        let stmt = create_index("CREATE INDEX FOR (n:Person) ON (n.name)");
-        assert_eq!(stmt.name, "Person_name_index");
-        assert_eq!(stmt.index_kind, crate::query::schema::IndexKind::Property);
-        let stmt = create_index("CREATE INDEX IF NOT EXISTS FOR (n:Person) ON (n.first, n.last)");
-        assert_eq!(
-            (stmt.name.as_str(), stmt.if_not_exists),
-            ("Person_first_last_index", true)
-        );
-    }
-
-    #[test]
-    fn create_index_using_a_kind_takes_gql_options() {
-        use crate::query::schema::IndexKind;
-
-        let text = create_index(
-            "CREATE INDEX notes FOR (n:Note) ON (n.body) USING TEXT \
-             {K1: 1.5, b: 0.5, tokenizer: 'standard', stop_words: ['and', 'or']}",
-        );
-        assert_eq!(text.index_kind, IndexKind::Text);
-        assert_eq!(
-            (
-                text.options.k1,
-                text.options.b,
-                text.options.tokenizer.as_deref(),
-                text.options.stop_words
-            ),
-            (
-                Some(1.5),
-                Some(0.5),
-                Some("standard"),
-                Some(vec!["and".to_string(), "or".to_string()])
-            )
-        );
-        let vector = create_index(
-            "CREATE INDEX FOR (d:Doc) ON (d.emb) USING vector {dimensions: 384, metric: 'cosine'}",
-        );
-        assert_eq!(
-            (
-                vector.name.as_str(),
-                vector.index_kind,
-                vector.options.dimensions,
-                vector.options.metric.as_deref()
-            ),
-            (
-                "Doc_emb_index",
-                IndexKind::Vector,
-                Some(384),
-                Some("cosine")
-            )
-        );
-        // A negative BM25 parameter parses; the engine refuses it, naming it.
-        let negative = create_index("CREATE INDEX FOR (n:Note) ON (n.body) USING TEXT {k1: -1}");
-        assert_eq!(negative.options.k1, Some(-1.0));
-        let btree = create_index("CREATE INDEX FOR (p:Person) ON (p.age) USING BTREE");
-        assert_eq!(btree.index_kind, IndexKind::BTree);
-    }
-
-    #[test]
-    fn create_index_options_of_the_wrong_name_or_type_are_errors() {
-        for (clause, says) in [
-            (
-                "USING TEXT {analyzer: 'standard'}",
-                "Unknown text index option 'analyzer'",
-            ),
-            ("USING TEXT {k1: 'high'}", "Expected a number for k1"),
-            (
-                "USING TEXT {tokenizer: standard}",
-                "Expected string for tokenizer",
-            ),
-            (
-                "USING TEXT {stop_words: ['and', 3]}",
-                "Expected string in stop_words",
-            ),
-            (
-                "USING VECTOR {dimensions: 'two'}",
-                "Expected integer for dimensions",
-            ),
-            ("USING VECTOR {dimensions: -3}", "Invalid dimension value"),
-            ("USING VECTOR {metric: 3}", "Expected string for metric"),
-            ("USING VECTOR {k1: 1.2}", "Unknown index option 'k1'"),
-            ("USING HASH", "Unknown index type 'HASH'"),
-        ] {
-            let message =
-                parse_error_message(&format!("CREATE INDEX FOR (n:Note) ON (n.body) {clause}"));
-            assert!(message.contains(says), "{clause}: {message}");
-        }
     }
 
     #[test]

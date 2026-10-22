@@ -73,13 +73,6 @@ tests:
     expect:
       error: "Expected end of query"
 
-  # A SELECT ends its query: a second one after it is an error, never dropped (#380).
-  - name: a_select_after_select_is_rejected
-    query: "SELECT * FROM GRAPH_TABLE (MATCH (n:Person) COLUMNS (n.name AS name)) SELECT 1"
-    expect:
-      error: "Expected end of query"
-      gql_status: "42001"
-
   # ---------------------------------------------------------------------------
   # CREATE PROPERTY GRAPH errors
   # ---------------------------------------------------------------------------

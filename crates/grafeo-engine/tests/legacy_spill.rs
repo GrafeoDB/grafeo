@@ -15,6 +15,7 @@
 //! ```
 
 #![cfg(all(
+    feature = "lpg",
     feature = "gql",
     feature = "wal",
     feature = "grafeo-file",
@@ -161,7 +162,7 @@ fn nearest_to_alix(db: &GrafeoDB) -> String {
     let hits = db
         .vector_search("Item", "embedding", &[3.0, 19.0, 88.0], 1, None, None)
         .unwrap();
-    let node = db.get_node(hits[0].0).unwrap().unwrap();
+    let node = db.get_node(hits[0].0).unwrap();
     match node.get_property("name") {
         Some(Value::String(name)) => name.to_string(),
         other => panic!("name: {other:?}"),
@@ -466,19 +467,12 @@ fn an_old_spill_file_that_is_not_one_moves_to_kept() {
 fn a_refused_file_moves_to_kept_and_the_next_open_neither_rebuilds_nor_checkpoints() {
     use grafeo_common::testing::crash::{CrashResult, with_crash_at, with_failure_at};
 
-    // Without a WAL, whose first segment an open writes (a failure point and
-    // crash points of its own): the failure and the crash count only the
-    // rebuild's and the checkpoint's.
-    let open_without_wal = |path: &std::path::Path| {
-        GrafeoDB::with_config(grafeo_engine::Config::persistent(path).without_wal())
-    };
-
     let (_dir, path) = fixture("0.6");
     let old = spill_dir(&path).join(SPILL_FILE);
     write_old(&old, 2, &[(0, vec![3.0, 19.0])]);
     let bytes = std::fs::read(&old).unwrap();
     assert!(
-        with_failure_at(1, || open_without_wal(&path)).is_err(),
+        with_failure_at(1, || GrafeoDB::open(&path)).is_err(),
         "the first open writes a checkpoint"
     );
     assert_eq!(
@@ -487,7 +481,7 @@ fn a_refused_file_moves_to_kept_and_the_next_open_neither_rebuilds_nor_checkpoin
         "a failed checkpoint moves nothing"
     );
 
-    let db = open_without_wal(&path).unwrap();
+    let db = GrafeoDB::open(&path).unwrap();
     assert!(!old.exists(), "the file left the top level");
     assert_eq!(
         std::fs::read(kept_dir(&path).join(SPILL_FILE)).unwrap(),
@@ -497,14 +491,14 @@ fn a_refused_file_moves_to_kept_and_the_next_open_neither_rebuilds_nor_checkpoin
     db.close().unwrap();
     drop(db);
 
-    let reopened = with_failure_at(1, || open_without_wal(&path));
+    let reopened = with_failure_at(1, || GrafeoDB::open(&path));
     assert!(
         reopened.is_ok(),
         "the next open writes a checkpoint: {:?}",
         reopened.err()
     );
     drop(reopened);
-    let CrashResult::Completed(reopened) = with_crash_at(1, || open_without_wal(&path)) else {
+    let CrashResult::Completed(reopened) = with_crash_at(1, || GrafeoDB::open(&path)) else {
         panic!("the next open passed a crash point: a rebuild or a checkpoint");
     };
     let db = reopened.unwrap();
@@ -566,9 +560,7 @@ fn folding_in_adds_no_change_event_and_no_epoch() {
 
     assert_eq!(folding.current_epoch(), plain.current_epoch());
     for name in ["Alix", "Gus", "Jules"] {
-        let ids = folding
-            .find_nodes_by_property("name", &Value::from(name))
-            .unwrap();
+        let ids = folding.find_nodes_by_property("name", &Value::from(name));
         assert_eq!(ids.len(), 1, "{name}");
         assert_eq!(
             format!("{:?}", folding.history(ids[0]).unwrap()),
@@ -904,7 +896,7 @@ fn search_names(db: &GrafeoDB, query: &[f32], k: usize) -> Vec<String> {
         .unwrap()
         .into_iter()
         .map(
-            |(id, _)| match db.get_node(id).unwrap().unwrap().get_property("name") {
+            |(id, _)| match db.get_node(id).unwrap().get_property("name") {
                 Some(Value::String(name)) => name.to_string(),
                 other => panic!("name: {other:?}"),
             },

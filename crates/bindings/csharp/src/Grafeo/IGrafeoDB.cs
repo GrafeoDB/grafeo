@@ -11,12 +11,6 @@ public interface IGrafeoDB : IDisposable, IAsyncDisposable
     QueryResult ExecuteWithParams(string query, Dictionary<string, object?> parameters);
     QueryResult ExecuteLanguage(string language, string query, Dictionary<string, object?>? parameters = null);
 
-    // Time travel
-    ulong CurrentEpoch { get; }
-    ulong EpochAsOf(TimePoint point);
-    AsOfView AsOf(TimePoint point);
-    QueryResult ExecuteAsOf(string query, TimePoint point, Dictionary<string, object?>? parameters = null);
-
     // Transactions
     ITransaction BeginTransaction();
     ITransaction BeginTransaction(IsolationLevel isolationLevel);

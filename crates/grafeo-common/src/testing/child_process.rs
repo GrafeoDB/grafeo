@@ -286,32 +286,17 @@ mod tests {
                 .unwrap()
         };
 
-        // The holder lets go right after the first try finds the lock held,
-        // as a starting child does: no thread and no sleep, so the release
-        // falls inside the window however loaded the machine is.
-        let holder = open();
-        holder.lock().unwrap();
-        let mut holder = Some(holder);
+        let held = open();
+        held.lock().unwrap();
+        let release = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(20));
+            drop(held);
+        });
         let held =
             |error: &std::fs::TryLockError| matches!(error, std::fs::TryLockError::WouldBlock);
         let ours = open();
-        let mut tries = 0;
-        let taken = take_lock(
-            || {
-                tries += 1;
-                let result = ours.try_lock();
-                if result.is_err() {
-                    drop(holder.take());
-                }
-                result
-            },
-            held,
-        );
-        assert!(taken.is_ok(), "{taken:?}");
-        assert_eq!(
-            tries, 2,
-            "the first try found the lock held, the second took it"
-        );
+        assert!(take_lock(|| ours.try_lock(), held).is_ok());
+        release.join().unwrap();
 
         let started = Instant::now();
         assert!(take_lock(|| open().try_lock(), held).is_err());

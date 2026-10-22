@@ -12,7 +12,7 @@
 //! cargo test -p grafeo-engine --all-features --test profile_without_match
 //! ```
 
-#![cfg(all(feature = "gql", feature = "cypher"))]
+#![cfg(all(feature = "lpg", feature = "gql", feature = "cypher"))]
 
 use std::panic::{AssertUnwindSafe, catch_unwind};
 
@@ -176,25 +176,17 @@ fn profile_of_a_first_unwind() {
 }
 
 /// A `MERGE` that comes first runs once without an input row, unless it
-/// computes a property, which it does on the one empty row. A call of
-/// constants (`toString('Alix')`) is folded into a constant at plan time; a
-/// volatile one (`rand()`) is computed.
+/// computes a property, which it does on the one empty row.
 #[test]
 fn profile_of_a_first_merge() {
-    for query in [
+    assert_profile(
+        &LANGUAGES,
         "MERGE (m:A {name: 'Alix'}) RETURN m.name",
-        "MERGE (m:A {name: toString('Alix')}) RETURN m.name",
-    ] {
-        assert_profile(
-            &LANGUAGES,
-            query,
-            // MERGE's empty input has no operator of its own: `Merge (m, Empty)` (#461).
-            &[(0, "Project", 1), (1, "Merge", 1)],
-        );
-    }
+        &[(0, "Project", 1), (1, "Merge", 1), (2, "Empty", 0)],
+    );
     assert_profile(
         &[Language::Cypher],
-        "MERGE (m:A {name: 'Alix', seed: rand()}) RETURN m.name",
+        "MERGE (m:A {name: toString('Alix')}) RETURN m.name",
         &[(0, "Project", 1), (1, "Merge", 1), (2, "SingleRow", 1)],
     );
 }

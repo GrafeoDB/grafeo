@@ -27,7 +27,7 @@ pub use image::{ImageSource, MemoryImage, MemorySection, ServedOnce};
 pub use log_record::{LogRecord, LogRecordRef, MAX_RECORD_BYTES, read_log_records};
 pub use page_fetcher::{AccessHint, PageFetcher};
 pub use section::{
-    ChunkKind, ChunkMeta, ChunkNamespace, ImageId, Section, SectionDirectoryEntry, SectionFlags,
+    ChunkKind, ChunkMeta, ChunkNamespace, Section, SectionDirectoryEntry, SectionFlags,
     SectionMemoryConfig, SectionSink, SectionSource, SectionType, TierOverride, check_version,
     legacy_bytes, read_raw, write_raw,
 };

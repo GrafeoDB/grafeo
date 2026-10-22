@@ -171,9 +171,8 @@ impl Operator for NodeListOperator {
             self.position = end;
 
             if let Some(predicate) = &self.predicate {
-                let selection = SelectionVector::try_from_predicate(count, |row| {
-                    predicate.evaluate(&chunk, row)
-                })?;
+                let selection =
+                    SelectionVector::from_predicate(count, |row| predicate.evaluate(&chunk, row));
                 if selection.is_empty() {
                     continue;
                 }

@@ -21,12 +21,9 @@
 /// ```
 library;
 
-export 'src/batch.dart';
 export 'src/database.dart';
 export 'src/error.dart';
-export 'src/graph.dart';
 export 'src/stream.dart';
-export 'src/time_travel.dart';
 export 'src/transaction.dart';
 export 'src/types.dart';
 export 'src/value.dart' show encodeParams, encodeValue;

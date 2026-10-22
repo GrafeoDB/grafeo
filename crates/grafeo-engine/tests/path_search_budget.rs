@@ -20,7 +20,7 @@
 //! cargo test -p grafeo-engine --all-features --test path_search_budget
 //! ```
 
-#![cfg(all(feature = "gql", feature = "cypher"))]
+#![cfg(all(feature = "lpg", feature = "gql", feature = "cypher"))]
 #![expect(
     unsafe_code,
     reason = "GlobalAlloc is an unsafe trait; this forwards to System below a cap"
@@ -183,8 +183,9 @@ fn code_graph() -> CodeGraph {
     code_graph_in(GrafeoDB::new_in_memory())
 }
 
-/// [`code_graph`] in `db`, written in one transaction rather than one commit
-/// per node and edge.
+/// [`code_graph`] in `db`, written in one transaction: a build with
+/// `tiered-storage` gives every commit's epoch an arena of its own, so one
+/// commit per node and edge would hold gigabytes before a query runs.
 fn code_graph_in(db: GrafeoDB) -> CodeGraph {
     let mut session = db.session();
     session.begin_transaction().unwrap();

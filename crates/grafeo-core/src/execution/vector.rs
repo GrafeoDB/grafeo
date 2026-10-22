@@ -76,11 +76,9 @@ impl ValueVector {
     pub fn with_capacity(data_type: LogicalType, capacity: usize) -> Self {
         let data = match &data_type {
             LogicalType::Bool => VectorData::Bool(Vec::with_capacity(capacity)),
-            LogicalType::Int8
-            | LogicalType::Int16
-            | LogicalType::Int32
-            | LogicalType::Int64
-            | LogicalType::RdfTermId => VectorData::Int64(Vec::with_capacity(capacity)),
+            LogicalType::Int8 | LogicalType::Int16 | LogicalType::Int32 | LogicalType::Int64 => {
+                VectorData::Int64(Vec::with_capacity(capacity))
+            }
             LogicalType::Float32 | LogicalType::Float64 => {
                 VectorData::Float64(Vec::with_capacity(capacity))
             }
@@ -750,15 +748,5 @@ mod tests {
 
         assert!(vec.is_empty());
         assert_eq!(vec.len(), 0);
-    }
-
-    #[test]
-    fn an_rdf_term_id_column_stores_integers() {
-        let mut column = ValueVector::with_capacity(LogicalType::RdfTermId, 4);
-        column.push_value(Value::Int64(7));
-        column.push_value(Value::Null);
-        assert_eq!(column.data_type(), &LogicalType::RdfTermId);
-        assert_eq!(column.get_value(0), Some(Value::Int64(7)));
-        assert!(column.is_null(1));
     }
 }

@@ -23,7 +23,7 @@ use pyo3::prelude::*;
 ///     quant_type = grafeo.QuantizationType.from_str("scalar")
 ///     print(quant_type.name())  # "scalar"
 ///     print(quant_type.compression_ratio(384))  # 4
-#[pyclass(name = "QuantizationType")]
+#[pyclass(name = "QuantizationType", skip_from_py_object)]
 #[derive(Clone)]
 pub struct PyQuantizationType {
     inner: QuantizationType,

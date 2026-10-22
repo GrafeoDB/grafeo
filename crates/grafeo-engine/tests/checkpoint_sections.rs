@@ -9,7 +9,7 @@
 //! cargo test -p grafeo-engine --features full --test checkpoint_sections
 //! ```
 
-#![cfg(all(feature = "grafeo-file", feature = "gql"))]
+#![cfg(all(feature = "lpg", feature = "grafeo-file", feature = "gql"))]
 
 use std::time::{Duration, Instant};
 
@@ -127,14 +127,10 @@ fn the_checkpoint_timer_writes_everything_after_compact() {
         .execute("INSERT (:Person {name: 'Vincent'})")
         .unwrap();
 
-    // A checkpoint holds commits off only while it takes its snapshot, so the
-    // timer's next checkpoint may have taken its snapshot before Vincent's
-    // commit and install its header after this read. The one after that
-    // starts once the next is installed, after Vincent's commit: wait for it.
     let fm = std::sync::Arc::clone(db.file_manager().unwrap());
     let compacted_at = fm.active_header().iteration;
     let deadline = Instant::now() + Duration::from_secs(10);
-    while fm.active_header().iteration < compacted_at + 2 {
+    while fm.active_header().iteration <= compacted_at {
         assert!(Instant::now() < deadline, "the timer did not checkpoint");
         std::thread::sleep(Duration::from_millis(20));
     }
@@ -298,6 +294,8 @@ fn every_kind_of_section_after_a_reopen(caps: ChunkCaps) -> Vec<(SectionType, us
         SectionType::Catalog,
         SectionType::LpgStore,
         SectionType::RdfStore,
+        SectionType::VectorStore,
+        SectionType::TextIndex,
     ]
     .into_iter()
     .map(|section_type| {

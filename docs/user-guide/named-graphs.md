@@ -90,21 +90,6 @@ USE GRAPH DEFAULT
 
 After switching, all subsequent queries in that session read from and write to the selected graph.
 
-### One Statement on Another Graph
-
-`USE g` in front of a query or a data-modifying statement (the ISO/IEC 39075 use graph clause) runs that one statement on g and leaves the session's graph as it is. `GRAPH` is optional, and `USE CURRENT_GRAPH` names the session's graph:
-
-```sql
--- Writes to friends, reads friends; the session stays on its graph
-USE friends INSERT (:Person {name: 'Alix'})
-USE GRAPH friends MATCH (p:Person) RETURN p.name
-
--- SELECT ... FROM names the graph the same way
-SELECT p.name FROM friends MATCH (p:Person)
-```
-
-The graph must exist (`Graph 'g' does not exist`, GQLSTATUS 42002). Every part of the statement reads the same graph: the operands of a `UNION` or a `NEXT` chain may repeat the `USE`, and parts that name different graphs fail with an error that this is not supported yet. Inside a transaction, the statement's writes commit or roll back with the transaction, as a `USE GRAPH` switch does.
-
 ### Python API
 
 ```python

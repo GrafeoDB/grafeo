@@ -11,7 +11,7 @@ pub mod writer;
 
 pub use cipher::ChunkCipher;
 pub use reader::{ImageReader, SectionChunks};
-pub use writer::{CheckpointStats, CheckpointWriter};
+pub use writer::CheckpointWriter;
 
 #[cfg(test)]
 mod tests {
@@ -70,14 +70,17 @@ mod tests {
     fn a_chunk_longer_than_the_file_is_refused_when_the_image_opens() {
         let dir = tempfile::tempdir().unwrap();
         let mut file = open(&dir);
-        let mut writer = CheckpointWriter::new(&file, PageAllocator::from_used([]).unwrap(), None);
+        let mut writer =
+            CheckpointWriter::new(&mut file, PageAllocator::from_used([]).unwrap(), None);
         writer.begin_section(SectionType::LpgStore, 1).unwrap();
         writer.write_chunk(ChunkMeta::raw(), b"Vincent").unwrap();
         let (good_root, _) = writer.finish().unwrap();
-        let mut entry = ImageReader::open(&file, good_root, None).unwrap().entries()[0];
+        let mut entry = ImageReader::open(&mut file, good_root, None)
+            .unwrap()
+            .entries()[0];
         entry.length = 1 << 40;
         let root = write_directory(&mut file, &[entry]);
-        let error = ImageReader::open(&file, root, None)
+        let error = ImageReader::open(&mut file, root, None)
             .map(|_| ())
             .unwrap_err()
             .to_string();
@@ -95,15 +98,18 @@ mod tests {
     fn a_misaligned_or_early_chunk_offset_is_refused_when_the_image_opens() {
         let dir = tempfile::tempdir().unwrap();
         let mut file = open(&dir);
-        let mut writer = CheckpointWriter::new(&file, PageAllocator::from_used([]).unwrap(), None);
+        let mut writer =
+            CheckpointWriter::new(&mut file, PageAllocator::from_used([]).unwrap(), None);
         writer.begin_section(SectionType::LpgStore, 1).unwrap();
         writer.write_chunk(ChunkMeta::raw(), &[3u8; 100]).unwrap();
         let (good_root, _) = writer.finish().unwrap();
-        let good = ImageReader::open(&file, good_root, None).unwrap().entries()[0];
+        let good = ImageReader::open(&mut file, good_root, None)
+            .unwrap()
+            .entries()[0];
         for offset in [good.offset + 1, 4096] {
             let entry = DirectoryEntry { offset, ..good };
             let root = write_directory(&mut file, &[entry]);
-            let error = ImageReader::open(&file, root, None)
+            let error = ImageReader::open(&mut file, root, None)
                 .map(|_| ())
                 .unwrap_err()
                 .to_string();
@@ -117,8 +123,9 @@ mod tests {
     #[test]
     fn an_image_round_trips_its_sections() {
         let dir = tempfile::tempdir().unwrap();
-        let file = open(&dir);
-        let mut writer = CheckpointWriter::new(&file, PageAllocator::from_used([]).unwrap(), None);
+        let mut file = open(&dir);
+        let mut writer =
+            CheckpointWriter::new(&mut file, PageAllocator::from_used([]).unwrap(), None);
         writer.begin_section(SectionType::Catalog, 2).unwrap();
         writer.write_chunk(ChunkMeta::raw(), b"Alix").unwrap();
         writer.begin_section(SectionType::LpgStore, 1).unwrap();
@@ -132,7 +139,7 @@ mod tests {
             "two chunks and one directory block"
         );
 
-        let reader = ImageReader::open(&file, root, None).unwrap();
+        let reader = ImageReader::open(&mut file, root, None).unwrap();
         let catalog = reader.section(SectionType::Catalog).unwrap();
         assert_eq!(&catalog.fetch(0).unwrap()[..], b"Alix");
         assert_eq!(
@@ -152,16 +159,17 @@ mod tests {
         use std::io::{Seek, SeekFrom, Write};
         let dir = tempfile::tempdir().unwrap();
         let mut file = open(&dir);
-        let mut writer = CheckpointWriter::new(&file, PageAllocator::from_used([]).unwrap(), None);
+        let mut writer =
+            CheckpointWriter::new(&mut file, PageAllocator::from_used([]).unwrap(), None);
         writer.begin_section(SectionType::LpgStore, 1).unwrap();
         writer
             .write_chunk(ChunkMeta::raw(), &vec![19u8; 9000])
             .unwrap();
         let (root, _) = writer.finish().unwrap();
-        let offset = ImageReader::open(&file, root, None).unwrap().entries()[0].offset;
+        let offset = ImageReader::open(&mut file, root, None).unwrap().entries()[0].offset;
         file.seek(SeekFrom::Start(offset + 4100)).unwrap();
         file.write_all(&[88]).unwrap();
-        let reader = ImageReader::open(&file, root, None).unwrap();
+        let reader = ImageReader::open(&mut file, root, None).unwrap();
         let error = reader
             .section(SectionType::LpgStore)
             .unwrap()
@@ -177,8 +185,9 @@ mod tests {
     #[test]
     fn a_chunk_without_bytes_takes_no_pages_and_reads_back_empty() {
         let dir = tempfile::tempdir().unwrap();
-        let file = open(&dir);
-        let mut writer = CheckpointWriter::new(&file, PageAllocator::from_used([]).unwrap(), None);
+        let mut file = open(&dir);
+        let mut writer =
+            CheckpointWriter::new(&mut file, PageAllocator::from_used([]).unwrap(), None);
         writer.begin_section(SectionType::Catalog, 1).unwrap();
         writer.write_chunk(ChunkMeta::raw(), b"").unwrap();
         let (root, runs) = writer.finish().unwrap();
@@ -187,7 +196,7 @@ mod tests {
             1,
             "directory only"
         );
-        let reader = ImageReader::open(&file, root, None).unwrap();
+        let reader = ImageReader::open(&mut file, root, None).unwrap();
         assert_eq!(reader.entries()[0].offset, 0);
         assert_eq!(reader.entries()[0].length, 0);
         assert!(
@@ -203,16 +212,18 @@ mod tests {
     #[test]
     fn writing_a_chunk_before_a_section_begins_is_an_error() {
         let dir = tempfile::tempdir().unwrap();
-        let file = open(&dir);
-        let mut writer = CheckpointWriter::new(&file, PageAllocator::from_used([]).unwrap(), None);
+        let mut file = open(&dir);
+        let mut writer =
+            CheckpointWriter::new(&mut file, PageAllocator::from_used([]).unwrap(), None);
         assert!(writer.write_chunk(ChunkMeta::raw(), b"Mia").is_err());
     }
 
     #[test]
     fn a_section_type_begins_at_most_once_per_checkpoint() {
         let dir = tempfile::tempdir().unwrap();
-        let file = open(&dir);
-        let mut writer = CheckpointWriter::new(&file, PageAllocator::from_used([]).unwrap(), None);
+        let mut file = open(&dir);
+        let mut writer =
+            CheckpointWriter::new(&mut file, PageAllocator::from_used([]).unwrap(), None);
         writer.begin_section(SectionType::Catalog, 1).unwrap();
         writer.write_chunk(ChunkMeta::raw(), b"Mia").unwrap();
         writer.begin_section(SectionType::LpgStore, 1).unwrap();
@@ -229,7 +240,7 @@ mod tests {
             "after the refusal no section is current, so the chunk cannot land in LpgStore"
         );
         let (root, _) = writer.finish().unwrap();
-        let reader = ImageReader::open(&file, root, None).unwrap();
+        let reader = ImageReader::open(&mut file, root, None).unwrap();
         let catalog = reader.section(SectionType::Catalog).unwrap();
         assert_eq!(catalog.chunks().len(), 1, "only the first Catalog chunk");
         assert_eq!(&catalog.fetch(0).unwrap()[..], b"Mia");
@@ -239,12 +250,13 @@ mod tests {
     #[test]
     fn fetching_past_the_last_chunk_is_an_error() {
         let dir = tempfile::tempdir().unwrap();
-        let file = open(&dir);
-        let mut writer = CheckpointWriter::new(&file, PageAllocator::from_used([]).unwrap(), None);
+        let mut file = open(&dir);
+        let mut writer =
+            CheckpointWriter::new(&mut file, PageAllocator::from_used([]).unwrap(), None);
         writer.begin_section(SectionType::Catalog, 1).unwrap();
         writer.write_chunk(ChunkMeta::raw(), b"Gus").unwrap();
         let (root, _) = writer.finish().unwrap();
-        let reader = ImageReader::open(&file, root, None).unwrap();
+        let reader = ImageReader::open(&mut file, root, None).unwrap();
         let section = reader.section(SectionType::Catalog).unwrap();
         assert_eq!(section.chunks().len(), 1);
         assert!(section.fetch(1).is_err());
@@ -253,8 +265,9 @@ mod tests {
     #[test]
     fn a_section_of_many_chunks_spans_several_directory_blocks() {
         let dir = tempfile::tempdir().unwrap();
-        let file = open(&dir);
-        let mut writer = CheckpointWriter::new(&file, PageAllocator::from_used([]).unwrap(), None);
+        let mut file = open(&dir);
+        let mut writer =
+            CheckpointWriter::new(&mut file, PageAllocator::from_used([]).unwrap(), None);
         writer.begin_section(SectionType::LpgStore, 1).unwrap();
         for i in 0..1400u32 {
             let meta = ChunkMeta {
@@ -269,7 +282,7 @@ mod tests {
         // fit one: 16 pages, then one page for the other 36).
         assert_eq!(runs.len(), 1400 + 2);
         assert_eq!(runs.iter().map(|r| r.count).sum::<u64>(), 1400 + 16 + 1);
-        let reader = ImageReader::open(&file, root, None).unwrap();
+        let reader = ImageReader::open(&mut file, root, None).unwrap();
         assert_eq!(sorted(reader.used_runs()), sorted(runs));
         let section = reader.section(SectionType::LpgStore).unwrap();
         assert_eq!(section.chunks().len(), 1400);
@@ -359,7 +372,7 @@ mod tests {
             &a,
         );
         {
-            let reader = ImageReader::open(&file, a_root, cipher).unwrap();
+            let reader = ImageReader::open(&mut file, a_root, cipher).unwrap();
             assert_eq!(sorted(reader.used_runs()), sorted(a_runs.clone()));
         }
         let a_bytes = std::fs::read(dir.path().join("x")).unwrap();
@@ -432,8 +445,9 @@ mod tests {
     #[test]
     fn a_file_truncated_inside_its_last_directory_block_fails_naming_the_block() {
         let dir = tempfile::tempdir().unwrap();
-        let file = open(&dir);
-        let mut writer = CheckpointWriter::new(&file, PageAllocator::from_used([]).unwrap(), None);
+        let mut file = open(&dir);
+        let mut writer =
+            CheckpointWriter::new(&mut file, PageAllocator::from_used([]).unwrap(), None);
         writer.begin_section(SectionType::Catalog, 1).unwrap();
         writer.write_chunk(ChunkMeta::raw(), b"Amsterdam").unwrap();
         let (root, _) = writer.finish().unwrap();
@@ -444,7 +458,7 @@ mod tests {
         );
         file.set_len(root.offset + u64::from(root.length) / 2)
             .unwrap();
-        let error = ImageReader::open(&file, root, None)
+        let error = ImageReader::open(&mut file, root, None)
             .map(|_| ())
             .unwrap_err();
         let Error::Corruption(corruption) = &error else {
@@ -463,13 +477,14 @@ mod tests {
     fn a_directory_whose_runs_overlap_is_refused_when_the_image_opens() {
         let dir = tempfile::tempdir().unwrap();
         let mut file = open(&dir);
-        let mut writer = CheckpointWriter::new(&file, PageAllocator::from_used([]).unwrap(), None);
+        let mut writer =
+            CheckpointWriter::new(&mut file, PageAllocator::from_used([]).unwrap(), None);
         writer.begin_section(SectionType::Catalog, 1).unwrap();
         writer.write_chunk(ChunkMeta::raw(), &[3u8; 5000]).unwrap();
         writer.begin_section(SectionType::LpgStore, 1).unwrap();
         writer.write_chunk(ChunkMeta::raw(), b"Jules").unwrap();
         let (good_root, _) = writer.finish().unwrap();
-        let good = ImageReader::open(&file, good_root, None)
+        let good = ImageReader::open(&mut file, good_root, None)
             .unwrap()
             .entries()
             .to_vec();
@@ -484,7 +499,7 @@ mod tests {
         into_chunk[1].offset = good[0].offset + PAGE_SIZE;
         for entries in [into_directory, into_chunk] {
             let root = write_directory(&mut file, &entries);
-            let error = ImageReader::open(&file, root, None)
+            let error = ImageReader::open(&mut file, root, None)
                 .map(|_| ())
                 .unwrap_err()
                 .to_string();
@@ -499,13 +514,16 @@ mod tests {
         let alix = PageEncryptor::new(&[3u8; 32]);
         let gus = PageEncryptor::new(&[19u8; 32]);
         let dir = tempfile::tempdir().unwrap();
-        let file = open(&dir);
-        let mut writer =
-            CheckpointWriter::new(&file, PageAllocator::from_used([]).unwrap(), Some(&alix));
+        let mut file = open(&dir);
+        let mut writer = CheckpointWriter::new(
+            &mut file,
+            PageAllocator::from_used([]).unwrap(),
+            Some(&alix),
+        );
         writer.begin_section(SectionType::Catalog, 1).unwrap();
         writer.write_chunk(ChunkMeta::raw(), b"Alix").unwrap();
         let (root, _) = writer.finish().unwrap();
-        let reader = ImageReader::open(&file, root, Some(&alix)).unwrap();
+        let reader = ImageReader::open(&mut file, root, Some(&alix)).unwrap();
         assert_eq!(
             &reader
                 .section(SectionType::Catalog)
@@ -517,7 +535,7 @@ mod tests {
         let stored = reader.entries()[0];
         assert_eq!(stored.length, 4 + 28, "stored bytes carry nonce and tag");
         drop(reader);
-        let wrong = ImageReader::open(&file, root, Some(&gus))
+        let wrong = ImageReader::open(&mut file, root, Some(&gus))
             .map(|_| ())
             .unwrap_err()
             .to_string();
@@ -530,9 +548,12 @@ mod tests {
         use grafeo_common::encryption::PageEncryptor;
         let alix = PageEncryptor::new(&[3u8; 32]);
         let dir = tempfile::tempdir().unwrap();
-        let file = open(&dir);
-        let mut writer =
-            CheckpointWriter::new(&file, PageAllocator::from_used([]).unwrap(), Some(&alix));
+        let mut file = open(&dir);
+        let mut writer = CheckpointWriter::new(
+            &mut file,
+            PageAllocator::from_used([]).unwrap(),
+            Some(&alix),
+        );
         writer.begin_section(SectionType::LpgStore, 1).unwrap();
         // 170 entries: a 8192 byte block, stored as 8220 bytes over three pages.
         for i in 0..170u32 {
@@ -543,7 +564,7 @@ mod tests {
             writer.write_chunk(meta, &i.to_le_bytes()).unwrap();
         }
         let (root, runs) = writer.finish().unwrap();
-        let reader = ImageReader::open(&file, root, Some(&alix)).unwrap();
+        let reader = ImageReader::open(&mut file, root, Some(&alix)).unwrap();
         assert_eq!(sorted(reader.used_runs()), sorted(runs));
     }
 
@@ -580,7 +601,7 @@ mod tests {
             ENTRY_SECTION_OPTIONAL,
             ENTRY_CHUNK_OPTIONAL,
         );
-        let reader = ImageReader::open(&file, root, None).unwrap();
+        let reader = ImageReader::open(&mut file, root, None).unwrap();
         assert_eq!(
             &reader
                 .section(SectionType::Catalog)
@@ -632,7 +653,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mut file = open(&dir);
         let root = image_with_foreign_entries(&mut file, None, 0, ENTRY_CHUNK_OPTIONAL);
-        let error = ImageReader::open(&file, root, None)
+        let error = ImageReader::open(&mut file, root, None)
             .map(|_| ())
             .unwrap_err()
             .to_string();
@@ -642,7 +663,7 @@ mod tests {
         );
         let mut file = open(&dir);
         let root = image_with_foreign_entries(&mut file, None, ENTRY_SECTION_OPTIONAL, 0);
-        let error = ImageReader::open(&file, root, None)
+        let error = ImageReader::open(&mut file, root, None)
             .map(|_| ())
             .unwrap_err()
             .to_string();
@@ -665,7 +686,7 @@ mod tests {
             ENTRY_CHUNK_OPTIONAL,
         );
         let (known, foreign) = {
-            let reader = ImageReader::open(&file, root, None).unwrap();
+            let reader = ImageReader::open(&mut file, root, None).unwrap();
             (reader.entries().to_vec(), reader.skipped()[0])
         };
         let file_length = file.metadata().unwrap().len();
@@ -691,7 +712,7 @@ mod tests {
             moved[44] = foreign.flags;
             raw.push(moved);
             let root = write_raw_directory(&mut file, &raw);
-            let error = ImageReader::open(&file, root, None)
+            let error = ImageReader::open(&mut file, root, None)
                 .map(|_| ())
                 .unwrap_err()
                 .to_string();
@@ -717,7 +738,7 @@ mod tests {
             ENTRY_SECTION_OPTIONAL,
             ENTRY_CHUNK_OPTIONAL,
         );
-        let reader = ImageReader::open(&file, root, Some(&alix)).unwrap();
+        let reader = ImageReader::open(&mut file, root, Some(&alix)).unwrap();
         // The bits come back from the decrypted directory block: they are part
         // of the entry, which the block's authentication covers, not of the
         // chunk's payload.
@@ -736,12 +757,12 @@ mod tests {
         drop(reader);
         let mut file = open(&dir);
         let root = image_with_foreign_entries(&mut file, Some(&alix), 0, ENTRY_CHUNK_OPTIONAL);
-        let error = ImageReader::open(&file, root, Some(&alix))
+        let error = ImageReader::open(&mut file, root, Some(&alix))
             .map(|_| ())
             .unwrap_err()
             .to_string();
         assert!(error.contains("section type 250"), "{error}");
-        let error = ImageReader::open(&file, root, Some(&gus))
+        let error = ImageReader::open(&mut file, root, Some(&gus))
             .map(|_| ())
             .unwrap_err()
             .to_string();
@@ -766,7 +787,7 @@ mod tests {
             ENTRY_SECTION_OPTIONAL,
             ENTRY_CHUNK_OPTIONAL,
         );
-        let foreign = ImageReader::open(&file, root, Some(&alix))
+        let foreign = ImageReader::open(&mut file, root, Some(&alix))
             .unwrap()
             .skipped()[1];
         let bytes = std::fs::read(dir.path().join("x")).unwrap();
@@ -789,14 +810,17 @@ mod tests {
 
         let alix = PageEncryptor::new(&[3u8; 32]);
         let dir = tempfile::tempdir().unwrap();
-        let file = open(&dir);
+        let mut file = open(&dir);
         let meta = ChunkMeta::column(3, 19, 88, 2, 0);
-        let mut writer =
-            CheckpointWriter::new(&file, PageAllocator::from_used([]).unwrap(), Some(&alix));
+        let mut writer = CheckpointWriter::new(
+            &mut file,
+            PageAllocator::from_used([]).unwrap(),
+            Some(&alix),
+        );
         writer.begin_section(SectionType::LpgStore, 3).unwrap();
         writer.write_chunk(meta, b"Prague").unwrap();
         let (root, _) = writer.finish().unwrap();
-        let reader = ImageReader::open(&file, root, Some(&alix)).unwrap();
+        let reader = ImageReader::open(&mut file, root, Some(&alix)).unwrap();
         let section = reader.section(SectionType::LpgStore).unwrap();
         assert_eq!(section.chunks(), [meta]);
         assert_eq!(&section.fetch(0).unwrap()[..], b"Prague", "it reads back");
@@ -818,15 +842,18 @@ mod tests {
         use grafeo_common::encryption::PageEncryptor;
         let alix = PageEncryptor::new(&[3u8; 32]);
         let dir = tempfile::tempdir().unwrap();
-        let file = open(&dir);
+        let mut file = open(&dir);
         let mut stored = Vec::new();
         for _ in 0..2 {
-            let mut writer =
-                CheckpointWriter::new(&file, PageAllocator::from_used([]).unwrap(), Some(&alix));
+            let mut writer = CheckpointWriter::new(
+                &mut file,
+                PageAllocator::from_used([]).unwrap(),
+                Some(&alix),
+            );
             writer.begin_section(SectionType::Catalog, 1).unwrap();
             writer.write_chunk(ChunkMeta::raw(), b"Berlin").unwrap();
             let (root, _) = writer.finish().unwrap();
-            let reader = ImageReader::open(&file, root, Some(&alix)).unwrap();
+            let reader = ImageReader::open(&mut file, root, Some(&alix)).unwrap();
             let entry = reader.entries()[0];
             drop(reader);
             stored.push((entry.offset, entry.crc));

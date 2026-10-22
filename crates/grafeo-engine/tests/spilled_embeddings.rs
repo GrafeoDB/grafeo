@@ -21,6 +21,7 @@
     feature = "grafeo-file",
     feature = "gql",
     feature = "wal",
+    not(feature = "temporal"),
     not(miri)
 ))]
 
@@ -107,16 +108,7 @@ fn cache_dir(path: &Path) -> PathBuf {
 fn spilled(path: &Path) -> (GrafeoDB, Vec<NodeId>) {
     let db = GrafeoDB::with_config(force_disk(Config::persistent(path))).unwrap();
     let ids = indexed_items(&db);
-    // A small column frees no heap (its encoded chunks take as much), so
-    // what counts is that it spilled.
-    db.buffer_manager().spill_all();
-    assert!(
-        !db.store()
-            .unwrap()
-            .spilled_node_property_columns()
-            .is_empty(),
-        "nothing was spilled"
-    );
+    assert!(db.buffer_manager().spill_all() > 0, "nothing was spilled");
     (db, ids)
 }
 
@@ -127,7 +119,7 @@ fn return_embedding_reads_spilled_values() {
     let dir = tempfile::tempdir().unwrap();
     let (db, ids) = spilled(&dir.path().join("amsterdam.grafeo"));
     assert_eq!(embeddings(&db), all_three());
-    let node = db.get_node(ids[1]).unwrap().unwrap();
+    let node = db.get_node(ids[1]).unwrap();
     assert_eq!(
         node.get_property("embedding"),
         Some(&Value::Vector(embedding_of(1).into()))
@@ -208,19 +200,7 @@ fn a_spill_takes_the_embeddings_off_the_heap() {
     let heap = || db.memory_usage().store.node_properties_bytes;
     let before = heap();
 
-    // A small column frees no heap (its encoded chunks take as much), so
-
-    // what counts is that it spilled.
-
-    db.buffer_manager().spill_all();
-
-    assert!(
-        !db.store()
-            .unwrap()
-            .spilled_node_property_columns()
-            .is_empty(),
-        "nothing was spilled"
-    );
+    assert!(db.buffer_manager().spill_all() > 0);
     let spilled = heap();
     assert!(
         spilled * 10 < before,
@@ -242,20 +222,14 @@ fn removals_while_spilled_stay_removed() {
     assert!(db.delete_node(ids[0]).unwrap());
     assert!(db.remove_node_property(ids[1], "embedding").unwrap());
     assert_eq!(embeddings(&db), vec![None, Some(embedding_of(2))]);
-    // The writes brought the column back into memory (a write thaws its
-    // row group's column, #412 decision Q9): nothing is left to reload.
-    assert_eq!(
-        db.store().unwrap().spilled_node_property_columns(),
-        Vec::<grafeo_common::types::PropertyKey>::new()
-    );
 
-    db.reload_eligible(1.0);
+    assert!(db.reload_eligible(1.0) > 0);
     assert_eq!(embeddings(&db), vec![None, Some(embedding_of(2))]);
     db.close().unwrap();
     drop(db);
     let db = GrafeoDB::open(&path).unwrap();
     assert_eq!(embeddings(&db), vec![None, Some(embedding_of(2))]);
-    assert!(db.get_node(ids[0]).unwrap().is_none());
+    assert!(db.get_node(ids[0]).is_none());
 }
 
 /// Search on a spilled index answers as it did in memory, and reads an
@@ -272,16 +246,7 @@ fn search_while_spilled_answers_as_in_memory() {
     let in_memory = db
         .vector_search("Item", "embedding", &query, 3, None, None)
         .unwrap();
-    // A small column frees no heap (its encoded chunks take as much), so
-    // what counts is that it spilled.
-    db.buffer_manager().spill_all();
-    assert!(
-        !db.store()
-            .unwrap()
-            .spilled_node_property_columns()
-            .is_empty(),
-        "nothing was spilled"
-    );
+    assert!(db.buffer_manager().spill_all() > 0);
     let spilled = db
         .vector_search("Item", "embedding", &query, 3, None, None)
         .unwrap();
@@ -352,27 +317,20 @@ fn a_crash_after_a_reload_keeps_embeddings() {
 }
 
 /// A crash while spilled leaves the cache behind; the next read-write open
-/// has every embedding and removes the stale cache. The file stores the
-/// forced spill of the vector section (#551), so that open spills again,
-/// into files of new names.
+/// has every embedding and removes the stale cache.
 #[test]
 fn a_crash_while_spilled_keeps_embeddings_and_the_next_open_removes_the_cache() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("barcelona.grafeo");
     crash_in_child(&path, "while_spilled");
-    let stale = names_in(&cache_dir(&path));
-    assert_eq!(stale.len(), 1, "the crash left it");
+    assert_eq!(names_in(&cache_dir(&path)).len(), 1, "the crash left it");
     // A 0.5.x spill file beside the cache is not the cache's to remove (one
     // of an index this database does not have, which the fold leaves alone).
     let old = spill_dir(&path).join("vectors_Doc%3Aembedding.bin");
     std::fs::write(&old, b"0.5.x").unwrap();
 
     let db = GrafeoDB::open(&path).unwrap();
-    let now = names_in(&cache_dir(&path));
-    assert!(
-        stale.iter().all(|name| !now.contains(name)),
-        "the stale cache was removed: {stale:?} in {now:?}"
-    );
+    assert!(!cache_dir(&path).exists(), "the stale cache was removed");
     assert_eq!(std::fs::read(&old).unwrap(), b"0.5.x", "the old file stays");
     assert_eq!(embeddings(&db), all_three());
 }
@@ -452,16 +410,7 @@ fn a_reload_deletes_its_cache_file() {
     assert_eq!(names_in(&cache_dir(&path)).len(), 1, "the cache file");
     assert!(db.reload_eligible(1.0) > 0);
     assert_eq!(names_in(&cache_dir(&path)), Vec::<String>::new());
-    // A small column frees no heap (its encoded chunks take as much), so
-    // what counts is that it spilled.
-    db.buffer_manager().spill_all();
-    assert!(
-        !db.store()
-            .unwrap()
-            .spilled_node_property_columns()
-            .is_empty(),
-        "nothing was spilled"
-    );
+    assert!(db.buffer_manager().spill_all() > 0);
     assert_eq!(names_in(&cache_dir(&path)).len(), 1);
     assert_eq!(embeddings(&db), all_three());
 }
@@ -519,16 +468,7 @@ fn databases_sharing_a_spill_path_keep_their_own_cache() {
     let open = |config: Config| {
         let db = GrafeoDB::with_config(force_disk(config.with_spill_path(&shared))).unwrap();
         indexed_items(&db);
-        // A small column frees no heap (its encoded chunks take as much), so
-        // what counts is that it spilled.
-        db.buffer_manager().spill_all();
-        assert!(
-            !db.store()
-                .unwrap()
-                .spilled_node_property_columns()
-                .is_empty(),
-            "nothing was spilled"
-        );
+        assert!(db.buffer_manager().spill_all() > 0);
         db
     };
     let file_db = open(Config::persistent(dir.path().join("paris.grafeo")));

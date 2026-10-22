@@ -298,77 +298,6 @@ fn test_variable_length_path() {
     assert_eq!(result.row_count(), 6, "Should find 6 variable-length paths");
 }
 
-/// `LENGTH`, `SIZE` and `CARDINALITY` are one function, and `RELATIONSHIPS`
-/// is `EDGES`: every spelling reads the path the pattern binds, in `COLUMNS`
-/// and in the pattern's `WHERE`.
-#[test]
-fn path_functions_in_every_spelling() {
-    let db = create_chain_network();
-    let session = db.session();
-    let column = |query: &str, name: &str| -> Vec<String> {
-        let result = session
-            .execute_sql(query)
-            .unwrap_or_else(|e| panic!("{query}: {e}"));
-        let index = result
-            .columns
-            .iter()
-            .position(|c| c == name)
-            .unwrap_or_else(|| panic!("{query}: no column {name}"));
-        let mut values: Vec<String> = result
-            .rows()
-            .iter()
-            .map(|row| format!("{:?}", row[index]))
-            .collect();
-        values.sort();
-        values
-    };
-    for function in ["LENGTH", "SIZE", "CARDINALITY", "length", "Size"] {
-        let distances = column(
-            &format!(
-                "SELECT * FROM GRAPH_TABLE (
-                    MATCH (src:Person)-[p:KNOWS*1..3]->(dst:Person)
-                    COLUMNS ({function}(p) AS distance)
-                )"
-            ),
-            "distance",
-        );
-        assert_eq!(
-            distances,
-            [
-                "Int64(1)", "Int64(1)", "Int64(1)", "Int64(2)", "Int64(2)", "Int64(3)"
-            ],
-            "{function} in COLUMNS"
-        );
-        let longer = column(
-            &format!(
-                "SELECT * FROM GRAPH_TABLE (
-                    MATCH (src:Person)-[p:KNOWS*1..3]->(dst:Person)
-                    WHERE {function}(p) > 1
-                    COLUMNS (src.name AS source, dst.name AS target)
-                )"
-            ),
-            "target",
-        );
-        assert_eq!(
-            longer,
-            [r#"String("C")"#, r#"String("D")"#, r#"String("D")"#],
-            "{function} in WHERE"
-        );
-    }
-    let edges = |function: &str| {
-        column(
-            &format!(
-                "SELECT * FROM GRAPH_TABLE (
-                    MATCH (src:Person)-[p:KNOWS*1..3]->(dst:Person)
-                    COLUMNS ({function}(p) AS hops)
-                )"
-            ),
-            "hops",
-        )
-    };
-    assert_eq!(edges("RELATIONSHIPS"), edges("EDGES"));
-}
-
 #[test]
 fn test_length_path_function() {
     let db = create_chain_network();
@@ -515,6 +444,7 @@ fn test_create_property_graph() {
              )
              EDGE TABLES (
                  KNOWS (
+                     id BIGINT PRIMARY KEY,
                      source BIGINT REFERENCES Person(id),
                      target BIGINT REFERENCES Person(id),
                      since INT
@@ -559,6 +489,7 @@ fn test_create_property_graph_multiple_tables() {
              )
              EDGE TABLES (
                  WORKS_AT (
+                     id BIGINT PRIMARY KEY,
                      employee BIGINT REFERENCES Person(id),
                      employer BIGINT REFERENCES Company(id)
                  )
@@ -898,29 +829,21 @@ fn test_group_by_having() {
 // Graph name reference in GRAPH_TABLE
 // ============================================================================
 
-/// `GRAPH_TABLE (g, ...)` reads the graph g: one that does not exist is an
-/// invalid reference (it was parsed and ignored, and the default graph read).
 #[test]
-fn test_graph_name_reference_reads_that_graph() {
+fn test_graph_name_reference_parses() {
     let db = create_social_network();
     let session = db.session();
-    let error = session
-        .execute_sql(
-            "SELECT * FROM GRAPH_TABLE (social_graph, MATCH (a:Person) COLUMNS (a.name AS name))",
-        )
-        .unwrap_err();
-    assert_eq!(
-        grafeo_common::utils::GqlStatus::from(&error).as_str(),
-        "42002",
-        "{error}"
+
+    // The parser should accept a graph name before MATCH.
+    // Execution routes to the default graph (named graph routing is session-level).
+    let result = session.execute_sql(
+        "SELECT * FROM GRAPH_TABLE (social_graph, MATCH (a:Person) COLUMNS (a.name AS name))",
     );
-    session.execute("CREATE GRAPH social_graph").unwrap();
-    let result = session
-        .execute_sql(
-            "SELECT * FROM GRAPH_TABLE (social_graph, MATCH (a:Person) COLUMNS (a.name AS name))",
-        )
-        .unwrap();
-    assert!(result.rows().is_empty(), "the new graph has no people");
+    // Should parse and execute (graph name is parsed but not yet routed)
+    assert!(
+        result.is_ok(),
+        "graph name reference should parse, got: {result:?}"
+    );
 }
 
 // ============================================================================
@@ -1051,45 +974,4 @@ fn having_count_zero_returns_empty() {
         )
         .unwrap();
     assert_eq!(result.rows().len(), 0);
-}
-
-/// `-[:T*]->` is one or more hops, as `*1..`, in GQL and Cypher too (it read
-/// as exactly one hop).
-#[test]
-fn a_star_without_bounds_is_one_or_more_hops() {
-    let db = GrafeoDB::new_in_memory();
-    db.execute(
-        "INSERT (:Message {id: 10})-[:REPLY_OF]->(:Message {id: 11})-[:REPLY_OF]->(:Post {id: 12})",
-    )
-    .unwrap();
-    let ids = |query: &str| -> Vec<Value> {
-        let mut ids: Vec<Value> = db
-            .execute_sql(query)
-            .unwrap_or_else(|e| panic!("`{query}`: {e}"))
-            .rows()
-            .iter()
-            .map(|row| row[0].clone())
-            .collect();
-        ids.sort_by_key(ToString::to_string);
-        ids
-    };
-    let reached = [Value::Int64(11), Value::Int64(12)];
-    assert_eq!(
-        ids(
-            "SELECT * FROM GRAPH_TABLE (MATCH (m:Message {id: 10})-[:REPLY_OF*]->(p) COLUMNS (p.id AS id))"
-        ),
-        reached
-    );
-    assert_eq!(
-        ids(
-            "SELECT * FROM GRAPH_TABLE (MATCH (m:Message {id: 10})-[:REPLY_OF*1..]->(p) COLUMNS (p.id AS id))"
-        ),
-        reached
-    );
-    assert_eq!(
-        ids(
-            "SELECT * FROM GRAPH_TABLE (MATCH (m:Message {id: 10})-[:REPLY_OF*1]->(p) COLUMNS (p.id AS id))"
-        ),
-        [Value::Int64(11)]
-    );
 }

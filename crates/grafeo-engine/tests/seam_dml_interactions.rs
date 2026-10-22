@@ -7,7 +7,7 @@
 //! cargo test -p grafeo-engine --test seam_dml_interactions
 //! ```
 
-use grafeo_common::types::{Decimal, Value};
+use grafeo_common::types::Value;
 use grafeo_engine::GrafeoDB;
 
 fn db() -> GrafeoDB {
@@ -541,23 +541,17 @@ mod insert_edge_cases {
         let session = db.session();
         session
             .execute(
-                "INSERT (:Data {str_val: 'hello', int_val: 42, float_val: 3.125e0,                  dec_val: 3.125, bool_val: true})",
+                "INSERT (:Data {str_val: 'hello', int_val: 42, float_val: 3.125, bool_val: true})",
             )
             .unwrap();
 
         let result = session
-            .execute(
-                "MATCH (n:Data) RETURN n.str_val, n.int_val, n.float_val, n.dec_val, n.bool_val",
-            )
+            .execute("MATCH (n:Data) RETURN n.str_val, n.int_val, n.float_val, n.bool_val")
             .unwrap();
         assert_eq!(result.rows()[0][0], Value::String("hello".into()));
         assert_eq!(result.rows()[0][1], Value::Int64(42));
         assert_eq!(result.rows()[0][2], Value::Float64(3.125));
-        assert_eq!(
-            result.rows()[0][3],
-            Value::Decimal(Decimal::parse("3.125").unwrap())
-        );
-        assert_eq!(result.rows()[0][4], Value::Bool(true));
+        assert_eq!(result.rows()[0][3], Value::Bool(true));
     }
 }
 
@@ -572,7 +566,7 @@ mod negative_literal_properties {
     fn insert_negative_float() {
         let db = db();
         let session = db.session();
-        session.execute("INSERT (:Point {lat: -6.248e0})").unwrap();
+        session.execute("INSERT (:Point {lat: -6.248})").unwrap();
 
         let result = session.execute("MATCH (n:Point) RETURN n.lat").unwrap();
         assert_eq!(result.rows()[0][0], Value::Float64(-6.248));
@@ -599,10 +593,8 @@ mod negative_literal_properties {
         let result = session
             .execute("MATCH (n:Point) RETURN n.lat, n.lon")
             .unwrap();
-        // Exact in GQL: `-6.248` is a decimal.
-        let decimal = |text: &str| Value::Decimal(Decimal::parse(text).unwrap());
-        assert_eq!(result.rows()[0][0], decimal("-6.248"));
-        assert_eq!(result.rows()[0][1], decimal("106.845"));
+        assert_eq!(result.rows()[0][0], Value::Float64(-6.248));
+        assert_eq!(result.rows()[0][1], Value::Float64(106.845));
     }
 }
 

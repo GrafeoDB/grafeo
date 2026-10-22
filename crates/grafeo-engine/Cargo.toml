@@ -52,7 +52,7 @@ arrow-array = { workspace = true, optional = true }
 arrow-ipc = { workspace = true, optional = true }
 
 # Embedding (optional, for ONNX embedding generation)
-ort = { version = "2.0.0-rc.14", optional = true, default-features = false, features = ["std", "ndarray", "load-dynamic", "api-24"] }
+ort = { version = "2.0.0-rc.12", optional = true, default-features = false, features = ["std", "ndarray", "load-dynamic", "api-24"] }
 tokenizers = { version = "0.23", optional = true, default-features = false, features = ["onig"] }
 hf-hub = { version = "1.0", optional = true, features = ["blocking"] }
 crc32fast = { workspace = true, optional = true }
@@ -71,8 +71,8 @@ tokio.workspace = true
 proptest.workspace = true
 
 [features]
-default = ["gql", "parallel", "wal", "grafeo-file", "spill", "mmap", "regex"]
-lpg = []  # Deprecated: the LPG store is always built, so this enables nothing. Removed in 0.7.0.
+default = ["lpg", "gql", "parallel", "wal", "grafeo-file", "spill", "mmap", "regex"]
+lpg = ["grafeo-core/lpg"]  # Enable LPG (labeled property graph) model
 regex = ["dep:regex", "grafeo-core/regex"]
 regex-lite = ["dep:regex-lite", "grafeo-core/regex-lite"]
 gql = ["grafeo-adapters/gql"]
@@ -81,7 +81,7 @@ sparql = ["grafeo-adapters/sparql"]
 gremlin = ["grafeo-adapters/gremlin"]
 graphql = ["grafeo-adapters/graphql"]
 sql-pgq = ["grafeo-adapters/sql-pgq"]  # SQL/PGQ (SQL:2023 GRAPH_TABLE)
-triple-store = ["grafeo-core/triple-store", "grafeo-adapters/triple-store", "md5", "sha1", "sha2", "regex"]  # RDF triple store model and planner
+triple-store = ["lpg", "grafeo-core/triple-store", "grafeo-adapters/triple-store", "md5", "sha1", "sha2", "regex"]  # RDF triple store model and planner; with the LPG store, which sessions, persistence and recovery need (#544)
 ring-index = ["grafeo-core/ring-index", "triple-store"]  # Ring Index for compact RDF (3x memory reduction)
 shacl = ["grafeo-core/shacl", "sparql"]  # SHACL validation (core constraints + SPARQL dispatch)
 rdf = ["triple-store"]  # Deprecated: use triple-store
@@ -93,7 +93,7 @@ grafeo-file = ["dep:grafeo-storage", "grafeo-storage/grafeo-file", "dep:crc32fas
 encryption = ["dep:grafeo-storage", "grafeo-common/encryption", "grafeo-storage/encryption"]  # AES-256-GCM encryption at rest
 spill = ["grafeo-core/spill"]  # Disk spilling for out-of-core execution
 mmap = ["grafeo-core/mmap", "dep:memmap2"]  # File-backed vector storage
-temporal = []  # Deprecated since 0.6.0: enables nothing (a database's history retention, Config::with_history_retention, replaces it); removed in 0.7.0
+temporal = ["grafeo-core/temporal"]  # Append-only versioned properties
 compact-store = []  # Deprecated since 0.6.0: enables nothing (a build that opens files reads a compacted 0.5.x one); removed in 0.7.0
 # Convenience groups
 languages = ["gql", "cypher", "sparql", "gremlin", "graphql", "sql-pgq"]  # All query language parsers
@@ -101,10 +101,10 @@ ai = ["vector-index", "text-index", "hybrid-search", "cdc"]  # All AI/RAG featur
 storage = ["wal", "grafeo-file", "spill", "mmap"]  # Persistent storage (WAL, single-file, disk spill, mmap)
 
 # Named profiles (ecosystem-aligned)
-embedded = ["gql", "ai", "algos", "parallel", "regex", "jsonl-import", "grafeo-file", "arrow-export"]  # Python libs, MCP, in-process
-browser = ["gql", "regex-lite"]  # WASM / grafeo-web
+embedded = ["lpg", "gql", "ai", "algos", "parallel", "regex", "jsonl-import", "grafeo-file", "arrow-export"]  # Python libs, MCP, in-process
+browser = ["lpg", "gql", "regex-lite"]  # WASM / grafeo-web
 server = ["full", "async-storage", "metrics", "tracing"]  # grafeo-server
-full = ["languages", "ai", "triple-store", "parallel", "algos", "storage", "jsonl-import", "parquet-import"]
+full = ["lpg", "languages", "ai", "triple-store", "parallel", "algos", "storage", "jsonl-import", "parquet-import"]
 
 # Data import
 jsonl-import = ["grafeo-core/jsonl-import"]  # JSON Lines file import

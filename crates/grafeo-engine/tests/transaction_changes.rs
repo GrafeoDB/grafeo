@@ -35,7 +35,9 @@ fn names(db: &GrafeoDB) -> Vec<String> {
 /// Planner statistics: total nodes and edges, `:Person` and `:Admin` nodes,
 /// `:KNOWS` edges.
 fn statistics(db: &GrafeoDB) -> (u64, u64, u64, u64, u64) {
-    let stats = grafeo_core::graph::GraphStore::statistics(&*db.store().unwrap());
+    let store = db.store();
+    store.ensure_statistics_fresh();
+    let stats = store.statistics();
     let label = |name: &str| stats.get_label(name).map_or(0, |l| l.node_count);
     (
         stats.total_nodes,
@@ -80,7 +82,7 @@ fn rollback_restores_counts_and_statistics() {
     session.rollback().unwrap();
 
     assert_eq!(statistics(&db), before);
-    assert_eq!((db.node_count().unwrap(), db.edge_count().unwrap()), (2, 1));
+    assert_eq!((db.node_count(), db.edge_count()), (2, 1));
     assert_eq!(names(&db), ["Alix", "Gus"]);
     assert_eq!(
         int(&db, "MATCH (:Person)-[k:KNOWS]->(:Person) RETURN count(k)"),
@@ -89,7 +91,6 @@ fn rollback_restores_counts_and_statistics() {
     assert_eq!(int(&db, "MATCH (n:Admin) RETURN count(n)"), 0);
     assert!(
         db.find_nodes_by_property("name", &Value::from("Vincent"))
-            .unwrap()
             .is_empty(),
         "expected no nodes"
     );
@@ -145,7 +146,7 @@ fn a_transaction_can_delete_what_it_created() {
     session.commit().unwrap();
 
     assert_eq!(names(&db), ["Jules"]);
-    assert_eq!((db.node_count().unwrap(), db.edge_count().unwrap()), (1, 0));
+    assert_eq!((db.node_count(), db.edge_count()), (1, 0));
 }
 
 #[test]
@@ -241,7 +242,8 @@ fn fastest_micros(runs: usize, mut write: impl FnMut()) -> u128 {
 /// commit and rollback, each the fastest of 20 runs, in microseconds.
 fn write_costs(size: i64) -> [u128; 3] {
     let db = GrafeoDB::new_in_memory();
-    // Batches of 10,000, one statement each.
+    // Batches of 10,000: with `tiered-storage`, one transaction's versions
+    // must fit in one arena chunk.
     for first in (1..=size).step_by(10_000) {
         let last = (first + 9_999).min(size);
         db.execute(&format!(

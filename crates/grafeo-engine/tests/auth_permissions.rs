@@ -14,7 +14,7 @@ fn session_with_identity_admin_can_write() {
 
     let result = session.execute("INSERT (:Person {name: 'Alix'})");
     assert!(result.is_ok(), "Admin identity should be able to write");
-    assert_eq!(db.node_count().unwrap(), 1);
+    assert_eq!(db.node_count(), 1);
 }
 
 #[test]
@@ -25,7 +25,7 @@ fn session_with_identity_readwrite_can_write() {
 
     let result = session.execute("INSERT (:Person {name: 'Gus'})");
     assert!(result.is_ok(), "ReadWrite identity should be able to write");
-    assert_eq!(db.node_count().unwrap(), 1);
+    assert_eq!(db.node_count(), 1);
 }
 
 #[test]
@@ -72,43 +72,6 @@ fn session_with_role_readonly() {
     assert!(result.is_err(), "ReadOnly role should not allow writes");
 }
 
-/// A SHOW reads the catalog, so a read-only role may run it; schema DDL
-/// stays an Admin statement, in GQL and in Cypher.
-#[test]
-fn readonly_role_shows_the_schema_and_may_not_change_it() {
-    let db = GrafeoDB::new_in_memory();
-    db.execute("CREATE CONSTRAINT FOR (p:Person) ON (p.email) UNIQUE")
-        .unwrap();
-    let session = db.session_with_role(Role::ReadOnly);
-    for show in ["SHOW CONSTRAINTS", "SHOW INDEXES", "SHOW NODE TYPES"] {
-        let result = session.execute(show);
-        assert!(result.is_ok(), "{show}: {:?}", result.err());
-    }
-    assert_eq!(session.execute("SHOW CONSTRAINTS").unwrap().rows().len(), 1);
-    assert!(
-        session
-            .execute("CREATE CONSTRAINT FOR (p:Person) ON (p.name) UNIQUE")
-            .is_err()
-    );
-    #[cfg(feature = "cypher")]
-    {
-        assert!(session.execute_cypher("SHOW CONSTRAINTS").is_ok());
-        assert!(
-            session
-                .execute_cypher("CREATE CONSTRAINT FOR (p:Person) REQUIRE p.name IS UNIQUE")
-                .is_err()
-        );
-    }
-    assert_eq!(
-        db.session()
-            .execute("SHOW CONSTRAINTS")
-            .unwrap()
-            .rows()
-            .len(),
-        1
-    );
-}
-
 #[test]
 fn session_with_role_readwrite() {
     let db = GrafeoDB::new_in_memory();
@@ -116,7 +79,7 @@ fn session_with_role_readwrite() {
 
     let result = session.execute("INSERT (:City {name: 'Berlin'})");
     assert!(result.is_ok(), "ReadWrite role should allow writes");
-    assert_eq!(db.node_count().unwrap(), 1);
+    assert_eq!(db.node_count(), 1);
 }
 
 #[test]
@@ -191,7 +154,7 @@ fn readwrite_session_parameterized_write_succeeds() {
         "ReadWrite session should accept parameterized writes: {:?}",
         result.err()
     );
-    assert_eq!(db.node_count().unwrap(), 1);
+    assert_eq!(db.node_count(), 1);
 }
 
 // ── Projection API ──────────────────────────────────────────────

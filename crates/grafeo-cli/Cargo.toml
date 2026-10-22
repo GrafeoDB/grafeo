@@ -24,7 +24,7 @@ clap_complete = "4"
 # Output formatting
 comfy-table = "8"
 serde = { workspace = true }
-serde_json = { version = "1", features = ["arbitrary_precision"] }
+serde_json = "1"
 is-terminal = "0.4"
 
 # REPL
@@ -42,8 +42,8 @@ tracing.workspace = true
 tracing-subscriber.workspace = true
 
 [features]
-default = ["gql", "jsonl-import"]
-lpg = []  # Deprecated: the LPG store is always built, so this enables nothing. Removed in 0.7.0.
+default = ["lpg", "gql", "jsonl-import"]
+lpg = ["grafeo-engine/lpg"]
 gql = ["grafeo-engine/gql"]
 cypher = ["grafeo-engine/cypher"]
 sparql = ["grafeo-engine/sparql"]
@@ -63,8 +63,8 @@ languages = ["gql", "cypher", "sparql", "gremlin", "graphql", "sql-pgq"]
 ai = ["vector-index", "text-index", "hybrid-search", "cdc"]
 storage = ["grafeo-engine/storage"]
 # Named profiles
-embedded = ["gql", "ai", "algos", "jsonl-import", "grafeo-engine/parallel", "grafeo-engine/regex"]
-full = ["languages", "ai", "algos", "triple-store", "jsonl-import"]
+embedded = ["lpg", "gql", "ai", "algos", "jsonl-import", "grafeo-engine/parallel", "grafeo-engine/regex"]
+full = ["lpg", "languages", "ai", "algos", "triple-store", "jsonl-import"]
 
 [dev-dependencies]
 tempfile = "3.27"

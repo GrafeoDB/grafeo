@@ -5,7 +5,7 @@
 //! The database answers as before afterwards. Writes and index creation
 //! check their vectors the same way.
 
-#![cfg(all(feature = "vector-index", feature = "gql"))]
+#![cfg(all(feature = "vector-index", feature = "lpg", feature = "gql"))]
 
 use std::collections::HashMap;
 

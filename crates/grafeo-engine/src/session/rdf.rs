@@ -3,50 +3,40 @@
 //! This module consolidates all RDF functionality from the session layer.
 //! The entire module is gated behind `#[cfg(feature = "triple-store")]` in the parent.
 
-use grafeo_common::clock::Instant;
+use std::sync::Arc;
+#[cfg(feature = "lpg")]
+use std::sync::atomic::AtomicUsize;
+#[cfg(not(target_arch = "wasm32"))]
+use std::time::Instant;
+
 use grafeo_common::types::Value;
 use grafeo_common::utils::error::Result;
-use grafeo_core::graph::GraphBackend;
-use grafeo_core::graph::GraphStore;
+#[cfg(feature = "lpg")]
+use grafeo_core::graph::lpg::LpgStore;
+#[cfg(feature = "lpg")]
 use grafeo_core::graph::rdf::RdfStore;
-use grafeo_core::graph::rowgroup::RowGroupStore;
-use std::sync::Arc;
-use std::sync::atomic::AtomicUsize;
+#[cfg(feature = "lpg")]
+use grafeo_core::graph::{GraphStoreMut, GraphStoreSearch};
 
 use crate::database::QueryResult;
 
 use super::Session;
+#[cfg(feature = "lpg")]
 use super::SessionConfig;
 
 impl Session {
-    /// Plans native RDF paths with the session's pending writes and resource limits.
-    fn make_rdf_planner(
-        &self,
-        deadline: Option<Instant>,
-    ) -> crate::query::planner::rdf::RdfPlanner {
-        let budget = self.plan_options.path_search_budget;
-        #[cfg(feature = "spill")]
-        let budget = self
-            .buffer_manager
-            .as_ref()
-            .map_or(budget, |bm| budget.min(bm.available()));
-        crate::query::planner::rdf::RdfPlanner::new(Arc::clone(&self.rdf_store))
-            .with_shuffle_unordered(self.plan_options.shuffle_unordered)
-            .with_writer(self.rdf_writer())
-            .with_path_search_budget(budget)
-            .with_deadline(deadline)
-    }
-
     /// Creates a session that reads and writes `store` and `rdf_store`.
+    #[cfg(feature = "lpg")]
     pub(crate) fn with_rdf_store(
-        store: Arc<RowGroupStore>,
+        store: Arc<LpgStore>,
         rdf_store: Arc<RdfStore>,
         cfg: SessionConfig,
     ) -> Self {
-        let graph_store = Arc::clone(&store) as Arc<dyn GraphStore>;
-        let graph_store_mut = Some(Arc::clone(&store) as Arc<dyn GraphBackend>);
+        let graph_store = Arc::clone(&store) as Arc<dyn GraphStoreSearch>;
+        let graph_store_mut = Some(Arc::clone(&store) as Arc<dyn GraphStoreMut>);
         Self {
-            store: Some(store),
+            store,
+            lpg_backend: super::LpgBackend::Active,
             graph_store,
             graph_store_mut,
             catalog: cfg.catalog,
@@ -58,7 +48,6 @@ impl Session {
             db_read_only: cfg.read_only,
             identity: cfg.identity,
             auto_commit: true,
-            #[cfg(query_language)]
             plan_options: super::PlanOptions {
                 factorized_execution: cfg.factorized_execution,
                 shuffle_unordered: cfg.shuffle_unordered,
@@ -66,7 +55,6 @@ impl Session {
                 path_search_budget: cfg.path_search_budget,
             },
             graph_model: cfg.graph_model,
-            #[cfg(query_language)]
             query_timeout: cfg.query_timeout,
             max_property_size: cfg.max_property_size,
             #[cfg(feature = "spill")]
@@ -81,21 +69,18 @@ impl Session {
             #[cfg(feature = "cdc")]
             records_cdc: false,
             current_graph: parking_lot::Mutex::new(None),
-            statement_graph: parking_lot::Mutex::new(None),
             current_schema: parking_lot::Mutex::new(None),
-            home_schema: None,
-            home_graph: None,
             time_zone: parking_lot::Mutex::new(None),
             session_params: parking_lot::Mutex::new(std::collections::HashMap::new()),
             viewing_epoch_override: parking_lot::Mutex::new(None),
             savepoints: parking_lot::Mutex::new(Vec::new()),
             transaction_nesting_depth: parking_lot::Mutex::new(0),
             changes: parking_lot::Mutex::new(None),
+            external_target: None,
             #[cfg(feature = "metrics")]
             metrics: None,
             #[cfg(feature = "metrics")]
             tx_start_time: parking_lot::Mutex::new(None),
-            #[cfg(query_language)]
             projections: cfg.projections,
         }
     }
@@ -107,12 +92,6 @@ impl Session {
     /// Returns an error if the query fails to parse or execute.
     #[cfg(feature = "graphql")]
     pub fn execute_graphql_rdf(&self, query: &str) -> Result<QueryResult> {
-        self.timed(|| self.execute_graphql_rdf_untimed(query))
-    }
-
-    /// [`execute_graphql_rdf`](Self::execute_graphql_rdf) without the time of the whole call.
-    #[cfg(feature = "graphql")]
-    fn execute_graphql_rdf_untimed(&self, query: &str) -> Result<QueryResult> {
         use crate::query::{optimizer::Optimizer, translators::graphql_rdf};
 
         let logical_plan = graphql_rdf::translate(query, "http://example.org/")?;
@@ -129,16 +108,6 @@ impl Session {
     /// Returns an error if the query fails to parse or execute.
     #[cfg(feature = "graphql")]
     pub fn execute_graphql_rdf_with_params(
-        &self,
-        query: &str,
-        params: std::collections::HashMap<String, Value>,
-    ) -> Result<QueryResult> {
-        self.timed(|| self.execute_graphql_rdf_with_params_untimed(query, params))
-    }
-
-    /// [`execute_graphql_rdf_with_params`](Self::execute_graphql_rdf_with_params) without the time of the whole call.
-    #[cfg(feature = "graphql")]
-    fn execute_graphql_rdf_with_params_untimed(
         &self,
         query: &str,
         params: std::collections::HashMap<String, Value>,
@@ -171,12 +140,6 @@ impl Session {
     /// Returns an error if the query fails to parse or execute.
     #[cfg(feature = "sparql")]
     pub fn execute_sparql(&self, query: &str) -> Result<QueryResult> {
-        self.timed(|| self.execute_sparql_untimed(query))
-    }
-
-    /// [`execute_sparql`](Self::execute_sparql) without the time of the whole call.
-    #[cfg(feature = "sparql")]
-    fn execute_sparql_untimed(&self, query: &str) -> Result<QueryResult> {
         use crate::query::{optimizer::Optimizer, translators::sparql};
 
         let logical_plan = sparql::translate(query)?;
@@ -193,16 +156,6 @@ impl Session {
     /// Returns an error if the query fails to parse or execute.
     #[cfg(feature = "sparql")]
     pub fn execute_sparql_with_params(
-        &self,
-        query: &str,
-        params: std::collections::HashMap<String, Value>,
-    ) -> Result<QueryResult> {
-        self.timed(|| self.execute_sparql_with_params_untimed(query, params))
-    }
-
-    /// [`execute_sparql_with_params`](Self::execute_sparql_with_params) without the time of the whole call.
-    #[cfg(feature = "sparql")]
-    fn execute_sparql_with_params_untimed(
         &self,
         query: &str,
         params: std::collections::HashMap<String, Value>,
@@ -240,6 +193,9 @@ impl Session {
         optimized_plan: &crate::query::plan::LogicalPlan,
         language: &'static str,
     ) -> Result<QueryResult> {
+        use crate::query::planner::rdf::RdfPlanner;
+
+        #[cfg(not(target_arch = "wasm32"))]
         let start_time = Instant::now();
 
         // A write needs a writable session: a writing role, and no read-only
@@ -262,16 +218,18 @@ impl Session {
             self.transaction_manager.check_open()?;
         }
 
-        let deadline = self.query_deadline();
         let result = self.in_statement_transaction(mutates, || {
-            let planner = self.make_rdf_planner(deadline);
+            let planner = RdfPlanner::new(Arc::clone(&self.rdf_store))
+                .with_shuffle_unordered(self.plan_options.shuffle_unordered)
+                .with_writer(self.rdf_writer());
             if optimized_plan.profile {
                 let (mut physical_plan, entries) = planner.plan_profiled(optimized_plan)?;
-                let executor = self
-                    .make_executor(physical_plan.columns.clone())
-                    .with_deadline(deadline);
+                let executor = self.make_executor(physical_plan.columns.clone());
                 let _result = executor.execute(physical_plan.operator.as_mut())?;
+                #[cfg(not(target_arch = "wasm32"))]
                 let total_time_ms = start_time.elapsed().as_secs_f64() * 1000.0;
+                #[cfg(target_arch = "wasm32")]
+                let total_time_ms = 0.0;
                 let profile_tree = crate::query::profile::build_profile_tree(
                     &optimized_plan.root,
                     &mut entries.into_iter(),
@@ -282,18 +240,16 @@ impl Session {
                 ));
             }
             let mut physical_plan = planner.plan(optimized_plan)?;
-            let executor = self
-                .make_executor(physical_plan.columns.clone())
-                .with_deadline(deadline)
-                .with_read_counter(planner.read_counter());
-            executor
-                .execute(physical_plan.operator.as_mut())
-                .map(|result| result.with_kind(optimized_plan.result_kind))
+            let executor = self.make_executor(physical_plan.columns.clone());
+            executor.execute(physical_plan.operator.as_mut())
         });
 
         #[cfg(feature = "metrics")]
         {
-            let elapsed_ms = start_time.elapsed().as_secs_f64() * 1000.0;
+            #[cfg(not(target_arch = "wasm32"))]
+            let elapsed_ms = Some(start_time.elapsed().as_secs_f64() * 1000.0);
+            #[cfg(target_arch = "wasm32")]
+            let elapsed_ms = None;
             self.record_query_metrics(language, elapsed_ms, &result);
         }
         #[cfg(not(feature = "metrics"))]

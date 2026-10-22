@@ -21,9 +21,9 @@ struct DatabaseInfoOutput {
 }
 
 /// Run the info command.
-pub fn run(path: &Path, format: OutputFormat) -> Result<()> {
-    let db = super::open_existing_read_only(path)?;
-    let info = db.info()?;
+pub fn run(path: &Path, format: OutputFormat, quiet: bool) -> Result<()> {
+    let db = super::open_existing(path)?;
+    let info = db.info();
 
     let output = DatabaseInfoOutput {
         mode: format!("{:?}", info.mode),
@@ -38,7 +38,9 @@ pub fn run(path: &Path, format: OutputFormat) -> Result<()> {
     let fmt: Format = format.into();
     match fmt {
         Format::Json => {
-            println!("{}", serde_json::to_string_pretty(&output)?);
+            if !quiet {
+                println!("{}", serde_json::to_string_pretty(&output)?);
+            }
         }
         Format::Table | Format::Csv => {
             let items = vec![
@@ -53,7 +55,7 @@ pub fn run(path: &Path, format: OutputFormat) -> Result<()> {
                 ("WAL Enabled", output.wal_enabled.to_string()),
                 ("Version", output.version),
             ];
-            output::print_key_value_table(&items, fmt);
+            output::print_key_value_table(&items, fmt, quiet);
         }
     }
 

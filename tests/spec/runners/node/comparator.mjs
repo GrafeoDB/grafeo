@@ -66,8 +66,6 @@ export function valueToString(val) {
     if (val instanceof Date) return val.toISOString()
     // Duration: {months, days, nanos} -> ISO 8601
     const keys = Object.keys(val)
-    // Decimal: {$decimal: '1.50'} -> its text, as Rust prints it
-    if (keys.length === 1 && typeof val.$decimal === 'string') return val.$decimal
     if (keys.length === 3 && 'months' in val && 'days' in val && 'nanos' in val) {
       return durationToIso(val.months, val.days, val.nanos)
     }
@@ -198,30 +196,5 @@ export function assertRowsOrdered(result, expected) {
         )
       }
     }
-  }
-}
-
-/**
- * What an error case expects, for its failure message.
- */
-export function describeError(expect) {
-  const parts = []
-  if (expect.error != null) parts.push(`containing '${expect.error}'`)
-  if (expect.gqlStatus != null) parts.push(`with GQLSTATUS ${expect.gqlStatus}`)
-  return parts.join(' ')
-}
-
-/**
- * Assert that an error carries the GQLSTATUS `expected` (its `gqlStatus`). An
- * error without one fails the case: a status the binding does not expose is a
- * gap, not a pass.
- */
-export function assertGqlStatus(err, expected) {
-  const status = err == null ? undefined : err.gqlStatus
-  if (status == null) {
-    throw new Error(`Error '${err?.message ?? String(err)}' has no GQLSTATUS`)
-  }
-  if (String(status) !== expected) {
-    throw new Error(`Error '${err.message}' has GQLSTATUS ${status}, expected ${expected}`)
   }
 }

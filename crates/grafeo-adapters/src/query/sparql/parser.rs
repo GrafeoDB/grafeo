@@ -908,12 +908,8 @@ impl<'a> Parser<'a> {
                 let literal = self.parse_literal()?;
                 Ok(Some(DataValue::Literal(literal)))
             }
-            TokenKind::Integer
-            | TokenKind::Decimal
-            | TokenKind::Double
-            | TokenKind::MinusOp
-            | TokenKind::Plus => {
-                let literal = self.parse_signed_numeric_literal()?;
+            TokenKind::Integer | TokenKind::Decimal | TokenKind::Double => {
+                let literal = self.parse_numeric_literal()?;
                 Ok(Some(DataValue::Literal(literal)))
             }
             TokenKind::True | TokenKind::False => {
@@ -1210,12 +1206,8 @@ impl<'a> Parser<'a> {
                 let literal = self.parse_literal()?;
                 Ok(TripleTerm::Literal(literal))
             }
-            TokenKind::Integer
-            | TokenKind::Decimal
-            | TokenKind::Double
-            | TokenKind::MinusOp
-            | TokenKind::Plus => {
-                let literal = self.parse_signed_numeric_literal()?;
+            TokenKind::Integer | TokenKind::Decimal | TokenKind::Double => {
+                let literal = self.parse_numeric_literal()?;
                 Ok(TripleTerm::Literal(literal))
             }
             TokenKind::True | TokenKind::False => {
@@ -2195,29 +2187,6 @@ impl<'a> Parser<'a> {
         result
     }
 
-    /// A numeric literal with an optional sign (`-1`, `+2.5`), as a VALUES
-    /// entry and a triple term may write one (SPARQL 1.1 grammar:
-    /// `NumericLiteralNegative`, `NumericLiteralPositive`). The lexer gives the
-    /// sign as its own token; there it can only start a number.
-    fn parse_signed_numeric_literal(&mut self) -> Result<Literal> {
-        let negative = match self.current.kind {
-            TokenKind::MinusOp => {
-                self.advance();
-                true
-            }
-            TokenKind::Plus => {
-                self.advance();
-                false
-            }
-            _ => false,
-        };
-        let mut literal = self.parse_numeric_literal()?;
-        if negative {
-            literal.value.insert(0, '-');
-        }
-        Ok(literal)
-    }
-
     fn parse_numeric_literal(&mut self) -> Result<Literal> {
         let text = self.current.text.clone();
         let datatype = match self.current.kind {
@@ -2388,7 +2357,7 @@ impl<'a> Parser<'a> {
     }
 
     fn error(&self, message: &str) -> Error {
-        Error::from(
+        Error::Query(
             QueryError::new(QueryErrorKind::Syntax, format!("[SPARQL] {message}"))
                 .with_span(self.current.span)
                 .with_source(self.source.to_string()),

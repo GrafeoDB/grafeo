@@ -67,4 +67,3 @@ pub mod v3;
 
 pub use format::{DbHeader, FileHeader, MAGIC};
 pub use manager::{CheckpointHeader, GrafeoFileManager, ImageStats};
-pub use v3::CheckpointStats;

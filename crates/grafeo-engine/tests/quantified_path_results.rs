@@ -352,7 +352,7 @@ fn a_horizontal_aggregate_beside_a_regular_aggregate_groups_the_rows() {
     assert_gql(
         &db,
         "MATCH (a:Person {name: 'Alix'})-[e:KNOWS]->{1,3}(b) \
-         RETURN min(e.w) / 2.0e0 AS half, count(*) AS paths",
+         RETURN min(e.w) / 2.0 AS half, count(*) AS paths",
         &[&["1.5", "3"], &["19.0", "2"]],
     );
     assert_gql(

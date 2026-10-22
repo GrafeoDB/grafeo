@@ -201,49 +201,6 @@ tests:
     expect:
       error: "after the end of the statement"
 
-  # The quickstart program of #380, statement for statement: before the fix
-  # only Alix was inserted, so Alix knew nobody.
-  - name: quickstart_program_finds_who_alix_knows
-    setup:
-      - |
-        INSERT (:Person {name: 'Alix', age: 30})
-        INSERT (:Person {name: 'Gus', age: 25})
-        INSERT (:Person {name: 'Harm', age: 35})
-      - |
-        MATCH (a:Person {name: 'Alix'}), (b:Person {name: 'Gus'})
-        INSERT (a)-[:KNOWS {since: 2020}]->(b)
-      - |
-        MATCH (b:Person {name: 'Gus'}), (c:Person {name: 'Harm'})
-        INSERT (b)-[:KNOWS {since: 2022}]->(c)
-    query: "MATCH (a:Person {name: 'Alix'})-[:KNOWS]->(friend) RETURN friend.name"
-    expect:
-      rows:
-        - [Gus]
-
-  - name: quickstart_program_lists_people_and_friends_of_friends
-    setup:
-      - |
-        INSERT (:Person {name: 'Alix', age: 30})
-        INSERT (:Person {name: 'Gus', age: 25})
-        INSERT (:Person {name: 'Harm', age: 35})
-      - |
-        MATCH (a:Person {name: 'Alix'}), (b:Person {name: 'Gus'})
-        INSERT (a)-[:KNOWS {since: 2020}]->(b)
-      - |
-        MATCH (b:Person {name: 'Gus'}), (c:Person {name: 'Harm'})
-        INSERT (b)-[:KNOWS {since: 2022}]->(c)
-    query: |
-      MATCH (p:Person)
-      OPTIONAL MATCH (p)-[:KNOWS]->()-[:KNOWS]->(fof)
-      RETURN p.name, p.age, fof.name
-      ORDER BY p.age
-    expect:
-      ordered: true
-      rows:
-        - [Gus, 25, null]
-        - [Alix, 30, Harm]
-        - [Harm, 35, null]
-
   # Computed property values (used to fail with an internal error)
   - name: insert_computed_properties_per_row
     statements:

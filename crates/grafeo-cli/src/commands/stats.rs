@@ -22,9 +22,9 @@ struct StatsOutput {
 }
 
 /// Run the stats command.
-pub fn run(path: &Path, format: OutputFormat) -> Result<()> {
-    let db = super::open_existing_read_only(path)?;
-    let stats = db.detailed_stats()?;
+pub fn run(path: &Path, format: OutputFormat, quiet: bool) -> Result<()> {
+    let db = super::open_existing(path)?;
+    let stats = db.detailed_stats();
 
     let output = StatsOutput {
         node_count: stats.node_count,
@@ -40,7 +40,9 @@ pub fn run(path: &Path, format: OutputFormat) -> Result<()> {
     let fmt: Format = format.into();
     match fmt {
         Format::Json => {
-            println!("{}", serde_json::to_string_pretty(&output)?);
+            if !quiet {
+                println!("{}", serde_json::to_string_pretty(&output)?);
+            }
         }
         Format::Table | Format::Csv => {
             let items = vec![
@@ -58,7 +60,7 @@ pub fn run(path: &Path, format: OutputFormat) -> Result<()> {
                         .map_or_else(|| "N/A".to_string(), format_bytes),
                 ),
             ];
-            output::print_key_value_table(&items, fmt);
+            output::print_key_value_table(&items, fmt, quiet);
         }
     }
 

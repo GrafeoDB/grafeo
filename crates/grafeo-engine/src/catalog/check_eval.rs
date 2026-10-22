@@ -12,13 +12,17 @@
 //! (dates order, `1 = 1.0`, a comparison with null is unknown), and holds
 //! only where that predicate is true, as a WHERE keeps only those rows.
 
+#[cfg(feature = "lpg")]
 use std::collections::HashMap;
+#[cfg(feature = "lpg")]
 use std::sync::{Arc, OnceLock};
 
-use grafeo_common::types::{ReadView, Value};
+use grafeo_common::types::Value;
 use grafeo_core::execution::operators::{BinaryFilterOp, FilterExpression, UnaryFilterOp};
+#[cfg(feature = "lpg")]
 use grafeo_core::execution::{DataChunk, operators::ExpressionPredicate, vector::ValueVector};
-use grafeo_core::graph::rowgroup::RowGroupStore;
+#[cfg(feature = "lpg")]
+use grafeo_core::graph::lpg::LpgStore;
 
 /// A parsed CHECK constraint expression, ready to evaluate.
 pub(crate) struct CheckExpression {
@@ -27,7 +31,10 @@ pub(crate) struct CheckExpression {
     /// The properties it reads, in the order of the evaluation row's
     /// columns.
     properties: Vec<String>,
-    /// The query evaluator of the expression, each property a variable.
+    /// The query evaluator of the expression, each property a variable. A
+    /// build without `lpg` has no store to build one with, and no node or
+    /// edge writes to check.
+    #[cfg(feature = "lpg")]
     predicate: ExpressionPredicate,
 }
 
@@ -49,6 +56,7 @@ impl CheckExpression {
         }
         let mut properties = Vec::new();
         collect_properties(&expression, &mut properties);
+        #[cfg(feature = "lpg")]
         let predicate = {
             let columns = properties
                 .iter()
@@ -56,13 +64,14 @@ impl CheckExpression {
                 .map(|(column, name)| (name.clone(), column))
                 .collect::<HashMap<_, _>>();
             let store = no_graph().ok_or("no store to evaluate the expression with")?;
-            // The evaluation row holds the values: the empty store is never
-            // read, at any view.
-            ExpressionPredicate::new(expression, columns, store, ReadView::latest())
+            ExpressionPredicate::new(expression, columns, store)
         };
+        #[cfg(not(feature = "lpg"))]
+        drop(expression);
         Ok(Self {
             text: text.to_string(),
             properties,
+            #[cfg(feature = "lpg")]
             predicate,
         })
     }
@@ -78,9 +87,19 @@ impl CheckExpression {
     ///
     /// When the expression gives a value other than a boolean (`x + 1`).
     pub(crate) fn evaluate(&self, properties: &[(String, Value)]) -> Result<bool, String> {
+        #[cfg(not(feature = "lpg"))]
+        {
+            let _ = (&self.properties, properties);
+            Err(format!(
+                "({}) cannot be checked: this build has no node and edge store (the `lpg` feature)",
+                self.text
+            ))
+        }
+        #[cfg(feature = "lpg")]
         self.evaluate_with_store(properties)
     }
 
+    #[cfg(feature = "lpg")]
     fn evaluate_with_store(&self, properties: &[(String, Value)]) -> Result<bool, String> {
         let columns = self
             .properties
@@ -93,11 +112,7 @@ impl CheckExpression {
                 ValueVector::from_values(&[value])
             })
             .collect();
-        let value = self
-            .predicate
-            .eval_at(&DataChunk::new(columns), 0)
-            .map_err(|error| format!("({}): {error}", self.text))?;
-        match value {
+        match self.predicate.eval_at(&DataChunk::new(columns), 0) {
             Some(Value::Bool(holds)) => Ok(holds),
             Some(Value::Null) | None => Ok(false),
             Some(other) => Err(format!("({}) gives {other:?}, not a boolean", self.text)),
@@ -108,10 +123,11 @@ impl CheckExpression {
 /// The store an expression evaluator reads graph elements from: an empty
 /// one, since a CHECK expression reads property values only. `None` when it
 /// cannot be made (an arena that does not allocate).
-fn no_graph() -> Option<Arc<RowGroupStore>> {
-    static NO_GRAPH: OnceLock<Option<Arc<RowGroupStore>>> = OnceLock::new();
+#[cfg(feature = "lpg")]
+fn no_graph() -> Option<Arc<LpgStore>> {
+    static NO_GRAPH: OnceLock<Option<Arc<LpgStore>>> = OnceLock::new();
     NO_GRAPH
-        .get_or_init(|| Some(Arc::new(RowGroupStore::new())))
+        .get_or_init(|| LpgStore::new().ok().map(Arc::new))
         .clone()
 }
 
@@ -657,7 +673,7 @@ fn expect_token(
 // Tests
 // ---------------------------------------------------------------------------
 
-#[cfg(test)]
+#[cfg(all(test, feature = "lpg"))]
 mod tests {
     use super::*;
 
@@ -887,16 +903,13 @@ mod tests {
         assert!(evaluate_check("name = 'oops", &p).is_err());
     }
 
-    /// A division by zero fails the check's evaluation, as it fails a WHERE
-    /// (#639): the error names the expression and the cause.
+    /// An operator that does not apply has no value, as in a WHERE, which
+    /// drops the row: the check does not hold.
     #[test]
-    fn test_division_by_zero_is_an_error() {
+    fn test_division_by_zero_does_not_hold() {
         let p = props(&[("x", Value::Int64(10))]);
-        for expression in ["x / 0 = 1", "NOT (x / 0 = 1)"] {
-            let error = evaluate_check(expression, &p).unwrap_err();
-            assert!(error.contains(expression), "{error}");
-            assert!(error.contains("division by zero: 10 / 0"), "{error}");
-        }
+        assert_eq!(evaluate_check("x / 0 = 1", &p), Ok(false));
+        assert_eq!(evaluate_check("NOT (x / 0 = 1)", &p), Ok(false));
     }
 
     #[test]
@@ -914,37 +927,30 @@ mod tests {
         assert!(evaluate_check("x + 1", &p).is_err());
     }
 
-    // -- Integer overflow / underflow: an error, as in a query (#639) --
-
-    fn assert_out_of_range(expression: &str, x: i64, operation: &str) {
-        let p = props(&[("x", Value::Int64(x))]);
-        let error = evaluate_check(expression, &p).unwrap_err();
-        assert!(
-            error.contains(&format!("numeric value out of range: {operation}")),
-            "{error}"
-        );
-    }
+    // -- Integer overflow / underflow --
 
     #[test]
     fn test_integer_overflow_add() {
-        assert_out_of_range("x + 1 > 0", i64::MAX, "9223372036854775807 + 1");
+        let p = props(&[("x", Value::Int64(i64::MAX))]);
+        assert_eq!(evaluate_check("x + 1 > 0", &p), Ok(false));
     }
 
     #[test]
     fn test_integer_underflow_sub() {
-        assert_out_of_range("x - 1 < 0", i64::MIN, "-9223372036854775808 - 1");
+        let p = props(&[("x", Value::Int64(i64::MIN))]);
+        assert_eq!(evaluate_check("x - 1 < 0", &p), Ok(false));
     }
 
     #[test]
     fn test_integer_overflow_mul() {
-        assert_out_of_range("x * 2 > 0", i64::MAX, "9223372036854775807 * 2");
+        let p = props(&[("x", Value::Int64(i64::MAX))]);
+        assert_eq!(evaluate_check("x * 2 > 0", &p), Ok(false));
     }
 
     #[test]
     fn test_modulo_by_zero() {
         let p = props(&[("x", Value::Int64(10))]);
-        let error = evaluate_check("x % 0 = 0", &p).unwrap_err();
-        assert!(error.contains("division by zero: 10 % 0"), "{error}");
+        assert_eq!(evaluate_check("x % 0 = 0", &p), Ok(false));
     }
 
     // -- Float arithmetic --

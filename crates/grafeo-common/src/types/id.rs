@@ -234,13 +234,6 @@ impl EpochId {
     /// On commit, the session finalizes these to the actual commit epoch.
     pub const PENDING: Self = Self(u64::MAX);
 
-    /// The epoch after every epoch a commit can take: a committed reader at
-    /// it sees every commit (see
-    /// [`ReadView::latest`](crate::types::ReadView::latest)). Below
-    /// [`PENDING`](Self::PENDING) and the high bit a store may mark pending
-    /// versions with.
-    pub const LATEST: Self = Self((1 << 63) - 1);
-
     /// Creates a new EpochId from a raw u64 value.
     #[inline]
     #[must_use]

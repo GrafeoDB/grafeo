@@ -3,154 +3,34 @@
 //! This module provides the fundamental building blocks for implementing
 //! high-performance graph algorithms, inspired by rustworkx patterns.
 
-use grafeo_common::types::{EdgeId, NodeId, PropertyKey, ReadView, Value};
+use grafeo_common::types::{EdgeId, NodeId, Value};
 use grafeo_common::utils::error::{Error, Result};
-use grafeo_core::graph::lpg::{Edge, Node};
 use grafeo_core::graph::{Direction, GraphStore};
-use parking_lot::Mutex;
 use std::cmp::Ordering;
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
 
 use super::super::{AlgorithmResult, ParameterDef, Parameters};
 
-/// The graph an algorithm reads: a store at one view.
+/// The edges from `node` in `direction` that an algorithm reads, each with the
+/// node at its other end: those visible at the store's current epoch whose
+/// other end is visible too, so the graph an algorithm walks has the nodes of
+/// [`GraphStore::node_ids`] and only edges between them.
 ///
-/// Every algorithm reads through it, so the graph it walks has the nodes of
-/// [`node_ids`](Self::node_ids) and only edges between them, all as one view
-/// sees them, however long it runs: a commit during the run changes nothing
-/// it reads. The view is the caller's, pinned for the run.
-///
-/// The reads answer like the store's; the first one that fails is recorded
-/// and the read answers as if nothing was found, and the public algorithm
-/// functions return that error instead of their answer
-/// ([`finish`](Self::finish)), so an algorithm never answers from a graph it
-/// could not read.
-pub struct GraphView<'a> {
-    store: &'a dyn GraphStore,
-    view: ReadView,
-    /// Whether a read failed: one load per read on the path without one.
-    failed: AtomicBool,
-    error: Mutex<Option<Error>>,
-}
-
-impl<'a> GraphView<'a> {
-    /// The graph of `store` as `view` sees it.
-    #[must_use]
-    pub fn new(store: &'a dyn GraphStore, view: ReadView) -> Self {
-        Self {
-            store,
-            view,
-            failed: AtomicBool::new(false),
-            error: Mutex::new(None),
-        }
-    }
-
-    /// The store read.
-    #[must_use]
-    pub fn store(&self) -> &'a dyn GraphStore {
-        self.store
-    }
-
-    /// The view the reads answer at.
-    #[must_use]
-    pub fn view(&self) -> ReadView {
-        self.view
-    }
-
-    /// The answer of a read, or `otherwise` after recording its error.
-    fn read<T>(&self, read: Result<T>, otherwise: T) -> T {
-        match read {
-            Ok(found) => found,
-            Err(error) => {
-                let mut slot = self.error.lock();
-                if slot.is_none() {
-                    *slot = Some(error);
-                    self.failed.store(true, AtomicOrdering::Release);
-                }
-                otherwise
-            }
-        }
-    }
-
-    /// `value`, the answer of the reads, or the error of the first read that
-    /// failed.
-    ///
-    /// # Errors
-    ///
-    /// Returns the error of the first read that failed.
-    pub fn finish<T>(self, value: T) -> Result<T> {
-        if self.failed.load(AtomicOrdering::Acquire)
-            && let Some(error) = self.error.into_inner()
-        {
-            return Err(error);
-        }
-        Ok(value)
-    }
-
-    /// The nodes the view sees, by ascending id.
-    #[must_use]
-    pub fn node_ids(&self) -> Vec<NodeId> {
-        self.read(self.store.node_ids(self.view), Vec::new())
-    }
-
-    /// Node `id` as the view sees it.
-    #[must_use]
-    pub fn node(&self, id: NodeId) -> Option<Node> {
-        self.read(self.store.node(id, self.view), None)
-    }
-
-    /// Edge `id` as the view sees it.
-    #[must_use]
-    pub fn edge(&self, id: EdgeId) -> Option<Edge> {
-        self.read(self.store.edge(id, self.view), None)
-    }
-
-    /// The edges from `node` in `direction` the view sees, each with the
-    /// node at its other end, which the view sees too (see
-    /// [`GraphStore::edges`]).
-    #[must_use]
-    pub fn edges(&self, node: NodeId, direction: Direction) -> Vec<(NodeId, EdgeId)> {
-        self.read(
-            self.store.edges(node, direction, &[], self.view),
-            Vec::new(),
-        )
-    }
-
-    /// The nodes the view sees whose `property` equals `value`.
-    #[must_use]
-    pub fn find_nodes_by_property(&self, property: &str, value: &Value) -> Vec<NodeId> {
-        self.read(
-            self.store
-                .find_nodes_by_property(property, value, self.view),
-            Vec::new(),
-        )
-    }
-
-    /// The value of `key` of each node of `ids` as the view sees it: a
-    /// read the caller handles itself (the key of an algorithm's `key=`).
-    ///
-    /// # Errors
-    ///
-    /// Returns the error of a read the store cannot do.
-    pub fn node_property_batch(
-        &self,
-        ids: &[NodeId],
-        key: &PropertyKey,
-    ) -> Result<Vec<Option<Value>>> {
-        self.store.node_property_batch(ids, key, self.view)
-    }
-}
-
-/// `n` as an INT64 output value (a node id, a count or a position). A value past `i64::MAX` is an
-/// error, never a wrapped negative number.
-pub(crate) fn int_value<T>(n: T) -> Result<Value>
-where
-    i64: TryFrom<T>,
-{
-    i64::try_from(n)
-        .map(Value::Int64)
-        .map_err(|_| Error::Internal("an algorithm result does not fit an INT64".into()))
+/// A store's adjacency holds more: the edges of a node a store-level
+/// `delete_node` removed without detaching it, and the edges a transaction
+/// created and has not committed (to a node only it sees, or between two
+/// visible nodes). Every algorithm reads adjacency through this function.
+pub(crate) fn visible_edges_from(
+    store: &dyn GraphStore,
+    node: NodeId,
+    direction: Direction,
+) -> Vec<(NodeId, EdgeId)> {
+    let epoch = store.current_epoch();
+    let mut edges = store.edges_from(node, direction);
+    edges.retain(|&(other, edge)| {
+        store.is_edge_visible_at_epoch(edge, epoch) && store.is_node_visible_at_epoch(other, epoch)
+    });
+    edges
 }
 
 /// Safely converts a user-supplied `i64` parameter into a [`NodeId`].
@@ -360,12 +240,7 @@ pub trait GraphAlgorithm: Send + Sync {
     /// # Errors
     ///
     /// Returns an error if the algorithm fails (e.g., invalid parameters or graph state).
-    fn execute(
-        &self,
-        store: &dyn GraphStore,
-        view: ReadView,
-        params: &Parameters,
-    ) -> Result<AlgorithmResult>;
+    fn execute(&self, store: &dyn GraphStore, params: &Parameters) -> Result<AlgorithmResult>;
 }
 
 /// A graph algorithm that supports parallel execution.
@@ -389,7 +264,6 @@ pub trait ParallelGraphAlgorithm: GraphAlgorithm {
     fn execute_parallel(
         &self,
         store: &dyn GraphStore,
-        view: ReadView,
         params: &Parameters,
         num_threads: usize,
     ) -> Result<AlgorithmResult>;
@@ -440,8 +314,7 @@ impl<V> DistanceMap<V> for HashMap<NodeId, V> {
 ///     name: "algorithm_name",
 ///     description: "What the algorithm does",
 ///     params: params_fn,            // fn() -> &'static [ParameterDef]
-///     execute(store, params) { ... } // body that returns Result<AlgorithmResult>,
-///                                    // `store` the `GraphView` it reads
+///     execute(store, params) { ... } // body that returns Result<AlgorithmResult>
 /// }
 /// ```
 ///
@@ -480,14 +353,10 @@ macro_rules! impl_algorithm {
 
             fn execute(
                 &self,
-                store: &dyn grafeo_core::graph::GraphStore,
-                view: grafeo_common::types::ReadView,
+                $store: &dyn grafeo_core::graph::GraphStore,
                 $params: &super::super::Parameters,
             ) -> grafeo_common::utils::error::Result<super::super::AlgorithmResult> {
-                let graph = $crate::plugins::algorithms::GraphView::new(store, view);
-                let $store = &graph;
-                let found = $crate::plugins::algorithms::traits::evaluated(|| $body);
-                graph.finish(found)?
+                $body
             }
         }
     };
@@ -513,28 +382,16 @@ macro_rules! impl_algorithm {
 
             fn execute(
                 &self,
-                store: &dyn grafeo_core::graph::GraphStore,
-                view: grafeo_common::types::ReadView,
+                $store: &dyn grafeo_core::graph::GraphStore,
                 $params: &super::super::Parameters,
             ) -> grafeo_common::utils::error::Result<super::super::AlgorithmResult> {
-                let graph = $crate::plugins::algorithms::GraphView::new(store, view);
-                let $store = &graph;
-                let found = $crate::plugins::algorithms::traits::evaluated(|| $body);
-                graph.finish(found)?
+                $body
             }
         }
     };
 }
 
 pub(crate) use impl_algorithm;
-
-/// The result of an algorithm's `body`, which may return early: the
-/// execute bodies of [`impl_algorithm!`] and the hand-written ones run in a
-/// closure so a `return` leaves the body, not `execute`, and the
-/// [`GraphView`]'s read error is still checked after it.
-pub(crate) fn evaluated<T>(body: impl FnOnce() -> T) -> T {
-    body()
-}
 
 // ============================================================================
 // Result Builders

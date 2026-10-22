@@ -17,7 +17,7 @@
 //! PROPTEST_CASES=1024 cargo test -p grafeo-engine ...
 //! ```
 
-#![cfg(feature = "gql")]
+#![cfg(all(feature = "lpg", feature = "gql"))]
 
 use grafeo_common::types::{NodeId, Value};
 use grafeo_engine::GrafeoDB;

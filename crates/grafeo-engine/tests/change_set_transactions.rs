@@ -8,9 +8,8 @@
 //! cargo test -p grafeo-engine --all-features --test change_set_transactions
 //! ```
 
-#![cfg(feature = "gql")]
+#![cfg(all(feature = "lpg", feature = "gql"))]
 
-use grafeo_common::types::ReadView;
 use std::sync::Arc;
 
 use grafeo_common::types::{NodeId, Value};
@@ -149,7 +148,6 @@ fn a_direct_call_conflicts_with_an_open_transaction_that_wrote_first() {
     session.commit().unwrap();
     let city = |id: NodeId| {
         db.get_node(id)
-            .unwrap()
             .and_then(|node| node.properties.get(&"city".into()).cloned())
     };
     assert_eq!(city(alix), Some(Value::from("Amsterdam")));
@@ -283,14 +281,10 @@ fn a_savepoint_rollback_restores_a_deleted_node_it_created_whole() {
 /// With `temporal`, a node deleted keeps its labels in its history: a read
 /// at an epoch before the delete finds it with them (the undo log path
 /// dropped the node's whole label history).
+#[cfg(feature = "temporal")]
 #[test]
 fn a_read_before_a_delete_sees_the_deleted_nodes_labels() {
-    // History kept: the test reads an earlier epoch.
-    let db = GrafeoDB::with_config(
-        grafeo_engine::Config::in_memory()
-            .with_history_retention(grafeo_engine::HistoryRetention::Forever),
-    )
-    .unwrap();
+    let db = GrafeoDB::new_in_memory();
     db.execute("INSERT (:Person:Boxer {name: 'Butch'})")
         .unwrap();
     let before = db.current_epoch();
@@ -313,7 +307,7 @@ fn a_read_before_a_delete_sees_the_deleted_nodes_labels() {
 
 /// With `temporal`, a rolled-back value and a rolled-back label leave the
 /// text index as they found it (the undo log path left both in the index).
-#[cfg(feature = "text-index")]
+#[cfg(all(feature = "temporal", feature = "text-index"))]
 #[test]
 fn a_rollback_leaves_the_text_index_as_committed() {
     let db = GrafeoDB::new_in_memory();
@@ -338,284 +332,67 @@ fn a_rollback_leaves_the_text_index_as_committed() {
     assert_eq!(found("bridges"), 0, "the rolled-back label took nothing in");
 }
 
-/// A database built on a backend of one's own (`with_store`) runs its
-/// transactions in the backend: the engine opens one transaction per
-/// transaction that writes, before its first write, and ends it with the
-/// commit at its epoch or a rollback; a savepoint and a failed statement
-/// roll back to their position and the transaction goes on. Another
-/// session sees nothing before the commit. The backend gets the recorded
-/// changes, in order, and every ended transaction was opened.
+/// On a database built on an external store, which has no undo, a rollback
+/// undoes what it can, aborts the transaction and fails naming the graph
+/// whose store keeps the writes; it does not poison the database. A
+/// rollback to a savepoint after such writes is refused before it changes
+/// anything.
 #[test]
-fn a_backend_of_ones_own_runs_the_transactions() {
-    use backend::{Call, Logged};
+fn a_rollback_names_the_external_store_that_keeps_its_writes() {
+    use grafeo_core::graph::GraphStoreMut;
+    use grafeo_core::graph::lpg::LpgStore;
 
-    let store = Arc::new(Logged::default());
+    let store = Arc::new(LpgStore::new().unwrap());
     let db = GrafeoDB::with_store(
-        Arc::clone(&store) as Arc<dyn grafeo_core::graph::GraphBackend>,
+        Arc::clone(&store) as Arc<dyn GraphStoreMut>,
         grafeo_engine::Config::in_memory(),
     )
     .unwrap();
-    let people =
-        |session: &Session| column(session, "MATCH (p:Person) RETURN p.name ORDER BY p.name");
+    let kept = |error: &Error| {
+        let message = error.to_string();
+        message.contains("graph 'default'") && message.contains("keeps")
+    };
 
-    // A rollback to a savepoint undoes what came after it.
     let mut session = db.session();
     session.begin_transaction().unwrap();
+    session.savepoint("start").unwrap();
     session.execute("INSERT (:Person {name: 'Alix'})").unwrap();
-    session.savepoint("after_alix").unwrap();
-    session.execute("INSERT (:Person {name: 'Gus'})").unwrap();
+    let refused = session.rollback_to_savepoint("start").unwrap_err();
+    assert!(kept(&refused), "{refused}");
     assert_eq!(
-        people(&session),
-        ["Alix", "Gus"],
-        "a transaction sees its own writes"
-    );
-    assert!(
-        people(&db.session()).is_empty(),
-        "another session sees nothing yet"
-    );
-    session.rollback_to_savepoint("after_alix").unwrap();
-    assert_eq!(people(&session), ["Alix"]);
-
-    // A failed statement inside the transaction undoes its own writes.
-    session.execute("CREATE NODE TYPE Doc (id INT64)").unwrap();
-    let error = session
-        .execute("UNWIND [3, 'x'] AS v INSERT (:Doc {id: v})")
-        .unwrap_err();
-    assert!(
-        !error.to_string().contains("rolled back"),
-        "the rollback worked: {error}"
-    );
-    assert_eq!(
-        column(&session, "MATCH (d:Doc) RETURN d.id"),
-        Vec::<String>::new(),
-        "the failed statement's first row is gone"
-    );
-    session.commit().unwrap();
-    assert_eq!(
-        people(&db.session()),
+        column(&session, "MATCH (p:Person) RETURN p.name"),
         ["Alix"],
-        "committed: everyone sees it"
+        "a refused rollback to a savepoint changes nothing"
+    );
+    assert!(
+        session.rollback_to_savepoint("start").is_err(),
+        "the savepoint stays, and is refused again"
     );
 
-    // A rollback leaves the backend as the commit left it.
+    let error = session.rollback().unwrap_err();
+    assert!(kept(&error), "{error}");
+    assert!(!session.in_transaction(), "the transaction is aborted");
+    assert_eq!(store.all_node_ids().len(), 1, "the store keeps the write");
+
+    // Not poisoned: another transaction commits.
     session.begin_transaction().unwrap();
-    session
-        .execute("MATCH (p:Person) SET p.name = 'Mia'")
-        .unwrap();
-    session
-        .execute("INSERT (:Person {name: 'Vincent'})")
-        .unwrap();
-    session.rollback().unwrap();
-    assert_eq!(people(&db.session()), ["Alix"]);
+    session.execute("INSERT (:Person {name: 'Gus'})").unwrap();
+    session.commit().unwrap();
 
-    // A statement outside a transaction commits in one of its own.
-    db.execute("INSERT (:Person {name: 'Jules'})").unwrap();
-    assert_eq!(people(&db.session()), ["Alix", "Jules"]);
-
-    // The backend saw each transaction open once, before its writes, and
-    // end once: with the recorded changes, the savepoint and the failed
-    // statement as rollbacks to a position.
-    let calls = store.calls();
-    let opened: Vec<_> = calls
-        .iter()
-        .filter_map(|call| match call {
-            Call::Begin(id) => Some(*id),
-            _ => None,
-        })
-        .collect();
-    let ended: Vec<_> = calls
-        .iter()
-        .filter_map(|call| match call {
-            Call::Commit(id, _) | Call::Rollback(id, _) => Some(*id),
-            _ => None,
-        })
-        .collect();
-    assert_eq!(opened.len(), 3, "three transactions wrote: {calls:?}");
-    assert_eq!(opened, ended, "each ended once, in order: {calls:?}");
-    let shapes: Vec<String> = calls.iter().map(Call::shape).collect();
-    assert_eq!(
-        shapes,
-        [
-            "begin",
-            "apply",
-            "apply",
-            "rollback_to 1",
-            "apply",
-            "rollback_to 1",
-            "commit 1",
-            "begin",
-            "apply",
-            "apply",
-            "rollback 2",
-            "begin",
-            "apply",
-            "commit 1",
-        ],
-        "{calls:?}"
+    // A statement that fails after a write says the store keeps it, with
+    // its own error first: in a transaction, and on its own.
+    session.execute("CREATE NODE TYPE Doc (id INT64)").unwrap();
+    let partial = "UNWIND [3, 'x'] AS v INSERT (:Doc {id: v})";
+    session.begin_transaction().unwrap();
+    let error = session.execute(partial).unwrap_err().to_string();
+    assert!(
+        error.contains("not all undone") && error.contains("graph 'default'"),
+        "{error}"
     );
-}
-
-/// A backend of one's own for [`a_backend_of_ones_own_runs_the_transactions`]:
-/// the row-group store behind the contract, logging every call of its write
-/// side.
-mod backend {
-    use std::sync::Arc;
-
-    use arcstr::ArcStr;
-    use grafeo_common::change::{Change, ChangeMark, DataOp};
-    use grafeo_common::types::{EdgeId, EpochId, NodeId, ReadView, TransactionId};
-    use grafeo_common::utils::error::Result;
-    use grafeo_core::graph::apply::{Applied, ApplyError, BackendTransaction, Writer};
-    use grafeo_core::graph::lpg::{Edge, Node};
-    use grafeo_core::graph::rowgroup::RowGroupStore;
-    use grafeo_core::graph::{Direction, GraphBackend, GraphStore};
-    use grafeo_core::statistics::Statistics;
-    use parking_lot::Mutex;
-
-    /// A call of the write side, with the number of changes it was handed.
-    #[derive(Debug, Clone, PartialEq, Eq)]
-    pub enum Call {
-        Begin(TransactionId),
-        Apply,
-        Commit(TransactionId, usize),
-        Rollback(TransactionId, usize),
-        RollbackTo(TransactionId, usize),
-    }
-
-    impl Call {
-        /// The call without its transaction, for comparing sequences.
-        pub fn shape(&self) -> String {
-            match self {
-                Self::Begin(_) => "begin".to_string(),
-                Self::Apply => "apply".to_string(),
-                Self::Commit(_, changes) => format!("commit {changes}"),
-                Self::Rollback(_, changes) => format!("rollback {changes}"),
-                Self::RollbackTo(_, changes) => format!("rollback_to {changes}"),
-            }
-        }
-    }
-
-    #[derive(Default)]
-    pub struct Logged {
-        rows: RowGroupStore,
-        calls: Mutex<Vec<Call>>,
-    }
-
-    impl Logged {
-        pub fn calls(&self) -> Vec<Call> {
-            self.calls.lock().clone()
-        }
-
-        fn log(&self, call: Call) {
-            self.calls.lock().push(call);
-        }
-    }
-
-    impl GraphStore for Logged {
-        fn node(&self, id: NodeId, view: ReadView) -> Result<Option<Node>> {
-            self.rows.node(id, view)
-        }
-        fn edge(&self, id: EdgeId, view: ReadView) -> Result<Option<Edge>> {
-            self.rows.edge(id, view)
-        }
-        fn edges(
-            &self,
-            node: NodeId,
-            direction: Direction,
-            types: &[ArcStr],
-            view: ReadView,
-        ) -> Result<Vec<(NodeId, EdgeId)>> {
-            self.rows.edges(node, direction, types, view)
-        }
-        fn has_backward_adjacency(&self) -> bool {
-            self.rows.has_backward_adjacency()
-        }
-        fn node_ids(&self, view: ReadView) -> Result<Vec<NodeId>> {
-            self.rows.node_ids(view)
-        }
-        fn all_labels(&self) -> Result<Vec<String>> {
-            self.rows.all_labels()
-        }
-        fn all_edge_types(&self) -> Result<Vec<String>> {
-            self.rows.all_edge_types()
-        }
-        fn all_property_keys(&self) -> Result<Vec<String>> {
-            self.rows.all_property_keys()
-        }
-        fn statistics(&self) -> Arc<Statistics> {
-            self.rows.statistics()
-        }
-        fn committed_epoch(&self) -> EpochId {
-            self.rows.committed_epoch()
-        }
-    }
-
-    impl GraphBackend for Logged {
-        fn reserve_node_ids(
-            &self,
-            count: u64,
-        ) -> std::result::Result<std::ops::Range<u64>, ApplyError> {
-            self.rows.reserve_node_ids(count)
-        }
-        fn reserve_edge_ids(
-            &self,
-            count: u64,
-        ) -> std::result::Result<std::ops::Range<u64>, ApplyError> {
-            self.rows.reserve_edge_ids(count)
-        }
-        fn begin(
-            &self,
-            transaction: TransactionId,
-            snapshot: EpochId,
-        ) -> std::result::Result<BackendTransaction, ApplyError> {
-            self.log(Call::Begin(transaction));
-            self.rows.begin(transaction, snapshot)
-        }
-        fn apply(&self, op: &DataOp, writer: Writer) -> std::result::Result<Applied, ApplyError> {
-            self.log(Call::Apply);
-            self.rows.apply(op, writer)
-        }
-        fn commit(
-            &self,
-            transaction: BackendTransaction,
-            changes: &mut dyn Iterator<Item = &Change>,
-            epoch: EpochId,
-        ) -> std::result::Result<(), ApplyError> {
-            let changes: Vec<&Change> = changes.collect();
-            self.log(Call::Commit(transaction.id(), changes.len()));
-            self.rows
-                .commit(transaction, &mut changes.into_iter(), epoch)
-        }
-        fn rollback(
-            &self,
-            transaction: BackendTransaction,
-            changes: &mut dyn DoubleEndedIterator<Item = &Change>,
-        ) -> std::result::Result<(), ApplyError> {
-            let changes: Vec<&Change> = changes.collect();
-            self.log(Call::Rollback(transaction.id(), changes.len()));
-            self.rows.rollback(transaction, &mut changes.into_iter())
-        }
-        fn rollback_to(
-            &self,
-            transaction: BackendTransaction,
-            savepoint: ChangeMark,
-            changes_since: &mut dyn DoubleEndedIterator<Item = &Change>,
-        ) -> std::result::Result<(), ApplyError> {
-            let changes: Vec<&Change> = changes_since.collect();
-            self.log(Call::RollbackTo(transaction.id(), changes.len()));
-            self.rows
-                .rollback_to(transaction, savepoint, &mut changes.into_iter())
-        }
-        fn collect(&self, horizon: EpochId) {
-            GraphBackend::collect(&self.rows, horizon);
-        }
-        fn durable_epoch(&self) -> EpochId {
-            self.rows.durable_epoch()
-        }
-        fn flush(&self, epoch: EpochId) -> std::result::Result<(), ApplyError> {
-            self.rows.flush(epoch)
-        }
-    }
+    // The statement reported what the store keeps: nothing is left to undo.
+    session.rollback().unwrap();
+    let error = session.execute(partial).unwrap_err().to_string();
+    assert!(error.contains("not all undone"), "{error}");
 }
 
 /// Direct calls that returned survive a crash (the process exits without
@@ -742,16 +519,13 @@ mod crash {
 /// writer of a node fails with a write conflict and changes nothing.
 #[test]
 fn query_processors_in_transactions_claim_what_they_write() {
-    use grafeo_core::graph::GraphStore as _;
-    use grafeo_core::graph::rowgroup::RowGroupStore;
+    use grafeo_core::graph::lpg::LpgStore;
     use grafeo_engine::query::{QueryLanguage, QueryProcessor};
     use grafeo_engine::transaction::TransactionManager;
 
-    let store = Arc::new(RowGroupStore::new());
-    let alix = store.create_node_with_props(&["Person"], &[("name".into(), Value::from("Alix"))]);
+    let store = Arc::new(LpgStore::new().unwrap());
+    let alix = store.create_node_with_props(&["Person"], [("name", Value::from("Alix"))]);
     let manager = Arc::new(TransactionManager::new());
-    // The transactions read from the epoch the store's direct write took.
-    manager.sync_epoch(store.current_epoch());
     let (first, second) = (manager.begin(), manager.begin());
     let epoch = manager.current_epoch();
     let processor = |transaction| {
@@ -775,17 +549,8 @@ fn query_processors_in_transactions_claim_what_they_write() {
         .unwrap_err();
     assert!(is_conflict(&error), "{error}");
     assert_eq!(
-        store
-            .node_property(alix, "city", ReadView::new(epoch, Some(first)))
-            .unwrap(),
+        store.get_node_property(alix, &"city".into()),
         Some(Value::from("Berlin")),
-        "the refused write changed nothing of the first's"
-    );
-    assert_eq!(
-        store
-            .node_property(alix, "city", ReadView::latest())
-            .unwrap(),
-        None,
-        "and neither is committed"
+        "the refused write changed nothing"
     );
 }

@@ -5,7 +5,7 @@
 //! rows as the direct `db.vector_search` / `db.mmr_search` / `db.text_search`
 //! APIs.
 
-#![cfg(all(feature = "algos", feature = "vector-index"))]
+#![cfg(all(feature = "algos", feature = "vector-index", feature = "lpg"))]
 
 use grafeo_common::types::Value;
 use grafeo_engine::GrafeoDB;

@@ -55,9 +55,12 @@ import { readFileSync } from 'fs'
 // `Infinity` and `''`, which the reference runner keeps as strings.
 const DECIMAL_INTEGER = /^[+-]?[0-9]+$/
 const DECIMAL_NUMBER = /^[+-]?([0-9]+(\.[0-9]*)?|\.[0-9]+)([eE][+-]?[0-9]+)?$/
-// A small integer goes as a JS number, any other as a BigInt, which both
-// bindings type by the integer rule: an INT64 when it fits 64 bits, else an
-// exact DECIMAL up to 38 digits, and an error past that.
+const I64_MIN = -(2n ** 63n)
+const I64_MAX = 2n ** 63n - 1n
+// The whole numbers a binding takes as integers from a JS number: napi-rs
+// (Node.js) makes one from i32::MIN to u32::MAX an integer and any other a
+// float, so an integer past that range goes as a BigInt, which both bindings
+// read as an i64.
 const NUMBER_INTEGER_MIN = -(2n ** 31n)
 const NUMBER_INTEGER_MAX = 2n ** 32n - 1n
 
@@ -66,9 +69,9 @@ const NUMBER_INTEGER_MAX = 2n ** 32n - 1n
  * the Rust reference runner that every runner follows: a quoted value is a
  * string, whatever it reads like; a bare value starting with `[` or `{` is
  * JSON, whose numbers follow the rule of bare ones; a bare decimal integer
- * is an integer (a BigInt past 32 bits, which a number would round), which
- * the binding types, and any other bare decimal number a float, an error
- * past the f64 range; a bare `true` or `false` is a boolean; any other
+ * that fits i64 is an integer (a BigInt past 32 bits, which a number would
+ * turn into a float or round) and any other bare decimal number a float, an
+ * error past the f64 range; a bare `true` or `false` is a boolean; any other
  * bare value is a string.
  */
 export function paramValue(text) {
@@ -81,13 +84,17 @@ export function paramValue(text) {
 }
 
 /**
- * A decimal number written as `text`: an integer when it is one, of any
- * width (the binding types it), else a float, which must be finite.
+ * A decimal number written as `text`: an integer when it is one that fits
+ * i64, else a float, which must be finite.
  */
 function numberValue(text) {
   if (DECIMAL_INTEGER.test(text)) {
     const integer = BigInt(text)
-    return integer >= NUMBER_INTEGER_MIN && integer <= NUMBER_INTEGER_MAX ? Number(integer) : integer
+    if (integer >= I64_MIN && integer <= I64_MAX) {
+      return integer >= NUMBER_INTEGER_MIN && integer <= NUMBER_INTEGER_MAX
+        ? Number(integer)
+        : integer
+    }
   }
   const number = Number(text)
   if (!Number.isFinite(number)) throw new Error(`parameter ${text} is out of the f64 range`)
@@ -243,7 +250,7 @@ function parseSingleTest(ctx) {
 // ---------------------------------------------------------------------------
 
 function makeExpect() {
-  return { rows: [], ordered: false, count: null, empty: false, error: null, gqlStatus: null, hash: null, precision: null, columns: [] }
+  return { rows: [], ordered: false, count: null, empty: false, error: null, hash: null, precision: null, columns: [] }
 }
 
 function parseExpectBlock(ctx) {
@@ -264,7 +271,6 @@ function parseExpectBlock(ctx) {
       case 'count': expect.count = parseInt(value, 10); ctx.idx++; break
       case 'empty': expect.empty = value === 'true'; ctx.idx++; break
       case 'error': expect.error = unquote(value); ctx.idx++; break
-      case 'gql_status': expect.gqlStatus = unquote(value); ctx.idx++; break
       case 'hash': expect.hash = unquote(value); ctx.idx++; break
       case 'precision': expect.precision = parseInt(value, 10); ctx.idx++; break
       case 'columns': expect.columns = parseYamlList(value); ctx.idx++; break

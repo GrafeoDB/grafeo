@@ -2,8 +2,7 @@
 //!
 //! The catalog section holds the catalog as records of the types below, one
 //! per schema, node type, edge type, graph type, graph type binding, named
-//! constraint, index, index name and procedure, and the database's stored
-//! configuration. They hold no engine types,
+//! constraint, index, index name and procedure. They hold no engine types,
 //! so the WAL can log the same records. Each record is framed:
 //!
 //! | Bytes | Field |
@@ -24,7 +23,6 @@
 //! | 7 | [`IndexRecord`] |
 //! | 8 | [`IndexNameRecord`] |
 //! | 9 | [`ProcedureRecord`] |
-//! | 10 | [`StoredConfigRecord`] |
 //!
 //! Kind 0 is never written. A reader skips a record of a kind it does not
 //! know when the record's required flag is clear, and refuses the catalog
@@ -51,10 +49,6 @@
 //! | 5 | `TIME` | 13 | `NODE` |
 //! | 6 | `TIMESTAMP` | 14 | `EDGE` |
 //! | 7 | `LOCAL DATETIME` | 15 | `ANY` |
-//!
-//! Code 16 is `DECIMAL` (any decimal), and `0x0100_0000 | precision << 8 |
-//! scale` is `DECIMAL(precision, scale)`, a precision from 1 to 38 and a
-//! scale up to it.
 //!
 //! A reader checks a payload's length against the maximum before it reads
 //! the payload, into a buffer that grows with the bytes present, and decodes
@@ -107,7 +101,7 @@ use serde::ser::Error as _;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use super::value_codec::{MAX_PROPERTY_VALUE_DEPTH, encoded_len, nests_too_deep_to_encode};
-use crate::types::{DecimalType, Value};
+use crate::types::Value;
 use crate::utils::error::{Error, Result};
 
 /// Flag bit 0 of a framed record: a reader that does not know the record's
@@ -167,7 +161,6 @@ const KIND_CONSTRAINT: u8 = 6;
 const KIND_INDEX: u8 = 7;
 const KIND_INDEX_NAME: u8 = 8;
 const KIND_PROCEDURE: u8 = 9;
-const KIND_STORED_CONFIG: u8 = 10;
 
 // ── Record types ────────────────────────────────────────────────────
 
@@ -212,13 +205,7 @@ pub enum PropertyTypeRecord {
     Edge,
     /// `ANY`: any value.
     Any,
-    /// `DECIMAL`, any decimal (`None`), or `DECIMAL(p, s)`.
-    Decimal(Option<DecimalType>),
 }
-
-/// The code of `DECIMAL(p, s)` is this flag with the precision in bits 8 to 15
-/// and the scale in bits 0 to 7.
-const DECIMAL_TYPE_FLAG: u32 = 0x0100_0000;
 
 impl PropertyTypeRecord {
     /// The `LIST<...>` levels around the type inside them, and that type's
@@ -249,12 +236,6 @@ impl PropertyTypeRecord {
                 Self::Node => 13,
                 Self::Edge => 14,
                 Self::Any => 15,
-                Self::Decimal(None) => 16,
-                Self::Decimal(Some(decimal)) => {
-                    DECIMAL_TYPE_FLAG
-                        | u32::from(decimal.precision()) << 8
-                        | u32::from(decimal.scale())
-                }
             };
             return (levels, code);
         }
@@ -279,11 +260,6 @@ impl PropertyTypeRecord {
             13 => Self::Node,
             14 => Self::Edge,
             15 => Self::Any,
-            16 => Self::Decimal(None),
-            code if code & 0xFFFF_0000 == DECIMAL_TYPE_FLAG => {
-                let [.., precision, scale] = code.to_be_bytes();
-                Self::Decimal(Some(DecimalType::new(precision, scale).ok()?))
-            }
             _ => return None,
         })
     }
@@ -553,99 +529,6 @@ pub struct GraphTypeRecord {
     pub open: bool,
 }
 
-/// The configuration a database stores (#551): what defines or protects it,
-/// which an open applies unless the open sets the value itself. Not stored:
-/// what belongs to the machine (the thread count, an absolute path).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct StoredConfigRecord {
-    /// The graph data model, fixed when the database is created.
-    pub graph_model: GraphModelRecord,
-    /// Whether the store keeps backward edges, fixed when it is created.
-    pub backward_edges: bool,
-    /// Whether the catalog enforces schema constraints.
-    pub schema_constraints: bool,
-    /// Whether commits are logged to the sidecar WAL.
-    pub wal_enabled: bool,
-    /// When the WAL is synced.
-    pub wal_durability: DurabilityRecord,
-    /// The memory limit in bytes, `None` for the default share of the RAM.
-    pub memory_limit: Option<u64>,
-    /// The spill directory, relative to the database file's directory.
-    pub spill_path: Option<String>,
-    /// The memory configuration of each section that has one, by section
-    /// type, ascending.
-    pub sections: Vec<SectionMemoryRecord>,
-    /// How long the database keeps history (time travel).
-    pub history_retention: HistoryRetentionRecord,
-}
-
-/// How long a database keeps history.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum HistoryRetentionRecord {
-    /// No history: only what open snapshots read.
-    Off,
-    /// The states committed within this many milliseconds before now.
-    Duration {
-        /// The window, in milliseconds.
-        millis: u64,
-    },
-    /// Every state from when history was turned on.
-    Forever,
-}
-
-/// A graph data model.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum GraphModelRecord {
-    /// A labeled property graph.
-    Lpg,
-    /// An RDF triple store.
-    Rdf,
-}
-
-/// When the WAL is synced to disk.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum DurabilityRecord {
-    /// At every commit.
-    Sync,
-    /// At a commit once the delay has passed or that many records were
-    /// written.
-    Batch {
-        /// The longest delay, in milliseconds.
-        max_delay_ms: u64,
-        /// The most records between syncs.
-        max_records: u64,
-    },
-    /// By a background thread, at a steady interval.
-    Adaptive {
-        /// The interval, in milliseconds.
-        target_interval_ms: u64,
-    },
-    /// Never: the operating system writes the WAL back.
-    NoSync,
-}
-
-/// The memory configuration of one section.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub struct SectionMemoryRecord {
-    /// The section type's code (its byte in the file's directory).
-    pub section: u8,
-    /// The most RAM the section may hold, in bytes.
-    pub max_ram: Option<u64>,
-    /// The storage tier it is pinned to.
-    pub tier: TierRecord,
-}
-
-/// The storage tier a section is pinned to.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum TierRecord {
-    /// In memory first, spilled when the budget is exceeded.
-    Auto,
-    /// Always in memory.
-    ForceRam,
-    /// Spilled at open.
-    ForceDisk,
-}
-
 /// A graph bound to a graph type.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GraphBindingRecord {
@@ -878,9 +761,6 @@ pub enum CatalogKey {
     IndexName(String),
     /// A stored procedure, by name (catalog kind 9).
     Procedure(String),
-    /// The stored configuration, of which a database has one (catalog
-    /// kind 10).
-    StoredConfig,
 }
 
 impl CatalogKey {
@@ -898,7 +778,6 @@ impl CatalogKey {
             Self::Index { .. } => KIND_INDEX,
             Self::IndexName(_) => KIND_INDEX_NAME,
             Self::Procedure(_) => KIND_PROCEDURE,
-            Self::StoredConfig => KIND_STORED_CONFIG,
         }
     }
 }
@@ -925,15 +804,12 @@ pub enum CatalogRecord {
     IndexName(IndexNameRecord),
     /// A stored procedure (kind 9).
     Procedure(ProcedureRecord),
-    /// The stored configuration (kind 10).
-    StoredConfig(StoredConfigRecord),
 }
 
 impl CatalogRecord {
     /// The record's kind, the first byte of its frame: 1 `Schema`,
     /// 2 `NodeType`, 3 `EdgeType`, 4 `GraphType`, 5 `GraphBinding`,
-    /// 6 `Constraint`, 7 `Index`, 8 `IndexName`, 9 `Procedure`,
-    /// 10 `StoredConfig`.
+    /// 6 `Constraint`, 7 `Index`, 8 `IndexName`, 9 `Procedure`.
     #[must_use]
     pub const fn kind(&self) -> u8 {
         match self {
@@ -946,7 +822,6 @@ impl CatalogRecord {
             Self::Index(_) => KIND_INDEX,
             Self::IndexName(_) => KIND_INDEX_NAME,
             Self::Procedure(_) => KIND_PROCEDURE,
-            Self::StoredConfig(_) => KIND_STORED_CONFIG,
         }
     }
 
@@ -983,7 +858,6 @@ impl CatalogRecord {
             },
             Self::IndexName(record) => CatalogKey::IndexName(record.name.clone()),
             Self::Procedure(record) => CatalogKey::Procedure(record.name.clone()),
-            Self::StoredConfig(_) => CatalogKey::StoredConfig,
         }
     }
 
@@ -1041,7 +915,6 @@ impl CatalogRecord {
             Self::Index(record) => encode_bincode_payload(record, out),
             Self::IndexName(record) => encode_bincode_payload(record, out),
             Self::Procedure(record) => encode_bincode_payload(record, out),
-            Self::StoredConfig(record) => encode_bincode_payload(record, out),
         }
     }
 
@@ -1056,8 +929,7 @@ impl CatalogRecord {
             | Self::Constraint(_)
             | Self::Index(_)
             | Self::IndexName(_)
-            | Self::Procedure(_)
-            | Self::StoredConfig(_) => &[],
+            | Self::Procedure(_) => &[],
         }
     }
 
@@ -1098,7 +970,6 @@ impl CatalogRecord {
             KIND_INDEX => Self::Index(decode(payload)?),
             KIND_INDEX_NAME => Self::IndexName(decode(payload)?),
             KIND_PROCEDURE => Self::Procedure(decode(payload)?),
-            KIND_STORED_CONFIG => Self::StoredConfig(decode(payload)?),
             _ => return Ok(None),
         };
         Ok(Some(record))
@@ -1580,7 +1451,6 @@ mod tests {
             T::Node,
             T::Edge,
             T::Any,
-            T::Decimal(None),
         ]
     }
 
@@ -1677,24 +1547,6 @@ mod tests {
                 params: Vec::new(),
                 returns: vec![("name".into(), "STRING".into())],
                 body: "MATCH (p:Person) WHERE p.age >= 19 RETURN p.name AS name".into(),
-            }),
-            CatalogRecord::StoredConfig(StoredConfigRecord {
-                graph_model: GraphModelRecord::Lpg,
-                backward_edges: false,
-                schema_constraints: true,
-                wal_enabled: true,
-                wal_durability: DurabilityRecord::Batch {
-                    max_delay_ms: 19,
-                    max_records: 88,
-                },
-                memory_limit: Some(88 * 1024 * 1024),
-                spill_path: Some("amsterdam.spill".into()),
-                sections: vec![SectionMemoryRecord {
-                    section: 10,
-                    max_ram: None,
-                    tier: TierRecord::ForceRam,
-                }],
-                history_retention: HistoryRetentionRecord::Duration { millis: 3_600_000 },
             }),
         ]
     }
@@ -1860,7 +1712,7 @@ mod tests {
         let kinds: Vec<u8> = back.iter().map(CatalogRecord::kind).collect();
         assert_eq!(
             kinds,
-            [1, 2, 3, 4, 5, 6, 7, 7, 7, 8, 9, 10],
+            [1, 2, 3, 4, 5, 6, 7, 7, 7, 8, 9],
             "one kind per record type, numbered as the module documents"
         );
     }
@@ -1900,7 +1752,6 @@ mod tests {
                 },
                 CatalogKey::IndexName("person_name".into()),
                 CatalogKey::Procedure("get_adults".into()),
-                CatalogKey::StoredConfig,
             ]
         );
         for record in one_of_each().iter().chain(&every_variant()) {
@@ -2070,18 +1921,6 @@ mod tests {
                 72, 69, 82, 69, 32, 112, 46, 97, 103, 101, 32, 62, 61, 32, 49, 57, 32, 82, 69, 84,
                 85, 82, 78, 32, 112, 46, 110, 97, 109, 101, 32, 65, 83, 32, 110, 97, 109, 101,
             ],
-            &[
-                10, 1, 40, 0, 0, 0, // kind 10 (StoredConfig), required, 40 bytes
-                0, // graph model: LPG
-                0, 1, 1, // no backward edges, schema constraints, the WAL on
-                1, 19, 88, // Batch durability: 19 ms, 88 records
-                1, 252, 0, 0, 128, 5, // memory limit Some(88 MiB): u32 marker, then LE
-                // spill path Some("amsterdam.spill")
-                1, 15, 97, 109, 115, 116, 101, 114, 100, 97, 109, 46, 115, 112, 105, 108, 108,
-                1, 10, 0, 1, // one section: VectorStore (10), no RAM cap, ForceRam
-                // history retention Duration { millis: 3,600,000 }: u32 marker, then LE
-                1, 252, 128, 238, 54, 0,
-            ],
         ];
         let encoded: Vec<Vec<u8>> = one_of_each().iter().map(framed).collect();
         assert_eq!(encoded, EXPECTED, "{encoded:?}");
@@ -2092,7 +1931,7 @@ mod tests {
     #[test]
     fn every_variant_has_a_fixed_code() {
         let codes: Vec<Vec<u8>> = element_types().iter().map(bincode_of).collect();
-        let expected: Vec<Vec<u8>> = (0u8..17).map(|code| vec![0, code]).collect();
+        let expected: Vec<Vec<u8>> = (0u8..16).map(|code| vec![0, code]).collect();
         assert_eq!(codes, expected, "no LIST level, then the element code");
         assert_eq!(
             bincode_of(&list_of(2, PropertyTypeRecord::ZonedDatetime)),
@@ -2179,15 +2018,6 @@ mod tests {
             ]
             .map(|variant| bincode_of(&variant)),
             [[0], [1], [2]]
-        );
-        assert_eq!(
-            [
-                HistoryRetentionRecord::Off,
-                HistoryRetentionRecord::Duration { millis: 19 },
-                HistoryRetentionRecord::Forever,
-            ]
-            .map(|variant| bincode_of(&variant)),
-            [vec![0], vec![1, 19], vec![2]]
         );
         // A text index: the variant, label and property (empty), k1 and b
         // as 8-byte little-endian floats, the tokenizer, and the stop words:
@@ -2866,52 +2696,9 @@ mod tests {
         let mut bytes = framed(&node);
         let code_at = RECORD_HEADER_BYTES + (1 + "Event".len()) + 1 + (1 + "seen".len()) + 1;
         assert_eq!(bytes[code_at], 15, "the code of ANY");
-        bytes[code_at] = 17;
+        bytes[code_at] = 16;
         let error = read_error(&bytes);
-        assert!(error.contains("property type code 17"), "{error}");
-    }
-
-    /// `DECIMAL(p, s)` is the flag, the precision and the scale in one code;
-    /// a precision or scale out of range, or another bit set, is no code.
-    #[test]
-    fn decimal_types_have_codes_of_their_precision_and_scale() {
-        let money = PropertyTypeRecord::Decimal(Some(DecimalType::new(6, 2).unwrap()));
-        // bincode writes a u32 from 251 up as 252 and its four bytes.
-        assert_eq!(bincode_of(&money), [0, 252, 0x02, 0x06, 0x00, 0x01]);
-        assert_eq!(
-            PropertyTypeRecord::of_code(0x0100_0602),
-            Some(money.clone())
-        );
-        let widest = DecimalType::new(38, 38).unwrap();
-        assert_eq!(
-            PropertyTypeRecord::of_code(0x0100_2626),
-            Some(PropertyTypeRecord::Decimal(Some(widest)))
-        );
-        for code in [
-            0x0100_0000,
-            0x0100_2700,
-            0x0100_0506,
-            0x0101_0602,
-            0x0200_0602,
-        ] {
-            assert_eq!(PropertyTypeRecord::of_code(code), None, "{code:#x}");
-        }
-        let node = CatalogRecord::NodeType(NodeTypeRecord {
-            name: "Item".into(),
-            properties: vec![
-                property("price", money, true, None),
-                property(
-                    "tags",
-                    list_of(2, PropertyTypeRecord::Decimal(None)),
-                    true,
-                    None,
-                ),
-            ],
-            constraints: Vec::new(),
-            parent_types: Vec::new(),
-            key_labels: Vec::new(),
-        });
-        assert_eq!(read_all(&framed(&node)).unwrap(), [node]);
+        assert!(error.contains("property type code 16"), "{error}");
     }
 
     #[test]

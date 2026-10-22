@@ -16,7 +16,7 @@ use super::filter::{ExpressionPredicate, FilterExpression};
 use super::{GraphWriter, Operator, OperatorError, OperatorResult, SessionContext};
 use crate::execution::chunk::{DataChunk, DataChunkBuilder, copied_column_types};
 use crate::execution::vector::ValueVector;
-use crate::graph::GraphStore;
+use crate::graph::GraphStoreSearch;
 
 /// Trait for validating schema constraints during mutation operations.
 ///
@@ -253,7 +253,7 @@ pub struct CreateNodeOperator {
 /// attached to the operator after construction.
 #[derive(Default)]
 pub(super) struct PropertyExpressions {
-    search_store: Option<Arc<dyn GraphStore>>,
+    search_store: Option<Arc<dyn GraphStoreSearch>>,
     session_context: SessionContext,
     compiled: Option<Vec<Option<ExpressionPredicate>>>,
 }
@@ -261,7 +261,7 @@ pub(super) struct PropertyExpressions {
 impl PropertyExpressions {
     /// Creates evaluators that use `search_store` and `session_context`.
     pub(super) fn new(
-        search_store: Option<Arc<dyn GraphStore>>,
+        search_store: Option<Arc<dyn GraphStoreSearch>>,
         session_context: SessionContext,
     ) -> Self {
         Self {
@@ -297,29 +297,31 @@ impl PropertyExpressions {
                             .to_string(),
                     )
                 })?;
-                let predicate = ExpressionPredicate::new(
+                let mut predicate = ExpressionPredicate::new(
                     (**expr).clone(),
                     variable_columns.clone(),
                     Arc::clone(search_store),
-                    writer.view(),
                 )
                 .with_session_context(self.session_context.clone());
+                if let Some(epoch) = writer.viewing_epoch() {
+                    predicate = predicate.with_transaction_context(epoch, writer.transaction_id());
+                }
                 compiled.push(Some(predicate));
             }
             self.compiled = Some(compiled);
         }
         let compiled = self.compiled.as_deref().unwrap_or_default();
-        properties
+        Ok(properties
             .iter()
             .enumerate()
             .map(|(i, (name, source))| {
                 let value = match compiled.get(i).and_then(Option::as_ref) {
-                    Some(predicate) => predicate.eval_at(chunk, row)?.unwrap_or(Value::Null),
-                    None => source.resolve(chunk, row, writer)?,
+                    Some(predicate) => predicate.eval_at(chunk, row).unwrap_or(Value::Null),
+                    None => source.resolve(chunk, row, writer),
                 };
-                Ok((name.clone(), value))
+                (name.clone(), value)
             })
-            .collect()
+            .collect())
     }
 }
 
@@ -363,17 +365,13 @@ impl PropertySource {
     /// Returns `Value::Null` for [`PropertySource::Expression`]: those sources
     /// require an operator-specific augmented row and must be intercepted by
     /// the producing operator (currently the MERGE node and edge operators).
-    ///
-    /// # Errors
-    ///
-    /// The error of a read of the store that fails.
     pub fn resolve(
         &self,
         chunk: &crate::execution::chunk::DataChunk,
         row: usize,
         writer: &GraphWriter,
-    ) -> Result<Value, OperatorError> {
-        Ok(match self {
+    ) -> Value {
+        match self {
             PropertySource::Column(col_idx) => chunk
                 .column(*col_idx)
                 .and_then(|c| c.get_value(row))
@@ -381,17 +379,17 @@ impl PropertySource {
             PropertySource::Constant(v) => v.clone(),
             PropertySource::PropertyAccess { column, property } => {
                 let Some(col) = chunk.column(*column) else {
-                    return Ok(Value::Null);
+                    return Value::Null;
                 };
                 // Try node ID first, then edge ID, then map value
                 if let Some(node_id) = col.get_node_id(row) {
                     writer
-                        .node(node_id)?
+                        .node(node_id)
                         .and_then(|node| node.get_property(property).cloned())
                         .unwrap_or(Value::Null)
                 } else if let Some(edge_id) = col.get_edge_id(row) {
                     writer
-                        .edge(edge_id)?
+                        .edge(edge_id)
                         .and_then(|edge| edge.get_property(property).cloned())
                         .unwrap_or(Value::Null)
                 } else {
@@ -409,7 +407,7 @@ impl PropertySource {
             // Expression sources require an augmented row built by the producer.
             // Reaching this branch means an operator forgot to intercept it.
             PropertySource::Expression { .. } => Value::Null,
-        })
+        }
     }
 }
 
@@ -447,7 +445,7 @@ impl CreateNodeOperator {
     /// Provides a search-store handle so computed property values
     /// (`PropertySource::Expression`) can be evaluated.
     #[must_use]
-    pub fn with_search_store(mut self, search_store: Arc<dyn GraphStore>) -> Self {
+    pub fn with_search_store(mut self, search_store: Arc<dyn GraphStoreSearch>) -> Self {
         self.expressions.search_store = Some(search_store);
         self
     }
@@ -542,11 +540,6 @@ impl Operator for CreateNodeOperator {
 
 /// Reads the entity id in `column` of `row`, for the error messages naming
 /// the column (`from`, `node`, ...) and the id kind (`node`, `edge`, ...).
-/// The start of a relationship a CREATE or MERGE creates, for [`id_at`]'s errors.
-const START: &str = "the start of the created relationship";
-/// The end of a relationship a CREATE or MERGE creates, for [`id_at`]'s errors.
-const END: &str = "the end of the created relationship";
-
 fn id_at(
     chunk: &DataChunk,
     column: usize,
@@ -561,11 +554,6 @@ fn id_at(
     match value {
         // Ids travel as the bits of an i64.
         Value::Int64(id) => Ok(id.cast_unsigned()),
-        // A node an OPTIONAL MATCH did not find, for one.
-        Value::Null => Err(OperatorError::TypeMismatch {
-            expected: format!("a {id_kind} for {column_name}"),
-            found: "null".to_string(),
-        }),
         other => Err(OperatorError::TypeMismatch {
             expected: format!("Int64 ({id_kind} ID)"),
             found: format!("{other:?}"),
@@ -663,7 +651,7 @@ impl CreateEdgeOperator {
     /// Provides a search-store handle so computed property values
     /// (`PropertySource::Expression`) can be evaluated.
     #[must_use]
-    pub fn with_search_store(mut self, search_store: Arc<dyn GraphStore>) -> Self {
+    pub fn with_search_store(mut self, search_store: Arc<dyn GraphStoreSearch>) -> Self {
         self.expressions.search_store = Some(search_store);
         self
     }
@@ -688,8 +676,8 @@ impl Operator for CreateEdgeOperator {
         let mut builder = DataChunkBuilder::with_capacity(&types, chunk.row_count());
 
         for row in chunk.selected_indices() {
-            let from = NodeId(id_at(&chunk, self.from_column, row, START, "node")?);
-            let to = NodeId(id_at(&chunk, self.to_column, row, END, "node")?);
+            let from = NodeId(id_at(&chunk, self.from_column, row, "from", "node")?);
+            let to = NodeId(id_at(&chunk, self.to_column, row, "to", "node")?);
             let properties =
                 self.expressions
                     .resolve_row(&self.properties, &chunk, row, &self.writer)?;
@@ -828,7 +816,7 @@ impl CreateOperator {
     /// Provides a search-store handle so computed property values
     /// (`PropertySource::Expression`) can be evaluated.
     #[must_use]
-    pub fn with_search_store(mut self, search_store: Arc<dyn GraphStore>) -> Self {
+    pub fn with_search_store(mut self, search_store: Arc<dyn GraphStoreSearch>) -> Self {
         for expressions in &mut self.expressions {
             expressions.search_store = Some(Arc::clone(&search_store));
         }
@@ -888,8 +876,8 @@ impl Operator for CreateOperator {
                     let mut ids =
                         output.then(|| ValueVector::with_capacity(LogicalType::Edge, rows.len()));
                     for row in 0..rows.len() {
-                        let from = NodeId(id_at(&out, *from_column, row, START, "node")?);
-                        let to = NodeId(id_at(&out, *to_column, row, END, "node")?);
+                        let from = NodeId(id_at(&out, *from_column, row, "from", "node")?);
+                        let to = NodeId(id_at(&out, *to_column, row, "to", "node")?);
                         let properties =
                             expressions.resolve_row(properties, &out, row, &self.writer)?;
                         let edge_id = self.writer.create_edge(from, to, edge_type, properties)?;
@@ -1270,10 +1258,8 @@ impl Operator for SetPropertyOperator {
             let assignments: Vec<(String, Value)> = self
                 .properties
                 .iter()
-                .map(|(name, source)| {
-                    Ok((name.clone(), source.resolve(&chunk, row, &self.writer)?))
-                })
-                .collect::<Result<_, OperatorError>>()?;
+                .map(|(name, source)| (name.clone(), source.resolve(&chunk, row, &self.writer)))
+                .collect();
             if self.is_edge {
                 self.writer
                     .set_edge_properties(EdgeId(entity_id), &assignments, self.replace)?;
@@ -1302,19 +1288,19 @@ impl Operator for SetPropertyOperator {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "lpg"))]
 mod tests {
     use super::*;
     use crate::execution::DataChunk;
     use crate::execution::chunk::DataChunkBuilder;
-    use crate::graph::rowgroup::RowGroupStore;
-    use grafeo_common::types::ReadView;
+    use crate::graph::GraphStoreMut;
+    use crate::graph::lpg::LpgStore;
     use grafeo_common::types::{EpochId, TransactionId};
 
     // ── Helpers ────────────────────────────────────────────────────
 
-    fn create_test_store() -> Arc<RowGroupStore> {
-        Arc::new(RowGroupStore::new())
+    fn create_test_store() -> Arc<dyn GraphStoreMut> {
+        Arc::new(LpgStore::new().unwrap())
     }
 
     struct MockInput {
@@ -1402,7 +1388,7 @@ mod tests {
         // Second call should return None (standalone executes once)
         assert!(op.next().unwrap().is_none());
 
-        assert_eq!(store.node_count(ReadView::latest()).unwrap(), 1);
+        assert_eq!(store.node_count(), 1);
     }
 
     #[test]
@@ -1429,7 +1415,7 @@ mod tests {
         );
 
         let _chunk = op.next().unwrap().unwrap();
-        assert_eq!(store.edge_count(ReadView::latest()).unwrap(), 1);
+        assert_eq!(store.edge_count(), 1);
     }
 
     #[test]
@@ -1437,7 +1423,7 @@ mod tests {
         let store = create_test_store();
 
         let node_id = store.create_node(&["Person"]);
-        assert_eq!(store.node_count(ReadView::latest()).unwrap(), 1);
+        assert_eq!(store.node_count(), 1);
 
         let mut op = DeleteNodeOperator::new(
             Arc::clone(&store),
@@ -1450,7 +1436,7 @@ mod tests {
         let chunk = op.next().unwrap().unwrap();
         // Pass-through: output row contains the original node ID
         assert_eq!(chunk.row_count(), 1);
-        assert_eq!(store.node_count(ReadView::latest()).unwrap(), 0);
+        assert_eq!(store.node_count(), 0);
     }
 
     // ── DeleteEdgeOperator ───────────────────────────────────────
@@ -1462,7 +1448,7 @@ mod tests {
         let n1 = store.create_node(&["Person"]);
         let n2 = store.create_node(&["Person"]);
         let eid = store.create_edge(n1, n2, "KNOWS");
-        assert_eq!(store.edge_count(ReadView::latest()).unwrap(), 1);
+        assert_eq!(store.edge_count(), 1);
 
         let mut op = DeleteEdgeOperator::new(
             Arc::clone(&store),
@@ -1473,7 +1459,7 @@ mod tests {
 
         let chunk = op.next().unwrap().unwrap();
         assert_eq!(chunk.row_count(), 1);
-        assert_eq!(store.edge_count(ReadView::latest()).unwrap(), 0);
+        assert_eq!(store.edge_count(), 0);
     }
 
     #[test]
@@ -1498,7 +1484,7 @@ mod tests {
         let n2 = store.create_node(&["N"]);
         let e1 = store.create_edge(n1, n2, "R");
         let e2 = store.create_edge(n2, n1, "S");
-        assert_eq!(store.edge_count(ReadView::latest()).unwrap(), 2);
+        assert_eq!(store.edge_count(), 2);
 
         let mut op = DeleteEdgeOperator::new(
             Arc::clone(&store),
@@ -1509,7 +1495,7 @@ mod tests {
 
         let chunk = op.next().unwrap().unwrap();
         assert_eq!(chunk.row_count(), 2);
-        assert_eq!(store.edge_count(ReadView::latest()).unwrap(), 0);
+        assert_eq!(store.edge_count(), 0);
     }
 
     // ── DeleteNodeOperator with DETACH ───────────────────────────
@@ -1522,7 +1508,7 @@ mod tests {
         let n2 = store.create_node(&["Person"]);
         store.create_edge(n1, n2, "KNOWS");
         store.create_edge(n2, n1, "FOLLOWS");
-        assert_eq!(store.edge_count(ReadView::latest()).unwrap(), 2);
+        assert_eq!(store.edge_count(), 2);
 
         let mut op = DeleteNodeOperator::new(
             Arc::clone(&store),
@@ -1534,8 +1520,8 @@ mod tests {
 
         let chunk = op.next().unwrap().unwrap();
         assert_eq!(chunk.row_count(), 1);
-        assert_eq!(store.node_count(ReadView::latest()).unwrap(), 1);
-        assert_eq!(store.edge_count(ReadView::latest()).unwrap(), 0); // edges detached
+        assert_eq!(store.node_count(), 1);
+        assert_eq!(store.edge_count(), 0); // edges detached
     }
 
     // ── AddLabelOperator ─────────────────────────────────────────
@@ -1559,7 +1545,7 @@ mod tests {
         assert_eq!(updated, 1);
 
         // Verify label was added
-        let node_data = store.node(node, ReadView::latest()).unwrap().unwrap();
+        let node_data = store.get_node(node).unwrap();
         let labels: Vec<&str> = node_data.labels.iter().map(|l| l.as_ref()).collect();
         assert!(labels.contains(&"Person"));
         assert!(labels.contains(&"Employee"));
@@ -1583,7 +1569,7 @@ mod tests {
         let updated = chunk.column(1).unwrap().get_int64(0).unwrap();
         assert_eq!(updated, 2); // 2 labels added
 
-        let node_data = store.node(node, ReadView::latest()).unwrap().unwrap();
+        let node_data = store.get_node(node).unwrap();
         let labels: Vec<&str> = node_data.labels.iter().map(|l| l.as_ref()).collect();
         assert!(labels.contains(&"LabelA"));
         assert!(labels.contains(&"LabelB"));
@@ -1625,7 +1611,7 @@ mod tests {
         assert_eq!(updated, 1);
 
         // Verify label was removed
-        let node_data = store.node(node, ReadView::latest()).unwrap().unwrap();
+        let node_data = store.get_node(node).unwrap();
         let labels: Vec<&str> = node_data.labels.iter().map(|l| l.as_ref()).collect();
         assert!(labels.contains(&"Person"));
         assert!(!labels.contains(&"Employee"));
@@ -1673,7 +1659,7 @@ mod tests {
         assert_eq!(chunk.row_count(), 1);
 
         // Verify property was set
-        let node_data = store.node(node, ReadView::latest()).unwrap().unwrap();
+        let node_data = store.get_node(node).unwrap();
         assert_eq!(
             node_data
                 .properties
@@ -1710,7 +1696,7 @@ mod tests {
         let chunk = op.next().unwrap().unwrap();
         assert_eq!(chunk.row_count(), 1);
 
-        let node_data = store.node(node, ReadView::latest()).unwrap().unwrap();
+        let node_data = store.get_node(node).unwrap();
         assert_eq!(
             node_data
                 .properties
@@ -1741,7 +1727,7 @@ mod tests {
         let chunk = op.next().unwrap().unwrap();
         assert_eq!(chunk.row_count(), 1);
 
-        let edge_data = store.edge(eid, ReadView::latest()).unwrap().unwrap();
+        let edge_data = store.get_edge(eid).unwrap();
         assert_eq!(
             edge_data
                 .properties
@@ -1775,7 +1761,7 @@ mod tests {
 
         op.next().unwrap().unwrap();
 
-        let node_data = store.node(node, ReadView::latest()).unwrap().unwrap();
+        let node_data = store.get_node(node).unwrap();
         assert_eq!(
             node_data
                 .properties
@@ -1825,13 +1811,13 @@ mod tests {
 
         let err = op.next().unwrap_err();
         match err {
-            OperatorError::ConstraintViolation(_, msg) => {
+            OperatorError::ConstraintViolation(msg) => {
                 assert!(msg.contains("connected edge"), "unexpected message: {msg}");
             }
             other => panic!("expected ConstraintViolation, got {other:?}"),
         }
         // Node should still exist
-        assert_eq!(store.node_count(ReadView::latest()).unwrap(), 2);
+        assert_eq!(store.node_count(), 2);
     }
 
     // ── CreateNodeOperator with input ───────────────────────────
@@ -1859,7 +1845,7 @@ mod tests {
         assert_eq!(chunk.row_count(), 1);
 
         // Should have created one new node (2 total: Seed + Created)
-        assert_eq!(store.node_count(ReadView::latest()).unwrap(), 2);
+        assert_eq!(store.node_count(), 2);
 
         // Exhausted
         assert!(op.next().unwrap().is_none());
@@ -1897,7 +1883,7 @@ mod tests {
 
         let chunk = op.next().unwrap().unwrap();
         assert_eq!(chunk.row_count(), 1);
-        assert_eq!(store.edge_count(ReadView::latest()).unwrap(), 1);
+        assert_eq!(store.edge_count(), 1);
 
         // Verify the output chunk contains the edge in column 2, as an edge
         // (whatever type the planner declared for it)
@@ -1908,10 +1894,7 @@ mod tests {
             .expect("edge ID should be in output column 2");
 
         // Verify the edge has the property
-        let edge = store
-            .edge(edge_id, ReadView::latest())
-            .unwrap()
-            .expect("edge should exist");
+        let edge = store.get_edge(edge_id).expect("edge should exist");
         assert_eq!(
             edge.properties
                 .get(&grafeo_common::types::PropertyKey::new("since")),
@@ -1947,7 +1930,7 @@ mod tests {
 
         op.next().unwrap().unwrap();
 
-        let node_data = store.node(node, ReadView::latest()).unwrap().unwrap();
+        let node_data = store.get_node(node).unwrap();
         // Old property should be gone
         assert!(
             node_data
@@ -1989,7 +1972,7 @@ mod tests {
 
         op.next().unwrap().unwrap();
 
-        let node_data = store.node(node, ReadView::latest()).unwrap().unwrap();
+        let node_data = store.get_node(node).unwrap();
         // Existing property should still be there
         assert_eq!(
             node_data.properties.get(&PropertyKey::new("existing")),
@@ -2040,10 +2023,7 @@ mod tests {
 
         op.next().unwrap().unwrap();
 
-        let target_data = store
-            .node(target_node, ReadView::latest())
-            .unwrap()
-            .unwrap();
+        let target_data = store.get_node(target_node).unwrap();
         assert_eq!(
             target_data.properties.get(&PropertyKey::new("copied_name")),
             Some(&Value::String("Alix".into()))
@@ -2065,7 +2045,7 @@ mod tests {
                 _value: &Value,
             ) -> Result<(), OperatorError> {
                 if key == "forbidden" {
-                    return Err(OperatorError::schema_violation(
+                    return Err(OperatorError::ConstraintViolation(
                         "property 'forbidden' is not allowed".to_string(),
                     ));
                 }
@@ -2105,7 +2085,7 @@ mod tests {
 
         // Valid property should succeed
         let mut op = CreateNodeOperator::new(
-            GraphWriter::immediate(Arc::clone(&store)).with_validator(Arc::new(RejectAgeValidator)),
+            GraphWriter::new(Arc::clone(&store)).with_validator(Arc::new(RejectAgeValidator)),
             None,
             vec!["Thing".to_string()],
             vec![(
@@ -2117,11 +2097,11 @@ mod tests {
         );
 
         assert!(op.next().is_ok());
-        assert_eq!(store.node_count(ReadView::latest()).unwrap(), 1);
+        assert_eq!(store.node_count(), 1);
 
         // Forbidden property should fail
         let mut op = CreateNodeOperator::new(
-            GraphWriter::immediate(Arc::clone(&store)).with_validator(Arc::new(RejectAgeValidator)),
+            GraphWriter::new(Arc::clone(&store)).with_validator(Arc::new(RejectAgeValidator)),
             None,
             vec!["Thing".to_string()],
             vec![(
@@ -2133,7 +2113,7 @@ mod tests {
         );
 
         let err = op.next().unwrap_err();
-        assert!(matches!(err, OperatorError::ConstraintViolation(..)));
+        assert!(matches!(err, OperatorError::ConstraintViolation(_)));
         // Node count should still be 2 (the node is created before validation, but the error
         // propagates - this tests the validation logic fires)
     }
@@ -2161,7 +2141,7 @@ mod tests {
         op.reset();
         assert!(op.next().unwrap().is_some());
 
-        assert_eq!(store.node_count(ReadView::latest()).unwrap(), 2);
+        assert_eq!(store.node_count(), 2);
     }
 
     // ── Operator name() ──────────────────────────────────────────
@@ -2420,40 +2400,40 @@ mod tests {
 
     #[test]
     fn test_property_source_column() {
-        let writer = GraphWriter::immediate(create_test_store());
+        let writer = GraphWriter::new(create_test_store());
         let mut builder = DataChunkBuilder::new(&[LogicalType::Int64]);
         builder.column_mut(0).unwrap().push_int64(42);
         builder.advance_row();
         let chunk = builder.finish();
 
         let src = PropertySource::Column(0);
-        assert_eq!(src.resolve(&chunk, 0, &writer).unwrap(), Value::Int64(42));
+        assert_eq!(src.resolve(&chunk, 0, &writer), Value::Int64(42));
     }
 
     #[test]
     fn test_property_source_constant() {
-        let writer = GraphWriter::immediate(create_test_store());
+        let writer = GraphWriter::new(create_test_store());
         let chunk = DataChunk::empty();
 
         let src = PropertySource::Constant(Value::String("hello".into()));
         assert_eq!(
-            src.resolve(&chunk, 0, &writer).unwrap(),
+            src.resolve(&chunk, 0, &writer),
             Value::String("hello".into()),
         );
     }
 
     #[test]
     fn test_property_source_column_out_of_bounds() {
-        let writer = GraphWriter::immediate(create_test_store());
+        let writer = GraphWriter::new(create_test_store());
         let chunk = DataChunk::empty();
 
         let src = PropertySource::Column(99);
-        assert_eq!(src.resolve(&chunk, 0, &writer).unwrap(), Value::Null);
+        assert_eq!(src.resolve(&chunk, 0, &writer), Value::Null);
     }
 
     #[test]
     fn test_property_source_property_access_from_map() {
-        let writer = GraphWriter::immediate(create_test_store());
+        let writer = GraphWriter::new(create_test_store());
         let mut map = std::collections::BTreeMap::new();
         map.insert(PropertyKey::new("age"), Value::Int64(30));
 
@@ -2469,19 +2449,19 @@ mod tests {
             column: 0,
             property: "age".to_string(),
         };
-        assert_eq!(src.resolve(&chunk, 0, &writer).unwrap(), Value::Int64(30));
+        assert_eq!(src.resolve(&chunk, 0, &writer), Value::Int64(30));
     }
 
     #[test]
     fn test_property_source_property_access_missing_column() {
-        let writer = GraphWriter::immediate(create_test_store());
+        let writer = GraphWriter::new(create_test_store());
         let chunk = DataChunk::empty();
 
         let src = PropertySource::PropertyAccess {
             column: 99,
             property: "name".to_string(),
         };
-        assert_eq!(src.resolve(&chunk, 0, &writer).unwrap(), Value::Null);
+        assert_eq!(src.resolve(&chunk, 0, &writer), Value::Null);
     }
 
     /// A property of a node or edge the writer's transaction created, not
@@ -2489,8 +2469,8 @@ mod tests {
     #[test]
     fn a_property_access_reads_what_its_transaction_wrote() {
         let store = create_test_store();
-        let writer =
-            GraphWriter::pending(Arc::clone(&store), TransactionId::new(3), EpochId::INITIAL);
+        let writer = GraphWriter::new(Arc::clone(&store))
+            .with_transaction_context(EpochId::INITIAL, Some(TransactionId::new(3)));
         let alix = writer
             .create_node(
                 &["Person".to_string()],
@@ -2510,16 +2490,14 @@ mod tests {
             .unwrap();
         assert_eq!(
             store
-                .node(alix, ReadView::latest())
-                .unwrap()
+                .get_node(alix)
                 .and_then(|node| node.get_property("age").cloned()),
             None,
             "a read outside the transaction does not see its value"
         );
         assert_eq!(
             store
-                .edge(knows, ReadView::latest())
-                .unwrap()
+                .get_edge(knows)
                 .and_then(|edge| edge.get_property("since").cloned()),
             None,
             "a read outside the transaction does not see its value"
@@ -2539,7 +2517,7 @@ mod tests {
             column: 1,
             property: "since".to_string(),
         };
-        assert_eq!(age.resolve(&chunk, 0, &writer).unwrap(), Value::Int64(19));
-        assert_eq!(since.resolve(&chunk, 0, &writer).unwrap(), Value::Int64(88));
+        assert_eq!(age.resolve(&chunk, 0, &writer), Value::Int64(19));
+        assert_eq!(since.resolve(&chunk, 0, &writer), Value::Int64(88));
     }
 }

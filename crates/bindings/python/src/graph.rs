@@ -13,7 +13,7 @@ use crate::types::PyValue;
 /// Access properties with `node["name"]` or `node.get("name")`. Check labels
 /// with `node.has_label("Person")`. Nodes are returned by queries like
 /// `MATCH (n:Person) RETURN n`.
-#[pyclass(name = "Node")]
+#[pyclass(name = "Node", skip_from_py_object)]
 #[derive(Clone, Debug)]
 pub struct PyNode {
     pub(crate) id: NodeId,
@@ -113,7 +113,7 @@ impl PyNode {
 /// Access properties with `edge["weight"]` or `edge.get("weight")`. Check the
 /// relationship type with `edge.edge_type`. Edges connect a `source_id` to a
 /// `target_id` and are returned by queries like `MATCH ()-[r:WORKS_AT]->() RETURN r`.
-#[pyclass(name = "Edge")]
+#[pyclass(name = "Edge", skip_from_py_object)]
 #[derive(Clone, Debug)]
 pub struct PyEdge {
     pub(crate) id: EdgeId,

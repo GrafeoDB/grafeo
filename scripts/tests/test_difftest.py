@@ -174,35 +174,6 @@ def test_compare_fails_when_a_reviewed_difference_is_gone(tmp_path, capsys):
     assert "A2|gql [NO LONGER DIFFERENT]" in capsys.readouterr().out
 
 
-def test_a_varying_case_passes_whether_or_not_it_differs(tmp_path, capsys):
-    """A `~` line: the old build's result varies, so the case may also not differ."""
-    digest = difftest.fingerprint(rows([2]))
-    varies = difftest.fingerprint(rows([5]))
-    old, new, reviewed = gate_files(
-        tmp_path,
-        [
-            f"A1|gql ~{digest} A1 now returns 2",
-            f"A2|gql ~{varies} A2 varies in the old build",
-        ],
-    )
-    assert difftest.compare(old, new, reviewed) == 0
-    out = capsys.readouterr().out
-    assert "=== A1|gql [reviewed]" in out
-    assert "A2|gql" not in out
-    assert "all reviewed" in out
-
-
-@pytest.mark.parametrize("key", ["A1|gql", "A2|gql"])  # A1 differs, A2 does not
-def test_a_varying_case_fails_when_its_new_result_changed(tmp_path, capsys, key):
-    """A `~` line still checks the new result, also when the old build agrees."""
-    reviewed_a1 = f"A1|gql {difftest.fingerprint(rows([2]))} A1 now returns 2"
-    varying = f"{key} ~{difftest.fingerprint(rows([3]))} returned 3 when reviewed"
-    lines = [varying] if key == "A1|gql" else [reviewed_a1, varying]
-    old, new, reviewed = gate_files(tmp_path, lines)
-    assert difftest.compare(old, new, reviewed) == 1
-    assert f"=== {key} [CHANGED SINCE THE REVIEW]" in capsys.readouterr().out
-
-
 def test_compare_without_a_reviewed_list_only_reports(tmp_path, capsys):
     old, new, _ = gate_files(tmp_path, [])
     assert difftest.compare(old, new) == 0
@@ -249,44 +220,15 @@ def test_cases_name_known_languages_and_fixtures():
         assert re.fullmatch(r"[A-Z]+\d+", case.id), case.id
 
 
-WRITES = re.compile(r"\b(INSERT|CREATE|SET|REMOVE|DELETE|MERGE|DROP)\b", re.IGNORECASE)
-# A quoted string, with backslash escapes: query text inside one is a value.
-STRING_LITERAL = re.compile(r"'(?:[^'\\]|\\.)*'|\"(?:[^\"\\]|\\.)*\"")
-
-
-def writes_outside_strings(query: str) -> bool:
-    return WRITES.search(STRING_LITERAL.sub("''", query)) is not None
-
-
-def test_a_write_keyword_counts_only_outside_a_string():
-    assert writes_outside_strings("MATCH (n) DETACH DELETE n")
-    assert writes_outside_strings("CALL p('x') YIELD v SET v.a = 1")
-    assert not writes_outside_strings(
-        r"CALL p('it\'s\' DETACH DELETE n') YIELD v RETURN v"
-    )
-    assert not writes_outside_strings('RETURN "CREATE (n)" AS text')
-
-
-def test_only_the_write_fixtures_have_writing_cases():
+def test_only_the_writes_fixture_has_writing_cases():
     # Each fixture is built once and shared by its cases, so a write would change
-    # what later cases see. The write fixtures (`corpus.WRITE_FIXTURES`) are the
-    # exception: databases of their own, whose cases run in corpus order and read
-    # what the writes before them left. A write keyword inside a string literal is
-    # a value (BZ2 passes query text as an argument that must run nothing).
+    # what later cases see. The `writes` fixture is the one exception: an empty
+    # database of its own, whose cases run in corpus order and read what the
+    # writes before them left.
+    writes = re.compile(
+        r"\b(INSERT|CREATE|SET|REMOVE|DELETE|MERGE|DROP)\b", re.IGNORECASE
+    )
     for case in corpus.CASES:
-        if case.fixture in corpus.WRITE_FIXTURES:
+        if case.fixture == "writes":
             continue
-        assert not writes_outside_strings(case.query), case.id
-
-
-def test_a_write_fixture_serves_only_its_sections():
-    # A write fixture's cases read what the writes before them left, so a case of
-    # another section on it would see those writes: each one is used by the
-    # sections it names only.
-    for case in corpus.CASES:
-        sections = corpus.WRITE_FIXTURES.get(case.fixture)
-        if sections is not None:
-            section = re.match(r"[A-Z]+", case.id).group()
-            assert section in sections, (case.id, case.fixture)
-    for fixture in corpus.WRITE_FIXTURES:
-        assert fixture in corpus.FIXTURES, fixture
+        assert not writes.search(case.query), case.id

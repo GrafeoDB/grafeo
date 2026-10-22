@@ -7,7 +7,7 @@
 
 use std::sync::Arc;
 
-use grafeo_common::types::{Decimal, Value};
+use grafeo_common::types::Value;
 use grafeo_engine::GrafeoDB;
 
 /// Helper: extract string values from single-column result rows.
@@ -47,8 +47,8 @@ async fn test_async_checkpoint_persists_data() {
     // Reopen and verify
     {
         let db = GrafeoDB::open(&path).unwrap();
-        assert_eq!(db.node_count().unwrap(), 2);
-        assert_eq!(db.edge_count().unwrap(), 1);
+        assert_eq!(db.node_count(), 2);
+        assert_eq!(db.edge_count(), 1);
 
         let session = db.session();
         let result = session
@@ -91,7 +91,7 @@ async fn test_async_checkpoint_multiple_sessions() {
 
     {
         let db = GrafeoDB::open(&path).unwrap();
-        assert_eq!(db.node_count().unwrap(), 3);
+        assert_eq!(db.node_count(), 3);
 
         let session = db.session();
         let result = session
@@ -125,7 +125,7 @@ async fn test_async_snapshot_then_continue_writing() {
 
     {
         let db = GrafeoDB::open(&path).unwrap();
-        assert_eq!(db.node_count().unwrap(), 2);
+        assert_eq!(db.node_count(), 2);
 
         let session = db.session();
         let result = session
@@ -144,8 +144,8 @@ async fn test_async_checkpoint_empty_database() {
     let db = Arc::new(GrafeoDB::open(&path).unwrap());
     // Checkpoint an empty database should succeed
     db.async_wal_checkpoint().await.unwrap();
-    assert_eq!(db.node_count().unwrap(), 0);
-    assert_eq!(db.edge_count().unwrap(), 0);
+    assert_eq!(db.node_count(), 0);
+    assert_eq!(db.edge_count(), 0);
     db.close().unwrap();
 }
 
@@ -175,7 +175,7 @@ async fn test_async_checkpoint_after_deletes() {
 
     {
         let db = GrafeoDB::open(&path).unwrap();
-        assert_eq!(db.node_count().unwrap(), 2);
+        assert_eq!(db.node_count(), 2);
 
         let session = db.session();
         let result = session
@@ -216,7 +216,7 @@ async fn test_async_checkpoint_with_properties_and_labels() {
 
     {
         let db = GrafeoDB::open(&path).unwrap();
-        assert_eq!(db.node_count().unwrap(), 3);
+        assert_eq!(db.node_count(), 3);
 
         let session = db.session();
 
@@ -226,10 +226,7 @@ async fn test_async_checkpoint_with_properties_and_labels() {
             .unwrap();
         assert_eq!(result.rows().len(), 1);
         assert_eq!(result.rows()[0][0], Value::Int64(30));
-        assert_eq!(
-            result.rows()[0][1],
-            Value::Decimal(Decimal::parse("9.5").unwrap())
-        );
+        assert_eq!(result.rows()[0][1], Value::Float64(9.5));
         assert_eq!(result.rows()[0][2], Value::Bool(true));
 
         // Verify Alix has both labels
@@ -334,6 +331,6 @@ async fn test_async_checkpoint_idempotent() {
     db.async_wal_checkpoint().await.unwrap();
     db.async_wal_checkpoint().await.unwrap();
 
-    assert_eq!(db.node_count().unwrap(), 1);
+    assert_eq!(db.node_count(), 1);
     db.close().unwrap();
 }

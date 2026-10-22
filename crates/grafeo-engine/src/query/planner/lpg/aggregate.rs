@@ -3,7 +3,7 @@
 use super::{
     AggregateOp, Arc, Direction, EntityValue, Error, ExpandDirection, ExpandStep,
     ExpressionPredicate, FactorizedAggregate, FactorizedAggregateOperator, FilterExpression,
-    FilterOperator, GraphStore, HashAggregateOperator, HashMap, LazyFactorizedChainOperator,
+    FilterOperator, GraphStoreSearch, HashAggregateOperator, HashMap, LazyFactorizedChainOperator,
     LogicalAggregateFunction, LogicalExpression, LogicalType, Operator, PhysicalAggregateExpr,
     ProjectExpr, ProjectOperator, Result, SimpleAggregateOperator, convert_aggregate_function,
     expression_to_string, resolved_column_name,
@@ -42,55 +42,12 @@ impl super::Planner {
 
         // An aggregate that comes first (`RETURN count(*)`) aggregates the
         // one empty row.
-        let (mut input_op, mut input_columns) = self.plan_input(&agg.input)?;
+        let (mut input_op, input_columns) = self.plan_input(&agg.input)?;
         // Values that read the graph after a write (`... SET h.c = i RETURN
         // sum(h.c)`) read what the whole write left (see `after_write`).
         if super::after_write::aggregate_reads(agg) {
             input_op = super::mutation::read_first_after_a_write(input_op, &agg.input);
         }
-
-        // A subquery in a grouping key or an aggregate's argument
-        // (`sum(COUNT { ... })`) runs per input row, as one in a projection
-        // does (see `lift_subqueries`): its value is a column of the rows
-        // the aggregate reads. A key column keeps the name of the key as
-        // written (`COUNT {...}`), which the RETURN above it reads.
-        let key_names: Vec<String> = agg.group_by.iter().map(expression_to_string).collect();
-        let input_writes = agg.input.has_mutations();
-        let lifted_aggregate;
-        let agg = if agg
-            .group_by
-            .iter()
-            .chain(
-                agg.aggregates.iter().flat_map(|aggregate| {
-                    aggregate.expression.iter().chain(&aggregate.expression2)
-                }),
-            )
-            .any(|expression| {
-                self.has_subquery_to_lift(expression, Some(&input_columns), input_writes)
-            }) {
-            let mut owned = agg.clone();
-            let expressions =
-                owned
-                    .group_by
-                    .iter_mut()
-                    .chain(owned.aggregates.iter_mut().flat_map(|aggregate| {
-                        aggregate
-                            .expression
-                            .iter_mut()
-                            .chain(aggregate.expression2.iter_mut())
-                    }));
-            for expression in expressions {
-                let (lifted, lifted_input, lifted_columns) =
-                    self.lift_subqueries(expression, input_op, input_columns, input_writes)?;
-                *expression = lifted;
-                input_op = lifted_input;
-                input_columns = lifted_columns;
-            }
-            lifted_aggregate = owned;
-            &lifted_aggregate
-        } else {
-            agg
-        };
 
         // Build variable to column index mapping
         let mut variable_columns: HashMap<String, usize> = input_columns
@@ -228,9 +185,9 @@ impl super::Planner {
                     input_op,
                     projections,
                     output_types,
-                    Arc::clone(&self.store) as Arc<dyn GraphStore>,
-                    self.read_view(),
+                    Arc::clone(&self.store) as Arc<dyn GraphStoreSearch>,
                 )
+                .with_transaction_context(self.viewing_epoch, self.transaction_id)
                 .with_session_context(self.session_context.clone()),
             );
         }
@@ -286,10 +243,10 @@ impl super::Planner {
 
         // Add group-by columns: a group key keeps what it holds, also one
         // computed by an expression (`{msg: m}`, `x.msg`, `startNode(r)`).
-        for (expr, name) in agg.group_by.iter().zip(key_names) {
+        for expr in &agg.group_by {
             let entity = self.held_entity(expr);
             output_schema.push(entity_type(entity.as_ref()));
-            output_columns.push(name);
+            output_columns.push(expression_to_string(expr));
             output_entities.push(entity);
         }
 
@@ -310,8 +267,7 @@ impl super::Planner {
                     LogicalType::Int64
                 }
                 LogicalAggregateFunction::Sum => LogicalType::Any,
-                // A float, or a decimal for decimals and integers.
-                LogicalAggregateFunction::Avg => LogicalType::Any,
+                LogicalAggregateFunction::Avg => LogicalType::Float64,
                 LogicalAggregateFunction::Min | LogicalAggregateFunction::Max => {
                     // MIN/MAX preserve input type: the result can be any type
                     // (Int64, Float64, String, Date, etc.), so use Any/Generic
@@ -385,9 +341,9 @@ impl super::Planner {
             let predicate = ExpressionPredicate::new(
                 filter_expr,
                 having_var_columns,
-                Arc::clone(&self.store) as Arc<dyn GraphStore>,
-                self.read_view(),
+                Arc::clone(&self.store) as Arc<dyn GraphStoreSearch>,
             )
+            .with_transaction_context(self.viewing_epoch, self.transaction_id)
             .with_session_context(self.session_context.clone());
             operator = Box::new(FilterOperator::new(operator, Box::new(predicate)));
         }
@@ -470,7 +426,7 @@ impl super::Planner {
             steps.push(ExpandStep {
                 source_column,
                 direction,
-                edge_types: self.stored_edge_types(&expand.edge_types)?,
+                edge_types: expand.edge_types.clone(),
             });
 
             let edge_col_name = self.register_edge_column(&expand.edge_variable);
@@ -481,13 +437,17 @@ impl super::Planner {
         }
 
         // Create the lazy factorized chain operator
-        let lazy_op = LazyFactorizedChainOperator::new(
-            Arc::clone(&self.store) as Arc<dyn GraphStore>,
+        let mut lazy_op = LazyFactorizedChainOperator::new(
+            Arc::clone(&self.store) as Arc<dyn GraphStoreSearch>,
             base_op,
             steps,
-            self.read_view(),
-        )
-        .with_read_counter(self.read_counter());
+        );
+
+        if let Some(transaction_id) = self.transaction_id {
+            lazy_op = lazy_op.with_transaction_context(self.viewing_epoch, Some(transaction_id));
+        } else {
+            lazy_op = lazy_op.with_transaction_context(self.viewing_epoch, None);
+        }
 
         // Convert logical aggregates to factorized aggregates
         let factorized_aggs: Vec<FactorizedAggregate> = agg
@@ -572,8 +532,8 @@ mod tests {
         Projection,
     };
     use crate::transaction::TransactionManager;
-    use grafeo_core::graph::GraphStore;
-    use grafeo_core::graph::rowgroup::RowGroupStore;
+    use grafeo_core::graph::lpg::LpgStore;
+    use grafeo_core::graph::{GraphStoreMut, GraphStoreSearch};
     use std::sync::Arc;
 
     /// A one-hop expand from `from` to `to` along `edge_type` over `input`.
@@ -601,7 +561,7 @@ mod tests {
     /// `tests/pattern_after_write.rs` check the count).
     #[test]
     fn a_count_over_a_chain_from_a_written_node_is_planned_factorized() {
-        let store = Arc::new(RowGroupStore::new());
+        let store = Arc::new(LpgStore::new().unwrap());
         let transaction_manager = Arc::new(TransactionManager::new());
         let transaction_id = transaction_manager.begin();
         let epoch = transaction_manager.current_epoch();
@@ -612,12 +572,14 @@ mod tests {
             .recording(
                 &transaction_manager,
                 None,
-                Arc::clone(&store) as Arc<dyn grafeo_core::graph::apply::GraphBackend>,
+                grafeo_core::execution::operators::WriteTarget::Store(
+                    Arc::clone(&store) as Arc<dyn grafeo_core::graph::apply::ChangeTarget>
+                ),
             )
             .unwrap();
         let planner = Planner::with_context(
-            Arc::clone(&store) as Arc<dyn GraphStore>,
-            Some(Arc::clone(&store) as Arc<dyn grafeo_core::graph::GraphBackend>),
+            Arc::clone(&store) as Arc<dyn GraphStoreSearch>,
+            Some(Arc::clone(&store) as Arc<dyn GraphStoreMut>),
             Arc::clone(&transaction_manager),
             Some(transaction_id),
             epoch,

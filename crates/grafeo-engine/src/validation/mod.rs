@@ -76,6 +76,7 @@ impl SparqlExecutor for SessionSparqlExecutor<'_> {
                     format!("\"{escaped}\"")
                 }
             }
+            _ => return Ok(Vec::new()),
         };
 
         let mut substituted = query.replace("$this", &this_str);

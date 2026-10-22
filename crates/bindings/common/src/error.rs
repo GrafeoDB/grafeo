@@ -71,7 +71,7 @@ mod tests {
 
     #[test]
     fn classifies_query_error() {
-        let err = Error::from(QueryError::new(QueryErrorKind::Syntax, "bad syntax"));
+        let err = Error::Query(QueryError::new(QueryErrorKind::Syntax, "bad syntax"));
         assert_eq!(classify_error(&err), ErrorCategory::Query);
     }
 
@@ -136,7 +136,7 @@ mod tests {
 
     #[test]
     fn classifies_storage_error() {
-        let err = Error::from(StorageError::Full);
+        let err = Error::Storage(StorageError::Full);
         assert_eq!(classify_error(&err), ErrorCategory::Storage);
     }
 

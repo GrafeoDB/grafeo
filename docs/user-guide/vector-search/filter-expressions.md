@@ -13,9 +13,8 @@ tags:
 Since 0.5.40, BM25 text scoring and vector similarity are callable as ordinary
 expressions inside `WHERE` and `RETURN` clauses. The planner rewrites the
 matching predicate shapes into dedicated `TextScan` and `VectorScan` operators,
-so a text or vector index is used whenever one applies. Vector similarity
-falls back to brute-force per-row evaluation when no vector index exists; the
-text functions need a text index on their property.
+so a text or vector index is used whenever one applies, and a brute-force
+per-row fallback kicks in when no index exists.
 
 This is the unified-query companion to [`hybrid_search()`](hybrid-search.md):
 instead of calling a fusion API, you express the filter directly in GQL and let
@@ -29,7 +28,7 @@ the planner pick the execution strategy.
 | Text or vector predicate combined with a MATCH pattern | Filter expressions (this page) |
 | AND/OR composition with other WHERE predicates | Filter expressions |
 | Score column in the result set | Filter expressions (put the same call in `RETURN`) |
-| Works without an index | Vector similarity only: `text_score` and `text_match` need a text index |
+| Works without an index | Both: filter expressions fall back to per-row eval |
 
 ## Functions
 
@@ -53,9 +52,8 @@ RETURN doc.title
 
 With a text index on `Article.body`, the planner rewrites this into a
 `TextScanOperator` in threshold mode, pulling only matching documents from the
-inverted index. BM25 needs the statistics of that index, so without one the
-query fails before it runs, with an error that names the property and the
-`CREATE INDEX ... USING TEXT` statement to run.
+inverted index. Without an index, the same query falls through to per-row BM25
+evaluation (slow but correct).
 
 ## `text_match` as a boolean
 
@@ -157,8 +155,8 @@ RETURN doc.title, text_score(doc.body, 'attention mechanisms') AS score
 ```
 
 If you only need the score (no threshold), put it in `RETURN` without a
-WHERE clause. Each row then reads its score from the index: a Float64, 0.0 for
-a document that does not match:
+WHERE clause. The planner falls back to per-row scoring, returning one row per
+matched node with a Float64 (or 0.0 for non-matches):
 
 ```gql
 MATCH (doc:Article)
@@ -169,13 +167,8 @@ RETURN doc.title, text_score(doc.body, 'rust database') AS score
 
 | Missing index | Behavior |
 |---------------|----------|
-| No text index | `text_score` and `text_match` are an error before the query runs, naming the property and the index to create |
+| No text index | `text_score` returns 0.0 per row, `text_match` returns false per row, query still runs |
 | No vector index | `cosine_similarity` / `euclidean_distance` evaluate per-row over all candidates |
 
-A text index on the property under one label is enough for a query over
-several labels: a node of a label without the index scores null. A database
-on a store of its own (`with_store`) has no text indexes, so the text
-functions are the unsupported error there.
-
-Vector queries return correct results either way, but with an index the
+Queries still return correct results in every case, but with an index the
 planner executes them through dedicated scan operators instead of a full scan.

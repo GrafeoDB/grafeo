@@ -12,7 +12,12 @@
 //! cargo test -p grafeo-engine --all-features --test migration
 //! ```
 
-#![cfg(all(feature = "gql", feature = "wal", feature = "grafeo-file"))]
+#![cfg(all(
+    feature = "lpg",
+    feature = "gql",
+    feature = "wal",
+    feature = "grafeo-file"
+))]
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -478,20 +483,15 @@ fn assert_migrated_with(
 // =========================================================================
 
 /// The crash points a migrating open of the fixture reaches, in order: writing
-/// the image (creating its partial file, taking the snapshot, releasing
-/// commits, the checkpoint, then the rename into place), then the steps of
-/// the migration, with a point after each rename (named by its target).
+/// the image (creating the file, then its checkpoint), then the steps of the
+/// migration, with a point after each rename (named by its target).
 #[cfg(feature = "testing-crash-injection")]
-const MIGRATION_POINTS: [&str; 15] = [
+const MIGRATION_POINTS: [&str; 11] = [
     "create:after_write",
-    "copy:after_snapshot",
-    "copy:after_release",
     "checkpoint:after_chunks",
     "checkpoint:after_data_sync",
     "checkpoint:after_header",
     "checkpoint:before_trim",
-    "copy:after_write",
-    "copy:before_rename",
     "migrate:after_image",
     "migrate:renamed:.pre-0.6",
     "migrate:renamed:.pre-0.6.wal",
@@ -503,16 +503,12 @@ const MIGRATION_POINTS: [&str; 15] = [
 /// The same for a file with a pending checkpoint image and no sidecar WAL
 /// ([`pending_kept`]): the image moves instead of the WAL.
 #[cfg(feature = "testing-crash-injection")]
-const PENDING_MIGRATION_POINTS: [&str; 15] = [
+const PENDING_MIGRATION_POINTS: [&str; 11] = [
     "create:after_write",
-    "copy:after_snapshot",
-    "copy:after_release",
     "checkpoint:after_chunks",
     "checkpoint:after_data_sync",
     "checkpoint:after_header",
     "checkpoint:before_trim",
-    "copy:after_write",
-    "copy:before_rename",
     "migrate:after_image",
     "migrate:renamed:.pre-0.6",
     "migrate:renamed:.pre-0.6.checkpoint",
@@ -524,16 +520,12 @@ const PENDING_MIGRATION_POINTS: [&str; 15] = [
 /// The same for a WAL directory ([`directory_kept`]): it has no side files,
 /// and the whole directory moves to `<p>.pre-0.6`.
 #[cfg(feature = "testing-crash-injection")]
-const DIRECTORY_MIGRATION_POINTS: [&str; 14] = [
+const DIRECTORY_MIGRATION_POINTS: [&str; 10] = [
     "create:after_write",
-    "copy:after_snapshot",
-    "copy:after_release",
     "checkpoint:after_chunks",
     "checkpoint:after_data_sync",
     "checkpoint:after_header",
     "checkpoint:before_trim",
-    "copy:after_write",
-    "copy:before_rename",
     "migrate:after_image",
     "migrate:renamed:.pre-0.6",
     "migrate:after_old",
@@ -544,16 +536,12 @@ const DIRECTORY_MIGRATION_POINTS: [&str; 14] = [
 /// The same for a file closed while spilled ([`spilled_kept`]): its spill
 /// directory moves after the file.
 #[cfg(feature = "testing-crash-injection")]
-const SPILLED_MIGRATION_POINTS: [&str; 15] = [
+const SPILLED_MIGRATION_POINTS: [&str; 11] = [
     "create:after_write",
-    "copy:after_snapshot",
-    "copy:after_release",
     "checkpoint:after_chunks",
     "checkpoint:after_data_sync",
     "checkpoint:after_header",
     "checkpoint:before_trim",
-    "copy:after_write",
-    "copy:before_rename",
     "migrate:after_image",
     "migrate:renamed:.pre-0.6",
     "migrate:renamed:.pre-0.6.spill",
@@ -619,21 +607,11 @@ fn migrate_child() {
     }
 }
 
-/// The crash points of a read-write open after its migration: the WAL's first
-/// segment is created, its header written and the directory synced. The
-/// migration is over (its lock removed) when they are reached.
-#[cfg(feature = "testing-crash-injection")]
-const OPEN_WAL_POINTS: [&str; 3] = [
-    "wal:after_segment_create",
-    "wal:after_segment_header",
-    "wal:before_dir_sync",
-];
-
 /// For each crash point of a read-write open of the files `arrange` puts at a
 /// path, and once past the last: runs the open in a child process that crashes
 /// there, then checks that an open in this process finds the 0.5.x files of
 /// `kept` migrated ([`assert_migrated`]). Checks that the open reaches exactly
-/// `points`, then [`OPEN_WAL_POINTS`], in order, and then completes.
+/// `points`, in order, and then completes.
 ///
 /// A crash before the old database moved (`migrate:renamed:.pre-0.6`) may
 /// leave an empty `LOCK` in a directory that had none: the migration created
@@ -643,13 +621,8 @@ const OPEN_WAL_POINTS: [&str; 3] = [
 /// directory may hold it ([`assert_kept_with`]); one kept after a later
 /// crash, or after none, is the original exactly.
 #[cfg(feature = "testing-crash-injection")]
-fn sweep_crashes(arrange: impl Fn(&Path), migration_points: &[&str], kept: &Kept) {
+fn sweep_crashes(arrange: impl Fn(&Path), points: &[&str], kept: &Kept) {
     let expected = kept_contents(kept);
-    let points: Vec<&str> = migration_points
-        .iter()
-        .copied()
-        .chain(OPEN_WAL_POINTS)
-        .collect();
     // The last crash point (1-based) at which the lock is still held.
     let moved_at = points
         .iter()
@@ -666,7 +639,7 @@ fn sweep_crashes(arrange: impl Fn(&Path), migration_points: &[&str], kept: &Kept
             "crash_point={crash_point} ({})",
             crashed_at.as_deref().unwrap_or("no crash")
         );
-        if crashed_at.is_some() && crash_point <= migration_points.len() {
+        if crashed_at.is_some() {
             assert!(
                 with_suffix(&path, ".migrate.lock").exists(),
                 "{context}: a crash inside the migration leaves its lock file"
@@ -1466,7 +1439,7 @@ fn race_child() {
     loop {
         match GrafeoDB::open(&path) {
             Ok(db) => {
-                println!("nodes={}", db.node_count().unwrap());
+                println!("nodes={}", db.node_count());
                 db.close().unwrap();
                 drop(db);
                 std::process::exit(OPENED_AND_CLOSED);
@@ -1504,7 +1477,7 @@ fn a_create_never_races_a_migration_between_its_renames() {
         let path = dir.path().join("db.grafeo");
         copy_fixture(&path);
         let db = GrafeoDB::open_read_only(&path).unwrap();
-        let nodes = db.node_count().unwrap();
+        let nodes = db.node_count();
         db.close().unwrap();
         nodes
     };
@@ -1633,7 +1606,7 @@ fn read_child() {
     };
     match opened {
         Ok(db) => {
-            println!("nodes={}", db.node_count().unwrap());
+            println!("nodes={}", db.node_count());
             drop(db);
             std::process::exit(OPENED_AND_CLOSED);
         }
@@ -1847,10 +1820,7 @@ fn a_read_write_open_of_a_kept_copy_is_refused() {
 
         let db = GrafeoDB::open_read_only(&kept)
             .unwrap_or_else(|error| panic!("{kind}: a read-only open reads it: {error}"));
-        assert!(
-            db.node_count().unwrap() > 0,
-            "{kind}: the kept data is there"
-        );
+        assert!(db.node_count() > 0, "{kind}: the kept data is there");
         db.close().unwrap();
     }
 }
@@ -1956,160 +1926,6 @@ fn a_pending_0_5_44_checkpoint_image_is_migrated_and_kept() {
         &pending,
         "a pending checkpoint image",
     );
-}
-
-/// Writes at `path` a 0.5.x container v1 file: the database as one snapshot
-/// blob after the headers, the form 0.5.x used before container v2.
-fn write_0_5_snapshot_file(path: &Path, snapshot: &[u8]) {
-    use std::io::{Seek, SeekFrom, Write};
-
-    use grafeo_storage::file::format::DATA_OFFSET;
-    use grafeo_storage::file::header::{write_db_header, write_file_header};
-    use grafeo_storage::file::{DbHeader, FileHeader};
-
-    let mut file = std::fs::File::create(path).unwrap();
-    write_file_header(&mut file, &FileHeader::new()).unwrap();
-    write_db_header(&mut file, 0, &DbHeader::EMPTY).unwrap();
-    write_db_header(
-        &mut file,
-        1,
-        &DbHeader {
-            iteration: 1,
-            checksum: crc32fast::hash(snapshot),
-            snapshot_length: u64::try_from(snapshot.len()).unwrap(),
-            epoch: 1,
-            ..DbHeader::EMPTY
-        },
-    )
-    .unwrap();
-    file.seek(SeekFrom::Start(DATA_OFFSET)).unwrap();
-    file.write_all(snapshot).unwrap();
-}
-
-/// The graph of the version 4 snapshot `tests/fixtures/snapshot_v4.bin`
-/// (0.5.x wrote it): every node with its labels and properties, then every
-/// edge with its endpoints and property.
-fn snapshot_graph(db: &GrafeoDB) -> (Vec<Vec<Value>>, Vec<Vec<Value>>) {
-    (
-        rows(
-            db,
-            "MATCH (n) RETURN n.name AS name, labels(n), n.age ORDER BY name",
-        ),
-        rows(
-            db,
-            "MATCH (a)-[r]->(b) RETURN a.name AS a, type(r), b.name, r.since, r.role ORDER BY a",
-        ),
-    )
-}
-
-fn expected_snapshot_graph() -> (Vec<Vec<Value>>, Vec<Vec<Value>>) {
-    let labels = |names: &[&str]| Value::List(names.iter().map(|n| Value::from(*n)).collect());
-    (
-        vec![
-            vec![Value::from("Acme Corp"), labels(&["Company"]), Value::Null],
-            vec![Value::from("Alix"), labels(&["Person"]), Value::Int64(30)],
-            vec![
-                Value::from("Gus"),
-                labels(&["Employee", "Person"]),
-                Value::Int64(25),
-            ],
-        ],
-        vec![
-            vec![
-                Value::from("Alix"),
-                Value::from("KNOWS"),
-                Value::from("Gus"),
-                Value::Int64(2020),
-                Value::Null,
-            ],
-            vec![
-                Value::from("Gus"),
-                Value::from("WORKS_AT"),
-                Value::from("Acme Corp"),
-                Value::Null,
-                Value::from("Engineer"),
-            ],
-        ],
-    )
-}
-
-/// A 0.5.x container v1 file (#323: a reader once mistook such files for
-/// container v2 and refused them) holds its LPG graph in one snapshot. A
-/// read-only open reads the graph and leaves the file byte for byte; a
-/// read-write open migrates it with its graph, keeps the 0.5.x file as
-/// `<path>.pre-0.6`, and the migrated database takes new writes, whose ids
-/// do not collide with the migrated ones, across a reopen.
-#[test]
-fn a_0_5_snapshot_file_migrates_with_its_graph() {
-    let snapshot = include_bytes!("fixtures/snapshot_v4.bin");
-    assert_eq!(snapshot[0], 4, "a version 4 snapshot, as 0.5.x wrote");
-    let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("db.grafeo");
-    write_0_5_snapshot_file(&path, snapshot);
-    assert_eq!(detect(&path).unwrap(), OnDisk::LegacyFile);
-    let before = files(dir.path());
-
-    let db = GrafeoDB::open_read_only(&path).unwrap();
-    assert_eq!(snapshot_graph(&db), expected_snapshot_graph(), "read-only");
-    db.close().unwrap();
-    drop(db);
-    assert_eq!(
-        files(dir.path()),
-        before,
-        "a read-only open changes nothing"
-    );
-
-    let db = GrafeoDB::open(&path).unwrap();
-    assert_eq!(snapshot_graph(&db), expected_snapshot_graph(), "migrated");
-    db.execute(
-        "MATCH (g:Person {name: 'Gus'}) INSERT (g)-[:KNOWS {since: 2026}]->(:Person {name: 'Vincent', age: 40})",
-    )
-    .unwrap();
-    db.close().unwrap();
-    drop(db);
-    assert_eq!(detect(&path).unwrap(), OnDisk::Current);
-    assert_eq!(
-        std::fs::read(with_suffix(&path, ".pre-0.6")).unwrap(),
-        snapshot_file_bytes(&before),
-        "the 0.5.x file is kept as it was"
-    );
-    assert_no_leftovers(&path, "after the migration");
-
-    let db = GrafeoDB::open(&path).unwrap();
-    assert_eq!(
-        rows(
-            &db,
-            "MATCH (a)-[r:KNOWS]->(b) RETURN a.name AS a, b.name, b.age, r.since ORDER BY a"
-        ),
-        vec![
-            vec![
-                Value::from("Alix"),
-                Value::from("Gus"),
-                Value::Int64(25),
-                Value::Int64(2020),
-            ],
-            vec![
-                Value::from("Gus"),
-                Value::from("Vincent"),
-                Value::Int64(40),
-                Value::Int64(2026),
-            ],
-        ]
-    );
-    assert_eq!(
-        rows(&db, "MATCH (n) RETURN count(DISTINCT id(n)), count(n)"),
-        vec![vec![Value::Int64(4), Value::Int64(4)]],
-        "four nodes with four distinct ids"
-    );
-    db.close().unwrap();
-}
-
-/// The bytes of the one file in `listing` (of [`files`]).
-fn snapshot_file_bytes(listing: &BTreeMap<PathBuf, Entry>) -> Vec<u8> {
-    match listing.values().collect::<Vec<_>>().as_slice() {
-        [Entry::File(bytes)] => bytes.clone(),
-        other => panic!("one file, got {other:?}"),
-    }
 }
 
 /// While another handle holds the 0.5.x file locked for writing, as a 0.5.x
@@ -2437,7 +2253,7 @@ fn a_directory_path_with_a_trailing_separator_migrates_as_the_directory() {
         // The path as given no longer exists once `<p>` is a file (`<p>/` is
         // not a directory): disk usage goes by the database's files.
         let file_bytes = usize::try_from(std::fs::metadata(&path).unwrap().len()).unwrap();
-        let disk_bytes = db.detailed_stats().unwrap().disk_bytes;
+        let disk_bytes = db.detailed_stats().disk_bytes;
         assert!(
             disk_bytes.is_some_and(|bytes| bytes >= file_bytes),
             "{separator}: disk usage {disk_bytes:?} counts the migrated file ({file_bytes} bytes)"
@@ -2482,7 +2298,7 @@ fn current_directory_child() {
         Err(error) => println!("read-write={error}"),
     }
     match GrafeoDB::open_read_only(".") {
-        Ok(db) => println!("read-only={}", db.node_count().unwrap()),
+        Ok(db) => println!("read-only={}", db.node_count()),
         Err(error) => println!("read-only={error}"),
     }
 }
@@ -2497,7 +2313,7 @@ fn current_directory_child() {
 fn a_directory_that_is_the_current_directory_is_read_but_not_migrated() {
     let expected_nodes = {
         let db = GrafeoDB::open_read_only(directory()).unwrap();
-        let nodes = db.node_count().unwrap();
+        let nodes = db.node_count();
         db.close().unwrap();
         nodes
     };
@@ -2664,7 +2480,7 @@ fn a_migration_logs_the_counts_before_and_after() {
         let path = dir.path().join("db.grafeo");
         copy_fixture(&path);
         let db = GrafeoDB::open_read_only(&path).unwrap();
-        let nodes = db.node_count().unwrap();
+        let nodes = db.node_count();
         db.close().unwrap();
         nodes
     };

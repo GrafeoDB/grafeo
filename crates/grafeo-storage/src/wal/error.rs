@@ -264,7 +264,7 @@ impl From<WalError> for Error {
             | WalError::UnsupportedSegment { .. }
             | WalError::UnsupportedFrame { .. }
             | WalError::Misplaced { .. } => {
-                Error::from(StorageError::RecoveryFailed(error.to_string()))
+                Error::Storage(StorageError::RecoveryFailed(error.to_string()))
             }
             WalError::RecordTooLarge { .. } => Error::InvalidValue(error.to_string()),
             WalError::Unavailable { .. } => Error::Io(std::io::Error::other(error.to_string())),

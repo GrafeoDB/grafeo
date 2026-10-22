@@ -1,19 +1,14 @@
 //! Node scan planning, and the choice of the label a node scan reads.
 
 use super::{
-    Arc, BinaryOp, EagerOperator, ExpressionPredicate, FilterExpression, FilterOp, FilterOperator,
-    GraphStore, HashMap, LogicalExpression, LogicalOperator, LogicalType, NestedLoopJoinOperator,
-    NodeScanOp, Operator, PhysicalJoinType, Result, ScanOperator, Value,
+    Arc, BinaryOp, EagerOperator, EpochId, ExpressionPredicate, FilterExpression, FilterOp,
+    FilterOperator, GraphStoreSearch, HashMap, LogicalExpression, LogicalOperator, LogicalType,
+    NestedLoopJoinOperator, NodeScanOp, Operator, PhysicalJoinType, Result, ScanOperator,
+    TransactionId, Value,
 };
-use crate::query::plan::{BuiltinFunction, Callee, ListPredicateKind};
 
 /// The copy of `filter` whose node scan reads the label with the fewest
 /// nodes, or `None` when the scan reads that label already.
-///
-/// A scan of every node below filters that require a label (`WHERE
-/// n:Repository`, `'Repository' IN labels(n)`, alone or in an `AND` chain)
-/// scans the label with the fewest nodes of those they require, and the
-/// filters still check every label they name.
 ///
 /// A pattern like `(n:Graph:Repository)` is a scan of `Graph` below filters
 /// that require the other labels (`hasLabel(n, 'Repository')`), in a chain of
@@ -32,7 +27,7 @@ use crate::query::plan::{BuiltinFunction, Callee, ListPredicateKind};
 /// the filter does.
 pub(crate) fn with_smallest_scan_label(
     filter: &FilterOp,
-    store: &dyn GraphStore,
+    store: &dyn GraphStoreSearch,
 ) -> Option<FilterOp> {
     let mut predicates = vec![&filter.predicate];
     let mut below = filter.input.as_ref();
@@ -43,26 +38,27 @@ pub(crate) fn with_smallest_scan_label(
     let LogicalOperator::NodeScan(scan) = below else {
         return None;
     };
+    let scan_label = scan.label.as_deref()?;
     let mut checks = Vec::new();
     for predicate in &predicates {
         label_checks(predicate, &scan.variable, &mut checks);
     }
-    let first = *checks.first()?;
-    let scan_label = scan.label.as_deref().unwrap_or(first);
-    let statistics = store.statistics();
+    if checks.is_empty() {
+        return None;
+    }
     let mut smallest = scan_label;
-    let mut fewest = label_estimate(&statistics, scan_label);
+    let mut fewest = store.nodes_by_label_count(scan_label);
     for label in checks {
         if fewest == 0 {
             break;
         }
-        let count = label_estimate(&statistics, label);
+        let count = store.nodes_by_label_count(label);
         if count < fewest {
             smallest = label;
             fewest = count;
         }
     }
-    if scan.label.as_deref() == Some(smallest) {
+    if smallest == scan_label {
         return None;
     }
     #[cfg(any(feature = "vector-index", feature = "text-index"))]
@@ -72,195 +68,48 @@ pub(crate) fn with_smallest_scan_label(
         return None;
     }
     let variable = scan.variable.clone();
-    let (smallest, scan_label) = (smallest.to_string(), scan.label.clone());
+    let (smallest, scan_label) = (smallest.to_string(), scan_label.to_string());
     let mut reordered = filter.clone();
-    match scan_label {
-        // The check of the label scanned now checks the label scanned before.
-        Some(scan_label) => {
-            let checked =
-                replace_label_check(&mut reordered.predicate, &variable, &smallest, &scan_label);
-            move_scan_label(
-                &mut reordered.input,
-                &variable,
-                &smallest,
-                &scan_label,
-                !checked,
-            );
-        }
-        // A scan of every node had no label to check: the checks stay.
-        None => move_scan_label(&mut reordered.input, &variable, &smallest, "", false),
-    }
+    let checked = replace_label_check(&mut reordered.predicate, &variable, &smallest, &scan_label);
+    move_scan_label(
+        &mut reordered.input,
+        &variable,
+        &smallest,
+        &scan_label,
+        !checked,
+    );
     Some(reordered)
 }
 
-/// The labels of the `OR` of labels that `predicate` requires of the node a
-/// scan of every node reads (`n:Tag OR n:Topic`, `'Tag' IN labels(n) OR ...`,
-/// `any(l IN labels(n) WHERE l IN ['Tag', 'Topic'])`), when the scan may read
-/// only their nodes: it has no label and no input, and the labels hold at most
-/// half the nodes (a scan of every node is cheaper than larger lists). Of
-/// several such conjuncts of an `AND`, the one whose labels hold the fewest
-/// nodes. One label alone is the scan's label instead (see
-/// [`with_smallest_scan_label`]).
-pub(crate) fn label_union(
-    predicate: &LogicalExpression,
-    scan: &NodeScanOp,
-    store: &dyn GraphStore,
-) -> Option<Vec<String>> {
-    if scan.label.is_some() || scan.input.is_some() {
-        return None;
-    }
-    let mut conjuncts = Vec::new();
-    and_conjuncts(predicate, &mut conjuncts);
-    let statistics = store.statistics();
-    let mut best: Option<(u64, Vec<&str>)> = None;
-    for conjunct in conjuncts {
-        let Some(found) = any_label(conjunct, &scan.variable) else {
-            continue;
-        };
-        let mut labels: Vec<&str> = Vec::with_capacity(found.len());
-        for label in found {
-            if !labels.contains(&label) {
-                labels.push(label);
-            }
-        }
-        if labels.len() < 2 {
-            continue;
-        }
-        let nodes: u64 = labels
-            .iter()
-            .map(|label| label_estimate(&statistics, label))
-            .sum();
-        if best.as_ref().is_none_or(|(fewest, _)| nodes < *fewest) {
-            best = Some((nodes, labels));
-        }
-    }
-    let (nodes, labels) = best?;
-    (nodes.saturating_mul(2) <= statistics.total_nodes)
-        .then(|| labels.into_iter().map(str::to_string).collect())
+/// Whether a query that reads at `viewing_epoch`, in `transaction_id`, may
+/// scan another of a pattern's labels than the one written
+/// ([`with_smallest_scan_label`]). Not at a past epoch outside a transaction
+/// (`current_epoch` is the transaction manager's, `None` without one): a label
+/// scan finds the nodes that have the label now, while the check per row
+/// reads the labels a node had at the epoch. The same rule decides whether a
+/// query may look values up in a property index, which holds the values of
+/// now.
+pub(crate) fn may_choose_scan_label(
+    viewing_epoch: EpochId,
+    transaction_id: Option<TransactionId>,
+    current_epoch: Option<EpochId>,
+) -> bool {
+    transaction_id.is_some() || current_epoch.is_none_or(|current| viewing_epoch >= current)
 }
 
-/// How many nodes have `label` by the store's statistics: none for a label
-/// they do not list. Plans choose by it; the reads at a view answer the
-/// same whichever label a plan scans.
-fn label_estimate(statistics: &grafeo_core::statistics::Statistics, label: &str) -> u64 {
-    statistics
-        .get_label(label)
-        .map_or(0, |label| label.node_count)
-}
-
-/// The conjuncts of an `AND` chain.
-fn and_conjuncts<'a>(predicate: &'a LogicalExpression, out: &mut Vec<&'a LogicalExpression>) {
-    match predicate {
-        LogicalExpression::Binary {
-            left,
-            op: BinaryOp::And,
-            right,
-        } => {
-            and_conjuncts(left, out);
-            and_conjuncts(right, out);
-        }
-        other => out.push(other),
-    }
-}
-
-/// The labels of which `expression` requires one of `variable`: label checks
-/// joined by `OR`, or `any(l IN labels(variable) WHERE ...)` over equalities
-/// of `l` and `IN` lists of label names.
-fn any_label<'a>(expression: &'a LogicalExpression, variable: &str) -> Option<Vec<&'a str>> {
-    if let Some(label) = label_check(expression, variable) {
-        return Some(vec![label]);
-    }
-    match expression {
-        LogicalExpression::Binary {
-            left,
-            op: BinaryOp::Or,
-            right,
-        } => {
-            let mut labels = any_label(left, variable)?;
-            labels.extend(any_label(right, variable)?);
-            Some(labels)
-        }
-        LogicalExpression::ListPredicate {
-            kind: ListPredicateKind::Any,
-            variable: element,
-            list_expr,
-            predicate,
-        } if is_labels_of(list_expr, variable) => element_labels(predicate, element),
-        _ => None,
-    }
-}
-
-/// Whether `expression` is `labels(variable)`.
-fn is_labels_of(expression: &LogicalExpression, variable: &str) -> bool {
-    matches!(
-        expression,
-        LogicalExpression::FunctionCall {
-            callee: Callee::Builtin(BuiltinFunction::Labels),
-            args,
-            ..
-        } if matches!(args.as_slice(), [LogicalExpression::Variable(of)] if of == variable)
-    )
-}
-
-/// The label names of which `predicate` requires `element` to be one:
-/// `element = 'Tag'`, `element IN ['Tag', 'Topic']`, joined by `OR`.
-fn element_labels<'a>(predicate: &'a LogicalExpression, element: &str) -> Option<Vec<&'a str>> {
-    let LogicalExpression::Binary { left, op, right } = predicate else {
-        return None;
-    };
-    let is_element = |side: &LogicalExpression| matches!(side, LogicalExpression::Variable(name) if name == element);
-    let name = |side: &'a LogicalExpression| match side {
-        LogicalExpression::Literal(Value::String(label)) => Some(label.as_str()),
-        _ => None,
-    };
-    match op {
-        BinaryOp::Or => {
-            let mut labels = element_labels(left, element)?;
-            labels.extend(element_labels(right, element)?);
-            Some(labels)
-        }
-        BinaryOp::Eq if is_element(left) => name(right).map(|label| vec![label]),
-        BinaryOp::Eq if is_element(right) => name(left).map(|label| vec![label]),
-        BinaryOp::In if is_element(left) => match right.as_ref() {
-            LogicalExpression::List(items) => items.iter().map(name).collect(),
-            _ => None,
-        },
-        _ => None,
-    }
-}
-
-/// The label of a `hasLabel(variable, 'Label')` check, or of its spelling
-/// `'Label' IN labels(variable)`.
+/// The label of a `hasLabel(variable, 'Label')` check.
 fn label_check<'a>(expression: &'a LogicalExpression, variable: &str) -> Option<&'a str> {
-    match expression {
-        LogicalExpression::FunctionCall {
-            callee: Callee::Builtin(BuiltinFunction::HasLabel),
-            args,
-            ..
-        } => match args.as_slice() {
-            [
-                LogicalExpression::Variable(checked),
-                LogicalExpression::Literal(Value::String(label)),
-            ] if checked == variable => Some(label.as_str()),
-            _ => None,
-        },
-        LogicalExpression::Binary {
-            left,
-            op: BinaryOp::In,
-            right,
-        } => match (left.as_ref(), right.as_ref()) {
-            (
-                LogicalExpression::Literal(Value::String(label)),
-                LogicalExpression::FunctionCall {
-                    callee: Callee::Builtin(BuiltinFunction::Labels),
-                    args,
-                    ..
-                },
-            ) if matches!(args.as_slice(), [LogicalExpression::Variable(checked)] if checked == variable) => {
-                Some(label.as_str())
-            }
-            _ => None,
-        },
+    let LogicalExpression::FunctionCall { name, args, .. } = expression else {
+        return None;
+    };
+    if !name.eq_ignore_ascii_case("hasLabel") {
+        return None;
+    }
+    match args.as_slice() {
+        [
+            LogicalExpression::Variable(checked),
+            LogicalExpression::Literal(Value::String(label)),
+        ] if checked == variable => Some(label.as_str()),
         _ => None,
     }
 }
@@ -290,13 +139,9 @@ fn replace_label_check(
     checked: &str,
 ) -> bool {
     if label_check(predicate, variable) == Some(label) {
-        *predicate = LogicalExpression::builtin(
-            BuiltinFunction::HasLabel,
-            vec![
-                LogicalExpression::Variable(variable.to_string()),
-                LogicalExpression::Literal(Value::String(checked.into())),
-            ],
-        );
+        if let LogicalExpression::FunctionCall { args, .. } = predicate {
+            args[1] = LogicalExpression::Literal(Value::String(checked.into()));
+        }
         return true;
     }
     match predicate {
@@ -340,7 +185,7 @@ pub(super) fn search_index_covers(
     predicate: &LogicalExpression,
     variable: &str,
     labels: [&str; 2],
-    store: &dyn GraphStore,
+    store: &dyn GraphStoreSearch,
 ) -> bool {
     let covered = |property: &str| {
         labels.iter().any(|label| {
@@ -385,10 +230,25 @@ fn reads_property(
 
 impl super::Planner {
     /// The copy of `filter` whose node scan reads the label with the fewest
-    /// nodes (see [`with_smallest_scan_label`]): a scan of any of the
-    /// pattern's labels finds the same nodes at the query's view.
+    /// nodes (see [`with_smallest_scan_label`]), when this query may choose
+    /// (see [`may_choose_scan_label`]).
     pub(super) fn scan_smallest_label(&self, filter: &FilterOp) -> Option<FilterOp> {
+        if !self.reads_the_current_store() {
+            return None;
+        }
         with_smallest_scan_label(filter, self.store.as_ref())
+    }
+
+    /// Whether this query reads the store as it is now (see
+    /// [`may_choose_scan_label`]): label counts and property indexes describe
+    /// that state, so a read of a past epoch outside a transaction uses
+    /// neither.
+    pub(super) fn reads_the_current_store(&self) -> bool {
+        let current_epoch = self
+            .transaction_manager
+            .as_ref()
+            .map(|manager| manager.current_epoch());
+        may_choose_scan_label(self.viewing_epoch, self.transaction_id, current_epoch)
     }
 
     /// Plans a node scan operator.
@@ -397,20 +257,14 @@ impl super::Planner {
         scan: &NodeScanOp,
     ) -> Result<(Box<dyn Operator>, Vec<String>)> {
         let scan_op = if let Some(label) = &scan.label {
-            ScanOperator::with_label(
-                Arc::clone(&self.store) as Arc<dyn GraphStore>,
-                label,
-                self.read_view(),
-            )
+            ScanOperator::with_label(Arc::clone(&self.store) as Arc<dyn GraphStoreSearch>, label)
         } else {
-            ScanOperator::new(
-                Arc::clone(&self.store) as Arc<dyn GraphStore>,
-                self.read_view(),
-            )
+            ScanOperator::new(Arc::clone(&self.store) as Arc<dyn GraphStoreSearch>)
         };
 
+        // Apply MVCC context if available
         let scan_operator: Box<dyn Operator> =
-            Box::new(scan_op.with_read_counter(self.read_counter()));
+            Box::new(scan_op.with_transaction_context(self.viewing_epoch, self.transaction_id));
 
         // If there's an input, chain operators with a nested loop join (cross join)
         if let Some(input) = &scan.input {
@@ -438,7 +292,7 @@ impl super::Planner {
                         .map(|(i, name)| (name.clone(), i))
                         .collect();
                     let filter_expr = FilterExpression::FunctionCall {
-                        function: grafeo_core::execution::operators::BuiltinFunction::HasLabel,
+                        name: "hasLabel".to_string(),
                         args: vec![
                             FilterExpression::Variable(scan.variable.clone()),
                             FilterExpression::Literal(Value::String(label.as_str().into())),
@@ -447,9 +301,9 @@ impl super::Planner {
                     let predicate = ExpressionPredicate::new(
                         filter_expr,
                         variable_columns,
-                        Arc::clone(&self.store) as Arc<dyn GraphStore>,
-                        self.read_view(),
-                    );
+                        Arc::clone(&self.store) as Arc<dyn GraphStoreSearch>,
+                    )
+                    .with_transaction_context(self.viewing_epoch, self.transaction_id);
                     let filtered = Box::new(FilterOperator::new(input_op, Box::new(predicate)));
                     return Ok((filtered, input_columns));
                 }
@@ -492,11 +346,11 @@ mod tests {
     use crate::query::plan::UnaryOp;
     use crate::transaction::TransactionManager;
     use grafeo_common::types::{EpochId, TransactionId};
-    use grafeo_core::graph::rowgroup::RowGroupStore;
+    use grafeo_core::graph::lpg::LpgStore;
 
     /// 19 `Big` nodes, three of them also `Small`, and three `Same` nodes.
-    fn store() -> Arc<RowGroupStore> {
-        let store = Arc::new(RowGroupStore::new());
+    fn store() -> Arc<LpgStore> {
+        let store = Arc::new(LpgStore::new().unwrap());
         for i in 0..19 {
             if i < 3 {
                 store.create_node(&["Big", "Small"]);
@@ -512,7 +366,6 @@ mod tests {
 
     fn has_label(variable: &str, label: &str) -> LogicalExpression {
         LogicalExpression::FunctionCall {
-            callee: crate::query::plan::Callee::named("hasLabel"),
             name: "hasLabel".to_string(),
             args: vec![
                 LogicalExpression::Variable(variable.to_string()),
@@ -680,25 +533,24 @@ mod tests {
         assert_eq!(shape(&reordered), shape(&expected));
     }
 
-    /// The row-group store answers label scans at a view, so a read at a
-    /// past epoch outside a transaction scans the smallest label as well as
-    /// the current epoch and a transaction do.
+    /// Outside a transaction, a past epoch keeps the label as written; the
+    /// current epoch, or a transaction, scans the smallest label.
     #[test]
-    fn a_read_of_a_past_epoch_scans_the_smallest_label() {
+    fn a_read_of_a_past_epoch_keeps_the_scan_label() {
         let store = store();
         let manager = Arc::new(TransactionManager::new());
         manager.sync_epoch(EpochId::new(3));
         let written = filter(has_label("n", "Small"), scan("Big"));
         let planner = |epoch: u64, transaction: Option<TransactionId>| {
             super::super::Planner::with_context(
-                Arc::clone(&store) as Arc<dyn GraphStore>,
+                Arc::clone(&store) as Arc<dyn GraphStoreSearch>,
                 None,
                 Arc::clone(&manager),
                 transaction,
                 EpochId::new(epoch),
             )
         };
-        assert!(planner(1, None).scan_smallest_label(&written).is_some());
+        assert!(planner(1, None).scan_smallest_label(&written).is_none());
         assert!(planner(3, None).scan_smallest_label(&written).is_some());
         assert!(
             planner(1, Some(TransactionId::new(19)))

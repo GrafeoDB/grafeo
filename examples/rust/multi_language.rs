@@ -36,8 +36,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     println!(
         "Movie database: {} nodes, {} edges\n",
-        db.node_count()?,
-        db.edge_count()?
+        db.node_count(),
+        db.edge_count()
     );
 
     // ── GQL (ISO standard) ────────────────────────────────────────

@@ -22,7 +22,7 @@ struct WalStatusOutput {
 pub fn run(cmd: WalCommands, format: OutputFormat, quiet: bool) -> Result<()> {
     match cmd {
         WalCommands::Status { path } => {
-            let db = super::open_existing_read_only(&path)?;
+            let db = super::open_existing(&path)?;
             let status = db.wal_status();
 
             let output = WalStatusOutput {
@@ -38,7 +38,9 @@ pub fn run(cmd: WalCommands, format: OutputFormat, quiet: bool) -> Result<()> {
             let fmt: Format = format.into();
             match fmt {
                 Format::Json => {
-                    println!("{}", serde_json::to_string_pretty(&output)?);
+                    if !quiet {
+                        println!("{}", serde_json::to_string_pretty(&output)?);
+                    }
                 }
                 Format::Table | Format::Csv => {
                     let items = vec![
@@ -54,7 +56,7 @@ pub fn run(cmd: WalCommands, format: OutputFormat, quiet: bool) -> Result<()> {
                         ),
                         ("Current Epoch", output.current_epoch.to_string()),
                     ];
-                    output::print_key_value_table(&items, fmt);
+                    output::print_key_value_table(&items, fmt, quiet);
                 }
             }
         }
@@ -65,13 +67,6 @@ pub fn run(cmd: WalCommands, format: OutputFormat, quiet: bool) -> Result<()> {
             db.wal_checkpoint()?;
 
             output::success("WAL checkpoint completed", quiet);
-            output::print_record(
-                &[
-                    ("database", path.display().to_string().into()),
-                    ("checkpointed", true.into()),
-                ],
-                format.into(),
-            );
         }
     }
 

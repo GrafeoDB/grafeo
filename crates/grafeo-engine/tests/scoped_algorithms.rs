@@ -1,14 +1,9 @@
 //! Which graph an algorithm reads (#566): the selected graph, a named graph,
 //! or a projection built over the graph selected when it was created.
 
-#![cfg(feature = "gql")]
+#![cfg(all(feature = "lpg", feature = "gql"))]
 
-use grafeo_engine::{GrafeoDB, ProjectionSpec, Snapshot};
-
-/// The nodes a snapshot sees, at its own view.
-fn nodes(snapshot: &Snapshot) -> usize {
-    snapshot.node_count(snapshot.view()).unwrap()
-}
+use grafeo_engine::{GrafeoDB, ProjectionSpec};
 
 fn with_graph_g() -> GrafeoDB {
     let db = GrafeoDB::new_in_memory();
@@ -24,19 +19,20 @@ fn with_graph_g() -> GrafeoDB {
 }
 
 #[test]
-fn the_snapshot_follows_set_current_graph() {
+fn selected_graph_store_follows_set_current_graph() {
     let db = with_graph_g();
-    assert_eq!(nodes(&db.snapshot().unwrap()), 1);
+    assert_eq!(db.selected_graph_store().unwrap().node_count(), 1);
     db.set_current_graph(Some("g")).unwrap();
-    assert_eq!(nodes(&db.snapshot().unwrap()), 3);
+    assert_eq!(db.selected_graph_store().unwrap().node_count(), 3);
     db.set_current_graph(None).unwrap();
-    assert_eq!(nodes(&db.snapshot().unwrap()), 1);
+    assert_eq!(db.selected_graph_store().unwrap().node_count(), 1);
 }
 
 #[test]
 fn a_graph_handle_reads_its_own_graph() {
     let db = with_graph_g();
-    assert_eq!(nodes(&db.graph("g").unwrap().snapshot().unwrap()), 3);
+    let store = db.graph("g").unwrap().graph_store().unwrap();
+    assert_eq!(store.node_count(), 3);
 }
 
 #[test]
@@ -45,7 +41,7 @@ fn dropping_the_selected_graph_selects_the_default_graph() {
     db.set_current_graph(Some("g")).unwrap();
     db.execute("DROP GRAPH g").unwrap();
     assert_eq!(db.current_graph(), None);
-    assert_eq!(nodes(&db.snapshot().unwrap()), 1);
+    assert_eq!(db.selected_graph_store().unwrap().node_count(), 1);
 }
 
 #[test]
@@ -55,7 +51,7 @@ fn a_selected_graph_dropped_elsewhere_is_an_error_not_the_default_graph() {
     // Another session drops it: the database's selection still names g.
     db.session().execute("DROP GRAPH g").unwrap();
     assert_eq!(db.current_graph().as_deref(), Some("g"));
-    let error = db.snapshot().err().unwrap().to_string();
+    let error = db.selected_graph_store().err().unwrap().to_string();
     assert!(error.contains("Graph 'g' does not exist"), "{error}");
     let error = db
         .create_projection("p", ProjectionSpec::new())
@@ -74,7 +70,7 @@ fn create_projection_follows_the_selected_graph_and_keeps_it() {
     assert!(!db.create_projection("extraction", spec).unwrap());
     db.set_current_graph(None).unwrap();
     // Built over g when it was created, whatever is selected now.
-    assert_eq!(nodes(&db.projection("extraction").unwrap()), 2);
+    assert_eq!(db.projection("extraction").unwrap().node_count(), 2);
 }
 
 #[test]
@@ -84,7 +80,7 @@ fn create_projection_without_a_selection_uses_the_default_graph() {
         db.create_projection("people", ProjectionSpec::new())
             .unwrap()
     );
-    assert_eq!(nodes(&db.projection("people").unwrap()), 1);
+    assert_eq!(db.projection("people").unwrap().node_count(), 1);
 }
 
 /// `CALL grafeo.<algorithm>({projection: ...})` runs on the projection (#566).

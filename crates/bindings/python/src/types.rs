@@ -4,7 +4,7 @@
 //! | ----------- | ----------- | ----- |
 //! | `None` | `Null` | |
 //! | `bool` | `Bool` | |
-//! | `int` | `Int64` | Past 64 bits an exact `Decimal` (scale 0), past 38 digits an error |
+//! | `int` | `Int64` | |
 //! | `float` | `Float64` | |
 //! | `str` | `String` | |
 //! | `list[float]` | `Vector` | Lists where every element is a Python float (not int) |
@@ -17,11 +17,9 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use pyo3::prelude::*;
-use pyo3::types::{
-    PyByteArray, PyBytes, PyDate, PyDateTime, PyDict, PyFloat, PyInt, PyList, PyTime,
-};
+use pyo3::types::{PyBytes, PyDateTime, PyDict, PyFloat, PyList};
 
-use grafeo_common::types::{Date, Decimal, PropertyKey, Time, Timestamp, Value};
+use grafeo_common::types::{PropertyKey, Timestamp, Value};
 
 use crate::error::{PyGrafeoError, PyGrafeoResult};
 
@@ -29,7 +27,7 @@ use crate::error::{PyGrafeoError, PyGrafeoResult};
 ///
 /// Usually you don't need this - Python types convert automatically. Use this
 /// when you need explicit control like `Value.null()` or type checking.
-#[pyclass(name = "Value")]
+#[pyclass(name = "Value", skip_from_py_object)]
 #[derive(Clone, Debug)]
 pub struct PyValue {
     pub(crate) inner: Value,
@@ -122,17 +120,6 @@ impl PyValue {
 }
 
 impl PyValue {
-    /// [`Self::from_py`] for a named value: a conversion error names it, as
-    /// `parameter 'x'` or `property 'v'`.
-    pub fn from_py_named(obj: &Bound<'_, PyAny>, what: &str, name: &str) -> PyGrafeoResult<Value> {
-        Self::from_py(obj).map_err(|error| match error {
-            PyGrafeoError::Type(message) => {
-                PyGrafeoError::Type(format!("{what} '{name}': {message}"))
-            }
-            other => other,
-        })
-    }
-
     /// Converts a Python object to a Grafeo Value.
     pub fn from_py(obj: &Bound<'_, PyAny>) -> PyGrafeoResult<Value> {
         if obj.is_none() {
@@ -147,50 +134,12 @@ impl PyValue {
             return Ok(Value::Int64(v));
         }
 
-        // An int past 64 bits is an exact DECIMAL up to 38 digits (an i128
-        // holds every one of them), and an error past that.
-        if obj.is_instance_of::<PyInt>() {
-            let too_wide =
-                || PyGrafeoError::Type(format!("the integer {obj} has more than 38 digits"));
-            let wide = obj.extract::<i128>().map_err(|_| too_wide())?;
-            return Value::from_wide_integer(wide).map_err(|_| too_wide());
-        }
-
-        // decimal.Decimal before float: it converts to a float, which would
-        // lose its exact value. `format(d, 'f')` writes `1E+3` as `1000`.
-        let decimal_type = obj
-            .py()
-            .import("decimal")
-            .and_then(|module| module.getattr("Decimal"))
-            .map_err(|e| PyGrafeoError::Type(format!("decimal module unavailable: {e}")))?;
-        if obj.is_instance(&decimal_type).unwrap_or(false) {
-            let text: String = obj
-                .py()
-                .import("builtins")
-                .and_then(|builtins| builtins.getattr("format"))
-                .and_then(|format| format.call1((obj, "f")))
-                .and_then(|text| text.extract())
-                .map_err(|e| PyGrafeoError::Type(format!("cannot read decimal {obj}: {e}")))?;
-            return Decimal::parse(&text).map(Value::Decimal).map_err(|e| {
-                PyGrafeoError::Type(format!("decimal {obj} has no exact value here: {e}"))
-            });
-        }
-
         if let Ok(v) = obj.extract::<f64>() {
             return Ok(Value::Float64(v));
         }
 
         if let Ok(v) = obj.extract::<String>() {
             return Ok(Value::String(v.into()));
-        }
-
-        // Bytes before sequences: `bytes` and `bytearray` are sequences of
-        // ints, so the list case below would read them as a list.
-        if obj.is_instance_of::<PyBytes>() || obj.is_instance_of::<PyByteArray>() {
-            let bytes: Vec<u8> = obj
-                .extract()
-                .map_err(|e| PyGrafeoError::Type(format!("Cannot read bytes: {}", e)))?;
-            return Ok(Value::Bytes(bytes.into()));
         }
 
         if let Ok(v) = obj.extract::<Vec<Bound<'_, PyAny>>>() {
@@ -228,6 +177,13 @@ impl PyValue {
         }
 
         // Handle bytes
+        if obj.is_instance_of::<PyBytes>() {
+            let bytes: &Bound<'_, PyBytes> = obj
+                .cast()
+                .map_err(|e| PyGrafeoError::Type(format!("Cannot cast to bytes: {}", e)))?;
+            let byte_slice: &[u8] = bytes.as_bytes();
+            return Ok(Value::Bytes(byte_slice.into()));
+        }
 
         // Handle datetime. Naive datetimes are UTC, the same convention used
         // when timestamps are returned, so values round-trip on any machine.
@@ -242,17 +198,6 @@ impl PyValue {
                 )));
             }
             return Ok(Value::Timestamp(Timestamp::from_micros(micros)));
-        }
-
-        // A date, and a time of day: aware, it keeps its UTC offset, as a
-        // time read from a query comes back.
-        if obj.is_instance_of::<PyDate>() {
-            return date_value(obj)
-                .map_err(|e| PyGrafeoError::Type(format!("Failed to convert date: {}", e)));
-        }
-        if obj.is_instance_of::<PyTime>() {
-            return time_value(obj)
-                .map_err(|e| PyGrafeoError::Type(format!("Failed to convert time: {}", e)));
         }
 
         let type_name = obj
@@ -308,13 +253,6 @@ impl PyValue {
             Value::Bytes(bytes) => PyBytes::new(py, bytes.as_ref()).unbind().into_any(),
             Value::Timestamp(ts) => utc_micros_to_datetime(py, ts.as_micros())
                 .map_or_else(|_| py.None(), |dt| dt.unbind().into_any()),
-            Value::Decimal(d) => {
-                let decimal_mod = py.import("decimal").expect("decimal module should exist");
-                decimal_mod
-                    .getattr("Decimal")
-                    .and_then(|class| class.call1((d.to_string(),)))
-                    .map_or_else(|_| py.None(), |value| value.unbind().into_any())
-            }
             Value::Date(d) => {
                 let datetime_mod = py.import("datetime").expect("datetime module should exist");
                 let date_class = datetime_mod
@@ -330,21 +268,8 @@ impl PyValue {
                     .getattr("time")
                     .expect("datetime.time should exist");
                 let micros = t.nanosecond() / 1000;
-                // A time with a UTC offset is an aware `datetime.time`.
-                let tzinfo = match t.offset_seconds() {
-                    Some(seconds) => datetime_mod
-                        .getattr("timedelta")
-                        .and_then(|class| class.call1((0, seconds)))
-                        .and_then(|delta| {
-                            datetime_mod
-                                .getattr("timezone")
-                                .and_then(|class| class.call1((delta,)))
-                        })
-                        .map_or_else(|_| py.None(), |tz| tz.unbind()),
-                    None => py.None(),
-                };
                 time_class
-                    .call1((t.hour(), t.minute(), t.second(), micros, tzinfo))
+                    .call1((t.hour(), t.minute(), t.second(), micros))
                     .map_or_else(|_| py.None(), |dt| dt.unbind().into_any())
             }
             Value::Duration(d) => {
@@ -506,37 +431,6 @@ fn timedelta_micros(delta: &Bound<'_, PyAny>) -> PyResult<i64> {
     let seconds: i64 = delta.getattr("seconds")?.extract()?;
     let micros: i64 = delta.getattr("microseconds")?.extract()?;
     Ok(days * MICROS_PER_DAY + seconds * MICROS_PER_SECOND + micros)
-}
-
-/// The `Date` of a Python `datetime.date` (not a `datetime`).
-fn date_value(obj: &Bound<'_, PyAny>) -> PyResult<Value> {
-    let year: i32 = obj.getattr("year")?.extract()?;
-    let month: u32 = obj.getattr("month")?.extract()?;
-    let day: u32 = obj.getattr("day")?.extract()?;
-    Date::from_ymd(year, month, day)
-        .map(Value::Date)
-        .ok_or_else(|| pyo3::exceptions::PyValueError::new_err(format!("{obj} is out of range")))
-}
-
-/// The `Time` of a Python `datetime.time`: an aware one keeps its UTC
-/// offset, as `Value::Time` holds it.
-fn time_value(obj: &Bound<'_, PyAny>) -> PyResult<Value> {
-    let field = |name: &str| -> PyResult<u32> { obj.getattr(name)?.extract() };
-    let out_of_range = || pyo3::exceptions::PyValueError::new_err(format!("{obj} is out of range"));
-    let time = Time::from_hms_nano(
-        field("hour")?,
-        field("minute")?,
-        field("second")?,
-        field("microsecond")? * 1000,
-    )
-    .ok_or_else(out_of_range)?;
-    let offset = obj.call_method0("utcoffset")?;
-    if offset.is_none() {
-        return Ok(Value::Time(time));
-    }
-    let seconds = i32::try_from(timedelta_micros(&offset)? / MICROS_PER_SECOND)
-        .map_err(|_| out_of_range())?;
-    Ok(Value::Time(time.with_offset(seconds)))
 }
 
 /// A naive UTC datetime for microseconds since the Unix epoch.

@@ -6,7 +6,7 @@
 use std::cmp::Ordering;
 use std::collections::HashMap;
 
-use grafeo_common::types::{Decimal, Value};
+use grafeo_common::types::Value;
 
 use super::sort::{NullOrder, SortDirection};
 
@@ -17,31 +17,9 @@ pub fn value_to_f64(value: &Value) -> Option<f64> {
     match value {
         Value::Int64(i) => Some(*i as f64),
         Value::Float64(f) => Some(*f),
-        Value::Decimal(d) => Some(d.to_f64()),
         // RDF stores numeric literals as strings - try to parse them
         Value::String(s) => s.parse::<f64>().ok(),
         _ => None,
-    }
-}
-
-/// The order of two values when at least one is a decimal, by
-/// [`Value::compare_decimal`]. A string meeting a decimal compares as the
-/// number it reads as, as it does against an integer or a float (RDF stores
-/// numeric literals as strings): decimal text exactly, other number text
-/// (`'1e3'`) as its float.
-pub fn compare_with_decimal(a: &Value, b: &Value) -> Option<Ordering> {
-    let number = |text: &str| {
-        Decimal::parse(text).map(Value::Decimal).ok().or_else(|| {
-            text.parse::<f64>()
-                .ok()
-                .filter(|float| !float.is_nan())
-                .map(Value::Float64)
-        })
-    };
-    match (a, b) {
-        (Value::String(text), Value::Decimal(_)) => number(text)?.compare_decimal(b),
-        (Value::Decimal(_), Value::String(text)) => a.compare_decimal(&number(text)?),
-        _ => a.compare_decimal(b),
     }
 }
 
@@ -51,7 +29,6 @@ pub fn compare_with_decimal(a: &Value, b: &Value) -> Option<Ordering> {
 /// RDF numeric strings that need parsing before comparison.
 pub fn compare_values(a: &Value, b: &Value) -> Option<Ordering> {
     match (a, b) {
-        (Value::Decimal(_), _) | (_, Value::Decimal(_)) => compare_with_decimal(a, b),
         (Value::Int64(a), Value::Int64(b)) => Some(a.cmp(b)),
         (Value::Float64(a), Value::Float64(b)) => a.partial_cmp(b),
         (Value::String(a), Value::String(b)) => {
@@ -63,17 +40,13 @@ pub fn compare_values(a: &Value, b: &Value) -> Option<Ordering> {
             }
         }
         (Value::Bool(a), Value::Bool(b)) => Some(a.cmp(b)),
-        (Value::Int64(a), Value::Float64(b)) => partial_cmp_int_float(*a, *b),
-        (Value::Float64(a), Value::Int64(b)) => {
-            partial_cmp_int_float(*b, *a).map(Ordering::reverse)
-        }
+        (Value::Int64(a), Value::Float64(b)) => (*a as f64).partial_cmp(b),
+        (Value::Float64(a), Value::Int64(b)) => a.partial_cmp(&(*b as f64)),
         // String-to-numeric comparisons for RDF
-        (Value::String(s), Value::Int64(i)) => partial_cmp_text_int(s, *i),
-        (Value::String(s), Value::Float64(f)) => partial_cmp_text_float(s, *f),
-        (Value::Int64(i), Value::String(s)) => partial_cmp_text_int(s, *i).map(Ordering::reverse),
-        (Value::Float64(f), Value::String(s)) => {
-            partial_cmp_text_float(s, *f).map(Ordering::reverse)
-        }
+        (Value::String(s), Value::Int64(i)) => s.parse::<f64>().ok()?.partial_cmp(&(*i as f64)),
+        (Value::String(s), Value::Float64(f)) => s.parse::<f64>().ok()?.partial_cmp(f),
+        (Value::Int64(i), Value::String(s)) => (*i as f64).partial_cmp(&s.parse::<f64>().ok()?),
+        (Value::Float64(f), Value::String(s)) => f.partial_cmp(&s.parse::<f64>().ok()?),
         (Value::Timestamp(a), Value::Timestamp(b)) => Some(a.cmp(b)),
         (Value::Date(a), Value::Date(b)) => Some(a.cmp(b)),
         (Value::Time(a), Value::Time(b)) => Some(a.cmp(b)),
@@ -92,14 +65,12 @@ pub fn compare_values(a: &Value, b: &Value) -> Option<Ordering> {
 /// `NULLS FIRST` / `NULLS LAST` says (see [`compare_sort_values`]); null
 /// inside a list or map is larger than any other value.
 ///
-/// Within a type: numbers numerically, integers and floats exactly, decimals
-/// exactly with integers and by a float's shortest text with floats, with NaN
+/// Within a type: numbers numerically, integers and floats exactly, with NaN
 /// after positive infinity; strings by code point; `false` before `true`;
 /// temporal values in time order; durations by months, then days, then
 /// nanoseconds; lists and paths element by element, a prefix first; maps by
 /// size, then their keys, then their values; vectors and bytes element by
-/// element; counters by their value; RDF terms in SPARQL order (see
-/// [`sparql_order`](grafeo_common::types::sparql_order)).
+/// element; counters by their value.
 #[must_use]
 pub fn compare_values_total(a: &Value, b: &Value) -> Ordering {
     let by_type = type_rank(a).cmp(&type_rank(b));
@@ -108,12 +79,6 @@ pub fn compare_values_total(a: &Value, b: &Value) -> Ordering {
     }
     match (a, b) {
         (Value::Bool(a), Value::Bool(b)) => a.cmp(b),
-        // A decimal among the numbers; NaN after every decimal.
-        (Value::Decimal(_), Value::Float64(f)) if f.is_nan() => Ordering::Less,
-        (Value::Float64(f), Value::Decimal(_)) if f.is_nan() => Ordering::Greater,
-        (Value::Decimal(_), _) | (_, Value::Decimal(_)) => {
-            a.compare_decimal(b).unwrap_or(Ordering::Equal)
-        }
         (Value::Int64(a), Value::Int64(b)) => a.cmp(b),
         (Value::Float64(a), Value::Float64(b)) => compare_floats(*a, *b),
         (Value::Int64(a), Value::Float64(b)) => compare_int_float(*a, *b),
@@ -155,7 +120,6 @@ pub fn compare_values_total(a: &Value, b: &Value) -> Ordering {
         (Value::GCounter(_) | Value::OnCounter { .. }, _) => {
             counter_value(a).cmp(&counter_value(b))
         }
-        (Value::RdfTerm(a), Value::RdfTerm(b)) => grafeo_common::types::sparql_order(a, b),
         // Values of the same rank not matched above are equal: nulls, and
         // values of a type added later.
         _ => Ordering::Equal,
@@ -179,11 +143,8 @@ fn type_rank(value: &Value) -> u8 {
         Value::String(_) => 11,
         Value::Bool(_) => 12,
         Value::GCounter(_) | Value::OnCounter { .. } => 13,
-        Value::Int64(_) | Value::Float64(_) | Value::Decimal(_) => 15,
+        Value::Int64(_) | Value::Float64(_) => 15,
         Value::Null => 16,
-        // RDF terms: SPARQL results order them among themselves; next to other
-        // types they take the place openCypher leaves for types it does not define.
-        Value::RdfTerm(_) => 14,
         // A type added later goes before the numbers: openCypher keeps types
         // it does not define out from after them.
         _ => 14,
@@ -200,54 +161,6 @@ pub(crate) fn compare_floats(a: f64, b: f64) -> Ordering {
         (false, true) => Ordering::Less,
         // Without NaN, `partial_cmp` always has an answer.
         (false, false) => a.partial_cmp(&b).unwrap_or(Ordering::Equal),
-    }
-}
-
-/// Whether `=` finds an integer equal to a float: exactly, as
-/// `compare_int_float` orders them, so `2^53 + 1` does not equal the float
-/// `2^53`. NaN equals no integer.
-#[must_use]
-pub fn int_equals_float(int: i64, float: f64) -> bool {
-    compare_int_float(int, float).is_eq()
-}
-
-/// Whether `=` finds a numeric string equal to a float (RDF stores numeric
-/// literals as strings): integer text exactly as that integer, so
-/// `'9007199254740993'` does not equal the float `2^53`; other number text
-/// as the float it parses as.
-#[must_use]
-pub fn text_equals_float(text: &str, float: f64) -> bool {
-    match text.parse::<i64>() {
-        Ok(integer) => int_equals_float(integer, float),
-        Err(_) => text.parse::<f64>().is_ok_and(|number| number == float),
-    }
-}
-
-/// The order of an integer and a float for `<`, `<=`, `>` and `>=`: exact, as
-/// `compare_int_float` orders them (`2^53 + 1` is above the float `2^53`),
-/// and `None` for NaN, which is neither less nor greater.
-#[must_use]
-pub fn partial_cmp_int_float(int: i64, float: f64) -> Option<Ordering> {
-    (!float.is_nan()).then(|| compare_int_float(int, float))
-}
-
-/// The order of a numeric string and an integer (RDF stores numeric literals
-/// as strings): integer text exactly, other number text as its float.
-#[must_use]
-pub fn partial_cmp_text_int(text: &str, int: i64) -> Option<Ordering> {
-    match text.parse::<i64>() {
-        Ok(number) => Some(number.cmp(&int)),
-        Err(_) => partial_cmp_int_float(int, text.parse::<f64>().ok()?).map(Ordering::reverse),
-    }
-}
-
-/// The order of a numeric string and a float: integer text exactly, other
-/// number text as its float.
-#[must_use]
-pub fn partial_cmp_text_float(text: &str, float: f64) -> Option<Ordering> {
-    match text.parse::<i64>() {
-        Ok(number) => partial_cmp_int_float(number, float),
-        Err(_) => text.parse::<f64>().ok()?.partial_cmp(&float),
     }
 }
 
@@ -858,30 +771,6 @@ mod tests {
                 NullOrder::NullsLast
             ),
             Ordering::Less
-        );
-    }
-
-    #[test]
-    fn rdf_terms_sort_in_sparql_order() {
-        use grafeo_common::types::rdf::{Literal, Term};
-        let rdf = |term: Term| Value::RdfTerm(Arc::new(term));
-        let mut values = vec![
-            rdf(Term::typed_literal("10", Literal::XSD_INTEGER)),
-            rdf(Term::literal("Apple")),
-            rdf(Term::iri("http://example.org/a")),
-            rdf(Term::typed_literal("9", Literal::XSD_INTEGER)),
-            rdf(Term::blank("b0")),
-        ];
-        values.sort_by(compare_values_total);
-        assert_eq!(
-            values,
-            vec![
-                rdf(Term::blank("b0")),
-                rdf(Term::iri("http://example.org/a")),
-                rdf(Term::typed_literal("9", Literal::XSD_INTEGER)),
-                rdf(Term::typed_literal("10", Literal::XSD_INTEGER)),
-                rdf(Term::literal("Apple")),
-            ]
         );
     }
 }

@@ -2,8 +2,6 @@
 
 #[allow(clippy::wildcard_imports)]
 use super::*;
-use crate::query::functions::resolve_call;
-use crate::query::plan::BuiltinFunction;
 
 impl GqlTranslator {
     pub(super) fn translate_expression(&self, expr: &ast::Expression) -> Result<LogicalExpression> {
@@ -29,6 +27,10 @@ impl GqlTranslator {
             }
             ast::Expression::Unary { op, operand } => {
                 let operand = self.translate_expression(operand)?;
+                // Unary positive is identity: just return the operand
+                if *op == ast::UnaryOp::Pos {
+                    return Ok(operand);
+                }
                 let op = self.translate_unary_op(*op);
                 Ok(LogicalExpression::Unary {
                     op,
@@ -46,9 +48,9 @@ impl GqlTranslator {
                 // by a WITH, unwound from a list).
 
                 // NULLIF(a, b) desugars to CASE WHEN a = b THEN NULL ELSE a END
-                if BuiltinFunction::from_name(name) == Some(BuiltinFunction::Nullif) {
+                if name.eq_ignore_ascii_case("nullif") {
                     if args.len() != 2 {
-                        return Err(Error::from(QueryError::new(
+                        return Err(Error::Query(QueryError::new(
                             QueryErrorKind::Semantic,
                             "NULLIF requires exactly 2 arguments",
                         )));
@@ -73,7 +75,11 @@ impl GqlTranslator {
                     .iter()
                     .map(|a| self.translate_expression(a))
                     .collect::<Result<Vec<_>>>()?;
-                resolve_call(name, args, *distinct)
+                Ok(LogicalExpression::FunctionCall {
+                    name: name.clone(),
+                    args,
+                    distinct: *distinct,
+                })
             }
             ast::Expression::List(items) => {
                 let items = items
@@ -276,7 +282,6 @@ impl GqlTranslator {
             ast::Literal::Bool(b) => Value::Bool(*b),
             ast::Literal::Integer(i) => Value::Int64(*i),
             ast::Literal::Float(f) => Value::Float64(*f),
-            ast::Literal::Decimal(d) => Value::Decimal(*d),
             ast::Literal::String(s) => Value::String(s.clone().into()),
             ast::Literal::Date(s) => grafeo_common::types::Date::parse(s)
                 .map_or_else(|| Value::String(s.clone().into()), Value::Date),
@@ -348,7 +353,8 @@ impl GqlTranslator {
         match op {
             ast::UnaryOp::Not => UnaryOp::Not,
             ast::UnaryOp::Neg => UnaryOp::Neg,
-            ast::UnaryOp::Pos => UnaryOp::Pos,
+            // Pos is handled as a no-op at the call site; this arm is unreachable.
+            ast::UnaryOp::Pos => UnaryOp::Not,
             ast::UnaryOp::IsNull => UnaryOp::IsNull,
             ast::UnaryOp::IsNotNull => UnaryOp::IsNotNull,
         }
@@ -537,8 +543,8 @@ mod tests {
     }
 
     #[test]
-    fn test_length_with_multiple_args_is_an_arity_error() {
-        // length(a, b) is no path length either: the translator refuses the call.
+    fn test_length_with_multiple_args_is_regular_function() {
+        // length(a, b) should remain a regular function call (path optimization is single-arg only)
         let t = translator();
         let expr = ast::Expression::FunctionCall {
             name: "length".to_string(),
@@ -549,7 +555,10 @@ mod tests {
             distinct: false,
         };
 
-        let error = t.translate_expression(&expr).unwrap_err().to_string();
-        assert!(error.contains("length"), "{error}");
+        let result = t.translate_expression(&expr).unwrap();
+        assert!(
+            matches!(&result, LogicalExpression::FunctionCall { name, .. } if name == "length"),
+            "length(a, b) should stay as FunctionCall, got: {result:?}"
+        );
     }
 }

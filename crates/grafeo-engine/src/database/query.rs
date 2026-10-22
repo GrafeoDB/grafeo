@@ -12,17 +12,12 @@ impl super::GrafeoDB {
     where
         F: FnOnce(&crate::session::Session) -> Result<QueryResult>,
     {
-        let mut session = self.session();
-        // One-shot calls share the database's graph context like one long session,
-        // whose home stays the default graph and schema.
-        session.set_home(None, None);
+        let session = self.session();
         let result = func(&session);
-        // Sync graph, schema and time zone state back, even on error (the session
-        // command may have succeeded before a subsequent query failed in the same
-        // session).
+        // Sync graph and schema state back, even on error (the session command may
+        // have succeeded before a subsequent query failed in the same session).
         *self.current_graph.write() = session.current_graph();
         *self.current_schema.write() = session.current_schema();
-        *self.current_time_zone.write() = session.time_zone();
         result
     }
 
@@ -54,27 +49,26 @@ impl super::GrafeoDB {
     ///
     /// # Stability: Experimental
     ///
-    /// New in 0.5.40. It may change or be removed in any release, with a
-    /// CHANGELOG entry: see <https://grafeo.dev/stability/>.
+    /// New in 0.5.40. Signature may change before being promoted to Beta.
     ///
     /// # Errors
     ///
     /// Returns an error if parsing or planning fails, or if the query is a
     /// kind that cannot be streamed.
-    #[cfg(feature = "gql")]
+    #[cfg(all(feature = "gql", feature = "lpg"))]
     pub fn execute_streaming(
         &self,
         query: &str,
     ) -> Result<crate::query::executor::stream::OwnedResultStream> {
         use crate::query::executor::stream::OwnedResultStream;
         let session = self.session();
-        let (source, columns, deadline, pin) = session.build_streaming_plan(query)?;
+        let (source, columns, deadline) = session.build_streaming_plan(query)?;
         // Sync graph/schema state back (parser may have changed the session's
         // view, although streaming rejects session commands so this is a
         // defensive no-op today).
         *self.current_graph.write() = session.current_graph();
         *self.current_schema.write() = session.current_schema();
-        OwnedResultStream::new(source, columns, deadline, pin)
+        OwnedResultStream::new(source, columns, deadline)
     }
 
     /// Executes a GQL query with visibility at the specified epoch.

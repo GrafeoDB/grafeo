@@ -37,32 +37,7 @@ public sealed record QueryResult(
     IReadOnlyList<Node> Nodes,
     IReadOnlyList<Edge> Edges,
     double ExecutionTimeMs,
-    long RowsScanned)
-{
-    /// <summary>What a write statement changed (all zero for a read).</summary>
-    public WriteCounters Counters { get; init; } = WriteCounters.None;
-}
-
-/// <summary>What a write statement changed.</summary>
-/// <param name="NodesCreated">Nodes created.</param>
-/// <param name="NodesDeleted">Nodes deleted.</param>
-/// <param name="EdgesCreated">Edges created.</param>
-/// <param name="EdgesDeleted">Edges deleted.</param>
-/// <param name="PropertiesSet">Properties set.</param>
-/// <param name="LabelsAdded">Labels added.</param>
-/// <param name="LabelsRemoved">Labels removed.</param>
-public sealed record WriteCounters(
-    long NodesCreated,
-    long NodesDeleted,
-    long EdgesCreated,
-    long EdgesDeleted,
-    long PropertiesSet,
-    long LabelsAdded,
-    long LabelsRemoved)
-{
-    /// <summary>No changes.</summary>
-    public static readonly WriteCounters None = new(0, 0, 0, 0, 0, 0, 0);
-}
+    long RowsScanned);
 
 /// <summary>A single vector search result (node ID + distance).</summary>
 /// <param name="NodeId">The matching node's ID.</param>

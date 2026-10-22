@@ -76,7 +76,7 @@ impl GraphQLRdfTranslator {
                 _ => None,
             })
             .ok_or_else(|| {
-                Error::from(QueryError::new(
+                Error::Query(QueryError::new(
                     QueryErrorKind::Syntax,
                     "No operation found in document",
                 ))
@@ -84,8 +84,8 @@ impl GraphQLRdfTranslator {
 
         // Only Query operations are supported
         if operation.operation != ast::OperationType::Query {
-            return Err(Error::from(QueryError::new(
-                QueryErrorKind::Unsupported,
+            return Err(Error::Query(QueryError::new(
+                QueryErrorKind::Semantic,
                 "Only Query operations are supported for RDF",
             )));
         }
@@ -116,7 +116,7 @@ impl GraphQLRdfTranslator {
         // Each field in the root selection set is a separate query
         let selections = &op.selection_set.selections;
         if selections.is_empty() {
-            return Err(Error::from(QueryError::new(
+            return Err(Error::Query(QueryError::new(
                 QueryErrorKind::Syntax,
                 "Empty selection set",
             )));
@@ -135,7 +135,7 @@ impl GraphQLRdfTranslator {
             .collect();
 
         if root_fields.is_empty() {
-            return Err(Error::from(QueryError::new(
+            return Err(Error::Query(QueryError::new(
                 QueryErrorKind::Syntax,
                 "No field found in selection set",
             )));

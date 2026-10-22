@@ -18,7 +18,7 @@ grafeo-core = { path = "../../grafeo-core" }
 grafeo-common = { path = "../../grafeo-common" }
 grafeo-bindings-common = { path = "../common" }
 
-serde_json = { version = "1.0", features = ["preserve_order", "arbitrary_precision"] }
+serde_json = { version = "1.0", features = ["preserve_order"] }
 parking_lot.workspace = true
 
 [features]
@@ -42,10 +42,10 @@ languages = ["gql", "cypher", "sparql", "gremlin", "graphql", "sql-pgq"]
 ai = ["vector-index", "text-index", "hybrid-search", "cdc"]
 storage = ["grafeo-engine/storage"]
 # Persona-based profiles
-lpg = ["gql", "cypher", "gremlin", "sql-pgq", "storage", "grafeo-engine/regex"]
+lpg = ["grafeo-engine/lpg", "gql", "cypher", "gremlin", "sql-pgq", "storage", "grafeo-engine/regex"]
 rdf = ["triple-store", "gql", "sparql", "graphql", "storage", "grafeo-engine/regex"]
 analytics = ["algos", "vector-index", "text-index", "hybrid-search", "jsonl-import", "parquet-import"]
-edge = ["gql", "grafeo-engine/regex-lite"]
+edge = ["grafeo-engine/lpg", "gql", "grafeo-engine/regex-lite"]
 # Deployment-based profiles (deprecated)
 embedded = ["gql", "ai", "algos", "grafeo-engine/parallel", "grafeo-engine/regex", "grafeo-engine/grafeo-file"]
 full = ["languages", "ai", "algos", "triple-store"]

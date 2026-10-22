@@ -17,12 +17,10 @@
 //! inline.
 
 use super::{
-    BuiltinFunction, Direction, Error, ExpandDirection, FilterExpression, LogicalExpression,
-    LogicalOperator, Result, Value, convert_binary_op, convert_unary_op,
+    Direction, Error, ExpandDirection, FilterExpression, LogicalExpression, LogicalOperator,
+    Result, Value, convert_binary_op, convert_unary_op,
 };
-use crate::query::functions::check_pattern_match;
-use crate::query::plan::Callee;
-use grafeo_common::utils::error::QueryError;
+use crate::query::functions::{check_function_call, check_pattern_match};
 
 impl super::Planner {
     /// Converts a logical expression to a filter expression.
@@ -62,41 +60,19 @@ impl super::Planner {
                     operand: Box::new(operand_expr),
                 })
             }
-            LogicalExpression::FunctionCall {
-                callee, name, args, ..
-            } => {
-                #[cfg(feature = "text-index")]
-                if let Callee::Builtin(
-                    function @ (BuiltinFunction::TextMatch | BuiltinFunction::TextScore),
-                ) = callee
-                {
-                    self.check_text_index(*function, args)?;
-                }
-                // The translator resolved the call and checked its arguments.
+            LogicalExpression::FunctionCall { name, args, .. } => {
+                // The evaluator answers a call it cannot compute with a null
+                // for every row: refuse it here, before any row is read.
+                check_function_call(name, args.len())?;
                 let filter_args: Vec<FilterExpression> = args
                     .iter()
                     .map(|a| self.convert_expression(a))
                     .collect::<Result<Vec<_>>>()?;
-                match callee {
-                    Callee::Builtin(function) => Ok(FilterExpression::FunctionCall {
-                        function: *function,
-                        args: filter_args,
-                    }),
-                    // An aggregate the planner did not group (`WHERE count(p)
-                    // > 0` on a match): the evaluator has no value for it.
-                    Callee::Aggregate(_) => Err(Error::from(QueryError::semantic(format!(
-                        "Aggregate function '{name}' cannot be used here: it needs a RETURN or WITH that groups rows"
-                    )))),
-                }
+                Ok(FilterExpression::FunctionCall {
+                    name: name.clone(),
+                    args: filter_args,
+                })
             }
-            // SPARQL calls reach only the RDF planner; here they have no value.
-            LogicalExpression::SparqlCall { name, args } => Ok(FilterExpression::SparqlCall {
-                name: name.clone(),
-                args: args
-                    .iter()
-                    .map(|a| self.convert_expression(a))
-                    .collect::<Result<Vec<_>>>()?,
-            }),
             LogicalExpression::Case {
                 operand,
                 when_clauses,
@@ -283,7 +259,7 @@ impl super::Planner {
                             Ok((
                                 "*".to_string(),
                                 FilterExpression::FunctionCall {
-                                    function: BuiltinFunction::Properties,
+                                    name: "properties".to_string(),
                                     args: vec![FilterExpression::Variable(base.clone())],
                                 },
                             ))
@@ -392,7 +368,7 @@ impl super::Planner {
                         end_var: expand.from_variable.clone(),
                         edge_var: expand.edge_variable.clone(),
                         direction,
-                        edge_types: self.stored_edge_types(&expand.edge_types)?,
+                        edge_types: expand.edge_types.clone(),
                         end_labels,
                         one_edge,
                         max_hops: expand.max_hops,
@@ -414,7 +390,7 @@ impl super::Planner {
                         end_var: expand.to_variable.clone(),
                         edge_var: expand.edge_variable.clone(),
                         direction,
-                        edge_types: self.stored_edge_types(&expand.edge_types)?,
+                        edge_types: expand.edge_types.clone(),
                         end_labels: None,
                         one_edge,
                         max_hops: expand.max_hops,
@@ -465,57 +441,18 @@ impl super::Planner {
         }
     }
 
-    /// `text_match` and `text_score` read a text index on their property:
-    /// without one under any label they would match no row, so the query is
-    /// refused before it runs (#308). This replaced the rule that scored such
-    /// a node 0 (user, 2026-10-22). A query over several labels runs while
-    /// one of them has the index; a node of the others scores null.
-    #[cfg(feature = "text-index")]
-    fn check_text_index(
-        &self,
-        function: BuiltinFunction,
-        args: &[LogicalExpression],
-    ) -> Result<()> {
-        let Some(LogicalExpression::Property { variable, property }) = args.first() else {
-            return Ok(());
-        };
-        let name = if function == BuiltinFunction::TextMatch {
-            "text_match"
-        } else {
-            "text_score"
-        };
-        if self.store_kind == super::StoreKind::External {
-            return Err(Error::from(QueryError::unsupported(format!(
-                "{name} needs a text index, which only the built-in store has: this database is on a store of its own"
-            ))));
-        }
-        let labels = self.store.all_labels()?;
-        if labels
-            .iter()
-            .any(|label| self.store.has_text_index(label, property))
-        {
-            return Ok(());
-        }
-        Err(Error::from(QueryError::semantic(format!(
-            "{name}({variable}.{property}, ...) needs a text index on '{property}': \
-             create one with CREATE INDEX FOR (n:Label) ON (n.{property}) USING TEXT"
-        ))))
-    }
-
     /// The variable and label of a `hasLabel(variable, 'Label')` predicate.
     fn label_condition<'a>(&self, predicate: &'a LogicalExpression) -> Option<(&'a str, String)> {
         match predicate {
-            LogicalExpression::FunctionCall {
-                callee: Callee::Builtin(BuiltinFunction::HasLabel),
-                args,
-                ..
-            } => match (args.first(), args.get(1)) {
-                (
-                    Some(LogicalExpression::Variable(variable)),
-                    Some(LogicalExpression::Literal(Value::String(label))),
-                ) => Some((variable, label.to_string())),
-                _ => None,
-            },
+            LogicalExpression::FunctionCall { name, args, .. } if name == "hasLabel" => {
+                match (args.first(), args.get(1)) {
+                    (
+                        Some(LogicalExpression::Variable(variable)),
+                        Some(LogicalExpression::Literal(Value::String(label))),
+                    ) => Some((variable, label.to_string())),
+                    _ => None,
+                }
+            }
             _ => None,
         }
     }

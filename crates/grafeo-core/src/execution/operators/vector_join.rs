@@ -18,9 +18,9 @@
 
 use super::{Operator, OperatorError, OperatorResult};
 use crate::execution::DataChunk;
-use crate::graph::GraphStore;
+use crate::graph::GraphStoreSearch;
 use crate::index::vector::{DistanceMetric, brute_force_knn};
-use grafeo_common::types::{LogicalType, NodeId, ReadView, Value};
+use grafeo_common::types::{LogicalType, NodeId, PropertyKey, Value};
 use std::sync::Arc;
 
 #[cfg(feature = "vector-index")]
@@ -46,7 +46,7 @@ pub struct VectorJoinOperator {
     /// Left input operator providing entities.
     left: Box<dyn Operator>,
     /// The store to search vectors from.
-    store: Arc<dyn GraphStore>,
+    store: Arc<dyn GraphStoreSearch>,
     /// The HNSW index for right side (None = brute-force).
     #[cfg(feature = "vector-index")]
     index: Option<Arc<VectorIndexKind>>,
@@ -85,9 +85,6 @@ pub struct VectorJoinOperator {
     left_exhausted: bool,
     /// Uses index flag for name().
     uses_index: bool,
-    /// Who reads: the join reads vectors and finds nodes as this view sees
-    /// them.
-    view: ReadView,
 }
 
 impl VectorJoinOperator {
@@ -103,16 +100,14 @@ impl VectorJoinOperator {
     /// * `right_property` - Property containing right-side embeddings
     /// * `k` - Number of nearest neighbors per left row
     /// * `metric` - Distance metric
-    /// * `view` - Who reads
     #[must_use]
     pub fn with_static_query(
         left: Box<dyn Operator>,
-        store: Arc<dyn GraphStore>,
+        store: Arc<dyn GraphStoreSearch>,
         query_vector: Vec<f32>,
         right_property: impl Into<String>,
         k: usize,
         metric: DistanceMetric,
-        view: ReadView,
     ) -> Self {
         Self {
             left,
@@ -136,7 +131,6 @@ impl VectorJoinOperator {
             chunk_capacity: 1024,
             left_exhausted: false,
             uses_index: false,
-            view,
         }
     }
 
@@ -154,21 +148,15 @@ impl VectorJoinOperator {
     /// * `right_property` - Property containing right-side embeddings
     /// * `k` - Number of nearest neighbors per left entity
     /// * `metric` - Distance metric
-    /// * `view` - Who reads
     #[must_use]
-    #[expect(
-        clippy::too_many_arguments,
-        reason = "the join's parts and the view it reads at; the options are builders"
-    )]
     pub fn entity_to_entity(
         left: Box<dyn Operator>,
-        store: Arc<dyn GraphStore>,
+        store: Arc<dyn GraphStoreSearch>,
         left_node_column: usize,
         left_property: impl Into<String>,
         right_property: impl Into<String>,
         k: usize,
         metric: DistanceMetric,
-        view: ReadView,
     ) -> Self {
         Self {
             left,
@@ -192,7 +180,6 @@ impl VectorJoinOperator {
             chunk_capacity: 1024,
             left_exhausted: false,
             uses_index: false,
-            view,
         }
     }
 
@@ -241,10 +228,10 @@ impl VectorJoinOperator {
     }
 
     /// Gets the query vector for the current left row.
-    fn get_query_vector(&self) -> Result<Option<Vec<f32>>, OperatorError> {
+    fn get_query_vector(&self) -> Option<Vec<f32>> {
         // Static query vector (same for all left rows)
         if let Some(ref v) = self.query_vector {
-            return Ok(Some(v.clone()));
+            return Some(v.clone());
         }
 
         // Entity-to-entity: fetch from left entity's property
@@ -254,27 +241,26 @@ impl VectorJoinOperator {
             &self.left_property,
         ) && let Some(col) = chunk.column(col_idx)
             && let Some(node_id) = col.get_node_id(self.current_left_row)
-            && let Some(Value::Vector(vec)) = self.store.node_property(node_id, prop, self.view)?
+            && let Some(Value::Vector(vec)) = self
+                .store
+                .get_node_property(node_id, &PropertyKey::new(prop))
         {
-            return Ok(Some(vec.to_vec()));
+            return Some(vec.to_vec());
         }
 
-        Ok(None)
+        None
     }
 
     /// Performs vector search for the current query.
-    fn search_right_side(&self, query: &[f32]) -> Result<Vec<(NodeId, f32)>, OperatorError> {
+    fn search_right_side(&self, query: &[f32]) -> Vec<(NodeId, f32)> {
         #[cfg(feature = "vector-index")]
         {
             if let Some(ref index) = self.index {
                 let accessor = crate::index::vector::PropertyVectorAccessor::new(
                     &*self.store,
                     &*self.right_property,
-                    self.view,
                 );
-                let found = index.search_with_ef(query, self.k, self.ef, &accessor);
-                accessor.check()?;
-                return Ok(found);
+                return index.search_with_ef(query, self.k, self.ef, &accessor);
             }
         }
 
@@ -283,27 +269,32 @@ impl VectorJoinOperator {
     }
 
     /// Performs brute-force k-NN search.
-    fn brute_force_search(&self, query: &[f32]) -> Result<Vec<(NodeId, f32)>, OperatorError> {
+    fn brute_force_search(&self, query: &[f32]) -> Vec<(NodeId, f32)> {
         // Get right-side nodes (optionally filtered by label)
         let node_ids = match &self.right_label {
-            Some(label) => self.store.nodes_by_label(label, self.view)?,
-            None => self.store.node_ids(self.view)?,
+            Some(label) => self.store.nodes_by_label(label),
+            None => self.store.node_ids(),
         };
 
         // Collect vectors from node properties
-        let mut vectors: Vec<(NodeId, Vec<f32>)> = Vec::new();
-        for id in node_ids {
-            if let Some(Value::Vector(vec)) =
+        let vectors: Vec<(NodeId, Vec<f32>)> = node_ids
+            .into_iter()
+            .filter_map(|id| {
                 self.store
-                    .node_property(id, &self.right_property, self.view)?
-            {
-                vectors.push((id, vec.to_vec()));
-            }
-        }
+                    .get_node_property(id, &PropertyKey::new(&self.right_property))
+                    .and_then(|v| {
+                        if let Value::Vector(vec) = v {
+                            Some((id, vec.to_vec()))
+                        } else {
+                            None
+                        }
+                    })
+            })
+            .collect();
 
         // Run brute-force k-NN
         let iter = vectors.iter().map(|(id, v)| (*id, v.as_slice()));
-        Ok(brute_force_knn(iter, query, self.k, self.metric))
+        brute_force_knn(iter, query, self.k, self.metric)
     }
 
     /// Applies similarity/distance filters to results.
@@ -356,9 +347,9 @@ impl VectorJoinOperator {
             }
 
             // Get query vector for current left row
-            if let Some(query) = self.get_query_vector()? {
+            if let Some(query) = self.get_query_vector() {
                 // Search right side
-                let mut results = self.search_right_side(&query)?;
+                let mut results = self.search_right_side(&query);
                 self.apply_filters(&mut results);
 
                 if !results.is_empty() {
@@ -473,16 +464,74 @@ impl Operator for VectorJoinOperator {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "lpg"))]
 mod tests {
     use super::*;
     use crate::execution::operators::single_row::NodeListOperator;
-    use crate::graph::rowgroup::RowGroupStore;
+    use crate::graph::GraphStoreMut;
+    use crate::graph::lpg::LpgStore;
     use std::sync::Arc as StdArc;
+
+    /// A join with an index over a spilled column reads the vectors in place:
+    /// the backing never copies one out (ruling (d) of #594).
+    #[cfg(all(feature = "vector-index", not(feature = "temporal")))]
+    #[test]
+    fn a_join_over_a_spilled_column_reads_the_vectors_in_place() {
+        use crate::graph::lpg::test_backing::MemoryBacking;
+        use crate::index::vector::{
+            HnswConfig, HnswIndex, PropertyVectorAccessor, VectorIndexKind,
+        };
+        use grafeo_common::types::PropertyKey;
+        use std::sync::atomic::Ordering;
+
+        let lpg = StdArc::new(LpgStore::new().unwrap());
+        let vectors = [[3.0, 19.0, 88.0], [19.0, 88.0, 3.0], [88.0, 3.0, 19.0]];
+        let ids: Vec<NodeId> = vectors
+            .iter()
+            .map(|vector| {
+                lpg.create_node_with_props(
+                    &["Item"],
+                    [("embedding", Value::Vector(vector.to_vec().into()))],
+                )
+            })
+            .collect();
+        let index = HnswIndex::new(HnswConfig::new(3, DistanceMetric::Euclidean));
+        {
+            let accessor = PropertyVectorAccessor::new(&*lpg, "embedding");
+            for (id, vector) in ids.iter().zip(vectors) {
+                index.insert(*id, &vector, &accessor);
+            }
+        }
+        let key = PropertyKey::new("embedding");
+        let snapshot = lpg.node_property_column_entries(&key).unwrap();
+        let backing = MemoryBacking::of(&snapshot);
+        assert!(lpg.spill_node_property_column(&key, backing.clone(), &snapshot));
+
+        let left = Box::new(NodeListOperator::new(vec![ids[0]], 1024));
+        let mut join = VectorJoinOperator::with_static_query(
+            left,
+            StdArc::clone(&lpg) as StdArc<dyn GraphStoreSearch>,
+            vec![3.0, 19.0, 88.0],
+            "embedding",
+            3,
+            DistanceMetric::Euclidean,
+        )
+        .with_index(StdArc::new(VectorIndexKind::Hnsw(index)));
+        let mut rows = 0;
+        while let Ok(Some(chunk)) = join.next() {
+            rows += chunk.row_count();
+        }
+        assert_eq!(rows, 3);
+        assert_eq!(
+            backing.copies.load(Ordering::Relaxed),
+            0,
+            "a vector was copied"
+        );
+    }
 
     #[test]
     fn test_vector_join_static_query() {
-        let store: StdArc<RowGroupStore> = StdArc::new(RowGroupStore::new());
+        let store: StdArc<dyn GraphStoreMut> = StdArc::new(LpgStore::new().unwrap());
 
         // Create nodes with vector embeddings
         let n1 = store.create_node(&["Item"]);
@@ -500,12 +549,11 @@ mod tests {
         let query = vec![1.0, 0.0, 0.0];
         let mut join = VectorJoinOperator::with_static_query(
             left,
-            StdArc::clone(&store) as StdArc<dyn GraphStore>,
+            StdArc::clone(&store) as StdArc<dyn GraphStoreSearch>,
             query,
             "embedding",
             3,
             DistanceMetric::Euclidean,
-            ReadView::latest(),
         );
 
         // Should find all 3 items, sorted by distance
@@ -519,7 +567,7 @@ mod tests {
 
     #[test]
     fn test_vector_join_entity_to_entity() {
-        let store: StdArc<RowGroupStore> = StdArc::new(RowGroupStore::new());
+        let store: StdArc<dyn GraphStoreMut> = StdArc::new(LpgStore::new().unwrap());
 
         // Create source nodes
         let src1 = store.create_node(&["Source"]);
@@ -537,13 +585,12 @@ mod tests {
         // Entity-to-entity join: find targets similar to source
         let mut join = VectorJoinOperator::entity_to_entity(
             left,
-            StdArc::clone(&store) as StdArc<dyn GraphStore>,
+            StdArc::clone(&store) as StdArc<dyn GraphStoreSearch>,
             0, // node column
             "embedding",
             "embedding",
             2,
             DistanceMetric::Euclidean,
-            ReadView::latest(),
         )
         .with_right_label("Target");
 
@@ -564,7 +611,7 @@ mod tests {
 
     #[test]
     fn test_vector_join_with_distance_filter() {
-        let store: StdArc<RowGroupStore> = StdArc::new(RowGroupStore::new());
+        let store: StdArc<dyn GraphStoreMut> = StdArc::new(LpgStore::new().unwrap());
 
         // Create nodes with embeddings
         let n1 = store.create_node(&["Item"]);
@@ -577,12 +624,11 @@ mod tests {
 
         let mut join = VectorJoinOperator::with_static_query(
             left,
-            StdArc::clone(&store) as StdArc<dyn GraphStore>,
+            StdArc::clone(&store) as StdArc<dyn GraphStoreSearch>,
             query,
             "vec",
             10,
             DistanceMetric::Euclidean,
-            ReadView::latest(),
         )
         .with_max_distance(0.5); // Only very close matches
 
@@ -601,17 +647,16 @@ mod tests {
 
     #[test]
     fn test_vector_join_name() {
-        let store: StdArc<RowGroupStore> = StdArc::new(RowGroupStore::new());
+        let store: StdArc<dyn GraphStoreMut> = StdArc::new(LpgStore::new().unwrap());
         let left = Box::new(NodeListOperator::new(vec![], 1024));
 
         let join = VectorJoinOperator::with_static_query(
             left,
-            store as StdArc<dyn GraphStore>,
+            store as StdArc<dyn GraphStoreSearch>,
             vec![1.0],
             "embedding",
             5,
             DistanceMetric::Cosine,
-            ReadView::latest(),
         );
 
         assert_eq!(join.name(), "VectorJoin(BruteForce)");
@@ -619,17 +664,16 @@ mod tests {
 
     #[test]
     fn test_vector_join_into_any() {
-        let store: StdArc<RowGroupStore> = StdArc::new(RowGroupStore::new());
+        let store: StdArc<dyn GraphStoreMut> = StdArc::new(LpgStore::new().unwrap());
         let left = Box::new(NodeListOperator::new(vec![], 1024));
 
         let op = VectorJoinOperator::with_static_query(
             left,
-            store as StdArc<dyn GraphStore>,
+            store as StdArc<dyn GraphStoreSearch>,
             vec![1.0],
             "embedding",
             5,
             DistanceMetric::Cosine,
-            ReadView::latest(),
         );
         let any = Box::new(op).into_any();
         assert!(any.downcast::<VectorJoinOperator>().is_ok());

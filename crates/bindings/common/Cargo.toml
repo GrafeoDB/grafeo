@@ -12,7 +12,7 @@ description = "Shared abstractions for Grafeo language bindings"
 grafeo-engine = { path = "../../grafeo-engine", default-features = false }
 grafeo-common = { path = "../../grafeo-common" }
 
-serde_json = { version = "1.0", features = ["arbitrary_precision"] }
+serde_json = "1.0"
 
 [features]
 default = ["embedded"]

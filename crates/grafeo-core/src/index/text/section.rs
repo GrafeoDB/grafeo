@@ -1012,11 +1012,12 @@ mod tests {
         (postings, lengths, total)
     }
 
-    /// Search results by descending score, ties by node id (the order
-    /// `search` gives them), each score as its bits.
+    /// Search results by descending score, ties by node id (`search` leaves
+    /// ties in hash order), each score as its bits.
     fn ranking(index: &InvertedIndex, query: &str) -> Vec<(NodeId, u64)> {
-        index
-            .search(query, usize::MAX)
+        let mut results = index.search(query, usize::MAX);
+        results.sort_by(|left, right| right.1.total_cmp(&left.1).then(left.0.cmp(&right.0)));
+        results
             .into_iter()
             .map(|(node, score)| (node, score.to_bits()))
             .collect()

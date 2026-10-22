@@ -14,7 +14,7 @@
 //! cargo test -p grafeo-engine --all-features --test typed_paths_see_open_writes
 //! ```
 
-#![cfg(all(feature = "gql", feature = "cypher"))]
+#![cfg(all(feature = "lpg", feature = "gql", feature = "cypher"))]
 
 use grafeo_common::types::Value;
 use grafeo_engine::{Config, GrafeoDB, Session};

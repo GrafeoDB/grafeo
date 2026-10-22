@@ -28,7 +28,7 @@
 //! cargo test -p grafeo-engine --all-features --test compacted_file_in_every_build
 //! ```
 
-#![cfg(all(feature = "gql", feature = "grafeo-file", not(miri)))]
+#![cfg(all(feature = "lpg", feature = "gql", feature = "grafeo-file", not(miri)))]
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};

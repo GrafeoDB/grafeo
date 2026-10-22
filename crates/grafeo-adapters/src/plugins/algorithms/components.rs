@@ -8,12 +8,11 @@ use grafeo_common::utils::error::Result;
 use grafeo_common::utils::hash::{FxHashMap, FxHashSet};
 use grafeo_core::graph::Direction;
 use grafeo_core::graph::GraphStore;
-#[cfg(test)]
-#[cfg(test)]
-use grafeo_core::graph::rowgroup::RowGroupStore;
+#[cfg(all(test, feature = "lpg"))]
+use grafeo_core::graph::lpg::LpgStore;
 
 use super::super::{AlgorithmResult, ParameterDef, Parameters};
-use super::traits::{ComponentResultBuilder, GraphAlgorithm, impl_algorithm, int_value};
+use super::traits::{ComponentResultBuilder, GraphAlgorithm, impl_algorithm, visible_edges_from};
 
 // ============================================================================
 // Union-Find Data Structure
@@ -95,23 +94,7 @@ impl UnionFind {
 /// # Returns
 ///
 /// A map from node ID to component ID.
-///
-/// # Errors
-///
-/// The error of a read of the store that fails.
-pub fn connected_components(
-    store: &dyn GraphStore,
-    view: grafeo_common::types::ReadView,
-) -> grafeo_common::utils::error::Result<FxHashMap<NodeId, u64>> {
-    let graph = super::traits::GraphView::new(store, view);
-    let found = connected_components_on(&graph);
-    graph.finish(found)
-}
-
-/// [`connected_components`] on the graph a [`GraphView`](super::traits::GraphView) reads.
-pub(crate) fn connected_components_on(
-    store: &super::traits::GraphView<'_>,
-) -> FxHashMap<NodeId, u64> {
+pub fn connected_components(store: &dyn GraphStore) -> FxHashMap<NodeId, u64> {
     let node_ids = store.node_ids();
     let n = node_ids.len();
 
@@ -132,14 +115,14 @@ pub(crate) fn connected_components_on(
         let idx = node_to_idx[&node];
 
         // Outgoing edges
-        for (neighbor, _) in store.edges(node, Direction::Outgoing) {
+        for (neighbor, _) in visible_edges_from(store, node, Direction::Outgoing) {
             if let Some(&neighbor_idx) = node_to_idx.get(&neighbor) {
                 uf.union(idx, neighbor_idx);
             }
         }
 
         // Incoming edges (for weakly connected)
-        for (neighbor, _) in store.edges(node, Direction::Incoming) {
+        for (neighbor, _) in visible_edges_from(store, node, Direction::Incoming) {
             if let Some(&neighbor_idx) = node_to_idx.get(&neighbor) {
                 uf.union(idx, neighbor_idx);
             }
@@ -165,22 +148,8 @@ pub(crate) fn connected_components_on(
 }
 
 /// Returns the number of connected components.
-///
-/// # Errors
-///
-/// The error of a read of the store that fails.
-pub fn connected_component_count(
-    store: &dyn GraphStore,
-    view: grafeo_common::types::ReadView,
-) -> grafeo_common::utils::error::Result<usize> {
-    let graph = super::traits::GraphView::new(store, view);
-    let found = connected_component_count_on(&graph);
-    graph.finish(found)
-}
-
-/// [`connected_component_count`] on the graph a [`GraphView`](super::traits::GraphView) reads.
-pub(crate) fn connected_component_count_on(store: &super::traits::GraphView<'_>) -> usize {
-    let components = connected_components_on(store);
+pub fn connected_component_count(store: &dyn GraphStore) -> usize {
+    let components = connected_components(store);
     let unique: FxHashSet<u64> = components.values().copied().collect();
     unique.len()
 }
@@ -205,23 +174,7 @@ struct TarjanState {
 /// # Panics
 ///
 /// Panics if the internal DFS state is inconsistent (should not happen with a valid `GraphStore`).
-///
-/// # Errors
-///
-/// The error of a read of the store that fails.
-pub fn strongly_connected_components(
-    store: &dyn GraphStore,
-    view: grafeo_common::types::ReadView,
-) -> grafeo_common::utils::error::Result<FxHashMap<NodeId, u64>> {
-    let graph = super::traits::GraphView::new(store, view);
-    let found = strongly_connected_components_on(&graph);
-    graph.finish(found)
-}
-
-/// [`strongly_connected_components`] on the graph a [`GraphView`](super::traits::GraphView) reads.
-pub(crate) fn strongly_connected_components_on(
-    store: &super::traits::GraphView<'_>,
-) -> FxHashMap<NodeId, u64> {
+pub fn strongly_connected_components(store: &dyn GraphStore) -> FxHashMap<NodeId, u64> {
     let node_ids = store.node_ids();
 
     if node_ids.is_empty() {
@@ -257,8 +210,7 @@ pub(crate) fn strongly_connected_components_on(
         index += 1;
         stack.push(start);
 
-        let neighbors: Vec<NodeId> = store
-            .edges(start, Direction::Outgoing)
+        let neighbors: Vec<NodeId> = visible_edges_from(store, start, Direction::Outgoing)
             .into_iter()
             .map(|(n, _)| n)
             .collect();
@@ -328,11 +280,11 @@ pub(crate) fn strongly_connected_components_on(
                 index += 1;
                 stack.push(neighbor);
 
-                let neighbor_neighbors: Vec<NodeId> = store
-                    .edges(neighbor, Direction::Outgoing)
-                    .into_iter()
-                    .map(|(n, _)| n)
-                    .collect();
+                let neighbor_neighbors: Vec<NodeId> =
+                    visible_edges_from(store, neighbor, Direction::Outgoing)
+                        .into_iter()
+                        .map(|(n, _)| n)
+                        .collect();
                 dfs_stack.push((neighbor, neighbor_neighbors, 0, true));
             }
         }
@@ -342,22 +294,8 @@ pub(crate) fn strongly_connected_components_on(
 }
 
 /// Returns the number of strongly connected components.
-///
-/// # Errors
-///
-/// The error of a read of the store that fails.
-pub fn strongly_connected_component_count(
-    store: &dyn GraphStore,
-    view: grafeo_common::types::ReadView,
-) -> grafeo_common::utils::error::Result<usize> {
-    let graph = super::traits::GraphView::new(store, view);
-    let found = strongly_connected_component_count_on(&graph);
-    graph.finish(found)
-}
-
-/// [`strongly_connected_component_count`] on the graph a [`GraphView`](super::traits::GraphView) reads.
-pub(crate) fn strongly_connected_component_count_on(store: &super::traits::GraphView<'_>) -> usize {
-    let components = strongly_connected_components_on(store);
+pub fn strongly_connected_component_count(store: &dyn GraphStore) -> usize {
+    let components = strongly_connected_components(store);
     let unique: FxHashSet<u64> = components.values().copied().collect();
     unique.len()
 }
@@ -371,21 +309,7 @@ pub(crate) fn strongly_connected_component_count_on(store: &super::traits::Graph
 /// # Returns
 ///
 /// `Some(order)` if the graph is a DAG, `None` if there's a cycle.
-///
-/// # Errors
-///
-/// The error of a read of the store that fails.
-pub fn topological_sort(
-    store: &dyn GraphStore,
-    view: grafeo_common::types::ReadView,
-) -> grafeo_common::utils::error::Result<Option<Vec<NodeId>>> {
-    let graph = super::traits::GraphView::new(store, view);
-    let found = topological_sort_on(&graph);
-    graph.finish(found)
-}
-
-/// [`topological_sort`] on the graph a [`GraphView`](super::traits::GraphView) reads.
-pub(crate) fn topological_sort_on(store: &super::traits::GraphView<'_>) -> Option<Vec<NodeId>> {
+pub fn topological_sort(store: &dyn GraphStore) -> Option<Vec<NodeId>> {
     let node_ids = store.node_ids();
 
     if node_ids.is_empty() {
@@ -399,7 +323,7 @@ pub(crate) fn topological_sort_on(store: &super::traits::GraphView<'_>) -> Optio
     }
 
     for &node in &node_ids {
-        for (neighbor, _) in store.edges(node, Direction::Outgoing) {
+        for (neighbor, _) in visible_edges_from(store, node, Direction::Outgoing) {
             *in_degree.entry(neighbor).or_default() += 1;
         }
     }
@@ -416,7 +340,7 @@ pub(crate) fn topological_sort_on(store: &super::traits::GraphView<'_>) -> Optio
     while let Some(node) = queue.pop() {
         result.push(node);
 
-        for (neighbor, _) in store.edges(node, Direction::Outgoing) {
+        for (neighbor, _) in visible_edges_from(store, node, Direction::Outgoing) {
             if let Some(deg) = in_degree.get_mut(&neighbor) {
                 *deg -= 1;
                 if *deg == 0 {
@@ -435,22 +359,8 @@ pub(crate) fn topological_sort_on(store: &super::traits::GraphView<'_>) -> Optio
 }
 
 /// Checks if the graph is a DAG (Directed Acyclic Graph).
-///
-/// # Errors
-///
-/// The error of a read of the store that fails.
-pub fn is_dag(
-    store: &dyn GraphStore,
-    view: grafeo_common::types::ReadView,
-) -> grafeo_common::utils::error::Result<bool> {
-    let graph = super::traits::GraphView::new(store, view);
-    let found = is_dag_on(&graph);
-    graph.finish(found)
-}
-
-/// [`is_dag`] on the graph a [`GraphView`](super::traits::GraphView) reads.
-pub(crate) fn is_dag_on(store: &super::traits::GraphView<'_>) -> bool {
-    topological_sort_on(store).is_some()
+pub fn is_dag(store: &dyn GraphStore) -> bool {
+    topological_sort(store).is_some()
 }
 
 // ============================================================================
@@ -466,7 +376,7 @@ impl_algorithm! {
     description: "Find connected components (undirected) or weakly connected components (directed)",
     params: &[],
     execute(store, _params) {
-        let components = connected_components_on(store);
+        let components = connected_components(store);
 
         let mut builder = ComponentResultBuilder::with_capacity(components.len());
         for (node, component) in components {
@@ -488,7 +398,7 @@ impl_algorithm! {
     description: "Find strongly connected components using Tarjan's algorithm",
     params: &[],
     execute(store, _params) {
-        let components = strongly_connected_components_on(store);
+        let components = strongly_connected_components(store);
 
         let mut builder = ComponentResultBuilder::with_capacity(components.len());
         for (node, component) in components {
@@ -517,43 +427,34 @@ impl GraphAlgorithm for TopologicalSortAlgorithm {
         &[]
     }
 
-    fn execute(
-        &self,
-        store: &dyn GraphStore,
-        view: grafeo_common::types::ReadView,
-        _params: &Parameters,
-    ) -> Result<AlgorithmResult> {
-        let graph = super::traits::GraphView::new(store, view);
-        let store = &graph;
-        let found = super::traits::evaluated(|| {
-            match topological_sort_on(store) {
-                Some(order) => {
-                    let mut result =
-                        AlgorithmResult::new(vec!["node_id".to_string(), "order".to_string()]);
-                    for (idx, node) in order.iter().enumerate() {
-                        result.add_row(vec![int_value(node.0)?, int_value(idx)?]);
-                    }
-                    Ok(result)
+    fn execute(&self, store: &dyn GraphStore, _params: &Parameters) -> Result<AlgorithmResult> {
+        match topological_sort(store) {
+            Some(order) => {
+                let mut result =
+                    AlgorithmResult::new(vec!["node_id".to_string(), "order".to_string()]);
+                for (idx, node) in order.iter().enumerate() {
+                    // reason: Node IDs and order indices are bounded by graph size, well within i64::MAX
+                    #[allow(clippy::cast_possible_wrap)]
+                    result.add_row(vec![Value::Int64(node.0 as i64), Value::Int64(idx as i64)]);
                 }
-                None => {
-                    // Return empty result with error indication for cycles
-                    let mut result = AlgorithmResult::new(vec!["error".to_string()]);
-                    result.add_row(vec![Value::String("Graph contains a cycle".into())]);
-                    Ok(result)
-                }
+                Ok(result)
             }
-        });
-        graph.finish(found)?
+            None => {
+                // Return empty result with error indication for cycles
+                let mut result = AlgorithmResult::new(vec!["error".to_string()]);
+                result.add_row(vec![Value::String("Graph contains a cycle".into())]);
+                Ok(result)
+            }
+        }
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "lpg"))]
 mod tests {
     use super::*;
-    use grafeo_common::types::ReadView;
 
-    fn create_dag() -> RowGroupStore {
-        let store = RowGroupStore::new();
+    fn create_dag() -> LpgStore {
+        let store = LpgStore::new().unwrap();
 
         // Create a DAG:
         //   0 -> 1 -> 3
@@ -575,8 +476,8 @@ mod tests {
         store
     }
 
-    fn create_cyclic_graph() -> RowGroupStore {
-        let store = RowGroupStore::new();
+    fn create_cyclic_graph() -> LpgStore {
+        let store = LpgStore::new().unwrap();
 
         // Create a cycle: 0 -> 1 -> 2 -> 0
         let n0 = store.create_node(&["Node"]);
@@ -590,8 +491,8 @@ mod tests {
         store
     }
 
-    fn create_disconnected_graph() -> RowGroupStore {
-        let store = RowGroupStore::new();
+    fn create_disconnected_graph() -> LpgStore {
+        let store = LpgStore::new().unwrap();
 
         // Two disconnected components: {0, 1} and {2, 3}
         let n0 = store.create_node(&["Node"]);
@@ -624,14 +525,14 @@ mod tests {
     #[test]
     fn test_connected_components_single() {
         let store = create_dag();
-        let count = connected_component_count(&store, ReadView::latest()).unwrap();
+        let count = connected_component_count(&store);
         assert_eq!(count, 1);
     }
 
     #[test]
     fn test_connected_components_disconnected() {
         let store = create_disconnected_graph();
-        let count = connected_component_count(&store, ReadView::latest()).unwrap();
+        let count = connected_component_count(&store);
         assert_eq!(count, 2);
     }
 
@@ -639,7 +540,7 @@ mod tests {
     fn test_scc_dag() {
         let store = create_dag();
         // In a DAG, each node is its own SCC
-        let count = strongly_connected_component_count(&store, ReadView::latest()).unwrap();
+        let count = strongly_connected_component_count(&store);
         assert_eq!(count, 5);
     }
 
@@ -647,14 +548,14 @@ mod tests {
     fn test_scc_cycle() {
         let store = create_cyclic_graph();
         // All nodes in a single cycle form one SCC
-        let count = strongly_connected_component_count(&store, ReadView::latest()).unwrap();
+        let count = strongly_connected_component_count(&store);
         assert_eq!(count, 1);
     }
 
     #[test]
     fn test_topological_sort_dag() {
         let store = create_dag();
-        let order = topological_sort(&store, ReadView::latest()).unwrap();
+        let order = topological_sort(&store);
         assert!(order.is_some());
 
         let order = order.unwrap();
@@ -665,10 +566,7 @@ mod tests {
             order.iter().enumerate().map(|(i, &n)| (n, i)).collect();
 
         for &node in &order {
-            for (neighbor, _) in store
-                .edges(node, Direction::Outgoing, &[], ReadView::latest())
-                .unwrap()
-            {
+            for (neighbor, _) in store.edges_from(node, Direction::Outgoing) {
                 assert!(position[&node] < position[&neighbor]);
             }
         }
@@ -677,16 +575,16 @@ mod tests {
     #[test]
     fn test_topological_sort_cycle() {
         let store = create_cyclic_graph();
-        let order = topological_sort(&store, ReadView::latest()).unwrap();
+        let order = topological_sort(&store);
         assert!(order.is_none()); // Cycle detected
     }
 
     #[test]
     fn test_is_dag() {
         let dag = create_dag();
-        assert!(is_dag(&dag, ReadView::latest()).unwrap());
+        assert!(is_dag(&dag));
 
         let cyclic = create_cyclic_graph();
-        assert!(!is_dag(&cyclic, ReadView::latest()).unwrap());
+        assert!(!is_dag(&cyclic));
     }
 }

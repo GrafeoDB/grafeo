@@ -8,7 +8,6 @@ use std::collections::{HashMap, HashSet};
 use std::fmt;
 
 use grafeo_common::types::Value;
-pub use grafeo_core::execution::operators::BuiltinFunction;
 
 /// A count expression for SKIP/LIMIT: either a resolved literal or an unresolved parameter.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -90,12 +89,6 @@ pub struct LogicalPlan {
     /// `query($limit: Int = 2)`). The processor merges these with caller-supplied
     /// params, giving caller values higher precedence.
     pub default_params: HashMap<String, Value>,
-    /// The graph the statement names for itself (SQL/PGQ `GRAPH_TABLE (g
-    /// ...)`), which it reads in place of the session's current graph.
-    pub graph: Option<String>,
-    /// What executing the plan returns (set by the SPARQL translator for ASK,
-    /// CONSTRUCT and DESCRIBE).
-    pub result_kind: crate::database::ResultKind,
 }
 
 impl LogicalPlan {
@@ -106,8 +99,6 @@ impl LogicalPlan {
             explain: false,
             profile: false,
             default_params: HashMap::new(),
-            graph: None,
-            result_kind: crate::database::ResultKind::Rows,
         }
     }
 
@@ -118,16 +109,7 @@ impl LogicalPlan {
             explain: true,
             profile: false,
             default_params: HashMap::new(),
-            graph: None,
-            result_kind: crate::database::ResultKind::Rows,
         }
-    }
-
-    /// Returns the plan marked as returning `kind`.
-    #[must_use]
-    pub fn with_result_kind(mut self, kind: crate::database::ResultKind) -> Self {
-        self.result_kind = kind;
-        self
     }
 
     /// Creates a PROFILE plan that executes and returns per-operator metrics.
@@ -137,8 +119,6 @@ impl LogicalPlan {
             explain: false,
             profile: true,
             default_params: HashMap::new(),
-            graph: None,
-            result_kind: crate::database::ResultKind::Rows,
         }
     }
 }
@@ -214,9 +194,6 @@ pub enum LogicalOperator {
     // ==================== RDF/SPARQL Operators ====================
     /// Scan RDF triples matching a pattern.
     TripleScan(TripleScanOp),
-
-    /// Unbounded RDF endpoint reachability through a finite property path.
-    PropertyPath(PropertyPathOp),
 
     /// Union of multiple result sets.
     Union(UnionOp),
@@ -322,8 +299,6 @@ pub enum LogicalOperator {
     // ==================== DDL Operators ====================
     /// Define a property graph schema (SQL/PGQ DDL).
     CreatePropertyGraph(CreatePropertyGraphOp),
-    /// Drop a property graph (SQL/PGQ DDL).
-    DropPropertyGraph(DropPropertyGraphOp),
 
     // ==================== Multi-Way Join ====================
     /// Multi-way join using worst-case optimal join (leapfrog).
@@ -365,8 +340,7 @@ impl LogicalOperator {
             | Self::CopyGraph(_)
             | Self::MoveGraph(_)
             | Self::AddGraph(_)
-            | Self::CreatePropertyGraph(_)
-            | Self::DropPropertyGraph(_) => true,
+            | Self::CreatePropertyGraph(_) => true,
 
             // Operators with an `input` child
             Self::Filter(op) => op.input.has_mutations(),
@@ -406,11 +380,9 @@ impl LogicalOperator {
             Self::ShortestPath(op) => op.input.has_mutations(),
 
             // Leaf operators (read-only)
-            Self::PropertyPath(_)
-            | Self::Empty
-            | Self::ParameterScan(_)
-            | Self::CallProcedure(_)
-            | Self::LoadData(_) => false,
+            Self::Empty | Self::ParameterScan(_) | Self::CallProcedure(_) | Self::LoadData(_) => {
+                false
+            }
             Self::Construct(op) => op.input.has_mutations(),
         }
     }
@@ -476,7 +448,6 @@ impl LogicalOperator {
 
             // Leaf operators
             Self::Empty
-            | Self::PropertyPath(_)
             | Self::ParameterScan(_)
             | Self::CallProcedure(_)
             | Self::ClearGraph(_)
@@ -487,7 +458,6 @@ impl LogicalOperator {
             | Self::MoveGraph(_)
             | Self::AddGraph(_)
             | Self::CreatePropertyGraph(_)
-            | Self::DropPropertyGraph(_)
             | Self::LoadData(_)
             | Self::TextScan(_) => vec![],
         }
@@ -690,7 +660,6 @@ impl LogicalOperator {
 
             // Leaf operators
             leaf @ (Self::Empty
-            | Self::PropertyPath(_)
             | Self::ParameterScan(_)
             | Self::CallProcedure(_)
             | Self::ClearGraph(_)
@@ -701,7 +670,6 @@ impl LogicalOperator {
             | Self::MoveGraph(_)
             | Self::AddGraph(_)
             | Self::CreatePropertyGraph(_)
-            | Self::DropPropertyGraph(_)
             | Self::LoadData(_)
             | Self::TextScan(_)) => leaf,
         }
@@ -711,13 +679,6 @@ impl LogicalOperator {
     #[must_use]
     pub fn display_label(&self) -> String {
         match self {
-            Self::PropertyPath(op) => format!(
-                "{} {:?}{} {}",
-                fmt_triple_component(&op.subject),
-                op.path,
-                if op.zero_length { "*" } else { "+" },
-                fmt_triple_component(&op.object),
-            ),
             Self::NodeScan(op) => {
                 let label = op.label.as_deref().unwrap_or("*");
                 format!("{}:{}", op.variable, label)
@@ -756,9 +717,6 @@ impl LogicalOperator {
                         format!(" [range: {property}]")
                     }
                     Some(PushdownHint::LabelFirst) => " [label-first]".to_string(),
-                    Some(PushdownHint::LabelUnion { labels }) => {
-                        format!(" [labels: {}]", labels.join("|"))
-                    }
                     Some(PushdownHint::IdSeek) => " [seek: id]".to_string(),
                     Some(PushdownHint::HashJoin { keys }) => hash_join_hint(keys),
                     None => String::new(),
@@ -1051,8 +1009,7 @@ impl LogicalOperator {
                 }
             }
             // RDF and graph management plans have no node patterns to close.
-            Self::PropertyPath(_)
-            | Self::TripleScan(_)
+            Self::TripleScan(_)
             | Self::Construct(_)
             | Self::InsertTriple(_)
             | Self::DeleteTriple(_)
@@ -1064,8 +1021,7 @@ impl LogicalOperator {
             | Self::CopyGraph(_)
             | Self::MoveGraph(_)
             | Self::AddGraph(_)
-            | Self::CreatePropertyGraph(_)
-            | Self::DropPropertyGraph(_) => return None,
+            | Self::CreatePropertyGraph(_) => return None,
         }
         Some(bound)
     }
@@ -1202,9 +1158,6 @@ impl LogicalOperator {
                         format!(" [range: {property}]")
                     }
                     Some(PushdownHint::LabelFirst) => " [label-first]".to_string(),
-                    Some(PushdownHint::LabelUnion { labels }) => {
-                        format!(" [labels: {}]", labels.join("|"))
-                    }
                     Some(PushdownHint::IdSeek) => " [seek: id]".to_string(),
                     Some(PushdownHint::HashJoin { keys }) => hash_join_hint(keys),
                     None => String::new(),
@@ -1401,11 +1354,7 @@ impl LogicalOperator {
                 op.input.fmt_tree(out, depth + 1);
             }
             Self::Merge(op) => {
-                let hint = op
-                    .index_hint
-                    .as_ref()
-                    .map_or(String::new(), |property| format!(" [index: {property}]"));
-                let _ = writeln!(out, "{indent}Merge ({var}){hint}{after}", var = op.variable);
+                let _ = writeln!(out, "{indent}Merge ({var}){after}", var = op.variable);
                 op.input.fmt_tree(out, depth + 1);
             }
             Self::MergeRelationship(op) => {
@@ -1505,9 +1454,6 @@ impl LogicalOperator {
                     var = op.variable,
                 );
             }
-            Self::PropertyPath(_) => {
-                let _ = writeln!(out, "{indent}PropertyPath ({})", self.display_label());
-            }
             Self::TripleScan(op) => {
                 let _ = writeln!(
                     out,
@@ -1603,8 +1549,7 @@ fn fmt_expr(expr: &LogicalExpression) -> String {
         LogicalExpression::Unary { op, operand } => {
             format!("{op:?} {}", fmt_expr(operand))
         }
-        LogicalExpression::FunctionCall { name, args, .. }
-        | LogicalExpression::SparqlCall { name, args } => {
+        LogicalExpression::FunctionCall { name, args, .. } => {
             let arg_strs: Vec<String> = args.iter().map(fmt_expr).collect();
             format!("{name}({})", arg_strs.join(", "))
         }
@@ -1851,44 +1796,6 @@ pub struct AggregateExpr {
     pub separator: Option<String>,
 }
 
-/// What a call resolves to: a built-in function, or an aggregate.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Callee {
-    /// A built-in function the expression evaluator computes.
-    Builtin(BuiltinFunction),
-    /// An aggregate, which groups rows.
-    Aggregate(AggregateFunction),
-}
-
-#[cfg(test)]
-impl Callee {
-    /// The callee `name` resolves to, for tests that build calls by hand.
-    ///
-    /// # Panics
-    ///
-    /// When `name` is neither an aggregate nor a built-in function.
-    pub(crate) fn named(name: &str) -> Self {
-        AggregateFunction::from_name(name)
-            .map(Self::Aggregate)
-            .or_else(|| BuiltinFunction::from_name(name).map(Self::Builtin))
-            .unwrap_or_else(|| panic!("{name} is no function"))
-    }
-}
-
-impl LogicalExpression {
-    /// A call of `function` the planner or a translator makes itself (a
-    /// label in a pattern becomes `hasLabel`), named by the function's name.
-    #[must_use]
-    pub fn builtin(function: BuiltinFunction, args: Vec<LogicalExpression>) -> Self {
-        Self::FunctionCall {
-            callee: Callee::Builtin(function),
-            name: function.name().to_string(),
-            args,
-            distinct: false,
-        }
-    }
-}
-
 /// Aggregate function.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
@@ -1949,73 +1856,6 @@ pub enum AggregateFunction {
     RegrAvgy,
 }
 
-impl AggregateFunction {
-    /// Every spelling of an aggregate, with its function; case does not
-    /// matter. `count` is [`Count`](Self::Count): the translators turn
-    /// `count(x)` into [`CountNonNull`](Self::CountNonNull) themselves.
-    #[cfg(any(
-        test,
-        feature = "gql",
-        feature = "cypher",
-        feature = "sql-pgq",
-        feature = "sparql"
-    ))]
-    pub(crate) const ALIASES: &'static [(&'static str, AggregateFunction)] = &[
-        ("count", Self::Count),
-        ("sum", Self::Sum),
-        ("avg", Self::Avg),
-        ("min", Self::Min),
-        ("max", Self::Max),
-        ("collect", Self::Collect),
-        // The ISO GQL name of `collect`.
-        ("collect_list", Self::Collect),
-        ("stdev", Self::StdDev),
-        ("stddev", Self::StdDev),
-        ("stddev_samp", Self::StdDev),
-        ("stdevp", Self::StdDevPop),
-        ("stddevp", Self::StdDevPop),
-        ("stddev_pop", Self::StdDevPop),
-        ("variance", Self::Variance),
-        ("var_samp", Self::Variance),
-        ("var_pop", Self::VariancePop),
-        ("percentile_disc", Self::PercentileDisc),
-        ("percentileDisc", Self::PercentileDisc),
-        ("percentile_cont", Self::PercentileCont),
-        ("percentileCont", Self::PercentileCont),
-        ("group_concat", Self::GroupConcat),
-        ("groupConcat", Self::GroupConcat),
-        ("listagg", Self::GroupConcat),
-        ("sample", Self::Sample),
-        ("covar_samp", Self::CovarSamp),
-        ("covar_pop", Self::CovarPop),
-        ("corr", Self::Corr),
-        ("regr_slope", Self::RegrSlope),
-        ("regr_intercept", Self::RegrIntercept),
-        ("regr_r2", Self::RegrR2),
-        ("regr_count", Self::RegrCount),
-        ("regr_sxx", Self::RegrSxx),
-        ("regr_syy", Self::RegrSyy),
-        ("regr_sxy", Self::RegrSxy),
-        ("regr_avgx", Self::RegrAvgx),
-        ("regr_avgy", Self::RegrAvgy),
-    ];
-
-    /// The aggregate a call names, in any case.
-    #[cfg(any(
-        test,
-        feature = "gql",
-        feature = "cypher",
-        feature = "sql-pgq",
-        feature = "sparql"
-    ))]
-    pub(crate) fn from_name(name: &str) -> Option<Self> {
-        Self::ALIASES
-            .iter()
-            .find(|(alias, _)| alias.eq_ignore_ascii_case(name))
-            .map(|&(_, function)| function)
-    }
-}
-
 /// Hint about how a filter will be executed at the physical level.
 ///
 /// Set during EXPLAIN annotation to communicate pushdown decisions.
@@ -2034,12 +1874,6 @@ pub enum PushdownHint {
     },
     /// No index available, but label narrows the scan before filtering.
     LabelFirst,
-    /// The predicate requires one of several labels: the scan reads the
-    /// nodes of those labels, each once, instead of every node.
-    LabelUnion {
-        /// The labels, as the predicate names them.
-        labels: Vec<String>,
-    },
     /// The node is looked up by ID for each input row.
     IdSeek,
     /// The nodes are scanned once and joined to the input's rows by hash on
@@ -2365,23 +2199,6 @@ pub struct DatasetRestriction {
     pub named_graphs: Vec<String>,
 }
 
-/// Endpoint reachability for an outer SPARQL `+` or `*` property path.
-#[derive(Debug, Clone)]
-pub struct PropertyPathOp {
-    /// Starting term or variable.
-    pub subject: TripleComponent,
-    /// Ending term or variable.
-    pub object: TripleComponent,
-    /// Finite path repeated by the outer quantifier.
-    pub path: grafeo_core::execution::operators::PathStep,
-    /// Whether the zero-length path is included (`*`).
-    pub zero_length: bool,
-    /// Active named graph or graph variable; absent for the default graph.
-    pub graph: Option<TripleComponent>,
-    /// Dataset restriction from FROM / FROM NAMED.
-    pub dataset: Option<DatasetRestriction>,
-}
-
 /// Scan RDF triples matching a pattern.
 #[derive(Debug, Clone)]
 pub struct TripleScanOp {
@@ -2590,11 +2407,6 @@ pub struct MergeOp {
     pub on_create_labels: Vec<String>,
     /// Labels to add on MATCH (`ON MATCH SET n:Label`).
     pub on_match_labels: Vec<String>,
-    /// The property whose index the merge looks its node up through, for
-    /// `EXPLAIN` (`Merge (n) [index: name]`): set when `EXPLAIN` annotates the
-    /// plan with the store's indexes, `None` before or when it scans the
-    /// label.
-    pub index_hint: Option<String>,
     /// Input operator.
     pub input: Box<LogicalOperator>,
 }
@@ -3013,67 +2825,37 @@ pub struct ReturnItem {
     pub alias: Option<String>,
 }
 
-/// Define a property graph (SQL/PGQ DDL): its node and edge types, a closed
-/// graph type of them and an empty graph of that type.
+/// Define a property graph schema (SQL/PGQ DDL).
 #[derive(Debug, Clone)]
 pub struct CreatePropertyGraphOp {
-    /// Graph name: of the graph and of its graph type.
+    /// Graph name.
     pub name: String,
-    /// `OR REPLACE`: replace a property graph of the same name.
-    pub or_replace: bool,
-    /// `IF NOT EXISTS`: change nothing when it exists.
-    pub if_not_exists: bool,
-    /// Node tables, each a node type.
+    /// Node table schemas (label name + column definitions).
     pub node_tables: Vec<PropertyGraphNodeTable>,
-    /// Edge tables, each an edge type between two of the node tables.
+    /// Edge table schemas (type name + column definitions + references).
     pub edge_tables: Vec<PropertyGraphEdgeTable>,
-}
-
-/// A column of a property graph table: a typed property, a part of the
-/// table's primary key, or (in an edge table) an endpoint.
-#[derive(Debug, Clone)]
-pub struct PropertyGraphColumn {
-    /// Column name, the property's name.
-    pub name: String,
-    /// The property's type.
-    pub data_type: crate::catalog::PropertyDataType,
-    /// Whether the column is part of the table's primary key.
-    pub primary_key: bool,
-    /// Whether the column references a node table: an edge's endpoint, not
-    /// a property.
-    pub references: bool,
 }
 
 /// A node table in a property graph definition.
 #[derive(Debug, Clone)]
 pub struct PropertyGraphNodeTable {
-    /// Table name (the node type's name and label).
+    /// Table name (maps to a node label).
     pub name: String,
-    /// Columns.
-    pub columns: Vec<PropertyGraphColumn>,
+    /// Column definitions as (name, type_name) pairs.
+    pub columns: Vec<(String, String)>,
 }
 
 /// An edge table in a property graph definition.
 #[derive(Debug, Clone)]
 pub struct PropertyGraphEdgeTable {
-    /// Table name (the edge type's name).
+    /// Table name (maps to an edge type).
     pub name: String,
-    /// Columns, with the two that reference the source and the target.
-    pub columns: Vec<PropertyGraphColumn>,
+    /// Column definitions as (name, type_name) pairs.
+    pub columns: Vec<(String, String)>,
     /// Source node table name.
     pub source_table: String,
     /// Target node table name.
     pub target_table: String,
-}
-
-/// Drop a property graph (SQL/PGQ DDL): the graph, its graph type and the
-/// element types only that graph type has.
-#[derive(Debug, Clone)]
-pub struct DropPropertyGraphOp {
-    /// Graph name.
-    pub name: String,
-    /// `IF EXISTS`: change nothing when there is no such property graph.
-    pub if_exists: bool,
 }
 
 // ==================== Procedure Call Types ====================
@@ -3160,25 +2942,14 @@ pub enum LogicalExpression {
         operand: Box<LogicalExpression>,
     },
 
-    /// A call of a built-in or an aggregate, resolved by the translator.
+    /// Function call.
     FunctionCall {
-        /// What the call resolves to.
-        callee: Callee,
-        /// The name as the query wrote it, for `EXPLAIN` and errors only:
-        /// decisions read `callee`.
+        /// Function name.
         name: String,
         /// Arguments.
         args: Vec<LogicalExpression>,
         /// Whether DISTINCT is applied (e.g., COUNT(DISTINCT x)).
         distinct: bool,
-    },
-
-    /// A call of a SPARQL function, by name: only the RDF planner computes it.
-    SparqlCall {
-        /// The function's name, as the query wrote it.
-        name: String,
-        /// Arguments.
-        args: Vec<LogicalExpression>,
     },
 
     /// List literal.
@@ -3441,8 +3212,6 @@ pub enum UnaryOp {
     Not,
     /// Numeric negation.
     Neg,
-    /// Unary plus: a number as it is, as negation reads numbers.
-    Pos,
     /// IS NULL check.
     IsNull,
     /// IS NOT NULL check.
@@ -4035,8 +3804,6 @@ mod tests {
 
         let ddl = LogicalOperator::CreatePropertyGraph(CreatePropertyGraphOp {
             name: "g".into(),
-            or_replace: false,
-            if_not_exists: false,
             node_tables: vec![],
             edge_tables: vec![],
         });
@@ -4699,7 +4466,6 @@ mod tests {
         assert_eq!(sp.display_label(), "a -> b");
 
         let merge = LogicalOperator::Merge(MergeOp {
-            index_hint: None,
             variable: "django".into(),
             labels: vec![],
             match_properties: vec![],
@@ -5205,7 +4971,6 @@ mod tests {
     #[test]
     fn explain_tree_mutations() {
         let merge = LogicalOperator::Merge(MergeOp {
-            index_hint: None,
             variable: "vincent".into(),
             labels: vec!["Person".into()],
             match_properties: vec![],
@@ -5442,7 +5207,6 @@ mod tests {
         assert!(s.contains("Not"));
 
         let fc = LogicalExpression::FunctionCall {
-            callee: Callee::named("toLower"),
             name: "toLower".into(),
             args: vec![var("name")],
             distinct: false,

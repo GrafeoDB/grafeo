@@ -19,7 +19,7 @@ struct CompactionOutput {
 /// Run the compact command.
 pub fn run(path: &Path, dry_run: bool, format: OutputFormat, quiet: bool) -> Result<()> {
     let db = super::open_existing(path)?;
-    let stats_before = db.detailed_stats()?;
+    let stats_before = db.detailed_stats();
 
     if dry_run {
         output::status("Dry run, no changes will be made", quiet);
@@ -33,7 +33,9 @@ pub fn run(path: &Path, dry_run: bool, format: OutputFormat, quiet: bool) -> Res
         let fmt: Format = format.into();
         match fmt {
             Format::Json => {
-                println!("{}", serde_json::to_string_pretty(&result)?);
+                if !quiet {
+                    println!("{}", serde_json::to_string_pretty(&result)?);
+                }
             }
             Format::Table | Format::Csv => {
                 let items = vec![
@@ -42,14 +44,14 @@ pub fn run(path: &Path, dry_run: bool, format: OutputFormat, quiet: bool) -> Res
                     ("Nodes", stats_before.node_count.to_string()),
                     ("Edges", stats_before.edge_count.to_string()),
                 ];
-                output::print_key_value_table(&items, fmt);
+                output::print_key_value_table(&items, fmt, quiet);
             }
         }
     } else {
         output::status("Compacting database...", quiet);
         db.gc();
 
-        let stats_after = db.detailed_stats()?;
+        let stats_after = db.detailed_stats();
 
         let result = CompactionOutput {
             dry_run: false,
@@ -60,7 +62,9 @@ pub fn run(path: &Path, dry_run: bool, format: OutputFormat, quiet: bool) -> Res
         let fmt: Format = format.into();
         match fmt {
             Format::Json => {
-                println!("{}", serde_json::to_string_pretty(&result)?);
+                if !quiet {
+                    println!("{}", serde_json::to_string_pretty(&result)?);
+                }
             }
             Format::Table | Format::Csv => {
                 let reclaimed = stats_before
@@ -71,7 +75,7 @@ pub fn run(path: &Path, dry_run: bool, format: OutputFormat, quiet: bool) -> Res
                     ("After", format_bytes(stats_after.memory_bytes)),
                     ("Reclaimed", format_bytes(reclaimed)),
                 ];
-                output::print_key_value_table(&items, fmt);
+                output::print_key_value_table(&items, fmt, quiet);
             }
         }
     }

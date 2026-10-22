@@ -312,7 +312,7 @@ mod selective_reset {
         session.execute("SESSION SET GRAPH mygraph").unwrap();
         session.execute("CREATE SCHEMA myschema").unwrap();
         session.execute("SESSION SET SCHEMA myschema").unwrap();
-        session.execute("SESSION SET TIME ZONE '+02:00'").unwrap();
+        session.execute("SESSION SET TIME ZONE 'UTC+2'").unwrap();
         session
             .execute("SESSION SET PARAMETER viewing_epoch = 0")
             .unwrap();
@@ -466,14 +466,14 @@ mod state_persistence {
     fn time_zone_persists_across_queries() {
         let db = db();
         let session = db.session();
-        session.execute("SESSION SET TIME ZONE '+05:00'").unwrap();
+        session.execute("SESSION SET TIME ZONE 'UTC+5'").unwrap();
 
         session.execute("RETURN 1").unwrap();
         session.execute("RETURN 2").unwrap();
 
         assert_eq!(
             session.time_zone(),
-            Some("+05:00".to_string()),
+            Some("UTC+5".to_string()),
             "Time zone should persist across queries"
         );
     }

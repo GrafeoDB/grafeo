@@ -8,7 +8,7 @@
 //! cargo test -p grafeo-engine --all-features --test transaction_edge_reads
 //! ```
 
-#![cfg(feature = "gql")]
+#![cfg(all(feature = "lpg", feature = "gql"))]
 
 use grafeo_common::types::Value;
 use grafeo_engine::{Config, GrafeoDB};

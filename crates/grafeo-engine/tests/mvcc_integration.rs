@@ -4,14 +4,12 @@
 //! These tests verify snapshot isolation, write-write conflict detection,
 //! rollback behavior, and version chain garbage collection.
 
-use grafeo_common::types::ReadView;
 use std::sync::Arc;
 
 use grafeo_common::change::{ChangeSet, DataModel, DataOp, GraphRef};
 use grafeo_common::types::{EpochId, NodeId, TransactionId, Value};
-use grafeo_core::graph::GraphStore as _;
-use grafeo_core::graph::apply::{Applied, BackendTransaction, GraphBackend, Writer};
-use grafeo_core::graph::rowgroup::RowGroupStore;
+use grafeo_core::graph::apply::{Applied, ChangeTarget, Writer};
+use grafeo_core::graph::lpg::LpgStore;
 use grafeo_engine::{
     GrafeoDB,
     transaction::{TransactionManager, TransactionState},
@@ -22,7 +20,7 @@ use grafeo_engine::{
 /// does: the change set is what the transaction's commit stamps and its
 /// rollback undoes.
 fn create_recorded(
-    store: &RowGroupStore,
+    store: &LpgStore,
     changes: &mut ChangeSet,
     (snapshot, transaction): (EpochId, TransactionId),
     label: &str,
@@ -55,34 +53,19 @@ fn create_recorded(
     id
 }
 
-/// A node with `labels` and the values `properties`.
-fn with_props<const N: usize>(
-    store: &RowGroupStore,
-    labels: &[&str],
-    properties: [(&str, Value); N],
-) -> NodeId {
-    let properties: Vec<(grafeo_common::types::PropertyKey, Value)> = properties
-        .into_iter()
-        .map(|(key, value)| (key.into(), value))
-        .collect();
-    store.create_node_with_props(labels, &properties)
-}
-
 /// Helper to create a test store with some initial data.
-fn create_test_store() -> Arc<RowGroupStore> {
-    let store = Arc::new(RowGroupStore::new());
+fn create_test_store() -> Arc<LpgStore> {
+    let store = Arc::new(LpgStore::new().unwrap());
 
     // Create some initial nodes
-    let alice_id = with_props(
-        &store,
+    let alice_id = store.create_node_with_props(
         &["Person"],
         [
             ("name", Value::String("Alix".into())),
             ("age", Value::Int64(30)),
         ],
     );
-    let bob_id = with_props(
-        &store,
+    let bob_id = store.create_node_with_props(
         &["Person"],
         [
             ("name", Value::String("Gus".into())),
@@ -105,8 +88,6 @@ fn test_snapshot_isolation_reads_see_consistent_data() {
     // A transaction should see a consistent snapshot of data at its start time
     let store = create_test_store();
     let tx_manager = Arc::new(TransactionManager::new());
-    // The transactions start where the store's direct writes left it.
-    tx_manager.sync_epoch(store.current_epoch());
 
     // Start T1
     let tx1 = tx_manager.begin();
@@ -119,15 +100,10 @@ fn test_snapshot_isolation_reads_see_consistent_data() {
     tx_manager.commit(new_tx).unwrap();
 
     // T1 should not see the new node (created after T1's snapshot)
-    let all_nodes = store.node_ids(ReadView::latest()).unwrap();
+    let all_nodes = store.node_ids();
     let visible_at_epoch1: Vec<_> = all_nodes
         .iter()
-        .filter(|id| {
-            store
-                .node(**id, ReadView::transaction(tx1, epoch1))
-                .unwrap()
-                .is_some()
-        })
+        .filter(|id| store.get_node_versioned(**id, epoch1, tx1).is_some())
         .collect();
 
     // Should see initial 2 nodes, not the new one
@@ -141,7 +117,7 @@ fn test_snapshot_isolation_reads_see_consistent_data() {
 #[test]
 fn test_transaction_sees_own_writes() {
     // A transaction should always see its own uncommitted writes
-    let store = Arc::new(RowGroupStore::new());
+    let store = Arc::new(LpgStore::new().unwrap());
     let tx_manager = Arc::new(TransactionManager::new());
 
     let tx1 = tx_manager.begin();
@@ -151,9 +127,7 @@ fn test_transaction_sees_own_writes() {
     let node_id = store.create_node_versioned(&["TestNode"], epoch, tx1);
 
     // Transaction should see its own node
-    let visible = store
-        .node(node_id, ReadView::transaction(tx1, epoch))
-        .unwrap();
+    let visible = store.get_node_versioned(node_id, epoch, tx1);
     assert!(
         visible.is_some(),
         "Transaction should see its own uncommitted writes"
@@ -163,7 +137,7 @@ fn test_transaction_sees_own_writes() {
 #[test]
 fn test_committed_writes_visible_to_new_transactions() {
     // After commit, writes should be visible to new transactions
-    let store = Arc::new(RowGroupStore::new());
+    let store = Arc::new(LpgStore::new().unwrap());
     let tx_manager = Arc::new(TransactionManager::new());
 
     // T1 creates and commits: its change set is stamped with the commit
@@ -174,11 +148,7 @@ fn test_committed_writes_visible_to_new_transactions() {
     let node_id = create_recorded(&store, &mut changes, (epoch1, tx1), "Committed");
     let commit_epoch = tx_manager.commit(tx1).unwrap();
     store
-        .commit(
-            BackendTransaction::new(tx1, epoch1),
-            &mut changes.entries().iter(),
-            commit_epoch,
-        )
+        .stamp(tx1, &mut changes.entries().iter(), commit_epoch)
         .unwrap();
 
     // T2 starts after commit
@@ -186,9 +156,7 @@ fn test_committed_writes_visible_to_new_transactions() {
     let epoch2 = tx_manager.current_epoch();
 
     // T2 should see T1's committed node
-    let visible = store
-        .node(node_id, ReadView::transaction(tx2, epoch2))
-        .unwrap();
+    let visible = store.get_node_versioned(node_id, epoch2, tx2);
     assert!(
         visible.is_some(),
         "New transaction should see committed writes"
@@ -206,7 +174,7 @@ fn test_write_write_conflict_detection() {
     let store = create_test_store();
     let tx_manager = Arc::new(TransactionManager::new());
 
-    let node_id = store.node_ids(ReadView::latest()).unwrap()[0]; // Get first node
+    let node_id = store.node_ids()[0]; // Get first node
 
     // T1 records a write (succeeds)
     let tx1 = tx_manager.begin();
@@ -235,7 +203,7 @@ fn test_committed_transaction_conflict_at_commit() {
     let store = create_test_store();
     let tx_manager = Arc::new(TransactionManager::new());
 
-    let node_id = store.node_ids(ReadView::latest()).unwrap()[0];
+    let node_id = store.node_ids()[0];
 
     // Both transactions start (T2 records its start_epoch)
     let tx1 = tx_manager.begin();
@@ -268,7 +236,7 @@ fn test_post_commit_write_succeeds() {
     let store = create_test_store();
     let tx_manager = Arc::new(TransactionManager::new());
 
-    let node_id = store.node_ids(ReadView::latest()).unwrap()[0];
+    let node_id = store.node_ids()[0];
 
     // T1 writes and commits
     let tx1 = tx_manager.begin();
@@ -292,7 +260,7 @@ fn test_non_overlapping_writes_succeed() {
     let store = create_test_store();
     let tx_manager = Arc::new(TransactionManager::new());
 
-    let nodes = store.node_ids(ReadView::latest()).unwrap();
+    let nodes = store.node_ids();
     assert!(nodes.len() >= 2, "Need at least 2 nodes for this test");
 
     // T1 writes to node 0
@@ -318,7 +286,7 @@ fn test_non_overlapping_writes_succeed() {
 #[test]
 fn test_rollback_makes_writes_invisible() {
     // After rollback, a transaction's writes should not be visible
-    let store = Arc::new(RowGroupStore::new());
+    let store = Arc::new(LpgStore::new().unwrap());
     let tx_manager = Arc::new(TransactionManager::new());
 
     // T1 creates a node
@@ -330,19 +298,12 @@ fn test_rollback_makes_writes_invisible() {
 
     // Abort T1, undoing its change set
     tx_manager.abort(tx1).unwrap();
-    store
-        .rollback(
-            BackendTransaction::new(tx1, epoch),
-            &mut changes.entries().iter(),
-        )
-        .unwrap();
+    store.undo(tx1, &mut changes.entries().iter()).unwrap();
 
     // New transaction should not see the aborted node
     let tx2 = tx_manager.begin();
     let epoch2 = tx_manager.current_epoch();
-    let visible = store
-        .node(node_id, ReadView::transaction(tx2, epoch2))
-        .unwrap();
+    let visible = store.get_node_versioned(node_id, epoch2, tx2);
 
     assert!(
         visible.is_none(),
@@ -356,7 +317,7 @@ fn test_abort_releases_write_locks() {
     let store = create_test_store();
     let tx_manager = Arc::new(TransactionManager::new());
 
-    let node_id = store.node_ids(ReadView::latest()).unwrap()[0];
+    let node_id = store.node_ids()[0];
 
     // T1 records a write
     let tx1 = tx_manager.begin();
@@ -537,7 +498,7 @@ fn test_commit_after_abort_fails() {
 #[test]
 fn test_many_concurrent_transactions() {
     // Verify system handles many concurrent transactions
-    let store = Arc::new(RowGroupStore::new());
+    let store = Arc::new(LpgStore::new().unwrap());
     let tx_manager = Arc::new(TransactionManager::new());
 
     let mut transactions = Vec::new();

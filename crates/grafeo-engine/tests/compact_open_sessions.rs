@@ -10,7 +10,7 @@
 //! cargo test -p grafeo-engine --all-features --test compact_open_sessions
 //! ```
 
-#![cfg(feature = "gql")]
+#![cfg(all(feature = "lpg", feature = "gql"))]
 
 use grafeo_common::types::Value;
 use grafeo_engine::{GrafeoDB, Session};

@@ -7,7 +7,7 @@
 //! `count(a)`, `count(b)`, two different `CASE`s) get distinct names without
 //! aliases.
 
-use grafeo_common::types::{Decimal, Value};
+use grafeo_common::types::Value;
 use grafeo_engine::GrafeoDB;
 
 /// Two `Person` nodes (ids 0 and 1) joined by a single `KNOWS` edge (id 0):
@@ -126,10 +126,7 @@ fn literals_are_named_as_written() {
         vec!["1", "1.0", "'x'", r"'it\'s'", "true", "NULL", "[1, 2]"]
     );
     assert_eq!(r.rows()[0][0], Value::Int64(1));
-    assert_eq!(
-        r.rows()[0][1],
-        Value::Decimal(Decimal::parse("1.0").unwrap())
-    );
+    assert_eq!(r.rows()[0][1], Value::Float64(1.0));
     assert_eq!(r.rows()[0][3], Value::String("it's".into()));
 }
 

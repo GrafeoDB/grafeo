@@ -66,9 +66,8 @@ pub fn extract_and_map<N, E>(
 /// a returned list, map or path count too (`RETURN [a, r]`, `RETURN {k: a}`,
 /// `RETURN p`); the property values of a node or edge are not searched.
 ///
-/// The structural keys (`_id` and `_labels` of a node; `_id`, `_type`, `_source`
-/// and `_target` of an edge) are left out of the returned property maps; every
-/// other key is a property, one that starts with `_` too (#254).
+/// Properties whose key starts with `_` are considered internal metadata and are
+/// excluded from the returned property maps.
 pub fn extract_entities(result: &QueryResult) -> (Vec<RawNode>, Vec<RawEdge>) {
     let mut found = Found::default();
     for row in result.rows() {
@@ -115,7 +114,7 @@ impl Found {
                         self.nodes.push(RawNode {
                             id: node_id,
                             labels: label_strings,
-                            properties: user_properties(map, NODE_KEYS),
+                            properties: user_properties(map),
                         });
                     }
                 }
@@ -142,7 +141,7 @@ impl Found {
                             edge_type: edge_type.to_string(),
                             source_id: NodeId(*src as u64),
                             target_id: NodeId(*dst as u64),
-                            properties: user_properties(map, EDGE_KEYS),
+                            properties: user_properties(map),
                         });
                     }
                 }
@@ -168,19 +167,13 @@ impl Found {
     }
 }
 
-/// The structural keys of a node map: its id and labels.
-const NODE_KEYS: &[&str] = &["_id", "_labels"];
-
-/// The structural keys of an edge map: its id, type and ends.
-const EDGE_KEYS: &[&str] = &["_id", "_type", "_source", "_target"];
-
-/// The properties of a node or edge map: every key but its `structural` ones.
+/// The properties of a node or edge map, without the metadata keys that
+/// start with `_`.
 fn user_properties(
     map: &std::collections::BTreeMap<PropertyKey, Value>,
-    structural: &[&str],
 ) -> HashMap<PropertyKey, Value> {
     map.iter()
-        .filter(|(k, _)| !structural.contains(&k.as_str()))
+        .filter(|(k, _)| !k.as_str().starts_with('_'))
         .map(|(k, v)| (k.clone(), v.clone()))
         .collect()
 }
@@ -244,54 +237,6 @@ mod tests {
         assert_eq!(edges[0].edge_type, "KNOWS");
         assert_eq!(edges[0].source_id, NodeId(1));
         assert_eq!(edges[0].target_id, NodeId(2));
-    }
-
-    /// A property whose name starts with `_` is a property (#254): only the
-    /// structural keys of its kind are left out.
-    #[test]
-    fn keeps_underscore_properties_and_drops_the_structural_keys() {
-        let mut result = QueryResult::new(vec!["n".into(), "e".into()]).unwrap();
-        result.push_row(vec![
-            node_map(
-                1,
-                &["Person"],
-                &[
-                    ("_created", Value::Int64(2020)),
-                    ("_source", Value::String("import".into())),
-                ],
-            ),
-            edge_map(
-                10,
-                "KNOWS",
-                1,
-                2,
-                &[("_note", Value::String("Paris".into()))],
-            ),
-        ]);
-
-        let (nodes, edges) = extract_entities(&result);
-
-        let mut node_keys: Vec<&str> = nodes[0]
-            .properties
-            .keys()
-            .map(PropertyKey::as_str)
-            .collect();
-        node_keys.sort_unstable();
-        assert_eq!(node_keys, ["_created", "_source"]);
-        assert_eq!(
-            nodes[0].properties.get("_source"),
-            Some(&Value::String("import".into()))
-        );
-        let edge_keys: Vec<&str> = edges[0]
-            .properties
-            .keys()
-            .map(PropertyKey::as_str)
-            .collect();
-        assert_eq!(edge_keys, ["_note"]);
-        assert_eq!(
-            (edges[0].id, edges[0].source_id, edges[0].target_id),
-            (EdgeId(10), NodeId(1), NodeId(2))
-        );
     }
 
     #[test]

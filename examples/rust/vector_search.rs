@@ -71,7 +71,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("{:<40} Distance", "Title");
     println!("{}", "-".repeat(55));
     for (node_id, distance) in &results {
-        let title = get_title(&db, *node_id)?;
+        let title = get_title(&db, *node_id);
         println!("{:<40} {:.4}", title, distance);
     }
 
@@ -84,7 +84,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("{:<40} Distance", "Title");
     println!("{}", "-".repeat(55));
     for (node_id, distance) in &results {
-        let title = get_title(&db, *node_id)?;
+        let title = get_title(&db, *node_id);
         println!("{:<40} {:.4}", title, distance);
     }
 
@@ -93,12 +93,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 /// Look up a document's title by its node ID.
-fn get_title(db: &GrafeoDB, node_id: NodeId) -> grafeo::Result<String> {
-    Ok(db
-        .get_node(node_id)?
+fn get_title(db: &GrafeoDB, node_id: NodeId) -> String {
+    db.get_node(node_id)
         .and_then(|n| {
             n.get_property("title")
                 .and_then(|v| v.as_str().map(String::from))
         })
-        .unwrap_or_else(|| "?".to_string()))
+        .unwrap_or_else(|| "?".to_string())
 }

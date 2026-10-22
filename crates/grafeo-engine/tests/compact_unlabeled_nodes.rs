@@ -9,15 +9,17 @@
 //! cargo test -p grafeo-engine --all-features --test compact_unlabeled_nodes
 //! ```
 
-#![cfg(feature = "gql")]
+#![cfg(all(feature = "lpg", feature = "gql"))]
 
 use grafeo_common::types::Value;
 use grafeo_engine::GrafeoDB;
 
-/// The statistics as the planner reads them (the store computes them from
-/// its counters, which move at each commit).
+/// The statistics as the planner reads them: refreshed from the store's
+/// counters first.
 fn fresh_statistics(db: &GrafeoDB) -> std::sync::Arc<grafeo_core::statistics::Statistics> {
-    grafeo_core::graph::GraphStore::statistics(&*db.store().unwrap())
+    let store = db.store();
+    store.ensure_statistics_fresh();
+    store.statistics()
 }
 
 /// Every node's name, sorted.
@@ -86,8 +88,8 @@ impl Holds {
             know_mia: rows(db, KNOW_MIA),
             gus_age: rows(db, "MATCH (g {name: 'Gus'}) RETURN g.age"),
             counted: rows(db, "MATCH (n) RETURN count(n)"),
-            node_count: db.node_count().unwrap(),
-            edge_count: db.edge_count().unwrap(),
+            node_count: db.node_count(),
+            edge_count: db.edge_count(),
         }
     }
 
@@ -178,7 +180,7 @@ fn a_database_without_labels_compacts_whole() {
         knows(&[("Vincent", "Jules", 1988)]),
         "their edge"
     );
-    assert_eq!(db.node_count().unwrap(), 2);
+    assert_eq!(db.node_count(), 2);
     assert_eq!(fresh_statistics(&db).total_nodes, 2);
 }
 
@@ -205,7 +207,7 @@ fn nodes_without_labels_stay_through_writes_and_recompact() {
         names(&["Gus"]),
         "Jules is deleted, Gus stays"
     );
-    assert_eq!(db.node_count().unwrap(), 4);
+    assert_eq!(db.node_count(), 4);
 }
 
 /// The nodes without labels are in the file: after `compact()` and a close

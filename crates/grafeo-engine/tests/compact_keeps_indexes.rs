@@ -12,9 +12,13 @@
 //! cargo test -p grafeo-engine --all-features --test compact_keeps_indexes
 //! ```
 
-#![cfg(all(feature = "gql", feature = "text-index", feature = "vector-index"))]
+#![cfg(all(
+    feature = "lpg",
+    feature = "gql",
+    feature = "text-index",
+    feature = "vector-index"
+))]
 
-use grafeo_common::types::ReadView;
 use grafeo_common::types::{NodeId, Value};
 use grafeo_core::index::vector::{DistanceMetric, QuantizationType};
 use grafeo_engine::GrafeoDB;
@@ -94,7 +98,6 @@ fn names_of(db: &GrafeoDB, hits: impl IntoIterator<Item = NodeId>) -> Vec<String
         .map(|id| {
             match db
                 .get_node(id)
-                .unwrap()
                 .and_then(|node| node.get_property("name").cloned())
             {
                 Some(Value::String(name)) => name.to_string(),
@@ -125,11 +128,7 @@ fn nearest_to_the_origin(db: &GrafeoDB, stage: &str) -> Vec<String> {
 
 /// The people the property index finds by `name`.
 fn named(db: &GrafeoDB, name: &str) -> Vec<String> {
-    names_of(
-        db,
-        db.find_nodes_by_property("name", &Value::from(name))
-            .unwrap(),
-    )
+    names_of(db, db.find_nodes_by_property("name", &Value::from(name)))
 }
 
 /// The indexes on `:Person` work in `db` and find `everyone`, whose bios
@@ -164,8 +163,7 @@ fn assert_person_indexes(db: &GrafeoDB, everyone: &[&str], canals: &[&str], stag
         "{stage}: the vector index"
     );
     let config = db
-        .snapshot()
-        .unwrap()
+        .graph_store()
         .vector_index_config("Person", "embedding")
         .unwrap_or_else(|| panic!("{stage}: no vector index config"));
     assert_eq!(
@@ -180,8 +178,7 @@ fn assert_person_indexes(db: &GrafeoDB, everyone: &[&str], canals: &[&str], stag
 /// `:Note(embedding)`, whose search finds both notes.
 fn assert_api_configuration(db: &GrafeoDB, stage: &str) {
     let config = db
-        .snapshot()
-        .unwrap()
+        .graph_store()
         .vector_index_config("Person", "embedding")
         .unwrap_or_else(|| panic!("{stage}: no vector index config"));
     assert_eq!(
@@ -191,7 +188,6 @@ fn assert_api_configuration(db: &GrafeoDB, stage: &str) {
     );
     let notes = db
         .store()
-        .unwrap()
         .get_vector_index("Note", "embedding")
         .unwrap_or_else(|| panic!("{stage}: no quantized index"));
     assert_eq!(
@@ -286,17 +282,13 @@ fn named_graph_indexes_stay_after_compact() {
     assert_eq!(
         session
             .find_nodes_by_property("name", &Value::from("Vincent"))
-            .unwrap()
             .len(),
         1,
         "the property index finds Vincent"
     );
-    let store = model.snapshot().unwrap();
+    let store = model.graph_store().unwrap();
     assert_eq!(
-        store
-            .text_search("Person", "bio", "canals", 19, ReadView::latest())
-            .unwrap()
-            .len(),
+        store.text_search("Person", "bio", "canals", 19).len(),
         2,
         "the text index finds Alix and Vincent"
     );
@@ -312,9 +304,7 @@ fn named_graph_indexes_stay_after_compact() {
                 &[0.0, 0.0],
                 19,
                 DistanceMetric::Euclidean,
-                ReadView::latest()
             )
-            .unwrap()
             .len(),
         4,
         "the vector index finds everyone"

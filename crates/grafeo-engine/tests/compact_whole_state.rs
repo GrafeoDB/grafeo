@@ -12,7 +12,7 @@
 //! cargo test -p grafeo-engine --all-features --test compact_whole_state
 //! ```
 
-#![cfg(feature = "gql")]
+#![cfg(all(feature = "lpg", feature = "gql"))]
 
 use grafeo_common::types::Value;
 use grafeo_engine::GrafeoDB;
@@ -77,8 +77,8 @@ fn assert_holds_the_snapshot(db: &GrafeoDB, stage: &str) {
         Vec::<Vec<Value>>::new(),
         "{stage}: Amsterdam was only in the base"
     );
-    assert_eq!(db.node_count().unwrap(), 2, "{stage}");
-    assert_eq!(db.edge_count().unwrap(), 1, "{stage}");
+    assert_eq!(db.node_count(), 2, "{stage}");
+    assert_eq!(db.edge_count(), 1, "{stage}");
 }
 
 /// A compacted database with a base delete and an overlay node, restored
@@ -97,7 +97,7 @@ fn a_restore_replaces_the_compacted_base() {
     db.restore_snapshot(&snapshot_of_mia_and_jules()).unwrap();
     assert_holds_the_snapshot(&db, "after the restore");
     assert_eq!(
-        db.iter_nodes().unwrap().count(),
+        db.iter_nodes().count(),
         2,
         "the direct iteration holds the snapshot too"
     );
@@ -190,7 +190,6 @@ fn a_snapshot_of_a_compacted_database_imports_whole() {
 fn iterated_names(db: &GrafeoDB) -> Vec<String> {
     let mut names: Vec<String> = db
         .iter_nodes()
-        .unwrap()
         .map(|node| {
             match node
                 .properties
@@ -209,7 +208,6 @@ fn iterated_names(db: &GrafeoDB) -> Vec<String> {
 fn iterated_edge_types(db: &GrafeoDB) -> Vec<String> {
     let mut types: Vec<String> = db
         .iter_edges()
-        .unwrap()
         .map(|edge| edge.edge_type.to_string())
         .collect();
     types.sort();
@@ -236,7 +234,6 @@ fn iteration_reads_the_compacted_base_and_the_overlay() {
     assert_eq!(iterated_edge_types(&db), ["KNOWS", "KNOWS"]);
     let gus = db
         .iter_nodes()
-        .unwrap()
         .find(|node| {
             node.properties
                 .get(&grafeo_common::types::PropertyKey::new("name"))
@@ -249,7 +246,7 @@ fn iteration_reads_the_compacted_base_and_the_overlay() {
         Some(&Value::Int64(88)),
         "Gus as he is now"
     );
-    let ids: Vec<_> = db.iter_nodes().unwrap().map(|node| node.id).collect();
+    let ids: Vec<_> = db.iter_nodes().map(|node| node.id).collect();
     let mut sorted = ids.clone();
     sorted.sort_unstable();
     assert_eq!(ids, sorted, "in id order");

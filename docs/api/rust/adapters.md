@@ -8,7 +8,7 @@ tags:
 
 # grafeo-adapters
 
-Query parsers and plugins. Storage lives in `grafeo-storage` (the WAL and the `.grafeo` container) and `grafeo-core` (the stores).
+Parsers, storage backends and plugins.
 
 ## GQL Parser
 
@@ -16,6 +16,16 @@ Query parsers and plugins. Storage lives in `grafeo-storage` (the WAL and the `.
 use grafeo_adapters::query::gql;
 
 let ast = gql::parse("MATCH (n:Person) RETURN n")?;
+```
+
+## Storage
+
+```rust
+use grafeo_adapters::storage::MemoryBackend;
+use grafeo_storage::wal::WalManager;
+
+let backend = MemoryBackend::new();
+let wal = WalManager::open("path/to/wal")?;
 ```
 
 ## Plugins

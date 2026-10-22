@@ -86,7 +86,7 @@ fn test_filtered_vector_search_by_user_id() {
 
     // Verify all results have user_id=2
     for (id, _) in &results {
-        let node = db.get_node(*id).unwrap().expect("node exists");
+        let node = db.get_node(*id).expect("node exists");
         let uid = node
             .properties
             .get(&grafeo_common::types::PropertyKey::new("user_id"))
@@ -155,7 +155,7 @@ fn test_batch_vector_search_with_filters() {
     // All results in both queries should be user_id=1
     for query_results in &results {
         for (id, _) in query_results {
-            let node = db.get_node(*id).unwrap().expect("node exists");
+            let node = db.get_node(*id).expect("node exists");
             let uid = node
                 .properties
                 .get(&grafeo_common::types::PropertyKey::new("user_id"))
@@ -190,7 +190,7 @@ fn test_mmr_search_with_filters() {
     assert!(results.len() <= 2);
 
     for (id, _) in &results {
-        let node = db.get_node(*id).unwrap().expect("node exists");
+        let node = db.get_node(*id).expect("node exists");
         let uid = node
             .properties
             .get(&grafeo_common::types::PropertyKey::new("user_id"))
@@ -325,7 +325,7 @@ fn test_grafeo_memory_pattern() {
 
     // Verify all results have user_id="alix"
     for (id, _) in &results {
-        let node = db.get_node(*id).unwrap().expect("node exists");
+        let node = db.get_node(*id).expect("node exists");
         let uid = node
             .properties
             .get(&grafeo_common::types::PropertyKey::new("user_id"))

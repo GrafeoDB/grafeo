@@ -7,10 +7,9 @@
 //!
 //! Better to catch these errors early than waste time executing a broken query.
 
-use crate::query::plan::{AggregateFunction, BuiltinFunction, Callee};
 use crate::query::plan::{
     CreateElement, ExpandOp, FilterOp, LogicalExpression, LogicalOperator, LogicalPlan, NodeScanOp,
-    Projection, ReturnItem, ReturnOp, TripleScanOp,
+    ReturnItem, ReturnOp, TripleScanOp,
 };
 use grafeo_common::types::LogicalType;
 use grafeo_common::utils::error::{Error, QueryError, QueryErrorKind, Result};
@@ -20,12 +19,12 @@ use std::collections::HashSet;
 
 /// Creates a semantic binding error.
 fn binding_error(message: impl Into<String>) -> Error {
-    Error::from(QueryError::new(QueryErrorKind::Semantic, message))
+    Error::Query(QueryError::new(QueryErrorKind::Semantic, message))
 }
 
 /// Creates a semantic binding error with a hint.
 fn binding_error_with_hint(message: impl Into<String>, hint: impl Into<String>) -> Error {
-    Error::from(QueryError::new(QueryErrorKind::Semantic, message).with_hint(hint))
+    Error::Query(QueryError::new(QueryErrorKind::Semantic, message).with_hint(hint))
 }
 
 /// What a pattern binds a variable to.
@@ -51,17 +50,19 @@ fn holds_a_value(info: &VariableInfo) -> bool {
         )
 }
 
-/// Creates an "undefined variable" error (an invalid reference, GQLSTATUS
-/// 42002) with a suggestion if a similar variable exists.
+/// Creates an "undefined variable" error with a suggestion if a similar variable exists.
 fn undefined_variable_error(variable: &str, context: &BindingContext, suffix: &str) -> Error {
     let candidates: Vec<String> = context.variable_names();
     let candidates_ref: Vec<&str> = candidates.iter().map(|s| s.as_str()).collect();
 
-    let error = QueryError::invalid_reference(format!("Undefined variable '{variable}'{suffix}"));
-    Error::from(match find_similar(variable, &candidates_ref) {
-        Some(suggestion) => error.with_hint(format_suggestion(suggestion)),
-        None => error,
-    })
+    if let Some(suggestion) = find_similar(variable, &candidates_ref) {
+        binding_error_with_hint(
+            format!("Undefined variable '{variable}'{suffix}"),
+            format_suggestion(suggestion),
+        )
+    } else {
+        binding_error(format!("Undefined variable '{variable}'{suffix}"))
+    }
 }
 
 /// The parts of a subquery body joined by `UNION` (under the `DISTINCT` of
@@ -219,25 +220,6 @@ impl Binder {
         Ok(self.context.clone())
     }
 
-    /// A WITH names each column once: two items with the same output name
-    /// (`WITH a.name AS x, a.name AS x`) leave the next clause unable to tell
-    /// them apart, so the statement is rejected, as a RETURN is.
-    fn check_unique_projection_names(projections: &[Projection]) -> Result<()> {
-        let mut seen = HashSet::new();
-        for projection in projections {
-            let name = projection.alias.clone().unwrap_or_else(|| {
-                crate::query::planner::common::expression_to_string(&projection.expression)
-            });
-            if !seen.insert(name.clone()) {
-                return Err(binding_error(format!(
-                    "duplicate column name '{name}' in WITH: the clauses after it could not \
-                     tell the two apart; give the projections distinct aliases"
-                )));
-            }
-        }
-        Ok(())
-    }
-
     /// Binds a single logical operator.
     fn bind_operator(&mut self, op: &LogicalOperator) -> Result<()> {
         match op {
@@ -251,9 +233,6 @@ impl Binder {
                 // ends the scope of what it leaves out: its rows hold only
                 // the projected columns.
                 let mut projected = (!project.pass_through_input).then(BindingContext::new);
-                if projected.is_some() {
-                    Self::check_unique_projection_names(&project.projections)?;
-                }
                 for projection in &project.projections {
                     self.validate_expression(&projection.expression)?;
                     // Add the projection alias to the context (for WITH clause support)
@@ -441,27 +420,6 @@ impl Binder {
 
             // RDF/SPARQL operators
             LogicalOperator::TripleScan(scan) => self.bind_triple_scan(scan),
-            LogicalOperator::PropertyPath(path) => {
-                for component in [Some(&path.subject), Some(&path.object), path.graph.as_ref()]
-                    .into_iter()
-                    .flatten()
-                {
-                    if let Some(name) = component.as_variable()
-                        && !self.context.contains(name)
-                    {
-                        self.context.add_variable(
-                            name.to_string(),
-                            VariableInfo {
-                                name: name.to_string(),
-                                data_type: LogicalType::Any,
-                                is_node: false,
-                                is_edge: false,
-                            },
-                        );
-                    }
-                }
-                Ok(())
-            }
             LogicalOperator::Union(union) => self.bind_branches(&union.inputs),
             LogicalOperator::LeftJoin(lj) => {
                 self.bind_join_inputs(&lj.left, &lj.right)?;
@@ -889,9 +847,7 @@ impl Binder {
                 Ok(())
             }
             // DDL operators don't need binding: they're handled before the binder
-            LogicalOperator::CreatePropertyGraph(_) | LogicalOperator::DropPropertyGraph(_) => {
-                Ok(())
-            }
+            LogicalOperator::CreatePropertyGraph(_) => Ok(()),
             // Procedure calls: register yielded columns as variables for downstream operators
             LogicalOperator::CallProcedure(call) => {
                 if let Some(yields) = &call.yield_items {
@@ -1233,31 +1189,6 @@ impl Binder {
                 }
             }
             LogicalOperator::Distinct(d) => Self::register_subplan_columns(&d.input, ctx),
-            // The branches of an OTHERWISE return the same columns.
-            LogicalOperator::Otherwise(otherwise) => {
-                Self::register_subplan_columns(&otherwise.left, ctx);
-            }
-            // A procedure call in a query returns the columns it yields, also
-            // under the `WHERE` that follows its `YIELD`.
-            LogicalOperator::CallProcedure(call) => {
-                for item in call.yield_items.iter().flatten() {
-                    let name = item.alias.as_deref().unwrap_or(&item.field_name);
-                    ctx.add_variable(
-                        name.to_string(),
-                        VariableInfo {
-                            name: name.to_string(),
-                            data_type: LogicalType::Any,
-                            is_node: false,
-                            is_edge: false,
-                        },
-                    );
-                }
-            }
-            LogicalOperator::Filter(filter)
-                if matches!(*filter.input, LogicalOperator::CallProcedure(_)) =>
-            {
-                Self::register_subplan_columns(&filter.input, ctx);
-            }
             LogicalOperator::Aggregate(agg) => {
                 // Aggregate produces named output columns
                 for expr in &agg.aggregates {
@@ -1338,8 +1269,7 @@ impl Binder {
                 self.validate_expression(right)
             }
             LogicalExpression::Unary { operand, .. } => self.validate_expression(operand),
-            LogicalExpression::FunctionCall { args, .. }
-            | LogicalExpression::SparqlCall { args, .. } => {
+            LogicalExpression::FunctionCall { args, .. } => {
                 for arg in args {
                     self.validate_expression(arg)?;
                 }
@@ -1519,15 +1449,17 @@ impl Binder {
             }
             LogicalExpression::Binary { .. } => LogicalType::Any, // Could be bool or numeric
             LogicalExpression::Unary { .. } => LogicalType::Any,
-            LogicalExpression::FunctionCall { callee, .. } => match callee {
-                Callee::Aggregate(AggregateFunction::Count | AggregateFunction::Sum)
-                | Callee::Builtin(BuiltinFunction::Id) => LogicalType::Int64,
-                Callee::Aggregate(AggregateFunction::Avg) => LogicalType::Float64,
-                Callee::Builtin(BuiltinFunction::Type) => LogicalType::String,
-                // List-returning functions (labels, collect) use Any: the
-                // element type is not tracked.
-                _ => LogicalType::Any,
-            },
+            LogicalExpression::FunctionCall { name, .. } => {
+                // Infer based on function name
+                match name.to_lowercase().as_str() {
+                    "count" | "sum" | "id" => LogicalType::Int64,
+                    "avg" => LogicalType::Float64,
+                    "type" => LogicalType::String,
+                    // List-returning functions use Any since we don't track element type
+                    "labels" | "collect" => LogicalType::Any,
+                    _ => LogicalType::Any,
+                }
+            }
             LogicalExpression::List(_) => LogicalType::Any, // Complex type
             LogicalExpression::Map(_) => LogicalType::Any,  // Complex type
             _ => LogicalType::Any,
@@ -1966,7 +1898,6 @@ mod tests {
             items: vec![
                 ReturnItem {
                     expression: LogicalExpression::FunctionCall {
-                        callee: crate::query::plan::Callee::named("count"),
                         name: "count".to_string(),
                         args: vec![LogicalExpression::Variable("n".to_string())],
                         distinct: false,
@@ -2110,7 +2041,6 @@ mod tests {
         let plan = LogicalPlan::new(LogicalOperator::Return(ReturnOp {
             items: vec![ReturnItem {
                 expression: LogicalExpression::FunctionCall {
-                    callee: crate::query::plan::Callee::named("count"),
                     name: "count".to_string(),
                     args: vec![], // count() needs an argument
                     distinct: false,
@@ -2488,7 +2418,6 @@ mod tests {
             }],
             distinct: false,
             input: Box::new(LogicalOperator::Merge(MergeOp {
-                index_hint: None,
                 variable: "m".to_string(),
                 labels: vec!["Person".to_string()],
                 match_properties: vec![(
@@ -2523,7 +2452,6 @@ mod tests {
         use crate::query::plan::MergeOp;
 
         let plan = LogicalPlan::new(LogicalOperator::Merge(MergeOp {
-            index_hint: None,
             variable: "m".to_string(),
             labels: vec![],
             match_properties: vec![],
@@ -2558,7 +2486,6 @@ mod tests {
         use crate::query::plan::MergeOp;
 
         let plan = LogicalPlan::new(LogicalOperator::Merge(MergeOp {
-            index_hint: None,
             variable: "n".to_string(),
             labels: vec!["Item".to_string()],
             match_properties: vec![(
@@ -2589,7 +2516,6 @@ mod tests {
         use crate::query::plan::MergeOp;
 
         let plan = LogicalPlan::new(LogicalOperator::Merge(MergeOp {
-            index_hint: None,
             variable: "n".to_string(),
             labels: vec!["Item".to_string()],
             match_properties: vec![(
@@ -2623,7 +2549,6 @@ mod tests {
         use crate::query::plan::MergeOp;
 
         let plan = LogicalPlan::new(LogicalOperator::Merge(MergeOp {
-            index_hint: None,
             variable: "n".to_string(),
             labels: vec!["Item".to_string()],
             match_properties: vec![(
@@ -3711,8 +3636,6 @@ mod tests {
         let plan = LogicalPlan::new(LogicalOperator::CreatePropertyGraph(
             CreatePropertyGraphOp {
                 name: "social".to_string(),
-                or_replace: false,
-                if_not_exists: false,
                 node_tables: vec![],
                 edge_tables: vec![],
             },
@@ -4599,7 +4522,6 @@ mod tests {
             },
             Projection {
                 expression: LogicalExpression::FunctionCall {
-                    callee: crate::query::plan::Callee::named("count"),
                     name: "count".to_string(),
                     args: vec![LogicalExpression::Literal(Value::Int64(1))],
                     distinct: false,
@@ -4608,7 +4530,6 @@ mod tests {
             },
             Projection {
                 expression: LogicalExpression::FunctionCall {
-                    callee: crate::query::plan::Callee::named("AVG"),
                     name: "AVG".to_string(),
                     args: vec![LogicalExpression::Literal(Value::Int64(1))],
                     distinct: false,
@@ -4617,7 +4538,6 @@ mod tests {
             },
             Projection {
                 expression: LogicalExpression::FunctionCall {
-                    callee: crate::query::plan::Callee::named("type"),
                     name: "type".to_string(),
                     args: vec![],
                     distinct: false,
@@ -4626,7 +4546,6 @@ mod tests {
             },
             Projection {
                 expression: LogicalExpression::FunctionCall {
-                    callee: crate::query::plan::Callee::named("labels"),
                     name: "labels".to_string(),
                     args: vec![],
                     distinct: false,
@@ -4635,8 +4554,7 @@ mod tests {
             },
             Projection {
                 expression: LogicalExpression::FunctionCall {
-                    callee: crate::query::plan::Callee::named("keys"),
-                    name: "keys".to_string(),
+                    name: "unknown_fn".to_string(),
                     args: vec![],
                     distinct: false,
                 },

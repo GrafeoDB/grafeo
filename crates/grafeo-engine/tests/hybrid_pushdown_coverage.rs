@@ -213,15 +213,16 @@ fn test_hybrid_and_with_scalar_remainder() {
 }
 
 // ============================================================================
-// filter_hybrid.rs: missing text index (AND, OR) is a planning error
+// filter_hybrid.rs: missing text index (AND) falls through to per-row eval
 // ============================================================================
 
-/// Compound AND predicate with a vector index present but no text index:
-/// `text_match` needs a text index on its property, so the query is an error
-/// that says to create one, instead of a `false` for every row (#308).
+/// Compound AND predicate with a vector index present but no text index: the
+/// compound hybrid planner must fall through (returns `Ok(None)`) and let the
+/// per-row filter evaluate everything. Without a text index `text_match`
+/// returns false, so the AND produces zero rows.
 #[cfg(all(feature = "text-index", feature = "vector-index"))]
 #[test]
-fn test_hybrid_and_missing_text_index_is_an_error() {
+fn test_hybrid_and_missing_text_index_falls_through() {
     let session = article_fixture(false, true).session();
     let r = session
         .execute(
@@ -230,18 +231,15 @@ fn test_hybrid_and_missing_text_index_is_an_error() {
                AND text_match(doc.body, 'attention') \
              RETURN doc.title",
         )
-        .expect_err("a text_match without a text index");
-    assert!(
-        r.to_string().contains("needs a text index on 'body'"),
-        "{r}"
-    );
+        .expect("missing text index should fall through, not error");
+    assert_eq!(r.row_count(), 0);
 }
 
-/// Same shape with the compound in OR form: the vector branch alone would
-/// match a row, but the query is still an error, not a partial answer.
+/// Same shape with the compound in OR form: the OR extractor sees both
+/// predicates but the text-index check returns false, so it falls through.
 #[cfg(all(feature = "text-index", feature = "vector-index"))]
 #[test]
-fn test_hybrid_or_missing_text_index_is_an_error() {
+fn test_hybrid_or_missing_text_index_falls_through() {
     let session = article_fixture(false, true).session();
     let r = session
         .execute(
@@ -250,11 +248,10 @@ fn test_hybrid_or_missing_text_index_is_an_error() {
                 OR text_match(doc.body, 'attention') \
              RETURN doc.title",
         )
-        .expect_err("a text_match without a text index");
-    assert!(
-        r.to_string().contains("needs a text index on 'body'"),
-        "{r}"
-    );
+        .expect("OR with missing text index should fall through");
+    // Per-row eval: vector branch matches article 1 (embedding near query);
+    // text branch always false (no index). The OR returns at least one row.
+    assert!(r.row_count() >= 1);
 }
 
 /// Missing vector index side of the AND: hybrid must fall through; without a

@@ -234,7 +234,7 @@ which the section's 0.5.x reader reads.
 | 0 | `Raw` | A section's bytes, whole | Every section of a 0.5.x file |
 | 1 | `Meta` | The section's metadata: a layout byte, the caps it was written with, and its graphs, columns or streams | Every section, once |
 | 2 | `Column` | The values of one column over a range of rows | `LPG_STORE` and `RDF_STORE` |
-| 3 | `History` | The older versions of one property column's values over a range of rows | `LPG_STORE`: a database that keeps history; in version 3, a 0.6.0-beta.1 build with the `temporal` feature |
+| 3 | `History` | The older versions of one property column's values over a range of rows | `LPG_STORE`, in builds with the `temporal` feature |
 | 4 | `Stream` | A piece of a byte stream | The [stream sections](#stream-sections), `CATALOG` included |
 
 A raw or metadata chunk has every other field of its directory entry set to 0.
@@ -319,16 +319,13 @@ Layout, little-endian:
 | 5 | `RawI64` | `Int64` | Count `u32`, then each `i64` |
 | 6 | `Float32Vector` | Vectors of one dimension count, 1 to 65,535 | Dimensions `u16`, component count `u32`, then each component's `f32` bits |
 | 7 | `Values` | Any | Count `u32`, then each value in the [value encoding](#value-encoding) |
-| 8 | `Decimal64` | `Decimal`s of one scale whose mantissas fit an `i64` | Scale `u8` (0 to 38), count `u32`, then each mantissa as an `i64` |
 
-A writer picks a typed codec (1 to 6, or 8) only when every value of the chunk
-has its kind, and `Values` otherwise, so every value reads back exactly as it
-was written: an `Int64` next to a `Float64` stays an `Int64`, and decimals of
-several scales go into a `Values` chunk, each keeping its own scale (`1.50`
-stays `1.50`).
+A writer picks a typed codec (1 to 6) only when every value of the chunk has
+its kind, and `Values` otherwise, so every value reads back exactly as it was
+written: an `Int64` next to a `Float64` stays an `Int64`.
 
-**Zone maps.** A chunk of the codecs `BitPacked`, `RawI64`, `Float64`,
-`Bitmap` and `Decimal64` carries the minimum and the maximum of its values, two values in the
+**Zone maps.** A chunk of the codecs `BitPacked`, `RawI64`, `Float64` and
+`Bitmap` carries the minimum and the maximum of its values, two values in the
 [value encoding](#value-encoding); NaN is left out (a chunk of NaN only has no
 zone map). Every `Dict` chunk carries a string zone map, by the strings' UTF-8
 bytes:
@@ -348,9 +345,8 @@ cut), and each is from the shortest to the longest length. `Float32Vector` and
 `Values` chunks have none. A reader refuses a zone map other than the one the
 values give, so it can be trusted. See [Zone Maps](zone-maps.md).
 
-**Epochs.** In a section of version 3 written by a build with the `temporal`
-feature, each property value carries the epoch it was set at, in its `Column`
-chunk's epochs. A chunk whose
+**Epochs.** In a build with the `temporal` feature, each property value
+carries the epoch it was set at, in its `Column` chunk's epochs. A chunk whose
 epochs are all 0 carries none, and a reader refuses epochs that are all 0. The
 fixed columns and the `History` chunks never carry epochs: a history value
 holds the epochs of its versions itself.
@@ -381,8 +377,6 @@ zoned datetimes with their offsets, counters with every replica.
 | 14 | Path | Node count `u32`, the nodes, edge count `u32`, the edges |
 | 15 | GCounter | Count `u32`, then per entry its replica (length `u32` and UTF-8) and its `u64` count, sorted by replica |
 | 16 | OnCounter | The positive entries, then the negative entries, each as in 15 |
-| 17 | Decimal | Scale `u8` (0 to 38), then the mantissa as a 16-byte little-endian `i128` (at most 38 digits); the value is the mantissa divided by 10 to the scale |
-| 18 | RdfTerm | Kind `u8` (0 IRI, 1 blank node, 2 literal), then the IRI, the blank node label or the literal's lexical form as in 4; a literal then has `u8` has a language tag (0 or 1) and its language tag or datatype IRI as in 4 |
 
 A reader checks every length and count against the bytes left before it
 allocates, and refuses an unknown tag, a field the kind does not accept (such
@@ -403,9 +397,6 @@ defined (ids, names, keys and terms sorted), so the same data gives the same
 bytes.
 
 #### `LPG_STORE` (version 3)
-
-Version 3 is the layout 0.6.0-beta.1 wrote. This release reads it to migrate
-such a file into the layout it writes, version 4, and no longer writes it.
 
 Per graph in id order, the section holds its node table and then its edge
 table, and it ends with its metadata chunk. Graph 0 is the default graph; a
@@ -436,15 +427,14 @@ edge columns 1, 2 and 3 come as three chunks of one range in a row. Only the
 nodes and edges visible at the checkpoint are written, with their properties.
 A property whose value is null does not exist and is not written.
 
-A build with the `temporal` feature wrote, in a `Column` chunk of a property,
-its current values with their epochs, and its older versions in a `History` chunk
+With the `temporal` feature, a `Column` chunk of a property holds its current
+values with their epochs, and its older versions go to a `History` chunk
 written right before it: a history value is a list of `[epoch, value]` lists,
 with `Int64` epochs, ascending. A property removed last (its latest version
 null) has no current value: its history holds every version. A `History`
 chunk and the `Column` chunk after it cover the same rows, and either can come
-alone. Versions of transactions that did not commit are not written. This
-release checks the `History` chunks and does not apply them: the history of a
-migrated file starts at its epoch.
+alone. Versions of transactions that did not commit are not written. A build
+without `temporal` checks the `History` chunks and does not apply them.
 
 The metadata chunk, little-endian:
 
@@ -452,7 +442,7 @@ The metadata chunk, little-endian:
 |-------|----------|
 | layout | `u8`, `1` |
 | `max_rows`, `max_bytes` | `u32` each: the caps |
-| epoch | `u64`: the store's epoch when a build with `temporal` wrote it, 0 otherwise |
+| epoch | `u64`: the store's epoch with `temporal`, 0 without |
 | next graph id | `u32`: above every graph id given out |
 | graphs | A count `u32`, then per graph (the default graph first, then the named graphs by id, ascending) its id `u32`, its name (a length `u32` and UTF-8, empty for the default graph), next node id `u64`, next edge id `u64`, and its labels, edge types and property keys |
 | a dictionary | Its next id `u32` (above every id given out), a count `u32`, then per name its id `u32` and the name (as above), ids ascending |
@@ -638,10 +628,6 @@ them:
 | 6 | `TIMESTAMP` | 14 | `EDGE` |
 | 7 | `LOCAL DATETIME` | 15 | `ANY` |
 
-Code 16 is `DECIMAL`, any decimal with its own scale. `DECIMAL(p, s)` is
-`0x0100_0000 | p << 8 | s`, with a precision `p` from 1 to 38 and a scale `s`
-from 0 to `p`; any other code with bit 24 set is refused.
-
 The records come in the order of their kinds, and the records of one kind in
 increasing order of their key, so the same catalog is written to the same
 bytes: schemas, types and procedures by name, bindings by graph, constraints
@@ -705,18 +691,17 @@ These sections hold more, in proportion to their data:
 | Section | Writing | Reading |
 |---------|---------|---------|
 | `CATALOG` | A sorted copy of every entry, and the record being written | The record being read (at most 120 bytes per payload byte plus 1 MiB, see [Catalog Records](#catalog-records)), and the named constraints, index definitions and index names until the last record |
-| `LPG_STORE` | The ids of the rows of one of the store's row groups being written (16 bytes per node or edge, at most 1 MiB) | |
+| `LPG_STORE` | The sorted ids of the table being written (8 bytes per node or edge) and, without `temporal`, of each of its property columns (8 bytes per value) | |
 | `RDF_STORE` | A reference to every triple, sorted (8 bytes per triple) | |
 | `VECTOR_STORE` | A reference to every node of an in-memory topology, sorted by id (16 bytes per node) | |
 | `TEXT_INDEX` | References to the terms (16 bytes per term), a copy of the document lengths (16 bytes per document) and, for a posting list not held in node order, a sorted copy of it (16 bytes per posting) | Each document's length and the part of it the term frequencies read so far leave uncovered (16 bytes per document) |
 | `RDF_RING` | The packed term dictionary, built whole before it is written | Each of the six streams in one buffer, which becomes that part of the ring |
 
-**Locks.** A checkpoint holds commits off while it takes its snapshot and
-writes the catalog, the RDF sections and the time index, and so does a copy
-(see [Copies and Full Backups](#copies-and-full-backups)). It then holds a
-graph store's read lock while it gathers the values of one file row group,
-never while it encodes them or writes to the file: a write to that store
-waits for one row group's values to be read at most.
+**Locks.** A checkpoint holds a vector or text index's read lock while it
+writes that index's stream. Changes to that index (a node's vector or text
+inserted, updated or removed) wait until the stream is written, and so do
+searches of the index that arrive after a waiting change, as its locks are
+fair.
 
 ### Encryption
 
@@ -737,66 +722,24 @@ header and the database headers are not encrypted. See
 
 ## Checkpoint Flow
 
-Every checkpoint writes a complete new image, which shares the chunks that did
-not change with the active image:
+Every checkpoint writes the whole database as a new image:
 
 ```text
 Checkpoint:
-  1. (Engine) Hold commits off and take the snapshot: the epoch E of the last
-     commit, a read pinned at E (at the start of the history window for a
-     database that keeps history), and what changed in each row group since
-     the active image
-  2. (Engine) Start a new WAL segment at the end of the log: every commit so
-     far is in the segments before its first log position, the checkpoint
-     LSN, and is at or before E
+  1. (Engine) Start a new WAL file
+  2. (Engine) Hand every section to the container; commits wait until the
+     image is written
   3. Stream each section's chunks, one section at a time, into free pages as
-     the section writes them (CRC-32, encrypted if enabled): first the
-     sections without versions (the catalog, the RDF sections, the time
-     index) while commits are still held off, then, with commits going on,
-     the `LPG_STORE` section as of E; a chunk the active image holds
-     unchanged is not written: the new directory entry points at its pages
-     (see below)
+     the section writes them (CRC-32, encrypted if enabled)
   4. Write the directory blocks into free pages
   5. fsync
-  6. Write the new database header (iteration + 1, the new root, the
-     checkpoint LSN) into the inactive slot
+  6. Write the new database header (iteration + 1, the new root) into the
+     inactive slot
   7. fsync
   8. Shorten the file to end at the last page of the new image
-  9. (Engine) Delete the WAL segments before the checkpoint LSN, unless an
-     incremental backup still needs them; a reopen replays the WAL from the
-     checkpoint LSN the active header records
+  9. (Engine) Mark the WAL: recovery starts at the new WAL file, and earlier
+     WAL files are deleted unless an incremental backup still needs them
 ```
-
-**Commits during a checkpoint:** commits wait for steps 1 and 2 and for the
-sections without versions. While the `LPG_STORE` section is written, they go
-on: it is written as a reader at E sees the store, a file row group at a
-time, its values gathered under the store's read lock and encoded and written
-once the lock is released, and the pinned read keeps every version it reads.
-So the image holds the committed state at E exactly, and the commits after E
-are in the WAL after the checkpoint LSN.
-
-**Incremental checkpoints:** a write marks what it changes in its row group as
-it takes effect (at its commit, or at once for a write outside a transaction):
-rows created or deleted, the property keys and labels it changed (per vector
-of 2,048 rows), the nodes' outgoing and incoming adjacency. The snapshot takes
-the marks, and per file row group of the `LPG_STORE` section the checkpoint:
-
-- reuses every chunk of a row group without marks, its row count from the
-  active image's metadata;
-- for a row group whose rows did not change (and with no history kept), writes
-  the changed columns again within the chunk boundaries of the active image,
-  the chunks of the vectors that changed, and the adjacency of a direction
-  that changed, reusing every other chunk;
-- writes any other row group anew.
-
-The sections encoded in step 1 reuse every chunk the active image holds with
-the same description and bytes, so a catalog that did not change is not
-written again. Chunks are reused only from the image a store's data was last
-written to or read from: a store loaded from another file, a copy, or one
-whose last checkpoint failed writes every chunk at its next checkpoint, the
-same path with nothing to reuse. A reused chunk keeps its directory entry
-(offset, length, CRC, codec): its associated data names its section and
-place, not its offset, so an encrypted chunk decrypts in the new image too.
 
 **Free space:** the pages free for a checkpoint are derived from the pages the
 active image uses, which an open reads from its directory: every page from
@@ -804,13 +747,7 @@ page 3 up to the end of the last used page that the active image does not use.
 No free list is stored. Allocation is first fit and appends at the end of the
 file when no gap is large enough, so a checkpoint reuses the pages of the image
 before the active one. While a checkpoint runs, the file can hold the active
-image and the new one; the chunks they share take their pages once, and become
-free only when no image uses them any more. A reused chunk stays where it is,
-unless at least half of the pages the active image spans are free: then each
-chunk the checkpoint reuses that fits a free run before it is copied there as
-stored (its CRC, and for an encrypted file its nonce and tag, stay valid), so
-the image packs toward the start of the file and the file shrinks after its
-data did.
+image and the new one.
 
 **Crash safety:** steps 3 to 5 write only pages the active image does not use,
 so a crash before the new header is on disk opens the previous image, intact. A
@@ -819,42 +756,6 @@ step 7 opens the new image. If a checkpoint fails at or after its header
 write, the new header may or may not have reached the disk: the next checkpoint
 spares the pages of both images, and the WAL is kept until a later checkpoint
 succeeds.
-
-### Copies and Full Backups
-
-A full backup, `save()` and `to_memory()` write a complete image of the
-database at an epoch through the same path, with commits going on:
-
-```text
-Copy:
-  1. (Engine) Hold commits off and take the snapshot as a checkpoint does
-     (the epoch E, a read pinned at E), without taking the row groups' marks
-  2. (Engine) For a full backup, start a new WAL segment: its first log
-     position is where the incremental backups after it begin
-  3. Write every section into a new file `<target>.partial` (into memory for
-     `to_memory()`): the sections without versions while commits are still
-     held off, then the `LPG_STORE` section as of E with commits going on;
-     every chunk is written, as nothing is shared with another file
-  4. Write the directory, fsync, the database header, fsync
-  5. Rename `<target>.partial` to the target and sync its directory
-```
-
-The image holds the committed state at E exactly. The copy leaves the marks
-and the baselines of the database alone, so its next checkpoint reuses what it
-would have without the copy. A crash before step 5 leaves the database and
-the target as they were, and at most a `<target>.partial` that the next copy
-to the same target removes. A full backup enters the backup manifest only
-after its rename, so a restore never reads an image a crash cut off, and the
-next full backup replaces an image the manifest does not list. The incremental
-backups after a full backup hold the WAL from the segment it started, so a
-restore to an epoch is the full image and the commits after E up to that
-epoch. A read-only database starts no WAL segment: its image records the end
-of the sidecar WAL its open replayed, and as it cannot move the WAL's backup
-cursor, the writer's next incremental backup starts before that image's epoch.
-A restore therefore replays every incremental backup taken after the full
-backup it starts from, from the image's log position on, which skips what the
-image holds. `export_snapshot()` reads the graphs' rows at E the same way: commits
-are held off while it takes the catalog's records and the RDF triples.
 
 ---
 
@@ -884,21 +785,18 @@ Open database:
      that no pages overlap
   5. Read each section's chunks, verify their CRC-32 (and decrypt them), and
      load the section into RAM
-  6. If a sidecar WAL exists: replay the commits logged after the active
-     header's checkpoint LSN, each complete group at the epoch it names (a
-     group without its last frame was never committed and is skipped); a
-     WAL written by 0.5.x or 0.6.0-beta.1 is replayed once, checkpointed
-     into the file and removed
+  6. If a sidecar WAL exists: replay the changes committed since the last
+     checkpoint
   7. Database is ready
 ```
 
 A read-only open takes a shared lock instead and goes through the same steps, the WAL
 replay included, but only into memory: it writes nothing, so a torn tail stays until
-the next read-write open. With the WAL enabled, that open cuts the tail before it
+the next read-write open. With the WAL enabled, that open seals the tail before it
 logs anything new; with `wal_enabled` off, it writes the replayed changes to the file
 and removes the WAL, the torn tail with it. A build without the `wal` feature cannot
-replay: it refuses to open a database whose sidecar WAL holds commits (a log file
-with more than a segment header), read-only or not, and leaves the WAL as it is. Likewise a build refuses a file
+replay: it refuses to open a database whose sidecar WAL holds commits (a non-empty log
+file), read-only or not, and leaves the WAL as it is. Likewise a build refuses a file
 that holds data only a feature it lacks reads, which it would load without and its next
 checkpoint drop: without `triple-store` RDF triples (an `RdfStore` or `RdfRing`
 section, or RDF records in the sidecar WAL), without `vector-index` or `text-index` the

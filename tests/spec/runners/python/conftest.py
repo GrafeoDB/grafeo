@@ -24,7 +24,6 @@ from comparator import (
     assert_count,
     assert_empty,
     assert_error,
-    assert_gql_status,
     assert_hash,
     assert_rows_ordered,
     assert_rows_sorted,
@@ -200,7 +199,7 @@ class GtestItem(pytest.Item):
 
         if statements:
             queries = list(statements)
-        elif query or tc.expect.error is not None or tc.expect.gql_status is not None:
+        elif query or tc.expect.error is not None:
             queries = [query or ""]
         else:
             pytest.fail(f"No query or statements in test '{tc.name}' in {self.path}")
@@ -212,10 +211,8 @@ class GtestItem(pytest.Item):
         params = coerce_params(tc.params)
 
         # Error tests
-        if expect.error is not None or expect.gql_status is not None:
-            self._run_error_test(
-                db, language, queries, expect.error, expect.gql_status, params
-            )
+        if expect.error is not None:
+            self._run_error_test(db, language, queries, expect.error, params)
             return
 
         # Execute all-but-last as fire-and-forget (with params, so
@@ -251,13 +248,10 @@ class GtestItem(pytest.Item):
         db,
         language: str,
         queries: list[str],
-        expected_substr: str | None,
-        expected_status: str | None,
+        expected_substr: str,
         params=None,
     ) -> None:
-        """Execute queries expecting the last one to raise an error: one whose
-        message contains *expected_substr* and whose GQLSTATUS is
-        *expected_status*, for each that is given."""
+        """Execute queries expecting the last one to raise an error."""
         for q in queries[:-1]:
             _execute(db, language, q, params)
 
@@ -267,14 +261,10 @@ class GtestItem(pytest.Item):
         # Any error the binding raises counts (a GrafeoError, or a TypeError
         # or ValueError from converting a parameter): the message decides.
         except Exception as exc:  # noqa: BLE001
-            if expected_substr is not None:
-                assert_error(exc, expected_substr)
-            if expected_status is not None:
-                assert_gql_status(exc, expected_status)
+            assert_error(exc, expected_substr)
         else:
             pytest.fail(
-                f"Expected error {_describe(expected_substr, expected_status)} "
-                "but query succeeded"
+                f"Expected error containing '{expected_substr}' but query succeeded"
             )
 
     def repr_failure(self, excinfo):
@@ -304,16 +294,6 @@ def _load_dataset(db, dataset_name: str) -> None:
         if not trimmed or trimmed.startswith("#"):
             continue
         db.execute(trimmed)
-
-
-def _describe(expected_substr: str | None, expected_status: str | None) -> str:
-    """What an error case expects, for its failure message."""
-    parts = []
-    if expected_substr is not None:
-        parts.append(f"containing '{expected_substr}'")
-    if expected_status is not None:
-        parts.append(f"with GQLSTATUS {expected_status}")
-    return " ".join(parts)
 
 
 def _execute(db, language: str, query: str, params=None):

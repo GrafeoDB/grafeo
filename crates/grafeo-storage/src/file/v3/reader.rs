@@ -211,7 +211,12 @@ impl<'f> ImageReader<'f> {
     /// or chunk kind that it does not mark optional, or an unknown flag among
     /// bits 0 to 3 (a newer version wrote it), and [`Error::Io`] when a read
     /// fails.
-    pub fn open(file: &'f File, root: BlockRef, cipher: Option<&'f ChunkCipher>) -> Result<Self> {
+    pub fn open(
+        file: &'f mut File,
+        root: BlockRef,
+        cipher: Option<&'f ChunkCipher>,
+    ) -> Result<Self> {
+        let file: &'f File = file;
         // An encrypted block is stored with its nonce and tag around it.
         let extra = if cipher.is_some() {
             ENCRYPTION_OVERHEAD
@@ -341,7 +346,7 @@ impl<'f> ImageReader<'f> {
 
     /// The chunks of one section, or `None` when the image has none of it.
     #[must_use]
-    pub fn section(&self, section_type: SectionType) -> Option<SectionChunks<'f>> {
+    pub fn section(&self, section_type: SectionType) -> Option<SectionChunks<'_>> {
         let entries: Vec<DirectoryEntry> = self
             .entries
             .iter()
@@ -380,47 +385,6 @@ pub struct SectionChunks<'r> {
     metas: Vec<ChunkMeta>,
     /// The section version, which every chunk carries.
     version: u8,
-}
-
-impl SectionChunks<'_> {
-    /// The directory entry of chunk `index`, `None` past the last.
-    pub(crate) fn entry(&self, index: usize) -> Option<&DirectoryEntry> {
-        self.entries.get(index)
-    }
-
-    /// The bytes chunk `index` is stored in, as the file holds them (an
-    /// encrypted chunk still encrypted), checked against its CRC.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`Error::Internal`] for an index out of range,
-    /// [`Error::Corruption`] when the bytes fail their checksum, and the
-    /// error of the read.
-    pub(crate) fn stored_bytes(&self, index: usize) -> Result<Vec<u8>> {
-        let entry = self.entries.get(index).ok_or_else(|| {
-            Error::Internal(format!(
-                "chunk {index} out of range: section has {} chunks",
-                self.entries.len()
-            ))
-        })?;
-        let length = usize::try_from(entry.length).map_err(|_| {
-            Error::Serialization(format!(
-                "chunk of section {:?} at offset {} is too large",
-                entry.section_type, entry.offset
-            ))
-        })?;
-        let stored = read_at(self.file, entry.offset, length)?;
-        if crc32fast::hash(&stored) != entry.crc {
-            return Err(Error::corruption_at(
-                format!(
-                    "chunk of section {:?} at offset {} fails its checksum",
-                    entry.section_type, entry.offset
-                ),
-                entry.offset,
-            ));
-        }
-        Ok(stored)
-    }
 }
 
 impl SectionSource for SectionChunks<'_> {
@@ -574,14 +538,15 @@ mod tests {
             .truncate(true)
             .open(dir.path().join("x"))
             .unwrap();
-        let mut writer = CheckpointWriter::new(&file, PageAllocator::from_used([]).unwrap(), None);
+        let mut writer =
+            CheckpointWriter::new(&mut file, PageAllocator::from_used([]).unwrap(), None);
         writer.begin_section(SectionType::LpgStore, 3).unwrap();
         writer.write_chunk(ChunkMeta::meta(), b"Vincent").unwrap();
         writer
             .write_chunk(ChunkMeta::column(0, 3, 0, 19, 2), b"Jules")
             .unwrap();
         let (root, _) = writer.finish().unwrap();
-        let good = ImageReader::open(&file, root, None)
+        let good = ImageReader::open(&mut file, root, None)
             .unwrap()
             .entries()
             .to_vec();
@@ -604,7 +569,7 @@ mod tests {
             let (root, blocks) = encode_blocks(&entries, |_| Ok(at)).unwrap();
             file.seek(SeekFrom::Start(at)).unwrap();
             file.write_all(&blocks[0].1).unwrap();
-            let error = ImageReader::open(&file, root, None)
+            let error = ImageReader::open(&mut file, root, None)
                 .map(|_| ())
                 .unwrap_err()
                 .to_string();

@@ -67,7 +67,7 @@ db.execute("""
 
 ## PyArrow: Filtering and DuckDB Integration
 
-`nodes_to_arrow()` returns a `pyarrow.Table` with columns: `_id` (uint64), `_labels` (list\<utf8\>), plus one column per property key.
+`nodes_to_arrow()` returns a `pyarrow.Table` with columns: `id` (uint64), `labels` (list\<utf8\>), plus one column per property key.
 
 ```python
 import pyarrow.compute as pc
@@ -78,8 +78,8 @@ print(f"{table.num_rows} nodes exported")
 ```
 
 ```title="Output"
-_id: uint64
-_labels: list<item: string>
+id: uint64
+labels: list<item: string>
 name: string
 age: int64
 city: string
@@ -137,7 +137,7 @@ print(df)
 ```title="Output"
 shape: (7, 5)
 +-----+-----------+---------+------+-----------+
-| _id | _labels   | name    | age  | city      |
+| id  | labels    | name    | age  | city      |
 | u64 | list[str] | str     | i64  | str       |
 +-----+-----------+---------+------+-----------+
 | 1   | [Person]  | Alix    | 30   | Amsterdam |
@@ -189,7 +189,7 @@ Name: age, dtype: float64
 
 ## Edge Export
 
-`edges_to_arrow()` returns columns: `_id` (uint64), `_type` (utf8), `_source` (uint64), `_target` (uint64), plus one column per property key.
+`edges_to_arrow()` returns columns: `id` (uint64), `type` (utf8), `source` (uint64), `target` (uint64), plus one column per property key.
 
 ```python
 edges_table = db.edges_to_arrow()
@@ -197,10 +197,10 @@ print(edges_table.schema)
 ```
 
 ```title="Output"
-_id: uint64
-_type: string
-_source: uint64
-_target: uint64
+id: uint64
+type: string
+source: uint64
+target: uint64
 since: int64
 role: string
 ```
@@ -211,8 +211,8 @@ With Polars:
 edges_df = db.edges_to_polars()
 
 # All KNOWS relationships
-knows = edges_df.filter(pl.col("_type") == "KNOWS")
-print(knows.select("_source", "_target", "since"))
+knows = edges_df.filter(pl.col("type") == "KNOWS")
+print(knows.select("source", "target", "since"))
 ```
 
 With DuckDB (join nodes and edges for a full view):
@@ -224,9 +224,9 @@ edges = db.edges_to_arrow()
 result = duckdb.sql("""
     SELECT n1.name AS from_person, n2.name AS to_person, e.since
     FROM edges e
-    JOIN nodes n1 ON e._source = n1._id
-    JOIN nodes n2 ON e._target = n2._id
-    WHERE e._type = 'KNOWS'
+    JOIN nodes n1 ON e.source = n1.id
+    JOIN nodes n2 ON e.target = n2.id
+    WHERE e.type = 'KNOWS'
 """)
 print(result.fetchdf())
 ```

@@ -16,6 +16,7 @@
 
 use std::fmt;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 const LOGICAL_BITS: u32 = 16;
 const LOGICAL_MASK: u64 = (1 << LOGICAL_BITS) - 1; // 0xFFFF
@@ -250,7 +251,10 @@ impl fmt::Debug for HlcClock {
 
 /// Reads the current wall-clock time in milliseconds since Unix epoch.
 fn wall_clock_ms() -> u64 {
-    crate::clock::unix_millis()
+    let duration = SystemTime::now().duration_since(UNIX_EPOCH);
+    // reason: wall-clock millis since epoch fits u64 for thousands of years
+    #[allow(clippy::cast_possible_truncation)]
+    duration.map_or(0, |d| d.as_millis() as u64)
 }
 
 #[cfg(test)]

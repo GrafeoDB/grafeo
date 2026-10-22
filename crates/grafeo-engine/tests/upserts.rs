@@ -1,7 +1,7 @@
 //! Upserts create or update nodes and edges by a key property, in one
 //! statement per call, and report what they did with every row.
 
-#![cfg(feature = "gql")]
+#![cfg(all(feature = "lpg", feature = "gql"))]
 
 use std::collections::HashMap;
 
@@ -344,7 +344,7 @@ fn clashing_field_names_are_rejected() {
             "{key} {src_field} {dst_field}: {error}"
         );
     }
-    assert_eq!(db.edge_count().unwrap(), 0);
+    assert_eq!(db.edge_count(), 0);
 }
 
 #[test]

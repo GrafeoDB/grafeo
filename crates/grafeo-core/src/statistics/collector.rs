@@ -515,7 +515,6 @@ fn value_to_f64(value: &Value) -> Option<f64> {
 #[cfg(test)]
 fn compare_values(a: &Value, b: &Value) -> Option<std::cmp::Ordering> {
     match (a, b) {
-        (Value::Decimal(_), _) | (_, Value::Decimal(_)) => a.compare_decimal(b),
         (Value::Int64(a), Value::Int64(b)) => Some(a.cmp(b)),
         (Value::Float64(a), Value::Float64(b)) => a.partial_cmp(b),
         (Value::String(a), Value::String(b)) => Some(a.cmp(b)),

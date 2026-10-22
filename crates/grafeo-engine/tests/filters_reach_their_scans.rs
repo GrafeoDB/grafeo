@@ -18,7 +18,7 @@
 //! cargo test -p grafeo-engine --all-features --test filters_reach_their_scans
 //! ```
 
-#![cfg(feature = "gql")]
+#![cfg(all(feature = "lpg", feature = "gql"))]
 
 use std::collections::HashMap;
 

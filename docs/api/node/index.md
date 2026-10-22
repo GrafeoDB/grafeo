@@ -37,7 +37,6 @@ db.close();
 | [GrafeoDB](database.md) | Database connection, queries, CRUD, vector/text search |
 | [QueryResult](query.md) | Query result with rows, columns, nodes, edges |
 | [Transaction](transaction.md) | ACID transaction management |
-| [GraphHandle](database.md#named-graphs) | Queries and direct calls in one named graph, from `db.graph(name)` |
 | [JsNode](node.md) | Graph node with labels and properties |
 | [JsEdge](edge.md) | Graph edge with type, endpoints and properties |
 
@@ -101,9 +100,8 @@ await db.executeSql(query, params?);      // SQL/PGQ
 | `boolean` | Bool | |
 | `number` (integer) | Int64 | No fractional part and within safe integer range |
 | `number` (float) | Float64 | |
-| `{ $decimal: '1.50' }` | Decimal | An exact decimal as its text with its scale, both ways: GQL `1.50` comes back as `{ $decimal: '1.50' }`. Only as an object's only key; with other keys it is a map |
 | `string` | String | |
-| `BigInt` | Int64, or Decimal past 64 bits | Exact up to 38 digits (scale 0); past that an error naming the parameter or property |
+| `BigInt` | Int64 | |
 | `Array` | List | Elements converted recursively |
 | `Object` | Map | Keys must be strings |
 | `Buffer` | Bytes | |

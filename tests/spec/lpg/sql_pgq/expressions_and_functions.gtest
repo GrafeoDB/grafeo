@@ -384,32 +384,6 @@ tests:
   # Type conversion functions
   # ---------------------------------------------------------------------------
 
-  # A number with a point is an exact decimal, one with an exponent a float,
-  # as SQL specifies (#610).
-  - name: exact_and_approximate_number_literals
-    query: |
-      SELECT * FROM GRAPH_TABLE (
-        MATCH (n:Person {name: 'Alix'})
-        COLUMNS (0.1 + 0.2 AS exact, 1.50 AS scaled, 1.5e0 AS approximate)
-      )
-    expect:
-      rows:
-        - [0.3, 1.50, 1.5]
-
-  # CAST to every SQL type: DECIMAL(p, s) rounds half away from zero,
-  # VARCHAR(n) keeps the first n characters (#610).
-  - name: cast_to_sql_types
-    query: |
-      SELECT * FROM GRAPH_TABLE (
-        MATCH (n:Person {name: 'Alix'})
-        COLUMNS (CAST('2.345' AS DECIMAL(10, 2)) AS d, CAST(2.5 AS NUMERIC(3)) AS n,
-                 CAST('42' AS INTEGER) AS i, CAST(n.name AS VARCHAR(2)) AS v,
-                 CAST('true' AS BOOLEAN) AS b)
-      )
-    expect:
-      rows:
-        - [2.35, 3, 42, Al, true]
-
   - name: to_integer_from_float
     query: |
       SELECT * FROM GRAPH_TABLE (

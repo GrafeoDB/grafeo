@@ -1,7 +1,7 @@
 //! A query result reports what its writes changed: nodes and edges created
 //! and deleted, properties set, labels added and removed.
 
-#![cfg(feature = "gql")]
+#![cfg(all(feature = "lpg", feature = "gql"))]
 
 use std::collections::HashMap;
 

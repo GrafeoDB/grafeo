@@ -94,15 +94,13 @@ CREATE OR REPLACE NODE TYPE Person (
 
 ### Property Types
 
-Each property of a node or edge type has one of these types. A value written to the property (when a node or edge of the type is created, or with `SET`) must have the type, or the write fails; `NULL` is accepted unless the property is `NOT NULL`. Types match strictly, with the conversions of numbers and instants that ISO GQL makes on assignment: an integer written to a `FLOAT64` property is stored as a float (an integer beyond 2^53 that has no exact float fails), a decimal written to a `FLOAT64` property as the nearest float, an integer, float (by its shortest text) or decimal written to a `DECIMAL` property as a decimal, and a zoned datetime written to a `TIMESTAMP` property as its instant in UTC. A float is not an `INT64`, and a zoned datetime is not a `LOCAL DATETIME`.
+Each property of a node or edge type has one of these types. A value written to the property (when a node or edge of the type is created, or with `SET`) must have the type, or the write fails; `NULL` is accepted unless the property is `NOT NULL`. Types match strictly, with two conversions that lose nothing: an integer written to a `FLOAT64` property is stored as a float (an integer beyond 2^53 that has no exact float fails), and a zoned datetime written to a `TIMESTAMP` property is stored as its instant in UTC. A float is not an `INT64`, and a zoned datetime is not a `LOCAL DATETIME`.
 
 | Type | Also written | Values |
 |------|--------------|--------|
 | `STRING` | `VARCHAR`, `TEXT` | Strings |
 | `INT64` | `INT`, `INTEGER`, `BIGINT` | Integers |
 | `FLOAT64` | `FLOAT`, `DOUBLE`, `REAL` | Floats |
-| `DECIMAL` | `DEC` | Exact decimals, each with its own scale |
-| `DECIMAL(p, s)` | `DEC(p, s)`, `DECIMAL(p)` | Exact decimals of at most `p` digits, `s` of them after the point (`p` from 1 to 38, `s` up to `p`, 0 when left out): a value is rounded to `s` digits, half away from zero, and one with more than `p - s` digits before the point is refused |
 | `BOOLEAN` | `BOOL` | `TRUE` and `FALSE` |
 | `DATE` | | Dates, such as `date('2024-03-19')` |
 | `TIME` | | Times of day, such as `time('08:30:00')` |
@@ -118,7 +116,7 @@ Each property of a node or edge type has one of these types. A value written to 
 | `EDGE` | `RELATIONSHIP` | Edges |
 | `ANY` | | Any value |
 
-Any other type name is refused, a typo or a type of ISO GQL that Grafeo does not support (such as `INT32`). A property name may be any name a property map takes, keywords such as `starts`, `ends` and `contains` included.
+Any other type name is refused, a typo or a type of ISO GQL that Grafeo does not support (such as `INT32` or `DECIMAL`). A property name may be any name a property map takes, keywords such as `starts`, `ends` and `contains` included.
 
 ```sql
 CREATE NODE TYPE Event (
@@ -256,18 +254,16 @@ DROP SCHEMA IF EXISTS analytics
 
 ## Indexes
 
-Indexes improve query performance for property lookups, text search and vector similarity. In GQL an index
-always has a name, the one `SHOW INDEXES` lists and `DROP INDEX` takes (Cypher may leave it out, see the
-[Cypher guide](../cypher/mutations.md)).
+Indexes improve query performance for property lookups, text search and vector similarity.
 
 ### Property Indexes
 
 ```sql
 -- Create a property index
-CREATE INDEX person_email FOR (p:Person) ON (p.email)
+CREATE INDEX FOR (p:Person) ON (p.email)
 
 -- B-tree index (explicit)
-CREATE INDEX person_age FOR (p:Person) ON (p.age) USING BTREE
+CREATE INDEX FOR (p:Person) ON (p.age) USING BTREE
 
 -- Drop an index
 DROP INDEX index_name
@@ -280,22 +276,16 @@ When the pattern follows an earlier clause (`UNWIND`, another `MATCH`), an index
 
 ```sql
 -- Full-text search index (BM25)
-CREATE INDEX post_content FOR (p:Post) ON (p.content) USING TEXT
-
--- With BM25 parameters, a tokenizer or stop words
-CREATE INDEX post_content FOR (p:Post) ON (p.content) USING TEXT {k1: 1.2, b: 0.75, stop_words: ['and', 'or']}
+CREATE INDEX FOR (p:Post) ON (p.content) USING TEXT
 ```
 
 ### Vector Indexes
 
 ```sql
 -- Vector similarity index (HNSW)
-CREATE VECTOR INDEX document_embedding ON :Document(embedding)
+CREATE VECTOR INDEX FOR (d:Document) ON (d.embedding)
     DIMENSION 384
     METRIC 'cosine'
-
--- The same through CREATE INDEX
-CREATE INDEX document_embedding FOR (d:Document) ON (d.embedding) USING VECTOR {dimensions: 384, metric: 'cosine'}
 ```
 
 ## Constraints

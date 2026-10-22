@@ -50,12 +50,18 @@ impl Operator for ProfiledOperator {
             s.calls += 1;
         }
 
-        let start = grafeo_common::clock::Instant::now();
+        #[cfg(not(target_arch = "wasm32"))]
+        let start = std::time::Instant::now();
 
         let result = self.inner.next();
 
-        let elapsed = u64::try_from(start.elapsed().as_nanos()).unwrap_or(u64::MAX);
-        self.stats.lock().time_ns += elapsed;
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            // reason: per-call elapsed nanos fits u64 for any practical duration
+            #[allow(clippy::cast_possible_truncation)]
+            let elapsed = start.elapsed().as_nanos() as u64;
+            self.stats.lock().time_ns += elapsed;
+        }
 
         if let Ok(Some(ref chunk)) = result {
             self.stats.lock().rows_out += chunk.row_count() as u64;
@@ -160,6 +166,7 @@ mod tests {
         assert_eq!(s.calls, 4); // 3 data + 1 None
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
     #[test]
     fn profiled_operator_measures_time() {
         let mock = MockOperator::new(1, 5);

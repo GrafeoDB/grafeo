@@ -212,11 +212,11 @@ fn test_vector_where_with_pushdown() {
 }
 
 // ============================================================================
-// Test 4: text_score without text index → an error that says to create one
+// Test 4: text_score without text index → falls through to per-row eval, 0 rows
 // ============================================================================
 
 #[test]
-fn test_text_score_without_index_is_an_error() {
+fn test_text_score_without_index_fallthrough() {
     let db = GrafeoDB::new_in_memory();
     // Create nodes but NO text index
     let n = db.create_node(&["Article"]).unwrap();
@@ -224,18 +224,15 @@ fn test_text_score_without_index_is_an_error() {
         .unwrap();
 
     let session = db.session();
-    let error = session
+    let result = session
         .execute("MATCH (doc:Article) WHERE text_score(doc.body, 'rust') > 0.0 RETURN doc.title")
-        .expect_err("text_score without a text index");
+        .expect("text_score without index should fall through to per-row eval, not error");
 
-    // It used to score 0.0 for every node, so the predicate kept none (#308).
-    let message = error.to_string();
-    assert!(
-        message.contains(
-            "text_score(doc.body, ...) needs a text index on 'body': \
-             create one with CREATE INDEX FOR (n:Label) ON (n.body) USING TEXT"
-        ),
-        "{message}"
+    // Without an index, score_text returns None → text_score evaluates to 0.0 → predicate false.
+    assert_eq!(
+        result.row_count(),
+        0,
+        "Expected 0 rows when no text index exists (per-row eval returns 0.0 for all nodes)"
     );
 }
 
@@ -872,10 +869,10 @@ fn test_compound_with_scalar_remainder() {
     );
 }
 
-/// Compound OR where the text side is missing its index: an error that says
-/// to create it, not a panic and not the vector side's rows alone.
+/// Compound OR where one side is missing the required index: should fall through
+/// to per-row evaluation rather than panic or error.
 #[test]
-fn test_compound_or_with_missing_text_index_is_an_error() {
+fn test_compound_or_with_missing_text_index_falls_through() {
     let db = GrafeoDB::new_in_memory();
     let a1 = db.create_node(&["Article"]).unwrap();
     db.set_node_property(a1, "body", Value::String("rust".into()))
@@ -897,22 +894,21 @@ fn test_compound_or_with_missing_text_index_is_an_error() {
         None,
     )
     .unwrap();
-    // NB: no text index: the text_match is an error even though the vector
-    // branch of the OR would match (#308).
+    // NB: no text index — compound OR pushdown should fall through
 
     let session = db.session();
-    let error = session
+    let result = session
         .execute(
             "MATCH (doc:Article) \
              WHERE cosine_similarity(doc.embedding, [1.0, 0.0, 0.0]) > 0.5 \
                 OR text_match(doc.body, 'rust') \
              RETURN doc.body",
         )
-        .expect_err("a text_match without a text index");
-    assert!(
-        error.to_string().contains("needs a text index on 'body'"),
-        "{error}"
-    );
+        .expect("OR with missing text index should not error — falls through to per-row eval");
+
+    // Vector predicate matches; per-row text_match returns false (no index → 0.0 score).
+    // The OR is true via the vector branch.
+    assert_eq!(result.row_count(), 1);
 }
 
 // ============================================================================

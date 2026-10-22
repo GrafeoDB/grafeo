@@ -65,9 +65,6 @@ impl GqlStatus {
     /// `22004` - null value not allowed.
     pub const DATA_NULL_NOT_ALLOWED: Self = Self::from_bytes(*b"22004");
 
-    /// `22009` - invalid time zone displacement value.
-    pub const DATA_INVALID_TIME_ZONE_DISPLACEMENT: Self = Self::from_bytes(*b"22009");
-
     /// `22012` - division by zero.
     pub const DATA_DIVISION_BY_ZERO: Self = Self::from_bytes(*b"22012");
 
@@ -119,9 +116,6 @@ impl GqlStatus {
 
     /// `G1000` - dependent object error, no subclass.
     pub const DEPENDENT_OBJECT_ERROR: Self = Self::from_bytes(*b"G1000");
-
-    /// `G1001` - dependent object error: edges still exist.
-    pub const EDGES_STILL_EXIST: Self = Self::from_bytes(*b"G1001");
 
     // ── Graph type violation (class G2) ───────────────────────────────
 
@@ -206,26 +200,15 @@ impl fmt::Display for GqlStatus {
 /// Maps a Grafeo [`super::error::Error`] to a GQLSTATUS code.
 impl From<&super::error::Error> for GqlStatus {
     fn from(err: &super::error::Error) -> Self {
-        use super::error::{ConstraintKind, Error, QueryErrorKind, TransactionError};
+        use super::error::{Error, QueryErrorKind, TransactionError};
 
         match err {
             Error::Query(q) => match q.kind {
                 QueryErrorKind::Lexer | QueryErrorKind::Syntax => GqlStatus::SYNTAX_INVALID,
-                // ISO/IEC 39075 §4: a violated syntax rule without a
-                // condition of its own is 42000.
-                QueryErrorKind::Semantic => GqlStatus::SYNTAX_ERROR,
-                QueryErrorKind::InvalidReference => GqlStatus::SYNTAX_INVALID_REFERENCE,
+                QueryErrorKind::Semantic => GqlStatus::SYNTAX_INVALID_REFERENCE,
                 QueryErrorKind::Optimization => GqlStatus::SYNTAX_ERROR,
                 QueryErrorKind::Execution => GqlStatus::DATA_EXCEPTION,
                 QueryErrorKind::Timeout => GqlStatus::DATA_EXCEPTION,
-                QueryErrorKind::NumericOutOfRange => GqlStatus::DATA_NUMERIC_OUT_OF_RANGE,
-                QueryErrorKind::DivisionByZero => GqlStatus::DATA_DIVISION_BY_ZERO,
-                QueryErrorKind::NegativeLimit => GqlStatus::DATA_NEGATIVE_LIMIT,
-                QueryErrorKind::InvalidValueType => GqlStatus::DATA_INVALID_VALUE_TYPE,
-                QueryErrorKind::InvalidTimeZoneDisplacement => {
-                    GqlStatus::DATA_INVALID_TIME_ZONE_DISPLACEMENT
-                }
-                QueryErrorKind::ValuesNotComparable => GqlStatus::DATA_VALUES_NOT_COMPARABLE,
                 // GQL defines no class for a feature an implementation lacks.
                 QueryErrorKind::Unsupported => GqlStatus::SYNTAX_ERROR,
             },
@@ -251,13 +234,8 @@ impl From<&super::error::Error> for GqlStatus {
                 // The one case the class was made for.
                 TransactionError::CommitOutcomeUnknown(_) => GqlStatus::TX_COMPLETION_UNKNOWN,
             },
-            Error::TypeMismatch(_) => GqlStatus::DATA_INVALID_VALUE_TYPE,
+            Error::TypeMismatch { .. } => GqlStatus::DATA_INVALID_VALUE_TYPE,
             Error::InvalidValue(_) => GqlStatus::DATA_EXCEPTION,
-            Error::Constraint { kind, .. } => match kind {
-                ConstraintKind::Schema => GqlStatus::GRAPH_TYPE_VIOLATION,
-                ConstraintKind::EdgesStillExist => GqlStatus::EDGES_STILL_EXIST,
-                ConstraintKind::Limit => GqlStatus::DATA_EXCEPTION,
-            },
             Error::NodeNotFound(_) | Error::EdgeNotFound(_) => GqlStatus::NO_DATA,
             Error::PropertyNotFound(_) | Error::LabelNotFound(_) => {
                 GqlStatus::SYNTAX_INVALID_REFERENCE
@@ -416,8 +394,14 @@ mod tests {
     fn test_error_to_gqlstatus() {
         use super::super::error::{Error, QueryError, QueryErrorKind, TransactionError};
 
-        let syntax_err = Error::from(QueryError::new(QueryErrorKind::Syntax, "bad syntax"));
+        let syntax_err = Error::Query(QueryError::new(QueryErrorKind::Syntax, "bad syntax"));
         assert_eq!(GqlStatus::from(&syntax_err), GqlStatus::SYNTAX_INVALID);
+
+        let semantic_err = Error::Query(QueryError::new(QueryErrorKind::Semantic, "unknown label"));
+        assert_eq!(
+            GqlStatus::from(&semantic_err),
+            GqlStatus::SYNTAX_INVALID_REFERENCE
+        );
 
         let tx_err = Error::Transaction(TransactionError::ReadOnly);
         assert_eq!(GqlStatus::from(&tx_err), GqlStatus::INVALID_TX_READ_ONLY);
@@ -425,111 +409,14 @@ mod tests {
         let conflict = Error::Transaction(TransactionError::Conflict);
         assert_eq!(GqlStatus::from(&conflict), GqlStatus::TX_ROLLBACK);
 
-        let type_err = Error::type_mismatch("INT64", "STRING");
+        let type_err = Error::TypeMismatch {
+            expected: "INT64".into(),
+            found: "STRING".into(),
+        };
         assert_eq!(
             GqlStatus::from(&type_err),
             GqlStatus::DATA_INVALID_VALUE_TYPE
         );
-    }
-
-    /// Each kind of query error has one GQLSTATUS, decided here: a name
-    /// that resolves to nothing is 42002 (invalid reference), any other
-    /// violated rule beyond the grammar 42000 (ISO/IEC 39075 §4), a feature
-    /// Grafeo lacks 42000, and the data exceptions their own subclass.
-    #[test]
-    fn every_query_error_kind_has_its_gqlstatus() {
-        use super::super::error::{Error, ErrorCode, QueryError, QueryErrorKind};
-
-        for (kind, status, code) in [
-            (QueryErrorKind::Lexer, "42001", ErrorCode::QuerySyntax),
-            (QueryErrorKind::Syntax, "42001", ErrorCode::QuerySyntax),
-            (QueryErrorKind::Semantic, "42000", ErrorCode::QuerySemantic),
-            (
-                QueryErrorKind::InvalidReference,
-                "42002",
-                ErrorCode::QuerySemantic,
-            ),
-            (
-                QueryErrorKind::Optimization,
-                "42000",
-                ErrorCode::QueryOptimization,
-            ),
-            (
-                QueryErrorKind::Unsupported,
-                "42000",
-                ErrorCode::QueryUnsupported,
-            ),
-            (
-                QueryErrorKind::Execution,
-                "22000",
-                ErrorCode::QueryExecution,
-            ),
-            (QueryErrorKind::Timeout, "22000", ErrorCode::QueryTimeout),
-            (
-                QueryErrorKind::NumericOutOfRange,
-                "22003",
-                ErrorCode::QueryExecution,
-            ),
-            (
-                QueryErrorKind::DivisionByZero,
-                "22012",
-                ErrorCode::QueryExecution,
-            ),
-            (
-                QueryErrorKind::NegativeLimit,
-                "22G02",
-                ErrorCode::QueryExecution,
-            ),
-            (
-                QueryErrorKind::InvalidValueType,
-                "22G03",
-                ErrorCode::QueryExecution,
-            ),
-            (
-                QueryErrorKind::InvalidTimeZoneDisplacement,
-                "22009",
-                ErrorCode::QueryExecution,
-            ),
-            (
-                QueryErrorKind::ValuesNotComparable,
-                "22G04",
-                ErrorCode::QueryExecution,
-            ),
-        ] {
-            let error = QueryError::new(kind, "message");
-            assert_eq!(error.error_code(), code, "{kind:?}");
-            assert_eq!(
-                GqlStatus::from(&Error::from(error)).as_str(),
-                status,
-                "{kind:?}"
-            );
-        }
-    }
-
-    /// A computation that leaves its type's range or divides by zero is a
-    /// data exception of its own subclass (ISO GQL 22003 and 22012), under the
-    /// code of a statement that failed on its data (#639).
-    #[test]
-    fn numeric_errors_have_their_data_exception_subclass() {
-        use super::super::error::{Error, ErrorCode, QueryError, QueryErrorKind};
-
-        for (kind, status, shown) in [
-            (
-                QueryErrorKind::NumericOutOfRange,
-                GqlStatus::DATA_NUMERIC_OUT_OF_RANGE,
-                "numeric value out of range",
-            ),
-            (
-                QueryErrorKind::DivisionByZero,
-                GqlStatus::DATA_DIVISION_BY_ZERO,
-                "division by zero",
-            ),
-        ] {
-            let error = QueryError::new(kind, "integer overflow in 9223372036854775807 + 1");
-            assert_eq!(error.error_code(), ErrorCode::QueryExecution, "{kind}");
-            assert_eq!(kind.to_string(), shown);
-            assert_eq!(GqlStatus::from(&Error::from(error)), status, "{kind}");
-        }
     }
 
     /// After a commit that did not complete, the database holds a commit

@@ -131,7 +131,7 @@ jobs:
           cp target/${{ matrix.target }}/release/grafeo "$STAGING/" || true
           cp target/${{ matrix.target }}/release/libgrafeo_c.so "$STAGING/" || true
           cp target/${{ matrix.target }}/release/libgrafeo_c.dylib "$STAGING/" || true
-          cp LICENSE README.md crates/bindings/c/grafeo.h "$STAGING/"
+          cp LICENSE README.md "$STAGING/"
           tar czvf "${STAGING}.tar.gz" "$STAGING"
 
       - name: Package (Windows)
@@ -142,7 +142,7 @@ jobs:
           New-Item -ItemType Directory -Force -Path $staging
           Copy-Item target/${{ matrix.target }}/release/grafeo.exe $staging/ -ErrorAction SilentlyContinue
           Copy-Item target/${{ matrix.target }}/release/grafeo_c.dll $staging/ -ErrorAction SilentlyContinue
-          Copy-Item LICENSE, README.md, crates/bindings/c/grafeo.h $staging/
+          Copy-Item LICENSE, README.md $staging/
           Compress-Archive -Path $staging -DestinationPath "${staging}.zip"
 
       - name: Upload Release Asset
@@ -159,67 +159,12 @@ jobs:
             target/${{ matrix.target }}/release/grafeo.exe
           if-no-files-found: ignore
 
-      # Standalone grafeo-c assets, one per feature variant: grafeo-c-<tag>-<target>-<variant>,
-      # each with the library, grafeo.h and FEATURES.txt. "default" is the library from the
-      # workspace build above (the one in the grafeo-<tag>-<target> archive), so stage it
-      # before the next build replaces it. "all" rebuilds grafeo-c alone with every persona
-      # profile the C binding has (lpg, rdf, analytics, ai); the NuGet package bundles it.
-      # `embed` stays opt-in and is not in any asset.
-      - name: Stage C library (default variant)
-        shell: bash
-        run: bash scripts/stage-c-library.sh "${{ github.ref_name }}" "${{ matrix.target }}" default "target/${{ matrix.target }}/release"
-
-      - name: Build C library (all variant)
-        run: cargo build --release -p grafeo-c --target ${{ matrix.target }} --features lpg,rdf,analytics,ai
-        env:
-          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
-
-      - name: Stage C library (all variant)
-        shell: bash
-        run: bash scripts/stage-c-library.sh "${{ github.ref_name }}" "${{ matrix.target }}" all "target/${{ matrix.target }}/release" lpg,rdf,analytics,ai
-
-      # The C# API calls every query language, so NuGet gets the "all" library
       - name: Upload native library for NuGet
         uses: actions/upload-artifact@v7
         with:
           name: native-${{ matrix.rid }}
-          path: grafeo-c-${{ github.ref_name }}-${{ matrix.target }}-all/${{ matrix.native_lib }}
-          if-no-files-found: error
-
-      - name: Archive C libraries (Unix)
-        if: matrix.archive == 'tar.gz'
-        run: |
-          for variant in default all; do
-            STAGING="grafeo-c-${{ github.ref_name }}-${{ matrix.target }}-${variant}"
-            tar czvf "${STAGING}.tar.gz" "$STAGING"
-          done
-
-      - name: Archive C libraries (Windows)
-        if: matrix.archive == 'zip'
-        shell: pwsh
-        run: |
-          foreach ($variant in 'default', 'all') {
-            $staging = "grafeo-c-${{ github.ref_name }}-${{ matrix.target }}-$variant"
-            Compress-Archive -Path $staging -DestinationPath "${staging}.zip"
-          }
-
-      - name: Upload C library assets
-        uses: softprops/action-gh-release@v3
-        with:
-          files: |
-            ./grafeo-c-${{ github.ref_name }}-${{ matrix.target }}-default.${{ matrix.archive }}
-            ./grafeo-c-${{ github.ref_name }}-${{ matrix.target }}-all.${{ matrix.archive }}
-
-      # The checksums job reads workflow artifacts, not release assets
-      - name: Upload release archives for checksums
-        uses: actions/upload-artifact@v7
-        with:
-          name: release-archives-${{ matrix.target }}
-          path: |
-            grafeo-${{ github.ref_name }}-${{ matrix.target }}.${{ matrix.archive }}
-            grafeo-c-${{ github.ref_name }}-${{ matrix.target }}-default.${{ matrix.archive }}
-            grafeo-c-${{ github.ref_name }}-${{ matrix.target }}-all.${{ matrix.archive }}
-          if-no-files-found: error
+          path: target/${{ matrix.target }}/release/${{ matrix.native_lib }}
+          if-no-files-found: ignore
 
   # Generate and upload SHA256 checksums for all release archives
   checksums:
@@ -235,9 +180,9 @@ jobs:
       - name: Generate checksums
         run: |
           cd artifacts
-          # Collect all archive files, listed by their release asset name
+          # Collect all archive files
           find . -name '*.tar.gz' -o -name '*.zip' | sort | while read -r f; do
-            (cd "$(dirname "$f")" && sha256sum "$(basename "$f")") >> ../checksums.txt
+            sha256sum "$f" >> ../checksums.txt
           done
           # Also checksum the CLI binaries
           find . -name 'grafeo' -o -name 'grafeo.exe' | sort | while read -r f; do

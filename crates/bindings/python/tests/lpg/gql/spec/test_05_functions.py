@@ -6,8 +6,6 @@ type conversion functions.
 
 import math
 
-import pytest
-
 # =============================================================================
 # Aggregation Functions
 # =============================================================================
@@ -603,19 +601,16 @@ class TestGraphElementFunctions:
         assert result[0]["en"]["_labels"] == ["Person"]
 
     def test_start_node_matches_source(self, db):
-        """startNode(r) is s and endNode(r) is t; a node is not its id (#180)."""
+        """startNode(r) == id(s) and endNode(r) == id(t) (#180)."""
         db.execute("INSERT (:Person {name: 'Alix'})-[:KNOWS]->(:Person {name: 'Gus'})")
         result = list(
             db.execute(
                 "MATCH (s)-[r:KNOWS]->(t) "
-                "RETURN startNode(r) = s AS src_ok, endNode(r) = t AS dst_ok, "
-                "id(startNode(r)) = id(s) AS src_id"
+                "RETURN startNode(r) = id(s) AS src_ok, endNode(r) = id(t) AS dst_ok"
             )
         )
-        assert result == [{"src_ok": True, "dst_ok": True, "src_id": True}]
-        # GQL makes a node and a number not comparable (22G04)
-        with pytest.raises(Exception, match="22G04|not comparable"):
-            list(db.execute("MATCH (s)-[r:KNOWS]->(t) RETURN startNode(r) = id(s) AS bad"))
+        assert result[0]["src_ok"] is True
+        assert result[0]["dst_ok"] is True
 
 
 # =============================================================================

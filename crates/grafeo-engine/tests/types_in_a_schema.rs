@@ -11,7 +11,7 @@
 //! cargo test -p grafeo-engine --all-features --test types_in_a_schema
 //! ```
 
-#![cfg(feature = "gql")]
+#![cfg(all(feature = "lpg", feature = "gql"))]
 
 use grafeo_common::types::{NodeId, Value};
 use grafeo_common::utils::error::Result;

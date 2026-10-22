@@ -222,7 +222,8 @@ pub(crate) use manager::CommitGuard;
 pub(crate) use manager::CommitsHeld;
 pub(crate) use manager::ReadPin;
 pub use manager::{
-    EntityId, GraphEntity, IsolationLevel, TransactionInfo, TransactionManager, TransactionState,
+    EntityId, GraphEntity, IsolationLevel, KeyClaim, TransactionInfo, TransactionManager,
+    TransactionState,
 };
 #[doc(hidden)]
 pub use mvcc::{VersionChain, VersionInfo};

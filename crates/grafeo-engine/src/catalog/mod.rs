@@ -2370,6 +2370,14 @@ pub struct CatalogConstraintValidator {
     /// The schema written in, whose node and edge types check the writes
     /// (`None`: no schema).
     schema: Option<String>,
+    /// Where the writing transaction claims the values it writes under
+    /// unique constraints, and the storage key of the graph written to
+    /// (`None`: the default graph). Without it (a write no other transaction
+    /// can overlap) nothing is claimed.
+    key_claims: Option<(
+        Arc<crate::transaction::TransactionManager>,
+        Option<Arc<str>>,
+    )>,
 }
 
 impl CatalogConstraintValidator {
@@ -2382,7 +2390,60 @@ impl CatalogConstraintValidator {
             max_property_size: None,
             transaction: None,
             schema: None,
+            key_claims: None,
         }
+    }
+
+    /// Claims each value the transaction writes under a UNIQUE, PRIMARY KEY
+    /// or NODE KEY constraint in `manager`, for the graph with storage key
+    /// `graph` (`None`: the default graph), once the check found no other
+    /// node with it: of two transactions that write the same value, the
+    /// second fails with a write conflict, even when neither sees the other's
+    /// write (see [`TransactionManager::record_key`](crate::transaction::TransactionManager::record_key)).
+    /// Needs [`with_transaction_context`](Self::with_transaction_context)
+    /// with a transaction.
+    #[must_use]
+    pub fn with_key_claims(
+        mut self,
+        manager: Arc<crate::transaction::TransactionManager>,
+        graph: Option<&str>,
+    ) -> Self {
+        self.key_claims = Some((manager, graph.map(Arc::from)));
+        self
+    }
+
+    /// Claims the values `values` of the properties `keys` of a constraint on
+    /// `label` for the writing transaction (see
+    /// [`with_key_claims`](Self::with_key_claims)).
+    fn claim_key(
+        &self,
+        label: &str,
+        keys: &[String],
+        values: &[&Value],
+    ) -> Result<(), OperatorError> {
+        let (Some((manager, graph)), Some((_, transaction))) = (&self.key_claims, self.transaction)
+        else {
+            return Ok(());
+        };
+        let key = crate::transaction::KeyClaim {
+            graph: graph.clone(),
+            label: Arc::from(label),
+            properties: keys.to_vec(),
+            values: values
+                .iter()
+                .map(|value| grafeo_common::types::HashableValue((*value).clone()))
+                .collect(),
+        };
+        manager
+            .record_key(transaction, key)
+            .map_err(|error| match error {
+                // Not a conflict: nothing commits until a reopen, which the
+                // caller must learn (a conflict reads as retryable).
+                error @ grafeo_common::utils::error::Error::Transaction(
+                    grafeo_common::utils::error::TransactionError::IncompleteCommit,
+                ) => OperatorError::Wrapped(Box::new(error)),
+                error => OperatorError::WriteConflict(error.to_string()),
+            })
     }
 
     /// Checks the writes with the node and edge types of `schema`, the schema
@@ -2654,16 +2715,17 @@ impl ConstraintValidator for CatalogConstraintValidator {
                         }
                         _ => false,
                     };
-                    if is_unique
-                        && let Some(ref store) = self.store
-                        && !self
+                    if is_unique && let Some(ref store) = self.store {
+                        if !self
                             .nodes_with_value(store.as_ref(), label, key, value)
                             .is_empty()
-                    {
-                        return Err(OperatorError::schema_violation(format!(
-                            "UNIQUE constraint violation: property '{key}' \
-                             with value {value:?} already exists on :{label}"
-                        )));
+                        {
+                            return Err(OperatorError::schema_violation(format!(
+                                "UNIQUE constraint violation: property '{key}' \
+                                 with value {value:?} already exists on :{label}"
+                            )));
+                        }
+                        self.claim_key(label, &[key.to_string()], &[value])?;
                     }
                 }
             }
@@ -2727,6 +2789,7 @@ impl ConstraintValidator for CatalogConstraintValidator {
                         keys.join(", ")
                     )));
                 }
+                self.claim_key(label, keys, &values)?;
             }
         }
         Ok(())

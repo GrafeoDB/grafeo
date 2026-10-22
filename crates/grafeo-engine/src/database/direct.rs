@@ -491,7 +491,8 @@ impl GrafeoDB {
             .with_store(Arc::clone(store) as Arc<dyn GraphStoreSearch>)
             .with_max_property_size(self.config.max_property_size())
             .with_transaction_context(context.0, context.1)
-            .with_schema(schema);
+            .with_schema(schema)
+            .with_key_claims(Arc::clone(&self.transaction_manager), graph);
         if let Some(graph) = graph {
             validator = validator.with_graph_name(graph);
         }

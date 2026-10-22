@@ -5724,7 +5724,10 @@ impl Session {
             .with_max_property_size(self.max_property_size)
             .with_transaction_context(epoch, transaction_id)
             .with_schema(self.current_schema().as_deref());
-        match self.active_graph_storage_key() {
+        let graph = self.active_graph_storage_key();
+        let validator =
+            validator.with_key_claims(Arc::clone(&self.transaction_manager), graph.as_deref());
+        match graph {
             Some(graph) => validator.with_graph_name(&graph),
             None => validator,
         }

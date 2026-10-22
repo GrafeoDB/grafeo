@@ -204,7 +204,6 @@ fn serializable_prevents_two_row_write_skew() {
 /// key. Two open transactions insert the same key; whichever statement
 /// comes second (its insert or its commit) fails, and one node is left.
 #[test]
-#[ignore = "a UNIQUE constraint is checked when a statement runs, never at commit: a concurrent duplicate commits"]
 fn unique_constraint_rejects_an_interleaved_duplicate() {
     let db = GrafeoDB::new_in_memory();
     db.execute("CREATE CONSTRAINT memory_key FOR (m:Memory) ON (m.idempotency_key) UNIQUE")
@@ -230,7 +229,6 @@ fn unique_constraint_rejects_an_interleaved_duplicate() {
 /// the default isolation: exactly one inserts, every other one either finds
 /// the key or fails, and one node is left.
 #[test]
-#[ignore = "a UNIQUE constraint is checked when a statement runs, never at commit: a concurrent duplicate commits"]
 fn unique_constraint_rejects_a_concurrent_duplicate() {
     let db = GrafeoDB::new_in_memory();
     db.execute("CREATE CONSTRAINT memory_key FOR (m:Memory) ON (m.idempotency_key) UNIQUE")

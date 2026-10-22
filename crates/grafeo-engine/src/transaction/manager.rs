@@ -4,7 +4,7 @@ use std::collections::VecDeque;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
-use grafeo_common::types::{EdgeId, EpochId, NodeId, Timestamp, TransactionId};
+use grafeo_common::types::{EdgeId, EpochId, HashableValue, NodeId, Timestamp, TransactionId};
 use grafeo_common::utils::error::{Error, Result, TransactionError};
 use grafeo_common::utils::hash::{FxHashMap, FxHashSet};
 use grafeo_core::execution::operators::WriteInProgress;
@@ -147,6 +147,42 @@ impl std::fmt::Display for GraphEntity {
     }
 }
 
+/// A value a transaction writes under a UNIQUE, PRIMARY KEY or NODE KEY
+/// constraint: the graph, the constraint's label and properties, and the
+/// values, one per property. Two transactions that write the same one
+/// conflict as two writes of one entity do: between open transactions the
+/// first writer wins, and at commit a transaction loses to one that wrote it
+/// and committed after it began. Within one transaction a value may be
+/// written any number of times.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct KeyClaim {
+    /// The graph's storage key; `None` for the default graph.
+    pub graph: Option<Arc<str>>,
+    /// The label the constraint is on.
+    pub label: Arc<str>,
+    /// The constraint's properties, in its order.
+    pub properties: Vec<String>,
+    /// The value of each property.
+    pub values: Vec<HashableValue>,
+}
+
+impl std::fmt::Display for KeyClaim {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, ":{}(", self.label)?;
+        for (index, (property, value)) in self.properties.iter().zip(&self.values).enumerate() {
+            if index > 0 {
+                write!(f, ", ")?;
+            }
+            write!(f, "{property} = {:?}", value.0)?;
+        }
+        write!(f, ")")?;
+        if let Some(graph) = &self.graph {
+            write!(f, " in graph '{graph}'")?;
+        }
+        Ok(())
+    }
+}
+
 /// Information about an active transaction.
 pub struct TransactionInfo {
     /// Transaction state.
@@ -166,6 +202,9 @@ pub struct TransactionInfo {
     /// a delete by another transaction (see
     /// [`TransactionManager::record_endpoints`]).
     pub endpoint_set: FxHashSet<GraphEntity>,
+    /// The values the transaction wrote under UNIQUE, PRIMARY KEY and NODE
+    /// KEY constraints (see [`TransactionManager::record_key`]).
+    pub(crate) key_set: FxHashSet<KeyClaim>,
     /// What the transaction changed, while it is open or committing: a
     /// checkpoint reads the committed state of what open transactions
     /// changed from it (see [`TransactionManager::open_change_sets`]).
@@ -194,6 +233,7 @@ impl TransactionInfo {
             read_set: FxHashSet::default(),
             delete_set: FxHashSet::default(),
             endpoint_set: FxHashSet::default(),
+            key_set: FxHashSet::default(),
             changes: Some(changes),
             private,
         }
@@ -1012,6 +1052,53 @@ impl TransactionManager {
         Ok(())
     }
 
+    /// Claims `key`, a value the transaction writes under a UNIQUE, PRIMARY
+    /// KEY or NODE KEY constraint, so no two transactions commit the same
+    /// one: when another open transaction claimed it, this one fails, first
+    /// writer wins, and at commit it fails if one that claimed it committed
+    /// after it began. A constraint check calls this once it found no
+    /// committed node with the value.
+    ///
+    /// # Errors
+    ///
+    /// Returns a write conflict if another open transaction claimed `key`,
+    /// and an error if the transaction is not active or an earlier commit did
+    /// not complete.
+    pub fn record_key(&self, transaction_id: TransactionId, key: KeyClaim) -> Result<()> {
+        self.check_no_incomplete_commit()?;
+        let mut txns = self.transactions.write();
+        if self.active_count.load(Ordering::Relaxed) > 1 {
+            for (other_tx, other_info) in txns.iter() {
+                if *other_tx != transaction_id
+                    && matches!(
+                        other_info.state,
+                        TransactionState::Active | TransactionState::Committing
+                    )
+                    && other_info.key_set.contains(&key)
+                {
+                    return Err(Error::Transaction(TransactionError::WriteConflict(
+                        format!(
+                            "Write conflict on key {key}: another open transaction writes the same \
+                         value of the key"
+                        ),
+                    )));
+                }
+            }
+        }
+        let info = txns.get_mut(&transaction_id).ok_or_else(|| {
+            Error::Transaction(TransactionError::InvalidState(
+                "Transaction not found".to_string(),
+            ))
+        })?;
+        if info.state != TransactionState::Active {
+            return Err(Error::Transaction(TransactionError::InvalidState(
+                "Transaction is not active".to_string(),
+            )));
+        }
+        info.key_set.insert(key);
+        Ok(())
+    }
+
     /// Records a read operation for the transaction (for serializable isolation).
     ///
     /// # Errors
@@ -1171,6 +1258,29 @@ impl TransactionManager {
                             conflict,
                         )));
                     }
+                }
+            }
+        }
+
+        // The same for the values of unique keys: a transaction that
+        // committed after our snapshot wrote a value we write, which neither
+        // the other's constraint check nor ours could see.
+        if others_committed && !ours.key_set.is_empty() {
+            for (other_tx, commit_epoch) in committed.iter() {
+                if *other_tx != transaction_id
+                    && commit_epoch.as_u64() > our_start_epoch.as_u64()
+                    && let Some(other_info) = txns.get(other_tx)
+                    && let Some(key) = ours
+                        .key_set
+                        .iter()
+                        .find(|key| other_info.key_set.contains(*key))
+                {
+                    return Err(Error::Transaction(TransactionError::WriteConflict(
+                        format!(
+                            "Write conflict on key {key}: a transaction that committed after this \
+                         one began wrote the same value of the key"
+                        ),
+                    )));
                 }
             }
         }

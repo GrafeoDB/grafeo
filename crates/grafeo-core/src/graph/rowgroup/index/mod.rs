@@ -465,13 +465,15 @@ impl RowGroupStore {
             .collect()
     }
 
-    /// The nodes whose `property` may be equal to `key` under `=` (see
-    /// [`GraphStore::find_nodes_maybe_equal`](crate::graph::GraphStore::find_nodes_maybe_equal)),
-    /// found through the property's index in any version: every node `=`
-    /// finds equal at any view, and maybe others, for a filter to decide at
-    /// its view. `None` when the property has no index.
+    /// The entries of the index on `property` that may be equal to `key`
+    /// under `=` (see
+    /// [`GraphRead::find_nodes_maybe_equal`](crate::graph::traits::GraphRead::find_nodes_maybe_equal)),
+    /// in any version: every node `=` finds equal at any view, and maybe
+    /// others, for a filter to decide at its view. `None` when the property
+    /// has no index. What the index holds, for its tests and diagnostics; a
+    /// reader looks up at its view.
     #[must_use]
-    pub fn find_nodes_maybe_equal(&self, property: &str, key: &Value) -> Option<Vec<NodeId>> {
+    pub fn property_index_entries(&self, property: &str, key: &Value) -> Option<Vec<NodeId>> {
         self.inner.read().maybe_equal(property, key)
     }
 

@@ -10,7 +10,9 @@ use grafeo_common::change::DataOp;
 use grafeo_common::memory::arena::AllocError;
 use grafeo_common::types::{EpochId, NodeId, PropertyKey, Value};
 
-use super::{KnownGap, Outcome, Store, Tx, committed, ensure, labels, properties, same};
+use super::{
+    KnownGap, Outcome, Store, Tx, committed, committed_view, ensure, labels, ok, properties, same,
+};
 use crate::graph::apply::{ApplyError, Writer};
 use crate::graph::rowgroup::RowGroupStore;
 
@@ -250,12 +252,12 @@ pub(crate) fn a_dropped_graph_refuses_writes_and_leaves_the_list<S: Registry>(
     same(&root.graph_count(), &1, "the count after the drop")?;
 
     let before = data(&*trips);
-    let epoch = EpochId::new(trips.current_epoch().as_u64() + 1);
+    let epoch = EpochId::new(trips.epoch().as_u64() + 1);
     let gus = NodeId::new(super::reserve_node(&*trips)?);
     let writers = [
         Writer::Transaction {
             id: grafeo_common::types::TransactionId::new(19),
-            snapshot: trips.current_epoch(),
+            snapshot: trips.epoch(),
         },
         Writer::Immediate {
             epoch,
@@ -364,7 +366,11 @@ pub(crate) fn a_named_graphs_data_is_its_own<S: Registry>(make: &dyn Fn() -> S) 
     let now = committed(&root);
     same(&now.nodes, &before.nodes, "the root's nodes")?;
     same(&now.edges, &before.edges, "the root's edges")?;
-    same(&root.node_count(), &3, "the root's node count")?;
+    same(
+        &ok(root.node_count(committed_view(&root)), "node_count"),
+        &3,
+        "the root's node count",
+    )?;
     same(
         &data(&*trips),
         &(vec![vincent.as_u64(), paris.as_u64()], vec![visit.as_u64()]),
@@ -382,16 +388,20 @@ pub(crate) fn a_named_graphs_data_is_its_own<S: Registry>(make: &dyn Fn() -> S) 
         "travel",
     )?;
     same(
-        &(trips.node_count(), trips.edge_count(), travel.node_count()),
+        &(
+            ok(trips.node_count(committed_view(&*trips)), "node_count"),
+            ok(trips.edge_count(committed_view(&*trips)), "edge_count"),
+            ok(travel.node_count(committed_view(&*travel)), "node_count"),
+        ),
         &(2, 1, 1),
         "the named graphs' counts",
     )?;
     same(
-        &(trips.current_epoch(), travel.current_epoch()),
+        &(trips.epoch(), travel.epoch()),
         &(EpochId::new(2), EpochId::new(1)),
         "each graph's epoch",
     )?;
-    let labels: BTreeSet<String> = trips.all_labels().into_iter().collect();
+    let labels: BTreeSet<String> = ok(trips.all_labels(), "all_labels").into_iter().collect();
     same(
         &labels,
         &BTreeSet::from(["City".to_string(), "Person".into()]),

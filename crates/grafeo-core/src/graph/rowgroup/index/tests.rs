@@ -15,7 +15,7 @@ fn in_city(store: &RowGroupStore, city: &str, view: ReadView) -> Vec<NodeId> {
 /// The nodes the index holds for `city` in any version.
 fn held(store: &RowGroupStore, city: &str) -> Vec<NodeId> {
     store
-        .find_nodes_maybe_equal("city", &Value::from(city))
+        .property_index_entries("city", &Value::from(city))
         .expect("an index on city")
 }
 
@@ -97,7 +97,7 @@ fn a_deleted_nodes_entries_stay_until_collect() {
     );
     store.collect(deleted);
     assert_eq!(
-        store.find_nodes_maybe_equal("name", &mia),
+        store.property_index_entries("name", &mia),
         Some(Vec::new()),
         "collected with the node"
     );

@@ -239,7 +239,7 @@ impl RowGroupStore {
     /// write of a value or a label), the epoch the next one or the delete
     /// ended it at (`None` for the version a reader sees now), and the node
     /// as a reader at its first epoch sees it.
-    pub(super) fn node_history(&self, id: NodeId) -> Vec<(EpochId, Option<EpochId>, Node)> {
+    pub(super) fn node_versions(&self, id: NodeId) -> Vec<(EpochId, Option<EpochId>, Node)> {
         let floor = self.floor.load(Ordering::Acquire);
         let inner = self.inner.read();
         let Some((group, row)) = inner.node(id.as_u64()) else {
@@ -265,9 +265,9 @@ impl RowGroupStore {
     }
 
     /// The versions of edge `id`, newest first (see
-    /// [`node_history`](Self::node_history)): a write of a value begins a
+    /// [`node_versions`](Self::node_versions)): a write of a value begins a
     /// version.
-    pub(super) fn edge_history(&self, id: EdgeId) -> Vec<(EpochId, Option<EpochId>, Edge)> {
+    pub(super) fn edge_versions(&self, id: EdgeId) -> Vec<(EpochId, Option<EpochId>, Edge)> {
         let floor = self.floor.load(Ordering::Acquire);
         let inner = self.inner.read();
         let Some((group, row)) = inner.edge(id.as_u64()) else {

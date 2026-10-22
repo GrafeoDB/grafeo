@@ -1162,7 +1162,7 @@ mod tests {
                 for (node, id) in model.ids.iter().enumerate() {
                     for city in CITIES {
                         let held = store
-                            .find_nodes_maybe_equal("city", &Value::from(city))
+                            .property_index_entries("city", &Value::from(city))
                             .expect("the index")
                             .contains(id);
                         assert_eq!(

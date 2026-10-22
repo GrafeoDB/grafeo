@@ -126,7 +126,7 @@ mod text {
 
     use super::{RowGroupStore, Writes, docs};
     use crate::graph::conformance::indexes::set;
-    use crate::graph::conformance::{Outcome, Store, ensure, people, same};
+    use crate::graph::conformance::{Outcome, Store, ensure, ok, people, same};
     use crate::index::text::{BM25Config, InvertedIndex};
 
     /// A store that holds text indexes for the engine.
@@ -172,16 +172,20 @@ mod text {
         query: &str,
         view: ReadView,
     ) -> Result<BTreeSet<u64>, String> {
-        let top: Vec<NodeId> = store
-            .text_search_at("Doc", "body", query, 10, view)
-            .into_iter()
-            .map(|(id, _)| id)
-            .collect();
-        let all: Vec<NodeId> = store
-            .text_search_with_threshold_at("Doc", "body", query, 0.0, view)
-            .into_iter()
-            .map(|(id, _)| id)
-            .collect();
+        let top: Vec<NodeId> = ok(
+            store.text_search("Doc", "body", query, 10, view),
+            "text_search",
+        )
+        .into_iter()
+        .map(|(id, _)| id)
+        .collect();
+        let all: Vec<NodeId> = ok(
+            store.text_search_with_threshold("Doc", "body", query, 0.0, view),
+            "text_search_with_threshold",
+        )
+        .into_iter()
+        .map(|(id, _)| id)
+        .collect();
         same(
             &set(&all),
             &set(&top),
@@ -232,9 +236,11 @@ mod text {
             "storage for the other",
         )?;
         let score = |id: NodeId, query: &str, view: ReadView| {
-            store
-                .score_text_at(id, "Doc", "body", query, view)
-                .unwrap_or(-1.0)
+            ok(
+                store.score_text(id, "Doc", "body", query, view),
+                "score_text",
+            )
+            .unwrap_or(-1.0)
         };
         ensure(
             score(ids[0], "graph", before) > 0.0 && score(ids[0], "graph", own) == 0.0,
@@ -246,7 +252,7 @@ mod text {
         )?;
         // A document every reader sees alike scores with the statistics of
         // now at every view.
-        let now = ReadView::committed(store.current_epoch());
+        let now = ReadView::committed(store.epoch());
         same(
             &score(ids[1], "storage", before),
             &score(ids[1], "storage", now),
@@ -278,7 +284,7 @@ mod text {
         let store = make();
         store.add_text_index("Doc", "body", text_index());
         let ids = docs(&store)?;
-        let before = ReadView::committed(store.current_epoch());
+        let before = ReadView::committed(store.epoch());
         let writes = Writes::begin(&store, &ids)?;
         check(&store, &ids, writes, before)
     }
@@ -290,14 +296,17 @@ mod text {
     ) -> Outcome {
         let store = make();
         let ids = docs(&store)?;
-        let before = ReadView::committed(store.current_epoch());
+        let before = ReadView::committed(store.epoch());
         let writes = Writes::begin(&store, &ids)?;
         let index = text_index();
         {
             let mut built = index.write();
             let key = PropertyKey::new("body");
-            for id in store.nodes_by_label("Doc") {
-                if let Some(Value::String(text)) = store.get_node_property(id, &key) {
+            for id in ok(store.nodes_by_label("Doc", before), "nodes_by_label") {
+                if let Some(Value::String(text)) = ok(
+                    store.node_property(id, key.as_str(), before),
+                    "node_property",
+                ) {
                     built.insert(id, &text);
                 }
             }
@@ -341,10 +350,10 @@ mod text {
 mod vector {
     use std::sync::Arc;
 
-    use grafeo_common::types::{NodeId, PropertyKey, ReadView, Value};
+    use grafeo_common::types::{NodeId, ReadView, Value};
 
     use super::{RowGroupStore, Writes, docs};
-    use crate::graph::conformance::{Outcome, Store, ensure, people, same};
+    use crate::graph::conformance::{Outcome, Store, committed_view, ensure, ok, people, same};
     use crate::index::vector::{
         DistanceMetric, HnswConfig, HnswIndex, VectorAccessor, VectorIndexKind,
     };
@@ -397,18 +406,23 @@ mod vector {
     /// scan finds.
     fn nearest<S: VectorIndexed>(store: &S, k: usize, view: ReadView) -> Result<Vec<u64>, String> {
         let euclidean = DistanceMetric::Euclidean;
-        let through: Vec<u64> = store
-            .vector_search_at(Some("Doc"), "embedding", &QUERY, k, euclidean, view)
-            .into_iter()
-            .map(|(id, _)| id.as_u64())
-            .collect();
-        let within = store.vector_search_with_threshold_at(
-            Some("Doc"),
-            "embedding",
-            &QUERY,
-            100.0,
-            euclidean,
-            view,
+        let through: Vec<u64> = ok(
+            store.vector_search(Some("Doc"), "embedding", &QUERY, k, euclidean, view),
+            "vector_search",
+        )
+        .into_iter()
+        .map(|(id, _)| id.as_u64())
+        .collect();
+        let within = ok(
+            store.vector_search_with_threshold(
+                Some("Doc"),
+                "embedding",
+                &QUERY,
+                100.0,
+                euclidean,
+                view,
+            ),
+            "vector_search_with_threshold",
         );
         let scanned: Vec<u64> = within.iter().take(k).map(|(id, _)| id.as_u64()).collect();
         same(
@@ -416,16 +430,18 @@ mod vector {
             &scanned,
             &format!("the index and the threshold scan at {view:?}"),
         )?;
-        let cosine = store
-            .vector_search_at(
+        let cosine = ok(
+            store.vector_search(
                 Some("Doc"),
                 "embedding",
                 &QUERY,
                 10,
                 DistanceMetric::Cosine,
                 view,
-            )
-            .len();
+            ),
+            "vector_search",
+        )
+        .len();
         same(
             &cosine,
             &within.len(),
@@ -496,7 +512,7 @@ mod vector {
         let store = make();
         store.add_vector_index("Doc", "embedding", vector_index());
         let ids = docs(&store)?;
-        let before = ReadView::committed(store.current_epoch());
+        let before = ReadView::committed(store.epoch());
         let writes = Writes::begin(&store, &ids)?;
         check(&store, &ids, writes, before)
     }
@@ -506,7 +522,11 @@ mod vector {
 
     impl<S: Store> VectorAccessor for Built<'_, S> {
         fn get_vector(&self, id: NodeId) -> Option<Arc<[f32]>> {
-            match self.0.get_node_property(id, &PropertyKey::new("embedding")) {
+            match ok(
+                self.0
+                    .node_property(id, "embedding", committed_view(self.0)),
+                "node_property",
+            ) {
                 Some(Value::Vector(vector)) => Some(vector),
                 _ => None,
             }
@@ -522,11 +542,11 @@ mod vector {
     ) -> Outcome {
         let store = make();
         let ids = docs(&store)?;
-        let before = ReadView::committed(store.current_epoch());
+        let before = ReadView::committed(store.epoch());
         let writes = Writes::begin(&store, &ids)?;
         let index = vector_index();
         let built = Built(&store);
-        for id in store.nodes_by_label("Doc") {
+        for id in ok(store.nodes_by_label("Doc", before), "nodes_by_label") {
             if let Some(vector) = built.get_vector(id) {
                 index.insert(id, &vector, &built);
             }

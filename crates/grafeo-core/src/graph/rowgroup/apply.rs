@@ -517,7 +517,13 @@ impl ChangeTarget for RowGroupStore {
                     inner.mark_op(op);
                 }
             }
-            applied?
+            let applied = applied?;
+            // Under the lock: a reader that holds it finds the counts and
+            // the epoch they count up to together (`counts_answer`).
+            if let Some(epoch) = mode.epoch {
+                self.sync_epoch(epoch);
+            }
+            applied
         };
         match op {
             DataOp::CreateNode { id, .. } => {
@@ -529,9 +535,6 @@ impl ChangeTarget for RowGroupStore {
                     .fetch_max(id.as_u64() + 1, Ordering::AcqRel);
             }
             _ => {}
-        }
-        if let Some(epoch) = mode.epoch {
-            self.sync_epoch(epoch);
         }
         Ok(applied)
     }
@@ -570,8 +573,9 @@ impl ChangeTarget for RowGroupStore {
             // waits for the collect like the rest.
             self.note_settled(settled);
             stamped?;
+            // Under the lock, as `apply` moves it.
+            self.sync_epoch(epoch);
         }
-        self.sync_epoch(epoch);
         Ok(())
     }
 

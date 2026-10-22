@@ -14,7 +14,7 @@ use grafeo_common::types::{NodeId, ReadView, Value};
 
 use super::graphs::Registry;
 use super::{
-    KnownGap, Outcome, Store, Tx, apply_all, ensure, labels, next_epoch, people, properties,
+    KnownGap, Outcome, Store, Tx, apply_all, ensure, labels, next_epoch, ok, people, properties,
     reserve_node, same,
 };
 use crate::graph::apply::Writer;
@@ -25,6 +25,9 @@ pub(crate) trait Indexed: Store {
     fn create_property_index(&self, property: &str);
     fn drop_property_index(&self, property: &str) -> bool;
     fn property_index_keys(&self) -> Vec<String>;
+    /// What the index on `property` holds that may equal `value`, in any
+    /// version; `None` without the index.
+    fn property_index_entries(&self, property: &str, value: &Value) -> Option<Vec<NodeId>>;
 }
 
 /// Implements [`Indexed`] for a store by its own methods.
@@ -39,6 +42,9 @@ macro_rules! indexed {
             }
             fn property_index_keys(&self) -> Vec<String> {
                 <$store>::property_index_keys(self)
+            }
+            fn property_index_entries(&self, property: &str, value: &Value) -> Option<Vec<NodeId>> {
+                <$store>::property_index_entries(self, property, value)
             }
         }
     };
@@ -94,22 +100,32 @@ fn found<S: Indexed>(
     value: &Value,
     view: ReadView,
 ) -> Result<BTreeSet<u64>, String> {
-    let one = set(&store.find_nodes_by_property_at(key, value, view));
-    let two = set(&store.find_nodes_by_properties_at(
-        &[(key, value.clone()), ("kind", Value::from("person"))],
-        view,
+    let one = set(&ok(
+        store.find_nodes_by_property(key, value, view),
+        "find_nodes_by_property",
+    ));
+    let two = set(&ok(
+        store.find_nodes_by_properties(
+            &[(key, value.clone()), ("kind", Value::from("person"))],
+            view,
+        ),
+        "find_nodes_by_properties",
     ));
     same(
         &two,
         &one,
         &format!("the two-key lookup of {key} = {value:?} at {view:?}"),
     )?;
-    let maybe = store
-        .find_nodes_maybe_equal_at(key, value, view)
-        .ok_or_else(|| format!("no maybe-equal answer for {key} with an index"))?;
+    let maybe = ok(
+        store.find_nodes_maybe_equal(key, value, view),
+        "find_nodes_maybe_equal",
+    )
+    .ok_or_else(|| format!("no maybe-equal answer for {key} with an index"))?;
     let maybe: BTreeSet<u64> = maybe
         .into_iter()
-        .filter(|id| store.node_property_at(*id, key, view).as_ref() == Some(value))
+        .filter(|id| {
+            ok(store.node_property(*id, key, view), "node_property").as_ref() == Some(value)
+        })
         .map(|id| id.as_u64())
         .collect();
     same(
@@ -147,7 +163,7 @@ fn indexed_people<S: Indexed>(store: &S) -> Result<super::People, String> {
 pub(crate) fn an_indexed_lookup_answers_at_its_view<S: Indexed>(make: &dyn Fn() -> S) -> Outcome {
     let store = make();
     let people = indexed_people(&store)?;
-    let before = ReadView::committed(store.current_epoch());
+    let before = ReadView::committed(store.epoch());
     let (amsterdam, berlin, paris) = (
         Value::from("Amsterdam"),
         Value::from("Berlin"),
@@ -255,7 +271,7 @@ pub(crate) fn an_undone_write_leaves_no_index_entry<S: Indexed>(make: &dyn Fn() 
     let people = indexed_people(&store)?;
     let held = |city: &str| -> Result<BTreeSet<u64>, String> {
         store
-            .find_nodes_maybe_equal("city", &Value::from(city))
+            .property_index_entries("city", &Value::from(city))
             .map(|found| set(&found))
             .ok_or_else(|| "no answer from the index on city".to_string())
     };
@@ -320,16 +336,18 @@ pub(crate) fn maybe_equal_finds_every_spelling_at_a_view<S: Indexed>(
         });
     }
     apply_all(&store, &ops, Writer::Replay { epoch })?;
-    let before = ReadView::committed(store.current_epoch());
+    let before = ReadView::committed(store.epoch());
     let mut tx = Tx::begin(&store, 10);
     tx.set_node(nodes[0], "code", Value::from("xyz"))?;
     tx.set_node(nodes[3], "code", Value::from("42"))?;
     let own = ReadView::transaction(tx.id, tx.snapshot);
     let maybe = |view: ReadView, key: &Value| -> Result<BTreeSet<u64>, String> {
-        store
-            .find_nodes_maybe_equal_at("code", key, view)
-            .map(|found| set(&found))
-            .ok_or_else(|| "no answer from the index on code".to_string())
+        ok(
+            store.find_nodes_maybe_equal("code", key, view),
+            "find_nodes_maybe_equal",
+        )
+        .map(|found| set(&found))
+        .ok_or_else(|| "no answer from the index on code".to_string())
     };
     for key in [Value::Int64(42), Value::Float64(42.0), Value::from("42.0")] {
         let at_before = maybe(before, &key)?;
@@ -388,13 +406,13 @@ pub(crate) fn indexes_are_created_listed_and_dropped<S: Indexed>(make: &dyn Fn()
     )?;
     same(
         &store
-            .find_nodes_maybe_equal("city", &Value::from("Amsterdam"))
+            .property_index_entries("city", &Value::from("Amsterdam"))
             .map(|found| set(&found)),
         &Some(set(&[people.alix])),
         "a lookup through the index",
     )?;
     same(
-        &store.find_nodes_maybe_equal("name", &Value::from("Alix")),
+        &store.property_index_entries("name", &Value::from("Alix")),
         &None,
         "a key without an index",
     )?;
@@ -431,19 +449,25 @@ pub(crate) fn each_graph_keeps_its_own_indexes<S: Indexed + Registry>(
     let berlin = tx.create_node(&["City"], &[("city", Value::from("Amsterdam"))])?;
     let view = ReadView::committed(tx.commit()?);
     same(
-        &set(&graph.find_nodes_by_property_at("city", &Value::from("Amsterdam"), view)),
+        &set(&ok(
+            graph.find_nodes_by_property("city", &Value::from("Amsterdam"), view),
+            "find_nodes_by_property",
+        )),
         &set(&[berlin]),
         "the graph's Amsterdam",
     )?;
-    let root_view = ReadView::committed(root.current_epoch());
+    let root_view = ReadView::committed(root.epoch());
     same(
-        &set(&root.find_nodes_by_property_at("city", &Value::from("Amsterdam"), root_view)),
+        &set(&ok(
+            root.find_nodes_by_property("city", &Value::from("Amsterdam"), root_view),
+            "find_nodes_by_property",
+        )),
         &set(&[people.alix]),
         "the root's Amsterdam",
     )?;
     same(
         &graph
-            .find_nodes_maybe_equal("city", &Value::from("Amsterdam"))
+            .property_index_entries("city", &Value::from("Amsterdam"))
             .map(|found| set(&found)),
         &Some(set(&[berlin])),
         "the graph's index holds the graph's node alone",

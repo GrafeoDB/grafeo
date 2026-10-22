@@ -16,7 +16,6 @@
 //! the property index's maybe-equal lookups without a view: every node the
 //! index holds that a reader may find (see `index`).
 
-use std::cmp::Ordering as CmpOrdering;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
@@ -26,6 +25,7 @@ use grafeo_common::types::{
 };
 use grafeo_common::utils::error::Result;
 use grafeo_common::utils::hash::FxHashMap;
+use smallvec::SmallVec;
 
 use super::adjacency::Adjacent;
 use super::column::Columns;
@@ -34,56 +34,13 @@ use super::index::TextLimit;
 use super::{Inner, ROWS_PER_GROUP, Read, RowGroupStore};
 use crate::graph::Direction;
 use crate::graph::lpg::{CompareOp, Edge, Node};
-use crate::graph::traits::{GraphStore, GraphStoreSearch};
+use crate::graph::traits::{GraphRead, GraphStore, GraphStoreSearch, list_self_loops_once};
 #[cfg(feature = "vector-index")]
 use crate::index::vector::{DistanceMetric, HnswConfig};
 use crate::statistics::{EdgeTypeStatistics, LabelStatistics, Statistics};
 
-/// Compares two values for a range check (as `LpgStore` does).
-pub(super) fn compare_for_range(a: &Value, b: &Value) -> Option<CmpOrdering> {
-    match (a, b) {
-        // Decimals by value, also against integers and floats, as a filter
-        // compares them (#610).
-        (Value::Decimal(_), _) | (_, Value::Decimal(_)) => a.compare_decimal(b),
-        (Value::Int64(a), Value::Int64(b)) => Some(a.cmp(b)),
-        (Value::Float64(a), Value::Float64(b)) => a.partial_cmp(b),
-        // An integer and a float compare exactly, as a filter does.
-        (Value::Int64(a), Value::Float64(b)) => {
-            crate::execution::operators::value_utils::partial_cmp_int_float(*a, *b)
-        }
-        (Value::Float64(a), Value::Int64(b)) => {
-            crate::execution::operators::value_utils::partial_cmp_int_float(*b, *a)
-                .map(CmpOrdering::reverse)
-        }
-        (Value::String(a), Value::String(b)) => Some(a.cmp(b)),
-        (Value::Bool(a), Value::Bool(b)) => Some(a.cmp(b)),
-        (Value::Timestamp(a), Value::Timestamp(b)) => Some(a.cmp(b)),
-        (Value::Date(a), Value::Date(b)) => Some(a.cmp(b)),
-        (Value::Time(a), Value::Time(b)) => Some(a.cmp(b)),
-        _ => a.compare_instants(b),
-    }
-}
-
-/// Whether `value` lies between the bounds.
-fn in_range(
-    value: &Value,
-    min: Option<&Value>,
-    max: Option<&Value>,
-    min_inclusive: bool,
-    max_inclusive: bool,
-) -> bool {
-    let above = min.is_none_or(|min| match compare_for_range(value, min) {
-        Some(CmpOrdering::Greater) => true,
-        Some(CmpOrdering::Equal) => min_inclusive,
-        _ => false,
-    });
-    let below = max.is_none_or(|max| match compare_for_range(value, max) {
-        Some(CmpOrdering::Less) => true,
-        Some(CmpOrdering::Equal) => max_inclusive,
-        _ => false,
-    });
-    above && below
-}
+pub(super) use crate::graph::traits::compare_for_range;
+use crate::graph::traits::value_in_range as in_range;
 
 /// A count kept as a signed total, as a size.
 fn size(count: i64) -> usize {
@@ -289,15 +246,16 @@ impl Inner {
         ids
     }
 
-    /// A node's entries in `direction`, of one edge type id or of all, as
-    /// (other node, edge), outgoing ones first: each kept direction's sorted
-    /// list, then its delta; without the incoming edges kept, the incoming
-    /// ones from the edge table, by edge id.
+    /// A node's entries in `direction`, of one of the edge type ids or of
+    /// all (`None`), as (other node, edge), outgoing ones first: each kept
+    /// direction's sorted list, then its delta; without the incoming edges
+    /// kept, the incoming ones from the edge table, by edge id. One type
+    /// reads one slice of each sorted list.
     fn entries_in(
         &self,
         node: NodeId,
         direction: Direction,
-        edge_type: Option<u32>,
+        edge_types: Option<&[u32]>,
     ) -> Vec<(NodeId, EdgeId)> {
         let Some((group, row)) = self.node(node.as_u64()) else {
             return Vec::new();
@@ -308,20 +266,24 @@ impl Inner {
             Direction::Both => &[true, false],
         };
         let pair = |adjacent: Adjacent| (NodeId::new(adjacent.other), EdgeId::new(adjacent.edge));
+        let wanted = |adjacent: &Adjacent| {
+            edge_types.is_none_or(|types| types.contains(&adjacent.edge_type))
+        };
         let mut entries = Vec::new();
         for &outgoing in directions {
             if outgoing || self.keeps_incoming() {
                 let adjacency = group.adjacency(outgoing);
-                match edge_type {
+                match edge_types {
                     None => entries.extend(adjacency.of(row).map(pair)),
-                    Some(edge_type) => entries.extend(adjacency.of_type(row, edge_type).map(pair)),
+                    Some(&[edge_type]) => {
+                        entries.extend(adjacency.of_type(row, edge_type).map(pair));
+                    }
+                    Some(_) => entries.extend(adjacency.of(row).filter(wanted).map(pair)),
                 }
             } else {
                 entries.extend(
                     self.incoming_by_scan(node.as_u64())
-                        .filter(|adjacent| {
-                            edge_type.is_none_or(|wanted| adjacent.edge_type == wanted)
-                        })
+                        .filter(wanted)
                         .map(pair),
                 );
             }
@@ -330,7 +292,7 @@ impl Inner {
     }
 
     /// A node's adjacency entries, as (other node, edge): each direction's
-    /// sorted list, then its delta (see [`entries`](Self::entries)).
+    /// sorted list, then its delta (see [`entries_in`](Self::entries_in)).
     pub(super) fn adjacency(&self, node: NodeId, direction: Direction) -> Vec<(NodeId, EdgeId)> {
         self.entries_in(node, direction, None)
     }
@@ -343,9 +305,102 @@ impl Inner {
         edge_type: &str,
     ) -> Vec<(NodeId, EdgeId)> {
         match self.edge_types.get_id(edge_type) {
-            Some(edge_type) => self.entries_in(node, direction, Some(edge_type)),
+            Some(edge_type) => self.entries_in(node, direction, Some(&[edge_type])),
             None => Vec::new(),
         }
+    }
+
+    /// The edges of `node` in `direction` of one of `types` (every type
+    /// when empty) that `read` sees and whose other end it sees, as
+    /// (other node, edge); `Both` lists a self-loop once. Empty for a node
+    /// `read` does not see, and for types the store has no edge of.
+    fn edges_seen(
+        &self,
+        node: NodeId,
+        direction: Direction,
+        types: &[ArcStr],
+        read: Read,
+    ) -> Vec<(NodeId, EdgeId)> {
+        if !self.node_visible(node.as_u64(), read) {
+            return Vec::new();
+        }
+        let mut edges = if types.is_empty() {
+            self.entries_in(node, direction, None)
+        } else {
+            let ids: SmallVec<[u32; 4]> = types
+                .iter()
+                .filter_map(|name| self.edge_types.get_id(name))
+                .collect();
+            if ids.is_empty() {
+                return Vec::new();
+            }
+            self.entries_in(node, direction, Some(&ids))
+        };
+        edges.retain(|(other, edge)| {
+            self.edge_visible(edge.as_u64(), read) && self.node_visible(other.as_u64(), read)
+        });
+        if direction == Direction::Both {
+            list_self_loops_once(node, &mut edges);
+        }
+        edges
+    }
+
+    /// How many edges a committed reader or transaction `read` sees, of
+    /// those whose two ends it sees: what the edges of every node it sees
+    /// add up to, from their sources.
+    fn edges_seen_count(&self, read: Read) -> usize {
+        self.edges
+            .values()
+            .map(|group| {
+                group
+                    .versions
+                    .rows()
+                    .filter(|(row, version)| {
+                        let (src, dst, _) = group.ends(*row);
+                        version.visible(read)
+                            && self.node_visible(src, read)
+                            && self.node_visible(dst, read)
+                    })
+                    .count()
+            })
+            .sum()
+    }
+
+    /// Whether some node's or edge's (`nodes` false) column of `property`
+    /// may hold a value that meets `op value`: by the zone maps of the hot
+    /// columns (every value they held, so every version a reader may see),
+    /// and always for a column still cold or a key no row group has.
+    fn might_match(
+        &self,
+        nodes: bool,
+        property: &PropertyKey,
+        op: CompareOp,
+        value: &Value,
+    ) -> bool {
+        // A key no row group has a column of might match, as for a store
+        // without zone maps (the planner keeps the filter).
+        let Some(key) = self.keys.get_id(property.as_str()) else {
+            return true;
+        };
+        let mut held = false;
+        let mut decide = |found: Option<bool>| match found {
+            Some(true) => Some(true),
+            Some(false) => {
+                held = true;
+                None
+            }
+            None => None,
+        };
+        let matched = if nodes {
+            self.nodes
+                .values()
+                .any(|group| decide(group.columns.might_match(key, op, value)).is_some())
+        } else {
+            self.edges
+                .values()
+                .any(|group| decide(group.columns.might_match(key, op, value)).is_some())
+        };
+        matched || !held
     }
 
     /// How many of a node's edges in one direction `read` sees.
@@ -452,13 +507,13 @@ impl GraphStore for RowGroupStore {
     /// The node's versions as the store holds them, each with its own
     /// values and labels (see `history`).
     fn get_node_history(&self, id: NodeId) -> Vec<(EpochId, Option<EpochId>, Node)> {
-        self.node_history(id)
+        self.node_versions(id)
     }
 
     /// The edge's versions as the store holds them, each with its own
     /// values (see `history`).
     fn get_edge_history(&self, id: EdgeId) -> Vec<(EpochId, Option<EpochId>, Edge)> {
-        self.edge_history(id)
+        self.edge_versions(id)
     }
 
     fn get_node_property(&self, id: NodeId, key: &PropertyKey) -> Option<Value> {
@@ -598,7 +653,7 @@ impl GraphStore for RowGroupStore {
     }
 
     fn find_nodes_maybe_equal(&self, property: &str, value: &Value) -> Option<Vec<NodeId>> {
-        RowGroupStore::find_nodes_maybe_equal(self, property, value)
+        RowGroupStore::property_index_entries(self, property, value)
     }
 
     fn find_nodes_in_range(
@@ -619,53 +674,22 @@ impl GraphStore for RowGroupStore {
         )
     }
 
-    /// By the zone maps of the hot columns (every value they held, so every
-    /// version a reader may see), and always for a column still cold.
     fn node_property_might_match(
         &self,
         property: &PropertyKey,
         op: CompareOp,
         value: &Value,
     ) -> bool {
-        let inner = self.inner.read();
-        // A key no row group has a column of might match, as for a store
-        // without zone maps (the planner keeps the filter).
-        let Some(key) = inner.keys.get_id(property.as_str()) else {
-            return true;
-        };
-        let mut held = false;
-        for group in inner.nodes.values() {
-            match group.columns.might_match(key, op, value) {
-                Some(true) => return true,
-                Some(false) => held = true,
-                None => {}
-            }
-        }
-        !held
+        self.inner.read().might_match(true, property, op, value)
     }
 
-    /// As [`node_property_might_match`](Self::node_property_might_match).
     fn edge_property_might_match(
         &self,
         property: &PropertyKey,
         op: CompareOp,
         value: &Value,
     ) -> bool {
-        let inner = self.inner.read();
-        // A key no row group has a column of might match, as for a store
-        // without zone maps (the planner keeps the filter).
-        let Some(key) = inner.keys.get_id(property.as_str()) else {
-            return true;
-        };
-        let mut held = false;
-        for group in inner.edges.values() {
-            match group.columns.might_match(key, op, value) {
-                Some(true) => return true,
-                Some(false) => held = true,
-                None => {}
-            }
-        }
-        !held
+        self.inner.read().might_match(false, property, op, value)
     }
 
     fn statistics(&self) -> Arc<Statistics> {
@@ -1096,7 +1120,7 @@ impl GraphStoreSearch for RowGroupStore {
 
     #[cfg(feature = "vector-index")]
     fn has_vector_index(&self, label: &str, property: &str) -> bool {
-        self.vector_index_config(label, property).is_some()
+        GraphStoreSearch::vector_index_config(self, label, property).is_some()
     }
 
     #[cfg(feature = "vector-index")]
@@ -1171,7 +1195,461 @@ impl GraphStoreSearch for RowGroupStore {
     }
 }
 
+/// The reads at a view: existence from the rows' versions, values and
+/// labels from the columns and bitmaps and their update chains, lookups
+/// through a property index from its entries of every version, each one
+/// read again at the view (`index`). The row-group store reads nothing from
+/// a file it could fail on, so every read is `Ok`.
+impl GraphRead for RowGroupStore {
+    fn node(&self, id: NodeId, view: ReadView) -> Result<Option<Node>> {
+        Ok(self.inner.read().read_node(id.as_u64(), Read::view(view)))
+    }
+
+    fn edge(&self, id: EdgeId, view: ReadView) -> Result<Option<Edge>> {
+        Ok(self.inner.read().read_edge(id.as_u64(), Read::view(view)))
+    }
+
+    fn is_node_visible(&self, id: NodeId, view: ReadView) -> Result<bool> {
+        Ok(self
+            .inner
+            .read()
+            .node_visible(id.as_u64(), Read::view(view)))
+    }
+
+    fn is_edge_visible(&self, id: EdgeId, view: ReadView) -> Result<bool> {
+        Ok(self
+            .inner
+            .read()
+            .edge_visible(id.as_u64(), Read::view(view)))
+    }
+
+    fn filter_visible_node_ids(&self, ids: &[NodeId], view: ReadView) -> Result<Vec<NodeId>> {
+        let (inner, read) = (self.inner.read(), Read::view(view));
+        Ok(ids
+            .iter()
+            .copied()
+            .filter(|id| inner.node_visible(id.as_u64(), read))
+            .collect())
+    }
+
+    fn node_property(&self, id: NodeId, key: &str, view: ReadView) -> Result<Option<Value>> {
+        Ok(self
+            .inner
+            .read()
+            .node_value_at(id.as_u64(), key, Read::view(view)))
+    }
+
+    fn edge_property(&self, id: EdgeId, key: &str, view: ReadView) -> Result<Option<Value>> {
+        Ok(self
+            .inner
+            .read()
+            .edge_value_at(id.as_u64(), key, Read::view(view)))
+    }
+
+    fn node_labels(&self, id: NodeId, view: ReadView) -> Result<Option<Labels>> {
+        let (inner, read) = (self.inner.read(), Read::view(view));
+        let Some((group, row)) = inner.node(id.as_u64()) else {
+            return Ok(None);
+        };
+        if !group.version(row).visible(read) {
+            return Ok(None);
+        }
+        Ok(Some(inner.label_names(&group.labels_at(row, read))))
+    }
+
+    fn node_has_label(&self, id: NodeId, label: &str, view: ReadView) -> Result<Option<bool>> {
+        let (inner, read) = (self.inner.read(), Read::view(view));
+        let Some((group, row)) = inner.node(id.as_u64()) else {
+            return Ok(None);
+        };
+        if !group.version(row).visible(read) {
+            return Ok(None);
+        }
+        Ok(Some(
+            inner
+                .label_id(label)
+                .is_some_and(|label| group.has_label_at(row, label, read)),
+        ))
+    }
+
+    fn edge_type(&self, id: EdgeId, view: ReadView) -> Result<Option<ArcStr>> {
+        let inner = self.inner.read();
+        let Some((group, row)) = inner.edge_seen(id.as_u64(), Read::view(view)) else {
+            return Ok(None);
+        };
+        let (_, _, edge_type) = group.ends(row);
+        Ok(inner.edge_types.get_name(edge_type).cloned())
+    }
+
+    fn node_property_batch(
+        &self,
+        ids: &[NodeId],
+        key: &PropertyKey,
+        view: ReadView,
+    ) -> Result<Vec<Option<Value>>> {
+        let (inner, read) = (self.inner.read(), Read::view(view));
+        Ok(ids
+            .iter()
+            .map(|id| inner.node_value_at(id.as_u64(), key.as_str(), read))
+            .collect())
+    }
+
+    fn node_properties_batch(
+        &self,
+        ids: &[NodeId],
+        view: ReadView,
+    ) -> Result<Vec<FxHashMap<PropertyKey, Value>>> {
+        let (inner, read) = (self.inner.read(), Read::view(view));
+        Ok(ids
+            .iter()
+            .map(|id| inner.node_values_at(*id, None, read))
+            .collect())
+    }
+
+    fn node_properties_selective_batch(
+        &self,
+        ids: &[NodeId],
+        keys: &[PropertyKey],
+        view: ReadView,
+    ) -> Result<Vec<FxHashMap<PropertyKey, Value>>> {
+        let (inner, read) = (self.inner.read(), Read::view(view));
+        Ok(ids
+            .iter()
+            .map(|id| inner.node_values_at(*id, Some(keys), read))
+            .collect())
+    }
+
+    fn edge_properties_selective_batch(
+        &self,
+        ids: &[EdgeId],
+        keys: &[PropertyKey],
+        view: ReadView,
+    ) -> Result<Vec<FxHashMap<PropertyKey, Value>>> {
+        let (inner, read) = (self.inner.read(), Read::view(view));
+        Ok(ids
+            .iter()
+            .map(|id| inner.edge_values_at(*id, keys, read))
+            .collect())
+    }
+
+    fn edges(
+        &self,
+        node: NodeId,
+        direction: Direction,
+        types: &[ArcStr],
+        view: ReadView,
+    ) -> Result<Vec<(NodeId, EdgeId)>> {
+        Ok(self
+            .inner
+            .read()
+            .edges_seen(node, direction, types, Read::view(view)))
+    }
+
+    /// Whether it keeps each node's incoming edges: without them an
+    /// incoming read scans the edge table (see
+    /// [`RowGroupStore::with_backward_edges`]).
+    fn has_backward_adjacency(&self) -> bool {
+        self.keeps_backward_edges()
+    }
+
+    fn node_ids(&self, view: ReadView) -> Result<Vec<NodeId>> {
+        let read = Read::view(view);
+        Ok(self
+            .inner
+            .read()
+            .node_rows(|_, group, row| group.version(row).visible(read)))
+    }
+
+    fn nodes_by_label(&self, label: &str, view: ReadView) -> Result<Vec<NodeId>> {
+        let inner = self.inner.read();
+        Ok(inner.label_id(label).map_or_else(Vec::new, |label| {
+            inner.nodes_with_labels_at(&[label], Read::view(view))
+        }))
+    }
+
+    fn nodes_with_any_label(&self, labels: &[&str], view: ReadView) -> Result<Vec<NodeId>> {
+        let inner = self.inner.read();
+        let mut label_ids: Vec<u32> = labels
+            .iter()
+            .filter_map(|label| inner.label_id(label))
+            .collect();
+        label_ids.sort_unstable();
+        label_ids.dedup();
+        Ok(inner.nodes_with_labels_at(&label_ids, Read::view(view)))
+    }
+
+    /// From the count the store keeps when it answers for `view` (see
+    /// `counts_answer`), by a scan otherwise.
+    fn nodes_by_label_count(&self, label: &str, view: ReadView) -> Result<usize> {
+        let inner = self.inner.read();
+        let Some(label) = inner.label_id(label) else {
+            return Ok(0);
+        };
+        if self.counts_answer(view) {
+            return Ok(inner
+                .counts
+                .labels
+                .get(label as usize)
+                .copied()
+                .map_or(0, size));
+        }
+        Ok(inner.nodes_with_labels_at(&[label], Read::view(view)).len())
+    }
+
+    /// From the count the store keeps when it answers for `view`, by a scan
+    /// otherwise.
+    fn node_count(&self, view: ReadView) -> Result<usize> {
+        let inner = self.inner.read();
+        if self.counts_answer(view) {
+            return Ok(size(inner.counts.nodes));
+        }
+        let read = Read::view(view);
+        Ok(inner
+            .node_rows(|_, group, row| group.version(row).visible(read))
+            .len())
+    }
+
+    /// From the count the store keeps when it answers for `view`, by a scan
+    /// otherwise.
+    fn edge_count(&self, view: ReadView) -> Result<usize> {
+        let inner = self.inner.read();
+        if self.counts_answer(view) {
+            return Ok(size(inner.counts.edges));
+        }
+        Ok(inner.edges_seen_count(Read::view(view)))
+    }
+
+    fn all_labels(&self) -> Result<Vec<String>> {
+        Ok(self
+            .inner
+            .read()
+            .labels
+            .iter()
+            .map(|(_, name)| name.to_string())
+            .collect())
+    }
+
+    fn all_edge_types(&self) -> Result<Vec<String>> {
+        Ok(self
+            .inner
+            .read()
+            .edge_types
+            .iter()
+            .map(|(_, name)| name.to_string())
+            .collect())
+    }
+
+    fn all_property_keys(&self) -> Result<Vec<String>> {
+        Ok(self
+            .inner
+            .read()
+            .keys
+            .iter()
+            .map(|(_, name)| name.to_string())
+            .collect())
+    }
+
+    fn has_property_index(&self, property: &str) -> bool {
+        RowGroupStore::has_property_index(self, property)
+    }
+
+    fn find_nodes_by_property(
+        &self,
+        property: &str,
+        value: &Value,
+        view: ReadView,
+    ) -> Result<Vec<NodeId>> {
+        let (inner, read) = (self.inner.read(), Read::view(view));
+        Ok(inner
+            .indexed_equal_at(property, value, read)
+            .unwrap_or_else(|| inner.nodes_matching_at(&[(property, value.clone())], read)))
+    }
+
+    fn find_nodes_by_properties(
+        &self,
+        conditions: &[(&str, Value)],
+        view: ReadView,
+    ) -> Result<Vec<NodeId>> {
+        let (inner, read) = (self.inner.read(), Read::view(view));
+        Ok(inner
+            .indexed_matching_at(conditions, read)
+            .unwrap_or_else(|| inner.nodes_matching_at(conditions, read)))
+    }
+
+    fn find_nodes_maybe_equal(
+        &self,
+        property: &str,
+        value: &Value,
+        view: ReadView,
+    ) -> Result<Option<Vec<NodeId>>> {
+        Ok(self
+            .inner
+            .read()
+            .maybe_equal_at(property, value, Read::view(view)))
+    }
+
+    fn find_nodes_in_range(
+        &self,
+        property: &str,
+        min: Option<&Value>,
+        max: Option<&Value>,
+        min_inclusive: bool,
+        max_inclusive: bool,
+        view: ReadView,
+    ) -> Result<Vec<NodeId>> {
+        Ok(self.inner.read().nodes_in_range_at(
+            property,
+            min,
+            max,
+            min_inclusive,
+            max_inclusive,
+            Read::view(view),
+        ))
+    }
+
+    fn node_property_might_match(
+        &self,
+        property: &PropertyKey,
+        op: CompareOp,
+        value: &Value,
+    ) -> bool {
+        self.inner.read().might_match(true, property, op, value)
+    }
+
+    fn edge_property_might_match(
+        &self,
+        property: &PropertyKey,
+        op: CompareOp,
+        value: &Value,
+    ) -> bool {
+        self.inner.read().might_match(false, property, op, value)
+    }
+
+    fn statistics(&self) -> Arc<Statistics> {
+        Arc::new(self.inner.read().statistics())
+    }
+
+    /// The node's versions as the store holds them, each with its own
+    /// values and labels (see `history`).
+    fn node_history(&self, id: NodeId) -> Result<Vec<(EpochId, Option<EpochId>, Node)>> {
+        Ok(self.node_versions(id))
+    }
+
+    /// The edge's versions as the store holds them, each with its own
+    /// values (see `history`).
+    fn edge_history(&self, id: EdgeId) -> Result<Vec<(EpochId, Option<EpochId>, Edge)>> {
+        Ok(self.edge_versions(id))
+    }
+
+    #[cfg(feature = "text-index")]
+    fn has_text_index(&self, label: &str, property: &str) -> bool {
+        self.inner.read().has_text_index(label, property)
+    }
+
+    #[cfg(feature = "text-index")]
+    fn score_text(
+        &self,
+        id: NodeId,
+        label: &str,
+        property: &str,
+        query: &str,
+        view: ReadView,
+    ) -> Result<Option<f64>> {
+        Ok(self
+            .inner
+            .read()
+            .score_text_at(id.as_u64(), label, property, query, Read::view(view)))
+    }
+
+    #[cfg(feature = "text-index")]
+    fn text_search(
+        &self,
+        label: &str,
+        property: &str,
+        query: &str,
+        k: usize,
+        view: ReadView,
+    ) -> Result<Vec<(NodeId, f64)>> {
+        Ok(self.inner.read().text_search_at(
+            label,
+            property,
+            query,
+            TextLimit::Top(k),
+            None,
+            Read::view(view),
+        ))
+    }
+
+    #[cfg(feature = "text-index")]
+    fn text_search_with_threshold(
+        &self,
+        label: &str,
+        property: &str,
+        query: &str,
+        threshold: f64,
+        view: ReadView,
+    ) -> Result<Vec<(NodeId, f64)>> {
+        Ok(self.inner.read().text_search_at(
+            label,
+            property,
+            query,
+            TextLimit::AtLeast(threshold),
+            None,
+            Read::view(view),
+        ))
+    }
+
+    #[cfg(feature = "vector-index")]
+    fn vector_index_config(&self, label: &str, property: &str) -> Option<HnswConfig> {
+        self.inner.read().vector_index_config(label, property)
+    }
+
+    #[cfg(feature = "vector-index")]
+    fn vector_search(
+        &self,
+        label: Option<&str>,
+        property: &str,
+        query: &[f32],
+        k: usize,
+        metric: DistanceMetric,
+        view: ReadView,
+    ) -> Result<Vec<(NodeId, f64)>> {
+        Ok(self
+            .inner
+            .read()
+            .vector_search_at(label, property, query, k, metric, Read::view(view)))
+    }
+
+    #[cfg(feature = "vector-index")]
+    fn vector_search_with_threshold(
+        &self,
+        label: Option<&str>,
+        property: &str,
+        query: &[f32],
+        threshold: f64,
+        metric: DistanceMetric,
+        view: ReadView,
+    ) -> Result<Vec<(NodeId, f64)>> {
+        Ok(self.inner.read().vector_search_within_at(
+            label,
+            property,
+            query,
+            threshold,
+            metric,
+            Read::view(view),
+        ))
+    }
+}
+
 impl RowGroupStore {
+    /// Whether the counts the store keeps answer for `view`: a committed
+    /// reader at or after the store's epoch sees every commit they count,
+    /// and nothing they do not. Called under the store's lock, under which
+    /// the writes move the counts and the epoch together.
+    fn counts_answer(&self, view: ReadView) -> bool {
+        view.transaction.is_none() && view.epoch.as_u64() >= self.epoch.load(Ordering::Acquire)
+    }
+
     /// A node's edges of one type, as (other node, edge): one slice of each
     /// direction's sorted list, then its delta. As `edges_from`, it lists
     /// deleted edges too; a reader checks each edge's visibility.

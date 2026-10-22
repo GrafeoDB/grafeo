@@ -1072,8 +1072,8 @@ mod tests {
                         for age in 0..88 {
                             let age = Value::Int64(age);
                             assert_eq!(
-                                a.find_nodes_maybe_equal("age", &age),
-                                b.find_nodes_maybe_equal("age", &age),
+                                a.property_index_entries("age", &age),
+                                b.property_index_entries("age", &age),
                                 "{what}: the index entries of {age:?}"
                             );
                         }

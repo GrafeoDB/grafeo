@@ -5,10 +5,11 @@ use grafeo_common::change::{Before, DataOp, Table};
 use grafeo_common::types::{ArcStr, EdgeId, EpochId, NodeId, PropertyKey, Value};
 
 use super::{
-    Image, LABELS, Outcome, Reader, Rng, Store, Tx, apply_all, committed, counts, counts_of,
-    ensure, image, labels, next_epoch, people, properties, random_write, reserve_edge,
-    reserve_node, same,
+    Image, LABELS, Outcome, Reader, Rng, Store, Tx, apply_all, committed, committed_view, counts,
+    counts_of, ensure, image, labels, next_epoch, ok, people, properties, random_write,
+    reserve_edge, reserve_node, same,
 };
+use crate::graph::Direction;
 use crate::graph::apply::{Applied, ApplyError, Writer};
 
 /// The nodes and edges two images hold, without their problems.
@@ -605,11 +606,7 @@ pub(crate) fn replay_rebuilds_what_live_commits_wrote<S: Store>(make: &dyn Fn() 
             &committed(&live),
             &what("the replayed data"),
         )?;
-        same(
-            &replayed.current_epoch(),
-            &live.current_epoch(),
-            &what("the epoch"),
-        )?;
+        same(&replayed.epoch(), &live.epoch(), &what("the epoch"))?;
         same(
             &counts(&replayed, &LABELS),
             &counts(&live, &LABELS),
@@ -641,7 +638,7 @@ pub(crate) fn immediate_writes_commit_at_once<S: Store>(make: &dyn Fn() -> S) ->
         matches!(&applied, Ok(Applied::Changed { before: Before::Value(Some(value)), .. }) if *value == Value::from("Amsterdam")),
         || format!("an immediate write with images gave {applied:?}"),
     )?;
-    ensure(store.current_epoch() >= epoch, || {
+    ensure(store.epoch() >= epoch, || {
         "the store's epoch moved to the write".to_string()
     })?;
     image(&store, Reader::At(epoch)).has_node(
@@ -1063,7 +1060,10 @@ pub(crate) fn every_access_path_agrees<S: Store>(make: &dyn Fn() -> S) -> Outcom
             let id = NodeId::new(*raw);
             for (key, value) in values {
                 same(
-                    &store.get_node_property(id, &PropertyKey::new(key.as_str())),
+                    &ok(
+                        store.node_property(id, key, committed_view(&store)),
+                        "node_property",
+                    ),
                     &Some(value.clone()),
                     &format!("seed {seed}: node {raw}'s {key} read alone"),
                 )?;
@@ -1071,12 +1071,18 @@ pub(crate) fn every_access_path_agrees<S: Store>(make: &dyn Fn() -> S) -> Outcom
             let out = now.edges.values().filter(|edge| edge.0 == *raw).count();
             let incoming = now.edges.values().filter(|edge| edge.1 == *raw).count();
             same(
-                &store.out_degree(id),
+                &ok(
+                    store.degree(id, Direction::Outgoing, committed_view(&store)),
+                    "degree",
+                ),
                 &out,
                 &format!("seed {seed}: node {raw}'s out-degree"),
             )?;
             same(
-                &store.in_degree(id),
+                &ok(
+                    store.degree(id, Direction::Incoming, committed_view(&store)),
+                    "degree",
+                ),
                 &incoming,
                 &format!("seed {seed}: node {raw}'s in-degree"),
             )?;
@@ -1084,7 +1090,10 @@ pub(crate) fn every_access_path_agrees<S: Store>(make: &dyn Fn() -> S) -> Outcom
         for (raw, (_, _, _, values)) in &now.edges {
             for (key, value) in values {
                 same(
-                    &store.get_edge_property(EdgeId::new(*raw), &PropertyKey::new(key.as_str())),
+                    &ok(
+                        store.edge_property(EdgeId::new(*raw), key, committed_view(&store)),
+                        "edge_property",
+                    ),
                     &Some(value.clone()),
                     &format!("seed {seed}: edge {raw}'s {key} read alone"),
                 )?;
@@ -1130,16 +1139,14 @@ pub(crate) fn names_first_used_by_a_rolled_back_transaction_stay_listed<S: Store
     tx.add_label(people.alix, "Traveller")?;
     tx.create_edge(people.alix, people.mia, "VISITED", &[])?;
     tx.roll_back()?;
+    let labels = ok(store.all_labels(), "all_labels");
+    ensure(labels.iter().any(|label| label == "Traveller"), || {
+        format!("the labels {labels:?} list Traveller")
+    })?;
+    let edge_types = ok(store.all_edge_types(), "all_edge_types");
     ensure(
-        store.all_labels().iter().any(|label| label == "Traveller"),
-        || format!("the labels {:?} list Traveller", store.all_labels()),
-    )?;
-    ensure(
-        store
-            .all_edge_types()
-            .iter()
-            .any(|edge_type| edge_type == "VISITED"),
-        || format!("the edge types {:?} list VISITED", store.all_edge_types()),
+        edge_types.iter().any(|edge_type| edge_type == "VISITED"),
+        || format!("the edge types {edge_types:?} list VISITED"),
     )
 }
 
@@ -1201,7 +1208,7 @@ pub(crate) fn a_reader_at_an_earlier_epoch_keeps_its_values_and_labels<S: Store>
 ) -> Outcome {
     let store = make();
     let people = people(&store)?;
-    let epoch = store.current_epoch();
+    let epoch = store.epoch();
     let before = committed(&store);
     let reader = Tx::begin(&store, 11);
     let mut tx = Tx::begin(&store, 10);
@@ -1230,7 +1237,7 @@ pub(crate) fn a_reader_at_an_earlier_epoch_keeps_deleted_entities<S: Store>(
 ) -> Outcome {
     let store = make();
     let people = people(&store)?;
-    let epoch = store.current_epoch();
+    let epoch = store.epoch();
     let before = committed(&store);
     let reader = Tx::begin(&store, 11);
     let mut tx = Tx::begin(&store, 10);
@@ -1385,7 +1392,7 @@ pub(crate) fn every_read_path_hides_an_open_transactions_creates_and_deletes<S: 
         &before,
         &[&own],
     )?;
-    super::paths_at(&store, Reader::At(store.current_epoch()), &before, &[&own])
+    super::paths_at(&store, Reader::At(store.epoch()), &before, &[&own])
 }
 
 /// Another transaction and a committed reader see none of an open
@@ -1407,7 +1414,7 @@ pub(crate) fn every_read_path_hides_an_open_transactions_values_and_labels<S: St
         &before,
         &[&own],
     )?;
-    super::paths_at(&store, Reader::At(store.current_epoch()), &before, &[&own])
+    super::paths_at(&store, Reader::At(store.epoch()), &before, &[&own])
 }
 
 /// A transaction that began before a commit, and a reader at the epoch
@@ -1418,7 +1425,7 @@ pub(crate) fn every_read_path_at_an_earlier_epoch_keeps_creates_and_deletes<S: S
 ) -> Outcome {
     let store = make();
     let people = people(&store)?;
-    let epoch = store.current_epoch();
+    let epoch = store.epoch();
     let before = committed(&store);
     let reader = Tx::begin(&store, 11);
     let mut tx = Tx::begin(&store, 10);
@@ -1442,7 +1449,7 @@ pub(crate) fn every_read_path_at_an_earlier_epoch_keeps_values_and_labels<S: Sto
 ) -> Outcome {
     let store = make();
     let people = people(&store)?;
-    let epoch = store.current_epoch();
+    let epoch = store.epoch();
     let before = committed(&store);
     let reader = Tx::begin(&store, 11);
     let mut tx = Tx::begin(&store, 10);
@@ -1531,12 +1538,7 @@ pub(crate) fn an_immediate_write_is_seen_at_its_epoch_through_every_read_path<S:
     expected.set_value(people.alix, "city", Some(Value::from("Paris")));
     expected.set_labels(people.mia, &["Person", "Traveller"]);
     expected.set_edge_value(people.gus_mia, "since", Some(Value::Int64(2019)));
-    super::paths_at(
-        &store,
-        Reader::At(store.current_epoch()),
-        &expected,
-        &[&before],
-    )?;
+    super::paths_at(&store, Reader::At(store.epoch()), &expected, &[&before])?;
     let later = Tx::begin(&store, 11);
     super::paths_at(
         &store,
@@ -1554,7 +1556,7 @@ pub(crate) fn an_immediate_write_keeps_the_old_value_for_an_older_reader<S: Stor
 ) -> Outcome {
     let store = make();
     let people = people(&store)?;
-    let epoch = store.current_epoch();
+    let epoch = store.epoch();
     let before = committed(&store);
     let reader = Tx::begin(&store, 11);
     for op in [
@@ -1631,7 +1633,7 @@ pub(crate) fn a_property_set_to_null_is_removed<S: Store>(make: &dyn Fn() -> S) 
         )
         .map_err(|error| format!("an immediate set to null: {error:?}"))?;
     expected.set_value(people.gus, "age", None);
-    super::paths_at(&store, Reader::At(store.current_epoch()), &expected, &[])?;
+    super::paths_at(&store, Reader::At(store.epoch()), &expected, &[])?;
 
     let replayed = make();
     let replayed_people = super::people(&replayed)?;
@@ -1648,10 +1650,5 @@ pub(crate) fn a_property_set_to_null_is_removed<S: Store>(make: &dyn Fn() -> S) 
     )?;
     let mut expected = fresh;
     expected.set_value(replayed_people.mia, "name", None);
-    super::paths_at(
-        &replayed,
-        Reader::At(replayed.current_epoch()),
-        &expected,
-        &[],
-    )
+    super::paths_at(&replayed, Reader::At(replayed.epoch()), &expected, &[])
 }

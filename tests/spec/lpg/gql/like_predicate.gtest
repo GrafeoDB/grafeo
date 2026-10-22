@@ -3,8 +3,7 @@
 # `s LIKE p` as SQL defines it: `%` matches any sequence of characters and `_`
 # any one character, a line break included; a backslash makes the next `%` or
 # `_` literal; every other character, a dot included, matches itself; a null
-# operand gives null. The skipped cases are a bug:
-# value-kinds/like-wildcards-skip-newlines.md.
+# operand gives null.
 
 meta:
   language: gql
@@ -47,7 +46,6 @@ tests:
         - [null]
 
   - name: percent_matches_a_line_break
-    skip: "value-kinds/like-wildcards-skip-newlines.md: % does not match a newline"
     query: |
       RETURN 'a\nb' LIKE 'a%' AS r
     expect:
@@ -55,9 +53,15 @@ tests:
         - [true]
 
   - name: underscore_matches_a_line_break
-    skip: "value-kinds/like-wildcards-skip-newlines.md: _ does not match a newline"
     query: |
       RETURN 'a\nb' LIKE 'a_b' AS r
     expect:
       rows:
         - [true]
+
+  - name: wildcards_match_line_breaks_inside_a_pattern
+    query: |
+      RETURN 'Alix\n Gus' LIKE 'Alix__Gus' AS two, 'Alix\nGus\n' LIKE '%Gus%' AS around, 'Alix\nGus' LIKE 'Alix%' AS rest, 'Alix\n' LIKE 'Alix' AS exact
+    expect:
+      rows:
+        - [true, true, true, false]

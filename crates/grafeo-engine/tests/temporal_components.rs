@@ -79,9 +79,12 @@ fn datetime_from_epoch_millis_is_that_instant() {
             Timestamp::from_micros(3_000_019),
         ),
     ] {
+        // openCypher's datetime() is zoned: an epoch names an instant at +00:00
         assert_eq!(
             cypher(&session, &format!("RETURN {expression} AS d")),
-            [vec![Value::Timestamp(expected)]],
+            [vec![Value::ZonedDatetime(
+                grafeo_common::types::ZonedDatetime::from_timestamp_offset(expected, 0)
+            )]],
             "{expression}"
         );
     }

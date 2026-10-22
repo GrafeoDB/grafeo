@@ -556,7 +556,7 @@ CF3|cypher 062dcc1245 properties reads the node startNode(r) yields; it returned
 CF3|gql 062dcc1245 properties reads the node startNode(r) yields; it returned null.
 CF4|cypher cb62d95ce2 properties of a map is the map (openCypher); it returned null.
 CF4|gql cb62d95ce2 properties of a map is the map (openCypher); it returned null.
-CF5|cypher f31b54ca7c date, time and datetime read a zoned datetime: its local date, its local time of day with its offset (an aware datetime.time in Python) and its instant; they returned null.
+CF5|cypher 228db5664a date, time and datetime read a zoned datetime: its local date and its local time of day with its offset (an aware datetime.time in Python); Cypher's datetime is zoned, so it keeps the offset (an aware datetime). All three returned null.
 CF5|gql f31b54ca7c date, time and datetime read a zoned datetime: its local date, its local time of day with its offset (an aware datetime.time in Python) and its instant; they returned null.
 CF6|gql fcd746ade6 A label added to a node converts its values to the types of the label's node type, as a write does; an integer of a FLOAT64 property failed with expects Float64.
 CF7|cypher d465c9b19b A label added to a node converts its values to the types of the label's node type, as a write does; an integer of a FLOAT64 property failed with expects Float64.
@@ -620,3 +620,13 @@ CR1|gql 43a0b674a9 cosine_distance of one direction is exactly 0 and of opposite
 CR3|cypher dc2525bcc3 cosine_similarity of identical vectors is exactly 1; it was 1.000000119, outside [-1, 1].
 CR3|gql dc2525bcc3 cosine_similarity of identical vectors is exactly 1; it was 1.000000119, outside [-1, 1].
 CR4|gql f516844c53 HOME_SCHEMA and HOME_GRAPH name the session's home, 'default' in a new session; they returned null.
+CS1|cypher be000ea9ea Cypher's datetime() is zoned and keeps its offset, also after adding a duration; it was the UTC instant as a local datetime, without hour or offset components.
+CS2|cypher 8abd43876d Cypher's datetime() without an offset is at +00:00 and writes Z; localdatetime() is local and its text has no zone (it ended in .000000Z).
+CS3|gql e7fff6b187 The text of a LOCAL DATETIME has no zone and a fraction only when there is one; it ended in .000000Z as if at UTC.
+CS4|gql a2ccd6a9fc Arithmetic on a zoned datetime keeps its offset, a month moves the local date, and two zoned datetimes differ by a duration; all three were null.
+CS5|cypher a70f6f6229 A duration times or divided by a number carries fractions down (a month as 30.436875 days, openCypher's rule); a decimal or float factor gave null and P1D / 2 was PT0S.
+CS5|gql a70f6f6229 A duration times or divided by a number carries fractions down (a month as 30.436875 days, openCypher's rule); a decimal or float factor gave null and P1D / 2 was PT0S.
+CS6|cypher ca047fb78e A duration divided by zero is a division by zero (22012); it was null.
+CS6|gql ca047fb78e A duration divided by zero is a division by zero (22012); it was null.
+CS7|gql 291307aea6 normalize puts a string in NFC, as ISO GQL defines it; it returned the string unchanged.
+CS8|gql e7f516d45f LIKE wildcards match a line break, as SQL's LIKE does; % and _ skipped it.

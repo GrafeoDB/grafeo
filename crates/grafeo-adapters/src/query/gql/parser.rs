@@ -4348,6 +4348,33 @@ impl<'a> Parser<'a> {
                     });
                 }
 
+                // NORMALIZE(string [, NFC|NFD|NFKC|NFKD]) - ISO GQL normalize function,
+                // NFC by default
+                if name.eq_ignore_ascii_case("NORMALIZE") && self.peek_kind() == TokenKind::LParen {
+                    self.advance(); // consume NORMALIZE
+                    self.advance(); // consume (
+                    let mut args = vec![self.parse_expression()?];
+                    if self.current.kind == TokenKind::Comma {
+                        self.advance();
+                        let form = if self.is_identifier() {
+                            self.get_identifier_name().to_uppercase()
+                        } else {
+                            String::new()
+                        };
+                        if !matches!(form.as_str(), "NFC" | "NFD" | "NFKC" | "NFKD") {
+                            return Err(self.error("Expected NFC, NFD, NFKC or NFKD in NORMALIZE"));
+                        }
+                        self.advance();
+                        args.push(Expression::Literal(Literal::String(form)));
+                    }
+                    self.expect(TokenKind::RParen)?;
+                    return Ok(Expression::FunctionCall {
+                        name: "normalize".to_string(),
+                        args,
+                        distinct: false,
+                    });
+                }
+
                 // COALESCE(expr1, expr2, ...) - ISO GQL keyword syntax (Section 20.7)
                 if name.eq_ignore_ascii_case("COALESCE") && self.peek_kind() == TokenKind::LParen {
                     self.advance(); // consume COALESCE

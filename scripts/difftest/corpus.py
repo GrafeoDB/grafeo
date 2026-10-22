@@ -1863,7 +1863,7 @@ for case_id, query in [
 ]:
     case(case_id, query, SQL)
 
-# CQ: cosine_distance of one direction is exactly 0 and of opposite ones exactly 2, also for
+# CR: cosine_distance of one direction is exactly 0 and of opposite ones exactly 2, also for
 #     very short vectors, a zero vector is at distance 1 (CR1, CR2), cosine_similarity is 1 and
 #     -1 (CR3); HOME_SCHEMA and HOME_GRAPH name a default session's home, 'default' (CR4)
 for case_id, query, languages in [
@@ -1871,6 +1871,23 @@ for case_id, query, languages in [
     ("CR2", "RETURN cosine_distance([1.0, 2.0], [0.0, 0.0]) AS one_zero, cosine_distance([0.0, 0.0], [0.0, 0.0]) AS both_zero", BOTH),
     ("CR3", "RETURN cosine_similarity([0.3, -1.7, 2.9], [0.3, -1.7, 2.9]) AS same, cosine_similarity([0.3, -1.7, 2.9], [-0.3, 1.7, -2.9]) AS opposite", BOTH),
     ("CR4", "RETURN HOME_SCHEMA AS s, HOME_GRAPH AS g, HOME_PROPERTY_GRAPH AS pg", GQL),
+]:
+    case(case_id, query, languages, "empty")
+
+# CS: Cypher's datetime() is zoned and keeps its offset (CS1), +00:00 without one (CS2); a local
+#     datetime's text has no zone (CS3); a zoned datetime plus or minus a duration keeps its offset
+#     and two zoned datetimes differ by a duration (CS4); a duration times or divided by a decimal
+#     or float carries fractions down (CS5), by zero is 22012 (CS6); normalize gives NFC (CS7);
+#     LIKE wildcards match a line break (CS8)
+for case_id, query, languages in [
+    ("CS1", "WITH datetime('2024-03-15T10:00:00+01:00') AS d RETURN d.hour AS h, d.offset AS o, toString(d + duration('PT1H')) AS later", CYPHER),
+    ("CS2", "RETURN toString(datetime('2024-03-15T10:00:00')) AS d, toString(localdatetime('2024-03-15T10:00:00')) AS l", CYPHER),
+    ("CS3", "RETURN toString(datetime('2024-03-15T10:00:00')) AS l, CAST(local_datetime('2024-03-15T10:00:00.25') AS STRING) AS c", GQL),
+    ("CS4", "RETURN toString(zoned_datetime('2024-03-15T10:00:00+01:00') + DURATION 'PT1H') AS plus, toString(zoned_datetime('2024-01-31T23:30:00+01:00') + DURATION 'P1M') AS month, zoned_datetime('2024-03-15T12:00:00+01:00') - zoned_datetime('2024-03-15T10:00:00Z') = DURATION 'PT1H' AS diff", GQL),
+    ("CS5", "RETURN toString(duration('P1D') * 1.5) AS a, toString(duration('P1M') * 1.5) AS b, toString(duration('P1D') / 2) AS c", BOTH),
+    ("CS6", "RETURN duration('P1D') / 0 AS r", BOTH),
+    ("CS7", "RETURN char_length(normalize('e\u0301')) AS n, normalize('e\u0301') = '\u00e9' AS same", GQL),
+    ("CS8", "RETURN 'a\nb' LIKE 'a%' AS percent, 'a\nb' LIKE 'a_b' AS underscore", GQL),
 ]:
     case(case_id, query, languages, "empty")
 

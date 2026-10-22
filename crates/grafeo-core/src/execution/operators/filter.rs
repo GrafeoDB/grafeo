@@ -27,6 +27,76 @@ use std::sync::Arc;
 /// the key is absent. Rejects non-finite floats (NaN, Infinity) by
 /// returning `Some(None)` through `map_int_checked`, which lets callers
 /// distinguish "missing" from "invalid".
+/// The LOCAL DATETIME a text names: a date (at midnight) or a date and a
+/// time; a time with an offset gives its instant.
+fn local_datetime_of_text(text: &str) -> Option<grafeo_common::types::Timestamp> {
+    use grafeo_common::types::{Date, Time, Timestamp};
+    if let Some(date) = Date::parse(text) {
+        return Some(date.to_timestamp());
+    }
+    let (date, time) = text.split_once('T')?;
+    Some(Timestamp::from_date_time(
+        Date::parse(date)?,
+        Time::parse(time)?,
+    ))
+}
+
+/// The LOCAL DATETIME a map names: `{epochMillis: n}` and `{epochSeconds: n,
+/// nanosecond: m}` the instant that long after 1970-01-01T00:00:00Z, and
+/// `{year, month, day, hour, minute, second, nanosecond}` that date and time.
+fn local_datetime_of_map(
+    m: &BTreeMap<PropertyKey, Value>,
+) -> Option<grafeo_common::types::Timestamp> {
+    use grafeo_common::types::{Date, Time, Timestamp};
+    if m.contains_key(&PropertyKey::from("epochMillis")) {
+        let micros = map_int(m, "epochMillis")?.checked_mul(1_000)?;
+        return Some(Timestamp::from_micros(micros));
+    }
+    if m.contains_key(&PropertyKey::from("epochSeconds")) {
+        let nanosecond = map_int_or(m, "nanosecond", 0)?;
+        let micros = map_int(m, "epochSeconds")?
+            .checked_mul(1_000_000)?
+            .checked_add(nanosecond.div_euclid(1_000))?;
+        return Some(Timestamp::from_micros(micros));
+    }
+    let year = i32::try_from(map_int(m, "year")?).ok()?;
+    let month = u32::try_from(map_int_or(m, "month", 1)?).ok()?;
+    let day = u32::try_from(map_int_or(m, "day", 1)?).ok()?;
+    let hour = u32::try_from(map_int_or(m, "hour", 0)?).ok()?;
+    let minute = u32::try_from(map_int_or(m, "minute", 0)?).ok()?;
+    let second = u32::try_from(map_int_or(m, "second", 0)?).ok()?;
+    let nanosecond = u32::try_from(map_int_or(m, "nanosecond", 0)?).ok()?;
+    let date = Date::from_ymd(year, month, day)?;
+    let time = Time::from_hms_nano(hour, minute, second, nanosecond)?;
+    Some(Timestamp::from_date_time(date, time))
+}
+
+/// The ZONED DATETIME a map names: as [`local_datetime_of_map`], in the
+/// offset its `timezone` gives (`'+01:00'`, `'Z'`), +00:00 without one. An
+/// epoch map names an instant, which the offset does not move.
+fn zoned_datetime_of_map(
+    m: &BTreeMap<PropertyKey, Value>,
+) -> Option<grafeo_common::types::ZonedDatetime> {
+    use grafeo_common::types::{Time, Timestamp, ZonedDatetime};
+    let local = local_datetime_of_map(m)?;
+    let offset = match m.get(&PropertyKey::from("timezone")) {
+        None => 0,
+        Some(Value::String(zone)) => Time::parse(&format!("00:00:00{zone}"))?.offset_seconds()?,
+        Some(_) => return None,
+    };
+    let epoch = m.contains_key(&PropertyKey::from("epochMillis"))
+        || m.contains_key(&PropertyKey::from("epochSeconds"));
+    let utc_micros = if epoch {
+        local.as_micros()
+    } else {
+        local.as_micros() - i64::from(offset) * 1_000_000
+    };
+    Some(ZonedDatetime::from_timestamp_offset(
+        Timestamp::from_micros(utc_micros),
+        offset,
+    ))
+}
+
 fn map_int(m: &BTreeMap<PropertyKey, Value>, key: &str) -> Option<i64> {
     match map_int_checked(m, key) {
         MapIntResult::Absent => None,
@@ -1822,6 +1892,10 @@ impl ExpressionPredicate {
                     | (Value::Duration(dur), Value::Timestamp(ts)) => {
                         Some(Value::Timestamp(ts.add_duration(dur)))
                     }
+                    (Value::ZonedDatetime(zdt), Value::Duration(dur))
+                    | (Value::Duration(dur), Value::ZonedDatetime(zdt)) => {
+                        Some(Value::ZonedDatetime(zdt.add_duration(dur)))
+                    }
                     (Value::Duration(a), Value::Duration(b)) => Some(Value::Duration(a.add(*b))),
                     (Value::List(a), Value::List(b)) => {
                         let mut combined = Vec::with_capacity(a.len() + b.len());
@@ -1848,6 +1922,9 @@ impl ExpressionPredicate {
                 (Value::Timestamp(a), Value::Duration(dur)) => {
                     Some(Value::Timestamp(a.add_duration(&dur.neg())))
                 }
+                (Value::ZonedDatetime(a), Value::Duration(dur)) => {
+                    Some(Value::ZonedDatetime(a.add_duration(&dur.neg())))
+                }
                 (Value::Date(a), Value::Date(b)) => {
                     let days = a.as_days() as i64 - b.as_days() as i64;
                     Some(Value::Duration(grafeo_common::types::Duration::from_days(
@@ -1868,6 +1945,13 @@ impl ExpressionPredicate {
                         micros * 1000,
                     )))
                 }
+                // Two zoned datetimes: the time between their instants
+                (Value::ZonedDatetime(a), Value::ZonedDatetime(b)) => {
+                    let micros = a.as_timestamp().duration_since(b.as_timestamp());
+                    Some(Value::Duration(grafeo_common::types::Duration::from_nanos(
+                        micros * 1000,
+                    )))
+                }
                 (Value::Duration(a), Value::Duration(b)) => Some(Value::Duration(a.sub(*b))),
                 _ => self.eval_arithmetic(
                     left,
@@ -1879,8 +1963,10 @@ impl ExpressionPredicate {
                 ),
             },
             BinaryFilterOp::Mul => match (left, right) {
-                (Value::Duration(d), Value::Int64(n)) | (Value::Int64(n), Value::Duration(d)) => {
-                    Some(Value::Duration(d.mul(*n)))
+                (Value::Duration(d), factor) | (factor, Value::Duration(d))
+                    if !matches!(factor, Value::Duration(_) | Value::Null) =>
+                {
+                    self.scale_duration(*d, factor, left, op, right)
                 }
                 _ => self.eval_arithmetic(
                     left,
@@ -1892,8 +1978,10 @@ impl ExpressionPredicate {
                 ),
             },
             BinaryFilterOp::Div => match (left, right) {
-                (Value::Duration(d), Value::Int64(n)) if *n != 0 => {
-                    Some(Value::Duration(d.div(*n)))
+                (Value::Duration(d), divisor)
+                    if !matches!(divisor, Value::Duration(_) | Value::Null) =>
+                {
+                    self.scale_duration(*d, divisor, left, op, right)
                 }
                 _ => self.eval_arithmetic(
                     left,
@@ -1974,8 +2062,9 @@ impl ExpressionPredicate {
                 #[cfg(any(feature = "regex", feature = "regex-lite"))]
                 match (left, right) {
                     (Value::String(s), Value::String(pattern)) => {
-                        let mut regex_pattern = String::with_capacity(pattern.len() + 4);
-                        regex_pattern.push('^');
+                        // `(?s)`: `%` and `_` match a line break too, as in SQL
+                        let mut regex_pattern = String::with_capacity(pattern.len() + 8);
+                        regex_pattern.push_str("(?s)^");
                         let mut chars = pattern.chars().peekable();
                         while let Some(ch) = chars.next() {
                             match ch {
@@ -2074,6 +2163,40 @@ impl ExpressionPredicate {
             (Value::Int64(a), Value::Float64(b)) => Some(Value::Float64(float_op(*a as f64, *b))),
             (Value::Float64(a), Value::Int64(b)) => Some(Value::Float64(float_op(*a, *b as f64))),
             _ => None,
+        }
+    }
+
+    /// A duration times (`*`) or divided by (`/`) a number, each component
+    /// scaled with its fraction carried down (see
+    /// [`Duration::checked_mul_decimal`](grafeo_common::types::Duration::checked_mul_decimal));
+    /// a float reads as the decimal it prints as. A result that does not fit
+    /// and a float that is not finite fail the query as out of range (22003),
+    /// a division by zero as one (22012). Null for anything but a number.
+    fn scale_duration(
+        &self,
+        duration: grafeo_common::types::Duration,
+        number: &Value,
+        left: &Value,
+        op: BinaryFilterOp,
+        right: &Value,
+    ) -> Option<Value> {
+        let number = match number {
+            Value::Int64(n) => Decimal::from_i64(*n),
+            Value::Decimal(d) => *d,
+            Value::Float64(f) => match Decimal::from_f64(*f) {
+                Ok(d) => d,
+                Err(error) => return self.fail(decimal_error(error, left, op, right)),
+            },
+            _ => return None,
+        };
+        let scaled = if op == BinaryFilterOp::Div {
+            duration.checked_div_decimal(&number)
+        } else {
+            duration.checked_mul_decimal(&number)
+        };
+        match scaled {
+            Ok(result) => Some(Value::Duration(result)),
+            Err(error) => self.fail(decimal_error(error, left, op, right)),
         }
     }
 
@@ -2406,6 +2529,8 @@ impl ExpressionPredicate {
                     Value::Float64(f) => f.to_string(),
                     Value::Bool(b) => b.to_string(),
                     Value::Null => return Some(Value::Null),
+                    // A LOCAL DATETIME has no zone, so its text has none
+                    Value::Timestamp(ts) => ts.to_local_text(),
                     // ISO 8601 for temporal values, `[1, 2]` for lists.
                     _ => val.to_string(),
                 };
@@ -3103,15 +3228,32 @@ impl ExpressionPredicate {
                 }
             }
             BuiltinFunction::Normalize => {
-                // normalize(string) - returns the string as-is (NFC normalization).
-                // Rust strings are valid UTF-8; full NFC normalization requires the
-                // unicode-normalization crate, which is deferred to Phase 2.
-                if args.len() != 1 {
+                // normalize(string [, form]) - the string in a Unicode normal form,
+                // NFC when no form is given (ISO/IEC 39075 normalize function)
+                if args.is_empty() || args.len() > 2 {
                     return None;
                 }
                 let val = self.eval_expr(&args[0], chunk, row)?;
+                let form = if args.len() == 2 {
+                    match self.eval_expr(&args[1], chunk, row)? {
+                        Value::String(s) => s.to_uppercase(),
+                        _ => return None,
+                    }
+                } else {
+                    "NFC".to_string()
+                };
                 match val {
-                    Value::String(s) => Some(Value::String(s)),
+                    Value::String(ref s) => {
+                        use unicode_normalization::UnicodeNormalization;
+                        let normalized: String = match form.as_str() {
+                            "NFC" => s.nfc().collect(),
+                            "NFD" => s.nfd().collect(),
+                            "NFKC" => s.nfkc().collect(),
+                            "NFKD" => s.nfkd().collect(),
+                            _ => return None,
+                        };
+                        Some(Value::String(normalized.into()))
+                    }
                     Value::Null => Some(Value::Null),
                     _ => None,
                 }
@@ -3503,62 +3645,11 @@ impl ExpressionPredicate {
                 }
                 let val = self.eval_expr(&args[0], chunk, row)?;
                 match val {
-                    Value::String(s) => {
-                        // Parse ISO datetime: try Date first, then full timestamp
-                        if let Some(d) = grafeo_common::types::Date::parse(&s) {
-                            return Some(Value::Timestamp(d.to_timestamp()));
-                        }
-                        // Try full ISO format: YYYY-MM-DDTHH:MM:SS[.fff][Z|+HH:MM]
-                        if let Some(pos) = s.find('T') {
-                            let date_part = &s[..pos];
-                            let time_part = &s[pos + 1..];
-                            if let (Some(d), Some(t)) = (
-                                grafeo_common::types::Date::parse(date_part),
-                                grafeo_common::types::Time::parse(time_part),
-                            ) {
-                                return Some(Value::Timestamp(
-                                    grafeo_common::types::Timestamp::from_date_time(d, t),
-                                ));
-                            }
-                        }
-                        None
-                    }
+                    Value::String(s) => local_datetime_of_text(&s).map(Value::Timestamp),
                     Value::Timestamp(_) => Some(val),
                     // The instant, as `datetime('...+01:00')` reads one.
                     Value::ZonedDatetime(zoned) => Some(Value::Timestamp(zoned.as_timestamp())),
-                    // `{epochMillis: n}` and `{epochSeconds: n, nanosecond: m}`:
-                    // the instant that long after 1970-01-01T00:00:00Z.
-                    Value::Map(m) if m.contains_key(&PropertyKey::from("epochMillis")) => {
-                        let micros = map_int(&m, "epochMillis")?.checked_mul(1_000)?;
-                        Some(Value::Timestamp(
-                            grafeo_common::types::Timestamp::from_micros(micros),
-                        ))
-                    }
-                    Value::Map(m) if m.contains_key(&PropertyKey::from("epochSeconds")) => {
-                        let nanosecond = map_int_or(&m, "nanosecond", 0)?;
-                        let micros = map_int(&m, "epochSeconds")?
-                            .checked_mul(1_000_000)?
-                            .checked_add(nanosecond.div_euclid(1_000))?;
-                        Some(Value::Timestamp(
-                            grafeo_common::types::Timestamp::from_micros(micros),
-                        ))
-                    }
-                    Value::Map(m) => {
-                        let year = i32::try_from(map_int(&m, "year")?).ok()?;
-                        let month = u32::try_from(map_int_or(&m, "month", 1)?).ok()?;
-                        let day = u32::try_from(map_int_or(&m, "day", 1)?).ok()?;
-                        let hour = u32::try_from(map_int_or(&m, "hour", 0)?).ok()?;
-                        let minute = u32::try_from(map_int_or(&m, "minute", 0)?).ok()?;
-                        let second = u32::try_from(map_int_or(&m, "second", 0)?).ok()?;
-                        let nanosecond = u32::try_from(map_int_or(&m, "nanosecond", 0)?).ok()?;
-                        let date = grafeo_common::types::Date::from_ymd(year, month, day)?;
-                        let time = grafeo_common::types::Time::from_hms_nano(
-                            hour, minute, second, nanosecond,
-                        )?;
-                        Some(Value::Timestamp(
-                            grafeo_common::types::Timestamp::from_date_time(date, time),
-                        ))
-                    }
+                    Value::Map(m) => local_datetime_of_map(&m).map(Value::Timestamp),
                     _ => None,
                 }
             }
@@ -3606,14 +3697,16 @@ impl ExpressionPredicate {
                     ));
                 }
                 let val = self.eval_expr(&args[0], chunk, row)?;
+                // A text or a map without a zone is at +00:00, the default zone
+                // (openCypher's datetime() resolves to this function).
+                let utc = |ts| grafeo_common::types::ZonedDatetime::from_timestamp_offset(ts, 0);
                 match val {
-                    Value::String(s) => {
-                        grafeo_common::types::ZonedDatetime::parse(&s).map(Value::ZonedDatetime)
-                    }
-                    Value::Timestamp(ts) => Some(Value::ZonedDatetime(
-                        grafeo_common::types::ZonedDatetime::from_timestamp_offset(ts, 0),
-                    )),
+                    Value::String(ref s) => grafeo_common::types::ZonedDatetime::parse(s)
+                        .or_else(|| local_datetime_of_text(s).map(utc))
+                        .map(Value::ZonedDatetime),
+                    Value::Timestamp(ts) => Some(Value::ZonedDatetime(utc(ts))),
                     Value::ZonedDatetime(_) => Some(val),
+                    Value::Map(ref m) => zoned_datetime_of_map(m).map(Value::ZonedDatetime),
                     _ => None,
                 }
             }
@@ -4283,6 +4376,7 @@ impl ExpressionPredicate {
             "DECIMAL" | "DEC" => to_decimal(&val).map(Value::Decimal),
             "STRING" => match val {
                 Value::String(_) => Some(val),
+                Value::Timestamp(ts) => Some(Value::String(ts.to_local_text().into())),
                 other => Some(Value::String(other.to_string().into())),
             },
             "BOOLEAN" | "BOOL" => match val {

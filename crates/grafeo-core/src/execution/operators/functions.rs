@@ -196,7 +196,7 @@ builtin_functions! {
     Left => ["left"], "2", String, immutable;
     Right => ["right"], "2", String, immutable;
     OctetLength => ["octet_length", "byte_length"], "1", String, immutable;
-    Normalize => ["normalize"], "1", String, immutable;
+    Normalize => ["normalize"], "1-2", String, immutable;
     IsNormalized => ["isNormalized"], "1-2", String, immutable;
     Abs => ["abs"], "1", Numeric, immutable;
     Ceil => ["ceil", "ceiling"], "1", Numeric, immutable;

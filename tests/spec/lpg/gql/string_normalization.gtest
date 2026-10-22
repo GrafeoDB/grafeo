@@ -2,8 +2,8 @@
 #
 # ISO/IEC 39075 normalized predicate and normalize function: `s IS [form]
 # NORMALIZED` tells whether s is in a normal form (NFC by default), and
-# normalize(s) puts s in NFC. The decomposed 'e' + U+0301 is not NFC, its NFC
-# is U+00E9. The skipped cases are a bug: value-kinds/normalize-is-a-no-op.md.
+# normalize(s) puts s in NFC, normalize(s, form) in the form it names. The
+# decomposed 'e' + U+0301 is not NFC, its NFC is U+00E9.
 
 meta:
   language: gql
@@ -35,7 +35,6 @@ tests:
         - [true, true, true, true]
 
   - name: normalize_composes_to_nfc
-    skip: "value-kinds/normalize-is-a-no-op.md: normalize() returns its input unchanged"
     query: |
       RETURN normalize('e\u0301') = '\u00e9' AS same, char_length(normalize('e\u0301')) AS n
     expect:
@@ -43,9 +42,26 @@ tests:
         - [true, 1]
 
   - name: normalize_gives_a_normalized_string
-    skip: "value-kinds/normalize-is-a-no-op.md: normalize() returns its input unchanged"
     query: |
       RETURN normalize('e\u0301') IS NORMALIZED AS r
     expect:
       rows:
         - [true]
+
+  - name: normalize_to_each_named_form
+    query: |
+      RETURN char_length(normalize('\u00e9', NFD)) AS nfd, char_length(normalize('e\u0301', NFC)) AS nfc, normalize('\ufb01', NFKC) AS nfkc, char_length(normalize('\ufb01', NFKD)) AS nfkd, char_length(normalize('\ufb01')) AS default_keeps_the_ligature
+    expect:
+      rows:
+        - [2, 1, fi, 2, 1]
+
+  - name: normalize_of_null_is_null
+    query: "RETURN normalize(null) AS a, normalize(null, NFD) AS b"
+    expect:
+      rows:
+        - [null, null]
+
+  - name: normalize_with_an_unknown_form_is_a_syntax_error
+    query: "RETURN normalize('Alix', NFX) AS r"
+    expect:
+      gql_status: "42001"

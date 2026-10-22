@@ -2344,7 +2344,7 @@ impl CypherTranslator {
                         translated_args.push(self.translate_expression(arg)?);
                     }
                 }
-                resolve_call(name, translated_args, false)
+                resolve_cypher_call(name, translated_args)
             }
             ast::Expression::Binary { left, op, right } => {
                 let binary_op = self.translate_binary_op(*op)?;
@@ -2700,14 +2700,13 @@ impl CypherTranslator {
             ast::Expression::FunctionCall { name, args, .. }
                 if !is_aggregate_function(name) && args.iter().any(contains_aggregate) =>
             {
-                resolve_call(
+                resolve_cypher_call(
                     name,
                     args.iter()
                         .map(|arg| {
                             self.translate_projected_sort_key(arg, columns, scope, as_planned)
                         })
                         .collect::<Result<_>>()?,
-                    false,
                 )
             }
             other if contains_aggregate(other) => Err(Error::Query(QueryError::new(
@@ -3143,7 +3142,7 @@ impl CypherTranslator {
                     .map(|a| self.translate_expression(a))
                     .collect::<Result<_>>()?;
 
-                resolve_call(name, translated_args, false)
+                resolve_cypher_call(name, translated_args)
             }
             ast::Expression::List(items) => {
                 let translated: Vec<LogicalExpression> = items
@@ -3855,6 +3854,21 @@ fn contains_aggregate(expr: &ast::Expression) -> bool {
         }
         _ => false,
     }
+}
+
+/// The call for `name(args)` in Cypher, as [`resolve_call`] builds it, except
+/// that openCypher's `datetime()` is zoned: it keeps the input's offset, and
+/// is at +00:00 without one (`localdatetime()` is the local one, as GQL's
+/// `datetime` is).
+fn resolve_cypher_call(name: &str, args: Vec<LogicalExpression>) -> Result<LogicalExpression> {
+    if !name.eq_ignore_ascii_case("datetime") {
+        return resolve_call(name, args, false);
+    }
+    let mut call = resolve_call("zoned_datetime", args, false)?;
+    if let LogicalExpression::FunctionCall { name: called, .. } = &mut call {
+        *called = name.to_string();
+    }
+    Ok(call)
 }
 
 #[cfg(test)]

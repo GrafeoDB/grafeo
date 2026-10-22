@@ -9,6 +9,8 @@ Welcome to the Grafeo User Guide. This section covers everything needed to use G
 
 Grafeo supports both **Labeled Property Graph (LPG)** and **RDF** data models, with multiple query languages for each.
 
+Grafeo is GQL-first: [GQL](gql/index.md) (ISO/IEC 39075) sets its semantics, and the other languages are translated onto them. Where the languages disagree, each follows its own specification wherever Grafeo's translator can tell the cases apart: [Cypher](cypher/index.md) follows openCypher and [SQL/PGQ](sql-pgq/index.md) follows SQL:2023. Otherwise GQL's semantics apply, also for [Gremlin](gremlin/index.md) and [GraphQL](graphql/index.md). On RDF data, [SPARQL](sparql/index.md) follows SPARQL 1.1.
+
 ## Sections
 
 <div class="grid cards" markdown>

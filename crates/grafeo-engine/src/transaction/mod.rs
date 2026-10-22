@@ -220,7 +220,6 @@ pub(crate) use history::HistoryImage;
 #[cfg(feature = "wal")]
 pub(crate) use manager::CommitGuard;
 pub(crate) use manager::CommitsHeld;
-#[cfg(feature = "lpg")]
 pub(crate) use manager::ReadPin;
 pub use manager::{
     EntityId, GraphEntity, IsolationLevel, TransactionInfo, TransactionManager, TransactionState,

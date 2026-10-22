@@ -6,7 +6,9 @@
 //! `web-time` reads the host's clock instead (`Date.now()` and
 //! `performance.now()` in a browser).
 //!
-//! ```
+//! (`no_run`: Miri's isolation has no wall clock; the unit tests check the values.)
+//!
+//! ```no_run
 //! use grafeo_common::clock::{self, Instant};
 //!
 //! let start = Instant::now();

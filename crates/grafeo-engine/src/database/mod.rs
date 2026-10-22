@@ -1426,7 +1426,7 @@ impl GrafeoDB {
     /// Whether the sidecar WAL `dir` holds files of the first log format
     /// (0.5.x and 0.6.0-beta.1 wrote it): `wal_` with 8 digits and `.log`,
     /// or its `checkpoint.meta`. A segment of this release has 20 digits.
-    #[cfg(all(feature = "wal", feature = "lpg"))]
+    #[cfg(feature = "wal")]
     fn holds_first_format_wal(dir: &std::path::Path) -> Result<bool> {
         let cannot_list = |error: std::io::Error| {
             Error::Io(std::io::Error::new(

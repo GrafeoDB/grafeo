@@ -442,6 +442,14 @@ impl GraphBackend for Refusing {
     fn collect(&self, horizon: EpochId) {
         GraphBackend::collect(&*self.store, horizon);
     }
+
+    fn durable_epoch(&self) -> EpochId {
+        self.store.durable_epoch()
+    }
+
+    fn flush(&self, epoch: EpochId) -> Result<(), ApplyError> {
+        self.store.flush(epoch)
+    }
 }
 
 /// The read side of [`Refusing`]: the row-group store's.

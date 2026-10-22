@@ -609,6 +609,12 @@ mod backend {
         fn collect(&self, horizon: EpochId) {
             GraphBackend::collect(&self.rows, horizon);
         }
+        fn durable_epoch(&self) -> EpochId {
+            self.rows.durable_epoch()
+        }
+        fn flush(&self, epoch: EpochId) -> std::result::Result<(), ApplyError> {
+            self.rows.flush(epoch)
+        }
     }
 }
 

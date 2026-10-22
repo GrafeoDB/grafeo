@@ -26,7 +26,7 @@ use grafeo_common::change::{DataModel, DataOp, StandaloneOp};
 use grafeo_common::storage::{LogRecord, read_log_records};
 use grafeo_common::types::EpochId;
 use grafeo_common::utils::error::{Error, Result, StorageError};
-use grafeo_core::graph::apply::Writer;
+use grafeo_core::graph::apply::{GraphBackend, Writer};
 #[cfg(feature = "triple-store")]
 use grafeo_core::graph::rdf::RdfStore;
 use grafeo_core::graph::rowgroup::RowGroupStore;
@@ -210,6 +210,108 @@ fn apply_standalone<S: RootStore>(op: &StandaloneOp, targets: &mut Targets<'_, S
             unbuilt: targets.unbuilt,
         },
     )
+}
+
+/// What [`replay_into_backend`] applied: where the log ends and the epoch of
+/// its last group.
+#[derive(Debug)]
+pub(crate) struct BackendReplayed {
+    /// Where the scan ended (see [`Replayed::end`]).
+    pub(crate) end: ScanEnd,
+    /// The epoch of the last group the log holds, applied or skipped as
+    /// durable already: the database goes on above it.
+    pub(crate) last_epoch: EpochId,
+}
+
+/// Replays the WAL in `dir` of a database on a backend of one's own
+/// (`GrafeoDB::with_store`): every group's catalog records go to `catalog`
+/// (the log starts with the catalog the last checkpoint wrote, see
+/// `GrafeoDB::checkpoint_backend`), and the data records of the groups after
+/// `durable` (the backend's [`durable_epoch`](GraphBackend::durable_epoch))
+/// apply to `backend` as a [`Writer::Replay`] at their group's epoch; a
+/// group at `durable` or before is the backend's already.
+///
+/// # Errors
+///
+/// As [`replay`]; also a record such a database never logs (a write to a
+/// named graph, an RDF record, an index), which it has no store for.
+pub(crate) fn replay_into_backend(
+    dir: &Path,
+    options: ScanOptions,
+    backend: &dyn GraphBackend,
+    catalog: &Catalog,
+    durable: EpochId,
+    history: Option<&crate::transaction::TransactionManager>,
+) -> Result<BackendReplayed> {
+    let mut scan = WalScan::open(dir, options).map_err(Error::from)?;
+    let mut last_epoch = EpochId::INITIAL;
+    let mut unbuilt = Vec::new();
+    while let Some(mut group) = scan.next_group().map_err(Error::from)? {
+        let start = group.start_lsn();
+        let failed = |reason: String| {
+            Error::from(StorageError::RecoveryFailed(format!(
+                "cannot replay the group at log position {start} of the WAL {}: {reason}",
+                dir.display()
+            )))
+        };
+        let mut records = Vec::new();
+        while let Some(payload) = group.next_payload().map_err(Error::from)? {
+            read_log_records(payload, &mut |record| {
+                records.push(record);
+                Ok(())
+            })
+            .map_err(|error| failed(error.to_string()))?;
+        }
+        let mut records = records.into_iter();
+        let Some(LogRecord::GroupBegin(begin)) = records.next() else {
+            return Err(failed("it does not start with its GroupBegin".to_string()));
+        };
+        let new = begin.epoch > durable;
+        for record in records {
+            match record {
+                LogRecord::Data { graph: None, op } if op.model() != DataModel::Rdf => {
+                    if new {
+                        backend
+                            .apply(&op, Writer::Replay { epoch: begin.epoch })
+                            .map_err(|error| failed(error.to_string()))?;
+                    }
+                }
+                LogRecord::Standalone(op) => standalone::apply::<RowGroupStore>(
+                    &op,
+                    None,
+                    None,
+                    catalog,
+                    &mut Applying::Replay {
+                        unbuilt: &mut unbuilt,
+                    },
+                )
+                .map_err(|error| failed(error.to_string()))?,
+                other => {
+                    return Err(failed(format!(
+                        "a database on a backend of its own logs no {}",
+                        describe_record(&other)
+                    )));
+                }
+            }
+        }
+        last_epoch = last_epoch.max(begin.epoch);
+        if let Some(manager) = history {
+            manager.record_commit_time(begin.epoch, begin.timestamp_ms);
+        }
+    }
+    let end = scan.finish().map_err(Error::from)?;
+    Ok(BackendReplayed { end, last_epoch })
+}
+
+/// How an error names a record a database on a backend of its own does not
+/// log.
+fn describe_record(record: &LogRecord) -> &'static str {
+    match record {
+        LogRecord::Data { graph: Some(_), .. } => "write to a named graph",
+        LogRecord::Data { .. } => "RDF record",
+        LogRecord::GroupBegin(_) => "second GroupBegin inside a group",
+        LogRecord::Standalone(_) => "standalone record",
+    }
 }
 
 #[cfg(test)]

@@ -570,70 +570,14 @@ impl<S: CatalogStore> CatalogSection<S> {
     /// is the one its `finish` returns), or the error of a record that does
     /// not encode, with the section and the entry named.
     fn write_records(&self, stream: &mut dyn std::io::Write, with_config: bool) -> Result<()> {
-        // The constraint names and the node types that enforce them, from
-        // one moment, as version 1 reads them.
-        let (mut schema, constraints) = self
-            .catalog
-            .with_constraints(|constraints| (self.collect_schema(), constraints));
         let indexes = index_records(&self.collect_graph_indexes()).map_err(in_section)?;
         let index_names = self.collect_index_names();
-
-        schema.schemas.sort();
-        schema.node_types.sort_by(|a, b| a.name.cmp(&b.name));
-        schema.edge_types.sort_by(|a, b| a.name.cmp(&b.name));
-        schema.graph_types.sort_by(|a, b| a.name.cmp(&b.name));
-        schema.graph_type_bindings.sort();
-        schema.procedures.sort_by(|a, b| a.name.cmp(&b.name));
-        // `DROP GRAPH TYPE` leaves the bindings to the type, which then bind
-        // nothing (and a version 1 load dropped them, as binding them
-        // failed). They are left out, so every binding written names a graph
-        // type written, which the reader requires.
-        let graph_types: HashSet<&str> = schema
-            .graph_types
-            .iter()
-            .map(|def| def.name.as_str())
-            .collect();
-        schema
-            .graph_type_bindings
-            .retain(|(_, graph_type)| graph_types.contains(graph_type.as_str()));
-
         let mut writer = RecordWriter {
             stream,
             buffer: Vec::new(),
         };
-        for name in schema.schemas {
-            writer.write(&CatalogRecord::Schema(SchemaRecord { name }))?;
-        }
-        for def in &schema.node_types {
-            writer.write(&CatalogRecord::NodeType(node_type_record(def)))?;
-        }
-        for def in &schema.edge_types {
-            let record = edge_type_record(def).map_err(in_section)?;
-            writer.write(&CatalogRecord::EdgeType(record))?;
-        }
-        for def in &schema.graph_types {
-            writer.write(&CatalogRecord::GraphType(graph_type_record(def)))?;
-        }
-        for (graph, graph_type) in schema.graph_type_bindings {
-            writer.write(&CatalogRecord::GraphBinding(GraphBindingRecord {
-                graph,
-                graph_type,
-            }))?;
-        }
-        for def in &constraints {
-            writer.write(&CatalogRecord::Constraint(constraint_record(def)))?;
-        }
-        for record in indexes {
-            writer.write(&CatalogRecord::Index(record))?;
-        }
-        for name in &index_names {
-            writer.write(&CatalogRecord::IndexName(index_name_record(name)))?;
-        }
-        for def in &schema.procedures {
-            writer.write(&CatalogRecord::Procedure(procedure_record(def)))?;
-        }
-        if with_config && let Some(config) = self.catalog.stored_config() {
-            writer.write(&CatalogRecord::StoredConfig(config))?;
+        for record in catalog_records(&self.catalog, indexes, &index_names, with_config)? {
+            writer.write(&record)?;
         }
         Ok(())
     }
@@ -848,6 +792,95 @@ fn index_key(record: &IndexRecord) -> IndexKey {
 }
 
 /// Frames records into the record stream, one at a time.
+/// The records of `catalog`, in the order of the module documentation, with
+/// `indexes` and the names `CREATE INDEX` gave them, and the stored
+/// configuration when `with_config`: what a catalog section holds, and what
+/// the checkpoint of a database on a backend of its own writes as the first
+/// group of its new log (no indexes, no configuration).
+///
+/// # Errors
+///
+/// The error of an edge type whose endpoints do not encode, with the section
+/// and the entry named.
+pub(crate) fn catalog_records(
+    catalog: &Catalog,
+    indexes: Vec<IndexRecord>,
+    index_names: &[IndexName],
+    with_config: bool,
+) -> Result<Vec<CatalogRecord>> {
+    // The constraint names and the node types that enforce them, from one
+    // moment, as version 1 reads them.
+    let (mut schema, constraints) = catalog.with_constraints(|constraints| {
+        (
+            SnapshotSchema {
+                node_types: catalog.all_node_type_defs(),
+                edge_types: catalog.all_edge_type_defs(),
+                graph_types: catalog.all_graph_type_defs(),
+                procedures: catalog.all_procedure_defs(),
+                schemas: catalog.schema_names(),
+                graph_type_bindings: catalog.all_graph_type_bindings(),
+            },
+            constraints,
+        )
+    });
+    schema.schemas.sort();
+    schema.node_types.sort_by(|a, b| a.name.cmp(&b.name));
+    schema.edge_types.sort_by(|a, b| a.name.cmp(&b.name));
+    schema.graph_types.sort_by(|a, b| a.name.cmp(&b.name));
+    schema.graph_type_bindings.sort();
+    schema.procedures.sort_by(|a, b| a.name.cmp(&b.name));
+    // `DROP GRAPH TYPE` leaves the bindings to the type, which then bind
+    // nothing (and a version 1 load dropped them, as binding them failed).
+    // They are left out, so every binding written names a graph type
+    // written, which the reader requires.
+    let graph_types: HashSet<&str> = schema
+        .graph_types
+        .iter()
+        .map(|def| def.name.as_str())
+        .collect();
+    schema
+        .graph_type_bindings
+        .retain(|(_, graph_type)| graph_types.contains(graph_type.as_str()));
+
+    let mut records = Vec::new();
+    for name in schema.schemas {
+        records.push(CatalogRecord::Schema(SchemaRecord { name }));
+    }
+    for def in &schema.node_types {
+        records.push(CatalogRecord::NodeType(node_type_record(def)));
+    }
+    for def in &schema.edge_types {
+        records.push(CatalogRecord::EdgeType(
+            edge_type_record(def).map_err(in_section)?,
+        ));
+    }
+    for def in &schema.graph_types {
+        records.push(CatalogRecord::GraphType(graph_type_record(def)));
+    }
+    for (graph, graph_type) in schema.graph_type_bindings {
+        records.push(CatalogRecord::GraphBinding(GraphBindingRecord {
+            graph,
+            graph_type,
+        }));
+    }
+    for def in &constraints {
+        records.push(CatalogRecord::Constraint(constraint_record(def)));
+    }
+    for record in indexes {
+        records.push(CatalogRecord::Index(record));
+    }
+    for name in index_names {
+        records.push(CatalogRecord::IndexName(index_name_record(name)));
+    }
+    for def in &schema.procedures {
+        records.push(CatalogRecord::Procedure(procedure_record(def)));
+    }
+    if with_config && let Some(config) = catalog.stored_config() {
+        records.push(CatalogRecord::StoredConfig(config));
+    }
+    Ok(records)
+}
+
 struct RecordWriter<'w> {
     stream: &'w mut dyn std::io::Write,
     /// The record being written, framed.

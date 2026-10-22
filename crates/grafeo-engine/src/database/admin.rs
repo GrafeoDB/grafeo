@@ -608,6 +608,17 @@ impl super::GrafeoDB {
         // The store holds the stamped part of a commit that did not complete.
         self.transaction_manager.check_no_incomplete_commit()?;
 
+        // A database on a backend of its own checkpoints through the backend,
+        // and drops the log the backend holds durably.
+        #[cfg(feature = "wal")]
+        if let Some(backend) = self.external_write_store.as_ref() {
+            if self.wal.is_none() {
+                return Ok(false);
+            }
+            self.checkpoint_backend(backend)?;
+            return Ok(true);
+        }
+
         // Flush all sections to the .grafeo file. The flush marks and truncates
         // the WAL only once the file is durable (#417).
         #[cfg(feature = "grafeo-file")]

@@ -617,6 +617,17 @@ impl GraphBackend for RowGroupStore {
     fn collect(&self, horizon: EpochId) {
         self.gc_versions_after_write(horizon);
     }
+
+    /// Nothing: as a backend of one's own the row-group store is in memory
+    /// (a database file checkpoints it itself, without this contract).
+    fn durable_epoch(&self) -> EpochId {
+        EpochId::INITIAL
+    }
+
+    /// Keeps nothing across a restart: the log keeps every commit.
+    fn flush(&self, _epoch: EpochId) -> Result<(), ApplyError> {
+        Ok(())
+    }
 }
 
 impl RowGroupStore {

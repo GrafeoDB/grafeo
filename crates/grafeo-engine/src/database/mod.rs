@@ -75,6 +75,8 @@ mod row_group_sections;
 mod row_group_spill;
 // Replay of the WAL v2 groups at open.
 #[cfg(feature = "wal")]
+mod backend_wal;
+#[cfg(feature = "wal")]
 mod replay;
 pub(crate) mod root_store;
 // The commit's WAL v2 group, written from its change set. Built for tests
@@ -200,6 +202,11 @@ pub struct GrafeoDB {
     /// Wrapped in Mutex because `close()` takes `&self` but stops it.
     #[cfg(feature = "wal")]
     wal_flusher: parking_lot::Mutex<Option<grafeo_storage::wal::AdaptiveFlusher>>,
+    /// The hold on the WAL directory of a database on a backend of its own
+    /// with a path, which no database file guards: taken at the open,
+    /// released by `close()`.
+    #[cfg(feature = "wal")]
+    backend_wal_lock: parking_lot::Mutex<Option<grafeo_storage::wal::DirectoryLock>>,
     /// The spill directory this open owns (a read-only open's temp
     /// directory), removed with the database once nothing spills into it.
     _spill_root: Option<Arc<spill_directory::SpillDirectory>>,
@@ -902,6 +909,8 @@ impl GrafeoDB {
             wal_records_at_checkpoint: Arc::new(AtomicU64::new(0)),
             #[cfg(feature = "wal")]
             wal_flusher: parking_lot::Mutex::new(wal_flusher),
+            #[cfg(feature = "wal")]
+            backend_wal_lock: parking_lot::Mutex::new(None),
             _spill_root: spill_layout.root_guard.clone(),
             #[cfg(all(feature = "vector-index", feature = "wal"))]
             vector_cache: spill_layout.vector_cache.clone(),
@@ -1030,8 +1039,23 @@ impl GrafeoDB {
     /// ([`GraphBackend::begin`]) and the engine commits or rolls back through
     /// it, also a rollback to a savepoint and the rollback of a failed
     /// statement. The engine reserves the ids of what a write creates. The
-    /// built-in store's features are not there: named graphs, property,
-    /// vector and text indexes, and persistence to a `.grafeo` file.
+    /// built-in store's features are not there: named graphs (and schemas,
+    /// whose default graph is one), property, vector and text indexes, and the
+    /// `.grafeo` file: such a statement or call is an unsupported error. A
+    /// schema statement applies its types and constraints.
+    ///
+    /// With a path (`Config::persistent(path)`) and the WAL on, the database
+    /// logs every commit to its own write-ahead log, `<path>.wal`, which this
+    /// process holds while it is open, and writes no database file. An open
+    /// replays the log: the catalog, and the commits after the backend's
+    /// [`durable_epoch`](GraphBackend::durable_epoch). A checkpoint
+    /// ([`wal_checkpoint`](Self::wal_checkpoint), and `close()`) asks the
+    /// backend to [`flush`](GraphBackend::flush) up to the committed epoch;
+    /// once the backend reports it durable, the log starts again with the
+    /// catalog and drops the older commits. A backend that keeps nothing
+    /// across a restart reports [`EpochId::INITIAL`](grafeo_common::types::EpochId::INITIAL):
+    /// its log keeps every commit and replays them all at every open. Change
+    /// data capture hears its commits as it hears the built-in store's.
     ///
     /// # Examples
     ///
@@ -1079,7 +1103,7 @@ impl GrafeoDB {
         #[cfg(feature = "cdc")]
         let cdc_enabled_val = config.cdc_enabled();
 
-        Ok(Self {
+        let db = Self {
             config,
             store: None,
             catalog: Arc::new(Catalog::new()),
@@ -1110,11 +1134,13 @@ impl GrafeoDB {
             wal_records_at_checkpoint: Arc::new(AtomicU64::new(0)),
             #[cfg(feature = "wal")]
             wal_flusher: parking_lot::Mutex::new(None),
+            #[cfg(feature = "wal")]
+            backend_wal_lock: parking_lot::Mutex::new(None),
             _spill_root: None,
             #[cfg(all(feature = "vector-index", feature = "wal"))]
             vector_cache: None,
             external_read_store: Some(Arc::clone(&store) as Arc<dyn GraphStore>),
-            external_write_store: Some(store),
+            external_write_store: Some(Arc::clone(&store)),
             #[cfg(feature = "metrics")]
             metrics: Some(Arc::new(crate::metrics::MetricsRegistry::new())),
             current_graph: RwLock::new(None),
@@ -1123,7 +1149,14 @@ impl GrafeoDB {
             read_only: false,
             projections: Arc::new(RwLock::new(std::collections::HashMap::new())),
             immediate_writes: std::sync::OnceLock::new(),
-        })
+        };
+        #[cfg(feature = "wal")]
+        let db = {
+            let mut db = db;
+            db.open_backend_wal(&store)?;
+            db
+        };
+        Ok(db)
     }
 
     /// Creates a database backed by a read-only [`GraphStore`].
@@ -1205,6 +1238,8 @@ impl GrafeoDB {
             wal_records_at_checkpoint: Arc::new(AtomicU64::new(0)),
             #[cfg(feature = "wal")]
             wal_flusher: parking_lot::Mutex::new(None),
+            #[cfg(feature = "wal")]
+            backend_wal_lock: parking_lot::Mutex::new(None),
             _spill_root: None,
             #[cfg(all(feature = "vector-index", feature = "wal"))]
             vector_cache: None,
@@ -1313,10 +1348,28 @@ impl GrafeoDB {
         keys: &encryption::DatabaseKeys,
         start_lsn: u64,
     ) -> Result<()> {
-        use grafeo_storage::wal::{Wal, WalOptions};
-
         let path = fm.sidecar_wal_path();
         std::fs::create_dir_all(&path)?;
+        self.open_wal_at(&path, fm.database_id(), keys, start_lsn)
+    }
+
+    /// Opens the WAL in `path` of the database `database_id`, continuing at
+    /// `start_lsn`, with the configured durability and, for an encrypted
+    /// database, a key per segment; `Adaptive` starts its flusher.
+    ///
+    /// # Errors
+    ///
+    /// The errors of opening the WAL and of starting its flusher.
+    #[cfg(feature = "wal")]
+    fn open_wal_at(
+        &mut self,
+        path: &std::path::Path,
+        database_id: u128,
+        keys: &encryption::DatabaseKeys,
+        start_lsn: u64,
+    ) -> Result<()> {
+        use grafeo_storage::wal::{Wal, WalOptions};
+
         let durability = match self.config.wal_durability() {
             crate::config::DurabilityMode::Sync => WalDurabilityMode::Sync,
             crate::config::DurabilityMode::Batch {
@@ -1333,11 +1386,11 @@ impl GrafeoDB {
         };
         let wal = Arc::new(
             Wal::open(
-                &path,
+                path,
                 WalOptions {
                     durability,
-                    cipher_for_salt: keys.wal_segment_ciphers(fm.database_id()),
-                    ..WalOptions::new(fm.database_id(), start_lsn)
+                    cipher_for_salt: keys.wal_segment_ciphers(database_id),
+                    ..WalOptions::new(database_id, start_lsn)
                 },
             )
             .map_err(Error::from)?,
@@ -2123,20 +2176,26 @@ impl GrafeoDB {
             projections: Arc::clone(&self.projections),
         };
 
-        if let Some(ref ext_read) = self.external_read_store {
-            return Session::with_external_store(
+        // A session on a backend of one's own, or on the built-in store; the
+        // rest of its set-up is the same for both.
+        let mut session = if let Some(ref ext_read) = self.external_read_store {
+            Session::with_external_store(
                 Arc::clone(ext_read),
                 self.external_write_store.as_ref().map(Arc::clone),
                 session_cfg(),
             )
-            .expect("arena allocation for external store session");
-        }
-
-        #[cfg(feature = "triple-store")]
-        let mut session =
-            Session::with_rdf_store(self.lpg_store(), Arc::clone(&self.rdf_store), session_cfg());
-        #[cfg(not(feature = "triple-store"))]
-        let mut session = Session::with_store(self.lpg_store(), session_cfg());
+            .expect("arena allocation for external store session")
+        } else {
+            #[cfg(feature = "triple-store")]
+            let session = Session::with_rdf_store(
+                self.lpg_store(),
+                Arc::clone(&self.rdf_store),
+                session_cfg(),
+            );
+            #[cfg(not(feature = "triple-store"))]
+            let session = Session::with_store(self.lpg_store(), session_cfg());
+            session
+        };
 
         #[cfg(feature = "wal")]
         if let Some(ref wal) = self.wal {
@@ -2204,8 +2263,9 @@ impl GrafeoDB {
     pub fn set_current_graph(&self, name: Option<&str>) -> Result<()> {
         if let Some(name) = name
             && !name.eq_ignore_ascii_case("default")
-            && let Some(store) = self.root_store()
-            && store.graph(name).is_none()
+            && self
+                .root_store()
+                .is_none_or(|store| store.graph(name).is_none())
         {
             return Err(Error::from(QueryError::new(
                 QueryErrorKind::InvalidReference,
@@ -2714,6 +2774,20 @@ impl GrafeoDB {
             }
             *is_open = false;
             return self.transaction_manager.check_no_incomplete_commit();
+        }
+
+        // A database on a backend of its own: a checkpoint through the
+        // backend, then the log is closed; it stays for the next open, which
+        // replays what the backend does not hold durably.
+        #[cfg(feature = "wal")]
+        if let (Some(backend), Some(wal)) = (self.external_write_store.as_ref(), self.wal.as_ref())
+        {
+            wal.sync()?;
+            let checkpointed = self.checkpoint_backend(backend);
+            wal.close();
+            drop(self.backend_wal_lock.lock().take());
+            *is_open = false;
+            return checkpointed.map(|_| ());
         }
 
         // Checkpoint to the database file, then remove the sidecar WAL.

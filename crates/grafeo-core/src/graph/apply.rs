@@ -272,6 +272,17 @@ impl BackendTransaction {
 /// a backend creates at the id it is given, so a replay of the log creates
 /// at the logged ids.
 ///
+/// # Durability
+///
+/// A database on a backend with a path logs every commit to its own
+/// write-ahead log first. At a checkpoint the engine asks the backend to
+/// make everything up to an epoch durable ([`flush`](Self::flush)), then
+/// drops the logged commits up to the epoch the backend reports durable
+/// ([`durable_epoch`](Self::durable_epoch)); at an open it replays the
+/// logged commits after that epoch. A backend that keeps nothing across a
+/// restart reports [`EpochId::INITIAL`]: the engine then replays the whole
+/// log at every open and never drops any of it, so the log is what persists.
+///
 /// # Errors and invariants
 ///
 /// `apply` allocates everything a version needs, so `commit` only makes the
@@ -398,6 +409,26 @@ pub trait GraphBackend: GraphStore {
     /// with the oldest epoch an open reader or the history retention still
     /// reads. A backend without versions of its own has nothing to drop.
     fn collect(&self, horizon: EpochId);
+
+    /// The latest epoch whose commits the backend holds durably: the commits
+    /// at it and before it survive a restart of the process, and an open
+    /// replays the logged commits after it. [`EpochId::INITIAL`] for a
+    /// backend that keeps nothing across a restart: an open replays the
+    /// whole log, and the engine never drops any of it.
+    fn durable_epoch(&self) -> EpochId;
+
+    /// Makes every commit up to `epoch` (the database's committed epoch at a
+    /// checkpoint) durable, so [`durable_epoch`](Self::durable_epoch)
+    /// reports `epoch` or later afterwards; then the engine drops the
+    /// logged commits up to it. A backend that keeps nothing across a
+    /// restart returns `Ok` and keeps reporting [`EpochId::INITIAL`]: the
+    /// log keeps every commit.
+    ///
+    /// # Errors
+    ///
+    /// When the backend cannot make the commits durable: the checkpoint
+    /// fails, and the log keeps every commit.
+    fn flush(&self, epoch: EpochId) -> Result<(), ApplyError>;
 }
 
 /// Refuses what no bulk write applies as a row (see

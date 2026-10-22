@@ -124,33 +124,53 @@ impl Inner {
     fn nodes_with_labels_at(&self, label_ids: &[u32], read: Read) -> Vec<NodeId> {
         let mut ids = Vec::new();
         for (index, group) in &self.nodes {
-            // The rows the newest label bitmaps hold that `read` sees.
-            let newest = label_ids
-                .iter()
-                .filter_map(|label| group.labels.get(label))
-                .flat_map(|rows| group.versions.visible_of(rows, read));
+            let base = index * ROWS_PER_GROUP;
             let changed = group.label_updates.rows();
-            let mut rows: Vec<usize> = match &changed {
-                None => newest.collect(),
-                Some(changed) => {
-                    let mut rows: Vec<usize> = newest.filter(|row| !changed.get(*row)).collect();
-                    rows.extend(changed.rows().filter(|row| {
-                        group.version(*row).visible(read)
-                            && label_ids
-                                .iter()
-                                .any(|label| group.has_label_at(*row, *label, read))
-                    }));
-                    rows
+            // One label and no label chain, the common case: the rows of
+            // its bitmap `read` sees are the answer, ascending and once.
+            if changed.is_none()
+                && let [label] = label_ids
+            {
+                if let Some(rows) = group.labels.get(label) {
+                    group.versions.for_each_visible(rows, read, |row| {
+                        ids.push(NodeId::new(base + row as u64));
+                    });
                 }
-            };
-            if label_ids.len() > 1 || changed.is_some() {
-                rows.sort_unstable();
-                rows.dedup();
+                continue;
             }
-            ids.extend(
-                rows.into_iter()
-                    .map(|row| NodeId::new(index * ROWS_PER_GROUP + row as u64)),
-            );
+            // The rows the newest label bitmaps hold that `read` sees, but
+            // those a label chain holds, which are read at the view.
+            let mut rows = Vec::new();
+            for label_rows in label_ids.iter().filter_map(|label| group.labels.get(label)) {
+                group.versions.for_each_visible(label_rows, read, |row| {
+                    if changed.as_ref().is_none_or(|changed| !changed.get(row)) {
+                        rows.push(row);
+                    }
+                });
+            }
+            if let Some(changed) = &changed {
+                rows.extend(changed.rows().filter(|row| {
+                    group.version(*row).visible(read)
+                        && label_ids
+                            .iter()
+                            .any(|label| group.has_label_at(*row, *label, read))
+                }));
+            }
+            rows.sort_unstable();
+            rows.dedup();
+            ids.extend(rows.into_iter().map(|row| NodeId::new(base + row as u64)));
+        }
+        ids
+    }
+
+    /// Every node `read` sees, ascending, a word of rows at a time.
+    fn visible_node_ids(&self, read: Read) -> Vec<NodeId> {
+        let mut ids = Vec::new();
+        for (index, group) in &self.nodes {
+            let base = index * ROWS_PER_GROUP;
+            group.versions.for_each_visible_row(read, |row| {
+                ids.push(NodeId::new(base + row as u64));
+            });
         }
         ids
     }
@@ -637,11 +657,7 @@ impl GraphStore for RowGroupStore {
     }
 
     fn node_ids(&self, view: ReadView) -> Result<Vec<NodeId>> {
-        let read = Read::view(view);
-        Ok(self
-            .inner
-            .read()
-            .node_rows(|_, group, row| group.version(row).visible(read)))
+        Ok(self.inner.read().visible_node_ids(Read::view(view)))
     }
 
     fn nodes_by_label(&self, label: &str, view: ReadView) -> Result<Vec<NodeId>> {
@@ -689,8 +705,10 @@ impl GraphStore for RowGroupStore {
         }
         let read = Read::view(view);
         Ok(inner
-            .node_rows(|_, group, row| group.version(row).visible(read))
-            .len())
+            .nodes
+            .values()
+            .map(|group| group.versions.count_visible(read))
+            .sum())
     }
 
     /// From the count the store keeps when it answers for `view`, by a scan

@@ -23,6 +23,7 @@ use grafeo_common::storage::catalog_record::{
     CatalogKey, CatalogRecord, IndexKeyRecord, IndexKindRecord, IndexNameRecord, IndexRecord,
 };
 #[cfg(feature = "wal")]
+#[cfg(query_language)]
 use grafeo_common::types::EpochId;
 use grafeo_common::utils::error::{Error, Result};
 
@@ -217,6 +218,7 @@ pub(crate) fn commit<S: RootStore>(
 ///
 /// As [`commit`]; a copied entity that does not apply poisons the database
 /// (the graph is new and empty, so it cannot conflict).
+#[cfg(query_language)]
 pub(crate) fn commit_copy<S: RootStore>(
     change: StandaloneChange,
     _held: &CommitsHeld<'_>,
@@ -262,6 +264,7 @@ pub(crate) fn commit_copy<S: RootStore>(
 ///
 /// As [`log`].
 #[cfg(feature = "wal")]
+#[cfg(query_language)]
 fn log_copy<S: RootStore>(
     wal: &grafeo_storage::wal::Wal,
     change: &StandaloneChange,

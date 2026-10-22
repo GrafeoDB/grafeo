@@ -2096,11 +2096,15 @@ impl GrafeoDB {
             transaction_manager: Arc::clone(&self.transaction_manager),
             query_cache: Arc::clone(&self.query_cache),
             catalog: Arc::clone(&self.catalog),
+            #[cfg(query_language)]
             factorized_execution: self.config.factorized_execution(),
+            #[cfg(query_language)]
             shuffle_unordered: self.config.shuffle_unordered(),
             graph_model: self.config.graph_model(),
+            #[cfg(query_language)]
             query_timeout: self.config.query_timeout(),
             max_property_size: self.config.max_property_size(),
+            #[cfg(query_language)]
             path_search_budget: self.config.path_search_budget(),
             #[cfg(feature = "spill")]
             buffer_manager: Some(Arc::clone(&self.buffer_manager)),
@@ -2108,6 +2112,7 @@ impl GrafeoDB {
             gc_interval: self.config.gc_interval(),
             read_only: self.read_only || force_read_only,
             identity: identity.clone(),
+            #[cfg(query_language)]
             projections: Arc::clone(&self.projections),
         };
 

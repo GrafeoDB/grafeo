@@ -7,7 +7,9 @@
 //! by its inherent methods of the same names (H4, #416, settles the store
 //! contract these become part of).
 
+#[cfg(query_language)]
 use grafeo_common::change::DataOp;
+#[cfg(any(query_language, feature = "wal", feature = "grafeo-file"))]
 use grafeo_common::types::EpochId;
 use grafeo_core::graph::apply::ChangeTarget;
 use grafeo_core::graph::load::LoadTarget;
@@ -89,6 +91,7 @@ pub(crate) trait RootStore: CatalogStore + LoadTarget + ChangeTarget {
     fn remove_text_index(&self, label: &str, property: &str) -> bool;
 
     /// Moves the store's epoch to `epoch` when it is later.
+    #[cfg(any(query_language, feature = "wal", feature = "grafeo-file"))]
     fn sync_epoch(&self, epoch: EpochId);
 
     /// A commit of the WAL of the first log format, replayed: the store
@@ -100,6 +103,7 @@ pub(crate) trait RootStore: CatalogStore + LoadTarget + ChangeTarget {
     /// The create ops of every node, then every edge, a reader at `epoch`
     /// sees, with their ids, labels and values at `epoch`: what a graph copy
     /// logs and applies.
+    #[cfg(query_language)]
     fn copied(&self, epoch: EpochId) -> Box<dyn Iterator<Item = DataOp> + '_>;
 
     /// Loads the sections of `image`, the image of the database file `file`
@@ -195,6 +199,7 @@ macro_rules! root_store_indexes {
             Self::remove_text_index(self, label, property)
         }
 
+        #[cfg(any(query_language, feature = "wal", feature = "grafeo-file"))]
         fn sync_epoch(&self, epoch: EpochId) {
             Self::sync_epoch(self, epoch);
         }
@@ -235,6 +240,7 @@ impl RootStore for RowGroupStore {
         self.new_epoch();
     }
 
+    #[cfg(query_language)]
     fn copied(&self, epoch: EpochId) -> Box<dyn Iterator<Item = DataOp> + '_> {
         let nodes = self.nodes_at(epoch).map(|node| DataOp::CreateNode {
             id: node.id,

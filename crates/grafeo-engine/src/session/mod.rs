@@ -16,8 +16,10 @@ mod rdf;
 use std::sync::Arc;
 use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering;
+#[cfg(query_language)]
 use std::time::Duration;
 
+#[cfg(any(query_language, feature = "metrics"))]
 use grafeo_common::clock::Instant;
 use grafeo_common::grafeo_debug_span;
 use grafeo_common::grafeo_info_span;
@@ -35,6 +37,7 @@ use crate::catalog::{Catalog, CatalogConstraintValidator};
 use crate::config::GraphModel;
 use crate::database::QueryResult;
 use crate::database::direct;
+#[cfg(query_language)]
 use crate::query::Executor;
 use crate::query::cache::QueryCache;
 use crate::transaction::TransactionManager;
@@ -70,11 +73,13 @@ pub(crate) fn graph_storage_key(schema: Option<&str>, graph: Option<&str>) -> Op
 /// drops, when it goes back to the one before (a statement run inside
 /// another, as a procedure body is, focuses on its own graph and then leaves
 /// the outer one's).
+#[cfg(query_language)]
 struct StatementFocus<'a> {
     session: &'a Session,
     previous: Option<String>,
 }
 
+#[cfg(query_language)]
 impl Drop for StatementFocus<'_> {
     fn drop(&mut self) {
         *self.session.statement_graph.lock() = self.previous.take();
@@ -95,6 +100,7 @@ enum AfterSchemaChange {
 /// Handles string literals (single- or double-quoted), integers, floats,
 /// decimals (spelled with the suffix `M`), booleans (`true`/`false`), and
 /// `NULL`.
+#[cfg(query_language)]
 fn parse_default_literal(text: &str) -> Value {
     if text.eq_ignore_ascii_case("null") {
         return Value::Null;
@@ -178,6 +184,7 @@ fn typed_properties(
 }
 
 /// How a session's queries are planned, from the database's configuration.
+#[cfg(query_language)]
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct PlanOptions {
     /// Whether to use factorized execution for multi-hop queries.
@@ -201,12 +208,16 @@ pub(crate) struct SessionConfig {
     pub transaction_manager: Arc<TransactionManager>,
     pub query_cache: Arc<QueryCache>,
     pub catalog: Arc<Catalog>,
+    #[cfg(query_language)]
     pub factorized_execution: bool,
+    #[cfg(query_language)]
     pub shuffle_unordered: bool,
     pub graph_model: GraphModel,
+    #[cfg(query_language)]
     pub query_timeout: Option<Duration>,
     pub max_property_size: Option<usize>,
     /// The bytes one path search may hold (`Config::path_search_budget`).
+    #[cfg(query_language)]
     pub path_search_budget: usize,
     /// Buffer manager for memory-aware query execution.
     #[cfg(feature = "spill")]
@@ -218,6 +229,7 @@ pub(crate) struct SessionConfig {
     /// The identity bound to this session (for permission checks).
     pub identity: crate::auth::Identity,
     /// Named graph projections shared with the database.
+    #[cfg(query_language)]
     pub projections: Arc<
         parking_lot::RwLock<
             std::collections::HashMap<String, Arc<grafeo_core::graph::GraphProjection>>,
@@ -266,10 +278,12 @@ pub struct Session {
     /// Whether the session is in auto-commit mode.
     auto_commit: bool,
     /// How the session's queries are planned.
+    #[cfg(query_language)]
     plan_options: PlanOptions,
     /// The graph data model this session operates on.
     graph_model: GraphModel,
     /// Maximum time a query may run before being cancelled.
+    #[cfg(query_language)]
     query_timeout: Option<Duration>,
     /// Maximum size in bytes for a single property value.
     max_property_size: Option<usize>,
@@ -337,6 +351,7 @@ pub struct Session {
     #[cfg(feature = "metrics")]
     tx_start_time: parking_lot::Mutex<Option<Instant>>,
     /// Named graph projections shared with the database.
+    #[cfg(query_language)]
     projections: Arc<
         parking_lot::RwLock<
             std::collections::HashMap<String, Arc<grafeo_core::graph::GraphProjection>>,
@@ -385,6 +400,7 @@ impl Session {
             db_read_only: cfg.read_only,
             identity: cfg.identity,
             auto_commit: true,
+            #[cfg(query_language)]
             plan_options: PlanOptions {
                 factorized_execution: cfg.factorized_execution,
                 shuffle_unordered: cfg.shuffle_unordered,
@@ -392,6 +408,7 @@ impl Session {
                 path_search_budget: cfg.path_search_budget,
             },
             graph_model: cfg.graph_model,
+            #[cfg(query_language)]
             query_timeout: cfg.query_timeout,
             max_property_size: cfg.max_property_size,
             #[cfg(feature = "spill")]
@@ -421,6 +438,7 @@ impl Session {
             metrics: None,
             #[cfg(feature = "metrics")]
             tx_start_time: parking_lot::Mutex::new(None),
+            #[cfg(query_language)]
             projections: cfg.projections,
         }
     }
@@ -539,6 +557,7 @@ impl Session {
             db_read_only: cfg.read_only,
             identity: cfg.identity,
             auto_commit: true,
+            #[cfg(query_language)]
             plan_options: PlanOptions {
                 factorized_execution: cfg.factorized_execution,
                 shuffle_unordered: cfg.shuffle_unordered,
@@ -546,6 +565,7 @@ impl Session {
                 path_search_budget: cfg.path_search_budget,
             },
             graph_model: cfg.graph_model,
+            #[cfg(query_language)]
             query_timeout: cfg.query_timeout,
             max_property_size: cfg.max_property_size,
             #[cfg(feature = "spill")]
@@ -575,6 +595,7 @@ impl Session {
             metrics: None,
             #[cfg(feature = "metrics")]
             tx_start_time: parking_lot::Mutex::new(None),
+            #[cfg(query_language)]
             projections: cfg.projections,
         })
     }
@@ -630,6 +651,7 @@ impl Session {
     ///
     /// Per ISO/IEC 39075 Section 17.2, graphs resolve relative to the current schema.
     /// Uses `/` as separator since it is invalid in GQL identifiers.
+    #[cfg(query_language)]
     fn effective_graph_key(&self, graph_name: &str) -> String {
         let schema = self.current_schema.lock().clone();
         match schema {
@@ -641,6 +663,7 @@ impl Session {
     /// Computes the effective storage key for a type, accounting for schema context.
     ///
     /// Mirrors `effective_graph_key()`: types resolve relative to the current schema.
+    #[cfg(query_language)]
     fn effective_type_key(&self, type_name: &str) -> String {
         let schema = self.current_schema.lock().clone();
         match schema {
@@ -702,6 +725,7 @@ impl Session {
     ///
     /// An invalid reference when no graph has that name, and a permission
     /// error when the user may not read it.
+    #[cfg(query_language)]
     fn focus_statement(&self, graph: Option<&str>) -> Result<Option<StatementFocus<'_>>> {
         use grafeo_common::utils::error::{Error, QueryError, QueryErrorKind};
 
@@ -766,6 +790,7 @@ impl Session {
     /// Returns the writable store for the active graph, if available.
     ///
     /// Returns `None` for read-only databases.
+    #[cfg(query_language)]
     fn active_write_store(&self) -> Option<Arc<dyn GraphStoreMut>> {
         self.write_store_for_key(self.active_graph_storage_key().as_deref())
     }
@@ -887,6 +912,7 @@ impl Session {
     /// How this session compares a zoned datetime or time with a local one:
     /// openCypher keeps the types apart, GQL and SQL/PGQ read the local one
     /// at the session time zone (UTC without one).
+    #[cfg(query_language)]
     fn temporal_comparison(&self, open_cypher: bool) -> grafeo_common::types::TemporalComparison {
         use grafeo_common::types::TemporalComparison;
         if open_cypher {
@@ -993,6 +1019,7 @@ impl Session {
     }
 
     /// Checks that the session's graph model supports LPG operations.
+    #[cfg(query_language)]
     fn require_lpg(&self, language: &str) -> Result<()> {
         if self.graph_model == GraphModel::Rdf {
             return Err(grafeo_common::utils::error::Error::from(
@@ -2719,6 +2746,7 @@ impl Session {
     }
 
     /// Returns a table of all indexes from the catalog.
+    #[cfg(query_language)]
     fn execute_show_indexes(&self) -> Result<QueryResult> {
         let indexes = self.catalog.all_indexes();
         let columns = vec![
@@ -2755,6 +2783,7 @@ impl Session {
     }
 
     /// Returns a table of all constraints (currently metadata-only).
+    #[cfg(query_language)]
     fn execute_show_constraints(&self) -> Result<QueryResult> {
         let rows = self
             .catalog
@@ -2783,6 +2812,7 @@ impl Session {
     }
 
     /// Returns a table of all registered node types in the current schema.
+    #[cfg(query_language)]
     fn execute_show_node_types(&self) -> Result<QueryResult> {
         let columns = vec![
             "name".to_string(),
@@ -2838,6 +2868,7 @@ impl Session {
     }
 
     /// Returns a table of all registered edge types in the current schema.
+    #[cfg(query_language)]
     fn execute_show_edge_types(&self) -> Result<QueryResult> {
         let columns = vec![
             "name".to_string(),
@@ -2892,6 +2923,7 @@ impl Session {
     }
 
     /// Returns a table of all registered graph types in the current schema.
+    #[cfg(query_language)]
     fn execute_show_graph_types(&self) -> Result<QueryResult> {
         let columns = vec![
             "name".to_string(),
@@ -2949,6 +2981,7 @@ impl Session {
     /// When a session schema is set, only graphs belonging to that schema are
     /// shown (their compound prefix is stripped). When no schema is set, graphs
     /// without a schema prefix are shown (the default schema).
+    #[cfg(query_language)]
     fn execute_show_graphs(&self) -> Result<QueryResult> {
         let schema = self.current_schema.lock().clone();
         let all_names = self.root_store().graph_names();
@@ -2976,6 +3009,7 @@ impl Session {
     }
 
     /// Returns the list of all schema namespaces.
+    #[cfg(query_language)]
     fn execute_show_schemas(&self) -> Result<QueryResult> {
         let mut names = self.catalog.schema_names();
         names.sort();
@@ -2989,6 +3023,7 @@ impl Session {
     }
 
     /// Returns detailed info for a specific graph type.
+    #[cfg(query_language)]
     fn execute_show_graph_type(&self, name: &str) -> Result<QueryResult> {
         use grafeo_common::utils::error::{Error, QueryError, QueryErrorKind};
 
@@ -3020,6 +3055,7 @@ impl Session {
     }
 
     /// Returns the graph type bound to the current graph.
+    #[cfg(query_language)]
     fn execute_show_current_graph_type(&self) -> Result<QueryResult> {
         let graph_name = self
             .current_graph()
@@ -5059,6 +5095,7 @@ impl Session {
     /// Runs one statement and gives its result the time of the whole call
     /// (#461): parsing, planning, execution and, for a statement outside a
     /// transaction, its commit.
+    #[cfg(query_language)]
     fn timed(&self, run: impl FnOnce() -> Result<QueryResult>) -> Result<QueryResult> {
         let start = Instant::now();
         let mut result = run();
@@ -5073,6 +5110,7 @@ impl Session {
     /// plan does not show. Such a statement is checked and runs as a write
     /// (in a transaction, see [`with_auto_commit`](Self::with_auto_commit)),
     /// so its writes are recorded, logged and undone like any other.
+    #[cfg(query_language)]
     fn plan_writes(&self, root: &crate::query::plan::LogicalOperator) -> bool {
         root.has_mutations() || self.calls_writing_procedure(root, 0)
     }
@@ -5108,6 +5146,7 @@ impl Session {
     /// # Stability: Experimental
     ///
     /// New in 0.6.0.
+    #[cfg(query_language)]
     pub fn statement_writes(&self, query: &str, language: &str) -> Result<bool> {
         let plan: crate::query::plan::LogicalPlan = match language {
             #[cfg(feature = "gql")]
@@ -5181,6 +5220,7 @@ impl Session {
     /// body writes, directly or through the procedures it calls (up to a
     /// depth that no procedure that runs reaches).
     #[cfg(all(feature = "algos", feature = "gql"))]
+    #[cfg(query_language)]
     fn calls_writing_procedure(&self, op: &crate::query::plan::LogicalOperator, depth: u8) -> bool {
         use crate::query::plan::LogicalOperator;
 
@@ -5207,6 +5247,7 @@ impl Session {
 
     /// Without stored procedures, no call writes.
     #[cfg(not(all(feature = "algos", feature = "gql")))]
+    #[cfg(query_language)]
     fn calls_writing_procedure(
         &self,
         _op: &crate::query::plan::LogicalOperator,
@@ -5398,11 +5439,13 @@ impl Session {
 
     /// Computes the wall-clock deadline for query execution.
     #[must_use]
+    #[cfg(query_language)]
     fn query_deadline(&self) -> Option<Instant> {
         self.query_timeout.map(|d| Instant::now() + d)
     }
 
     /// Creates an executor with deadline and timeout duration configured.
+    #[cfg(query_language)]
     fn make_executor(&self, columns: Vec<String>) -> Executor {
         Executor::with_columns(columns)
             .with_deadline(self.query_deadline())
@@ -5443,6 +5486,7 @@ impl Session {
     /// Called after query execution to update counters, latency histogram,
     /// and per-language tracking.
     #[cfg(feature = "metrics")]
+    #[cfg(query_language)]
     fn record_query_metrics(
         &self,
         language: &str,
@@ -5548,6 +5592,7 @@ impl Session {
     ///
     /// The `store` parameter is the graph store to plan against (use
     /// `self.active_store()` for graph-aware execution).
+    #[cfg(query_language)]
     fn create_planner_for_store(
         &self,
         store: Arc<dyn GraphStore>,
@@ -5571,6 +5616,7 @@ impl Session {
     ///
     /// Fails when the open transaction wrote the active graph through
     /// another store: the graph was dropped and created again since.
+    #[cfg(query_language)]
     fn create_planner_for_store_with_read_only(
         &self,
         store: Arc<dyn GraphStore>,
@@ -5731,6 +5777,7 @@ impl Session {
     }
 
     /// Builds a `Value::Map` for the `info()` introspection function.
+    #[cfg(query_language)]
     fn build_info_value(store: &dyn GraphStore, view: ReadView) -> Result<Value> {
         use grafeo_common::types::PropertyKey;
         use std::collections::BTreeMap;
@@ -5753,6 +5800,7 @@ impl Session {
     }
 
     /// Builds a `Value::Map` for the `schema()` introspection function.
+    #[cfg(query_language)]
     fn build_schema_value(store: &dyn GraphStore) -> Result<Value> {
         use grafeo_common::types::PropertyKey;
         use std::collections::BTreeMap;

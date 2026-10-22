@@ -914,6 +914,7 @@ impl Config {
     /// [`memory_limit`](Self::memory_limit) when it is set, else 256 MiB. A
     /// search that would hold more fails with an error instead of growing.
     #[must_use]
+    #[cfg(query_language)]
     pub(crate) fn path_search_budget(&self) -> usize {
         self.memory_limit.map_or(
             grafeo_core::execution::operators::DEFAULT_PATH_SEARCH_BUDGET,

@@ -58,6 +58,7 @@ impl Session {
             db_read_only: cfg.read_only,
             identity: cfg.identity,
             auto_commit: true,
+            #[cfg(query_language)]
             plan_options: super::PlanOptions {
                 factorized_execution: cfg.factorized_execution,
                 shuffle_unordered: cfg.shuffle_unordered,
@@ -65,6 +66,7 @@ impl Session {
                 path_search_budget: cfg.path_search_budget,
             },
             graph_model: cfg.graph_model,
+            #[cfg(query_language)]
             query_timeout: cfg.query_timeout,
             max_property_size: cfg.max_property_size,
             #[cfg(feature = "spill")]
@@ -94,6 +96,7 @@ impl Session {
             metrics: None,
             #[cfg(feature = "metrics")]
             tx_start_time: parking_lot::Mutex::new(None),
+            #[cfg(query_language)]
             projections: cfg.projections,
         }
     }

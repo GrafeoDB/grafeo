@@ -11,17 +11,34 @@ use crate::output;
 use crate::{ImportCommands, OutputFormat};
 
 /// Run an import subcommand.
-pub fn run(cmd: ImportCommands, _format: OutputFormat, quiet: bool) -> Result<()> {
-    match cmd {
+pub fn run(cmd: ImportCommands, format: OutputFormat, quiet: bool) -> Result<()> {
+    let fmt: output::Format = format.into();
+    let (file, path, label, count) = match cmd {
         ImportCommands::Csv {
             file,
             path,
             headers,
             separator,
             label,
-        } => import_csv(&file, &path, headers, separator.as_deref(), &label, quiet),
-        ImportCommands::Jsonl { file, path, label } => import_jsonl(&file, &path, &label, quiet),
-    }
+        } => {
+            let count = import_csv(&file, &path, headers, separator.as_deref(), &label, quiet)?;
+            (file, path, label, count)
+        }
+        ImportCommands::Jsonl { file, path, label } => {
+            let count = import_jsonl(&file, &path, &label, quiet)?;
+            (file, path, label, count)
+        }
+    };
+    output::print_record(
+        &[
+            ("file", file.display().to_string().into()),
+            ("database", path.display().to_string().into()),
+            ("label", label.into()),
+            ("nodes", count.into()),
+        ],
+        fmt,
+    );
+    Ok(())
 }
 
 /// Import each row of a CSV file as a node.
@@ -32,7 +49,7 @@ fn import_csv(
     separator: Option<&str>,
     label: &str,
     quiet: bool,
-) -> Result<()> {
+) -> Result<u64> {
     let delimiter = separator.map(parse_separator).transpose()?;
     import(
         file,
@@ -44,7 +61,7 @@ fn import_csv(
 }
 
 /// Import each line of a JSON Lines file as a node.
-fn import_jsonl(file: &Path, db_path: &Path, label: &str, quiet: bool) -> Result<()> {
+fn import_jsonl(file: &Path, db_path: &Path, label: &str, quiet: bool) -> Result<u64> {
     import(file, db_path, label, quiet, Format::Jsonl)
 }
 
@@ -58,7 +75,8 @@ enum Format {
 }
 
 #[cfg(feature = "gql")]
-fn import(file: &Path, db_path: &Path, label: &str, quiet: bool, format: Format) -> Result<()> {
+/// Imports `file` as nodes with `label`: the number of nodes.
+fn import(file: &Path, db_path: &Path, label: &str, quiet: bool, format: Format) -> Result<u64> {
     use grafeo_engine::import::{ImportFormat, import_nodes};
 
     let format = match format {
@@ -76,7 +94,7 @@ fn import(file: &Path, db_path: &Path, label: &str, quiet: bool, format: Format)
         ),
         quiet,
     );
-    Ok(())
+    Ok(count)
 }
 
 #[cfg(not(feature = "gql"))]
@@ -86,7 +104,7 @@ fn import(
     _label: &str,
     _quiet: bool,
     _format: Format,
-) -> Result<()> {
+) -> Result<u64> {
     anyhow::bail!("import needs a build with the 'gql' feature")
 }
 

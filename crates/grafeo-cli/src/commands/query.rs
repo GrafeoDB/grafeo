@@ -67,19 +67,8 @@ pub fn run(opts: QueryRunOptions<'_>) -> Result<()> {
 
     let fmt: Format = format.into();
 
-    // Format rows as strings, applying max_width truncation
-    let headers = result.columns.clone();
-    let rows: Vec<Vec<String>> = result
-        .rows()
-        .iter()
-        .map(|row| {
-            row.iter()
-                .map(|v| truncate_value(format_value(v), max_width))
-                .collect()
-        })
-        .collect();
-
-    output::print_result_table(&headers, &rows, fmt, quiet);
+    let rows = result.rows();
+    output::print_value_rows(&result.columns, rows, fmt, max_width);
 
     // Print row count + optional timing footer
     if !quiet && fmt == Format::Table {
@@ -90,7 +79,7 @@ pub fn run(opts: QueryRunOptions<'_>) -> Result<()> {
         } else {
             String::new()
         };
-        println!(
+        eprintln!(
             "{} row{}{}",
             rows.len(),
             if rows.len() == 1 { "" } else { "s" },
@@ -236,80 +225,9 @@ fn parse_value(s: &str) -> Value {
     Value::from(s)
 }
 
-/// Truncate a string to `max_width` characters, appending `...` if truncated.
-fn truncate_value(s: String, max_width: Option<usize>) -> String {
-    match max_width {
-        Some(w) if s.len() > w && w > 3 => {
-            let mut truncated = s;
-            truncated.truncate(w - 3);
-            truncated.push_str("...");
-            truncated
-        }
-        _ => s,
-    }
-}
-
-/// Format a Value for display.
-pub fn format_value(v: &Value) -> String {
-    match v {
-        Value::Null => "null".to_string(),
-        Value::Bool(b) => b.to_string(),
-        Value::Int64(i) => i.to_string(),
-        Value::Float64(f) => format!("{f}"),
-        Value::String(s) => format!("\"{s}\""),
-        Value::List(items) => {
-            let inner: Vec<String> = items.iter().map(format_value).collect();
-            format!("[{}]", inner.join(", "))
-        }
-        Value::Map(entries) => {
-            let inner: Vec<String> = entries
-                .iter()
-                .map(|(k, v)| format!("{}: {}", k, format_value(v)))
-                .collect();
-            format!("{{{}}}", inner.join(", "))
-        }
-        Value::Bytes(b) => format!("<{} bytes>", b.len()),
-        other => format!("{other:?}"),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    // --- truncate_value ---
-
-    #[test]
-    fn test_truncate_none_returns_original() {
-        assert_eq!(truncate_value("hello world".into(), None), "hello world");
-    }
-
-    #[test]
-    fn test_truncate_short_string_unchanged() {
-        assert_eq!(truncate_value("hi".into(), Some(10)), "hi");
-    }
-
-    #[test]
-    fn test_truncate_exact_width_unchanged() {
-        assert_eq!(truncate_value("12345".into(), Some(5)), "12345");
-    }
-
-    #[test]
-    fn test_truncate_long_string() {
-        assert_eq!(truncate_value("hello world".into(), Some(8)), "hello...");
-    }
-
-    #[test]
-    fn test_truncate_width_too_small_returns_original() {
-        // When max_width <= 3, can't fit "...", so return original
-        assert_eq!(truncate_value("hello".into(), Some(3)), "hello");
-        assert_eq!(truncate_value("hello".into(), Some(2)), "hello");
-    }
-
-    #[test]
-    fn test_truncate_width_4() {
-        assert_eq!(truncate_value("hello".into(), Some(4)), "h...");
-    }
 
     // --- parse_value ---
 
@@ -377,48 +295,5 @@ mod tests {
             Some(Value::String(s)) => assert_eq!(s.as_str(), "a=b"),
             other => panic!("expected String(\"a=b\"), got {other:?}"),
         }
-    }
-
-    // --- format_value ---
-
-    #[test]
-    fn test_format_value_null() {
-        assert_eq!(format_value(&Value::Null), "null");
-    }
-
-    #[test]
-    fn test_format_value_bool() {
-        assert_eq!(format_value(&Value::Bool(true)), "true");
-        assert_eq!(format_value(&Value::Bool(false)), "false");
-    }
-
-    #[test]
-    fn test_format_value_int() {
-        assert_eq!(format_value(&Value::Int64(42)), "42");
-        assert_eq!(format_value(&Value::Int64(-1)), "-1");
-    }
-
-    #[test]
-    fn test_format_value_float() {
-        assert_eq!(format_value(&Value::Float64(1.5)), "1.5");
-    }
-
-    #[test]
-    fn test_format_value_string() {
-        assert_eq!(format_value(&Value::from("hello")), "\"hello\"");
-    }
-
-    #[test]
-    fn test_format_value_list() {
-        let list = Value::List(vec![Value::Int64(1), Value::Int64(2), Value::Int64(3)].into());
-        assert_eq!(format_value(&list), "[1, 2, 3]");
-    }
-
-    #[test]
-    fn test_format_value_bytes() {
-        assert_eq!(
-            format_value(&Value::Bytes(vec![0, 1, 2, 3, 4].into())),
-            "<5 bytes>"
-        );
     }
 }

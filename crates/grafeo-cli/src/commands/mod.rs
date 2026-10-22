@@ -105,13 +105,10 @@ mod tests {
             assert_eq!(snapshot(dir), before, "{name} changed the database files");
         };
         let path_buf = path.to_path_buf();
-        run("info", super::info::run(path, OutputFormat::Json, true));
-        run("stats", super::stats::run(path, OutputFormat::Json, true));
-        run("schema", super::schema::run(path, OutputFormat::Json, true));
-        run(
-            "validate",
-            super::validate::run(path, OutputFormat::Json, true),
-        );
+        run("info", super::info::run(path, OutputFormat::Json));
+        run("stats", super::stats::run(path, OutputFormat::Json));
+        run("schema", super::schema::run(path, OutputFormat::Json));
+        run("validate", super::validate::run(path, OutputFormat::Json));
         run(
             "index list",
             super::index::run(

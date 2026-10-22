@@ -269,12 +269,16 @@ grafeo info ./mydb --format json
 grafeo info ./mydb --format csv
 ```
 
+Standard output holds only results, in the chosen format: progress and status lines (`Creating full backup of ...`, the row count of a query) go to standard error, and `--quiet` leaves them out. So `--format json` prints JSON for every command; a command that acts, such as `backup full`, `import csv` or `data dump`, prints a record of what it did (`{"kind": "full", "file": "backup_full_0000.grafeo", "start_epoch": 0, "end_epoch": 2, "size_bytes": 45056}`).
+
+In JSON a query result is an array with an object per row, its keys in the order of the columns. Values keep their JSON type: numbers (a decimal that a number would round stays text), `true` and `false`, `null`, strings, arrays for lists and vectors, objects for maps; dates, times and durations are their text (`"1988-03-19"`). In CSV and tables a value is its text, a string without quotes; inside a list or a map strings are quoted, as in `["canals", "bridges"]`.
+
 ## Global Options
 
 | Option | Description |
 |--------|-------------|
 | `--format <auto\|table\|json\|csv>` | Output format (default: `auto`) |
-| `--quiet`, `-q` | Suppress progress messages |
+| `--quiet`, `-q` | Suppress progress and status messages; results still print |
 | `--verbose`, `-v` | Enable debug logging |
 | `--no-color` | Disable colored output (also respects `NO_COLOR` env var) |
 | `--color` | Force colored output even when piped |

@@ -12,11 +12,12 @@ use grafeo_common::utils::hash::FxHashMap;
 use grafeo_engine::{GrafeoDB, Session};
 
 use self::format::Record;
-use crate::output;
+use crate::output::{self, Format};
 use crate::{DataCommands, OutputFormat};
 
 /// Run data commands.
-pub fn run(cmd: DataCommands, _format: OutputFormat, quiet: bool) -> Result<()> {
+pub fn run(cmd: DataCommands, format: OutputFormat, quiet: bool) -> Result<()> {
+    let fmt: Format = format.into();
     match cmd {
         DataCommands::Dump {
             path,
@@ -25,7 +26,7 @@ pub fn run(cmd: DataCommands, _format: OutputFormat, quiet: bool) -> Result<()> 
         } => {
             let format_name = export_format.as_deref().unwrap_or("json");
 
-            match format_name {
+            let (nodes, edges) = match format_name {
                 "json" | "jsonl" => dump_jsonl(&path, &out, quiet)?,
                 "arrow" | "arrow-ipc" | "ipc" => dump_arrow(&path, &out, quiet)?,
                 "gexf" => dump_gexf(&path, &out, quiet)?,
@@ -36,9 +37,27 @@ pub fn run(cmd: DataCommands, _format: OutputFormat, quiet: bool) -> Result<()> 
                          Supported formats: json, arrow, gexf, graphml"
                     );
                 }
-            }
+            };
+            output::print_record(
+                &[
+                    ("output", out.display().to_string().into()),
+                    ("nodes", nodes.into()),
+                    ("edges", edges.into()),
+                ],
+                fmt,
+            );
         }
-        DataCommands::Load { input, path } => load_jsonl(&input, &path, quiet)?,
+        DataCommands::Load { input, path } => {
+            let (nodes, edges) = load_jsonl(&input, &path, quiet)?;
+            output::print_record(
+                &[
+                    ("database", path.display().to_string().into()),
+                    ("nodes", nodes.into()),
+                    ("edges", edges.into()),
+                ],
+                fmt,
+            );
+        }
     }
 
     Ok(())
@@ -61,7 +80,8 @@ pub fn run(cmd: DataCommands, _format: OutputFormat, quiet: bool) -> Result<()> 
 /// commits, its transaction also holds its own bookkeeping and the log
 /// records of everything it wrote, which is about as much again as the
 /// values it loads (measured in `load_holds_the_file_one_line_at_a_time`).
-fn load_jsonl(input: &Path, path: &Path, quiet: bool) -> Result<()> {
+/// Loads `input` into the database at `path`: the nodes and edges added.
+fn load_jsonl(input: &Path, path: &Path, quiet: bool) -> Result<(usize, usize)> {
     let checked = check_file(input)?;
     let db = if path.exists() {
         super::open_existing(path)?
@@ -77,7 +97,7 @@ fn load_jsonl(input: &Path, path: &Path, quiet: bool) -> Result<()> {
         ),
         quiet,
     );
-    Ok(())
+    Ok((nodes, edges))
 }
 
 /// What [`check_file`] learned about a file.
@@ -313,7 +333,11 @@ fn for_each_record(input: &Path, mut each: impl FnMut(u64, Record) -> Result<()>
     }
 }
 
-fn dump_jsonl(path: &std::path::Path, out: &std::path::Path, quiet: bool) -> Result<()> {
+fn dump_jsonl(
+    path: &std::path::Path,
+    out: &std::path::Path,
+    quiet: bool,
+) -> Result<(usize, usize)> {
     let db = super::open_existing_read_only(path)?;
     let file = std::fs::File::create(out)
         .with_context(|| format!("Failed to create output file: {}", out.display()))?;
@@ -362,7 +386,7 @@ fn dump_jsonl(path: &std::path::Path, out: &std::path::Path, quiet: bool) -> Res
         ),
         quiet,
     );
-    Ok(())
+    Ok((node_count, edge_count))
 }
 
 /// The structural columns of the Arrow dump's nodes, before their properties.
@@ -387,7 +411,11 @@ fn property_columns<'a>(
 }
 
 #[cfg(feature = "arrow-export")]
-fn dump_arrow(path: &std::path::Path, out: &std::path::Path, quiet: bool) -> Result<()> {
+fn dump_arrow(
+    path: &std::path::Path,
+    out: &std::path::Path,
+    quiet: bool,
+) -> Result<(usize, usize)> {
     use grafeo_common::LogicalType;
     use grafeo_common::types::Value;
 
@@ -520,18 +548,22 @@ fn dump_arrow(path: &std::path::Path, out: &std::path::Path, quiet: bool) -> Res
         ),
         quiet,
     );
-    Ok(())
+    Ok((node_count, edge_count))
 }
 
 #[cfg(not(feature = "arrow-export"))]
-fn dump_arrow(_path: &std::path::Path, _out: &std::path::Path, _quiet: bool) -> Result<()> {
+fn dump_arrow(
+    _path: &std::path::Path,
+    _out: &std::path::Path,
+    _quiet: bool,
+) -> Result<(usize, usize)> {
     anyhow::bail!(
         "Arrow export is not enabled.\n\
          Rebuild with --features arrow-export to enable Arrow IPC export."
     )
 }
 
-fn dump_gexf(path: &std::path::Path, out: &std::path::Path, quiet: bool) -> Result<()> {
+fn dump_gexf(path: &std::path::Path, out: &std::path::Path, quiet: bool) -> Result<(usize, usize)> {
     let db = super::open_existing_read_only(path)?;
     let nodes: Vec<_> = db.iter_nodes().collect();
     let edges: Vec<_> = db.iter_edges().collect();
@@ -553,10 +585,14 @@ fn dump_gexf(path: &std::path::Path, out: &std::path::Path, quiet: bool) -> Resu
         ),
         quiet,
     );
-    Ok(())
+    Ok((nodes.len(), edges.len()))
 }
 
-fn dump_graphml(path: &std::path::Path, out: &std::path::Path, quiet: bool) -> Result<()> {
+fn dump_graphml(
+    path: &std::path::Path,
+    out: &std::path::Path,
+    quiet: bool,
+) -> Result<(usize, usize)> {
     let db = super::open_existing_read_only(path)?;
     let nodes: Vec<_> = db.iter_nodes().collect();
     let edges: Vec<_> = db.iter_edges().collect();
@@ -578,7 +614,7 @@ fn dump_graphml(path: &std::path::Path, out: &std::path::Path, quiet: bool) -> R
         ),
         quiet,
     );
-    Ok(())
+    Ok((nodes.len(), edges.len()))
 }
 
 #[cfg(test)]

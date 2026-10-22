@@ -10,7 +10,6 @@ use grafeo_engine::GrafeoDB;
 use rustyline::DefaultEditor;
 use rustyline::error::ReadlineError;
 
-use crate::commands::query::format_value;
 use crate::output::{self, Format, format_duration_ms};
 use crate::{OutputFormat, QueryLanguage};
 
@@ -171,14 +170,10 @@ pub fn run(
 
         match result {
             Ok(qr) => {
-                let headers = qr.columns.clone();
-                let rows: Vec<Vec<String>> = qr
-                    .rows()
-                    .iter()
-                    .map(|row| row.iter().map(format_value).collect())
-                    .collect();
-
-                output::print_result_table(&headers, &rows, settings.format, settings.quiet);
+                let rows = qr.rows();
+                if !settings.quiet {
+                    output::print_value_rows(&qr.columns, rows, settings.format, None);
+                }
 
                 if !settings.quiet {
                     let timing_str = if settings.show_timing {

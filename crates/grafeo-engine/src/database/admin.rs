@@ -369,7 +369,8 @@ impl super::GrafeoDB {
                     .get_property_key_name(def.property_key)
                     .unwrap_or_else(|| "?".into());
                 crate::admin::IndexInfo {
-                    name: format!("idx_{}_{}", label_name, prop_name),
+                    // The name `CREATE INDEX` gave it, as `SHOW INDEXES` lists it.
+                    name: def.name,
                     index_type: format!("{:?}", def.index_type),
                     target: format!("{}:{}", label_name, prop_name),
                     unique: false,

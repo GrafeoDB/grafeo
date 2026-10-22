@@ -25,24 +25,20 @@ pub fn run(cmd: IndexCommands, format: OutputFormat, quiet: bool) -> Result<()> 
             let fmt: Format = format.into();
             match fmt {
                 Format::Json => {
-                    if !quiet {
-                        let output: Vec<IndexOutput> = indexes
-                            .iter()
-                            .map(|idx| IndexOutput {
-                                name: idx.name.clone(),
-                                index_type: idx.index_type.clone(),
-                                target: idx.target.clone(),
-                                unique: idx.unique,
-                            })
-                            .collect();
-                        println!("{}", serde_json::to_string_pretty(&output)?);
-                    }
+                    let output: Vec<IndexOutput> = indexes
+                        .iter()
+                        .map(|idx| IndexOutput {
+                            name: idx.name.clone(),
+                            index_type: idx.index_type.clone(),
+                            target: idx.target.clone(),
+                            unique: idx.unique,
+                        })
+                        .collect();
+                    println!("{}", serde_json::to_string_pretty(&output)?);
                 }
                 Format::Table | Format::Csv => {
                     if indexes.is_empty() {
-                        if !quiet {
-                            println!("No indexes.");
-                        }
+                        println!("No indexes.");
                     } else {
                         let headers = vec![
                             "Name".to_string(),
@@ -61,9 +57,9 @@ pub fn run(cmd: IndexCommands, format: OutputFormat, quiet: bool) -> Result<()> 
                                 ]
                             })
                             .collect();
-                        output::print_result_table(&headers, &rows, fmt, quiet);
+                        output::print_result_table(&headers, &rows, fmt);
                         if !quiet {
-                            println!(
+                            eprintln!(
                                 "{} index{}",
                                 indexes.len(),
                                 if indexes.len() == 1 { "" } else { "es" }
@@ -83,7 +79,7 @@ pub fn run(cmd: IndexCommands, format: OutputFormat, quiet: bool) -> Result<()> 
                 ("Labels Indexed", stats.label_count.to_string()),
                 ("Edge Types Indexed", stats.edge_type_count.to_string()),
             ];
-            output::print_key_value_table(&items, fmt, quiet);
+            output::print_key_value_table(&items, fmt);
         }
     }
 

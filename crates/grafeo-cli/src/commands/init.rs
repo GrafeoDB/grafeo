@@ -31,14 +31,12 @@ pub fn run(path: &Path, mode: GraphMode, format: OutputFormat, quiet: bool) -> R
     let fmt: Format = format.into();
     match fmt {
         Format::Json => {
-            if !quiet {
-                let output = serde_json::json!({
-                    "path": path.display().to_string(),
-                    "mode": format!("{:?}", info.mode),
-                    "wal_enabled": info.wal_enabled,
-                });
-                println!("{}", serde_json::to_string_pretty(&output)?);
-            }
+            let output = serde_json::json!({
+                "path": path.display().to_string(),
+                "mode": format!("{:?}", info.mode),
+                "wal_enabled": info.wal_enabled,
+            });
+            println!("{}", serde_json::to_string_pretty(&output)?);
         }
         Format::Table | Format::Csv => {
             output::success(

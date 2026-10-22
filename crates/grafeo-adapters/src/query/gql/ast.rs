@@ -22,6 +22,17 @@ pub enum Statement {
         /// The right query.
         right: Box<Statement>,
     },
+    /// A statement focused on a graph, `USE g <statement>` (ISO/IEC 39075
+    /// use graph clause): it reads and writes `graph` in place of the
+    /// session's current graph, which it does not change.
+    Use {
+        /// The graph's name, or `None` for `CURRENT_GRAPH` (or
+        /// `CURRENT_PROPERTY_GRAPH`): the session's current graph.
+        graph: Option<String>,
+        /// The focused statement: a query, a data-modifying statement or a
+        /// procedure call.
+        statement: Box<Statement>,
+    },
     /// A session or transaction command.
     SessionCommand(SessionCommand),
     /// EXPLAIN: returns the query plan without executing.
@@ -268,6 +279,10 @@ pub enum QueryClause {
     /// An `<order by and page statement>` before the result statement: orders
     /// and cuts the rows the clauses after it read.
     OrderByAndPage(OrderByAndPage),
+    /// A `USE g` before a later part of a linear query (ISO/IEC 39075
+    /// focused linear query statement part): the graph the clauses after it
+    /// read, `None` for `CURRENT_GRAPH`.
+    Use(Option<String>),
 }
 
 /// An ISO GQL `<order by and page statement>`: `ORDER BY ...`, `OFFSET n` (or

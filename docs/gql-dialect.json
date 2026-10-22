@@ -7,11 +7,11 @@
     "homepage": "https://grafeo.dev",
     "repository": "https://github.com/GrafeoDB/grafeo"
   },
-  "generated": "2026-10-19T09:09:44Z",
+  "generated": "2026-10-22T06:04:02Z",
   "summary": {
     "total_features": 228,
-    "supported": 129,
-    "partial": 6,
+    "supported": 128,
+    "partial": 7,
     "not_supported": 90,
     "inactive": 3,
     "tested": 111
@@ -527,7 +527,7 @@
       "category": "Catalog & Graph Features",
       "status": "supported",
       "tested": true,
-      "test_count": 22
+      "test_count": 46
     },
     {
       "id": "GC05",
@@ -535,7 +535,7 @@
       "category": "Catalog & Graph Features",
       "status": "supported",
       "tested": true,
-      "test_count": 22
+      "test_count": 46
     },
     {
       "id": "GD01",
@@ -1093,9 +1093,9 @@
       "id": "GQ01",
       "name": "USE graph clause",
       "category": "Query Composition Features",
-      "status": "supported",
+      "status": "partial",
       "tested": true,
-      "test_count": 22
+      "test_count": 46
     },
     {
       "id": "GQ02",
@@ -1559,7 +1559,7 @@
       "category": "Value Type Features",
       "status": "supported",
       "tested": true,
-      "test_count": 1
+      "test_count": 3
     },
     {
       "id": "GV18",

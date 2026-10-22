@@ -85,6 +85,7 @@ impl Session {
             #[cfg(feature = "cdc")]
             records_cdc: false,
             current_graph: parking_lot::Mutex::new(None),
+            statement_graph: parking_lot::Mutex::new(None),
             current_schema: parking_lot::Mutex::new(None),
             home_schema: None,
             home_graph: None,

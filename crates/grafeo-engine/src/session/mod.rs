@@ -73,6 +73,22 @@ pub(crate) fn graph_storage_key(schema: Option<&str>, graph: Option<&str>) -> Op
     }
 }
 
+/// A statement focused on a graph by its `USE` (see
+/// [`Session::focus_statement`]): the session's statement graph until this
+/// drops, when it goes back to the one before (a statement run inside
+/// another, as a procedure body is, focuses on its own graph and then leaves
+/// the outer one's).
+struct StatementFocus<'a> {
+    session: &'a Session,
+    previous: Option<String>,
+}
+
+impl Drop for StatementFocus<'_> {
+    fn drop(&mut self) {
+        *self.session.statement_graph.lock() = self.previous.take();
+    }
+}
+
 /// What a session does once the change of a schema statement is applied.
 #[cfg(all(feature = "lpg", feature = "gql"))]
 enum AfterSchemaChange {
@@ -287,6 +303,10 @@ pub struct Session {
     records_cdc: bool,
     /// Current graph name (for multi-graph USE GRAPH support). None = default graph.
     current_graph: parking_lot::Mutex<Option<String>>,
+    /// The graph the statement being run is focused on (`USE g <statement>`),
+    /// which it reads and writes in place of `current_graph` (see
+    /// [`focus_statement`](Self::focus_statement)). None outside one.
+    statement_graph: parking_lot::Mutex<Option<String>>,
     /// Current schema name (ISO/IEC 39075 Section 4.7.3: independent from session graph).
     /// None = "not set" (uses default schema).
     current_schema: parking_lot::Mutex<Option<String>>,
@@ -398,6 +418,7 @@ impl Session {
             #[cfg(feature = "cdc")]
             records_cdc: false,
             current_graph: parking_lot::Mutex::new(None),
+            statement_graph: parking_lot::Mutex::new(None),
             current_schema: parking_lot::Mutex::new(None),
             home_schema: None,
             home_graph: None,
@@ -554,6 +575,7 @@ impl Session {
             #[cfg(feature = "cdc")]
             records_cdc: false,
             current_graph: parking_lot::Mutex::new(None),
+            statement_graph: parking_lot::Mutex::new(None),
             current_schema: parking_lot::Mutex::new(None),
             home_schema: None,
             home_graph: None,
@@ -674,9 +696,66 @@ impl Session {
     ///
     /// Combines `current_schema` and `current_graph` into a flat lookup key.
     fn active_graph_storage_key(&self) -> Option<String> {
-        let graph = self.current_graph.lock().clone();
+        let graph = self.effective_graph();
         let schema = self.current_schema.lock().clone();
         graph_storage_key(schema.as_deref(), graph.as_deref())
+    }
+
+    /// The graph the statement being run reads and writes: the one its `USE`
+    /// names, else the session's current graph.
+    fn effective_graph(&self) -> Option<String> {
+        self.statement_graph
+            .lock()
+            .clone()
+            .or_else(|| self.current_graph.lock().clone())
+    }
+
+    /// Focuses the statement being run on `graph`, the graph its `USE` names
+    /// (ISO/IEC 39075 use graph clause): until the returned guard drops, it
+    /// reads and writes that graph in place of the session's current graph,
+    /// which stays as it is. `None` leaves the statement on the current graph.
+    ///
+    /// # Errors
+    ///
+    /// An invalid reference when no graph has that name, and a permission
+    /// error when the user may not read it.
+    fn focus_statement(&self, graph: Option<&str>) -> Result<Option<StatementFocus<'_>>> {
+        use grafeo_common::utils::error::{Error, QueryError, QueryErrorKind};
+
+        let Some(name) = graph else {
+            return Ok(None);
+        };
+        let default = name.eq_ignore_ascii_case("default");
+        if self.identity.has_grants()
+            && !default
+            && !self
+                .identity
+                .can_access_graph(name, crate::auth::Role::ReadOnly)
+        {
+            return Err(Error::Query(QueryError::new(
+                QueryErrorKind::Semantic,
+                format!(
+                    "permission denied: no grant for graph '{name}' (user: {})",
+                    self.identity.user_id()
+                ),
+            )));
+        }
+        #[cfg(feature = "lpg")]
+        if !default
+            && self
+                .root_store()
+                .graph(&self.effective_graph_key(name))
+                .is_none()
+        {
+            return Err(Error::Query(QueryError::invalid_reference(format!(
+                "Graph '{name}' does not exist"
+            ))));
+        }
+        let previous = self.statement_graph.lock().replace(name.to_string());
+        Ok(Some(StatementFocus {
+            session: self,
+            previous,
+        }))
     }
 
     /// Returns the graph store for the currently active graph: the session's
@@ -3124,7 +3203,10 @@ impl Session {
             .is_none()
             .then(|| self.query_cache.get_optimized(&cache_key))
             .flatten();
+        // The graph a `USE g` focuses the statement on, from here to its end.
+        let mut _focus = None;
         let optimized_plan = if let Some(plan) = cached {
+            _focus = self.focus_statement(plan.graph.as_deref())?;
             check_writes(&plan)?;
             plan
         } else {
@@ -3165,6 +3247,7 @@ impl Session {
                     }
                 },
             };
+            _focus = self.focus_statement(logical_plan.graph.as_deref())?;
             check_writes(&logical_plan)?;
 
             // An empty parameter map fills in nothing and shares the plan of
@@ -3408,6 +3491,9 @@ impl Session {
                 plan
             }
         };
+        // The stream keeps the store it is planned on: the graph a `USE g`
+        // focuses it on needs to hold only while it is built.
+        let _focus = self.focus_statement(logical_plan.graph.as_deref())?;
         self.check_graph_access(false)?;
 
         // Cache + bind + optimize (same path as execute).
@@ -5359,7 +5445,7 @@ impl Session {
         if !self.identity.has_grants() {
             return Ok(());
         }
-        let Some(graph) = self.current_graph.lock().clone() else {
+        let Some(graph) = self.effective_graph() else {
             return Ok(());
         };
         if graph.eq_ignore_ascii_case("default") {
@@ -5392,9 +5478,7 @@ impl Session {
         match self.active_graph_storage_key() {
             Some(key) if self.root_store().graph(&key).is_none() => {
                 let name = self
-                    .current_graph
-                    .lock()
-                    .clone()
+                    .effective_graph()
                     .unwrap_or_else(|| "default".to_string());
                 Err(grafeo_common::utils::error::Error::Query(
                     grafeo_common::utils::error::QueryError::new(
@@ -5642,7 +5726,7 @@ impl Session {
 
         let session_context = SessionContext {
             current_schema: self.current_schema(),
-            current_graph: self.current_graph(),
+            current_graph: self.effective_graph(),
             home_schema: self.home_schema.clone(),
             home_graph: self.home_graph.clone(),
             temporal_comparison: self.temporal_comparison(open_cypher),

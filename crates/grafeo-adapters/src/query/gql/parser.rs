@@ -489,7 +489,7 @@ impl<'a> Parser<'a> {
                 let name = self.get_identifier_name();
                 match name.to_uppercase().as_str() {
                     "DROP" => self.parse_drop(),
-                    "USE" => self.parse_use_graph().map(Statement::SessionCommand),
+                    "USE" => self.parse_use(),
                     "SESSION" => self.parse_session_command().map(Statement::SessionCommand),
                     "START" => self
                         .parse_start_transaction()
@@ -919,6 +919,15 @@ impl<'a> Parser<'a> {
                 {
                     let clause = self.parse_load_data_clause()?;
                     ordered_clauses.push(QueryClause::LoadData(clause));
+                }
+                // `USE g` before a later part of the query: the graph the
+                // clauses after it read (a focused linear query statement part).
+                _ if self.is_identifier()
+                    && self.get_identifier_name().eq_ignore_ascii_case("USE") =>
+                {
+                    self.advance(); // consume USE
+                    let graph = self.parse_use_graph_name()?;
+                    ordered_clauses.push(QueryClause::Use(graph));
                 }
                 // A FILTER statement, or a WHERE after a clause: a WHERE right
                 // after a MATCH is that MATCH's graph pattern WHERE clause.
@@ -3080,20 +3089,21 @@ impl<'a> Parser<'a> {
         }
         self.advance(); // consume FROM
 
-        // Parse graph reference: a single name or dot-qualified name (schema.graph),
-        // or CURRENT_GRAPH / CURRENT_PROPERTY_GRAPH. Skip if MATCH follows directly.
-        if self.is_identifier() && self.current.kind != TokenKind::Match {
-            self.advance(); // consume graph name
-            // Optional dot-qualified continuation (e.g., schema.graph_name)
-            while self.current.kind == TokenKind::Dot && self.peek_kind() != TokenKind::Eof {
-                self.advance(); // consume dot
-                if self.is_identifier() {
-                    self.advance(); // consume qualifier
-                } else {
-                    break;
-                }
+        // The graph it reads, as a USE names it: a graph name, or
+        // CURRENT_GRAPH / CURRENT_PROPERTY_GRAPH. None when MATCH follows
+        // directly: the session's graph.
+        let graph = if self.is_identifier() && self.current.kind != TokenKind::Match {
+            let graph = self.parse_use_graph_name()?;
+            if self.current.kind == TokenKind::Dot {
+                return Err(self.error(
+                    "a qualified graph name after SELECT ... FROM is not supported yet: \
+                     select the schema with SESSION SET SCHEMA",
+                ));
             }
-        }
+            graph
+        } else {
+            None
+        };
 
         // Expect MATCH
         if self.current.kind != TokenKind::Match {
@@ -3162,7 +3172,7 @@ impl<'a> Parser<'a> {
             span: None,
         };
 
-        Ok(Statement::Query(QueryStatement {
+        let query = Statement::Query(QueryStatement {
             match_clauses: vec![match_clause],
             where_clause,
             set_clauses: Vec::new(),
@@ -3176,7 +3186,14 @@ impl<'a> Parser<'a> {
             having_clause: None,
             ordered_clauses: Vec::new(),
             span: Some(SourceSpan::new(span_start, self.current.span.end, 1, 1)),
-        }))
+        });
+        Ok(match graph {
+            Some(graph) => Statement::Use {
+                graph: Some(graph),
+                statement: Box::new(query),
+            },
+            None => query,
+        })
     }
 
     fn parse_select_clause(&mut self) -> Result<ReturnClause> {
@@ -7434,24 +7451,60 @@ impl<'a> Parser<'a> {
         Ok(SessionCommand::DropGraph { name, if_exists })
     }
 
-    /// Parses `USE GRAPH <name>`.
-    fn parse_use_graph(&mut self) -> Result<SessionCommand> {
+    /// Parses `USE [GRAPH] <graph> [<statement>]`. `USE GRAPH g` alone is
+    /// the session command that selects the session's graph. Followed by a
+    /// query, a data-modifying statement or a procedure call, `USE g` focuses
+    /// that statement on g (ISO/IEC 39075 use graph clause): it reads and
+    /// writes g, and leaves the session's graph as it is.
+    fn parse_use(&mut self) -> Result<Statement> {
         self.advance(); // consume USE
-
-        // Expect GRAPH
-        if !self.is_identifier() || !self.get_identifier_name().eq_ignore_ascii_case("GRAPH") {
-            return Err(self.error("Expected GRAPH after USE"));
+        let graph_keyword =
+            self.is_identifier() && self.get_identifier_name().eq_ignore_ascii_case("GRAPH");
+        if graph_keyword {
+            self.advance(); // consume GRAPH
         }
-        self.advance();
+        let graph = self.parse_use_graph_name()?;
+        let follows = |graph: &Option<String>| {
+            format!(
+                "USE {} must be followed by a query or a data-modifying statement",
+                graph.as_deref().unwrap_or("CURRENT_GRAPH")
+            )
+        };
+        if matches!(self.current.kind, TokenKind::Eof | TokenKind::Semicolon) {
+            return match graph {
+                Some(name) if graph_keyword => {
+                    Ok(Statement::SessionCommand(SessionCommand::UseGraph(name)))
+                }
+                graph => Err(self.error(&follows(&graph))),
+            };
+        }
+        let statement = self.parse_single_statement()?;
+        if !matches!(
+            statement,
+            Statement::Query(_) | Statement::DataModification(_) | Statement::Call(_)
+        ) {
+            return Err(self.error(&follows(&graph)));
+        }
+        Ok(Statement::Use {
+            graph,
+            statement: Box::new(statement),
+        })
+    }
 
-        // Parse graph name
+    /// The graph a `USE` names (an ISO/IEC 39075 graph expression): a graph
+    /// name, or `None` for `CURRENT_GRAPH` and `CURRENT_PROPERTY_GRAPH`.
+    fn parse_use_graph_name(&mut self) -> Result<Option<String>> {
         if !self.is_identifier() {
-            return Err(self.error("Expected graph name"));
+            return Err(self.error("Expected a graph name after USE"));
         }
         let name = self.get_identifier_name();
         self.advance();
-
-        Ok(SessionCommand::UseGraph(name))
+        if name.eq_ignore_ascii_case("CURRENT_GRAPH")
+            || name.eq_ignore_ascii_case("CURRENT_PROPERTY_GRAPH")
+        {
+            return Ok(None);
+        }
+        Ok(Some(name))
     }
 
     /// Parses SESSION commands: SET, RESET, CLOSE.
@@ -10166,6 +10219,97 @@ mod tests {
         } else {
             panic!("Expected UseGraph session command");
         }
+    }
+
+    /// `USE [GRAPH] g` before a statement focuses it on g; alone, only `USE
+    /// GRAPH g` is a statement (the session command).
+    #[test]
+    fn use_before_a_statement_focuses_it() {
+        for (query, graph) in [
+            ("USE floria MATCH (n) RETURN n", Some("floria")),
+            ("USE GRAPH floria INSERT (:Person)", Some("floria")),
+            ("USE CURRENT_GRAPH MATCH (n) RETURN n", None),
+            ("USE CURRENT_PROPERTY_GRAPH MATCH (n) RETURN n", None),
+            ("USE floria CALL grafeo.pagerank()", Some("floria")),
+        ] {
+            let statement = Parser::new(query).parse().unwrap();
+            let Statement::Use {
+                graph: parsed,
+                statement,
+            } = statement
+            else {
+                panic!("{query}: {statement:?}");
+            };
+            assert_eq!(parsed.as_deref(), graph, "{query}");
+            assert!(
+                matches!(
+                    *statement,
+                    Statement::Query(_) | Statement::DataModification(_) | Statement::Call(_)
+                ),
+                "{query}: {statement:?}"
+            );
+        }
+        for (query, message) in [
+            ("USE floria", "USE floria must be followed by"),
+            ("USE CURRENT_GRAPH", "USE CURRENT_GRAPH must be followed by"),
+            (
+                "USE floria CREATE GRAPH other",
+                "USE floria must be followed by",
+            ),
+            (
+                "USE floria SESSION SET GRAPH other",
+                "USE floria must be followed by",
+            ),
+            ("USE", "Expected a graph name after USE"),
+        ] {
+            let error = Parser::new(query).parse().unwrap_err().to_string();
+            assert!(error.contains(message), "{query}: {error}");
+        }
+    }
+
+    /// A `USE` inside a query and on each operand of a composite query is
+    /// parsed where it stands; the translator checks the graphs agree.
+    #[test]
+    fn use_inside_a_query_and_on_operands_is_kept() {
+        let statement = Parser::new("USE a MATCH (p) USE b MATCH (c) RETURN p, c")
+            .parse()
+            .unwrap();
+        let Statement::Use { graph, statement } = statement else {
+            panic!("{statement:?}");
+        };
+        assert_eq!(graph.as_deref(), Some("a"));
+        let Statement::Query(query) = *statement else {
+            panic!("{statement:?}");
+        };
+        assert!(matches!(
+            &query.ordered_clauses[1],
+            QueryClause::Use(Some(name)) if name == "b"
+        ));
+
+        let statement = Parser::new("USE a MATCH (p) RETURN p UNION USE b MATCH (p) RETURN p")
+            .parse()
+            .unwrap();
+        let Statement::CompositeQuery { left, right, .. } = statement else {
+            panic!("{statement:?}");
+        };
+        assert!(matches!(*left, Statement::Use { graph: Some(ref g), .. } if g == "a"));
+        assert!(matches!(*right, Statement::Use { graph: Some(ref g), .. } if g == "b"));
+    }
+
+    /// `SELECT ... FROM g MATCH ...` reads g: it is focused on it.
+    #[test]
+    fn select_from_a_graph_focuses_on_it() {
+        let statement = Parser::new("SELECT n.name FROM floria MATCH (n)")
+            .parse()
+            .unwrap();
+        assert!(matches!(statement, Statement::Use { graph: Some(ref g), .. } if g == "floria"));
+        let statement = Parser::new("SELECT n.name FROM MATCH (n)").parse().unwrap();
+        assert!(matches!(statement, Statement::Query(_)));
+        let error = Parser::new("SELECT n.name FROM europe.floria MATCH (n)")
+            .parse()
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("not supported yet"), "{error}");
     }
 
     #[test]

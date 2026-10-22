@@ -657,3 +657,11 @@ CV5|gql 69333180aa SUM and AVG of durations add them and divide the sum, as open
 CW1|gql 1fed328d7b CAST of a boolean to FLOAT64 and DECIMAL is 1 or 0, as to INT64 (DuckDB's rule); CAST AS DECIMAL did not parse in 0.5.44 and CAST(true AS FLOAT64) was null.
 CW2|gql 6de4a5360c CAST of a number to BOOLEAN is true unless the number is 0 (DuckDB's rule); it was null.
 CX1|gql 8ee82b4577 CAST trims the spaces around a text before converting it, as SQL casts a character string; padded text was null.
+CY1|gql 35e5e1d8e4 USE g in front of a statement reads graph g (grafeo-web#55); it was a syntax error.
+CY2|gql a30e971429 USE GRAPH g in front of a statement reads graph g (grafeo-web#55); the statement after it was refused.
+CY3|gql 251a434f71 USE g in front of a statement reads graph g (grafeo-web#55); it was a syntax error.
+CY4|gql 956e1cf8f7 Every UNION operand may repeat the same USE g and reads g; it was a syntax error.
+CY5|gql 8ffe23c0d3 USE CURRENT_GRAPH reads the session's graph; it was a syntax error.
+CY6|gql e5fb251992 SELECT ... FROM g reads graph g; the graph name was left unused and the session's graph read.
+CY7|gql 3ddd997a75 USE of a graph that does not exist is 42002, Graph 'g' does not exist; it was a syntax error.
+CY8|gql c27bd4ce58 Parts of one statement on different graphs are not supported yet, with an error that says so; it was a syntax error.

@@ -264,6 +264,20 @@ def quoted(grafeo):
     return db
 
 
+def graphs(grafeo):
+    """Gus in the default graph; Alix, who KNOWS Paris, in the graph floria. The session
+    is back on the default graph."""
+    db = grafeo.GrafeoDB()
+    db.execute("INSERT (:Person {name: 'Gus', w: 101})")
+    db.execute("CREATE GRAPH floria")
+    db.execute("USE GRAPH floria")
+    db.execute(
+        "INSERT (:Person {name: 'Alix', w: 100})-[:KNOWS {since: 2010, w: 1}]->(:City {name: 'Paris', w: 105})"
+    )
+    db.execute("USE GRAPH default")
+    return db
+
+
 def mixed_indexed(grafeo):
     """`mixed` with a property index on `p`."""
     return mixed(grafeo, indexed=True)
@@ -300,6 +314,7 @@ FIXTURES = {
     "weighted": weighted,
     "leads": leads,
     "quoted": quoted,
+    "graphs": graphs,
 }
 
 CASES: list[Case] = []
@@ -1949,5 +1964,22 @@ for case_id, query, languages in [
     ("CX3", "RETURN toInteger(' 42 ') AS i", CYPHER),
 ]:
     case(case_id, query, languages, "empty")
+
+# CY: USE g <statement> reads graph g and leaves the session on its graph (grafeo-web#55; it
+#     was refused, CY1 to CY3), the same USE may repeat on every UNION operand (CY4); USE
+#     CURRENT_GRAPH reads the session's graph (CY5); SELECT ... FROM g reads g (CY6; it read the
+#     session's graph); a missing graph is 42002 (CY7); parts on different graphs are not
+#     supported yet (CY8)
+for case_id, query in [
+    ("CY1", "USE floria MATCH (p:Person) RETURN p.name, p.w"),
+    ("CY2", "USE GRAPH floria MATCH (a)-[k:KNOWS]->(c) RETURN a.name, c.name, k.since, k.w"),
+    ("CY3", "USE floria MATCH (n) RETURN count(n) AS n"),
+    ("CY4", "USE floria MATCH (p:Person) RETURN p.name AS name UNION USE floria MATCH (c:City) RETURN c.name AS name"),
+    ("CY5", "USE CURRENT_GRAPH MATCH (p:Person) RETURN p.name"),
+    ("CY6", "SELECT p.name FROM floria MATCH (p:Person)"),
+    ("CY7", "USE nowhere MATCH (n) RETURN n"),
+    ("CY8", "USE floria MATCH (p:Person) RETURN p.name AS name UNION MATCH (p:Person) RETURN p.name AS name"),
+]:
+    case(case_id, query, GQL, "graphs")
 
 # fmt: on

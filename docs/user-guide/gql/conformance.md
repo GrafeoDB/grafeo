@@ -77,7 +77,7 @@ Per the standard, minimum conformance requires:
 
 | Feature | Status | Notes |
 |---------|--------|-------|
-| USE GRAPH | Supported | |
+| USE GRAPH | Supported | `USE GRAPH g` alone selects the session's graph; `USE g <statement>` focuses one statement on g (GQ01) |
 | SESSION SET GRAPH | Supported | |
 | SESSION SET TIME ZONE | Supported | |
 | SESSION SET PARAMETER | Supported | |
@@ -441,7 +441,7 @@ refuses `=~` and LIKE with an error that says so.
 
 | ID | Feature | Status |
 |----|---------|--------|
-| GQ01 | USE graph clause | Supported |
+| GQ01 | USE graph clause | Partial: `USE g <statement>` runs the whole statement on g; parts of one statement that use different graphs are not supported yet |
 | GQ02 | OTHERWISE | Supported |
 | GQ03 | UNION | Supported |
 | GQ04 | EXCEPT DISTINCT | Supported |

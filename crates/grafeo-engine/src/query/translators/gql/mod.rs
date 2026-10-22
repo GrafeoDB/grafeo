@@ -4,6 +4,7 @@
 
 mod aggregate;
 mod expression;
+mod focus;
 mod pattern;
 mod sort;
 
@@ -73,11 +74,17 @@ pub fn translate(query: &str) -> Result<LogicalPlan> {
 /// Returns an error if the query cannot be parsed or translated.
 pub fn translate_full(query: &str) -> Result<GqlTranslationResult> {
     let statement = gql::parse(query)?;
+    // The graph a `USE g` focuses the statement on, which it reads and
+    // writes in place of the session's current graph.
+    let graph = focus::statement_graph(&statement)?;
     let translator = GqlTranslator::new(query);
     match translator.translate_statement_full(&statement)? {
-        GqlTranslationResult::Plan(plan) => Ok(GqlTranslationResult::Plan(
-            crate::query::limits::check_plan_depth(plan)?,
-        )),
+        GqlTranslationResult::Plan(mut plan) => {
+            plan.graph = graph;
+            Ok(GqlTranslationResult::Plan(
+                crate::query::limits::check_plan_depth(plan)?,
+            ))
+        }
         other => Ok(other),
     }
 }
@@ -321,6 +328,15 @@ fn combine_queries(
     })
 }
 
+/// `statement` without the `USE` it is focused by: the graph is the plan's
+/// (see `focus`).
+fn unfocused(statement: &ast::Statement) -> &ast::Statement {
+    match statement {
+        ast::Statement::Use { statement, .. } => unfocused(statement),
+        other => other,
+    }
+}
+
 impl GqlTranslator {
     /// A translator for the statement `query`, whose text the generated
     /// names skip.
@@ -382,6 +398,8 @@ impl GqlTranslator {
             ast::Statement::Explain(inner) | ast::Statement::Profile(inner) => {
                 self.translate_statement(inner)
             }
+            // The graph is the plan's (see `focus`).
+            ast::Statement::Use { statement, .. } => self.translate_statement(statement),
         }
     }
 
@@ -410,7 +428,7 @@ impl GqlTranslator {
             } else {
                 return_as_with(left_plan.root)
             };
-            return match right {
+            return match unfocused(right) {
                 ast::Statement::Query(right_query) => self.translate_query_from(right_query, input),
                 ast::Statement::DataModification(dm) => self.translate_data_modification(dm, input),
                 other => {
@@ -802,6 +820,9 @@ impl GqlTranslator {
                     ast::QueryClause::OrderByAndPage(page) => {
                         plan = self.apply_order_by_and_page(plan, page, sort_scope.as_ref())?;
                     }
+                    // The statement's graph, which `focus` checked is the
+                    // one every part reads.
+                    ast::QueryClause::Use(_) => {}
                 }
                 if !matches!(clause, ast::QueryClause::With(_)) {
                     self.sort_scope.replace(None);

@@ -252,7 +252,7 @@ impl super::Planner {
             PhysicalJoinType::Inner,
             schema,
         )
-        .with_value_equality_keys();
+        .with_value_equality_keys_in(self.session_context.temporal_comparison);
         // The columns of the scan per row: the input's, then the node.
         let kept = (0..width)
             .chain([width + key_count])
@@ -646,7 +646,6 @@ mod tests {
                 (Value::from("5.0"), Value::Int64(5)),
                 (Value::Float64(f64::NAN), Value::Float64(f64::NAN)),
                 (Value::Float64(2.0), Value::Float64(1.999_999_999_999_999_8)),
-                (time("13:00:00"), time("13:00:00Z")),
                 (Value::Int64(two_to_53), Value::Int64(two_to_53 + 1)),
                 // Floats compare exactly: no tolerance near 0 or 1, and an
                 // integer above 2^53 meets no float.
@@ -664,6 +663,11 @@ mod tests {
                     "{language}: {a:?} <> {b:?}"
                 );
             }
+            // A local and a zoned time at the same UTC instant: equal in GQL,
+            // which reads the local one at the session time zone (UTC here),
+            // and apart in Cypher, as openCypher compares them
+            let local_meets_zoned = joined.contains(&pair(&time("13:00:00"), &time("13:00:00Z")));
+            assert_eq!(local_meets_zoned, language == "gql", "{language}");
             assert!(
                 !joined.iter().any(|row| row.contains(&Value::Int64(-1))),
                 "{language}: a missing `k` meets nothing"

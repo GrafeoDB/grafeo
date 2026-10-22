@@ -802,9 +802,52 @@ impl Session {
             .map(Some)
     }
 
-    /// Sets the session time zone.
-    pub fn set_time_zone(&self, tz: &str) {
+    /// Sets the session time zone: a UTC offset (`+01:00`, `-05:30`, `Z` or
+    /// `UTC`), ISO GQL's time zone displacement. GQL and SQL/PGQ read a local
+    /// datetime or time at this offset when they compare it with a zoned one.
+    ///
+    /// # Errors
+    ///
+    /// An invalid time zone displacement (GQLSTATUS 22009) for any other
+    /// text, a named zone such as `Europe/Amsterdam` included.
+    pub fn set_time_zone(&self, tz: &str) -> Result<()> {
+        use grafeo_common::types::TemporalComparison;
+        use grafeo_common::utils::error::{Error, QueryError, QueryErrorKind};
+
+        if TemporalComparison::parse_displacement(tz).is_none() {
+            return Err(Error::Query(QueryError::new(
+                QueryErrorKind::InvalidTimeZoneDisplacement,
+                format!(
+                    "'{tz}' is not a time zone displacement: give a UTC offset such as \
+                     '+01:00', '-05:30', 'Z' or 'UTC'"
+                ),
+            )));
+        }
         *self.time_zone.lock() = Some(tz.to_string());
+        Ok(())
+    }
+
+    /// Sets a time zone that already passed [`set_time_zone`](Self::set_time_zone)'s
+    /// check (the database's, from an earlier one-shot call).
+    pub(crate) fn inherit_time_zone(&self, zone: String) {
+        *self.time_zone.lock() = Some(zone);
+    }
+
+    /// How this session compares a zoned datetime or time with a local one:
+    /// openCypher keeps the types apart, GQL and SQL/PGQ read the local one
+    /// at the session time zone (UTC without one).
+    fn temporal_comparison(&self, open_cypher: bool) -> grafeo_common::types::TemporalComparison {
+        use grafeo_common::types::TemporalComparison;
+        if open_cypher {
+            return TemporalComparison::TypesApart;
+        }
+        let offset = self
+            .time_zone
+            .lock()
+            .as_deref()
+            .and_then(TemporalComparison::parse_displacement)
+            .unwrap_or(0);
+        TemporalComparison::LocalAt(offset)
     }
 
     /// Returns the session time zone, if set.
@@ -1223,7 +1266,7 @@ impl Session {
                 Ok(QueryResult::empty())
             }
             SessionCommand::SessionSetTimeZone(tz) => {
-                self.set_time_zone(&tz);
+                self.set_time_zone(&tz)?;
                 Ok(QueryResult::empty())
             }
             #[cfg(feature = "gql")]
@@ -3175,6 +3218,7 @@ impl Session {
                     Arc::clone(&active),
                     viewing_epoch,
                     transaction_id,
+                    false,
                 )?;
                 let (mut physical_plan, entries) = planner.plan_profiled(&optimized_plan)?;
 
@@ -3214,6 +3258,7 @@ impl Session {
                 viewing_epoch,
                 transaction_id,
                 read_only,
+                false,
             )?;
             let physical_plan = planner.plan(&optimized_plan)?;
 
@@ -3406,6 +3451,7 @@ impl Session {
                 viewing_epoch,
                 transaction_id,
                 !has_active_tx,
+                false,
             )?
             .for_streaming();
         let physical_plan = planner.plan(&optimized_plan)?;
@@ -3703,6 +3749,7 @@ impl Session {
                     Arc::clone(&active),
                     viewing_epoch,
                     transaction_id,
+                    true,
                 )?;
                 let (mut physical_plan, entries) = planner.plan_profiled(&optimized_plan)?;
 
@@ -3732,8 +3779,12 @@ impl Session {
             let (viewing_epoch, transaction_id) = self.get_transaction_context();
 
             // Convert to physical plan with transaction context
-            let planner =
-                self.create_planner_for_store(Arc::clone(&active), viewing_epoch, transaction_id)?;
+            let planner = self.create_planner_for_store(
+                Arc::clone(&active),
+                viewing_epoch,
+                transaction_id,
+                true,
+            )?;
             let mut physical_plan = planner.plan(&optimized_plan)?;
 
             // Execute the plan
@@ -3817,8 +3868,12 @@ impl Session {
             let (viewing_epoch, transaction_id) = self.get_transaction_context();
 
             // Convert to physical plan with transaction context
-            let planner =
-                self.create_planner_for_store(Arc::clone(&active), viewing_epoch, transaction_id)?;
+            let planner = self.create_planner_for_store(
+                Arc::clone(&active),
+                viewing_epoch,
+                transaction_id,
+                false,
+            )?;
             let mut physical_plan = planner.plan(&optimized_plan)?;
 
             // Execute the plan
@@ -3889,8 +3944,12 @@ impl Session {
 
         let result = self.with_auto_commit(has_mutations, || {
             let (viewing_epoch, transaction_id) = self.get_transaction_context();
-            let planner =
-                self.create_planner_for_store(Arc::clone(&active), viewing_epoch, transaction_id)?;
+            let planner = self.create_planner_for_store(
+                Arc::clone(&active),
+                viewing_epoch,
+                transaction_id,
+                false,
+            )?;
             let mut physical_plan = planner.plan(&optimized_plan)?;
             let executor = self
                 .make_executor(physical_plan.columns.clone())
@@ -3967,8 +4026,12 @@ impl Session {
 
         let result = self.with_auto_commit(has_mutations, || {
             let (viewing_epoch, transaction_id) = self.get_transaction_context();
-            let planner =
-                self.create_planner_for_store(Arc::clone(&active), viewing_epoch, transaction_id)?;
+            let planner = self.create_planner_for_store(
+                Arc::clone(&active),
+                viewing_epoch,
+                transaction_id,
+                false,
+            )?;
             let mut physical_plan = planner.plan(&optimized_plan)?;
             let executor = self
                 .make_executor(physical_plan.columns.clone())
@@ -4043,8 +4106,12 @@ impl Session {
 
         let result = self.with_auto_commit(has_mutations, || {
             let (viewing_epoch, transaction_id) = self.get_transaction_context();
-            let planner =
-                self.create_planner_for_store(Arc::clone(&active), viewing_epoch, transaction_id)?;
+            let planner = self.create_planner_for_store(
+                Arc::clone(&active),
+                viewing_epoch,
+                transaction_id,
+                false,
+            )?;
             let mut physical_plan = planner.plan(&optimized_plan)?;
             let executor = self
                 .make_executor(physical_plan.columns.clone())
@@ -4184,8 +4251,12 @@ impl Session {
 
         let result = self.with_auto_commit(has_mutations, || {
             let (viewing_epoch, transaction_id) = self.get_transaction_context();
-            let planner =
-                self.create_planner_for_store(Arc::clone(&active), viewing_epoch, transaction_id)?;
+            let planner = self.create_planner_for_store(
+                Arc::clone(&active),
+                viewing_epoch,
+                transaction_id,
+                false,
+            )?;
             let mut physical_plan = planner.plan(&optimized_plan)?;
             let executor = self
                 .make_executor(physical_plan.columns.clone())
@@ -5536,8 +5607,15 @@ impl Session {
         store: Arc<dyn GraphStoreSearch>,
         viewing_epoch: EpochId,
         transaction_id: Option<TransactionId>,
+        open_cypher: bool,
     ) -> Result<crate::query::Planner> {
-        self.create_planner_for_store_with_read_only(store, viewing_epoch, transaction_id, false)
+        self.create_planner_for_store_with_read_only(
+            store,
+            viewing_epoch,
+            transaction_id,
+            false,
+            open_cypher,
+        )
     }
 
     /// A planner with transaction context and constraint validator, whose
@@ -5553,6 +5631,7 @@ impl Session {
         viewing_epoch: EpochId,
         transaction_id: Option<TransactionId>,
         read_only: bool,
+        open_cypher: bool,
     ) -> Result<crate::query::Planner> {
         use crate::query::Planner;
         use grafeo_core::execution::operators::{LazyValue, SessionContext};
@@ -5566,6 +5645,7 @@ impl Session {
             current_graph: self.current_graph(),
             home_schema: self.home_schema.clone(),
             home_graph: self.home_graph.clone(),
+            temporal_comparison: self.temporal_comparison(open_cypher),
             db_info: LazyValue::new(move || Self::build_info_value(&*info_store)),
             schema_info: LazyValue::new(move || Self::build_schema_value(&*schema_store)),
         };
@@ -7534,10 +7614,16 @@ mod tests {
             session.execute("SESSION SET TIME ZONE 'UTC'").unwrap();
             assert_eq!(session.time_zone(), Some("UTC".to_string()));
 
-            session
-                .execute("SESSION SET TIME ZONE 'America/New_York'")
-                .unwrap();
-            assert_eq!(session.time_zone(), Some("America/New_York".to_string()));
+            session.execute("SESSION SET TIME ZONE '-05:00'").unwrap();
+            assert_eq!(session.time_zone(), Some("-05:00".to_string()));
+
+            // A named zone is refused (22009) and the setting stays
+            assert!(
+                session
+                    .execute("SESSION SET TIME ZONE 'America/New_York'")
+                    .is_err()
+            );
+            assert_eq!(session.time_zone(), Some("-05:00".to_string()));
         }
 
         #[test]

@@ -11,7 +11,7 @@ use crate::graph::GraphStoreSearch;
 use crate::graph::lpg::{Edge, Node};
 use grafeo_common::types::{
     Decimal, DecimalError, EdgeId, EpochId, HashableValue, LogicalType, NodeId, PropertyDataType,
-    PropertyKey, PropertyMap, ReadView, TransactionId, Value, ValueType,
+    PropertyKey, PropertyMap, ReadView, TemporalComparison, TransactionId, Value, ValueType,
 };
 #[cfg(feature = "regex")]
 use regex::Regex;
@@ -484,6 +484,10 @@ pub struct SessionContext {
     pub home_schema: Option<String>,
     /// Home graph name (for `HOME_GRAPH`); `None` is the default graph.
     pub home_graph: Option<String>,
+    /// How a comparison reads a zoned datetime or time against a local one:
+    /// at the session time zone (GQL, SQL/PGQ), or as different types
+    /// (Cypher).
+    pub temporal_comparison: TemporalComparison,
     /// Lazily-computed `info()` result.
     pub db_info: LazyValue,
     /// Lazily-computed `schema()` result.
@@ -1830,14 +1834,14 @@ impl ExpressionPredicate {
                 if left.is_null() || right.is_null() {
                     Some(Value::Null)
                 } else {
-                    Some(Value::Bool(Self::values_equal(left, right)))
+                    Some(Value::Bool(self.values_equal(left, right)))
                 }
             }
             BinaryFilterOp::Ne => {
                 if left.is_null() || right.is_null() {
                     Some(Value::Null)
                 } else {
-                    Some(Value::Bool(!Self::values_equal(left, right)))
+                    Some(Value::Bool(!self.values_equal(left, right)))
                 }
             }
             // NaN is neither less nor greater than a number (IEEE): the
@@ -2257,7 +2261,7 @@ impl ExpressionPredicate {
                 for item in items.iter() {
                     if item.is_null() {
                         has_null = true;
-                    } else if Self::values_equal(left, item) {
+                    } else if self.values_equal(left, item) {
                         return Some(Value::Bool(true));
                     }
                 }
@@ -3711,17 +3715,42 @@ impl ExpressionPredicate {
                 }
             }
             BuiltinFunction::ZonedTime => {
-                let val = self.eval_expr(args.first()?, chunk, row)?;
+                // A time of day with an offset: the input's, +00:00 (the
+                // default zone) without one, as openCypher's time() reads it
+                // (Cypher's time() resolves to this function).
+                let utc = |time: grafeo_common::types::Time| match time.offset_seconds() {
+                    Some(_) => time,
+                    None => time.with_offset(0),
+                };
+                if args.is_empty() {
+                    return Some(Value::Time(utc(grafeo_common::types::Time::now())));
+                }
+                let val = self.eval_expr(&args[0], chunk, row)?;
                 match val {
-                    Value::String(s) => {
-                        let t = grafeo_common::types::Time::parse(&s)?;
-                        if t.offset_seconds().is_some() {
-                            Some(Value::Time(t))
-                        } else {
-                            None
-                        }
+                    Value::String(s) => grafeo_common::types::Time::parse(&s)
+                        .map(utc)
+                        .map(Value::Time),
+                    Value::Time(t) => Some(Value::Time(utc(t))),
+                    // The time of day where the value's offset puts it, with
+                    // the offset.
+                    Value::ZonedDatetime(zoned) => Some(Value::Time(zoned.to_local_time())),
+                    Value::Timestamp(ts) => Some(Value::Time(utc(ts.to_time()))),
+                    Value::Map(m) => {
+                        let hour = u32::try_from(map_int_or(&m, "hour", 0)?).ok()?;
+                        let minute = u32::try_from(map_int_or(&m, "minute", 0)?).ok()?;
+                        let second = u32::try_from(map_int_or(&m, "second", 0)?).ok()?;
+                        let nanosecond = u32::try_from(map_int_or(&m, "nanosecond", 0)?).ok()?;
+                        let offset = match m.get(&PropertyKey::from("timezone")) {
+                            None => 0,
+                            Some(Value::String(zone)) => {
+                                grafeo_common::types::Time::parse(&format!("00:00:00{zone}"))?
+                                    .offset_seconds()?
+                            }
+                            Some(_) => return None,
+                        };
+                        grafeo_common::types::Time::from_hms_nano(hour, minute, second, nanosecond)
+                            .map(|time| Value::Time(time.with_offset(offset)))
                     }
-                    Value::Time(t) if t.offset_seconds().is_some() => Some(val),
                     _ => None,
                 }
             }
@@ -4180,7 +4209,7 @@ impl ExpressionPredicate {
                 // Three-valued: NULLIF(NULL, x) = NULL; NULLIF(x, NULL) = x
                 if val1.is_null() || val2.is_null() {
                     Some(val1)
-                } else if Self::values_equal(&val1, &val2) {
+                } else if self.values_equal(&val1, &val2) {
                     Some(Value::Null)
                 } else {
                     Some(val1)
@@ -4208,7 +4237,7 @@ impl ExpressionPredicate {
                 // Three-valued logic: NULL never matches anything in simple CASE
                 if !test_val.is_null()
                     && !when_val.is_null()
-                    && Self::values_equal(&test_val, &when_val)
+                    && self.values_equal(&test_val, &when_val)
                 {
                     return self.eval_expr(then_expr, chunk, row);
                 }
@@ -4277,7 +4306,7 @@ impl ExpressionPredicate {
     /// Treats NULL == NULL as `true` (grouping semantics). For SQL/GQL
     /// comparison operators, use [`eval_binary_op`] which returns UNKNOWN
     /// when either operand is NULL.
-    fn values_equal(left: &Value, right: &Value) -> bool {
+    fn values_equal(&self, left: &Value, right: &Value) -> bool {
         match (left, right) {
             (Value::Null, Value::Null) => true,
             (Value::Decimal(_), _) | (_, Value::Decimal(_)) => {
@@ -4300,16 +4329,13 @@ impl ExpressionPredicate {
                 super::value_utils::text_equals_float(s, *f)
             }
             (Value::List(a), Value::List(b)) => {
-                a.len() == b.len()
-                    && a.iter()
-                        .zip(b.iter())
-                        .all(|(x, y)| Self::values_equal(x, y))
+                a.len() == b.len() && a.iter().zip(b.iter()).all(|(x, y)| self.values_equal(x, y))
             }
             (Value::Map(a), Value::Map(b)) => {
                 a.len() == b.len()
                     && a.iter()
                         .zip(b.iter())
-                        .all(|((k1, v1), (k2, v2))| k1 == k2 && Self::values_equal(v1, v2))
+                        .all(|((k1, v1), (k2, v2))| k1 == k2 && self.values_equal(v1, v2))
             }
             (
                 Value::Path {
@@ -4326,18 +4352,20 @@ impl ExpressionPredicate {
                     && n1
                         .iter()
                         .zip(n2.iter())
-                        .all(|(a, b)| Self::values_equal(a, b))
+                        .all(|(a, b)| self.values_equal(a, b))
                     && e1
                         .iter()
                         .zip(e2.iter())
-                        .all(|(a, b)| Self::values_equal(a, b))
+                        .all(|(a, b)| self.values_equal(a, b))
             }
-            // A timestamp and a zoned datetime: the same instant, as `<` and
-            // `>` compare them.
-            (Value::Timestamp(_), Value::ZonedDatetime(_))
-            | (Value::ZonedDatetime(_), Value::Timestamp(_)) => left
-                .compare_instants(right)
-                .is_some_and(|order| order.is_eq()),
+            // A zoned and a local datetime or time: as the query's language
+            // reads them, as `<` and `>` compare them (see
+            // `TemporalComparison`).
+            _ if TemporalComparison::is_mixed_pair(left, right) => self
+                .session_context
+                .temporal_comparison
+                .compare_mixed(left, right)
+                .is_some_and(std::cmp::Ordering::is_eq),
             // Temporal values, bytes, vectors and the rest: the same variant
             // with the same value (zoned datetimes compare by instant). This
             // used to be `false`, so `date('2024-01-01') = date('2024-01-01')`
@@ -4428,6 +4456,13 @@ impl ExpressionPredicate {
             (Value::Float64(f), Value::String(s)) => {
                 super::value_utils::partial_cmp_text_float(s, *f).map(|o| o.reverse() as i32)
             }
+            // A zoned and a local datetime or time: as the query's language
+            // reads them (see `TemporalComparison`).
+            _ if TemporalComparison::is_mixed_pair(left, right) => self
+                .session_context
+                .temporal_comparison
+                .compare_mixed(left, right)
+                .map(|o| o as i32),
             // Temporal comparisons
             (Value::Timestamp(a), Value::Timestamp(b)) => Some(a.cmp(b) as i32),
             (Value::Date(a), Value::Date(b)) => Some(a.cmp(b) as i32),

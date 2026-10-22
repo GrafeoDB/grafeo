@@ -37,7 +37,7 @@ use std::collections::HashSet;
 use grafeo_common::collections::GrafeoSet;
 
 use super::subquery::reads_outer_values;
-use grafeo_common::types::NodeId;
+use grafeo_common::types::{NodeId, TemporalComparison};
 
 use super::{
     Arc, BinaryOp, EmptyOperator, Error, ExpressionPredicate, FilterOp, FilterOperator,
@@ -706,6 +706,11 @@ impl super::Planner {
                     _ => return None,
                 };
 
+                // A zone map orders values as the store does, which can
+                // differ from the query's comparison of datetimes and times.
+                if !self.store_orders_like_query(&value) {
+                    return None;
+                }
                 // Node statistics only describe nodes: consult the zone map that
                 // matches what the variable is bound to, or nothing at all.
                 let key = property.into();
@@ -765,10 +770,7 @@ impl super::Planner {
                 if !self.store.has_property_index(property) {
                     continue;
                 }
-                let Some(found) =
-                    self.store
-                        .find_nodes_maybe_equal_at(property, value, self.read_view())
-                else {
+                let Some(found) = self.find_maybe_equal(property, value) else {
                     continue;
                 };
                 // Every lookup reads, also one whose set is not the smallest.
@@ -926,10 +928,7 @@ impl super::Planner {
         let mut seen: GrafeoSet<_> = GrafeoSet::default();
         let mut matching_nodes = Vec::new();
         for value in &values {
-            let Some(found) =
-                self.store
-                    .find_nodes_maybe_equal_at(property, value, self.read_view())
-            else {
+            let Some(found) = self.find_maybe_equal(property, value) else {
                 return Ok(None);
             };
             self.read_counter().add(found.len());
@@ -1088,6 +1087,8 @@ impl super::Planner {
         if let Some((variable, property, min, max, min_inc, max_inc)) =
             Self::extract_between_predicate(&filter.predicate)
             && variable == scan_variable
+            && self.store_orders_like_query(&min)
+            && self.store_orders_like_query(&max)
         {
             self.record_absorbed_scan_entry("NodeScan", &filter.input);
             return self.plan_range_filter(
@@ -1107,6 +1108,7 @@ impl super::Planner {
         if let Some((variable, property, op, value)) =
             Self::extract_range_predicate(&filter.predicate)
             && variable == scan_variable
+            && self.store_orders_like_query(&value)
         {
             let (min, max, min_inc, max_inc) = match op {
                 BinaryOp::Lt => (None, Some(value), false, false),
@@ -1130,6 +1132,40 @@ impl super::Planner {
         }
 
         Ok(None)
+    }
+
+    /// The nodes an index lookup finds that `=` may find equal to `value`
+    /// under the query's temporal comparison (see [`equality_probes`]), each
+    /// once and ascending; `None` without an index on `property`, or when no
+    /// set of lookups covers them.
+    fn find_maybe_equal(&self, property: &str, value: &Value) -> Option<Vec<NodeId>> {
+        let mut found = Vec::new();
+        for probe in equality_probes(value, self.session_context.temporal_comparison)? {
+            found.extend(self.store.find_nodes_maybe_equal_at(
+                property,
+                &probe,
+                self.read_view(),
+            )?);
+        }
+        found.sort_unstable();
+        found.dedup();
+        Some(found)
+    }
+
+    /// Whether the store's range lookups and zone maps order `value` against
+    /// stored values as the query compares them. They read a local datetime
+    /// at UTC against a zoned one, which is the query's reading only in a GQL
+    /// session without a time zone, and order a time without an offset
+    /// against one with an offset by more than its instant, so a time is
+    /// never left to them.
+    fn store_orders_like_query(&self, value: &Value) -> bool {
+        match value {
+            Value::Time(_) => false,
+            Value::Timestamp(_) | Value::ZonedDatetime(_) => {
+                self.session_context.temporal_comparison == TemporalComparison::default()
+            }
+            _ => true,
+        }
     }
 
     /// Plans a range filter using [`RangeScanOperator`].
@@ -1836,4 +1872,36 @@ fn edge_condition_of(
     read.iter()
         .all(|name| name == hop || row.contains(name))
         .then(|| (hop.clone(), predicate.as_ref().clone()))
+}
+
+/// The values an index lookup probes for `value`, so that it finds every
+/// node `=` finds equal to it under `comparison`: the value itself, and in
+/// GQL and SQL/PGQ, which read a local datetime at the session time zone,
+/// the datetime of the other kind at the same instant (zoned datetimes are
+/// equal, and indexed, by their instant, so one zoned probe covers every
+/// offset). `None` for a time in GQL and SQL/PGQ: a local time equals zoned
+/// ones at any offset, which no set of probes covers.
+fn equality_probes(value: &Value, comparison: TemporalComparison) -> Option<Vec<Value>> {
+    use grafeo_common::types::{Timestamp, ZonedDatetime};
+    let TemporalComparison::LocalAt(offset) = comparison else {
+        return Some(vec![value.clone()]);
+    };
+    let offset_micros = i64::from(offset) * 1_000_000;
+    match value {
+        Value::ZonedDatetime(zoned) => Some(vec![
+            value.clone(),
+            Value::Timestamp(Timestamp::from_micros(
+                zoned.as_timestamp().as_micros() + offset_micros,
+            )),
+        ]),
+        Value::Timestamp(local) => Some(vec![
+            value.clone(),
+            Value::ZonedDatetime(ZonedDatetime::from_timestamp_offset(
+                Timestamp::from_micros(local.as_micros() - offset_micros),
+                0,
+            )),
+        ]),
+        Value::Time(_) => None,
+        _ => Some(vec![value.clone()]),
+    }
 }

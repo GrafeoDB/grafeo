@@ -705,7 +705,8 @@ impl QueryError {
             | QueryErrorKind::NumericOutOfRange
             | QueryErrorKind::DivisionByZero
             | QueryErrorKind::NegativeLimit
-            | QueryErrorKind::InvalidValueType => ErrorCode::QueryExecution,
+            | QueryErrorKind::InvalidValueType
+            | QueryErrorKind::InvalidTimeZoneDisplacement => ErrorCode::QueryExecution,
             QueryErrorKind::Timeout => ErrorCode::QueryTimeout,
             QueryErrorKind::Unsupported => ErrorCode::QueryUnsupported,
         }
@@ -830,6 +831,9 @@ pub enum QueryErrorKind {
     /// A value of another type than the statement needs where it is used,
     /// such as a parameter or a procedure argument (GQLSTATUS 22G03).
     InvalidValueType,
+    /// A time zone that is not a UTC offset (`+01:00`, `Z`, `UTC`), or one
+    /// past 14 hours (GQLSTATUS 22009).
+    InvalidTimeZoneDisplacement,
 }
 
 impl fmt::Display for QueryErrorKind {
@@ -848,6 +852,9 @@ impl fmt::Display for QueryErrorKind {
             QueryErrorKind::DivisionByZero => write!(f, "division by zero"),
             QueryErrorKind::NegativeLimit => write!(f, "negative limit value"),
             QueryErrorKind::InvalidValueType => write!(f, "invalid value type"),
+            QueryErrorKind::InvalidTimeZoneDisplacement => {
+                write!(f, "invalid time zone displacement value")
+            }
         }
     }
 }

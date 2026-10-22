@@ -630,3 +630,7 @@ CS6|cypher ca047fb78e A duration divided by zero is a division by zero (22012); 
 CS6|gql ca047fb78e A duration divided by zero is a division by zero (22012); it was null.
 CS7|gql 291307aea6 normalize puts a string in NFC, as ISO GQL defines it; it returned the string unchanged.
 CS8|gql e7f516d45f LIKE wildcards match a line break, as SQL's LIKE does; % and _ skipped it.
+CT1|gql 7df1f205be GQL reads a local datetime at the session time zone, UTC without one, as SQL compares a TIMESTAMP with a TIMESTAMP WITH TIME ZONE; a zoned and a local datetime at the same instant were not equal, and < between them was null.
+CT2|gql 160b12822c GQL reads a local time at the session time zone, UTC without one: a zoned and a local time at the same instant are equal; they were not.
+CT4|gql e00542b911 SESSION SET TIME ZONE takes a UTC offset ('+01:00', 'Z', 'UTC'), ISO GQL's time zone displacement; a named zone fails with 22009, where it was stored and never used.
+CT5|cypher e09ddcadbb Cypher's time() is zoned, at +00:00 without an offset, as openCypher defines it, and localtime() is the local one; time() without an offset was local and localtime() did not exist.

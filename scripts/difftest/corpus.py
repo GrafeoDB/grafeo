@@ -274,7 +274,7 @@ def mixed_indexed(grafeo):
 # whose cases use it. Every other fixture is built once and shared, so a write would
 # change what later cases see.
 WRITE_FIXTURES = {
-    "writes": {"BR", "BS", "BU"},
+    "writes": {"BR", "BS", "BU", "CT"},
     "merges": {"CC"},
     "leads": {"CF"},
     "quoted": {"CK"},
@@ -1890,5 +1890,21 @@ for case_id, query, languages in [
     ("CS8", "RETURN 'a\nb' LIKE 'a%' AS percent, 'a\nb' LIKE 'a_b' AS underscore", GQL),
 ]:
     case(case_id, query, languages, "empty")
+
+# CT: a zoned datetime or time against a local one. GQL reads the local value at the session time
+#     zone, UTC without one (CT1 and CT2 hold, as SQL compares them), and Cypher keeps the types
+#     apart (CT1 is false and null there, as openCypher defines it): the parity run reports CT1
+#     and CT2 on purpose. Two zoned values compare by instant in both (CT3). A named time zone
+#     is not a displacement, 22009 (CT4). Cypher's time() is zoned, at +00:00 without an offset,
+#     and localtime() local (CT5)
+for case_id, query, languages in [
+    ("CT1", "RETURN zoned_datetime('2024-03-15T10:00:00+01:00') = local_datetime('2024-03-15T09:00:00') AS eq, zoned_datetime('2024-03-15T10:00:00+01:00') < local_datetime('2024-03-15T11:00:00') AS lt", BOTH),
+    ("CT2", "RETURN zonedTime('10:00:00+01:00') = local_time('09:00:00') AS eq", BOTH),
+    ("CT3", "RETURN zoned_datetime('2024-03-15T10:00:00+01:00') = zoned_datetime('2024-03-15T09:00:00Z') AS eq", BOTH),
+    ("CT5", "RETURN toString(time('10:00:00+01:00')) AS zoned, toString(time('10:00:00')) AS utc, toString(localtime('10:00:00')) AS local", CYPHER),
+]:
+    case(case_id, query, languages, "empty")
+# A session command: on a database of its own (it fails, so it changes nothing)
+case("CT4", "SESSION SET TIME ZONE 'Europe/Amsterdam'", GQL, "writes")
 
 # fmt: on

@@ -65,6 +65,9 @@ impl GqlStatus {
     /// `22004` - null value not allowed.
     pub const DATA_NULL_NOT_ALLOWED: Self = Self::from_bytes(*b"22004");
 
+    /// `22009` - invalid time zone displacement value.
+    pub const DATA_INVALID_TIME_ZONE_DISPLACEMENT: Self = Self::from_bytes(*b"22009");
+
     /// `22012` - division by zero.
     pub const DATA_DIVISION_BY_ZERO: Self = Self::from_bytes(*b"22012");
 
@@ -219,6 +222,9 @@ impl From<&super::error::Error> for GqlStatus {
                 QueryErrorKind::DivisionByZero => GqlStatus::DATA_DIVISION_BY_ZERO,
                 QueryErrorKind::NegativeLimit => GqlStatus::DATA_NEGATIVE_LIMIT,
                 QueryErrorKind::InvalidValueType => GqlStatus::DATA_INVALID_VALUE_TYPE,
+                QueryErrorKind::InvalidTimeZoneDisplacement => {
+                    GqlStatus::DATA_INVALID_TIME_ZONE_DISPLACEMENT
+                }
                 // GQL defines no class for a feature an implementation lacks.
                 QueryErrorKind::Unsupported => GqlStatus::SYNTAX_ERROR,
             },
@@ -479,6 +485,11 @@ mod tests {
             (
                 QueryErrorKind::InvalidValueType,
                 "22G03",
+                ErrorCode::QueryExecution,
+            ),
+            (
+                QueryErrorKind::InvalidTimeZoneDisplacement,
+                "22009",
                 ErrorCode::QueryExecution,
             ),
         ] {

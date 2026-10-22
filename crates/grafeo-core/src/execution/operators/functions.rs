@@ -222,11 +222,11 @@ builtin_functions! {
     Degrees => ["degrees"], "1", Numeric, immutable;
     Radians => ["radians"], "1", Numeric, immutable;
     Date => ["date", "toDate"], "0-1", Temporal, clock;
-    Time => ["time", "toTime", "local_time"], "0-1", Temporal, clock;
+    Time => ["time", "toTime", "local_time", "localtime"], "0-1", Temporal, clock;
     Datetime => ["datetime", "localdatetime", "local_datetime", "toDatetime"], "0-1", Temporal, clock;
     Duration => ["duration", "toDuration"], "1", Temporal, immutable;
     ZonedDatetime => ["toZonedDatetime", "zonedDatetime", "zoned_datetime"], "0-1", Temporal, clock;
-    ZonedTime => ["toZonedTime", "zonedTime"], "1", Temporal, immutable;
+    ZonedTime => ["toZonedTime", "zonedTime", "zoned_time"], "0-1", Temporal, clock;
     CurrentDate => ["current_date", "currentDate"], "0", Temporal, stable;
     CurrentTime => ["current_time", "currentTime"], "0", Temporal, stable;
     Now => ["now", "current_timestamp", "currentTimestamp"], "0", Temporal, stable;

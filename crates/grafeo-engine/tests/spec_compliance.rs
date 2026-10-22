@@ -645,9 +645,12 @@ mod gql_session_commands {
     fn session_set_time_zone() {
         let db = GrafeoDB::new_in_memory();
         let session = db.session();
-        let result = session.execute("SESSION SET TIME ZONE 'UTC+5'");
+        let result = session.execute("SESSION SET TIME ZONE '+05:00'");
         assert!(result.is_ok());
-        assert_eq!(session.time_zone(), Some("UTC+5".to_string()));
+        assert_eq!(session.time_zone(), Some("+05:00".to_string()));
+        // 'UTC+5' is no time zone displacement (ISO GQL writes '+05:00')
+        assert!(session.execute("SESSION SET TIME ZONE 'UTC+5'").is_err());
+        assert_eq!(session.time_zone(), Some("+05:00".to_string()));
     }
 
     #[test]
@@ -688,7 +691,7 @@ mod gql_session_commands {
         let session = db.session();
         session.execute("CREATE GRAPH g1").unwrap();
         session.execute("USE GRAPH g1").unwrap();
-        session.execute("SESSION SET TIME ZONE 'EST'").unwrap();
+        session.execute("SESSION SET TIME ZONE '-05:00'").unwrap();
         session.execute("CREATE SCHEMA s1").unwrap();
         session.execute("SESSION SET SCHEMA s1").unwrap();
         // Reset clears everything (Section 7.2 GR1+GR2+GR3)

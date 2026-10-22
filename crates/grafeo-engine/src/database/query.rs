@@ -17,10 +17,12 @@ impl super::GrafeoDB {
         // whose home stays the default graph and schema.
         session.set_home(None, None);
         let result = func(&session);
-        // Sync graph and schema state back, even on error (the session command may
-        // have succeeded before a subsequent query failed in the same session).
+        // Sync graph, schema and time zone state back, even on error (the session
+        // command may have succeeded before a subsequent query failed in the same
+        // session).
         *self.current_graph.write() = session.current_graph();
         *self.current_schema.write() = session.current_schema();
+        *self.current_time_zone.write() = session.time_zone();
         result
     }
 

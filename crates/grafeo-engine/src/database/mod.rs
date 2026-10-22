@@ -242,6 +242,9 @@ pub struct GrafeoDB {
     /// When set, each call to `session()` pre-configures the session to this schema.
     /// Updated after every one-shot `execute()` to reflect `SESSION SET SCHEMA` / `SESSION RESET`.
     current_schema: RwLock<Option<String>>,
+    /// Persistent time zone for one-shot `execute()` calls, as for the graph
+    /// and the schema: `SESSION SET TIME ZONE` carries over to the next call.
+    current_time_zone: RwLock<Option<String>>,
     /// Whether this database is open in read-only mode.
     /// When true, sessions automatically enforce read-only transactions.
     read_only: bool,
@@ -952,6 +955,7 @@ impl GrafeoDB {
             metrics: Some(Arc::new(crate::metrics::MetricsRegistry::new())),
             current_graph: RwLock::new(None),
             current_schema: RwLock::new(None),
+            current_time_zone: RwLock::new(None),
             read_only: is_read_only,
             projections: Arc::new(RwLock::new(std::collections::HashMap::new())),
             #[cfg(feature = "lpg")]
@@ -1156,6 +1160,7 @@ impl GrafeoDB {
             metrics: Some(Arc::new(crate::metrics::MetricsRegistry::new())),
             current_graph: RwLock::new(None),
             current_schema: RwLock::new(None),
+            current_time_zone: RwLock::new(None),
             read_only: false,
             projections: Arc::new(RwLock::new(std::collections::HashMap::new())),
             #[cfg(feature = "lpg")]
@@ -1252,6 +1257,7 @@ impl GrafeoDB {
             metrics: Some(Arc::new(crate::metrics::MetricsRegistry::new())),
             current_graph: RwLock::new(None),
             current_schema: RwLock::new(None),
+            current_time_zone: RwLock::new(None),
             read_only: true,
             projections: Arc::new(RwLock::new(std::collections::HashMap::new())),
             #[cfg(feature = "lpg")]
@@ -2191,6 +2197,11 @@ impl GrafeoDB {
         // Propagate persistent schema context to the new session
         if let Some(ref schema) = *self.current_schema.read() {
             session.set_schema(schema);
+        }
+
+        // And the time zone a one-shot SESSION SET TIME ZONE left
+        if let Some(ref zone) = *self.current_time_zone.read() {
+            session.inherit_time_zone(zone.clone());
         }
 
         // The session's home is where it starts

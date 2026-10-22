@@ -3857,14 +3857,18 @@ fn contains_aggregate(expr: &ast::Expression) -> bool {
 }
 
 /// The call for `name(args)` in Cypher, as [`resolve_call`] builds it, except
-/// that openCypher's `datetime()` is zoned: it keeps the input's offset, and
-/// is at +00:00 without one (`localdatetime()` is the local one, as GQL's
-/// `datetime` is).
+/// that openCypher's `datetime()` and `time()` are zoned: they keep the
+/// input's offset, and are at +00:00 without one (`localdatetime()` and
+/// `localtime()` are the local ones, as GQL's `datetime` and `time` are).
 fn resolve_cypher_call(name: &str, args: Vec<LogicalExpression>) -> Result<LogicalExpression> {
-    if !name.eq_ignore_ascii_case("datetime") {
+    let zoned = if name.eq_ignore_ascii_case("datetime") {
+        "zoned_datetime"
+    } else if name.eq_ignore_ascii_case("time") {
+        "zoned_time"
+    } else {
         return resolve_call(name, args, false);
-    }
-    let mut call = resolve_call("zoned_datetime", args, false)?;
+    };
+    let mut call = resolve_call(zoned, args, false)?;
     if let LogicalExpression::FunctionCall { name: called, .. } = &mut call {
         *called = name.to_string();
     }

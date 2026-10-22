@@ -9,7 +9,7 @@ use std::collections::{HashMap, VecDeque};
 use std::hash::{Hash, Hasher};
 
 use arcstr::ArcStr;
-use grafeo_common::types::{HashableValue, LogicalType, Value};
+use grafeo_common::types::{HashableValue, LogicalType, TemporalComparison, Value};
 
 use super::{Operator, OperatorError, OperatorResult};
 use crate::execution::chunk::{ColumnTypes, DataChunkBuilder, copied_column_types};
@@ -170,11 +170,20 @@ impl HashKey {
     /// equal keys; values it tells apart may share one.
     #[must_use]
     pub fn for_equality(value: &Value) -> Option<Self> {
-        (!value.is_null()).then(|| Self::equality_key(value))
+        Self::for_equality_in(value, TemporalComparison::default())
+    }
+
+    /// [`for_equality`](Self::for_equality), with a zoned and a local
+    /// datetime or time keyed as `comparison` makes `=` compare them: by
+    /// their instant with the local one at the comparison's offset, or apart.
+    #[must_use]
+    pub fn for_equality_in(value: &Value, comparison: TemporalComparison) -> Option<Self> {
+        (!value.is_null()).then(|| Self::equality_key(value, comparison))
     }
 
     /// The key of a value, by the rules of `=` (a filter's `values_equal`).
-    fn equality_key(value: &Value) -> Self {
+    fn equality_key(value: &Value, comparison: TemporalComparison) -> Self {
+        let key = |value: &Value| Self::equality_key(value, comparison);
         match value {
             // Inside a list or map, NULL equals NULL.
             Value::Null => HashKey::Null,
@@ -192,23 +201,24 @@ impl HashKey {
                 Ok(number) if !number.is_nan() => Self::number_key(number),
                 _ => HashKey::String(s.clone()),
             },
-            Value::List(items) => {
-                HashKey::Composite(items.iter().map(Self::equality_key).collect())
-            }
+            Value::List(items) => HashKey::Composite(items.iter().map(key).collect()),
             Value::Map(map) => HashKey::Composite(
                 map.iter()
-                    .map(|(key, value)| {
+                    .map(|(name, value)| {
                         HashKey::Composite(vec![
-                            HashKey::String(ArcStr::from(key.as_str())),
-                            Self::equality_key(value),
+                            HashKey::String(ArcStr::from(name.as_str())),
+                            key(value),
                         ])
                     })
                     .collect(),
             ),
             Value::Path { nodes, edges } => HashKey::Composite(vec![
-                HashKey::Composite(nodes.iter().map(Self::equality_key).collect()),
-                HashKey::Composite(edges.iter().map(Self::equality_key).collect()),
+                HashKey::Composite(nodes.iter().map(key).collect()),
+                HashKey::Composite(edges.iter().map(key).collect()),
             ]),
+            Value::Timestamp(_) | Value::ZonedDatetime(_) | Value::Time(_) => {
+                Self::temporal_key(value, comparison)
+            }
             // The elements compare as `f32`: zero equals negative zero.
             Value::Vector(items) => HashKey::Composite(
                 items
@@ -230,6 +240,44 @@ impl HashKey {
         }
     }
 
+    /// The key of a datetime or a time by the rules of `=` under
+    /// `comparison`: the UTC instant (of a datetime) or time of day (of a
+    /// time), a local value read at the comparison's offset, so that a zoned
+    /// and a local value `=` finds equal share it; with the types kept apart
+    /// (Cypher), a zoned and a local value never do.
+    fn temporal_key(value: &Value, comparison: TemporalComparison) -> Self {
+        const NANOS_PER_DAY: i64 = 86_400_000_000_000;
+        let keyed =
+            |kind: i64, at: i64| HashKey::Composite(vec![HashKey::Int64(kind), HashKey::Int64(at)]);
+        let (local_offset, apart) = match comparison {
+            TemporalComparison::LocalAt(offset) => (i64::from(offset), false),
+            TemporalComparison::TypesApart => (0, true),
+        };
+        match value {
+            Value::ZonedDatetime(zoned) => keyed(0, zoned.as_timestamp().as_micros()),
+            Value::Timestamp(local) => keyed(
+                i64::from(apart),
+                local.as_micros() - local_offset * 1_000_000,
+            ),
+            Value::Time(time) => {
+                #[allow(
+                    clippy::cast_possible_wrap,
+                    reason = "a time of day is below 86,400 s in nanoseconds, which fits i64"
+                )]
+                let nanos = time.as_nanos() as i64;
+                let (kind, offset) = match time.offset_seconds() {
+                    Some(offset) => (2, i64::from(offset)),
+                    None => (if apart { 3 } else { 2 }, local_offset),
+                };
+                keyed(
+                    kind,
+                    (nanos - offset * 1_000_000_000).rem_euclid(NANOS_PER_DAY),
+                )
+            }
+            other => HashKey::from_value(other),
+        }
+    }
+
     /// The key of a number: `=` compares numbers exactly (IEEE for floats),
     /// so equal numbers have the same `f64`, with `-0.0` equal to `0.0`. An
     /// integer above 2^53 shares the key of the integers that round to the
@@ -246,8 +294,9 @@ impl HashKey {
 enum KeyMatch {
     /// The same value of the same kind ([`HashKey::from_value`]).
     Exact,
-    /// As `=` compares values ([`HashKey::for_equality`]).
-    ValueEquality,
+    /// As `=` compares values ([`HashKey::for_equality_in`]), a zoned and a
+    /// local datetime or time as the query's language reads them.
+    ValueEquality(TemporalComparison),
 }
 
 /// How a [`HashJoinOperator`] reads its probe side.
@@ -382,7 +431,16 @@ impl HashJoinOperator {
     /// row to meet ends without reading it.
     #[must_use]
     pub fn with_value_equality_keys(mut self) -> Self {
-        self.keys = KeyMatch::ValueEquality;
+        self.keys = KeyMatch::ValueEquality(TemporalComparison::default());
+        self
+    }
+
+    /// [`with_value_equality_keys`](Self::with_value_equality_keys), with a
+    /// zoned and a local datetime or time meeting as `comparison` reads them
+    /// (the query's language and session time zone).
+    #[must_use]
+    pub fn with_value_equality_keys_in(mut self, comparison: TemporalComparison) -> Self {
+        self.keys = KeyMatch::ValueEquality(comparison);
         self
     }
 
@@ -480,14 +538,17 @@ impl HashJoinOperator {
         row: usize,
         key_columns: &[usize],
     ) -> Result<HashKey, OperatorError> {
-        if self.keys == KeyMatch::ValueEquality {
+        if let KeyMatch::ValueEquality(comparison) = self.keys {
             let mut keys = Vec::with_capacity(key_columns.len());
             for &column in key_columns {
                 let value = chunk
                     .column(column)
                     .ok_or_else(|| OperatorError::ColumnNotFound(format!("column {column}")))?
                     .get_value(row);
-                match value.as_ref().and_then(HashKey::for_equality) {
+                match value
+                    .as_ref()
+                    .and_then(|value| HashKey::for_equality_in(value, comparison))
+                {
                     Some(key) => keys.push(key),
                     None => return Ok(HashKey::Null),
                 }
@@ -695,7 +756,7 @@ impl Operator for HashJoinOperator {
         if !self.build_complete {
             self.build_hash_table()?;
         }
-        if self.keys == KeyMatch::ValueEquality
+        if matches!(self.keys, KeyMatch::ValueEquality(_))
             && self.join_type == JoinType::Inner
             && self.hash_table.is_empty()
         {
@@ -742,7 +803,8 @@ impl Operator for HashJoinOperator {
                     let key = self.extract_key(probe_chunk, probe_row, &self.probe_keys)?;
                     // A NULL value-equality key meets nothing, not even the
                     // NULL keys an outer join keeps on the build side.
-                    let candidates = if self.keys == KeyMatch::ValueEquality && key == HashKey::Null
+                    let candidates = if matches!(self.keys, KeyMatch::ValueEquality(_))
+                        && key == HashKey::Null
                     {
                         None
                     } else {
@@ -2203,6 +2265,8 @@ mod tests {
                 (list(vec![Value::from("1")]), list(vec![Value::Int64(1)])),
                 (map("a", Value::Int64(1)), map("a", Value::Float64(1.0))),
                 (time("14:00:00+01:00"), time("13:00:00Z")),
+                // A local time reads at UTC without a session time zone
+                (time("13:00:00"), time("13:00:00Z")),
                 (
                     zoned("2026-10-07T14:00:00+01:00"),
                     zoned("2026-10-07T13:00:00Z"),
@@ -2231,7 +2295,7 @@ mod tests {
                 (Value::from("-0"), Value::Float64(1e-17)),
                 (Value::Float64(0.999_999_999_999_999_9), Value::Int64(1)),
                 (Value::Float64(0.999_999_999_999_999_9), Value::Float64(1.0)),
-                (time("13:00:00"), time("13:00:00Z")),
+                (time("13:00:00"), time("14:00:00Z")),
                 (Value::Null, Value::Null),
             ] {
                 assert!(!equal(&a, &b), "{a:?} <> {b:?}");

@@ -253,7 +253,19 @@ fn checkpoints_during_concurrent_writers_lose_nothing() {
             })
         })
         .collect();
+    // Commits no longer wait for a checkpoint, so five checkpoints can end
+    // before a writer commits once: each one starts after the writers
+    // committed more, so every checkpoint overlaps writes.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(300);
     for _ in 0..5 {
+        let before = written.load(Ordering::Acquire);
+        while written.load(Ordering::Acquire) == before {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the writers stopped committing"
+            );
+            std::thread::yield_now();
+        }
         db.wal_checkpoint().unwrap();
     }
     stop.store(true, Ordering::Release);

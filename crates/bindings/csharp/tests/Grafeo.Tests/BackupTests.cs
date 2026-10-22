@@ -14,13 +14,13 @@ public sealed class BackupTests
     [Fact]
     public void FullAndIncrementalBackupsRestoreToEachEpoch()
     {
-        var dir = Path.Combine(Path.GetTempPath(), $"grafeo-csharp-{Guid.NewGuid():N}");
+        var dir = Path.Join(Path.GetTempPath(), $"grafeo-csharp-{Guid.NewGuid():N}");
         Directory.CreateDirectory(dir);
         try
         {
-            var backups = Path.Combine(dir, "backups");
+            var backups = Path.Join(dir, "backups");
             ulong fullEpoch, latest;
-            using (var db = GrafeoDB.Open(Path.Combine(dir, "paris.grafeo")))
+            using (var db = GrafeoDB.Open(Path.Join(dir, "paris.grafeo")))
             {
                 db.Execute("INSERT (:Person {name: 'Alix'})");
                 db.BackupFull(backups);
@@ -30,12 +30,12 @@ public sealed class BackupTests
                 latest = db.CurrentEpoch;
             }
 
-            var atFull = Path.Combine(dir, "full.grafeo");
+            var atFull = Path.Join(dir, "full.grafeo");
             GrafeoDB.RestoreToEpoch(backups, fullEpoch, atFull);
             using (var restored = GrafeoDB.Open(atFull))
                 Assert.Equal(["Alix"], People(restored));
 
-            var atLatest = Path.Combine(dir, "latest.grafeo");
+            var atLatest = Path.Join(dir, "latest.grafeo");
             GrafeoDB.RestoreToEpoch(backups, latest, atLatest);
             using (var restored = GrafeoDB.Open(atLatest))
                 Assert.Equal(["Alix", "Gus"], People(restored));
@@ -63,17 +63,17 @@ public sealed class BackupTests
     [Fact]
     public void FullBackupDuringConcurrentWritersHoldsWholeTransactions()
     {
-        var dir = Path.Combine(Path.GetTempPath(), $"grafeo-csharp-{Guid.NewGuid():N}");
+        var dir = Path.Join(Path.GetTempPath(), $"grafeo-csharp-{Guid.NewGuid():N}");
         Directory.CreateDirectory(dir);
         try
         {
-            var backups = Path.Combine(dir, "backups");
+            var backups = Path.Join(dir, "backups");
             var counts = new int[Writers];
             using var stop = new ManualResetEventSlim();
             using var started = new CountdownEvent(Writers);
             ulong latest;
             int[] before;
-            using (var db = GrafeoDB.Open(Path.Combine(dir, "lyon.grafeo")))
+            using (var db = GrafeoDB.Open(Path.Join(dir, "lyon.grafeo")))
             {
                 var threads = Enumerable.Range(0, Writers).Select(writer => new Thread(() =>
                 {
@@ -102,8 +102,8 @@ public sealed class BackupTests
                 stop.Set();
                 threads.ForEach(thread => thread.Join());
 
-                var image = Path.Combine(dir, "image.grafeo");
-                File.Copy(Path.Combine(backups, "backup_full_0000.grafeo"), image);
+                var image = Path.Join(dir, "image.grafeo");
+                File.Copy(Path.Join(backups, "backup_full_0000.grafeo"), image);
                 using (var copy = GrafeoDB.Open(image))
                 {
                     var people = Committed(copy, "Person");
@@ -123,7 +123,7 @@ public sealed class BackupTests
             var expected = Enumerable.Range(0, Writers)
                 .SelectMany(writer => Enumerable.Range(0, counts[writer]).Select(seq => ((long)writer, (long)seq)))
                 .ToList();
-            var restored = Path.Combine(dir, "restored.grafeo");
+            var restored = Path.Join(dir, "restored.grafeo");
             GrafeoDB.RestoreToEpoch(backups, latest, restored);
             for (var reopen = 0; reopen < 2; reopen++)
             {

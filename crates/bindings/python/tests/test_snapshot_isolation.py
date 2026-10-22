@@ -10,8 +10,7 @@ engine's full set of guarantees is
 import contextlib
 import threading
 
-import grafeo
-from grafeo import GrafeoDB
+from grafeo import GrafeoDB, GrafeoError
 
 
 def only(result, column):
@@ -112,11 +111,11 @@ def increment(db):
             tx.execute(f"MATCH (c:Counter) SET c.n = {n + 1}")
             tx.commit()
             return
-        except grafeo.GrafeoError as error:
+        except GrafeoError as error:
             if not error.is_retryable:
                 raise
             if tx.is_active:
-                with contextlib.suppress(grafeo.GrafeoError):
+                with contextlib.suppress(GrafeoError):
                     tx.rollback()
 
 

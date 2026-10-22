@@ -7,12 +7,12 @@ public sealed class PersistenceTests
 {
     private static string TempDbPath(string name)
     {
-        var dir = Path.Combine(Path.GetTempPath(), $"grafeo-csharp-{Guid.NewGuid():N}");
+        var dir = Path.Join(Path.GetTempPath(), $"grafeo-csharp-{Guid.NewGuid():N}");
         Directory.CreateDirectory(dir);
         var fileName = Path.GetFileName(name);
         if (string.IsNullOrEmpty(fileName))
             fileName = "db.grafeo";
-        return Path.Combine(dir, fileName);
+        return Path.Join(dir, fileName);
     }
 
     private static void Cleanup(string dbPath)

@@ -137,9 +137,9 @@ public sealed class TimeTravelTests : IDisposable
     [Fact]
     public void TheFileStoresTheRetention()
     {
-        var dir = Path.Combine(Path.GetTempPath(), $"grafeo-csharp-{Guid.NewGuid():N}");
+        var dir = Path.Join(Path.GetTempPath(), $"grafeo-csharp-{Guid.NewGuid():N}");
         Directory.CreateDirectory(dir);
-        var path = Path.Combine(dir, "history.grafeo");
+        var path = Path.Join(dir, "history.grafeo");
         try
         {
             ulong then;

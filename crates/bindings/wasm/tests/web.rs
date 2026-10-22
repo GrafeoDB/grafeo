@@ -1248,7 +1248,7 @@ fn test_import_lpg_failure_keeps_nothing() {
     }))
     .unwrap();
     assert!(db.import_lpg(data).is_err());
-    assert_eq!((db.node_count(), db.edge_count()), (0, 0));
+    assert_eq!((db.node_count().unwrap(), db.edge_count().unwrap()), (0, 0));
 }
 
 /// The same for `importRows`: a row without its target column fails the
@@ -1266,7 +1266,7 @@ fn test_import_rows_failure_keeps_nothing() {
     .unwrap();
     let options = to_js(&serde_json::json!({ "mode": "edges", "edgeType": "KNOWS" })).unwrap();
     assert!(db.import_rows(edges, options).is_err());
-    assert_eq!((db.node_count(), db.edge_count()), (2, 0));
+    assert_eq!((db.node_count().unwrap(), db.edge_count().unwrap()), (2, 0));
 }
 
 /// setSchema makes the check a query makes (#245): a schema that does not

@@ -18,6 +18,14 @@ from pathlib import Path
 try:
     import yaml as _yaml
 
+    class _TextFloatLoader(_yaml.SafeLoader):
+        """A safe loader that keeps each YAML float as its source text, as the Rust
+        runner reads it: an expected ``8.0`` is a decimal's ``8.0``, not the float 8."""
+
+    _TextFloatLoader.add_constructor(
+        "tag:yaml.org,2002:float", lambda loader, node: loader.construct_scalar(node)
+    )
+
     HAS_YAML = True
 except ImportError:
     HAS_YAML = False
@@ -104,16 +112,6 @@ def parse_gtest_file(path: Path) -> GtestFile:
 # ---------------------------------------------------------------------------
 # YAML-based parser (preferred)
 # ---------------------------------------------------------------------------
-
-
-class _TextFloatLoader(_yaml.SafeLoader):
-    """A safe loader that keeps each YAML float as its source text, as the Rust
-    runner reads it: an expected ``8.0`` is a decimal's ``8.0``, not the float 8."""
-
-
-_TextFloatLoader.add_constructor(
-    "tag:yaml.org,2002:float", lambda loader, node: loader.construct_scalar(node)
-)
 
 
 def _parse_with_yaml(content: str, path: Path) -> GtestFile:

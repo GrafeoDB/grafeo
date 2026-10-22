@@ -105,6 +105,9 @@ describe('backups', () => {
     expect(people.length).toBeLessThanOrEqual(300)
     expect(people).not.toContain(-1)
 
+    // The writes may all commit before the full backup starts; one more after
+    // it gives the incremental backup something to hold either way.
+    await insert(300)
     db.backupIncremental(backups)
     const latest = db.currentEpoch()
     db.close()
@@ -113,7 +116,7 @@ describe('backups', () => {
     for (let reopen = 0; reopen < 2; reopen++) {
       // Opened twice: the restore and its reopen hold every write.
       const restored = GrafeoDB.open(restoredPath)
-      expect(await committed(restored)).toEqual([range(300), range(300)])
+      expect(await committed(restored)).toEqual([range(301), range(301)])
       restored.close()
     }
   })

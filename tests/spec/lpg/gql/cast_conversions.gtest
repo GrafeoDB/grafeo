@@ -45,12 +45,31 @@ tests:
       rows:
         - [null, null]
 
+  # A text loses its leading and trailing spaces first, as SQL casts a
+  # character string; a cast to STRING keeps them.
   - name: cast_text_with_surrounding_spaces_to_int64
-    skip: "CAST(' 42 ' AS INT64) is null; SQL and ISO GQL trim the spaces first (inbox value-kinds/cast-of-padded-text-and-booleans.md)"
-    query: "RETURN CAST(' 42 ' AS INT64) AS a"
+    query: "RETURN CAST(' 42 ' AS INT64) AS a, CAST('  -7' AS INT) AS b"
     expect:
       rows:
-        - [42]
+        - [42, -7]
+
+  - name: cast_text_with_surrounding_spaces_to_each_type
+    query: "RETURN CAST(' 1.5 ' AS FLOAT64) AS f, CAST(' 1.50 ' AS DECIMAL) AS d, CAST(' true ' AS BOOLEAN) AS b, CAST(' 2024-03-15 ' AS DATE) AS dt, CAST(' PT1H ' AS DURATION) = DURATION 'PT1H' AS du"
+    expect:
+      rows:
+        - [1.5, 1.50, true, "2024-03-15", true]
+
+  - name: a_cast_to_string_keeps_the_spaces
+    query: "RETURN CAST(' 42 ' AS STRING) AS s, char_length(CAST(' 42 ' AS STRING)) AS n"
+    expect:
+      rows:
+        - [" 42 ", 4]
+
+  - name: only_spaces_are_trimmed
+    query: "RETURN CAST(' 4 2 ' AS INT64) AS inner_space, CAST('x42' AS INT64) AS letter"
+    expect:
+      rows:
+        - [null, null]
 
   # ---------------------------------------------------------------------------
   # FLOAT64

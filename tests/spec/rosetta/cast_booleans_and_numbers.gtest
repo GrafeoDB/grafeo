@@ -1,17 +1,19 @@
-# CAST between booleans and numbers, in GQL and SQL/PGQ
+# CAST between booleans and numbers, and of padded text, in GQL and SQL/PGQ
 #
 # A boolean is 1 or 0 as a number (INT64, FLOAT64, DECIMAL), and a number is
 # true unless it is 0 as a boolean, in every direction, as DuckDB casts them
 # (ISO GQL and SQL have no such cast). Only CAST does this: Cypher's toFloat
 # and toBoolean keep openCypher's rules. CAST(true AS FLOAT64) and
-# CAST(0 AS BOOLEAN) were null, while CAST(true AS INT64) was 1.
+# CAST(0 AS BOOLEAN) were null, while CAST(true AS INT64) was 1. A text
+# loses its leading and trailing spaces before a cast, as SQL casts a
+# character string (toInteger in Cypher does not).
 
 meta:
   model: lpg
   section: rosetta
   title: CAST between booleans and numbers
   dataset: empty
-  requires: [sql-pgq]
+  requires: [cypher, sql-pgq]
 
 tests:
 
@@ -61,3 +63,22 @@ tests:
     expect:
       rows:
         - [true, 2, null]
+
+  - name: a_cast_trims_a_stored_padded_text
+    setup:
+      - "INSERT (:P {n: ' 42 ', b: ' false ', d: '  2024-03-15'})"
+    variants:
+      gql: "MATCH (p:P) RETURN CAST(p.n AS INT64) AS n, CAST(p.b AS BOOLEAN) AS b, CAST(p.d AS DATE) = DATE '2024-03-15' AS d"
+      sql-pgq: "SELECT * FROM GRAPH_TABLE (MATCH (p:P) COLUMNS (CAST(p.n AS BIGINT) AS n, CAST(p.b AS BOOLEAN) AS b, CAST(p.d AS DATE) = CAST('2024-03-15' AS DATE) AS d))"
+    expect:
+      rows:
+        - [42, false, true]
+
+  - name: cypher_to_integer_does_not_trim
+    setup:
+      - "INSERT (:P {n: ' 42 '})"
+    variants:
+      cypher: "MATCH (p:P) RETURN toInteger(p.n) AS n"
+    expect:
+      rows:
+        - [null]

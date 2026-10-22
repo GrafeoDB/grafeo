@@ -392,11 +392,16 @@ fn sign_of_a_non_number(sign: char, value: &Value) -> OperatorError {
 
 /// The value CAST gives the conversion function of the `target` category
 /// (`INTEGER`, `FLOAT`, `DECIMAL`, `BOOLEAN` or a temporal type, as the
-/// parsers name it): a boolean is 1 or 0 to a number, and a number is true
-/// unless it is 0 to a boolean, in every direction, as DuckDB casts them.
-/// Every other value is the value itself.
+/// parsers name it): a text without its leading and trailing spaces, as SQL
+/// casts a character string; a boolean is 1 or 0 to a number, and a number
+/// is true unless it is 0 to a boolean, in every direction, as DuckDB casts
+/// them. Every other value is the value itself.
 fn cast_operand(value: Value, target: &str) -> Value {
     match (target, value) {
+        (_, Value::String(text)) => match text.trim_matches(' ') {
+            trimmed if trimmed.len() == text.len() => Value::String(text),
+            trimmed => Value::String(trimmed.into()),
+        },
         ("INTEGER" | "FLOAT" | "DECIMAL", Value::Bool(b)) => Value::Int64(i64::from(b)),
         ("BOOLEAN", Value::Int64(i)) => Value::Bool(i != 0),
         ("BOOLEAN", Value::Float64(f)) => Value::Bool(f != 0.0),

@@ -656,3 +656,4 @@ CV5|cypher 69333180aa SUM and AVG of durations add them and divide the sum, as o
 CV5|gql 69333180aa SUM and AVG of durations add them and divide the sum, as openCypher defines them; both were null.
 CW1|gql 1fed328d7b CAST of a boolean to FLOAT64 and DECIMAL is 1 or 0, as to INT64 (DuckDB's rule); CAST AS DECIMAL did not parse in 0.5.44 and CAST(true AS FLOAT64) was null.
 CW2|gql 6de4a5360c CAST of a number to BOOLEAN is true unless the number is 0 (DuckDB's rule); it was null.
+CX1|gql 8ee82b4577 CAST trims the spaces around a text before converting it, as SQL casts a character string; padded text was null.

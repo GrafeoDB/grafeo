@@ -1940,4 +1940,14 @@ for case_id, query, languages in [
 ]:
     case(case_id, query, languages, "empty")
 
+# CX: CAST trims the spaces around a text, as SQL casts a character string (CX1: to numbers, a
+#     boolean and a date, which were null), a cast to STRING keeps them (CX2), and Cypher's
+#     toInteger does not trim (CX3)
+for case_id, query, languages in [
+    ("CX1", "RETURN CAST(' 42 ' AS INT64) AS i, CAST(' 1.5 ' AS FLOAT64) AS f, CAST(' true ' AS BOOLEAN) AS b, CAST(' 2024-03-15 ' AS DATE) AS d", GQL),
+    ("CX2", "RETURN CAST(' 42 ' AS STRING) AS s", GQL),
+    ("CX3", "RETURN toInteger(' 42 ') AS i", CYPHER),
+]:
+    case(case_id, query, languages, "empty")
+
 # fmt: on

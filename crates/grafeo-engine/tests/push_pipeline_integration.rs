@@ -1037,6 +1037,114 @@ fn grouped_distinct_keeps_later_rows_after_pressure_spill() {
     );
 }
 
+/// Runs `query` twice on a database of 16384 `:N` nodes (`g = i % 512`,
+/// `x = i % 8192`) while memory pressure stays High, and checks that each of
+/// the 512 buckets holds the 16 distinct values `b + 512 k`: count 16, sum
+/// `16 b + 61440`, mean `b + 3840`, and with `with_collect` the list of them.
+/// Afterwards the spill directory is empty.
+#[cfg(feature = "spill")]
+fn check_distinct_aggregates_under_pressure(language: &str, query: &str, with_collect: bool) {
+    use grafeo_common::memory::buffer::{MemoryRegion, PressureLevel};
+    use grafeo_engine::Config;
+
+    let spill_root = tempfile::tempdir().unwrap();
+    let db = GrafeoDB::with_config(
+        Config::in_memory()
+            .with_memory_limit(64 * 1024 * 1024)
+            .with_spill_path(spill_root.path())
+            .without_query_timeout(),
+    )
+    .unwrap();
+    db.execute("FOR i IN range(0, 16383) INSERT (:N {g: i % 512, x: i % 8192})")
+        .unwrap();
+    let manager = db.buffer_manager();
+    let session = db.session();
+    let check = |result: &grafeo_engine::database::QueryResult| {
+        let mut rows = result.rows().to_vec();
+        rows.sort_by_key(|row| row[0].as_int64().unwrap());
+        assert_eq!(rows.len(), 512, "{language} {query}");
+        for (bucket, row) in rows.iter().enumerate() {
+            let b = i64::try_from(bucket).unwrap();
+            assert_eq!(
+                row[..4],
+                [
+                    Value::Int64(b),
+                    Value::Int64(16),
+                    Value::Int64(16 * b + 61440),
+                    Value::Float64(f64::from(u32::try_from(bucket).unwrap()) + 3840.0),
+                ],
+                "{language} {query}"
+            );
+            if with_collect {
+                let mut values: Vec<i64> = row[4]
+                    .as_list()
+                    .unwrap()
+                    .iter()
+                    .map(|value| value.as_int64().unwrap())
+                    .collect();
+                values.sort_unstable();
+                let expected: Vec<i64> = (0..16).map(|k| b + 512 * k).collect();
+                assert_eq!(values, expected, "{language} {query}");
+            }
+        }
+    };
+
+    let pressure = manager
+        .try_allocate(
+            manager.config().budget * 9 / 10,
+            MemoryRegion::ExecutionBuffers,
+        )
+        .unwrap();
+    assert_eq!(manager.pressure_level(), PressureLevel::High);
+    check(&session.execute_language(query, language, None).unwrap());
+    check(&session.execute_language(query, language, None).unwrap());
+    drop(pressure);
+
+    assert!(
+        std::fs::read_dir(spill_root.path())
+            .unwrap()
+            .next()
+            .is_none(),
+        "{language}: every spilled partition was reloaded and removed"
+    );
+}
+
+/// The other DISTINCT aggregates keep later rows too (#602), over a list and
+/// over stored nodes: every chunk revisits all 512 groups, so later chunks
+/// reload the groups pressure spilled.
+#[cfg(feature = "spill")]
+#[test]
+fn grouped_distinct_aggregates_keep_later_rows_after_pressure_spill() {
+    check_distinct_aggregates_under_pressure(
+        "gql",
+        "FOR i IN range(0, 16383) LET x = i % 8192 RETURN x % 512 AS bucket, count(DISTINCT x) AS c, sum(DISTINCT x) AS s, avg(DISTINCT x) AS a, collect(DISTINCT x) AS l",
+        true,
+    );
+    check_distinct_aggregates_under_pressure(
+        "gql",
+        "MATCH (n:N) RETURN n.g AS bucket, count(DISTINCT n.x) AS c, sum(DISTINCT n.x) AS s, avg(DISTINCT n.x) AS a, collect(DISTINCT n.x) AS l",
+        true,
+    );
+}
+
+/// Cypher and SQL/PGQ give the same groups under pressure. (Their plans do
+/// not run on the spilling push pipeline yet, so this checks the values, not
+/// a reload.)
+#[cfg(all(feature = "spill", feature = "cypher", feature = "sql-pgq"))]
+#[test]
+fn grouped_distinct_aggregates_under_pressure_in_cypher_and_sql_pgq() {
+    check_distinct_aggregates_under_pressure(
+        "cypher",
+        "MATCH (n:N) RETURN n.g AS bucket, count(DISTINCT n.x) AS c, sum(DISTINCT n.x) AS s, avg(DISTINCT n.x) AS a, collect(DISTINCT n.x) AS l",
+        true,
+    );
+    check_distinct_aggregates_under_pressure(
+        "sql-pgq",
+        "SELECT g AS bucket, COUNT(DISTINCT x) AS c, SUM(DISTINCT x) AS s, AVG(DISTINCT x) AS a FROM GRAPH_TABLE (MATCH (n:N) COLUMNS (n.g AS g, n.x AS x)) GROUP BY g",
+        false,
+    );
+}
+
 #[cfg(feature = "spill")]
 #[test]
 fn grouped_decimal_identities_survive_chunks_and_pressure_spill() {

@@ -72,6 +72,43 @@ fn session_with_role_readonly() {
     assert!(result.is_err(), "ReadOnly role should not allow writes");
 }
 
+/// A SHOW reads the catalog, so a read-only role may run it; schema DDL
+/// stays an Admin statement, in GQL and in Cypher.
+#[test]
+fn readonly_role_shows_the_schema_and_may_not_change_it() {
+    let db = GrafeoDB::new_in_memory();
+    db.execute("CREATE CONSTRAINT FOR (p:Person) ON (p.email) UNIQUE")
+        .unwrap();
+    let session = db.session_with_role(Role::ReadOnly);
+    for show in ["SHOW CONSTRAINTS", "SHOW INDEXES", "SHOW NODE TYPES"] {
+        let result = session.execute(show);
+        assert!(result.is_ok(), "{show}: {:?}", result.err());
+    }
+    assert_eq!(session.execute("SHOW CONSTRAINTS").unwrap().rows().len(), 1);
+    assert!(
+        session
+            .execute("CREATE CONSTRAINT FOR (p:Person) ON (p.name) UNIQUE")
+            .is_err()
+    );
+    #[cfg(feature = "cypher")]
+    {
+        assert!(session.execute_cypher("SHOW CONSTRAINTS").is_ok());
+        assert!(
+            session
+                .execute_cypher("CREATE CONSTRAINT FOR (p:Person) REQUIRE p.name IS UNIQUE")
+                .is_err()
+        );
+    }
+    assert_eq!(
+        db.session()
+            .execute("SHOW CONSTRAINTS")
+            .unwrap()
+            .rows()
+            .len(),
+        1
+    );
+}
+
 #[test]
 fn session_with_role_readwrite() {
     let db = GrafeoDB::new_in_memory();

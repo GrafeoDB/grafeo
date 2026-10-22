@@ -300,7 +300,7 @@ db.Save("/path/to/backup.grafeo");
 
 ```csharp
 // Create a vector index via GQL
-db.Execute("CREATE VECTOR INDEX ON Document(embedding) OPTIONS {dimensions: 384}");
+db.Execute("CREATE VECTOR INDEX document_embedding ON :Document(embedding) DIMENSION 384");
 
 // Similarity search: returns nearest k nodes
 float[] queryVector = GetEmbedding("graph database");

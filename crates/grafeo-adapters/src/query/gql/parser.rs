@@ -5,6 +5,7 @@ use super::ast::*;
 use super::lexer::{Lexer, Token, TokenKind};
 use crate::query::keywords::unescape_string;
 use crate::query::limits::{Chain, Nesting, nesting_error_message};
+use crate::query::schema::IndexOptionValue;
 use grafeo_common::storage::value_codec::MAX_PROPERTY_VALUE_DEPTH;
 use grafeo_common::types::{Decimal, DecimalError, DecimalType, MAX_DECIMAL_DIGITS};
 use grafeo_common::utils::error::{Error, QueryError, QueryErrorKind, Result, SourceSpan};
@@ -5461,52 +5462,23 @@ impl<'a> Parser<'a> {
         }
     }
 
-    /// Parses the options of a text index, `{k1: 1.2, b: 0.75, tokenizer:
-    /// 'standard', stop_words: ['and', 'or']}` (each optional, names in any
-    /// case), into `options`.
-    fn parse_text_index_options(&mut self, options: &mut IndexOptions) -> Result<()> {
+    /// Parses the options of a text or vector index, `{name: value, ...}`
+    /// (names in any case), into `options`: `{k1: 1.2, b: 0.75, tokenizer:
+    /// 'standard', stop_words: ['and', 'or']}` for text, `{dimensions: 384,
+    /// metric: 'cosine'}` for vector. [`IndexOptions::set`] checks each one.
+    fn parse_index_options(&mut self, kind: IndexKind, options: &mut IndexOptions) -> Result<()> {
         self.expect(TokenKind::LBrace)?;
         while self.current.kind != TokenKind::RBrace {
             if !self.is_identifier() {
                 return Err(self.error("Expected option name"));
             }
-            let opt_name = self.get_identifier_name();
+            let name = self.get_identifier_name();
             self.advance();
             self.expect(TokenKind::Colon)?;
-            match opt_name.to_uppercase().as_str() {
-                "K1" => options.k1 = Some(self.parse_index_option_number("k1")?),
-                "B" => options.b = Some(self.parse_index_option_number("b")?),
-                "TOKENIZER" => {
-                    if self.current.kind != TokenKind::String {
-                        return Err(self.error("Expected string for tokenizer"));
-                    }
-                    options.tokenizer = Some(self.index_option_string());
-                    self.advance();
-                }
-                "STOP_WORDS" => {
-                    self.expect(TokenKind::LBracket)?;
-                    let mut words = Vec::new();
-                    while self.current.kind != TokenKind::RBracket {
-                        if self.current.kind != TokenKind::String {
-                            return Err(self.error("Expected string in stop_words"));
-                        }
-                        words.push(self.index_option_string());
-                        self.advance();
-                        if self.current.kind == TokenKind::Comma {
-                            self.advance();
-                        } else {
-                            break;
-                        }
-                    }
-                    self.expect(TokenKind::RBracket)?;
-                    options.stop_words = Some(words);
-                }
-                _ => {
-                    return Err(self.error(&format!(
-                        "Unknown text index option '{opt_name}'. Use: k1, b, tokenizer, stop_words"
-                    )));
-                }
-            }
+            let value = self.parse_index_option_value(&name)?;
+            options
+                .set(kind, &name, value)
+                .map_err(|message| self.error(&message))?;
             if self.current.kind == TokenKind::Comma {
                 self.advance();
             }
@@ -5515,25 +5487,47 @@ impl<'a> Parser<'a> {
         Ok(())
     }
 
-    /// Parses the number of the index option `name`: an integer or a float,
-    /// with an optional leading minus (which the engine then refuses as out
-    /// of range, naming the option).
-    fn parse_index_option_number(&mut self, name: &str) -> Result<f64> {
+    /// Parses the value of the index option `name`: a number with an
+    /// optional leading minus (which the engine then refuses as out of
+    /// range, naming the option), a string, or a list of them. Any other
+    /// token is read as [`IndexOptionValue::Other`].
+    fn parse_index_option_value(&mut self, name: &str) -> Result<IndexOptionValue> {
         let negative = self.current.kind == TokenKind::Minus;
         if negative {
             self.advance();
         }
-        if !matches!(
-            self.current.kind,
-            TokenKind::Integer | TokenKind::Float | TokenKind::Decimal
-        ) {
-            return Err(self.error(&format!("Expected a number for {name}")));
-        }
-        let value: f64 = number_text(&self.current.text)
-            .parse()
-            .map_err(|_| self.error(&format!("Invalid number for {name}")))?;
+        let value = match self.current.kind {
+            TokenKind::Integer => {
+                let n = integer_literal(number_text(&self.current.text), negative)
+                    .ok_or_else(|| self.error(&format!("Invalid number for {name}")))?;
+                IndexOptionValue::Integer(n)
+            }
+            TokenKind::Float | TokenKind::Decimal => {
+                let value: f64 = number_text(&self.current.text)
+                    .parse()
+                    .map_err(|_| self.error(&format!("Invalid number for {name}")))?;
+                IndexOptionValue::Float(if negative { -value } else { value })
+            }
+            _ if negative => return Err(self.error(&format!("Expected a number for {name}"))),
+            TokenKind::String => IndexOptionValue::String(self.index_option_string()),
+            TokenKind::LBracket => {
+                self.advance();
+                let mut items = Vec::new();
+                while self.current.kind != TokenKind::RBracket {
+                    items.push(self.parse_index_option_value(name)?);
+                    if self.current.kind == TokenKind::Comma {
+                        self.advance();
+                    } else {
+                        break;
+                    }
+                }
+                self.expect(TokenKind::RBracket)?;
+                return Ok(IndexOptionValue::List(items));
+            }
+            _ => IndexOptionValue::Other,
+        };
         self.advance();
-        Ok(if negative { -value } else { value })
+        Ok(value)
     }
 
     /// The text of the current string literal, without its quotes.
@@ -5618,69 +5612,12 @@ impl<'a> Parser<'a> {
                 self.get_identifier_name()
             };
             self.advance();
-            match kind_text.to_uppercase().as_str() {
-                "TEXT" => {
-                    index_kind = IndexKind::Text;
-                    // Parse optional {k1: 1.2, b: 0.75, tokenizer: 'name', stop_words: [...]}
-                    if self.current.kind == TokenKind::LBrace {
-                        self.parse_text_index_options(&mut options)?;
-                    }
-                }
-                "VECTOR" => {
-                    index_kind = IndexKind::Vector;
-                    // Parse optional {dimensions: N, metric: 'name'}
-                    if self.current.kind == TokenKind::LBrace {
-                        self.advance();
-                        while self.current.kind != TokenKind::RBrace {
-                            if !self.is_identifier() {
-                                return Err(self.error("Expected option name"));
-                            }
-                            let opt_name = self.get_identifier_name();
-                            self.advance();
-                            self.expect(TokenKind::Colon)?;
-                            match opt_name.to_uppercase().as_str() {
-                                "DIMENSIONS" | "DIMENSION" => {
-                                    if self.current.kind != TokenKind::Integer {
-                                        return Err(self.error("Expected integer for dimensions"));
-                                    }
-                                    let dim: usize = self
-                                        .current
-                                        .text
-                                        .parse()
-                                        .map_err(|_| self.error("Invalid dimension value"))?;
-                                    self.advance();
-                                    options.dimensions = Some(dim);
-                                }
-                                "METRIC" => {
-                                    if self.current.kind != TokenKind::String {
-                                        return Err(self.error("Expected string for metric"));
-                                    }
-                                    let metric = self
-                                        .current
-                                        .text
-                                        .trim_matches('\'')
-                                        .trim_matches('"')
-                                        .to_string();
-                                    self.advance();
-                                    options.metric = Some(metric);
-                                }
-                                _ => {
-                                    return Err(
-                                        self.error(&format!("Unknown index option '{opt_name}'"))
-                                    );
-                                }
-                            }
-                            if self.current.kind == TokenKind::Comma {
-                                self.advance();
-                            }
-                        }
-                        self.expect(TokenKind::RBrace)?;
-                    }
-                }
-                "BTREE" => index_kind = IndexKind::BTree,
-                _ => {
-                    return Err(self.error(&format!("Unknown index type '{kind_text}'")));
-                }
+            index_kind = IndexKind::from_using_name(&kind_text)
+                .ok_or_else(|| self.error(&format!("Unknown index type '{kind_text}'")))?;
+            if matches!(index_kind, IndexKind::Text | IndexKind::Vector)
+                && self.current.kind == TokenKind::LBrace
+            {
+                self.parse_index_options(index_kind, &mut options)?;
             }
         }
 

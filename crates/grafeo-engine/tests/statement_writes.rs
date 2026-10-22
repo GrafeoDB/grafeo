@@ -73,6 +73,28 @@ fn schema_ddl_and_graph_commands_write_and_session_commands_do_not() {
     }
 }
 
+/// A SHOW reads the catalog: it used to count as DDL, so a read-only
+/// database or transaction refused it.
+#[test]
+fn show_statements_read() {
+    let db = GrafeoDB::new_in_memory();
+    for query in [
+        "SHOW CONSTRAINTS",
+        "SHOW INDEXES",
+        "SHOW NODE TYPES",
+        "SHOW EDGE TYPES",
+        "SHOW GRAPH TYPES",
+        "SHOW GRAPHS",
+    ] {
+        assert!(!writes(&db, query, "gql"), "{query}");
+    }
+    assert!(writes(
+        &db,
+        "CREATE CONSTRAINT FOR (p:Person) ON (p.email) UNIQUE",
+        "gql"
+    ));
+}
+
 /// A call of a stored procedure writes when its body does, which the plan of
 /// the call does not show.
 #[cfg(feature = "algos")]
@@ -100,11 +122,22 @@ fn cypher_statements() {
     let db = GrafeoDB::new_in_memory();
     assert!(!writes(&db, "MATCH (n) RETURN n", "cypher"));
     assert!(!writes(&db, "SHOW INDEXES", "cypher"));
+    assert!(!writes(&db, "SHOW CONSTRAINTS", "cypher"));
     assert!(writes(&db, "CREATE (:Person {name: 'Alix'})", "cypher"));
     assert!(writes(&db, "MATCH (n) DETACH DELETE n", "cypher"));
     assert!(writes(
         &db,
         "CREATE INDEX person_name FOR (n:Person) ON (n.name)",
+        "cypher"
+    ));
+    assert!(writes(
+        &db,
+        "CREATE INDEX FOR (n:Person) ON (n.name)",
+        "cypher"
+    ));
+    assert!(writes(
+        &db,
+        "CREATE CONSTRAINT FOR (p:Person) REQUIRE p.email IS UNIQUE",
         "cypher"
     ));
 }
@@ -199,6 +232,11 @@ fn a_read_only_database_refuses_exactly_the_writing_statements() {
         ("gql", "PROFILE INSERT (:Person {name: 'Mia'})"),
         ("gql", "CREATE NODE TYPE City (name STRING)"),
         ("gql", "CREATE GRAPH other"),
+        ("gql", "SHOW CONSTRAINTS"),
+        ("gql", "SHOW INDEXES"),
+        ("gql", "SHOW NODE TYPES"),
+        ("gql", "SHOW GRAPHS"),
+        ("gql", "CREATE CONSTRAINT FOR (p:Person) ON (p.name) UNIQUE"),
     ];
     #[cfg(feature = "cypher")]
     cases.extend([
@@ -208,6 +246,12 @@ fn a_read_only_database_refuses_exactly_the_writing_statements() {
         (
             "cypher",
             "CREATE INDEX person_name FOR (n:Person) ON (n.name)",
+        ),
+        ("cypher", "CREATE INDEX FOR (n:Person) ON (n.name)"),
+        ("cypher", "SHOW CONSTRAINTS"),
+        (
+            "cypher",
+            "CREATE CONSTRAINT FOR (p:Person) REQUIRE p.name IS UNIQUE",
         ),
     ]);
     for (language, query) in cases {
@@ -239,4 +283,27 @@ fn a_read_only_transaction_explains_a_write_and_refuses_it() {
     assert!(session.execute("INSERT (:Person {name: 'Alix'})").is_err());
     session.execute("ROLLBACK").unwrap();
     assert_eq!(db.node_count().unwrap(), 0);
+}
+
+/// A read-only transaction lists the schema and refuses to change it.
+#[test]
+fn a_read_only_transaction_shows_the_schema_and_refuses_ddl() {
+    let db = GrafeoDB::new_in_memory();
+    let session = db.session();
+    session
+        .execute("CREATE CONSTRAINT FOR (p:Person) ON (p.email) UNIQUE")
+        .unwrap();
+    session.execute("START TRANSACTION READ ONLY").unwrap();
+    let shown = session.execute("SHOW CONSTRAINTS").unwrap();
+    assert_eq!(
+        shown.rows()[0][0],
+        grafeo_common::types::Value::from("Person_email_unique")
+    );
+    assert!(
+        session
+            .execute("CREATE CONSTRAINT FOR (p:Person) ON (p.name) UNIQUE")
+            .is_err()
+    );
+    session.execute("ROLLBACK").unwrap();
+    assert_eq!(session.execute("SHOW CONSTRAINTS").unwrap().rows().len(), 1);
 }

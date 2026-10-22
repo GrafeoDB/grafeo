@@ -453,14 +453,33 @@ fn order_by_limit_text_score_key_yields_map() {
     }
 }
 
-/// The order by text_score of a query that returns the node: the sort runs
-/// after `s` became a node record, where the per-row text_score finds no node
-/// id, so every key is null and the rows keep their insertion order (the
-/// non-matching A2 first), without a LIMIT and with one.
+/// The order by text_score of a query that returns the node (#347): the
+/// sort runs after `s` became a node record, whose `_id` names the node to
+/// score. It found no node id there, so every key was null and the rows kept
+/// their insertion order (the non-matching A2 first), without a LIMIT and
+/// with one. Also with the score in an expression, and with the score only
+/// in the ORDER BY, in GQL and Cypher.
 #[test]
-#[ignore = "ORDER BY text_score(s.body, ...) does not sort when RETURN has s: the key is null on the node record"]
 fn order_by_text_score_sorts_the_returned_nodes() {
-    assert_text_score_order(&["", " LIMIT 1", " LIMIT 50"]);
+    for language in ["gql", "cypher"] {
+        for (returned, key) in [
+            (
+                "s, text_score(s.body, $sub) AS score",
+                "text_score(s.body, $sub)",
+            ),
+            (
+                "s, text_score(s.body, $sub) * 2 AS score",
+                "text_score(s.body, $sub) * 2",
+            ),
+            ("s", "text_score(s.body, $sub)"),
+        ] {
+            assert_text_score_order(
+                language,
+                &format!("MATCH (s:Article) RETURN {returned} ORDER BY {key} DESC"),
+                &["", " LIMIT 1", " LIMIT 50"],
+            );
+        }
+    }
 }
 
 /// A2 'attention mechanisms', then A1 'rust database internals', with a
@@ -478,27 +497,38 @@ fn two_articles() -> grafeo_engine::Session {
     session
 }
 
-/// Two articles, of which A1 matches `database`: for each of `limits`, the
-/// query returning `s` and its score ordered by the score finds the A1 node
-/// first, with a positive score.
-fn assert_text_score_order(limits: &[&str]) {
+/// Two articles, of which A1 matches `database`: for each of `limits`,
+/// `query` (in `language`, returning `s` and optionally its score, ordered
+/// by the score) finds the A1 node first, with a positive score when it
+/// returns one, and A2 after it when the limit keeps both.
+fn assert_text_score_order(language: &str, query: &str, limits: &[&str]) {
     use std::collections::HashMap;
 
     let session = two_articles();
     let params = HashMap::from([("sub".to_string(), Value::from("database"))]);
     for limit in limits {
-        let query = format!(
-            "MATCH (s:Article) RETURN s, text_score(s.body, $sub) AS score \
-             ORDER BY text_score(s.body, $sub) DESC{limit}"
-        );
+        let query = format!("{query}{limit}");
         let result = session
-            .execute_with_params(&query, params.clone())
-            .unwrap_or_else(|error| panic!("{query}: {error}"));
-        assert_article(&result.rows()[0][0], "A1", &query);
-        let Value::Float64(score) = result.rows()[0][1] else {
-            panic!("{query}: a float score, got {:?}", result.rows()[0][1]);
+            .execute_language(&query, language, Some(params.clone()))
+            .unwrap_or_else(|error| panic!("{language} {query}: {error}"));
+        let expected = if limit.is_empty() || *limit == " LIMIT 50" {
+            ["A1", "A2"].as_slice()
+        } else {
+            ["A1"].as_slice()
         };
-        assert!(score > 0.0, "{query}: {score}");
+        assert_eq!(result.rows().len(), expected.len(), "{language} {query}");
+        for (row, title) in result.rows().iter().zip(expected) {
+            assert_article(&row[0], title, &query);
+        }
+        if result.columns.len() == 2 {
+            let Value::Float64(score) = result.rows()[0][1] else {
+                panic!(
+                    "{language} {query}: a float score, got {:?}",
+                    result.rows()[0][1]
+                );
+            };
+            assert!(score > 0.0, "{language} {query}: {score}");
+        }
     }
 }
 

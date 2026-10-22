@@ -90,6 +90,40 @@ fn merge_self_reference_rolls_back() {
     assert_eq!(counters(&db), [counter(1, 2)], "after the next commit");
 }
 
+/// The #317 statement over a batch: one `MERGE` per row, each row seeing the
+/// row before, so `[1, 2, 1, 1, 2]` counts 1 three times and 2 twice.
+const MERGE_BATCH: &str = "UNWIND [1, 2, 1, 1, 2] AS k MERGE (n:Counter {id: k}) \
+     ON CREATE SET n.cnt = 1 ON MATCH SET n.cnt = n.cnt + 1";
+
+/// A rolled-back batch `MERGE` leaves the counters as they were, and the
+/// next batch counts on from them.
+#[test]
+fn merge_batch_self_reference_rolls_back() {
+    let db = GrafeoDB::new_in_memory();
+    db.execute(&merge_counter(1)).unwrap();
+
+    let mut session = db.session();
+    session.begin_transaction().unwrap();
+    session.execute_cypher(MERGE_BATCH).unwrap();
+    assert_eq!(
+        session
+            .execute("MATCH (n:Counter) RETURN n.id AS id, n.cnt ORDER BY id")
+            .unwrap()
+            .rows(),
+        [counter(1, 4), counter(2, 2)],
+        "inside the transaction"
+    );
+    session.rollback().unwrap();
+    assert_eq!(counters(&db), [counter(1, 1)], "after the rollback");
+
+    db.execute_cypher(MERGE_BATCH).unwrap();
+    assert_eq!(
+        counters(&db),
+        [counter(1, 4), counter(2, 2)],
+        "after a commit"
+    );
+}
+
 /// A rolled-back `MATCH MATCH CREATE` leaves no edge and no phantom node.
 #[test]
 fn match_match_create_rolls_back() {
@@ -142,6 +176,32 @@ mod persistent {
             counters(&db),
             [counter(1, 2), counter(2, 2)],
             "second reopen"
+        );
+        db.close().unwrap();
+    }
+
+    /// What a batch `MERGE` counted is there after a close, and a batch on
+    /// the reopened database counts on from it.
+    #[test]
+    fn merge_batch_self_reference_survives_close_and_reopen() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("db.grafeo");
+        let db = open(&path);
+        db.execute_cypher(MERGE_BATCH).unwrap();
+        db.close().unwrap();
+        drop(db);
+
+        let db = open(&path);
+        assert_eq!(counters(&db), [counter(1, 3), counter(2, 2)], "reopened");
+        db.execute_cypher(MERGE_BATCH).unwrap();
+        db.close().unwrap();
+        drop(db);
+
+        let db = GrafeoDB::open_read_only(&path).unwrap();
+        assert_eq!(
+            counters(&db),
+            [counter(1, 6), counter(2, 4)],
+            "read-only reopen"
         );
         db.close().unwrap();
     }

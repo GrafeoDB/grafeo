@@ -185,6 +185,85 @@ mod tests {
         }
     }
 
+    /// Cypher's unnamed `CREATE CONSTRAINT` and `CREATE INDEX` (#344) keep
+    /// their default names through replay after a crash, through the catalog
+    /// section after `close()`, and in a read-only open: the names are what
+    /// `DROP` takes after the reopen.
+    #[test]
+    #[cfg(feature = "cypher")]
+    fn unnamed_constraints_survive_reopen() {
+        const STATEMENTS: [&str; 3] = [
+            "CREATE CONSTRAINT FOR (c:City) REQUIRE c.name IS UNIQUE",
+            "CREATE CONSTRAINT FOR (p:Person) REQUIRE p.name IS NOT NULL",
+            "CREATE INDEX FOR (p:Person) ON (p.age)",
+        ];
+        let run_cypher = |db: &GrafeoDB| {
+            for statement in STATEMENTS {
+                db.execute_cypher(statement).unwrap();
+            }
+        };
+        let expected = vec![
+            vec![
+                Value::from("City_name_unique"),
+                Value::from("UNIQUE"),
+                Value::from("City"),
+                Value::from("name"),
+            ],
+            vec![
+                Value::from("Person_name_not_null"),
+                Value::from("NOT NULL"),
+                Value::from("Person"),
+                Value::from("name"),
+            ],
+        ];
+        let (_replayed_dir, replayed) =
+            reopened_after_crash("tests::unnamed_constraints_survive_reopen", open, |db| {
+                run_cypher(db);
+            });
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("checkpointed.grafeo");
+        {
+            let db = open(&path);
+            run_cypher(&db);
+            db.close().unwrap();
+        }
+        {
+            let read_only = GrafeoDB::open_read_only(&path).unwrap();
+            let mut constraints = rows(&read_only, "SHOW CONSTRAINTS");
+            constraints.sort_by_key(|row| format!("{row:?}"));
+            assert_eq!(constraints, expected, "read-only open");
+            read_only.close().unwrap();
+        }
+        let checkpointed = open(&path);
+
+        for (format, db) in [
+            ("replayed from the sidecar WAL", replayed),
+            ("read from the catalog section", checkpointed),
+        ] {
+            let mut constraints = rows(&db, "SHOW CONSTRAINTS");
+            constraints.sort_by_key(|row| format!("{row:?}"));
+            assert_eq!(constraints, expected, "{format}");
+            db.execute("INSERT (:City {name: 'Paris'})").unwrap();
+            assert!(
+                db.execute("INSERT (:City {name: 'Paris'})").is_err(),
+                "{format}: the unique constraint is enforced after reopen"
+            );
+            assert!(
+                db.execute("INSERT (:Person {age: 30})").is_err(),
+                "{format}: the not-null constraint is enforced after reopen"
+            );
+            db.execute_cypher("DROP CONSTRAINT City_name_unique")
+                .unwrap();
+            db.execute("INSERT (:City {name: 'Paris'})").unwrap();
+            db.execute_cypher("DROP INDEX Person_age_index").unwrap();
+            assert!(
+                db.execute_cypher("DROP INDEX Person_age_index").is_err(),
+                "{format}: the index was there under its default name"
+            );
+            db.close().unwrap();
+        }
+    }
+
     /// An `ALTER` whose last alteration fails changes nothing. The ones before
     /// it used to stay applied without a WAL record, so the live schema and
     /// the one rebuilt from the WAL differed.

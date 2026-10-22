@@ -288,7 +288,7 @@ def mixed_indexed(grafeo):
 # whose cases use it. Every other fixture is built once and shared, so a write would
 # change what later cases see.
 WRITE_FIXTURES = {
-    "writes": {"BR", "BS", "BU", "CT"},
+    "writes": {"BR", "BS", "BU", "CT", "DB"},
     "merges": {"CC"},
     "leads": {"CF"},
     "quoted": {"CK"},
@@ -2003,5 +2003,18 @@ for case_id, query in [
     ("CZ4", "MATCH (a:Person {name: 'Alix'})-[r:KNOWS]->(b) RETURN startNode(r) = a AS same, id(startNode(r)) = id(a) AS ids ORDER BY same"),
 ]:
     case(case_id, query, BOTH)
+
+# DB: a WITH names each column once (#371; it kept one of two items named alike, DB1 and DB2);
+#     Cypher CREATE CONSTRAINT and CREATE INDEX take no name (#344; they failed, DB3 and DB4)
+for case_id, query in [
+    ("DB1", "MATCH (p:Person) WITH p.name AS x, p.name AS x RETURN x"),
+    ("DB2", "MATCH (p:Person)-[:KNOWS]->(q) WITH p, q.name AS p RETURN p"),
+]:
+    case(case_id, query)
+for case_id, query in [
+    ("DB3", "CREATE CONSTRAINT FOR (p:Person) REQUIRE p.email IS UNIQUE"),
+    ("DB4", "CREATE INDEX FOR (p:Person) ON (p.name)"),
+]:
+    case(case_id, query, CYPHER, "writes")
 
 # fmt: on

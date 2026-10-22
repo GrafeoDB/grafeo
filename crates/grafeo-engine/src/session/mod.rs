@@ -3191,13 +3191,7 @@ impl Session {
                         return self.execute_session_command(cmd);
                     }
                     gql::GqlTranslationResult::SchemaCommand(cmd) => {
-                        // All DDL requires Admin role
-                        self.require_permission(crate::auth::StatementKind::Admin)?;
-                        if *self.read_only_tx.lock() {
-                            return Err(grafeo_common::utils::error::Error::Transaction(
-                                grafeo_common::utils::error::TransactionError::ReadOnly,
-                            ));
-                        }
+                        self.check_schema_command(&cmd)?;
                         return self.execute_schema_command(cmd);
                     }
                     gql::GqlTranslationResult::Plan(plan) => {
@@ -3701,13 +3695,7 @@ impl Session {
                 // Schema DDL and SHOW commands run before the normal query path.
                 None => match cypher::translate_full(query)? {
                     cypher::CypherTranslationResult::SchemaCommand(cmd) => {
-                        self.require_permission(crate::auth::StatementKind::Admin)?;
-                        // As in GQL: a read-only transaction refuses DDL (25G03).
-                        if *self.read_only_tx.lock() {
-                            return Err(grafeo_common::utils::error::Error::Transaction(
-                                grafeo_common::utils::error::TransactionError::ReadOnly,
-                            ));
-                        }
+                        self.check_schema_command(&cmd)?;
                         return self.execute_schema_command(cmd);
                     }
                     cypher::CypherTranslationResult::ShowIndexes => {
@@ -5128,7 +5116,9 @@ impl Session {
                     Gql::SessionCommand(command) => {
                         return Ok(Self::session_command_writes(&command));
                     }
-                    Gql::SchemaCommand(_) => return Ok(true),
+                    Gql::SchemaCommand(command) => {
+                        return Ok(Self::schema_command_writes(&command));
+                    }
                     Gql::Plan(plan) => plan,
                 }
             }
@@ -5139,7 +5129,9 @@ impl Session {
                 };
                 match translate_full(query)? {
                     Cypher::Plan(plan) => plan,
-                    Cypher::SchemaCommand(_) => return Ok(true),
+                    Cypher::SchemaCommand(command) => {
+                        return Ok(Self::schema_command_writes(&command));
+                    }
                     Cypher::ShowIndexes
                     | Cypher::ShowConstraints
                     | Cypher::ShowCurrentGraphType => {
@@ -5163,6 +5155,47 @@ impl Session {
         };
         // EXPLAIN shows the plan and runs nothing.
         Ok(!plan.explain && self.plan_writes(&plan.root))
+    }
+
+    /// Whether a schema statement changes the catalog: every one but the SHOW
+    /// statements, which read it and run in a read-only database or
+    /// transaction, for any role that may read.
+    #[cfg(feature = "gql")]
+    fn schema_command_writes(command: &grafeo_adapters::query::gql::ast::SchemaStatement) -> bool {
+        use grafeo_adapters::query::gql::ast::SchemaStatement;
+
+        !matches!(
+            command,
+            SchemaStatement::ShowIndexes
+                | SchemaStatement::ShowConstraints
+                | SchemaStatement::ShowNodeTypes
+                | SchemaStatement::ShowEdgeTypes
+                | SchemaStatement::ShowGraphTypes
+                | SchemaStatement::ShowGraphType(_)
+                | SchemaStatement::ShowCurrentGraphType
+                | SchemaStatement::ShowGraphs
+                | SchemaStatement::ShowSchemas
+        )
+    }
+
+    /// Fails when this session may not run a schema statement: DDL needs the
+    /// Admin role, and a read-only transaction or database refuses it
+    /// (25G03); a SHOW needs only the right to read.
+    #[cfg(feature = "gql")]
+    fn check_schema_command(
+        &self,
+        command: &grafeo_adapters::query::gql::ast::SchemaStatement,
+    ) -> Result<()> {
+        if !Self::schema_command_writes(command) {
+            return self.require_permission(crate::auth::StatementKind::Read);
+        }
+        self.require_permission(crate::auth::StatementKind::Admin)?;
+        if *self.read_only_tx.lock() {
+            return Err(grafeo_common::utils::error::Error::Transaction(
+                grafeo_common::utils::error::TransactionError::ReadOnly,
+            ));
+        }
+        Ok(())
     }
 
     /// Whether a GQL session command writes: the graph and projection

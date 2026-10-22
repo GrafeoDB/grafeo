@@ -307,6 +307,105 @@ pub struct IndexOptions {
     pub stop_words: Option<Vec<String>>,
 }
 
+impl IndexKind {
+    /// The kind `USING name` selects (TEXT, VECTOR or BTREE, in any case).
+    #[must_use]
+    pub fn from_using_name(name: &str) -> Option<Self> {
+        match name.to_uppercase().as_str() {
+            "TEXT" => Some(Self::Text),
+            "VECTOR" => Some(Self::Vector),
+            "BTREE" => Some(Self::BTree),
+            _ => None,
+        }
+    }
+}
+
+/// The value written for one option in `USING kind {name: value, ...}`, as
+/// each parser reads it, before [`IndexOptions::set`] checks it.
+#[derive(Debug, Clone, PartialEq)]
+pub enum IndexOptionValue {
+    /// An integer literal.
+    Integer(i64),
+    /// A float or decimal literal.
+    Float(f64),
+    /// A string literal, without its quotes.
+    String(String),
+    /// A list literal.
+    List(Vec<IndexOptionValue>),
+    /// Anything else, such as a bare name.
+    Other,
+}
+
+impl IndexOptions {
+    /// Sets the option `name` (in any case) of an index of `kind` to
+    /// `value`. GQL and Cypher both read the options of `CREATE INDEX ...
+    /// USING kind {...}` through this, so they take the same options.
+    ///
+    /// # Errors
+    ///
+    /// The message for the parse error: an option `kind` does not take, or
+    /// a value of the wrong type.
+    pub fn set(
+        &mut self,
+        kind: IndexKind,
+        name: &str,
+        value: IndexOptionValue,
+    ) -> std::result::Result<(), String> {
+        // BM25 parameters are small: an integer past the i32 range is no
+        // value the index takes.
+        let number = |value: IndexOptionValue, option: &str| match value {
+            IndexOptionValue::Integer(n) => i32::try_from(n)
+                .map(f64::from)
+                .map_err(|_| format!("Invalid number for {option}")),
+            IndexOptionValue::Float(f) => Ok(f),
+            _ => Err(format!("Expected a number for {option}")),
+        };
+        match (kind, name.to_uppercase().as_str()) {
+            (IndexKind::Vector, "DIMENSIONS" | "DIMENSION") => {
+                let IndexOptionValue::Integer(n) = value else {
+                    return Err("Expected integer for dimensions".to_string());
+                };
+                self.dimensions =
+                    Some(usize::try_from(n).map_err(|_| "Invalid dimension value".to_string())?);
+            }
+            (IndexKind::Vector, "METRIC") => {
+                let IndexOptionValue::String(metric) = value else {
+                    return Err("Expected string for metric".to_string());
+                };
+                self.metric = Some(metric);
+            }
+            (IndexKind::Text, "K1") => self.k1 = Some(number(value, "k1")?),
+            (IndexKind::Text, "B") => self.b = Some(number(value, "b")?),
+            (IndexKind::Text, "TOKENIZER") => {
+                let IndexOptionValue::String(tokenizer) = value else {
+                    return Err("Expected string for tokenizer".to_string());
+                };
+                self.tokenizer = Some(tokenizer);
+            }
+            (IndexKind::Text, "STOP_WORDS") => {
+                let IndexOptionValue::List(items) = value else {
+                    return Err("Expected a list of strings for stop_words".to_string());
+                };
+                let words = items
+                    .into_iter()
+                    .map(|item| match item {
+                        IndexOptionValue::String(word) => Ok(word),
+                        _ => Err("Expected string in stop_words".to_string()),
+                    })
+                    .collect::<std::result::Result<Vec<_>, _>>()?;
+                self.stop_words = Some(words);
+            }
+            (IndexKind::Text, _) => {
+                return Err(format!(
+                    "Unknown text index option '{name}'. Use: k1, b, tokenizer, stop_words"
+                ));
+            }
+            _ => return Err(format!("Unknown index option '{name}'")),
+        }
+        Ok(())
+    }
+}
+
 /// A CREATE CONSTRAINT statement.
 ///
 /// # Syntax

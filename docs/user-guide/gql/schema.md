@@ -256,16 +256,18 @@ DROP SCHEMA IF EXISTS analytics
 
 ## Indexes
 
-Indexes improve query performance for property lookups, text search and vector similarity.
+Indexes improve query performance for property lookups, text search and vector similarity. In GQL an index
+always has a name, the one `SHOW INDEXES` lists and `DROP INDEX` takes (Cypher may leave it out, see the
+[Cypher guide](../cypher/mutations.md)).
 
 ### Property Indexes
 
 ```sql
 -- Create a property index
-CREATE INDEX FOR (p:Person) ON (p.email)
+CREATE INDEX person_email FOR (p:Person) ON (p.email)
 
 -- B-tree index (explicit)
-CREATE INDEX FOR (p:Person) ON (p.age) USING BTREE
+CREATE INDEX person_age FOR (p:Person) ON (p.age) USING BTREE
 
 -- Drop an index
 DROP INDEX index_name
@@ -278,16 +280,22 @@ When the pattern follows an earlier clause (`UNWIND`, another `MATCH`), an index
 
 ```sql
 -- Full-text search index (BM25)
-CREATE INDEX FOR (p:Post) ON (p.content) USING TEXT
+CREATE INDEX post_content FOR (p:Post) ON (p.content) USING TEXT
+
+-- With BM25 parameters, a tokenizer or stop words
+CREATE INDEX post_content FOR (p:Post) ON (p.content) USING TEXT {k1: 1.2, b: 0.75, stop_words: ['and', 'or']}
 ```
 
 ### Vector Indexes
 
 ```sql
 -- Vector similarity index (HNSW)
-CREATE VECTOR INDEX FOR (d:Document) ON (d.embedding)
+CREATE VECTOR INDEX document_embedding ON :Document(embedding)
     DIMENSION 384
     METRIC 'cosine'
+
+-- The same through CREATE INDEX
+CREATE INDEX document_embedding FOR (d:Document) ON (d.embedding) USING VECTOR {dimensions: 384, metric: 'cosine'}
 ```
 
 ## Constraints

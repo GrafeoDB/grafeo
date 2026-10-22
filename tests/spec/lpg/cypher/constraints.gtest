@@ -150,6 +150,71 @@ tests:
       count: 0
 
   # ---------------------------------------------------------------------------
+  # Unnamed constraints (#344): the name is optional, as in openCypher, and
+  # the default is GQL's: label, properties and kind.
+  # ---------------------------------------------------------------------------
+
+  - name: unnamed_unique_constraint_gets_default_name
+    statements:
+      - "CREATE CONSTRAINT FOR (p:Person) REQUIRE p.email IS UNIQUE"
+      - "SHOW CONSTRAINTS"
+    expect:
+      rows:
+        - [Person_email_unique, UNIQUE, Person, email]
+
+  - name: unnamed_constraints_of_every_kind_get_default_names
+    statements:
+      - "CREATE CONSTRAINT FOR (p:Person) REQUIRE p.email IS UNIQUE"
+      - "CREATE CONSTRAINT FOR (p:Person) REQUIRE p.name IS NOT NULL"
+      - "CREATE CONSTRAINT FOR (p:Person) REQUIRE (p.firstName, p.lastName) IS NODE KEY"
+      - "SHOW CONSTRAINTS"
+    expect:
+      rows:
+        - [Person_email_unique, UNIQUE, Person, email]
+        - [Person_firstName_lastName_node_key, NODE KEY, Person, "firstName, lastName"]
+        - [Person_name_not_null, NOT NULL, Person, name]
+
+  - name: unnamed_unique_constraint_is_enforced
+    setup:
+      - "CREATE CONSTRAINT FOR (p:Person) REQUIRE p.email IS UNIQUE"
+      - "CREATE (:Person {name: 'Alix', email: 'alix@example.org'})"
+    query: "CREATE (:Person {name: 'Gus', email: 'alix@example.org'})"
+    expect:
+      error: "constraint"
+
+  - name: unnamed_constraint_if_not_exists_is_created_once
+    statements:
+      - "CREATE CONSTRAINT IF NOT EXISTS FOR (p:Person) REQUIRE p.email IS UNIQUE"
+      - "CREATE CONSTRAINT IF NOT EXISTS FOR (p:Person) REQUIRE p.email IS UNIQUE"
+      - "SHOW CONSTRAINTS"
+    expect:
+      rows:
+        - [Person_email_unique, UNIQUE, Person, email]
+
+  - name: unnamed_constraint_twice_is_an_error
+    setup:
+      - "CREATE CONSTRAINT FOR (p:Person) REQUIRE p.email IS UNIQUE"
+    query: "CREATE CONSTRAINT FOR (p:Person) REQUIRE p.email IS UNIQUE"
+    expect:
+      error: "already exists"
+
+  - name: unnamed_constraint_drops_by_its_default_name
+    statements:
+      - "CREATE CONSTRAINT FOR (p:Person) REQUIRE p.email IS UNIQUE"
+      - "DROP CONSTRAINT Person_email_unique"
+      - "SHOW CONSTRAINTS"
+    expect:
+      empty: true
+
+  - name: a_constraint_named_like_a_keyword_still_parses
+    statements:
+      - "CREATE CONSTRAINT for_email FOR (p:Person) REQUIRE p.email IS UNIQUE"
+      - "SHOW CONSTRAINTS"
+    expect:
+      rows:
+        - [for_email, UNIQUE, Person, email]
+
+  # ---------------------------------------------------------------------------
   # SHOW CONSTRAINTS
   # ---------------------------------------------------------------------------
 

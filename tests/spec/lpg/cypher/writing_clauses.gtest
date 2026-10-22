@@ -702,3 +702,21 @@ tests:
     expect:
       rows:
         - [1, 1, true]
+
+  # #182: count(*) after SET n:Tagged over more rows than one chunk counts
+  # every row (it returned 1).
+  - name: count_after_set_label_over_many_chunks
+    setup:
+      - "UNWIND range(1, 5000) AS i CREATE (:Node {i: i})"
+    query: "MATCH (n:Node) SET n:Tagged RETURN count(*) AS a, count(n) AS b"
+    expect:
+      rows:
+        - [5000, 5000]
+
+  - name: count_after_remove_label_over_many_chunks
+    setup:
+      - "UNWIND range(1, 5000) AS i CREATE (:Node:Tagged {i: i})"
+    query: "MATCH (n:Tagged) REMOVE n:Tagged RETURN count(*) AS a, count(n) AS b"
+    expect:
+      rows:
+        - [5000, 5000]

@@ -676,3 +676,9 @@ CZ3|cypher f0c845b50c WHERE p = 0 on a node keeps no row in Cypher; it kept the 
 CZ3|gql c69250cac6 WHERE p = 0 on a node is 22G04 (values not comparable) in GQL; it kept the node with id 0.
 CZ4|cypher 8b50ea7401 startNode(r) = a is true and id(startNode(r)) gives the node's id; id(startNode(r)) was null.
 CZ4|gql 8b50ea7401 startNode(r) = a is true and id(startNode(r)) gives the node's id; id(startNode(r)) was null.
+DB1|cypher a64a99b28e A WITH with two items named alike is an error that names the column (#371); it kept one of them.
+DB1|gql a64a99b28e A WITH with two items named alike is an error that names the column (#371); it kept one of them.
+DB2|cypher 943f1a33b7 A WITH whose alias repeats a passed-on variable is an error (#371); the alias replaced the node.
+DB2|gql 943f1a33b7 A WITH whose alias repeats a passed-on variable is an error (#371); the alias replaced the node.
+DB3|cypher 0197c21812 Cypher CREATE CONSTRAINT takes no name and gets GQL's default (#344); it was a syntax error.
+DB4|cypher 0197c21812 Cypher CREATE INDEX takes no name and gets Label_property_index (#344); it was a syntax error.

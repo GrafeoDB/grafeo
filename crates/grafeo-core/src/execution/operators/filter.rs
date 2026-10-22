@@ -97,6 +97,23 @@ fn zoned_datetime_of_map(
     ))
 }
 
+/// The node a node record names: the `_id` of a map that has `_labels`, as
+/// a projection builds it for a returned node (an edge record has `_type`
+/// instead, and its `_id` is no node).
+#[cfg(feature = "text-index")]
+fn node_record_id(value: &Value) -> Option<NodeId> {
+    let Value::Map(map) = value else {
+        return None;
+    };
+    if !map.contains_key(&PropertyKey::new("_labels")) {
+        return None;
+    }
+    match map.get(&PropertyKey::new("_id")) {
+        Some(Value::Int64(id)) => u64::try_from(*id).ok().map(NodeId::new),
+        _ => None,
+    }
+}
+
 fn map_int(m: &BTreeMap<PropertyKey, Value>, key: &str) -> Option<i64> {
     match map_int_checked(m, key) {
         MapIntResult::Absent => None,
@@ -4188,10 +4205,14 @@ impl ExpressionPredicate {
                     return None;
                 };
 
-                // Get node_id from the chunk
+                // Get node_id from the chunk: the column holds the node, or
+                // the node record a projection made of it (`RETURN s ...
+                // ORDER BY text_score(s.body, $q)`).
                 let col_idx = *self.variable_columns.get(variable.as_str())?;
                 let col = chunk.column(col_idx)?;
-                let node_id = col.get_node_id(row)?;
+                let node_id = col
+                    .get_node_id(row)
+                    .or_else(|| node_record_id(&col.get_value(row)?))?;
 
                 // Second arg: query string
                 let query_val = self.eval_expr(&args[1], chunk, row)?;

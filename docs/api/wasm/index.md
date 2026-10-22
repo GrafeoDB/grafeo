@@ -122,8 +122,8 @@ Combine BM25 text scores with HNSW vector similarity:
 
 ```javascript
 // Create indexes via GQL queries
-db.execute("CREATE TEXT INDEX ON Document(content)");
-db.execute("CREATE VECTOR INDEX ON Document(embedding) OPTIONS {dimensions: 384}");
+db.execute("CREATE INDEX document_content FOR (d:Document) ON (d.content) USING TEXT");
+db.execute("CREATE VECTOR INDEX document_embedding ON :Document(embedding) DIMENSION 384");
 
 const results = db.hybridSearch(
     "Document",

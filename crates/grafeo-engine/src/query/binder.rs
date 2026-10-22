@@ -10,7 +10,7 @@
 use crate::query::plan::{AggregateFunction, BuiltinFunction, Callee};
 use crate::query::plan::{
     CreateElement, ExpandOp, FilterOp, LogicalExpression, LogicalOperator, LogicalPlan, NodeScanOp,
-    ReturnItem, ReturnOp, TripleScanOp,
+    Projection, ReturnItem, ReturnOp, TripleScanOp,
 };
 use grafeo_common::types::LogicalType;
 use grafeo_common::utils::error::{Error, QueryError, QueryErrorKind, Result};
@@ -219,6 +219,25 @@ impl Binder {
         Ok(self.context.clone())
     }
 
+    /// A WITH names each column once: two items with the same output name
+    /// (`WITH a.name AS x, a.name AS x`) leave the next clause unable to tell
+    /// them apart, so the statement is rejected, as a RETURN is.
+    fn check_unique_projection_names(projections: &[Projection]) -> Result<()> {
+        let mut seen = HashSet::new();
+        for projection in projections {
+            let name = projection.alias.clone().unwrap_or_else(|| {
+                crate::query::planner::common::expression_to_string(&projection.expression)
+            });
+            if !seen.insert(name.clone()) {
+                return Err(binding_error(format!(
+                    "duplicate column name '{name}' in WITH: the clauses after it could not \
+                     tell the two apart; give the projections distinct aliases"
+                )));
+            }
+        }
+        Ok(())
+    }
+
     /// Binds a single logical operator.
     fn bind_operator(&mut self, op: &LogicalOperator) -> Result<()> {
         match op {
@@ -232,6 +251,9 @@ impl Binder {
                 // ends the scope of what it leaves out: its rows hold only
                 // the projected columns.
                 let mut projected = (!project.pass_through_input).then(BindingContext::new);
+                if projected.is_some() {
+                    Self::check_unique_projection_names(&project.projections)?;
+                }
                 for projection in &project.projections {
                     self.validate_expression(&projection.expression)?;
                     // Add the projection alias to the context (for WITH clause support)

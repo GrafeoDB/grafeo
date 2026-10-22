@@ -231,3 +231,54 @@ tests:
         - [null]
         - [19]
         - [3]
+
+  # #218: a RETURN alias that shadows its variable (caller.name AS caller),
+  # then ORDER BY a property of that variable, after a traversal and with a
+  # LIMIT: the sort read zeros, so LIMIT kept the wrong row.
+  - name: order_by_shadowed_alias_with_edge_and_limit
+    setup:
+      - "INSERT (foo:Method {name: 'foo', qn: 'java://A:foo()'}), (bar:Method {name: 'bar', qn: 'java://B:bar()'}), (baz:Method {name: 'baz', qn: 'java://C:baz()'}), (foo)-[:CALLS]->(bar), (baz)-[:CALLS]->(bar)"
+    variants:
+      gql: "MATCH (caller)-[:CALLS]->(target) WHERE target.name = 'bar' RETURN caller.name AS caller, caller.qn AS caller_qn ORDER BY caller.qn DESC LIMIT 1"
+      cypher: "MATCH (caller)-[:CALLS]->(target) WHERE target.name = 'bar' RETURN caller.name AS caller, caller.qn AS caller_qn ORDER BY caller.qn DESC LIMIT 1"
+    expect:
+      columns: [caller, caller_qn]
+      rows:
+        - [baz, "java://C:baz()"]
+
+  - name: order_by_shadowed_alias_with_edge_ascending_and_limit
+    setup:
+      - "INSERT (foo:Method {name: 'foo', qn: 'java://A:foo()'}), (bar:Method {name: 'bar', qn: 'java://B:bar()'}), (baz:Method {name: 'baz', qn: 'java://C:baz()'}), (foo)-[:CALLS]->(bar), (baz)-[:CALLS]->(bar)"
+    variants:
+      gql: "MATCH (caller)-[:CALLS]->(target) WHERE target.name = 'bar' RETURN caller.name AS caller, caller.qn AS caller_qn ORDER BY caller.qn LIMIT 1"
+      cypher: "MATCH (caller)-[:CALLS]->(target) WHERE target.name = 'bar' RETURN caller.name AS caller, caller.qn AS caller_qn ORDER BY caller.qn LIMIT 1"
+    expect:
+      columns: [caller, caller_qn]
+      rows:
+        - [foo, "java://A:foo()"]
+
+  # #187: grouping by labels(n)[0] or type(r) beside count(), ordered by the
+  # count (the report's ORDER BY cnt DESC).
+  - name: group_by_first_label_ordered_by_count
+    setup:
+      - "INSERT (:Class {n: 1}), (:Class {n: 2}), (:Method {n: 3})-[:CALLS]->(:Class {n: 4}), (:Method {n: 5})"
+    variants:
+      gql: "MATCH (n) RETURN labels(n)[0] AS label, count(*) AS cnt ORDER BY cnt DESC"
+      cypher: "MATCH (n) RETURN labels(n)[0] AS label, count(*) AS cnt ORDER BY cnt DESC"
+    expect:
+      ordered: true
+      rows:
+        - [Class, 3]
+        - [Method, 2]
+
+  - name: group_by_edge_type_ordered_by_count
+    setup:
+      - "INSERT (a:Class {n: 1}), (b:Class {n: 2}), (m:Method {n: 3}), (m)-[:CALLS]->(a), (m)-[:CALLS]->(b), (a)-[:EXTENDS]->(b)"
+    variants:
+      gql: "MATCH ()-[r]->() RETURN type(r) AS t, count(*) AS cnt ORDER BY cnt DESC"
+      cypher: "MATCH ()-[r]->() RETURN type(r) AS t, count(*) AS cnt ORDER BY cnt DESC"
+    expect:
+      ordered: true
+      rows:
+        - [CALLS, 2]
+        - [EXTENDS, 1]

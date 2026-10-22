@@ -7,6 +7,7 @@ use super::ast::*;
 use super::lexer::{Lexer, Token, TokenKind};
 use crate::query::keywords::unescape_string;
 use crate::query::limits::{Chain, Nesting, nesting_error_message};
+use crate::query::schema::IndexOptionValue;
 use grafeo_common::utils::error::{QueryError, QueryErrorKind, Result};
 
 /// Cypher query parser.
@@ -2461,9 +2462,11 @@ impl<'a> Parser<'a> {
         }
     }
 
-    /// CREATE INDEX name [IF NOT EXISTS] FOR (n:Label) ON (n.property)
+    /// CREATE INDEX [name] [IF NOT EXISTS] FOR (n:Label) ON (n.property)
+    /// [USING TEXT|VECTOR|BTREE [{options}]]: an index without a name is
+    /// named `Label_property_index`.
     fn parse_create_index(&mut self) -> Result<Statement> {
-        let name = self.expect_identifier()?;
+        let name = self.parse_optional_schema_name()?;
         let if_not_exists = self.parse_if_not_exists();
 
         self.expect_contextual("FOR")?;
@@ -2486,24 +2489,74 @@ impl<'a> Parser<'a> {
             self.advance();
         }
         self.expect(TokenKind::RParen)?;
+        let (index_kind, options) = self.parse_index_using()?;
+        let name = name.unwrap_or_else(|| format!("{label}_{}_index", properties.join("_")));
 
         use crate::query::schema as gql;
         Ok(Statement::Schema(gql::SchemaStatement::CreateIndex(
             gql::CreateIndexStatement {
                 name,
-                index_kind: gql::IndexKind::Property,
+                index_kind,
                 label,
                 properties,
-                options: gql::IndexOptions::default(),
+                options,
                 if_not_exists,
                 span: None,
             },
         )))
     }
 
-    /// CREATE CONSTRAINT name [IF NOT EXISTS] FOR (n:Label) REQUIRE n.property IS UNIQUE
+    /// `USING TEXT|VECTOR|BTREE [{name: value, ...}]` after CREATE INDEX, as
+    /// in GQL: the kind and its options, which [`IndexOptions::set`] checks
+    /// for both languages. Without USING, a property index.
+    ///
+    /// [`IndexOptions::set`]: crate::query::schema::IndexOptions::set
+    fn parse_index_using(
+        &mut self,
+    ) -> Result<(
+        crate::query::schema::IndexKind,
+        crate::query::schema::IndexOptions,
+    )> {
+        use crate::query::schema::{IndexKind, IndexOptions};
+
+        let mut options = IndexOptions::default();
+        if !self.is_contextual("USING") {
+            return Ok((IndexKind::Property, options));
+        }
+        self.advance();
+        let kind_text = self
+            .expect_identifier()
+            .map_err(|_| self.error("Expected TEXT, VECTOR, or BTREE after USING"))?;
+        let kind = IndexKind::from_using_name(&kind_text)
+            .ok_or_else(|| self.error(&format!("Unknown index type '{kind_text}'")))?;
+        if matches!(kind, IndexKind::Text | IndexKind::Vector)
+            && self.current.kind == TokenKind::LBrace
+        {
+            self.advance();
+            while self.current.kind != TokenKind::RBrace {
+                let name = self
+                    .expect_identifier()
+                    .map_err(|_| self.error("Expected option name"))?;
+                self.expect(TokenKind::Colon)?;
+                let value = index_option_value(self.parse_expression()?);
+                options
+                    .set(kind, &name, value)
+                    .map_err(|message| self.error(&message))?;
+                if self.current.kind != TokenKind::Comma {
+                    break;
+                }
+                self.advance();
+            }
+            self.expect(TokenKind::RBrace)?;
+        }
+        Ok((kind, options))
+    }
+
+    /// CREATE CONSTRAINT [name] [IF NOT EXISTS] FOR (n:Label) REQUIRE n.property
+    /// IS UNIQUE: a constraint without a name gets the default name GQL gives
+    /// one (`Label_property_unique`).
     fn parse_create_constraint(&mut self) -> Result<Statement> {
-        let name = self.expect_identifier()?;
+        let name = self.parse_optional_schema_name()?;
         let if_not_exists = self.parse_if_not_exists();
 
         self.expect_contextual("FOR")?;
@@ -2565,7 +2618,7 @@ impl<'a> Parser<'a> {
 
         Ok(Statement::Schema(gql::SchemaStatement::CreateConstraint(
             gql::CreateConstraintStatement {
-                name: Some(name),
+                name,
                 constraint_kind,
                 label,
                 properties,
@@ -2573,6 +2626,17 @@ impl<'a> Parser<'a> {
                 span: None,
             },
         )))
+    }
+
+    /// The name of a `CREATE INDEX` or `CREATE CONSTRAINT`, which may be left
+    /// out: none when `FOR` or `IF NOT EXISTS` follows.
+    fn parse_optional_schema_name(&mut self) -> Result<Option<String>> {
+        let unnamed = self.is_contextual("FOR")
+            || (self.is_contextual("IF") && self.peek_kind() == TokenKind::Not);
+        if unnamed {
+            return Ok(None);
+        }
+        self.expect_identifier().map(Some)
     }
 
     /// DROP INDEX name [IF EXISTS] / DROP CONSTRAINT name [IF EXISTS]
@@ -2997,6 +3061,32 @@ fn comparison_op(kind: TokenKind) -> Option<BinaryOp> {
         TokenKind::Gt => Some(BinaryOp::Gt),
         TokenKind::Ge => Some(BinaryOp::Ge),
         _ => None,
+    }
+}
+
+/// The value written for an index option: a literal, a negated number or a
+/// list of them; anything else is [`IndexOptionValue::Other`], which
+/// `IndexOptions::set` refuses with the type the option wants.
+fn index_option_value(expression: Expression) -> IndexOptionValue {
+    match expression {
+        Expression::Literal(Literal::Integer(n)) => IndexOptionValue::Integer(n),
+        Expression::Literal(Literal::Float(f)) => IndexOptionValue::Float(f),
+        Expression::Literal(Literal::String(s)) => IndexOptionValue::String(s),
+        Expression::Unary {
+            op: UnaryOp::Neg,
+            operand,
+            ..
+        } => match index_option_value(*operand) {
+            IndexOptionValue::Integer(n) => n
+                .checked_neg()
+                .map_or(IndexOptionValue::Other, IndexOptionValue::Integer),
+            IndexOptionValue::Float(f) => IndexOptionValue::Float(-f),
+            _ => IndexOptionValue::Other,
+        },
+        Expression::List(items) => {
+            IndexOptionValue::List(items.into_iter().map(index_option_value).collect())
+        }
+        _ => IndexOptionValue::Other,
     }
 }
 
@@ -4346,6 +4436,103 @@ mod tests {
     fn test_parse_create_index_if_not_exists() {
         let stmt = parse_ok("CREATE INDEX idx_name IF NOT EXISTS FOR (n:Person) ON (n.name)");
         assert!(matches!(stmt, Statement::Schema(_)));
+    }
+
+    fn create_index(query: &str) -> crate::query::schema::CreateIndexStatement {
+        match parse_ok(query) {
+            Statement::Schema(crate::query::schema::SchemaStatement::CreateIndex(stmt)) => stmt,
+            other => panic!("{query}: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn unnamed_index_gets_the_label_and_properties_as_its_name() {
+        let stmt = create_index("CREATE INDEX FOR (n:Person) ON (n.name)");
+        assert_eq!(stmt.name, "Person_name_index");
+        assert_eq!(stmt.index_kind, crate::query::schema::IndexKind::Property);
+        let stmt = create_index("CREATE INDEX IF NOT EXISTS FOR (n:Person) ON (n.first, n.last)");
+        assert_eq!(
+            (stmt.name.as_str(), stmt.if_not_exists),
+            ("Person_first_last_index", true)
+        );
+    }
+
+    #[test]
+    fn create_index_using_a_kind_takes_gql_options() {
+        use crate::query::schema::IndexKind;
+
+        let text = create_index(
+            "CREATE INDEX notes FOR (n:Note) ON (n.body) USING TEXT \
+             {K1: 1.5, b: 0.5, tokenizer: 'standard', stop_words: ['and', 'or']}",
+        );
+        assert_eq!(text.index_kind, IndexKind::Text);
+        assert_eq!(
+            (
+                text.options.k1,
+                text.options.b,
+                text.options.tokenizer.as_deref(),
+                text.options.stop_words
+            ),
+            (
+                Some(1.5),
+                Some(0.5),
+                Some("standard"),
+                Some(vec!["and".to_string(), "or".to_string()])
+            )
+        );
+        let vector = create_index(
+            "CREATE INDEX FOR (d:Doc) ON (d.emb) USING vector {dimensions: 384, metric: 'cosine'}",
+        );
+        assert_eq!(
+            (
+                vector.name.as_str(),
+                vector.index_kind,
+                vector.options.dimensions,
+                vector.options.metric.as_deref()
+            ),
+            (
+                "Doc_emb_index",
+                IndexKind::Vector,
+                Some(384),
+                Some("cosine")
+            )
+        );
+        // A negative BM25 parameter parses; the engine refuses it, naming it.
+        let negative = create_index("CREATE INDEX FOR (n:Note) ON (n.body) USING TEXT {k1: -1}");
+        assert_eq!(negative.options.k1, Some(-1.0));
+        let btree = create_index("CREATE INDEX FOR (p:Person) ON (p.age) USING BTREE");
+        assert_eq!(btree.index_kind, IndexKind::BTree);
+    }
+
+    #[test]
+    fn create_index_options_of_the_wrong_name_or_type_are_errors() {
+        for (clause, says) in [
+            (
+                "USING TEXT {analyzer: 'standard'}",
+                "Unknown text index option 'analyzer'",
+            ),
+            ("USING TEXT {k1: 'high'}", "Expected a number for k1"),
+            (
+                "USING TEXT {tokenizer: standard}",
+                "Expected string for tokenizer",
+            ),
+            (
+                "USING TEXT {stop_words: ['and', 3]}",
+                "Expected string in stop_words",
+            ),
+            (
+                "USING VECTOR {dimensions: 'two'}",
+                "Expected integer for dimensions",
+            ),
+            ("USING VECTOR {dimensions: -3}", "Invalid dimension value"),
+            ("USING VECTOR {metric: 3}", "Expected string for metric"),
+            ("USING VECTOR {k1: 1.2}", "Unknown index option 'k1'"),
+            ("USING HASH", "Unknown index type 'HASH'"),
+        ] {
+            let message =
+                parse_error_message(&format!("CREATE INDEX FOR (n:Note) ON (n.body) {clause}"));
+            assert!(message.contains(says), "{clause}: {message}");
+        }
     }
 
     #[test]

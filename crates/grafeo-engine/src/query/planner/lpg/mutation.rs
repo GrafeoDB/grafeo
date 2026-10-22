@@ -1509,7 +1509,9 @@ impl super::Planner {
                 let value = self.try_fold_expression(operand)?;
                 match op {
                     UnaryOp::Neg => match value {
-                        Value::Int64(n) => Some(Value::Int64(-n)),
+                        // The smallest integer has no negation: the
+                        // evaluator fails it as out of range
+                        Value::Int64(n) => n.checked_neg().map(Value::Int64),
                         Value::Float64(f) => Some(Value::Float64(-f)),
                         _ => None,
                     },

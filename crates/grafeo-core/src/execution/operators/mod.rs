@@ -496,6 +496,16 @@ impl OperatorError {
         )
     }
 
+    /// A value of a type an operation does not take, such as a string under
+    /// a unary minus (GQLSTATUS 22G03); `message` says which.
+    #[must_use]
+    pub fn invalid_value_type(message: impl Into<String>) -> Self {
+        Self::query_data(
+            grafeo_common::utils::error::QueryErrorKind::InvalidValueType,
+            message,
+        )
+    }
+
     fn query_data(
         kind: grafeo_common::utils::error::QueryErrorKind,
         operation: impl Into<String>,

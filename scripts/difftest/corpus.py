@@ -1907,4 +1907,16 @@ for case_id, query, languages in [
 # A session command: on a database of its own (it fails, so it changes nothing)
 case("CT4", "SESSION SET TIME ZONE 'Europe/Amsterdam'", GQL, "writes")
 
+# CU: a unary sign takes a number or a duration: on a stored string (CU1), a boolean (CU2) or a
+#     list (CU3) it is a type error, 22G03, where it was null; on a duration it negates it (CU4),
+#     where it was null; on the smallest integer it is out of range, 22003 (CU5)
+for case_id, query, languages, fixture in [
+    ("CU1", "MATCH (n:Person {name: 'Alix'}) RETURN -n.name AS a", BOTH, "social"),
+    ("CU2", "RETURN +true AS a", BOTH, "empty"),
+    ("CU3", "RETURN -[1, 2] AS a", BOTH, "empty"),
+    ("CU4", "RETURN toString(-duration('P1DT2H')) AS minus, toString(+duration('PT5M')) AS plus", BOTH, "empty"),
+    ("CU5", "RETURN -(-9223372036854775807 - 1) AS a", BOTH, "empty"),
+]:
+    case(case_id, query, languages, fixture)
+
 # fmt: on

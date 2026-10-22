@@ -1,7 +1,8 @@
 //! Unary plus is the number under it, exactly: a decimal keeps its scale and
-//! a negative zero its sign; like unary minus it reads numbers only, and
-//! gives null for anything else. SQL/PGQ did not parse `+x`, and GQL and
-//! Cypher passed any value through it.
+//! a negative zero its sign; like unary minus it reads numbers (and
+//! durations) only, and is a type error (22G03) for anything else, null
+//! staying null. SQL/PGQ did not parse `+x`, and GQL and Cypher passed any
+//! value through it.
 
 #![cfg(feature = "gql")]
 
@@ -42,14 +43,23 @@ fn plus_reads_numbers_only_as_minus_does() {
     #[cfg(feature = "cypher")]
     languages.push("cypher");
     for language in languages {
-        let values = row(
-            &db,
-            language,
-            "MATCH (n:P) RETURN +n.name AS a, +n.at AS b, +n.ok AS c, -n.name AS d",
-        );
+        for item in ["+n.name", "+n.at", "+n.ok", "-n.name", "-n.ok"] {
+            let error = db
+                .execute_language(&format!("MATCH (n:P) RETURN {item} AS a"), language, None)
+                .unwrap_err();
+            assert_eq!(
+                grafeo_common::utils::gqlstatus::GqlStatus::from(&error).as_str(),
+                "22G03",
+                "{language}: {item}"
+            );
+        }
         assert_eq!(
-            values,
-            [Value::Null, Value::Null, Value::Null, Value::Null],
+            row(
+                &db,
+                language,
+                "MATCH (n:P) RETURN +n.missing AS a, -n.missing AS b"
+            ),
+            [Value::Null, Value::Null],
             "{language}"
         );
     }
@@ -61,12 +71,20 @@ fn plus_reads_numbers_only_as_minus_does() {
 fn plus_of_a_constant_is_the_constant() {
     let db = GrafeoDB::new_in_memory();
     db.execute("INSERT (:P {age: +30, neg: +(-3)})").unwrap();
-    let values = row(
-        &db,
-        "gql",
-        "MATCH (n:P) RETURN n.age AS a, n.neg AS n, +'x' AS s",
+    let values = row(&db, "gql", "MATCH (n:P) RETURN n.age AS a, n.neg AS n");
+    assert_eq!(values, [Value::Int64(30), Value::Int64(-3)]);
+    // A constant that is no number does not fold: the sign fails on it
+    let error = db.execute("RETURN +'x' AS s").unwrap_err();
+    assert_eq!(
+        grafeo_common::utils::gqlstatus::GqlStatus::from(&error).as_str(),
+        "22G03"
     );
-    assert_eq!(values, [Value::Int64(30), Value::Int64(-3), Value::Null]);
+    // A write through a sign on a string fails, and writes nothing
+    assert!(db.execute("INSERT (:Q {v: -'x'})").is_err());
+    assert_eq!(
+        row(&db, "gql", "MATCH (q:Q) RETURN count(q) AS c"),
+        [Value::Int64(0)]
+    );
 }
 
 #[cfg(feature = "sql-pgq")]

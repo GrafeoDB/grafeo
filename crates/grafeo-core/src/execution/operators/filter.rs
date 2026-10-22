@@ -381,6 +381,15 @@ fn binary_text(left: &Value, op: BinaryFilterOp, right: &Value) -> String {
     format!("{left} {symbol} {right}")
 }
 
+/// The error of a unary `sign` on a value that is neither a number nor a
+/// duration: a type error (22G03), as ISO GQL makes it a data exception.
+fn sign_of_a_non_number(sign: char, value: &Value) -> OperatorError {
+    OperatorError::invalid_value_type(format!(
+        "unary {sign} takes a number or a duration, got a {} value: {sign}{value}",
+        value.type_name()
+    ))
+}
+
 /// The error of a decimal operation that failed with `error`.
 fn decimal_error(
     error: DecimalError,
@@ -4280,11 +4289,17 @@ impl ExpressionPredicate {
                 },
                 Value::Float64(f) => Some(Value::Float64(-f)),
                 Value::Decimal(d) => Some(Value::Decimal(d.neg())),
-                _ => None,
+                Value::Duration(d) => Some(Value::Duration(d.neg())),
+                Value::Null => None,
+                other => self.fail(sign_of_a_non_number('-', &other)),
             },
             UnaryFilterOp::Pos => match val? {
-                number @ (Value::Int64(_) | Value::Float64(_) | Value::Decimal(_)) => Some(number),
-                _ => None,
+                number @ (Value::Int64(_)
+                | Value::Float64(_)
+                | Value::Decimal(_)
+                | Value::Duration(_)) => Some(number),
+                Value::Null => None,
+                other => self.fail(sign_of_a_non_number('+', &other)),
             },
         }
     }

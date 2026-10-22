@@ -601,8 +601,8 @@ CM3|gql e527573b6a An underscore between two digits is a separator, in every rad
 CM4|cypher 904fecd430 The error starts with its code, GRAFEO-Q001 (#588); openCypher has no digit separators, so the message is unchanged.
 CM5|cypher e52ba6d736 A float literal past the float range is a syntax error, as openCypher refuses it; it was infinity.
 CM5|gql ab08f300db A float literal past the FLOAT64 range is a data exception (22003), as ISO GQL defines it; it was infinity.
-CN2|cypher a0a093dc7e Unary plus reads numbers only, as unary minus does: a string or a boolean under it is null; it passed them through unchanged.
-CN2|gql a0a093dc7e Unary plus reads numbers only, as unary minus does: a string or a boolean under it is null; it passed them through unchanged.
+CN2|cypher 205d6d42a0 A unary sign on a string or a boolean is a type error (22G03), as on any value that is neither a number nor a duration; unary plus passed them through unchanged.
+CN2|gql 205d6d42a0 A unary sign on a string or a boolean is a type error (22G03), as on any value that is neither a number nor a duration; unary plus passed them through unchanged.
 AJ9|cypher ~784ee734f1 A later MATCH joined to an earlier one by a computed property value is joined, not scanned once per earlier row (#455); 0.5.44 timed out when the machine was busy, so its result varies.
 CO1|gql 38ffdf57dc IS TYPED NODE and ANY are true for a node, and IS TYPED INT64 is false for it: a node was of INT64 by its id, and not of NODE or ANY.
 CO2|gql 8cd5e3b518 IS TYPED EDGE is true for an edge; it was false.
@@ -634,3 +634,13 @@ CT1|gql 7df1f205be GQL reads a local datetime at the session time zone, UTC with
 CT2|gql 160b12822c GQL reads a local time at the session time zone, UTC without one: a zoned and a local time at the same instant are equal; they were not.
 CT4|gql e00542b911 SESSION SET TIME ZONE takes a UTC offset ('+01:00', 'Z', 'UTC'), ISO GQL's time zone displacement; a named zone fails with 22009, where it was stored and never used.
 CT5|cypher e09ddcadbb Cypher's time() is zoned, at +00:00 without an offset, as openCypher defines it, and localtime() is the local one; time() without an offset was local and localtime() did not exist.
+CU1|cypher c7fd978402 A unary sign on a string is a type error (22G03), as ISO GQL makes it a data exception; it was null.
+CU1|gql c7fd978402 A unary sign on a string is a type error (22G03), as ISO GQL makes it a data exception; it was null.
+CU2|cypher 04434985da A unary sign on a boolean is a type error (22G03); unary plus passed it through unchanged.
+CU2|gql 04434985da A unary sign on a boolean is a type error (22G03); unary plus passed it through unchanged.
+CU3|cypher 3c84b7cf32 A unary sign on a list is a type error (22G03); it was null.
+CU3|gql 3c84b7cf32 A unary sign on a list is a type error (22G03); it was null.
+CU4|cypher 32f5c87566 Unary minus negates a duration; it was null.
+CU4|gql 32f5c87566 Unary minus negates a duration; it was null.
+CU5|cypher 08c2adc46b The negation of the smallest integer is out of range (22003); it was null.
+CU5|gql 08c2adc46b The negation of the smallest integer is out of range (22003); it was null.

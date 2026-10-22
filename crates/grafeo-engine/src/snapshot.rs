@@ -59,6 +59,7 @@ impl Snapshot {
 
     /// A snapshot of `store` at the view of a query that pins it itself, for
     /// the procedures the query calls.
+    #[cfg(feature = "algos")]
     pub(crate) fn of_query(store: Arc<dyn GraphStore>, view: ReadView) -> Self {
         Self {
             store,

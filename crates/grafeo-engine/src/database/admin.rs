@@ -439,7 +439,7 @@ impl super::GrafeoDB {
             }
             None => result.warnings.push(crate::admin::ValidationWarning {
                 code: "EXTERNAL_EDGES_UNCHECKED".to_string(),
-                message: "the edges of an external store are not checked for dangling ends: its                           reads list only the edges whose ends it sees"
+                message: "the edges of an external store are not checked for dangling ends: its reads list only the edges whose ends it sees"
                     .to_string(),
                 context: None,
             }),

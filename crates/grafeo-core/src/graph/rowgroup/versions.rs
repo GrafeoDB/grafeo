@@ -217,6 +217,18 @@ impl Stamped {
         }
     }
 
+    /// The one version every row that exists has, when the vector's rows
+    /// share it: one creator and no delete.
+    fn uniform(&self) -> Option<RowVersion> {
+        match (&self.created, &self.deleted) {
+            (Inserts::Constant(created), None) => Some(RowVersion {
+                created: *created,
+                deleted: ABSENT,
+            }),
+            _ => None,
+        }
+    }
+
     /// Whether every row that exists, `row` aside, was created by `stamp`.
     fn others_created_by(&self, row: usize, stamp: u64) -> bool {
         match &self.created {
@@ -381,8 +393,6 @@ impl Versions {
         }
     }
 
-    /// Whether `row` exists in any reader's view (created, by anyone, and
-    /// not undone): a bit test in either form of its vector.
     /// Whether `read` sees `row`, in one lookup: a row of a flat vector,
     /// the common case, is seen by every reader once it exists (a bit
     /// test); a stamped vector's row by its stamps.
@@ -394,6 +404,8 @@ impl Versions {
         }
     }
 
+    /// Whether `row` exists in any reader's view (created, by anyone, and
+    /// not undone): a bit test in either form of its vector.
     pub(super) fn exists(&self, row: usize) -> bool {
         match self.vectors.get(row / VECTOR_ROWS) {
             None => false,
@@ -411,26 +423,42 @@ impl Versions {
         }
     }
 
-    /// The rows of `rows` that exist, ascending: a word of bits at a time.
-    pub(super) fn existing<'a>(&'a self, rows: &'a Bitset) -> impl Iterator<Item = usize> + 'a {
+    /// The rows of `rows` that `read` sees, ascending: a word of bits at a
+    /// time where a vector's rows are seen alike (a flat vector, or a
+    /// stamped one whose rows share one version), row by row in the others.
+    pub(super) fn visible_of<'a>(
+        &'a self,
+        rows: &'a Bitset,
+        read: Read,
+    ) -> impl Iterator<Item = usize> + 'a {
         const WORDS: usize = VECTOR_ROWS / 64;
         rows.words()
             .iter()
             .enumerate()
             .flat_map(move |(index, word)| {
-                let exists = match self.vectors.get(index / WORDS) {
-                    None => 0,
-                    Some(Vector::Flat(exists)) => exists.word(index % WORDS),
-                    Some(Vector::Stamped(stamped)) => stamped.exists.word(index % WORDS),
+                let (exists, per_row) = match self.vectors.get(index / WORDS) {
+                    None => (0, None),
+                    Some(Vector::Flat(exists)) => (exists.word(index % WORDS), None),
+                    Some(Vector::Stamped(stamped)) => {
+                        let exists = stamped.exists.word(index % WORDS);
+                        match stamped.uniform() {
+                            Some(version) if version.visible(read) => (exists, None),
+                            Some(_) => (0, None),
+                            None => (exists, Some(&**stamped)),
+                        }
+                    }
                 };
+                let offset = (index % WORDS) * 64;
                 let mut bits = word & exists;
                 std::iter::from_fn(move || {
-                    if bits == 0 {
-                        return None;
+                    while bits != 0 {
+                        let bit = bits.trailing_zeros() as usize;
+                        bits &= bits - 1;
+                        if per_row.is_none_or(|stamped| stamped.get(offset + bit).visible(read)) {
+                            return Some(index * 64 + bit);
+                        }
                     }
-                    let bit = bits.trailing_zeros() as usize;
-                    bits &= bits - 1;
-                    Some(index * 64 + bit)
+                    None
                 })
             })
     }
@@ -655,7 +683,9 @@ impl Versions {
 mod tests {
     use super::{ALWAYS, FEW_DELETES, VECTOR_ROWS, Versions};
     use crate::graph::conformance::Rng;
-    use crate::graph::rowgroup::{ABSENT, PENDING, RowVersion};
+    use crate::graph::rowgroup::bitset::Bitset;
+    use crate::graph::rowgroup::{ABSENT, PENDING, Read, RowVersion};
+    use grafeo_common::types::{EpochId, TransactionId};
 
     fn existing(versions: &Versions) -> Vec<usize> {
         versions.rows().map(|(row, _)| row).collect()
@@ -666,6 +696,80 @@ mod tests {
 
     /// The bytes of a bit per row of a vector.
     const BITS: usize = VECTOR_ROWS / 8;
+
+    /// `visible_of` gives the rows a reader sees, ascending, alike for a
+    /// flat vector (every row that exists), a stamped vector whose rows
+    /// share one creator (all of them or none, by that creator) and a
+    /// stamped vector read row by row (a pending create seen by its own
+    /// transaction alone, a delete hiding its row from a reader after it).
+    #[test]
+    fn visible_of_gives_the_rows_a_reader_sees() {
+        let mut versions = Versions::default();
+        // Vector 0: flat, rows 1, 3 and 70.
+        for row in [1, 3, 70] {
+            versions.set_always(row);
+        }
+        // Vector 1: rows created at epoch 5 alone.
+        let shared = VECTOR_ROWS;
+        for row in [shared, shared + 2, shared + 65] {
+            versions.set_created(row, 5);
+        }
+        // Vector 2: created at 2, deleted at 6, pending by transaction 19.
+        let mixed = 2 * VECTOR_ROWS;
+        let transaction = 19;
+        versions.set_created(mixed, 2);
+        versions.set_created(mixed + 1, 2);
+        versions.set_deleted(mixed + 1, 6);
+        versions.set_created(mixed + 2, PENDING | transaction);
+
+        let mut asked = Bitset::default();
+        for row in [0, 1, 3, 70, 71]
+            .into_iter()
+            .chain([shared, shared + 1, shared + 2, shared + 65])
+            .chain([mixed, mixed + 1, mixed + 2, mixed + 3])
+            .chain([3 * VECTOR_ROWS])
+        {
+            asked.set(row);
+        }
+        let seen = |read: Read| -> Vec<usize> { versions.visible_of(&asked, read).collect() };
+        // Each answer is what `visible` says row by row.
+        let one_by_one = |read: Read| -> Vec<usize> {
+            asked
+                .rows()
+                .filter(|&row| versions.visible(row, read))
+                .collect()
+        };
+
+        let before = Read::at(EpochId::new(4));
+        assert_eq!(seen(before), [1, 3, 70, mixed, mixed + 1]);
+        let between = Read::at(EpochId::new(5));
+        assert_eq!(
+            seen(between),
+            [1, 3, 70, shared, shared + 2, shared + 65, mixed, mixed + 1]
+        );
+        let after = Read::at(EpochId::new(6));
+        assert_eq!(
+            seen(after),
+            [1, 3, 70, shared, shared + 2, shared + 65, mixed],
+            "the delete at 6 hides its row"
+        );
+        let own = Read::transaction(TransactionId::new(transaction), EpochId::new(6));
+        assert_eq!(
+            seen(own),
+            [1, 3, 70, shared, shared + 2, shared + 65, mixed, mixed + 2],
+            "a transaction sees its own pending create"
+        );
+        let other = Read::transaction(TransactionId::new(20), EpochId::new(4));
+        assert_eq!(seen(other), [1, 3, 70, mixed, mixed + 1]);
+        for read in [before, between, after, own, other] {
+            assert_eq!(seen(read), one_by_one(read), "{read:?}");
+        }
+        assert_eq!(
+            versions.visible_of(&Bitset::default(), after).count(),
+            0,
+            "no rows asked, none seen"
+        );
+    }
 
     #[test]
     fn loaded_rows_stay_flat_and_a_write_stamps_its_vector_alone() {
@@ -753,10 +857,9 @@ mod tests {
 
     /// `existing` keeps the rows of a set that exist, in flat and stamped
     /// vectors and past the last vector.
+    /// A removed row is in no reader's rows, across words and vectors.
     #[test]
-    fn existing_rows_of_a_set_are_listed_a_word_at_a_time() {
-        use crate::graph::rowgroup::bitset::Bitset;
-
+    fn rows_of_a_set_a_reader_sees_leave_a_removed_row_out() {
         let mut versions = Versions::default();
         for row in [0, 63, 64, 700] {
             versions.set_always(row);
@@ -781,9 +884,16 @@ mod tests {
         ] {
             rows.set(row);
         }
+        let own = Read::transaction(TransactionId::new(id), EpochId::new(3));
         assert_eq!(
-            versions.existing(&rows).collect::<Vec<_>>(),
+            versions.visible_of(&rows, own).collect::<Vec<_>>(),
             [0, 63, 64, 700, VECTOR_ROWS + 1, VECTOR_ROWS + 64]
+        );
+        let committed = Read::at(EpochId::new(3));
+        assert_eq!(
+            versions.visible_of(&rows, committed).collect::<Vec<_>>(),
+            [0, 63, 64, 700],
+            "the pending rows are the transaction's alone"
         );
     }
 

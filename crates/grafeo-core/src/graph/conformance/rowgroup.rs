@@ -1109,3 +1109,181 @@ fn a_detach_delete_finds_the_incoming_edges_without_backward_edges() {
         vec![(people.alix, people.alix_gus)]
     );
 }
+
+/// The row-group store's fast reads answer what its row-by-row reads
+/// answer, at every view: a label scan a word of rows at a time (flat
+/// vectors, vectors of one transaction's rows, open and committed, and
+/// vectors read row by row) against the nodes the view sees with their
+/// labels read one by one; the degree and the neighbors, counted and listed
+/// without the edge list, against the edge list; and the edge list against
+/// the edges read one by one with both ends seen (a self-loop once).
+#[test]
+fn fast_reads_agree_with_the_row_by_row_reads_at_every_view() {
+    use std::collections::BTreeSet;
+
+    use grafeo_common::types::{EdgeId, TransactionId};
+
+    use crate::graph::rowgroup::VECTOR_ROWS;
+
+    let store = RowGroupStore::new();
+    let mut epochs = vec![store.current_epoch()];
+    let mut nodes: Vec<NodeId> = Vec::new();
+
+    // Two vectors of one transaction's people, a third of them travellers,
+    // a ring of edges and a self-loop; collected flat.
+    let mut tx = Tx::begin(&store, 10);
+    for row in 0..2 * VECTOR_ROWS {
+        let labels: &[&str] = if row % 3 == 0 {
+            &["Person", "Traveller"]
+        } else {
+            &["Person"]
+        };
+        nodes.push(tx.create_node(labels, &[]).unwrap());
+    }
+    for pair in nodes.windows(2).step_by(97) {
+        tx.create_edge(pair[0], pair[1], "KNOWS", &[]).unwrap();
+    }
+    tx.create_edge(nodes[5], nodes[5], "KNOWS", &[]).unwrap();
+    epochs.push(tx.commit().unwrap());
+    store.collect(store.current_epoch());
+
+    // A vector one transaction fills: one constant stamp, which the views
+    // before its commit do not see; then a second writer's rows in the
+    // next vector, a stamp per row there.
+    let mut tx = Tx::begin(&store, 11);
+    let cities: Vec<NodeId> = (0..VECTOR_ROWS)
+        .map(|_| tx.create_node(&["City"], &[]).unwrap())
+        .collect();
+    for (row, city) in cities.iter().enumerate().step_by(7) {
+        tx.create_edge(nodes[row], *city, "LIVES_IN", &[]).unwrap();
+    }
+    epochs.push(tx.commit().unwrap());
+    let mut tx = Tx::begin(&store, 12);
+    let late: Vec<NodeId> = (0..20)
+        .map(|_| tx.create_node(&["City", "Traveller"], &[]).unwrap())
+        .collect();
+    tx.create_edge(late[0], cities[0], "ROUTE", &[]).unwrap();
+    epochs.push(tx.commit().unwrap());
+
+    // Deletes in a flat vector, a node with edges among them.
+    let mut tx = Tx::begin(&store, 13);
+    for &node in &[nodes[1], nodes[3], nodes[97], nodes[VECTOR_ROWS + 4]] {
+        tx.detach_delete(node).unwrap();
+    }
+    epochs.push(tx.commit().unwrap());
+
+    // An open transaction: rows of its own, deletes and edges pending.
+    let mut open = Tx::begin(&store, 14);
+    let pending: Vec<NodeId> = (0..10)
+        .map(|_| open.create_node(&["City"], &[]).unwrap())
+        .collect();
+    open.detach_delete(nodes[194]).unwrap();
+    open.detach_delete(late[3]).unwrap();
+    open.create_edge(pending[0], nodes[0], "ROUTE", &[])
+        .unwrap();
+    open.create_edge(pending[1], pending[1], "ROUTE", &[])
+        .unwrap();
+
+    let mut views: Vec<ReadView> = epochs.iter().map(|&e| ReadView::committed(e)).collect();
+    views.push(ReadView::latest());
+    views.push(ReadView::transaction(open.id, open.snapshot));
+    views.push(ReadView::transaction(TransactionId::new(99), open.snapshot));
+    views.push(ReadView::transaction(TransactionId::new(99), epochs[2]));
+
+    let next_edge = store.next_edge_id();
+    let mut probes: Vec<NodeId> = nodes.iter().step_by(97).copied().collect();
+    probes.extend([nodes[5], nodes[1], nodes[194], nodes[VECTOR_ROWS + 4]]);
+    probes.extend(
+        cities
+            .iter()
+            .step_by(7)
+            .chain(&late)
+            .chain(&pending)
+            .copied(),
+    );
+
+    for &view in &views {
+        let seen = store.node_ids(view).unwrap();
+        for label in ["Person", "Traveller", "City", "Nowhere"] {
+            let slow: Vec<NodeId> = seen
+                .iter()
+                .copied()
+                .filter(|&id| {
+                    store
+                        .node_labels(id, view)
+                        .unwrap()
+                        .is_some_and(|labels| labels.iter().any(|l| l.as_str() == label))
+                })
+                .collect();
+            assert_eq!(
+                store.nodes_by_label(label, view).unwrap(),
+                slow,
+                "{label} at {view:?}"
+            );
+            assert_eq!(
+                store.nodes_by_label_count(label, view).unwrap(),
+                slow.len(),
+                "{label} count at {view:?}"
+            );
+        }
+        let union = store
+            .nodes_with_any_label(&["City", "Traveller"], view)
+            .unwrap();
+        let slow: Vec<NodeId> = seen
+            .iter()
+            .copied()
+            .filter(|&id| {
+                store.node_labels(id, view).unwrap().is_some_and(|labels| {
+                    labels
+                        .iter()
+                        .any(|l| l.as_str() == "City" || l.as_str() == "Traveller")
+                })
+            })
+            .collect();
+        assert_eq!(union, slow, "City or Traveller at {view:?}");
+
+        // Every edge the view sees with both its ends.
+        let edges: Vec<(EdgeId, NodeId, NodeId)> = (0..next_edge)
+            .filter_map(|raw| store.edge(EdgeId::new(raw), view).unwrap())
+            .filter(|edge| {
+                store.is_node_visible(edge.src, view).unwrap()
+                    && store.is_node_visible(edge.dst, view).unwrap()
+            })
+            .map(|edge| (edge.id, edge.src, edge.dst))
+            .collect();
+        for &node in &probes {
+            for direction in [Direction::Outgoing, Direction::Incoming, Direction::Both] {
+                let listed = store.edges(node, direction, &[], view).unwrap();
+                let mut slow: BTreeSet<(NodeId, EdgeId)> = BTreeSet::new();
+                if store.is_node_visible(node, view).unwrap() {
+                    for &(id, src, dst) in &edges {
+                        if src == node && direction != Direction::Incoming {
+                            slow.insert((dst, id));
+                        }
+                        if dst == node && direction != Direction::Outgoing {
+                            slow.insert((src, id));
+                        }
+                    }
+                }
+                let as_set: BTreeSet<(NodeId, EdgeId)> = listed.iter().copied().collect();
+                assert_eq!(
+                    as_set.len(),
+                    listed.len(),
+                    "each edge once: {node:?} {direction:?}"
+                );
+                assert_eq!(as_set, slow, "edges of {node:?} {direction:?} at {view:?}");
+                assert_eq!(
+                    store.degree(node, direction, view).unwrap(),
+                    listed.len(),
+                    "degree of {node:?} {direction:?} at {view:?}"
+                );
+                assert_eq!(
+                    store.neighbors(node, direction, view).unwrap(),
+                    listed.iter().map(|(other, _)| *other).collect::<Vec<_>>(),
+                    "neighbors of {node:?} {direction:?} at {view:?}"
+                );
+            }
+        }
+    }
+    open.roll_back().unwrap();
+}

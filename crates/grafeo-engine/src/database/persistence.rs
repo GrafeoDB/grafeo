@@ -744,7 +744,7 @@ impl super::GrafeoDB {
         // (#362): they are held off only while the snapshot is taken. A new
         // database: its WAL starts at log position 0.
         super::flush::write_copy(
-            &self.checkpoint_sources(),
+            &self.checkpoint_sources()?,
             path,
             new_database_id(),
             keys,
@@ -793,10 +793,11 @@ impl super::GrafeoDB {
         let target = Self::with_config(config)?;
         // Each section is served once and freed as soon as it is loaded.
         let image = grafeo_common::storage::ServedOnce::new(self.copy_into(&target)?);
+        let target_root = target.lpg_store()?;
         let mut loaded = super::sections::load_sections(
             &image,
             None,
-            &target.lpg_store(),
+            &target_root,
             &target.catalog,
             #[cfg(feature = "triple-store")]
             &target.rdf_store,
@@ -804,15 +805,13 @@ impl super::GrafeoDB {
         // The copy continues at the epoch of what it holds, which
         // `copy_into` gave its transaction manager, as a reopen of a
         // checkpoint continues at the checkpoint's epoch.
-        target
-            .lpg_store()
-            .sync_epoch(target.transaction_manager.current_epoch());
+        target_root.sync_epoch(target.transaction_manager.current_epoch());
         super::row_group_sections::restore_row_group_history(
-            &target.lpg_store(),
+            &target_root,
             &target.transaction_manager,
             loaded.take_history(),
         );
-        Self::continue_epochs(&target.lpg_store(), &target.transaction_manager);
+        Self::continue_epochs(&target_root, &target.transaction_manager);
         target.finish_load(loaded);
         Ok(target)
     }
@@ -833,8 +832,8 @@ impl super::GrafeoDB {
     /// Returns an error if commits cannot be held or a section fails to
     /// write.
     pub(super) fn copy_into(&self, target: &Self) -> Result<grafeo_common::storage::MemoryImage> {
+        let sources = self.checkpoint_sources()?;
         let commits = self.transaction_manager.hold_commits()?;
-        let sources = self.checkpoint_sources();
         #[cfg(feature = "grafeo-file")]
         {
             let mut image = grafeo_common::storage::MemoryImage::new();
@@ -964,18 +963,16 @@ impl super::GrafeoDB {
     /// # Errors
     ///
     /// Returns an error if serialization fails, or after a commit that did
-    /// not complete.
+    /// not complete; the unsupported error on a database on a backend of its
+    /// own ([`with_store`](Self::with_store)).
     pub fn export_snapshot(&self) -> Result<Vec<u8>> {
         // The snapshot holds every commit whole, none that did not complete
         // (whose stamped part the store holds), and nothing of a transaction
         // still open (the hold also holds its writes).
+        let sources = self.checkpoint_sources()?;
         let commits = self.transaction_manager.hold_commits()?;
-        let root = self.root_store().ok_or_else(|| {
-            Error::from(grafeo_common::utils::error::QueryError::unsupported(
-                "a snapshot export needs the built-in LPG store",
-            ))
-        })?;
-        let epoch = EpochId::new(self.checkpoint_sources().epoch());
+        let root = std::sync::Arc::clone(&sources.store);
+        let epoch = EpochId::new(sources.epoch());
         // The graphs are read at the epoch with commits going on, while a
         // read pinned at it keeps their versions (#362); the rest is taken
         // under the hold.
@@ -1028,7 +1025,7 @@ impl super::GrafeoDB {
         let decoded = decode_snapshot(data, "import")?;
         refuse_unreadable_snapshot(&decoded, "import")?;
         let db = Self::new_in_memory();
-        let root = db.lpg_store();
+        let root = db.lpg_store()?;
         row_groups::restore(&db.snapshot_parts(&root), data, "import")?;
         // The database continues at the snapshot's epoch.
         Self::continue_epochs(&root, &db.transaction_manager);
@@ -1082,7 +1079,7 @@ impl super::GrafeoDB {
         self.transaction_manager.check_open()?;
         // Validates the snapshot and refuses data this build cannot read
         // before it changes anything (see `row_groups::restore`).
-        let root = self.lpg_store();
+        let root = self.lpg_store()?;
         row_groups::restore(&self.snapshot_parts(&root), data, "restore")?;
         // The database continues at the snapshot's epoch, or above it when
         // it had committed further (epochs never go back).
@@ -1101,18 +1098,23 @@ impl super::GrafeoDB {
     ///
     /// The read is pinned at its epoch while the iterator lives, so a
     /// collect between two steps keeps every node it still reads.
-    pub fn iter_nodes(&self) -> impl Iterator<Item = grafeo_core::graph::lpg::Node> + '_ {
+    ///
+    /// # Errors
+    ///
+    /// The unsupported error on a database on a store of its own: it walks
+    /// the built-in store.
+    pub fn iter_nodes(&self) -> Result<impl Iterator<Item = grafeo_core::graph::lpg::Node> + '_> {
         use grafeo_core::graph::GraphStore;
 
+        let store = self.lpg_store()?;
         let pin = self.transaction_manager.pin_read();
         let view = ReadView::committed(self.read_epoch());
-        let store = self.lpg_store();
         // The database's own row-group store: its reads do not fail.
         let ids = store.node_ids(view).unwrap_or_default();
-        ids.into_iter().filter_map(move |id| {
+        Ok(ids.into_iter().filter_map(move |id| {
             let _pinned = &pin;
             store.node(id, view).ok().flatten()
-        })
+        }))
     }
 
     /// Returns an iterator over all edges in the database, as of the current
@@ -1122,14 +1124,18 @@ impl super::GrafeoDB {
     ///
     /// The read is pinned at its epoch while the iterator lives (see
     /// [`iter_nodes`](Self::iter_nodes)).
-    pub fn iter_edges(&self) -> impl Iterator<Item = grafeo_core::graph::lpg::Edge> + '_ {
+    ///
+    /// # Errors
+    ///
+    /// As [`iter_nodes`](Self::iter_nodes).
+    pub fn iter_edges(&self) -> Result<impl Iterator<Item = grafeo_core::graph::lpg::Edge> + '_> {
         use grafeo_core::graph::GraphStore;
 
+        let store = self.lpg_store()?;
         let pin = self.transaction_manager.pin_read();
         let epoch = self.read_epoch();
-        let store = self.lpg_store();
         // The store numbers its edges densely, and its reads do not fail.
-        (0..store.next_edge_id()).filter_map(move |id| {
+        Ok((0..store.next_edge_id()).filter_map(move |id| {
             let _pinned = &pin;
             store
                 .edge(
@@ -1138,7 +1144,7 @@ impl super::GrafeoDB {
                 )
                 .ok()
                 .flatten()
-        })
+        }))
     }
 }
 
@@ -1419,12 +1425,24 @@ mod tests {
         session
             .execute("INSERT (:Person {name: 'Vincent'})")
             .unwrap();
-        assert_eq!(db.lpg_store().node_count(ReadView::latest()).unwrap(), 3);
+        assert_eq!(
+            db.lpg_store()
+                .unwrap()
+                .node_count(ReadView::latest())
+                .unwrap(),
+            3
+        );
 
         // Restore original
         db.restore_snapshot(&snapshot).unwrap();
 
-        assert_eq!(db.lpg_store().node_count(ReadView::latest()).unwrap(), 2);
+        assert_eq!(
+            db.lpg_store()
+                .unwrap()
+                .node_count(ReadView::latest())
+                .unwrap(),
+            2
+        );
         let result = session.execute("MATCH (n:Person) RETURN n.name").unwrap();
         assert_eq!(result.rows.len(), 2);
     }
@@ -1441,7 +1459,13 @@ mod tests {
         assert!(result.is_err());
 
         // DB should be unchanged
-        assert_eq!(db.lpg_store().node_count(ReadView::latest()).unwrap(), 1);
+        assert_eq!(
+            db.lpg_store()
+                .unwrap()
+                .node_count(ReadView::latest())
+                .unwrap(),
+            1
+        );
     }
 
     #[test]
@@ -1453,10 +1477,22 @@ mod tests {
 
         let session = db.session();
         session.execute("INSERT (:Person {name: 'Alix'})").unwrap();
-        assert_eq!(db.lpg_store().node_count(ReadView::latest()).unwrap(), 1);
+        assert_eq!(
+            db.lpg_store()
+                .unwrap()
+                .node_count(ReadView::latest())
+                .unwrap(),
+            1
+        );
 
         db.restore_snapshot(&empty_snapshot).unwrap();
-        assert_eq!(db.lpg_store().node_count(ReadView::latest()).unwrap(), 0);
+        assert_eq!(
+            db.lpg_store()
+                .unwrap()
+                .node_count(ReadView::latest())
+                .unwrap(),
+            0
+        );
     }
 
     #[test]
@@ -1473,7 +1509,13 @@ mod tests {
             .unwrap();
 
         let snapshot = db.export_snapshot().unwrap();
-        assert_eq!(db.lpg_store().edge_count(ReadView::latest()).unwrap(), 1);
+        assert_eq!(
+            db.lpg_store()
+                .unwrap()
+                .edge_count(ReadView::latest())
+                .unwrap(),
+            1
+        );
 
         // Modify: add more data
         session
@@ -1482,8 +1524,20 @@ mod tests {
 
         // Restore
         db.restore_snapshot(&snapshot).unwrap();
-        assert_eq!(db.lpg_store().node_count(ReadView::latest()).unwrap(), 2);
-        assert_eq!(db.lpg_store().edge_count(ReadView::latest()).unwrap(), 1);
+        assert_eq!(
+            db.lpg_store()
+                .unwrap()
+                .node_count(ReadView::latest())
+                .unwrap(),
+            2
+        );
+        assert_eq!(
+            db.lpg_store()
+                .unwrap()
+                .edge_count(ReadView::latest())
+                .unwrap(),
+            1
+        );
     }
 
     #[test]
@@ -1548,7 +1602,7 @@ mod tests {
         let copy = db.to_memory().unwrap();
         let imported = GrafeoDB::import_snapshot(&db.export_snapshot().unwrap()).unwrap();
         for (what, copy) in [("to_memory", &copy), ("export_snapshot", &imported)] {
-            let store = copy.lpg_store();
+            let store = copy.lpg_store().unwrap();
             let ids = store.node_ids(ReadView::latest()).unwrap();
             assert_eq!(ids.len(), 1, "{what}: Alix");
             let mut history = store.node_property_history(ids[0]);
@@ -1581,8 +1635,20 @@ mod tests {
     fn test_to_memory_empty() {
         let db = GrafeoDB::new_in_memory();
         let copy = db.to_memory().unwrap();
-        assert_eq!(copy.lpg_store().node_count(ReadView::latest()).unwrap(), 0);
-        assert_eq!(copy.lpg_store().edge_count(ReadView::latest()).unwrap(), 0);
+        assert_eq!(
+            copy.lpg_store()
+                .unwrap()
+                .node_count(ReadView::latest())
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            copy.lpg_store()
+                .unwrap()
+                .edge_count(ReadView::latest())
+                .unwrap(),
+            0
+        );
     }
 
     #[test]
@@ -1597,7 +1663,13 @@ mod tests {
             .unwrap();
 
         let copy = db.to_memory().unwrap();
-        assert_eq!(copy.lpg_store().node_count(ReadView::latest()).unwrap(), 2);
+        assert_eq!(
+            copy.lpg_store()
+                .unwrap()
+                .node_count(ReadView::latest())
+                .unwrap(),
+            2
+        );
 
         let s2 = copy.session();
         let result = s2
@@ -1620,8 +1692,20 @@ mod tests {
             .unwrap();
 
         let copy = db.to_memory().unwrap();
-        assert_eq!(copy.lpg_store().node_count(ReadView::latest()).unwrap(), 2);
-        assert_eq!(copy.lpg_store().edge_count(ReadView::latest()).unwrap(), 1);
+        assert_eq!(
+            copy.lpg_store()
+                .unwrap()
+                .node_count(ReadView::latest())
+                .unwrap(),
+            2
+        );
+        assert_eq!(
+            copy.lpg_store()
+                .unwrap()
+                .edge_count(ReadView::latest())
+                .unwrap(),
+            1
+        );
 
         let s2 = copy.session();
         let result = s2.execute("MATCH ()-[e:KNOWS]->() RETURN e.since").unwrap();
@@ -1638,8 +1722,20 @@ mod tests {
 
         // Mutating original should not affect copy
         session.execute("INSERT (:Person {name: 'Gus'})").unwrap();
-        assert_eq!(db.lpg_store().node_count(ReadView::latest()).unwrap(), 2);
-        assert_eq!(copy.lpg_store().node_count(ReadView::latest()).unwrap(), 1);
+        assert_eq!(
+            db.lpg_store()
+                .unwrap()
+                .node_count(ReadView::latest())
+                .unwrap(),
+            2
+        );
+        assert_eq!(
+            copy.lpg_store()
+                .unwrap()
+                .node_count(ReadView::latest())
+                .unwrap(),
+            1
+        );
     }
 
     // --- iter_nodes() / iter_edges() ---
@@ -1647,7 +1743,7 @@ mod tests {
     #[test]
     fn test_iter_nodes_empty() {
         let db = GrafeoDB::new_in_memory();
-        assert_eq!(db.iter_nodes().count(), 0);
+        assert_eq!(db.iter_nodes().unwrap().count(), 0);
     }
 
     #[test]
@@ -1658,7 +1754,7 @@ mod tests {
         let id2 = db.create_node(&["Animal"]).unwrap();
         db.set_node_property(id2, "name", "Fido".into()).unwrap();
 
-        let nodes: Vec<_> = db.iter_nodes().collect();
+        let nodes: Vec<_> = db.iter_nodes().unwrap().collect();
         assert_eq!(nodes.len(), 2);
 
         let names: Vec<_> = nodes
@@ -1673,7 +1769,7 @@ mod tests {
     #[test]
     fn test_iter_edges_empty() {
         let db = GrafeoDB::new_in_memory();
-        assert_eq!(db.iter_edges().count(), 0);
+        assert_eq!(db.iter_edges().unwrap().count(), 0);
     }
 
     #[test]
@@ -1685,7 +1781,7 @@ mod tests {
         db.create_edge(a, b, "R1").unwrap();
         db.create_edge(b, c, "R2").unwrap();
 
-        let edges: Vec<_> = db.iter_edges().collect();
+        let edges: Vec<_> = db.iter_edges().unwrap().collect();
         assert_eq!(edges.len(), 2);
 
         let types: Vec<_> = edges.iter().map(|e| e.edge_type.as_ref()).collect();
@@ -1724,7 +1820,13 @@ mod tests {
         assert!(err.contains("unsupported snapshot version"), "got: {err}");
 
         // DB unchanged
-        assert_eq!(db.lpg_store().node_count(ReadView::latest()).unwrap(), 1);
+        assert_eq!(
+            db.lpg_store()
+                .unwrap()
+                .node_count(ReadView::latest())
+                .unwrap(),
+            1
+        );
     }
 
     /// A snapshot holding a value nested deeper than a database can store is
@@ -1782,7 +1884,10 @@ mod tests {
             let error = db.restore_snapshot(bytes).unwrap_err().to_string();
             assert!(error.contains(words), "{words}: {error}");
             assert_eq!(
-                db.lpg_store().node_count(ReadView::latest()).unwrap(),
+                db.lpg_store()
+                    .unwrap()
+                    .node_count(ReadView::latest())
+                    .unwrap(),
                 1,
                 "a refused restore changes nothing"
             );
@@ -1865,7 +1970,13 @@ mod tests {
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
         assert!(err.contains("duplicate node ID"), "got: {err}");
-        assert_eq!(db.lpg_store().node_count(ReadView::latest()).unwrap(), 1);
+        assert_eq!(
+            db.lpg_store()
+                .unwrap()
+                .node_count(ReadView::latest())
+                .unwrap(),
+            1
+        );
     }
 
     #[test]

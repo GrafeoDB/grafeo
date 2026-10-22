@@ -412,20 +412,12 @@ impl CheckpointSources {
             .transaction_manager
             .last_assigned_transaction_id()
             .map_or(0, |t| t.0);
-        let epoch = self.epoch();
-        if let Some((nodes, edges)) = self.counts() {
-            return FlushContext {
-                epoch,
-                transaction_id,
-                node_count: nodes as u64,
-                edge_count: edges as u64,
-            };
-        }
+        let (nodes, edges) = self.counts();
         FlushContext {
-            epoch,
+            epoch: self.epoch(),
             transaction_id,
-            node_count: 0,
-            edge_count: 0,
+            node_count: nodes as u64,
+            edge_count: edges as u64,
         }
     }
 }

@@ -111,7 +111,10 @@ fn spilled(path: &Path) -> (GrafeoDB, Vec<NodeId>) {
     // what counts is that it spilled.
     db.buffer_manager().spill_all();
     assert!(
-        !db.store().spilled_node_property_columns().is_empty(),
+        !db.store()
+            .unwrap()
+            .spilled_node_property_columns()
+            .is_empty(),
         "nothing was spilled"
     );
     (db, ids)
@@ -212,7 +215,10 @@ fn a_spill_takes_the_embeddings_off_the_heap() {
     db.buffer_manager().spill_all();
 
     assert!(
-        !db.store().spilled_node_property_columns().is_empty(),
+        !db.store()
+            .unwrap()
+            .spilled_node_property_columns()
+            .is_empty(),
         "nothing was spilled"
     );
     let spilled = heap();
@@ -239,7 +245,7 @@ fn removals_while_spilled_stay_removed() {
     // The writes brought the column back into memory (a write thaws its
     // row group's column, #412 decision Q9): nothing is left to reload.
     assert_eq!(
-        db.store().spilled_node_property_columns(),
+        db.store().unwrap().spilled_node_property_columns(),
         Vec::<grafeo_common::types::PropertyKey>::new()
     );
 
@@ -270,7 +276,10 @@ fn search_while_spilled_answers_as_in_memory() {
     // what counts is that it spilled.
     db.buffer_manager().spill_all();
     assert!(
-        !db.store().spilled_node_property_columns().is_empty(),
+        !db.store()
+            .unwrap()
+            .spilled_node_property_columns()
+            .is_empty(),
         "nothing was spilled"
     );
     let spilled = db
@@ -447,7 +456,10 @@ fn a_reload_deletes_its_cache_file() {
     // what counts is that it spilled.
     db.buffer_manager().spill_all();
     assert!(
-        !db.store().spilled_node_property_columns().is_empty(),
+        !db.store()
+            .unwrap()
+            .spilled_node_property_columns()
+            .is_empty(),
         "nothing was spilled"
     );
     assert_eq!(names_in(&cache_dir(&path)).len(), 1);
@@ -511,7 +523,10 @@ fn databases_sharing_a_spill_path_keep_their_own_cache() {
         // what counts is that it spilled.
         db.buffer_manager().spill_all();
         assert!(
-            !db.store().spilled_node_property_columns().is_empty(),
+            !db.store()
+                .unwrap()
+                .spilled_node_property_columns()
+                .is_empty(),
             "nothing was spilled"
         );
         db

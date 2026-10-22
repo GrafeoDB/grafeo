@@ -26,13 +26,18 @@ impl super::GrafeoDB {
     /// The store of the current graph: the one `set_current_graph` and
     /// `set_current_schema` select, or the default graph when they select
     /// none (or one that no longer exists).
-    pub(crate) fn current_lpg_store(&self) -> Arc<RowGroupStore> {
-        crate::session::graph_storage_key(
+    ///
+    /// # Errors
+    ///
+    /// On a database on a backend of its own, which has no built-in store.
+    pub(crate) fn current_lpg_store(&self) -> Result<Arc<RowGroupStore>> {
+        let root = self.lpg_store()?;
+        Ok(crate::session::graph_storage_key(
             self.current_schema.read().as_deref(),
             self.current_graph.read().as_deref(),
         )
-        .and_then(|key| self.lpg_store().graph(&key))
-        .unwrap_or_else(|| self.lpg_store())
+        .and_then(|key| root.graph(&key))
+        .unwrap_or(root))
     }
 
     /// The epoch the direct reads see: the last one whose commit is
@@ -245,7 +250,7 @@ impl super::GrafeoDB {
                 ),
             ));
         }
-        Ok(self.current_lpg_store())
+        self.current_lpg_store()
     }
 
     /// Returns the version timeline for a single property of a node, up to

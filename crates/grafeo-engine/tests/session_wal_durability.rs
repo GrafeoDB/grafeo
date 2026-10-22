@@ -678,7 +678,7 @@ mod session_wal_durability {
 
         fn update_property(db: &GrafeoDB, caller: PropertyCaller, value: &str) -> Result<()> {
             use grafeo_common::types::Value;
-            let node = db.iter_nodes().next().expect("the seed node").id;
+            let node = db.iter_nodes().unwrap().next().expect("the seed node").id;
             match caller {
                 PropertyCaller::Explicit => {
                     let mut session = db.session();
@@ -698,7 +698,7 @@ mod session_wal_durability {
         fn assert_revision(db: &GrafeoDB, expected: &str) {
             use grafeo_common::types::Value;
             assert_eq!(db.node_count().unwrap(), 1, "updates must not add nodes");
-            let node = db.iter_nodes().next().expect("the seed node");
+            let node = db.iter_nodes().unwrap().next().expect("the seed node");
             assert_eq!(node.get_property("revision"), Some(&Value::from(expected)));
             let result = db.execute("MATCH (n:Probe) RETURN n.revision").unwrap();
             assert_eq!(result.rows(), &[vec![Value::from(expected)]]);

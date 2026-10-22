@@ -26,8 +26,8 @@ use grafeo_core::graph::rowgroup::section::RowGroupStoreSection;
 /// `to_memory()` copies a database through them.
 #[derive(Clone)]
 pub(super) struct CheckpointSources {
-    /// The root store with its named graphs, `None` with an external store.
-    pub store: Option<Arc<RowGroupStore>>,
+    /// The root store with its named graphs.
+    pub store: Arc<RowGroupStore>,
     pub catalog: Arc<crate::catalog::Catalog>,
     pub transaction_manager: Arc<crate::transaction::TransactionManager>,
     #[cfg(feature = "triple-store")]
@@ -52,27 +52,22 @@ impl CheckpointSources {
     /// last complete commit.
     pub fn epoch(&self) -> u64 {
         let published = self.transaction_manager.current_epoch();
-        if let Some(store) = &self.store {
-            return store.current_epoch().max(published).as_u64();
-        }
-        published.as_u64()
+        self.store.current_epoch().max(published).as_u64()
     }
 
     /// The default graph's committed nodes and edges, for the header.
     #[cfg(feature = "grafeo-file")]
-    pub(super) fn counts(&self) -> Option<(usize, usize)> {
+    pub(super) fn counts(&self) -> (usize, usize) {
         use grafeo_common::types::ReadView;
         use grafeo_core::graph::GraphStore;
         // The header counts what a reader after every commit sees (the
         // caller holds commits off); the row-group store's reads do not
         // fail.
         let view = ReadView::latest();
-        self.store.as_ref().map(|store| {
-            (
-                store.node_count(view).unwrap_or(0),
-                store.edge_count(view).unwrap_or(0),
-            )
-        })
+        (
+            self.store.node_count(view).unwrap_or(0),
+            self.store.edge_count(view).unwrap_or(0),
+        )
     }
 
     /// Builds every section of the database. The caller holds commits off
@@ -98,22 +93,20 @@ impl CheckpointSources {
         let _ = commits;
         let mut sections: Vec<Box<dyn Section>> = Vec::new();
 
-        if let Some(root) = &self.store {
-            let transaction_manager = Arc::clone(&self.transaction_manager);
-            sections.push(Box::new(CatalogSection::new(
-                Arc::clone(&self.catalog),
-                Arc::clone(root),
-                move || transaction_manager.current_epoch().as_u64(),
-            )));
-            let section = RowGroupStoreSection::new(Arc::clone(root))
-                .at(grafeo_common::types::EpochId::new(self.epoch()));
-            let section = if self.transaction_manager.history_image().is_some() {
-                section.with_history_from(self.transaction_manager.history_floor())
-            } else {
-                section
-            };
-            sections.push(Box::new(section));
-        }
+        let transaction_manager = Arc::clone(&self.transaction_manager);
+        sections.push(Box::new(CatalogSection::new(
+            Arc::clone(&self.catalog),
+            Arc::clone(&self.store),
+            move || transaction_manager.current_epoch().as_u64(),
+        )));
+        let section = RowGroupStoreSection::new(Arc::clone(&self.store))
+            .at(grafeo_common::types::EpochId::new(self.epoch()));
+        let section = if self.transaction_manager.history_image().is_some() {
+            section.with_history_from(self.transaction_manager.history_floor())
+        } else {
+            section
+        };
+        sections.push(Box::new(section));
 
         #[cfg(feature = "triple-store")]
         if !self.rdf_store.is_empty() || self.rdf_store.graph_count() > 0 {
@@ -208,21 +201,16 @@ impl CheckpointSources {
             .pin_read_at(history_from.unwrap_or(epoch))?;
         let mut held: Vec<Box<dyn Section>> = Vec::new();
         let mut after: Vec<Box<dyn Section>> = Vec::new();
-        let lpg = self.store.as_ref().map(|root| {
-            let snapshot = Arc::new(if copy {
-                CheckpointSnapshot::take_copy(root, epoch, history_from)
-            } else {
-                CheckpointSnapshot::take(root, epoch, history_from)
-            });
-            (Arc::clone(root), snapshot)
+        let lpg = Arc::new(if copy {
+            CheckpointSnapshot::take_copy(&self.store, epoch, history_from)
+        } else {
+            CheckpointSnapshot::take(&self.store, epoch, history_from)
         });
         for section in self.sections(commits) {
-            if section.section_type() == SectionType::LpgStore
-                && let Some((root, snapshot)) = &lpg
-            {
+            if section.section_type() == SectionType::LpgStore {
                 after.push(Box::new(RowGroupStoreSection::from_snapshot(
-                    Arc::clone(root),
-                    Arc::clone(snapshot),
+                    Arc::clone(&self.store),
+                    Arc::clone(&lpg),
                 )));
                 continue;
             }
@@ -234,7 +222,7 @@ impl CheckpointSources {
             sections: held,
             held: held_count,
             context: self.context(),
-            lpg: lpg.map(|(_, snapshot)| snapshot),
+            lpg,
             _pin: pin,
         })
     }
@@ -252,8 +240,8 @@ pub(super) struct CheckpointImage {
     pub held: usize,
     /// The header values at the checkpoint's epoch.
     pub context: super::flush::FlushContext,
-    /// The LPG section's snapshot, `None` without the root store.
-    pub lpg: Option<Arc<CheckpointSnapshot>>,
+    /// The LPG section's snapshot.
+    pub lpg: Arc<CheckpointSnapshot>,
     _pin: crate::transaction::ReadPin,
 }
 
@@ -262,16 +250,12 @@ impl CheckpointImage {
     /// The image is written and active as `image`: each graph's marks are
     /// relative to it from now on.
     pub fn written_as(&self, image: grafeo_common::storage::ImageId) {
-        if let Some(snapshot) = &self.lpg {
-            snapshot.written_as(image);
-        }
+        self.lpg.written_as(image);
     }
 
     /// The image was not written: the next checkpoint writes every chunk.
     pub fn failed(&self) {
-        if let Some(snapshot) = &self.lpg {
-            snapshot.failed();
-        }
+        self.lpg.failed();
     }
 }
 
@@ -921,6 +905,7 @@ mod tests {
         let commits = db.transaction_manager.hold_commits().unwrap();
         let raw: Vec<(SectionType, Vec<u8>)> = db
             .checkpoint_sources()
+            .unwrap()
             .sections(&commits)
             .iter()
             .filter(|section| section.section_type() != SectionType::LpgStore)
@@ -1007,7 +992,7 @@ mod tests {
     fn image_with(db: &GrafeoDB, replace: impl Fn(&dyn Section) -> Option<Vec<u8>>) -> MemoryImage {
         let commits = db.transaction_manager.hold_commits().unwrap();
         let mut image = MemoryImage::new();
-        for section in db.checkpoint_sources().sections(&commits) {
+        for section in db.checkpoint_sources().unwrap().sections(&commits) {
             image
                 .begin_section(section.section_type(), section.version())
                 .unwrap();
@@ -1095,7 +1080,7 @@ mod tests {
     ) -> MemoryImage {
         let commits = db.transaction_manager.hold_commits().unwrap();
         let mut image = MemoryImage::new();
-        for section in db.checkpoint_sources().sections(&commits) {
+        for section in db.checkpoint_sources().unwrap().sections(&commits) {
             image
                 .begin_section(section.section_type(), section.version())
                 .unwrap();
@@ -1178,6 +1163,7 @@ mod tests {
         let commits = db.transaction_manager.hold_commits().unwrap();
         let raw: Vec<(SectionType, Vec<u8>)> = db
             .checkpoint_sources()
+            .unwrap()
             .sections(&commits)
             .iter()
             .filter(|section| section.section_type() != SectionType::LpgStore)
@@ -1591,7 +1577,7 @@ mod tests {
     #[test]
     fn a_folded_database_checkpoints_as_a_plain_one() {
         let db = GrafeoDB::new_in_memory();
-        let loaded = load(&compacted_image(), &db.lpg_store()).unwrap();
+        let loaded = load(&compacted_image(), &db.lpg_store().unwrap()).unwrap();
         db.finish_load(loaded);
         let names = |db: &GrafeoDB| {
             db.execute("MATCH (n) WHERE n.name IS NOT NULL RETURN n.name ORDER BY n.name")
@@ -1612,7 +1598,7 @@ mod tests {
             by_byte(vec![SectionType::Catalog, SectionType::LpgStore])
         );
         let reopened = GrafeoDB::new_in_memory();
-        let loaded = load(&checkpoint, &reopened.lpg_store()).unwrap();
+        let loaded = load(&checkpoint, &reopened.lpg_store().unwrap()).unwrap();
         reopened.finish_load(loaded);
         assert_eq!(names(&reopened), before);
         let edges = reopened
@@ -1649,7 +1635,7 @@ mod tests {
     fn image_with_version(db: &GrafeoDB, section_type: SectionType, version: u8) -> MemoryImage {
         let commits = db.transaction_manager.hold_commits().unwrap();
         let mut image = MemoryImage::new();
-        for section in db.checkpoint_sources().sections(&commits) {
+        for section in db.checkpoint_sources().unwrap().sections(&commits) {
             let claimed = if section.section_type() == section_type {
                 version
             } else {
@@ -1799,7 +1785,7 @@ mod tests {
         let copied = db.copy_into(&target).unwrap();
 
         let commits = db.transaction_manager.hold_commits().unwrap();
-        let sections = db.checkpoint_sources().sections(&commits);
+        let sections = db.checkpoint_sources().unwrap().sections(&commits);
         let refs: Vec<&dyn Section> = sections.iter().map(AsRef::as_ref).collect();
         let expected = MemoryImage::from_sections(&refs).unwrap();
         drop(commits);
@@ -1927,7 +1913,7 @@ mod tests {
         .collect();
         let db = database_with_every_section();
         let commits = db.transaction_manager.hold_commits().unwrap();
-        let sections = db.checkpoint_sources().sections(&commits);
+        let sections = db.checkpoint_sources().unwrap().sections(&commits);
         let refs: Vec<&dyn Section> = sections.iter().map(AsRef::as_ref).collect();
         let image = MemoryImage::from_sections(&refs).unwrap();
         drop(commits);

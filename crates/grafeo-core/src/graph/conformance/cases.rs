@@ -606,7 +606,11 @@ pub(crate) fn replay_rebuilds_what_live_commits_wrote<S: Store>(make: &dyn Fn() 
             &committed(&live),
             &what("the replayed data"),
         )?;
-        same(&replayed.epoch(), &live.epoch(), &what("the epoch"))?;
+        same(
+            &replayed.committed_epoch(),
+            &live.committed_epoch(),
+            &what("the epoch"),
+        )?;
         same(
             &counts(&replayed, &LABELS),
             &counts(&live, &LABELS),
@@ -638,7 +642,7 @@ pub(crate) fn immediate_writes_commit_at_once<S: Store>(make: &dyn Fn() -> S) ->
         matches!(&applied, Ok(Applied::Changed { before: Before::Value(Some(value)), .. }) if *value == Value::from("Amsterdam")),
         || format!("an immediate write with images gave {applied:?}"),
     )?;
-    ensure(store.epoch() >= epoch, || {
+    ensure(store.committed_epoch() >= epoch, || {
         "the store's epoch moved to the write".to_string()
     })?;
     image(&store, Reader::At(epoch)).has_node(
@@ -1208,7 +1212,7 @@ pub(crate) fn a_reader_at_an_earlier_epoch_keeps_its_values_and_labels<S: Store>
 ) -> Outcome {
     let store = make();
     let people = people(&store)?;
-    let epoch = store.epoch();
+    let epoch = store.committed_epoch();
     let before = committed(&store);
     let reader = Tx::begin(&store, 11);
     let mut tx = Tx::begin(&store, 10);
@@ -1237,7 +1241,7 @@ pub(crate) fn a_reader_at_an_earlier_epoch_keeps_deleted_entities<S: Store>(
 ) -> Outcome {
     let store = make();
     let people = people(&store)?;
-    let epoch = store.epoch();
+    let epoch = store.committed_epoch();
     let before = committed(&store);
     let reader = Tx::begin(&store, 11);
     let mut tx = Tx::begin(&store, 10);
@@ -1392,7 +1396,12 @@ pub(crate) fn every_read_path_hides_an_open_transactions_creates_and_deletes<S: 
         &before,
         &[&own],
     )?;
-    super::paths_at(&store, Reader::At(store.epoch()), &before, &[&own])
+    super::paths_at(
+        &store,
+        Reader::At(store.committed_epoch()),
+        &before,
+        &[&own],
+    )
 }
 
 /// Another transaction and a committed reader see none of an open
@@ -1414,7 +1423,12 @@ pub(crate) fn every_read_path_hides_an_open_transactions_values_and_labels<S: St
         &before,
         &[&own],
     )?;
-    super::paths_at(&store, Reader::At(store.epoch()), &before, &[&own])
+    super::paths_at(
+        &store,
+        Reader::At(store.committed_epoch()),
+        &before,
+        &[&own],
+    )
 }
 
 /// A transaction that began before a commit, and a reader at the epoch
@@ -1425,7 +1439,7 @@ pub(crate) fn every_read_path_at_an_earlier_epoch_keeps_creates_and_deletes<S: S
 ) -> Outcome {
     let store = make();
     let people = people(&store)?;
-    let epoch = store.epoch();
+    let epoch = store.committed_epoch();
     let before = committed(&store);
     let reader = Tx::begin(&store, 11);
     let mut tx = Tx::begin(&store, 10);
@@ -1449,7 +1463,7 @@ pub(crate) fn every_read_path_at_an_earlier_epoch_keeps_values_and_labels<S: Sto
 ) -> Outcome {
     let store = make();
     let people = people(&store)?;
-    let epoch = store.epoch();
+    let epoch = store.committed_epoch();
     let before = committed(&store);
     let reader = Tx::begin(&store, 11);
     let mut tx = Tx::begin(&store, 10);
@@ -1538,7 +1552,12 @@ pub(crate) fn an_immediate_write_is_seen_at_its_epoch_through_every_read_path<S:
     expected.set_value(people.alix, "city", Some(Value::from("Paris")));
     expected.set_labels(people.mia, &["Person", "Traveller"]);
     expected.set_edge_value(people.gus_mia, "since", Some(Value::Int64(2019)));
-    super::paths_at(&store, Reader::At(store.epoch()), &expected, &[&before])?;
+    super::paths_at(
+        &store,
+        Reader::At(store.committed_epoch()),
+        &expected,
+        &[&before],
+    )?;
     let later = Tx::begin(&store, 11);
     super::paths_at(
         &store,
@@ -1556,7 +1575,7 @@ pub(crate) fn an_immediate_write_keeps_the_old_value_for_an_older_reader<S: Stor
 ) -> Outcome {
     let store = make();
     let people = people(&store)?;
-    let epoch = store.epoch();
+    let epoch = store.committed_epoch();
     let before = committed(&store);
     let reader = Tx::begin(&store, 11);
     for op in [
@@ -1633,7 +1652,7 @@ pub(crate) fn a_property_set_to_null_is_removed<S: Store>(make: &dyn Fn() -> S) 
         )
         .map_err(|error| format!("an immediate set to null: {error:?}"))?;
     expected.set_value(people.gus, "age", None);
-    super::paths_at(&store, Reader::At(store.epoch()), &expected, &[])?;
+    super::paths_at(&store, Reader::At(store.committed_epoch()), &expected, &[])?;
 
     let replayed = make();
     let replayed_people = super::people(&replayed)?;
@@ -1650,5 +1669,10 @@ pub(crate) fn a_property_set_to_null_is_removed<S: Store>(make: &dyn Fn() -> S) 
     )?;
     let mut expected = fresh;
     expected.set_value(replayed_people.mia, "name", None);
-    super::paths_at(&replayed, Reader::At(replayed.epoch()), &expected, &[])
+    super::paths_at(
+        &replayed,
+        Reader::At(replayed.committed_epoch()),
+        &expected,
+        &[],
+    )
 }

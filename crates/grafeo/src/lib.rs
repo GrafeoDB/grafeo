@@ -123,3 +123,39 @@ pub use grafeo_common::types::{EdgeId, NodeId, Value};
 
 // Re-export error types so users don't need to depend on grafeo-common directly
 pub use grafeo_common::utils::error::{Error, Result};
+
+/// The store contract: what a store of one's own implements to hold a
+/// database's graph, for [`GrafeoDB::with_store`] (the read side
+/// [`GraphStore`] and the write side
+/// [`GraphBackend`](store::GraphBackend)) or [`GrafeoDB::with_read_store`]
+/// (the read side only), with the types their methods take. The built-in
+/// [`RowGroupStore`](store::RowGroupStore) is a store to delegate to.
+///
+/// With the `conformance` feature, [`conformance_suite!`](store::conformance_suite)
+/// runs the suite the built-in store passes against a store of one's own,
+/// one test per case. See <https://grafeo.dev/user-guide/extending/storage-backends/>.
+///
+/// # Stability: Experimental
+///
+/// Calling the traits is stable. Implementing them, and the conformance
+/// suite, are experimental through 0.6.x: a release may add a required
+/// method or a case.
+pub mod store {
+    pub use grafeo_common::change::{
+        Before, Change, ChangeMark, DataOp, Entity, Labels, PendingVersion, Properties,
+    };
+    pub use grafeo_common::types::{
+        ArcStr, EdgeId, EpochId, NodeId, PropertyKey, ReadView, TransactionId, Value,
+    };
+    pub use grafeo_common::utils::error::{Error, Result};
+    pub use grafeo_core::graph::apply::{Applied, ApplyError, Writer};
+    pub use grafeo_core::graph::lpg::{Edge, Node};
+    pub use grafeo_core::graph::rowgroup::RowGroupStore;
+    pub use grafeo_core::graph::{BackendTransaction, Direction, GraphBackend, GraphStore};
+    pub use grafeo_core::statistics::Statistics;
+
+    #[cfg(feature = "conformance")]
+    pub use grafeo_core::conformance_suite;
+    #[cfg(feature = "conformance")]
+    pub use grafeo_core::graph::conformance::{KnownGap, Store, run_named};
+}

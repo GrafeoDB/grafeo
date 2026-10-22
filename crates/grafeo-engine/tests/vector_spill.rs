@@ -68,7 +68,7 @@ fn an_embedding_updated_while_spilled_wins() {
     // The write brings its row group's column back (a write thaws a spilled
     // column, #412 decision Q9); a reload has nothing left to bring back.
     assert_eq!(
-        db.store().spilled_node_property_columns(),
+        db.store().unwrap().spilled_node_property_columns(),
         Vec::<grafeo_common::types::PropertyKey>::new()
     );
 

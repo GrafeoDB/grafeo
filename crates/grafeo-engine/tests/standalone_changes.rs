@@ -532,7 +532,7 @@ mod replay {
         let path = db_path(&dir);
         crash_after("indexes", &path);
         let db = open(&path);
-        let store = db.store();
+        let store = db.store().unwrap();
 
         for (property, indexed) in [
             ("email", true),

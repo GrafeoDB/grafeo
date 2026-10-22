@@ -128,6 +128,7 @@ fn a_store_level_delete_keeps_a_node_that_has_edges() {
     // in place).
     assert!(
         !db.store()
+            .unwrap()
             .delete_node(NodeId::new(u64::try_from(butch).unwrap()))
     );
     let centrality = rows(

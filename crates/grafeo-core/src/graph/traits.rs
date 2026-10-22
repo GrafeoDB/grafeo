@@ -62,6 +62,12 @@ pub type Labels = grafeo_common::change::Labels;
 /// The trait is object-safe: the engine holds a store as
 /// `Arc<dyn GraphStore>`. Reads return `Vec`s rather than iterators for
 /// that reason.
+///
+/// # Stability: Experimental
+///
+/// Calling the trait is stable. Implementing it (for `GrafeoDB::with_store`
+/// or `with_read_store`) is experimental through 0.6.x: any release may add
+/// a required method.
 pub trait GraphStore: Send + Sync {
     // --- Point reads ---
 

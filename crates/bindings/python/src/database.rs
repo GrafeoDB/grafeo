@@ -323,7 +323,7 @@ impl PyGrafeoDB {
     fn nodes_ipc_bytes(&self, py: Python<'_>) -> PyResult<Vec<u8>> {
         self.released(py, |db| {
             // As of the current epoch: never part of a commit.
-            let nodes: Vec<_> = db.iter_nodes().collect();
+            let nodes: Vec<_> = db.iter_nodes()?.collect();
             Ok(grafeo_engine::database::arrow::nodes_to_ipc_stream(&nodes))
         })?
         .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(format!("Arrow export failed: {e}")))
@@ -334,7 +334,7 @@ impl PyGrafeoDB {
     fn edges_ipc_bytes(&self, py: Python<'_>) -> PyResult<Vec<u8>> {
         self.released(py, |db| {
             // As of the current epoch: never part of a commit.
-            let edges: Vec<_> = db.iter_edges().collect();
+            let edges: Vec<_> = db.iter_edges()?.collect();
             Ok(grafeo_engine::database::arrow::edges_to_ipc_stream(&edges))
         })?
         .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(format!("Arrow export failed: {e}")))
@@ -3152,7 +3152,7 @@ impl PyGrafeoDB {
         // to prevent silent overwrites (GrafeoDB/grafeo#254).
         const RESERVED_NODE_COLS: &[&str] = &["_id", "_labels"];
         // A pinned read of the committed graph (see `GrafeoDB::iter_nodes`).
-        let nodes: Vec<_> = db.iter_nodes().collect();
+        let nodes: Vec<_> = crate::error::raised(db.iter_nodes())?.collect();
         let mut prop_keys: Vec<String> = Vec::new();
         let mut prop_key_set = std::collections::HashSet::new();
         for node in &nodes {
@@ -3308,7 +3308,7 @@ impl PyGrafeoDB {
         // to prevent silent overwrites (GrafeoDB/grafeo#254).
         const RESERVED_EDGE_COLS: &[&str] = &["_id", "_source", "_target", "_type"];
         // A pinned read of the committed graph (see `GrafeoDB::iter_edges`).
-        let edges: Vec<_> = db.iter_edges().collect();
+        let edges: Vec<_> = crate::error::raised(db.iter_edges())?.collect();
         let mut prop_keys: Vec<String> = Vec::new();
         let mut prop_key_set = std::collections::HashSet::new();
         for edge in &edges {

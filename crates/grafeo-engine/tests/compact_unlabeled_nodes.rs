@@ -17,7 +17,7 @@ use grafeo_engine::GrafeoDB;
 /// The statistics as the planner reads them (the store computes them from
 /// its counters, which move at each commit).
 fn fresh_statistics(db: &GrafeoDB) -> std::sync::Arc<grafeo_core::statistics::Statistics> {
-    grafeo_core::graph::GraphStore::statistics(&*db.store())
+    grafeo_core::graph::GraphStore::statistics(&*db.store().unwrap())
 }
 
 /// Every node's name, sorted.

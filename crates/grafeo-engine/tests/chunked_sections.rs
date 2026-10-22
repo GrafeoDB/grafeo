@@ -56,7 +56,7 @@ const CITIES: [&str; 4] = ["Amsterdam", "Berlin", "Paris", "Prague"];
 /// lists after a 0.5.x load).
 fn dump(db: &GrafeoDB) -> Vec<String> {
     let mut lines = Vec::new();
-    let store = db.store();
+    let store = db.store().unwrap();
     dump_graph(&mut lines, "default graph", &store);
     let mut names = db.list_graphs();
     names.sort();

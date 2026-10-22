@@ -257,7 +257,10 @@ fn the_retention_is_stored_and_changes_from_then_on() {
         ["Alix"],
         "the time index came back"
     );
-    assert!(db.store().keeps_history(), "the store keeps history too");
+    assert!(
+        db.store().unwrap().keeps_history(),
+        "the store keeps history too"
+    );
     db.set_stored_config(&Config::in_memory().with_history_retention(HistoryRetention::Off))
         .unwrap();
     assert!(
@@ -265,12 +268,12 @@ fn the_retention_is_stored_and_changes_from_then_on() {
         "off from now on"
     );
     assert!(
-        !db.store().keeps_history(),
+        !db.store().unwrap().keeps_history(),
         "and the store keeps none from now on (a replay keeps no history)"
     );
     db.set_stored_config(&Config::in_memory().with_history_retention(HistoryRetention::Forever))
         .unwrap();
-    assert!(db.store().keeps_history(), "on again");
+    assert!(db.store().unwrap().keeps_history(), "on again");
     db.set_stored_config(&Config::in_memory().with_history_retention(HistoryRetention::Off))
         .unwrap();
     db.close().unwrap();

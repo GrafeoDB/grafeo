@@ -81,6 +81,9 @@ parquet-import = ["parquet"]  # Apache Parquet file import (LOAD DATA ... FORMAT
 # Convenience groups
 ai = ["vector-index", "text-index", "hybrid-search"]  # All AI/RAG search features
 
+# The conformance suite of the store contract, for a store of one's own (graph::conformance)
+conformance = []
+
 # Testing utilities (zero overhead when disabled)
 testing-crash-injection = ["grafeo-common/testing-crash-injection"]  # Deterministic crash injection for recovery testing
 

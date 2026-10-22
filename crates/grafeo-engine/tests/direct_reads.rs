@@ -272,7 +272,7 @@ fn reads_at_a_view_of_now_see_one_state_while_it_lives() {
     let alix = person(&db, "Alix");
     let gus = person(&db, "Gus");
     db.create_edge(alix, gus, "KNOWS").unwrap();
-    let store = db.store();
+    let store = db.store().unwrap();
 
     let now = db.as_of(db.current_epoch()).unwrap();
     let view = now.read_view();

@@ -5,8 +5,8 @@ use std::collections::BTreeMap;
 use grafeo_common::types::{ArcStr, EpochId, NodeId, ReadView, Value};
 
 use super::{
-    KnownGap, LABELS, Reader, Rng, Tx, apply_all, committed, conformance_suite, counts, counts_of,
-    image, people, random_write,
+    KnownGap, LABELS, Reader, Rng, Tx, apply_all, committed, counts, counts_of, image, people,
+    random_write,
 };
 use crate::graph::Direction;
 use crate::graph::rowgroup::RowGroupStore;
@@ -16,7 +16,7 @@ use crate::graph::traits::GraphStore;
 /// H2b's update chains (#412).
 const GAPS: &[KnownGap] = &[];
 
-conformance_suite!(RowGroupStore, RowGroupStore::new, GAPS);
+crate::conformance_suite!(RowGroupStore, RowGroupStore::new, GAPS);
 
 // ── Collect at the horizon, and replay, through every read path ──────
 
@@ -59,13 +59,12 @@ collect_cases!(RowGroupStore::new;
 /// collect, and the store reports no backward adjacency.
 mod without_backward_edges {
     use super::{GAPS, RowGroupStore};
-    use crate::graph::conformance::conformance_suite;
 
     fn store() -> RowGroupStore {
         RowGroupStore::with_backward_edges(false)
     }
 
-    conformance_suite!(RowGroupStore, store, GAPS);
+    crate::conformance_suite!(RowGroupStore, store, GAPS);
 
     collect_cases!(store;
         collect_keeps_every_read_path_at_the_horizon,
@@ -82,7 +81,6 @@ mod without_backward_edges {
 /// values, which it must recheck at the view (#412 S7).
 mod indexed {
     use super::{GAPS, RowGroupStore};
-    use crate::graph::conformance::conformance_suite;
 
     fn indexed_store() -> RowGroupStore {
         let store = RowGroupStore::new();
@@ -92,7 +90,7 @@ mod indexed {
         store
     }
 
-    conformance_suite!(RowGroupStore, indexed_store, GAPS);
+    crate::conformance_suite!(RowGroupStore, indexed_store, GAPS);
 
     collect_cases!(indexed_store;
         collect_keeps_every_read_path_at_the_horizon,

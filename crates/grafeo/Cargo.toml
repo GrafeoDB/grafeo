@@ -79,6 +79,7 @@ compact-store = []  # Deprecated since 0.6.0: enables nothing (a build that open
 grafeo-file = ["grafeo-engine/grafeo-file"]  # Single-file .grafeo database format
 async-storage = ["grafeo-engine/async-storage"]  # Async WAL and storage backend
 encryption = ["grafeo-engine/encryption", "grafeo-common/encryption"]  # AES-256-GCM encryption at rest (Config::with_encryption)
+conformance = ["grafeo-core/conformance"]  # The store contract's conformance suite, for a store of one's own (grafeo::store::conformance_suite!)
 
 # Enable platform-optimized memory allocator (10-20% faster allocations)
 jemalloc = ["tikv-jemallocator"]

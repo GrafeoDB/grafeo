@@ -459,6 +459,7 @@ fn topology(db: &GrafeoDB) -> Topology {
 
     let index = db
         .store()
+        .unwrap()
         .get_vector_index("Person", "embedding")
         .expect("the vector index");
     match &*index {

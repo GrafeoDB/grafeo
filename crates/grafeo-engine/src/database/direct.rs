@@ -357,7 +357,7 @@ impl GrafeoDB {
         graph: Option<&str>,
     ) -> Result<ImmediateCall<'a>> {
         let commits = self.transaction_manager.hold_commits_for_change()?;
-        let root = self.lpg_store();
+        let root = self.lpg_store()?;
         let epoch = EpochId::new(self.transaction_manager.current_epoch().as_u64() + 1);
         // The stores read at the new epoch from here: the call sees every
         // commit, and stamps its writes (and the store's history) at it.
@@ -671,7 +671,7 @@ impl GrafeoDB {
             crate::database::wal_log::sync_commit(wal, logged)?;
         }
 
-        let root = self.lpg_store();
+        let root = self.lpg_store()?;
         let published = publish.complete_with(|| {
             // A store that fails to stamp leaves the commit half done: it is
             // not published, which poisons the database.

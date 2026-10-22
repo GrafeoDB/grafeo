@@ -218,7 +218,7 @@ impl super::GrafeoDB {
         })?;
 
         let held = self.hold_commits_for_import()?;
-        let store: Arc<dyn GraphBackend> = self.lpg_store();
+        let store: Arc<dyn GraphBackend> = self.lpg_store()?;
         let mut changes = self.streaming_changes(&held, true);
         let nodes = changes.reserve(&store, Table::Nodes, rows.len())?;
         let labels: Labels = std::iter::once(ArcStr::from("_Imported")).collect();

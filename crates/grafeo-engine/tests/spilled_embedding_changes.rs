@@ -147,7 +147,10 @@ fn spilled(path: &Path, count: u8) -> (GrafeoDB, Vec<NodeId>) {
     // what counts is that it spilled.
     db.buffer_manager().spill_all();
     assert!(
-        !db.store().spilled_node_property_columns().is_empty(),
+        !db.store()
+            .unwrap()
+            .spilled_node_property_columns()
+            .is_empty(),
         "nothing was spilled"
     );
     assert_spilled(&db, true, "after the spill");
@@ -161,7 +164,7 @@ fn assert_spilled(db: &GrafeoDB, spilled: bool, phase: &str) {
         Vec::new()
     };
     assert_eq!(
-        db.store().spilled_node_property_columns(),
+        db.store().unwrap().spilled_node_property_columns(),
         expected,
         "{phase}: the spilled columns"
     );
@@ -198,6 +201,7 @@ fn check(db: &GrafeoDB, ids: &[NodeId], expected: &[Expected], search: Search, p
             );
             assert_eq!(
                 db.store()
+                    .unwrap()
                     .node_property_batch(&[id], &key, ReadView::latest())
                     .unwrap(),
                 vec![None],
@@ -238,6 +242,7 @@ fn check(db: &GrafeoDB, ids: &[NodeId], expected: &[Expected], search: Search, p
         );
         assert_eq!(
             db.store()
+                .unwrap()
                 .node_property_batch(&[id], &key, ReadView::latest())
                 .unwrap()[0]
                 .as_ref()
@@ -247,6 +252,7 @@ fn check(db: &GrafeoDB, ids: &[NodeId], expected: &[Expected], search: Search, p
         );
         assert_eq!(
             db.store()
+                .unwrap()
                 .node_properties_batch(&[id], ReadView::latest())
                 .unwrap()[0]
                 .get(&key)
@@ -272,6 +278,7 @@ fn check(db: &GrafeoDB, ids: &[NodeId], expected: &[Expected], search: Search, p
     db.gc();
     let index = db
         .store()
+        .unwrap()
         .get_vector_index("Item", "embedding")
         .expect("the vector index");
     for &id in ids {

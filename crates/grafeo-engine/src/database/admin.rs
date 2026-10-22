@@ -145,13 +145,19 @@ impl super::GrafeoDB {
     ///
     /// Walks all internal structures (store, indexes, MVCC chains, caches,
     /// string pools, buffer manager) and returns estimated heap bytes for each.
-    /// Safe to call concurrently with queries.
+    /// Safe to call concurrently with queries. On a database on a backend of
+    /// its own the store, its indexes and its versions are the backend's,
+    /// which the engine does not measure: they count as zero, and the rest
+    /// (caches, buffers, the catalog) is the engine's own.
     #[must_use]
     pub fn memory_usage(&self) -> crate::memory_usage::MemoryUsage {
         use crate::memory_usage::{BufferManagerMemory, CacheMemory, MemoryUsage};
         use grafeo_common::memory::MemoryRegion;
 
-        let (store, indexes, mvcc, string_pool) = self.lpg_store().memory_breakdown();
+        let (store, indexes, mvcc, string_pool) = self
+            .root_store()
+            .map(|store| store.memory_breakdown())
+            .unwrap_or_default();
 
         let (parsed_bytes, optimized_bytes, cached_plan_count) =
             self.query_cache.heap_memory_bytes();

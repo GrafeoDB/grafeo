@@ -603,6 +603,7 @@ fn checkpoint_and_open_memory_does_not_grow_with_a_vector_index() {
         &|db, documents| {
             let index = db
                 .store()
+                .unwrap()
                 .get_vector_index("Doc", "embedding")
                 .expect("the vector index came back");
             assert_eq!(index.len(), documents, "every node is in the index");

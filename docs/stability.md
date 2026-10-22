@@ -45,6 +45,8 @@ The implementation crates (`grafeo-common`, `grafeo-core`, `grafeo-storage`, `gr
 | `Session::statement_writes`: whether a statement writes, without running it | New in 0.6.0; which statements count as writes may be refined |
 | File import from Rust: `import::import_nodes` and `ImportFormat` (the Python `import_csv` and `import_jsonl`, the Node.js `importCsv` and `importJsonl` and the CLI `grafeo import csv` and `grafeo import jsonl` that run it are stable) | New in 0.6.0; formats and options may be added |
 | The operator tree of a `PROFILE` statement: `QueryResult::profile` and `QueryProfile`, the Python and Node.js `profile` and the WASM `profile` key | New in 0.6.0; its operators and fields may still change |
+| A store of one's own: `GrafeoDB::with_store` and `with_read_store`, implementing `GraphStore` or `GraphBackend`, and the `conformance` suite that checks an implementation | The write contract is new in 0.6.0, and no backend outside Grafeo has run it yet: a required method may be added within 0.6.x. Calling the traits is stable |
+| `GrafeoDB::store()`: the built-in row-group store itself | For admin work; the row-group store's own methods follow the storage engine |
 
 ## Stable APIs
 
@@ -58,9 +60,9 @@ Everything else on the public surface is stable, among others:
 - indexes and search (property, vector, text and hybrid), backup and restore, checkpoints, `compact()`
 - the `auth`, `admin` and `cdc` modules: identities and roles, statistics and validation, change data capture
   events
-- the store contract: the `GraphStore` and `GraphBackend` traits, `GrafeoDB::with_store`, `Snapshot` and the
-  methods that give one (`GrafeoDB::snapshot()`, `GraphHandle::snapshot()`, `AsOfView::snapshot()`,
-  `GrafeoDB::projection()`); `GrafeoDB::store()` is experimental
+- reading through the store contract: calling the `GraphStore` and `GraphBackend` traits (`grafeo::store`), and
+  `Snapshot` with the methods that give one (`GrafeoDB::snapshot()`, `GraphHandle::snapshot()`,
+  `AsOfView::snapshot()`, `GrafeoDB::projection()`)
 
 ## The Promise for 0.7 and 1.0
 

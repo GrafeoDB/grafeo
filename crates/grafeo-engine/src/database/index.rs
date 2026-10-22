@@ -308,7 +308,10 @@ impl super::GrafeoDB {
             self.current_schema.read().as_deref(),
             self.current_graph.read().as_deref(),
         )
-        .filter(|key| self.lpg_store().graph(key).is_some())
+        .filter(|key| {
+            self.root_store()
+                .is_some_and(|root| root.graph(key).is_some())
+        })
     }
 
     /// Creates an index on a node property of the current graph, for O(1)
@@ -341,7 +344,7 @@ impl super::GrafeoDB {
     pub fn create_property_index(&self, property: &str) -> Result<()> {
         let held = self.hold_for_standalone(false)?;
         let graph = self.current_graph_key();
-        if self.current_lpg_store().has_property_index(property) {
+        if self.current_lpg_store()?.has_property_index(property) {
             return Ok(());
         }
         let mut change = StandaloneChange::new();
@@ -364,7 +367,7 @@ impl super::GrafeoDB {
     pub fn drop_property_index(&self, property: &str) -> Result<bool> {
         let held = self.hold_for_standalone(false)?;
         let graph = self.current_graph_key();
-        if !self.current_lpg_store().has_property_index(property) {
+        if !self.current_lpg_store()?.has_property_index(property) {
             return Ok(false);
         }
         let mut change = StandaloneChange::new();
@@ -390,7 +393,9 @@ impl super::GrafeoDB {
     /// Returns `true` if the property has an index in the current graph.
     #[must_use]
     pub fn has_property_index(&self, property: &str) -> bool {
-        self.current_lpg_store().has_property_index(property)
+        // A backend of its own has no index.
+        self.current_lpg_store()
+            .is_ok_and(|store| store.has_property_index(property))
     }
 
     /// Finds all nodes of the current graph that have a specific property value.
@@ -521,10 +526,10 @@ impl super::GrafeoDB {
         graph: Option<&str>,
     ) -> Result<(Arc<dyn GraphStore>, Arc<RowGroupStore>)> {
         match graph {
-            None => Ok((self.graph_store(), self.lpg_store())),
+            None => Ok((self.graph_store(), self.lpg_store()?)),
             Some(key) => {
                 let store = self
-                    .lpg_store()
+                    .lpg_store()?
                     .graph(key)
                     .ok_or_else(|| super::direct::missing_graph(key))?;
                 Ok((Arc::clone(&store) as Arc<dyn GraphStore>, store))
@@ -646,7 +651,11 @@ impl super::GrafeoDB {
     #[cfg(feature = "vector-index")]
     pub fn drop_vector_index(&self, label: &str, property: &str) -> Result<bool> {
         let held = self.hold_for_standalone(false)?;
-        if self.lpg_store().get_vector_index(label, property).is_none() {
+        if self
+            .lpg_store()?
+            .get_vector_index(label, property)
+            .is_none()
+        {
             return Ok(false);
         }
         let mut change = StandaloneChange::new();
@@ -670,7 +679,10 @@ impl super::GrafeoDB {
     /// more. A column that cannot be read stays spilled (and readable).
     #[cfg(feature = "vector-index")]
     fn reload_unindexed_column(&self, property: &str) {
-        let store = self.lpg_store();
+        // A backend of its own spills nothing of the built-in store's.
+        let Some(store) = self.root_store() else {
+            return;
+        };
         let still_indexed = store.vector_index_entries().iter().any(|(key, _)| {
             key.split_once(':')
                 .is_some_and(|(_, indexed)| indexed == property)
@@ -713,7 +725,7 @@ impl super::GrafeoDB {
     #[cfg(feature = "vector-index")]
     pub fn rebuild_vector_index(&self, label: &str, property: &str) -> Result<()> {
         // Preserve config and quantization type from existing index if available
-        let existing = self.lpg_store().get_vector_index(label, property);
+        let existing = self.lpg_store()?.get_vector_index(label, property);
 
         let (config, quantization_name) = if let Some(ref idx) = existing {
             let qt = idx.quantization_type().and_then(quantization_name);
@@ -827,7 +839,8 @@ impl super::GrafeoDB {
         label: &str,
         property: &str,
     ) -> Option<grafeo_core::index::text::TextIndexOptions> {
-        self.lpg_store()
+        // A backend of its own has no text index.
+        self.root_store()?
             .get_text_index(label, property)
             .map(|index| index.read().options().clone())
     }
@@ -873,7 +886,7 @@ impl super::GrafeoDB {
     #[cfg(feature = "text-index")]
     pub fn drop_text_index(&self, label: &str, property: &str) -> Result<bool> {
         let held = self.hold_for_standalone(false)?;
-        if self.lpg_store().get_text_index(label, property).is_none() {
+        if self.lpg_store()?.get_text_index(label, property).is_none() {
             return Ok(false);
         }
         let mut change = StandaloneChange::new();

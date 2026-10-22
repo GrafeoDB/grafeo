@@ -1351,7 +1351,12 @@ fn direct_calls() -> Vec<DirectCall> {
                 db.create_vector_index("Person", "vec3", Some(3), None, None, None, None)
                     .unwrap();
             },
-            done: |db| db.store().get_vector_index("Person", "vec3").is_some(),
+            done: |db| {
+                db.store()
+                    .unwrap()
+                    .get_vector_index("Person", "vec3")
+                    .is_some()
+            },
             image_needle: Some("vec3"),
         },
         DirectCall {
@@ -1363,7 +1368,12 @@ fn direct_calls() -> Vec<DirectCall> {
             call: |db| {
                 db.drop_vector_index("Person", "vec3").unwrap();
             },
-            done: |db| db.store().get_vector_index("Person", "vec3").is_none(),
+            done: |db| {
+                db.store()
+                    .unwrap()
+                    .get_vector_index("Person", "vec3")
+                    .is_none()
+            },
             image_needle: None,
         },
     ]);
@@ -1373,7 +1383,12 @@ fn direct_calls() -> Vec<DirectCall> {
             name: "create_text_index",
             setup: |_| {},
             call: |db| db.create_text_index("Person", "bio").unwrap(),
-            done: |db| db.store().get_text_index("Person", "bio").is_some(),
+            done: |db| {
+                db.store()
+                    .unwrap()
+                    .get_text_index("Person", "bio")
+                    .is_some()
+            },
             image_needle: Some("bio"),
         },
         DirectCall {
@@ -1382,7 +1397,12 @@ fn direct_calls() -> Vec<DirectCall> {
             call: |db| {
                 db.drop_text_index("Person", "bio").unwrap();
             },
-            done: |db| db.store().get_text_index("Person", "bio").is_none(),
+            done: |db| {
+                db.store()
+                    .unwrap()
+                    .get_text_index("Person", "bio")
+                    .is_none()
+            },
             image_needle: None,
         },
     ]);

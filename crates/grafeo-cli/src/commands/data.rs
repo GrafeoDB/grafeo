@@ -344,7 +344,7 @@ fn dump_jsonl(
     let mut writer = std::io::BufWriter::new(file);
 
     let mut node_count = 0usize;
-    for node in db.iter_nodes() {
+    for node in db.iter_nodes()? {
         let labels: Vec<String> = node.labels.iter().map(|s| s.to_string()).collect();
         let properties = format::write_properties(&node.properties.to_btree_map())
             .map_err(|reason| anyhow!("node {}: {reason}", node.id.0))?;
@@ -360,7 +360,7 @@ fn dump_jsonl(
     }
 
     let mut edge_count = 0usize;
-    for edge in db.iter_edges() {
+    for edge in db.iter_edges()? {
         let properties = format::write_properties(&edge.properties.to_btree_map())
             .map_err(|reason| anyhow!("edge {}: {reason}", edge.id.0))?;
         let record = serde_json::json!({
@@ -422,7 +422,7 @@ fn dump_arrow(
     let db = super::open_existing_read_only(path)?;
 
     // Build nodes RecordBatch
-    let nodes: Vec<_> = db.iter_nodes().collect();
+    let nodes: Vec<_> = db.iter_nodes()?.collect();
     let property_keys = property_columns(
         nodes
             .iter()
@@ -458,7 +458,7 @@ fn dump_arrow(
         .collect();
 
     // Build edges RecordBatch
-    let edges: Vec<_> = db.iter_edges().collect();
+    let edges: Vec<_> = db.iter_edges()?.collect();
     let edge_prop_keys = property_columns(
         edges
             .iter()
@@ -565,8 +565,8 @@ fn dump_arrow(
 
 fn dump_gexf(path: &std::path::Path, out: &std::path::Path, quiet: bool) -> Result<(usize, usize)> {
     let db = super::open_existing_read_only(path)?;
-    let nodes: Vec<_> = db.iter_nodes().collect();
-    let edges: Vec<_> = db.iter_edges().collect();
+    let nodes: Vec<_> = db.iter_nodes()?.collect();
+    let edges: Vec<_> = db.iter_edges()?.collect();
 
     let file = std::fs::File::create(out)
         .with_context(|| format!("Failed to create output file: {}", out.display()))?;
@@ -594,8 +594,8 @@ fn dump_graphml(
     quiet: bool,
 ) -> Result<(usize, usize)> {
     let db = super::open_existing_read_only(path)?;
-    let nodes: Vec<_> = db.iter_nodes().collect();
-    let edges: Vec<_> = db.iter_edges().collect();
+    let nodes: Vec<_> = db.iter_nodes()?.collect();
+    let edges: Vec<_> = db.iter_edges()?.collect();
 
     let file = std::fs::File::create(out)
         .with_context(|| format!("Failed to create output file: {}", out.display()))?;
@@ -1729,7 +1729,7 @@ this is not json\n";
     /// the same edges between them, whatever their IDs.
     fn contents(db: &GrafeoDB) -> (Vec<NodeContent>, Vec<EdgeContent>) {
         let mut nodes = HashMap::new();
-        for node in db.iter_nodes() {
+        for node in db.iter_nodes().unwrap() {
             let mut labels: Vec<String> = node.labels.iter().map(ToString::to_string).collect();
             labels.sort();
             let properties = node
@@ -1742,6 +1742,7 @@ this is not json\n";
         }
         let mut edges: Vec<EdgeContent> = db
             .iter_edges()
+            .unwrap()
             .map(|edge| {
                 let properties = edge
                     .properties
@@ -2200,7 +2201,7 @@ this is not json\n";
         load(&file, &target).expect("load");
 
         let db = GrafeoDB::open(&target).unwrap();
-        let node = db.iter_nodes().next().expect("the node");
+        let node = db.iter_nodes().unwrap().next().expect("the node");
         let get = |key: &str| {
             node.properties
                 .get(&PropertyKey::new(key))

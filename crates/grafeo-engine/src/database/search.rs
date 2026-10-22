@@ -144,7 +144,7 @@ impl super::GrafeoDB {
         ef: Option<usize>,
         filters: Option<&std::collections::HashMap<String, Value>>,
     ) -> Result<Vec<(grafeo_common::types::NodeId, f32)>> {
-        let store = self.lpg_store();
+        let store = self.lpg_store()?;
         let config = store
             .vector_index_config(label, property)
             .ok_or_else(|| no_vector_index(label, property))?;
@@ -191,7 +191,7 @@ impl super::GrafeoDB {
         ef: Option<usize>,
         filters: Option<&std::collections::HashMap<String, Value>>,
     ) -> Result<Vec<Vec<(grafeo_common::types::NodeId, f32)>>> {
-        let store = self.lpg_store();
+        let store = self.lpg_store()?;
         let config = store
             .vector_index_config(label, property)
             .ok_or_else(|| no_vector_index(label, property))?;
@@ -254,7 +254,7 @@ impl super::GrafeoDB {
     ) -> Result<Vec<(grafeo_common::types::NodeId, f32)>> {
         use grafeo_core::index::vector::mmr_select;
 
-        let store = self.lpg_store();
+        let store = self.lpg_store()?;
         let config = store
             .vector_index_config(label, property)
             .ok_or_else(|| no_vector_index(label, property))?;
@@ -328,7 +328,7 @@ impl super::GrafeoDB {
         k: usize,
         filters: Option<&std::collections::HashMap<String, Value>>,
     ) -> Result<Vec<(NodeId, f64)>> {
-        let store = self.lpg_store();
+        let store = self.lpg_store()?;
         let (_pin, view) = self.search_view();
         let allowlist = Self::compute_filter_allowlist(&store, label, filters, view)?;
         let search = IndexSearch {
@@ -405,7 +405,7 @@ impl super::GrafeoDB {
 
         let fusion_method = fusion.unwrap_or_default();
         let mut sources: Vec<Vec<(NodeId, f64)>> = Vec::new();
-        let store = self.lpg_store();
+        let store = self.lpg_store()?;
         let fetch = k.saturating_mul(2);
         let vector_config = store.vector_index_config(label, vector_property);
         if let (Some(query_vec), Some(config)) = (query_vector, &vector_config) {

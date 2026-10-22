@@ -108,7 +108,10 @@ fn seen(db: &GrafeoDB, alix: NodeId, gus: NodeId, knows: EdgeId) -> Seen {
         gus: db.get_node(gus).unwrap().is_some(),
         knows: db.get_edge(knows).unwrap().is_some(),
         city,
-        iterated: (db.iter_nodes().count(), db.iter_edges().count()),
+        iterated: (
+            db.iter_nodes().unwrap().count(),
+            db.iter_edges().unwrap().count(),
+        ),
         no_edges_warning: db
             .validate()
             .unwrap()

@@ -1,23 +1,39 @@
-//! The conformance suite of the stores behind the change set.
+//! The conformance suite of the store contract.
 //!
 //! Every case writes a store through [`GraphBackend`] as the engine does: a
-//! transaction's writes recorded in a [`ChangeSet`], then stamped at commit
-//! or undone at rollback and savepoints; a direct call as an immediate
-//! write; recovery as replay. It checks what readers see through the read
-//! traits only, so any store passes the same cases (the row-group store, and
-//! `LpgStore` until 0.6.0 deleted it).
+//! transaction's writes recorded in a
+//! [`ChangeSet`](grafeo_common::change::ChangeSet), then committed or rolled
+//! back, also to a savepoint; a direct call as an immediate write; recovery
+//! as replay. It checks what readers see through the read trait only, so any
+//! store passes the same cases.
 //!
 //! A store lists the cases it is known to fail, each with its reason (a
-//! [`KnownGap`]). Such a case must keep failing: once it passes, its test
+//! [`KnownGap`](crate::graph::conformance::KnownGap)). Such a case must keep
+//! failing: once it passes, its test
 //! fails too and asks to drop the gap, so the list says exactly where a
 //! store stands.
+//!
+//! A store of one's own runs the suite with the `conformance` feature and
+//! [`conformance_suite!`](crate::conformance_suite), one test per case; any
+//! store that implements [`GraphStore`] and [`GraphBackend`] can. The cases
+//! of the row-group store's own parts (named graphs, indexes, search,
+//! collect) run in this crate's tests only.
+//!
+//! # Stability: Experimental
+//!
+//! The cases follow the contract, which is experimental to implement through
+//! 0.6.x: a release may add a case.
 
 mod cases;
+#[cfg(test)]
 mod epochs;
+#[cfg(test)]
 mod graphs;
+#[cfg(test)]
 mod indexes;
+#[cfg(test)]
 mod rowgroup;
-#[cfg(any(feature = "text-index", feature = "vector-index"))]
+#[cfg(all(test, any(feature = "text-index", feature = "vector-index")))]
 mod searches;
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -31,26 +47,19 @@ use grafeo_common::utils::hash::FxHashMap;
 
 use crate::graph::Direction;
 use crate::graph::apply::{Applied, ApplyError, BackendTransaction, GraphBackend, Writer};
-use crate::graph::rowgroup::RowGroupStore;
 use crate::graph::traits::GraphStore;
 
-/// A store the suite can run: written through the change target, read
-/// through the read trait.
-pub(crate) trait Store: GraphStore + GraphBackend {
-    /// The latest epoch the store committed at: a case's next commit lands
-    /// after it, and a committed reader at it sees every commit so far.
-    fn epoch(&self) -> EpochId;
-}
+/// A store the suite can run: written through [`GraphBackend`], read through
+/// [`GraphStore`]. A case's next commit lands after the store's
+/// [`committed_epoch`](GraphStore::committed_epoch), and a committed reader
+/// at it sees every commit so far.
+pub trait Store: GraphStore + GraphBackend {}
 
-impl Store for RowGroupStore {
-    fn epoch(&self) -> EpochId {
-        self.current_epoch()
-    }
-}
+impl<T: GraphStore + GraphBackend + ?Sized> Store for T {}
 
 /// A case a store is known to fail, and why.
-#[derive(Clone, Copy)]
-pub(crate) struct KnownGap {
+#[derive(Clone, Copy, Debug)]
+pub struct KnownGap {
     /// The case's name.
     pub case: &'static str,
     /// Why the store fails it (an issue or an inbox note).
@@ -91,11 +100,36 @@ pub(crate) fn run<S: Store>(
     }
 }
 
-/// Instantiates every case for a store: `conformance_suite!(Store, make,
-/// GAPS)` in a test module gives one test per case.
+/// One test per case of the suite for the store `$store`, each on stores
+/// from `$make` (a `fn() -> $store`), with the store's known gaps `$gaps`
+/// (a `&[KnownGap]`): a case fails its test unless it holds, and a known gap
+/// fails it once it holds, so the list says exactly where the store stands.
+///
+/// ```
+/// use grafeo_core::graph::conformance::KnownGap;
+/// use grafeo_core::graph::rowgroup::RowGroupStore;
+///
+/// /// The cases the store is known to fail, each with its reason.
+/// const GAPS: &[KnownGap] = &[];
+///
+/// grafeo_core::conformance_suite!(RowGroupStore, RowGroupStore::new, GAPS);
+/// # fn main() {}
+/// ```
+#[macro_export]
 macro_rules! conformance_suite {
-    ($store:ty, $make:expr, $gaps:expr) => {
-        $crate::graph::conformance::conformance_suite!(@cases $store, $make, $gaps;
+    ($store:ty, $make:expr, $gaps:expr $(,)?) => {
+        $crate::__conformance_cases!(tests($store, $make, $gaps));
+    };
+}
+
+/// The names of the suite's cases, in one list: one test per case
+/// ([`conformance_suite!`](crate::conformance_suite)), or the case of a name
+/// ([`run_named`]).
+#[doc(hidden)]
+#[macro_export]
+macro_rules! __conformance_cases {
+    ($mode:ident $args:tt) => {
+        $crate::__conformance_cases! { @each $mode $args;
             each_op_is_seen_by_its_transaction_and_committed_by_stamp,
             undo_restores_the_committed_state,
             a_savepoint_rollback_restores_each_tail,
@@ -130,23 +164,41 @@ macro_rules! conformance_suite {
             an_immediate_write_is_seen_at_its_epoch_through_every_read_path,
             an_immediate_write_keeps_the_old_value_for_an_older_reader,
             a_property_set_to_null_is_removed,
-        );
+        }
     };
-    (@cases $store:ty, $make:expr, $gaps:expr; $($case:ident),* $(,)?) => {
+    (@each tests($store:ty, $make:expr, $gaps:expr); $($case:ident),* $(,)?) => {
         $(
             #[test]
             fn $case() {
-                $crate::graph::conformance::run::<$store>(
-                    stringify!($case),
-                    $crate::graph::conformance::cases::$case::<$store>,
-                    $make,
-                    $gaps,
-                );
+                $crate::graph::conformance::run_named::<$store>(stringify!($case), $make, $gaps);
             }
         )*
     };
+    (@each lookup($store:ty, $name:expr); $($case:ident),* $(,)?) => {
+        match $name {
+            $(name if name == stringify!($case) => Some(cases::$case::<$store> as Case<$store>),)*
+            _ => None,
+        }
+    };
 }
-pub(crate) use conformance_suite;
+
+/// A case of the suite: `Err` names the first guarantee that did not hold
+/// on stores from the maker it takes.
+type Case<S> = fn(&dyn Fn() -> S) -> Outcome;
+
+/// Runs the case `name` of the suite on stores from `make`, against the
+/// store's known gaps `gaps`; [`conformance_suite!`](crate::conformance_suite)
+/// gives a test per case that calls it.
+///
+/// # Panics
+///
+/// Panics when no case has that name, when the case fails and is not a
+/// known gap, and when a known gap passes.
+pub fn run_named<S: Store>(name: &str, make: fn() -> S, gaps: &[KnownGap]) {
+    let case = crate::__conformance_cases!(lookup(S, name))
+        .unwrap_or_else(|| panic!("the conformance suite has no case {name}"));
+    run(name, case, make, gaps);
+}
 
 // ── Writing ─────────────────────────────────────────────────────────
 
@@ -165,7 +217,7 @@ pub(crate) fn properties(pairs: &[(&str, Value)]) -> grafeo_common::change::Prop
 
 /// The epoch after the store's current one: where the next commit lands.
 pub(crate) fn next_epoch<S: Store + ?Sized>(store: &S) -> EpochId {
-    EpochId::new(store.epoch().as_u64() + 1)
+    EpochId::new(store.committed_epoch().as_u64() + 1)
 }
 
 /// A change set's slot for the default graph.
@@ -198,7 +250,7 @@ impl<'s, S: Store> Tx<'s, S> {
     pub fn begin(store: &'s S, id: u64) -> Self {
         let mut set = ChangeSet::new();
         let slot = lpg_slot(&mut set);
-        let (id, snapshot) = (TransactionId::new(id), store.epoch());
+        let (id, snapshot) = (TransactionId::new(id), store.committed_epoch());
         let handle = store
             .begin(id, snapshot)
             .unwrap_or_else(|error| panic!("begin transaction {id:?}: {error:?}"));
@@ -703,12 +755,12 @@ pub(crate) fn image<S: Store + ?Sized>(store: &S, reader: Reader) -> Image {
 
 /// The view of a committed reader at the epoch the store last committed at.
 pub(crate) fn committed_view<S: Store + ?Sized>(store: &S) -> ReadView {
-    ReadView::committed(store.epoch())
+    ReadView::committed(store.committed_epoch())
 }
 
 /// The committed state now, as a reader at the store's epoch sees it.
 pub(crate) fn committed<S: Store + ?Sized>(store: &S) -> Image {
-    image(store, Reader::At(store.epoch()))
+    image(store, Reader::At(store.committed_epoch()))
 }
 
 /// The counts of the committed state now, as a reader at the store's epoch

@@ -252,12 +252,12 @@ pub(crate) fn a_dropped_graph_refuses_writes_and_leaves_the_list<S: Registry>(
     same(&root.graph_count(), &1, "the count after the drop")?;
 
     let before = data(&*trips);
-    let epoch = EpochId::new(trips.epoch().as_u64() + 1);
+    let epoch = EpochId::new(trips.committed_epoch().as_u64() + 1);
     let gus = NodeId::new(super::reserve_node(&*trips)?);
     let writers = [
         Writer::Transaction {
             id: grafeo_common::types::TransactionId::new(19),
-            snapshot: trips.epoch(),
+            snapshot: trips.committed_epoch(),
         },
         Writer::Immediate {
             epoch,
@@ -397,7 +397,7 @@ pub(crate) fn a_named_graphs_data_is_its_own<S: Registry>(make: &dyn Fn() -> S) 
         "the named graphs' counts",
     )?;
     same(
-        &(trips.epoch(), travel.epoch()),
+        &(trips.committed_epoch(), travel.committed_epoch()),
         &(EpochId::new(2), EpochId::new(1)),
         "each graph's epoch",
     )?;

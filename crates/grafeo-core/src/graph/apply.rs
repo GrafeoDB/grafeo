@@ -235,9 +235,8 @@ impl BackendTransaction {
 /// # Stability: Experimental
 ///
 /// Implementing this trait (and so building a database on a backend of
-/// one's own, `GrafeoDB::with_store`) is experimental through 0.6.x: its
-/// methods may change in a minor release. Calling the read side
-/// ([`GraphStore`]) is stable.
+/// one's own, `GrafeoDB::with_store`) is experimental through 0.6.x: any
+/// release may add or change a required method. Calling it is stable.
 ///
 /// # The transaction
 ///

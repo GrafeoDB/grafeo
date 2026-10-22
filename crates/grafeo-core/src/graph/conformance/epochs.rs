@@ -66,12 +66,20 @@ macro_rules! epoch_suite {
 pub(crate) fn sync_epoch_only_moves_the_epoch_forward<S: Epochs>(make: &dyn Fn() -> S) -> Outcome {
     let store = make();
     let people = people(&store)?;
-    let start = store.epoch().as_u64();
+    let start = store.committed_epoch().as_u64();
     let later = EpochId::new(start + 18);
     store.sync_epoch(later);
-    same(&store.epoch(), &later, "after a sync to a later epoch")?;
+    same(
+        &store.committed_epoch(),
+        &later,
+        "after a sync to a later epoch",
+    )?;
     store.sync_epoch(EpochId::new(start));
-    same(&store.epoch(), &later, "after a sync to an earlier epoch")?;
+    same(
+        &store.committed_epoch(),
+        &later,
+        "after a sync to an earlier epoch",
+    )?;
     let mut tx = Tx::begin(&store, 10);
     tx.set_node(people.alix, "city", Value::from("Paris"))?;
     let epoch = tx.commit()?;
@@ -80,7 +88,11 @@ pub(crate) fn sync_epoch_only_moves_the_epoch_forward<S: Epochs>(make: &dyn Fn()
         &EpochId::new(later.as_u64() + 1),
         "the commit after the sync",
     )?;
-    same(&store.epoch(), &epoch, "the epoch after the commit")
+    same(
+        &store.committed_epoch(),
+        &epoch,
+        "the epoch after the commit",
+    )
 }
 
 /// `new_epoch` returns the epoch after the current one and moves the store
@@ -90,10 +102,10 @@ pub(crate) fn new_epoch_moves_past_every_write<S: Epochs>(make: &dyn Fn() -> S) 
     let store = make();
     people(&store)?;
     let before = committed(&store);
-    let start = store.epoch().as_u64();
+    let start = store.committed_epoch().as_u64();
     let fresh = store.new_epoch();
     same(&fresh, &EpochId::new(start + 1), "the new epoch")?;
-    same(&store.epoch(), &fresh, "the store's epoch")?;
+    same(&store.committed_epoch(), &fresh, "the store's epoch")?;
     same(
         &image(&store, Reader::At(fresh)),
         &before,
@@ -168,7 +180,7 @@ pub(crate) fn gc_versions_leaves_an_open_transactions_writes<S: Epochs>(
     create_and_delete_writes(&mut tx, &people)?;
     let own = tx.view();
     let others = committed(&store);
-    store.gc_versions(store.epoch());
+    store.gc_versions(store.committed_epoch());
     same(&tx.view(), &own, "the open transaction")?;
     same(&committed(&store), &others, "the other readers")?;
     tx.commit()?;

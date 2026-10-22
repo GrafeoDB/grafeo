@@ -738,10 +738,10 @@ impl super::GrafeoDB {
         if files.is_empty() && !rebuild_every_index {
             return Ok(());
         }
-        let folded = fold_in(&*self.lpg_store(), &files);
+        let folded = fold_in(&*self.lpg_store()?, &files);
         let mut rebuilt = folded.indexes.clone();
         if rebuild_every_index {
-            rebuilt.extend(every_vector_index(&*self.lpg_store()));
+            rebuilt.extend(every_vector_index(&*self.lpg_store()?));
         }
         for (label, property) in &rebuilt {
             // A crash point where the rebuild is to be made durable: a
@@ -750,7 +750,7 @@ impl super::GrafeoDB {
             if !self.read_only {
                 grafeo_common::testing::crash::maybe_crash("legacy_spill:rebuild");
             }
-            rebuild_index(&*self.lpg_store(), label, property)?;
+            rebuild_index(&*self.lpg_store()?, label, property)?;
         }
         let shared: Vec<String> = folded
             .files
@@ -1017,7 +1017,7 @@ mod tests {
             .unwrap();
         db.create_vector_index("Item", "embedding", Some(2), None, None, None, None)
             .unwrap();
-        let store = db.lpg_store();
+        let store = db.lpg_store().unwrap();
 
         for dimensions in [0, 3] {
             let vector: Vec<f32> = [3.0, 19.0, 88.0].into_iter().take(dimensions).collect();
@@ -1073,7 +1073,7 @@ mod tests {
             ],
         );
 
-        let folded = fold_in(&*db.lpg_store(), &find(dir.path(), true));
+        let folded = fold_in(&*db.lpg_store().unwrap(), &find(dir.path(), true));
         assert_eq!(folded.filled, 1, "Alix");
         assert!(folded.files.is_empty(), "not deleted");
         assert_eq!(folded.kept.len(), 1);
@@ -1090,6 +1090,7 @@ mod tests {
         let key = PropertyKey::new("embedding");
         assert_eq!(
             db.lpg_store()
+                .unwrap()
                 .node_property(butch, key.as_str(), ReadView::latest())
                 .unwrap(),
             None
@@ -1136,7 +1137,7 @@ mod tests {
         let found = find(dir.path(), true);
         std::fs::remove_file(&path).unwrap();
 
-        let folded = fold_in(&*db.lpg_store(), &found);
+        let folded = fold_in(&*db.lpg_store().unwrap(), &found);
         assert!(folded.files.is_empty(), "not deleted");
         assert!(folded.kept.is_empty(), "not kept: {:?}", folded.kept);
         assert!(
@@ -1204,7 +1205,7 @@ mod tests {
         std::fs::write(&path, &bytes).unwrap();
 
         assert!(read(&path).is_err(), "longer than its header says");
-        let folded = fold_in(&*db.lpg_store(), &find(dir.path(), true));
+        let folded = fold_in(&*db.lpg_store().unwrap(), &find(dir.path(), true));
         assert!(folded.files.is_empty(), "the file is to be deleted");
         assert_eq!(folded.kept.len(), 1);
         assert!(
@@ -1232,7 +1233,7 @@ mod tests {
             &records,
         );
 
-        let folded = fold_in_batches(&*db.lpg_store(), &find(dir.path(), true), 40);
+        let folded = fold_in_batches(&*db.lpg_store().unwrap(), &find(dir.path(), true), 40);
         assert_eq!((folded.batches, folded.filled), (3, 5));
         assert_eq!(folded.files.len(), 1);
     }
@@ -1258,7 +1259,7 @@ mod tests {
             .unwrap()
             .set_len(HEADER_BYTES as u64 + 16 * 319)
             .unwrap();
-        let read = fill_from(&*db.lpg_store(), &file, &mut old, 16);
+        let read = fill_from(&*db.lpg_store().unwrap(), &file, &mut old, 16);
         assert!(read.stopped.is_some(), "the read stops");
         assert!(
             read.filled > 0 && read.filled < 1988,
@@ -1289,7 +1290,7 @@ mod tests {
             db.create_vector_index("Item", property, Some(2), None, None, None, None)
                 .unwrap();
         }
-        let store = db.lpg_store();
+        let store = db.lpg_store().unwrap();
 
         let folded = fold_in(&*store, &find(dir.path(), true));
         let paths: Vec<&PathBuf> = folded.files.iter().map(|file| &file.path).collect();

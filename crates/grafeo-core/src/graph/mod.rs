@@ -23,9 +23,10 @@
 //! 0.5.x database file, so that opening the file folds it into the LPG store.
 
 pub mod apply;
-/// The conformance suite of the stores behind the change set.
-#[cfg(test)]
-mod conformance;
+/// The conformance suite of the store contract (the `conformance`
+/// feature): the cases a store of one's own passes.
+#[cfg(any(test, feature = "conformance"))]
+pub mod conformance;
 // Rows loaded under their ids: the readers of earlier formats and the
 // copies of graph data write into either store through it.
 pub mod load;

@@ -6663,9 +6663,10 @@ mod tests {
             1,
             "PENDING nodes should be invisible to non-versioned node_count()"
         );
-        let epoch = db.store().current_epoch();
+        let epoch = db.store().unwrap().current_epoch();
         assert!(
             db.store()
+                .unwrap()
                 .node(node_in_tx, ReadView::transaction(transaction_id, epoch))
                 .unwrap()
                 .is_some(),
@@ -6715,9 +6716,10 @@ mod tests {
             1,
             "PENDING nodes should be invisible to non-versioned node_count()"
         );
-        let epoch = db.store().current_epoch();
+        let epoch = db.store().unwrap().current_epoch();
         assert!(
             db.store()
+                .unwrap()
                 .node(node_in_tx, ReadView::transaction(transaction_id, epoch))
                 .unwrap()
                 .is_some(),

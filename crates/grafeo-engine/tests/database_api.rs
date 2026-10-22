@@ -201,7 +201,7 @@ fn test_iter_nodes() {
     let _n2 = db.create_node(&["Company"]).unwrap();
     let _n3 = db.create_node(&["Person"]).unwrap();
 
-    let nodes: Vec<_> = db.iter_nodes().collect();
+    let nodes: Vec<_> = db.iter_nodes().unwrap().collect();
     assert_eq!(nodes.len(), 3);
 }
 
@@ -215,15 +215,15 @@ fn test_iter_edges() {
     let _e1 = db.create_edge(a, b, "R").unwrap();
     let _e2 = db.create_edge(b, c, "S").unwrap();
 
-    let edges: Vec<_> = db.iter_edges().collect();
+    let edges: Vec<_> = db.iter_edges().unwrap().collect();
     assert_eq!(edges.len(), 2);
 }
 
 #[test]
 fn test_iter_empty_database() {
     let db = GrafeoDB::new_in_memory();
-    assert_eq!(db.iter_nodes().count(), 0);
-    assert_eq!(db.iter_edges().count(), 0);
+    assert_eq!(db.iter_nodes().unwrap().count(), 0);
+    assert_eq!(db.iter_edges().unwrap().count(), 0);
 }
 
 // ── Validation ───────────────────────────────────────────────────

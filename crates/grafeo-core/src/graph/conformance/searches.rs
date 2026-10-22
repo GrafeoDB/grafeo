@@ -252,7 +252,7 @@ mod text {
         )?;
         // A document every reader sees alike scores with the statistics of
         // now at every view.
-        let now = ReadView::committed(store.epoch());
+        let now = ReadView::committed(store.committed_epoch());
         same(
             &score(ids[1], "storage", before),
             &score(ids[1], "storage", now),
@@ -284,7 +284,7 @@ mod text {
         let store = make();
         store.add_text_index("Doc", "body", text_index());
         let ids = docs(&store)?;
-        let before = ReadView::committed(store.epoch());
+        let before = ReadView::committed(store.committed_epoch());
         let writes = Writes::begin(&store, &ids)?;
         check(&store, &ids, writes, before)
     }
@@ -296,7 +296,7 @@ mod text {
     ) -> Outcome {
         let store = make();
         let ids = docs(&store)?;
-        let before = ReadView::committed(store.epoch());
+        let before = ReadView::committed(store.committed_epoch());
         let writes = Writes::begin(&store, &ids)?;
         let index = text_index();
         {
@@ -512,7 +512,7 @@ mod vector {
         let store = make();
         store.add_vector_index("Doc", "embedding", vector_index());
         let ids = docs(&store)?;
-        let before = ReadView::committed(store.epoch());
+        let before = ReadView::committed(store.committed_epoch());
         let writes = Writes::begin(&store, &ids)?;
         check(&store, &ids, writes, before)
     }
@@ -542,7 +542,7 @@ mod vector {
     ) -> Outcome {
         let store = make();
         let ids = docs(&store)?;
-        let before = ReadView::committed(store.epoch());
+        let before = ReadView::committed(store.committed_epoch());
         let writes = Writes::begin(&store, &ids)?;
         let index = vector_index();
         let built = Built(&store);

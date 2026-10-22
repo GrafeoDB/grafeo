@@ -163,7 +163,7 @@ fn indexed_people<S: Indexed>(store: &S) -> Result<super::People, String> {
 pub(crate) fn an_indexed_lookup_answers_at_its_view<S: Indexed>(make: &dyn Fn() -> S) -> Outcome {
     let store = make();
     let people = indexed_people(&store)?;
-    let before = ReadView::committed(store.epoch());
+    let before = ReadView::committed(store.committed_epoch());
     let (amsterdam, berlin, paris) = (
         Value::from("Amsterdam"),
         Value::from("Berlin"),
@@ -336,7 +336,7 @@ pub(crate) fn maybe_equal_finds_every_spelling_at_a_view<S: Indexed>(
         });
     }
     apply_all(&store, &ops, Writer::Replay { epoch })?;
-    let before = ReadView::committed(store.epoch());
+    let before = ReadView::committed(store.committed_epoch());
     let mut tx = Tx::begin(&store, 10);
     tx.set_node(nodes[0], "code", Value::from("xyz"))?;
     tx.set_node(nodes[3], "code", Value::from("42"))?;
@@ -456,7 +456,7 @@ pub(crate) fn each_graph_keeps_its_own_indexes<S: Indexed + Registry>(
         &set(&[berlin]),
         "the graph's Amsterdam",
     )?;
-    let root_view = ReadView::committed(root.epoch());
+    let root_view = ReadView::committed(root.committed_epoch());
     same(
         &set(&ok(
             root.find_nodes_by_property("city", &Value::from("Amsterdam"), root_view),

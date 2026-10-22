@@ -246,18 +246,21 @@ pub struct GrafeoDB {
 }
 
 impl GrafeoDB {
-    /// Returns a reference to the built-in LPG store.
+    /// The built-in store, which what only it has (named graphs, indexes,
+    /// search, the database file, imports, backups) works on.
     ///
-    /// # Panics
+    /// # Errors
     ///
-    /// Panics if the database was created with [`with_store()`](Self::with_store) or
-    /// [`with_read_store()`](Self::with_read_store), which use an external store
-    /// instead of the built-in LPG store.
-    fn lpg_store(&self) -> Arc<RowGroupStore> {
-        self.root_store().expect(
-            "no built-in RowGroupStore: this GrafeoDB was created with an external store \
-             (with_store / with_read_store). Use session() or snapshot() instead.",
-        )
+    /// The unsupported error on a database built on a store of one's own
+    /// ([`with_store()`](Self::with_store),
+    /// [`with_read_store()`](Self::with_read_store)), which has none of them.
+    fn lpg_store(&self) -> Result<Arc<RowGroupStore>> {
+        self.root_store().ok_or_else(|| {
+            Error::from(QueryError::unsupported(concat!(
+                "this needs the built-in store: a database on a backend of its own has none ",
+                "(named graphs, indexes, search, the database file, imports and backups)"
+            )))
+        })
     }
 
     /// The built-in LPG store, or `None` with an external store.
@@ -946,7 +949,7 @@ impl GrafeoDB {
         #[cfg(feature = "wal")]
         if let (Some(held_records), Some(fm)) = (retire_sidecar_wal, db.file_manager.clone()) {
             if held_records {
-                flush::flush_covering(&fm, &db.checkpoint_sources(), Some(wal_start_lsn))?;
+                flush::flush_covering(&fm, &db.checkpoint_sources()?, Some(wal_start_lsn))?;
             }
             grafeo_common::testing::crash::maybe_crash("open:before_remove_replayed_wal");
             if set_aside_sidecar_wal {
@@ -1181,6 +1184,10 @@ impl GrafeoDB {
     /// # Errors
     ///
     /// Returns an error if config validation fails.
+    ///
+    /// # Stability: Experimental
+    ///
+    /// Implementing [`GraphStore`] is experimental through 0.6.x.
     ///
     /// [`GraphStore`]: grafeo_core::graph::GraphStore
     pub fn with_read_store(store: Arc<dyn GraphStore>, config: Config) -> Result<Self> {
@@ -2178,23 +2185,22 @@ impl GrafeoDB {
 
         // A session on a backend of one's own, or on the built-in store; the
         // rest of its set-up is the same for both.
-        let mut session = if let Some(ref ext_read) = self.external_read_store {
-            Session::with_external_store(
+        let mut session = match (self.root_store(), &self.external_read_store) {
+            (Some(root), _) => {
+                #[cfg(feature = "triple-store")]
+                let session =
+                    Session::with_rdf_store(root, Arc::clone(&self.rdf_store), session_cfg());
+                #[cfg(not(feature = "triple-store"))]
+                let session = Session::with_store(root, session_cfg());
+                session
+            }
+            (None, Some(ext_read)) => Session::with_external_store(
                 Arc::clone(ext_read),
                 self.external_write_store.as_ref().map(Arc::clone),
                 session_cfg(),
             )
-            .expect("arena allocation for external store session")
-        } else {
-            #[cfg(feature = "triple-store")]
-            let session = Session::with_rdf_store(
-                self.lpg_store(),
-                Arc::clone(&self.rdf_store),
-                session_cfg(),
-            );
-            #[cfg(not(feature = "triple-store"))]
-            let session = Session::with_store(self.lpg_store(), session_cfg());
-            session
+            .expect("arena allocation for external store session"),
+            (None, None) => unreachable!("a database holds the built-in store or one of its own"),
         };
 
         #[cfg(feature = "wal")]
@@ -2383,12 +2389,11 @@ impl GrafeoDB {
     ///
     /// The row-group store's own methods may change in any release.
     ///
-    /// # Panics
+    /// # Errors
     ///
-    /// Panics if the database uses an external store
+    /// The unsupported error on a database on a store of its own
     /// ([`with_store`](Self::with_store), [`with_read_store`](Self::with_read_store)).
-    #[must_use]
-    pub fn store(&self) -> Arc<RowGroupStore> {
+    pub fn store(&self) -> Result<Arc<RowGroupStore>> {
         self.lpg_store()
     }
 
@@ -2419,7 +2424,7 @@ impl GrafeoDB {
         }
         let held = self.hold_for_standalone(false)?;
         // Checked under the hold, as every standalone change.
-        if self.lpg_store().graph(name).is_some() {
+        if self.lpg_store()?.graph(name).is_some() {
             return Ok(false);
         }
         let mut change = crate::transaction::StandaloneChange::new();
@@ -2453,7 +2458,7 @@ impl GrafeoDB {
         }
         let held = self.hold_for_standalone(true)?;
         // Checked under the hold, as every standalone change.
-        if self.lpg_store().graph(name).is_none() {
+        if self.lpg_store()?.graph(name).is_none() {
             return Ok(false);
         }
         standalone::refuse_drop_with_open_changes(&self.transaction_manager, &held, name)?;
@@ -2585,10 +2590,10 @@ impl GrafeoDB {
     /// The default graph's store as a trait object: the external store of a
     /// database built on one, else the built-in row-group store.
     pub(crate) fn graph_store(&self) -> Arc<dyn GraphStore> {
-        if let Some(ref ext_read) = self.external_read_store {
-            Arc::clone(ext_read)
-        } else {
-            self.lpg_store() as Arc<dyn GraphStore>
+        match (&self.external_read_store, self.root_store()) {
+            (Some(ext_read), _) => Arc::clone(ext_read),
+            (None, Some(root)) => root,
+            (None, None) => unreachable!("a database holds the built-in store or one of its own"),
         }
     }
 
@@ -3162,9 +3167,14 @@ impl GrafeoDB {
 
     /// What a checkpoint writes: the complete current state (see
     /// [`sections::CheckpointSources`]).
-    fn checkpoint_sources(&self) -> sections::CheckpointSources {
-        sections::CheckpointSources {
-            store: self.store.clone(),
+    ///
+    /// # Errors
+    ///
+    /// The unsupported error on a database on a backend of its own: what a
+    /// checkpoint, a copy or a backup writes is the built-in store's.
+    fn checkpoint_sources(&self) -> Result<sections::CheckpointSources> {
+        Ok(sections::CheckpointSources {
+            store: self.lpg_store()?,
             catalog: Arc::clone(&self.catalog),
             transaction_manager: Arc::clone(&self.transaction_manager),
             #[cfg(feature = "triple-store")]
@@ -3173,7 +3183,7 @@ impl GrafeoDB {
             wal: self.wal.clone(),
             #[cfg(feature = "wal")]
             wal_records_at_checkpoint: Arc::clone(&self.wal_records_at_checkpoint),
-        }
+        })
     }
 
     /// Starts the automatic checkpointer when a trigger is set, replacing a
@@ -3192,13 +3202,14 @@ impl GrafeoDB {
     fn restart_checkpoint_timer(&self) {
         self.stop_checkpoint_timer();
         let triggers = *self.checkpoint_triggers.lock();
-        // A file opened read-only stays so.
+        // A file opened read-only stays so. A database with a file has the
+        // built-in store, which its checkpoints write.
         if let Some(fm) = &self.file_manager
             && triggers.any()
             && !self.read_only
             && !fm.is_read_only()
+            && let Ok(sources) = self.checkpoint_sources()
         {
-            let sources = self.checkpoint_sources();
             let (checkpoint_fm, size_fm) = (Arc::clone(fm), Arc::clone(fm));
             #[cfg(feature = "wal")]
             let wal = self.wal.clone();
@@ -3299,10 +3310,9 @@ impl GrafeoDB {
         self.transaction_manager.set_history_retention(retention);
         // The store keeps what a replayed write replaces while history is
         // kept, as an open sets it.
-        let keeps_history = || {
-            self.lpg_store()
-                .set_keeps_history(self.transaction_manager.history_image().is_some());
-        };
+        let root = self.lpg_store()?;
+        let keeps_history =
+            || root.set_keeps_history(self.transaction_manager.history_image().is_some());
         keeps_history();
         if let Err(error) = self.checkpoint_to_file(fm) {
             // Nothing was stored: the record goes back to what the file holds.
@@ -3333,10 +3343,13 @@ impl GrafeoDB {
     /// # Errors
     ///
     /// Returns an error if the database has no file manager or I/O fails,
-    /// and the database-closed error after `close()`.
+    /// and the database-closed error after `close()`; the unsupported error
+    /// on a database on a backend of its own
+    /// ([`with_store`](Self::with_store)), whose data the backend keeps.
     #[cfg(all(feature = "wal", feature = "grafeo-file"))]
     pub fn backup_full(&self, backup_dir: &std::path::Path) -> Result<backup::BackupSegment> {
         let _open = self.hold_open()?;
+        let sources = self.checkpoint_sources()?;
         let fm = self.file_manager.as_ref().ok_or_else(|| {
             Error::from(grafeo_common::utils::error::QueryError::unsupported(
                 "a backup needs a persistent database",
@@ -3346,14 +3359,9 @@ impl GrafeoDB {
         // An image of the state at an epoch, written with commits going on
         // (#362).
         let keys = encryption::DatabaseKeys::from_config(&self.config);
-        backup::do_backup_full(
-            backup_dir,
-            fm,
-            &self.checkpoint_sources(),
-            &keys,
-            self.wal.as_deref(),
-            || self.log_end_without_wal(fm, &keys),
-        )
+        backup::do_backup_full(backup_dir, fm, &sources, &keys, self.wal.as_deref(), || {
+            self.log_end_without_wal(fm, &keys)
+        })
     }
 
     /// Creates an incremental backup containing WAL records since the last backup.
@@ -3363,13 +3371,18 @@ impl GrafeoDB {
     /// # Errors
     ///
     /// Returns an error if no full backup exists, or if the WAL has no new
-    /// records, and the database-closed error after `close()`.
+    /// records, and the database-closed error after `close()`; the
+    /// unsupported error on a database on a backend of its own
+    /// ([`with_store`](Self::with_store)), which has no full backup to
+    /// follow.
     #[cfg(all(feature = "wal", feature = "grafeo-file"))]
     pub fn backup_incremental(
         &self,
         backup_dir: &std::path::Path,
     ) -> Result<backup::BackupSegment> {
         let _open = self.hold_open()?;
+        // A backend's own log follows no full backup.
+        self.lpg_store()?;
         let wal = self.wal.as_ref().ok_or_else(|| {
             Error::from(grafeo_common::utils::error::QueryError::unsupported(
                 "an incremental backup needs a database with a WAL",
@@ -3470,7 +3483,7 @@ impl GrafeoDB {
     /// separately after this returns.
     #[cfg(feature = "grafeo-file")]
     fn checkpoint_to_file(&self, fm: &GrafeoFileManager) -> Result<flush::FlushResult> {
-        flush::flush(fm, &self.checkpoint_sources())
+        flush::flush(fm, &self.checkpoint_sources()?)
     }
 
     /// Returns the file manager if using single-file format.
@@ -4148,7 +4161,7 @@ mod tests {
                 .execute(&format!("MATCH (c:City) SET c.name = '{name}'"))
                 .unwrap();
         }
-        let named = db.lpg_store().graph("trips").unwrap();
+        let named = db.lpg_store().unwrap().graph("trips").unwrap();
         let held = named.memory().total_bytes();
         reader.rollback().unwrap();
 

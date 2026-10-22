@@ -634,7 +634,7 @@ fn processor_profile_reports_native_path_cardinality() {
     let db = chain_db(&["p"]);
     // Session::execute_sparql does not dispatch PROFILE. This is the existing
     // public RDF processor route that plans and executes profiling wrappers.
-    let processor = QueryProcessor::with_rdf(db.store(), Arc::clone(db.rdf_store()));
+    let processor = QueryProcessor::with_rdf(db.store().unwrap(), Arc::clone(db.rdf_store()));
     let result = processor
         .process(
             &format!("EXPLAIN ANALYZE {PREFIX} SELECT ?o WHERE {{ e:n0 e:p+ ?o }}"),

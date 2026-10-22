@@ -191,6 +191,7 @@ fn assert_api_configuration(db: &GrafeoDB, stage: &str) {
     );
     let notes = db
         .store()
+        .unwrap()
         .get_vector_index("Note", "embedding")
         .unwrap_or_else(|| panic!("{stage}: no quantized index"));
     assert_eq!(

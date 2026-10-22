@@ -65,7 +65,7 @@ impl Database {
     /// What a checkpoint of this database writes from.
     fn sources(&self) -> CheckpointSources {
         CheckpointSources {
-            store: Some(Arc::clone(&self.root)),
+            store: Arc::clone(&self.root),
             catalog: Arc::clone(&self.catalog),
             transaction_manager: Arc::clone(&self.transaction_manager),
             #[cfg(feature = "triple-store")]

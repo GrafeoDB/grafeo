@@ -1268,3 +1268,12 @@ fn test_import_rows_failure_keeps_nothing() {
     assert!(db.import_rows(edges, options).is_err());
     assert_eq!((db.node_count(), db.edge_count()), (2, 0));
 }
+
+/// setSchema makes the check a query makes (#245): a schema that does not
+/// exist is refused, and the current schema stays as it was.
+#[wasm_bindgen_test]
+fn test_set_schema_of_a_missing_schema_fails_and_keeps_the_schema() {
+    let db = Database::new().expect("create db");
+    assert!(db.set_schema("missing").is_err());
+    assert_eq!(db.current_schema(), None);
+}

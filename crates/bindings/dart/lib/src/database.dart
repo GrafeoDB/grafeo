@@ -407,13 +407,10 @@ class GrafeoDB implements Finalizable {
   /// Return the currently active schema name, or `null` if none is set.
   String? currentSchema() {
     _checkOpen();
+    // The C layer owns this string (valid until its next schema call), so it
+    // is copied here and never freed.
     final ptr = _bindings.grafeoCurrentSchema(_handle);
-    if (ptr == nullptr) return null;
-    try {
-      return ptr.toDartString();
-    } finally {
-      _bindings.grafeoFreeString(ptr);
-    }
+    return ptr == nullptr ? null : ptr.toDartString();
   }
 
   // ===========================================================================

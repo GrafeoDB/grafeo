@@ -4,6 +4,8 @@ import { GrafeoDB, version, simdSupport } from '../grafeo.js'
 
 const packageVersion = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8')).version
 
+const packageVersion = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8')).version
+
 // ── Helpers ──────────────────────────────────────────────────────────
 
 /** Create a fresh in-memory database with some seed data. */

@@ -12,7 +12,6 @@ use pyo3_async_runtimes::tokio::future_into_py;
 
 use grafeo_common::storage::{SectionMemoryConfig, SectionType, TierOverride};
 use grafeo_common::types::{EdgeId, LogicalType, NodeId, Value};
-use grafeo_core::graph::GraphStore as _;
 use grafeo_engine::config::Config;
 use grafeo_engine::database::GrafeoDB;
 
@@ -134,15 +133,6 @@ use crate::gil::without_gil;
 use crate::graph::{PyEdge, PyNode};
 use crate::query::{PyQueryBuilder, PyQueryResult};
 use crate::types::PyValue;
-
-/// A view of the committed graph of now, pinned while it lives: the store
-/// reads at its [`read_view`](grafeo_engine::AsOfView::read_view) see one
-/// committed state, garbage collection keeps what they read, and no commit
-/// that has not completed shows. Every binding method that makes several
-/// store calls for one answer reads through one.
-pub(crate) fn committed_now(db: &GrafeoDB) -> Result<grafeo_engine::AsOfView, PyGrafeoError> {
-    Ok(db.as_of(db.current_epoch())?)
-}
 
 /// Holds results from async query execution.
 ///
@@ -1263,9 +1253,9 @@ impl PyGrafeoDB {
     ) -> PyResult<Vec<(u64, Py<pyo3::types::PyDict>)>> {
         let (node_ids, props_batch) = self.released(py, |db| {
             // One pinned read for both calls: the nodes and their values
-            // of one committed state.
-            let now = committed_now(db)?;
-            let (store, view) = (db.store(), now.read_view());
+            // of one committed state, of the graph `set_graph()` selects.
+            let snapshot = db.snapshot()?;
+            let (store, view) = (snapshot.store(), snapshot.view());
             let mut node_ids = store.nodes_by_label(label, view)?;
 
             // Apply offset and limit
@@ -1315,10 +1305,8 @@ impl PyGrafeoDB {
         let ids: Vec<NodeId> = node_ids.into_iter().map(NodeId).collect();
         let key = grafeo_common::types::PropertyKey::new(property);
         let values = self.released(py, |db| {
-            let now = committed_now(db)?;
-            Ok(db
-                .store()
-                .node_property_batch(&ids, &key, now.read_view())?)
+            let snapshot = db.snapshot()?;
+            Ok(snapshot.node_property_batch(&ids, &key, snapshot.view())?)
         })?;
 
         Ok(values

@@ -58,8 +58,9 @@ Everything else on the public surface is stable, among others:
 - indexes and search (property, vector, text and hybrid), backup and restore, checkpoints, `compact()`
 - the `auth`, `admin` and `cdc` modules: identities and roles, statistics and validation, change data capture
   events
-- the store contract: the `GraphStore` and `GraphStoreMut` traits, `GrafeoDB::with_store`, `store()`,
-  `graph_store()` and `GraphHandle::graph_store()`
+- the store contract: the `GraphStore` and `GraphStoreMut` traits, `GrafeoDB::with_store`, `Snapshot` and the
+  methods that give one (`GrafeoDB::snapshot()`, `GraphHandle::snapshot()`, `AsOfView::snapshot()`,
+  `GrafeoDB::projection()`); `GrafeoDB::store()` is experimental
 
 ## The Promise for 0.7 and 1.0
 

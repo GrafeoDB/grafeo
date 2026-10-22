@@ -466,10 +466,20 @@ pub(crate) struct ReadPin {
 impl ReadPin {
     /// The epoch the read is pinned at: the published epoch when it was
     /// pinned.
-    #[cfg(test)]
     #[must_use]
     pub(crate) fn epoch(&self) -> EpochId {
         self.epoch
+    }
+
+    /// Another pin at the same epoch, released on its own: this pin keeps
+    /// the epoch at or after the history floor while the new one is made.
+    pub(crate) fn again(&self) -> ReadPin {
+        let mut epochs = self.pins.epochs.lock();
+        ReadPins::hold_at(&mut epochs, self.epoch.as_u64());
+        ReadPin {
+            pins: Arc::clone(&self.pins),
+            epoch: self.epoch,
+        }
     }
 }
 

@@ -32,6 +32,8 @@ use grafeo_common::types::{ReadView, Value};
 use grafeo_common::utils::error::{Error, QueryError, QueryErrorKind, Result};
 use grafeo_core::graph::GraphStore;
 use grafeo_core::graph::rowgroup::RowGroupStore;
+
+use crate::Snapshot;
 use hashbrown::HashMap;
 
 /// Unified interface for built-in procedures callable via `CALL`.
@@ -66,52 +68,56 @@ pub trait Procedure: Send + Sync {
 
 /// Runtime context passed to [`Procedure::execute`].
 ///
-/// Graph algorithms and catalog introspection need only [`ProcedureContext::store`].
+/// Graph algorithms and catalog introspection need only [`ProcedureContext::snapshot`].
 /// Vector and text search procedures additionally require
 /// [`ProcedureContext::lpg_store`] to reach the HNSW and BM25 indexes owned
 /// by the LPG store.
 pub struct ProcedureContext<'a> {
-    /// Read-only graph store, sufficient for graph algorithms and catalog
-    /// introspection (labels, edge types, property keys).
-    pub store: &'a dyn GraphStore,
+    /// The graph the calling query reads, at its view, pinned for the call:
+    /// every procedure reads the graph as the query sees it, an algorithm
+    /// from start to end, and the search procedures return only the nodes
+    /// it sees (a search index holds what open transactions wrote too, #412,
+    /// which the store rechecks at the view). Sufficient for graph
+    /// algorithms and catalog introspection (labels, edge types, property
+    /// keys).
+    pub snapshot: &'a Snapshot,
 
     /// Concrete LPG store reference when available, used by search procedures
     /// to reach vector and text indexes. `None` when the active backend is
     /// not an LPG store (e.g., pure RDF) or in contexts that do not need it.
     pub lpg_store: Option<&'a RowGroupStore>,
-
-    /// The view the calling query reads at, pinned for the call: every
-    /// procedure reads the graph as it sees it, an algorithm from start to
-    /// end, and the search procedures return only the nodes it sees (a
-    /// search index holds what open transactions wrote too, #412, which the
-    /// store rechecks at the view).
-    pub view: ReadView,
 }
 
 impl<'a> ProcedureContext<'a> {
-    /// Creates a context with only a graph store available, read at `view`.
+    /// Creates a context with only the graph's snapshot available.
     #[must_use]
-    pub fn new(store: &'a dyn GraphStore, view: ReadView) -> Self {
+    pub fn new(snapshot: &'a Snapshot) -> Self {
         Self {
-            store,
+            snapshot,
             lpg_store: None,
-            view,
         }
     }
 
-    /// Creates a context with a graph store and LPG store available, read
-    /// at `view`.
+    /// Creates a context with the graph's snapshot and the LPG store
+    /// available.
     #[must_use]
-    pub fn with_lpg_store(
-        store: &'a dyn GraphStore,
-        lpg_store: &'a RowGroupStore,
-        view: ReadView,
-    ) -> Self {
+    pub fn with_lpg_store(snapshot: &'a Snapshot, lpg_store: &'a RowGroupStore) -> Self {
         Self {
-            store,
+            snapshot,
             lpg_store: Some(lpg_store),
-            view,
         }
+    }
+
+    /// The graph's store; read it at [`view`](Self::view).
+    #[must_use]
+    pub fn store(&self) -> &dyn GraphStore {
+        self.snapshot.store()
+    }
+
+    /// The view the calling query reads at.
+    #[must_use]
+    pub fn view(&self) -> ReadView {
+        self.snapshot.view()
     }
 }
 
@@ -153,7 +159,7 @@ impl Procedure for GraphAlgorithmProcedure {
     }
 
     fn execute(&self, ctx: &ProcedureContext<'_>, params: &Parameters) -> Result<AlgorithmResult> {
-        self.inner.execute(ctx.store, ctx.view, params)
+        self.inner.execute(ctx.store(), ctx.view(), params)
     }
 }
 
@@ -183,7 +189,7 @@ impl Procedure for LabelsProcedure {
 
     fn execute(&self, ctx: &ProcedureContext<'_>, _params: &Parameters) -> Result<AlgorithmResult> {
         let mut result = AlgorithmResult::new(vec!["label".into()]);
-        for label in ctx.store.all_labels()? {
+        for label in ctx.store().all_labels()? {
             result.rows.push(vec![Value::String(label.into())]);
         }
         Ok(result)
@@ -212,7 +218,7 @@ impl Procedure for RelationshipTypesProcedure {
 
     fn execute(&self, ctx: &ProcedureContext<'_>, _params: &Parameters) -> Result<AlgorithmResult> {
         let mut result = AlgorithmResult::new(vec!["relationshipType".into()]);
-        for t in ctx.store.all_edge_types()? {
+        for t in ctx.store().all_edge_types()? {
             result.rows.push(vec![Value::String(t.into())]);
         }
         Ok(result)
@@ -241,7 +247,7 @@ impl Procedure for PropertyKeysProcedure {
 
     fn execute(&self, ctx: &ProcedureContext<'_>, _params: &Parameters) -> Result<AlgorithmResult> {
         let mut result = AlgorithmResult::new(vec!["propertyKey".into()]);
-        for key in ctx.store.all_property_keys()? {
+        for key in ctx.store().all_property_keys()? {
             result.rows.push(vec![Value::String(key.into())]);
         }
         Ok(result)
@@ -392,7 +398,7 @@ impl Procedure for SearchVectorProcedure {
             allowed: None,
         };
         let results = lpg
-            .vector_index_search_at(label, property, &query, search, ctx.view)
+            .vector_index_search_at(label, property, &query, search, ctx.view())
             .ok_or_else(missing)?;
 
         let mut result = AlgorithmResult::new(vec!["node_id".into(), "distance".into()]);
@@ -519,7 +525,7 @@ impl Procedure for SearchMmrProcedure {
         let config = GraphStore::vector_index_config(lpg, label, property).ok_or_else(missing)?;
         grafeo_core::index::vector::check_query_vector(&query, config.dimensions, label, property)?;
 
-        let view = ctx.view;
+        let view = ctx.view();
         let search = grafeo_core::graph::rowgroup::IndexSearch {
             k: fetch_k,
             ef: None,
@@ -653,7 +659,7 @@ impl Procedure for SearchTextProcedure {
             allowed: None,
         };
         let results = lpg
-            .text_index_search_at(label, property, query, search, ctx.view)
+            .text_index_search_at(label, property, query, search, ctx.view())
             .ok_or_else(|| {
                 grafeo_common::utils::error::Error::InvalidValue(format!(
                     "there is no text index on :{label}({property}); create one first"
@@ -1557,7 +1563,7 @@ mod tests {
         use grafeo_common::utils::error::ErrorCode;
         use grafeo_core::index::vector::{DistanceMetric, HnswConfig, HnswIndex, VectorIndexKind};
 
-        let store = RowGroupStore::new();
+        let store = Arc::new(RowGroupStore::new());
         for vector in [[1.0f32, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]] {
             let node = store.create_node(&["Doc"]);
             store.set_node_property(node, "emb", Value::Vector(vector.to_vec().into()));
@@ -1577,7 +1583,11 @@ mod tests {
                 .expect("vector");
             store.set_node_property(node, "emb", vector);
         }
-        let ctx = ProcedureContext::with_lpg_store(&store, &store, ReadView::latest());
+        let snapshot = Snapshot::of_query(
+            Arc::clone(&store) as Arc<dyn GraphStore>,
+            ReadView::latest(),
+        );
+        let ctx = ProcedureContext::with_lpg_store(&snapshot, &store);
         let procedures: [Box<dyn Procedure>; 2] = [
             Box::new(SearchVectorProcedure::new()),
             Box::new(SearchMmrProcedure::new()),

@@ -41,6 +41,7 @@ pub mod metrics;
 pub mod procedures;
 pub mod query;
 pub mod session;
+mod snapshot;
 pub mod transaction;
 #[cfg(feature = "shacl")]
 pub mod validation;
@@ -66,4 +67,5 @@ pub use metrics::{MetricsRegistry, MetricsSnapshot};
 #[cfg(feature = "gql")]
 pub use query::executor::stream::{OwnedResultStream, OwnedRowIterator, ResultStream, RowIterator};
 pub use session::Session;
+pub use snapshot::Snapshot;
 pub use transaction::{CommitInfo, PreparedCommit};

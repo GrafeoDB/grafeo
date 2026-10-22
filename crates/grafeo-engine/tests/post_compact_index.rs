@@ -96,7 +96,8 @@ fn vector_index_after_compact_nearest_neighbor_is_correct() {
 
     // Verify it's the right node by checking its property
     let title = db
-        .graph_store()
+        .snapshot()
+        .unwrap()
         .node_property(nearest_id, "title", ReadView::latest())
         .unwrap();
     assert_eq!(title, Some(Value::String("alpha".into())));
@@ -279,7 +280,7 @@ fn graph_store_has_a_vector_index_created_after_compact() {
     db.compact().expect("compact");
 
     // No index yet: the graph store reports none
-    let gs = db.graph_store();
+    let gs = db.snapshot().unwrap();
     assert!(!gs.has_vector_index("Doc", "embedding"));
 
     // Create the index via the imperative API
@@ -295,7 +296,7 @@ fn graph_store_has_a_vector_index_created_after_compact() {
     .expect("create");
 
     // Now the graph store reports it
-    let gs = db.graph_store();
+    let gs = db.snapshot().unwrap();
     assert!(gs.has_vector_index("Doc", "embedding"));
     assert!(gs.vector_index_config("Doc", "embedding").is_some());
 }
@@ -311,12 +312,12 @@ fn graph_store_has_a_text_index_created_after_compact() {
 
     db.compact().expect("compact");
 
-    let gs = db.graph_store();
+    let gs = db.snapshot().unwrap();
     assert!(!gs.has_text_index("Article", "body"));
 
     db.create_text_index("Article", "body").expect("create");
 
-    let gs = db.graph_store();
+    let gs = db.snapshot().unwrap();
     assert!(gs.has_text_index("Article", "body"));
 }
 

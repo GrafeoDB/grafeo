@@ -207,13 +207,15 @@ fn the_direct_api_reads_each_label_of_a_compacted_node() {
     labels.sort();
     assert_eq!(labels, ["Employee", "Person"]);
     let mut people = db
-        .graph_store()
+        .snapshot()
+        .unwrap()
         .nodes_by_label("Person", ReadView::latest())
         .unwrap();
     people.sort_unstable();
     assert_eq!(people, [alix, gus]);
     assert_eq!(
-        db.graph_store()
+        db.snapshot()
+            .unwrap()
             .nodes_by_label("Employee", ReadView::latest())
             .unwrap(),
         [alix]

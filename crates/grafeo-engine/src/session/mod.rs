@@ -745,7 +745,7 @@ impl Session {
     /// graph's store from the root store. Writes go through a transaction's
     /// recording (see [`recording_for`](Self::recording_for)), which logs
     /// them and reports them to change data capture at commit.
-    fn active_store(&self) -> Arc<dyn GraphStore> {
+    pub(crate) fn active_store(&self) -> Arc<dyn GraphStore> {
         self.store_for_key(self.active_graph_storage_key().as_deref())
     }
 

@@ -104,6 +104,7 @@ fn the_counts_and_reports_return_the_stores_error() {
     failed("info", db.info());
     failed("detailed_stats", db.detailed_stats());
     failed("schema", db.schema());
+    failed("validate", db.validate());
 }
 
 #[test]

@@ -248,7 +248,7 @@ impl GrafeoDB {
     fn lpg_store(&self) -> Arc<RowGroupStore> {
         self.root_store().expect(
             "no built-in RowGroupStore: this GrafeoDB was created with an external store \
-             (with_store / with_read_store). Use session() or graph_store() instead.",
+             (with_store / with_read_store). Use session() or snapshot() instead.",
         )
     }
 
@@ -2300,13 +2300,16 @@ impl GrafeoDB {
         self.query_cache.reset_stats();
     }
 
-    /// Returns the underlying (default) store.
+    /// Returns the underlying (default) row-group store, for admin work
+    /// (index management, schema introspection, MVCC internals) and its own
+    /// writes, which bypass the WAL, transactions and change capture.
     ///
-    /// This provides direct access to the LPG store for algorithm implementations
-    /// and admin operations (index management, schema introspection, MVCC internals).
+    /// To read the graph, take a [`snapshot`](Self::snapshot): it reads one
+    /// pinned state of the selected graph through [`GraphStore`].
     ///
-    /// For code that only needs read/write graph operations, prefer
-    /// [`graph_store()`](Self::graph_store) which returns the trait interface.
+    /// # Stability: Experimental
+    ///
+    /// The row-group store's own methods may change in any release.
     ///
     /// # Panics
     ///
@@ -2441,7 +2444,7 @@ impl GrafeoDB {
         use grafeo_core::graph::GraphProjection;
         use std::collections::hash_map::Entry;
 
-        let store = self.selected_graph_store()?;
+        let store = self.read_store(direct::DirectTarget::Current)?;
         let projection = Arc::new(GraphProjection::new(store, spec));
         let mut projections = self.projections.write();
         Ok(match projections.entry(name.into()) {
@@ -2464,36 +2467,52 @@ impl GrafeoDB {
         self.projections.read().keys().cloned().collect()
     }
 
-    /// Returns a named projection as a [`GraphStore`] trait object.
+    /// A [`Snapshot`](crate::Snapshot) of the named projection, as a committed reader at the
+    /// current epoch sees it, pinned while it lives; `None` when there is no
+    /// projection of that name.
     #[must_use]
-    pub fn projection(&self, name: &str) -> Option<Arc<dyn GraphStore>> {
-        self.projections
+    pub fn projection(&self, name: &str) -> Option<crate::Snapshot> {
+        let pin = self.transaction_manager.pin_read();
+        let store = self
+            .projections
             .read()
             .get(name)
-            .map(|p| Arc::clone(p) as Arc<dyn GraphStore>)
+            .map(|p| Arc::clone(p) as Arc<dyn GraphStore>)?;
+        let view = grafeo_common::types::ReadView::committed(pin.epoch());
+        Some(crate::Snapshot::pinned(store, view, pin))
     }
 
-    /// The store of the graph [`set_current_graph`](Self::set_current_graph) and
-    /// [`set_current_schema`](Self::set_current_schema) select, or of the default
-    /// graph when they select none, as the direct API reads it. Graph algorithms
-    /// read this store.
+    /// A [`Snapshot`](crate::Snapshot) of the graph
+    /// [`set_current_graph`](Self::set_current_graph) and
+    /// [`set_current_schema`](Self::set_current_schema) select (the default
+    /// graph when they select none), as a committed reader at the current
+    /// epoch sees it: the graph the direct API and graph algorithms read.
+    /// Every read through it sees that one state while it lives.
     ///
     /// # Errors
     ///
     /// Returns an error if the selected graph no longer exists.
-    pub fn selected_graph_store(&self) -> Result<Arc<dyn GraphStore>> {
-        self.read_store(direct::DirectTarget::Current)
+    pub fn snapshot(&self) -> Result<crate::Snapshot> {
+        // Pinned first, then read: no collect passes the view meanwhile.
+        let pin = self.transaction_manager.pin_read();
+        let store = self.read_store(direct::DirectTarget::Current)?;
+        let view = grafeo_common::types::ReadView::committed(pin.epoch());
+        Ok(crate::Snapshot::pinned(store, view, pin))
     }
 
-    /// Returns the graph store as a trait object.
-    ///
-    /// Returns a read-only trait object for the active graph store.
-    ///
-    /// This provides the [`GraphStore`] interface (graph-structure reads
-    /// plus text/vector search capabilities) for code that only needs read
-    /// operations. For write access, use [`graph_store_mut()`](Self::graph_store_mut).
-    #[must_use]
-    pub fn graph_store(&self) -> Arc<dyn GraphStore> {
+    /// A [`Snapshot`](crate::Snapshot) of the default graph's store (the
+    /// external one, for a database built on one), pinned at the current
+    /// epoch: what the counts and the admin reports read, one state for all
+    /// of a report's reads.
+    pub(crate) fn default_snapshot(&self) -> crate::Snapshot {
+        let pin = self.transaction_manager.pin_read();
+        let view = grafeo_common::types::ReadView::committed(pin.epoch());
+        crate::Snapshot::pinned(self.graph_store(), view, pin)
+    }
+
+    /// The default graph's store as a trait object: the external store of a
+    /// database built on one, else the built-in row-group store.
+    pub(crate) fn graph_store(&self) -> Arc<dyn GraphStore> {
         if let Some(ref ext_read) = self.external_read_store {
             Arc::clone(ext_read)
         } else {
@@ -3926,7 +3945,6 @@ impl FromValue for bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use grafeo_common::types::ReadView;
 
     /// The 0.5.x loader passes the vector and text sections of a 0.5.44 file
     /// on: their indexes come back from them, before anything is built from
@@ -5025,15 +5043,15 @@ mod tests {
     }
 
     // =========================================================================
-    // graph_store / graph_store_mut
+    // snapshot / graph_store_mut
     // =========================================================================
 
     #[test]
-    fn test_graph_store_returns_lpg_by_default() {
+    fn test_snapshot_reads_the_built_in_store_by_default() {
         let db = GrafeoDB::new_in_memory();
         db.create_node(&["Person"]).unwrap();
-        let store = db.graph_store();
-        assert_eq!(store.node_count(ReadView::latest()).unwrap(), 1);
+        let snapshot = db.snapshot().unwrap();
+        assert_eq!(snapshot.node_count(snapshot.view()).unwrap(), 1);
     }
 
     #[test]
@@ -5056,8 +5074,8 @@ mod tests {
         assert!(db.graph_store_mut().is_none());
 
         // Read queries should work
-        let gs = db.graph_store();
-        assert_eq!(gs.node_count(ReadView::latest()).unwrap(), 1);
+        let snapshot = db.snapshot().unwrap();
+        assert_eq!(snapshot.node_count(snapshot.view()).unwrap(), 1);
     }
 
     #[test]
@@ -5075,7 +5093,8 @@ mod tests {
 
         assert!(!db.is_read_only());
         assert!(db.graph_store_mut().is_some());
-        assert_eq!(db.graph_store().node_count(ReadView::latest()).unwrap(), 1);
+        let snapshot = db.snapshot().unwrap();
+        assert_eq!(snapshot.node_count(snapshot.view()).unwrap(), 1);
     }
 
     // =========================================================================

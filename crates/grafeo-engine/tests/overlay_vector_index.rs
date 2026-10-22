@@ -246,7 +246,7 @@ fn a_search_without_an_index_of_its_metric_scans_both_layers() {
         "a compacted node and a later one"
     );
 
-    let store = db.graph_store();
+    let store = db.snapshot().unwrap();
     let found: Vec<String> = store
         .vector_search_with_threshold(
             Some("Person"),

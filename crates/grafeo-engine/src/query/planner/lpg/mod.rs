@@ -89,11 +89,10 @@
 //!
 //! # Transaction context
 //!
-//! Every operator inherits the planner's `viewing_epoch` and
-//! `transaction_id`. Factorised chains and mutations carry them
-//! through `with_transaction_context()` so MVCC visibility is applied
-//! at every hop: see [`crate::transaction`] for the epoch/visibility
-//! rules.
+//! Every operator reads at the planner's view
+//! ([`Planner::read_view`]), its `viewing_epoch` and `transaction_id`:
+//! factorised chains and mutations carry it so MVCC visibility is applied
+//! at every hop. See [`crate::transaction`] for the epoch/visibility rules.
 
 pub(crate) mod after_write;
 mod aggregate;

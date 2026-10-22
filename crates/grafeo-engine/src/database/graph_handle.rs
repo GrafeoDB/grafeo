@@ -1,12 +1,11 @@
 //! Handles on one named graph, for working in several graphs at once.
 
 use std::collections::HashMap;
-use std::sync::Arc;
 
 use grafeo_common::types::{EdgeId, NodeId, PropertyKey, Value};
 use grafeo_common::utils::error::Result;
+use grafeo_core::graph::Direction;
 use grafeo_core::graph::lpg::{Edge, Node};
-use grafeo_core::graph::{Direction, GraphStore};
 
 use super::direct::{BatchEdge, DirectCalls, DirectTarget, missing_graph};
 use super::{GrafeoDB, QueryResult};
@@ -97,16 +96,21 @@ impl GraphHandle<'_> {
         self.schema.as_deref()
     }
 
-    /// The graph's store, for reads such as graph algorithms.
+    /// A [`Snapshot`](crate::Snapshot) of the graph, as a committed reader at
+    /// the current epoch sees it, pinned while it lives: for reads such as
+    /// graph algorithms.
     ///
     /// # Errors
     ///
     /// Returns an error if the graph no longer exists.
-    pub fn graph_store(&self) -> Result<Arc<dyn GraphStore>> {
-        self.db.read_store(DirectTarget::Named {
+    pub fn snapshot(&self) -> Result<crate::Snapshot> {
+        let pin = self.db.transaction_manager.pin_read();
+        let store = self.db.read_store(DirectTarget::Named {
             schema: self.schema.as_deref(),
             name: &self.name,
-        })
+        })?;
+        let view = grafeo_common::types::ReadView::committed(pin.epoch());
+        Ok(crate::Snapshot::pinned(store, view, pin))
     }
 
     /// Opens a session working in this graph.

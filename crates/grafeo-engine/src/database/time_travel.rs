@@ -105,6 +105,18 @@ impl AsOfView {
         ReadView::committed(self.epoch)
     }
 
+    /// A [`Snapshot`](crate::Snapshot) of the graph the view reads, at the
+    /// view's epoch, pinned on its own: it stays readable after the view is
+    /// dropped.
+    #[must_use]
+    pub fn snapshot(&self) -> crate::Snapshot {
+        crate::Snapshot::pinned(
+            self.session.active_store(),
+            self.read_view(),
+            self._pin.again(),
+        )
+    }
+
     /// Runs a GQL query at the view's epoch.
     ///
     /// # Errors

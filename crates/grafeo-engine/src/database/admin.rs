@@ -2,10 +2,10 @@
 
 use std::path::Path;
 
-use grafeo_common::types::{ArcStr, ReadView};
+use grafeo_common::types::{ArcStr, EdgeId};
 use grafeo_common::utils::error::Result;
 use grafeo_common::utils::hash::FxHashMap;
-use grafeo_core::graph::Direction;
+use grafeo_core::graph::{Direction, GraphStore};
 
 impl super::GrafeoDB {
     // =========================================================================
@@ -19,8 +19,8 @@ impl super::GrafeoDB {
     ///
     /// The error of a read the store cannot do (an external store's own).
     pub fn node_count(&self) -> Result<usize> {
-        let view = ReadView::committed(self.read_epoch());
-        self.graph_store().node_count(view)
+        let snapshot = self.default_snapshot();
+        snapshot.store().node_count(snapshot.view())
     }
 
     /// Returns the number of edges in the database, as of the current epoch
@@ -30,8 +30,8 @@ impl super::GrafeoDB {
     ///
     /// As [`node_count`](Self::node_count).
     pub fn edge_count(&self) -> Result<usize> {
-        let view = ReadView::committed(self.read_epoch());
-        self.graph_store().edge_count(view)
+        let snapshot = self.default_snapshot();
+        snapshot.store().edge_count(snapshot.view())
     }
 
     /// Returns the number of distinct labels in the database.
@@ -90,10 +90,13 @@ impl super::GrafeoDB {
     ///
     /// As [`node_count`](Self::node_count).
     pub fn info(&self) -> Result<crate::admin::DatabaseInfo> {
+        // One pinned state for both counts.
+        let snapshot = self.default_snapshot();
+        let (store, view) = (snapshot.store(), snapshot.view());
         Ok(crate::admin::DatabaseInfo {
             mode: crate::admin::DatabaseMode::Lpg,
-            node_count: self.node_count()?,
-            edge_count: self.edge_count()?,
+            node_count: store.node_count(view)?,
+            edge_count: store.edge_count(view)?,
             is_persistent: self.is_persistent(),
             path: self.config.path().map(Path::to_path_buf),
             wal_enabled: self.config.wal_enabled(),
@@ -238,12 +241,15 @@ impl super::GrafeoDB {
         #[cfg(not(feature = "wal"))]
         let disk_bytes: Option<usize> = None;
 
+        // One pinned state for every count.
+        let snapshot = self.default_snapshot();
+        let (store, view) = (snapshot.store(), snapshot.view());
         Ok(crate::admin::DatabaseStats {
-            node_count: self.node_count()?,
-            edge_count: self.edge_count()?,
-            label_count: self.label_count()?,
-            edge_type_count: self.edge_type_count()?,
-            property_key_count: self.property_key_count()?,
+            node_count: store.node_count(view)?,
+            edge_count: store.edge_count(view)?,
+            label_count: store.all_labels()?.len(),
+            edge_type_count: store.all_edge_types()?.len(),
+            property_key_count: store.all_property_keys()?.len(),
             index_count: self.catalog.index_count(),
             memory_bytes: self.memory_usage().total_bytes,
             disk_bytes,
@@ -311,10 +317,11 @@ impl super::GrafeoDB {
     ///
     /// As [`node_count`](Self::node_count).
     pub fn schema(&self) -> Result<crate::admin::SchemaInfo> {
-        let store = self.graph_store();
         // The nodes that have each label as a committed reader at the
-        // current epoch sees them, without building them (#546).
-        let view = ReadView::committed(self.read_epoch());
+        // current epoch sees them, without building them (#546), all of the
+        // report in one pinned state.
+        let snapshot = self.default_snapshot();
+        let (store, view) = (snapshot.store(), snapshot.view());
         let mut labels = Vec::new();
         for name in store.all_labels()? {
             labels.push(crate::admin::LabelInfo {
@@ -393,36 +400,53 @@ impl super::GrafeoDB {
     /// not a finding.
     pub fn validate(&self) -> Result<crate::admin::ValidationResult> {
         let mut result = crate::admin::ValidationResult::default();
-        // Nodes as queries see them, at the current epoch.
-        let view = ReadView::committed(self.read_epoch());
-        let store = self.graph_store();
+        // The graph as queries see it at the current epoch, one pinned state
+        // for every check.
+        let snapshot = self.default_snapshot();
+        let (store, view) = (snapshot.store(), snapshot.view());
 
-        // Check for dangling edge references
-        for edge in self.iter_edges() {
-            if !store.is_node_visible(edge.src, view)? {
-                result.errors.push(crate::admin::ValidationError {
-                    code: "DANGLING_SRC".to_string(),
-                    message: format!(
-                        "Edge {} references non-existent source node {}",
-                        edge.id.0, edge.src.0
-                    ),
-                    context: Some(format!("edge:{}", edge.id.0)),
-                });
+        // Check for dangling edge references: every edge row of the built-in
+        // store the view sees, against the nodes it sees. An external store's
+        // reads list only the edges whose ends it sees, so its edges cannot
+        // be checked this way: the report says so.
+        match self.root_store() {
+            Some(root) => {
+                for id in 0..root.next_edge_id() {
+                    let Some(edge) = root.edge(EdgeId::new(id), view)? else {
+                        continue;
+                    };
+                    if !store.is_node_visible(edge.src, view)? {
+                        result.errors.push(crate::admin::ValidationError {
+                            code: "DANGLING_SRC".to_string(),
+                            message: format!(
+                                "Edge {} references non-existent source node {}",
+                                edge.id.0, edge.src.0
+                            ),
+                            context: Some(format!("edge:{}", edge.id.0)),
+                        });
+                    }
+                    if !store.is_node_visible(edge.dst, view)? {
+                        result.errors.push(crate::admin::ValidationError {
+                            code: "DANGLING_DST".to_string(),
+                            message: format!(
+                                "Edge {} references non-existent destination node {}",
+                                edge.id.0, edge.dst.0
+                            ),
+                            context: Some(format!("edge:{}", edge.id.0)),
+                        });
+                    }
+                }
             }
-            if !store.is_node_visible(edge.dst, view)? {
-                result.errors.push(crate::admin::ValidationError {
-                    code: "DANGLING_DST".to_string(),
-                    message: format!(
-                        "Edge {} references non-existent destination node {}",
-                        edge.id.0, edge.dst.0
-                    ),
-                    context: Some(format!("edge:{}", edge.id.0)),
-                });
-            }
+            None => result.warnings.push(crate::admin::ValidationWarning {
+                code: "EXTERNAL_EDGES_UNCHECKED".to_string(),
+                message: "the edges of an external store are not checked for dangling ends: its                           reads list only the edges whose ends it sees"
+                    .to_string(),
+                context: None,
+            }),
         }
 
         // Add warnings for potential issues
-        if self.node_count()? > 0 && self.edge_count()? == 0 {
+        if store.node_count(view)? > 0 && store.edge_count(view)? == 0 {
             result.warnings.push(crate::admin::ValidationWarning {
                 code: "NO_EDGES".to_string(),
                 message: "Database has nodes but no edges".to_string(),

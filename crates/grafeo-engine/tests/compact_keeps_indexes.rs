@@ -164,7 +164,8 @@ fn assert_person_indexes(db: &GrafeoDB, everyone: &[&str], canals: &[&str], stag
         "{stage}: the vector index"
     );
     let config = db
-        .graph_store()
+        .snapshot()
+        .unwrap()
         .vector_index_config("Person", "embedding")
         .unwrap_or_else(|| panic!("{stage}: no vector index config"));
     assert_eq!(
@@ -179,7 +180,8 @@ fn assert_person_indexes(db: &GrafeoDB, everyone: &[&str], canals: &[&str], stag
 /// `:Note(embedding)`, whose search finds both notes.
 fn assert_api_configuration(db: &GrafeoDB, stage: &str) {
     let config = db
-        .graph_store()
+        .snapshot()
+        .unwrap()
         .vector_index_config("Person", "embedding")
         .unwrap_or_else(|| panic!("{stage}: no vector index config"));
     assert_eq!(
@@ -288,7 +290,7 @@ fn named_graph_indexes_stay_after_compact() {
         1,
         "the property index finds Vincent"
     );
-    let store = model.graph_store().unwrap();
+    let store = model.snapshot().unwrap();
     assert_eq!(
         store
             .text_search("Person", "bio", "canals", 19, ReadView::latest())

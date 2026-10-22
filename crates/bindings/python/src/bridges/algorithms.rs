@@ -15,6 +15,7 @@ use grafeo_adapters::plugins::algorithms::{self, KeyOrderError};
 use grafeo_common::types::{NodeId, ReadView, Value};
 use grafeo_common::utils::error::{Error, QueryError, QueryErrorKind};
 use grafeo_core::graph::GraphStore;
+use grafeo_engine::Snapshot;
 use grafeo_engine::database::GrafeoDB;
 
 use crate::error::PyGrafeoError;
@@ -205,15 +206,16 @@ impl PyAlgorithms {
         }
     }
 
-    /// The store an algorithm reads: the projection when the call names one
-    /// (projection names are database-wide, so it wins over the graph), else
-    /// the handle's graph, else the selected graph. A graph or projection that
-    /// does not exist is an error, never another graph.
-    fn store_for(
+    /// A snapshot of what an algorithm reads: the projection when the call
+    /// names one (projection names are database-wide, so it wins over the
+    /// graph), else the handle's graph, else the selected graph, one pinned
+    /// state for the whole run. A graph or projection that does not exist is
+    /// an error, never another graph.
+    fn snapshot_for(
         &self,
         db: &GrafeoDB,
         projection: Option<&str>,
-    ) -> Result<Arc<dyn GraphStore>, PyGrafeoError> {
+    ) -> Result<Snapshot, PyGrafeoError> {
         if let Some(name) = projection {
             return db.projection(name).ok_or_else(|| {
                 PyGrafeoError::from(Error::Query(QueryError::new(
@@ -222,19 +224,18 @@ impl PyAlgorithms {
                 )))
             });
         }
-        let store = match &self.graph {
+        let snapshot = match &self.graph {
             Some((schema, name)) => db
                 .graph_in(schema.as_deref(), name)
-                .and_then(|graph| graph.graph_store()),
-            None => db.selected_graph_store(),
+                .and_then(|graph| graph.snapshot()),
+            None => db.snapshot(),
         };
-        Ok(store?)
+        Ok(snapshot?)
     }
 
-    /// Runs `compute` on the store the algorithm reads (see
-    /// [`store_for`](Self::store_for)) with the GIL released, as a committed
-    /// reader at the current epoch sees it; a read the store cannot do
-    /// raises its error.
+    /// Runs `compute` on a snapshot of what the algorithm reads (see
+    /// [`snapshot_for`](Self::snapshot_for)) with the GIL released; a read the
+    /// store cannot do raises its error.
     fn compute<T: Send, E: Into<PyGrafeoError>>(
         &self,
         py: Python<'_>,
@@ -243,9 +244,8 @@ impl PyAlgorithms {
     ) -> PyResult<T> {
         without_gil(py, || {
             let db = self.db.read();
-            let store = self.store_for(&db, projection)?;
-            let view = ReadView::committed(db.current_epoch());
-            compute(&*store, view).map_err(Into::into)
+            let snapshot = self.snapshot_for(&db, projection)?;
+            compute(snapshot.store(), snapshot.view()).map_err(Into::into)
         })
     }
 
@@ -261,13 +261,13 @@ impl PyAlgorithms {
     ) -> PyResult<(T, Option<KeyOrder>)> {
         let (result, ordered) = without_gil(py, || {
             let db = self.db.read();
-            let store = self.store_for(&db, projection)?;
-            let view = ReadView::committed(db.current_epoch());
-            let ordered = ordered_by_key(&*store, view, key)?;
+            let snapshot = self.snapshot_for(&db, projection)?;
+            let (store, view) = (snapshot.store(), snapshot.view());
+            let ordered = ordered_by_key(store, view, key)?;
             let nodes: Option<Vec<NodeId>> = ordered
                 .as_ref()
                 .map(|ordered| ordered.iter().map(|(node, _)| *node).collect());
-            let result = compute(&*store, view, nodes.as_deref()).map_err(Into::into)?;
+            let result = compute(store, view, nodes.as_deref()).map_err(Into::into)?;
             Ok::<_, PyGrafeoError>((result, ordered))
         })?;
         Ok((result, key_order(py, key, ordered)?))

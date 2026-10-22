@@ -7,7 +7,7 @@ use smallvec::SmallVec;
 /// A node with its labels and properties fully loaded.
 ///
 /// This is what you get back from
-/// [`GraphStore::get_node`](crate::graph::GraphStore::get_node).
+/// [`GraphStore::node`](crate::graph::GraphStore::node).
 ///
 /// # Example
 ///

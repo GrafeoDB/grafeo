@@ -826,8 +826,11 @@ fn a_projection_finds_the_nodes_of_a_label_outside_its_spec() {
         db.create_projection("people", ProjectionSpec::new().with_node_labels(["Person"]))
             .unwrap()
     );
-    let view =
-        GrafeoDB::with_read_store(db.projection("people").unwrap(), Config::in_memory()).unwrap();
+    let view = GrafeoDB::with_read_store(
+        db.projection("people").unwrap().shared(),
+        Config::in_memory(),
+    )
+    .unwrap();
     let session = view.session();
     let alix = ids(&["Alix"]);
     let one = vec![vec![Value::Int64(1)]];

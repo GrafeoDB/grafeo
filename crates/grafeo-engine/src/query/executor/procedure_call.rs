@@ -21,14 +21,14 @@ use crate::procedures::{Procedure, ProcedureContext};
 /// the full result is cached. Subsequent calls yield rows in chunks of
 /// `CHUNK_SIZE` until exhausted.
 pub struct ProcedureCallOperator {
-    store: Arc<dyn GraphStore>,
+    /// The graph the calling query reads, at its view, pinned by the query
+    /// for the call.
+    snapshot: crate::Snapshot,
     procedure: Arc<dyn Procedure>,
     params: Parameters,
     /// Optional LPG store handle, required by search procedures that reach
     /// the HNSW / BM25 indexes rather than the raw graph store.
     lpg_store: Option<Arc<grafeo_core::graph::rowgroup::RowGroupStore>>,
-    /// The view the calling query reads at, pinned for the call.
-    view: ReadView,
     /// YIELD items: (original_column, alias). `None` means yield all columns.
     yield_columns: Option<Vec<(String, Option<String>)>>,
     /// Canonical column names from the procedure registry (e.g., `["node_id", "score"]`
@@ -59,11 +59,10 @@ impl ProcedureCallOperator {
         view: ReadView,
     ) -> Self {
         Self {
-            store,
+            snapshot: crate::Snapshot::of_query(store, view),
             procedure,
             params,
             lpg_store: None,
-            view,
             yield_columns,
             canonical_columns,
             result: None,
@@ -87,8 +86,8 @@ impl ProcedureCallOperator {
     /// Executes the procedure and resolves YIELD column mapping.
     fn execute_algorithm(&mut self) -> Result<(), OperatorError> {
         let ctx = match self.lpg_store.as_deref() {
-            Some(lpg) => ProcedureContext::with_lpg_store(&*self.store, lpg, self.view),
-            None => ProcedureContext::new(&*self.store, self.view),
+            Some(lpg) => ProcedureContext::with_lpg_store(&self.snapshot, lpg),
+            None => ProcedureContext::new(&self.snapshot),
         };
         let result = self
             .procedure

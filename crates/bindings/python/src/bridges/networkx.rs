@@ -13,16 +13,14 @@ use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyTuple};
 
 use grafeo_common::types::{NodeId, ReadView};
-use grafeo_core::graph::rowgroup::RowGroupStore;
 use grafeo_core::graph::{Direction, GraphStore};
 use grafeo_engine::database::GrafeoDB;
 
-use crate::database::committed_now;
 use crate::error::{PyGrafeoError, raised};
 use crate::gil::without_gil;
 
 /// The nodes `view` sees, in ID order.
-fn node_ids(store: &RowGroupStore, view: ReadView) -> PyResult<Vec<NodeId>> {
+fn node_ids(store: &dyn GraphStore, view: ReadView) -> PyResult<Vec<NodeId>> {
     raised(store.node_ids(view))
 }
 
@@ -52,18 +50,18 @@ impl PyNetworkXAdapter {
         Self { db, directed }
     }
 
-    /// Runs `compute` on the database with the GIL released, as a committed
-    /// reader at the current epoch sees it; a read the store cannot do raises
-    /// its error.
+    /// Runs `compute` with the GIL released on a snapshot of the graph
+    /// `set_graph()` selects (the default graph when none is), one pinned
+    /// state for the whole run; a read the store cannot do raises its error.
     fn compute<T: Send>(
         &self,
         py: Python<'_>,
-        compute: impl FnOnce(&GrafeoDB, ReadView) -> grafeo_common::utils::error::Result<T> + Send,
+        compute: impl FnOnce(&dyn GraphStore, ReadView) -> grafeo_common::utils::error::Result<T> + Send,
     ) -> PyResult<T> {
         without_gil(py, || {
             let db = self.db.read();
-            let view = ReadView::committed(db.current_epoch());
-            compute(&db, view).map_err(PyGrafeoError::from)
+            let snapshot = db.snapshot()?;
+            compute(snapshot.store(), snapshot.view()).map_err(PyGrafeoError::from)
         })
     }
 }
@@ -74,14 +72,16 @@ impl PyNetworkXAdapter {
     #[getter]
     fn number_of_nodes(&self) -> PyResult<usize> {
         let db = self.db.read();
-        raised(db.node_count())
+        let snapshot = raised(db.snapshot())?;
+        raised(snapshot.node_count(snapshot.view()))
     }
 
     /// Get number of edges.
     #[getter]
     fn number_of_edges(&self) -> PyResult<usize> {
         let db = self.db.read();
-        raised(db.edge_count())
+        let snapshot = raised(db.snapshot())?;
+        raised(snapshot.edge_count(snapshot.view()))
     }
 
     /// Check if graph is directed.
@@ -93,8 +93,9 @@ impl PyNetworkXAdapter {
     /// Get list of all node IDs.
     fn nodes(&self) -> PyResult<Vec<u64>> {
         let db = self.db.read();
-        let (store, now) = (db.store(), committed_now(&db)?);
-        Ok(node_ids(&store, now.read_view())?
+        let snapshot = raised(db.snapshot())?;
+        let store = snapshot.store();
+        Ok(node_ids(store, snapshot.view())?
             .into_iter()
             .map(|n| n.0)
             .collect())
@@ -103,9 +104,10 @@ impl PyNetworkXAdapter {
     /// Get list of all edges as (source, target) tuples.
     fn edges(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         let db = self.db.read();
-        let (store, now) = (db.store(), committed_now(&db)?);
-        let view = now.read_view();
-        let nodes = node_ids(&store, view)?;
+        let snapshot = raised(db.snapshot())?;
+        let store = snapshot.store();
+        let view = snapshot.view();
+        let nodes = node_ids(store, view)?;
 
         let mut edges: Vec<(u64, u64)> = Vec::new();
         for node in nodes {
@@ -120,9 +122,10 @@ impl PyNetworkXAdapter {
     /// Get neighbors of a node.
     fn neighbors(&self, node_id: u64) -> PyResult<Vec<u64>> {
         let db = self.db.read();
-        let (store, now) = (db.store(), committed_now(&db)?);
+        let snapshot = raised(db.snapshot())?;
+        let store = snapshot.store();
         let neighbors: Vec<u64> =
-            raised(store.neighbors(NodeId::new(node_id), Direction::Outgoing, now.read_view()))?
+            raised(store.neighbors(NodeId::new(node_id), Direction::Outgoing, snapshot.view()))?
                 .into_iter()
                 .map(|n| n.0)
                 .collect();
@@ -132,15 +135,17 @@ impl PyNetworkXAdapter {
     /// Get in-degree of a node.
     fn in_degree(&self, node_id: u64) -> PyResult<usize> {
         let db = self.db.read();
-        let (store, now) = (db.store(), committed_now(&db)?);
-        raised(store.degree(NodeId::new(node_id), Direction::Incoming, now.read_view()))
+        let snapshot = raised(db.snapshot())?;
+        let store = snapshot.store();
+        raised(store.degree(NodeId::new(node_id), Direction::Incoming, snapshot.view()))
     }
 
     /// Get out-degree of a node.
     fn out_degree(&self, node_id: u64) -> PyResult<usize> {
         let db = self.db.read();
-        let (store, now) = (db.store(), committed_now(&db)?);
-        raised(store.degree(NodeId::new(node_id), Direction::Outgoing, now.read_view()))
+        let snapshot = raised(db.snapshot())?;
+        let store = snapshot.store();
+        raised(store.degree(NodeId::new(node_id), Direction::Outgoing, snapshot.view()))
     }
 
     /// Get degree of a node (in + out for directed, total for undirected).
@@ -156,9 +161,10 @@ impl PyNetworkXAdapter {
     /// Check if an edge exists.
     fn has_edge(&self, source: u64, target: u64) -> PyResult<bool> {
         let db = self.db.read();
-        let (store, now) = (db.store(), committed_now(&db)?);
+        let snapshot = raised(db.snapshot())?;
+        let store = snapshot.store();
         Ok(
-            raised(store.neighbors(NodeId::new(source), Direction::Outgoing, now.read_view()))?
+            raised(store.neighbors(NodeId::new(source), Direction::Outgoing, snapshot.view()))?
                 .into_iter()
                 .any(|neighbor| neighbor.0 == target),
         )
@@ -188,9 +194,10 @@ impl PyNetworkXAdapter {
         };
 
         let db = self.db.read();
-        let (store, now) = (db.store(), committed_now(&db)?);
-        let view = now.read_view();
-        let nodes = node_ids(&store, view)?;
+        let snapshot = raised(db.snapshot())?;
+        let store = snapshot.store();
+        let view = snapshot.view();
+        let nodes = node_ids(store, view)?;
 
         // Build a mapping from Grafeo NodeId -> NetworkX node identifier.
         let mut id_map: HashMap<u64, Py<PyAny>> = HashMap::new();
@@ -424,8 +431,8 @@ impl PyNetworkXAdapter {
     ) -> PyResult<BTreeMap<u64, f64>> {
         use grafeo_adapters::plugins::algorithms;
 
-        let result = self.compute(py, |db, view| {
-            algorithms::pagerank(&*db.store(), view, alpha, max_iter, tol, self.directed)
+        let result = self.compute(py, |store, view| {
+            algorithms::pagerank(store, view, alpha, max_iter, tol, self.directed)
         })?;
         Ok(result.into_iter().map(|(n, s)| (n.0, s)).collect())
     }
@@ -439,8 +446,8 @@ impl PyNetworkXAdapter {
     ) -> PyResult<BTreeMap<u64, f64>> {
         use grafeo_adapters::plugins::algorithms;
 
-        let result = self.compute(py, |db, view| {
-            algorithms::betweenness_centrality(&*db.store(), view, normalized)
+        let result = self.compute(py, |store, view| {
+            algorithms::betweenness_centrality(store, view, normalized)
         })?;
         Ok(result.into_iter().map(|(n, s)| (n.0, s)).collect())
     }
@@ -454,8 +461,8 @@ impl PyNetworkXAdapter {
     ) -> PyResult<BTreeMap<u64, f64>> {
         use grafeo_adapters::plugins::algorithms;
 
-        let result = self.compute(py, |db, view| {
-            algorithms::closeness_centrality(&*db.store(), view, wf_improved)
+        let result = self.compute(py, |store, view| {
+            algorithms::closeness_centrality(store, view, wf_improved)
         })?;
         Ok(result.into_iter().map(|(n, s)| (n.0, s)).collect())
     }
@@ -465,8 +472,8 @@ impl PyNetworkXAdapter {
     fn connected_components(&self, py: Python<'_>) -> PyResult<Vec<Vec<u64>>> {
         use grafeo_adapters::plugins::algorithms;
 
-        let components = self.compute(py, |db, view| {
-            algorithms::connected_components(&*db.store(), view)
+        let components = self.compute(py, |store, view| {
+            algorithms::connected_components(store, view)
         })?;
 
         // Group by component, each in node-id order (the result is a hash map,
@@ -497,9 +504,9 @@ impl PyNetworkXAdapter {
         use grafeo_adapters::plugins::algorithms;
 
         if let Some(target_id) = target {
-            let path = self.compute(py, |db, view| {
+            let path = self.compute(py, |store, view| {
                 algorithms::dijkstra_path(
-                    &*db.store(),
+                    store,
                     view,
                     NodeId::new(source),
                     NodeId::new(target_id),
@@ -515,8 +522,8 @@ impl PyNetworkXAdapter {
             }
         } else {
             // Return paths to all reachable nodes
-            let result = self.compute(py, |db, view| {
-                algorithms::dijkstra(&*db.store(), view, NodeId::new(source), weight)
+            let result = self.compute(py, |store, view| {
+                algorithms::dijkstra(store, view, NodeId::new(source), weight)
             })?;
             let dict = PyDict::new(py);
 
@@ -543,9 +550,9 @@ impl PyNetworkXAdapter {
         use grafeo_adapters::plugins::algorithms;
 
         if let Some(target_id) = target {
-            let path = self.compute(py, |db, view| {
+            let path = self.compute(py, |store, view| {
                 algorithms::dijkstra_path(
-                    &*db.store(),
+                    store,
                     view,
                     NodeId::new(source),
                     NodeId::new(target_id),
@@ -557,8 +564,8 @@ impl PyNetworkXAdapter {
                 None => Err(PyGrafeoError::InvalidArgument("No path found".into()).into()),
             }
         } else {
-            let result = self.compute(py, |db, view| {
-                algorithms::dijkstra(&*db.store(), view, NodeId::new(source), weight)
+            let result = self.compute(py, |store, view| {
+                algorithms::dijkstra(store, view, NodeId::new(source), weight)
             })?;
             let distances: BTreeMap<u64, f64> = result
                 .distances
@@ -575,9 +582,10 @@ impl PyNetworkXAdapter {
     #[getter]
     fn adj(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         let db = self.db.read();
-        let (store, now) = (db.store(), committed_now(&db)?);
-        let view = now.read_view();
-        let nodes = node_ids(&store, view)?;
+        let snapshot = raised(db.snapshot())?;
+        let store = snapshot.store();
+        let view = snapshot.view();
+        let nodes = node_ids(store, view)?;
 
         let outer = PyDict::new(py);
         for node_id in &nodes {
@@ -620,8 +628,9 @@ impl PyNetworkXAdapter {
         };
 
         let db = self.db.read();
-        let (store, now) = (db.store(), committed_now(&db)?);
-        let view = now.read_view();
+        let snapshot = raised(db.snapshot())?;
+        let store = snapshot.store();
+        let view = snapshot.view();
 
         let node_set: std::collections::HashSet<u64> = nodes.iter().copied().collect();
 

@@ -75,7 +75,7 @@ static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 pub use grafeo_engine::{
     AccessMode, Catalog, CatalogError, Config, ConfigError, Direction, DurabilityMode, GrafeoDB,
     Grant, GraphModel, GraphStore, GraphStoreMut, Identity, IndexDefinition, IndexType, Role,
-    Session, StatementKind, VERSION,
+    Session, Snapshot, StatementKind, VERSION,
 };
 
 // Re-export what the `Config` methods take, so a configuration needs no other

@@ -184,7 +184,7 @@ fn assert_each_label_reads_its_nodes(db: &GrafeoDB, stage: &str, nodes: &[(&str,
     assert_eq!(all, expected, "{stage}: the nodes and their labels");
 
     // A scan and a count per label, through the query and the store.
-    let store = db.graph_store();
+    let store = db.snapshot().unwrap();
     for label in LABELS {
         let names = named_with(nodes, &[label]);
         assert_eq!(

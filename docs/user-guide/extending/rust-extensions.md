@@ -35,17 +35,16 @@ grafeo-engine = "0.6"
 ### Extension Code
 
 ```rust
-use grafeo_common::types::ReadView;
 use grafeo_common::utils::error::Result;
 use grafeo_engine::GrafeoDB;
 
 /// Custom graph analysis function
 pub fn analyze_connectivity(db: &GrafeoDB) -> Result<ConnectivityReport> {
-    // Access the underlying graph store (read-only), as a committed reader
-    // at the current epoch sees it. Every read can fail (an external store's
+    // A snapshot of the graph: its store and the view its reads take, one
+    // pinned state for every read. Every read can fail (an external store's
     // own error), so it returns a Result.
-    let store = db.graph_store();
-    let view = ReadView::committed(db.current_epoch());
+    let snapshot = db.snapshot()?;
+    let (store, view) = (snapshot.store(), snapshot.view());
 
     let node_count = store.node_count(view)?;
     let edge_count = store.edge_count(view)?;

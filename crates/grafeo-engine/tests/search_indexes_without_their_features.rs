@@ -145,7 +145,8 @@ fn assert_indexed(db: &GrafeoDB) {
         "the nearest document"
     );
     let config = db
-        .graph_store()
+        .snapshot()
+        .unwrap()
         .vector_index_config("Document", "embedding")
         .expect("the vector index of the documents");
     assert_eq!(
@@ -172,7 +173,7 @@ fn assert_indexed(db: &GrafeoDB) {
     assert!(
         db.graph("trips")
             .unwrap()
-            .graph_store()
+            .snapshot()
             .unwrap()
             .has_vector_index("Stop", "position"),
         "the vector index of the named graph"

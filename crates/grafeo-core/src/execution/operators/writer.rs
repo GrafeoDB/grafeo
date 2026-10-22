@@ -230,9 +230,9 @@ impl GraphWriter {
 
     /// Claims what each write changes through `claims`, and holds its write
     /// freeze, for a writer without a recording that writes as a transaction
-    /// through the store's versioned methods (see
-    /// [`with_transaction_context`](Self::with_transaction_context)). A
-    /// recording claims through its own recorder instead.
+    /// through the store's versioned methods (its view names the
+    /// transaction, see [`new`](Self::new)). A recording claims through its
+    /// own recorder instead.
     #[must_use]
     pub fn with_claims(mut self, claims: Arc<dyn WriteClaims>) -> Self {
         self.claims = Some(claims);

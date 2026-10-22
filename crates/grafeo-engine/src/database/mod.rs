@@ -107,8 +107,6 @@ mod upsert;
 pub(crate) mod wal_log;
 
 use grafeo_common::grafeo_error;
-#[cfg(feature = "wal")]
-use std::path::Path;
 use std::sync::Arc;
 #[cfg(feature = "wal")]
 use std::sync::atomic::AtomicU64;
@@ -317,6 +315,13 @@ impl GrafeoDB {
     /// empty database: a single file, whatever the path's extension, with its
     /// write-ahead log in the sidecar directory `<path>.wal/` while it is open.
     ///
+    /// A build without the `wal` feature (the `grafeo` crate's default
+    /// features have none; its `storage` group and `lpg` profile add it)
+    /// keeps no write-ahead log: commits stay in memory until a checkpoint
+    /// writes them to the file (`close()`, dropping the database, or
+    /// [`wal_checkpoint`](Self::wal_checkpoint)), and a process that exits
+    /// without one loses the commits since the last.
+    ///
     /// A database written by 0.5.x is migrated to the 0.6 file format first:
     /// a `.grafeo` file, or a WAL directory (a directory holding `wal/`),
     /// which becomes a single file at the same path. The old files are kept,
@@ -343,8 +348,8 @@ impl GrafeoDB {
     /// let db = GrafeoDB::open("./my_social_network")?;
     /// # Ok::<(), grafeo_common::utils::error::Error>(())
     /// ```
-    #[cfg(feature = "wal")]
-    pub fn open(path: impl AsRef<Path>) -> Result<Self> {
+    #[cfg(feature = "grafeo-file")]
+    pub fn open(path: impl AsRef<std::path::Path>) -> Result<Self> {
         Self::with_config(Config::persistent(path.as_ref()))
     }
 

@@ -251,6 +251,13 @@ fn write_sections(
 /// records.
 #[cfg(feature = "grafeo-file")]
 #[derive(Debug, Clone, Copy)]
+#[cfg_attr(
+    not(feature = "wal"),
+    expect(
+        dead_code,
+        reason = "a full backup reads them, and backups need the `wal` feature"
+    )
+)]
 pub(super) struct CopyWritten {
     /// The epoch E of the copy.
     pub epoch: u64,

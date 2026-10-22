@@ -19,6 +19,9 @@ Add `--json` for machine-readable output. Exit code 1 when an error is found.
     T3  the private planning directory is never tracked or referenced
     T4  no em or en dashes in public docs, README, CHANGELOG, CONTRIBUTING, .github
     T5  every published workspace crate declares the workspace's rust-version (the MSRV)
+    T6  docs/stability.md's Experimental table and the `# Stability: Experimental` sections
+        of the facade's crates agree both ways; the facade and its modules have a
+        `# Stability` section
     D1  an added #[allow(...)] states a reason = "..."
     D2  no em or en dashes in added Markdown lines or code comments
     D3  no added references to private planning notes; no internal phase wording in docs
@@ -135,6 +138,7 @@ HINTS = {
     "T3": "restate what matters inline or link a public issue",
     "T4": "rewrite with a comma, colon or parentheses",
     "T5": "add `rust-version.workspace = true` to the crate's [package]",
+    "T6": "an experimental item has a `# Stability: Experimental` section and a row in docs/stability.md; a module the facade exports has a `# Stability` section",
     "D1": 'add reason = "..." naming the bound or invariant that makes it safe',
     "D2": "em or en dash; rewrite with a comma, colon or parentheses",
     "D3": "public text must stand on its own; restate the content or link a public issue",
@@ -397,6 +401,277 @@ def rust_version_findings(root: Path, metadata: dict) -> list[Finding]:
     return findings
 
 
+# ------------------------------------------------------------------ stability markers
+
+#: The crates whose code the `grafeo` facade exposes: where experimental items live.
+STABILITY_CRATES = ("grafeo", "grafeo-engine", "grafeo-core", "grafeo-common")
+#: A `# Stability` heading of an item (`///`) or a module (`//!`).
+STABILITY_HEADING = re.compile(
+    r"^\s*//[/!]\s*#{1,2} Stability(?:: (Experimental))?\s*$"
+)
+#: A Rust path in the Experimental table: `Type`, `Type::member`, `module::item`, `a::b::c`;
+#: a trailing `()` (a method named as a call) is dropped.
+TABLE_PATH = re.compile(r"^(?:[A-Za-z_]\w*::)+[A-Za-z_]\w*(?:\(\))?$|^[A-Z][a-z]\w*$")
+ITEM = re.compile(
+    r"^\s*pub(?:\([^)]*\))?\s+(?:(?:const|async|unsafe|extern \"C\")\s+)*"
+    r"(?:(fn|struct|enum|trait|type|mod)\s+(\w+)|(\w+)\s*:)"
+)
+CONTAINER = re.compile(
+    r"^\s*(?:pub(?:\([^)]*\))?\s+)?(?:impl\b(.*)|(?:struct|enum|trait)\s+(\w+))"
+)
+
+
+def experimental_table(root: Path) -> list[tuple[int, str]]:
+    """The Rust paths of the Experimental table in docs/stability.md, with their lines."""
+    text = read_text(root / "docs" / "stability.md")
+    if text is None:
+        return []
+    paths, inside = [], False
+    for number, line in enumerate(text.splitlines(), 1):
+        if line.startswith("## "):
+            inside = line.strip() == "## Experimental APIs"
+            continue
+        if (
+            not inside
+            or not line.startswith("| ")
+            or line.startswith(("| API", "| ---"))
+        ):
+            continue
+        for token in re.findall(r"`([^`]+)`", line.split("|")[1]):
+            if TABLE_PATH.match(token):
+                paths.append((number, token.removesuffix("()")))
+    return paths
+
+
+def doc_above(lines: list[str], index: int) -> list[str]:
+    """The `///` lines of the item at `index`, past its attributes."""
+    docs, at = [], index - 1
+    while at >= 0:
+        stripped = lines[at].strip()
+        if stripped.startswith("///"):
+            docs.append(stripped)
+        elif stripped.startswith(("#[", "#!")) or (
+            stripped
+            and not stripped.endswith((";", "{", "}"))
+            and not stripped.startswith("//")
+        ):
+            # An attribute, or a line of one that spans several.
+            pass
+        else:
+            break
+        at -= 1
+    return docs
+
+
+@dataclass
+class RustItem:
+    """A public item of the facade's crates: where it is, what holds it, and its markers."""
+
+    path: str
+    line: int
+    kind: str
+    name: str
+    container: str | None
+    experimental: bool
+
+
+def module_name(rel: str) -> str:
+    stem = Path(rel).stem
+    return Path(rel).parent.name if stem in ("mod", "lib") else stem
+
+
+def rust_items(
+    root: Path, files: list[str]
+) -> tuple[list[RustItem], list[tuple[str, int, bool]]]:
+    """The public items of the facade's crates, and the `//!` stability headings of their
+    modules (file, line, experimental)."""
+    items, modules = [], []
+    for rel in files:
+        parts = rel.split("/")
+        if not rel.endswith(".rs") or len(parts) < 3 or parts[0] != "crates":
+            continue
+        if parts[1] not in STABILITY_CRATES or parts[2] != "src":
+            continue
+        text = read_text(root / rel)
+        if text is None:
+            continue
+        lines = text.splitlines()
+        for number, line in enumerate(lines, 1):
+            if not line.lstrip().startswith("//!"):
+                break
+            heading = STABILITY_HEADING.match(line)
+            if heading:
+                modules.append((rel, number, bool(heading.group(1))))
+        container = None
+        for index, line in enumerate(lines):
+            if line.rstrip() == "}":
+                # The end of a top-level block: what follows belongs to no type.
+                container = None
+            holder = CONTAINER.match(line)
+            if holder and not line.strip().startswith("//"):
+                if holder.group(2):
+                    container = holder.group(2)
+                else:
+                    target = holder.group(1).split(" for ")[-1]
+                    words = re.findall(r"[A-Za-z_]\w*", target.split("{")[0])
+                    container = next((w for w in words if w[0].isupper()), None)
+            found = ITEM.match(line)
+            if not found:
+                continue
+            kind = found.group(1) or "field"
+            name = found.group(2) or found.group(3)
+            docs = doc_above(lines, index)
+            experimental = any(
+                (heading := STABILITY_HEADING.match(doc)) and heading.group(1)
+                for doc in docs
+            )
+            items.append(
+                RustItem(
+                    rel,
+                    index + 1,
+                    kind,
+                    name,
+                    container if kind in ("fn", "field") else None,
+                    experimental,
+                )
+            )
+    return items, modules
+
+
+def stability_findings(root: Path, files: list[str]) -> list[Finding]:
+    """T6: the Experimental table of docs/stability.md and the code agree, and every module
+    the facade re-exports says what is stable.
+
+    Both ways: each Rust path the table names has a `# Stability: Experimental` section where it
+    is defined, and each such section in the facade's crates belongs to an item or module the
+    table names. The `grafeo` crate's root documentation, each `grafeo_engine` module it
+    re-exports and each module it defines has a `# Stability` section.
+    """
+    if not (root / "docs" / "stability.md").exists():
+        return []
+    findings = []
+    table = experimental_table(root)
+    items, modules = rust_items(root, files)
+    named = {segment for _, path in table for segment in path.split("::")}
+
+    def definitions(path: str) -> list[RustItem]:
+        *outer, name = path.split("::")
+        holder = outer[-1] if outer else None
+        candidates = [item for item in items if item.name == name]
+        if holder and holder[0].isupper():
+            return [item for item in candidates if item.container == holder]
+        if holder:
+            return [
+                item
+                for item in candidates
+                if module_name(item.path) == holder or holder in item.path.split("/")
+            ]
+        return [
+            item
+            for item in candidates
+            if item.kind in ("struct", "enum", "trait", "type")
+        ]
+
+    for line, path in table:
+        *outer, name = path.split("::")
+        if outer and outer[-1][0].islower() and not definitions(path):
+            # A module: its own `//!` heading marks it.
+            marked = [m for m in modules if module_name(m[0]) == name and m[2]]
+            if marked:
+                continue
+        found = definitions(path)
+        if not found:
+            findings.append(
+                finding(
+                    "T6",
+                    "docs/stability.md",
+                    line,
+                    f"`{path}` is not defined in the facade's crates",
+                )
+            )
+        elif not any(item.experimental for item in found):
+            item = found[0]
+            findings.append(
+                finding(
+                    "T6",
+                    item.path,
+                    item.line,
+                    f"`{path}` is in the Experimental table but has no `# Stability: Experimental` section",
+                )
+            )
+    for item in items:
+        if item.experimental and item.name not in named:
+            findings.append(
+                finding(
+                    "T6",
+                    item.path,
+                    item.line,
+                    f"`{item.name}` is marked experimental but not in the Experimental table of docs/stability.md",
+                )
+            )
+    marked_files = {
+        item.path for item in items if item.experimental and item.name in named
+    }
+    for rel, line, experimental in modules:
+        if experimental and module_name(rel) not in named and rel not in marked_files:
+            findings.append(
+                finding(
+                    "T6",
+                    rel,
+                    line,
+                    f"module `{module_name(rel)}` is marked experimental but not in the Experimental table",
+                )
+            )
+
+    facade = read_text(root / "crates" / "grafeo" / "src" / "lib.rs")
+    if facade is not None:
+        lines = facade.splitlines()
+        if not any(
+            STABILITY_HEADING.match(line)
+            for line in lines
+            if line.lstrip().startswith("//!")
+        ):
+            findings.append(
+                finding(
+                    "T6",
+                    "crates/grafeo/src/lib.rs",
+                    1,
+                    "the crate documentation has no `# Stability` section",
+                )
+            )
+        sections = {m[0] for m in modules}
+        for number, line in enumerate(lines, 1):
+            reexport = re.match(r"^pub use grafeo_engine::([a-z_]+);", line)
+            if reexport:
+                module = reexport.group(1)
+                candidates = [
+                    f"crates/grafeo-engine/src/{module}.rs",
+                    f"crates/grafeo-engine/src/{module}/mod.rs",
+                ]
+                if not any(c in sections for c in candidates):
+                    findings.append(
+                        finding(
+                            "T6",
+                            "crates/grafeo/src/lib.rs",
+                            number,
+                            f"re-exported module `{module}` has no `# Stability` section",
+                        )
+                    )
+            own = re.match(r"^pub mod (\w+)", line)
+            if own and not any(
+                STABILITY_HEADING.match(doc) for doc in doc_above(lines, number - 1)
+            ):
+                findings.append(
+                    finding(
+                        "T6",
+                        "crates/grafeo/src/lib.rs",
+                        number,
+                        f"module `{own.group(1)}` has no `# Stability` section",
+                    )
+                )
+    return findings
+
+
 def toolchain_findings(root: Path) -> list[Finding]:
     """T2: every pinned toolchain in the workflows is the channel or the MSRV."""
     toolchain_file, manifest = root / "rust-toolchain.toml", root / "Cargo.toml"
@@ -466,6 +741,7 @@ def text_findings(root: Path, files: list[str]) -> list[Finding]:
 def tree_findings(root: Path, metadata_arg: str | None) -> list[Finding]:
     files = git(root, "ls-files").splitlines()
     findings = toolchain_findings(root) + text_findings(root, files)
+    findings += stability_findings(root, files)
     if metadata_arg != "none" and (root / "Cargo.toml").exists():
         if metadata_arg:
             metadata = json.loads(Path(metadata_arg).read_text(encoding="utf-8"))
@@ -989,7 +1265,7 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     parser.add_argument("--json", action="store_true", help="print findings as JSON")
     commands = parser.add_subparsers(dest="command", required=True)
-    tree = commands.add_parser("tree", help="whole-repository rules (T1 to T4)")
+    tree = commands.add_parser("tree", help="whole-repository rules (T1 to T6)")
     tree.add_argument(
         "--metadata", help="cargo metadata JSON file, or 'none' to skip T1"
     )

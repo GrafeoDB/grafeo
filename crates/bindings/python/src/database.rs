@@ -2438,6 +2438,11 @@ impl PyGrafeoDB {
     ///     usage = db.memory_usage()
     ///     print(f"Total: {usage['total_bytes']} bytes")
     ///     print(f"Store: {usage['store']['total_bytes']} bytes")
+    ///
+    /// # Stability: Experimental
+    ///
+    /// The call is stable; the keys and what each one counts follow the
+    /// storage engine and may change in any release. See <https://grafeo.dev/stability/>.
     fn memory_usage(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         let db = self.inner.read();
         let usage = db.memory_usage();

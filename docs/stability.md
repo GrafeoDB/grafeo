@@ -12,7 +12,7 @@ is experimental only when its documentation says so.
 
 | Level | What may change | When | How you hear about it |
 | --- | --- | --- | --- |
-| **Stable** | Nothing that breaks code written against it: a signature, a behavior, a result shape | Only in a minor release (`0.6` to `0.7`), and a removal or rename only after a deprecation in an earlier release | A **Breaking** entry in the [CHANGELOG](changelog.md), the upgrade guide of that release, and `#[deprecated]` (or the binding's own deprecation warning) from the release that deprecates it |
+| **Stable** | Nothing that breaks code written against it: a signature, a behavior, a result shape | Only in a minor release (`0.6` to `0.7`), and a removal or rename only after a deprecation in an earlier release | A **Breaking** entry in the [CHANGELOG](changelog.md), the [upgrade guide](upgrading/index.md) of that release, and `#[deprecated]` (or the binding's own deprecation warning) from the release that deprecates it |
 | **Experimental** | Anything, including removal | In any release, patch releases included | An entry under **Changed** in the [CHANGELOG](changelog.md) |
 
 A stable API still grows within a minor version: a patch release can add a setting, a field to a result type, or a
@@ -22,6 +22,9 @@ If you depend on an experimental API, pin the exact version (`grafeo = "=0.6.2"`
 CHANGELOG before you upgrade.
 
 ## Where the Levels Are Marked
+
+The table under [Experimental APIs](#experimental-apis) is the list: a check in CI compares it with the
+`# Stability: Experimental` sections of the Rust code both ways, so neither can name an item the other lacks.
 
 - **Rust**: the documentation of the `grafeo` crate and of each module it re-exports says *Stable unless marked*.
   An experimental item has a `# Stability: Experimental` section in its documentation. A deprecated item carries
@@ -41,11 +44,11 @@ The implementation crates (`grafeo-common`, `grafeo-core`, `grafeo-storage`, `gr
 | API | Why it is experimental |
 | --- | --- |
 | Streaming results: `Session::execute_streaming` and `GrafeoDB::execute_streaming` with `ResultStream`, `OwnedResultStream`, `RowIterator` and `OwnedRowIterator`; Python `execute_lazy()` and `ResultStream`; Node.js `executeStream()` and `ResultStream` | New in 0.5.40; the iterator and its lifetime rules may still change |
-| The numbers `memory_usage()` reports: the fields of `MemoryUsage` and its parts, and what each one counts | Memory accounting follows the storage engine, which changes within 0.6. The types are `#[non_exhaustive]`, so a field can be added; what a field counts can change too. The call `memory_usage()` itself is stable |
+| The numbers `memory_usage()` reports: the fields of `MemoryUsage` and its parts (the `grafeo::memory_usage` module), and what each one counts | Memory accounting follows the storage engine, which changes within 0.6. The types are `#[non_exhaustive]`, so a field can be added; what a field counts can change too. The call `memory_usage()` itself is stable |
 | `Session::statement_writes`: whether a statement writes, without running it | New in 0.6.0; which statements count as writes may be refined |
 | File import from Rust: `import::import_nodes` and `ImportFormat` (the Python `import_csv` and `import_jsonl`, the Node.js `importCsv` and `importJsonl` and the CLI `grafeo import csv` and `grafeo import jsonl` that run it are stable) | New in 0.6.0; formats and options may be added |
-| The operator tree of a `PROFILE` statement: `QueryResult::profile` and `QueryProfile`, the Python and Node.js `profile` and the WASM `profile` key | New in 0.6.0; its operators and fields may still change |
-| A store of one's own: `GrafeoDB::with_store` and `with_read_store`, implementing `GraphStore` or `GraphBackend`, and the `conformance` suite that checks an implementation | The write contract is new in 0.6.0, and no backend outside Grafeo has run it yet: a required method may be added within 0.6.x. Calling the traits is stable |
+| The operator tree of a `PROFILE` statement: `QueryResult::profile`, `QueryProfile` and `OperatorProfile`, the Python and Node.js `profile` and the WASM `profile` key | New in 0.6.0; its operators and fields may still change |
+| A store of one's own: `GrafeoDB::with_store` and `GrafeoDB::with_read_store`, implementing `GraphStore` or `GraphBackend`, and the `store::conformance` suite that checks an implementation | The write contract is new in 0.6.0, and no backend outside Grafeo has run it yet: a required method may be added within 0.6.x. Calling the traits is stable |
 | `GrafeoDB::store()`: the built-in row-group store itself | For admin work; the row-group store's own methods follow the storage engine |
 
 ## Stable APIs

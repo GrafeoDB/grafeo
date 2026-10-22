@@ -41,8 +41,11 @@ pub struct QueryResult {
     pub(crate) profile: Option<grafeo_engine::database::QueryProfile>,
 }
 
-/// The operators of a `PROFILE` statement as a tree. Experimental: the
-/// fields may still change (see https://grafeo.dev/stability/).
+/// The operators of a `PROFILE` statement as a tree.
+///
+/// # Stability: Experimental
+///
+/// New in 0.6.0: the fields may still change. See <https://grafeo.dev/stability/>.
 #[napi(object)]
 pub struct QueryProfile {
     /// The operator that produces the statement's result.
@@ -53,6 +56,10 @@ pub struct QueryProfile {
 }
 
 /// One operator of a `QueryProfile`.
+///
+/// # Stability: Experimental
+///
+/// New in 0.6.0: the fields may still change. See <https://grafeo.dev/stability/>.
 #[napi(object)]
 pub struct OperatorProfile {
     /// The operator, for example `NodeScan`, `Filter` or `Expand`.
@@ -110,6 +117,10 @@ impl QueryResult {
 
     /// The operators of a `PROFILE` statement as a tree, or `null` for any
     /// other statement.
+    ///
+    /// # Stability: Experimental
+    ///
+    /// New in 0.6.0: the operators and their fields may still change. See <https://grafeo.dev/stability/>.
     #[napi(getter)]
     pub fn profile(&self) -> Option<QueryProfile> {
         self.profile.as_ref().map(|profile| QueryProfile {

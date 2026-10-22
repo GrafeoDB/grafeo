@@ -273,7 +273,13 @@ impl Database {
 
     /// Executes a GQL query and returns raw columns, rows, and metadata.
     ///
-    /// Returns `{ columns: string[], rows: any[][], executionTimeMs?: number }`.
+    /// Returns `{ columns: string[], rows: any[][], executionTimeMs?: number,
+    /// counters, profile? }`, `profile` for a `PROFILE` statement only.
+    ///
+    /// # Stability: Experimental
+    ///
+    /// The `profile` key only: new in 0.6.0, its operators and keys may still
+    /// change. The rest is stable. See <https://grafeo.dev/stability/>.
     ///
     /// # Errors
     ///
@@ -1332,6 +1338,11 @@ impl Database {
     /// console.log(`Store: ${usage.store.total_bytes} bytes`);
     /// console.log(`Indexes: ${usage.indexes.total_bytes} bytes`);
     /// ```
+    ///
+    /// # Stability: Experimental
+    ///
+    /// The call is stable; the keys and what each one counts follow the
+    /// storage engine and may change in any release. See <https://grafeo.dev/stability/>.
     ///
     /// # Errors
     ///

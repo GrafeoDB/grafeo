@@ -3693,6 +3693,11 @@ pub struct QueryResult {
     pub counters: WriteCounters,
     /// The operators of a statement run with `PROFILE`, as a tree with their
     /// rows and times; `None` for every other statement.
+    ///
+    /// # Stability: Experimental
+    ///
+    /// New in 0.6.0: the operators and their fields may still change, with a
+    /// CHANGELOG entry. See <https://grafeo.dev/stability/>.
     pub profile: Option<QueryProfile>,
 }
 

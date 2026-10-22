@@ -72,6 +72,7 @@ cargo build --release -p grafeo-c --features full
 ## Links
 
 - [Documentation](https://grafeo.dev)
+- [API Stability](https://grafeo.dev/stability/): which calls are stable and which are experimental; a call here has the level of the Rust call it wraps
 - [GitHub](https://github.com/GrafeoDB/grafeo)
 - [Python Package](https://pypi.org/project/grafeo/)
 - [npm Package](https://www.npmjs.com/package/@grafeo-db/js)

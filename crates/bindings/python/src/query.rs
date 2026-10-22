@@ -169,6 +169,10 @@ impl PyQueryResult {
     /// root = result.profile["root"]
     /// print(root["operator"], root["rows"])
     /// ```
+    ///
+    /// # Stability: Experimental
+    ///
+    /// New in 0.6.0: the operators and their keys may still change. See <https://grafeo.dev/stability/>.
     #[getter]
     fn profile(&self, py: Python<'_>) -> PyResult<Option<Py<PyDict>>> {
         let Some(profile) = &self.profile else {

@@ -2013,9 +2013,14 @@ pub fn write_lpg_snapshot(
 struct Loading {
     meta_index: usize,
     inner: Inner,
-    /// Each direction's lists as the chunks gave them: node id and list,
-    /// nodes ascending.
-    adjacency: [Vec<(u64, Vec<Adjacent>)>; 2],
+    /// Each direction's adjacency per node row group, built as the chunks
+    /// give the lists (rows ascending), checked against the edge table once
+    /// every chunk is read and then installed: what the load holds of it is
+    /// what the store will, not every node's list of the whole graph.
+    adjacency: [BTreeMap<u64, Adjacency>; 2],
+    /// Per direction, the row group of the last list set: a piece extends
+    /// that list, and a group is complete once a list of a later one comes.
+    last_list: [Option<u64>; 2],
     /// Rows the delete chunks name.
     deleted_nodes: Vec<u64>,
     deleted_edges: Vec<u64>,
@@ -2437,7 +2442,8 @@ pub fn read_lpg_section_with_backward_edges(
         loading.push(Loading {
             meta_index,
             inner,
-            adjacency: [Vec::new(), Vec::new()],
+            adjacency: [BTreeMap::new(), BTreeMap::new()],
+            last_list: [None, None],
             deleted_nodes: Vec::new(),
             deleted_edges: Vec::new(),
             node_groups: BTreeMap::new(),
@@ -2785,11 +2791,13 @@ pub fn read_lpg_section_with_backward_edges(
                     }
                     let list = &decoded.lists[0];
                     // A piece follows its list's first chunk (checked above).
-                    let Some((_, whole)) = graph.adjacency[direction].last_mut() else {
+                    let Some(whole) = graph.last_list[direction]
+                        .and_then(|group| graph.adjacency[direction].get_mut(&group))
+                    else {
                         return Err(refuse("a piece without its list's first chunk".to_string()));
                     };
                     if whole
-                        .last()
+                        .last_sorted()
                         .is_some_and(|last| list.first().is_some_and(|first| last >= first))
                     {
                         return Err(refuse(
@@ -2798,7 +2806,7 @@ pub fn read_lpg_section_with_backward_edges(
                     }
                     *next_piece += 1;
                     *entries += list.len();
-                    whole.extend(list);
+                    whole.extend_last_sorted(list);
                 } else {
                     if decoded.first_entry != 0 {
                         return Err(refuse(format!(
@@ -2816,7 +2824,21 @@ pub fn read_lpg_section_with_backward_edges(
                         if graph.inner.node(id).is_none() {
                             return Err(refuse(format!("row {id} is no node of its group")));
                         }
-                        graph.adjacency[direction].push((id, list));
+                        let (group, row) = locate(id);
+                        // The lists of a direction come in row order, so the
+                        // group before is complete: it gives back the room
+                        // its lists grew past.
+                        if let Some(before) =
+                            graph.last_list[direction].filter(|before| *before != group)
+                            && let Some(complete) = graph.adjacency[direction].get_mut(&before)
+                        {
+                            complete.shrink_to_fit();
+                        }
+                        graph.last_list[direction] = Some(group);
+                        graph.adjacency[direction]
+                            .entry(group)
+                            .or_default()
+                            .push_sorted(row, &list);
                     }
                 }
             }
@@ -2862,30 +2884,34 @@ pub fn read_lpg_section_with_backward_edges(
             .map(|(_, rows)| *rows as usize)
             .sum();
         let written = graph_meta.adjacency_written;
-        for (direction, lists) in graph.adjacency.iter().enumerate() {
+        for (direction, groups) in graph.adjacency.iter().enumerate() {
             if !written.holds(direction == 0) {
                 continue;
             }
             let mut entries = 0;
-            for (node, list) in lists {
-                for adjacent in list {
-                    let ends = graph
-                        .inner
-                        .edge(adjacent.edge)
-                        .map(|(group, row)| group.ends(row));
-                    let expected = if direction == 0 {
-                        (*node, adjacent.other, adjacent.edge_type)
-                    } else {
-                        (adjacent.other, *node, adjacent.edge_type)
-                    };
-                    if ends != Some(expected) {
-                        return Err(refuse(format!(
-                            "node {node}'s adjacency names edge {} as {expected:?}, where the edge table has {ends:?}",
-                            adjacent.edge
-                        )));
+            for (group, adjacency) in groups {
+                let base = group * ROWS_PER_GROUP;
+                for (row, list) in adjacency.sorted_rows() {
+                    let node = base + row as u64;
+                    for adjacent in list {
+                        let ends = graph
+                            .inner
+                            .edge(adjacent.edge)
+                            .map(|(group, row)| group.ends(row));
+                        let expected = if direction == 0 {
+                            (node, adjacent.other, adjacent.edge_type)
+                        } else {
+                            (adjacent.other, node, adjacent.edge_type)
+                        };
+                        if ends != Some(expected) {
+                            return Err(refuse(format!(
+                                "node {node}'s adjacency names edge {} as {expected:?}, where the edge table has {ends:?}",
+                                adjacent.edge
+                            )));
+                        }
                     }
                 }
-                entries += list.len();
+                entries += adjacency.sorted_len();
             }
             if entries != edge_count {
                 return Err(refuse(format!(
@@ -2894,25 +2920,21 @@ pub fn read_lpg_section_with_backward_edges(
             }
         }
         let keeps_incoming = graph.inner.keeps_incoming();
-        for (direction, lists) in graph.adjacency.into_iter().enumerate() {
+        for (direction, groups) in graph.adjacency.into_iter().enumerate() {
             // The incoming lists of a store that keeps none are dropped,
             // once checked.
             if direction == 1 && !keeps_incoming {
                 continue;
             }
-            let mut by_group: BTreeMap<u64, Vec<(usize, Vec<Adjacent>)>> = BTreeMap::new();
-            for (node, list) in lists {
-                let (group, row) = locate(node);
-                by_group.entry(group).or_default().push((row, list));
-            }
-            for (group, lists) in by_group {
+            for (group, mut adjacency) in groups {
                 // Every list's node was checked to be a node of the graph.
                 let Some(group) = graph.inner.nodes.get_mut(&group) else {
                     return Err(Error::corruption(format!(
                         "LPG section: adjacency of group {group}, which holds no nodes"
                     )));
                 };
-                *group.adjacency_mut(direction == 0) = Adjacency::from_sorted(lists);
+                adjacency.shrink_to_fit();
+                *group.adjacency_mut(direction == 0) = adjacency;
             }
         }
         // What the file lacks of the adjacency the store keeps (a file
@@ -3749,6 +3771,83 @@ mod tests {
         assert!(matches!(error, Error::Corruption(_)), "{error}");
         assert_eq!(empty.node_count(ReadView::latest()).unwrap(), 0);
         assert!(section.serialize().is_err(), "no blob form");
+    }
+
+    /// Nodes in several of the store's row groups, with edges within and
+    /// across them and a hub whose incoming list goes in pieces in a later
+    /// group: the load builds each group's adjacency from its chunks as
+    /// they come (#429), and the section reads back as the committed state,
+    /// keeping backward edges or not, at the default caps and at caps that
+    /// cut the tables into many chunks and the hub's list into pieces; and
+    /// the loaded store that keeps backward edges writes the same chunks
+    /// again.
+    #[test]
+    fn adjacency_in_several_row_groups_round_trips() {
+        let build = || {
+            let store = RowGroupStore::new();
+            let mut tx = Tx::begin(&store, 10);
+            let mut groups: Vec<Vec<NodeId>> = Vec::new();
+            for group in 0..3 {
+                if group > 0 {
+                    // The next node starts the store's next row group.
+                    store.reserve_node_ids(super::ROWS_PER_GROUP).unwrap();
+                }
+                groups.push(
+                    (0..30)
+                        .map(|_| tx.create_node(&["Person"], &[]).unwrap())
+                        .collect(),
+                );
+            }
+            let hub = groups[2][29];
+            for (at, group) in groups.iter().enumerate() {
+                for pair in group.windows(2) {
+                    tx.create_edge(pair[0], pair[1], "KNOWS", &[]).unwrap();
+                }
+                let next = &groups[(at + 1) % groups.len()];
+                tx.create_edge(group[0], next[3], "LIVES_IN", &[]).unwrap();
+                for other in group {
+                    if *other != hub {
+                        tx.create_edge(*other, hub, "LIKES", &[]).unwrap();
+                    }
+                }
+            }
+            tx.commit().unwrap();
+            (store, hub)
+        };
+        for caps in [
+            ChunkCaps::DEFAULT,
+            ChunkCaps {
+                max_rows: 7,
+                max_bytes: 256,
+            },
+        ] {
+            for backward_edges in [true, false] {
+                let what = format!("caps {caps:?}, backward edges {backward_edges}");
+                // A store of its own each time: the comparison takes an id
+                // from each store.
+                let (store, hub) = build();
+                let chunks = write(&store, caps);
+                let loaded = read_keeping(&chunks, backward_edges);
+                // A store without backward edges writes its outgoing lists
+                // alone.
+                if backward_edges {
+                    let again = write(&loaded, caps);
+                    assert!(
+                        again.metas == chunks.metas && again.bytes == chunks.bytes,
+                        "{what}: the loaded store writes the same chunks"
+                    );
+                }
+                assert_same(&loaded, &store, &what);
+                assert_eq!(
+                    loaded
+                        .edges(hub, Direction::Incoming, &[], ReadView::latest())
+                        .unwrap()
+                        .len(),
+                    89 + 1,
+                    "{what}: the hub's incoming edges"
+                );
+            }
+        }
     }
 
     /// A node whose list fills a chunk alone is written in pieces with

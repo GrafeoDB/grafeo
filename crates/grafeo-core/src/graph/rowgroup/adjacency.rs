@@ -101,20 +101,53 @@ impl Adjacency {
             .copied()
     }
 
-    /// Sets the sorted list of each row of `lists` (row, list), rows
-    /// ascending and each list sorted, as a load hands them over; nothing is
-    /// in the delta.
-    pub(super) fn from_sorted(lists: impl IntoIterator<Item = (usize, Vec<Adjacent>)>) -> Self {
-        let mut adjacency = Self::default();
-        adjacency.offsets.push(0);
-        for (row, list) in lists {
-            while adjacency.offsets.len() <= row {
-                adjacency.offsets.push(adjacency.sorted.len());
-            }
-            adjacency.sorted.extend(list);
-            adjacency.offsets.push(adjacency.sorted.len());
+    /// Sets the sorted list of `row`, after the rows set before it, as a
+    /// load reads them chunk by chunk: rows ascending, each list sorted,
+    /// nothing in the delta.
+    pub(super) fn push_sorted(&mut self, row: usize, list: &[Adjacent]) {
+        if self.offsets.is_empty() {
+            self.offsets.push(0);
         }
-        adjacency
+        while self.offsets.len() <= row {
+            self.offsets.push(self.sorted.len());
+        }
+        self.sorted.extend_from_slice(list);
+        self.offsets.push(self.sorted.len());
+    }
+
+    /// Adds `list` at the end of the last row's sorted list: the next piece
+    /// of a list a load reads over several chunks.
+    pub(super) fn extend_last_sorted(&mut self, list: &[Adjacent]) {
+        self.sorted.extend_from_slice(list);
+        if let Some(end) = self.offsets.last_mut() {
+            *end = self.sorted.len();
+        }
+    }
+
+    /// The last entry of the sorted lists: the end of the last row's list.
+    pub(super) fn last_sorted(&self) -> Option<&Adjacent> {
+        self.sorted.last()
+    }
+
+    /// The rows with a sorted list, ascending, each with it.
+    pub(super) fn sorted_rows(&self) -> impl Iterator<Item = (usize, &[Adjacent])> + '_ {
+        self.offsets
+            .windows(2)
+            .enumerate()
+            .filter(|(_, ends)| ends[0] < ends[1])
+            .map(|(row, ends)| (row, &self.sorted[ends[0]..ends[1]]))
+    }
+
+    /// The entries of the sorted lists.
+    pub(super) fn sorted_len(&self) -> usize {
+        self.sorted.len()
+    }
+
+    /// Gives back the room the sorted lists grew past their entries, once a
+    /// load set every row.
+    pub(super) fn shrink_to_fit(&mut self) {
+        self.offsets.shrink_to_fit();
+        self.sorted.shrink_to_fit();
     }
 
     /// Adds an edge to the row's delta.

@@ -467,19 +467,23 @@ tests:
       rows:
         - [null, null]
 
-  - name: negative_limit_returns_empty
+  # A negative count is the negative-limit error (ISO GQL 22G02), written
+  # as a literal as when given as a parameter (it gave no rows).
+  - name: negative_limit_is_an_error
     setup:
       - "INSERT (:LimTest {v: 1})"
       - "INSERT (:LimTest {v: 2})"
     query: "MATCH (n:LimTest) RETURN n.v AS v LIMIT -1"
     expect:
-      empty: true
+      error: "must be non-negative, got -1"
+      gql_status: "22G02"
 
-  - name: negative_limit_returns_empty_cypher
+  - name: negative_limit_is_an_error_cypher
     setup:
       - "INSERT (:LimTest2 {v: 1})"
       - "INSERT (:LimTest2 {v: 2})"
     variants:
       cypher: "MATCH (n:LimTest2) RETURN n.v AS v LIMIT -1"
     expect:
-      empty: true
+      error: "must be non-negative, got -1"
+      gql_status: "22G02"

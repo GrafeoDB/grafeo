@@ -1226,7 +1226,7 @@ fn resolve_count_param(
     params: &QueryParams,
 ) -> Result<()> {
     use crate::query::plan::CountExpr;
-    use grafeo_common::utils::error::{QueryError, QueryErrorKind};
+    use grafeo_common::utils::error::QueryError;
 
     if let CountExpr::Parameter(name) = count {
         let value = params.get(name.as_str()).ok_or_else(|| {
@@ -1234,24 +1234,7 @@ fn resolve_count_param(
                 "Missing parameter for SKIP/LIMIT: ${name}"
             )))
         })?;
-        let n = match value {
-            // reason: guard ensures *i >= 0
-            #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-            Value::Int64(i) if *i >= 0 => *i as usize,
-            Value::Int64(i) => {
-                return Err(Error::from(QueryError::new(
-                    QueryErrorKind::NegativeLimit,
-                    format!("SKIP/LIMIT parameter ${name} must be non-negative, got {i}"),
-                )));
-            }
-            other => {
-                return Err(Error::from(QueryError::new(
-                    QueryErrorKind::InvalidValueType,
-                    format!("SKIP/LIMIT parameter ${name} must be an integer, got {other:?}"),
-                )));
-            }
-        };
-        *count = CountExpr::Literal(n);
+        *count = CountExpr::Literal(CountExpr::count_of(value)?);
     }
     Ok(())
 }

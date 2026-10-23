@@ -175,6 +175,13 @@ impl HavingScope {
         if let LogicalExpression::Variable(name) = &expr {
             return self.aliases.get(name).cloned().unwrap_or(expr);
         }
+        // A parameter has one value for the whole statement, so it reads
+        // as itself also where it is a grouping key: filled in before
+        // planning, its key column is named after its value, which a
+        // reference by its text would not find (see `group_key_reference`).
+        if let LogicalExpression::Parameter(_) = &expr {
+            return expr;
+        }
         let text = crate::query::planner::common::expression_to_string(&expr);
         if self.keys.contains(&text) {
             return LogicalExpression::Variable(text);
@@ -361,6 +368,19 @@ pub(crate) fn with_imports(
             join_type: JoinType::Cross,
             conditions: Vec::new(),
         }),
+    }
+}
+
+/// What the item after an Aggregate reads for its grouping key `key`: the
+/// Aggregate's output column, named after the key's text, or, for a key that
+/// is a parameter alone, the parameter itself. A parameter is filled in with
+/// its value before planning, which renames its column after the value
+/// (`3`, not `$x`), so a reference by name would no longer find it; the value
+/// is the same on every row of the group, so reading it again is the key.
+pub(crate) fn group_key_reference(key: &LogicalExpression) -> LogicalExpression {
+    match key {
+        LogicalExpression::Parameter(_) => key.clone(),
+        _ => LogicalExpression::Variable(crate::query::planner::common::expression_to_string(key)),
     }
 }
 

@@ -133,3 +133,57 @@ tests:
       ordered: true
       rows:
         - [Gus]
+
+  # ---------------------------------------------------------------------------
+  # Counts written as literals take the same rule and give the same errors
+  # (a negative LIMIT gave no rows and a negative SKIP every row; a count
+  # of another type was a syntax error of its own)
+  # ---------------------------------------------------------------------------
+
+  - name: a_negative_skip_literal
+    setup:
+      - "INSERT (:Person {name: 'Alix'})"
+    variants:
+      gql: "MATCH (n:Person) RETURN n.name AS name SKIP -1"
+      cypher: "MATCH (n:Person) RETURN n.name AS name SKIP -1"
+    expect:
+      error: "must be non-negative, got -1"
+      gql_status: "22G02"
+
+  - name: a_negative_offset_literal
+    setup:
+      - "INSERT (:Person {name: 'Alix'})"
+    query: "MATCH (n:Person) RETURN n.name AS name OFFSET -2"
+    expect:
+      error: "must be non-negative, got -2"
+      gql_status: "22G02"
+
+  - name: a_negative_limit_literal
+    setup:
+      - "INSERT (:Person {name: 'Alix'})"
+    variants:
+      gql: "MATCH (n:Person) RETURN n.name AS name LIMIT -1"
+      cypher: "MATCH (n:Person) RETURN n.name AS name LIMIT -1"
+    expect:
+      error: "must be non-negative, got -1"
+      gql_status: "22G02"
+
+  - name: a_limit_literal_that_is_text
+    setup:
+      - "INSERT (:Person {name: 'Alix'})"
+    variants:
+      gql: "MATCH (n:Person) RETURN n.name AS name LIMIT 'three'"
+      cypher: "MATCH (n:Person) RETURN n.name AS name LIMIT 'three'"
+    expect:
+      error: "must be an integer"
+      gql_status: "22G03"
+
+  - name: a_skip_literal_that_is_a_number_with_a_point
+    setup:
+      - "INSERT (:Person {name: 'Alix'})"
+    variants:
+      gql: "MATCH (n:Person) RETURN n.name AS name SKIP 1.5"
+      cypher: "MATCH (n:Person) RETURN n.name AS name SKIP 1.5"
+    expect:
+      error: "must be an integer"
+      gql_status: "22G03"

@@ -2283,9 +2283,8 @@ impl CypherTranslator {
                 // In the post-return, reference the Aggregate's output column
                 // by its generated name. The Aggregate already extracts
                 // property values, so we reference the column, not re-evaluate.
-                let col_name = crate::query::planner::common::expression_to_string(&expr);
                 post_return_items.push(ReturnItem {
-                    expression: LogicalExpression::Variable(col_name),
+                    expression: super::common::group_key_reference(&expr),
                     alias: item.alias.clone(),
                 });
             }
@@ -3384,17 +3383,39 @@ impl CypherTranslator {
         })
     }
 
+    /// The count of a SKIP or LIMIT: a parameter, filled in later, or a
+    /// literal (a negative number with its sign), which takes the rule a
+    /// parameter's value takes ([`CountExpr::count_of`]): a negative integer
+    /// is the negative-limit error, any other non-integer an invalid value
+    /// type.
     fn eval_as_count_expr(&self, expr: &ast::Expression) -> Result<CountExpr> {
-        match expr {
-            ast::Expression::Literal(ast::Literal::Integer(i)) => {
-                // Clamp negative values to 0 (LIMIT -1 returns empty, not an error)
-                // reason: clamped to >= 0 by .max(0)
-                #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-                let n = (*i).max(0) as usize;
-                Ok(CountExpr::Literal(n))
-            }
-            ast::Expression::Parameter(name) => Ok(CountExpr::Parameter(name.clone())),
-            _ => Err(Error::from(QueryError::new(
+        let literal = |literal: &ast::Literal, negate: bool| -> Option<Value> {
+            Some(match (literal, negate) {
+                (ast::Literal::Integer(i), false) => Value::Int64(*i),
+                (ast::Literal::Integer(i), true) => Value::Int64(i.checked_neg()?),
+                (ast::Literal::Float(f), false) => Value::Float64(*f),
+                (ast::Literal::Float(f), true) => Value::Float64(-f),
+                (ast::Literal::String(s), false) => Value::from(s.as_str()),
+                (ast::Literal::Bool(b), false) => Value::Bool(*b),
+                (ast::Literal::Null, false) => Value::Null,
+                _ => return None,
+            })
+        };
+        let value = match expr {
+            ast::Expression::Parameter(name) => return Ok(CountExpr::Parameter(name.clone())),
+            ast::Expression::Literal(written) => literal(written, false),
+            ast::Expression::Unary {
+                op: ast::UnaryOp::Neg,
+                operand,
+            } => match &**operand {
+                ast::Expression::Literal(written) => literal(written, true),
+                _ => None,
+            },
+            _ => None,
+        };
+        match value {
+            Some(value) => Ok(CountExpr::Literal(CountExpr::count_of(&value)?)),
+            None => Err(Error::from(QueryError::new(
                 QueryErrorKind::Unsupported,
                 "Expected integer literal or parameter for SKIP/LIMIT",
             ))),

@@ -1147,21 +1147,48 @@ impl GqlTranslator {
         Ok(LogicalPlan::new(plan))
     }
 
+    /// The count of a SKIP, OFFSET or LIMIT: a parameter, filled in later, or
+    /// a literal (a negative number with its sign), which takes the rule a
+    /// parameter's value takes ([`CountExpr::count_of`]): a negative integer
+    /// is the negative-limit error, any other non-integer an invalid value
+    /// type.
     fn eval_as_count_expr(expr: &ast::Expression) -> Result<CountExpr> {
-        match expr {
-            ast::Expression::Literal(ast::Literal::Integer(i)) => {
-                // Clamp negative values to 0 (LIMIT -1 returns empty, not an error)
-                // reason: clamped to >= 0 by .max(0)
-                #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-                let n = (*i).max(0) as usize;
-                Ok(CountExpr::Literal(n))
-            }
-            ast::Expression::Parameter(name) => Ok(CountExpr::Parameter(name.clone())),
-            _ => Err(Error::from(QueryError::new(
+        let value = match expr {
+            ast::Expression::Parameter(name) => return Ok(CountExpr::Parameter(name.clone())),
+            ast::Expression::Literal(literal) => Self::count_literal(literal, false),
+            ast::Expression::Unary {
+                op: ast::UnaryOp::Neg,
+                operand,
+            } => match &**operand {
+                ast::Expression::Literal(literal) => Self::count_literal(literal, true),
+                _ => None,
+            },
+            _ => None,
+        };
+        match value {
+            Some(value) => Ok(CountExpr::Literal(CountExpr::count_of(&value)?)),
+            None => Err(Error::from(QueryError::new(
                 QueryErrorKind::Semantic,
                 "Expected integer literal or parameter for SKIP/LIMIT",
             ))),
         }
+    }
+
+    /// The value of a literal a count is written as, negated with `negate`;
+    /// `None` for one a count cannot be written as (a typed date, ...).
+    fn count_literal(literal: &ast::Literal, negate: bool) -> Option<Value> {
+        Some(match (literal, negate) {
+            (ast::Literal::Integer(i), false) => Value::Int64(*i),
+            (ast::Literal::Integer(i), true) => Value::Int64(i.checked_neg()?),
+            (ast::Literal::Float(f), false) => Value::Float64(*f),
+            (ast::Literal::Float(f), true) => Value::Float64(-f),
+            (ast::Literal::Decimal(d), false) => Value::Decimal(*d),
+            (ast::Literal::Decimal(d), true) => Value::Decimal(d.neg()),
+            (ast::Literal::String(s), false) => Value::from(s.as_str()),
+            (ast::Literal::Bool(b), false) => Value::Bool(*b),
+            (ast::Literal::Null, false) => Value::Null,
+            _ => return None,
+        })
     }
 
     fn substitute_let_bindings(

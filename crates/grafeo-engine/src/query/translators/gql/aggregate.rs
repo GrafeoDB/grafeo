@@ -276,9 +276,8 @@ impl GqlTranslator {
                 needs_post_return |= seen_aggregate;
                 let expr = self.translate_expression(&item.expression)?;
                 group_by.push(expr.clone());
-                let col_name = crate::query::planner::common::expression_to_string(&expr);
                 post_return_items.push(ReturnItem {
-                    expression: LogicalExpression::Variable(col_name),
+                    expression: crate::query::translators::common::group_key_reference(&expr),
                     alias: item.alias.clone(),
                 });
             }

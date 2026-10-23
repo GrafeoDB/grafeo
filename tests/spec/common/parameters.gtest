@@ -361,3 +361,34 @@ tests:
     expect:
       rows:
         - [30]
+
+  # ---------------------------------------------------------------------------
+  # A parameter returned beside an aggregate is a grouping key with one value
+  # (it failed with "Undefined variable '$tag'", where the literal worked)
+  # ---------------------------------------------------------------------------
+
+  - name: gql_param_beside_an_aggregate
+    setup:
+      - "INSERT (:Person {name: 'Alix'})"
+      - "INSERT (:Person {name: 'Gus'})"
+      - "INSERT (:Person {name: 'Vincent'})"
+    query: "MATCH (p:Person) RETURN count(p) AS c, $tag AS tag"
+    params:
+      tag: "team"
+    expect:
+      rows:
+        - [3, team]
+
+  - name: gql_param_before_an_aggregate_and_beside_a_key
+    setup:
+      - "INSERT (:Person {name: 'Alix', city: 'Amsterdam'})"
+      - "INSERT (:Person {name: 'Gus', city: 'Amsterdam'})"
+      - "INSERT (:Person {name: 'Vincent', city: 'Berlin'})"
+    query: "MATCH (p:Person) RETURN $tag AS tag, p.city AS city, count(p) AS c ORDER BY city"
+    params:
+      tag: 7
+    expect:
+      ordered: true
+      rows:
+        - [7, Amsterdam, 2]
+        - [7, Berlin, 1]

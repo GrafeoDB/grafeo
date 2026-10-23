@@ -6,7 +6,7 @@
 //! The operator that writes a record reads it back within the same query: the
 //! bytes are temporary, not a database format.
 
-use std::collections::HashSet;
+use grafeo_common::utils::hash::FxHashSet as HashSet;
 use std::io::{Read, Write};
 
 use grafeo_common::types::Value;
@@ -620,7 +620,7 @@ mod tests {
         assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
 
         let distinct = |inner| AggregateState::Distinct {
-            seen: HashSet::new(),
+            seen: HashSet::default(),
             inner: Box::new(inner),
         };
         let group = GroupState {

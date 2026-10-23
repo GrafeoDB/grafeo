@@ -110,7 +110,7 @@ impl std::error::Error for TripleRingInvariantError {}
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct TermDictionary {
     /// Term to ID mapping.
-    term_to_id: HashMap<Arc<Term>, u32, foldhash::fast::RandomState>,
+    term_to_id: HashMap<Arc<Term>, u32, grafeo_common::utils::hash::FxBuildHasher>,
     /// ID to term mapping.
     id_to_term: Vec<Arc<Term>>,
 }
@@ -120,7 +120,7 @@ impl TermDictionary {
     #[must_use]
     pub fn new() -> Self {
         Self {
-            term_to_id: HashMap::with_hasher(foldhash::fast::RandomState::default()),
+            term_to_id: HashMap::with_hasher(grafeo_common::utils::hash::FxBuildHasher::default()),
             id_to_term: Vec::new(),
         }
     }
@@ -131,7 +131,7 @@ impl TermDictionary {
         Self {
             term_to_id: HashMap::with_capacity_and_hasher(
                 capacity,
-                foldhash::fast::RandomState::default(),
+                grafeo_common::utils::hash::FxBuildHasher::default(),
             ),
             id_to_term: Vec::with_capacity(capacity),
         }

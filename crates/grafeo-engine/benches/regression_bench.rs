@@ -8,6 +8,10 @@
 //! 2. Repeated execution: parser overhead compounding across many queries
 //! 3. Edge type filtering: MVCC edge_type_versioned lookup overhead
 //!
+//! A case that times a path another case already times is left out (one-hop
+//! and two-hop patterns: query_bench; the same paths at larger sizes or
+//! counts), which keeps CodSpeed's run short.
+//!
 //! Run with: cargo bench -p grafeo-engine --bench regression_bench
 //! All features: cargo bench --all-features --bench regression_bench
 // reason: criterion_group! expansion from codspeed-criterion-compat does not
@@ -90,51 +94,6 @@ fn setup_multi_type_graph(node_count: usize) -> GrafeoDB {
 // Multi-hop traversal benchmarks
 // ============================================================================
 
-fn bench_1hop_1k(c: &mut Criterion) {
-    let db = setup_social_graph(1_000, 5);
-    let session = db.session();
-
-    let mut group = c.benchmark_group("multihop");
-    group.measurement_time(Duration::from_secs(10));
-    group.sample_size(50);
-    group.warm_up_time(Duration::from_secs(3));
-
-    group.bench_function("regression_1hop_1k", |b| {
-        b.iter(|| {
-            let result = session
-                .execute("MATCH (a:Person {id: 0})-[:KNOWS]->(b) RETURN b.id")
-                .unwrap();
-            black_box(result)
-        });
-    });
-
-    group.finish();
-}
-
-fn bench_2hop_1k(c: &mut Criterion) {
-    let db = setup_social_graph(1_000, 5);
-    let session = db.session();
-
-    let mut group = c.benchmark_group("multihop");
-    group.measurement_time(Duration::from_secs(10));
-    group.sample_size(50);
-    group.warm_up_time(Duration::from_secs(3));
-
-    group.bench_function("regression_2hop_1k", |b| {
-        b.iter(|| {
-            let result = session
-                .execute(
-                    "MATCH (a:Person {id: 0})-[:KNOWS]->(b)-[:KNOWS]->(c) \
-                     RETURN DISTINCT c.id",
-                )
-                .unwrap();
-            black_box(result)
-        });
-    });
-
-    group.finish();
-}
-
 fn bench_3hop_1k(c: &mut Criterion) {
     let db = setup_social_graph(1_000, 5);
     let session = db.session();
@@ -159,48 +118,6 @@ fn bench_3hop_1k(c: &mut Criterion) {
     group.finish();
 }
 
-fn bench_1hop_5k(c: &mut Criterion) {
-    let db = setup_social_graph(5_000, 5);
-    let session = db.session();
-
-    let mut group = c.benchmark_group("multihop");
-    group.measurement_time(Duration::from_secs(10));
-    group.sample_size(50);
-    group.warm_up_time(Duration::from_secs(3));
-
-    group.bench_function("regression_1hop_5k", |b| {
-        b.iter(|| {
-            let result = session
-                .execute("MATCH (a:Person {id: 0})-[:KNOWS]->(b) RETURN b.id")
-                .unwrap();
-            black_box(result)
-        });
-    });
-
-    group.finish();
-}
-
-fn bench_fan_out_5k(c: &mut Criterion) {
-    let db = setup_social_graph(5_000, 5);
-    let session = db.session();
-
-    let mut group = c.benchmark_group("multihop");
-    group.measurement_time(Duration::from_secs(10));
-    group.sample_size(50);
-    group.warm_up_time(Duration::from_secs(3));
-
-    group.bench_function("regression_fan_out_5k", |b| {
-        b.iter(|| {
-            let result = session
-                .execute("MATCH (a:Person)-[:KNOWS]->(b) RETURN COUNT(b)")
-                .unwrap();
-            black_box(result)
-        });
-    });
-
-    group.finish();
-}
-
 // ============================================================================
 // Repeated execution benchmarks
 // ============================================================================
@@ -217,28 +134,6 @@ fn bench_repeat_unique_100(c: &mut Criterion) {
     group.bench_function("regression_repeat_unique_100", |b| {
         b.iter(|| {
             for i in 0..100 {
-                let query = format!("MATCH (n:Person {{id: {}}}) RETURN n.name", i);
-                let result = session.execute(&query).unwrap();
-                black_box(result);
-            }
-        });
-    });
-
-    group.finish();
-}
-
-fn bench_repeat_unique_500(c: &mut Criterion) {
-    let db = setup_social_graph(1_000, 5);
-    let session = db.session();
-
-    let mut group = c.benchmark_group("repeated");
-    group.measurement_time(Duration::from_secs(10));
-    group.sample_size(50);
-    group.warm_up_time(Duration::from_secs(3));
-
-    group.bench_function("regression_repeat_unique_500", |b| {
-        b.iter(|| {
-            for i in 0..500 {
                 let query = format!("MATCH (n:Person {{id: {}}}) RETURN n.name", i);
                 let result = session.execute(&query).unwrap();
                 black_box(result);
@@ -345,19 +240,11 @@ fn bench_edge_filter_any(c: &mut Criterion) {
 // Groups and main
 // ============================================================================
 
-criterion_group!(
-    multihop_benches,
-    bench_1hop_1k,
-    bench_2hop_1k,
-    bench_3hop_1k,
-    bench_1hop_5k,
-    bench_fan_out_5k,
-);
+criterion_group!(multihop_benches, bench_3hop_1k);
 
 criterion_group!(
     repeated_benches,
     bench_repeat_unique_100,
-    bench_repeat_unique_500,
     bench_repeat_cached_500,
 );
 

@@ -7,8 +7,8 @@
 //! Shared types ([`AggregateFunction`], [`AggregateExpr`], [`HashableValue`]) live in
 //! the [`super::accumulator`] module.
 
+use grafeo_common::utils::hash::FxHashSet as HashSet;
 use indexmap::IndexMap;
-use std::collections::HashSet;
 
 use grafeo_common::types::{Decimal, Duration, LogicalType, Value};
 
@@ -178,7 +178,7 @@ impl AggregateState {
             ),
             AggregateState::AvgDistinct(..) if expr.rdf_literals => {
                 AggregateState::ReadsNumericText(Box::new(AggregateState::Distinct {
-                    seen: HashSet::new(),
+                    seen: HashSet::default(),
                     inner: Box::new(AggregateState::AvgDecimal(Some(Decimal::from_i64(0)), 0)),
                 }))
             }
@@ -221,7 +221,7 @@ impl AggregateState {
             )
         {
             AggregateState::Distinct {
-                seen: HashSet::new(),
+                seen: HashSet::default(),
                 inner: Box::new(state),
             }
         } else {
@@ -244,19 +244,23 @@ impl AggregateState {
                 AggregateState::Count(0)
             }
             (AggregateFunction::Count | AggregateFunction::CountNonNull, true) => {
-                AggregateState::CountDistinct(0, HashSet::new())
+                AggregateState::CountDistinct(0, HashSet::default())
             }
             (AggregateFunction::Sum, false) => AggregateState::SumInt(0, 0),
-            (AggregateFunction::Sum, true) => AggregateState::SumIntDistinct(0, 0, HashSet::new()),
+            (AggregateFunction::Sum, true) => {
+                AggregateState::SumIntDistinct(0, 0, HashSet::default())
+            }
             (AggregateFunction::Avg, false) => AggregateState::Avg(0.0, 0),
-            (AggregateFunction::Avg, true) => AggregateState::AvgDistinct(0.0, 0, HashSet::new()),
+            (AggregateFunction::Avg, true) => {
+                AggregateState::AvgDistinct(0.0, 0, HashSet::default())
+            }
             (AggregateFunction::Min, _) => AggregateState::Min(None), // MIN/MAX don't need distinct
             (AggregateFunction::Max, _) => AggregateState::Max(None),
             (AggregateFunction::First, _) => AggregateState::First(None),
             (AggregateFunction::Last, _) => AggregateState::Last(None),
             (AggregateFunction::Collect, false) => AggregateState::Collect(Vec::new()),
             (AggregateFunction::Collect, true) => {
-                AggregateState::CollectDistinct(Vec::new(), HashSet::new())
+                AggregateState::CollectDistinct(Vec::new(), HashSet::default())
             }
             // Statistical functions (Welford's algorithm for online computation)
             (AggregateFunction::StdDev, _) => AggregateState::StdDev {
@@ -283,7 +287,7 @@ impl AggregateState {
             (AggregateFunction::GroupConcat, true) => AggregateState::GroupConcatDistinct(
                 Vec::new(),
                 separator.unwrap_or(" ").to_string(),
-                HashSet::new(),
+                HashSet::default(),
             ),
             (AggregateFunction::Sample, _) => AggregateState::Sample(None),
             // Binary set functions (all share the same Bivariate state)

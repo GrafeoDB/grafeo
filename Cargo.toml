@@ -118,6 +118,10 @@ rand = "0.10.3"
 [workspace.lints.rust]
 unsafe_code = "deny"
 missing_docs = "warn"
+# Set by the CodSpeed workflow only: the deterministic benchmark build (a fixed
+# hash seed in grafeo_common::utils::hash, the SIMD kernels the build's target
+# features name instead of the ones the runner's CPU offers).
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(grafeo_codspeed)"] }
 
 [workspace.lints.clippy]
 all = { level = "warn", priority = -1 }

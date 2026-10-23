@@ -204,49 +204,91 @@ These companion projects live in separate repositories under the [GrafeoDB](http
 
 ## Benchmarks and Performance Regressions
 
-PRs opened from this repository are benchmarked on
-[CodSpeed](https://codspeed.io/), which runs the Criterion microbenchmarks
-under Callgrind for <1% variance. Results post as a PR comment with a diff
-vs `main`. PRs from forks are skipped: the CodSpeed token isn't exposed to
-fork workflows; after an initial review a maintainer can push the branch to
-this repo to trigger a run.
+PRs to `main` and pushes to `main` are benchmarked on [CodSpeed](https://codspeed.io/)
+(`.github/workflows/codspeed.yml`), which posts a comment with the changes against `main`. PRs from forks
+are skipped: the CodSpeed token isn't exposed to fork workflows; after an initial review a maintainer can
+push the branch to this repository to trigger a run.
 
-The following suites are tracked:
+### What runs where, and why
 
-- `grafeo-core/benches/index_bench.rs`: adjacency, HashIndex, HNSW
-  insert/search, distance kernels, quantisation, CompactStore point queries
-- `grafeo-common/benches/arena_bench.rs`: epoch arena, bump allocator,
-  object pool
-- `grafeo-storage/benches/wal_bench.rs`: WAL write throughput, recovery
-  replay
-- `grafeo-engine/benches/query_bench.rs`: end-to-end GQL + SPARQL
-- `grafeo-engine/benches/serialization_bench.rs`: snapshot + Value codecs
-- `grafeo-engine/benches/regression_bench.rs`: multi-hop, repeated-parse,
-  edge-type filter
-- `grafeo-engine/benches/memory_bench.rs`: memory footprint snapshot
+| Job | Instrument | Runner | Benchmarks |
+| --- | --- | --- | --- |
+| `simulation` | CPU simulation: instructions and simulated cache misses, system calls left out | `ubuntu-24.04` (one image, so base and head run on the same runner type) | `grafeo-common` arena_bench; `grafeo-core` index_bench, store_apply; `grafeo-engine` query_bench, serialization_bench, regression_bench, topk_e2e, and write_path_bench's in-memory cases, reads and transaction manager (`GRAFEO_BENCH_STORAGE=mem`) |
+| `walltime` | wall time on a bare-metal CodSpeed Macro Runner | `codspeed-macro-arm64-graviton-ubuntu-22-04` | write_path_bench's file-backed cases and checkpoints (`GRAFEO_BENCH_STORAGE=file`): the WAL, fsync, and a checkpoint thread beside the writers |
 
-Reproduce locally:
+- **Simulation** is deterministic for CPU work, so it suits the in-memory benchmarks. It runs each
+  benchmark once, so a case that times one call of a few nanoseconds measures a cold call: such cases
+  time a batch per iteration (the `/x64` and `/x1024` cases), sized to a whole cycle of the periodic work
+  they do (a collect, the transaction manager's cleanup), so every iteration does the same work.
+- **The simulation build is deterministic**: `--cfg grafeo_codspeed` fixes the hash tables' seed (a random
+  seed per run sends hash joins, DISTINCT and GROUP BY through other collision chains, and moves their
+  counts) and takes the SIMD kernels from the build's target features, which `-C target-cpu=x86-64-v3`
+  fixes, instead of the runner's CPU. The run is on one CPU (`taskset -c 0`, `RAYON_NUM_THREADS=1`), so
+  every pool has one thread: simulation runs threads one at a time, and parallelism would only add
+  scheduling. A shipped build never sets the cfg: there the random seed guards against hash flooding.
+- **No duplicates**: a case that times a path another case already times (the same query at a larger
+  size, the same pattern in two suites) is left out, which keeps the run short.
+- **Walltime** measures what simulation cannot: system calls and the scheduling of several threads. It
+  needs a CodSpeed Macro Runner, a machine of its own, and is off until the organization allows the macro
+  runners for this public repository (Organization settings, Actions, Runner groups, Default) and the
+  repository variable `CODSPEED_MACRO_RUNNERS` is `true`. The free plan holds 600 macro-runner minutes a
+  month, so on a pull request it runs only with the label `bench: walltime`; it always runs on `main`.
+- **Not on CodSpeed:** memory_bench (its `iter_custom` cases are skipped by CodSpeed, and it measures
+  memory, not time), morsel_pipeline (it times thread pools, which simulation runs one thread at a time),
+  core top_k (covered end to end by topk_e2e) and the storage crate's wal_bench (it times the 0.5.x WAL
+  writer, which the engine no longer uses).
+
+### Reading CodSpeed's report
+
+- **"Base and head ran on different runner types"**: the two runs were on different hardware, so part of
+  each change may be the machine's (simulation models the runner's caches). Pinning one image keeps the
+  runner type stable; after a change to the workflow, `main` needs one run on the new setup before PRs
+  compare against it. The simulation job prints the runner's CPU, its caches and SIMD features: a change
+  on unchanged code that follows a CPU change there is the machine's.
+- **"N benchmarks are dominated by system calls"**: simulation leaves system calls out, so such a
+  benchmark understates its cost. The file-backed cases run in the walltime job for that reason; a case
+  that still shows the warning belongs there too.
+- **Skipped benchmarks** ran on the base but not on the head (renamed or removed): archive them in the
+  CodSpeed app so the report stops carrying them.
+- **An A/A run** checks the setup: run the workflow twice on one commit (Actions, CodSpeed, Run workflow,
+  on `main`), or open a PR to `main` that changes only a comment. Both runs must report no change; a
+  change there names a benchmark that depends on the machine or on timing.
+
+### Paired benchmarks on your machine
+
+CodSpeed tells you that something moved; a local paired run tells you how much and whether it is noise.
+`scripts/bench-paired.sh` builds the benchmarks of two revisions in release, runs them interleaved for
+several rounds and prints each case's fastest round per side, the change, and whether the rounds overlap:
 
 ```bash
-# Pin matches .github/workflows/codspeed.yml; bump both in lock-step.
-cargo install cargo-codspeed --version 4.5.0
-cargo codspeed build --package grafeo-core \
-    --features vector-index --bench index_bench
-cargo codspeed run --package grafeo-core
+scripts/bench-paired.sh -r 3 main HEAD \
+  'grafeo-core:store_apply:in_degree|expand_outgoing' \
+  'grafeo-engine:query_bench:query_1hop_pattern'
+GRAFEO_BENCH_SCALE=10 GRAFEO_BENCH_STORAGE=file scripts/bench-paired.sh main HEAD \
+  'grafeo-engine:write_path_bench:cypher_create_rel'
 ```
 
-If a PR flags a >5% regression on a hot path, include a brief explanation in
-the PR description. The trade-off is often acceptable (e.g. a correctness
-fix that costs some throughput), but the maintainer should know it was
-deliberate rather than accidental.
+Run it on a quiet machine: another build at the same time makes rounds of one side differ by a factor of
+two. A change whose rounds overlap the other side's is within the noise.
 
-Adding a new Criterion bench: import `use criterion::{...}` as usual. The
-workspace renames `criterion` to the `codspeed-criterion-compat` package
-(see root `Cargo.toml`), so there is nothing to change per crate: add the
-`[[bench]]` entry and any features in the owning crate's `Cargo.toml`, and
-add the suite to `.github/workflows/codspeed.yml` so it lands in the PR
-comment. The adapter is a drop-in replacement: plain `cargo bench` continues
-to work unchanged.
+To reproduce a CodSpeed run itself (Linux, with valgrind):
+
+```bash
+cargo install cargo-codspeed
+cargo codspeed build -m simulation --all-features -p grafeo-core --bench store_apply
+GRAFEO_BENCH_STORAGE=mem cargo codspeed run -m simulation
+```
+
+If a PR flags a >5% regression on a hot path, include a brief explanation in the PR description. The
+trade-off is often acceptable (e.g. a correctness fix that costs some throughput), but the maintainer
+should know it was deliberate rather than accidental.
+
+Adding a new Criterion bench: import `use criterion::{...}` as usual. The workspace renames `criterion`
+to the `codspeed-criterion-compat` package (see root `Cargo.toml`), so there is nothing to change per
+crate: add the `[[bench]]` entry and any features in the owning crate's `Cargo.toml`, and add the suite to
+the job of `.github/workflows/codspeed.yml` that fits it (simulation for CPU work, walltime for system
+calls and threads). Build the case's input outside the measured closure (`iter_batched`, not
+`iter_custom`, which CodSpeed skips), and measure a batch when one call takes nanoseconds.
 
 ## Pre-commit Hooks (Optional)
 

@@ -8,9 +8,9 @@ use crate::execution::pipeline::{ChunkSizeHint, PushOperator, Sink};
 use crate::execution::spill::{PartitionedState, SpillManager};
 use crate::execution::vector::ValueVector;
 use grafeo_common::types::Value;
+use grafeo_common::utils::hash::FxHashMap as HashMap;
 #[cfg(feature = "spill")]
 use spill_codec::{deserialize_group_state, serialize_group_state};
-use std::collections::HashMap;
 #[cfg(feature = "spill")]
 use std::sync::Arc;
 
@@ -98,7 +98,7 @@ impl AggregatePushOperator {
         Self {
             group_by,
             aggregates,
-            groups: HashMap::new(),
+            groups: HashMap::default(),
             global_state,
             input_types: ColumnTypes::default(),
         }
@@ -259,7 +259,7 @@ impl SpillableAggregatePushOperator {
             aggregates,
             spill_manager: None,
             partitioned_groups: None,
-            groups: HashMap::new(),
+            groups: HashMap::default(),
             global_state,
             spill_threshold: DEFAULT_AGGREGATE_SPILL_THRESHOLD,
             using_partitioned: false,
@@ -295,7 +295,7 @@ impl SpillableAggregatePushOperator {
             aggregates,
             spill_manager: Some(manager),
             partitioned_groups: Some(partitioned),
-            groups: HashMap::new(),
+            groups: HashMap::default(),
             global_state,
             spill_threshold: threshold,
             using_partitioned: true,
@@ -343,7 +343,7 @@ impl SpillableAggregatePushOperator {
             aggregates,
             spill_manager: None,
             partitioned_groups: Some(partitioned),
-            groups: HashMap::new(),
+            groups: HashMap::default(),
             global_state,
             spill_threshold: DEFAULT_AGGREGATE_SPILL_THRESHOLD,
             using_partitioned: true,
@@ -1308,9 +1308,9 @@ mod tests {
     #[cfg(feature = "spill")]
     fn spill_roundtrip_count_distinct() {
         use crate::execution::operators::accumulator::HashableValue;
-        use std::collections::HashSet;
+        use grafeo_common::utils::hash::FxHashSet as HashSet;
 
-        let mut seen = HashSet::new();
+        let mut seen = HashSet::default();
         seen.insert(HashableValue::from(Value::Int64(1)));
         seen.insert(HashableValue::from(Value::Int64(2)));
         seen.insert(HashableValue::from(Value::Int64(3)));
@@ -1331,9 +1331,9 @@ mod tests {
     #[cfg(feature = "spill")]
     fn spill_roundtrip_avg_distinct() {
         use crate::execution::operators::accumulator::HashableValue;
-        use std::collections::HashSet;
+        use grafeo_common::utils::hash::FxHashSet as HashSet;
 
-        let mut seen = HashSet::new();
+        let mut seen = HashSet::default();
         seen.insert(HashableValue::from(Value::Float64(2.0)));
         seen.insert(HashableValue::from(Value::Float64(4.0)));
         let state = GroupState {
@@ -1353,9 +1353,9 @@ mod tests {
     #[cfg(feature = "spill")]
     fn spill_roundtrip_collect_distinct() {
         use crate::execution::operators::accumulator::HashableValue;
-        use std::collections::HashSet;
+        use grafeo_common::utils::hash::FxHashSet as HashSet;
 
-        let mut seen = HashSet::new();
+        let mut seen = HashSet::default();
         seen.insert(HashableValue::from(Value::Int64(10)));
         seen.insert(HashableValue::from(Value::Int64(20)));
         let state = GroupState {
@@ -1842,9 +1842,9 @@ mod tests {
     #[cfg(feature = "spill")]
     fn test_serialize_deserialize_count_distinct() {
         use crate::execution::operators::accumulator::HashableValue;
-        use std::collections::HashSet;
+        use grafeo_common::utils::hash::FxHashSet as HashSet;
 
-        let mut seen = HashSet::new();
+        let mut seen = HashSet::default();
         seen.insert(HashableValue::from(Value::String("Paris".into())));
         seen.insert(HashableValue::from(Value::String("Prague".into())));
         seen.insert(HashableValue::from(Value::String("Barcelona".into())));
@@ -2063,7 +2063,7 @@ mod tests {
     #[cfg(feature = "spill")]
     fn spill_float_compensation_resumes() {
         use crate::execution::operators::accumulator::HashableValue;
-        use std::collections::HashSet;
+        use grafeo_common::utils::hash::FxHashSet as HashSet;
 
         // A nonzero compensation is retained accumulator state, independently
         // of the numerical policy used to produce it from input rows.

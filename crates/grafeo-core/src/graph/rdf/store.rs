@@ -201,22 +201,43 @@ pub struct RdfStore {
     /// All triples (primary storage).
     triples: RwLock<FxHashSet<Arc<Triple>>>,
     /// Subject index: subject -> triples.
-    subject_index: RwLock<hashbrown::HashMap<Term, Vec<Arc<Triple>>, foldhash::fast::RandomState>>,
+    subject_index: RwLock<
+        hashbrown::HashMap<Term, Vec<Arc<Triple>>, grafeo_common::utils::hash::FxBuildHasher>,
+    >,
     /// Predicate index: predicate -> triples.
-    predicate_index:
-        RwLock<hashbrown::HashMap<Term, Vec<Arc<Triple>>, foldhash::fast::RandomState>>,
+    predicate_index: RwLock<
+        hashbrown::HashMap<Term, Vec<Arc<Triple>>, grafeo_common::utils::hash::FxBuildHasher>,
+    >,
     /// Object index: object -> triples (optional).
-    object_index:
-        RwLock<Option<hashbrown::HashMap<Term, Vec<Arc<Triple>>, foldhash::fast::RandomState>>>,
+    object_index: RwLock<
+        Option<
+            hashbrown::HashMap<Term, Vec<Arc<Triple>>, grafeo_common::utils::hash::FxBuildHasher>,
+        >,
+    >,
     /// Subject+Predicate composite index: (subject, predicate) -> triples.
-    sp_index:
-        RwLock<hashbrown::HashMap<(Term, Term), Vec<Arc<Triple>>, foldhash::fast::RandomState>>,
+    sp_index: RwLock<
+        hashbrown::HashMap<
+            (Term, Term),
+            Vec<Arc<Triple>>,
+            grafeo_common::utils::hash::FxBuildHasher,
+        >,
+    >,
     /// Predicate+Object composite index: (predicate, object) -> triples.
-    po_index:
-        RwLock<hashbrown::HashMap<(Term, Term), Vec<Arc<Triple>>, foldhash::fast::RandomState>>,
+    po_index: RwLock<
+        hashbrown::HashMap<
+            (Term, Term),
+            Vec<Arc<Triple>>,
+            grafeo_common::utils::hash::FxBuildHasher,
+        >,
+    >,
     /// Object+Subject composite index: (object, subject) -> triples.
-    os_index:
-        RwLock<hashbrown::HashMap<(Term, Term), Vec<Arc<Triple>>, foldhash::fast::RandomState>>,
+    os_index: RwLock<
+        hashbrown::HashMap<
+            (Term, Term),
+            Vec<Arc<Triple>>,
+            grafeo_common::utils::hash::FxBuildHasher,
+        >,
+    >,
     /// The deprecated per-transaction buffers (removed in 0.7.0).
     tx_buffer: RwLock<TransactionBuffer>,
     /// Named graphs, each a separate `RdfStore` partition.
@@ -246,7 +267,7 @@ impl RdfStore {
         let object_index = if config.index_objects {
             Some(hashbrown::HashMap::with_capacity_and_hasher(
                 config.initial_capacity,
-                foldhash::fast::RandomState::default(),
+                grafeo_common::utils::hash::FxBuildHasher::default(),
             ))
         } else {
             None
@@ -256,24 +277,24 @@ impl RdfStore {
             triples: RwLock::new(FxHashSet::default()),
             subject_index: RwLock::new(hashbrown::HashMap::with_capacity_and_hasher(
                 config.initial_capacity,
-                foldhash::fast::RandomState::default(),
+                grafeo_common::utils::hash::FxBuildHasher::default(),
             )),
             predicate_index: RwLock::new(hashbrown::HashMap::with_capacity_and_hasher(
                 config.initial_capacity,
-                foldhash::fast::RandomState::default(),
+                grafeo_common::utils::hash::FxBuildHasher::default(),
             )),
             object_index: RwLock::new(object_index),
             sp_index: RwLock::new(hashbrown::HashMap::with_capacity_and_hasher(
                 config.initial_capacity,
-                foldhash::fast::RandomState::default(),
+                grafeo_common::utils::hash::FxBuildHasher::default(),
             )),
             po_index: RwLock::new(hashbrown::HashMap::with_capacity_and_hasher(
                 config.initial_capacity,
-                foldhash::fast::RandomState::default(),
+                grafeo_common::utils::hash::FxBuildHasher::default(),
             )),
             os_index: RwLock::new(hashbrown::HashMap::with_capacity_and_hasher(
                 config.initial_capacity,
-                foldhash::fast::RandomState::default(),
+                grafeo_common::utils::hash::FxBuildHasher::default(),
             )),
             tx_buffer: RwLock::new(TransactionBuffer::default()),
             named_graphs: RwLock::new(HashMap::new()),
@@ -1226,7 +1247,7 @@ impl RdfStore {
         }
 
         // Build all indexes in local HashMaps (no locks during build)
-        let hasher = || foldhash::fast::RandomState::default();
+        let hasher = || grafeo_common::utils::hash::FxBuildHasher::default();
         let mut subject_idx = hashbrown::HashMap::with_capacity_and_hasher(count / 4, hasher());
         let mut predicate_idx = hashbrown::HashMap::with_capacity_and_hasher(count / 8, hasher());
         let mut object_idx_map = hashbrown::HashMap::with_capacity_and_hasher(count / 4, hasher());

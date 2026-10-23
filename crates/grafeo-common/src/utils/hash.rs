@@ -14,8 +14,18 @@ use std::sync::OnceLock;
 /// It's suitable for hash tables, bloom filters, and other internal uses.
 pub type FxHasher = FoldHasher<'static>;
 
-/// A fast hash builder using foldhash.
+/// A fast hash builder using foldhash, seeded per process and table, so a
+/// crafted set of keys cannot make a table's probes long (hash flooding).
+#[cfg(not(grafeo_codspeed))]
 pub type FxBuildHasher = foldhash::fast::RandomState;
+
+/// A fast hash builder using foldhash with a fixed seed: only in the build of
+/// CodSpeed's simulation (`--cfg grafeo_codspeed`, which only the CodSpeed
+/// workflow sets), whose instruction counts would otherwise move with each
+/// run's seed through the tables' collision chains. A shipped build never sets
+/// the cfg.
+#[cfg(grafeo_codspeed)]
+pub type FxBuildHasher = foldhash::fast::FixedState;
 
 /// A `HashMap` using fast hashing.
 pub type FxHashMap<K, V> = hashbrown::HashMap<K, V, FxBuildHasher>;
@@ -24,10 +34,10 @@ pub type FxHashMap<K, V> = hashbrown::HashMap<K, V, FxBuildHasher>;
 pub type FxHashSet<T> = hashbrown::HashSet<T, FxBuildHasher>;
 
 /// Static `RandomState` used for consistent hashing within a program run.
-static HASH_STATE: OnceLock<foldhash::fast::RandomState> = OnceLock::new();
+static HASH_STATE: OnceLock<FxBuildHasher> = OnceLock::new();
 
-fn get_hash_state() -> &'static foldhash::fast::RandomState {
-    HASH_STATE.get_or_init(foldhash::fast::RandomState::default)
+fn get_hash_state() -> &'static FxBuildHasher {
+    HASH_STATE.get_or_init(FxBuildHasher::default)
 }
 
 /// Computes a 64-bit hash of the given value.

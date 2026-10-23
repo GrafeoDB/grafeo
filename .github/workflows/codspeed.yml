@@ -5,7 +5,8 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
-  # Allow CodSpeed to trigger backtest performance analysis
+  # Allow CodSpeed to trigger backtest performance analysis, and a maintainer
+  # to run the benchmarks again on one commit (an A/A run, see CONTRIBUTING.md)
   workflow_dispatch:
 
 permissions:
@@ -14,11 +15,87 @@ permissions:
 
 env:
   CARGO_TERM_COLOR: always
+  # The write-path bench at a tenth of its sizes: simulation counts
+  # instructions and walltime repeats each case, so smaller inputs keep both
+  # jobs short.
+  GRAFEO_BENCH_SCALE: '10'
 
 jobs:
-  codspeed:
-    name: Run benchmarks
-    runs-on: ubuntu-latest
+  # The CPU-bound benchmarks under CodSpeed's CPU simulation, which counts
+  # instructions and simulated cache misses and leaves system calls out. One
+  # image, not `ubuntu-latest`, so base and head run on the same runner type
+  # (CodSpeed warns when they do not, and part of each change is then the
+  # machine's).
+  simulation:
+    name: Run benchmarks (simulation)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Record the runner's CPU
+        # A change on unchanged code that follows a CPU change in this log is
+        # the machine's, not the code's.
+        run: |
+          lscpu | grep -E '^(Architecture|Model name|L1d cache|L2 cache|L3 cache):'
+          grep -o -w -E 'avx2|fma|avx512f|bmi2|popcnt' /proc/cpuinfo | sort -u | tr '\n' ' '
+
+      - name: Setup rust toolchain, cache and cargo-codspeed binary
+        uses: moonrepo/setup-rust@v1
+        with:
+          cache-target: release
+          bins: cargo-codspeed
+
+      - name: Build the benchmark targets
+        env:
+          # The deterministic benchmark build: `grafeo_codspeed` fixes the
+          # hash tables' seed (each run's random seed sent hash joins,
+          # DISTINCT and GROUP BY through other collision chains) and takes
+          # the SIMD kernels from the build's target features, which
+          # `x86-64-v3` fixes, instead of the runner's CPU. Never set for a
+          # shipped build, where the random seed guards against hash flooding.
+          RUSTFLAGS: --cfg grafeo_codspeed -C target-cpu=x86-64-v3
+        run: |
+          cargo codspeed build -m simulation --all-features \
+            -p grafeo-common --bench arena_bench \
+            -p grafeo-core --bench index_bench \
+                           --bench store_apply \
+            -p grafeo-engine --bench query_bench \
+                             --bench serialization_bench \
+                             --bench regression_bench \
+                             --bench write_path_bench \
+                             --bench topk_e2e
+
+      - name: Run the benchmarks
+        uses: CodSpeedHQ/action@v5
+        env:
+          # The in-memory write path, the reads and the transaction manager;
+          # the file-backed cases are the walltime job's.
+          GRAFEO_BENCH_STORAGE: mem
+          # One thread for every pool: simulation runs threads one at a time,
+          # so parallel scans and joins only add scheduling to the counts.
+          RAYON_NUM_THREADS: '1'
+        with:
+          mode: simulation
+          # On one CPU, the engine sizes its own pools
+          # (available_parallelism) at one thread too.
+          run: taskset -c 0 cargo codspeed run -m simulation
+
+  # The file-backed write path: query writes, batches and rollbacks on a
+  # database file with its WAL, and the checkpoints (one of them with a
+  # checkpoint thread running beside the writes). Their cost is system calls
+  # (writes, fsync) and scheduling, which only wall time measures, on a
+  # machine of its own: a CodSpeed Macro Runner. Off until the organization
+  # allows the macro runners for this public repository and the repository
+  # variable CODSPEED_MACRO_RUNNERS is 'true'; on a pull request only with the
+  # label `bench: walltime`, as the runner's minutes are limited (see the
+  # Benchmarks section of CONTRIBUTING.md).
+  walltime:
+    name: Run benchmarks (walltime)
+    if: >-
+      vars.CODSPEED_MACRO_RUNNERS == 'true' &&
+      (github.event_name != 'pull_request' ||
+       contains(github.event.pull_request.labels.*.name, 'bench: walltime'))
+    runs-on: codspeed-macro-arm64-graviton-ubuntu-22-04
     steps:
       - uses: actions/checkout@v7
 
@@ -28,23 +105,15 @@ jobs:
           cache-target: release
           bins: cargo-codspeed
 
-      - name: Build the benchmark targets
+      - name: Build the benchmark target
         run: |
-          cargo codspeed build --all-features \
-            -p grafeo-common --bench arena_bench \
-            -p grafeo-core --bench index_bench \
-                           --bench store_apply \
-            -p grafeo-engine --bench query_bench \
-                             --bench serialization_bench \
-                             --bench regression_bench \
-                             --bench write_path_bench
+          cargo codspeed build -m walltime --all-features \
+            -p grafeo-engine --bench write_path_bench
 
       - name: Run the benchmarks
         uses: CodSpeedHQ/action@v5
         env:
-          # The write-path bench at a tenth of its sizes: simulation counts
-          # instructions, so smaller batches keep the run short.
-          GRAFEO_BENCH_SCALE: '10'
+          GRAFEO_BENCH_STORAGE: file
         with:
-          mode: simulation
-          run: cargo codspeed run
+          mode: walltime
+          run: cargo codspeed run -m walltime

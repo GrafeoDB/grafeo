@@ -2,6 +2,8 @@
 
 All notable changes to Grafeo, for future reference (and enjoyment).
 
+## [0.6.1] - Unreleased
+
 ## [0.6.0] - 2026-10-23
 
 Storage release: a new single-file format on a new storage engine, with online checkpoints and backups, snapshot isolation on every read path and time travel over a retained history. Plus exact decimals, a store contract for backends of your own, binding parity across C, Go, C#, Dart, Node.js and WASM, and a large round of correctness fixes in GQL, Cypher, SQL/PGQ and SPARQL.

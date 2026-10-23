@@ -108,15 +108,24 @@ mod tests {
         assert_eq!(all.len(), 40_000);
     }
 
-    /// Both seeds give a value, and two fallback seeds differ: the clock and
-    /// the hasher keys change between calls.
+    /// The seed gives a value, and with the system's entropy two seeds differ.
     #[test]
-    fn seeding_works_with_and_without_the_systems_entropy() {
+    fn seeding_works_with_the_systems_entropy() {
         let _ = seed();
-        let (first, second) = (fallback_seed(), fallback_seed());
-        assert_ne!(first, second);
         #[cfg(feature = "os-entropy")]
         assert_ne!(seed(), seed(), "the system's entropy differs per call");
+    }
+
+    /// Two fallback seeds differ: the clock and the hasher keys change between
+    /// calls.
+    #[test]
+    #[cfg_attr(
+        miri,
+        ignore = "reads the system clock, which Miri's isolation refuses"
+    )]
+    fn two_fallback_seeds_differ() {
+        let (first, second) = (fallback_seed(), fallback_seed());
+        assert_ne!(first, second);
     }
 
     #[test]

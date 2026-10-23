@@ -32,9 +32,11 @@ use grafeo_engine::{Config, GrafeoDB};
 const SCENARIO_VAR: &str = "GRAFEO_RDF_TERM_IDS_SCENARIO";
 const PATH_VAR: &str = "GRAFEO_RDF_TERM_IDS_PATH";
 /// The exit code of a child whose `close()` ran to completion.
+#[cfg(feature = "testing-crash-injection")]
 const CLOSE_COMPLETED: i32 = 3;
 
 /// The golden fixture, written by [`write_terms`].
+#[cfg(feature = "ring-index")]
 const GOLDEN: &str = "tests/fixtures/rdf/0.6.0/terms.grafeo";
 /// A 0.6.0-beta.1 file: version 3 RDF and ring sections.
 const BETA: &str = "tests/fixtures/rdf/0.6.0-beta.1/triples.grafeo";
@@ -186,6 +188,7 @@ fn section_versions(path: &Path) -> Vec<(SectionType, u8)> {
 
 /// The chunks of the RDF and ring sections of the file at `path`, with
 /// their bytes.
+#[cfg(feature = "ring-index")]
 fn rdf_chunks(path: &Path) -> Vec<(SectionType, Vec<u8>)> {
     let manager = grafeo_storage::file::GrafeoFileManager::open_read_only(path, None).unwrap();
     let chunks = manager
@@ -400,6 +403,9 @@ fn crash_child() {
         }
         other => panic!("unknown scenario {other}"),
     }
+    // Reached only when a crash-injection scenario's crash point lies past
+    // the work it injects into.
+    #[cfg(feature = "testing-crash-injection")]
     std::process::exit(0);
 }
 

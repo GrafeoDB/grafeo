@@ -132,7 +132,14 @@ const PROPS: &[&str] = &[
 ];
 const VARS: &[&str] = &["n", "m", "a", "b", "c", "x", "y", "p", "q", "r"];
 const STRINGS: &[&str] = &[
-    "Alix", "Gus", "Vincent", "Amsterdam", "Berlin", "test", "", "hello",
+    "Alix",
+    "Gus",
+    "Vincent",
+    "Amsterdam",
+    "Berlin",
+    "test",
+    "",
+    "hello",
 ];
 
 impl FuzzQuery {

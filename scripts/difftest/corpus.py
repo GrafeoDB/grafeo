@@ -693,6 +693,8 @@ for case_id, query in [
     ("O9", "MATCH (a:Person)-[r:KNOWS]->() WITH a, count(r) AS n RETURN a, n"),
     ("O10", "MATCH ()-[r:LIVES_IN]->() WITH collect(r) AS rs UNWIND rs AS e MATCH (x)-[e]->(y) RETURN x.name AS x, y.name AS y"),
     ("O11", "MATCH ()-[r:KNOWS {w: 5}]->() WITH collect(r) AS rs RETURN rs[0].w AS w, rs[-1].since AS since"),
+    # An UNWIND after WITH ... WHERE unwinds the rows the filter kept (0.5.44 read the first rows of the chunk)
+    ("O12", "MATCH (a:Person) WITH a.name AS n, a.age AS age, [a.age, a.age + 1] AS l WHERE age >= 30 UNWIND l AS v RETURN n, v"),
 ]:
     case(case_id, query)
 

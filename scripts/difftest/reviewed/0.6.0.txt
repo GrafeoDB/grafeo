@@ -437,6 +437,8 @@ BS2|gql f8f0f8a302 An unknown YIELD column is a semantic error that names the pr
 BS3|cypher dfd84e4596 A function called with too few arguments is a semantic error that names the function and the arguments it takes (#588, #540); it was GRAFEO-X001.
 BS3|gql dfd84e4596 A function called with too few arguments is a semantic error that names the function and the arguments it takes (#588, #540); it was GRAFEO-X001.
 BS4|cypher 0a88e3eae7 A Cypher DELETE of a variable nothing binds names that variable (#588); it said only "DELETE requires input".
+O12|cypher 858eba8240 An UNWIND after WITH ... WHERE unwinds the rows the filter kept; it read the first rows of the chunk, so Gus (age 25) came out instead of Jules.
+O12|gql 858eba8240 An UNWIND after WITH ... WHERE unwinds the rows the filter kept; it read the first rows of the chunk, so Gus (age 25) came out instead of Jules.
 P3|cypher 36c8f2cf63 The error starts with its code, GRAFEO-Q002 (#588); the message is unchanged.
 P3|gql 36c8f2cf63 The error starts with its code, GRAFEO-Q002 (#588); the message is unchanged.
 P4|cypher 4417410084 The error starts with its code, GRAFEO-Q002 (#588); the message is unchanged.

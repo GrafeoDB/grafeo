@@ -87,7 +87,7 @@ mod tests {
                 .unwrap();
             assert_eq!(
                 format!("{rows:?}"),
-                r#"[[String("1"), String("active"), String("2027-01-01")]]"#,
+                r#"[[RdfTerm("1"), RdfTerm("active"), RdfTerm("2027-01-01")]]"#,
                 "{tail}"
             );
         }
@@ -137,7 +137,7 @@ mod tests {
                     .unwrap();
                 assert_eq!(
                     format!("{rows:?}"),
-                    r#"[[String("1"), String("active"), String("2027-01-01")]]"#,
+                    r#"[[RdfTerm("1"), RdfTerm("active"), RdfTerm("2027-01-01")]]"#,
                     "{graph:?} {tail}"
                 );
             }
@@ -185,7 +185,7 @@ mod tests {
                                     let rows = db.execute_sparql(query).unwrap().rows().to_vec();
                                     assert_eq!(
                                         format!("{rows:?}"),
-                                        r#"[[String("1"), String("active"), String("2027-01-01")]]"#,
+                                        r#"[[RdfTerm("1"), RdfTerm("active"), RdfTerm("2027-01-01")]]"#,
                                         "reader {reader}, round {round}: {query}"
                                     );
                                 }
@@ -216,7 +216,10 @@ mod tests {
                 "SELECT (COUNT(?kv) AS ?n) WHERE { ?kv <http://ex.org/version_public_key> ?key }",
             )
             .unwrap();
-        assert_eq!(format!("{:?}", keys.rows()), "[[Int64(49)]]");
+        assert_eq!(
+            format!("{:?}", keys.rows()),
+            r#"[[RdfTerm("49"^^<http://www.w3.org/2001/XMLSchema#integer>)]]"#
+        );
     }
 
     #[test]

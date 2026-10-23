@@ -63,8 +63,8 @@ edges, err := db.EdgeCount() // number of edges
 
 ## Decimals
 
-An exact decimal (GQL `1.50`, `CAST(x AS DECIMAL(10, 2))`, SPARQL
-`xsd:decimal`) comes back as a `grafeo.Decimal`: up to 38 digits, kept as its
+An exact decimal (GQL `1.50`, `CAST(x AS DECIMAL(10, 2))`) comes back as a
+`grafeo.Decimal`: up to 38 digits, kept as its
 text with its scale (`String()` gives `"1.50"`). Compare decimals with
 `Equal`, which ignores the scale; `Rat()` gives the exact `*big.Rat`, and
 `grafeo.ParseDecimal("1.50")` makes one to pass as a parameter, exactly.
@@ -73,6 +73,30 @@ text with its scale (`String()` gives `"1.50"`). Compare decimals with
 result, _ := db.Execute("RETURN 19.99 AS price")
 price := result.Rows[0]["price"].(grafeo.Decimal)
 fmt.Println(price.String()) // 19.99
+```
+
+## RDF Terms
+
+A SPARQL result holds each IRI, blank node and literal as a `grafeo.RdfTerm`:
+its `Type` (`grafeo.IRI`, `grafeo.BlankNode` or `grafeo.Literal`), its `Value`
+(the IRI, the blank node's label without `_:`, or the lexical form), and for a
+literal its `Language` tag or `Datatype` (empty for a simple literal;
+`LiteralDatatype()` gives `xsd:string` or `rdf:langString` there). An
+`RdfTerm` passed as a parameter, or stored as a property, is that exact term.
+`grafeo.NewIRI`, `NewBlankNode`, `NewLiteral`, `NewLangLiteral` and
+`NewTypedLiteral` build one: language tags compare without case, so a tag is
+kept in lowercase, and a literal of datatype `xsd:string` is the simple
+literal. `Equal` compares two terms so, also terms built as struct literals.
+A `map[string]any` with `type` and `value` keys stays a map: on the wire a
+term is the `$term` tag (see the C API).
+A result's `Kind` is `grafeo.ResultRows`, `grafeo.ResultBoolean` for a SPARQL
+ASK (`Boolean()` gives its answer) or `grafeo.ResultGraph` for CONSTRUCT and
+DESCRIBE.
+
+```go
+result, _ := db.ExecuteSPARQL(`SELECT ?o WHERE { <http://ex.org/apple> <http://ex.org/label> ?o }`)
+label := result.Rows[0]["o"].(grafeo.RdfTerm)
+fmt.Println(label.Value, label.Language) // Pomme fr
 ```
 
 ## Query Languages

@@ -47,17 +47,52 @@ use std::sync::Arc;
 
 use grafeo_common::storage::section::SectionSource;
 use grafeo_common::storage::{ChunkCaps, ChunkKind, ChunkMeta, ChunkNamespace, SectionSink};
-use grafeo_common::types::Value;
+use grafeo_common::types::rdf::UnsupportedTermKind;
+use grafeo_common::types::{TermId, TermIdKind, Value};
 use grafeo_common::utils::error::{Error, Result};
 
 use super::{RdfStore, Term, Triple};
 use crate::codec::column_chunk::decode_column_chunk_bytes;
 use crate::codec::{ChunkColumn, RowsChunker};
 
-/// The RDF section's version: chunks, as this module writes them.
-pub(crate) const RDF_SECTION_VERSION: u8 = 3;
-/// The layout byte of the metadata chunk.
-pub(crate) const RDF_META_LAYOUT: u8 = 1;
+/// The RDF section's version: chunks of term ids and a term table, as this
+/// module writes them.
+pub(crate) const RDF_SECTION_VERSION: u8 = 4;
+/// The version of the chunks of N-Triples strings (0.6.0-beta.1), which a
+/// load still reads.
+pub(crate) const RDF_SECTION_VERSION_STRINGS: u8 = 3;
+/// The layout byte of the metadata chunk: with the term count.
+pub(crate) const RDF_META_LAYOUT: u8 = 2;
+/// The layout of version 3's metadata chunk, without it.
+pub(crate) const RDF_META_LAYOUT_STRINGS: u8 = 1;
+/// The graph id of the term table's chunks: no graph has it (a section
+/// counts its graphs in a u32 from 0, the default graph).
+pub(crate) const TERM_TABLE: u32 = u32::MAX;
+/// The term table's column of each term's kind ([`TermKind`]).
+pub(crate) const COLUMN_TERM_KIND: u32 = 3;
+/// The term table's column of the IRI, the blank node's label or the
+/// literal's lexical form.
+pub(crate) const COLUMN_TERM_VALUE: u32 = 4;
+/// The term table's column of a typed literal's datatype IRI or a tagged
+/// literal's tag; empty for the other kinds.
+pub(crate) const COLUMN_TERM_EXTRA: u32 = 5;
+/// The term table's columns with their names, in the order their chunks
+/// come.
+const TERM_COLUMNS: [(u32, &str); 3] = [
+    (COLUMN_TERM_KIND, "term kind"),
+    (COLUMN_TERM_VALUE, "term value"),
+    (COLUMN_TERM_EXTRA, "term datatype or tag"),
+];
+
+/// A term's kind in the term table.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TermKind {
+    Iri = 0,
+    Blank = 1,
+    Simple = 2,
+    Typed = 3,
+    Tagged = 4,
+}
 /// The column of the triples' subjects.
 pub(crate) const COLUMN_SUBJECT: u32 = 0;
 /// The column of the triples' predicates.
@@ -77,12 +112,15 @@ const GRAPH_LEAST_BYTES: usize = 4 + 8;
 /// The metadata chunk of an RDF section.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct RdfMeta {
-    /// [`RDF_META_LAYOUT`].
+    /// [`RDF_META_LAYOUT`], or [`RDF_META_LAYOUT_STRINGS`] in version 3.
     pub layout: u8,
     /// The rows per row group and chunk the section was written with.
     pub max_rows: u32,
     /// The byte cap the section was written with.
     pub max_bytes: u32,
+    /// The rows of the term table: its terms have file indexes `[0, terms)`
+    /// (0 in version 3, which has none).
+    pub terms: u64,
     /// Graph `i` has graph id `i`: graph 0 is the default graph, with an
     /// empty name, then the named graphs in name order.
     pub graphs: Vec<GraphMeta>,
@@ -97,13 +135,22 @@ pub(crate) struct GraphMeta {
     pub triples: u64,
 }
 
-/// Writes the metadata chunk, then per graph (in id order) its triples.
+/// Writes the metadata chunk, the term table, then per graph (in id order)
+/// its triples as term ids.
+///
+/// The file numbers the dictionary terms by first use, in the order the
+/// triples are written (by graph, then by subject, predicate and object), so
+/// the same triples give the same bytes and a term no triple uses is not
+/// written; an inlined literal's id is its own. A load reads the file's
+/// numbers back as the store's ids.
 ///
 /// # Errors
 ///
 /// Returns [`Error::InvalidValue`] for caps [`ChunkCaps::validate`]
 /// refuses; [`Error::Serialization`] for more graphs or a longer name than
-/// the metadata chunk holds; the row chunker's and the sink's errors.
+/// the metadata chunk holds; [`Error::Internal`] for a stored triple without
+/// the ids of this dataset or with a query's own id (which never leaves the
+/// query); the row chunker's and the sink's errors.
 pub(crate) fn write_rdf_chunks(
     store: &RdfStore,
     caps: ChunkCaps,
@@ -112,17 +159,19 @@ pub(crate) fn write_rdf_chunks(
     caps.validate()?;
     let mut names = store.graph_names();
     names.sort_unstable();
-    let mut graphs = vec![(String::new(), store.sorted_triples())];
+    let mut graphs = vec![(String::new(), store.sorted_triples()?)];
     for name in names {
         // A graph dropped since the names were read is left out.
         if let Some(graph) = store.graph(&name) {
-            graphs.push((name, graph.sorted_triples()));
+            graphs.push((name, graph.sorted_triples()?));
         }
     }
+    let numbering = FileNumbering::of(store, graphs.iter().flat_map(|(_, triples)| triples))?;
     let meta = RdfMeta {
         layout: RDF_META_LAYOUT,
         max_rows: caps.max_rows,
         max_bytes: caps.max_bytes,
+        terms: numbering.terms,
         graphs: graphs
             .iter()
             .map(|(name, triples)| GraphMeta {
@@ -133,17 +182,224 @@ pub(crate) fn write_rdf_chunks(
             .collect(),
     };
     sink.write_chunk(ChunkMeta::meta(), &encode_rdf_meta(&meta)?)?;
+    write_term_table(
+        store,
+        &numbering,
+        graphs.iter().flat_map(|(_, triples)| triples),
+        caps,
+        sink,
+    )?;
     // `encode_rdf_meta` refused more graphs than a u32 counts.
     for (graph_id, (_, triples)) in (0u32..).zip(&graphs) {
-        write_triple_table(triples, graph_id, caps, sink)?;
+        write_triple_table(triples, &numbering, graph_id, caps, sink)?;
     }
     Ok(())
 }
 
-/// Writes `triples` as the rows of graph `graph_id`, one row chunker per row
-/// group.
+/// The file ids of the terms of `store`'s triples, as
+/// [`write_rdf_chunks`] numbers them (a pure function of the triples and
+/// their ids): the ring section refers to its terms by them.
+///
+/// # Errors
+///
+/// As [`write_rdf_chunks`] for the ids of a stored triple.
+#[cfg(feature = "ring-index")]
+pub(crate) fn file_numbering(store: &RdfStore) -> Result<FileNumbering> {
+    let mut names = store.graph_names();
+    names.sort_unstable();
+    let mut graphs = vec![store.sorted_triples()?];
+    for name in names {
+        if let Some(graph) = store.graph(&name) {
+            graphs.push(graph.sorted_triples()?);
+        }
+    }
+    FileNumbering::of(store, graphs.iter().flatten())
+}
+
+/// The file's numbers of the dictionary terms a checkpoint writes. It holds
+/// one u32 per dictionary term (the terms themselves stay in the
+/// dictionary): the memory a checkpoint needs beyond its sorted references
+/// to the triples.
+pub(crate) struct FileNumbering {
+    /// The file index of each store dictionary index, [`Self::UNUSED`] for a
+    /// term no triple uses.
+    index: Vec<u32>,
+    /// How many terms are numbered: the term table's rows.
+    terms: u64,
+}
+
+impl FileNumbering {
+    const UNUSED: u32 = u32::MAX;
+
+    /// Numbers the dictionary terms of `triples` by first use.
+    fn of<'t>(store: &RdfStore, triples: impl Iterator<Item = &'t Arc<Triple>>) -> Result<Self> {
+        let dictionary = store.dictionary();
+        let len = usize::try_from(dictionary.len()).unwrap_or(usize::MAX);
+        if len >= Self::UNUSED as usize {
+            return Err(Error::Internal(format!(
+                "RDF section: a checkpoint numbers at most {} terms, the dataset holds {len}",
+                Self::UNUSED - 1
+            )));
+        }
+        let mut numbering = Self {
+            index: vec![Self::UNUSED; len],
+            terms: 0,
+        };
+        for triple in triples {
+            for id in stored_ids(triple)? {
+                let Some(at) = dictionary_slot(id)? else {
+                    continue;
+                };
+                let slot = numbering.index.get_mut(at).ok_or_else(|| {
+                    Error::Internal(format!(
+                        "RDF section: the stored triple {triple} has the id of term {at}, past \
+                         the dictionary's {len} terms"
+                    ))
+                })?;
+                if *slot == Self::UNUSED {
+                    // Fewer than u32::MAX dictionary terms, checked above.
+                    *slot = u32::try_from(numbering.terms).unwrap_or(Self::UNUSED);
+                    numbering.terms += 1;
+                }
+            }
+        }
+        Ok(numbering)
+    }
+
+    /// The file index of dictionary index `at`, when a triple uses the term.
+    fn index_of(&self, at: usize) -> Option<u32> {
+        self.index
+            .get(at)
+            .copied()
+            .filter(|&index| index != Self::UNUSED)
+    }
+
+    /// The id the file holds for the store's `id`.
+    pub(crate) fn file_id(&self, id: TermId) -> Result<TermId> {
+        match dictionary_slot(id)? {
+            None => Ok(id),
+            Some(at) => self
+                .index_of(at)
+                .and_then(|index| TermId::dictionary(u64::from(index)))
+                .ok_or_else(|| Error::Internal(format!("RDF section: term {at} was not numbered"))),
+        }
+    }
+}
+
+/// The ids a stored triple carries.
+fn stored_ids(triple: &Triple) -> Result<[TermId; 3]> {
+    triple.ids().ok_or_else(|| {
+        Error::Internal(format!(
+            "RDF section: the stored triple {triple} has no ids of its dataset"
+        ))
+    })
+}
+
+/// The dictionary index of `id`, `None` for an inlined literal; a query's own
+/// id is refused, as it never leaves the query.
+fn dictionary_slot(id: TermId) -> Result<Option<usize>> {
+    match id.kind() {
+        TermIdKind::Dictionary => Ok(id.index().and_then(|index| usize::try_from(index).ok())),
+        TermIdKind::Query => Err(Error::Internal(
+            "RDF section: a stored triple holds a query's own term id".to_string(),
+        )),
+        _ => Ok(None),
+    }
+}
+
+/// Writes the term table: one row per numbered term in file order, in row
+/// groups. The rows come in the order the triples first use the terms, so
+/// one more walk over `triples` (in the order `numbering` was made) writes
+/// each term the first time it meets it.
+fn write_term_table<'t>(
+    store: &RdfStore,
+    numbering: &FileNumbering,
+    triples: impl Iterator<Item = &'t Arc<Triple>>,
+    caps: ChunkCaps,
+    sink: &mut dyn SectionSink,
+) -> Result<()> {
+    let dictionary = store.dictionary();
+    let group_rows = u64::from(caps.max_rows);
+    let mut chunker: Option<RowsChunker> = None;
+    let mut row = 0u64;
+    for triple in triples {
+        for id in stored_ids(triple)? {
+            let Some(at) = dictionary_slot(id)? else {
+                continue;
+            };
+            if numbering.index_of(at).map(u64::from) != Some(row) {
+                continue;
+            }
+            let term = u64::try_from(at)
+                .ok()
+                .and_then(|at| dictionary.get(at))
+                .ok_or_else(|| {
+                    Error::Internal(format!("RDF section: dictionary term {at} is not set"))
+                })?
+                .term();
+            if row.is_multiple_of(group_rows)
+                && let Some(full) = chunker.take()
+            {
+                full.finish(sink)?;
+            }
+            let open = chunker.get_or_insert_with(|| {
+                RowsChunker::new(TERM_TABLE, columns(&TERM_COLUMNS), row, caps)
+            });
+            open.push(sink, row, term_row(term)?)?;
+            row += 1;
+        }
+    }
+    if row != numbering.terms {
+        return Err(Error::Internal(format!(
+            "RDF section: the term table holds {row} rows of the {} numbered terms",
+            numbering.terms
+        )));
+    }
+    match chunker {
+        Some(last) => last.finish(sink),
+        None => Ok(()),
+    }
+}
+
+/// The cells of `term`'s row of the term table: its kind, its value, and its
+/// datatype or tag.
+fn term_row(term: &Term) -> Result<Vec<Option<(Value, u64)>>> {
+    let (kind, value, extra) = match term {
+        Term::Iri(iri) => (TermKind::Iri, iri.as_str(), ""),
+        Term::BlankNode(node) => (TermKind::Blank, node.id(), ""),
+        Term::Literal(literal) => match literal.language() {
+            Some(tag) => (TermKind::Tagged, literal.value(), tag),
+            None if literal.datatype() == super::Literal::XSD_STRING => {
+                (TermKind::Simple, literal.value(), "")
+            }
+            None => (TermKind::Typed, literal.value(), literal.datatype()),
+        },
+        other => return Err(UnsupportedTermKind::of(other).into()),
+    };
+    Ok(vec![
+        Some((Value::Int64(kind as i64), 0)),
+        Some((Value::from(value), 0)),
+        Some((Value::from(extra), 0)),
+    ])
+}
+
+/// The chunk columns of `columns`.
+fn columns(columns: &[(u32, &str); 3]) -> Vec<ChunkColumn> {
+    columns
+        .iter()
+        .map(|&(column_id, _)| ChunkColumn {
+            kind: ChunkKind::Column,
+            namespace: ChunkNamespace::Section,
+            column_id,
+        })
+        .collect()
+}
+
+/// Writes `triples` as the rows of graph `graph_id`, their terms as the
+/// file's ids, one row chunker per row group.
 fn write_triple_table(
     triples: &[Arc<Triple>],
+    numbering: &FileNumbering,
     graph_id: u32,
     caps: ChunkCaps,
     sink: &mut dyn SectionSink,
@@ -156,21 +412,12 @@ fn write_triple_table(
         {
             full.finish(sink)?;
         }
-        let open = chunker.get_or_insert_with(|| {
-            let columns = COLUMNS
-                .iter()
-                .map(|&(column_id, _)| ChunkColumn {
-                    kind: ChunkKind::Column,
-                    namespace: ChunkNamespace::Section,
-                    column_id,
-                })
-                .collect();
-            RowsChunker::new(graph_id, columns, row, caps)
-        });
-        let cells = [triple.subject(), triple.predicate(), triple.object()]
-            .into_iter()
-            .map(|term| Some((Value::from(term.to_string()), 0)))
-            .collect();
+        let open =
+            chunker.get_or_insert_with(|| RowsChunker::new(graph_id, columns(&COLUMNS), row, caps));
+        let mut cells = Vec::with_capacity(3);
+        for id in stored_ids(triple)? {
+            cells.push(Some((id_value(numbering.file_id(id)?), 0)));
+        }
         open.push(sink, row, cells)?;
     }
     match chunker {
@@ -179,12 +426,22 @@ fn write_triple_table(
     }
 }
 
+/// The value a column of ids holds for `id`: its 64 bits.
+#[allow(
+    clippy::cast_possible_wrap,
+    reason = "a column holds the id's 64 bits in an i64, read back by TermId::from_raw"
+)]
+const fn id_value(id: TermId) -> Value {
+    Value::Int64(id.raw() as i64)
+}
+
 /// Encodes a metadata chunk. Little-endian:
 ///
 /// | Field | Encoding |
 /// | --- | --- |
-/// | layout | u8, [`RDF_META_LAYOUT`] |
+/// | layout | u8, [`RDF_META_LAYOUT`] (or [`RDF_META_LAYOUT_STRINGS`]) |
 /// | max_rows, max_bytes | u32 each |
+/// | terms | u64, the term table's rows (not in [`RDF_META_LAYOUT_STRINGS`]) |
 /// | graphs | a count u32, then per graph its name (a length u32 and UTF-8) and its triple count u64 |
 ///
 /// Nothing in the layout limits its size: a reader checks every count and
@@ -199,6 +456,9 @@ pub(crate) fn encode_rdf_meta(meta: &RdfMeta) -> Result<Vec<u8>> {
     let mut out = vec![meta.layout];
     out.extend_from_slice(&meta.max_rows.to_le_bytes());
     out.extend_from_slice(&meta.max_bytes.to_le_bytes());
+    if meta.layout != RDF_META_LAYOUT_STRINGS {
+        out.extend_from_slice(&meta.terms.to_le_bytes());
+    }
     let count = u32::try_from(meta.graphs.len()).map_err(|_| {
         Error::Serialization(format!(
             "RDF metadata chunk: {} graphs, more than the {} a section holds",
@@ -236,14 +496,22 @@ pub(crate) fn encode_rdf_meta(meta: &RdfMeta) -> Result<Vec<u8>> {
 pub(crate) fn decode_rdf_meta(bytes: &[u8]) -> Result<RdfMeta> {
     let mut reader = MetaReader { bytes, pos: 0 };
     let layout = reader.u8("layout")?;
-    if layout != RDF_META_LAYOUT {
+    if layout != RDF_META_LAYOUT && layout != RDF_META_LAYOUT_STRINGS {
         return Err(reader.refuse(
             0,
-            format!("layout {layout}, this build reads layout {RDF_META_LAYOUT}"),
+            format!(
+                "layout {layout}, this build reads layouts {RDF_META_LAYOUT_STRINGS} and \
+                 {RDF_META_LAYOUT}"
+            ),
         ));
     }
     let max_rows = reader.u32("max_rows")?;
     let max_bytes = reader.u32("max_bytes")?;
+    let terms = if layout == RDF_META_LAYOUT_STRINGS {
+        0
+    } else {
+        reader.u64("term count")?
+    };
     let count = reader.count()?;
     let mut graphs = Vec::with_capacity(count);
     for _ in 0..count {
@@ -296,6 +564,7 @@ pub(crate) fn decode_rdf_meta(bytes: &[u8]) -> Result<RdfMeta> {
         layout,
         max_rows,
         max_bytes,
+        terms,
         graphs,
     })
 }
@@ -391,8 +660,14 @@ fn describe_graph(graph_id: u32, name: &str) -> String {
     }
 }
 
-/// Applies the chunks of an RDF section of version 3 to `store`, the three
-/// chunks of one range at a time, with one `batch_insert` per range.
+/// Applies the chunks of an RDF section of `version` (4, or 3 as
+/// 0.6.0-beta.1 wrote it) to `store`, the three chunks of one range at a
+/// time, with one insert per range.
+///
+/// Version 4's term table comes first: each term takes its id in the
+/// store's dictionary once, and the triples read their terms and ids from
+/// it. Version 3's chunks hold N-Triples strings, each parsed once per
+/// chunk.
 ///
 /// The graphs the metadata lists are created, also when they hold no
 /// triple. A triple is stored as it was written, whatever kinds its terms
@@ -403,7 +678,11 @@ fn describe_graph(graph_id: u32, name: &str) -> String {
 /// Returns [`Error::Corruption`] naming the graph and rows of what the
 /// module documentation lists as refused, and any error from fetching a
 /// chunk.
-pub(crate) fn read_rdf_chunks(store: &RdfStore, source: &dyn SectionSource) -> Result<()> {
+pub(crate) fn read_rdf_chunks(
+    store: &RdfStore,
+    source: &dyn SectionSource,
+    version: u8,
+) -> Result<()> {
     let chunks = source.chunks();
     match chunks.first() {
         Some(first) if *first == ChunkMeta::meta() => {}
@@ -421,6 +700,27 @@ pub(crate) fn read_rdf_chunks(store: &RdfStore, source: &dyn SectionSource) -> R
         }
     }
     let meta = decode_rdf_meta(&source.fetch(0)?)?;
+    let expected_layout = if version == RDF_SECTION_VERSION_STRINGS {
+        RDF_META_LAYOUT_STRINGS
+    } else {
+        RDF_META_LAYOUT
+    };
+    if meta.layout != expected_layout {
+        return Err(Error::corruption(format!(
+            "RDF section of version {version}: a metadata chunk of layout {}, where this \
+             version has layout {expected_layout}",
+            meta.layout
+        )));
+    }
+    let mut index = 1;
+    let table = if version == RDF_SECTION_VERSION_STRINGS {
+        None
+    } else {
+        let table = read_term_table(store, source, chunks, &meta, &mut index)?;
+        #[cfg(feature = "ring-index")]
+        store.set_loaded_ids(Arc::from(table.ids.as_slice()));
+        Some(table)
+    };
     let named: Vec<Arc<RdfStore>> = meta.graphs[1..]
         .iter()
         .map(|graph| store.graph_or_create(&graph.name))
@@ -429,7 +729,6 @@ pub(crate) fn read_rdf_chunks(store: &RdfStore, source: &dyn SectionSource) -> R
     // The graph whose chunks come now, and the rows read of each graph.
     let mut graph_id = 0u32;
     let mut rows_read = vec![0u64; meta.graphs.len()];
-    let mut index = 1;
     while index < chunks.len() {
         let head = chunks[index];
         let place = Place::of(&meta, &head);
@@ -468,11 +767,15 @@ pub(crate) fn read_rdf_chunks(store: &RdfStore, source: &dyn SectionSource) -> R
         place.check_range(
             &head,
             &meta,
+            COLUMNS[0],
             rows_read[position],
             meta.graphs[position].triples,
         )?;
-        let triples = read_range(source, chunks, index, &place)?;
-        target.batch_insert(triples);
+        let values = read_columns(source, chunks, index, &place, &COLUMNS)?;
+        match &table {
+            None => target.batch_insert(triples_of_strings(values, &place)?),
+            Some(table) => target.batch_insert_with_dataset_ids(table.triples(values, &place)?),
+        };
         rows_read[position] = place.row_end;
         index += COLUMNS.len();
     }
@@ -503,6 +806,13 @@ struct Place {
 impl Place {
     /// The range of `chunk`.
     fn of(meta: &RdfMeta, chunk: &ChunkMeta) -> Self {
+        if chunk.graph_id == TERM_TABLE {
+            return Self {
+                graph: "the term table".to_string(),
+                row_start: chunk.row_start,
+                row_end: chunk.row_start.saturating_add(u64::from(chunk.row_count)),
+            };
+        }
         let graph = usize::try_from(chunk.graph_id)
             .ok()
             .and_then(|position| meta.graphs.get(position))
@@ -533,19 +843,21 @@ impl Place {
         ))
     }
 
-    /// Refuses a subject chunk, `head`, whose rows are not the next rows of
-    /// its graph (`next_row` on), do not fit one row group or reach past the
-    /// graph's `triples`.
+    /// Refuses a first chunk of a range, `head`, of another column than
+    /// `first`, or whose rows are not the next rows of its table (`next_row`
+    /// on), do not fit one row group or reach past the table's `triples`
+    /// rows.
     fn check_range(
         &self,
         head: &ChunkMeta,
         meta: &RdfMeta,
+        (first, first_name): (u32, &str),
         next_row: u64,
         triples: u64,
     ) -> Result<()> {
-        if head.column_id != COLUMN_SUBJECT {
+        if head.column_id != first {
             return Err(self.error(format!(
-                "column {} where the subject column {COLUMN_SUBJECT} comes first",
+                "column {} where the {first_name} column {first} comes first",
                 head.column_id
             )));
         }
@@ -575,22 +887,23 @@ impl Place {
     }
 }
 
-/// Reads the subject, predicate and object chunks from chunk `index`, whose
-/// range is `place`, as triples. A term that repeats in a chunk is read
-/// once, and its rows share it.
-fn read_range(
+/// Reads the three chunks of `columns` from chunk `index`, whose range is
+/// `place`, as their values in row order (every row has one).
+fn read_columns(
     source: &dyn SectionSource,
     chunks: &[ChunkMeta],
     index: usize,
     place: &Place,
-) -> Result<Vec<Triple>> {
+    columns: &[(u32, &str); 3],
+) -> Result<[Vec<Value>; 3]> {
     let head = chunks[index];
-    let mut columns: Vec<Vec<Term>> = Vec::with_capacity(COLUMNS.len());
-    for (offset, &(column_id, column)) in COLUMNS.iter().enumerate() {
+    let mut read: Vec<Vec<Value>> = Vec::with_capacity(columns.len());
+    for (offset, &(column_id, column)) in columns.iter().enumerate() {
         let Some(chunk) = chunks.get(index + offset) else {
-            let missing: Vec<&str> = COLUMNS[offset..].iter().map(|&(_, name)| name).collect();
+            let missing: Vec<&str> = columns[offset..].iter().map(|&(_, name)| name).collect();
             return Err(place.error(format!(
-                "the subject chunk without its {} chunks",
+                "the {} chunk without its {} chunks",
+                columns[0].1,
                 missing.join(" and ")
             )));
         };
@@ -624,20 +937,38 @@ fn read_range(
                 place.row_start + u64::from(row)
             ))
         };
-        let mut terms = Vec::with_capacity(decoded.values.len());
+        let mut values = Vec::with_capacity(decoded.values.len());
+        // The next row that must have a value: every row has one.
+        let mut next = 0u32;
+        for (row, value) in decoded.values {
+            if row != next {
+                return Err(no_value(next));
+            }
+            values.push(value);
+            next += 1;
+        }
+        if next != chunk.row_count {
+            return Err(no_value(next));
+        }
+        read.push(values);
+    }
+    read.try_into()
+        .map_err(|_| place.error("the three columns were read but not kept"))
+}
+
+/// The triples of a range of version 3: each value an N-Triples string. A
+/// term that repeats in a chunk is parsed once, and its rows share it.
+fn triples_of_strings(values: [Vec<Value>; 3], place: &Place) -> Result<Vec<Triple>> {
+    let mut columns: Vec<Vec<Term>> = Vec::with_capacity(3);
+    for ((_, column), values) in COLUMNS.iter().zip(values) {
         // The terms read so far, by the address of their string: a `Dict`
         // chunk hands every row of one entry the same string.
         let mut read: HashMap<usize, Term> = HashMap::new();
-        // The next row that must have a value: every row has one.
-        let mut next = 0u32;
-        for (row, value) in &decoded.values {
-            if *row != next {
-                return Err(no_value(next));
-            }
-            let absolute = place.row_start + u64::from(*row);
+        let mut terms = Vec::with_capacity(values.len());
+        for (row, value) in (place.row_start..).zip(values) {
             let Value::String(text) = value else {
                 return Err(place.row_error(
-                    absolute,
+                    row,
                     column,
                     format!("{value:?}, where an N-Triples string belongs"),
                 ));
@@ -645,17 +976,13 @@ fn read_range(
             let term = match read.get(&text.as_ptr().addr()) {
                 Some(term) => term.clone(),
                 None => {
-                    let term = Term::from_ntriples(text)
-                        .map_err(|error| place.row_error(absolute, column, error))?;
+                    let term = Term::from_ntriples(&text)
+                        .map_err(|error| place.row_error(row, column, error))?;
                     read.insert(text.as_ptr().addr(), term.clone());
                     term
                 }
             };
             terms.push(term);
-            next += 1;
-        }
-        if next != chunk.row_count {
-            return Err(no_value(next));
         }
         columns.push(terms);
     }
@@ -672,6 +999,183 @@ fn read_range(
         .collect())
 }
 
+/// The term table of a section of version 4, read: per file index, the term
+/// and the id the store's dictionary gives it.
+struct TermTable {
+    terms: Vec<Arc<Term>>,
+    ids: Vec<TermId>,
+}
+
+/// Reads the term table's chunks from chunk `index` on (which it moves past
+/// them), and gives each term its id in the store's dictionary.
+fn read_term_table(
+    store: &RdfStore,
+    source: &dyn SectionSource,
+    chunks: &[ChunkMeta],
+    meta: &RdfMeta,
+    index: &mut usize,
+) -> Result<TermTable> {
+    let capacity = usize::try_from(meta.terms).unwrap_or(0).min(
+        chunks
+            .len()
+            .saturating_mul(usize::try_from(meta.max_rows).unwrap_or(usize::MAX)),
+    );
+    let mut terms = Vec::with_capacity(capacity);
+    let mut rows = 0u64;
+    while *index < chunks.len() && chunks[*index].graph_id == TERM_TABLE {
+        let head = chunks[*index];
+        let place = Place::of(meta, &head);
+        if head.kind != ChunkKind::Column {
+            return Err(place.error(format!(
+                "a {:?} chunk, where the term table holds only Column chunks",
+                head.kind
+            )));
+        }
+        place.check_range(&head, meta, TERM_COLUMNS[0], rows, meta.terms)?;
+        let [kinds, values, extras] = read_columns(source, chunks, *index, &place, &TERM_COLUMNS)?;
+        for (row, ((kind, value), extra)) in
+            (place.row_start..).zip(kinds.into_iter().zip(values).zip(extras))
+        {
+            terms.push(Arc::new(term_of_row(&kind, value, extra, row, &place)?));
+        }
+        rows = place.row_end;
+        *index += TERM_COLUMNS.len();
+    }
+    if rows != meta.terms {
+        return Err(Error::corruption(format!(
+            "RDF section: the term table's chunks end at row {rows}, where the metadata counts {} \
+             terms",
+            meta.terms
+        )));
+    }
+    let ids = store
+        .dictionary()
+        .intern_all(terms.iter().map(|term| term.as_ref()))
+        .map_err(|error| Error::Internal(error.to_string()))?;
+    Ok(TermTable { terms, ids })
+}
+
+/// The term of a term table row.
+fn term_of_row(kind: &Value, value: Value, extra: Value, row: u64, place: &Place) -> Result<Term> {
+    let text = |value: Value, column: &str| match value {
+        Value::String(text) => Ok(text),
+        other => Err(place.row_error(row, column, format!("{other:?}, where a string belongs"))),
+    };
+    let value = text(value, "term value")?;
+    let extra = text(extra, "term datatype or tag")?;
+    let kind = match kind {
+        Value::Int64(kind) => *kind,
+        other => {
+            return Err(place.row_error(
+                row,
+                "term kind",
+                format!("{other:?}, where a kind belongs"),
+            ));
+        }
+    };
+    let none = |what: &str| {
+        if extra.is_empty() {
+            Ok(())
+        } else {
+            Err(place.row_error(row, "term datatype or tag", format!("{extra:?} for {what}")))
+        }
+    };
+    Ok(match kind {
+        k if k == TermKind::Iri as i64 => {
+            none("an IRI")?;
+            Term::iri(value.as_str())
+        }
+        k if k == TermKind::Blank as i64 => {
+            none("a blank node")?;
+            Term::blank(value.as_str())
+        }
+        k if k == TermKind::Simple as i64 => {
+            none("a simple literal")?;
+            Term::literal(value.as_str())
+        }
+        k if k == TermKind::Typed as i64 => Term::typed_literal(value.as_str(), extra.as_str()),
+        k if k == TermKind::Tagged as i64 => Term::lang_literal(value.as_str(), extra.as_str()),
+        other => {
+            return Err(place.row_error(
+                row,
+                "term kind",
+                format!("kind {other}, which no term has"),
+            ));
+        }
+    })
+}
+
+impl TermTable {
+    /// The triples of a range of version 4, with the store's ids of their
+    /// terms: each value the 64 bits of a file id.
+    fn triples(&self, values: [Vec<Value>; 3], place: &Place) -> Result<Vec<Triple>> {
+        let [subjects, predicates, objects] = values;
+        let mut triples = Vec::with_capacity(subjects.len());
+        for (row, ((subject, predicate), object)) in
+            (place.row_start..).zip(subjects.into_iter().zip(predicates).zip(objects))
+        {
+            let (subject, subject_id) = self.term(&subject, row, COLUMNS[0].1, place)?;
+            let (predicate, predicate_id) = self.term(&predicate, row, COLUMNS[1].1, place)?;
+            let (object, object_id) = self.term(&object, row, COLUMNS[2].1, place)?;
+            triples.push(Triple::new_unchecked(subject, predicate, object).with_ids([
+                subject_id,
+                predicate_id,
+                object_id,
+            ]));
+        }
+        Ok(triples)
+    }
+
+    /// The term and the store's id of a cell.
+    #[allow(
+        clippy::cast_sign_loss,
+        reason = "a column holds an id's 64 bits in an i64, as the writer's id_value puts them"
+    )]
+    fn term(&self, value: &Value, row: u64, column: &str, place: &Place) -> Result<(Term, TermId)> {
+        let Value::Int64(raw) = value else {
+            return Err(place.row_error(
+                row,
+                column,
+                format!("{value:?}, where a term id belongs"),
+            ));
+        };
+        let id = TermId::from_raw(*raw as u64).ok_or_else(|| {
+            place.row_error(row, column, format!("{raw:#x}, which is no term id"))
+        })?;
+        match id.kind() {
+            TermIdKind::Dictionary => {
+                let at = id
+                    .index()
+                    .and_then(|at| usize::try_from(at).ok())
+                    .filter(|&at| at < self.terms.len())
+                    .ok_or_else(|| {
+                        place.row_error(
+                            row,
+                            column,
+                            format!(
+                                "term {} of a term table of {} terms",
+                                id.index().unwrap_or(0),
+                                self.terms.len()
+                            ),
+                        )
+                    })?;
+                Ok((self.terms[at].as_ref().clone(), self.ids[at]))
+            }
+            TermIdKind::Query => Err(place.row_error(
+                row,
+                column,
+                "a query's own term id, which a file never holds",
+            )),
+            _ => {
+                let term = id.inline_term().ok_or_else(|| {
+                    place.row_error(row, column, format!("{raw:#x}, an inlined id of no term"))
+                })?;
+                Ok((term, id))
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
@@ -686,7 +1190,8 @@ mod tests {
     use grafeo_common::utils::error::Result;
 
     use super::{
-        GraphMeta, RDF_SECTION_VERSION, RdfMeta, decode_rdf_meta, encode_rdf_meta, write_rdf_chunks,
+        GraphMeta, RDF_SECTION_VERSION, RDF_SECTION_VERSION_STRINGS, RdfMeta, TERM_TABLE,
+        decode_rdf_meta, encode_rdf_meta, write_rdf_chunks,
     };
     use crate::codec::column_chunk::{ChunkCodec, decode_column_chunk, encode_column_chunk};
     use crate::graph::rdf::term::unusual_terms;
@@ -725,7 +1230,7 @@ mod tests {
         let section = RdfStoreSection::with_caps(Arc::clone(store), caps);
         let image = MemoryImage::from_sections(&[&section]).unwrap();
         let source = image.section_source(SectionType::RdfStore).unwrap();
-        assert_eq!(source.section_version(), 3);
+        assert_eq!(source.section_version(), RDF_SECTION_VERSION);
         let back = Arc::new(RdfStore::new());
         RdfStoreSection::new(Arc::clone(&back))
             .read_from(&*source)
@@ -903,7 +1408,22 @@ mod tests {
                 )
             })
             .collect();
+        let terms = meta(&written).terms;
         let mut expected = vec![(ChunkKind::Meta, 0, 0, 0, 0)];
+        let mut row_start = 0;
+        while row_start < terms {
+            let row_count = (terms - row_start).min(3);
+            for column in 3..6 {
+                expected.push((
+                    ChunkKind::Column,
+                    TERM_TABLE,
+                    column,
+                    row_start,
+                    row_count as u32,
+                ));
+            }
+            row_start += row_count;
+        }
         for (row_start, row_count) in [(0, 3), (3, 3), (6, 1)] {
             for column in 0..3 {
                 expected.push((ChunkKind::Column, 0, column, row_start, row_count));
@@ -911,13 +1431,23 @@ mod tests {
         }
         assert_eq!(layout, expected);
         for (chunk, bytes) in &written[1..] {
-            assert_eq!(chunk.codec, ChunkCodec::Dict.to_byte(), "{chunk:?}");
             let decoded = decode_column_chunk(bytes, chunk.codec, chunk.row_count).unwrap();
             assert_eq!(decoded.values.len(), chunk.row_count as usize, "every row");
             assert_eq!(decoded.epochs, None);
+            if chunk.graph_id != TERM_TABLE {
+                assert!(
+                    decoded
+                        .values
+                        .iter()
+                        .all(|(_, value)| matches!(value, Value::Int64(_))),
+                    "a triple table holds term ids: {chunk:?}"
+                );
+            }
         }
     }
 
+    /// A long literal lives in the term table, whose three columns share the
+    /// chunks it cuts.
     #[test]
     fn a_long_literal_cuts_the_chunks_of_all_three_columns() {
         let store = Arc::new(RdfStore::new());
@@ -936,11 +1466,15 @@ mod tests {
             max_bytes: 320,
         };
         let written = chunks(&store, caps);
-        let ranges: Vec<Vec<(u64, u32)>> = (0..3)
+        let ranges: Vec<Vec<(u64, u32)>> = (3..6)
             .map(|column| {
                 written
                     .iter()
-                    .filter(|(meta, _)| meta.kind == ChunkKind::Column && meta.column_id == column)
+                    .filter(|(meta, _)| {
+                        meta.kind == ChunkKind::Column
+                            && meta.graph_id == TERM_TABLE
+                            && meta.column_id == column
+                    })
                     .map(|(meta, _)| (meta.row_start, meta.row_count))
                     .collect()
             })
@@ -969,9 +1503,10 @@ mod tests {
         assert_eq!(
             meta(&written),
             RdfMeta {
-                layout: 1,
+                layout: 2,
                 max_rows: 65_536,
                 max_bytes: 1 << 20,
+                terms: 0,
                 graphs: vec![graph("", 0)],
             }
         );
@@ -996,7 +1531,11 @@ mod tests {
             "every graph with its triple count"
         );
         let graphs: Vec<u32> = written[1..].iter().map(|(meta, _)| meta.graph_id).collect();
-        assert_eq!(graphs, [3, 3, 3]);
+        assert_eq!(
+            graphs,
+            [TERM_TABLE, TERM_TABLE, TERM_TABLE, 3, 3, 3],
+            "the term table, then the chunks of the one graph with a triple"
+        );
         let back = round_trip(&Arc::new(store), ChunkCaps::DEFAULT);
         assert_eq!(
             back.graph_count(),
@@ -1087,7 +1626,7 @@ mod tests {
         let subject_chunks = |section: &RdfStoreSection| {
             let image = MemoryImage::from_sections(&[section as &dyn Section]).unwrap();
             let source = image.section_source(SectionType::RdfStore).unwrap();
-            assert_eq!(source.section_version(), 3);
+            assert_eq!(source.section_version(), RDF_SECTION_VERSION);
             source
                 .chunks()
                 .iter()
@@ -1194,6 +1733,7 @@ mod tests {
             layout: 1,
             max_rows: 3,
             max_bytes: 1 << 20,
+            terms: 0,
             graphs: vec![graph("", default), graph("http://example.org/trips", trips)],
         }
     }
@@ -1280,8 +1820,10 @@ mod tests {
         Ok(Arc::try_unwrap(store).unwrap_or_else(|_| unreachable!("the section is gone")))
     }
 
+    /// Loads crafted chunks of version 3 (N-Triples strings), which a load
+    /// still reads.
     fn load_crafted(chunks: Vec<Chunk>) -> Result<RdfStore> {
-        load_crafted_version(chunks, RDF_SECTION_VERSION)
+        load_crafted_version(chunks, RDF_SECTION_VERSION_STRINGS)
     }
 
     #[test]
@@ -1718,7 +2260,7 @@ mod tests {
         assert!(
             error.contains("RdfStore")
                 && error.contains("version 2")
-                && error.contains("version 3"),
+                && error.contains("version 4"),
             "{error}"
         );
     }
@@ -1787,5 +2329,242 @@ mod tests {
             max_bytes: 1,
         };
         assert!(write_rdf_chunks(&store, zero, &mut RefusesThird(0)).is_err());
+    }
+
+    // -----------------------------------------------------------------------
+    // Version 4: the term table and term ids
+    // -----------------------------------------------------------------------
+
+    use super::{COLUMN_SUBJECT, RDF_META_LAYOUT_STRINGS, id_value};
+    use grafeo_common::types::{TermId, TermIdKind};
+
+    /// The values of chunk `index`, decoded.
+    fn values_of(written: &[(ChunkMeta, Bytes)], index: usize) -> Vec<(u32, Value)> {
+        let (meta, bytes) = &written[index];
+        decode_column_chunk(bytes, meta.codec, meta.row_count)
+            .unwrap()
+            .values
+    }
+
+    /// `written` with chunk `index`'s values changed by `change`.
+    fn with_values(
+        mut written: Vec<(ChunkMeta, Bytes)>,
+        index: usize,
+        change: impl FnOnce(&mut Vec<(u32, Value)>),
+    ) -> Vec<(ChunkMeta, Bytes)> {
+        let mut values = values_of(&written, index);
+        change(&mut values);
+        let (codec, bytes) =
+            encode_column_chunk(written[index].0.row_count, &values, None).unwrap();
+        written[index].0.codec = codec.to_byte();
+        written[index].1 = Bytes::from(bytes);
+        written
+    }
+
+    /// Loads written (or changed) chunks as a section of version 4.
+    fn load_written(written: Vec<(ChunkMeta, Bytes)>) -> Result<RdfStore> {
+        let (metas, bytes) = written.into_iter().unzip();
+        let store = Arc::new(RdfStore::new());
+        RdfStoreSection::new(Arc::clone(&store)).read_from(&Crafted(
+            metas,
+            bytes,
+            RDF_SECTION_VERSION,
+        ))?;
+        Ok(Arc::try_unwrap(store).unwrap_or_else(|_| unreachable!("the section is gone")))
+    }
+
+    /// The index of the first chunk of graph `graph_id`.
+    fn first_chunk_of(written: &[(ChunkMeta, Bytes)], graph_id: u32) -> usize {
+        written
+            .iter()
+            .position(|(meta, _)| meta.kind == ChunkKind::Column && meta.graph_id == graph_id)
+            .unwrap()
+    }
+
+    fn fruit() -> Arc<RdfStore> {
+        let store = Arc::new(RdfStore::new());
+        store.insert(Triple::new(
+            iri("apple"),
+            iri("label"),
+            Term::lang_literal("Pomme", "fr"),
+        ));
+        store.insert(Triple::new(
+            iri("apple"),
+            iri("price"),
+            Term::typed_literal("1.50", Literal::XSD_DECIMAL),
+        ));
+        store.insert(Triple::new(
+            iri("apple"),
+            iri("rank"),
+            Term::typed_literal("019", Literal::XSD_INTEGER),
+        ));
+        store.insert(Triple::new(
+            iri("apple"),
+            iri("grower"),
+            Term::blank("farm"),
+        ));
+        store
+    }
+
+    /// The term table holds each dictionary term once, in first use; an
+    /// inlined literal is no row, and its cell is its own id.
+    #[test]
+    fn the_term_table_holds_each_dictionary_term_once() {
+        let store = fruit();
+        let written = chunks(&store, ChunkCaps::DEFAULT);
+        let rows = meta(&written).terms;
+        // apple, label, "Pomme"@fr, price, rank, "019", grower, _:farm; the
+        // decimal 1.50 is inlined.
+        assert_eq!(rows, 8);
+        let table = first_chunk_of(&written, TERM_TABLE);
+        let texts: Vec<String> = values_of(&written, table + 1)
+            .into_iter()
+            .map(|(_, value)| match value {
+                Value::String(text) => text.to_string(),
+                other => panic!("{other:?}"),
+            })
+            .collect();
+        assert_eq!(texts.len(), 8);
+        assert!(
+            texts.contains(&"019".to_string()),
+            "a non-canonical integer is a row"
+        );
+        assert!(
+            !texts.contains(&"1.50".to_string()),
+            "an inlined decimal is no row"
+        );
+        let objects = values_of(&written, first_chunk_of(&written, 0) + 2);
+        let inlined = TermId::inline(&Term::typed_literal("1.50", Literal::XSD_DECIMAL)).unwrap();
+        assert!(
+            objects.iter().any(|(_, value)| *value == id_value(inlined)),
+            "an inlined decimal's cell is its own id: {objects:?}"
+        );
+        let back = round_trip(&store, ChunkCaps::DEFAULT);
+        assert!(same_triples(&back, &store));
+        for triple in back.triples() {
+            let ids = triple.ids().expect("a loaded triple has its ids");
+            for (term, id) in [triple.subject(), triple.predicate(), triple.object()]
+                .into_iter()
+                .zip(ids)
+            {
+                assert_eq!(back.dictionary().lookup(term), Some(id), "{term}");
+            }
+        }
+    }
+
+    /// A term no triple uses any more is left out of the file, and stays in
+    /// the store's dictionary while it is open (a snapshot may still read
+    /// it); the file numbers the rest from 0.
+    #[test]
+    fn an_unused_term_is_left_out_of_the_file_and_kept_in_memory() {
+        let store = fruit();
+        let blank = Term::blank("farm");
+        let id = store.dictionary().lookup(&blank).unwrap();
+        assert!(store.remove(&Triple::new(iri("apple"), iri("grower"), blank.clone())));
+        let written = chunks(&store, ChunkCaps::DEFAULT);
+        assert_eq!(meta(&written).terms, 6, "grower and _:farm are gone");
+        assert_eq!(store.dictionary().lookup(&blank), Some(id));
+        assert_eq!(store.dictionary().term(id).as_deref(), Some(&blank));
+        let back = round_trip(&store, ChunkCaps::DEFAULT);
+        assert_eq!(back.dictionary().len(), 6);
+        assert!(same_triples(&back, &store));
+        // The same triples give the same bytes, whatever the dictionary held.
+        let fresh = Arc::new(RdfStore::new());
+        for triple in store.triples() {
+            fresh.insert(triple.as_ref().clone());
+        }
+        let bytes = |written: Vec<(ChunkMeta, Bytes)>| -> Vec<Bytes> {
+            written.into_iter().map(|(_, bytes)| bytes).collect()
+        };
+        assert_eq!(bytes(chunks(&fresh, ChunkCaps::DEFAULT)), bytes(written));
+    }
+
+    /// A query's own term id never reaches the file: the writer refuses a
+    /// stored triple that holds one.
+    #[test]
+    fn a_query_term_id_is_refused_by_the_writer() {
+        let store = RdfStore::new();
+        let alix = Term::iri("http://example.org/alix");
+        let ids = store.dictionary().intern_all([&alix, &alix]).unwrap();
+        store.batch_insert_with_dataset_ids(vec![
+            Triple::new(alix.clone(), alix.clone(), Term::blank("q0")).with_ids([
+                ids[0],
+                ids[1],
+                TermId::query(0).unwrap(),
+            ]),
+        ]);
+        let mut image = MemoryImage::new();
+        image
+            .begin_section(SectionType::RdfStore, RDF_SECTION_VERSION)
+            .unwrap();
+        let error = write_rdf_chunks(&store, ChunkCaps::DEFAULT, &mut image)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("query's own term id"), "{error}");
+    }
+
+    /// A load refuses, naming where: a cell past the term table, a query's
+    /// own id, a value that is no id, a term kind no term has, a tag on an
+    /// IRI, a term table shorter than the metadata says, and a metadata
+    /// chunk of version 3's layout.
+    #[test]
+    fn a_damaged_version_4_section_is_refused() {
+        let written = chunks(&fruit(), ChunkCaps::DEFAULT);
+        let subjects = first_chunk_of(&written, 0);
+        assert_eq!(written[subjects].0.column_id, COLUMN_SUBJECT);
+        let table = first_chunk_of(&written, TERM_TABLE);
+        let refused = |written: Vec<(ChunkMeta, Bytes)>, expected: &str| {
+            let error = load_written(written).err().expect("refused").to_string();
+            assert!(error.contains(expected), "{expected:?} in {error}");
+        };
+        refused(
+            with_values(written.clone(), subjects, |values| {
+                values[0].1 = id_value(TermId::dictionary(999).unwrap());
+            }),
+            "term 999 of a term table of 8 terms",
+        );
+        refused(
+            with_values(written.clone(), subjects, |values| {
+                values[0].1 = id_value(TermId::query(0).unwrap());
+            }),
+            "a query's own term id",
+        );
+        refused(
+            with_values(written.clone(), subjects, |values| {
+                values[0].1 = Value::from("<http://example.org/apple>");
+            }),
+            "where a term id belongs",
+        );
+        refused(
+            with_values(written.clone(), table, |values| {
+                values[0].1 = Value::Int64(9);
+            }),
+            "kind 9",
+        );
+        refused(
+            with_values(written.clone(), table + 2, |values| {
+                values[0].1 = Value::from("fr");
+            }),
+            "for an IRI",
+        );
+        let mut short = written.clone();
+        short.drain(table..table + 3);
+        refused(short, "term table");
+        let mut layout = written.clone();
+        let mut old = meta(&written);
+        old.layout = RDF_META_LAYOUT_STRINGS;
+        layout[0].1 = Bytes::from(encode_meta(&old));
+        refused(layout, "layout 1");
+        let mut unknown = written;
+        unknown[subjects].1 = {
+            let mut values = values_of(&unknown, subjects);
+            values[0].1 = Value::Int64(0x7000_0000_0000_0000);
+            let (codec, bytes) =
+                encode_column_chunk(unknown[subjects].0.row_count, &values, None).unwrap();
+            unknown[subjects].0.codec = codec.to_byte();
+            Bytes::from(bytes)
+        };
+        refused(unknown, "which is no term id");
+        assert_ne!(TermId::dictionary(0).unwrap().kind(), TermIdKind::Query);
     }
 }

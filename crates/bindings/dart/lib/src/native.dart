@@ -43,6 +43,7 @@ QueryResult buildResult(GrafeoBindings bindings, Pointer<Void> resultPtr) {
       edges: edges,
       executionTimeMs: bindings.grafeoResultExecutionTimeMs(resultPtr),
       rowsScanned: bindings.grafeoResultRowsScanned(resultPtr),
+      kind: ResultKind.of(bindings.grafeoResultKind(resultPtr)),
       counters: WriteCounters(
         nodesCreated: bindings.grafeoResultNodesCreated(resultPtr),
         nodesDeleted: bindings.grafeoResultNodesDeleted(resultPtr),

@@ -218,8 +218,12 @@ fn assert_every_kind_of_section(db: &GrafeoDB, what: &str) {
             .unwrap()
             .rows(),
         [vec![
-            Value::from("http://example.org/alix"),
-            Value::from("http://example.org/gus")
+            Value::RdfTerm(std::sync::Arc::new(grafeo_common::types::rdf::Term::iri(
+                "http://example.org/alix"
+            ))),
+            Value::RdfTerm(std::sync::Arc::new(grafeo_common::types::rdf::Term::iri(
+                "http://example.org/gus"
+            )))
         ]],
         "{what}: the triple"
     );

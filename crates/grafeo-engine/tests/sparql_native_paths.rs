@@ -126,9 +126,9 @@ fn assert_result_rows(
         .iter()
         .map(|row| {
             row.iter()
-                .map(|value| match value {
-                    Value::String(value) => value.to_string(),
-                    other => panic!("{query}: expected a string RDF value, got {other:?}"),
+                .map(|value| {
+                    lexical(value)
+                        .unwrap_or_else(|| panic!("{query}: expected an RDF term, got {value:?}"))
                 })
                 .collect()
         })
@@ -136,6 +136,22 @@ fn assert_result_rows(
     actual.sort();
     expected.sort();
     assert_eq!(actual, expected, "exact row multiset for {query}");
+}
+
+/// A term's text as the expectations write it: an IRI bare, a blank node
+/// as `_:` and its label, a literal as its lexical form. `None` for a value
+/// that is no term.
+fn lexical(value: &Value) -> Option<String> {
+    use grafeo_common::types::rdf::Term;
+    match value {
+        Value::RdfTerm(term) => Some(match term.as_ref() {
+            Term::Iri(iri) => iri.as_str().to_string(),
+            Term::BlankNode(node) => format!("_:{}", node.id()),
+            Term::Literal(literal) => literal.value().to_string(),
+            other => panic!("unsupported RDF term kind {other:?}"),
+        }),
+        _ => None,
+    }
 }
 
 #[test]
@@ -596,9 +612,11 @@ fn optional_path_join_keeps_unmatched_input() {
         .map(|row| {
             row.iter()
                 .map(|value| match value {
-                    Value::String(value) => Some(value.to_string()),
                     Value::Null => None,
-                    other => panic!("{query}: unexpected value {other:?}"),
+                    other => Some(
+                        lexical(other)
+                            .unwrap_or_else(|| panic!("{query}: unexpected value {other:?}")),
+                    ),
                 })
                 .collect()
         })

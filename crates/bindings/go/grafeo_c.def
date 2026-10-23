@@ -129,6 +129,7 @@ grafeo_result_edges_deleted
 grafeo_result_edges_json
 grafeo_result_execution_time_ms
 grafeo_result_json
+grafeo_result_kind
 grafeo_result_labels_added
 grafeo_result_labels_removed
 grafeo_result_nodes_created

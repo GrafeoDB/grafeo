@@ -81,7 +81,7 @@ fn key_order(
     let mut nodes = Vec::with_capacity(ordered.len());
     let mut keys: HashMap<NodeId, Py<PyAny>> = HashMap::with_capacity(ordered.len());
     for (node, value) in ordered {
-        let python_key = PyValue::to_py(&value, py).into_bound(py);
+        let python_key = PyValue::to_py(&value, py)?.into_bound(py);
         if python_key.hash().is_err() {
             return Err(PyErr::from(key_error(format!(
                 "node {} has a value for the key '{key}' that Python cannot use as a key ({}): \

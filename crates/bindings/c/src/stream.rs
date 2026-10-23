@@ -20,7 +20,6 @@ use std::sync::Arc;
 
 use parking_lot::{Mutex, RwLock};
 
-use grafeo_bindings_common::json::value_to_json;
 use grafeo_engine::database::GrafeoDB;
 use grafeo_engine::{OwnedResultStream, OwnedRowIterator};
 
@@ -121,14 +120,15 @@ pub extern "C" fn grafeo_stream_next_row_json(
 
     match iter.next() {
         Some(Ok(values)) => {
-            let obj: serde_json::Map<String, serde_json::Value> = s
-                .columns
-                .iter()
-                .zip(values.iter())
-                .map(|(col, v)| (col.clone(), value_to_json(v)))
-                .collect();
-            let json_str = serde_json::to_string(&serde_json::Value::Object(obj))
-                .unwrap_or_else(|_| "{}".to_string());
+            let obj = match crate::types::json_object(s.columns.iter().cloned().zip(values.iter()))
+            {
+                Ok(obj) => obj,
+                Err(status) => {
+                    *guard = None;
+                    return status;
+                }
+            };
+            let json_str = serde_json::to_string(&obj).unwrap_or_else(|_| "{}".to_string());
             let Ok(c) = CString::new(json_str) else {
                 set_last_error("Row contained embedded NUL byte; cannot serialize to C string");
                 return GrafeoStatus::ErrorSerialization;

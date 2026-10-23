@@ -6,21 +6,19 @@
 //! This planner follows the same push-based, vectorized execution model as
 //! the LPG planner for consistent performance characteristics.
 
-use grafeo_common::types::ReadView;
 use std::collections::HashMap;
 use std::sync::Arc;
 
 use grafeo_common::change::RdfGraphOp;
 use grafeo_common::storage::log_record::RdfGraphTarget;
-use grafeo_common::types::{Decimal, LogicalType, Value};
+use grafeo_common::types::{LogicalType, Value};
 use grafeo_common::utils::error::{Error, QueryError, QueryErrorKind, Result};
 use grafeo_core::execution::DataChunk;
 use grafeo_core::execution::operators::{
-    BinaryFilterOp, FilterExpression, FilterOperator, HashAggregateOperator, Operator,
-    OperatorError, Predicate, ProjectExpr, ProjectOperator, SimpleAggregateOperator,
-    SingleRowOperator, SortOperator, UnaryFilterOp,
+    FilterExpression, FilterOperator, HashAggregateOperator, Operator, OperatorError,
+    SimpleAggregateOperator, SingleRowOperator,
 };
-use grafeo_core::graph::GraphStore;
+use grafeo_core::execution::vector::ValueVector;
 use grafeo_core::graph::rdf::{Literal, RdfStore, Term, Triple, TriplePattern};
 
 use crate::query::plan::{
@@ -33,10 +31,14 @@ use crate::query::plan::{
 use crate::query::planner::{PhysicalPlan, convert_aggregate_function, convert_filter_expression};
 use crate::transaction::RdfWriter;
 
-#[cfg(feature = "regex")]
-use regex::Regex;
-#[cfg(all(feature = "regex-lite", not(feature = "regex")))]
-use regex_lite::Regex;
+mod evaluator;
+mod order;
+mod term_ids;
+mod terms;
+
+use evaluator::RdfExpressionPredicate;
+use grafeo_common::types::TermId;
+use term_ids::{QueryTermIds, id_of, id_value};
 
 /// Default chunk size for morsel-driven execution.
 const DEFAULT_CHUNK_SIZE: usize = 1024;
@@ -52,6 +54,8 @@ struct TripleOperands {
     column_map: HashMap<String, usize>,
     /// Named graph to mutate (`None` = default graph).
     graph: Option<String>,
+    /// The query's term dictionary, which the variable columns index.
+    terms: Arc<QueryTermIds>,
 }
 
 /// Fails for a graph an update cannot target: a `?`-prefixed name is an
@@ -99,16 +103,16 @@ pub struct RdfPlanner {
     profiling: std::cell::Cell<bool>,
     /// Profile entries collected during planning (post-order).
     profile_entries: std::cell::RefCell<Vec<crate::query::profile::ProfileEntry>>,
-    /// Whether the query uses LANG()/LANGMATCHES()/DATATYPE() functions.
-    /// When false, companion columns are not emitted, saving ~66% scan overhead.
-    needs_companion_columns: std::cell::Cell<bool>,
-    /// Term dictionary for dictionary-encoded triple scans. When present,
-    /// `plan_triple_scan()` emits Int64 term IDs instead of strings, and a
-    /// `DictResolveOperator` at the result boundary converts them back.
-    dictionary: Option<Arc<grafeo_core::graph::rdf::TermDictionary>>,
-    /// Column names that carry dictionary-encoded Int64 term IDs.
-    /// Populated by `plan_triple_scan()`, consumed by `plan()` for resolution.
-    encoded_columns: std::cell::RefCell<std::collections::HashSet<String>>,
+    /// Set when the operator just planned is its input as it is (a
+    /// projection of the input's columns in their order): it runs nothing,
+    /// so the profile shows the input in its place.
+    folded: std::cell::Cell<bool>,
+    /// The term dictionary of the query: every variable column of the plan
+    /// holds ids into it (see [`term_ids`]).
+    terms: Arc<QueryTermIds>,
+    /// Whether results hold the values GraphQL reads for terms
+    /// ([`Term::query_value`]) instead of the terms themselves.
+    query_values: bool,
     /// Whether a plan without `ORDER BY` returns its rows in random order.
     shuffle_unordered: bool,
     /// One traversal's maximum resident memory, narrowed by the caller's budget.
@@ -124,15 +128,16 @@ impl RdfPlanner {
     /// Creates a new RDF planner with the given store.
     #[must_use]
     pub fn new(store: Arc<RdfStore>) -> Self {
+        let terms = Arc::new(QueryTermIds::new(Arc::clone(store.dictionary())));
         Self {
             store,
             chunk_size: DEFAULT_CHUNK_SIZE,
             writer: None,
             profiling: std::cell::Cell::new(false),
             profile_entries: std::cell::RefCell::new(Vec::new()),
-            needs_companion_columns: std::cell::Cell::new(false),
-            dictionary: None,
-            encoded_columns: std::cell::RefCell::new(std::collections::HashSet::new()),
+            folded: std::cell::Cell::new(false),
+            terms,
+            query_values: false,
             shuffle_unordered: false,
             path_search_budget: grafeo_core::execution::operators::DEFAULT_PATH_SEARCH_BUDGET,
             deadline: None,
@@ -176,6 +181,14 @@ impl RdfPlanner {
         self
     }
 
+    /// Returns results as the values GraphQL reads for terms (an IRI as its
+    /// text, a numeric literal as its number) instead of RDF terms.
+    #[must_use]
+    pub(crate) fn with_query_values(mut self, query_values: bool) -> Self {
+        self.query_values = query_values;
+        self
+    }
+
     /// Plans with the writer of the transaction the plan runs in: its
     /// updates record their triples through it, and its scans see them.
     #[must_use]
@@ -197,36 +210,8 @@ impl RdfPlanner {
     ///
     /// Returns an error if planning fails.
     pub fn plan(&self, logical_plan: &LogicalPlan) -> Result<PhysicalPlan> {
-        // Pre-analyze: only emit companion columns if the query uses LANG/DATATYPE
-        self.needs_companion_columns
-            .set(uses_lang_or_datatype(&logical_plan.root));
-
-        let (mut operator, columns, _types) = self.plan_operator(&logical_plan.root)?;
-
-        // Resolve dictionary-encoded columns back to strings at the result boundary.
-        if let Some(ref dict) = self.dictionary {
-            let encoded = self.encoded_columns.borrow();
-            if !encoded.is_empty() {
-                let encoded_indices: Vec<usize> = columns
-                    .iter()
-                    .enumerate()
-                    .filter(|(_, name)| encoded.contains(*name))
-                    .map(|(i, _)| i)
-                    .collect();
-                if !encoded_indices.is_empty() {
-                    operator = Box::new(DictResolveOperator::new(
-                        operator,
-                        Arc::clone(dict),
-                        encoded_indices,
-                    ));
-                }
-            }
-        }
-
-        // Strip internal companion columns (__lang_<var>, __datatype_<var>)
-        // from the output. They are used by LANG()/LANGMATCHES()/DATATYPE()
-        // during evaluation but should never appear in query results.
-        let (operator, columns) = strip_internal_columns(operator, columns);
+        let (operator, columns, types) = self.plan_operator(&logical_plan.root)?;
+        let operator = self.decode_results(operator, &types, logical_plan.result_kind);
         let operator: Box<dyn Operator> =
             if self.shuffle_unordered && !super::common::orders_rows(&logical_plan.root) {
                 Box::new(grafeo_core::execution::operators::ShuffleOperator::new(
@@ -256,11 +241,63 @@ impl RdfPlanner {
         let result = self.plan_operator(&logical_plan.root);
 
         self.profiling.set(false);
-        let (operator, columns, _types) = result?;
-        let (operator, columns) = strip_internal_columns(operator, columns);
+        let (operator, columns, types) = result?;
+        let operator = self.decode_results(operator, &types, logical_plan.result_kind);
         let entries = self.profile_entries.borrow_mut().drain(..).collect();
 
         Ok((PhysicalPlan { operator, columns }, entries))
+    }
+
+    /// Decodes the term id columns of a plan's result: each becomes the
+    /// RDF terms it holds; for GraphQL the values it reads for them, and for
+    /// ASK its boolean.
+    fn decode_results(
+        &self,
+        operator: Box<dyn Operator>,
+        types: &[LogicalType],
+        kind: crate::database::ResultKind,
+    ) -> Box<dyn Operator> {
+        let columns: Vec<usize> = types
+            .iter()
+            .enumerate()
+            .filter(|(_, ty)| **ty == LogicalType::RdfTermId)
+            .map(|(i, _)| i)
+            .collect();
+        if columns.is_empty() {
+            return operator;
+        }
+        let decode_as = if kind == crate::database::ResultKind::Boolean {
+            DecodeAs::Boolean
+        } else if self.query_values {
+            DecodeAs::QueryValues
+        } else {
+            DecodeAs::Terms
+        };
+        Box::new(TermDecodeOperator {
+            input: operator,
+            terms: Arc::clone(&self.terms),
+            columns,
+            decode_as,
+        })
+    }
+
+    /// Wraps `operator` so the columns `columns` hold term ids: a term, or a
+    /// native value as its literal, is interned.
+    fn intern(&self, operator: Box<dyn Operator>, columns: Vec<usize>) -> Box<dyn Operator> {
+        Box::new(TermInternOperator {
+            input: operator,
+            terms: Arc::clone(&self.terms),
+            columns,
+        })
+    }
+
+    /// The id of `term` in the query's dictionary.
+    fn term_id(&self, term: &Term) -> Result<Value> {
+        let id = self
+            .terms
+            .intern(term)
+            .map_err(|e| Error::Internal(e.to_string()))?;
+        Ok(id_value(id))
     }
 
     /// If profiling is enabled, wraps a planned result in `ProfiledOperator`
@@ -270,6 +307,14 @@ impl RdfPlanner {
         result: Result<(Box<dyn Operator>, Vec<String>, Vec<LogicalType>)>,
         op: &LogicalOperator,
     ) -> Result<(Box<dyn Operator>, Vec<String>, Vec<LogicalType>)> {
+        if self.folded.replace(false) {
+            if self.profiling.get() && result.is_ok() {
+                self.profile_entries.borrow_mut().push(
+                    crate::query::profile::ProfileEntry::folded(op.display_label()),
+                );
+            }
+            return result;
+        }
         if self.profiling.get() {
             let (physical, columns, types) = result?;
             let (entry, stats) =
@@ -375,7 +420,6 @@ impl RdfPlanner {
                 min_hops: !path.zero_length,
                 path: path.path.clone(),
                 graph,
-                companions: self.needs_companion_columns.get(),
                 transaction_id: None,
                 chunk_capacity: self.chunk_size,
             },
@@ -384,8 +428,9 @@ impl RdfPlanner {
         .with_deadline(self.deadline)
         .with_read_overlay(self.writer.as_ref().map(RdfWriter::path_overlay));
         let columns = operator.columns();
-        let types = vec![LogicalType::Any; columns.len()];
-        Ok((Box::new(operator), columns, types))
+        let types = vec![LogicalType::RdfTermId; columns.len()];
+        let operator = self.intern(Box::new(operator), (0..columns.len()).collect());
+        Ok((operator, columns, types))
     }
 
     /// Plans a triple scan operator.
@@ -411,27 +456,10 @@ impl RdfPlanner {
             columns.push(name.clone());
             output_mask[1] = true;
         }
-        // Track whether the object is a variable (for language-tag companion column)
-        let mut object_var_name: Option<String> = None;
         if let TripleComponent::Variable(name) = &scan.object {
             columns.push(name.clone());
             output_mask[2] = true;
-            object_var_name = Some(name.clone());
         }
-
-        // When the object is a variable, add a hidden companion column for
-        // language tags so that LANG() and LANGMATCHES() can access them.
-        // This must be added BEFORE the graph column to match the DataChunk
-        // layout (the lang column is emitted right after the object column).
-        let emit_companion_columns = object_var_name.is_some();
-        let emit_datatype_column = emit_companion_columns && self.needs_companion_columns.get();
-        if let Some(ref obj_name) = object_var_name {
-            columns.push(format!("__lang_{obj_name}"));
-            if emit_datatype_column {
-                columns.push(format!("__datatype_{obj_name}"));
-            }
-        }
-
         if let Some(TripleComponent::Variable(name)) = &scan.graph {
             columns.push(name.clone());
             output_mask[3] = true;
@@ -456,31 +484,11 @@ impl RdfPlanner {
                 scan_all_graphs,
                 dataset: scan.dataset.clone(),
             },
-            emit_companion_columns,
-            emit_datatype_column,
+            Arc::clone(&self.terms),
         )
         .with_writer(self.writer.clone())
         .with_read_counter(self.read_counter());
-
-        // Dictionary encoding is available but not yet automatically enabled for
-        // all queries. The infrastructure (TermDictionary, DictResolveOperator) is
-        // in place for use by the Ring Index planner (Phase 4) and WCOJ joins.
-        // Automatic activation requires detecting whether downstream operators
-        // (FILTER, BIND, ORDER BY) inspect string content, which is deferred.
-        let _ = &self.dictionary; // suppress unused warning
-        let _ = &self.encoded_columns;
-
-        // Text, except the object's column: a literal there may be a number.
-        let types = columns
-            .iter()
-            .map(|column| {
-                if object_var_name.as_ref() == Some(column) {
-                    LogicalType::Any
-                } else {
-                    LogicalType::String
-                }
-            })
-            .collect();
+        let types = vec![LogicalType::RdfTermId; columns.len()];
         Ok((Box::new(scan_op), columns, types))
     }
 
@@ -534,8 +542,8 @@ impl RdfPlanner {
         // Convert logical expression to filter expression
         let filter_expr = convert_filter_expression(&filter.predicate)?;
 
-        // Create RDF-specific predicate (doesn't need LpgStore)
-        let predicate = RdfExpressionPredicate::new(filter_expr, variable_columns);
+        let predicate =
+            RdfExpressionPredicate::new(filter_expr, variable_columns, Arc::clone(&self.terms));
 
         let operator = Box::new(FilterOperator::new(input_op, Box::new(predicate)));
         Ok((operator, columns, types))
@@ -634,105 +642,82 @@ impl RdfPlanner {
         Ok((op, cols, types))
     }
 
-    /// Plans a SORT operator.
+    /// Plans a SORT operator: every key is pre-projected as the RDF term it
+    /// is (a variable decoded, an expression evaluated), so the sort orders
+    /// terms in SPARQL order (section 15.1), unbound first ascending.
     fn plan_sort(
         &self,
         sort: &SortOp,
     ) -> Result<(Box<dyn Operator>, Vec<String>, Vec<LogicalType>)> {
         use crate::query::plan::SortOrder;
-        use grafeo_core::execution::operators::{
-            FilterExpression, ProjectExpr, ProjectOperator, SortDirection, SortKey,
-        };
 
-        let (mut input_op, columns, types) = self.plan_operator(&sort.input)?;
+        let (input_op, columns, types) = self.plan_operator(&sort.input)?;
+        let variable_columns = column_map(&columns);
 
-        let mut variable_columns: HashMap<String, usize> = columns
-            .iter()
-            .enumerate()
-            .map(|(i, name)| (name.clone(), i))
-            .collect();
-
-        // Pre-project complex sort key expressions
-        let mut expression_projections: Vec<(FilterExpression, String)> = Vec::new();
-        let mut next_col_idx = columns.len();
+        let mut projections: Vec<RdfProjectExpr> =
+            (0..columns.len()).map(RdfProjectExpr::Column).collect();
+        let mut output_types = types.clone();
+        let mut keys = Vec::with_capacity(sort.keys.len());
         for key in &sort.keys {
-            match &key.expression {
-                LogicalExpression::Variable(_) => {}
-                _ => {
-                    let col_name = resolved_column_name(&key.expression);
-                    if !variable_columns.contains_key(&col_name) {
-                        let filter_expr = convert_filter_expression(&key.expression)?;
-                        expression_projections.push((filter_expr, col_name.clone()));
-                        variable_columns.insert(col_name, next_col_idx);
-                        next_col_idx += 1;
+            // A variable's key is its own id column; an expression's value is
+            // projected as a term after the returned columns. A variable the
+            // pattern does not bind is unbound in every solution: a key that
+            // orders nothing.
+            let column = match &key.expression {
+                LogicalExpression::Variable(name) => match variable_columns.get(name) {
+                    Some(&column) => column,
+                    None => {
+                        projections.push(RdfProjectExpr::Constant(Value::Null));
+                        output_types.push(LogicalType::Any);
+                        projections.len() - 1
                     }
+                },
+                other => {
+                    projections.push(RdfProjectExpr::Evaluated {
+                        expr: convert_filter_expression(other)?,
+                        variable_columns: variable_columns.clone(),
+                        output: EvaluatedOutput::Term,
+                    });
+                    output_types.push(LogicalType::Any);
+                    projections.len() - 1
                 }
-            }
+            };
+            keys.push(order::OrderKey {
+                column,
+                descending: key.order == SortOrder::Descending,
+                // Unbound is the least value (15.1): first ascending.
+                nulls_first: matches!(
+                    (key.nulls, key.order),
+                    (Some(crate::query::plan::NullsOrdering::First), _)
+                        | (None, SortOrder::Ascending)
+                ),
+            });
         }
-
-        if !expression_projections.is_empty() {
-            let mut projections: Vec<ProjectExpr> =
-                (0..columns.len()).map(ProjectExpr::Column).collect();
-            let mut output_types: Vec<LogicalType> = types.clone();
-
-            for (filter_expr, _col_name) in &expression_projections {
-                projections.push(ProjectExpr::Expression {
-                    expr: filter_expr.clone(),
-                    variable_columns: variable_columns.clone(),
-                });
-                output_types.push(LogicalType::Any); // computed expressions may produce non-string types
-            }
-
-            input_op = Box::new(ProjectOperator::with_store(
+        // Variables only: the input as it is.
+        let projected: Box<dyn Operator> = if projections.len() == columns.len() {
+            input_op
+        } else {
+            Box::new(RdfProjectOperator::new(
                 input_op,
                 projections,
                 output_types,
-                Arc::new(grafeo_core::graph::NullGraphStore) as Arc<dyn GraphStore>,
-                // The SPARQL expressions read the row's values: the null store
-                // is never read, at any view.
-                ReadView::latest(),
-            ));
-        }
-
-        let physical_keys: Vec<SortKey> = sort
-            .keys
-            .iter()
-            .map(|key| {
-                let col_idx = resolve_expression(&key.expression, &variable_columns)?;
-                Ok(SortKey {
-                    column: col_idx,
-                    direction: match key.order {
-                        SortOrder::Ascending => SortDirection::Ascending,
-                        SortOrder::Descending => SortDirection::Descending,
-                    },
-                    null_order: super::common::physical_null_order(key),
-                })
-            })
-            .collect::<Result<Vec<_>>>()?;
-
-        let mut sort = SortOperator::new(input_op, physical_keys);
-        // The columns computed for ORDER BY come last and are not returned.
-        if !expression_projections.is_empty() {
-            sort = sort.with_output_width(columns.len());
-        }
-        Ok((Box::new(sort), columns, types))
+                Arc::clone(&self.terms),
+            ))
+        };
+        // The key columns come last and are not returned.
+        let sort_op =
+            order::RdfSortOperator::new(projected, keys, types.clone(), Arc::clone(&self.terms));
+        Ok((Box::new(sort_op), columns, types))
     }
 
-    /// Plans a PROJECT operator.
-    ///
-    /// Projects only the requested columns from the input.
+    /// Plans a PROJECT operator: a variable's ids are copied, a constant and
+    /// an expression's value are interned.
     fn plan_project(
         &self,
         project: &crate::query::plan::ProjectOp,
     ) -> Result<(Box<dyn Operator>, Vec<String>, Vec<LogicalType>)> {
         let (input_op, input_columns, input_types) = self.plan_operator(&project.input)?;
-
-        // Build mapping from variable name to column index
-        let variable_columns: HashMap<String, usize> = input_columns
-            .iter()
-            .enumerate()
-            .map(|(i, name)| (name.clone(), i))
-            .collect();
+        let variable_columns = column_map(&input_columns);
 
         let mut projections = Vec::new();
         let mut output_columns = Vec::new();
@@ -741,93 +726,87 @@ impl RdfPlanner {
         for proj in &project.projections {
             match &proj.expression {
                 LogicalExpression::Variable(name) => {
-                    if let Some(&col_idx) = variable_columns.get(name) {
-                        projections.push(RdfProjectExpr::Column(col_idx));
-                        output_columns.push(proj.alias.clone().unwrap_or_else(|| name.clone()));
-                        output_types.push(input_types[col_idx].clone());
-                    } else {
-                        return Err(Error::Internal(format!(
-                            "Variable '{}' not found in input columns",
-                            name
-                        )));
+                    match variable_columns.get(name) {
+                        Some(&col_idx) => {
+                            projections.push(RdfProjectExpr::Column(col_idx));
+                            output_types.push(input_types[col_idx].clone());
+                        }
+                        // A variable the pattern does not bind is unbound in
+                        // every solution (SPARQL 1.1, 18.2.5).
+                        None => {
+                            projections.push(RdfProjectExpr::Constant(Value::Null));
+                            output_types.push(LogicalType::RdfTermId);
+                        }
                     }
+                    output_columns.push(proj.alias.clone().unwrap_or_else(|| name.clone()));
                 }
                 LogicalExpression::Literal(value) => {
-                    projections.push(RdfProjectExpr::Constant(value.clone()));
+                    let id = match terms::to_term(value) {
+                        Some(term) => self.term_id(&term)?,
+                        None => Value::Null,
+                    };
+                    projections.push(RdfProjectExpr::Constant(id));
                     output_columns.push(proj.alias.clone().unwrap_or_else(|| format!("{value}")));
-                    output_types.push(LogicalType::Any);
+                    output_types.push(LogicalType::RdfTermId);
                 }
                 expr => {
-                    // Convert complex expressions (function calls, arithmetic, etc.)
-                    // to physical filter expressions and evaluate them in the projection.
-                    let filter_expr = convert_filter_expression(expr)?;
                     projections.push(RdfProjectExpr::Expression {
-                        expr: filter_expr,
+                        expr: convert_filter_expression(expr)?,
                         variable_columns: variable_columns.clone(),
                     });
                     output_columns.push(proj.alias.clone().unwrap_or_else(|| format!("{expr:?}")));
-                    output_types.push(LogicalType::Any);
+                    output_types.push(LogicalType::RdfTermId);
                 }
             }
         }
 
-        // If no projections were extracted, just return the input as-is
         if projections.is_empty() {
             return Ok((input_op, input_columns, input_types));
         }
+        // The input's columns in their order: only the names change.
+        let identity = projections.len() == input_columns.len()
+            && projections
+                .iter()
+                .enumerate()
+                .all(|(at, projection)| matches!(projection, RdfProjectExpr::Column(column) if *column == at));
+        if identity {
+            self.folded.set(true);
+            return Ok((input_op, output_columns, output_types));
+        }
 
-        // Use RdfProjectOperator which delegates expression evaluation to
-        // RdfExpressionPredicate, giving access to SPARQL functions (STRLEN,
-        // UCASE, LCASE, etc.) that the generic ProjectOperator does not know.
         let operator: Box<dyn Operator> = Box::new(RdfProjectOperator::new(
             input_op,
             projections,
             output_types.clone(),
+            Arc::clone(&self.terms),
         ));
         Ok((operator, output_columns, output_types))
     }
 
-    /// Plans a BIND operator.
-    ///
-    /// BIND adds a computed column to each row by evaluating an expression.
-    /// For example: `BIND (CONCAT(?name, " (age ", STR(?age), ")") AS ?label)`
+    /// Plans a BIND operator: the expression's value at each row, interned,
+    /// in a new column. For example
+    /// `BIND (CONCAT(?name, " (age ", STR(?age), ")") AS ?label)`.
     fn plan_bind(
         &self,
         bind: &BindOp,
     ) -> Result<(Box<dyn Operator>, Vec<String>, Vec<LogicalType>)> {
         let (input_op, input_columns, mut input_types) = self.plan_operator(&bind.input)?;
-
-        // Build variable-to-column mapping for expression evaluation
-        let variable_columns: HashMap<String, usize> = input_columns
-            .iter()
-            .enumerate()
-            .map(|(i, name)| (name.clone(), i))
-            .collect();
-
-        // Convert the BIND expression to a FilterExpression
+        let variable_columns = column_map(&input_columns);
         let filter_expr = convert_filter_expression(&bind.expression)?;
 
-        // Build output columns: all input columns + the new BIND variable
         let mut output_columns = input_columns;
         output_columns.push(bind.variable.clone());
-        input_types.push(LogicalType::Any);
+        input_types.push(LogicalType::RdfTermId);
 
-        // The language tag of the bound literal goes into the variable's
-        // hidden __lang_<var> companion, as the triple scan fills it, so
-        // LANG, LANGMATCHES and DATATYPE of the new variable read it.
-        let lang_expr = FilterExpression::SparqlCall {
-            name: "LANG".to_string(),
-            args: vec![filter_expr.clone()],
-        };
-        let operator: Box<dyn Operator> = Box::new(RdfBindOperator::new(
-            input_op,
-            filter_expr,
-            variable_columns.clone(),
-        ));
-        let operator: Box<dyn Operator> =
-            Box::new(RdfBindOperator::new(operator, lang_expr, variable_columns));
-        output_columns.push(format!("__lang_{}", bind.variable));
-        input_types.push(LogicalType::Any);
+        let operator: Box<dyn Operator> = Box::new(RdfBindOperator {
+            child: input_op,
+            evaluator: RdfExpressionPredicate::new(
+                filter_expr,
+                variable_columns,
+                Arc::clone(&self.terms),
+            ),
+            terms: Arc::clone(&self.terms),
+        });
         Ok((operator, output_columns, input_types))
     }
 
@@ -841,168 +820,188 @@ impl RdfPlanner {
     ) -> Result<(Box<dyn Operator>, Vec<String>, Vec<LogicalType>)> {
         let (input_op, input_columns, _input_types) = self.plan_operator(&construct.input)?;
 
-        let variable_columns: HashMap<String, usize> = input_columns
+        let variable_columns = column_map(&input_columns);
+        // Each component once: a variable's column, a constant's id, a blank
+        // node's label (fresh per solution).
+        let slot = |component: &TripleComponent| -> Result<TemplateSlot> {
+            Ok(match component {
+                TripleComponent::Variable(name) => {
+                    let name = name.strip_prefix('?').unwrap_or(name);
+                    variable_columns
+                        .get(name)
+                        .map_or(TemplateSlot::Unbound, |&column| {
+                            TemplateSlot::Column(column)
+                        })
+                }
+                TripleComponent::BlankNode(label) => TemplateSlot::Blank(label.clone()),
+                other => match component_to_term(other) {
+                    Some(term) => TemplateSlot::Constant(
+                        self.terms
+                            .intern(&term)
+                            .map_err(|e| Error::Internal(e.to_string()))?,
+                    ),
+                    None => TemplateSlot::Unbound,
+                },
+            })
+        };
+        let templates = construct
+            .templates
             .iter()
-            .enumerate()
-            .map(|(i, name)| (name.clone(), i))
-            .collect();
+            .map(|template| {
+                Ok([
+                    slot(&template.subject)?,
+                    slot(&template.predicate)?,
+                    slot(&template.object)?,
+                ])
+            })
+            .collect::<Result<Vec<_>>>()?;
 
-        let operator = Box::new(ConstructOperator::new(
-            input_op,
-            construct.templates.clone(),
-            variable_columns,
-        ));
+        let operator = Box::new(ConstructOperator {
+            input: input_op,
+            templates,
+            terms: Arc::clone(&self.terms),
+            seen: grafeo_common::utils::hash::FxHashSet::default(),
+        });
 
         let columns = vec![
             "subject".to_string(),
             "predicate".to_string(),
             "object".to_string(),
         ];
-        let types = vec![LogicalType::String; 3];
+        // Terms, not ids: the result boundary does not decode them.
+        let types = vec![LogicalType::Any; 3];
         Ok((operator, columns, types))
     }
 
-    /// Plans an AGGREGATE operator.
+    /// Plans an AGGREGATE operator. Group keys are term ids (a computed key
+    /// interned), so groups are by term identity. COUNT reads ids; SUM and
+    /// AVG the numbers of their arguments; MIN, MAX and SAMPLE the terms,
+    /// which MIN and MAX compare in SPARQL order; GROUP_CONCAT the lexical
+    /// forms. The results are interned.
     fn plan_aggregate(
         &self,
         agg: &AggregateOp,
     ) -> Result<(Box<dyn Operator>, Vec<String>, Vec<LogicalType>)> {
-        // COUNT(*) fast-path: when the aggregate is a single COUNT(*) with no
-        // GROUP BY, no DISTINCT, no HAVING, and the input is a fully-unbound
-        // TripleScan, short-circuit to store.len() in O(1).
         if let Some(result) = self.try_count_fast_path(agg) {
             return Ok(result);
         }
 
         use grafeo_core::execution::operators::AggregateExpr as PhysicalAggregateExpr;
 
-        let (mut input_op, input_columns, input_types) = self.plan_operator(&agg.input)?;
-
-        let mut variable_columns: HashMap<String, usize> = input_columns
-            .iter()
-            .enumerate()
-            .map(|(i, name)| (name.clone(), i))
+        let (input_op, input_columns, input_types) = self.plan_operator(&agg.input)?;
+        let input_map = column_map(&input_columns);
+        let mut variable_columns = input_map.clone();
+        let mut projections: Vec<RdfProjectExpr> = (0..input_columns.len())
+            .map(RdfProjectExpr::Column)
             .collect();
+        let mut projected_types = input_types;
 
-        // Pre-project complex expressions in group-by keys and aggregate arguments
-        let mut expression_projections: Vec<(FilterExpression, String)> = Vec::new();
-        let mut next_col_idx = input_columns.len();
-
-        // Group-by expressions (Labels, Type, FunctionCall, etc.)
+        let mut group_columns = Vec::with_capacity(agg.group_by.len());
         for expr in &agg.group_by {
-            match expr {
-                LogicalExpression::Variable(_) => {}
-                _ => {
-                    let col_name = resolved_column_name(expr);
-                    if !variable_columns.contains_key(&col_name) {
-                        let filter_expr = convert_filter_expression(expr)?;
-                        expression_projections.push((filter_expr, col_name.clone()));
-                        variable_columns.insert(col_name, next_col_idx);
-                        next_col_idx += 1;
+            let column = match expr {
+                LogicalExpression::Variable(_) => resolve_expression(expr, &variable_columns)?,
+                other => {
+                    let name = resolved_column_name(other);
+                    if let Some(&column) = variable_columns.get(&name) {
+                        column
+                    } else {
+                        projections.push(RdfProjectExpr::Expression {
+                            expr: convert_filter_expression(other)?,
+                            variable_columns: input_map.clone(),
+                        });
+                        projected_types.push(LogicalType::RdfTermId);
+                        variable_columns.insert(name, projections.len() - 1);
+                        projections.len() - 1
                     }
                 }
-            }
+            };
+            group_columns.push(column);
         }
 
-        // Aggregate argument expressions
+        let mut argument = |expr: &LogicalExpression, output: Option<EvaluatedOutput>| {
+            if output.is_none()
+                && let LogicalExpression::Variable(_) = expr
+            {
+                return resolve_expression(expr, &variable_columns);
+            }
+            let expr = convert_filter_expression(expr)?;
+            projections.push(match output {
+                Some(output) => RdfProjectExpr::Evaluated {
+                    expr,
+                    variable_columns: input_map.clone(),
+                    output,
+                },
+                None => RdfProjectExpr::Expression {
+                    expr,
+                    variable_columns: input_map.clone(),
+                },
+            });
+            projected_types.push(if output.is_some() {
+                LogicalType::Any
+            } else {
+                LogicalType::RdfTermId
+            });
+            Ok(projections.len() - 1)
+        };
+
+        let mut physical_aggregates = Vec::with_capacity(agg.aggregates.len());
         for agg_expr in &agg.aggregates {
-            for expr_opt in [&agg_expr.expression, &agg_expr.expression2] {
-                let Some(expr) = expr_opt else { continue };
-                match expr {
-                    LogicalExpression::Variable(_) => {}
-                    _ => {
-                        let col_name = resolved_column_name(expr);
-                        if !variable_columns.contains_key(&col_name) {
-                            let filter_expr = convert_filter_expression(expr)?;
-                            expression_projections.push((filter_expr, col_name.clone()));
-                            variable_columns.insert(col_name, next_col_idx);
-                            next_col_idx += 1;
-                        }
-                    }
+            let output = match agg_expr.function {
+                LogicalAggregateFunction::Count | LogicalAggregateFunction::CountNonNull => None,
+                LogicalAggregateFunction::Sum | LogicalAggregateFunction::Avg => {
+                    Some(EvaluatedOutput::Number)
                 }
-            }
+                LogicalAggregateFunction::GroupConcat => Some(EvaluatedOutput::Lexical),
+                _ => Some(EvaluatedOutput::Term),
+            };
+            let column = agg_expr
+                .expression
+                .as_ref()
+                .map(|expr| argument(expr, output))
+                .transpose()?;
+            let column2 = agg_expr
+                .expression2
+                .as_ref()
+                .map(|expr| argument(expr, Some(EvaluatedOutput::Term)))
+                .transpose()?;
+            physical_aggregates.push(PhysicalAggregateExpr {
+                function: convert_aggregate_function(agg_expr.function),
+                column,
+                column2,
+                distinct: agg_expr.distinct,
+                alias: agg_expr.alias.clone(),
+                percentile: agg_expr.percentile,
+                separator: agg_expr.separator.clone(),
+                // SPARQL's SUM and AVG: XPath's division for AVG, and an
+                // argument that is no number an error (the result unbound).
+                rdf_literals: matches!(
+                    agg_expr.function,
+                    LogicalAggregateFunction::Sum | LogicalAggregateFunction::Avg
+                ),
+            });
         }
 
-        if !expression_projections.is_empty() {
-            let mut projections: Vec<ProjectExpr> =
-                (0..input_columns.len()).map(ProjectExpr::Column).collect();
-            let mut output_types: Vec<LogicalType> = input_types;
-
-            for (filter_expr, _col_name) in &expression_projections {
-                projections.push(ProjectExpr::Expression {
-                    expr: filter_expr.clone(),
-                    variable_columns: variable_columns.clone(),
-                });
-                output_types.push(LogicalType::Any); // computed expressions may produce non-string types
-            }
-
-            input_op = Box::new(ProjectOperator::with_store(
+        let input_op: Box<dyn Operator> = if projections.len() > input_columns.len() {
+            Box::new(RdfProjectOperator::new(
                 input_op,
                 projections,
-                output_types,
-                Arc::new(grafeo_core::graph::NullGraphStore) as Arc<dyn GraphStore>,
-                // The SPARQL expressions read the row's values: the null store
-                // is never read, at any view.
-                ReadView::latest(),
-            ));
-        }
+                projected_types,
+                Arc::clone(&self.terms),
+            ))
+        } else {
+            input_op
+        };
 
-        let group_columns: Vec<usize> = agg
-            .group_by
-            .iter()
-            .map(|expr| resolve_expression(expr, &variable_columns))
-            .collect::<Result<Vec<_>>>()?;
-
-        let physical_aggregates: Vec<PhysicalAggregateExpr> = agg
-            .aggregates
-            .iter()
-            .map(|agg_expr| {
-                let column = agg_expr
-                    .expression
-                    .as_ref()
-                    .map(|e| resolve_expression(e, &variable_columns))
-                    .transpose()?;
-
-                let column2 = agg_expr
-                    .expression2
-                    .as_ref()
-                    .map(|e| resolve_expression(e, &variable_columns))
-                    .transpose()?;
-
-                Ok(PhysicalAggregateExpr {
-                    function: convert_aggregate_function(agg_expr.function),
-                    column,
-                    column2,
-                    distinct: agg_expr.distinct,
-                    alias: agg_expr.alias.clone(),
-                    percentile: agg_expr.percentile,
-                    separator: agg_expr.separator.clone(),
-                    // SPARQL rows hold RDF literals as text: MIN and MAX compare
-                    // those that read as numbers by their numbers.
-                    rdf_literals: true,
-                })
-            })
-            .collect::<Result<Vec<_>>>()?;
-
-        let mut output_schema = Vec::new();
-        let mut output_columns = Vec::new();
-
-        for expr in &agg.group_by {
-            output_schema.push(LogicalType::String);
-            output_columns.push(expression_to_string(expr));
-        }
-
+        let mut agg_schema = vec![LogicalType::RdfTermId; group_columns.len()];
+        let mut output_columns: Vec<String> =
+            agg.group_by.iter().map(expression_to_string).collect();
         for agg_expr in &agg.aggregates {
-            // A scan gives numbers as numbers of their XSD type, so SUM, AVG,
-            // MIN, MAX and SAMPLE give an integer, a decimal, a float or a term.
-            let result_type = match agg_expr.function {
+            agg_schema.push(match agg_expr.function {
                 LogicalAggregateFunction::Count | LogicalAggregateFunction::CountNonNull => {
                     LogicalType::Int64
                 }
-                LogicalAggregateFunction::GroupConcat => LogicalType::String,
                 _ => LogicalType::Any,
-            };
-            output_schema.push(result_type);
+            });
             output_columns.push(
                 agg_expr.alias.clone().unwrap_or_else(|| {
                     crate::query::planner::common::aggregate_column_name(agg_expr)
@@ -1010,8 +1009,8 @@ impl RdfPlanner {
             );
         }
 
-        let agg_schema = output_schema.clone();
-        let mut operator: Box<dyn Operator> = if group_columns.is_empty() {
+        let group_count = group_columns.len();
+        let operator: Box<dyn Operator> = if group_columns.is_empty() {
             Box::new(SimpleAggregateOperator::new(
                 input_op,
                 physical_aggregates,
@@ -1025,17 +1024,16 @@ impl RdfPlanner {
                 agg_schema,
             ))
         };
+        // The aggregates' values become terms of the dictionary.
+        let mut operator = self.intern(operator, (group_count..output_columns.len()).collect());
+        let output_schema = vec![LogicalType::RdfTermId; output_columns.len()];
 
-        // Apply HAVING clause filter if present
         if let Some(having_expr) = &agg.having {
-            let having_var_columns: HashMap<String, usize> = output_columns
-                .iter()
-                .enumerate()
-                .map(|(i, name)| (name.clone(), i))
-                .collect();
-
-            let filter_expr = convert_filter_expression(having_expr)?;
-            let predicate = RdfExpressionPredicate::new(filter_expr, having_var_columns);
+            let predicate = RdfExpressionPredicate::new(
+                convert_filter_expression(having_expr)?,
+                column_map(&output_columns),
+                Arc::clone(&self.terms),
+            );
             operator = Box::new(FilterOperator::new(operator, Box::new(predicate)));
         }
 
@@ -1082,7 +1080,7 @@ impl RdfPlanner {
             .clone()
             .unwrap_or_else(|| "count(*)".to_string());
 
-        Some(Self::make_constant_int64(count, alias))
+        self.make_constant_integer(count, alias).ok()
     }
 
     /// Resolves the count for a simple triple scan pattern, or returns `None`
@@ -1144,19 +1142,20 @@ impl RdfPlanner {
         None
     }
 
-    /// Creates a constant Int64 single-row result.
-    fn make_constant_int64(
+    /// A single-row result of one `xsd:integer`.
+    fn make_constant_integer(
+        &self,
         value: i64,
         column_name: String,
-    ) -> (Box<dyn Operator>, Vec<String>, Vec<LogicalType>) {
-        let mut chunk = DataChunk::with_capacity(&[LogicalType::Int64], 1);
+    ) -> Result<(Box<dyn Operator>, Vec<String>, Vec<LogicalType>)> {
+        let mut chunk = DataChunk::with_capacity(&[LogicalType::RdfTermId], 1);
         chunk
             .column_mut(0)
             .expect("just created")
-            .push_value(Value::Int64(value));
+            .push_value(self.term_id(&Term::Literal(Literal::integer(value)))?);
         chunk.set_count(1);
         let operator = Box::new(ConstantOperator::new(chunk));
-        (operator, vec![column_name], vec![LogicalType::Int64])
+        Ok((operator, vec![column_name], vec![LogicalType::RdfTermId]))
     }
 
     /// Walks through the input operator to find a simple TripleScan (no chained input).
@@ -1253,9 +1252,7 @@ impl RdfPlanner {
         // Skip when companion columns are needed (LANG/DATATYPE functions)
         // because the leapfrog operator emits raw variable columns only.
         #[cfg(feature = "ring-index")]
-        if !self.needs_companion_columns.get()
-            && let Some(result) = self.try_leapfrog_ring(mwj)
-        {
+        if let Some(result) = self.try_leapfrog_ring(mwj) {
             return result;
         }
 
@@ -1340,11 +1337,14 @@ impl RdfPlanner {
             annotated.push(ap);
         }
 
-        // Build output columns and types
         let columns = all_vars.clone();
-        let types = vec![LogicalType::Any; columns.len()];
-
-        let operator = Box::new(RdfLeapfrogOperator::new(ring, annotated, columns.clone()));
+        let types = vec![LogicalType::RdfTermId; columns.len()];
+        let operator = Box::new(RdfLeapfrogOperator::new(
+            ring,
+            annotated,
+            columns.clone(),
+            Arc::clone(&self.terms),
+        ));
         Some(Ok((operator, columns, types)))
     }
 
@@ -1395,7 +1395,9 @@ impl RdfPlanner {
         // ORDER BY copy rows at each chunk's own width.
         let operators: Vec<Box<dyn Operator>> = planned
             .into_iter()
-            .map(|(op, cols, _)| pad_union_branch(op, &cols, &unified_columns, &unified_types))
+            .map(|(op, cols, _)| {
+                pad_union_branch(op, &cols, &unified_columns, &unified_types, &self.terms)
+            })
             .collect();
 
         let operator = Box::new(RdfUnionOperator::new(operators, unified_columns.len()));
@@ -1435,6 +1437,7 @@ impl RdfPlanner {
                         object: insert.object.clone(),
                         column_map,
                         graph: insert.graph.clone(),
+                        terms: Arc::clone(&self.terms),
                     },
                 ));
 
@@ -1458,27 +1461,14 @@ impl RdfPlanner {
         Ok((operator, Vec::new(), Vec::new()))
     }
 
-    /// Converts a TripleComponent to an RDF Term.
+    /// The term of a constant component of `INSERT DATA` or `DELETE DATA`.
     fn component_to_term(&self, component: &TripleComponent) -> Result<Term> {
-        match component {
-            TripleComponent::Iri(iri) => Ok(Term::Iri(iri.clone().into())),
-            TripleComponent::Literal(value) => {
-                let lit =
-                    value_literal(value).unwrap_or_else(|| Literal::simple(format!("{:?}", value)));
-                Ok(Term::Literal(lit))
-            }
-            TripleComponent::LangLiteral { value, lang } => {
-                Ok(Term::lang_literal(value.clone(), lang.clone()))
-            }
-            TripleComponent::BlankNode(label) => Ok(Term::blank(label.clone())),
+        component_to_term(component).ok_or_else(|| match component {
             TripleComponent::Variable(name) => {
-                // Variables in INSERT DATA should have been bound
-                Err(Error::Internal(format!(
-                    "Unbound variable '{}' in INSERT DATA",
-                    name
-                )))
+                Error::Internal(format!("Unbound variable '{name}' in INSERT DATA"))
             }
-        }
+            other => Error::Internal(format!("{other:?} is no RDF term")),
+        })
     }
 
     /// Plans a DELETE TRIPLE operator.
@@ -1512,6 +1502,7 @@ impl RdfPlanner {
                         object: delete.object.clone(),
                         column_map,
                         graph: delete.graph.clone(),
+                        terms: Arc::clone(&self.terms),
                     },
                 ));
 
@@ -1654,15 +1645,15 @@ impl RdfPlanner {
             .map(|(i, name)| (name.clone(), i))
             .collect();
 
-        let operator = Box::new(RdfModifyOperator::new(
-            self.writer.clone(),
-            where_op,
-            ModifyTemplates {
-                delete: modify.delete_templates.clone(),
-                insert: modify.insert_templates.clone(),
-            },
+        let operator = Box::new(RdfModifyOperator {
+            writer: self.writer.clone(),
+            input: where_op,
+            delete_templates: modify.delete_templates.clone(),
+            insert_templates: modify.insert_templates.clone(),
             column_map,
-        ));
+            terms: Arc::clone(&self.terms),
+            done: false,
+        });
 
         Ok((operator, Vec::new(), Vec::new()))
     }
@@ -1733,6 +1724,7 @@ struct RdfInsertPatternOperator {
     column_map: HashMap<String, usize>,
     /// Named graph to insert into (`None` = default graph).
     graph_name: Option<String>,
+    terms: Arc<QueryTermIds>,
     done: bool,
 }
 
@@ -1746,38 +1738,8 @@ impl RdfInsertPatternOperator {
             object: operands.object,
             column_map: operands.column_map,
             graph_name: operands.graph,
+            terms: operands.terms,
             done: false,
-        }
-    }
-
-    fn resolve_component(
-        &self,
-        component: &TripleComponent,
-        chunk: &DataChunk,
-        row: usize,
-    ) -> Option<Term> {
-        match component {
-            TripleComponent::Iri(iri) => Some(Term::Iri(iri.clone().into())),
-            TripleComponent::BlankNode(label) => Some(Term::blank(label.clone())),
-            TripleComponent::Literal(value) => {
-                let lit =
-                    value_literal(value).unwrap_or_else(|| Literal::simple(format!("{:?}", value)));
-                Some(Term::Literal(lit))
-            }
-            TripleComponent::LangLiteral { value, lang } => {
-                Some(Term::lang_literal(value.clone(), lang.clone()))
-            }
-            TripleComponent::Variable(name) => {
-                // Remove the leading '?' if present
-                let var_name = name.strip_prefix('?').unwrap_or(name);
-                if let Some(&col_idx) = self.column_map.get(var_name)
-                    && let Some(col) = chunk.column(col_idx)
-                    && let Some(value) = col.get_value(row)
-                {
-                    return value_to_term(&value);
-                }
-                None
-            }
         }
     }
 }
@@ -1796,12 +1758,24 @@ impl Operator for RdfInsertPatternOperator {
         let mut triples_to_insert = Vec::new();
 
         while let Some(chunk) = self.input.next()? {
-            for row in 0..chunk.row_count() {
-                let subject = self.resolve_component(&self.subject, &chunk, row);
-                let predicate = self.resolve_component(&self.predicate, &chunk, row);
-                let object = self.resolve_component(&self.object, &chunk, row);
-
-                if let (Some(s), Some(p), Some(o)) = (subject, predicate, object) {
+            for row in chunk.selected_indices() {
+                let mut blanks = FreshBlankNodes::default();
+                let mut term = |component| {
+                    template_term(
+                        component,
+                        &self.column_map,
+                        &chunk,
+                        row,
+                        &self.terms,
+                        &mut blanks,
+                    )
+                };
+                if let (Some(s), Some(p), Some(o)) = (
+                    term(&self.subject),
+                    term(&self.predicate),
+                    term(&self.object),
+                ) && is_valid_triple(&s, &p)
+                {
                     triples_to_insert.push(Triple::new(s, p, o));
                 }
             }
@@ -1896,6 +1870,7 @@ struct RdfDeletePatternOperator {
     column_map: HashMap<String, usize>,
     /// Named graph to delete from (`None` = default graph).
     graph_name: Option<String>,
+    terms: Arc<QueryTermIds>,
     done: bool,
 }
 
@@ -1909,38 +1884,8 @@ impl RdfDeletePatternOperator {
             object: operands.object,
             column_map: operands.column_map,
             graph_name: operands.graph,
+            terms: operands.terms,
             done: false,
-        }
-    }
-
-    fn resolve_component(
-        &self,
-        component: &TripleComponent,
-        chunk: &DataChunk,
-        row: usize,
-    ) -> Option<Term> {
-        match component {
-            TripleComponent::Iri(iri) => Some(Term::Iri(iri.clone().into())),
-            TripleComponent::BlankNode(label) => Some(Term::blank(label.clone())),
-            TripleComponent::Literal(value) => {
-                let lit =
-                    value_literal(value).unwrap_or_else(|| Literal::simple(format!("{:?}", value)));
-                Some(Term::Literal(lit))
-            }
-            TripleComponent::LangLiteral { value, lang } => {
-                Some(Term::lang_literal(value.clone(), lang.clone()))
-            }
-            TripleComponent::Variable(name) => {
-                // Remove the leading '?' if present
-                let var_name = name.strip_prefix('?').unwrap_or(name);
-                if let Some(&col_idx) = self.column_map.get(var_name)
-                    && let Some(col) = chunk.column(col_idx)
-                    && let Some(value) = col.get_value(row)
-                {
-                    return value_to_term(&value);
-                }
-                None
-            }
         }
     }
 }
@@ -1958,12 +1903,23 @@ impl Operator for RdfDeletePatternOperator {
         let mut triples_to_delete = Vec::new();
 
         while let Some(chunk) = self.input.next()? {
-            for row in 0..chunk.row_count() {
-                let subject = self.resolve_component(&self.subject, &chunk, row);
-                let predicate = self.resolve_component(&self.predicate, &chunk, row);
-                let object = self.resolve_component(&self.object, &chunk, row);
-
-                if let (Some(s), Some(p), Some(o)) = (subject, predicate, object) {
+            for row in chunk.selected_indices() {
+                let mut blanks = FreshBlankNodes::default();
+                let mut term = |component| {
+                    template_term(
+                        component,
+                        &self.column_map,
+                        &chunk,
+                        row,
+                        &self.terms,
+                        &mut blanks,
+                    )
+                };
+                if let (Some(s), Some(p), Some(o)) = (
+                    term(&self.subject),
+                    term(&self.predicate),
+                    term(&self.object),
+                ) {
                     triples_to_delete.push(Triple::new(s, p, o));
                 }
             }
@@ -2101,61 +2057,8 @@ struct RdfModifyOperator {
     delete_templates: Vec<TripleTemplate>,
     insert_templates: Vec<TripleTemplate>,
     column_map: HashMap<String, usize>,
+    terms: Arc<QueryTermIds>,
     done: bool,
-}
-
-/// DELETE and INSERT templates of a SPARQL MODIFY.
-struct ModifyTemplates {
-    delete: Vec<TripleTemplate>,
-    insert: Vec<TripleTemplate>,
-}
-
-impl RdfModifyOperator {
-    fn new(
-        writer: Option<RdfWriter>,
-        input: Box<dyn Operator>,
-        templates: ModifyTemplates,
-        column_map: HashMap<String, usize>,
-    ) -> Self {
-        Self {
-            writer,
-            input,
-            delete_templates: templates.delete,
-            insert_templates: templates.insert,
-            column_map,
-            done: false,
-        }
-    }
-
-    fn resolve_component(
-        &self,
-        component: &TripleComponent,
-        chunk: &DataChunk,
-        row: usize,
-    ) -> Option<Term> {
-        match component {
-            TripleComponent::Iri(iri) => Some(Term::Iri(iri.clone().into())),
-            TripleComponent::BlankNode(label) => Some(Term::blank(label.clone())),
-            TripleComponent::Literal(value) => {
-                let lit =
-                    value_literal(value).unwrap_or_else(|| Literal::simple(format!("{:?}", value)));
-                Some(Term::Literal(lit))
-            }
-            TripleComponent::LangLiteral { value, lang } => {
-                Some(Term::lang_literal(value.clone(), lang.clone()))
-            }
-            TripleComponent::Variable(name) => {
-                let var_name = name.strip_prefix('?').unwrap_or(name);
-                if let Some(&col_idx) = self.column_map.get(var_name)
-                    && let Some(col) = chunk.column(col_idx)
-                    && let Some(value) = col.get_value(row)
-                {
-                    return value_to_term(&value);
-                }
-                None
-            }
-        }
-    }
 }
 
 impl Operator for RdfModifyOperator {
@@ -2165,84 +2068,63 @@ impl Operator for RdfModifyOperator {
         }
         let writer = update_writer(&self.writer)?;
 
-        // Step 1: Collect all bindings from WHERE clause (before any modifications)
+        // Step 1: every solution of the WHERE clause, before any change.
         let mut bindings: Vec<(DataChunk, usize)> = Vec::new();
         while let Some(chunk) = self.input.next()? {
-            for row in 0..chunk.row_count() {
+            for row in chunk.selected_indices() {
                 bindings.push((chunk.clone(), row));
             }
         }
 
-        // Step 2: Apply DELETE templates using collected bindings.
-        //
-        // RDF typed literals (xsd:integer, xsd:boolean, ...) are stored with
-        // their datatype, but the WHERE clause returns them as plain strings
-        // (Value::String). Reconstructing the Term from the string loses the
-        // type, so a delete of the exact triple would fail to match.
-        //
-        // Fix: when the exact triple isn't found, query the graph with the
-        // subject+predicate pattern and remove any triple whose literal value
-        // matches the bound string. This handles the type mismatch without
-        // changing the column type system.
+        // Step 2: the DELETE templates, each variable its exact bound term.
         for template in &self.delete_templates {
             let graph = template.graph.as_deref();
             check_mutation_graph(graph)?;
             for (chunk, row) in &bindings {
-                let subject = self.resolve_component(&template.subject, chunk, *row);
-                let predicate = self.resolve_component(&template.predicate, chunk, *row);
-                let object = self.resolve_component(&template.object, chunk, *row);
-
-                if let (Some(s), Some(p), Some(o)) = (subject, predicate, object) {
-                    let triple = Triple::new(s.clone(), p.clone(), o.clone());
-                    if writer.delete(graph, &triple)? {
-                        continue;
-                    }
-                    // Exact match failed: the object may be a plain string
-                    // whose stored form is a typed literal (e.g. "1" vs
-                    // xsd:integer "1"). Query by subject+predicate and
-                    // match on the literal's lexical value.
-                    let Term::Literal(target_lit) = &o else {
-                        continue;
-                    };
-                    let pattern = TriplePattern {
-                        subject: Some(s),
-                        predicate: Some(p),
-                        object: None,
-                    };
-                    let scope = graph.map(|name| [name]);
-                    let matching: Vec<_> = writer
-                        .find(&pattern, scope.as_ref().map(|names| &names[..]))
-                        .into_iter()
-                        .map(|(_, triple)| triple)
-                        .filter(|t| {
-                            if let Term::Literal(lit) = t.object() {
-                                // Only match typed literals whose lexical
-                                // value equals the target. Plain strings
-                                // (xsd:string) should have matched exactly.
-                                lit.value() == target_lit.value()
-                                    && lit.datatype() != Literal::XSD_STRING
-                            } else {
-                                false
-                            }
-                        })
-                        .collect();
-                    for matched in matching {
-                        writer.delete(graph, &matched)?;
-                    }
+                let mut blanks = FreshBlankNodes::default();
+                let mut term = |component| {
+                    template_term(
+                        component,
+                        &self.column_map,
+                        chunk,
+                        *row,
+                        &self.terms,
+                        &mut blanks,
+                    )
+                };
+                if let (Some(s), Some(p), Some(o)) = (
+                    term(&template.subject),
+                    term(&template.predicate),
+                    term(&template.object),
+                ) {
+                    writer.delete(graph, &Triple::new(s, p, o))?;
                 }
             }
         }
 
-        // Step 3: Apply INSERT templates using the SAME bindings
-        for template in &self.insert_templates {
-            let graph = template.graph.as_deref();
-            check_mutation_graph(graph)?;
-            for (chunk, row) in &bindings {
-                let subject = self.resolve_component(&template.subject, chunk, *row);
-                let predicate = self.resolve_component(&template.predicate, chunk, *row);
-                let object = self.resolve_component(&template.object, chunk, *row);
-
-                if let (Some(s), Some(p), Some(o)) = (subject, predicate, object) {
+        // Step 3: the INSERT templates over the same solutions, a template
+        // blank node fresh for each solution.
+        for (chunk, row) in &bindings {
+            let mut blanks = FreshBlankNodes::default();
+            for template in &self.insert_templates {
+                let graph = template.graph.as_deref();
+                check_mutation_graph(graph)?;
+                let mut term = |component| {
+                    template_term(
+                        component,
+                        &self.column_map,
+                        chunk,
+                        *row,
+                        &self.terms,
+                        &mut blanks,
+                    )
+                };
+                if let (Some(s), Some(p), Some(o)) = (
+                    term(&template.subject),
+                    term(&template.predicate),
+                    term(&template.object),
+                ) && is_valid_triple(&s, &p)
+                {
                     writer.insert(graph, Triple::new(s, p, o))?;
                 }
             }
@@ -2335,32 +2217,12 @@ impl Operator for RdfUnionOperator {
 // RDF Bind Operator
 // ============================================================================
 
-/// Operator that appends a computed column to each row.
-///
-/// Used for SPARQL BIND expressions (e.g., `BIND (CONCAT(?x, ?y) AS ?z)`).
-/// Evaluates an expression using `RdfExpressionPredicate` and appends the
-/// result as a new column in the output chunk.
+/// Operator that appends a computed column to each row: the term id of an
+/// expression's value (SPARQL `BIND`), NULL when it errs.
 struct RdfBindOperator {
-    /// Child operator providing input rows.
     child: Box<dyn Operator>,
-    /// Expression to evaluate per row.
-    expression: FilterExpression,
-    /// Variable name to column index mapping for expression evaluation.
-    variable_columns: HashMap<String, usize>,
-}
-
-impl RdfBindOperator {
-    fn new(
-        child: Box<dyn Operator>,
-        expression: FilterExpression,
-        variable_columns: HashMap<String, usize>,
-    ) -> Self {
-        Self {
-            child,
-            expression,
-            variable_columns,
-        }
-    }
+    evaluator: RdfExpressionPredicate,
+    terms: Arc<QueryTermIds>,
 }
 
 impl Operator for RdfBindOperator {
@@ -2368,51 +2230,30 @@ impl Operator for RdfBindOperator {
         let Some(input) = self.child.next()? else {
             return Ok(None);
         };
-
-        let input_col_count = input.column_count();
-        let row_count = input.row_count();
-
-        // Build output schema: preserve input column types + one extra column for BIND result
-        let mut output_types: Vec<LogicalType> = Vec::with_capacity(input_col_count + 1);
-        for col_idx in 0..input_col_count {
-            if let Some(col) = input.column(col_idx) {
-                output_types.push(col.logical_type());
-            } else {
-                output_types.push(LogicalType::Any);
-            }
+        let rows: Vec<usize> = input.selected_indices().collect();
+        let mut output_types: Vec<LogicalType> = (0..input.column_count())
+            .map(|i| {
+                input
+                    .column(i)
+                    .map_or(LogicalType::Any, |c| c.data_type().clone())
+            })
+            .collect();
+        output_types.push(LogicalType::RdfTermId);
+        let mut output = DataChunk::with_capacity(&output_types, rows.len());
+        for col_idx in 0..input.column_count() {
+            copy_column(&input, col_idx, &rows, &mut output, col_idx);
         }
-        output_types.push(LogicalType::Any);
-
-        let mut output = DataChunk::with_capacity(&output_types, row_count);
-
-        // Copy existing columns
-        for col_idx in 0..input_col_count {
-            let output_col = output
-                .column_mut(col_idx)
-                .expect("column exists: index within schema bounds");
-            if let Some(input_col) = input.column(col_idx) {
-                for row in input.selected_indices() {
-                    if let Some(value) = input_col.get_value(row) {
-                        output_col.push_value(value);
-                    } else {
-                        output_col.push_value(Value::Null);
-                    }
-                }
-            }
-        }
-
-        // Evaluate expression for each row and append as new column
-        let evaluator =
-            RdfExpressionPredicate::new(self.expression.clone(), self.variable_columns.clone());
+        let ids = rows
+            .iter()
+            .map(|&row| intern_value(&self.terms, self.evaluator.eval(&input, row)))
+            .collect::<std::result::Result<Vec<_>, _>>()?;
         let bind_col = output
-            .column_mut(input_col_count)
+            .column_mut(input.column_count())
             .expect("column exists: bind column is last in schema");
-        for row in input.selected_indices() {
-            let value = evaluator.eval(&input, row).unwrap_or(Value::Null);
-            bind_col.push_value(value);
+        for id in ids {
+            bind_col.push_value(id);
         }
-
-        output.set_count(row_count);
+        output.set_count(rows.len());
         Ok(Some(output))
     }
 
@@ -2433,31 +2274,46 @@ impl Operator for RdfBindOperator {
 // RDF Project Operator
 // ============================================================================
 
-/// Projection variant for expression evaluation.
+/// What an evaluated projection gives for an expression's value.
+#[derive(Debug, Clone, Copy)]
+enum EvaluatedOutput {
+    /// The value as an RDF term ([`Value::RdfTerm`]): a sort key, a MIN,
+    /// MAX or SAMPLE argument.
+    Term,
+    /// The number of a numeric value, the term of any other (an error for
+    /// SUM and AVG), NULL when unbound: a SUM or AVG argument.
+    Number,
+    /// The lexical form (`STR`): a GROUP_CONCAT argument.
+    Lexical,
+}
+
+/// One column of an [`RdfProjectOperator`].
 enum RdfProjectExpr {
-    /// Reference to an input column.
+    /// An input column, copied (term ids stay ids).
     Column(usize),
-    /// A constant value.
+    /// A constant: a term id, or NULL.
     Constant(Value),
-    /// Full expression evaluation using `RdfExpressionPredicate`.
+    /// An expression's value, interned: a term id, NULL when it errs.
     Expression {
-        /// The filter expression to evaluate.
         expr: FilterExpression,
-        /// Variable name to column index mapping.
         variable_columns: HashMap<String, usize>,
+    },
+    /// An expression's value as `output` says, not interned: the columns an
+    /// ORDER BY or an aggregate reads, which go no further.
+    Evaluated {
+        expr: FilterExpression,
+        variable_columns: HashMap<String, usize>,
+        output: EvaluatedOutput,
     },
 }
 
-/// An RDF-specific project operator that uses `RdfExpressionPredicate` for
-/// expression evaluation, giving access to SPARQL functions (STRLEN, UCASE,
-/// LCASE, etc.) that the generic `ProjectOperator` does not support.
+/// The project operator of SPARQL plans: evaluates expressions with the
+/// SPARQL evaluator and interns their values.
 struct RdfProjectOperator {
-    /// Child operator providing input rows.
     child: Box<dyn Operator>,
-    /// Projection expressions.
-    projections: Vec<RdfProjectExpr>,
-    /// Output column types.
+    projections: Vec<(RdfProjectExpr, Option<RdfExpressionPredicate>)>,
     output_types: Vec<LogicalType>,
+    terms: Arc<QueryTermIds>,
 }
 
 impl RdfProjectOperator {
@@ -2465,12 +2321,36 @@ impl RdfProjectOperator {
         child: Box<dyn Operator>,
         projections: Vec<RdfProjectExpr>,
         output_types: Vec<LogicalType>,
+        terms: Arc<QueryTermIds>,
     ) -> Self {
         assert_eq!(projections.len(), output_types.len());
+        let projections = projections
+            .into_iter()
+            .map(|projection| {
+                let evaluator = match &projection {
+                    RdfProjectExpr::Expression {
+                        expr,
+                        variable_columns,
+                    }
+                    | RdfProjectExpr::Evaluated {
+                        expr,
+                        variable_columns,
+                        ..
+                    } => Some(RdfExpressionPredicate::new(
+                        expr.clone(),
+                        variable_columns.clone(),
+                        Arc::clone(&terms),
+                    )),
+                    _ => None,
+                };
+                (projection, evaluator)
+            })
+            .collect();
         Self {
             child,
             projections,
             output_types,
+            terms,
         }
     }
 }
@@ -2480,47 +2360,54 @@ impl Operator for RdfProjectOperator {
         let Some(input) = self.child.next()? else {
             return Ok(None);
         };
+        let rows: Vec<usize> = input.selected_indices().collect();
+        let mut output = DataChunk::with_capacity(&self.output_types, rows.len());
 
-        let mut output = DataChunk::with_capacity(&self.output_types, input.row_count());
-
-        for (i, proj) in self.projections.iter().enumerate() {
-            let output_col = output
-                .column_mut(i)
-                .expect("column exists: index matches projection schema");
-
-            match proj {
+        for (i, (projection, evaluator)) in self.projections.iter().enumerate() {
+            match projection {
                 RdfProjectExpr::Column(col_idx) => {
-                    let input_col = input.column(*col_idx).ok_or_else(|| {
-                        OperatorError::ColumnNotFound(format!("Column {col_idx}"))
-                    })?;
-                    for row in input.selected_indices() {
-                        if let Some(value) = input_col.get_value(row) {
-                            output_col.push_value(value);
-                        } else {
-                            output_col.push_value(Value::Null);
-                        }
+                    if input.column(*col_idx).is_none() {
+                        return Err(OperatorError::ColumnNotFound(format!("Column {col_idx}")));
                     }
+                    copy_column(&input, *col_idx, &rows, &mut output, i);
                 }
                 RdfProjectExpr::Constant(value) => {
-                    for _ in input.selected_indices() {
-                        output_col.push_value(value.clone());
+                    let column = output.column_mut(i).expect("column exists");
+                    for _ in &rows {
+                        column.push_value(value.clone());
                     }
                 }
-                RdfProjectExpr::Expression {
-                    expr,
-                    variable_columns,
-                } => {
-                    let evaluator =
-                        RdfExpressionPredicate::new(expr.clone(), variable_columns.clone());
-                    for row in input.selected_indices() {
-                        let value = evaluator.eval(&input, row).unwrap_or(Value::Null);
-                        output_col.push_value(value);
+                RdfProjectExpr::Expression { .. } => {
+                    let evaluator = evaluator.as_ref().expect("expression evaluator");
+                    let ids = rows
+                        .iter()
+                        .map(|&row| intern_value(&self.terms, evaluator.eval(&input, row)))
+                        .collect::<std::result::Result<Vec<_>, _>>()?;
+                    let column = output.column_mut(i).expect("column exists");
+                    for id in ids {
+                        column.push_value(id);
+                    }
+                }
+                RdfProjectExpr::Evaluated { output: kind, .. } => {
+                    let evaluator = evaluator.as_ref().expect("expression evaluator");
+                    let values: Vec<Value> = rows
+                        .iter()
+                        .map(|&row| {
+                            let value = evaluator.eval(&input, row);
+                            value
+                                .and_then(|value| evaluated(&value, *kind))
+                                .unwrap_or(Value::Null)
+                        })
+                        .collect();
+                    let column = output.column_mut(i).expect("column exists");
+                    for value in values {
+                        column.push_value(value);
                     }
                 }
             }
         }
 
-        output.set_count(input.row_count());
+        output.set_count(rows.len());
         Ok(Some(output))
     }
 
@@ -2534,6 +2421,44 @@ impl Operator for RdfProjectOperator {
 
     fn into_any(self: Box<Self>) -> Box<dyn std::any::Any + Send> {
         self
+    }
+}
+
+/// What an [`RdfProjectExpr::Evaluated`] column holds for `value`.
+fn evaluated(value: &Value, output: EvaluatedOutput) -> Option<Value> {
+    match output {
+        EvaluatedOutput::Term => terms::to_term(value).map(|term| Value::RdfTerm(Arc::new(term))),
+        // A term that is no number goes on as itself, which SUM and AVG take
+        // as an error (their result is unbound); an unbound value is skipped.
+        EvaluatedOutput::Number => match terms::native(value).map(std::borrow::Cow::into_owned) {
+            Some(number @ (Value::Int64(_) | Value::Float64(_) | Value::Decimal(_))) => {
+                Some(number)
+            }
+            _ => terms::to_term(value).map(|term| Value::RdfTerm(Arc::new(term))),
+        },
+        EvaluatedOutput::Lexical => terms::str_of(value).map(|text| Value::from(&*text)),
+    }
+}
+
+/// The id of an expression's value: its term interned, NULL for an error.
+fn intern_value(
+    terms: &QueryTermIds,
+    value: Option<Value>,
+) -> std::result::Result<Value, OperatorError> {
+    match value.as_ref().and_then(terms::to_term) {
+        Some(term) => Ok(id_value(terms.intern(&term)?)),
+        None => Ok(Value::Null),
+    }
+}
+
+/// Copies column `from` of `input` at `rows` into column `to` of `output`.
+fn copy_column(input: &DataChunk, from: usize, rows: &[usize], output: &mut DataChunk, to: usize) {
+    let Some(source) = input.column(from) else {
+        return;
+    };
+    let target = output.column_mut(to).expect("column exists");
+    for &row in rows {
+        target.push_value(source.get_value(row).unwrap_or(Value::Null));
     }
 }
 
@@ -2570,6 +2495,7 @@ struct RdfLeapfrogOperator {
     position: usize,
     /// Whether the leapfrog join has been executed.
     executed: bool,
+    terms: Arc<QueryTermIds>,
 }
 
 #[cfg(feature = "ring-index")]
@@ -2578,6 +2504,7 @@ impl RdfLeapfrogOperator {
         ring: Arc<grafeo_core::index::ring::TripleRing>,
         annotated_patterns: Vec<grafeo_core::index::ring::AnnotatedPattern>,
         output_columns: Vec<String>,
+        terms: Arc<QueryTermIds>,
     ) -> Self {
         Self {
             ring,
@@ -2586,6 +2513,7 @@ impl RdfLeapfrogOperator {
             results: Vec::new(),
             position: 0,
             executed: false,
+            terms,
         }
     }
 
@@ -2602,19 +2530,27 @@ impl RdfLeapfrogOperator {
         self.results = join.collect();
     }
 
-    /// Extracts the value for a variable from a set of matched triples.
-    fn resolve_variable(&self, var: &str, matched_triples: &[Triple]) -> Option<Value> {
-        for (i, ap) in self.annotated_patterns.iter().enumerate() {
-            if let Some(triple) = matched_triples.get(i) {
-                if ap.subject_var.as_deref() == Some(var) {
-                    return Some(triple.subject().query_value());
-                }
-                if ap.predicate_var.as_deref() == Some(var) {
-                    return Some(triple.predicate().query_value());
-                }
-                if ap.object_var.as_deref() == Some(var) {
-                    return Some(triple.object().query_value());
-                }
+    /// The term a variable is bound to in a set of matched triples.
+    /// The id a variable takes in a match: the store's id the ring triple
+    /// carries, or its term interned (a ring of triples no store took);
+    /// `None` when no pattern binds it.
+    fn resolve_variable(
+        &self,
+        var: &str,
+        matched_triples: &[Triple],
+    ) -> Option<std::result::Result<TermId, OperatorError>> {
+        for (ap, triple) in self.annotated_patterns.iter().zip(matched_triples) {
+            let slot = [&ap.subject_var, &ap.predicate_var, &ap.object_var]
+                .into_iter()
+                .position(|bound| bound.as_deref() == Some(var));
+            if let Some(slot) = slot {
+                return Some(match triple.ids() {
+                    Some(ids) => Ok(ids[slot]),
+                    None => {
+                        let term = [triple.subject(), triple.predicate(), triple.object()][slot];
+                        self.terms.intern(term)
+                    }
+                });
             }
         }
         None
@@ -2634,19 +2570,20 @@ impl Operator for RdfLeapfrogOperator {
         let batch_size = end - self.position;
         let col_count = self.output_columns.len();
 
-        let schema = vec![LogicalType::Any; col_count];
+        let schema = vec![LogicalType::RdfTermId; col_count];
         let mut chunk = DataChunk::with_capacity(&schema, batch_size);
 
-        for i in self.position..end {
-            let matched = &self.results[i];
-            for (col_idx, var_name) in self.output_columns.iter().enumerate() {
-                if let Some(col) = chunk.column_mut(col_idx) {
-                    if let Some(val) = self.resolve_variable(var_name, matched) {
-                        col.push_value(val);
-                    } else {
-                        col.push_value(Value::Null);
-                    }
-                }
+        // The ids of each match; a variable no pattern binds is unbound.
+        for matched in &self.results[self.position..end] {
+            for (column, var_name) in self.output_columns.iter().enumerate() {
+                let value = match self.resolve_variable(var_name, matched) {
+                    Some(id) => id_value(id?),
+                    None => Value::Null,
+                };
+                chunk
+                    .column_mut(column)
+                    .expect("column exists")
+                    .push_value(value);
             }
         }
 
@@ -2669,53 +2606,48 @@ impl Operator for RdfLeapfrogOperator {
     }
 }
 
-/// CONSTRUCT operator: instantiates triple templates from variable bindings.
+/// CONSTRUCT operator: instantiates triple templates from variable bindings
+/// (SPARQL 1.1 section 16.2).
 ///
-/// For each input row, substitutes variables in each template triple to produce
-/// (subject, predicate, object) output rows. Skips template triples where a
-/// variable has no binding (unbound variables produce no triple).
+/// Each solution gives each template's triple, with the variables' exact
+/// terms and the template's blank nodes fresh for that solution. A triple
+/// with an unbound variable, a literal subject or a predicate that is no IRI
+/// is left out, and a triple given before is not repeated (a graph is a
+/// set). The output columns `subject`, `predicate` and `object` hold
+/// [`Value::RdfTerm`]s.
+/// Where a CONSTRUCT template component comes from in each solution.
+#[derive(Debug, Clone)]
+enum TemplateSlot {
+    /// A variable's id column.
+    Column(usize),
+    /// A constant term's id.
+    Constant(TermId),
+    /// A template blank node: a fresh one per solution (SPARQL 1.1, 16.2).
+    Blank(String),
+    /// A variable the pattern does not bind: no triple.
+    Unbound,
+}
+
+/// Instantiates CONSTRUCT templates per solution, as term ids: a triple is
+/// new when its three ids are (one id per term), and only new triples are
+/// decoded.
 struct ConstructOperator {
     input: Box<dyn Operator>,
-    templates: Vec<TripleTemplate>,
-    variable_columns: HashMap<String, usize>,
+    templates: Vec<[TemplateSlot; 3]>,
+    terms: Arc<QueryTermIds>,
+    seen: grafeo_common::utils::hash::FxHashSet<[TermId; 3]>,
 }
 
 impl ConstructOperator {
-    fn new(
-        input: Box<dyn Operator>,
-        templates: Vec<TripleTemplate>,
-        variable_columns: HashMap<String, usize>,
-    ) -> Self {
-        Self {
-            input,
-            templates,
-            variable_columns,
-        }
-    }
-
-    /// Resolves a `TripleComponent` to a string using the current row bindings.
-    fn resolve_component(
-        &self,
-        component: &TripleComponent,
-        chunk: &DataChunk,
-        row: usize,
-    ) -> Option<String> {
-        match component {
-            TripleComponent::Variable(name) => {
-                let col_idx = *self.variable_columns.get(name)?;
-                let col = chunk.column(col_idx)?;
-                let val = col.get_value(row)?;
-                if val.is_null() {
-                    None
-                } else {
-                    Some(val.to_string())
-                }
-            }
-            TripleComponent::Iri(iri) => Some(iri.clone()),
-            TripleComponent::Literal(val) => Some(val.to_string()),
-            TripleComponent::LangLiteral { value, lang } => Some(format!("\"{value}\"@{lang}")),
-            TripleComponent::BlankNode(label) => Some(format!("_:{label}")),
-        }
+    /// Whether `ids` make an RDF triple: a subject that is no literal and an
+    /// IRI predicate (a template can put anything there).
+    fn is_triple(&self, ids: [TermId; 3]) -> bool {
+        let is = |id: TermId, check: fn(&Term) -> bool| {
+            self.terms
+                .entry(id)
+                .is_some_and(|entry| check(entry.term()))
+        };
+        is(ids[0], |term| !term.is_literal()) && is(ids[1], Term::is_iri)
     }
 }
 
@@ -2725,50 +2657,54 @@ impl Operator for ConstructOperator {
             let Some(input_chunk) = self.input.next()? else {
                 return Ok(None);
             };
-
-            let row_count = input_chunk.row_count();
-            if row_count == 0 {
-                continue;
-            }
-
-            // Each input row can produce up to templates.len() output rows
-            let max_output = row_count * self.templates.len();
-            let schema = vec![LogicalType::String; 3];
-            let mut output = DataChunk::with_capacity(&schema, max_output);
-            let mut actual_count = 0;
-
-            for row in 0..row_count {
+            let schema = vec![LogicalType::Any; 3];
+            let mut output =
+                DataChunk::with_capacity(&schema, input_chunk.row_count() * self.templates.len());
+            let mut count = 0;
+            for row in input_chunk.selected_indices() {
+                let mut blanks: HashMap<&str, TermId> = HashMap::new();
                 for template in &self.templates {
-                    let Some(subject) =
-                        self.resolve_component(&template.subject, &input_chunk, row)
-                    else {
+                    let mut found = [None; 3];
+                    for (slot, id) in template.iter().zip(&mut found) {
+                        *id = match slot {
+                            TemplateSlot::Column(column) => input_chunk
+                                .column(*column)
+                                .and_then(|c| c.get_value(row))
+                                .as_ref()
+                                .and_then(id_of),
+                            TemplateSlot::Constant(constant) => Some(*constant),
+                            TemplateSlot::Blank(label) => Some(match blanks.get(label.as_str()) {
+                                Some(&blank) => blank,
+                                None => {
+                                    let blank = self.terms.intern(&fresh_blank_node())?;
+                                    blanks.insert(label, blank);
+                                    blank
+                                }
+                            }),
+                            TemplateSlot::Unbound => None,
+                        };
+                    }
+                    let [Some(subject), Some(predicate), Some(object)] = found else {
                         continue;
                     };
-                    let Some(predicate) =
-                        self.resolve_component(&template.predicate, &input_chunk, row)
-                    else {
+                    let ids = [subject, predicate, object];
+                    if !self.is_triple(ids) || !self.seen.insert(ids) {
                         continue;
-                    };
-                    let Some(object) = self.resolve_component(&template.object, &input_chunk, row)
-                    else {
-                        continue;
-                    };
-
-                    if let Some(col) = output.column_mut(0) {
-                        col.push_string(subject);
                     }
-                    if let Some(col) = output.column_mut(1) {
-                        col.push_string(predicate);
+                    for (i, id) in ids.into_iter().enumerate() {
+                        let value = self.terms.entry(id).map_or(Value::Null, |entry| {
+                            Value::RdfTerm(Arc::clone(entry.term()))
+                        });
+                        output
+                            .column_mut(i)
+                            .expect("column exists")
+                            .push_value(value);
                     }
-                    if let Some(col) = output.column_mut(2) {
-                        col.push_string(object);
-                    }
-                    actual_count += 1;
+                    count += 1;
                 }
             }
-
-            if actual_count > 0 {
-                output.set_count(actual_count);
+            if count > 0 {
+                output.set_count(count);
                 return Ok(Some(output));
             }
         }
@@ -2776,6 +2712,7 @@ impl Operator for ConstructOperator {
 
     fn reset(&mut self) {
         self.input.reset();
+        self.seen.clear();
     }
 
     fn name(&self) -> &'static str {
@@ -2820,96 +2757,89 @@ impl Operator for ConstantOperator {
     }
 }
 
-/// Resolves dictionary-encoded Int64 term IDs back to the values a query reads
-/// for their terms (see [`Term::query_value`]).
-///
-/// Placed at the result boundary (just before output) so that all intermediate
-/// operators (joins, aggregates, sorts) work with compact Int64 keys.
-struct DictResolveOperator {
-    input: Box<dyn Operator>,
-    dictionary: Arc<grafeo_core::graph::rdf::TermDictionary>,
-    /// Column indices that carry encoded term IDs and need resolution.
-    encoded_col_indices: Vec<usize>,
+/// What a result's term id columns become.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DecodeAs {
+    /// The terms ([`Value::RdfTerm`]): SPARQL results.
+    Terms,
+    /// The values GraphQL reads for them ([`Term::query_value`]).
+    QueryValues,
+    /// A boolean ([`Value::Bool`]): the one cell of an ASK result.
+    Boolean,
 }
 
-impl DictResolveOperator {
-    fn new(
-        input: Box<dyn Operator>,
-        dictionary: Arc<grafeo_core::graph::rdf::TermDictionary>,
-        encoded_col_indices: Vec<usize>,
-    ) -> Self {
-        Self {
-            input,
-            dictionary,
-            encoded_col_indices,
-        }
+/// The result boundary of a SPARQL plan: every term id column becomes what
+/// [`DecodeAs`] says.
+struct TermDecodeOperator {
+    input: Box<dyn Operator>,
+    terms: Arc<QueryTermIds>,
+    /// The term id columns.
+    columns: Vec<usize>,
+    decode_as: DecodeAs,
+}
+
+impl TermDecodeOperator {
+    /// What the result holds for the id column value `value`.
+    fn decode(&self, value: Option<Value>) -> Value {
+        value
+            .and_then(|id| self.terms.entry_of(&id))
+            .map_or(Value::Null, |entry| match self.decode_as {
+                DecodeAs::Terms => Value::RdfTerm(Arc::clone(entry.term())),
+                DecodeAs::QueryValues => entry.term().query_value(),
+                DecodeAs::Boolean => entry.native().cloned().unwrap_or(Value::Null),
+            })
     }
 }
 
-impl Operator for DictResolveOperator {
+impl Operator for TermDecodeOperator {
     fn next(&mut self) -> grafeo_core::execution::operators::OperatorResult {
-        let Some(chunk) = self.input.next()? else {
+        let Some(mut chunk) = self.input.next()? else {
             return Ok(None);
         };
-
-        if self.encoded_col_indices.is_empty() {
-            return Ok(Some(chunk));
-        }
-
-        let row_count = chunk.row_count();
-        let col_count = chunk.column_count();
-
-        // Build output schema: an encoded column holds any value of a term
-        let mut schema = Vec::with_capacity(col_count);
-        for col_idx in 0..col_count {
-            if self.encoded_col_indices.contains(&col_idx) {
-                schema.push(LogicalType::Any);
-            } else if let Some(col) = chunk.column(col_idx) {
-                schema.push(col.data_type().clone());
-            } else {
-                schema.push(LogicalType::String);
-            }
-        }
-
-        let mut out = DataChunk::with_capacity(&schema, row_count);
-
-        for row in 0..row_count {
-            for col_idx in 0..col_count {
-                let Some(in_col) = chunk.column(col_idx) else {
+        // Every row is kept: the id columns are decoded in place.
+        if chunk.selection().is_none() {
+            let rows = chunk.total_row_count();
+            for &column in &self.columns {
+                let Some(source) = chunk.column(column) else {
                     continue;
                 };
-                let Some(out_col) = out.column_mut(col_idx) else {
-                    continue;
-                };
-
-                if self.encoded_col_indices.contains(&col_idx) {
-                    // Resolve term ID to string
-                    if in_col.is_null(row) {
-                        out_col.push_value(Value::Null);
-                    } else if let Some(term_id) = in_col.get_int64(row) {
-                        // reason: term IDs are assigned sequentially from 0 and fit u32
-                        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-                        let tid = term_id as u32;
-                        if let Some(term) = self.dictionary.get_term(tid) {
-                            out_col.push_value(term.query_value());
-                        } else {
-                            out_col.push_value(Value::Null);
-                        }
-                    } else {
-                        out_col.push_value(Value::Null);
-                    }
-                } else {
-                    // Pass through non-encoded columns
-                    if let Some(val) = in_col.get_value(row) {
-                        out_col.push_value(val);
-                    } else {
-                        out_col.push_value(Value::Null);
-                    }
+                let mut decoded = ValueVector::with_capacity(LogicalType::Any, rows);
+                for row in 0..rows {
+                    decoded.push_value(self.decode(source.get_value(row)));
+                }
+                if let Some(target) = chunk.column_mut(column) {
+                    *target = decoded;
                 }
             }
+            return Ok(Some(chunk));
         }
-
-        out.set_count(row_count);
+        let rows: Vec<usize> = chunk.selected_indices().collect();
+        let schema: Vec<LogicalType> = (0..chunk.column_count())
+            .map(|i| {
+                if self.columns.contains(&i) {
+                    LogicalType::Any
+                } else {
+                    chunk
+                        .column(i)
+                        .map_or(LogicalType::Any, |c| c.data_type().clone())
+                }
+            })
+            .collect();
+        let mut out = DataChunk::with_capacity(&schema, rows.len());
+        for col_idx in 0..chunk.column_count() {
+            if !self.columns.contains(&col_idx) {
+                copy_column(&chunk, col_idx, &rows, &mut out, col_idx);
+                continue;
+            }
+            let Some(source) = chunk.column(col_idx) else {
+                continue;
+            };
+            let target = out.column_mut(col_idx).expect("column exists");
+            for &row in &rows {
+                target.push_value(self.decode(source.get_value(row)));
+            }
+        }
+        out.set_count(rows.len());
         Ok(Some(out))
     }
 
@@ -2918,7 +2848,70 @@ impl Operator for DictResolveOperator {
     }
 
     fn name(&self) -> &'static str {
-        "DictResolve"
+        "TermDecode"
+    }
+
+    fn into_any(self: Box<Self>) -> Box<dyn std::any::Any + Send> {
+        self
+    }
+}
+
+/// Turns value columns into term id columns: a [`Value::RdfTerm`] (a path's
+/// endpoint), or a native value (an aggregate's result) as its literal, is
+/// interned; NULL stays NULL.
+struct TermInternOperator {
+    input: Box<dyn Operator>,
+    terms: Arc<QueryTermIds>,
+    columns: Vec<usize>,
+}
+
+impl Operator for TermInternOperator {
+    fn next(&mut self) -> grafeo_core::execution::operators::OperatorResult {
+        let Some(chunk) = self.input.next()? else {
+            return Ok(None);
+        };
+        let rows: Vec<usize> = chunk.selected_indices().collect();
+        let schema: Vec<LogicalType> = (0..chunk.column_count())
+            .map(|i| {
+                if self.columns.contains(&i) {
+                    LogicalType::RdfTermId
+                } else {
+                    chunk
+                        .column(i)
+                        .map_or(LogicalType::Any, |c| c.data_type().clone())
+                }
+            })
+            .collect();
+        let mut out = DataChunk::with_capacity(&schema, rows.len());
+        for col_idx in 0..chunk.column_count() {
+            if !self.columns.contains(&col_idx) {
+                copy_column(&chunk, col_idx, &rows, &mut out, col_idx);
+                continue;
+            }
+            let Some(source) = chunk.column(col_idx) else {
+                continue;
+            };
+            let ids = rows
+                .iter()
+                .map(|&row| intern_value(&self.terms, source.get_value(row)))
+                .collect::<std::result::Result<Vec<_>, _>>()?;
+            let target = out.column_mut(col_idx).expect("column exists");
+            for id in ids {
+                target.push_value(id);
+            }
+        }
+        out.set_count(rows.len());
+        Ok(Some(out))
+    }
+
+    fn reset(&mut self) {
+        self.input.reset();
+    }
+
+    /// The name of the operator whose output it interns: the interning is
+    /// part of that operator in a profile.
+    fn name(&self) -> &'static str {
+        self.input.name()
     }
 
     fn into_any(self: Box<Self>) -> Box<dyn std::any::Any + Send> {
@@ -2939,19 +2932,14 @@ struct RdfTripleScanOperator {
     output_mask: [bool; 4],
     /// Graph resolution context (graph IRI, scan-all flag, dataset restriction).
     graph_context: GraphContext,
-    /// Whether to emit a companion language-tag column after the object column.
-    emit_companion_columns: bool,
-    /// Whether to also emit a companion datatype column (only when DATATYPE() is used).
-    emit_datatype_column: bool,
     /// Chunk size for batching.
     chunk_size: usize,
     /// Cached matching triples with graph names (lazily populated).
     triples: Option<Vec<(Option<String>, Arc<Triple>)>>,
     /// Current position in the triples.
     position: usize,
-    /// Optional term dictionary for dictionary-encoded output. When present,
-    /// S/P/O variable columns emit Int64 term IDs instead of String values.
-    dictionary: Option<Arc<grafeo_core::graph::rdf::TermDictionary>>,
+    /// The query's term dictionary, which the output columns index.
+    terms: Arc<QueryTermIds>,
     /// The writer of the scan's transaction, whose own writes it sees.
     writer: Option<RdfWriter>,
     /// Counts the triples the scan reads.
@@ -2965,20 +2953,17 @@ impl RdfTripleScanOperator {
         output_mask: [bool; 4],
         chunk_size: usize,
         graph_context: GraphContext,
-        emit_companion_columns: bool,
-        emit_datatype_column: bool,
+        terms: Arc<QueryTermIds>,
     ) -> Self {
         Self {
             store,
             pattern,
             output_mask,
             graph_context,
-            emit_companion_columns,
-            emit_datatype_column,
             chunk_size,
             triples: None,
             position: 0,
-            dictionary: None,
+            terms,
             writer: None,
             reads: None,
         }
@@ -3008,16 +2993,6 @@ impl RdfTripleScanOperator {
             Some(writer) => writer.find(&self.pattern, graphs),
             None => self.store.find_in_graphs(&self.pattern, graphs),
         }
-    }
-
-    /// Enables dictionary-encoded output for S/P/O columns.
-    ///
-    /// Infrastructure for Phase 4 (Ring Index) which will automatically enable
-    /// dictionary encoding when the Ring provides native integer-keyed iteration.
-    #[allow(dead_code)]
-    fn with_dictionary(mut self, dict: Arc<grafeo_core::graph::rdf::TermDictionary>) -> Self {
-        self.dictionary = Some(dict);
-        self
     }
 
     /// Lazily load matching triples on first access.
@@ -3116,45 +3091,6 @@ impl RdfTripleScanOperator {
             }
         }
     }
-
-    /// Count how many output columns we have.
-    fn output_column_count(&self) -> usize {
-        let base = self.output_mask.iter().filter(|&&b| b).count();
-        if self.emit_companion_columns {
-            base + if self.emit_datatype_column { 2 } else { 1 }
-        } else {
-            base
-        }
-    }
-
-    /// Builds the output schema. In dictionary mode, S/P/O variable columns
-    /// are Int64 (term IDs), companion and graph columns remain String.
-    fn build_output_schema(&self, col_count: usize, dict_mode: bool) -> Vec<LogicalType> {
-        let mut schema = Vec::with_capacity(col_count);
-        // S, P, O variable columns: Int64 term IDs in dictionary mode; otherwise
-        // text, and any value for the object, where a literal is a number.
-        for i in 0..3 {
-            if self.output_mask[i] {
-                schema.push(match (dict_mode, i) {
-                    (true, _) => LogicalType::Int64,
-                    (false, 2) => LogicalType::Any,
-                    (false, _) => LogicalType::String,
-                });
-            }
-        }
-        // Companion columns (lang, datatype) are always String
-        if self.output_mask[2] && self.emit_companion_columns {
-            schema.push(LogicalType::String); // lang
-            if self.emit_datatype_column {
-                schema.push(LogicalType::String); // datatype
-            }
-        }
-        // Graph column is always String
-        if self.output_mask[3] {
-            schema.push(LogicalType::String);
-        }
-        schema
-    }
 }
 
 impl Operator for RdfTripleScanOperator {
@@ -3172,94 +3108,53 @@ impl Operator for RdfTripleScanOperator {
 
         let end = (self.position + self.chunk_size).min(triples.len());
         let batch_size = end - self.position;
-        let col_count = self.output_column_count();
-
-        // Create output schema: Int64 for dictionary-encoded S/P/O, String otherwise
-        let dict_mode = self.dictionary.is_some();
-        let schema: Vec<LogicalType> = self.build_output_schema(col_count, dict_mode);
+        let col_count = self.output_mask.iter().filter(|&&b| b).count();
+        let schema = vec![LogicalType::RdfTermId; col_count];
         let mut chunk = DataChunk::with_capacity(&schema, batch_size);
 
-        // Fill the chunk
-        for i in self.position..end {
-            let (ref graph_name, ref triple) = triples[i];
+        // A stored triple carries its ids; a triple no store took yet (a
+        // pending write, the ring's) gets them here. A graph name is an IRI
+        // (the same for runs of rows), and a default-graph triple's graph is
+        // unbound.
+        let mut last_graph: Option<(&str, Value)> = None;
+        for (graph, triple) in &triples[self.position..end] {
+            let ids = match triple.ids() {
+                Some(ids) => ids,
+                None => {
+                    let ids = self.terms.intern_all([
+                        triple.subject(),
+                        triple.predicate(),
+                        triple.object(),
+                    ])?;
+                    [ids[0], ids[1], ids[2]]
+                }
+            };
             let mut col_idx = 0;
-
-            if self.output_mask[0] {
-                // Subject
-                if let Some(col) = chunk.column_mut(col_idx) {
-                    if let Some(ref dict) = self.dictionary {
-                        if let Some(id) = dict.get_id(triple.subject()) {
-                            col.push_value(Value::Int64(i64::from(id)));
-                        } else {
-                            col.push_value(Value::Null);
-                        }
-                    } else {
-                        col.push_string(term_to_string(triple.subject()));
-                    }
-                }
-                col_idx += 1;
-            }
-            if self.output_mask[1] {
-                // Predicate
-                if let Some(col) = chunk.column_mut(col_idx) {
-                    if let Some(ref dict) = self.dictionary {
-                        if let Some(id) = dict.get_id(triple.predicate()) {
-                            col.push_value(Value::Int64(i64::from(id)));
-                        } else {
-                            col.push_value(Value::Null);
-                        }
-                    } else {
-                        col.push_string(term_to_string(triple.predicate()));
-                    }
-                }
-                col_idx += 1;
-            }
-            if self.output_mask[2] {
-                // Object: dictionary encoding applies here too
-                if let Some(col) = chunk.column_mut(col_idx) {
-                    if let Some(ref dict) = self.dictionary {
-                        if let Some(id) = dict.get_id(triple.object()) {
-                            col.push_value(Value::Int64(i64::from(id)));
-                        } else {
-                            col.push_value(Value::Null);
-                        }
-                    } else {
-                        push_term_value(col, triple.object());
-                    }
-                }
-                col_idx += 1;
-
-                // Companion language-tag and datatype columns (always String)
-                if self.emit_companion_columns {
-                    if let Some(col) = chunk.column_mut(col_idx) {
-                        let lang_tag = match triple.object() {
-                            Term::Literal(lit) => lit.language().unwrap_or("").to_string(),
-                            _ => String::new(),
-                        };
-                        col.push_string(lang_tag);
-                    }
+            for (component, id) in ids.into_iter().enumerate() {
+                if self.output_mask[component] {
+                    chunk
+                        .column_mut(col_idx)
+                        .expect("column exists")
+                        .push_value(id_value(id));
                     col_idx += 1;
-
-                    if self.emit_datatype_column {
-                        if let Some(col) = chunk.column_mut(col_idx) {
-                            let datatype = match triple.object() {
-                                Term::Literal(lit) => lit.datatype().to_string(),
-                                _ => String::new(),
-                            };
-                            col.push_string(datatype);
-                        }
-                        col_idx += 1;
-                    }
                 }
             }
             if self.output_mask[3] {
-                // Graph (always String)
-                if let Some(col) = chunk.column_mut(col_idx) {
-                    match graph_name {
-                        Some(name) => col.push_string(name.clone()),
-                        None => col.push_value(Value::Null),
-                    }
-                }
+                let value = match graph.as_deref() {
+                    None => Value::Null,
+                    Some(name) => match &last_graph {
+                        Some((last, id)) if *last == name => id.clone(),
+                        _ => {
+                            let id = id_value(self.terms.intern(&Term::iri(name))?);
+                            last_graph = Some((name, id.clone()));
+                            id
+                        }
+                    },
+                };
+                chunk
+                    .column_mut(col_idx)
+                    .expect("column exists")
+                    .push_value(value);
             }
         }
 
@@ -3284,1429 +3179,8 @@ impl Operator for RdfTripleScanOperator {
 }
 
 // ============================================================================
-// RDF Expression Predicate
-// ============================================================================
-
-/// Expression predicate for RDF queries.
-///
-/// Unlike the LPG predicate, this doesn't need a store reference because
-/// RDF values are already materialized in the DataChunk columns.
-struct RdfExpressionPredicate {
-    expression: FilterExpression,
-    variable_columns: HashMap<String, usize>,
-}
-
-impl RdfExpressionPredicate {
-    fn new(expression: FilterExpression, variable_columns: HashMap<String, usize>) -> Self {
-        Self {
-            expression,
-            variable_columns,
-        }
-    }
-
-    fn eval(&self, chunk: &DataChunk, row: usize) -> Option<Value> {
-        self.eval_expr(&self.expression, chunk, row)
-    }
-
-    fn eval_expr(&self, expr: &FilterExpression, chunk: &DataChunk, row: usize) -> Option<Value> {
-        match expr {
-            FilterExpression::Literal(v) => Some(v.clone()),
-            FilterExpression::Variable(name) => {
-                let col_idx = *self.variable_columns.get(name)?;
-                chunk.column(col_idx)?.get_value(row)
-            }
-            FilterExpression::Property { variable, .. } => {
-                // For RDF, treat property access as variable access
-                let col_idx = *self.variable_columns.get(variable)?;
-                chunk.column(col_idx)?.get_value(row)
-            }
-            FilterExpression::Binary { left, op, right } => {
-                // IN operator: evaluate right side as a list, then check membership
-                if *op == BinaryFilterOp::In {
-                    let left_val = self.eval_expr(left, chunk, row)?;
-                    let right_val = self.eval_expr(right, chunk, row)?;
-                    return match right_val {
-                        Value::List(items) => {
-                            if left_val.is_null() {
-                                return Some(Value::Null);
-                            }
-                            let mut has_null = false;
-                            for item in items.iter() {
-                                if item.is_null() {
-                                    has_null = true;
-                                } else if rdf_values_equal(&left_val, item) {
-                                    return Some(Value::Bool(true));
-                                }
-                            }
-                            if has_null {
-                                Some(Value::Null)
-                            } else {
-                                Some(Value::Bool(false))
-                            }
-                        }
-                        _ => None,
-                    };
-                }
-                let left_val = self.eval_expr(left, chunk, row)?;
-                let right_val = self.eval_expr(right, chunk, row)?;
-                self.eval_binary_op(&left_val, *op, &right_val)
-            }
-            FilterExpression::Unary { op, operand } => {
-                let val = self.eval_expr(operand, chunk, row);
-                self.eval_unary_op(*op, val)
-            }
-            FilterExpression::Id(var)
-            | FilterExpression::Labels(var)
-            | FilterExpression::Type(var) => {
-                // Treat Id/Labels/Type access as variable lookup for RDF
-                let col_idx = *self.variable_columns.get(var)?;
-                chunk.column(col_idx)?.get_value(row)
-            }
-            FilterExpression::SparqlCall { name, args } => {
-                self.eval_function_call(name, args, chunk, row)
-            }
-            FilterExpression::List(items) => {
-                let values: Vec<Value> = items
-                    .iter()
-                    .filter_map(|item| self.eval_expr(item, chunk, row))
-                    .collect();
-                Some(Value::List(values.into()))
-            }
-            // These expression types are not commonly used in RDF FILTER clauses
-            FilterExpression::Case { .. }
-            | FilterExpression::Map(_)
-            | FilterExpression::IndexAccess { .. }
-            | FilterExpression::SliceAccess { .. }
-            | FilterExpression::ListComprehension { .. }
-            | FilterExpression::ListPredicate { .. }
-            | FilterExpression::ExistsSubquery { .. }
-            | FilterExpression::CountSubquery { .. }
-            | FilterExpression::Reduce { .. } => None,
-            _ => None,
-        }
-    }
-
-    fn eval_binary_op(&self, left: &Value, op: BinaryFilterOp, right: &Value) -> Option<Value> {
-        match op {
-            BinaryFilterOp::And => Some(Value::Bool(left.as_bool()? && right.as_bool()?)),
-            BinaryFilterOp::Or => Some(Value::Bool(left.as_bool()? || right.as_bool()?)),
-            BinaryFilterOp::Xor => Some(Value::Bool(left.as_bool()? != right.as_bool()?)),
-            BinaryFilterOp::Eq => compare_values(left, right, |o| o.is_eq()),
-            BinaryFilterOp::Ne => compare_values(left, right, |o| o.is_ne()),
-            BinaryFilterOp::Lt => compare_values(left, right, |o| o.is_lt()),
-            BinaryFilterOp::Le => compare_values(left, right, |o| o.is_le()),
-            BinaryFilterOp::Gt => compare_values(left, right, |o| o.is_gt()),
-            BinaryFilterOp::Ge => compare_values(left, right, |o| o.is_ge()),
-            BinaryFilterOp::Add
-            | BinaryFilterOp::Sub
-            | BinaryFilterOp::Mul
-            | BinaryFilterOp::Div => numeric_op(left, op, right),
-            BinaryFilterOp::Mod => match (left, right) {
-                (Value::Int64(l), Value::Int64(r)) if *r != 0 => Some(Value::Int64(l % r)),
-                _ => None,
-            },
-            BinaryFilterOp::Contains => match (left, right) {
-                (Value::String(l), Value::String(r)) => Some(Value::Bool(l.contains(&**r))),
-                _ => None,
-            },
-            BinaryFilterOp::StartsWith => match (left, right) {
-                (Value::String(l), Value::String(r)) => Some(Value::Bool(l.starts_with(&**r))),
-                _ => None,
-            },
-            BinaryFilterOp::EndsWith => match (left, right) {
-                (Value::String(l), Value::String(r)) => Some(Value::Bool(l.ends_with(&**r))),
-                _ => None,
-            },
-            BinaryFilterOp::In => {
-                // Not implemented for RDF filter evaluation
-                None
-            }
-            BinaryFilterOp::Regex => {
-                // SPARQL REGEX(string, pattern) - returns true if string matches pattern
-                match (left, right) {
-                    (Value::String(text), Value::String(pattern)) => {
-                        // Compile the regex pattern
-                        match Regex::new(pattern) {
-                            Ok(re) => Some(Value::Bool(re.is_match(text))),
-                            Err(_) => None, // Invalid regex pattern
-                        }
-                    }
-                    _ => None,
-                }
-            }
-            BinaryFilterOp::Pow => {
-                // Power operation
-                match (left, right) {
-                    (Value::Int64(base), Value::Int64(exp)) => {
-                        Some(Value::Float64((*base as f64).powf(*exp as f64)))
-                    }
-                    (Value::Float64(base), Value::Float64(exp)) => {
-                        Some(Value::Float64(base.powf(*exp)))
-                    }
-                    (Value::Int64(base), Value::Float64(exp)) => {
-                        Some(Value::Float64((*base as f64).powf(*exp)))
-                    }
-                    (Value::Float64(base), Value::Int64(exp)) => {
-                        Some(Value::Float64(base.powf(*exp as f64)))
-                    }
-                    _ => None,
-                }
-            }
-            BinaryFilterOp::Like => {
-                match (left, right) {
-                    (Value::String(s), Value::String(pattern)) => {
-                        // Convert SQL LIKE pattern to regex
-                        let mut re_pat = String::with_capacity(pattern.len() + 4);
-                        re_pat.push('^');
-                        let mut chars = pattern.chars().peekable();
-                        while let Some(ch) = chars.next() {
-                            match ch {
-                                '%' => re_pat.push_str(".*"),
-                                '_' => re_pat.push('.'),
-                                '\\' => {
-                                    if let Some(next) = chars.next() {
-                                        if ".+*?^${}()|[]\\".contains(next) {
-                                            re_pat.push('\\');
-                                        }
-                                        re_pat.push(next);
-                                    }
-                                }
-                                _ => {
-                                    if ".+*?^${}()|[]\\".contains(ch) {
-                                        re_pat.push('\\');
-                                    }
-                                    re_pat.push(ch);
-                                }
-                            }
-                        }
-                        re_pat.push('$');
-                        match Regex::new(&re_pat) {
-                            Ok(re) => Some(Value::Bool(re.is_match(s))),
-                            Err(_) => None,
-                        }
-                    }
-                    _ => None,
-                }
-            }
-            BinaryFilterOp::Concat => match (left, right) {
-                (Value::String(a), Value::String(b)) => {
-                    let mut s = String::with_capacity(a.len() + b.len());
-                    s.push_str(a);
-                    s.push_str(b);
-                    Some(Value::String(s.into()))
-                }
-                (Value::String(a), other) => {
-                    let b = match other {
-                        Value::Int64(i) => i.to_string(),
-                        Value::Float64(f) => f.to_string(),
-                        Value::Bool(b) => b.to_string(),
-                        _ => return None,
-                    };
-                    let mut s = String::with_capacity(a.len() + b.len());
-                    s.push_str(a);
-                    s.push_str(&b);
-                    Some(Value::String(s.into()))
-                }
-                (other, Value::String(b)) => {
-                    let a = match other {
-                        Value::Int64(i) => i.to_string(),
-                        Value::Float64(f) => f.to_string(),
-                        Value::Bool(bo) => bo.to_string(),
-                        _ => return None,
-                    };
-                    let mut s = String::with_capacity(a.len() + b.len());
-                    s.push_str(&a);
-                    s.push_str(b);
-                    Some(Value::String(s.into()))
-                }
-                _ => None,
-            },
-            _ => None,
-        }
-    }
-
-    fn eval_unary_op(&self, op: UnaryFilterOp, val: Option<Value>) -> Option<Value> {
-        match op {
-            UnaryFilterOp::Not => Some(Value::Bool(!val?.as_bool()?)),
-            UnaryFilterOp::IsNull => Some(Value::Bool(val.is_none())),
-            UnaryFilterOp::IsNotNull => Some(Value::Bool(val.is_some())),
-            UnaryFilterOp::Neg => match val? {
-                // -i64::MIN is past the i64 range: a decimal, as XPath integers have no limit.
-                Value::Int64(v) => Some(
-                    v.checked_neg()
-                        .map_or_else(|| Value::Decimal(Decimal::from_i64(v).neg()), Value::Int64),
-                ),
-                Value::Float64(v) => Some(Value::Float64(-v)),
-                Value::Decimal(v) => Some(Value::Decimal(v.neg())),
-                _ => None,
-            },
-            _ => None,
-        }
-    }
-
-    /// The language tag of the literal `expr` evaluates to, or `""` when it
-    /// has none. A variable's tag is in its hidden `__lang_<var>` companion
-    /// column (the triple scan and BIND fill it); `STRLANG` gives its second
-    /// argument; `COALESCE` and `IF` the tag of the argument they choose; the
-    /// functions SPARQL 1.1 defines to keep the tag of their first argument
-    /// (`UCASE`, `LCASE`, `SUBSTR`, `STRBEFORE`, `STRAFTER`, `REPLACE`) keep it;
-    /// `CONCAT` keeps a tag all its arguments share. Every other expression
-    /// gives a literal without a tag.
-    fn expression_language(
-        &self,
-        expr: &FilterExpression,
-        chunk: &DataChunk,
-        row: usize,
-    ) -> String {
-        match expr {
-            FilterExpression::Variable(var_name) => self
-                .variable_columns
-                .get(&format!("__lang_{var_name}"))
-                .and_then(|&col_idx| chunk.column(col_idx)?.get_value(row))
-                .and_then(|value| match value {
-                    Value::String(tag) => Some(tag.to_string()),
-                    _ => None,
-                })
-                .unwrap_or_default(),
-            FilterExpression::SparqlCall { name, args } => match name.to_uppercase().as_str() {
-                "STRLANG" => match args.get(1).and_then(|tag| self.eval_expr(tag, chunk, row)) {
-                    Some(Value::String(tag)) => tag.to_string(),
-                    _ => String::new(),
-                },
-                "COALESCE" => args
-                    .iter()
-                    .find(|arg| {
-                        self.eval_expr(arg, chunk, row)
-                            .is_some_and(|value| !matches!(value, Value::Null))
-                    })
-                    .map(|arg| self.expression_language(arg, chunk, row))
-                    .unwrap_or_default(),
-                "IF" if args.len() >= 3 => {
-                    match self
-                        .eval_expr(&args[0], chunk, row)
-                        .and_then(|c| c.as_bool())
-                    {
-                        Some(true) => self.expression_language(&args[1], chunk, row),
-                        Some(false) => self.expression_language(&args[2], chunk, row),
-                        None => String::new(),
-                    }
-                }
-                "UCASE" | "LCASE" | "SUBSTR" | "STRBEFORE" | "STRAFTER" | "REPLACE" => args
-                    .first()
-                    .map(|arg| self.expression_language(arg, chunk, row))
-                    .unwrap_or_default(),
-                "CONCAT" => {
-                    let mut tags = args
-                        .iter()
-                        .map(|arg| self.expression_language(arg, chunk, row));
-                    match tags.next() {
-                        Some(first) if !first.is_empty() && tags.all(|tag| tag == first) => first,
-                        _ => String::new(),
-                    }
-                }
-                _ => String::new(),
-            },
-            _ => String::new(),
-        }
-    }
-
-    /// Evaluates SPARQL function calls.
-    fn eval_function_call(
-        &self,
-        name: &str,
-        args: &[FilterExpression],
-        chunk: &DataChunk,
-        row: usize,
-    ) -> Option<Value> {
-        // Normalize function name to uppercase for case-insensitive matching
-        let func_name = name.to_uppercase();
-
-        match func_name.as_str() {
-            // CONCAT - concatenate multiple strings
-            "CONCAT" => {
-                let mut result = String::new();
-                for arg in args {
-                    if let Some(Value::String(s)) = self.eval_expr(arg, chunk, row) {
-                        result.push_str(&s);
-                    } else if let Some(val) = self.eval_expr(arg, chunk, row) {
-                        // Convert non-string values to string
-                        result.push_str(&value_to_string(&val));
-                    }
-                }
-                Some(Value::String(result.into()))
-            }
-
-            // REPLACE - replace occurrences of pattern with replacement
-            "REPLACE" => {
-                if args.len() < 3 {
-                    return None;
-                }
-                let text = match self.eval_expr(&args[0], chunk, row)? {
-                    Value::String(s) => s.to_string(),
-                    v => value_to_string(&v),
-                };
-                let pattern = match self.eval_expr(&args[1], chunk, row)? {
-                    Value::String(s) => s.to_string(),
-                    v => value_to_string(&v),
-                };
-                let replacement = match self.eval_expr(&args[2], chunk, row)? {
-                    Value::String(s) => s.to_string(),
-                    v => value_to_string(&v),
-                };
-
-                // Check if the pattern should be treated as regex (4th argument with 'r' flag)
-                if args.len() >= 4
-                    && let Some(Value::String(flags)) = self.eval_expr(&args[3], chunk, row)
-                    && (flags.contains('r') || flags.contains('i'))
-                {
-                    // Regex-based replace
-                    let regex_pattern = if flags.contains('i') {
-                        format!("(?i){}", pattern)
-                    } else {
-                        pattern.clone()
-                    };
-                    if let Ok(re) = Regex::new(&regex_pattern) {
-                        return Some(Value::String(re.replace_all(&text, &replacement).into()));
-                    }
-                }
-
-                // Simple string replace
-                Some(Value::String(text.replace(&pattern, &replacement).into()))
-            }
-
-            // STRLEN - string length
-            "STRLEN" => {
-                if args.is_empty() {
-                    return None;
-                }
-                let text = match self.eval_expr(&args[0], chunk, row)? {
-                    Value::String(s) => s.to_string(),
-                    v => value_to_string(&v),
-                };
-                // reason: string length will not exceed i64::MAX
-                #[allow(clippy::cast_possible_wrap)]
-                Some(Value::Int64(text.chars().count() as i64))
-            }
-
-            // UCASE - uppercase
-            "UCASE" | "UPPER" => {
-                if args.is_empty() {
-                    return None;
-                }
-                let text = match self.eval_expr(&args[0], chunk, row)? {
-                    Value::String(s) => s.to_string(),
-                    v => value_to_string(&v),
-                };
-                Some(Value::String(text.to_uppercase().into()))
-            }
-
-            // LCASE - lowercase
-            "LCASE" | "LOWER" => {
-                if args.is_empty() {
-                    return None;
-                }
-                let text = match self.eval_expr(&args[0], chunk, row)? {
-                    Value::String(s) => s.to_string(),
-                    v => value_to_string(&v),
-                };
-                Some(Value::String(text.to_lowercase().into()))
-            }
-
-            // SUBSTR - substring extraction
-            "SUBSTR" | "SUBSTRING" => {
-                if args.len() < 2 {
-                    return None;
-                }
-                let text = match self.eval_expr(&args[0], chunk, row)? {
-                    Value::String(s) => s.to_string(),
-                    v => value_to_string(&v),
-                };
-                let start = match self.eval_expr(&args[1], chunk, row)? {
-                    // reason: clamped to >= 0 by .max(1) - 1
-                    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-                    Value::Int64(i) => (i.max(1) - 1) as usize, // SPARQL uses 1-based indexing
-                    _ => return None,
-                };
-                let len = if args.len() >= 3 {
-                    match self.eval_expr(&args[2], chunk, row)? {
-                        // reason: clamped to >= 0 by .max(0)
-                        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-                        Value::Int64(i) => Some(i.max(0) as usize),
-                        _ => return None,
-                    }
-                } else {
-                    None
-                };
-
-                let chars: Vec<char> = text.chars().collect();
-                let substr: String = if let Some(len) = len {
-                    chars.iter().skip(start).take(len).collect()
-                } else {
-                    chars.iter().skip(start).collect()
-                };
-                Some(Value::String(substr.into()))
-            }
-
-            // STRSTARTS - check if string starts with prefix
-            "STRSTARTS" => {
-                if args.len() < 2 {
-                    return None;
-                }
-                let text = match self.eval_expr(&args[0], chunk, row)? {
-                    Value::String(s) => s.to_string(),
-                    v => value_to_string(&v),
-                };
-                let prefix = match self.eval_expr(&args[1], chunk, row)? {
-                    Value::String(s) => s.to_string(),
-                    v => value_to_string(&v),
-                };
-                Some(Value::Bool(text.starts_with(&prefix)))
-            }
-
-            // STRENDS - check if string ends with suffix
-            "STRENDS" => {
-                if args.len() < 2 {
-                    return None;
-                }
-                let text = match self.eval_expr(&args[0], chunk, row)? {
-                    Value::String(s) => s.to_string(),
-                    v => value_to_string(&v),
-                };
-                let suffix = match self.eval_expr(&args[1], chunk, row)? {
-                    Value::String(s) => s.to_string(),
-                    v => value_to_string(&v),
-                };
-                Some(Value::Bool(text.ends_with(&suffix)))
-            }
-
-            // CONTAINS - check if string contains substring
-            "CONTAINS" => {
-                if args.len() < 2 {
-                    return None;
-                }
-                let text = match self.eval_expr(&args[0], chunk, row)? {
-                    Value::String(s) => s.to_string(),
-                    v => value_to_string(&v),
-                };
-                let pattern = match self.eval_expr(&args[1], chunk, row)? {
-                    Value::String(s) => s.to_string(),
-                    v => value_to_string(&v),
-                };
-                Some(Value::Bool(text.contains(&pattern)))
-            }
-
-            // STRBEFORE - substring before pattern
-            "STRBEFORE" => {
-                if args.len() < 2 {
-                    return None;
-                }
-                let text = match self.eval_expr(&args[0], chunk, row)? {
-                    Value::String(s) => s.to_string(),
-                    v => value_to_string(&v),
-                };
-                let pattern = match self.eval_expr(&args[1], chunk, row)? {
-                    Value::String(s) => s.to_string(),
-                    v => value_to_string(&v),
-                };
-                if let Some(pos) = text.find(&pattern) {
-                    Some(Value::String(text[..pos].to_string().into()))
-                } else {
-                    Some(Value::String("".into()))
-                }
-            }
-
-            // STRAFTER - substring after pattern
-            "STRAFTER" => {
-                if args.len() < 2 {
-                    return None;
-                }
-                let text = match self.eval_expr(&args[0], chunk, row)? {
-                    Value::String(s) => s.to_string(),
-                    v => value_to_string(&v),
-                };
-                let pattern = match self.eval_expr(&args[1], chunk, row)? {
-                    Value::String(s) => s.to_string(),
-                    v => value_to_string(&v),
-                };
-                if let Some(pos) = text.find(&pattern) {
-                    Some(Value::String(
-                        text[pos + pattern.len()..].to_string().into(),
-                    ))
-                } else {
-                    Some(Value::String("".into()))
-                }
-            }
-
-            // ENCODE_FOR_URI - URL encode
-            "ENCODE_FOR_URI" => {
-                if args.is_empty() {
-                    return None;
-                }
-                let text = match self.eval_expr(&args[0], chunk, row)? {
-                    Value::String(s) => s.to_string(),
-                    v => value_to_string(&v),
-                };
-                // Simple URL encoding for common characters
-                let encoded: String = text
-                    .chars()
-                    .map(|c| match c {
-                        'a'..='z' | 'A'..='Z' | '0'..='9' | '-' | '_' | '.' | '~' => c.to_string(),
-                        _ => format!("%{:02X}", c as u32),
-                    })
-                    .collect();
-                Some(Value::String(encoded.into()))
-            }
-
-            // COALESCE - return first non-null value
-            "COALESCE" => {
-                for arg in args {
-                    if let Some(val) = self.eval_expr(arg, chunk, row)
-                        && !matches!(val, Value::Null)
-                    {
-                        return Some(val);
-                    }
-                }
-                None
-            }
-
-            // IF - conditional expression
-            "IF" => {
-                if args.len() < 3 {
-                    return None;
-                }
-                let condition = self.eval_expr(&args[0], chunk, row)?;
-                if condition.as_bool()? {
-                    self.eval_expr(&args[1], chunk, row)
-                } else {
-                    self.eval_expr(&args[2], chunk, row)
-                }
-            }
-
-            // BOUND - check if variable is bound
-            "BOUND" => {
-                if args.is_empty() {
-                    return None;
-                }
-                // For variable arguments, check the validity bitmap directly so
-                // that NULL entries from LEFT JOIN (OPTIONAL) are recognized as
-                // "unbound" rather than "bound to Null".
-                if let FilterExpression::Variable(var_name) = &args[0] {
-                    if let Some(&col_idx) = self.variable_columns.get(var_name)
-                        && let Some(col) = chunk.column(col_idx)
-                    {
-                        return Some(Value::Bool(!col.is_null(row)));
-                    }
-                    // Variable not in column map: unbound
-                    return Some(Value::Bool(false));
-                }
-                // Non-variable arguments: fall back to expression evaluation
-                let is_bound = self.eval_expr(&args[0], chunk, row).is_some();
-                Some(Value::Bool(is_bound))
-            }
-
-            // STR - convert to string
-            "STR" => {
-                if args.is_empty() {
-                    return None;
-                }
-                let val = self.eval_expr(&args[0], chunk, row)?;
-                Some(Value::String(value_to_string(&val).into()))
-            }
-
-            // ISIRI / ISURI - check if value is an IRI
-            "ISIRI" | "ISURI" => {
-                if args.is_empty() {
-                    return None;
-                }
-                let val = self.eval_expr(&args[0], chunk, row)?;
-                if let Value::String(s) = val {
-                    // Check if it looks like an IRI (starts with a scheme)
-                    let is_iri = s.contains("://") || s.starts_with("urn:");
-                    Some(Value::Bool(is_iri))
-                } else {
-                    Some(Value::Bool(false))
-                }
-            }
-
-            // ISBLANK - check if value is a blank node
-            "ISBLANK" => {
-                if args.is_empty() {
-                    return None;
-                }
-                let val = self.eval_expr(&args[0], chunk, row)?;
-                if let Value::String(s) = val {
-                    Some(Value::Bool(s.starts_with("_:")))
-                } else {
-                    Some(Value::Bool(false))
-                }
-            }
-
-            // ISLITERAL - check if value is a literal
-            "ISLITERAL" => {
-                if args.is_empty() {
-                    return None;
-                }
-                let val = self.eval_expr(&args[0], chunk, row)?;
-                // In our model, non-IRI strings and other values are literals
-                match &val {
-                    Value::String(s) => {
-                        Some(Value::Bool(!s.contains("://") && !s.starts_with("_:")))
-                    }
-                    _ => Some(Value::Bool(true)),
-                }
-            }
-
-            // ISNUMERIC - check if value is numeric
-            "ISNUMERIC" => {
-                if args.is_empty() {
-                    return None;
-                }
-                let val = self.eval_expr(&args[0], chunk, row)?;
-                // A numeric literal reads as a number of its type; a plain or
-                // ill-typed literal stays text and is not numeric ("1").
-                let is_numeric =
-                    matches!(val, Value::Int64(_) | Value::Float64(_) | Value::Decimal(_));
-                Some(Value::Bool(is_numeric))
-            }
-
-            // ABS - absolute value; past the i64 range it goes on as a
-            // decimal, as XPath integers are unbounded
-            "ABS" => {
-                if args.is_empty() {
-                    return None;
-                }
-                match self.eval_expr(&args[0], chunk, row)? {
-                    Value::Int64(v) => {
-                        Some(v.checked_abs().map_or_else(
-                            || Value::Decimal(Decimal::from_i64(v).abs()),
-                            Value::Int64,
-                        ))
-                    }
-                    Value::Float64(v) => Some(Value::Float64(v.abs())),
-                    Value::Decimal(v) => Some(Value::Decimal(v.abs())),
-                    _ => None,
-                }
-            }
-
-            // CEIL - ceiling
-            "CEIL" => {
-                if args.is_empty() {
-                    return None;
-                }
-                match self.eval_expr(&args[0], chunk, row)? {
-                    Value::Int64(v) => Some(Value::Int64(v)),
-                    Value::Float64(v) => Some(Value::Float64(v.ceil())),
-                    Value::Decimal(v) => Some(Value::Decimal(v.ceil())),
-                    _ => None,
-                }
-            }
-
-            // FLOOR - floor
-            "FLOOR" => {
-                if args.is_empty() {
-                    return None;
-                }
-                match self.eval_expr(&args[0], chunk, row)? {
-                    Value::Int64(v) => Some(Value::Int64(v)),
-                    Value::Float64(v) => Some(Value::Float64(v.floor())),
-                    Value::Decimal(v) => Some(Value::Decimal(v.floor())),
-                    _ => None,
-                }
-            }
-
-            // ROUND - fn:round: the nearest integer, of two equally near ones
-            // the one nearer positive infinity (ROUND(-2.5) is -2)
-            "ROUND" => {
-                if args.is_empty() {
-                    return None;
-                }
-                match self.eval_expr(&args[0], chunk, row)? {
-                    Value::Int64(v) => Some(Value::Int64(v)),
-                    Value::Float64(v) => Some(Value::Float64(round_half_up(v))),
-                    Value::Decimal(v) => Some(Value::Decimal(
-                        v.checked_add(&Decimal::new(5, 1).ok()?)
-                            .map_or_else(|_| v.round(), |half_up| half_up.floor()),
-                    )),
-                    _ => None,
-                }
-            }
-
-            // REGEX - regular expression matching
-            "REGEX" => {
-                if args.len() < 2 {
-                    return None;
-                }
-                let text = match self.eval_expr(&args[0], chunk, row)? {
-                    Value::String(s) => s.to_string(),
-                    v => value_to_string(&v),
-                };
-                let pattern = match self.eval_expr(&args[1], chunk, row)? {
-                    Value::String(s) => s.to_string(),
-                    _ => return None,
-                };
-                // Optional flags argument (3rd arg): "i" for case-insensitive
-                let regex_pattern = if args.len() >= 3
-                    && let Some(Value::String(flags)) = self.eval_expr(&args[2], chunk, row)
-                    && flags.contains('i')
-                {
-                    format!("(?i){pattern}")
-                } else {
-                    pattern
-                };
-                match Regex::new(&regex_pattern) {
-                    Ok(re) => Some(Value::Bool(re.is_match(&text))),
-                    Err(_) => None,
-                }
-            }
-
-            // ================================================================
-            // Date/Time Functions (SPARQL 1.1 Section 17.4.5)
-            // ================================================================
-
-            // NOW - current datetime
-            "NOW" => {
-                let ts = grafeo_common::types::Timestamp::now();
-                Some(Value::Timestamp(ts))
-            }
-
-            // YEAR - extract year from date/datetime
-            "YEAR" => {
-                let val = self.eval_expr(args.first()?, chunk, row)?;
-                match val {
-                    Value::Date(d) => Some(Value::Int64(i64::from(d.year()))),
-                    Value::Timestamp(ts) => Some(Value::Int64(i64::from(ts.to_date().year()))),
-                    Value::ZonedDatetime(zdt) => {
-                        Some(Value::Int64(i64::from(zdt.to_local_date().year())))
-                    }
-                    Value::String(s) => {
-                        // Try full dateTime parse first (handles "2024-06-15T10:30:45+02:00"),
-                        // then fall back to date-only parse (handles "2024-06-15").
-                        if let Some(zdt) = grafeo_common::types::ZonedDatetime::parse(&s) {
-                            Some(Value::Int64(i64::from(zdt.to_local_date().year())))
-                        } else {
-                            parse_datetime_date(&s).map(|d| Value::Int64(i64::from(d.year())))
-                        }
-                    }
-                    _ => None,
-                }
-            }
-
-            // MONTH - extract month from date/datetime
-            "MONTH" => {
-                let val = self.eval_expr(args.first()?, chunk, row)?;
-                match val {
-                    Value::Date(d) => Some(Value::Int64(i64::from(d.month()))),
-                    Value::Timestamp(ts) => Some(Value::Int64(i64::from(ts.to_date().month()))),
-                    Value::ZonedDatetime(zdt) => {
-                        Some(Value::Int64(i64::from(zdt.to_local_date().month())))
-                    }
-                    Value::String(s) => {
-                        if let Some(zdt) = grafeo_common::types::ZonedDatetime::parse(&s) {
-                            Some(Value::Int64(i64::from(zdt.to_local_date().month())))
-                        } else {
-                            parse_datetime_date(&s).map(|d| Value::Int64(i64::from(d.month())))
-                        }
-                    }
-                    _ => None,
-                }
-            }
-
-            // DAY - extract day from date/datetime
-            "DAY" => {
-                let val = self.eval_expr(args.first()?, chunk, row)?;
-                match val {
-                    Value::Date(d) => Some(Value::Int64(i64::from(d.day()))),
-                    Value::Timestamp(ts) => Some(Value::Int64(i64::from(ts.to_date().day()))),
-                    Value::ZonedDatetime(zdt) => {
-                        Some(Value::Int64(i64::from(zdt.to_local_date().day())))
-                    }
-                    Value::String(s) => {
-                        if let Some(zdt) = grafeo_common::types::ZonedDatetime::parse(&s) {
-                            Some(Value::Int64(i64::from(zdt.to_local_date().day())))
-                        } else {
-                            parse_datetime_date(&s).map(|d| Value::Int64(i64::from(d.day())))
-                        }
-                    }
-                    _ => None,
-                }
-            }
-
-            // HOURS - extract hours from time/datetime
-            "HOURS" => {
-                let val = self.eval_expr(args.first()?, chunk, row)?;
-                match val {
-                    Value::Time(t) => Some(Value::Int64(i64::from(t.hour()))),
-                    Value::Timestamp(ts) => Some(Value::Int64(i64::from(ts.to_time().hour()))),
-                    Value::ZonedDatetime(zdt) => {
-                        Some(Value::Int64(i64::from(zdt.to_local_time().hour())))
-                    }
-                    Value::String(s) => {
-                        if let Some(zdt) = grafeo_common::types::ZonedDatetime::parse(&s) {
-                            Some(Value::Int64(i64::from(zdt.to_local_time().hour())))
-                        } else {
-                            parse_datetime_time(&s).map(|t| Value::Int64(i64::from(t.hour())))
-                        }
-                    }
-                    _ => None,
-                }
-            }
-
-            // MINUTES - extract minutes from time/datetime
-            "MINUTES" => {
-                let val = self.eval_expr(args.first()?, chunk, row)?;
-                match val {
-                    Value::Time(t) => Some(Value::Int64(i64::from(t.minute()))),
-                    Value::Timestamp(ts) => Some(Value::Int64(i64::from(ts.to_time().minute()))),
-                    Value::ZonedDatetime(zdt) => {
-                        Some(Value::Int64(i64::from(zdt.to_local_time().minute())))
-                    }
-                    Value::String(s) => {
-                        if let Some(zdt) = grafeo_common::types::ZonedDatetime::parse(&s) {
-                            Some(Value::Int64(i64::from(zdt.to_local_time().minute())))
-                        } else {
-                            parse_datetime_time(&s).map(|t| Value::Int64(i64::from(t.minute())))
-                        }
-                    }
-                    _ => None,
-                }
-            }
-
-            // SECONDS - extract seconds (with fractional) from time/datetime
-            "SECONDS" => {
-                let val = self.eval_expr(args.first()?, chunk, row)?;
-                let to_secs = |t: &grafeo_common::types::Time| {
-                    f64::from(t.second()) + f64::from(t.nanosecond()) / 1_000_000_000.0
-                };
-                match val {
-                    Value::Time(t) => Some(Value::Float64(to_secs(&t))),
-                    Value::Timestamp(ts) => Some(Value::Float64(to_secs(&ts.to_time()))),
-                    Value::ZonedDatetime(zdt) => {
-                        Some(Value::Float64(to_secs(&zdt.to_local_time())))
-                    }
-                    Value::String(s) => {
-                        if let Some(zdt) = grafeo_common::types::ZonedDatetime::parse(&s) {
-                            Some(Value::Float64(to_secs(&zdt.to_local_time())))
-                        } else {
-                            grafeo_common::types::Time::parse(&s)
-                                .map(|t| Value::Float64(to_secs(&t)))
-                        }
-                    }
-                    _ => None,
-                }
-            }
-
-            // TIMEZONE - extract timezone as xsd:dayTimeDuration
-            "TIMEZONE" => {
-                let val = self.eval_expr(args.first()?, chunk, row)?;
-                match val {
-                    Value::Time(t) => t.offset_seconds().map(|offset| {
-                        Value::Duration(grafeo_common::types::Duration::from_seconds(i64::from(
-                            offset,
-                        )))
-                    }),
-                    Value::ZonedDatetime(zdt) => Some(Value::Duration(
-                        grafeo_common::types::Duration::from_seconds(i64::from(
-                            zdt.offset_seconds(),
-                        )),
-                    )),
-                    Value::String(s) => grafeo_common::types::ZonedDatetime::parse(&s).map(|zdt| {
-                        Value::Duration(grafeo_common::types::Duration::from_seconds(i64::from(
-                            zdt.offset_seconds(),
-                        )))
-                    }),
-                    _ => None,
-                }
-            }
-
-            // TZ - extract timezone as string ("+05:00", "Z", "")
-            "TZ" => {
-                let val = self.eval_expr(args.first()?, chunk, row)?;
-                match val {
-                    Value::Time(t) => {
-                        if let Some(offset) = t.offset_seconds() {
-                            Some(Value::String(format_tz_offset(offset).into()))
-                        } else {
-                            Some(Value::String(String::new().into()))
-                        }
-                    }
-                    Value::ZonedDatetime(zdt) => {
-                        Some(Value::String(format_tz_offset(zdt.offset_seconds()).into()))
-                    }
-                    Value::String(s) => {
-                        if let Some(zdt) = grafeo_common::types::ZonedDatetime::parse(&s) {
-                            Some(Value::String(format_tz_offset(zdt.offset_seconds()).into()))
-                        } else {
-                            Some(Value::String(String::new().into()))
-                        }
-                    }
-                    _ => Some(Value::String(String::new().into())),
-                }
-            }
-
-            // ================================================================
-            // Hash Functions (SPARQL 1.1 Section 17.4.4)
-            // ================================================================
-            "MD5" => {
-                let val = self.eval_expr(args.first()?, chunk, row)?;
-                let s = value_to_string(&val);
-                let digest = md5::compute(s.as_bytes());
-                Some(Value::String(format!("{digest:x}").into()))
-            }
-
-            "SHA1" => {
-                let val = self.eval_expr(args.first()?, chunk, row)?;
-                let s = value_to_string(&val);
-                use sha1::Digest as _;
-                let hash = sha1::Sha1::digest(s.as_bytes());
-                let hex = hash.iter().fold(String::new(), |mut s, b| {
-                    use std::fmt::Write as _;
-                    let _ = write!(s, "{b:02x}");
-                    s
-                });
-                Some(Value::String(hex.into()))
-            }
-
-            "SHA256" => {
-                let val = self.eval_expr(args.first()?, chunk, row)?;
-                let s = value_to_string(&val);
-                use sha2::Digest as _;
-                let hash = sha2::Sha256::digest(s.as_bytes());
-                let hex = hash.iter().fold(String::new(), |mut s, b| {
-                    use std::fmt::Write as _;
-                    let _ = write!(s, "{b:02x}");
-                    s
-                });
-                Some(Value::String(hex.into()))
-            }
-
-            "SHA384" => {
-                let val = self.eval_expr(args.first()?, chunk, row)?;
-                let s = value_to_string(&val);
-                use sha2::Digest as _;
-                let hash = sha2::Sha384::digest(s.as_bytes());
-                let hex = hash.iter().fold(String::new(), |mut s, b| {
-                    use std::fmt::Write as _;
-                    let _ = write!(s, "{b:02x}");
-                    s
-                });
-                Some(Value::String(hex.into()))
-            }
-
-            "SHA512" => {
-                let val = self.eval_expr(args.first()?, chunk, row)?;
-                let s = value_to_string(&val);
-                use sha2::Digest as _;
-                let hash = sha2::Sha512::digest(s.as_bytes());
-                let hex = hash.iter().fold(String::new(), |mut s, b| {
-                    use std::fmt::Write as _;
-                    let _ = write!(s, "{b:02x}");
-                    s
-                });
-                Some(Value::String(hex.into()))
-            }
-
-            // ================================================================
-            // RDF Term Functions (SPARQL 1.1 Section 17.4.2)
-            // ================================================================
-
-            // LANG - language tag of a literal
-            "LANG" => {
-                // The tag of the literal the argument evaluates to; "" when it
-                // has none (SPARQL 1.1, 17.4.2.7).
-                let tag = self.expression_language(args.first()?, chunk, row);
-                Some(Value::String(tag.into()))
-            }
-
-            // LANGMATCHES - BCP47 language range matching (Section 17.4.2.9)
-            "LANGMATCHES" => {
-                if args.len() < 2 {
-                    return None;
-                }
-                let tag = match self.eval_expr(&args[0], chunk, row)? {
-                    Value::String(s) => s.to_string(),
-                    _ => return None,
-                };
-                let range = match self.eval_expr(&args[1], chunk, row)? {
-                    Value::String(s) => s.to_string(),
-                    _ => return None,
-                };
-
-                // SPARQL spec: LANGMATCHES(tag, "*") matches any non-empty tag
-                if range == "*" {
-                    return Some(Value::Bool(!tag.is_empty()));
-                }
-
-                // Case-insensitive prefix match per RFC 4647 basic filtering:
-                // tag "en-US" matches range "en" because "en" is a prefix and
-                // the next character in tag is '-'.
-                let tag_lower = tag.to_lowercase();
-                let range_lower = range.to_lowercase();
-                let matches = tag_lower == range_lower
-                    || (tag_lower.starts_with(&range_lower)
-                        && tag_lower.as_bytes().get(range_lower.len()) == Some(&b'-'));
-                Some(Value::Bool(matches))
-            }
-
-            // DATATYPE - datatype IRI of a literal
-            "DATATYPE" => {
-                if let Some(FilterExpression::Variable(var_name)) = args.first() {
-                    let dt_col_name = format!("__datatype_{var_name}");
-                    if let Some(&col_idx) = self.variable_columns.get(&dt_col_name)
-                        && let Some(col) = chunk.column(col_idx)
-                        && let Some(Value::String(dt)) = col.get_value(row)
-                        && !dt.is_empty()
-                    {
-                        return Some(Value::String(dt));
-                    }
-                }
-                let val = self.eval_expr(args.first()?, chunk, row)?;
-                // A language-tagged literal is an rdf:langString (SPARQL 1.1,
-                // 17.4.2.8).
-                if matches!(val, Value::String(_))
-                    && !self.expression_language(&args[0], chunk, row).is_empty()
-                {
-                    return Some(Value::String(
-                        "http://www.w3.org/1999/02/22-rdf-syntax-ns#langString".into(),
-                    ));
-                }
-                let dt = match &val {
-                    Value::String(_) => "http://www.w3.org/2001/XMLSchema#string",
-                    Value::Int64(_) => "http://www.w3.org/2001/XMLSchema#integer",
-                    Value::Float64(_) => "http://www.w3.org/2001/XMLSchema#double",
-                    Value::Decimal(_) => "http://www.w3.org/2001/XMLSchema#decimal",
-                    Value::Bool(_) => "http://www.w3.org/2001/XMLSchema#boolean",
-                    Value::Date(_) => "http://www.w3.org/2001/XMLSchema#date",
-                    Value::Time(_) => "http://www.w3.org/2001/XMLSchema#time",
-                    Value::Timestamp(_) | Value::ZonedDatetime(_) => {
-                        "http://www.w3.org/2001/XMLSchema#dateTime"
-                    }
-                    Value::Duration(_) => "http://www.w3.org/2001/XMLSchema#duration",
-                    _ => return None,
-                };
-                Some(Value::String(dt.to_string().into()))
-            }
-
-            // IRI / URI - construct an IRI
-            "IRI" | "URI" => {
-                let val = self.eval_expr(args.first()?, chunk, row)?;
-                match val {
-                    Value::String(s) => Some(Value::String(s)),
-                    v => Some(Value::String(value_to_string(&v).into())),
-                }
-            }
-
-            // BNODE - construct or retrieve a blank node
-            "BNODE" => {
-                if args.is_empty() {
-                    // Generate a unique blank node ID
-                    use std::sync::atomic::{AtomicU64, Ordering};
-                    static BNODE_COUNTER: AtomicU64 = AtomicU64::new(0);
-                    let id = BNODE_COUNTER.fetch_add(1, Ordering::Relaxed);
-                    Some(Value::String(format!("_:b{id}").into()))
-                } else {
-                    let val = self.eval_expr(&args[0], chunk, row)?;
-                    let label = value_to_string(&val);
-                    Some(Value::String(format!("_:b{label}").into()))
-                }
-            }
-
-            // STRDT - construct a typed literal
-            "STRDT" => {
-                if args.len() < 2 {
-                    return None;
-                }
-                let lexical = self.eval_expr(&args[0], chunk, row)?;
-                let datatype = self.eval_expr(&args[1], chunk, row)?;
-                let lex_str = value_to_string(&lexical);
-                let dt_str = value_to_string(&datatype);
-                match dt_str.as_str() {
-                    "http://www.w3.org/2001/XMLSchema#integer"
-                    | "http://www.w3.org/2001/XMLSchema#int"
-                    | "http://www.w3.org/2001/XMLSchema#long" => {
-                        lex_str.parse::<i64>().ok().map(Value::Int64)
-                    }
-                    "http://www.w3.org/2001/XMLSchema#double"
-                    | "http://www.w3.org/2001/XMLSchema#float" => {
-                        lex_str.parse::<f64>().ok().map(Value::Float64)
-                    }
-                    "http://www.w3.org/2001/XMLSchema#decimal" => {
-                        Decimal::parse(&lex_str).ok().map(Value::Decimal)
-                    }
-                    "http://www.w3.org/2001/XMLSchema#boolean" => match lex_str.as_str() {
-                        "true" | "1" => Some(Value::Bool(true)),
-                        "false" | "0" => Some(Value::Bool(false)),
-                        _ => None,
-                    },
-                    _ => Some(Value::String(lex_str.into())),
-                }
-            }
-
-            // STRLANG - construct a language-tagged literal
-            "STRLANG" => {
-                if args.len() < 2 {
-                    return None;
-                }
-                // Return the string value (language tag is metadata)
-                self.eval_expr(&args[0], chunk, row)
-            }
-
-            // UUID - generate a UUID IRI
-            "UUID" => {
-                use std::sync::atomic::{AtomicU64, Ordering};
-                static UUID_COUNTER: AtomicU64 = AtomicU64::new(0);
-                let id = UUID_COUNTER.fetch_add(1, Ordering::Relaxed);
-                let ts = grafeo_common::clock::SystemTime::now()
-                    .duration_since(grafeo_common::clock::UNIX_EPOCH)
-                    .map_or(0, |d| d.as_nanos());
-                Some(Value::String(format!("urn:uuid:{ts:032x}-{id:04x}").into()))
-            }
-
-            // STRUUID - generate a UUID string (no urn: prefix)
-            "STRUUID" => {
-                use std::sync::atomic::{AtomicU64, Ordering};
-                static STRUUID_COUNTER: AtomicU64 = AtomicU64::new(0);
-                let id = STRUUID_COUNTER.fetch_add(1, Ordering::Relaxed);
-                let ts = grafeo_common::clock::SystemTime::now()
-                    .duration_since(grafeo_common::clock::UNIX_EPOCH)
-                    .map_or(0, |d| d.as_nanos());
-                Some(Value::String(format!("{ts:032x}-{id:04x}").into()))
-            }
-
-            // sameTerm - strict RDF term equality
-            "SAMETERM" => {
-                if args.len() < 2 {
-                    return None;
-                }
-                let a = self.eval_expr(&args[0], chunk, row)?;
-                let b = self.eval_expr(&args[1], chunk, row)?;
-                Some(Value::Bool(a == b))
-            }
-
-            // ================================================================
-            // Numeric Functions (SPARQL 1.1 Section 17.4.4)
-            // ================================================================
-
-            // RAND - random double in [0, 1)
-            "RAND" => {
-                use std::collections::hash_map::DefaultHasher;
-                use std::hash::{Hash, Hasher};
-                use std::sync::atomic::{AtomicU64, Ordering};
-                static RAND_STATE: AtomicU64 = AtomicU64::new(0);
-                let state = RAND_STATE.fetch_add(1, Ordering::Relaxed);
-                let mut hasher = DefaultHasher::new();
-                state.hash(&mut hasher);
-                // reason: truncation is intentional for hash seed entropy
-                #[allow(clippy::cast_possible_truncation)]
-                grafeo_common::clock::SystemTime::now()
-                    .duration_since(grafeo_common::clock::UNIX_EPOCH)
-                    .map_or(0u64, |d| d.as_nanos() as u64)
-                    .hash(&mut hasher);
-                let bits = hasher.finish();
-                let value = (bits >> 11) as f64 / (1u64 << 53) as f64;
-                Some(Value::Float64(value))
-            }
-
-            // XPath constructor functions (SPARQL 1.1, 17.5): `xsd:decimal(x)`
-            // and the others, called by their IRI.
-            iri if iri.starts_with("HTTP://WWW.W3.ORG/2001/XMLSCHEMA#") => {
-                let value = self.eval_expr(args.first()?, chunk, row)?;
-                xsd_cast(&iri["HTTP://WWW.W3.ORG/2001/XMLSCHEMA#".len()..], &value)
-            }
-
-            // Unknown function
-            _ => None,
-        }
-    }
-}
-
-/// The XPath cast of `value` to the XSD type `name` (in capitals): `DECIMAL`,
-/// `DOUBLE`, `FLOAT`, `INTEGER` (and `INT`, `LONG`), `STRING`, `BOOLEAN`,
-/// `DATE`, `TIME` or `DATETIME`.
-/// A number casts to a number (a double by its shortest text to a decimal, a
-/// decimal or a double to an integer by truncation); a string casts as the
-/// lexical form of the type. `None` for another type, a value that does not
-/// cast, NaN or an infinity to a decimal or an integer.
-#[allow(
-    clippy::cast_precision_loss,
-    clippy::cast_possible_truncation,
-    reason = "XPath casts an integer to the nearest double, and a double to an integer by \
-              truncation after the range check"
-)]
-fn xsd_cast(name: &str, value: &Value) -> Option<Value> {
-    match name {
-        "DECIMAL" => match value {
-            Value::Decimal(d) => Some(Value::Decimal(*d)),
-            Value::Int64(i) => Some(Value::Decimal(Decimal::from_i64(*i))),
-            Value::Float64(f) => Decimal::from_f64(*f).ok().map(Value::Decimal),
-            Value::Bool(b) => Some(Value::Decimal(Decimal::from_i64(i64::from(*b)))),
-            Value::String(s) => Decimal::parse(s.trim()).ok().map(Value::Decimal),
-            _ => None,
-        },
-        "DOUBLE" | "FLOAT" => match value {
-            Value::Float64(f) => Some(Value::Float64(*f)),
-            Value::Int64(i) => Some(Value::Float64(*i as f64)),
-            Value::Decimal(d) => Some(Value::Float64(d.to_f64())),
-            Value::Bool(b) => Some(Value::Float64(f64::from(u8::from(*b)))),
-            Value::String(s) => s.trim().parse::<f64>().ok().map(Value::Float64),
-            _ => None,
-        },
-        "INTEGER" | "INT" | "LONG" => match value {
-            Value::Int64(i) => Some(Value::Int64(*i)),
-            Value::Decimal(d) => d.trunc_to_i64().map(Value::Int64),
-            Value::Float64(f) if f.is_finite() && f.abs() < 9.223_372_036_854_775e18 => {
-                Some(Value::Int64(f.trunc() as i64))
-            }
-            Value::Bool(b) => Some(Value::Int64(i64::from(*b))),
-            Value::String(s) => s.trim().parse::<i64>().ok().map(Value::Int64),
-            _ => None,
-        },
-        "STRING" => Some(Value::String(value_to_string(value).into())),
-        "BOOLEAN" => match value {
-            Value::Bool(b) => Some(Value::Bool(*b)),
-            Value::Int64(i) => Some(Value::Bool(*i != 0)),
-            Value::Decimal(d) => Some(Value::Bool(d.signum() != 0)),
-            Value::Float64(f) => Some(Value::Bool(*f != 0.0 && !f.is_nan())),
-            Value::String(s) => match s.trim() {
-                "true" | "1" => Some(Value::Bool(true)),
-                "false" | "0" => Some(Value::Bool(false)),
-                _ => None,
-            },
-            _ => None,
-        },
-        // A date from its text or from a dateTime (its local date).
-        "DATE" => match value {
-            Value::Date(d) => Some(Value::Date(*d)),
-            Value::String(s) => grafeo_common::types::Date::parse(s.trim()).map(Value::Date),
-            Value::Timestamp(_) | Value::ZonedDatetime(_) => {
-                parse_datetime_date(&value_to_string(value)).map(Value::Date)
-            }
-            _ => None,
-        },
-        // A time from its text or from a dateTime (its local time).
-        "TIME" => match value {
-            Value::Time(t) => Some(Value::Time(*t)),
-            Value::String(s) => grafeo_common::types::Time::parse(s.trim()).map(Value::Time),
-            Value::Timestamp(_) | Value::ZonedDatetime(_) => {
-                parse_datetime_time(&value_to_string(value)).map(Value::Time)
-            }
-            _ => None,
-        },
-        // A dateTime from its text (zoned when it has an offset) or from a
-        // date (its midnight).
-        "DATETIME" => match value {
-            Value::Timestamp(_) | Value::ZonedDatetime(_) => Some(value.clone()),
-            Value::String(s) => parse_xsd_datetime(s.trim()),
-            Value::Date(d) => grafeo_common::types::Time::parse("00:00:00").map(|midnight| {
-                Value::Timestamp(grafeo_common::types::Timestamp::from_date_time(
-                    *d, midnight,
-                ))
-            }),
-            _ => None,
-        },
-        _ => None,
-    }
-}
-
-/// The value of an `xsd:dateTime` lexical form: a zoned datetime when it has
-/// an offset, otherwise a timestamp of its date and time. `None` when it is no
-/// dateTime (a date alone has no `T`).
-fn parse_xsd_datetime(text: &str) -> Option<Value> {
-    if let Some(zoned) = grafeo_common::types::ZonedDatetime::parse(text) {
-        return Some(Value::ZonedDatetime(zoned));
-    }
-    let pos = text.find('T')?;
-    let date = grafeo_common::types::Date::parse(&text[..pos])?;
-    let time = grafeo_common::types::Time::parse(&text[pos + 1..])?;
-    Some(Value::Timestamp(
-        grafeo_common::types::Timestamp::from_date_time(date, time),
-    ))
-}
-
-/// Parses the date component from a dateTime or date string.
-///
-/// Handles both "YYYY-MM-DD" and "YYYY-MM-DDTHH:MM:SS..." forms by splitting
-/// at 'T' and parsing only the date portion, then falling back to a plain date
-/// parse.
-fn parse_datetime_date(s: &str) -> Option<grafeo_common::types::Date> {
-    if let Some(pos) = s.find('T').or_else(|| s.find('t')) {
-        grafeo_common::types::Date::parse(&s[..pos])
-    } else {
-        grafeo_common::types::Date::parse(s)
-    }
-}
-
-/// Parses the time component from a dateTime or time string.
-///
-/// Handles both "HH:MM:SS..." and "YYYY-MM-DDTHH:MM:SS..." forms by splitting
-/// at 'T' and parsing only the time portion, then falling back to a plain time
-/// parse.
-fn parse_datetime_time(s: &str) -> Option<grafeo_common::types::Time> {
-    if let Some(pos) = s.find('T').or_else(|| s.find('t')) {
-        grafeo_common::types::Time::parse(&s[pos + 1..])
-    } else {
-        grafeo_common::types::Time::parse(s)
-    }
-}
-
-/// Formats a timezone offset in seconds as "+HH:MM" or "Z".
-fn format_tz_offset(offset_secs: i32) -> String {
-    if offset_secs == 0 {
-        return "Z".to_string();
-    }
-    let sign = if offset_secs >= 0 { '+' } else { '-' };
-    let abs = offset_secs.unsigned_abs();
-    let hours = abs / 3600;
-    let minutes = (abs % 3600) / 60;
-    format!("{sign}{hours:02}:{minutes:02}")
-}
-
-impl Predicate for RdfExpressionPredicate {
-    /// SPARQL turns an expression error into an unbound value (SPARQL 1.1,
-    /// 17.3), so a filter never fails the query.
-    fn evaluate(
-        &self,
-        chunk: &DataChunk,
-        row: usize,
-    ) -> std::result::Result<bool, grafeo_core::execution::operators::OperatorError> {
-        Ok(matches!(self.eval(chunk, row), Some(Value::Bool(true))))
-    }
-}
-
-// ============================================================================
 // Helper Functions
 // ============================================================================
-
-/// Strips internal `__lang_*` companion columns from the final output.
-///
-/// If no internal columns are present, the operator and columns pass through
-/// unchanged. Otherwise, a lightweight projection is inserted to remove them.
-fn strip_internal_columns(
-    operator: Box<dyn Operator>,
-    columns: Vec<String>,
-) -> (Box<dyn Operator>, Vec<String>) {
-    let keep_indices: Vec<usize> = columns
-        .iter()
-        .enumerate()
-        .filter(|(_, name)| !name.starts_with("__lang_") && !name.starts_with("__datatype_"))
-        .map(|(i, _)| i)
-        .collect();
-
-    if keep_indices.len() == columns.len() {
-        // Nothing to strip
-        return (operator, columns);
-    }
-
-    let output_columns: Vec<String> = keep_indices.iter().map(|&i| columns[i].clone()).collect();
-    let output_types: Vec<LogicalType> = keep_indices.iter().map(|_| LogicalType::Any).collect();
-
-    let projections = keep_indices
-        .into_iter()
-        .map(RdfProjectExpr::Column)
-        .collect();
-
-    let stripped = Box::new(RdfProjectOperator::new(operator, projections, output_types));
-    (stripped, output_columns)
-}
 
 /// Aligns a UNION branch to the unified columns by name, filling columns the
 /// branch does not bind with NULL.
@@ -4718,6 +3192,7 @@ fn pad_union_branch(
     branch_columns: &[String],
     unified_columns: &[String],
     unified_types: &[LogicalType],
+    terms: &Arc<QueryTermIds>,
 ) -> Box<dyn Operator> {
     if branch_columns == unified_columns {
         return branch;
@@ -4741,161 +3216,98 @@ fn pad_union_branch(
         branch,
         projections,
         unified_types.to_vec(),
+        Arc::clone(terms),
     ))
 }
 
-/// The RDF literal a SPARQL statement writes or matches for `value`: a string
-/// as a simple literal; a number, boolean, date, time, datetime or duration as
-/// a literal of its XSD type (a decimal with its scale, `"1.50"^^xsd:decimal`).
-/// `None` for a value with no literal form, such as a list or a map.
-fn value_literal(value: &Value) -> Option<Literal> {
-    Some(match value {
-        Value::String(s) => Literal::simple(s.to_string()),
-        Value::Int64(n) => Literal::integer(*n),
-        Value::Float64(f) => Literal::typed(f.to_string(), Literal::XSD_DOUBLE),
-        Value::Decimal(d) => Literal::typed(d.to_string(), Literal::XSD_DECIMAL),
-        Value::Bool(b) => Literal::typed(b.to_string(), Literal::XSD_BOOLEAN),
-        Value::Date(d) => Literal::typed(d.to_string(), "http://www.w3.org/2001/XMLSchema#date"),
-        Value::Time(t) => Literal::typed(t.to_string(), "http://www.w3.org/2001/XMLSchema#time"),
-        Value::Timestamp(ts) => Literal::typed(ts.to_string(), Literal::XSD_DATETIME),
-        Value::ZonedDatetime(zdt) => Literal::typed(zdt.to_string(), Literal::XSD_DATETIME),
-        Value::Duration(dur) => {
-            Literal::typed(dur.to_string(), "http://www.w3.org/2001/XMLSchema#duration")
-        }
-        _ => return None,
-    })
-}
-
-/// The RDF term of a value bound in a template: a string that looks like an
-/// IRI as that IRI, any other value as its literal (see [`value_literal`]).
-fn value_to_term(value: &Value) -> Option<Term> {
-    match value {
-        Value::String(s)
-            if s.starts_with("http://") || s.starts_with("https://") || s.starts_with("urn:") =>
-        {
-            Some(Term::Iri(s.to_string().into()))
-        }
-        _ => value_literal(value).map(Term::Literal),
-    }
-}
-
-/// Converts an RDF Term to a string for IRI/blank node representation.
-fn term_to_string(term: &Term) -> String {
-    match term {
-        Term::Iri(iri) => iri.as_str().to_string(),
-        Term::BlankNode(bnode) => format!("_:{}", bnode.id()),
-        Term::Literal(lit) => lit.value().to_string(),
-    }
-}
-
-/// Pushes the value a query reads for an RDF term to a column (see
-/// [`Term::query_value`]): a numeric literal as its number, anything else as
-/// its text. A column a term goes into is an `Any` column.
-fn push_term_value(col: &mut grafeo_core::execution::ValueVector, term: &Term) {
-    col.push_value(term.query_value());
-}
-
-/// Converts a TripleComponent to an Option<Term> for pattern matching.
+/// The term of a constant triple component: an IRI, a blank node, a literal
+/// as written in the query ([`Value::RdfTerm`]), or a native value as its
+/// literal. `None` for a variable.
 fn component_to_term(component: &TripleComponent) -> Option<Term> {
     match component {
         TripleComponent::Variable(_) => None,
         TripleComponent::BlankNode(label) => Some(Term::blank(label.clone())),
         TripleComponent::Iri(iri) => Some(Term::iri(iri.clone())),
-        TripleComponent::Literal(value) => Some(Term::Literal(
-            value_literal(value).unwrap_or_else(|| Literal::simple(value.to_string())),
-        )),
+        TripleComponent::Literal(value) => terms::to_term(value)
+            .or_else(|| Some(Term::Literal(Literal::simple(value.to_string())))),
         TripleComponent::LangLiteral { value, lang } => {
             Some(Term::lang_literal(value.clone(), lang.clone()))
         }
     }
 }
 
-/// Checks whether a logical plan tree references LANG, LANGMATCHES, or DATATYPE
-/// functions. When true, the planner emits companion columns on triple scans.
-fn uses_lang_or_datatype(op: &LogicalOperator) -> bool {
-    use LogicalOperator::{
-        Aggregate, AntiJoin, Bind, Distinct, Filter, Join, LeftJoin, Limit, Project, Return, Skip,
-        Sort, TripleScan, Union, Unwind,
-    };
-    match op {
-        Filter(f) => expr_uses_lang_or_datatype(&f.predicate) || uses_lang_or_datatype(&f.input),
-        Project(p) => {
-            p.projections
-                .iter()
-                .any(|proj| expr_uses_lang_or_datatype(&proj.expression))
-                || uses_lang_or_datatype(&p.input)
-        }
-        Bind(b) => expr_uses_lang_or_datatype(&b.expression) || uses_lang_or_datatype(&b.input),
-        Aggregate(a) => {
-            a.aggregates.iter().any(|ae| {
-                ae.expression
-                    .as_ref()
-                    .is_some_and(expr_uses_lang_or_datatype)
-            }) || a.having.as_ref().is_some_and(expr_uses_lang_or_datatype)
-                || uses_lang_or_datatype(&a.input)
-        }
-        Return(r) => {
-            r.items
-                .iter()
-                .any(|item| expr_uses_lang_or_datatype(&item.expression))
-                || uses_lang_or_datatype(&r.input)
-        }
-        Sort(s) => {
-            s.keys
-                .iter()
-                .any(|k| expr_uses_lang_or_datatype(&k.expression))
-                || uses_lang_or_datatype(&s.input)
-        }
-        Join(j) => uses_lang_or_datatype(&j.left) || uses_lang_or_datatype(&j.right),
-        LeftJoin(j) => {
-            uses_lang_or_datatype(&j.left)
-                || uses_lang_or_datatype(&j.right)
-                || j.condition.as_ref().is_some_and(expr_uses_lang_or_datatype)
-        }
-        AntiJoin(j) => uses_lang_or_datatype(&j.left) || uses_lang_or_datatype(&j.right),
-        Union(u) => u.inputs.iter().any(uses_lang_or_datatype),
-        Distinct(d) => uses_lang_or_datatype(&d.input),
-        Limit(l) => uses_lang_or_datatype(&l.input),
-        Skip(s) => uses_lang_or_datatype(&s.input),
-        Unwind(u) => uses_lang_or_datatype(&u.input),
-        TripleScan(t) => t.input.as_ref().is_some_and(|i| uses_lang_or_datatype(i)),
-        LogicalOperator::MultiWayJoin(mwj) => mwj.inputs.iter().any(uses_lang_or_datatype),
-        // For any other operator, conservatively assume companion columns are needed
-        _ => true,
+/// The blank nodes a template's labels stand for in one solution: fresh for
+/// each solution (SPARQL 1.1 sections 16.2 and 3.1.1 of Update), the same
+/// within it.
+#[derive(Default)]
+struct FreshBlankNodes {
+    labels: HashMap<String, Term>,
+}
+
+impl FreshBlankNodes {
+    fn get(&mut self, label: &str) -> Term {
+        self.labels
+            .entry(label.to_string())
+            .or_insert_with(fresh_blank_node)
+            .clone()
     }
 }
 
-/// Checks whether a logical expression references LANG, LANGMATCHES, or DATATYPE.
-fn expr_uses_lang_or_datatype(expr: &LogicalExpression) -> bool {
-    match expr {
-        LogicalExpression::SparqlCall { name, args } => {
-            let upper = name.to_uppercase();
-            if upper == "LANG" || upper == "LANGMATCHES" || upper == "DATATYPE" {
-                return true;
-            }
-            args.iter().any(expr_uses_lang_or_datatype)
+/// A blank node no other has: a label of this process's run and a counter.
+fn fresh_blank_node() -> Term {
+    use std::sync::OnceLock;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static RUN: OnceLock<u64> = OnceLock::new();
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+    let run = RUN.get_or_init(|| {
+        use std::hash::{BuildHasher, Hasher};
+        let mut hasher = std::collections::hash_map::RandomState::new().build_hasher();
+        hasher.write_u64(0x6772_6166_656f);
+        hasher.finish()
+    });
+    Term::blank(format!(
+        "g{run:016x}{:x}",
+        NEXT.fetch_add(1, Ordering::Relaxed)
+    ))
+}
+
+/// The term of a template component in a solution: a variable's bound term
+/// (`None` when unbound), a blank node fresh for the solution, a constant as
+/// written.
+fn template_term(
+    component: &TripleComponent,
+    columns: &HashMap<String, usize>,
+    chunk: &DataChunk,
+    row: usize,
+    terms: &QueryTermIds,
+    blanks: &mut FreshBlankNodes,
+) -> Option<Term> {
+    match component {
+        TripleComponent::Variable(name) => {
+            let name = name.strip_prefix('?').unwrap_or(name);
+            let id = chunk.column(*columns.get(name)?)?.get_value(row)?;
+            terms
+                .entry_of(&id)
+                .map(|entry| entry.term().as_ref().clone())
         }
-        LogicalExpression::FunctionCall { args, .. } => args.iter().any(expr_uses_lang_or_datatype),
-        LogicalExpression::Binary { left, right, .. } => {
-            expr_uses_lang_or_datatype(left) || expr_uses_lang_or_datatype(right)
-        }
-        LogicalExpression::Unary { operand, .. } => expr_uses_lang_or_datatype(operand),
-        LogicalExpression::List(items) => items.iter().any(expr_uses_lang_or_datatype),
-        LogicalExpression::Case {
-            operand,
-            when_clauses,
-            else_clause,
-        } => {
-            operand.as_deref().is_some_and(expr_uses_lang_or_datatype)
-                || when_clauses
-                    .iter()
-                    .any(|(w, t)| expr_uses_lang_or_datatype(w) || expr_uses_lang_or_datatype(t))
-                || else_clause
-                    .as_deref()
-                    .is_some_and(expr_uses_lang_or_datatype)
-        }
-        _ => false,
+        TripleComponent::BlankNode(label) => Some(blanks.get(label)),
+        other => component_to_term(other),
     }
+}
+
+/// Whether a template's subject and predicate make an RDF triple: no
+/// literal subject, an IRI predicate (SPARQL 1.1 section 16.2).
+fn is_valid_triple(subject: &Term, predicate: &Term) -> bool {
+    !matches!(subject, Term::Literal(_)) && matches!(predicate, Term::Iri(_))
+}
+
+/// The column index of each name.
+fn column_map(columns: &[String]) -> HashMap<String, usize> {
+    columns
+        .iter()
+        .enumerate()
+        .map(|(i, name)| (name.clone(), i))
+        .collect()
 }
 
 /// Quick cardinality estimate for a logical operator subtree.
@@ -4980,214 +3392,6 @@ use crate::query::planner::common::{
     expression_to_string, output_column_name, resolved_column_name,
 };
 
-/// Converts a value to its string representation.
-fn value_to_string(value: &Value) -> String {
-    match value {
-        Value::Null => String::new(),
-        Value::Bool(b) => b.to_string(),
-        Value::Int64(i) => i.to_string(),
-        Value::Float64(f) => f.to_string(),
-        Value::String(s) => s.to_string(),
-        Value::Bytes(b) => String::from_utf8_lossy(b).to_string(),
-        Value::Timestamp(t) => t.to_string(),
-        Value::Date(d) => d.to_string(),
-        Value::Time(t) => t.to_string(),
-        Value::Duration(d) => d.to_string(),
-        Value::List(items) => {
-            let parts: Vec<String> = items.iter().map(value_to_string).collect();
-            format!("[{}]", parts.join(", "))
-        }
-        Value::Map(entries) => {
-            let parts: Vec<String> = entries
-                .iter()
-                .map(|(k, v)| format!("{}: {}", k, value_to_string(v)))
-                .collect();
-            format!("{{{}}}", parts.join(", "))
-        }
-        Value::Vector(v) => {
-            let parts: Vec<String> = v.iter().map(|f| f.to_string()).collect();
-            format!("vector([{}])", parts.join(", "))
-        }
-        Value::ZonedDatetime(zdt) => zdt.to_string(),
-        Value::Path { nodes, edges } => {
-            format!("<path: {} nodes, {} edges>", nodes.len(), edges.len())
-        }
-        Value::GCounter(counts) => {
-            let total: u64 = counts.values().sum();
-            format!("GCounter({total})")
-        }
-        Value::OnCounter { pos, neg } => {
-            // reason: counter values are small increments, sum will not overflow i64
-            #[allow(clippy::cast_possible_wrap)]
-            let pos_sum: i64 = pos.values().copied().map(|v| v as i64).sum();
-            // reason: value is a small counter, well within i64::MAX
-            #[allow(clippy::cast_possible_wrap)]
-            let neg_sum: i64 = neg.values().copied().map(|v| v as i64).sum();
-            format!("OnCounter({})", pos_sum - neg_sum)
-        }
-        _ => value.to_string(),
-    }
-}
-
-/// A SPARQL numeric operand by its XPath type. A string, as a triple scan
-/// gives a literal, reads as the double its text is.
-enum Numeric {
-    Integer(i64),
-    Decimal(Decimal),
-    Double(f64),
-}
-
-fn numeric(value: &Value) -> Option<Numeric> {
-    match value {
-        Value::Int64(i) => Some(Numeric::Integer(*i)),
-        Value::Decimal(d) => Some(Numeric::Decimal(*d)),
-        Value::Float64(f) => Some(Numeric::Double(*f)),
-        Value::String(s) => s.parse::<f64>().ok().map(Numeric::Double),
-        _ => None,
-    }
-}
-
-/// fn:round of a double: the nearest integer, of two equally near ones the
-/// one nearer positive infinity, keeping the sign of a negative value that
-/// rounds to zero. `v - v.floor()` is exact for every finite double.
-fn round_half_up(v: f64) -> f64 {
-    let floor = v.floor();
-    let rounded = if v - floor >= 0.5 { floor + 1.0 } else { floor };
-    if rounded == 0.0 {
-        0.0_f64.copysign(v)
-    } else {
-        rounded
-    }
-}
-
-/// `+`, `-`, `*` and `/` by the XPath numeric promotion of SPARQL 1.1
-/// (`op:numeric-add` and the others): a double makes a double; otherwise a
-/// decimal makes a decimal; two integers give an integer, except a division,
-/// which gives a decimal, and a result past the `i64` range, computed as
-/// decimals. Division by zero and decimal overflow give `None`.
-#[allow(
-    clippy::cast_precision_loss,
-    reason = "an integer meeting a double is promoted to that double, as XPath promotes it"
-)]
-fn numeric_op(left: &Value, op: BinaryFilterOp, right: &Value) -> Option<Value> {
-    let (l, r) = (numeric(left)?, numeric(right)?);
-    let as_double = |n: &Numeric| match n {
-        Numeric::Integer(i) => *i as f64,
-        Numeric::Decimal(d) => d.to_f64(),
-        Numeric::Double(f) => *f,
-    };
-    if matches!(l, Numeric::Double(_)) || matches!(r, Numeric::Double(_)) {
-        let (a, b) = (as_double(&l), as_double(&r));
-        return match op {
-            BinaryFilterOp::Add => Some(Value::Float64(a + b)),
-            BinaryFilterOp::Sub => Some(Value::Float64(a - b)),
-            BinaryFilterOp::Mul => Some(Value::Float64(a * b)),
-            // IEEE 754: a double divided by zero is INF, -INF or NaN.
-            BinaryFilterOp::Div => Some(Value::Float64(a / b)),
-            _ => None,
-        };
-    }
-    if let (Numeric::Integer(a), Numeric::Integer(b)) = (&l, &r) {
-        let integer = match op {
-            BinaryFilterOp::Add => a.checked_add(*b),
-            BinaryFilterOp::Sub => a.checked_sub(*b),
-            BinaryFilterOp::Mul => a.checked_mul(*b),
-            _ => None,
-        };
-        if let Some(integer) = integer {
-            return Some(Value::Int64(integer));
-        }
-    }
-    let as_decimal = |n: &Numeric| match n {
-        Numeric::Integer(i) => Some(Decimal::from_i64(*i)),
-        Numeric::Decimal(d) => Some(*d),
-        Numeric::Double(_) => None,
-    };
-    let (a, b) = (as_decimal(&l)?, as_decimal(&r)?);
-    match op {
-        BinaryFilterOp::Add => a.checked_add(&b),
-        BinaryFilterOp::Sub => a.checked_sub(&b),
-        BinaryFilterOp::Mul => a.checked_mul(&b),
-        BinaryFilterOp::Div => a.checked_div(&b),
-        _ => return None,
-    }
-    .ok()
-    .map(Value::Decimal)
-}
-
-/// Compares two values and returns a boolean result.
-fn compare_values<F>(left: &Value, right: &Value, cmp: F) -> Option<Value>
-where
-    F: Fn(std::cmp::Ordering) -> bool,
-{
-    let ordering = match (left, right) {
-        (Value::Decimal(_), _) | (_, Value::Decimal(_)) => {
-            grafeo_core::execution::operators::value_utils::compare_with_decimal(left, right)?
-        }
-        (Value::Int64(l), Value::Int64(r)) => l.cmp(r),
-        (Value::Float64(l), Value::Float64(r)) => l.partial_cmp(r)?,
-        (Value::String(l), Value::String(r)) => {
-            // Try numeric comparison first if both look like numbers
-            if let (Ok(l_num), Ok(r_num)) = (l.parse::<f64>(), r.parse::<f64>()) {
-                l_num.partial_cmp(&r_num)?
-            } else {
-                l.cmp(r)
-            }
-        }
-        // An integer and a double compare exactly, as ORDER BY and = do.
-        (Value::Int64(l), Value::Float64(r)) => {
-            grafeo_core::execution::operators::value_utils::partial_cmp_int_float(*l, *r)?
-        }
-        (Value::Float64(l), Value::Int64(r)) => {
-            grafeo_core::execution::operators::value_utils::partial_cmp_int_float(*r, *l)?.reverse()
-        }
-        // RDF values are often stored as strings - try numeric conversion
-        (Value::String(s), Value::Int64(r)) => {
-            grafeo_core::execution::operators::value_utils::partial_cmp_text_int(s, *r)?
-        }
-        (Value::String(s), Value::Float64(r)) => {
-            grafeo_core::execution::operators::value_utils::partial_cmp_text_float(s, *r)?
-        }
-        (Value::Int64(l), Value::String(s)) => {
-            grafeo_core::execution::operators::value_utils::partial_cmp_text_int(s, *l)?.reverse()
-        }
-        (Value::Float64(l), Value::String(s)) => {
-            grafeo_core::execution::operators::value_utils::partial_cmp_text_float(s, *l)?.reverse()
-        }
-        _ => return None,
-    };
-    Some(Value::Bool(cmp(ordering)))
-}
-
-/// Checks equality of two RDF values, with cross-type numeric coercion.
-///
-/// Used by the IN operator to compare the left-hand value against each element
-/// of the right-hand list.
-fn rdf_values_equal(left: &Value, right: &Value) -> bool {
-    match (left, right) {
-        (Value::Decimal(_), _) | (_, Value::Decimal(_)) => {
-            grafeo_core::execution::operators::value_utils::compare_with_decimal(left, right)
-                == Some(std::cmp::Ordering::Equal)
-        }
-        (Value::Bool(a), Value::Bool(b)) => a == b,
-        (Value::Int64(a), Value::Int64(b)) => a == b,
-        // op:numeric-equal on doubles is IEEE: NaN equals nothing.
-        (Value::Float64(a), Value::Float64(b)) => a == b,
-        (Value::String(a), Value::String(b)) => a == b,
-        (Value::Int64(a), Value::Float64(b)) | (Value::Float64(b), Value::Int64(a)) => {
-            grafeo_core::execution::operators::value_utils::int_equals_float(*a, *b)
-        }
-        // RDF stores numeric literals as strings: allow cross-type equality
-        (Value::String(s), Value::Int64(i)) | (Value::Int64(i), Value::String(s)) => {
-            s.parse::<i64>().is_ok_and(|n| n == *i)
-        }
-        (Value::String(s), Value::Float64(f)) | (Value::Float64(f), Value::String(s)) => {
-            grafeo_core::execution::operators::value_utils::text_equals_float(s, *f)
-        }
-        _ => false,
-    }
-}
-
 // ============================================================================
 // Tests
 // ============================================================================
@@ -5195,6 +3399,16 @@ fn rdf_values_equal(left: &Value, right: &Value) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A simple literal as a result holds it.
+    fn literal(text: &str) -> Value {
+        Value::RdfTerm(Arc::new(Term::literal(text)))
+    }
+
+    /// An `xsd:integer` as a result holds it.
+    fn integer(n: i64) -> Value {
+        Value::RdfTerm(Arc::new(Term::Literal(Literal::integer(n))))
+    }
     use crate::query::plan::{CountExpr, JoinType, LogicalPlan};
 
     #[test]
@@ -5291,8 +3505,7 @@ mod tests {
                 scan_all_graphs: false,
                 dataset: None,
             },
-            false,
-            false,
+            Arc::default(),
         );
 
         let mut total_rows = 0;
@@ -5453,15 +3666,10 @@ mod tests {
         });
 
         let (_op, columns, types) = planner.plan_operator(&scan).unwrap();
-        // s, p and the __lang_o companion are String, o is Any
-        assert_eq!(columns.len(), types.len());
+        // Every variable column holds term ids, with no companion columns.
+        assert_eq!(columns, vec!["s", "p", "o"]);
         for (i, ty) in types.iter().enumerate() {
-            let expected = if columns[i] == "o" {
-                LogicalType::Any
-            } else {
-                LogicalType::String
-            };
-            assert_eq!(*ty, expected, "column {i} ({})", columns[i]);
+            assert_eq!(*ty, LogicalType::RdfTermId, "column {i} ({})", columns[i]);
         }
     }
 
@@ -5510,14 +3718,13 @@ mod tests {
 
         let (_op, columns, types) = planner.plan_operator(&join).unwrap();
         assert_eq!(columns.len(), types.len());
-        // The objects (name, age) are Any, every other column String
         for (i, ty) in types.iter().enumerate() {
-            let expected = if columns[i] == "name" || columns[i] == "age" {
-                LogicalType::Any
-            } else {
-                LogicalType::String
-            };
-            assert_eq!(*ty, expected, "join column {i} ({})", columns[i]);
+            assert_eq!(
+                *ty,
+                LogicalType::RdfTermId,
+                "join column {i} ({})",
+                columns[i]
+            );
         }
     }
 
@@ -5549,26 +3756,12 @@ mod tests {
         });
 
         let (_op, columns, types) = planner.plan_operator(&bind).unwrap();
-        // The BIND variable, then its hidden language-tag companion
-        let n = columns.len();
-        assert_eq!(columns[n - 2], "label");
-        assert_eq!(columns[n - 1], "__lang_label");
-        // The input columns keep their types (the object, name, is Any), and
-        // the BIND column is Any
-        let last_idx = n - 2;
-        assert_eq!(
-            types[last_idx],
-            LogicalType::Any,
-            "BIND column should be Any"
+        // The BIND variable comes last, a term id column like the others.
+        assert_eq!(columns.last().map(String::as_str), Some("label"));
+        assert!(
+            types.iter().all(|ty| *ty == LogicalType::RdfTermId),
+            "{types:?}"
         );
-        for (column, ty) in columns.iter().zip(&types).take(last_idx) {
-            let expected = if column == "name" {
-                LogicalType::Any
-            } else {
-                LogicalType::String
-            };
-            assert_eq!(*ty, expected, "input column {column}");
-        }
     }
 
     /// Aggregate output has concrete types: group-by columns are String,
@@ -5614,8 +3807,12 @@ mod tests {
 
         let (_op, columns, types) = planner.plan_operator(&agg).unwrap();
         assert_eq!(columns, vec!["name", "cnt"]);
-        assert_eq!(types[0], LogicalType::String, "group-by column is String");
-        assert_eq!(types[1], LogicalType::Int64, "COUNT produces Int64");
+        assert_eq!(
+            types[0],
+            LogicalType::RdfTermId,
+            "the group key is a term id"
+        );
+        assert_eq!(types[1], LogicalType::RdfTermId, "COUNT is interned");
     }
 
     /// Filter, Distinct, Limit, Skip all preserve input types.
@@ -5693,7 +3890,7 @@ mod tests {
             predicate: LogicalExpression::Binary {
                 left: Box::new(LogicalExpression::Variable("age".to_string())),
                 op: crate::query::plan::BinaryOp::Gt,
-                right: Box::new(LogicalExpression::Literal(Value::String("25".into()))),
+                right: Box::new(LogicalExpression::Literal(Value::Int64(25))),
             },
             input: Box::new(scan),
             pushdown_hint: None,
@@ -5745,10 +3942,7 @@ mod tests {
         let physical = planner.plan(&LogicalPlan::new(agg)).unwrap();
         let mut op = physical.operator;
         let chunk = op.next().unwrap().unwrap();
-        assert_eq!(
-            chunk.column(0).unwrap().get_value(0),
-            Some(Value::Int64(10))
-        );
+        assert_eq!(chunk.column(0).unwrap().get_value(0), Some(integer(10)));
     }
 
     #[test]
@@ -5791,7 +3985,7 @@ mod tests {
             having: Some(LogicalExpression::Binary {
                 left: Box::new(LogicalExpression::Variable("cnt".to_string())),
                 op: crate::query::plan::BinaryOp::Gt,
-                right: Box::new(LogicalExpression::Literal(Value::String("1".into()))),
+                right: Box::new(LogicalExpression::Literal(Value::Int64(1))),
             }),
         });
         let physical = planner.plan(&LogicalPlan::new(agg)).unwrap();
@@ -6051,14 +4245,7 @@ mod tests {
                 }
             }
         }
-        assert_eq!(
-            vals,
-            vec![
-                Value::String("1".into()),
-                Value::String("2".into()),
-                Value::String("3".into())
-            ]
-        );
+        assert_eq!(vals, vec![literal("1"), literal("2"), literal("3")]);
     }
 
     #[test]
@@ -6118,7 +4305,9 @@ mod tests {
                 let values = chunk.column(column).unwrap();
                 for row in chunk.selected_indices() {
                     ages.push(match values.get_value(row) {
-                        Some(Value::String(age)) => Some(age.to_string()),
+                        Some(Value::RdfTerm(age)) => {
+                            age.as_literal().map(|l| l.value().to_string())
+                        }
                         _ => None,
                     });
                 }
@@ -6484,7 +4673,7 @@ mod tests {
         let upper_idx = physical.columns.iter().position(|c| c == "upper").unwrap();
         assert_eq!(
             chunk.column(upper_idx).unwrap().get_value(0),
-            Some(Value::String("ALIX".into()))
+            Some(literal("ALIX"))
         );
     }
 
@@ -6524,13 +4713,10 @@ mod tests {
         assert_eq!(physical.columns, vec!["n", "c"]);
         let mut op = physical.operator;
         let chunk = op.next().unwrap().unwrap();
-        assert_eq!(
-            chunk.column(0).unwrap().get_value(0),
-            Some(Value::String("Alix".into()))
-        );
+        assert_eq!(chunk.column(0).unwrap().get_value(0), Some(literal("Alix")));
         assert_eq!(
             chunk.column(1).unwrap().get_value(0),
-            Some(Value::String("const".into()))
+            Some(literal("const"))
         );
     }
 
@@ -6882,7 +5068,7 @@ mod tests {
         let physical = planner.plan(&LogicalPlan::new(agg)).unwrap();
         let mut op = physical.operator;
         let chunk = op.next().unwrap().unwrap();
-        assert_eq!(chunk.column(0).unwrap().get_value(0), Some(Value::Int64(5)));
+        assert_eq!(chunk.column(0).unwrap().get_value(0), Some(integer(5)));
     }
 
     /// Runs the update `plan` on `store` in a private transaction, as a
@@ -6931,6 +5117,7 @@ mod tests {
             object: TripleComponent::Literal(Value::String("o".into())),
             column_map: HashMap::new(),
             graph: None,
+            terms: Arc::default(),
         };
         let op: Box<dyn Operator> = Box::new(RdfInsertPatternOperator::new(None, child, operands));
         let any = op.into_any();
@@ -6958,6 +5145,7 @@ mod tests {
             object: TripleComponent::Literal(Value::String("o".into())),
             column_map: HashMap::new(),
             graph: None,
+            terms: Arc::default(),
         };
         let op: Box<dyn Operator> = Box::new(RdfDeletePatternOperator::new(None, child, operands));
         let any = op.into_any();
@@ -6983,15 +5171,15 @@ mod tests {
     #[test]
     fn test_into_any_rdf_modify_operator() {
         let child: Box<dyn Operator> = Box::new(SingleRowOperator::new());
-        let op: Box<dyn Operator> = Box::new(RdfModifyOperator::new(
-            None,
-            child,
-            ModifyTemplates {
-                delete: vec![],
-                insert: vec![],
-            },
-            HashMap::new(),
-        ));
+        let op: Box<dyn Operator> = Box::new(RdfModifyOperator {
+            writer: None,
+            input: child,
+            delete_templates: vec![],
+            insert_templates: vec![],
+            column_map: HashMap::new(),
+            terms: Arc::default(),
+            done: false,
+        });
         let any = op.into_any();
         assert!(any.downcast::<RdfModifyOperator>().is_ok());
     }
@@ -7007,7 +5195,12 @@ mod tests {
     fn test_into_any_rdf_bind_operator() {
         let child: Box<dyn Operator> = Box::new(SingleRowOperator::new());
         let expr = FilterExpression::Literal(Value::String("test".into()));
-        let op: Box<dyn Operator> = Box::new(RdfBindOperator::new(child, expr, HashMap::new()));
+        let terms: Arc<QueryTermIds> = Arc::default();
+        let op: Box<dyn Operator> = Box::new(RdfBindOperator {
+            child,
+            evaluator: RdfExpressionPredicate::new(expr, HashMap::new(), Arc::clone(&terms)),
+            terms,
+        });
         let any = op.into_any();
         assert!(any.downcast::<RdfBindOperator>().is_ok());
     }
@@ -7017,8 +5210,9 @@ mod tests {
         let child: Box<dyn Operator> = Box::new(SingleRowOperator::new());
         let op: Box<dyn Operator> = Box::new(RdfProjectOperator::new(
             child,
-            vec![RdfProjectExpr::Constant(Value::String("x".into()))],
-            vec![LogicalType::String],
+            vec![RdfProjectExpr::Constant(Value::Null)],
+            vec![LogicalType::RdfTermId],
+            Arc::default(),
         ));
         let any = op.into_any();
         assert!(any.downcast::<RdfProjectOperator>().is_ok());
@@ -7027,7 +5221,12 @@ mod tests {
     #[test]
     fn test_into_any_construct_operator() {
         let child: Box<dyn Operator> = Box::new(SingleRowOperator::new());
-        let op: Box<dyn Operator> = Box::new(ConstructOperator::new(child, vec![], HashMap::new()));
+        let op: Box<dyn Operator> = Box::new(ConstructOperator {
+            input: child,
+            templates: vec![],
+            terms: Arc::default(),
+            seen: grafeo_common::utils::hash::FxHashSet::default(),
+        });
         let any = op.into_any();
         assert!(any.downcast::<ConstructOperator>().is_ok());
     }
@@ -7041,12 +5240,16 @@ mod tests {
     }
 
     #[test]
-    fn test_into_any_dict_resolve_operator() {
+    fn test_into_any_term_decode_operator() {
         let child: Box<dyn Operator> = Box::new(SingleRowOperator::new());
-        let dict = Arc::new(grafeo_core::graph::rdf::TermDictionary::new());
-        let op: Box<dyn Operator> = Box::new(DictResolveOperator::new(child, dict, vec![]));
+        let op: Box<dyn Operator> = Box::new(TermDecodeOperator {
+            input: child,
+            terms: Arc::default(),
+            columns: vec![],
+            decode_as: DecodeAs::Terms,
+        });
         let any = op.into_any();
-        assert!(any.downcast::<DictResolveOperator>().is_ok());
+        assert!(any.downcast::<TermDecodeOperator>().is_ok());
     }
 
     #[test]
@@ -7067,58 +5270,9 @@ mod tests {
                 scan_all_graphs: false,
                 dataset: None,
             },
-            false,
-            false,
+            Arc::default(),
         ));
         let any = op.into_any();
         assert!(any.downcast::<RdfTripleScanOperator>().is_ok());
-    }
-
-    /// fn:round takes a half towards positive infinity, keeps the sign of a
-    /// negative value that rounds to zero, and passes infinities and NaN on.
-    #[test]
-    fn round_half_up_follows_fn_round() {
-        assert_eq!(round_half_up(2.5), 3.0);
-        assert_eq!(round_half_up(-2.5), -2.0);
-        assert_eq!(round_half_up(-2.6), -3.0);
-        assert_eq!(round_half_up(0.49999999999999994), 0.0);
-        assert!(round_half_up(-0.4).is_sign_negative());
-        assert_eq!(round_half_up(-0.4), 0.0);
-        assert_eq!(round_half_up(-0.5), 0.0);
-        assert!(round_half_up(-0.5).is_sign_negative());
-        assert_eq!(round_half_up(f64::INFINITY), f64::INFINITY);
-        assert_eq!(round_half_up(f64::NEG_INFINITY), f64::NEG_INFINITY);
-        assert!(round_half_up(f64::NAN).is_nan());
-        assert_eq!(
-            round_half_up(4_503_599_627_370_495.5),
-            4_503_599_627_370_496.0
-        );
-    }
-
-    /// A double divided by zero follows IEEE 754; integer and decimal
-    /// division by zero leave the result unbound.
-    #[test]
-    fn numeric_division_by_zero() {
-        let divide = |left: Value, right: Value| numeric_op(&left, BinaryFilterOp::Div, &right);
-        assert_eq!(
-            divide(Value::Float64(1.0), Value::Int64(0)),
-            Some(Value::Float64(f64::INFINITY))
-        );
-        assert_eq!(
-            divide(Value::Float64(-1.0), Value::Int64(0)),
-            Some(Value::Float64(f64::NEG_INFINITY))
-        );
-        assert!(matches!(
-            divide(Value::Float64(0.0), Value::Float64(0.0)),
-            Some(Value::Float64(v)) if v.is_nan()
-        ));
-        assert_eq!(divide(Value::Int64(1), Value::Int64(0)), None);
-        assert_eq!(
-            divide(
-                Value::Decimal(Decimal::new(15, 1).unwrap()),
-                Value::Int64(0)
-            ),
-            None
-        );
     }
 }

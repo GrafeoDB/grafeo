@@ -39,7 +39,17 @@ fn run(db: &GrafeoDB, query: &str) -> (Vec<String>, Vec<Vec<String>>) {
         .iter()
         .map(|row| {
             row.iter()
-                .map(|value| value.to_string().trim_matches('"').to_string())
+                .map(|value| match value {
+                    // A term as its lexical form: an IRI's text, a literal's.
+                    grafeo_common::types::Value::RdfTerm(term) => match term.as_ref() {
+                        grafeo_common::types::rdf::Term::Iri(iri) => iri.as_str().to_string(),
+                        grafeo_common::types::rdf::Term::Literal(literal) => {
+                            literal.value().to_string()
+                        }
+                        other => other.to_string(),
+                    },
+                    other => other.to_string().trim_matches('"').to_string(),
+                })
                 .collect()
         })
         .collect();

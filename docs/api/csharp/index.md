@@ -364,8 +364,8 @@ All entity types are immutable C# records.
 
 ### GrafeoDecimal
 
-An exact decimal from Grafeo (GQL `1.50`, `CAST(x AS DECIMAL(10, 2))`, SPARQL
-`xsd:decimal`): up to 38 digits, kept as its `Text` with its scale. Equal
+An exact decimal from Grafeo (GQL `1.50`, `CAST(x AS DECIMAL(10, 2))`): up to
+38 digits, kept as its `Text` with its scale. Equal
 values are equal whatever their scale (`1.50` equals `1.5`). `ToDecimal()` and
 `TryToDecimal` give a .NET `decimal` (which holds 28 to 29 digits),
 `ToDouble()` the nearest double, and `GrafeoDecimal.FromDecimal(value)` or
@@ -376,6 +376,28 @@ var result = db.Execute("RETURN 19.99 AS price");
 var price = (GrafeoDecimal)result.Rows[0]["price"];
 Console.WriteLine(price.Text);         // 19.99
 decimal exact = price.ToDecimal();     // 19.99m
+```
+
+### RdfTerm
+
+An RDF term from a SPARQL result: its `Type` (`RdfTermType.Iri`, `BlankNode`
+or `Literal`), its `Value` (the IRI, the blank node's label without `_:`, or
+the lexical form), and for a literal its `Language` tag or `Datatype` (null
+for a simple literal; `LiteralDatatype` gives `xsd:string` or
+`rdf:langString` there). An `RdfTerm` passed as a parameter, or stored as a
+property, is that exact term. Language tags compare without case, so a term
+keeps its tag in lowercase (`Language: "FR"` is `"fr"`), and a literal of
+datatype `xsd:string` is the simple literal: two `RdfTerm`s are equal when they
+are the same RDF term. A dictionary with `type` and `value` keys stays a
+dictionary: on the wire a term is the `$term` tag (see the C API). A result's
+`Kind` is `ResultKind.Rows`,
+`ResultKind.Boolean` for a SPARQL ASK (`Boolean` gives its answer) or
+`ResultKind.Graph` for CONSTRUCT and DESCRIBE.
+
+```csharp
+var result = db.ExecuteSparql("SELECT ?o WHERE { <http://ex.org/apple> <http://ex.org/label> ?o }");
+var label = (RdfTerm)result.Rows[0]["o"];
+Console.WriteLine($"{label.Value} {label.Language}"); // Pomme fr
 ```
 
 ### Node

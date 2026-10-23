@@ -1228,7 +1228,6 @@ mod path_overlay_tests {
             min_hops: false,
             path: PathStep::Predicate("p".into()),
             graph: RdfPathGraph::Default,
-            companions: false,
             transaction_id: None,
             chunk_capacity: 16,
         };

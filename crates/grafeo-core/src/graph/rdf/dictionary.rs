@@ -1,84 +1,70 @@
-//! Term dictionary for dictionary-encoded triple scans.
+//! The term dictionary of an RDF dataset: one id per term, for the default
+//! graph and every named graph.
 //!
-//! Maps RDF `Term` values to compact `u32` IDs for efficient join processing.
-//! During query execution, triple scans emit integer term IDs instead of strings,
-//! and a `DictResolve` step at the result boundary converts them back.
+//! A literal the id scheme inlines ([`TermId::inline`]) needs no entry; every
+//! other term gets the next index the first time a write brings it, and keeps
+//! it while the dataset is open. The dictionary only grows: a term no triple
+//! uses any more keeps its entry until the next checkpoint writes the terms
+//! the triples use and a load reads them back.
+//!
+//! Reads do not lock: the entries live in segments of doubling size, each
+//! allocated once and never moved, and an entry is set once. Writes (the
+//! commit path, a load, an import) take one lock to find or add a term.
 
-use super::term::Term;
-use hashbrown::HashMap;
+use std::hash::BuildHasher;
+use std::sync::{Arc, OnceLock};
 
-/// Bidirectional mapping between RDF terms and compact integer IDs.
-///
-/// Built lazily on first query (or during `collect_statistics`). Invalidated
-/// by any store mutation so the planner falls back to string columns.
-#[derive(Debug, Clone)]
-pub struct TermDictionary {
-    term_to_id: HashMap<Term, u32>,
-    id_to_term: Vec<Term>,
+use grafeo_common::types::{TermId, Value};
+use grafeo_common::utils::hash::FxBuildHasher;
+use hashbrown::HashTable;
+use parking_lot::RwLock;
+
+use super::Term;
+
+/// The entries of the first segment; segment `k` holds `FIRST << k`.
+const FIRST: usize = 1024;
+/// Enough segments for every index an id can hold.
+const SEGMENTS: usize = 51;
+
+/// A term of the dictionary, with the value an expression computes with,
+/// parsed once while the dataset is open.
+#[derive(Debug)]
+pub struct DictionaryEntry {
+    term: Arc<Term>,
+    native: OnceLock<Option<Value>>,
 }
 
-impl TermDictionary {
-    /// Creates an empty dictionary.
+impl DictionaryEntry {
+    /// The term.
     #[must_use]
-    pub fn new() -> Self {
-        Self {
-            term_to_id: HashMap::new(),
-            id_to_term: Vec::new(),
-        }
+    pub fn term(&self) -> &Arc<Term> {
+        &self.term
     }
 
-    /// Creates a dictionary pre-sized for the given capacity.
+    /// The value of a literal as an expression computes with it
+    /// ([`Literal::native_value`](grafeo_common::types::rdf::Literal::native_value));
+    /// `None` for an IRI, a blank node, a tagged literal, or a literal of
+    /// another datatype or whose text is not of its type.
     #[must_use]
-    pub fn with_capacity(capacity: usize) -> Self {
-        Self {
-            term_to_id: HashMap::with_capacity(capacity),
-            id_to_term: Vec::with_capacity(capacity),
-        }
+    pub fn native(&self) -> Option<&Value> {
+        self.native
+            .get_or_init(|| self.term.as_literal().and_then(|l| l.native_value()))
+            .as_ref()
     }
+}
 
-    /// Inserts a term and returns its ID. If the term already exists, returns
-    /// the existing ID.
-    ///
-    /// # Panics
-    ///
-    /// Panics if the dictionary exceeds `u32::MAX` entries.
-    pub fn get_or_insert(&mut self, term: &Term) -> u32 {
-        if let Some(&id) = self.term_to_id.get(term) {
-            return id;
-        }
-        let id: u32 = self
-            .id_to_term
-            .len()
-            .try_into()
-            .expect("TermDictionary exceeded u32::MAX entries");
-        self.id_to_term.push(term.clone());
-        self.term_to_id.insert(term.clone(), id);
-        id
-    }
+/// The index from term to dictionary index.
+#[derive(Default)]
+struct Index {
+    hasher: FxBuildHasher,
+    indexes: HashTable<u64>,
+}
 
-    /// Looks up the ID for a term, returning `None` if unknown.
-    #[must_use]
-    pub fn get_id(&self, term: &Term) -> Option<u32> {
-        self.term_to_id.get(term).copied()
-    }
-
-    /// Resolves a term ID back to the original term.
-    #[must_use]
-    pub fn get_term(&self, id: u32) -> Option<&Term> {
-        self.id_to_term.get(id as usize)
-    }
-
-    /// Returns the number of distinct terms in the dictionary.
-    #[must_use]
-    pub fn len(&self) -> usize {
-        self.id_to_term.len()
-    }
-
-    /// Returns true if the dictionary is empty.
-    #[must_use]
-    pub fn is_empty(&self) -> bool {
-        self.id_to_term.is_empty()
-    }
+/// The term dictionary of an RDF dataset (see the module docs).
+pub struct TermDictionary {
+    segments: Box<[OnceLock<Box<[OnceLock<DictionaryEntry>]>>]>,
+    len: std::sync::atomic::AtomicU64,
+    index: RwLock<Index>,
 }
 
 impl Default for TermDictionary {
@@ -87,82 +73,260 @@ impl Default for TermDictionary {
     }
 }
 
+impl std::fmt::Debug for TermDictionary {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TermDictionary")
+            .field("terms", &self.len())
+            .finish()
+    }
+}
+
+/// The segment and the slot in it of `index`.
+fn slot_of(index: u64) -> (usize, usize) {
+    // Segment k starts at FIRST * (2^k - 1).
+    let scaled = index / FIRST as u64 + 1;
+    let segment = (u64::BITS - 1 - scaled.leading_zeros()) as usize;
+    let start = FIRST as u64 * ((1u64 << segment) - 1);
+    (
+        segment,
+        usize::try_from(index - start).unwrap_or(usize::MAX),
+    )
+}
+
+impl TermDictionary {
+    /// An empty dictionary.
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            segments: (0..SEGMENTS).map(|_| OnceLock::new()).collect(),
+            len: std::sync::atomic::AtomicU64::new(0),
+            index: RwLock::new(Index::default()),
+        }
+    }
+
+    /// How many terms have an index.
+    #[must_use]
+    pub fn len(&self) -> u64 {
+        self.len.load(std::sync::atomic::Ordering::Acquire)
+    }
+
+    /// An estimate of the heap the dictionary holds beyond the terms'
+    /// strings (which the triples share): per entry its term, the slot and
+    /// the writers' index.
+    #[must_use]
+    pub fn heap_bytes(&self) -> usize {
+        let per_entry = std::mem::size_of::<Term>()
+            + 2 * std::mem::size_of::<usize>()
+            + std::mem::size_of::<OnceLock<DictionaryEntry>>()
+            + std::mem::size_of::<u64>()
+            + 1;
+        usize::try_from(self.len())
+            .unwrap_or(usize::MAX)
+            .saturating_mul(per_entry)
+    }
+
+    /// Whether no term has an index.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    /// The entry at a dictionary index, without a lock; `None` for an index
+    /// no term has.
+    #[must_use]
+    pub fn get(&self, index: u64) -> Option<&DictionaryEntry> {
+        let (segment, slot) = slot_of(index);
+        self.segments.get(segment)?.get()?.get(slot)?.get()
+    }
+
+    /// The term of `id`: the inlined term, or the dictionary's; `None` for a
+    /// query's own id or an index no term has.
+    #[must_use]
+    pub fn term(&self, id: TermId) -> Option<Arc<Term>> {
+        match id.kind() {
+            grafeo_common::types::TermIdKind::Dictionary => {
+                self.get(id.index()?).map(|entry| Arc::clone(entry.term()))
+            }
+            grafeo_common::types::TermIdKind::Query => None,
+            _ => id.inline_term().map(Arc::new),
+        }
+    }
+
+    /// The id `term` has, without adding it: the inlined id, or its index
+    /// when a write gave it one.
+    #[must_use]
+    pub fn lookup(&self, term: &Term) -> Option<TermId> {
+        if let Some(id) = TermId::inline(term) {
+            return Some(id);
+        }
+        let index = self.index.read();
+        let hash = index.hasher.hash_one(term);
+        self.find(&index, term, hash).and_then(TermId::dictionary)
+    }
+
+    /// The id of `term`, adding it when it is new.
+    ///
+    /// # Errors
+    ///
+    /// When the dictionary already holds [`TermId::MAX_INDEX`] terms.
+    pub fn intern(&self, term: &Term) -> Result<TermId, DictionaryFull> {
+        if let Some(id) = TermId::inline(term) {
+            return Ok(id);
+        }
+        let mut index = self.index.write();
+        self.add(&mut index, term)
+    }
+
+    /// The ids of `terms` in order, under one lock.
+    ///
+    /// # Errors
+    ///
+    /// As [`intern`](Self::intern).
+    pub fn intern_all<'t>(
+        &self,
+        terms: impl IntoIterator<Item = &'t Term>,
+    ) -> Result<Vec<TermId>, DictionaryFull> {
+        let mut index = self.index.write();
+        terms
+            .into_iter()
+            .map(|term| match TermId::inline(term) {
+                Some(id) => Ok(id),
+                None => self.add(&mut index, term),
+            })
+            .collect()
+    }
+
+    fn find(&self, index: &Index, term: &Term, hash: u64) -> Option<u64> {
+        index
+            .indexes
+            .find(hash, |&at| {
+                self.get(at).is_some_and(|known| **known.term() == *term)
+            })
+            .copied()
+    }
+
+    fn add(&self, index: &mut Index, term: &Term) -> Result<TermId, DictionaryFull> {
+        let hash = index.hasher.hash_one(term);
+        if let Some(at) = self.find(index, term, hash) {
+            return TermId::dictionary(at).ok_or(DictionaryFull);
+        }
+        let at = self.len();
+        let id = TermId::dictionary(at).ok_or(DictionaryFull)?;
+        let (segment, slot) = slot_of(at);
+        let entries = self
+            .segments
+            .get(segment)
+            .ok_or(DictionaryFull)?
+            .get_or_init(|| (0..FIRST << segment).map(|_| OnceLock::new()).collect());
+        let _ = entries[slot].set(DictionaryEntry {
+            term: Arc::new(term.clone()),
+            native: OnceLock::new(),
+        });
+        self.len.store(at + 1, std::sync::atomic::Ordering::Release);
+        let Index { hasher, indexes } = index;
+        indexes.insert_unique(hash, at, |&known| {
+            self.get(known)
+                .map_or(0, |entry| hasher.hash_one(&**entry.term()))
+        });
+        Ok(id)
+    }
+}
+
+/// The dictionary holds every index an id can hold.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[error("the RDF dataset holds more than {} distinct terms", TermId::MAX_INDEX)]
+pub struct DictionaryFull;
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn roundtrip() {
-        let mut dict = TermDictionary::new();
-        let t1 = Term::iri("http://example.org/alix");
-        let t2 = Term::literal("Alix");
-        let t3 = Term::iri("http://example.org/gus");
-
-        let id1 = dict.get_or_insert(&t1);
-        let id2 = dict.get_or_insert(&t2);
-        let id3 = dict.get_or_insert(&t3);
-
-        assert_ne!(id1, id2);
-        assert_ne!(id2, id3);
-        assert_eq!(dict.get_or_insert(&t1), id1, "same term returns same ID");
-
-        assert_eq!(dict.get_term(id1), Some(&t1));
-        assert_eq!(dict.get_term(id2), Some(&t2));
-        assert_eq!(dict.get_term(id3), Some(&t3));
-        assert_eq!(dict.get_id(&t1), Some(id1));
-        assert_eq!(dict.len(), 3);
+    fn a_term_gets_one_id_and_reads_back() {
+        let dictionary = TermDictionary::new();
+        let alix = Term::iri("http://example.org/alix");
+        let label = Term::lang_literal("Alix", "nl");
+        let id = dictionary.intern(&alix).unwrap();
+        assert_eq!(id, TermId::dictionary(0).unwrap());
+        assert_eq!(
+            dictionary.intern(&label).unwrap(),
+            TermId::dictionary(1).unwrap()
+        );
+        assert_eq!(
+            dictionary.intern(&alix).unwrap(),
+            id,
+            "the same term, the same id"
+        );
+        assert_eq!(dictionary.lookup(&alix), Some(id));
+        assert_eq!(dictionary.term(id).as_deref(), Some(&alix));
+        assert_eq!(
+            dictionary.lookup(&Term::iri("http://example.org/gus")),
+            None
+        );
+        assert_eq!(dictionary.len(), 2);
     }
 
+    /// An inlined literal takes no entry.
     #[test]
-    fn unknown_term_returns_none() {
-        let dict = TermDictionary::new();
-        assert_eq!(dict.get_id(&Term::iri("http://unknown")), None);
-        assert_eq!(dict.get_term(999), None);
+    fn an_inlined_literal_takes_no_entry() {
+        let dictionary = TermDictionary::new();
+        let one = Term::typed_literal("1", "http://www.w3.org/2001/XMLSchema#integer");
+        let id = dictionary.intern(&one).unwrap();
+        assert_eq!(id, TermId::inline(&one).unwrap());
+        assert_eq!(dictionary.term(id).as_deref(), Some(&one));
+        assert!(dictionary.is_empty());
+        let zero_one = Term::typed_literal("01", "http://www.w3.org/2001/XMLSchema#integer");
+        assert_eq!(
+            dictionary.intern(&zero_one).unwrap(),
+            TermId::dictionary(0).unwrap()
+        );
     }
 
+    /// Indexes cross segment boundaries in order, and every term reads back.
     #[test]
-    fn with_capacity_works() {
-        let dict = TermDictionary::with_capacity(100);
-        assert!(dict.is_empty());
-        assert_eq!(dict.len(), 0);
+    fn indexes_cross_segments() {
+        let dictionary = TermDictionary::new();
+        let terms: Vec<Term> = (0..FIRST * 7 + 3)
+            .map(|i| Term::iri(format!("http://example.org/{i}")))
+            .collect();
+        let ids = dictionary.intern_all(&terms).unwrap();
+        for (i, (term, id)) in terms.iter().zip(&ids).enumerate() {
+            assert_eq!(id.index(), Some(i as u64));
+            assert_eq!(dictionary.get(i as u64).map(|e| &**e.term()), Some(term));
+        }
+        assert_eq!(slot_of(0), (0, 0));
+        assert_eq!(slot_of(FIRST as u64 - 1), (0, FIRST - 1));
+        assert_eq!(slot_of(FIRST as u64), (1, 0));
+        assert_eq!(slot_of(3 * FIRST as u64), (2, 0));
+        assert!(dictionary.get(terms.len() as u64).is_none());
     }
 
+    /// Readers on other threads see every term a writer added.
     #[test]
-    fn default_creates_empty() {
-        let dict = TermDictionary::default();
-        assert!(dict.is_empty());
-    }
-
-    #[test]
-    fn stable_ids_across_inserts() {
-        let mut dict = TermDictionary::new();
-        let t1 = Term::iri("http://example.org/a");
-        let t2 = Term::literal("value");
-        let id1 = dict.get_or_insert(&t1);
-        let id2 = dict.get_or_insert(&t2);
-        // IDs should be sequential starting from 0
-        assert_eq!(id1, 0);
-        assert_eq!(id2, 1);
-        // Re-insert should return same IDs
-        assert_eq!(dict.get_or_insert(&t1), 0);
-        assert_eq!(dict.get_or_insert(&t2), 1);
-        assert_eq!(dict.len(), 2);
-    }
-
-    #[test]
-    fn mixed_term_types() {
-        let mut dict = TermDictionary::new();
-        let iri = Term::iri("http://example.org/x");
-        let lit = Term::literal("hello");
-        let blank = Term::blank("b0");
-        let lang = Term::lang_literal("bonjour".to_string(), "fr".to_string());
-        dict.get_or_insert(&iri);
-        dict.get_or_insert(&lit);
-        dict.get_or_insert(&blank);
-        dict.get_or_insert(&lang);
-        assert_eq!(dict.len(), 4);
-        assert!(dict.get_id(&iri).is_some());
-        assert!(dict.get_id(&blank).is_some());
-        assert!(dict.get_id(&lang).is_some());
+    fn readers_see_what_writers_added() {
+        let dictionary = Arc::new(TermDictionary::new());
+        let writer = {
+            let dictionary = Arc::clone(&dictionary);
+            std::thread::spawn(move || {
+                for i in 0..20_000 {
+                    dictionary
+                        .intern(&Term::iri(format!("http://example.org/{i}")))
+                        .unwrap();
+                }
+            })
+        };
+        let mut seen = 0;
+        while seen < 20_000 {
+            let len = dictionary.len();
+            for index in seen..len {
+                let entry = dictionary.get(index).expect("an index below len is set");
+                assert_eq!(
+                    **entry.term(),
+                    Term::iri(format!("http://example.org/{index}"))
+                );
+            }
+            seen = len;
+        }
+        writer.join().unwrap();
     }
 }

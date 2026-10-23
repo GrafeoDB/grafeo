@@ -116,7 +116,8 @@ tests:
         - [Gus, false]
 
   - name: bind_after_optional_concat_with_unbound
-    # When ?city is unbound, CONCAT concatenates with empty string.
+    # When ?city is unbound, CONCAT errs (SPARQL 1.1 17.4.3.12 takes string
+    # literals; an unbound argument is an error), so ?desc is unbound.
     setup:
       - |
         INSERT DATA {
@@ -134,7 +135,7 @@ tests:
       ordered: true
       rows:
         - [Alix, "Alix from Amsterdam"]
-        - [Gus, "Gus from "]
+        - [Gus, null]
 
   - name: multiple_binds_in_one_query
     setup:

@@ -249,83 +249,41 @@ fn session_reports_rdf_graph_model() {
 
 // --- SPARQL FILTER regression tests ---
 
-/// Regression test: SPARQL FILTER equality must coerce types.
-///
-/// RDF stores all literal values as `Value::String`, but SPARQL FILTER
-/// expressions parse numeric constants as `Value::Int64`.  Before the fix,
-/// `Eq` used Rust's `PartialEq` (`==`) which never considered
-/// `String("30") == Int64(30)`, causing FILTER(?age = 30) to return no rows.
+/// A plain literal is no number, though its text reads as one (#464): the
+/// stored `"30"` is not the integer `30` in `FILTER(?age = 30)` and is in
+/// `FILTER(?age != 30)` (literals of two types differ, SPARQL 1.1 17.3); the
+/// integer literal `30` is.
 #[cfg(all(feature = "sparql", feature = "triple-store"))]
 #[test]
-fn sparql_filter_equality_coerces_string_to_numeric() {
-    use grafeo_common::types::Value;
-
+fn sparql_filter_compares_a_plain_literal_with_a_number_as_unequal() {
     let db = GrafeoDB::with_config(Config::in_memory().with_graph_model(GraphModel::Rdf)).unwrap();
     let session = db.session();
-
-    // Insert triples: :alix :age "30" ; :gus :age "25"
     session
         .execute_sparql(
             r#"INSERT DATA {
                 <http://ex.org/alix> <http://ex.org/age> "30" .
                 <http://ex.org/gus>   <http://ex.org/age> "25" .
+                <http://ex.org/mia>   <http://ex.org/age> 30 .
             }"#,
         )
         .unwrap();
-
-    // FILTER(?age = 30) - the literal 30 is parsed as Int64, stored value is String "30"
-    let result = session
-        .execute_sparql(
-            r#"SELECT ?s ?age WHERE {
-                ?s <http://ex.org/age> ?age .
-                FILTER(?age = 30)
-            }"#,
-        )
-        .unwrap();
-
+    let subjects = |filter: &str| -> Vec<String> {
+        let mut found: Vec<String> = session
+            .execute_sparql(&format!(
+                "SELECT ?s WHERE {{ ?s <http://ex.org/age> ?age . FILTER({filter}) }}"
+            ))
+            .unwrap()
+            .rows()
+            .iter()
+            .map(|row| row[0].to_string())
+            .collect();
+        found.sort();
+        found
+    };
+    assert_eq!(subjects("?age = 30"), ["<http://ex.org/mia>"]);
     assert_eq!(
-        result.rows().len(),
-        1,
-        "FILTER(?age = 30) should match String '30' via type coercion"
+        subjects("?age != 30"),
+        ["<http://ex.org/alix>", "<http://ex.org/gus>"]
     );
-
-    // Verify the matched value
-    let age = &result.rows()[0][1];
-    assert!(
-        matches!(age, Value::String(s) if s.as_str() == "30"),
-        "Expected String '30', got {age:?}"
-    );
-}
-
-/// Regression: FILTER inequality (!=) must also coerce types.
-#[cfg(all(feature = "sparql", feature = "triple-store"))]
-#[test]
-fn sparql_filter_inequality_coerces_string_to_numeric() {
-    let db = GrafeoDB::with_config(Config::in_memory().with_graph_model(GraphModel::Rdf)).unwrap();
-    let session = db.session();
-
-    session
-        .execute_sparql(
-            r#"INSERT DATA {
-                <http://ex.org/alix> <http://ex.org/age> "30" .
-                <http://ex.org/gus>   <http://ex.org/age> "25" .
-            }"#,
-        )
-        .unwrap();
-
-    // FILTER(?age != 30) should return only gus (age "25")
-    let result = session
-        .execute_sparql(
-            r#"SELECT ?s ?age WHERE {
-                ?s <http://ex.org/age> ?age .
-                FILTER(?age != 30)
-            }"#,
-        )
-        .unwrap();
-
-    assert_eq!(
-        result.rows().len(),
-        1,
-        "FILTER(?age != 30) should exclude String '30'"
-    );
+    assert_eq!(subjects("?age = \"30\""), ["<http://ex.org/alix>"]);
 }

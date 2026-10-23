@@ -402,8 +402,17 @@ fn max_of_numbers_with_nan_is_nan() {
     }
 }
 
-/// SPARQL compares numeric literals as numbers: a scan reads `10`, `9` and
-/// `88` as the integers they are (#610), and `9` is less than `10`.
+/// An `xsd:integer` as a SPARQL result holds it.
+#[cfg(all(feature = "sparql", feature = "triple-store"))]
+fn integer(n: i64) -> Value {
+    Value::RdfTerm(std::sync::Arc::new(
+        grafeo_common::types::rdf::Term::Literal(grafeo_common::types::rdf::Literal::integer(n)),
+    ))
+}
+
+/// SPARQL compares numeric literals as numbers: MIN and MAX order `10`, `9`
+/// and `88` as the integers they are (SPARQL 1.1 15.1), so `9` is less than
+/// `10`, and give the terms.
 #[cfg(all(feature = "sparql", feature = "triple-store"))]
 #[test]
 fn sparql_min_and_max_compare_numeric_literals_as_numbers() {
@@ -420,7 +429,7 @@ fn sparql_min_and_max_compare_numeric_literals_as_numbers() {
         .unwrap();
     assert_eq!(
         result.rows()[0],
-        [Value::Int64(9), Value::Int64(88)],
+        [integer(9), integer(88)],
         "{:?}",
         result.rows()
     );

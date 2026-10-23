@@ -211,14 +211,14 @@ tests:
     setup:
       - |
         INSERT DATA {
-          <http://ex.org/alix> <http://ex.org/val> "5" .
-          <http://ex.org/gus> <http://ex.org/val> "15" .
-          <http://ex.org/vincent> <http://ex.org/val> "25" .
+          <http://ex.org/alix> <http://ex.org/val> 5 .
+          <http://ex.org/gus> <http://ex.org/val> 15 .
+          <http://ex.org/vincent> <http://ex.org/val> 25 .
         }
     query: |
       SELECT ?val WHERE {
         ?s <http://ex.org/val> ?val .
-        FILTER(IF(?val > "10", true, false))
+        FILTER(IF(?val > 10, true, false))
       } ORDER BY ?val
     expect:
       ordered: true

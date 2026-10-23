@@ -80,15 +80,17 @@ tests:
       SELECT (1.50 + 1 AS ?s) (DATATYPE(1.5 + 1) = xsd:decimal AS ?decimal) WHERE {}
     expect:
       rows:
-        - [2.50, true]
+        - [2.5, true]
 
   - name: a_double_makes_a_double
+    # A computed double is written in its canonical form (XML Schema 1.1):
+    # one digit before the point, then E and the exponent.
     query: |
       PREFIX xsd: <http://www.w3.org/2001/XMLSchema#>
       SELECT (1.5 + 1.0e0 AS ?s) (DATATYPE(1.5 + 1.0e0) = xsd:double AS ?double) WHERE {}
     expect:
       rows:
-        - [2.5, true]
+        - ["2.5E0", true]
 
   # ---------------------------------------------------------------------------
   # Functions
@@ -98,7 +100,7 @@ tests:
     query: "SELECT (ABS(-1.50) AS ?a) (CEIL(1.25) = 2 AS ?c) (FLOOR(-1.25) = -2 AS ?f) WHERE {}"
     expect:
       rows:
-        - [1.50, true, true]
+        - [1.5, true, true]
 
   # XPath integers are unbounded: ABS of the smallest 64-bit integer goes on
   # as a decimal.
@@ -121,7 +123,7 @@ tests:
     query: "SELECT (ROUND(2.5e0) AS ?up) (ROUND(-2.5e0) AS ?down) (ROUND(-2.6e0) AS ?near) WHERE {}"
     expect:
       rows:
-        - [3, -2, -3]
+        - ["3.0E0", "-2.0E0", "-3.0E0"]
 
   - name: datatype_of_a_decimal
     query: |
@@ -143,7 +145,7 @@ tests:
       WHERE {}
     expect:
       rows:
-        - [1.50, 19, 1.5, true, "19"]
+        - [1.5, 19, "1.5E0", true, "19"]
 
   - name: a_cast_to_integer_truncates
     query: |
@@ -182,7 +184,7 @@ tests:
       }
     expect:
       rows:
-        - [31, 2.50, 3]
+        - [31, 2.50, "3.0E0"]
 
   - name: plain_and_ill_typed_literals_stay_text
     setup:
@@ -239,4 +241,17 @@ tests:
     query: "SELECT (1.0e0 / 0 AS ?pos) (-1.0e0 / 0 AS ?neg) WHERE {}"
     expect:
       rows:
-        - [Infinity, -Infinity]
+        - [INF, -INF]
+
+  - name: a_nan_is_neither_less_nor_greater_than_a_number
+    # op:numeric-less-than and op:numeric-greater-than are false when an
+    # argument is NaN (XPath), not an error; a NaN against a string still is.
+    query: |
+      PREFIX xsd: <http://www.w3.org/2001/XMLSchema#>
+      SELECT (xsd:double("NaN") < 1 AS ?lt) (1 < xsd:double("NaN") AS ?gt)
+             (xsd:double("NaN") >= xsd:double("NaN") AS ?ge) (xsd:double("NaN") < "a" AS ?text)
+      WHERE {}
+    expect:
+      columns: [lt, gt, ge, text]
+      rows:
+        - [false, false, false, null]

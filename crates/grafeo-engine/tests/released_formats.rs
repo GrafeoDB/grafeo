@@ -713,7 +713,11 @@ fn rdf_triples_hold_what_was_written_read_only() {
 }
 
 fn check_rdf_triples(fixture: Fixture, db: &GrafeoDB) {
-    let iri = |name: &str| Value::from(format!("http://example.org/{name}"));
+    let iri = |name: &str| {
+        Value::RdfTerm(std::sync::Arc::new(grafeo_common::types::rdf::Term::iri(
+            format!("http://example.org/{name}"),
+        )))
+    };
     assert_eq!(
         db.execute_sparql("SELECT ?s ?p ?o WHERE { ?s ?p ?o } ORDER BY ?s ?p ?o")
             .unwrap()

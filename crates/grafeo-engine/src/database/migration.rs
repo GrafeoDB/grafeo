@@ -962,6 +962,93 @@ fn lock_shared(path: &Path) -> Result<SharedLock> {
     Ok(SharedLock(file))
 }
 
+/// The suffix of the copy kept of a 0.6.0-beta.1 file whose RDF sections
+/// the open rewrites: `<path>.pre-0.6.0`.
+#[cfg(feature = "triple-store")]
+pub(super) const KEPT_BETA_SUFFIX: &str = ".pre-0.6.0";
+
+/// Keeps a copy of a 0.6.0-beta.1 database file, and of its sidecar WAL, as
+/// `<path>.pre-0.6.0` (and `<path>.pre-0.6.0.wal`), before its open rewrites
+/// its RDF sections in the current version (a checkpoint right after it
+/// loads them). Each is copied to `<copy>.partial`, synced and renamed, so a
+/// kept copy is always whole; one that exists is never replaced (an open cut
+/// off before its checkpoint made it, and the file is as it was).
+///
+/// The open holds the database's exclusive lock through `file`: nothing
+/// writes the file or its WAL meanwhile, and the file is read through that
+/// handle (Windows refuses a read through another one while the lock is
+/// held).
+///
+/// # Errors
+///
+/// Returns an error if a file cannot be copied, synced or renamed.
+#[cfg(feature = "triple-store")]
+pub(super) fn keep_copy_before_upgrade(file: &GrafeoFileManager) -> Result<()> {
+    let path = file.path();
+    let kept = with_suffix(path, KEPT_BETA_SUFFIX);
+    // The WAL first: a kept file without its WAL would lack the commits
+    // after its last checkpoint.
+    for (from, to) in [
+        (sidecar_wal_path(path), sidecar_wal_path(&kept)),
+        (path.to_path_buf(), kept.clone()),
+    ] {
+        if !exists(&from)? || exists(&to)? {
+            continue;
+        }
+        let partial = with_suffix(&to, ".partial");
+        let copied = if from == path {
+            file.copy_to(&partial)
+                .map(|_| ())
+                .map_err(|error| error.to_string())
+        } else {
+            copy_synced(&from, &partial).map_err(|error| error.to_string())
+        };
+        if let Err(error) = copied {
+            let _ = if partial.is_dir() {
+                fs::remove_dir_all(&partial)
+            } else {
+                fs::remove_file(&partial)
+            };
+            return Err(Error::Internal(format!(
+                "cannot keep a copy of {} as {}: {error}",
+                from.display(),
+                to.display()
+            )));
+        }
+        rename(&partial, &to, "upgrade:kept")?;
+        sync_parent_dir(&to)?;
+    }
+    grafeo_info!(
+        "{} holds RDF sections of 0.6.0-beta.1: the open writes them in the current version, \
+         and keeps the old file as {}",
+        path.display(),
+        kept.display()
+    );
+    Ok(())
+}
+
+/// Copies the file or directory `from` to `to`, each file synced (a sidecar
+/// WAL is a directory of segment files). A `to` left by an earlier cut-off
+/// copy is replaced.
+#[cfg(feature = "triple-store")]
+fn copy_synced(from: &Path, to: &Path) -> std::io::Result<()> {
+    if from.is_dir() {
+        if to.exists() {
+            fs::remove_dir_all(to)?;
+        }
+        fs::create_dir_all(to)?;
+        for entry in fs::read_dir(from)? {
+            let entry = entry?;
+            copy_synced(&entry.path(), &to.join(entry.file_name()))?;
+        }
+        Ok(())
+    } else {
+        fs::copy(from, to)?;
+        // Windows syncs (FlushFileBuffers) only through a writable handle.
+        OpenOptions::new().write(true).open(to)?.sync_all()
+    }
+}
+
 /// Removes the image of a migration that failed. Best effort: the error that
 /// matters is the one returned, and the next open removes a leftover image.
 fn remove_after_failure(migrating: &Path) {

@@ -342,8 +342,12 @@ pub extern "C" fn grafeo_as_of_get_node_property(
     let view = &unsafe { &*view }.view;
     match view.get_node_property(NodeId::new(id), key) {
         Ok(Some(value)) => {
-            let raw = CString::new(value_to_json(&value).to_string())
-                .map_or(std::ptr::null_mut(), CString::into_raw);
+            let json = match value_to_json(&value) {
+                Ok(json) => json,
+                Err(status) => return status,
+            };
+            let raw =
+                CString::new(json.to_string()).map_or(std::ptr::null_mut(), CString::into_raw);
             // SAFETY: checked not null above.
             unsafe { *out_json = raw };
             GrafeoStatus::Ok

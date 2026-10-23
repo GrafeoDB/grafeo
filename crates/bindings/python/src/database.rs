@@ -168,8 +168,7 @@ impl AsyncQueryResult {
         for row in &self.rows {
             let py_row = pyo3::types::PyList::empty(py);
             for val in row {
-                let py_val = PyValue::to_py(val, py);
-                py_row.append(py_val)?;
+                py_row.append(PyValue::to_py(val, py)?)?;
             }
             list.append(py_row)?;
         }
@@ -204,9 +203,10 @@ impl AsyncQueryResult {
         for (col_idx, col_name) in self.columns.iter().enumerate() {
             let values = pyo3::types::PyList::empty(py);
             for row in &self.rows {
-                let val = row
-                    .get(col_idx)
-                    .map_or_else(|| py.None(), |v| PyValue::to_py(v, py));
+                let val = match row.get(col_idx) {
+                    Some(v) => PyValue::to_py(v, py)?,
+                    None => py.None(),
+                };
                 values.append(val)?;
             }
             data.set_item(col_name, values)?;
@@ -231,9 +231,10 @@ impl AsyncQueryResult {
         for (col_idx, col_name) in self.columns.iter().enumerate() {
             let values = pyo3::types::PyList::empty(py);
             for row in &self.rows {
-                let val = row
-                    .get(col_idx)
-                    .map_or_else(|| py.None(), |v| PyValue::to_py(v, py));
+                let val = match row.get(col_idx) {
+                    Some(v) => PyValue::to_py(v, py)?,
+                    None => py.None(),
+                };
                 values.append(val)?;
             }
             data.set_item(col_name, values)?;
@@ -265,19 +266,23 @@ impl AsyncQueryResultIter {
         slf
     }
 
-    fn __next__(mut slf: PyRefMut<'_, Self>, py: Python<'_>) -> Option<Py<PyAny>> {
+    /// The next row.
+    ///
+    /// # Errors
+    ///
+    /// The error of a value that does not convert (see `PyValue::to_py`).
+    fn __next__(mut slf: PyRefMut<'_, Self>, py: Python<'_>) -> PyResult<Option<Py<PyAny>>> {
         if slf.index >= slf.rows.len() {
-            return None;
+            return Ok(None);
         }
         let row = slf.rows[slf.index].clone();
         slf.index += 1;
 
         let py_row = pyo3::types::PyList::empty(py);
         for val in &row {
-            let py_val = PyValue::to_py(val, py);
-            let _ = py_row.append(py_val);
+            py_row.append(PyValue::to_py(val, py)?)?;
         }
-        Some(py_row.into())
+        Ok(Some(py_row.into()))
     }
 }
 
@@ -1161,10 +1166,10 @@ impl PyGrafeoDB {
         let db = self.inner.read();
         let node_id = NodeId(id);
         let epoch_id = grafeo_common::types::EpochId::new(epoch);
-        Ok(db
-            .get_node_property_at_epoch(node_id, key, epoch_id)
+        db.get_node_property_at_epoch(node_id, key, epoch_id)
             .map_err(PyGrafeoError::from)?
-            .map(|v| PyValue::to_py(&v, py)))
+            .map(|v| PyValue::to_py(&v, py))
+            .transpose()
     }
 
     /// Get the full version history for a specific property of a node.
@@ -1180,10 +1185,10 @@ impl PyGrafeoDB {
         let db = self.inner.read();
         let node_id = NodeId(id);
         let history = raised(db.get_node_property_history(node_id, key))?;
-        Ok(history
+        history
             .into_iter()
-            .map(|(epoch, value)| (epoch.as_u64(), PyValue::to_py(&value, py)))
-            .collect())
+            .map(|(epoch, value)| Ok((epoch.as_u64(), PyValue::to_py(&value, py)?)))
+            .collect()
     }
 
     /// Get the full version history for ALL properties of a node.
@@ -1200,10 +1205,10 @@ impl PyGrafeoDB {
         let history = raised(db.get_all_node_property_history(node_id))?;
         let mut result = HashMap::new();
         for (key, entries) in history {
-            let py_entries: Vec<(u64, Py<PyAny>)> = entries
+            let py_entries = entries
                 .into_iter()
-                .map(|(epoch, value)| (epoch.as_u64(), PyValue::to_py(&value, py)))
-                .collect();
+                .map(|(epoch, value)| Ok((epoch.as_u64(), PyValue::to_py(&value, py)?)))
+                .collect::<PyResult<Vec<(u64, Py<PyAny>)>>>()?;
             result.insert(key.to_string(), py_entries);
         }
         Ok(result)
@@ -1274,7 +1279,7 @@ impl PyGrafeoDB {
         for (node_id, props) in node_ids.iter().zip(props_batch) {
             let py_dict = pyo3::types::PyDict::new(py);
             for (key, value) in props {
-                py_dict.set_item(key.as_str(), PyValue::to_py(&value, py))?;
+                py_dict.set_item(key.as_str(), PyValue::to_py(&value, py)?)?;
             }
             results.push((node_id.0, py_dict.into()));
         }
@@ -1309,10 +1314,10 @@ impl PyGrafeoDB {
             Ok(snapshot.node_property_batch(&ids, &key, snapshot.view())?)
         })?;
 
-        Ok(values
+        values
             .into_iter()
-            .map(|opt| opt.map(|v| PyValue::to_py(&v, py)))
-            .collect())
+            .map(|opt| opt.map(|v| PyValue::to_py(&v, py)).transpose())
+            .collect()
     }
 
     /// Delete a node by ID.
@@ -3189,7 +3194,7 @@ impl PyGrafeoDB {
             for (i, key) in prop_keys.iter().enumerate() {
                 let prop_key = grafeo_common::types::PropertyKey::new(key.clone());
                 match node.properties.get(&prop_key) {
-                    Some(v) => prop_columns[i].append(PyValue::to_py(v, py))?,
+                    Some(v) => prop_columns[i].append(PyValue::to_py(v, py)?)?,
                     None => prop_columns[i].append(py.None())?,
                 }
             }
@@ -3346,7 +3351,7 @@ impl PyGrafeoDB {
             for (i, key) in prop_keys.iter().enumerate() {
                 let prop_key = grafeo_common::types::PropertyKey::new(key.clone());
                 match edge.properties.get(&prop_key) {
-                    Some(v) => prop_columns[i].append(PyValue::to_py(v, py))?,
+                    Some(v) => prop_columns[i].append(PyValue::to_py(v, py)?)?,
                     None => prop_columns[i].append(py.None())?,
                 }
             }
@@ -3609,10 +3614,10 @@ impl PyGrafeoDB {
             .history(id)
             .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
         pyo3::Python::attach(|py| {
-            Ok(events
+            events
                 .into_iter()
                 .map(|e| change_event_to_dict(py, &e))
-                .collect())
+                .collect()
         })
     }
 
@@ -3628,10 +3633,10 @@ impl PyGrafeoDB {
             .history(id)
             .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
         pyo3::Python::attach(|py| {
-            Ok(events
+            events
                 .into_iter()
                 .map(|e| change_event_to_dict(py, &e))
-                .collect())
+                .collect()
         })
     }
 
@@ -3648,10 +3653,10 @@ impl PyGrafeoDB {
             .history_since(id, grafeo_common::types::EpochId(since_epoch))
             .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
         pyo3::Python::attach(|py| {
-            Ok(events
+            events
                 .into_iter()
                 .map(|e| change_event_to_dict(py, &e))
-                .collect())
+                .collect()
         })
     }
 
@@ -3670,10 +3675,10 @@ impl PyGrafeoDB {
             )
             .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
         pyo3::Python::attach(|py| {
-            Ok(events
+            events
                 .into_iter()
                 .map(|e| change_event_to_dict(py, &e))
-                .collect())
+                .collect()
         })
     }
 
@@ -4316,11 +4321,16 @@ impl PyDatabaseStats {
 }
 
 /// Converts a CDC ChangeEvent to a Python dict-like HashMap.
+///
+/// # Errors
+///
+/// The error of a property value that does not convert (see
+/// `PyValue::to_py`).
 #[cfg(feature = "cdc")]
 fn change_event_to_dict(
     py: pyo3::Python<'_>,
     event: &grafeo_engine::cdc::ChangeEvent,
-) -> std::collections::HashMap<String, pyo3::Py<pyo3::PyAny>> {
+) -> PyResult<std::collections::HashMap<String, pyo3::Py<pyo3::PyAny>>> {
     use crate::types::PyValue;
     use pyo3::conversion::IntoPyObjectExt;
 
@@ -4380,10 +4390,10 @@ fn change_event_to_dict(
     // before (Option<HashMap<String, Value>> -> dict or None)
     let before_py = match &event.before {
         Some(props) => {
-            let d: std::collections::HashMap<String, pyo3::Py<pyo3::PyAny>> = props
+            let d = props
                 .iter()
-                .map(|(k, v)| (k.clone(), PyValue::to_py(v, py)))
-                .collect();
+                .map(|(k, v)| Ok((k.clone(), PyValue::to_py(v, py)?)))
+                .collect::<PyResult<std::collections::HashMap<String, pyo3::Py<pyo3::PyAny>>>>()?;
             d.into_py_any(py).expect("dict to Python conversion")
         }
         None => py.None(),
@@ -4393,10 +4403,10 @@ fn change_event_to_dict(
     // after (Option<HashMap<String, Value>> -> dict or None)
     let after_py = match &event.after {
         Some(props) => {
-            let d: std::collections::HashMap<String, pyo3::Py<pyo3::PyAny>> = props
+            let d = props
                 .iter()
-                .map(|(k, v)| (k.clone(), PyValue::to_py(v, py)))
-                .collect();
+                .map(|(k, v)| Ok((k.clone(), PyValue::to_py(v, py)?)))
+                .collect::<PyResult<std::collections::HashMap<String, pyo3::Py<pyo3::PyAny>>>>()?;
             d.into_py_any(py).expect("dict to Python conversion")
         }
         None => py.None(),
@@ -4454,7 +4464,7 @@ fn change_event_to_dict(
             .expect("u64 to Python conversion"),
     );
 
-    map
+    Ok(map)
 }
 
 /// Extracts column names and row data from a pandas or polars DataFrame.

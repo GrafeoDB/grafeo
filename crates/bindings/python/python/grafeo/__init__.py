@@ -30,6 +30,7 @@ from grafeo.grafeo import (
     simd_support,
     vector,
 )
+from grafeo.terms import IRI, BlankNode, Literal
 
 __all__ = [
     "GrafeoDB",
@@ -47,4 +48,7 @@ __all__ = [
     "features",
     "simd_support",
     "vector",
+    "IRI",
+    "BlankNode",
+    "Literal",
 ]

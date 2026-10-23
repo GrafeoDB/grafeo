@@ -219,6 +219,12 @@ pub fn serialize_value<W: Write + ?Sized>(value: &Value, w: &mut W) -> std::io::
                     };
                     lexical + 1 + tail
                 }
+                other => {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        grafeo_common::types::rdf::UnsupportedTermKind::of(other),
+                    ));
+                }
             };
             Ok(2 + written)
         }

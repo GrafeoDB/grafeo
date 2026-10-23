@@ -37,7 +37,7 @@ use grafeo_common::types::Value;
 use grafeo_engine::{Config, GrafeoDB};
 
 /// The fixture, written by a build with `triple-store` (see its README).
-const FIXTURE: &str = "tests/fixtures/rdf/0.6.0-dev/triples.grafeo";
+const FIXTURE: &str = "tests/fixtures/rdf/0.6.0/triples.grafeo";
 
 /// A copy of the fixture, and the path of the copy.
 fn fixture() -> (tempfile::TempDir, PathBuf) {

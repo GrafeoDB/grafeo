@@ -84,6 +84,10 @@ class QueryResult {
   /// What a write statement changed (all zero for a read).
   final WriteCounters counters;
 
+  /// What the result holds: rows, one boolean (SPARQL ASK) or an RDF graph
+  /// (SPARQL CONSTRUCT and DESCRIBE).
+  final ResultKind kind;
+
   const QueryResult({
     required this.columns,
     required this.rows,
@@ -92,7 +96,13 @@ class QueryResult {
     required this.executionTimeMs,
     required this.rowsScanned,
     this.counters = WriteCounters.none,
+    this.kind = ResultKind.rows,
   });
+
+  /// The answer of a SPARQL ASK; `null` for every other result.
+  bool? get boolean => kind == ResultKind.boolean && rows.length == 1
+      ? rows.first['boolean'] as bool?
+      : null;
 
   @override
   String toString() =>
@@ -202,4 +212,151 @@ final class GrafeoDecimal {
     if (integer.isEmpty && fraction.isEmpty) return '0';
     return '${negative ? '-' : ''}$integer.$fraction';
   }
+}
+
+/// What a [QueryResult] holds.
+enum ResultKind {
+  /// Rows: SPARQL SELECT and updates, and every other language.
+  rows,
+
+  /// One boolean: SPARQL ASK, one row with a `boolean` column.
+  boolean,
+
+  /// An RDF graph: SPARQL CONSTRUCT and DESCRIBE, rows of `subject`,
+  /// `predicate` and `object` terms.
+  graph;
+
+  /// The kind the C library reports (`grafeo_result_kind`).
+  static ResultKind of(int code) => switch (code) {
+        1 => ResultKind.boolean,
+        2 => ResultKind.graph,
+        _ => ResultKind.rows,
+      };
+}
+
+/// The kind of an RDF term.
+enum RdfTermType {
+  /// An IRI.
+  iri,
+
+  /// A literal: its value with a language tag or a datatype.
+  literal,
+
+  /// A blank node: its value is the label, without `_:`.
+  blankNode,
+}
+
+/// An RDF term as a SPARQL result holds it: an IRI, a blank node, or a
+/// literal with its language tag or datatype. As a query parameter it is
+/// that exact term.
+///
+/// Language tags compare without case, so a term keeps its tag in lowercase
+/// (`'Pomme'@FR` is `'Pomme'@fr`), and a literal of datatype `xsd:string` is
+/// the simple literal.
+final class RdfTerm {
+  /// A term of [type] with [value]; a literal may have a [language] tag or a
+  /// [datatype] (with a tag, the datatype is `rdf:langString`).
+  RdfTerm(this.type, this.value, {String? language, String? datatype})
+      : language = type == RdfTermType.literal && language != null && language.isNotEmpty
+            ? language.toLowerCase()
+            : null,
+        datatype = type != RdfTermType.literal ||
+                (language != null && language.isNotEmpty) ||
+                datatype == xsdString
+            ? null
+            : datatype;
+
+  /// An IRI.
+  RdfTerm.iri(String value) : this(RdfTermType.iri, value);
+
+  /// A blank node with its label.
+  RdfTerm.blankNode(String label) : this(RdfTermType.blankNode, label);
+
+  /// A literal, simple, tagged or typed.
+  RdfTerm.literal(String value, {String? language, String? datatype})
+      : this(RdfTermType.literal, value,
+            language: language, datatype: datatype);
+
+  /// The datatype of a simple literal.
+  static const xsdString = 'http://www.w3.org/2001/XMLSchema#string';
+
+  /// The datatype of a language-tagged literal.
+  static const rdfLangString =
+      'http://www.w3.org/1999/02/22-rdf-syntax-ns#langString';
+
+  /// The kind of term.
+  final RdfTermType type;
+
+  /// The IRI, the blank node's label or the literal's lexical form.
+  final String value;
+
+  /// The tag of a language-tagged literal in lowercase, `null` otherwise.
+  final String? language;
+
+  /// The datatype IRI of a typed literal other than `xsd:string`, `null`
+  /// otherwise.
+  final String? datatype;
+
+  /// A literal's datatype as RDF reads it: `rdf:langString` for a tagged
+  /// literal, `xsd:string` for a simple one; `null` for an IRI or a blank
+  /// node.
+  String? get literalDatatype => switch (type) {
+        RdfTermType.literal when language != null => rdfLangString,
+        RdfTermType.literal => datatype ?? xsdString,
+        _ => null,
+      };
+
+  /// The term in the JSON form the C library reads and writes: the `$term`
+  /// tag as the map's only key, holding `type` (`uri`, `bnode` or
+  /// `literal`) and `value`, and for a literal `xml:lang` or `datatype`.
+  Map<String, Map<String, String>> toJson() => {
+        r'$term': {
+          'type': switch (type) {
+            RdfTermType.iri => 'uri',
+            RdfTermType.blankNode => 'bnode',
+            RdfTermType.literal => 'literal',
+          },
+          'value': value,
+          if (language != null) 'xml:lang': language!,
+          if (datatype != null) 'datatype': datatype!,
+        },
+      };
+
+  /// The term a map holds in the form [toJson] writes; `null` for any other
+  /// map, also one with `type` and `value` keys but no `$term` tag.
+  static RdfTerm? fromJson(Map m) {
+    final term = m[r'$term'];
+    if (m.length != 1 || term is! Map) return null;
+    final type = term['type'];
+    final value = term['value'];
+    if (type is! String || value is! String) return null;
+    final language = term['xml:lang'];
+    final datatype = term['datatype'];
+    return switch (type) {
+      'uri' when term.length == 2 => RdfTerm.iri(value),
+      'bnode' when term.length == 2 => RdfTerm.blankNode(value),
+      'literal' when language is String && datatype == null && term.length == 3 =>
+        RdfTerm.literal(value, language: language),
+      'literal' when datatype is String && language == null && term.length == 3 =>
+        RdfTerm.literal(value, datatype: datatype),
+      'literal' when term.length == 2 => RdfTerm.literal(value),
+      _ => null,
+    };
+  }
+
+  /// The term's text: the IRI, the blank node's label or the literal's
+  /// lexical form.
+  @override
+  String toString() => value;
+
+  @override
+  bool operator ==(Object other) =>
+      other is RdfTerm &&
+      other.type == type &&
+      other.value == value &&
+      other.language == language &&
+      other.literalDatatype == literalDatatype;
+
+  @override
+  int get hashCode => Object.hash(type, value, language, literalDatatype);
 }

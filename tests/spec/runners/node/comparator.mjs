@@ -68,6 +68,10 @@ export function valueToString(val) {
     const keys = Object.keys(val)
     // Decimal: {$decimal: '1.50'} -> its text, as Rust prints it
     if (keys.length === 1 && typeof val.$decimal === 'string') return val.$decimal
+    // RDF/JS term: its lexical form, a blank node as `_:` and its label
+    if (typeof val.termType === 'string' && typeof val.value === 'string') {
+      return val.termType === 'BlankNode' ? `_:${val.value}` : val.value
+    }
     if (keys.length === 3 && 'months' in val && 'days' in val && 'nanos' in val) {
       return durationToIso(val.months, val.days, val.nanos)
     }

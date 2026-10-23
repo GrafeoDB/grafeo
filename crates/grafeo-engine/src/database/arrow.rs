@@ -21,6 +21,17 @@
 //!   room for its largest integer part (an integer takes 19 digits); a column
 //!   that needs more than 38 digits is text, and a float among decimals makes
 //!   the column `Float64`.
+//! - an RDF term (a SPARQL result) is its native value when it is a literal
+//!   of a known XSD type (`xsd:integer` an `Int64`, `xsd:decimal` a decimal,
+//!   `xsd:double` and `xsd:float` a `Float64`, `xsd:boolean`, `xsd:date`,
+//!   `xsd:dateTime` and the others as their types), and text otherwise: an
+//!   IRI as itself, a blank node as `_:` and its label, any other literal as
+//!   its lexical form, without its language tag or datatype (see
+//!   [`Term::export_value`](grafeo_common::types::rdf::Term::export_value)).
+//!   An `xsd:integer` or `xsd:decimal` past 38 digits is its text, so the
+//!   column of it is text. In a text column every term is its lexical form
+//!   ([`Term::lexical_text`](grafeo_common::types::rdf::Term::lexical_text)),
+//!   so `"025"^^xsd:integer` is `025`, exact.
 //!
 //! Nulls are null at every level. Values of different types in one column
 //! (or one list) are written as their GQL text in a `Utf8` column, except
@@ -526,8 +537,46 @@ pub fn query_result_to_record_batch(
 
     for (col_idx, col_name) in columns.iter().enumerate() {
         let logical_type = column_types.get(col_idx).unwrap_or(&LogicalType::Any);
-        let values = &col_values[col_idx];
+        // RDF terms go out as their export values (see the module docs).
+        let exported: Option<Vec<Value>> = col_values[col_idx]
+            .iter()
+            .any(|value| matches!(value, Value::RdfTerm(_)))
+            .then(|| {
+                col_values[col_idx]
+                    .iter()
+                    .map(|value| match value {
+                        Value::RdfTerm(term) => term.export_value(),
+                        other => (*other).clone(),
+                    })
+                    .collect()
+            });
+        let exported_refs: Vec<&Value>;
+        let values = match &exported {
+            Some(exported) => {
+                exported_refs = exported.iter().collect();
+                &exported_refs
+            }
+            None => &col_values[col_idx],
+        };
         let arrow_type = infer_column_type(logical_type, values);
+
+        // A text column holds each term's lexical form, not the text of its
+        // value, so it is exact.
+        let texts: Vec<Value>;
+        let text_refs: Vec<&Value>;
+        let values = if exported.is_some() && arrow_type == DataType::Utf8 {
+            texts = col_values[col_idx]
+                .iter()
+                .map(|value| match value {
+                    Value::RdfTerm(term) => Value::from(term.lexical_text()),
+                    other => (*other).clone(),
+                })
+                .collect();
+            text_refs = texts.iter().collect();
+            &text_refs
+        } else {
+            values
+        };
 
         fields.push(Field::new(col_name.as_str(), arrow_type.clone(), true));
         arrays.push(build_array(values, &arrow_type)?);
@@ -1176,6 +1225,125 @@ mod tests {
         );
         assert!(matches!(data_type, DataType::Struct(_)), "{data_type:?}");
         assert_eq!(rows, ["{k: 0.5}"]);
+    }
+
+    /// An `xsd:decimal` or `xsd:integer` past 38 digits is its exact text,
+    /// so its column is text, decimals included; and a text column holds each
+    /// term's lexical form, not the text of its value.
+    #[test]
+    fn rdf_terms_past_a_decimal_and_in_a_text_column_keep_their_text() {
+        use grafeo_common::types::rdf::Term;
+        const XSD: &str = "http://www.w3.org/2001/XMLSchema#";
+        let typed = |text: &str, datatype: &str| {
+            Value::RdfTerm(StdArc::new(Term::typed_literal(
+                text,
+                format!("{XSD}{datatype}"),
+            )))
+        };
+        let huge = "123456789012345678901234567890123456789.5";
+        let (data_type, rows) = column(
+            LogicalType::Any,
+            vec![typed(huge, "decimal"), typed("1.50", "decimal")],
+        );
+        assert_eq!(data_type, DataType::Utf8);
+        assert_eq!(
+            rows,
+            [format!("'{huge}'"), "'1.50'".to_string()],
+            "exact, not the nearest float"
+        );
+        let (data_type, rows) = column(
+            LogicalType::Any,
+            vec![typed("1234567890123456789012345678901234567890", "integer")],
+        );
+        assert_eq!(data_type, DataType::Utf8);
+        assert_eq!(rows, ["'1234567890123456789012345678901234567890'"]);
+
+        let (data_type, rows) = column(
+            LogicalType::Any,
+            vec![
+                typed("025", "integer"),
+                typed("1.50", "decimal"),
+                typed("true", "boolean"),
+                Value::RdfTerm(StdArc::new(Term::lang_literal("Pomme", "fr"))),
+            ],
+        );
+        assert_eq!(data_type, DataType::Utf8);
+        assert_eq!(rows, ["'025'", "'1.50'", "'true'", "'Pomme'"]);
+    }
+
+    /// An RDF term exports as the native value of a literal of a known XSD
+    /// type, and as text otherwise (the IRI, `_:` and the label, the lexical
+    /// form): a SPARQL result goes to Arrow as numbers, booleans and dates.
+    #[test]
+    fn rdf_terms_export_as_native_values_or_text() {
+        use grafeo_common::types::rdf::{Literal, Term};
+        const XSD: &str = "http://www.w3.org/2001/XMLSchema#";
+        let term = |term: Term| Value::RdfTerm(StdArc::new(term));
+        let typed = |text: &str, datatype: &str| {
+            term(Term::typed_literal(text, format!("{XSD}{datatype}")))
+        };
+
+        let (data_type, rows) = column(
+            LogicalType::Any,
+            vec![
+                term(Term::Literal(Literal::integer(30))),
+                typed("025", "integer"),
+                Value::Null,
+            ],
+        );
+        assert_eq!(data_type, DataType::Int64);
+        assert_eq!(rows, ["30", "25", "null"]);
+        let (data_type, _) = column(
+            LogicalType::Any,
+            vec![typed("1.50", "decimal"), typed("12.5", "decimal")],
+        );
+        assert_eq!(data_type, DataType::Decimal128(4, 2));
+        let (data_type, rows) = column(
+            LogicalType::Any,
+            vec![typed("1.5e0", "double"), typed("2", "float")],
+        );
+        assert_eq!(data_type, DataType::Float64);
+        assert_eq!(rows, ["1.5", "2.0"]);
+        let (data_type, rows) = column(
+            LogicalType::Any,
+            vec![typed("true", "boolean"), typed("0", "boolean")],
+        );
+        assert_eq!(data_type, DataType::Boolean);
+        assert_eq!(rows, ["true", "false"]);
+        let (data_type, _) = column(LogicalType::Any, vec![typed("2026-01-15", "date")]);
+        assert_eq!(data_type, DataType::Date32);
+        let (data_type, _) = column(
+            LogicalType::Any,
+            vec![typed("2026-01-15T10:30:00Z", "dateTime")],
+        );
+        assert_eq!(
+            data_type,
+            DataType::Timestamp(arrow_schema::TimeUnit::Microsecond, Some("UTC".into()))
+        );
+
+        let (data_type, rows) = column(
+            LogicalType::Any,
+            vec![
+                term(Term::iri("http://ex.org/apple")),
+                term(Term::blank("b0")),
+                term(Term::lang_literal("Pomme", "fr")),
+                term(Term::typed_literal("x", "http://ex.org/dt")),
+                term(Term::literal("Apple")),
+                typed("abc", "integer"),
+            ],
+        );
+        assert_eq!(data_type, DataType::Utf8);
+        assert_eq!(
+            rows,
+            [
+                "'http://ex.org/apple'",
+                "'_:b0'",
+                "'Pomme'",
+                "'x'",
+                "'Apple'",
+                "'abc'"
+            ]
+        );
     }
 
     #[test]

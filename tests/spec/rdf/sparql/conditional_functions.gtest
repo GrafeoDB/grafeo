@@ -124,13 +124,30 @@ tests:
         - [Vincent, senior]
 
   - name: if_in_filter
-    # FILTER(IF(?val > "10", true, false)) should keep rows where val > 10.
+    # FILTER(IF(?val > 10, true, false)) keeps the rows whose val is over 10.
+    setup:
+      - |
+        INSERT DATA {
+          <http://ex.org/a> <http://ex.org/val> 5 .
+          <http://ex.org/b> <http://ex.org/val> 15 .
+          <http://ex.org/c> <http://ex.org/val> 25 .
+        }
+    query: |
+      SELECT ?val WHERE {
+        ?s <http://ex.org/val> ?val .
+        FILTER(IF(?val > 10, true, false))
+      }
+    expect:
+      count: 2
+
+  - name: if_in_filter_compares_strings_as_strings
+    # Plain literals compare as strings (SPARQL 1.1 17.3): "5" is after "10".
     setup:
       - |
         INSERT DATA {
           <http://ex.org/a> <http://ex.org/val> "5" .
           <http://ex.org/b> <http://ex.org/val> "15" .
-          <http://ex.org/c> <http://ex.org/val> "25" .
+          <http://ex.org/c> <http://ex.org/val> "05" .
         }
     query: |
       SELECT ?val WHERE {
@@ -138,7 +155,9 @@ tests:
         FILTER(IF(?val > "10", true, false))
       }
     expect:
-      count: 2
+      rows:
+        - ["15"]
+        - ["5"]
 
   - name: if_with_bound_check
     # IF(BOUND(?opt), ?opt, "default") to provide a fallback for unbound.
@@ -344,3 +363,20 @@ tests:
       rows:
         - [Butch]
         - [Gus]
+
+  - name: ebv_of_a_number_or_boolean_of_an_invalid_form_is_false
+    # A numeric or xsd:boolean literal whose text is not of its type has the
+    # effective boolean value false, not a type error (17.2.2); a literal of
+    # an unknown datatype stays an error, so IF is unbound.
+    query: |
+      PREFIX xsd: <http://www.w3.org/2001/XMLSchema#>
+      SELECT (IF("abc"^^xsd:integer, "t", "f") AS ?integer)
+             (!("abc"^^xsd:integer) AS ?negated)
+             (IF("maybe"^^xsd:boolean, "t", "f") AS ?boolean)
+             (IF("1.5.0"^^xsd:decimal, "t", "f") AS ?decimal)
+             (IF("x"^^<http://ex.org/dt>, "t", "f") AS ?unknown)
+      WHERE {}
+    expect:
+      columns: [integer, negated, boolean, decimal, unknown]
+      rows:
+        - [f, true, f, f, null]

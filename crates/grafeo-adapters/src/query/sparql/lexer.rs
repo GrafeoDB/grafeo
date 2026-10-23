@@ -510,41 +510,56 @@ impl<'a> Lexer<'a> {
         }
     }
 
+    /// Whether the `<` just consumed starts an IRI: the characters up to the
+    /// next `>` are all ones an `IRIREF` holds (SPARQL 1.1, grammar rule
+    /// 139). Otherwise the `<` is a comparison, so `?a<?b && ?c>?d` is no
+    /// IRI.
     fn is_iri_start(&self) -> bool {
-        // After seeing '<', check if this looks like an IRI
-        let remaining = &self.input[self.position..];
-        // Simple heuristic: IRIs don't start with whitespace or common operators
-        !remaining.is_empty()
-            && !remaining.starts_with(' ')
-            && !remaining.starts_with('\n')
-            && !remaining.starts_with('=')
+        Self::iri_ref_len(&self.input[self.position..]).is_some()
+    }
+
+    /// The length in bytes of the rest of an `IRIREF` whose `<` comes just
+    /// before `text`, up to and including its `>`: no control character,
+    /// space, `<`, `"`, `{`, `}`, `|`, `^` or backquote, and a backslash only
+    /// as the start of a `u` escape of 4 or a `U` escape of 8 hex digits.
+    /// `None` when `text` holds no such rest.
+    fn iri_ref_len(text: &str) -> Option<usize> {
+        let mut chars = text.char_indices();
+        while let Some((index, ch)) = chars.next() {
+            match ch {
+                '>' => return Some(index + 1),
+                '\\' => {
+                    let digits = match chars.next() {
+                        Some((_, 'u')) => 4,
+                        Some((_, 'U')) => 8,
+                        _ => return None,
+                    };
+                    for _ in 0..digits {
+                        match chars.next() {
+                            Some((_, digit)) if digit.is_ascii_hexdigit() => {}
+                            _ => return None,
+                        }
+                    }
+                }
+                '<' | '"' | '{' | '}' | '|' | '^' | '`' => return None,
+                ch if u32::from(ch) <= 0x20 => return None,
+                _ => {}
+            }
+        }
+        None
     }
 
     fn scan_iri(&mut self) -> TokenKind {
         // Consume opening '<'
         self.advance();
-
-        while self.position < self.input.len() {
-            let ch = self.current_char();
-            if ch == '>' {
-                self.advance();
-                return TokenKind::Iri;
-            }
-            if ch == '\\' {
-                // Escape sequence
-                self.advance();
-                if self.position < self.input.len() {
-                    self.advance();
-                }
-            } else if ch.is_whitespace() && ch != ' ' {
-                // Invalid character in IRI (newlines not allowed)
-                return TokenKind::Error;
-            } else {
-                self.advance();
-            }
+        let Some(len) = Self::iri_ref_len(&self.input[self.position..]) else {
+            return TokenKind::Error;
+        };
+        let end = self.position + len;
+        while self.position < end {
+            self.advance();
         }
-
-        TokenKind::Error // Unterminated IRI
+        TokenKind::Iri
     }
 
     fn scan_variable_rest(&mut self) -> TokenKind {
@@ -821,6 +836,36 @@ mod tests {
             }
         }
         tokens
+    }
+
+    /// A `<` starts an IRI only when an `IRIREF` follows (grammar rule 139):
+    /// a comparison without spaces stays two comparisons, and text with a
+    /// space, a quote or a stray backslash is no IRI.
+    #[test]
+    fn a_less_than_starts_an_iri_only_before_an_iri_ref() {
+        use TokenKind::{GreaterThan, Iri, LessThan, Variable};
+        assert_eq!(
+            lex_all("?a<?b && ?c>?d")[..3],
+            [Variable, LessThan, Variable]
+        );
+        assert_eq!(
+            lex_all("?a<?b && ?c>?d")[4..7],
+            [Variable, GreaterThan, Variable]
+        );
+        assert_eq!(lex_all("?a<10")[1], LessThan);
+        assert_eq!(lex_all(r"<http://ex.org/café>")[0], Iri);
+        assert_eq!(lex_all(r"<http://ex.org/\U0001F600>")[0], Iri);
+        assert_eq!(lex_all("<http://ex.org/Kraków#x>")[0], Iri);
+        assert_eq!(lex_all("<>")[0], Iri);
+        for text in [
+            "<invalid iri>",
+            "<http://ex.org/\"q\">",
+            r"<http://ex.org/\n>",
+            r"<http://ex.org/\u00E>",
+            "<http://ex.org/{x}>",
+        ] {
+            assert_ne!(lex_all(text)[0], Iri, "{text}");
+        }
     }
 
     #[test]

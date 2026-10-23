@@ -237,8 +237,8 @@ tests:
         - [null]
         - [http://ex.org/z]
 
-  - name: union_order_by_nulls_last
-    # ORDER BY puts unbound values last.
+  - name: union_order_by_unbound_first
+    # ORDER BY puts unbound values first ascending (SPARQL 1.1 15.1).
     setup:
       - |
         INSERT DATA {
@@ -258,8 +258,8 @@ tests:
       ordered: true
       columns: [y]
       rows:
-        - [http://ex.org/z]
         - [null]
+        - [http://ex.org/z]
 
   # ---------------------------------------------------------------------------
   # MINUS

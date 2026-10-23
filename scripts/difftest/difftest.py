@@ -180,9 +180,12 @@ def load(path: Path) -> dict:
 
 def canonical(result: dict):
     """What two results must share to count as equal: rows in order when the case is
-    ordered, otherwise as a multiset; for a failed query, its error."""
+    ordered, otherwise as a multiset; for a failed query, its error; for an ASK that
+    gives a boolean, the boolean."""
     if "error" in result:
         return ["error", result["error"]]
+    if "boolean" in result:
+        return ["boolean", result["boolean"]]
     rows = result["rows"]
     if not result.get("ordered"):
         rows = sorted(rows, key=lambda row: json.dumps(row, sort_keys=True))
@@ -239,6 +242,8 @@ def read_reviewed(path: Path) -> dict[str, tuple[str, str]]:
 def summary(result: dict, limit: int = 6) -> str:
     if "error" in result:
         return "ERROR " + result["error"]
+    if "boolean" in result:
+        return "boolean " + json.dumps(result["boolean"])
     rows = result["rows"]
     shown = json.dumps(rows[:limit], sort_keys=True)
     more = f" ... ({len(rows)} rows)" if len(rows) > limit else f" ({len(rows)} rows)"

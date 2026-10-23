@@ -61,6 +61,8 @@ pub struct GrafeoResult {
     /// What the statement wrote (see `grafeo_result_nodes_created` and the
     /// other counter getters).
     pub(crate) counters: grafeo_engine::database::WriteCounters,
+    /// What the result holds (see `grafeo_result_kind`).
+    pub(crate) kind: grafeo_engine::database::ResultKind,
 }
 
 /// Structured node returned by CRUD operations.
@@ -83,9 +85,23 @@ pub struct GrafeoEdge {
 // Value ↔ JSON conversion
 // ---------------------------------------------------------------------------
 
-/// Convert a Grafeo `Value` to a `serde_json::Value`.
-pub fn value_to_json(v: &Value) -> serde_json::Value {
+/// Convert a Grafeo `Value` to a `serde_json::Value`; an RDF term of a
+/// kind this binding does not know is an error, set as the last error.
+pub fn value_to_json(v: &Value) -> Result<serde_json::Value, GrafeoStatus> {
     grafeo_bindings_common::json::value_to_json(v)
+        .map_err(|error| crate::batch::invalid(&error.to_string()))
+}
+
+/// The JSON object of `(name, value)` pairs, as [`value_to_json`] writes
+/// each value.
+pub fn json_object<'a>(
+    pairs: impl Iterator<Item = (String, &'a Value)>,
+) -> Result<serde_json::Value, GrafeoStatus> {
+    Ok(serde_json::Value::Object(
+        pairs
+            .map(|(name, value)| Ok((name, value_to_json(value)?)))
+            .collect::<Result<_, GrafeoStatus>>()?,
+    ))
 }
 
 /// Convert a `serde_json::Value` to a Grafeo `Value`; `what` names it in
@@ -111,13 +127,14 @@ fn json_or_none(
 }
 
 /// Serialize a [`PropertyMap`] to a JSON `CString`.
-pub fn properties_to_json(props: &PropertyMap) -> CString {
-    let obj: serde_json::Map<std::string::String, serde_json::Value> = props
-        .iter()
-        .map(|(k, v)| (k.as_str().to_string(), value_to_json(v)))
-        .collect();
-    let json_str = serde_json::to_string(&serde_json::Value::Object(obj)).unwrap_or_default();
-    CString::new(json_str).unwrap_or_default()
+///
+/// # Errors
+///
+/// As [`value_to_json`].
+pub fn properties_to_json(props: &PropertyMap) -> Result<CString, GrafeoStatus> {
+    let obj = json_object(props.iter().map(|(k, v)| (k.as_str().to_string(), v)))?;
+    let json_str = serde_json::to_string(&obj).unwrap_or_default();
+    Ok(CString::new(json_str).unwrap_or_default())
 }
 
 /// Parse a JSON C-string into a `Vec<(PropertyKey, Value)>` for node/edge

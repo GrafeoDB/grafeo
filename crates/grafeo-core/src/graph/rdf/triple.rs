@@ -7,11 +7,22 @@
 
 use super::term::Term;
 use grafeo_common::storage::log_record::{TermRecord, TripleRecord};
+use grafeo_common::types::TermId;
 use serde::{Deserialize, Serialize};
 use std::fmt;
+use std::hash::{Hash, Hasher};
+
+/// The raw ids of a triple no store has taken: tag 14, which no id has.
+const NO_IDS: [u64; 3] = [0xE000_0000_0000_0000; 3];
 
 /// An RDF triple (subject, predicate, object).
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+///
+/// A triple a store holds also carries the ids its dataset's dictionary
+/// gives its terms ([`ids`](Self::ids)), so a scan reads them without a
+/// lookup. Equality, hashing and serialization are the terms': the ids are
+/// the store's, not part of the triple. Holding both the terms and their ids
+/// is the interim layout; the id-only store is #659.
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Triple {
     /// The subject (IRI or blank node).
     subject: Term,
@@ -19,6 +30,31 @@ pub struct Triple {
     predicate: Term,
     /// The object (IRI, blank node, or literal).
     object: Term,
+    /// The raw ids of subject, predicate and object, or [`NO_IDS`].
+    #[serde(skip, default = "no_ids")]
+    ids: [u64; 3],
+}
+
+const fn no_ids() -> [u64; 3] {
+    NO_IDS
+}
+
+impl PartialEq for Triple {
+    fn eq(&self, other: &Self) -> bool {
+        self.subject == other.subject
+            && self.predicate == other.predicate
+            && self.object == other.object
+    }
+}
+
+impl Eq for Triple {}
+
+impl Hash for Triple {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.subject.hash(state);
+        self.predicate.hash(state);
+        self.object.hash(state);
+    }
 }
 
 impl Triple {
@@ -38,6 +74,7 @@ impl Triple {
             subject,
             predicate,
             object,
+            ids: NO_IDS,
         }
     }
 
@@ -50,7 +87,29 @@ impl Triple {
             subject,
             predicate,
             object,
+            ids: NO_IDS,
         }
+    }
+
+    /// The triple with the ids of its subject, predicate and object, as a
+    /// store gives them when it takes the triple.
+    #[must_use]
+    pub fn with_ids(mut self, ids: [TermId; 3]) -> Self {
+        self.ids = ids.map(TermId::raw);
+        self
+    }
+
+    /// The ids of subject, predicate and object when a store holds the
+    /// triple; `None` for a triple no store has taken (a pending write, a
+    /// triple a query builds).
+    #[inline]
+    #[must_use]
+    pub fn ids(&self) -> Option<[TermId; 3]> {
+        if self.ids == NO_IDS {
+            return None;
+        }
+        let [subject, predicate, object] = self.ids.map(TermId::from_raw);
+        Some([subject?, predicate?, object?])
     }
 
     /// Returns the subject of the triple.

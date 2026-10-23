@@ -367,7 +367,7 @@ fn compacted_0_5_files_fold_into_row_groups() {
 #[test]
 fn beta_files_of_version_3_open_into_row_groups() {
     for (relative, name) in [
-        ("rdf/0.6.0-dev", "triples.grafeo"),
+        ("rdf/0.6.0-beta.1", "triples.grafeo"),
         ("search-indexes/0.6.0-dev", "documents.grafeo"),
     ] {
         let (dir, path) = fixture(relative, name);

@@ -146,8 +146,6 @@ mod physical {
         pub path: PathStep,
         /// Active default or named graphs.
         pub graph: RdfPathGraph,
-        /// Emit datatype companions; language companions are always emitted.
-        pub companions: bool,
         /// Pending operations visible to this transaction.
         pub transaction_id: Option<TransactionId>,
         /// Maximum rows returned by one next call.
@@ -203,18 +201,13 @@ mod physical {
             self
         }
 
-        /// Unique endpoint columns, their companions, then a unique graph column.
+        /// Unique endpoint columns, then a unique graph column. Each holds
+        /// the exact terms ([`Value::RdfTerm`](grafeo_common::types::Value::RdfTerm)).
         #[must_use]
         pub fn columns(&self) -> Vec<String> {
             let vars = endpoint_vars(&self.config);
             let mut columns: Vec<String> =
                 vars.iter().flatten().map(|var| (*var).to_owned()).collect();
-            for var in vars.iter().flatten() {
-                columns.push(format!("__lang_{var}"));
-                if self.config.companions {
-                    columns.push(format!("__datatype_{var}"));
-                }
-            }
             if let Some(graph) = unique_graph_var(&self.config) {
                 columns.push(graph.to_owned());
             }
@@ -233,7 +226,7 @@ mod physical {
             }
             let state = self.state.as_mut().expect("RDF path state initialized");
             let vars = endpoint_vars(&self.config);
-            let count = vars.iter().flatten().count() * (2 + usize::from(self.config.companions))
+            let count = vars.iter().flatten().count()
                 + usize::from(unique_graph_var(&self.config).is_some());
             let capacity = self.config.chunk_capacity.max(1);
             // Existing ValueVector allocation is bounded before it runs. Use the
@@ -649,9 +642,13 @@ mod physical {
     struct StateKey {
         term: Term,
         state: usize,
+        /// The bytes the term retains, charged when the key was made.
+        payload: usize,
     }
     struct Search {
         origin: Term,
+        /// The bytes the origin retains, charged when the search began.
+        origin_payload: usize,
         queue: VecDeque<StateKey>,
         visited: FxHashSet<StateKey>,
         zero_pending: bool,
@@ -664,9 +661,11 @@ mod physical {
             zero: bool,
             budget: &mut PathBudget,
         ) -> Result<Self, OperatorError> {
-            budget.charge(term_payload(origin))?;
+            let origin_payload = term_payload(origin)?;
+            budget.charge(origin_payload)?;
             let mut search = Self {
                 origin: origin.clone(),
+                origin_payload,
                 queue: VecDeque::new(),
                 visited: FxHashSet::default(),
                 zero_pending: zero,
@@ -685,11 +684,12 @@ mod physical {
             let key = StateKey {
                 term: term.clone(),
                 state,
+                payload: term_payload(term)?,
             };
             if self.visited.contains(&key) {
                 return Ok(());
             }
-            budget.charge(term_payload(term).saturating_mul(2))?;
+            budget.charge(key.payload.saturating_mul(2))?;
             budget.reserve_set(&mut self.visited, 1)?;
             budget.reserve_queue(&mut self.queue, 1)?;
             self.visited.insert(key.clone());
@@ -698,21 +698,11 @@ mod physical {
         }
 
         fn bytes(&self) -> usize {
-            term_payload(&self.origin)
+            self.origin_payload
                 .saturating_add(self.queue.capacity().saturating_mul(size_of::<StateKey>()))
-                .saturating_add(
-                    self.queue
-                        .iter()
-                        .map(|key| term_payload(&key.term))
-                        .sum::<usize>(),
-                )
+                .saturating_add(self.queue.iter().map(|key| key.payload).sum::<usize>())
                 .saturating_add(self.visited.allocation_size())
-                .saturating_add(
-                    self.visited
-                        .iter()
-                        .map(|key| term_payload(&key.term))
-                        .sum::<usize>(),
-                )
+                .saturating_add(self.visited.iter().map(|key| key.payload).sum::<usize>())
         }
     }
 
@@ -723,6 +713,8 @@ mod physical {
         read_overlay: Option<Arc<dyn RdfPathReadOverlay>>,
         graph_index: usize,
         origins: Vec<Term>,
+        /// The bytes the origins' terms retain, charged as they were found.
+        origins_payload: usize,
         origins_ready: bool,
         origin_index: usize,
         search: Option<Search>,
@@ -750,7 +742,7 @@ mod physical {
                 budget.charge(var.capacity())?;
             }
             for term in [&config.subject, &config.object].into_iter().flatten() {
-                budget.charge(term_payload(term))?;
+                budget.charge(term_payload(term)?)?;
             }
             match &config.graph {
                 RdfPathGraph::Named(name) => budget.charge(name.capacity())?,
@@ -772,6 +764,7 @@ mod physical {
                 read_overlay,
                 graph_index: 0,
                 origins: Vec::new(),
+                origins_payload: 0,
                 origins_ready: false,
                 origin_index: 0,
                 search: None,
@@ -788,10 +781,13 @@ mod physical {
             };
             if let Some(term) = bound {
                 self.budget.reserve_vec(&mut self.origins, 1)?;
-                self.budget.charge(term_payload(term))?;
+                let payload = term_payload(term)?;
+                self.budget.charge(payload)?;
+                self.origins_payload = self.origins_payload.saturating_add(payload);
                 self.origins.push(term.clone());
             } else {
                 let mut unique = FxHashSet::default();
+                let mut payloads = 0usize;
                 for source in &self.contexts[self.graph_index].sources {
                     source.visit_matches(
                         &TriplePattern::any(),
@@ -802,7 +798,9 @@ mod physical {
                             for term in [triple.subject(), triple.object()] {
                                 budget.check()?;
                                 if !unique.contains(term) {
-                                    budget.charge(term_payload(term))?;
+                                    let payload = term_payload(term)?;
+                                    budget.charge(payload)?;
+                                    payloads = payloads.saturating_add(payload);
                                     budget.reserve_set(&mut unique, 1)?;
                                     unique.insert(term.clone());
                                 }
@@ -812,6 +810,7 @@ mod physical {
                     )?;
                 }
                 self.budget.reserve_vec(&mut self.origins, unique.len())?;
+                self.origins_payload = self.origins_payload.saturating_add(payloads);
                 let table_bytes = unique.allocation_size();
                 for term in unique {
                     self.origins.push(term);
@@ -827,8 +826,9 @@ mod physical {
                 .origins
                 .capacity()
                 .saturating_mul(size_of::<Term>())
-                .saturating_add(self.origins.iter().map(term_payload).sum::<usize>());
+                .saturating_add(self.origins_payload);
             self.origins = Vec::new();
+            self.origins_payload = 0;
             self.budget.release(bytes);
             self.origins_ready = false;
             self.origin_index = 0;
@@ -931,7 +931,7 @@ mod physical {
                         search.enqueue(&key.term, transition.to, &mut self.budget)?;
                     }
                 }
-                self.budget.release(term_payload(&key.term));
+                self.budget.release(key.payload);
                 if key.state == self.nfa.accept && (config.min_hops || key.term != search.origin) {
                     let (subject, object) = if self.reverse {
                         (&key.term, &search.origin)
@@ -990,57 +990,21 @@ mod physical {
         )
     }
 
-    fn push_text(
-        column: &mut ValueVector,
-        prefix: &str,
-        text: &str,
-        budget: &mut PathBudget,
-        output_charge: &mut usize,
-    ) -> Result<(), OperatorError> {
-        let len = prefix
-            .len()
-            .checked_add(text.len())
-            .ok_or_else(output_allocation_error)?;
-        let bytes = len
-            .checked_mul(2)
-            .and_then(|len| len.checked_add(64))
-            .ok_or_else(output_allocation_error)?;
-        budget.charge(bytes)?;
-        *output_charge = output_charge
-            .checked_add(bytes)
-            .ok_or_else(output_allocation_error)?;
-        let mut value = String::new();
-        value
-            .try_reserve_exact(len)
-            .map_err(|_| output_allocation_error())?;
-        value.push_str(prefix);
-        value.push_str(text);
-        column.push_string(value);
-        Ok(())
-    }
-
     fn push_term(
         column: &mut ValueVector,
         term: &Term,
         budget: &mut PathBudget,
         output_charge: &mut usize,
     ) -> Result<(), OperatorError> {
-        match term {
-            Term::Iri(iri) => push_text(column, "", iri.as_str(), budget, output_charge),
-            Term::BlankNode(node) => push_text(column, "_:", node.id(), budget, output_charge),
-            // A numeric literal as its number, as a triple scan reads it.
-            Term::Literal(literal) => match literal.numeric_value() {
-                Some(number) => {
-                    budget.charge(64)?;
-                    *output_charge = output_charge
-                        .checked_add(64)
-                        .ok_or_else(output_allocation_error)?;
-                    column.push_value(number);
-                    Ok(())
-                }
-                None => push_text(column, "", literal.value(), budget, output_charge),
-            },
-        }
+        let bytes = term_payload(term)?
+            .checked_add(64)
+            .ok_or_else(output_allocation_error)?;
+        budget.charge(bytes)?;
+        *output_charge = output_charge
+            .checked_add(bytes)
+            .ok_or_else(output_allocation_error)?;
+        column.push_value(grafeo_common::types::Value::RdfTerm(Arc::new(term.clone())));
+        Ok(())
     }
 
     fn write_row(
@@ -1064,29 +1028,6 @@ mod physical {
                     output_charge,
                 )?;
                 column += 1;
-            }
-        }
-        for (var, term) in vars.iter().zip(terms) {
-            if var.is_some() {
-                let literal = term.as_literal();
-                push_text(
-                    chunk.column_mut(column).expect("RDF language column"),
-                    "",
-                    literal.and_then(|lit| lit.language()).unwrap_or(""),
-                    budget,
-                    output_charge,
-                )?;
-                column += 1;
-                if config.companions {
-                    push_text(
-                        chunk.column_mut(column).expect("RDF datatype column"),
-                        "",
-                        literal.map_or("", |lit| lit.datatype()),
-                        budget,
-                        output_charge,
-                    )?;
-                    column += 1;
-                }
             }
         }
         if unique_graph_var(config).is_some() {
@@ -1116,7 +1057,6 @@ mod physical {
                 min_hops: false,
                 path: PathStep::Predicate("p".into()),
                 graph: RdfPathGraph::Default,
-                companions: false,
                 transaction_id: None,
                 chunk_capacity: 1,
             }
@@ -1183,6 +1123,7 @@ mod physical {
             assert!(search.visited.contains(&StateKey {
                 term: Term::iri("n0"),
                 state: state.nfa.start,
+                payload: term_payload(&Term::iri("n0")).unwrap(),
             }));
             assert!(!search.queue.is_empty());
             assert!(state.budget.used() > 0);

@@ -86,14 +86,43 @@ Database.version(); // Grafeo version string
 
 ## Decimals
 
-An exact decimal (GQL `1.50`, `CAST(x AS DECIMAL(10, 2))`, SPARQL
-`xsd:decimal`) comes back as `{ $decimal: '1.50' }`, its text with its scale,
+An exact decimal (GQL `1.50`, `CAST(x AS DECIMAL(10, 2))`) comes back as
+`{ $decimal: '1.50' }`, its text with its scale,
 and such an object passed as a parameter is a decimal. With other keys beside
 `$decimal`, the object is a map.
 
 ```javascript
 db.execute("RETURN 0.1 + 0.2 AS x");      // [{ x: { $decimal: '0.3' } }]
 db.executeWithParams("RETURN $p * 3 AS x", { p: { $decimal: '0.10' } });  // { $decimal: '0.30' }
+```
+
+## RDF Terms
+
+A SPARQL result holds each IRI, blank node and literal as an RDF/JS term
+object: `{ termType: 'NamedNode', value }`, `{ termType: 'BlankNode', value }`
+(the label, without `_:`) or `{ termType: 'Literal', value, language,
+datatype }`, where `language` is the tag in lowercase, `''` without a tag,
+and `datatype` is a `NamedNode` (`xsd:string` for a simple literal,
+`rdf:langString` for a tagged one). Each term, and its datatype, has the RDF/JS
+`equals(other)` method: true for a term of the same `termType` and `value`,
+and for a literal the same language (tags compare without case) and datatype;
+false for `null` and `undefined`. The method is not enumerable, so a term's
+keys and its JSON hold the fields only.
+
+A parameter or property takes any object of that shape, the terms of other
+RDF/JS libraries (N3.js, rdf-data-factory) too: it is read by `termType`
+(`NamedNode`, `BlankNode` or `Literal`) and `value`, and for a literal
+`language` and the `value` of `datatype`, through getters as well, and other
+keys are ignored. A language tag is kept in lowercase. An object with another
+`termType`, or none, is a map.
+A raw result's `kind` is `'rows'`, `'boolean'` for a SPARQL ASK (its answer
+in `boolean`) or `'graph'` for CONSTRUCT and DESCRIBE.
+
+```javascript
+db.executeSparql('SELECT ?s WHERE { ?s <http://ex.org/label> "Pomme"@fr }');
+// [{ s: { termType: 'NamedNode', value: 'http://ex.org/apple' } }]
+const [{ s }] = db.executeSparql('SELECT ?s WHERE { ?s <http://ex.org/label> "Pomme"@fr }');
+s.equals({ termType: 'NamedNode', value: 'http://ex.org/apple' });  // true
 ```
 
 ## Text Search

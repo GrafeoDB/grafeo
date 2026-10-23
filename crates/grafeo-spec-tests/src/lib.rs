@@ -139,6 +139,11 @@ pub fn result_to_strings(result: &QueryResult) -> Vec<Vec<String>> {
 }
 
 /// Convert a Value to its canonical string representation for comparison.
+///
+/// # Panics
+///
+/// On an RDF term of a kind the runner does not know, so a new kind fails
+/// the spec run instead of comparing as some other text.
 pub fn value_to_string(value: &Value) -> String {
     match value {
         Value::Null => "null".to_string(),
@@ -190,6 +195,18 @@ pub fn value_to_string(value: &Value) -> String {
             let net = pos.values().sum::<u64>() as i64 - neg.values().sum::<u64>() as i64;
             format!("{net}")
         }
+        // An RDF term as its lexical form: an IRI bare, a blank node as
+        // `_:` and its label, a literal as its text (a `terms:`
+        // expectation checks kind, language tag and datatype).
+        Value::RdfTerm(term) => match term.as_ref() {
+            grafeo_common::types::rdf::Term::Iri(iri) => iri.as_str().to_string(),
+            grafeo_common::types::rdf::Term::BlankNode(node) => format!("_:{}", node.id()),
+            grafeo_common::types::rdf::Term::Literal(literal) => literal.value().to_string(),
+            other => panic!(
+                "{}",
+                grafeo_common::types::rdf::UnsupportedTermKind::of(other)
+            ),
+        },
         _ => value.to_string(),
     }
 }

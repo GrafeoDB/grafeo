@@ -17,6 +17,19 @@ type QueryResult struct {
 	RowsScanned     uint64
 	// Counters tells what the statement wrote.
 	Counters WriteCounters
+	// Kind tells what the result holds: rows, one boolean (SPARQL ASK) or an
+	// RDF graph (SPARQL CONSTRUCT and DESCRIBE).
+	Kind ResultKind
+}
+
+// Boolean returns the answer of a SPARQL ASK; false and not ok for any other
+// result.
+func (r *QueryResult) Boolean() (answer bool, ok bool) {
+	if r.Kind != ResultBoolean || len(r.Rows) != 1 {
+		return false, false
+	}
+	answer, ok = r.Rows[0]["boolean"].(bool)
+	return answer, ok
 }
 
 // Row is a single result row, mapping column names to values.
@@ -138,6 +151,7 @@ func parseResult(r *C.GrafeoResult) (*QueryResult, error) {
 		ExecutionTimeMs: float64(C.grafeo_result_execution_time_ms(r)),
 		RowsScanned:     uint64(C.grafeo_result_rows_scanned(r)),
 		Counters:        countersOf(r),
+		Kind:            ResultKind(C.grafeo_result_kind(r)),
 	}, nil
 }
 

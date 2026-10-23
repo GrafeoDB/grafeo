@@ -23,10 +23,15 @@ fn events(
     // SAFETY: Caller guarantees ptr from grafeo_open* and not yet freed.
     let db = unsafe { &*db };
     match read(&db.inner.read()) {
-        Ok(events) => {
-            let json = grafeo_bindings_common::cdc::events_to_json(&events);
-            CString::new(json.to_string()).map_or(std::ptr::null_mut(), CString::into_raw)
-        }
+        Ok(events) => match grafeo_bindings_common::cdc::events_to_json(&events) {
+            Ok(json) => {
+                CString::new(json.to_string()).map_or(std::ptr::null_mut(), CString::into_raw)
+            }
+            Err(error) => {
+                set_last_error(&error.to_string());
+                std::ptr::null_mut()
+            }
+        },
         Err(e) => {
             set_error(&e);
             std::ptr::null_mut()

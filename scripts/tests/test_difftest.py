@@ -112,6 +112,18 @@ def test_ordered_rows_compare_in_order():
     assert difftest.canonical(first) != difftest.canonical(second)
 
 
+def test_an_ask_result_is_its_boolean():
+    """An ASK that gives a boolean (no rows) compares and prints by it, and differs
+    from the row an older build gave."""
+    yes, no = {"boolean": True}, {"boolean": False}
+    assert difftest.canonical(yes) == ["boolean", True]
+    assert difftest.differing({"A1|sparql": yes}, {"A1|sparql": no}) == ["A1|sparql"]
+    assert difftest.differing({"A1|sparql": rows([])}, {"A1|sparql": yes}) == [
+        "A1|sparql"
+    ]
+    assert difftest.summary(yes) == "boolean true"
+
+
 def test_a_value_that_changes_type_differs():
     old = {"A1|gql": rows([1]), "A2|gql": rows([1]), "A3|gql": rows([True])}
     new = {"A1|gql": rows([1.0]), "A2|gql": rows([True]), "A3|gql": rows([True])}

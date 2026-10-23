@@ -42,16 +42,15 @@ impl PyNode {
 
     /// Get all properties as a dictionary.
     ///
-    /// # Panics
+    /// # Errors
     ///
-    /// Panics on memory exhaustion during Python dict allocation.
-    fn properties(&self, py: Python<'_>) -> Py<PyAny> {
+    /// The error of a value that does not convert (see `PyValue::to_py`).
+    fn properties(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         let dict = pyo3::types::PyDict::new(py);
         for (k, v) in &self.properties {
-            dict.set_item(k.as_str(), PyValue::to_py(v, py))
-                .expect("dict.set_item only fails on memory exhaustion");
+            dict.set_item(k.as_str(), PyValue::to_py(v, py)?)?;
         }
-        dict.unbind().into_any()
+        Ok(dict.unbind().into_any())
     }
 
     /// Check if node has a label.
@@ -65,10 +64,14 @@ impl PyNode {
     }
 
     /// Return a list of (key, value) pairs for all properties.
-    fn items(&self, py: Python<'_>) -> Vec<(String, Py<PyAny>)> {
+    ///
+    /// # Errors
+    ///
+    /// The error of a value that does not convert (see `PyValue::to_py`).
+    fn items(&self, py: Python<'_>) -> PyResult<Vec<(String, Py<PyAny>)>> {
         self.properties
             .iter()
-            .map(|(k, v)| (k.to_string(), PyValue::to_py(v, py)))
+            .map(|(k, v)| Ok((k.to_string(), PyValue::to_py(v, py)?)))
             .collect()
     }
 
@@ -156,16 +159,15 @@ impl PyEdge {
 
     /// Get all properties as a dictionary.
     ///
-    /// # Panics
+    /// # Errors
     ///
-    /// Panics on memory exhaustion during Python dict allocation.
-    fn properties(&self, py: Python<'_>) -> Py<PyAny> {
+    /// The error of a value that does not convert (see `PyValue::to_py`).
+    fn properties(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         let dict = pyo3::types::PyDict::new(py);
         for (k, v) in &self.properties {
-            dict.set_item(k.as_str(), PyValue::to_py(v, py))
-                .expect("dict.set_item only fails on memory exhaustion");
+            dict.set_item(k.as_str(), PyValue::to_py(v, py)?)?;
         }
-        dict.unbind().into_any()
+        Ok(dict.unbind().into_any())
     }
 
     /// Return a list of property key names.
@@ -174,10 +176,14 @@ impl PyEdge {
     }
 
     /// Return a list of (key, value) pairs for all properties.
-    fn items(&self, py: Python<'_>) -> Vec<(String, Py<PyAny>)> {
+    ///
+    /// # Errors
+    ///
+    /// The error of a value that does not convert (see `PyValue::to_py`).
+    fn items(&self, py: Python<'_>) -> PyResult<Vec<(String, Py<PyAny>)>> {
         self.properties
             .iter()
-            .map(|(k, v)| (k.to_string(), PyValue::to_py(v, py)))
+            .map(|(k, v)| Ok((k.to_string(), PyValue::to_py(v, py)?)))
             .collect()
     }
 

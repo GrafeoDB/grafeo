@@ -76,6 +76,11 @@ impl SparqlExecutor for SessionSparqlExecutor<'_> {
                     format!("\"{escaped}\"")
                 }
             }
+            other => {
+                return Err(ShaclError::SparqlError(
+                    grafeo_common::types::rdf::UnsupportedTermKind::of(other).to_string(),
+                ));
+            }
         };
 
         let mut substituted = query.replace("$this", &this_str);

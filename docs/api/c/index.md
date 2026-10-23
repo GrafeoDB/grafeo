@@ -198,6 +198,7 @@ const char* grafeo_result_json(const GrafeoResult* r);              /* JSON arra
 size_t      grafeo_result_row_count(const GrafeoResult* r);         /* number of rows */
 double      grafeo_result_execution_time_ms(const GrafeoResult* r); /* execution time in ms */
 uint64_t    grafeo_result_rows_scanned(const GrafeoResult* r);      /* estimated rows scanned */
+int32_t     grafeo_result_kind(const GrafeoResult* r);              /* 0 rows, 1 boolean (SPARQL ASK), 2 graph */
 const char* grafeo_result_nodes_json(const GrafeoResult* r);        /* JSON array of node objects */
 const char* grafeo_result_edges_json(const GrafeoResult* r);        /* JSON array of edge objects */
 void        grafeo_free_result(GrafeoResult* r);                    /* free the result */
@@ -215,6 +216,20 @@ uint64_t    grafeo_result_labels_removed(const GrafeoResult* r);
 All `const char*` pointers from result accessors are valid until `grafeo_free_result` is called. Do NOT free them separately.
 
 The `grafeo_result_nodes_json` and `grafeo_result_edges_json` functions return deduplicated, typed entities extracted from the result. Node objects have the shape `{"element_type": "node", "id": ..., "labels": [...], "properties": {...}}`. Edge objects have the shape `{"element_type": "edge", "id": ..., "type": "...", "source_id": ..., "target_id": ..., "properties": {...}}`.
+
+Values JSON has no literal for travel as tagged objects, the tag as the object's only key, in results and in params
+and properties JSON alike: `{"$timestamp_us": 1700000000000000}`, `{"$date": "2024-01-15"}`, `{"$time": ...}`,
+`{"$duration": ...}`, `{"$zoned_datetime": ...}`, `{"$decimal": "1.50"}`, and an RDF term as `{"$term": {...}}`.
+
+A SPARQL result's JSON holds each IRI, blank node and literal in the `$term` tag, around the term form of the SPARQL
+1.1 Query Results JSON format: `{"$term": {"type": "uri", "value": "http://ex.org/apple"}}`, `{"$term": {"type":
+"bnode", "value": "b0"}}` (the label, without `_:`), or `{"$term": {"type": "literal", "value": "Pomme", "xml:lang":
+"fr"}}` and `{"$term": {"type": "literal", "value": "1.50", "datatype":
+"http://www.w3.org/2001/XMLSchema#decimal"}}` (no `datatype` for a simple literal, of `xsd:string`). The language tag
+is in lowercase, and one read from params is made lowercase. A `$term` tag in params or properties JSON is that term;
+a plain object with `type` and `value` keys is a map, as is a `$term` tag with other keys or content. An ASK result
+(kind 1) is one row `{"boolean": true}`; CONSTRUCT and DESCRIBE (kind 2) give rows of `subject`, `predicate` and
+`object`.
 
 ## Node CRUD
 

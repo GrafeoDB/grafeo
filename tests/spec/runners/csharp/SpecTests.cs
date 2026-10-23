@@ -487,6 +487,9 @@ public class SpecTests : IDisposable
             return "null";
         if (value is bool b)
             return b ? "true" : "false";
+        // An RDF term as its lexical form, a blank node as "_:" and its label
+        if (value is RdfTerm term)
+            return term.Type == RdfTermType.BlankNode ? "_:" + term.Value : term.Value;
         if (value is long l)
             return l.ToString();
         if (value is int i)

@@ -9,6 +9,7 @@ use super::triple::{Triple, TriplePattern};
 use grafeo_common::change::RdfGraphOp;
 use grafeo_common::storage::log_record::RdfGraphTarget;
 use grafeo_common::types::TransactionId;
+use grafeo_common::types::rdf::UnsupportedTermKind;
 use grafeo_common::utils::hash::FxHashSet;
 use hashbrown::HashMap;
 use parking_lot::RwLock;
@@ -244,8 +245,14 @@ pub struct RdfStore {
     named_graphs: RwLock<HashMap<String, Arc<RdfStore>>>,
     /// Cached RDF statistics for query optimization. Invalidated on any mutation.
     statistics_cache: RwLock<Option<Arc<crate::statistics::RdfStatistics>>>,
-    /// Cached term dictionary for dictionary-encoded triple scans. Invalidated on any mutation.
-    dictionary_cache: RwLock<Option<Arc<super::dictionary::TermDictionary>>>,
+    /// The term dictionary of the dataset: the default graph and its named
+    /// graphs share one, so a term has one id in all of them.
+    dictionary: Arc<super::dictionary::TermDictionary>,
+    /// The store's id of each term of the term table the last RDF section
+    /// load read, by file index: the ring section, read next, refers to
+    /// those terms by file index.
+    #[cfg(feature = "ring-index")]
+    loaded_ids: parking_lot::Mutex<Option<Arc<[grafeo_common::types::TermId]>>>,
     /// Compact Ring Index for SPARQL query acceleration. Built during `bulk_load()`
     /// or explicitly via `rebuild_ring()`. Marked stale on incremental mutations,
     /// falling back to HashMap indexes until rebuilt.
@@ -299,7 +306,9 @@ impl RdfStore {
             tx_buffer: RwLock::new(TransactionBuffer::default()),
             named_graphs: RwLock::new(HashMap::new()),
             statistics_cache: RwLock::new(None),
-            dictionary_cache: RwLock::new(None),
+            dictionary: Arc::new(super::dictionary::TermDictionary::new()),
+            #[cfg(feature = "ring-index")]
+            loaded_ids: parking_lot::Mutex::new(None),
             #[cfg(feature = "ring-index")]
             ring: RwLock::new(None),
             #[cfg(feature = "ring-index")]
@@ -308,11 +317,53 @@ impl RdfStore {
         }
     }
 
+    /// The term dictionary of the dataset (shared by its named graphs).
+    #[must_use]
+    pub fn dictionary(&self) -> &Arc<super::dictionary::TermDictionary> {
+        &self.dictionary
+    }
+
+    /// Keeps the store's id of each term of a loaded term table, by file
+    /// index, for the ring section read after it.
+    #[cfg(feature = "ring-index")]
+    pub(crate) fn set_loaded_ids(&self, ids: Arc<[grafeo_common::types::TermId]>) {
+        *self.loaded_ids.lock() = Some(ids);
+    }
+
+    /// The ids [`set_loaded_ids`](Self::set_loaded_ids) kept, once.
+    #[cfg(feature = "ring-index")]
+    pub(crate) fn take_loaded_ids(&self) -> Option<Arc<[grafeo_common::types::TermId]>> {
+        self.loaded_ids.lock().take()
+    }
+
+    /// Drops the ids an RDF section load keeps for the ring section read
+    /// after it (8 bytes a term): an open calls it once it has read both, or
+    /// found no ring section.
+    #[cfg(feature = "ring-index")]
+    pub fn release_loaded_ids(&self) {
+        self.loaded_ids.lock().take();
+    }
+
+    /// `triple` as the store holds it: with the ids the dataset's dictionary
+    /// gives its terms (added when new).
+    ///
+    /// # Panics
+    ///
+    /// When the dataset already holds 2^60 distinct terms, which no memory
+    /// can hold.
+    fn stored(&self, triple: Triple) -> Arc<Triple> {
+        let ids = self
+            .dictionary
+            .intern_all([triple.subject(), triple.predicate(), triple.object()])
+            .expect("an RDF dataset holds fewer than 2^60 distinct terms");
+        Arc::new(triple.with_ids([ids[0], ids[1], ids[2]]))
+    }
+
     /// Inserts a triple into the store.
     ///
     /// Returns `true` if the triple was newly inserted, `false` if it already existed.
     pub fn insert(&self, triple: Triple) -> bool {
-        let triple = Arc::new(triple);
+        let triple = self.stored(triple);
 
         // Check if already exists
         {
@@ -392,12 +443,24 @@ impl RdfStore {
     /// Returns the number of triples that were newly inserted (duplicates are
     /// skipped).
     pub fn batch_insert(&self, triples: impl IntoIterator<Item = Triple>) -> usize {
+        self.insert_stored(triples.into_iter().map(|triple| self.stored(triple)))
+    }
+
+    /// Inserts triples whose ids this dataset's dictionary gave (a section
+    /// load reads them from the file's term table), without looking their
+    /// terms up again. Returns how many were new.
+    pub(crate) fn batch_insert_with_dataset_ids(&self, triples: Vec<Triple>) -> usize {
+        debug_assert!(triples.iter().all(|triple| triple.ids().is_some()));
+        self.insert_stored(triples.into_iter().map(Arc::new))
+    }
+
+    /// Inserts stored triples (with their ids) in one pass per index.
+    fn insert_stored(&self, triples: impl Iterator<Item = Arc<Triple>>) -> usize {
         // Phase 1: deduplicate against primary storage (single lock)
         let mut new_triples = Vec::new();
         {
             let mut primary = self.triples.write();
-            for triple in triples {
-                let arc = Arc::new(triple);
+            for arc in triples {
                 if primary.insert(Arc::clone(&arc)) {
                     new_triples.push(arc);
                 }
@@ -652,11 +715,9 @@ impl RdfStore {
             + po_bytes
             + os_bytes;
 
-        let term_dict_bytes = self
-            .dictionary_cache
-            .read()
-            .as_ref()
-            .map_or(0, |d| d.len() * (size_of::<Term>() + size_of::<u32>()) * 2);
+        // The dataset's dictionary, which the named graphs share: counted
+        // once, here (their totals below leave it out).
+        let term_dict_bytes = self.dictionary.heap_bytes();
 
         #[cfg(feature = "ring-index")]
         let ring_bytes = self
@@ -670,13 +731,12 @@ impl RdfStore {
         let named_graphs_guard = self.named_graphs.read();
         let named_graph_count = named_graphs_guard.len();
         let mut total_triples = self.len();
-        let mut total_term_dict = term_dict_bytes;
+        let total_term_dict = term_dict_bytes;
         let mut total_ring = ring_bytes;
         for (_name, graph) in named_graphs_guard.iter() {
-            let (ng_triples, ng_store, ng_dict, ng_ring, _) = graph.heap_memory_bytes();
+            let (ng_triples, ng_store, _shared_dictionary, ng_ring, _) = graph.heap_memory_bytes();
             total_triples += ng_triples;
             triples_and_indexes += ng_store;
-            total_term_dict += ng_dict;
             total_ring += ng_ring;
         }
 
@@ -729,7 +789,7 @@ impl RdfStore {
         &self,
         visit: &mut dyn FnMut(&Triple) -> grafeo_common::utils::error::Result<()>,
     ) -> grafeo_common::utils::error::Result<()> {
-        for triple in &self.sorted_triples() {
+        for triple in &self.sorted_triples()? {
             visit(triple)?;
         }
         Ok(())
@@ -744,15 +804,28 @@ impl RdfStore {
     ///
     /// Takes one reference per triple under one read lock, then sorts them
     /// after releasing it.
-    #[must_use]
-    pub fn sorted_triples(&self) -> Vec<Arc<Triple>> {
+    ///
+    /// # Errors
+    ///
+    /// [`UnsupportedTermKind`](grafeo_common::types::rdf::UnsupportedTermKind)
+    /// for a term of a kind this order does not know.
+    pub fn sorted_triples(&self) -> grafeo_common::utils::error::Result<Vec<Arc<Triple>>> {
         let mut triples = self.triples();
-        triples.sort_unstable_by(|a, b| {
-            term_order(a.subject(), b.subject())
-                .then_with(|| term_order(a.predicate(), b.predicate()))
-                .then_with(|| term_order(a.object(), b.object()))
+        // The first term of a kind the order does not know ends the sort
+        // with its error; the keys are made per comparison, so the sort
+        // holds no more than the triples.
+        let mut unsupported = None;
+        triples.sort_unstable_by(|a, b| match (triple_keys(a), triple_keys(b)) {
+            (Ok(a), Ok(b)) => a.cmp(&b),
+            (Err(error), _) | (_, Err(error)) => {
+                unsupported.get_or_insert(error);
+                std::cmp::Ordering::Equal
+            }
         });
-        triples
+        match unsupported {
+            Some(error) => Err(error.into()),
+            None => Ok(triples),
+        }
     }
 
     /// Returns triples matching the given pattern.
@@ -1138,48 +1211,12 @@ impl RdfStore {
     /// Invalidates the cached RDF statistics and term dictionary. Called after any mutation.
     fn invalidate_statistics_cache(&self) {
         *self.statistics_cache.write() = None;
-        *self.dictionary_cache.write() = None;
         #[cfg(feature = "ring-index")]
         {
             self.ring_stale
                 .store(true, std::sync::atomic::Ordering::Relaxed);
             *self.ring.write() = None;
         }
-    }
-
-    /// Returns a cached term dictionary, building it on first call.
-    ///
-    /// The dictionary maps each unique `Term` in the store to a compact `u32` ID.
-    /// It is invalidated by any mutation (insert, delete, bulk load).
-    #[must_use]
-    pub fn get_or_build_dictionary(&self) -> Arc<super::dictionary::TermDictionary> {
-        // Fast path: return cached dictionary
-        {
-            let cache = self.dictionary_cache.read();
-            if let Some(dict) = cache.as_ref() {
-                return Arc::clone(dict);
-            }
-        }
-
-        // Slow path: build dictionary from all triples
-        let triples = self.triples.read();
-        let mut dict =
-            super::dictionary::TermDictionary::with_capacity(triples.len().saturating_mul(3));
-        for triple in triples.iter() {
-            dict.get_or_insert(triple.subject());
-            dict.get_or_insert(triple.predicate());
-            dict.get_or_insert(triple.object());
-        }
-
-        let dict = Arc::new(dict);
-        *self.dictionary_cache.write() = Some(Arc::clone(&dict));
-        dict
-    }
-
-    /// Returns the cached term dictionary if it exists, without building it.
-    #[must_use]
-    pub fn term_dictionary(&self) -> Option<Arc<super::dictionary::TermDictionary>> {
-        self.dictionary_cache.read().clone()
     }
 
     /// Returns the Ring Index if it exists and is not stale.
@@ -1235,7 +1272,7 @@ impl RdfStore {
     /// **Warning**: This replaces all existing triples and indexes in the store.
     /// Any previously stored data will be lost.
     pub fn bulk_load(&self, triples: impl IntoIterator<Item = Triple>) -> BulkLoadResult {
-        let arcs: Vec<Arc<Triple>> = triples.into_iter().map(Arc::new).collect();
+        let arcs: Vec<Arc<Triple>> = triples.into_iter().map(|t| self.stored(t)).collect();
         let count = arcs.len();
 
         if count == 0 {
@@ -1313,9 +1350,6 @@ impl RdfStore {
         let stats = stats_collector.build();
         // Cache the freshly-computed statistics from the bulk load pass.
         *self.statistics_cache.write() = Some(Arc::new(stats.clone()));
-        // Invalidate the dictionary cache: the old dictionary mapped terms
-        // from the previous dataset, not the newly loaded one.
-        *self.dictionary_cache.write() = None;
 
         // Build Ring Index automatically during bulk load (when feature is enabled).
         #[cfg(feature = "ring-index")]
@@ -1477,6 +1511,14 @@ impl RdfStore {
     /// The configuration of a new named graph: this store's, with indexes
     /// that start empty and grow as triples arrive (a store can hold many
     /// named graphs, most of them small or empty).
+    /// A new named graph of this dataset: its configuration, and the
+    /// dataset's dictionary.
+    fn named_graph_store(&self) -> RdfStore {
+        let mut store = RdfStore::with_config(self.named_graph_config());
+        store.dictionary = Arc::clone(&self.dictionary);
+        store
+    }
+
     fn named_graph_config(&self) -> RdfStoreConfig {
         RdfStoreConfig {
             initial_capacity: 0,
@@ -1502,7 +1544,7 @@ impl RdfStore {
         Arc::clone(
             graphs
                 .entry(name.to_string())
-                .or_insert_with(|| Arc::new(RdfStore::with_config(self.named_graph_config()))),
+                .or_insert_with(|| Arc::new(self.named_graph_store())),
         )
     }
 
@@ -1512,10 +1554,7 @@ impl RdfStore {
         if graphs.contains_key(name) {
             return false;
         }
-        graphs.insert(
-            name.to_string(),
-            Arc::new(RdfStore::with_config(self.named_graph_config())),
-        );
+        graphs.insert(name.to_string(), Arc::new(self.named_graph_store()));
         true
     }
 
@@ -2040,27 +2079,28 @@ impl std::error::Error for NTriplesError {
     }
 }
 
-/// The order of [`RdfStore::for_each_triple`]: IRIs, then blank nodes, then
-/// literals; within a kind by the IRI, the id, or a literal's value,
-/// datatype and language. Only equal terms compare equal.
-fn term_order(a: &Term, b: &Term) -> std::cmp::Ordering {
-    fn rank(term: &Term) -> u8 {
-        match term {
-            Term::Iri(_) => 0,
-            Term::BlankNode(_) => 1,
-            Term::Literal(_) => 2,
-        }
-    }
-    match (a, b) {
-        (Term::Iri(a), Term::Iri(b)) => a.as_str().cmp(b.as_str()),
-        (Term::BlankNode(a), Term::BlankNode(b)) => a.id().cmp(b.id()),
-        (Term::Literal(a), Term::Literal(b)) => a
-            .value()
-            .cmp(b.value())
-            .then_with(|| a.datatype().cmp(b.datatype()))
-            .then_with(|| a.language().cmp(&b.language())),
-        _ => rank(a).cmp(&rank(b)),
-    }
+/// A term's place in the order of [`RdfStore::for_each_triple`]: IRIs, then
+/// blank nodes, then literals; within a kind by the IRI, the id, or a
+/// literal's value, datatype and language. Two terms have the same key
+/// exactly when they are equal.
+type TermKey<'t> = (u8, &'t str, &'t str, Option<&'t str>);
+
+/// The keys of a triple's subject, predicate and object (see [`term_key`]).
+fn triple_keys(triple: &Triple) -> std::result::Result<[TermKey<'_>; 3], UnsupportedTermKind> {
+    Ok([
+        term_key(triple.subject())?,
+        term_key(triple.predicate())?,
+        term_key(triple.object())?,
+    ])
+}
+
+fn term_key(term: &Term) -> std::result::Result<TermKey<'_>, UnsupportedTermKind> {
+    Ok(match term {
+        Term::Iri(iri) => (0, iri.as_str(), "", None),
+        Term::BlankNode(node) => (1, node.id(), "", None),
+        Term::Literal(literal) => (2, literal.value(), literal.datatype(), literal.language()),
+        other => return Err(UnsupportedTermKind::of(other)),
+    })
 }
 
 /// Extracts the next N-Triples term from a string, returning `(term_str, rest)`.
@@ -2321,10 +2361,10 @@ mod tests {
         assert_eq!(trips.triples_with_subject(visit.subject()).len(), 1);
     }
 
-    /// `term_order` calls two terms equal exactly when they are equal, so the
+    /// `term_key` gives two terms one key exactly when they are equal, so the
     /// order of `for_each_triple` never depends on the hash set's order.
     #[test]
-    fn term_order_is_equal_exactly_for_equal_terms() {
+    fn term_keys_are_equal_exactly_for_equal_terms() {
         let mut terms = crate::graph::rdf::term::unusual_terms();
         terms.extend([
             Term::lang_literal("Praha", "cs"),
@@ -2339,9 +2379,8 @@ mod tests {
         ]);
         for a in &terms {
             for b in &terms {
-                let order = term_order(a, b);
-                assert_eq!(order == std::cmp::Ordering::Equal, a == b, "{a} and {b}");
-                assert_eq!(order, term_order(b, a).reverse(), "{a} and {b}");
+                let (key_a, key_b) = (term_key(a).unwrap(), term_key(b).unwrap());
+                assert_eq!(key_a == key_b, a == b, "{a} and {b}");
             }
         }
     }
@@ -3776,5 +3815,59 @@ this is not valid ntriples
         });
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].as_ref(), &t);
+    }
+
+    /// A stored triple carries the ids of its terms; the default graph and
+    /// the named graphs share one dictionary, so a term has one id in all of
+    /// them; a removed triple's terms keep theirs.
+    #[test]
+    fn stored_triples_carry_the_dataset_ids() {
+        use grafeo_common::types::TermId;
+        let store = RdfStore::new();
+        let alix = Term::iri("http://example.org/alix");
+        let knows = Term::iri("http://example.org/knows");
+        let gus = Term::iri("http://example.org/gus");
+        let age = Term::typed_literal("30", "http://www.w3.org/2001/XMLSchema#integer");
+        let age_predicate = Term::iri("http://example.org/age");
+        store.insert(Triple::new(alix.clone(), knows.clone(), gus.clone()));
+        store.batch_insert([Triple::new(
+            alix.clone(),
+            age_predicate.clone(),
+            age.clone(),
+        )]);
+        store.insert_into(
+            Some("http://example.org/g"),
+            Triple::new(gus.clone(), knows.clone(), alix.clone()),
+        );
+
+        let ids_of = |terms: [&Term; 3]| terms.map(|t| store.dictionary().lookup(t).unwrap());
+        let stored = store.find(&TriplePattern::with_subject(alix.clone()));
+        assert_eq!(stored.len(), 2);
+        for triple in &stored {
+            assert_eq!(
+                triple.ids(),
+                Some(ids_of([
+                    triple.subject(),
+                    triple.predicate(),
+                    triple.object()
+                ]))
+            );
+        }
+        let named = store.graph("http://example.org/g").unwrap();
+        assert!(Arc::ptr_eq(named.dictionary(), store.dictionary()));
+        let in_named = named.triples();
+        assert_eq!(in_named[0].ids(), Some(ids_of([&gus, &knows, &alix])));
+        assert_eq!(
+            store.dictionary().lookup(&age),
+            TermId::inline(&age),
+            "an inlined literal takes no entry"
+        );
+        assert_eq!(store.dictionary().len(), 4, "alix, knows, gus, age");
+
+        let id = store.dictionary().lookup(&gus);
+        assert!(store.remove(&Triple::new(alix.clone(), knows.clone(), gus.clone())));
+        assert!(named.remove(&Triple::new(gus.clone(), knows, alix)));
+        assert_eq!(store.dictionary().lookup(&gus), id, "a term keeps its id");
+        assert!(Triple::new(gus, age_predicate, age).ids().is_none());
     }
 }

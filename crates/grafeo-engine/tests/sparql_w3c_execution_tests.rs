@@ -13,6 +13,21 @@ mod tests {
     use grafeo_common::types::Value;
     use grafeo_engine::GrafeoDB;
 
+    /// The integer an `xsd:integer` result holds.
+    fn integer_of(value: &Value) -> i64 {
+        match value {
+            Value::RdfTerm(term) => match term.as_literal() {
+                Some(literal)
+                    if literal.datatype() == grafeo_common::types::rdf::Literal::XSD_INTEGER =>
+                {
+                    literal.value().parse().unwrap()
+                }
+                _ => panic!("expected an xsd:integer, got {value:?}"),
+            },
+            other => panic!("expected an xsd:integer, got {other:?}"),
+        }
+    }
+
     fn rdf_db() -> GrafeoDB {
         GrafeoDB::new_in_memory()
     }
@@ -1276,7 +1291,7 @@ mod tests {
             .execute_sparql("SELECT (COUNT(*) AS ?cnt) WHERE { ?s ?p ?o }")
             .unwrap();
         assert_eq!(r.row_count(), 1);
-        let count = r.rows()[0][0].as_int64().unwrap();
+        let count = integer_of(&r.rows()[0][0]);
         assert_eq!(count, 15);
     }
 
@@ -1290,7 +1305,7 @@ mod tests {
             )
             .unwrap();
         assert_eq!(r.row_count(), 1);
-        let count = r.rows()[0][0].as_int64().unwrap();
+        let count = integer_of(&r.rows()[0][0]);
         assert_eq!(count, 2, "alix knows gus, gus knows alix");
     }
 
@@ -1317,7 +1332,7 @@ mod tests {
             .execute_sparql("SELECT (COUNT(DISTINCT ?s) AS ?cnt) WHERE { ?s ?p ?o }")
             .unwrap();
         assert_eq!(r.row_count(), 1);
-        let count = r.rows()[0][0].as_int64().unwrap();
+        let count = integer_of(&r.rows()[0][0]);
         // Unique subjects: alix, gus, vincent, amsterdam
         assert!(count > 0);
     }
@@ -1341,7 +1356,7 @@ mod tests {
             )
             .unwrap();
         assert_eq!(r.row_count(), 1);
-        let count = r.rows()[0][0].as_int64().unwrap();
+        let count = integer_of(&r.rows()[0][0]);
         assert_eq!(count, 2);
     }
 
@@ -1421,10 +1436,10 @@ mod tests {
             .unwrap();
         assert_eq!(r.row_count(), 1);
         let val = &r.rows()[0][0];
-        // Should be integer 42, not empty string
-        assert!(
-            val.as_int64() == Some(42) || val.to_string() == "42",
-            "expected 42, got: {val:?}"
+        // The literal as written: an xsd:integer 42.
+        assert_eq!(
+            val.to_string(),
+            "\"42\"^^<http://www.w3.org/2001/XMLSchema#integer>"
         );
     }
 
@@ -1443,9 +1458,9 @@ mod tests {
             .unwrap();
         assert_eq!(r.row_count(), 1);
         let val = &r.rows()[0][0];
-        assert!(
-            val.to_string().starts_with("3.14"),
-            "expected 3.14, got: {val:?}"
+        assert_eq!(
+            val.to_string(),
+            "\"3.14\"^^<http://www.w3.org/2001/XMLSchema#double>"
         );
     }
 

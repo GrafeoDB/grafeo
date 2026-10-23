@@ -765,8 +765,18 @@ mod rdf_snapshots {
             .execute_sparql("SELECT ?name WHERE { ?s <http://ex.org/name> ?name } ORDER BY ?name")
             .unwrap();
         assert_eq!(result.rows().len(), 2);
-        assert_eq!(result.rows()[0][0], Value::String("Alix".into()));
-        assert_eq!(result.rows()[1][0], Value::String("Gus".into()));
+        assert_eq!(
+            result.rows()[0][0],
+            Value::RdfTerm(std::sync::Arc::new(
+                grafeo_common::types::rdf::Term::literal("Alix")
+            ))
+        );
+        assert_eq!(
+            result.rows()[1][0],
+            Value::RdfTerm(std::sync::Arc::new(
+                grafeo_common::types::rdf::Term::literal("Gus")
+            ))
+        );
     }
 
     #[test]
@@ -794,7 +804,12 @@ mod rdf_snapshots {
             .execute_sparql("SELECT ?name WHERE { ?s <http://ex.org/name> ?name }")
             .unwrap();
         assert_eq!(result.rows().len(), 1);
-        assert_eq!(result.rows()[0][0], Value::String("Alix".into()));
+        assert_eq!(
+            result.rows()[0][0],
+            Value::RdfTerm(std::sync::Arc::new(
+                grafeo_common::types::rdf::Term::literal("Alix")
+            ))
+        );
 
         // Named graph
         let result = session2
@@ -805,7 +820,12 @@ mod rdf_snapshots {
             )
             .unwrap();
         assert_eq!(result.rows().len(), 1);
-        assert_eq!(result.rows()[0][0], Value::String("Gus".into()));
+        assert_eq!(
+            result.rows()[0][0],
+            Value::RdfTerm(std::sync::Arc::new(
+                grafeo_common::types::rdf::Term::literal("Gus")
+            ))
+        );
     }
 
     #[test]
@@ -839,7 +859,12 @@ mod rdf_snapshots {
             .execute_sparql("SELECT ?name WHERE { ?s <http://ex.org/name> ?name }")
             .unwrap();
         assert_eq!(result.rows().len(), 1, "restore should revert to snapshot");
-        assert_eq!(result.rows()[0][0], Value::String("Alix".into()));
+        assert_eq!(
+            result.rows()[0][0],
+            Value::RdfTerm(std::sync::Arc::new(
+                grafeo_common::types::rdf::Term::literal("Alix")
+            ))
+        );
     }
 
     #[test]
@@ -864,7 +889,12 @@ mod rdf_snapshots {
             .execute_sparql("SELECT ?name WHERE { ?s <http://ex.org/name> ?name }")
             .unwrap();
         assert_eq!(result.rows().len(), 1, "default RDF graph copied");
-        assert_eq!(result.rows()[0][0], Value::String("Alix".into()));
+        assert_eq!(
+            result.rows()[0][0],
+            Value::RdfTerm(std::sync::Arc::new(
+                grafeo_common::types::rdf::Term::literal("Alix")
+            ))
+        );
 
         let result = session2
             .execute_sparql(
@@ -874,7 +904,12 @@ mod rdf_snapshots {
             )
             .unwrap();
         assert_eq!(result.rows().len(), 1, "named RDF graph copied");
-        assert_eq!(result.rows()[0][0], Value::String("Gus".into()));
+        assert_eq!(
+            result.rows()[0][0],
+            Value::RdfTerm(std::sync::Arc::new(
+                grafeo_common::types::rdf::Term::literal("Gus")
+            ))
+        );
 
         // Independence: mutating original doesn't affect copy
         session

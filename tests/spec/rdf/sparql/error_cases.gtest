@@ -47,9 +47,10 @@ tests:
   # ---------------------------------------------------------------------------
 
   - name: malformed_typed_literal
-    query: "SELECT ?v WHERE { ?s ?p \"abc\"^^<invalid iri> }"
+    # An IRI holds no space (grammar rule 139, IRIREF).
+    query: "SELECT ?s WHERE { ?s ?p \"abc\"^^<invalid iri> }"
     expect:
-      error: ""
+      error: "expected IRI or prefixed name"
 
   # ---------------------------------------------------------------------------
   # Unknown prefix

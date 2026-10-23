@@ -690,6 +690,19 @@ pub(super) fn read_catalog<S: CatalogStore>(
     Ok((indexes, catalog_epoch))
 }
 
+/// Whether `image` holds RDF sections of 0.6.0-beta.1, which store terms as
+/// N-Triples strings: an RDF section or a ring section of version 3. A
+/// read-write open keeps a copy of such a file and writes them in the
+/// current version (see
+/// [`keep_copy_before_upgrade`](super::migration::keep_copy_before_upgrade)).
+#[cfg(all(feature = "grafeo-file", feature = "triple-store"))]
+pub(super) fn holds_beta_rdf_sections(image: &dyn ImageSource) -> bool {
+    [SectionType::RdfStore, SectionType::RdfRing]
+        .into_iter()
+        .filter_map(|section| image.section_source(section))
+        .any(|source| source.section_version() == 3)
+}
+
 /// Loads the RDF triples of `image` into `rdf_store`, and the Ring index
 /// over them.
 ///
@@ -718,6 +731,8 @@ pub(super) fn load_triples(
         grafeo_common::grafeo_warn!("rebuilding the RDF ring from the triples: {err}");
         rdf_store.rebuild_ring();
     }
+    #[cfg(feature = "ring-index")]
+    rdf_store.release_loaded_ids();
     Ok(())
 }
 

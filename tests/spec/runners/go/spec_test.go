@@ -326,6 +326,12 @@ func valueToString(v interface{}) string {
 		return strconv.FormatInt(val, 10)
 	case string:
 		return val
+	case grafeo.RdfTerm:
+		// An RDF term as its lexical form, a blank node as "_:" and its label
+		if val.Type == grafeo.BlankNode {
+			return "_:" + val.Value
+		}
+		return val.Value
 	case []interface{}:
 		parts := make([]string, len(val))
 		for i, item := range val {

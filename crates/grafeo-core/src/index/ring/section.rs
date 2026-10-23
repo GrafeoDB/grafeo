@@ -6,7 +6,13 @@
 //!
 //! ## Versions
 //!
-//! - **3 (current, written by [`Section::write_to`]):** a metadata chunk
+//! - **4 (current, written by [`Section::write_to`]):** as version 3, but
+//!   stream 0 holds the ring's terms as term ids in ring id order: a count
+//!   (u64) and per term its id (u64, little-endian), a dictionary term's id
+//!   naming its row of the RDF section's term table (which the load reads
+//!   just before), an inlined literal's id itself. The terms are not written
+//!   twice.
+//! - **3 (0.6.0-beta.1):** a metadata chunk
 //!   (bincode of `RingMeta`: the layout byte, the byte cap the section was
 //!   written with, the number of triples), then six byte streams of graph 0,
 //!   each cut into [`ChunkKind::Stream`] pieces of at most the cap: stream 0
@@ -25,9 +31,10 @@
 //! - **1 (0.5.x):** bincode, detected by the absence of the `GRFR` magic at
 //!   offset 0; data flows through `TripleRing::load_from_bytes`.
 //!
-//! [`Section::read_from`] reads version 3, and passes the one raw chunk of
-//! versions 1 and 2 to [`Section::deserialize`]. The next checkpoint writes
-//! version 3.
+//! [`Section::read_from`] reads versions 4 and 3, and passes the one raw
+//! chunk of versions 1 and 2 to [`Section::deserialize`]. The next
+//! checkpoint writes version 4. A ring read from versions 1 to 3, or from a
+//! spill, gets the store's ids of its terms by looking them up.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -44,12 +51,15 @@ use grafeo_common::storage::section::{
 };
 use grafeo_common::utils::error::{Error, Result};
 
-use super::{PackedTermDictionary, write_permutation, write_wavelet_tree};
+use super::{write_permutation, write_wavelet_tree};
 use crate::graph::rdf::RdfStore;
 
 /// The version of the section this build writes: 1 was bincode, 2 the
 /// packed envelope as one raw chunk, 3 a metadata chunk and six streams.
-pub(crate) const RING_SECTION_VERSION: u8 = 3;
+pub(crate) const RING_SECTION_VERSION: u8 = 4;
+/// The version whose stream 0 is a packed dictionary of N-Triples strings
+/// (0.6.0-beta.1), which a load still reads.
+pub(crate) const RING_SECTION_VERSION_STRINGS: u8 = 3;
 
 /// The layout byte of the metadata chunk.
 const RING_LAYOUT: u8 = 1;
@@ -244,13 +254,14 @@ impl Section for RdfRingSection {
             super::TripleRing::load_from_bytes(data)
                 .map_err(|e| Error::corruption(e.to_string()))?
         };
-        self.store.set_ring(ring);
+        self.store.set_ring(self.with_store_ids(ring));
         Ok(())
     }
 
-    /// Writes version 3: the metadata chunk, then streams 0 to 5, one after
+    /// Writes version 4: the metadata chunk, then streams 0 to 5, one after
     /// the other (see the module doc). A store without a ring writes no
-    /// chunk, so the image holds no ring section.
+    /// chunk, so the image holds no ring section; nor does a ring without
+    /// the store's ids of its terms (the load builds it from the triples).
     ///
     /// # Errors
     ///
@@ -260,7 +271,18 @@ impl Section for RdfRingSection {
         let Some(ring) = self.store.ring() else {
             return Ok(());
         };
+        if ring.store_ids().len() != ring.num_terms() {
+            return Ok(());
+        }
         self.caps.validate()?;
+        // The file ids of the ring's terms, numbered as the RDF section
+        // numbers them (from the same triples: a write drops the ring).
+        let numbering = crate::graph::rdf::chunked::file_numbering(&self.store)?;
+        let mut ids = Vec::with_capacity(8 * (ring.num_terms() + 1));
+        ids.extend_from_slice(&(ring.num_terms() as u64).to_le_bytes());
+        for &id in ring.store_ids() {
+            ids.extend_from_slice(&numbering.file_id(id)?.raw().to_le_bytes());
+        }
         let meta = RingMeta {
             layout: RING_LAYOUT,
             max_bytes: self.caps.max_bytes,
@@ -274,11 +296,8 @@ impl Section for RdfRingSection {
             })?;
         sink.write_chunk(ChunkMeta::meta(), &meta)?;
 
-        // The ring keeps its terms in a heap dictionary: the packed
-        // dictionary is built whole, written, and dropped.
-        let dictionary = PackedTermDictionary::from_term_dict(ring.dictionary());
-        write_stream(sink, self.caps, 0, |out| dictionary.write_to(out))?;
-        drop(dictionary);
+        write_stream(sink, self.caps, 0, |out| out.write_all(&ids))?;
+        drop(ids);
         write_stream(sink, self.caps, 1, |out| {
             write_wavelet_tree(ring.subjects_wt(), out)
         })?;
@@ -296,7 +315,7 @@ impl Section for RdfRingSection {
         })
     }
 
-    /// Reads version 3, or the one raw chunk of versions 1 and 2. Each
+    /// Reads versions 4 and 3, or the one raw chunk of versions 1 and 2. Each
     /// stream is read into one buffer, which becomes its part's storage; the
     /// ring is set on the store only once all six parts are read, so a
     /// section that fails leaves the store's ring as it was.
@@ -310,7 +329,10 @@ impl Section for RdfRingSection {
         if let Some(bytes) = legacy_bytes(source)? {
             return self.deserialize(&bytes);
         }
-        check_version(SectionType::RdfRing, source, RING_SECTION_VERSION)?;
+        let version = source.section_version();
+        if version != RING_SECTION_VERSION_STRINGS {
+            check_version(SectionType::RdfRing, source, RING_SECTION_VERSION)?;
+        }
         check_chunks(source.chunks())?;
         let meta = decode_meta(&source.fetch(0)?)?;
         let num_triples = usize::try_from(meta.num_triples).map_err(|_| {
@@ -344,16 +366,50 @@ impl Section for RdfRingSection {
                 parts.len()
             ))
         })?;
-        let ring = super::assemble_triple_ring(
-            num_triples,
-            dictionary,
-            subjects,
-            predicates,
-            objects,
-            spo_to_pos,
-            spo_to_osp,
-        )
-        .map_err(|error| Error::corruption(format!("section RdfRing: {error}")))?;
+        let ring = if version == RING_SECTION_VERSION_STRINGS {
+            let ring = super::assemble_triple_ring(
+                num_triples,
+                dictionary,
+                subjects,
+                predicates,
+                objects,
+                spo_to_pos,
+                spo_to_osp,
+            )
+            .map_err(|error| Error::corruption(format!("section RdfRing: {error}")))?;
+            self.with_store_ids(ring)
+        } else {
+            let file_ids = file_ids_of(&dictionary)?;
+            let corrupt = |error: super::PackedRingError| {
+                Error::corruption(format!("section RdfRing: {error}"))
+            };
+            let tree = |part: &'static str, bytes: Bytes| {
+                super::deserialize_wavelet_tree(bytes)
+                    .map_err(|error| corrupt(super::PackedRingError::Wavelet { part, error }))
+            };
+            let permutation = |part: &'static str, bytes: Bytes| {
+                super::deserialize_permutation(bytes)
+                    .map_err(|error| corrupt(super::PackedRingError::Permutation { part, error }))
+            };
+            let trees = [
+                tree("subjects", subjects)?,
+                tree("predicates", predicates)?,
+                tree("objects", objects)?,
+            ];
+            if trees[0].len() != num_triples {
+                return Err(corrupt(super::PackedRingError::NumTriplesMismatch {
+                    declared: num_triples,
+                    observed: trees[0].len(),
+                }));
+            }
+            let permutations = [
+                permutation("spo_to_pos", spo_to_pos)?,
+                permutation("spo_to_osp", spo_to_osp)?,
+            ];
+            let (terms, store_ids) = self.terms_of(&file_ids)?;
+            super::TripleRing::from_parts(terms, store_ids, num_triples, trees, permutations)
+                .map_err(|error| corrupt(super::PackedRingError::RingInvariantViolation(error)))?
+        };
         self.store.set_ring(ring);
         Ok(())
     }
@@ -406,13 +462,106 @@ impl Section for RdfRingSection {
                 .map_err(|e| SpillError::IoError(e.to_string()))?
         };
 
-        self.store.set_ring(ring);
+        self.store.set_ring(self.with_store_ids(ring));
         Ok(())
     }
 }
 
+impl RdfRingSection {
+    /// `ring` with the store's id of each of its terms, looked up.
+    fn with_store_ids(&self, mut ring: super::TripleRing) -> super::TripleRing {
+        let dictionary = self.store.dictionary();
+        ring.attach_store_ids(|term| dictionary.lookup(term));
+        ring
+    }
+
+    /// The terms and store ids of the file ids of a version 4 stream 0: a
+    /// dictionary term's id names its row of the term table the RDF section
+    /// load read; an inlined literal's is its own.
+    fn terms_of(
+        &self,
+        file_ids: &[grafeo_common::types::TermId],
+    ) -> Result<(
+        Vec<crate::graph::rdf::Term>,
+        Vec<grafeo_common::types::TermId>,
+    )> {
+        use grafeo_common::types::TermIdKind;
+        let corrupt = |what: String| {
+            Error::corruption(format!("section RdfRing, stream 0 (dictionary): {what}"))
+        };
+        let loaded = self
+            .store
+            .take_loaded_ids()
+            .ok_or_else(|| corrupt("no RDF term table was read before the ring".to_string()))?;
+        let dictionary = self.store.dictionary();
+        let mut terms = Vec::with_capacity(file_ids.len());
+        let mut store_ids = Vec::with_capacity(file_ids.len());
+        for (position, &id) in file_ids.iter().enumerate() {
+            let raw = id.raw();
+            let store_id = match id.kind() {
+                TermIdKind::Dictionary => {
+                    let at = id.index().unwrap_or(u64::MAX);
+                    usize::try_from(at)
+                        .ok()
+                        .and_then(|at| loaded.get(at).copied())
+                        .ok_or_else(|| {
+                            corrupt(format!(
+                                "term {position}: row {at} of a term table of {} terms",
+                                loaded.len()
+                            ))
+                        })?
+                }
+                TermIdKind::Query => {
+                    return Err(corrupt(format!(
+                        "term {position}: a query's own term id, which a file never holds"
+                    )));
+                }
+                _ => id,
+            };
+            let term = dictionary
+                .term(store_id)
+                .ok_or_else(|| corrupt(format!("term {position}: {raw:#x} names no term")))?;
+            terms.push(term.as_ref().clone());
+            store_ids.push(store_id);
+        }
+        Ok((terms, store_ids))
+    }
+}
+
+/// The term ids of a version 4 stream 0: a count (u64), then that many ids
+/// (u64 each), little-endian, and nothing after them.
+fn file_ids_of(stream: &[u8]) -> Result<Vec<grafeo_common::types::TermId>> {
+    let corrupt =
+        |what: String| Error::corruption(format!("section RdfRing, stream 0 (dictionary): {what}"));
+    let (count, ids) = stream.split_first_chunk::<8>().ok_or_else(|| {
+        corrupt(format!(
+            "{} bytes, too few for its term count",
+            stream.len()
+        ))
+    })?;
+    let count = u64::from_le_bytes(*count);
+    if ids.len() % 8 != 0 || (ids.len() / 8) as u64 != count {
+        return Err(corrupt(format!(
+            "{} bytes, where a count of {count} terms takes {}",
+            stream.len(),
+            count.saturating_mul(8).saturating_add(8)
+        )));
+    }
+    ids.as_chunks::<8>()
+        .0
+        .iter()
+        .enumerate()
+        .map(|(position, raw)| {
+            let raw = u64::from_le_bytes(*raw);
+            grafeo_common::types::TermId::from_raw(raw)
+                .ok_or_else(|| corrupt(format!("term {position}: {raw:#x} is no term id")))
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
+    use super::super::PackedTermDictionary;
     use super::*;
     use crate::graph::rdf::{Term, Triple};
 
@@ -445,7 +594,7 @@ mod tests {
         assert_eq!(section.section_type(), SectionType::RdfRing);
         // 1 was bincode, 2 the packed envelope as one raw chunk, 3 streams.
         assert_eq!(section.version(), RING_SECTION_VERSION);
-        assert_eq!(RING_SECTION_VERSION, 3);
+        assert_eq!(RING_SECTION_VERSION, 4);
     }
 
     #[test]
@@ -657,9 +806,7 @@ mod tests {
     use grafeo_common::storage::{ImageSource, MemoryImage};
 
     use crate::graph::rdf::TriplePattern;
-    use crate::index::ring::{
-        TripleRing, serialize_permutation, serialize_triple_ring, serialize_wavelet_tree,
-    };
+    use crate::index::ring::{TripleRing, serialize_permutation, serialize_wavelet_tree};
 
     /// Caps small enough that every stream of a 500-triple ring spans
     /// several pieces.
@@ -718,14 +865,19 @@ mod tests {
         store
     }
 
-    /// The image `section` writes, as a checkpoint writes it.
+    /// The image a checkpoint writes with `section`: the store's RDF
+    /// section, whose term table the ring refers to, then the ring.
     fn image_of(section: &RdfRingSection) -> MemoryImage {
-        MemoryImage::from_sections(&[section as &dyn Section]).unwrap()
+        let triples = crate::graph::rdf::RdfStoreSection::new(Arc::clone(&section.store));
+        MemoryImage::from_sections(&[&triples as &dyn Section, section as &dyn Section]).unwrap()
     }
 
-    /// The ring section of `image`, read into a new store.
+    /// The RDF and ring sections of `image`, read into a new store.
     fn read_back(image: &MemoryImage) -> Result<Arc<RdfStore>> {
         let store = Arc::new(RdfStore::new());
+        if let Some(source) = image.section_source(SectionType::RdfStore) {
+            crate::graph::rdf::RdfStoreSection::new(Arc::clone(&store)).read_from(&*source)?;
+        }
         let source = image
             .section_source(SectionType::RdfRing)
             .expect("the image has a ring section");
@@ -851,21 +1003,31 @@ mod tests {
             );
         }
 
-        let store = Arc::new(RdfStore::new());
-        store.set_ring(ring.clone());
-        let image = image_of(&RdfRingSection::with_caps(store, TINY));
+        // The section writes streams 1 to 5 as these parts, and stream 0 as
+        // the ring's terms by their ids (a count, then an id per term).
+        let store = ringed_store();
+        let ring = store.ring().unwrap();
+        let serialized = [
+            Vec::new(),
+            serialize_wavelet_tree(ring.subjects_wt()),
+            serialize_wavelet_tree(ring.predicates_wt()),
+            serialize_wavelet_tree(ring.objects_wt()),
+            serialize_permutation(ring.spo_to_pos_perm()),
+            serialize_permutation(ring.spo_to_osp_perm()),
+        ];
+        let image = image_of(&RdfRingSection::with_caps(Arc::clone(&store), TINY));
         let source = image.section_source(SectionType::RdfRing).unwrap();
-        let envelope = serialize_triple_ring(&ring);
-        let mut body = Vec::new();
-        for (part, expected) in (0u32..).zip(&serialized) {
+        let ids = read_stream(&*source, 0, 0).unwrap();
+        assert_eq!(
+            ids.len(),
+            8 * (ring.num_terms() + 1),
+            "a count and an id per term"
+        );
+        assert_eq!(ids[..8], (ring.num_terms() as u64).to_le_bytes());
+        for (part, expected) in (1u32..).zip(&serialized[1..]) {
             let stream = read_stream(&*source, 0, part).unwrap();
             assert!(stream == expected[..], "stream {part} of the section");
-            body.extend_from_slice(&stream);
         }
-        assert!(
-            body == envelope[64..envelope.len() - 4],
-            "the streams, one after the other, are the body of the 0.5.x envelope"
-        );
     }
 
     /// A ring written with small caps reads back into a ring that answers
@@ -908,7 +1070,21 @@ mod tests {
         );
 
         let restored = read_back(&image).unwrap();
-        assert_same_ring(&store.ring().unwrap(), &restored.ring().expect("a ring"));
+        let ring = restored.ring().expect("a ring");
+        assert_same_ring(&store.ring().unwrap(), &ring);
+        // The ring reads its terms as the store's ids: each names the term
+        // the ring holds, in the store the load filled.
+        assert_eq!(ring.store_ids().len(), ring.num_terms());
+        for index in 0..ring.len() {
+            let triple = ring.get_spo(index).unwrap();
+            let ids = triple.ids().expect("a ring triple carries the store's ids");
+            for (term, id) in [triple.subject(), triple.predicate(), triple.object()]
+                .into_iter()
+                .zip(ids)
+            {
+                assert_eq!(restored.dictionary().lookup(term), Some(id), "{term}");
+            }
+        }
     }
 
     /// A section built with `new` writes with the caps of its thread, read
@@ -955,7 +1131,7 @@ mod tests {
         assert!(first == second, "one ring written twice");
         let built = || {
             let store = Arc::new(RdfStore::new());
-            store.set_ring(TripleRing::from_triples(five_hundred_triples().into_iter()));
+            store.bulk_load(five_hundred_triples());
             chunks_of(&image_of(&RdfRingSection::with_caps(store, TINY)))
         };
         assert!(built() == built(), "two rings built from the same triples");
@@ -966,7 +1142,7 @@ mod tests {
     #[test]
     fn a_store_without_a_ring_writes_no_chunk() {
         let section = RdfRingSection::with_caps(Arc::new(RdfStore::new()), TINY);
-        let image = image_of(&section);
+        let image = MemoryImage::from_sections(&[&section as &dyn Section]).unwrap();
         assert_eq!(image.chunk_count(), 0);
         assert!(image.section_source(SectionType::RdfRing).is_none());
     }
@@ -1045,41 +1221,41 @@ mod tests {
                 "another version",
                 2,
                 chunks.clone(),
-                &["RdfRing", "version 2", "version 3"],
+                &["RdfRing", "version 2", "version 4"],
             ),
             (
                 "no metadata chunk",
-                3,
+                RING_SECTION_VERSION,
                 chunks[1..].to_vec(),
                 &["RdfRing", "metadata chunk"],
             ),
             (
                 "the metadata chunk after a piece",
-                3,
+                RING_SECTION_VERSION,
                 late_meta,
                 &["RdfRing", "metadata chunk"],
             ),
             (
                 "trailing bytes in the metadata",
-                3,
+                RING_SECTION_VERSION,
                 trailing,
                 &["RdfRing", "metadata"],
             ),
             (
                 "a byte cap wider than a u32",
-                3,
+                RING_SECTION_VERSION,
                 wide_cap,
                 &["RdfRing", "metadata chunk does not decode"],
             ),
             (
                 "a triple count wider than a u64",
-                3,
+                RING_SECTION_VERSION,
                 huge_count,
                 &["RdfRing", "metadata chunk does not decode"],
             ),
             (
                 "another layout",
-                3,
+                RING_SECTION_VERSION,
                 with_meta(&RingMeta {
                     layout: 2,
                     max_bytes: 64,
@@ -1089,7 +1265,7 @@ mod tests {
             ),
             (
                 "another triple count",
-                3,
+                RING_SECTION_VERSION,
                 with_meta(&RingMeta {
                     layout: 1,
                     max_bytes: 64,
@@ -1099,25 +1275,25 @@ mod tests {
             ),
             (
                 "a seventh stream",
-                3,
+                RING_SECTION_VERSION,
                 with_chunk(ChunkMeta::stream_piece(0, 6, 0)),
                 &["RdfRing", "stream 6"],
             ),
             (
                 "a stream of another graph",
-                3,
+                RING_SECTION_VERSION,
                 with_chunk(ChunkMeta::stream_piece(3, 1, 0)),
                 &["RdfRing", "graph 3"],
             ),
             (
                 "a column chunk",
-                3,
+                RING_SECTION_VERSION,
                 with_chunk(ChunkMeta::column(0, 1, 0, 3, 0)),
                 &["RdfRing", "Column"],
             ),
             (
                 "a stream piece with rows",
-                3,
+                RING_SECTION_VERSION,
                 chunks
                     .iter()
                     .map(|(meta, bytes)| {
@@ -1136,19 +1312,19 @@ mod tests {
             ),
             (
                 "a missing stream",
-                3,
+                RING_SECTION_VERSION,
                 without(&|meta| piece(meta, 4)),
                 &["RdfRing", "stream 4", "spo_to_pos"],
             ),
             (
                 "a stream without its last piece",
-                3,
+                RING_SECTION_VERSION,
                 without(&|meta| piece(meta, 1) && meta.row_start == last_subjects),
                 &["RdfRing", "wavelet"],
             ),
             (
                 "a stream without its first piece",
-                3,
+                RING_SECTION_VERSION,
                 without(&|meta| piece(meta, 2) && meta.row_start == 0),
                 &["RdfRing", "stream 2", "expected 0"],
             ),

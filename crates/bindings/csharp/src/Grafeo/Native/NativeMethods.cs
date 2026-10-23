@@ -109,6 +109,10 @@ internal static partial class NativeMethods
     [LibraryImport(LibName)]
     internal static partial ulong grafeo_result_rows_scanned(nint result);
 
+    /// <summary>What a result holds: 0 rows, 1 one boolean (SPARQL ASK), 2 an RDF graph.</summary>
+    [LibraryImport(LibName)]
+    internal static partial int grafeo_result_kind(nint result);
+
     /// <summary>Write counter: nodes created.</summary>
     [LibraryImport(LibName)]
     internal static partial ulong grafeo_result_nodes_created(nint result);

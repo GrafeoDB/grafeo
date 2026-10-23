@@ -24,6 +24,9 @@ def value_to_string(val: Any) -> str:
     """
     if val is None:
         return "null"
+    # An RDF term is a str of its text; a blank node shows as `_:` and its label
+    if type(val).__name__ == "BlankNode" and type(val).__module__ == "grafeo.terms":
+        return f"_:{val}"
     if isinstance(val, bool):
         return "true" if val else "false"
     if isinstance(val, int):

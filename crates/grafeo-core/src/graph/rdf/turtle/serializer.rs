@@ -79,7 +79,7 @@ impl TurtleSerializer {
             first_subject = false;
 
             // Subject
-            write!(writer, "{}", format_term(subject, &active_prefixes))?;
+            write!(writer, "{}", format_term(subject, &active_prefixes)?)?;
 
             let mut first_pred = true;
             for (predicate, objects) in pred_groups {
@@ -97,7 +97,7 @@ impl TurtleSerializer {
                 {
                     write!(writer, "a")?;
                 } else {
-                    write!(writer, "{}", format_term(predicate, &active_prefixes))?;
+                    write!(writer, "{}", format_term(predicate, &active_prefixes)?)?;
                 }
 
                 // Objects (comma-separated for multiple)
@@ -107,7 +107,7 @@ impl TurtleSerializer {
                     } else {
                         write!(writer, ", ")?;
                     }
-                    write!(writer, "{}", format_term(object, &active_prefixes))?;
+                    write!(writer, "{}", format_term(object, &active_prefixes)?)?;
                 }
             }
 
@@ -196,12 +196,23 @@ fn group_by_subject(triples: &[Arc<Triple>]) -> Vec<(&Term, Vec<(&Term, Vec<&Ter
 }
 
 /// Formats a term as a Turtle string, using prefix notation where possible.
-fn format_term(term: &Term, prefixes: &[(String, String)]) -> String {
-    match term {
+///
+/// # Errors
+///
+/// An [`io::ErrorKind::InvalidData`] error for a term of a kind Turtle
+/// writing does not know.
+fn format_term(term: &Term, prefixes: &[(String, String)]) -> io::Result<String> {
+    Ok(match term {
         Term::Iri(iri) => format_iri(iri, prefixes),
         Term::BlankNode(bn) => format!("_:{}", bn.id()),
         Term::Literal(lit) => format_literal(lit, prefixes),
-    }
+        other => {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                grafeo_common::types::rdf::UnsupportedTermKind::of(other),
+            ));
+        }
+    })
 }
 
 /// Formats an IRI, using prefixed form if a matching namespace is found.

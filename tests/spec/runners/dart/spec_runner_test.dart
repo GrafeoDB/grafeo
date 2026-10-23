@@ -220,6 +220,10 @@ void _loadDataset(GrafeoDB db, String datasetName) {
 String _valueToString(dynamic val) {
   if (val == null) return 'null';
   if (val is bool) return val ? 'true' : 'false';
+  // An RDF term as its lexical form, a blank node as `_:` and its label
+  if (val is RdfTerm) {
+    return val.type == RdfTermType.blankNode ? '_:${val.value}' : val.value;
+  }
   if (val is int) return val.toString();
   if (val is double) {
     if (val.isNaN) return 'NaN';

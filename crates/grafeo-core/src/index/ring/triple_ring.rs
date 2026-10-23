@@ -7,6 +7,7 @@
 use super::permutation::SuccinctPermutation;
 use crate::codec::succinct::WaveletTree;
 use crate::graph::rdf::{Term, Triple, TriplePattern};
+use grafeo_common::types::TermId;
 use hashbrown::HashMap;
 use std::sync::Arc;
 
@@ -253,6 +254,13 @@ pub struct TripleRing {
 
     /// Permutation from SPO position to OSP position.
     spo_to_osp: SuccinctPermutation,
+
+    /// The id the store's dataset gives each ring term, by ring id; empty
+    /// for a ring of triples no store took (whose results then carry no
+    /// ids). The ring keeps its own terms too (it shares their strings with
+    /// the store); a ring on the store's ids alone is part of #659.
+    #[serde(skip, default)]
+    store_ids: Vec<TermId>,
 }
 
 impl TripleRing {
@@ -266,13 +274,25 @@ impl TripleRing {
         // Collect all triples and build dictionary
         let mut dict = TermDictionary::new();
         let mut compact_triples: Vec<CompactTriple> = Vec::new();
+        // The store's id of each ring term, while every triple has its ids.
+        let mut store_ids: Option<Vec<TermId>> = Some(Vec::new());
 
         for triple in triples {
+            let ids = triple.ids();
             let (s, p, o) = triple.into_parts();
+            let mut ring_id = |term: Term, slot: usize| {
+                let id = dict.get_or_insert(term);
+                match (&mut store_ids, ids) {
+                    (Some(known), Some(ids)) if id as usize == known.len() => known.push(ids[slot]),
+                    (Some(_), Some(_)) | (None, Some(_)) => {}
+                    (known, None) => *known = None,
+                }
+                id
+            };
             let compact = CompactTriple {
-                subject: dict.get_or_insert(s),
-                predicate: dict.get_or_insert(p),
-                object: dict.get_or_insert(o),
+                subject: ring_id(s, 0),
+                predicate: ring_id(p, 1),
+                object: ring_id(o, 2),
             };
             compact_triples.push(compact);
         }
@@ -286,6 +306,7 @@ impl TripleRing {
                 objects: WaveletTree::new(&[]),
                 spo_to_pos: SuccinctPermutation::default(),
                 spo_to_osp: SuccinctPermutation::default(),
+                store_ids: Vec::new(),
             };
         }
 
@@ -301,6 +322,13 @@ impl TripleRing {
             triple.predicate = remap[triple.predicate as usize];
             triple.object = remap[triple.object as usize];
         }
+        let store_ids = store_ids.map_or_else(Vec::new, |old| {
+            let mut ids = old.clone();
+            for (old_id, &new_id) in remap.iter().enumerate() {
+                ids[new_id as usize] = old[old_id];
+            }
+            ids
+        });
 
         // Sort by SPO (primary order)
         compact_triples.sort_by_key(|t| (t.subject, t.predicate, t.object));
@@ -355,7 +383,28 @@ impl TripleRing {
             objects: objects_wt,
             spo_to_pos: SuccinctPermutation::new(&spo_to_pos_arr),
             spo_to_osp: SuccinctPermutation::new(&spo_to_osp_arr),
+            store_ids,
         }
+    }
+
+    /// The store's id of each ring term, by ring id; empty when the ring's
+    /// triples had none.
+    #[must_use]
+    pub fn store_ids(&self) -> &[TermId] {
+        &self.store_ids
+    }
+
+    /// Gives the ring the store's id of each of its terms, from `lookup`;
+    /// a term `lookup` does not know leaves the ring without ids (its
+    /// results then carry none).
+    pub fn attach_store_ids(&mut self, lookup: impl Fn(&Term) -> Option<TermId>) {
+        let ids: Option<Vec<TermId>> = self
+            .dict
+            .id_to_term
+            .iter()
+            .map(|term| lookup(term))
+            .collect();
+        self.store_ids = ids.unwrap_or_default();
     }
 
     /// Returns the number of triples.
@@ -422,6 +471,52 @@ impl TripleRing {
         spo_to_pos: SuccinctPermutation,
         spo_to_osp: SuccinctPermutation,
     ) -> Result<Self, TripleRingInvariantError> {
+        let dict_len = packed_dict.len();
+        if u32::try_from(dict_len).is_err() {
+            return Err(TripleRingInvariantError::DictionaryOverflow { len: dict_len });
+        }
+        // Materialize the packed dictionary into a heap TermDictionary.
+        // get_or_insert preserves insertion order, so id N in the packed
+        // dict ends up as id N in the heap dict, as long as every term
+        // comes back as itself and no term comes twice.
+        let mut terms = Vec::with_capacity(dict_len);
+        for id in (0u32..).take(dict_len) {
+            let missing = TripleRingInvariantError::DictionaryMissingTerm { id };
+            let text = packed_dict.get_term_str(id).ok_or(missing.clone())?;
+            // A string that does not parse cannot come back as its term either.
+            let term = Term::from_ntriples(text)
+                .map_err(|_| TripleRingInvariantError::TermDoesNotRoundTrip { id })?;
+            if term.to_string() != text {
+                return Err(TripleRingInvariantError::TermDoesNotRoundTrip { id });
+            }
+            terms.push(term);
+        }
+        Self::from_parts(
+            terms,
+            Vec::new(),
+            num_triples,
+            [subjects, predicates, objects],
+            [spo_to_pos, spo_to_osp],
+        )
+    }
+
+    /// Reassembles a ring from its terms in ring id order (with the store's
+    /// id of each, or none), its wavelet trees of subjects, predicates and
+    /// objects, and its permutations from SPO to POS and to OSP order.
+    ///
+    /// # Errors
+    ///
+    /// The invariants [`from_packed_parts`](Self::from_packed_parts) checks
+    /// that do not concern the packed strings: the lengths, a term listed
+    /// twice, a symbol past the terms; and store ids of another count than
+    /// the terms.
+    pub fn from_parts(
+        terms: Vec<Term>,
+        store_ids: Vec<TermId>,
+        num_triples: usize,
+        [subjects, predicates, objects]: [WaveletTree; 3],
+        [spo_to_pos, spo_to_osp]: [SuccinctPermutation; 2],
+    ) -> Result<Self, TripleRingInvariantError> {
         // Per-component length must equal num_triples; otherwise
         // `get_spo` would index out of bounds against the wavelet trees
         // or permutations.
@@ -442,9 +537,16 @@ impl TripleRing {
             }
         }
 
-        let dict_len = packed_dict.len();
+        let dict_len = terms.len();
         if u32::try_from(dict_len).is_err() {
             return Err(TripleRingInvariantError::DictionaryOverflow { len: dict_len });
+        }
+        if !store_ids.is_empty() && store_ids.len() != dict_len {
+            return Err(TripleRingInvariantError::ComponentLengthMismatch {
+                component: "store ids",
+                expected: dict_len,
+                actual: store_ids.len(),
+            });
         }
         // The trees hold term ids: every one names a term of the
         // dictionary (the symbols are sorted, the last is the largest).
@@ -464,20 +566,10 @@ impl TripleRing {
             }
         }
 
-        // Materialize the packed dictionary into a heap TermDictionary.
-        // get_or_insert preserves insertion order, so id N in the packed
-        // dict ends up as id N in the heap dict, as long as every term
-        // comes back as itself and no term comes twice.
+        // get_or_insert keeps the order: term N gets id N while no term
+        // comes twice.
         let mut dict = TermDictionary::with_capacity(dict_len);
-        for id in (0u32..).take(dict_len) {
-            let missing = TripleRingInvariantError::DictionaryMissingTerm { id };
-            let text = packed_dict.get_term_str(id).ok_or(missing.clone())?;
-            // A string that does not parse cannot come back as its term either.
-            let term = Term::from_ntriples(text)
-                .map_err(|_| TripleRingInvariantError::TermDoesNotRoundTrip { id })?;
-            if term.to_string() != text {
-                return Err(TripleRingInvariantError::TermDoesNotRoundTrip { id });
-            }
+        for (id, term) in (0u32..).zip(terms) {
             let given = dict.get_or_insert(term);
             if given != id {
                 return Err(TripleRingInvariantError::DuplicateTerm { id, first: given });
@@ -492,6 +584,7 @@ impl TripleRing {
             objects,
             spo_to_pos,
             spo_to_osp,
+            store_ids,
         })
     }
 
@@ -516,7 +609,12 @@ impl TripleRing {
         let p = self.dict.get_term(p_id)?.clone();
         let o = self.dict.get_term(o_id)?.clone();
 
-        Some(Triple::new_unchecked(s, p, o))
+        let triple = Triple::new_unchecked(s, p, o);
+        if self.store_ids.is_empty() {
+            return Some(triple);
+        }
+        let store_id = |ring_id: u32| self.store_ids.get(ring_id as usize).copied();
+        Some(triple.with_ids([store_id(s_id)?, store_id(p_id)?, store_id(o_id)?]))
     }
 
     /// Returns the subjects wavelet tree.

@@ -35,6 +35,102 @@ pub struct PyValue {
     pub(crate) inner: Value,
 }
 
+/// The classes of `grafeo.terms`, imported once.
+static IRI_CLASS: pyo3::sync::PyOnceLock<Py<pyo3::types::PyType>> = pyo3::sync::PyOnceLock::new();
+static BLANK_NODE_CLASS: pyo3::sync::PyOnceLock<Py<pyo3::types::PyType>> =
+    pyo3::sync::PyOnceLock::new();
+static LITERAL_CLASS: pyo3::sync::PyOnceLock<Py<pyo3::types::PyType>> =
+    pyo3::sync::PyOnceLock::new();
+
+/// An RDF term as Python reads it: a `grafeo.IRI`, a `grafeo.BlankNode`
+/// (its label without `_:`) or a `grafeo.Literal` (with `language` and
+/// `datatype`), each a `str` of its text.
+///
+/// # Errors
+///
+/// A `GrafeoError` naming the term for a term of a kind this binding does
+/// not know ([`UnsupportedTermKind`](grafeo_common::types::rdf::UnsupportedTermKind)),
+/// and the Python error when `grafeo.terms` cannot build the term.
+fn term_to_py(term: &grafeo_common::types::rdf::Term, py: Python<'_>) -> PyResult<Py<PyAny>> {
+    use grafeo_common::types::rdf::{Literal, Term};
+    let made = match term {
+        Term::Iri(iri) => IRI_CLASS
+            .import(py, "grafeo.terms", "IRI")
+            .and_then(|class| class.call1((iri.as_str(),))),
+        Term::BlankNode(node) => BLANK_NODE_CLASS
+            .import(py, "grafeo.terms", "BlankNode")
+            .and_then(|class| class.call1((node.id(),))),
+        Term::Literal(literal) => LITERAL_CLASS
+            .import(py, "grafeo.terms", "Literal")
+            .and_then(|class| match literal.language() {
+                Some(language) => class.call1((literal.value(), language)),
+                None if literal.datatype() == Literal::XSD_STRING => {
+                    class.call1((literal.value(),))
+                }
+                None => class.call1((literal.value(), py.None(), literal.datatype())),
+            }),
+        other => return Err(unsupported_term_kind(other).into()),
+    };
+    made.map(Bound::unbind)
+}
+
+/// The error for a term of a kind this binding does not know, as the
+/// database reports it (a `GrafeoError` with the code of an unsupported
+/// query feature).
+fn unsupported_term_kind(term: &grafeo_common::types::rdf::Term) -> PyGrafeoError {
+    PyGrafeoError::from(grafeo_common::utils::error::Error::from(
+        grafeo_common::types::rdf::UnsupportedTermKind::of(term),
+    ))
+}
+
+/// The RDF term a Python object is, when it is a `grafeo.IRI`, a
+/// `grafeo.BlankNode` or a `grafeo.Literal`.
+fn py_term(obj: &Bound<'_, PyAny>) -> PyGrafeoResult<Option<grafeo_common::types::rdf::Term>> {
+    use grafeo_common::types::rdf::{Literal, Term};
+    if !obj.is_instance_of::<pyo3::types::PyString>() {
+        return Ok(None);
+    }
+    let py = obj.py();
+    let class = |cell: &'static pyo3::sync::PyOnceLock<Py<pyo3::types::PyType>>, name: &str| {
+        cell.import(py, "grafeo.terms", name)
+            .map_err(|e| PyGrafeoError::Type(format!("grafeo.terms unavailable: {e}")))
+    };
+    let text = || -> PyGrafeoResult<String> {
+        obj.extract::<String>()
+            .map_err(|e| PyGrafeoError::Type(format!("cannot read term {obj}: {e}")))
+    };
+    if obj.is_instance(class(&IRI_CLASS, "IRI")?).unwrap_or(false) {
+        return Ok(Some(Term::iri(text()?)));
+    }
+    if obj
+        .is_instance(class(&BLANK_NODE_CLASS, "BlankNode")?)
+        .unwrap_or(false)
+    {
+        return Ok(Some(Term::blank(text()?)));
+    }
+    if obj
+        .is_instance(class(&LITERAL_CLASS, "Literal")?)
+        .unwrap_or(false)
+    {
+        let attribute = |name: &str| -> PyGrafeoResult<Option<String>> {
+            obj.getattr(name)
+                .and_then(|value| value.extract::<Option<String>>())
+                .map_err(|e| PyGrafeoError::Type(format!("cannot read the {name} of {obj}: {e}")))
+        };
+        let value = text()?;
+        return Ok(Some(
+            match (attribute("language")?, attribute("datatype")?) {
+                (Some(language), _) => Term::lang_literal(value, language),
+                (None, Some(datatype)) if datatype != Literal::XSD_STRING => {
+                    Term::typed_literal(value, datatype)
+                }
+                _ => Term::literal(value),
+            },
+        ));
+    }
+    Ok(None)
+}
+
 #[pymethods]
 impl PyValue {
     /// Create a null value.
@@ -137,6 +233,11 @@ impl PyValue {
     pub fn from_py(obj: &Bound<'_, PyAny>) -> PyGrafeoResult<Value> {
         if obj.is_none() {
             return Ok(Value::Null);
+        }
+
+        // An RDF term (a `str` subclass) before the strings: the exact term.
+        if let Some(term) = py_term(obj)? {
+            return Ok(Value::RdfTerm(std::sync::Arc::new(term)));
         }
 
         if let Ok(v) = obj.extract::<bool>() {
@@ -267,13 +368,19 @@ impl PyValue {
 
     /// Converts a Grafeo Value to a Python object.
     ///
+    /// # Errors
+    ///
+    /// A `GrafeoError` for an RDF term of a kind this binding does not know,
+    /// at any depth (see [`term_to_py`]).
+    ///
     /// # Panics
     ///
     /// Panics on memory exhaustion during Python object allocation.
-    pub fn to_py(value: &Value, py: Python<'_>) -> Py<PyAny> {
+    pub fn to_py(value: &Value, py: Python<'_>) -> PyResult<Py<PyAny>> {
         use pyo3::conversion::IntoPyObjectExt;
 
-        match value {
+        Ok(match value {
+            Value::RdfTerm(term) => term_to_py(term, py)?,
             Value::Null => py.None(),
             // PyO3 conversions for primitive types only fail on memory exhaustion
             Value::Bool(v) => (*v)
@@ -291,7 +398,10 @@ impl PyValue {
                     .expect("str to Python conversion cannot fail")
             }
             Value::List(items) => {
-                let py_items: Vec<Py<PyAny>> = items.iter().map(|v| Self::to_py(v, py)).collect();
+                let py_items = items
+                    .iter()
+                    .map(|v| Self::to_py(v, py))
+                    .collect::<PyResult<Vec<_>>>()?;
                 PyList::new(py, py_items)
                     .expect("PyList creation only fails on memory exhaustion")
                     .unbind()
@@ -300,7 +410,7 @@ impl PyValue {
             Value::Map(map) => {
                 let dict = PyDict::new(py);
                 for (k, v) in map.as_ref() {
-                    dict.set_item(k.as_str(), Self::to_py(v, py))
+                    dict.set_item(k.as_str(), Self::to_py(v, py)?)
                         .expect("dict.set_item only fails on memory exhaustion");
                 }
                 dict.unbind().into_any()
@@ -407,8 +517,14 @@ impl PyValue {
             }
             Value::Path { nodes, edges } => {
                 let dict = PyDict::new(py);
-                let py_nodes: Vec<Py<PyAny>> = nodes.iter().map(|v| Self::to_py(v, py)).collect();
-                let py_edges: Vec<Py<PyAny>> = edges.iter().map(|v| Self::to_py(v, py)).collect();
+                let py_nodes = nodes
+                    .iter()
+                    .map(|v| Self::to_py(v, py))
+                    .collect::<PyResult<Vec<_>>>()?;
+                let py_edges = edges
+                    .iter()
+                    .map(|v| Self::to_py(v, py))
+                    .collect::<PyResult<Vec<_>>>()?;
                 dict.set_item(
                     "nodes",
                     PyList::new(py, py_nodes)
@@ -460,7 +576,7 @@ impl PyValue {
                 s.into_py_any(py)
                     .expect("str to Python conversion cannot fail")
             }
-        }
+        })
     }
 }
 

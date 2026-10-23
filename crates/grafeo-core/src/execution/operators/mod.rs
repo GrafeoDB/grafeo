@@ -475,6 +475,12 @@ impl From<grafeo_common::utils::error::Error> for OperatorError {
     }
 }
 
+impl From<grafeo_common::types::rdf::UnsupportedTermKind> for OperatorError {
+    fn from(error: grafeo_common::types::rdf::UnsupportedTermKind) -> Self {
+        grafeo_common::utils::error::Error::from(error).into()
+    }
+}
+
 impl OperatorError {
     /// An integer or decimal result that does not fit (GQLSTATUS 22003);
     /// `operation` says which, such as `9223372036854775807 + 1`.

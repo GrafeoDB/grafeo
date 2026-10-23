@@ -346,10 +346,19 @@ fn sparql_xsd_date_literal() {
         )
         .unwrap();
     assert!(!result.rows().is_empty(), "expected at least one row");
-    let d = result.rows()[0][0].as_date().expect("expected Date value");
-    assert_eq!(d.year(), 2024);
-    assert_eq!(d.month(), 3);
-    assert_eq!(d.day(), 15);
+    // The literal as written, and its date parts read by value.
+    assert_eq!(
+        result.rows()[0][0].to_string(),
+        "\"2024-03-15\"^^<http://www.w3.org/2001/XMLSchema#date>"
+    );
+    let parts = db
+        .execute_sparql(
+            r#"SELECT (YEAR(?d) AS ?y) (MONTH(?d) AS ?m) (DAY(?d) AS ?day) WHERE { BIND("2024-03-15"^^<http://www.w3.org/2001/XMLSchema#date> AS ?d) }"#,
+        )
+        .unwrap();
+    let parts: Vec<String> = parts.rows()[0].iter().map(ToString::to_string).collect();
+    let integer = |n: &str| format!("\"{n}\"^^<http://www.w3.org/2001/XMLSchema#integer>");
+    assert_eq!(parts, [integer("2024"), integer("3"), integer("15")]);
 }
 
 #[test]
@@ -362,10 +371,10 @@ fn sparql_xsd_duration_literal() {
         )
         .unwrap();
     assert!(!result.rows().is_empty(), "expected at least one row");
-    let d = result.rows()[0][0]
-        .as_duration()
-        .expect("expected Duration value");
-    assert_eq!(d.months(), 18);
+    assert_eq!(
+        result.rows()[0][0].to_string(),
+        "\"P1Y6M\"^^<http://www.w3.org/2001/XMLSchema#duration>"
+    );
 }
 
 // ============================================================================

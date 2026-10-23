@@ -41,6 +41,18 @@ public sealed record QueryResult(
 {
     /// <summary>What a write statement changed (all zero for a read).</summary>
     public WriteCounters Counters { get; init; } = WriteCounters.None;
+
+    /// <summary>
+    /// What the result holds: rows, one boolean (SPARQL ASK) or an RDF graph
+    /// (SPARQL CONSTRUCT and DESCRIBE).
+    /// </summary>
+    public ResultKind Kind { get; init; } = ResultKind.Rows;
+
+    /// <summary>The answer of a SPARQL ASK; <c>null</c> for every other result.</summary>
+    public bool? Boolean =>
+        Kind == ResultKind.Boolean && Rows.Count == 1 && Rows[0].TryGetValue("boolean", out var answer)
+            ? answer as bool?
+            : null;
 }
 
 /// <summary>What a write statement changed.</summary>

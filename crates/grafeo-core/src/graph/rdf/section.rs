@@ -29,7 +29,9 @@ use grafeo_common::storage::section::{
 };
 use grafeo_common::utils::error::{Error, Result};
 
-use super::chunked::{RDF_SECTION_VERSION, read_rdf_chunks, write_rdf_chunks};
+use super::chunked::{
+    RDF_SECTION_VERSION, RDF_SECTION_VERSION_STRINGS, read_rdf_chunks, write_rdf_chunks,
+};
 use crate::graph::rdf::{RdfStore, Term, Triple};
 
 /// The version byte in the header of the block format (0.5.x).
@@ -460,8 +462,11 @@ impl Section for RdfStoreSection {
         if let Some(bytes) = legacy_bytes(source)? {
             return self.deserialize(&bytes);
         }
-        check_version(SectionType::RdfStore, source, RDF_SECTION_VERSION)?;
-        read_rdf_chunks(&self.store, source)
+        let version = source.section_version();
+        if version != RDF_SECTION_VERSION_STRINGS {
+            check_version(SectionType::RdfStore, source, RDF_SECTION_VERSION)?;
+        }
+        read_rdf_chunks(&self.store, source, version)
     }
 
     fn is_dirty(&self) -> bool {

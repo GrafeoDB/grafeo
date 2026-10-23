@@ -45,8 +45,17 @@ mod tests {
 
     fn pairs(session: &Session, query: &str) -> Vec<(String, String)> {
         let result = session.execute_sparql(query).unwrap();
+        // A subject's IRI and an object's literal text; any other kind shows.
         let text = |value: &Value| match value {
-            Value::String(s) => s.to_string(),
+            Value::RdfTerm(term) => match term.as_ref() {
+                grafeo_common::types::rdf::Term::Iri(iri) => iri.as_str().to_string(),
+                grafeo_common::types::rdf::Term::Literal(literal)
+                    if literal.datatype() == grafeo_common::types::rdf::Literal::XSD_STRING =>
+                {
+                    literal.value().to_string()
+                }
+                other => format!("{other:?}"),
+            },
             other => format!("{other:?}"),
         };
         let mut rows: Vec<(String, String)> = result

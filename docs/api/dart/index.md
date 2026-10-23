@@ -889,8 +889,8 @@ enum IsolationLevel {
 
 ### GrafeoDecimal
 
-An exact decimal from Grafeo (GQL `1.50`, `CAST(x AS DECIMAL(10, 2))`, SPARQL
-`xsd:decimal`): up to 38 digits, kept as its `text` with its scale. Equal
+An exact decimal from Grafeo (GQL `1.50`, `CAST(x AS DECIMAL(10, 2))`): up to
+38 digits, kept as its `text` with its scale. Equal
 values are equal whatever their scale (`1.50` equals `1.5`). Dart has no
 decimal type of its own: `toDouble()` gives the nearest double, and
 `GrafeoDecimal('1.50')` passed as a parameter goes in exactly.
@@ -899,6 +899,28 @@ decimal type of its own: `toDouble()` gives the nearest double, and
 final result = db.execute('RETURN 19.99 AS price');
 final price = result.rows.first['price'] as GrafeoDecimal;
 print(price.text);  // 19.99
+```
+
+### RdfTerm
+
+An RDF term from a SPARQL result: its `type` (`RdfTermType.iri`, `blankNode`
+or `literal`), its `value` (the IRI, the blank node's label without `_:`, or
+the lexical form), and for a literal its `language` tag or `datatype` (null
+for a simple literal; `literalDatatype` gives `xsd:string` or
+`rdf:langString` there). An `RdfTerm` passed as a parameter, or stored as a
+property, is that exact term. Language tags compare without case, so a term
+keeps its tag in lowercase (`language: 'FR'` is `'fr'`), and a literal of
+datatype `xsd:string` is the simple literal: two `RdfTerm`s are equal when they
+are the same RDF term. A map with `type` and `value` keys stays a map: on the
+wire a term is the `$term` tag (see the C API). A result's `kind` is
+`ResultKind.rows`,
+`ResultKind.boolean` for a SPARQL ASK (`boolean` gives its answer) or
+`ResultKind.graph` for CONSTRUCT and DESCRIBE.
+
+```dart
+final result = db.executeSparql('SELECT ?o WHERE { <http://ex.org/apple> <http://ex.org/label> ?o }');
+final label = result.rows.first['o'] as RdfTerm;
+print('${label.value} ${label.language}');  // Pomme fr
 ```
 
 ### Node

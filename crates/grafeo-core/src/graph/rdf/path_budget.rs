@@ -244,15 +244,23 @@ impl PathBudget {
 }
 
 /// Counts retained Arc payloads conservatively, including their headers.
-pub(crate) fn term_payload(term: &super::Term) -> usize {
+///
+/// # Errors
+///
+/// [`UnsupportedTermKind`](grafeo_common::types::rdf::UnsupportedTermKind)
+/// for a term of a kind it does not know.
+pub(crate) fn term_payload(
+    term: &super::Term,
+) -> Result<usize, grafeo_common::types::rdf::UnsupportedTermKind> {
     let arc = |len: usize| len.saturating_add(2 * size_of::<usize>());
-    match term {
+    Ok(match term {
         super::Term::Iri(iri) => arc(iri.as_str().len()),
         super::Term::BlankNode(node) => arc(node.id().len()),
         super::Term::Literal(literal) => arc(literal.value().len())
             .saturating_add(arc(literal.datatype().len()))
             .saturating_add(literal.language().map_or(0, |lang| arc(lang.len()))),
-    }
+        other => return Err(grafeo_common::types::rdf::UnsupportedTermKind::of(other)),
+    })
 }
 
 #[cfg(test)]

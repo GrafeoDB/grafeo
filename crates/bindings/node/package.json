@@ -6,6 +6,7 @@
   "types": "grafeo.d.ts",
   "napi": {
     "binaryName": "grafeo",
+    "dtsHeaderFile": "dts-header.d.ts",
     "targets": [
       "x86_64-apple-darwin",
       "x86_64-pc-windows-msvc",

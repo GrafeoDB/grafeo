@@ -160,10 +160,10 @@ The Ring Index implements the `Section` trait for `.grafeo` container persistenc
 | -------- | ----- |
 | Section type | `RdfRing` |
 | Version | 3 |
-| Encoding | A metadata chunk, then six byte streams (term dictionary, three wavelet trees, two permutations) in their packed formats |
+| Encoding | A metadata chunk, then six byte streams (the ring's terms as term ids of the RDF section's term table, three wavelet trees, two permutations) |
 | Dirty tracking | Atomic boolean, set on rebuild/invalidation |
 
-A checkpoint writes the term dictionary, the wavelet trees and the permutations as six streams, cut into chunks of at most 1 MiB (see [Stream Sections](container-format.md#stream-sections)). On load, each stream becomes that part's storage, and structural invariants are validated: wavelet tree lengths must match `num_triples`, permutation arrays must be valid permutations, and the term dictionary must be internally consistent. This prevents panics from corrupted data: a ring section that does not decode is rebuilt from the triples, with a warning. 0.5.x files hold the ring as one chunk (version 2, the packed formats in one envelope, or version 1, bincode), which still loads.
+A checkpoint writes the ring's terms (as the ids of the RDF section's term table, so no term is written twice), the wavelet trees and the permutations as six streams, cut into chunks of at most 1 MiB (see [Stream Sections](container-format.md#stream-sections)). On load, each stream becomes that part's storage, and structural invariants are validated: wavelet tree lengths must match `num_triples`, permutation arrays must be valid permutations, and the term dictionary must be internally consistent. This prevents panics from corrupted data: a ring section that does not decode is rebuilt from the triples, with a warning. 0.5.x files hold the ring as one chunk (version 2, the packed formats in one envelope, or version 1, bincode), which still loads.
 
 ## Memory Characteristics
 

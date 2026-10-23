@@ -1969,6 +1969,22 @@ mod sparql_features {
     use grafeo_common::types::Value;
     use grafeo_engine::{Config, GrafeoDB, GraphModel};
 
+    /// A simple literal as a SPARQL result holds it.
+    fn literal(text: &str) -> Value {
+        Value::RdfTerm(std::sync::Arc::new(
+            grafeo_common::types::rdf::Term::literal(text),
+        ))
+    }
+
+    /// An `xsd:integer` as a SPARQL result holds it.
+    fn integer(n: i64) -> Value {
+        Value::RdfTerm(std::sync::Arc::new(
+            grafeo_common::types::rdf::Term::Literal(grafeo_common::types::rdf::Literal::integer(
+                n,
+            )),
+        ))
+    }
+
     fn rdf_db() -> GrafeoDB {
         GrafeoDB::with_config(Config::in_memory().with_graph_model(GraphModel::Rdf)).unwrap()
     }
@@ -2076,7 +2092,7 @@ mod sparql_features {
         let gus_row = result
             .rows()
             .iter()
-            .find(|r| r[0] == Value::String("Gus".into()))
+            .find(|r| r[0] == literal("Gus"))
             .expect("Gus should appear in results");
         assert_eq!(gus_row[1], Value::Null, "Gus has no age, should be NULL");
     }
@@ -2117,15 +2133,15 @@ mod sparql_features {
         let alix_row = result
             .rows()
             .iter()
-            .find(|r| r[0] == Value::String("Alix".into()))
+            .find(|r| r[0] == literal("Alix"))
             .expect("Alix should appear");
-        assert_eq!(alix_row[1], Value::String("Gus".into()));
-        assert_eq!(alix_row[2], Value::String("Amsterdam".into()));
+        assert_eq!(alix_row[1], literal("Gus"));
+        assert_eq!(alix_row[2], literal("Amsterdam"));
 
         let harm_row = result
             .rows()
             .iter()
-            .find(|r| r[0] == Value::String("Harm".into()))
+            .find(|r| r[0] == literal("Harm"))
             .expect("Harm should appear");
         assert_eq!(harm_row[1], Value::Null, "Harm knows nobody");
         assert_eq!(harm_row[2], Value::Null, "Nested optional also NULL");
@@ -2174,18 +2190,14 @@ mod sparql_features {
         let alix_row = result
             .rows()
             .iter()
-            .find(|r| r[0] == Value::String("Alix".into()))
+            .find(|r| r[0] == literal("Alix"))
             .expect("Alix should appear");
-        assert_eq!(
-            alix_row[1],
-            Value::String("80".into()),
-            "Alix score passes filter"
-        );
+        assert_eq!(alix_row[1], literal("80"), "Alix score passes filter");
 
         let gus_row = result
             .rows()
             .iter()
-            .find(|r| r[0] == Value::String("Gus".into()))
+            .find(|r| r[0] == literal("Gus"))
             .expect("Gus should appear");
         assert_eq!(
             gus_row[1],
@@ -2196,7 +2208,7 @@ mod sparql_features {
         let harm_row = result
             .rows()
             .iter()
-            .find(|r| r[0] == Value::String("Harm".into()))
+            .find(|r| r[0] == literal("Harm"))
             .expect("Harm should appear");
         assert_eq!(
             harm_row[1],
@@ -2234,14 +2246,14 @@ mod sparql_features {
         let alix_row = result
             .rows()
             .iter()
-            .find(|r| r[0] == Value::String("Alix".into()))
+            .find(|r| r[0] == literal("Alix"))
             .expect("Alix should appear");
-        assert_eq!(alix_row[1], Value::String("Gus".into()));
+        assert_eq!(alix_row[1], literal("Gus"));
 
         let gus_row = result
             .rows()
             .iter()
-            .find(|r| r[0] == Value::String("Gus".into()))
+            .find(|r| r[0] == literal("Gus"))
             .expect("Gus should appear");
         assert_eq!(
             gus_row[1],
@@ -2537,27 +2549,23 @@ mod sparql_features {
         let alix_row = result
             .rows()
             .iter()
-            .find(|r| r[0] == Value::String("Alix".into()))
+            .find(|r| r[0] == literal("Alix"))
             .expect("Alix should appear");
-        assert_eq!(alix_row[1], Value::String("30".into()), "Alix has age");
+        assert_eq!(alix_row[1], literal("30"), "Alix has age");
         assert_eq!(alix_row[2], Value::Null, "Alix has no email");
 
         let gus_row = result
             .rows()
             .iter()
-            .find(|r| r[0] == Value::String("Gus".into()))
+            .find(|r| r[0] == literal("Gus"))
             .expect("Gus should appear");
         assert_eq!(gus_row[1], Value::Null, "Gus has no age");
-        assert_eq!(
-            gus_row[2],
-            Value::String("gus@example.org".into()),
-            "Gus has email"
-        );
+        assert_eq!(gus_row[2], literal("gus@example.org"), "Gus has email");
 
         let harm_row = result
             .rows()
             .iter()
-            .find(|r| r[0] == Value::String("Harm".into()))
+            .find(|r| r[0] == literal("Harm"))
             .expect("Harm should appear");
         assert_eq!(harm_row[1], Value::Null, "Harm has no age");
         assert_eq!(harm_row[2], Value::Null, "Harm has no email");
@@ -2589,14 +2597,10 @@ mod sparql_features {
             .unwrap();
         assert_eq!(result.row_count(), 1);
         // 3 people total, 2 with scores
-        assert_eq!(
-            result.rows()[0][0],
-            Value::Int64(3),
-            "COUNT(?name) should be 3"
-        );
+        assert_eq!(result.rows()[0][0], integer(3), "COUNT(?name) should be 3");
         assert_eq!(
             result.rows()[0][1],
-            Value::Int64(2),
+            integer(2),
             "COUNT(?score) should skip NULLs: 2"
         );
     }
@@ -2640,14 +2644,14 @@ mod sparql_features {
         let alix_row = result
             .rows()
             .iter()
-            .find(|r| r[0] == Value::String("Alix".into()))
+            .find(|r| r[0] == literal("Alix"))
             .expect("Alix should appear");
-        assert_eq!(alix_row[1], Value::String("Amsterdam".into()));
+        assert_eq!(alix_row[1], literal("Amsterdam"));
 
         let harm_row = result
             .rows()
             .iter()
-            .find(|r| r[0] == Value::String("Harm".into()))
+            .find(|r| r[0] == literal("Harm"))
             .expect("Harm should appear");
         assert_eq!(
             harm_row[1],
@@ -2724,7 +2728,7 @@ mod sparql_features {
         let harm_row = result
             .rows()
             .iter()
-            .find(|r| r[0] == Value::String("Harm".into()))
+            .find(|r| r[0] == literal("Harm"))
             .expect("Harm should appear");
         assert_eq!(harm_row[1], Value::Null, "Harm has neither nick nor label");
     }

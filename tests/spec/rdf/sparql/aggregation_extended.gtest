@@ -331,19 +331,38 @@ tests:
       - |
         INSERT DATA {
           <http://ex.org/alix> <http://ex.org/dept> "Engineering" .
-          <http://ex.org/alix> <http://ex.org/perf> "90" .
+          <http://ex.org/alix> <http://ex.org/perf> 90 .
           <http://ex.org/gus> <http://ex.org/dept> "Engineering" .
-          <http://ex.org/gus> <http://ex.org/perf> "85" .
+          <http://ex.org/gus> <http://ex.org/perf> 85 .
           <http://ex.org/jules> <http://ex.org/dept> "Support" .
-          <http://ex.org/jules> <http://ex.org/perf> "60" .
+          <http://ex.org/jules> <http://ex.org/perf> 60 .
           <http://ex.org/mia> <http://ex.org/dept> "Support" .
-          <http://ex.org/mia> <http://ex.org/perf> "55" .
+          <http://ex.org/mia> <http://ex.org/perf> 55 .
         }
     query: |
-      SELECT ?dept (AVG(?p) AS ?avg_perf) WHERE {
+      SELECT ?dept (AVG(?p) = 87.5 AS ?avg_perf) WHERE {
         ?person <http://ex.org/dept> ?dept .
         ?person <http://ex.org/perf> ?p .
       } GROUP BY ?dept
       HAVING (AVG(?p) > 80)
     expect:
-      count: 1
+      rows:
+        - [Engineering, true]
+
+  - name: the_average_of_plain_strings_has_no_value
+    # A plain literal is no number, though its text reads as one: SUM and
+    # AVG of it are an error, and their results are unbound (SPARQL 1.1
+    # 18.5; W3C agg-err-01).
+    setup:
+      - |
+        INSERT DATA {
+          <http://ex.org/alix> <http://ex.org/perf> "90" .
+          <http://ex.org/gus> <http://ex.org/perf> "85" .
+        }
+    query: |
+      SELECT (COUNT(?p) AS ?n) (AVG(?p) AS ?avg) (SUM(?p) AS ?sum) WHERE {
+        ?person <http://ex.org/perf> ?p .
+      }
+    expect:
+      rows:
+        - [2, null, null]

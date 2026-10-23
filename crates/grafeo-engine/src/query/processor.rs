@@ -591,25 +591,12 @@ impl QueryProcessor {
             Error::Internal("RDF store not configured for this processor".to_string())
         })?;
 
-        // 1. Parse and translate to logical plan
-        let mut logical_plan = self.translate_rdf(query, language)?;
+        // 1. Parse and translate to logical plan (SPARQL binds its
+        // parameters as initial bindings)
+        let mut logical_plan = self.translate_rdf(query, language, params)?;
 
         // 2. Substitute parameters if provided (merge defaults from the plan first)
-        let has_defaults = !logical_plan.default_params.is_empty();
-        // A parameter nobody supplied fails here, before planning; only an
-        // EXPLAIN without parameters shows the plan with them unresolved.
-        if params.is_some() || has_defaults || !logical_plan.explain {
-            let merged = if has_defaults {
-                let mut merged = logical_plan.default_params.clone();
-                if let Some(params) = params {
-                    merged.extend(params.iter().map(|(k, v)| (k.clone(), v.clone())));
-                }
-                merged
-            } else {
-                params.cloned().unwrap_or_default()
-            };
-            substitute_params(&mut logical_plan, &merged)?;
-        }
+        substitute_with_defaults(&mut logical_plan, params)?;
 
         // 3. Semantic validation
         let mut binder = Binder::new();
@@ -632,8 +619,15 @@ impl QueryProcessor {
 
         // 4. Plan and execute. An update runs in a private transaction of
         // the processor's, whose triples apply once it succeeds.
+        // GraphQL over RDF gives plain values, SPARQL gives terms.
+        #[cfg(all(feature = "graphql", feature = "triple-store"))]
+        let query_values = language == QueryLanguage::GraphQLRdf;
+        #[cfg(not(all(feature = "graphql", feature = "triple-store")))]
+        let query_values = false;
         let run = |writer: Option<crate::transaction::RdfWriter>| -> Result<QueryResult> {
-            let planner = RdfPlanner::new(Arc::clone(rdf_store)).with_writer(writer);
+            let planner = RdfPlanner::new(Arc::clone(rdf_store))
+                .with_writer(writer)
+                .with_query_values(query_values);
 
             // EXPLAIN ANALYZE (PROFILE): execute with instrumentation, report stats.
             if optimized_plan.profile {
@@ -666,13 +660,22 @@ impl QueryProcessor {
         }
     }
 
-    /// Translates an RDF query to a logical plan.
-    fn translate_rdf(&self, query: &str, language: QueryLanguage) -> Result<LogicalPlan> {
+    /// Translates an RDF query to a logical plan; a SPARQL query binds
+    /// `params` as its initial bindings.
+    fn translate_rdf(
+        &self,
+        query: &str,
+        language: QueryLanguage,
+        params: Option<&std::collections::HashMap<String, Value>>,
+    ) -> Result<LogicalPlan> {
+        // Only SPARQL takes them here.
+        #[cfg(not(feature = "sparql"))]
+        let _ = params;
         match language {
             #[cfg(feature = "sparql")]
             QueryLanguage::Sparql => {
                 use crate::query::translators::sparql;
-                sparql::translate(query)
+                sparql::translate_with_bindings(query, &params.cloned().unwrap_or_default())
             }
             #[cfg(all(feature = "graphql", feature = "triple-store"))]
             QueryLanguage::GraphQLRdf => {
@@ -902,6 +905,34 @@ fn format_physical_node(out: &mut String, node: &crate::query::profile::ProfileN
     for child in &node.children {
         format_physical_node(out, child, depth + 1);
     }
+}
+
+/// Substitutes the parameters of `plan`: the defaults its query declares
+/// (GraphQL variables with a default), then `params` over them. A parameter
+/// nobody supplied fails here, before planning; only an `EXPLAIN` without
+/// parameters shows the plan with them unresolved.
+///
+/// # Errors
+///
+/// As [`substitute_params`].
+pub(crate) fn substitute_with_defaults(
+    plan: &mut LogicalPlan,
+    params: Option<&QueryParams>,
+) -> Result<()> {
+    let has_defaults = !plan.default_params.is_empty();
+    if params.is_none() && !has_defaults && plan.explain {
+        return Ok(());
+    }
+    let merged = if has_defaults {
+        let mut merged = plan.default_params.clone();
+        if let Some(params) = params {
+            merged.extend(params.iter().map(|(k, v)| (k.clone(), v.clone())));
+        }
+        merged
+    } else {
+        params.cloned().unwrap_or_default()
+    };
+    substitute_params(plan, &merged)
 }
 
 /// Substitutes parameters in a logical plan with their values.

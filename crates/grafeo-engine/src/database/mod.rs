@@ -557,6 +557,10 @@ impl GrafeoDB {
         // configuration (see `stored_config`).
         #[cfg(feature = "grafeo-file")]
         let mut creates_the_file = false;
+        // Whether the file holds RDF sections of 0.6.0-beta.1, written in the
+        // current version once it is open.
+        #[cfg(all(feature = "grafeo-file", feature = "triple-store"))]
+        let mut upgrades_rdf_sections = false;
 
         // The migration lock while a read-write open creates a database at a
         // missing path, released once the database exists (see
@@ -774,6 +778,17 @@ impl GrafeoDB {
                 }
                 _ => return Err(not_a_database(db_path)),
             };
+
+            // A 0.6.0-beta.1 file's RDF sections are written in the current
+            // version right after the load, once a copy of the file is kept.
+            #[cfg(feature = "triple-store")]
+            {
+                upgrades_rdf_sections =
+                    fm.read_image(|image| Ok(sections::holds_beta_rdf_sections(image)))?;
+                if upgrades_rdf_sections {
+                    migration::keep_copy_before_upgrade(&fm)?;
+                }
+            }
 
             {
                 // Refused when it holds data this build cannot read: the
@@ -1017,6 +1032,13 @@ impl GrafeoDB {
         // Must happen after register_section_consumers() which creates
         // the consumers we're about to spill.
         db.apply_force_disk_overrides();
+
+        // The RDF sections of a 0.6.0-beta.1 file, written in the current
+        // version now (its copy is kept).
+        #[cfg(all(feature = "grafeo-file", feature = "triple-store"))]
+        if upgrades_rdf_sections && let Some(fm) = db.file_manager.clone() {
+            db.checkpoint_to_file(&fm)?;
+        }
 
         // A new database file stores its configuration, written at once so
         // the next open reads it from the image (it reads the record before

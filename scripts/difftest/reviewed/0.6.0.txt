@@ -682,3 +682,13 @@ DB2|cypher 943f1a33b7 A WITH whose alias repeats a passed-on variable is an erro
 DB2|gql 943f1a33b7 A WITH whose alias repeats a passed-on variable is an error (#371); the alias replaced the node.
 DB3|cypher 0197c21812 Cypher CREATE CONSTRAINT takes no name and gets GQL's default (#344); it was a syntax error.
 DB4|cypher 0197c21812 Cypher CREATE INDEX takes no name and gets Label_property_index (#344); it was a syntax error.
+DC2|sparql c64ef178e6 A typed integer literal comes back as a number, not its text; numbers sort by value (the non-canonical "025" as 25).
+DC8|sparql fb4277ec68 SUM of integers is an integer and AVG a decimal (SPARQL 18.5.1, op:numeric-divide); MIN and MAX give numbers, not their text.
+DC9|sparql 928daec4bf SUM over a decimal and an integer is the decimal 3.50, not the double 3.5; the invalid "abc"^^xsd:integer is still skipped, where SPARQL 18.5.1 makes the sum an error (#464).
+DC13|sparql 31d684eb55 UCASE keeps the argument's language tag (SPARQL 17.4.3.8); it dropped it.
+DC15|sparql fcc5ac491c ASK gives its boolean; it gave a row with no column.
+DC16|sparql 71d1f5ad33 A CONSTRUCT object literal comes back as its value, not quoted text; the IRI subject is still quoted text until #464.
+DC17|sparql c8997a6576 Integer division and mixed integer and decimal arithmetic give decimals (op:numeric-divide, numeric promotion): 1/2 is 0.5, not 0.
+DC19|sparql 6f4fa3023f A regression since 0.5.44, fixed by #464: sameTerm of "025"^^xsd:integer and 25 is true, as the value lost its lexical form; the terms differ (SPARQL 17.4.1.8), so it must be false.
+DC23|sparql c9b19e2eee A typed double comes back as a number, not its text.
+DD2|sparql 145b676f94 A typed integer comes back as a number; "01" and "1" are still one value, two terms in RDF, until #464.

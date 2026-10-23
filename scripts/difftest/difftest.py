@@ -76,6 +76,9 @@ def normalize(value):
         if math.isinf(value):
             return {"float": "Infinity" if value > 0 else "-Infinity"}
         return round(value, 9)
+    term = rdf_term(value)
+    if term is not None:
+        return term
     if isinstance(value, (str, int, bool)) or value is None:
         return value
     for attribute in ("to_dict", "as_dict"):
@@ -87,6 +90,25 @@ def normalize(value):
     return {"repr": repr(value)}
 
 
+def rdf_term(value):
+    """The JSON form of an RDF term a build returns as a term of its own (`grafeo.IRI`,
+    `grafeo.Literal` and `grafeo.BlankNode`, which are strings too): its kind, text,
+    datatype and language, so a term that changes kind or type differs, though its
+    text does not. `None` for anything else."""
+    kind = {"IRI": "iri", "Literal": "literal", "BlankNode": "blank"}.get(
+        type(value).__name__
+    )
+    if kind is None or not type(value).__module__.startswith("grafeo"):
+        return None
+    term = {"term": kind, "value": str(value)}
+    if kind == "literal":
+        term["datatype"] = str(getattr(value, "datatype", None))
+        language = getattr(value, "language", None)
+        if language:
+            term["language"] = str(language)
+    return term
+
+
 def error_text(error: Exception) -> str:
     lines = str(error).splitlines()
     return lines[0][:ERROR_LENGTH] if lines else type(error).__name__
@@ -94,11 +116,16 @@ def error_text(error: Exception) -> str:
 
 def run_case(db, language: str, query: str) -> dict:
     """The result of one query: its columns and rows, or the first line of its error."""
-    execute = {"gql": db.execute, "cypher": db.execute_cypher, "sql": db.execute_sql}[
-        language
-    ]
+    execute = {
+        "gql": db.execute,
+        "cypher": db.execute_cypher,
+        "sql": db.execute_sql,
+        "sparql": db.execute_sparql,
+    }[language]
     try:
         result = execute(query)
+        if getattr(result, "kind", None) == "boolean":
+            return {"boolean": result.boolean}
         records = [dict(row) for row in result]
     except Exception as error:  # noqa: BLE001 (a failing query is a result too)
         return {"error": error_text(error)}

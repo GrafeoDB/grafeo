@@ -64,6 +64,43 @@ def test_normalize_uses_an_entities_dict_form():
 # --- canonical and differing --------------------------------------------------
 
 
+class IRI(str):
+    """A stand-in for `grafeo.IRI` (a str subclass)."""
+
+
+class Literal(str):
+    """A stand-in for `grafeo.Literal`, with its datatype and language."""
+
+    def __new__(cls, text, datatype, language=None):
+        literal = super().__new__(cls, text)
+        literal.datatype = datatype
+        literal.language = language
+        return literal
+
+
+IRI.__module__ = Literal.__module__ = "grafeo.terms"
+
+
+def test_normalize_keeps_an_rdf_terms_kind_type_and_language():
+    xsd = "http://www.w3.org/2001/XMLSchema#"
+    assert difftest.normalize(IRI("http://ex.org/a")) == {
+        "term": "iri",
+        "value": "http://ex.org/a",
+    }
+    assert difftest.normalize(Literal("1", xsd + "integer")) == {
+        "term": "literal",
+        "value": "1",
+        "datatype": xsd + "integer",
+    }
+    tagged = difftest.normalize(Literal("x", "rdf:langString", "en"))
+    assert tagged["language"] == "en"
+    # A term and a plain string with the same text differ, and so do two datatypes.
+    assert difftest.normalize(IRI("1")) != difftest.normalize("1")
+    assert difftest.normalize(Literal("1", xsd + "integer")) != difftest.normalize(
+        Literal("1", xsd + "string")
+    )
+
+
 def test_unordered_rows_compare_as_a_multiset():
     assert difftest.canonical(rows([1], [2])) == difftest.canonical(rows([2], [1]))
     assert difftest.canonical(rows([1], [1])) != difftest.canonical(rows([1]))

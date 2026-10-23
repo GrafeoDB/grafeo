@@ -27,6 +27,29 @@ tests:
       rows:
         - [0.3, true]
 
+  # A double compared with an integer on either side, and sorted with them:
+  # the integer is promoted to a double (17.3, op:numeric-less-than).
+  - name: a_double_and_an_integer_compare_on_either_side
+    query: "SELECT (2.5e0 < 3 AS ?a) (3 > 2.5e0 AS ?b) (3.5e0 > 3 AS ?c) (1e2 >= 100 AS ?d) (2.0e0 = 2 AS ?e) (1e2 > 10 AS ?f) (-0.5e0 < -1 AS ?g) WHERE {}"
+    expect:
+      rows:
+        - [true, true, true, true, true, true, false]
+
+  - name: doubles_and_integers_sort_by_value
+    query: |
+      SELECT ?name WHERE {
+        VALUES (?v ?name) { (3 "three") (2.5e0 "two and a half") (10 "ten") (1.05e1 "ten and a half") (-1 "minus one") (-0.5e0 "minus a half") }
+      } ORDER BY ?v
+    expect:
+      ordered: true
+      rows:
+        - ["minus one"]
+        - ["minus a half"]
+        - ["two and a half"]
+        - ["three"]
+        - ["ten"]
+        - ["ten and a half"]
+
   - name: an_integer_divided_by_an_integer_is_a_decimal
     query: |
       PREFIX xsd: <http://www.w3.org/2001/XMLSchema#>

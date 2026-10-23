@@ -1038,3 +1038,132 @@ fn snapshot_round_trip_named_graph_within_schema() {
         "data in schema-scoped named graph should survive round-trip"
     );
 }
+
+// --- Import and restore read one snapshot alike ---
+
+/// A database with what a snapshot carries: several labels, values of
+/// several types, a property written twice and one removed, a deleted node
+/// (a gap in the ids), edges with properties, a schema with a named graph,
+/// and a property index.
+fn populated_db() -> GrafeoDB {
+    let db = GrafeoDB::new_in_memory();
+    let s = db.session();
+    s.execute("INSERT (:Person:Director {name: 'Alix', age: 30, score: 1.5, active: true})")
+        .unwrap();
+    s.execute("INSERT (:Person {name: 'Gus', age: 25, tags: ['a', 'b']})")
+        .unwrap();
+    s.execute("INSERT (:Person {name: 'Vincent'})").unwrap();
+    s.execute("INSERT (:City {name: 'Amsterdam'})").unwrap();
+    s.execute(
+        "MATCH (a:Person {name: 'Alix'}), (b:Person {name: 'Gus'}) \
+         INSERT (a)-[:KNOWS {since: 2020}]->(b)",
+    )
+    .unwrap();
+    s.execute(
+        "MATCH (a:Person {name: 'Gus'}), (c:City {name: 'Amsterdam'}) \
+         INSERT (a)-[:LIVES_IN]->(c)",
+    )
+    .unwrap();
+    s.execute("MATCH (n:Person {name: 'Gus'}) SET n.age = 26")
+        .unwrap();
+    s.execute("MATCH (n:Person {name: 'Alix'}) REMOVE n.score")
+        .unwrap();
+    s.execute("MATCH (n:Person {name: 'Vincent'}) DELETE n")
+        .unwrap();
+    db.create_property_index("name").unwrap();
+    s.execute("CREATE SCHEMA reports").unwrap();
+    s.execute("SESSION SET SCHEMA reports").unwrap();
+    s.execute("CREATE GRAPH quarterly").unwrap();
+    s.execute("SESSION SET GRAPH quarterly").unwrap();
+    s.execute("INSERT (:Row {q: 1})-[:NEXT]->(:Row {q: 2})")
+        .unwrap();
+    db
+}
+
+/// What the queries below return on `db`, in a fixed order.
+fn answers(db: &GrafeoDB) -> Vec<Vec<Vec<Value>>> {
+    let s = db.session();
+    let mut out = Vec::new();
+    for query in [
+        "MATCH (n) RETURN labels(n), n.name, n.age, n.score, n.active, n.tags ORDER BY n.name",
+        "MATCH (a)-[r]->(b) RETURN a.name, type(r), r.since, b.name ORDER BY a.name, b.name",
+        "MATCH (n:Person {name: 'Gus'}) RETURN n.age",
+    ] {
+        out.push(s.execute(query).unwrap().rows().to_vec());
+    }
+    s.execute("SESSION SET SCHEMA reports").unwrap();
+    s.execute("SESSION SET GRAPH quarterly").unwrap();
+    out.push(
+        s.execute("MATCH (a:Row)-[:NEXT]->(b:Row) RETURN a.q, b.q")
+            .unwrap()
+            .rows()
+            .to_vec(),
+    );
+    out
+}
+
+#[test]
+fn import_and_restore_read_a_snapshot_alike_and_export_it_unchanged() {
+    let db = populated_db();
+    let bytes = db.export_snapshot().unwrap();
+    let expected = answers(&db);
+
+    // An import reads the snapshot as decoded for its checks.
+    let imported = GrafeoDB::import_snapshot(&bytes).unwrap();
+    assert_eq!(answers(&imported), expected);
+    assert_eq!(imported.node_count().unwrap(), db.node_count().unwrap());
+    assert_eq!(imported.edge_count().unwrap(), db.edge_count().unwrap());
+    assert_eq!(
+        imported.export_snapshot().unwrap(),
+        bytes,
+        "an imported snapshot exports byte for byte as it came in"
+    );
+
+    // A restore decodes the bytes itself; it must read them the same way.
+    let restored = GrafeoDB::new_in_memory();
+    restored.restore_snapshot(&bytes).unwrap();
+    assert_eq!(answers(&restored), expected);
+    assert_eq!(
+        restored.export_snapshot().unwrap(),
+        bytes,
+        "a restored snapshot exports byte for byte as it came in"
+    );
+
+    // Twice round: still the same bytes.
+    let again = GrafeoDB::import_snapshot(&imported.export_snapshot().unwrap()).unwrap();
+    assert_eq!(again.export_snapshot().unwrap(), bytes);
+}
+
+#[test]
+fn an_import_refuses_what_a_restore_refuses_and_names_it_alike() {
+    // A snapshot whose edge points at a node it does not hold.
+    let snapshot = TestSnapshot::new(
+        4,
+        vec![TestNode {
+            id: NodeId::new(0),
+            labels: vec!["Person".to_string()],
+            properties: vec![],
+        }],
+        vec![TestEdge {
+            id: EdgeId::new(0),
+            src: NodeId::new(0),
+            dst: NodeId::new(7),
+            edge_type: "KNOWS".to_string(),
+            properties: vec![],
+        }],
+    );
+    let bytes = encode_snapshot(&snapshot);
+    let import = GrafeoDB::import_snapshot(&bytes)
+        .err()
+        .expect("a dangling edge is refused");
+
+    let db = populated_db();
+    let before = db.export_snapshot().unwrap();
+    let restore = db.restore_snapshot(&bytes).unwrap_err();
+    assert_eq!(import.to_string(), restore.to_string());
+    assert_eq!(
+        db.export_snapshot().unwrap(),
+        before,
+        "a refused restore leaves the database as it was"
+    );
+}

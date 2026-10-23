@@ -359,10 +359,14 @@ jobs:
         with:
           node-version: '24'
 
+      # The components of rust-toolchain.toml, so that no cargo call in the
+      # repository makes rustup add them later: adding them to this toolchain
+      # failed on a conflict over bin/cargo-fmt (0.6.0-beta.1 and 0.6.0).
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@1.99.0
         with:
           targets: ${{ matrix.target }}
+          components: rustfmt, clippy
 
       - name: Install cross tools (aarch64 Linux GNU)
         if: matrix.target == 'aarch64-unknown-linux-gnu'
@@ -370,11 +374,17 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y gcc-aarch64-linux-gnu
 
-      - name: Install cross tools (aarch64 Linux musl)
+      - name: Install zig (aarch64 Linux musl)
         if: matrix.target == 'aarch64-unknown-linux-musl'
-        run: |
-          pip install ziglang
-          cargo install cargo-zigbuild
+        run: pip install ziglang
+
+      # A prebuilt binary, as nextest is installed: `cargo install` in the
+      # repository was where rustup failed.
+      - name: Install cargo-zigbuild (aarch64 Linux musl)
+        if: matrix.target == 'aarch64-unknown-linux-musl'
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-zigbuild
 
       - name: Install dependencies
         working-directory: crates/bindings/node

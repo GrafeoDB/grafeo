@@ -168,7 +168,44 @@ enum Inserts {
     /// Every row that exists has this stamp (DuckDB's same inserted id).
     Constant(u64),
     /// A stamp per row.
-    PerRow(Box<[u64]>),
+    PerRow(Box<PerRowInserts>),
+}
+
+/// The create stamps of a vector whose rows have more than one creator.
+#[derive(Debug)]
+struct PerRowInserts {
+    /// A stamp per row, [`ABSENT`] where none exists.
+    stamps: [u64; VECTOR_ROWS],
+    /// The rows whose stamp may be one a reader does not see yet, a bit
+    /// each: the rows that existed when the vector took a stamp per row
+    /// (they kept the constant stamp, which may be an open transaction's)
+    /// and every row a create stamped since. The rows outside it hold every
+    /// reader's stamp, so whether the vector is settled costs what its
+    /// writes did, not its rows (see [`Stamped::settled_by_written`]).
+    written: [u64; WORDS],
+}
+
+impl PerRowInserts {
+    /// The stamps of a vector whose rows `exists` all have `constant`.
+    fn of(exists: &Bitset, constant: u64) -> Box<Self> {
+        let mut inserts = Box::new(Self {
+            stamps: [ABSENT; VECTOR_ROWS],
+            written: [0; WORDS],
+        });
+        for row in exists.rows() {
+            inserts.stamps[row] = constant;
+        }
+        for (at, word) in inserts.written.iter_mut().enumerate() {
+            *word = exists.word(at);
+        }
+        inserts
+    }
+
+    /// Stamps `row`.
+    fn set(&mut self, row: usize, stamp: u64) {
+        self.stamps[row] = stamp;
+        self.written[row / 64] |= 1 << (row % 64);
+    }
 }
 
 /// The stamps of a vector's rows.
@@ -183,10 +220,11 @@ struct Stamped {
 }
 
 impl Stamped {
-    /// The stamps of the rows of `exists`, every reader's.
-    fn from_flat(exists: &Bitset) -> Self {
+    /// The stamps of the rows of `exists`, every reader's: the flat
+    /// vector's bits move in, nothing is copied.
+    fn from_flat(exists: Bitset) -> Self {
         Self {
-            exists: exists.clone(),
+            exists,
             created: Inserts::Constant(ALWAYS.created),
             deleted: None,
         }
@@ -196,7 +234,7 @@ impl Stamped {
     fn creator(&self, row: usize) -> u64 {
         match &self.created {
             Inserts::Constant(stamp) => *stamp,
-            Inserts::PerRow(stamps) => stamps[row],
+            Inserts::PerRow(inserts) => inserts.stamps[row],
         }
     }
 
@@ -241,19 +279,16 @@ impl Stamped {
 
     fn set_created(&mut self, row: usize, stamp: u64) {
         match &mut self.created {
-            Inserts::PerRow(stamps) => stamps[row] = stamp,
+            Inserts::PerRow(inserts) => inserts.set(row, stamp),
             Inserts::Constant(constant) => {
                 let constant = *constant;
                 if self.others_created_by(row, stamp) {
                     self.created = Inserts::Constant(stamp);
                 } else {
                     // Rows of two creators: a stamp per row from now on.
-                    let mut stamps = stamp_array();
-                    for other in self.exists.rows() {
-                        stamps[other] = constant;
-                    }
-                    stamps[row] = stamp;
-                    self.created = Inserts::PerRow(stamps);
+                    let mut inserts = PerRowInserts::of(&self.exists, constant);
+                    inserts.set(row, stamp);
+                    self.created = Inserts::PerRow(inserts);
                 }
             }
         }
@@ -274,8 +309,8 @@ impl Stamped {
 
     fn remove(&mut self, row: usize) {
         self.exists.clear(row);
-        if let Inserts::PerRow(stamps) = &mut self.created {
-            stamps[row] = ABSENT;
+        if let Inserts::PerRow(inserts) = &mut self.created {
+            inserts.stamps[row] = ABSENT;
         }
         if let Some(deletes) = &mut self.deleted {
             deletes.set(row, ABSENT);
@@ -296,11 +331,11 @@ impl Stamped {
                     .collect()
             }
             Inserts::Constant(_) => Vec::new(),
-            Inserts::PerRow(stamps) => {
+            Inserts::PerRow(inserts) => {
                 let mut committed = Vec::new();
                 for row in rows {
-                    if stamps[row] == from {
-                        stamps[row] = to;
+                    if inserts.stamps[row] == from {
+                        inserts.set(row, to);
                         committed.push(row);
                     }
                 }
@@ -310,12 +345,43 @@ impl Stamped {
     }
 
     /// Whether every stamp of a row that exists is a commit at or before
-    /// `horizon`.
+    /// `horizon`, reading the rows a create stamped since the vector took a
+    /// stamp per row (`PerRowInserts::written`) and the rows with a delete
+    /// stamp alone: what [`settled_by`](Self::settled_by) answers, in what
+    /// the vector's writes cost.
+    fn settled_by_written(&self, horizon: u64) -> bool {
+        let settled = |stamp: u64| stamp & PENDING == 0 && stamp <= horizon;
+        let created = match &self.created {
+            Inserts::Constant(stamp) => self.exists.is_empty() || settled(*stamp),
+            Inserts::PerRow(inserts) => inserts.written.iter().enumerate().all(|(at, written)| {
+                let mut bits = written & self.exists.word(at);
+                while bits != 0 {
+                    let bit = bits.trailing_zeros() as usize;
+                    bits &= bits - 1;
+                    if !settled(inserts.stamps[at * 64 + bit]) {
+                        return false;
+                    }
+                }
+                true
+            }),
+        };
+        created
+            && self.deleted.as_ref().is_none_or(|deletes| {
+                deletes
+                    .of(&self.exists)
+                    .all(|(_, stamp)| stamp == ABSENT || settled(stamp))
+            })
+    }
+
+    /// Whether every stamp of a row that exists is a commit at or before
+    /// `horizon`, every row read: the reference of the collect of every
+    /// vector ([`Versions::collapse`]), which
+    /// [`settled_by_written`](Self::settled_by_written) must answer alike.
     fn settled_by(&self, horizon: u64) -> bool {
         let settled = |stamp: u64| stamp & PENDING == 0 && stamp <= horizon;
         let created = match &self.created {
             Inserts::Constant(stamp) => self.exists.is_empty() || settled(*stamp),
-            Inserts::PerRow(stamps) => self.exists.rows().all(|row| settled(stamps[row])),
+            Inserts::PerRow(inserts) => self.exists.rows().all(|row| settled(inserts.stamps[row])),
         };
         created
             && self.deleted.as_ref().is_none_or(|deletes| {
@@ -326,12 +392,11 @@ impl Stamped {
     }
 
     fn heap_bytes(&self) -> usize {
-        let array = |stamps: &[u64]| std::mem::size_of_val::<[u64]>(stamps);
         std::mem::size_of::<Self>()
             + self.exists.heap_bytes()
             + match &self.created {
                 Inserts::Constant(_) => 0,
-                Inserts::PerRow(stamps) => array(stamps),
+                Inserts::PerRow(_) => std::mem::size_of::<PerRowInserts>(),
             }
             + self
                 .deleted
@@ -385,6 +450,7 @@ impl Versions {
         }
         let vector = &mut self.vectors[index];
         if let Vector::Flat(exists) = vector {
+            let exists = std::mem::take(exists);
             *vector = Vector::Stamped(Box::new(Stamped::from_flat(exists)));
         }
         match vector {
@@ -593,10 +659,41 @@ impl Versions {
         gone
     }
 
-    /// [`collapse`](Self::collapse) of vector `index` alone.
+    /// [`collapse`](Self::collapse) of vector `index` alone, in what its
+    /// writes cost: whether it is settled reads the rows its creates and
+    /// deletes stamped (`Stamped::settled_by_written`), and the vector keeps
+    /// its bits and clears the rows deleted, where `collapse` builds them
+    /// anew from every row (the reference this must equal, which the collect
+    /// of every vector keeps).
     pub(super) fn collapse_vector(&mut self, index: usize, horizon: u64) -> Vec<usize> {
         let mut gone = Vec::new();
-        self.collapse_into(index, horizon, &mut gone);
+        let Some(vector) = self.vectors.get_mut(index) else {
+            return gone;
+        };
+        let Vector::Stamped(stamped) = vector else {
+            return gone;
+        };
+        if !stamped.settled_by_written(horizon) {
+            return gone;
+        }
+        let mut exists = std::mem::take(&mut stamped.exists);
+        if let Some(deletes) = &stamped.deleted {
+            let base = index * VECTOR_ROWS;
+            for (at, rows) in deletes.rows.iter().enumerate() {
+                let mut bits = rows & exists.word(at);
+                while bits != 0 {
+                    let bit = bits.trailing_zeros() as usize;
+                    bits &= bits - 1;
+                    if deletes.get(at * 64 + bit) != ABSENT {
+                        exists.clear(at * 64 + bit);
+                        gone.push(base + at * 64 + bit);
+                    }
+                }
+            }
+        }
+        // As the rebuild leaves it: no word past the last row.
+        exists.trim();
+        *vector = Vector::Flat(exists);
         gone
     }
 

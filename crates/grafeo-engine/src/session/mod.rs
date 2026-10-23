@@ -4689,6 +4689,11 @@ impl Session {
             }
         }
 
+        // Committed and collected: the set, emptied, is the next
+        // transaction's, with its buffers.
+        if let Some(changes) = changes {
+            self.transaction_manager.recycle(changes);
+        }
         Ok(())
     }
 
@@ -4744,6 +4749,12 @@ impl Session {
 
         let changes = self.changes.lock().take();
         let result = self.abort_transaction(transaction_id, changes.as_deref());
+        // Undone: the set, emptied, is the next transaction's.
+        if result.is_ok()
+            && let Some(changes) = changes
+        {
+            self.transaction_manager.recycle(changes);
+        }
 
         #[cfg(feature = "metrics")]
         if result.is_ok() {

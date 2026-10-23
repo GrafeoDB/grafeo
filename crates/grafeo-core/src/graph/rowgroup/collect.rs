@@ -26,6 +26,14 @@
 //! kept value or label set each and the stamps of at most one vector each
 //! (up to about 32 KiB, for a vector whose rows two creators and more than
 //! 32 deletes met).
+//!
+//! That collect also takes the rows deleted by the horizon out of the store,
+//! with their adjacency, values, labels and index entries, on the thread of
+//! the commit that asked for it, and costs what the commits wrote: the
+//! vectors it visits are settled and collapsed by their written rows.
+//! Reclaiming deleted rows off the commit path (at a checkpoint, in the
+//! background, under a bound tied to the memory limit) is
+//! [#660](https://github.com/GrafeoDB/grafeo/issues/660).
 
 use std::collections::BTreeMap;
 use std::sync::atomic::Ordering;

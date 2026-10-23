@@ -820,6 +820,22 @@ impl ChangeSet {
             .filter(move |change| change.graph() == slot)
     }
 
+    /// Empties the set, as a new one: no graph, no entry, nothing held; its
+    /// buffers stay, for the entries of the next transaction that takes it.
+    pub fn clear(&mut self) {
+        self.graphs.clear();
+        self.slots.clear();
+        self.entries.clear();
+        self.bulk_rows.clear();
+        self.held = Held::default();
+    }
+
+    /// How many entries the set holds room for without growing.
+    #[must_use]
+    pub fn capacity(&self) -> usize {
+        self.entries.capacity()
+    }
+
     /// The position after the last entry, for a savepoint.
     #[must_use]
     pub fn mark(&self) -> ChangeMark {

@@ -53,6 +53,14 @@ impl Bitset {
         }
     }
 
+    /// Drops the words past the last row set, as a bitset built by setting
+    /// its rows ends (its capacity stays).
+    pub(super) fn trim(&mut self) {
+        while self.words.last() == Some(&0) {
+            self.words.pop();
+        }
+    }
+
     /// Whether no row is set.
     pub(super) fn is_empty(&self) -> bool {
         self.words.iter().all(|word| *word == 0)

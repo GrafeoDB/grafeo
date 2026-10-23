@@ -583,6 +583,44 @@ impl Default for LazyValue {
     }
 }
 
+/// The instant a statement started. Every clock function without arguments
+/// reads it (`now()`, `current_timestamp`, `timestamp()`, `current_date`,
+/// `current_time`, and `date()`, `time()`, `datetime()` and their `local`
+/// and `zoned` forms), so every row of one statement sees one time and two
+/// clock calls agree: ISO GQL and SQL fix the current datetime for a
+/// statement, and openCypher's `timestamp()` "returns the same value during
+/// one entire query". `rand()` is drawn per call.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StatementClock(grafeo_common::types::Timestamp);
+
+impl StatementClock {
+    /// The clock of a statement that starts now.
+    #[must_use]
+    pub fn now() -> Self {
+        Self(grafeo_common::types::Timestamp::now())
+    }
+
+    /// The clock of a statement that started at `instant`.
+    #[must_use]
+    pub const fn at(instant: grafeo_common::types::Timestamp) -> Self {
+        Self(instant)
+    }
+
+    /// The instant the statement started.
+    #[must_use]
+    pub const fn instant(self) -> grafeo_common::types::Timestamp {
+        self.0
+    }
+}
+
+impl Default for StatementClock {
+    /// The clock read when the context is made: a context made outside a
+    /// session's statement still gives its evaluator one instant.
+    fn default() -> Self {
+        Self::now()
+    }
+}
+
 /// Session-level context passed to the filter evaluator for introspection functions.
 ///
 /// Lightweight strings (`current_schema`, `current_graph`) are stored directly.
@@ -602,6 +640,8 @@ pub struct SessionContext {
     /// at the session time zone (GQL, SQL/PGQ), or as different types
     /// (Cypher).
     pub temporal_comparison: TemporalComparison,
+    /// The instant the statement started, which the clock functions read.
+    pub statement_clock: StatementClock,
     /// Lazily-computed `info()` result.
     pub db_info: LazyValue,
     /// Lazily-computed `schema()` result.
@@ -3681,6 +3721,11 @@ impl ExpressionPredicate {
         }
     }
 
+    /// The instant the statement started (see [`StatementClock`]).
+    fn statement_instant(&self) -> grafeo_common::types::Timestamp {
+        self.session_context.statement_clock.instant()
+    }
+
     fn eval_temporal_fn(
         &self,
         function: BuiltinFunction,
@@ -3691,7 +3736,7 @@ impl ExpressionPredicate {
         match function {
             BuiltinFunction::Date => {
                 if args.is_empty() {
-                    return Some(Value::Date(grafeo_common::types::Date::today()));
+                    return Some(Value::Date(self.statement_instant().to_date()));
                 }
                 let val = self.eval_expr(&args[0], chunk, row)?;
                 match val {
@@ -3711,7 +3756,7 @@ impl ExpressionPredicate {
             }
             BuiltinFunction::Time => {
                 if args.is_empty() {
-                    return Some(Value::Time(grafeo_common::types::Time::now()));
+                    return Some(Value::Time(self.statement_instant().to_time()));
                 }
                 let val = self.eval_expr(&args[0], chunk, row)?;
                 match val {
@@ -3734,7 +3779,7 @@ impl ExpressionPredicate {
             }
             BuiltinFunction::Datetime => {
                 if args.is_empty() {
-                    return Some(Value::Timestamp(grafeo_common::types::Timestamp::now()));
+                    return Some(Value::Timestamp(self.statement_instant()));
                 }
                 let val = self.eval_expr(&args[0], chunk, row)?;
                 match val {
@@ -3784,7 +3829,7 @@ impl ExpressionPredicate {
                 if args.is_empty() {
                     return Some(Value::ZonedDatetime(
                         grafeo_common::types::ZonedDatetime::from_timestamp_offset(
-                            grafeo_common::types::Timestamp::now(),
+                            self.statement_instant(),
                             0,
                         ),
                     ));
@@ -3812,7 +3857,7 @@ impl ExpressionPredicate {
                     None => time.with_offset(0),
                 };
                 if args.is_empty() {
-                    return Some(Value::Time(utc(grafeo_common::types::Time::now())));
+                    return Some(Value::Time(utc(self.statement_instant().to_time())));
                 }
                 let val = self.eval_expr(&args[0], chunk, row)?;
                 match val {
@@ -3843,12 +3888,10 @@ impl ExpressionPredicate {
                     _ => None,
                 }
             }
-            BuiltinFunction::CurrentDate => Some(Value::Date(grafeo_common::types::Date::today())),
-            BuiltinFunction::CurrentTime => Some(Value::Time(grafeo_common::types::Time::now())),
-            BuiltinFunction::Now => Some(Value::Timestamp(grafeo_common::types::Timestamp::now())),
-            BuiltinFunction::Timestamp => Some(Value::Int64(
-                grafeo_common::types::Timestamp::now().as_millis(),
-            )),
+            BuiltinFunction::CurrentDate => Some(Value::Date(self.statement_instant().to_date())),
+            BuiltinFunction::CurrentTime => Some(Value::Time(self.statement_instant().to_time())),
+            BuiltinFunction::Now => Some(Value::Timestamp(self.statement_instant())),
+            BuiltinFunction::Timestamp => Some(Value::Int64(self.statement_instant().as_millis())),
             // The component functions read what the property form (`d.year`)
             // reads.
             BuiltinFunction::Year

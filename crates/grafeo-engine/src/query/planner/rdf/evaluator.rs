@@ -13,7 +13,7 @@ use grafeo_common::types::rdf::{Literal, Term};
 use grafeo_common::types::{Decimal, Value};
 use grafeo_core::execution::DataChunk;
 use grafeo_core::execution::operators::{
-    BinaryFilterOp, FilterExpression, OperatorError, Predicate, UnaryFilterOp,
+    BinaryFilterOp, FilterExpression, OperatorError, Predicate, StatementClock, UnaryFilterOp,
 };
 
 use super::term_ids::{QueryTermIds, TermEntry, id_of};
@@ -35,6 +35,8 @@ pub(super) struct RdfExpressionPredicate {
     expression: FilterExpression,
     variable_columns: HashMap<String, usize>,
     terms: Arc<QueryTermIds>,
+    /// The instant the query started, which `NOW()` gives.
+    clock: StatementClock,
 }
 
 /// An operand of a comparison: a variable's dictionary entry (whose value is
@@ -120,11 +122,13 @@ impl RdfExpressionPredicate {
         expression: FilterExpression,
         variable_columns: HashMap<String, usize>,
         terms: Arc<QueryTermIds>,
+        clock: StatementClock,
     ) -> Self {
         Self {
             expression: fold_compared_constants(expression),
             variable_columns,
             terms,
+            clock,
         }
     }
 
@@ -635,7 +639,8 @@ impl RdfExpressionPredicate {
             "RAND" => Some(Value::Float64(random_unit())),
 
             // ---- Functions on dates and times (17.4.5) ----
-            "NOW" => Some(Value::Timestamp(grafeo_common::types::Timestamp::now())),
+            // One instant for the whole query (17.4.5.1).
+            "NOW" => Some(Value::Timestamp(self.clock.instant())),
             "YEAR" | "MONTH" | "DAY" => {
                 let value = self.eval_expr(arg(0)?, chunk, row)?;
                 let date = match native(&value)?.into_owned() {

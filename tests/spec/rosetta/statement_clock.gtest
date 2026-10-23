@@ -19,7 +19,6 @@ meta:
 tests:
 
   - name: every_row_of_a_statement_sees_one_now
-    skip: "#179: the clock is read per call until the statement clock lands"
     variants:
       gql: "FOR i IN range(1, 100000) RETURN count(DISTINCT now()) AS now, count(DISTINCT current_timestamp()) AS ts, count(DISTINCT timestamp()) AS ms"
       cypher: "UNWIND range(1, 100000) AS i RETURN count(DISTINCT now()) AS now, count(DISTINCT current_timestamp()) AS ts, count(DISTINCT timestamp()) AS ms"
@@ -28,7 +27,6 @@ tests:
         - [1, 1, 1]
 
   - name: every_row_of_a_statement_sees_one_date_and_time
-    skip: "#179: the clock is read per call until the statement clock lands"
     variants:
       gql: "FOR i IN range(1, 100000) RETURN count(DISTINCT current_date()) AS d, count(DISTINCT current_time()) AS t, count(DISTINCT date()) AS d0, count(DISTINCT time()) AS t0, count(DISTINCT localtime()) AS lt"
       cypher: "UNWIND range(1, 100000) AS i RETURN count(DISTINCT current_date()) AS d, count(DISTINCT current_time()) AS t, count(DISTINCT date()) AS d0, count(DISTINCT time()) AS t0, count(DISTINCT localtime()) AS lt"
@@ -37,7 +35,6 @@ tests:
         - [1, 1, 1, 1, 1]
 
   - name: every_row_of_a_statement_sees_one_datetime
-    skip: "#179: the clock is read per call until the statement clock lands"
     variants:
       gql: "FOR i IN range(1, 100000) RETURN count(DISTINCT datetime()) AS dt, count(DISTINCT localdatetime()) AS ldt, count(DISTINCT zonedDatetime()) AS zdt, count(DISTINCT zonedTime()) AS zt"
       cypher: "UNWIND range(1, 100000) AS i RETURN count(DISTINCT datetime()) AS dt, count(DISTINCT localdatetime()) AS ldt, count(DISTINCT zonedDatetime()) AS zdt, count(DISTINCT zonedTime()) AS zt"
@@ -46,12 +43,13 @@ tests:
         - [1, 1, 1, 1]
 
   # Two reads in one row are the same instant, and the clock functions
-  # derive from it: the date of now() is current_date.
+  # derive from it: the date of now() is current_date. Cypher's datetime() is
+  # zoned and compares as another type than a local datetime, so the zoned
+  # one is read as a local datetime first.
   - name: clock_functions_in_one_row_agree
-    skip: "#179: the clock is read per call until the statement clock lands"
     variants:
-      gql: "RETURN now() = current_timestamp() AS same_instant, now() = now() AS twice, timestamp() = timestamp() AS ms_twice, date(now()) = current_date() AS same_day, datetime() = localdatetime() AS same_local"
-      cypher: "RETURN now() = current_timestamp() AS same_instant, now() = now() AS twice, timestamp() = timestamp() AS ms_twice, date(now()) = current_date() AS same_day, datetime() = localdatetime() AS same_local"
+      gql: "RETURN now() = current_timestamp() AS same_instant, now() = now() AS twice, timestamp() = timestamp() AS ms_twice, date(now()) = current_date() AS same_day, localdatetime(datetime()) = localdatetime() AS same_local"
+      cypher: "RETURN now() = current_timestamp() AS same_instant, now() = now() AS twice, timestamp() = timestamp() AS ms_twice, date(now()) = current_date() AS same_day, localdatetime(datetime()) = localdatetime() AS same_local"
     expect:
       rows:
         - [true, true, true, true, true]

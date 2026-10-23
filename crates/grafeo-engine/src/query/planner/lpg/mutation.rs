@@ -1092,6 +1092,7 @@ impl super::Planner {
                 read_counter: self.read_counter(),
                 recording: self.recording.clone(),
                 projections: self.projections.clone(),
+                statement_clock: self.session_context.statement_clock,
             },
         ));
 

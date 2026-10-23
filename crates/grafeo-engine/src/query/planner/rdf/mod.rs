@@ -16,7 +16,7 @@ use grafeo_common::utils::error::{Error, QueryError, QueryErrorKind, Result};
 use grafeo_core::execution::DataChunk;
 use grafeo_core::execution::operators::{
     FilterExpression, FilterOperator, HashAggregateOperator, Operator, OperatorError,
-    SimpleAggregateOperator, SingleRowOperator,
+    SimpleAggregateOperator, SingleRowOperator, StatementClock,
 };
 use grafeo_core::execution::vector::ValueVector;
 use grafeo_core::graph::rdf::{Literal, RdfStore, Term, Triple, TriplePattern};
@@ -122,6 +122,9 @@ pub struct RdfPlanner {
     /// Counts the triples the plan's scans read: the statement's
     /// `rows_scanned`.
     read_counter: Arc<grafeo_core::execution::operators::ReadCounter>,
+    /// The instant the query started, which `NOW()` gives in every row:
+    /// the planner is made for one execution of the query.
+    clock: StatementClock,
 }
 
 impl RdfPlanner {
@@ -142,6 +145,7 @@ impl RdfPlanner {
             path_search_budget: grafeo_core::execution::operators::DEFAULT_PATH_SEARCH_BUDGET,
             deadline: None,
             read_counter: Arc::default(),
+            clock: StatementClock::now(),
         }
     }
 
@@ -542,8 +546,12 @@ impl RdfPlanner {
         // Convert logical expression to filter expression
         let filter_expr = convert_filter_expression(&filter.predicate)?;
 
-        let predicate =
-            RdfExpressionPredicate::new(filter_expr, variable_columns, Arc::clone(&self.terms));
+        let predicate = RdfExpressionPredicate::new(
+            filter_expr,
+            variable_columns,
+            Arc::clone(&self.terms),
+            self.clock,
+        );
 
         let operator = Box::new(FilterOperator::new(input_op, Box::new(predicate)));
         Ok((operator, columns, types))
@@ -702,6 +710,7 @@ impl RdfPlanner {
                 projections,
                 output_types,
                 Arc::clone(&self.terms),
+                self.clock,
             ))
         };
         // The key columns come last and are not returned.
@@ -779,6 +788,7 @@ impl RdfPlanner {
             projections,
             output_types.clone(),
             Arc::clone(&self.terms),
+            self.clock,
         ));
         Ok((operator, output_columns, output_types))
     }
@@ -804,6 +814,7 @@ impl RdfPlanner {
                 filter_expr,
                 variable_columns,
                 Arc::clone(&self.terms),
+                self.clock,
             ),
             terms: Arc::clone(&self.terms),
         });
@@ -987,6 +998,7 @@ impl RdfPlanner {
                 projections,
                 projected_types,
                 Arc::clone(&self.terms),
+                self.clock,
             ))
         } else {
             input_op
@@ -1033,6 +1045,7 @@ impl RdfPlanner {
                 convert_filter_expression(having_expr)?,
                 column_map(&output_columns),
                 Arc::clone(&self.terms),
+                self.clock,
             );
             operator = Box::new(FilterOperator::new(operator, Box::new(predicate)));
         }
@@ -1396,7 +1409,14 @@ impl RdfPlanner {
         let operators: Vec<Box<dyn Operator>> = planned
             .into_iter()
             .map(|(op, cols, _)| {
-                pad_union_branch(op, &cols, &unified_columns, &unified_types, &self.terms)
+                pad_union_branch(
+                    op,
+                    &cols,
+                    &unified_columns,
+                    &unified_types,
+                    &self.terms,
+                    self.clock,
+                )
             })
             .collect();
 
@@ -2322,6 +2342,7 @@ impl RdfProjectOperator {
         projections: Vec<RdfProjectExpr>,
         output_types: Vec<LogicalType>,
         terms: Arc<QueryTermIds>,
+        clock: StatementClock,
     ) -> Self {
         assert_eq!(projections.len(), output_types.len());
         let projections = projections
@@ -2340,6 +2361,7 @@ impl RdfProjectOperator {
                         expr.clone(),
                         variable_columns.clone(),
                         Arc::clone(&terms),
+                        clock,
                     )),
                     _ => None,
                 };
@@ -3193,6 +3215,7 @@ fn pad_union_branch(
     unified_columns: &[String],
     unified_types: &[LogicalType],
     terms: &Arc<QueryTermIds>,
+    clock: StatementClock,
 ) -> Box<dyn Operator> {
     if branch_columns == unified_columns {
         return branch;
@@ -3217,6 +3240,7 @@ fn pad_union_branch(
         projections,
         unified_types.to_vec(),
         Arc::clone(terms),
+        clock,
     ))
 }
 
@@ -5198,7 +5222,12 @@ mod tests {
         let terms: Arc<QueryTermIds> = Arc::default();
         let op: Box<dyn Operator> = Box::new(RdfBindOperator {
             child,
-            evaluator: RdfExpressionPredicate::new(expr, HashMap::new(), Arc::clone(&terms)),
+            evaluator: RdfExpressionPredicate::new(
+                expr,
+                HashMap::new(),
+                Arc::clone(&terms),
+                StatementClock::now(),
+            ),
             terms,
         });
         let any = op.into_any();
@@ -5213,6 +5242,7 @@ mod tests {
             vec![RdfProjectExpr::Constant(Value::Null)],
             vec![LogicalType::RdfTermId],
             Arc::default(),
+            StatementClock::now(),
         ));
         let any = op.into_any();
         assert!(any.downcast::<RdfProjectOperator>().is_ok());

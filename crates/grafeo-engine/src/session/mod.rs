@@ -5632,7 +5632,7 @@ impl Session {
         open_cypher: bool,
     ) -> Result<crate::query::Planner> {
         use crate::query::Planner;
-        use grafeo_core::execution::operators::{LazyValue, SessionContext};
+        use grafeo_core::execution::operators::{LazyValue, SessionContext, StatementClock};
 
         // Capture store reference for lazy introspection (only computed if info()/schema() called).
         let info_store = Arc::clone(&store);
@@ -5650,6 +5650,8 @@ impl Session {
             home_schema: self.home_schema.clone(),
             home_graph: self.home_graph.clone(),
             temporal_comparison: self.temporal_comparison(open_cypher),
+            // One instant for the statement, which every clock function reads.
+            statement_clock: StatementClock::now(),
             db_info: LazyValue::new(move || Self::build_info_value(&*info_store, info_view)),
             schema_info: LazyValue::new(move || Self::build_schema_value(&*schema_store)),
         };

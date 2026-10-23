@@ -41,7 +41,7 @@ thiserror = "2.0"
 anyhow = "1.0"
 
 # Concurrency & synchronization
-parking_lot = "0.12"
+parking_lot = "0.13"
 # The host's clock on wasm32, where std::time panics (grafeo_common::clock)
 web-time = "1.1.0"
 crossbeam = "0.8"

@@ -270,3 +270,62 @@ fn golden_byte_equality() {
         "the export holds the database's epoch or a later one"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Every kind of value (`snapshot_v5_values.bin`)
+// ---------------------------------------------------------------------------
+
+/// The committed snapshot of [`generate_fixture::build_every_value_db`]: a
+/// property of every kind of value, an edge with a decimal and RDF triples.
+/// `Value` is encoded by its serde variant index, so this pins the order of
+/// its variants as well as each kind's fields.
+fn every_value_bytes() -> &'static [u8] {
+    include_bytes!("fixtures/snapshot_v5_values.bin")
+}
+
+/// Every kind of value comes back from the committed snapshot as it was
+/// written, with the edge and the triples.
+#[test]
+fn every_value_kind_imports_from_the_v5_fixture() {
+    assert_eq!(every_value_bytes()[0], EXPECTED_SNAPSHOT_VERSION);
+    let db = GrafeoDB::import_snapshot(every_value_bytes()).unwrap();
+    for (key, expected) in generate_fixture::every_value_kind() {
+        let value = db
+            .execute(&format!("MATCH (k:Kinds) WHERE NOT k:Other RETURN k.{key}"))
+            .unwrap()
+            .rows()[0][0]
+            .clone();
+        assert_eq!(value, expected, "{key}");
+        if let (Value::Float64(read), Value::Float64(written)) = (&value, &expected) {
+            assert_eq!(read.to_bits(), written.to_bits(), "{key}: the bits");
+        }
+    }
+    assert_eq!(
+        db.execute("MATCH (:Kinds)-[n:NEXT]->(:Other) RETURN n.weight")
+            .unwrap()
+            .rows()[0][0],
+        Value::Decimal(grafeo_common::types::Decimal::parse("0.10").unwrap()),
+        "the edge's decimal keeps its scale"
+    );
+    #[cfg(feature = "sparql")]
+    {
+        let triples = db
+            .execute_sparql(
+                "SELECT ?g ?s ?p ?o WHERE { { ?s ?p ?o } UNION { GRAPH ?g { ?s ?p ?o } } }",
+            )
+            .unwrap();
+        assert_eq!(triples.rows().len(), 4, "three triples and one in trips");
+    }
+}
+
+/// The same steps export the same bytes, but for the epoch at the end.
+#[test]
+fn every_value_kind_exports_the_fixtures_bytes() {
+    let exported = generate_fixture::build_every_value_db()
+        .export_snapshot()
+        .unwrap();
+    assert!(
+        without_epoch(&exported).0 == without_epoch(every_value_bytes()).0,
+        "the export of the every-kind graph differs from snapshot_v5_values.bin"
+    );
+}

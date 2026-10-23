@@ -13,6 +13,12 @@
 //! and keeps the 0.5.x files as `<name>.pre-0.6` (a file with `<name>.pre-0.6.wal/`, or
 //! the whole directory), so its checks read the migrated file.
 //!
+//! `0.6.0/` freezes the 0.6 format: a closed file and an unflushed one with its sidecar
+//! WAL (0.6 creates no WAL directories), written by the 0.6.0 release with more than 0.5.x
+//! could write: an RDF term and a decimal as properties, and the history of every commit.
+//! A 0.6 file opens as it is, with no migration; [`a_0_6_file_holds_the_sections_of_its_format`]
+//! pins its sections and their versions, and the WAL segments' version.
+//!
 //! ```bash
 //! cargo test -p grafeo-engine --all-features --test released_formats
 //! ```
@@ -60,7 +66,7 @@ struct Fixture {
     layout: Layout,
 }
 
-const FIXTURES: [Fixture; 7] = [
+const FIXTURES: [Fixture; 9] = [
     Fixture {
         version: "0.5.43",
         layout: Layout::Closed,
@@ -89,6 +95,14 @@ const FIXTURES: [Fixture; 7] = [
         version: "0.5.44",
         layout: Layout::Compacted,
     },
+    Fixture {
+        version: "0.6.0",
+        layout: Layout::Closed,
+    },
+    Fixture {
+        version: "0.6.0",
+        layout: Layout::Unflushed,
+    },
 ];
 
 impl Fixture {
@@ -103,6 +117,13 @@ impl Fixture {
 
     fn name(self) -> String {
         format!("{}/{}", self.version, self.file_name())
+    }
+
+    /// Whether a 0.6 release wrote it: a file of the current format, which an open reads
+    /// as it is (no migration), with what 0.6 adds (see `scripts/released_fixtures.py`):
+    /// a `Concept` node with an RDF term and a decimal, and the history of every commit.
+    fn writes_0_6(self) -> bool {
+        self.version.starts_with("0.6")
     }
 
     /// Whether the release wrote a WAL directory (`directory/`), not a single `.grafeo`
@@ -158,9 +179,11 @@ impl Fixture {
         self.layout == Layout::Directory
     }
 
-    /// Whether the second session's schema is only in WAL records.
+    /// Whether the second session's schema is only in WAL records of 0.5.x, which carry
+    /// no default values, parent types or edge endpoints. A 0.6 WAL records each definition
+    /// whole.
     fn second_session_schema_in_wal(self) -> bool {
-        matches!(self.layout, Layout::Unflushed | Layout::Directory)
+        matches!(self.layout, Layout::Unflushed | Layout::Directory) && !self.writes_0_6()
     }
 
     /// The constraint names `SHOW CONSTRAINTS` lists. 0.5.43 files store no constraint
@@ -379,6 +402,10 @@ fn names(db: &GrafeoDB, query: &str) -> Vec<String> {
 #[test]
 fn a_0_5_database_opened_read_only_is_not_locked_once_loaded() {
     each(FIXTURES, |fixture| {
+        // A 0.6 file is read in place: its read-only open holds the shared lock.
+        if fixture.writes_0_6() {
+            return;
+        }
         let name = fixture.name();
         let dir = fixture.copy();
         let path = dir.path().join(fixture.file_name());
@@ -424,6 +451,9 @@ fn with_suffix(path: &Path, suffix: &str) -> PathBuf {
 #[test]
 fn a_read_write_open_migrates_a_0_5_database_and_keeps_the_old_one() {
     each(FIXTURES, |fixture| {
+        if fixture.writes_0_6() {
+            return;
+        }
         let name = fixture.name();
         let dir = fixture.copy();
         let path = dir.path().join(fixture.file_name());
@@ -529,14 +559,18 @@ fn check_default_graph(fixture: Fixture, db: &GrafeoDB) {
         strings(&["Employee", "Person"])
     };
     let (labels, edges, people) = if complete {
+        let mut labels = vec![vec![strings(&["City"]), Value::Int64(2)]];
+        if fixture.writes_0_6() {
+            labels.push(vec![strings(&["Concept"]), Value::Int64(1)]);
+        }
+        labels.extend([
+            vec![strings(&["Document"]), Value::Int64(3)],
+            vec![gus, Value::Int64(1)],
+            vec![strings(&["Museum"]), Value::Int64(1)],
+            vec![strings(&["Person"]), Value::Int64(2)],
+        ]);
         (
-            vec![
-                vec![strings(&["City"]), Value::Int64(2)],
-                vec![strings(&["Document"]), Value::Int64(3)],
-                vec![gus, Value::Int64(1)],
-                vec![strings(&["Museum"]), Value::Int64(1)],
-                vec![strings(&["Person"]), Value::Int64(2)],
-            ],
+            labels,
             vec![
                 vec![Value::from("IN_CITY"), Value::Int64(1)],
                 vec![Value::from("KNOWS"), Value::Int64(1)],
@@ -609,6 +643,12 @@ fn check_default_graph(fixture: Fixture, db: &GrafeoDB) {
         ]
     };
     let [tags, address, born, seen, stay] = typed;
+    // `height: 1.88` is a decimal in 0.6 GQL, a float in 0.5.x.
+    let height = if fixture.writes_0_6() {
+        Value::Decimal(grafeo_common::types::Decimal::parse("1.88").unwrap())
+    } else {
+        Value::Float64(1.88)
+    };
     assert_eq!(
         rows(
             db,
@@ -619,7 +659,7 @@ fn check_default_graph(fixture: Fixture, db: &GrafeoDB) {
             Value::from("alix@example.org"),
             age,
             score,
-            Value::Float64(1.88),
+            height,
             Value::Bool(true),
             tags,
             address,
@@ -962,4 +1002,243 @@ fn check_indexes(fixture: Fixture, db: &GrafeoDB) {
     matches.sort_by_key(Value::as_int64);
     expected.sort_by_key(Value::as_int64);
     assert_eq!(matches, expected, "{name}: text search");
+}
+
+// ---------------------------------------------------------------------------
+// What 0.6 writes
+// ---------------------------------------------------------------------------
+
+/// The fixtures a 0.6 release wrote.
+fn fixtures_0_6() -> impl Iterator<Item = Fixture> {
+    FIXTURES.into_iter().filter(|fixture| fixture.writes_0_6())
+}
+
+/// A read-write open of a 0.6 file reads it as it is: no migration, no kept copy, and
+/// the file stays a 0.6 file; a closed one's sidecar WAL is gone once the close has
+/// checkpointed it.
+#[test]
+fn a_read_write_open_of_a_0_6_database_migrates_nothing() {
+    each(fixtures_0_6(), |fixture| {
+        let name = fixture.name();
+        let dir = fixture.copy();
+        let path = dir.path().join(fixture.file_name());
+        let db = GrafeoDB::open(&path).unwrap_or_else(|error| panic!("{name}: {error}"));
+        assert!(db.node_count().unwrap() > 0, "{name}: the data");
+        db.close().unwrap();
+        drop(db);
+        assert_eq!(
+            detect(&path).unwrap(),
+            OnDisk::Current,
+            "{name}: a 0.6 file"
+        );
+        for left in [
+            ".pre-0.6",
+            ".pre-0.6.wal",
+            ".pre-0.6.0",
+            ".migrating",
+            ".migrate.lock",
+        ] {
+            assert!(
+                !with_suffix(&path, left).exists(),
+                "{name}: <name>{left} next to a 0.6 file"
+            );
+        }
+        assert!(
+            !with_suffix(&path, ".wal").exists(),
+            "{name}: the close checkpointed the sidecar WAL"
+        );
+    });
+}
+
+#[test]
+fn values_of_the_0_6_kinds_hold_what_was_written() {
+    each(fixtures_0_6(), |fixture| {
+        let (_dir, db) = fixture.open();
+        check_values_of_the_0_6_kinds(fixture, &db);
+    });
+}
+
+#[test]
+fn values_of_the_0_6_kinds_hold_what_was_written_read_only() {
+    each(fixtures_0_6(), |fixture| {
+        let dir = fixture.copy();
+        let db = GrafeoDB::open_read_only(dir.path().join(fixture.file_name()))
+            .unwrap_or_else(|error| panic!("{}: read-only: {error}", fixture.name()));
+        check_values_of_the_0_6_kinds(fixture, &db);
+    });
+}
+
+/// The `Concept` node holds an RDF literal and an IRI as properties (value tag 18) and
+/// a decimal with its scale (tag 17).
+fn check_values_of_the_0_6_kinds(fixture: Fixture, db: &GrafeoDB) {
+    use grafeo_common::types::rdf::Term;
+    let term = |term: Term| Value::RdfTerm(std::sync::Arc::new(term));
+    assert_eq!(
+        rows(
+            db,
+            "MATCH (c:Concept {name: 'apple'}) RETURN c.label, c.iri, c.price"
+        ),
+        [vec![
+            term(Term::lang_literal("Pomme", "fr")),
+            term(Term::iri("http://example.org/apple")),
+            Value::Decimal(grafeo_common::types::Decimal::parse("19.50").unwrap()),
+        ]],
+        "{}: the concept",
+        fixture.name()
+    );
+}
+
+/// The sections a 0.6 file holds, with their versions: the format these fixtures
+/// freeze. A change of a version, or a section more or less, shows up here first.
+#[test]
+fn a_0_6_file_holds_the_sections_of_its_format() {
+    use grafeo_common::storage::section::SectionType;
+    each(fixtures_0_6(), |fixture| {
+        let name = fixture.name();
+        let dir = fixture.copy();
+        let path = dir.path().join(fixture.file_name());
+        let manager = grafeo_storage::file::GrafeoFileManager::open_read_only(&path, None)
+            .unwrap_or_else(|error| panic!("{name}: {error}"));
+        let creator = String::from_utf8_lossy(&manager.file_header().creator_version)
+            .trim_end_matches('\0')
+            .to_string();
+        assert_eq!(
+            creator, fixture.version,
+            "{name}: the creator in the header"
+        );
+        let sections: Vec<(SectionType, u8)> = manager
+            .read_image(|image| {
+                Ok([
+                    SectionType::Catalog,
+                    SectionType::LpgStore,
+                    SectionType::RdfStore,
+                    SectionType::CompactStore,
+                    SectionType::OverlayDeletions,
+                    SectionType::TimeIndex,
+                    SectionType::VectorStore,
+                    SectionType::TextIndex,
+                    SectionType::RdfRing,
+                    SectionType::PropertyIndex,
+                ]
+                .into_iter()
+                .filter_map(|section| {
+                    image
+                        .section_source(section)
+                        .map(|source| (section, source.section_version()))
+                })
+                .collect())
+            })
+            .unwrap();
+        manager.close().unwrap();
+        // The search and property indexes are built from the data at open; the ring
+        // only after `rebuild_ring()`, which these steps do not run.
+        assert_eq!(
+            sections,
+            [
+                (SectionType::Catalog, 2),
+                (SectionType::LpgStore, 4),
+                (SectionType::RdfStore, 4),
+                (SectionType::TimeIndex, 1),
+            ],
+            "{name}: sections"
+        );
+        if fixture.layout == Layout::Unflushed {
+            // The sidecar WAL's segments start with the magic and version 2.
+            let wal = fixture
+                .source()
+                .join(format!("{}.wal", fixture.file_name()));
+            let segments: Vec<PathBuf> = std::fs::read_dir(&wal)
+                .unwrap()
+                .map(|entry| entry.unwrap().path())
+                .filter(|path| path.extension().is_some_and(|ext| ext == "log"))
+                .collect();
+            assert!(!segments.is_empty(), "{name}: WAL segments");
+            for segment in segments {
+                let bytes = std::fs::read(&segment).unwrap();
+                assert_eq!(&bytes[..8], b"GRAFWAL\0", "{name}: segment magic");
+                assert_eq!(
+                    u16::from_le_bytes([bytes[8], bytes[9]]),
+                    2,
+                    "{name}: segment version"
+                );
+            }
+        }
+    });
+}
+
+/// The commits the time index of a 0.6 file holds, as its layout reads: a layout byte
+/// (1), the history floor, the count of commits, then each commit's epoch and its time in
+/// milliseconds, all u64 little endian.
+fn time_index_commits(path: &Path) -> Vec<(u64, u64)> {
+    use grafeo_common::storage::section::SectionType;
+    let manager = grafeo_storage::file::GrafeoFileManager::open_read_only(path, None).unwrap();
+    let stream = manager
+        .read_image(|image| {
+            let source = image
+                .section_source(SectionType::TimeIndex)
+                .expect("a time index");
+            let mut stream = Vec::new();
+            for index in 0..source.chunks().len() {
+                stream.extend_from_slice(&source.fetch(index)?);
+            }
+            Ok(stream)
+        })
+        .unwrap();
+    manager.close().unwrap();
+    let u64_at = |at: usize| u64::from_le_bytes(stream[at..at + 8].try_into().unwrap());
+    assert_eq!(stream[0], 1, "the time index's layout");
+    let count = usize::try_from(u64_at(9)).unwrap();
+    assert_eq!(stream.len(), 17 + 16 * count, "the time index's length");
+    (0..count)
+        .map(|commit| (u64_at(17 + 16 * commit), u64_at(25 + 16 * commit)))
+        .collect()
+}
+
+/// The file keeps its history: its time index maps each commit's time to its epoch, and
+/// a read as of an epoch before the second session finds Vincent, whom it deleted.
+#[test]
+fn a_0_6_file_keeps_its_history() {
+    use grafeo_common::types::{EpochId, Timestamp};
+    use grafeo_engine::TimePoint;
+    each(fixtures_0_6(), |fixture| {
+        let name = fixture.name();
+        let dir = fixture.copy();
+        let path = dir.path().join(fixture.file_name());
+        let commits = time_index_commits(&path);
+        assert!(commits.len() > 10, "{name}: the commits: {commits:?}");
+        assert!(
+            commits
+                .windows(2)
+                .all(|pair| pair[0].0 < pair[1].0 && pair[0].1 <= pair[1].1),
+            "{name}: epochs ascend and times never go back: {commits:?}"
+        );
+
+        let db = GrafeoDB::open_read_only(&path).unwrap_or_else(|error| panic!("{name}: {error}"));
+        for &(epoch, millis) in &commits {
+            // The last commit at or before the time: the latest of those in that millisecond.
+            let last = commits
+                .iter()
+                .filter(|(_, time)| *time <= millis)
+                .map(|(epoch, _)| *epoch)
+                .max()
+                .unwrap();
+            let point = TimePoint::Timestamp(Timestamp::from_micros(
+                i64::try_from(millis).unwrap() * 1000,
+            ));
+            assert_eq!(
+                db.epoch_as_of(point).unwrap(),
+                EpochId(last),
+                "{name}: the time of epoch {epoch}"
+            );
+        }
+        let vincent = "MATCH (p:Person {name: 'Vincent'}) RETURN count(p)";
+        assert_eq!(rows(&db, vincent), [[Value::Int64(0)]], "{name}: deleted");
+        let seen = commits.iter().any(|&(epoch, _)| {
+            db.as_of(EpochId(epoch))
+                .and_then(|view| view.execute(vincent))
+                .is_ok_and(|result| result.rows()[0][0] == Value::Int64(1))
+        });
+        assert!(seen, "{name}: a read as of an earlier epoch finds Vincent");
+        db.close().unwrap();
+    });
 }

@@ -26,6 +26,7 @@ Properties are key-value pairs stored on nodes and edges. Grafeo supports a rich
 | `Time` | `'14:30:00'` | Time of day with optional timezone |
 | `Duration` | `'P1Y2M3D'` | ISO 8601 duration (months, days, nanoseconds) |
 | `DateTime` | `'2024-01-15T10:30:00Z'` | Date and time (microsecond precision) |
+| `RdfTerm` | an IRI or a literal from SPARQL | An RDF term (IRI, blank node, or literal with its language tag or datatype), as a SPARQL result gives it; set from a binding's term type or a parameter, and kept exactly |
 | `Null` | `null` | Absence of value |
 | `GCounter` | `{"$gcounter": {...}}` | Grow-only CRDT counter |
 | `OnCounter` | `{"$pncounter": {...}}` | Positive-negative CRDT counter |

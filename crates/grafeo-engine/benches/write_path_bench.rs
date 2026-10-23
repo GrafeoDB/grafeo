@@ -10,8 +10,15 @@
 //!
 //! The scale defaults to 10,000 statements (100,000 rows for the large batch
 //! calls and 100,000 nodes for the reads); `GRAFEO_BENCH_SCALE` divides it,
-//! for example `GRAFEO_BENCH_SCALE=10` for a quick run or under CodSpeed's
-//! simulation.
+//! for example `GRAFEO_BENCH_SCALE=10` for a quick run or under CodSpeed.
+//!
+//! `GRAFEO_BENCH_STORAGE` picks the databases: `mem` runs the in-memory
+//! cases, the reads and the transaction manager, whose cost is CPU work;
+//! `file` runs the file-backed cases and the checkpoints, whose cost is in
+//! system calls (the WAL, fsync) and in another thread's timing; unset (or
+//! `all`) runs both. CodSpeed's simulation measures the first set (it leaves
+//! system calls out and runs one thread at a time), its walltime job the
+//! second (see the Benchmarks section of CONTRIBUTING.md).
 //!
 //! Run with: cargo bench -p grafeo-engine --features full --bench write_path_bench
 
@@ -156,6 +163,25 @@ impl Storage {
             Self::File => "file",
         }
     }
+
+    /// Whether this run measures the databases of `self`, as
+    /// `GRAFEO_BENCH_STORAGE` selects (both when it is unset).
+    fn measured(self) -> bool {
+        match std::env::var("GRAFEO_BENCH_STORAGE").as_deref() {
+            Ok("mem") => matches!(self, Self::Memory),
+            Ok("file") => matches!(self, Self::File),
+            Ok("all") | Err(_) => true,
+            Ok(other) => panic!("GRAFEO_BENCH_STORAGE is mem, file or all, not {other:?}"),
+        }
+    }
+
+    /// The databases this run measures, in-memory first.
+    fn measured_ones() -> Vec<Self> {
+        [Self::Memory, Self::File]
+            .into_iter()
+            .filter(|storage| storage.measured())
+            .collect()
+    }
 }
 
 /// A database for one iteration; the session drops first, then the
@@ -247,7 +273,7 @@ fn bench_query_writes(c: &mut Criterion) {
     let statements = scaled(STATEMENTS);
     let deletes = scaled(DELETES);
     let mut group = slow_group(c, "write_query");
-    for storage in [Storage::Memory, Storage::File] {
+    for storage in Storage::measured_ones() {
         let tag = storage.label();
 
         group.bench_function(format!("gql_insert_autocommit/{tag}"), |b| {
@@ -445,7 +471,7 @@ fn bench_query_writes(c: &mut Criterion) {
 
 fn bench_batch_calls(c: &mut Criterion) {
     let mut group = slow_group(c, "write_batch");
-    for storage in [Storage::Memory, Storage::File] {
+    for storage in Storage::measured_ones() {
         let tag = storage.label();
         for rows in [scaled(STATEMENTS), scaled(LARGE_BATCH)] {
             group.bench_function(format!("batch_create_nodes/{rows}/{tag}"), |b| {
@@ -496,7 +522,11 @@ fn bench_batch_calls(c: &mut Criterion) {
     }
 
     // The direct calls one at a time, as memory_bench builds its graph: a
-    // node, three properties, then five edges per node.
+    // node, three properties, then five edges per node. In memory only.
+    if !Storage::Memory.measured() {
+        group.finish();
+        return;
+    }
     let nodes = scaled(STATEMENTS);
     group.bench_function(format!("direct_calls_nodes_edges/{nodes}/mem"), |b| {
         per_iteration(
@@ -577,7 +607,7 @@ fn bench_batch_calls(c: &mut Criterion) {
 fn bench_rollback(c: &mut Criterion) {
     let statements = scaled(STATEMENTS);
     let mut group = slow_group(c, "write_rollback");
-    for storage in [Storage::Memory, Storage::File] {
+    for storage in Storage::measured_ones() {
         let tag = storage.label();
 
         // The whole transaction: 10k inserts, then the rollback.
@@ -648,6 +678,9 @@ fn read_graph(nodes: usize) -> Fixture {
 }
 
 fn bench_reads(c: &mut Criterion) {
+    if !Storage::Memory.measured() {
+        return;
+    }
     let nodes = scaled(READ_NODES);
     let lookups = scaled(LOOKUPS).min(nodes);
     // Built by the first case that runs, so a filtered run without reads
@@ -709,7 +742,17 @@ fn bench_reads(c: &mut Criterion) {
 /// The read horizon each immediate call and commit asks for before its
 /// collect: with no transaction finished, and with 100 committed ones that
 /// the manager's periodic cleanup has not dropped yet.
+/// Calls per measured iteration of the transaction manager cases: a whole
+/// cycle of the cleanup `begin_commit` runs every 64 commits. CodSpeed's
+/// simulation runs a benchmark once, and one call of a few nanoseconds
+/// measured that way is a cold call whose cost the runner's cache decides:
+/// `read_horizon` reported a 14% change on unchanged code.
+const MANAGER_CALLS: usize = 64;
+
 fn bench_read_horizon(c: &mut Criterion) {
+    if !Storage::Memory.measured() {
+        return;
+    }
     let mut group = c.benchmark_group("transaction_manager");
     for finished in [0, 100] {
         let manager = TransactionManager::new();
@@ -717,21 +760,30 @@ fn bench_read_horizon(c: &mut Criterion) {
             let transaction = manager.begin();
             manager.commit(transaction).expect("commit");
         }
-        group.bench_function(format!("read_horizon/{finished}_finished"), |b| {
-            b.iter(|| black_box(manager.read_horizon()));
-        });
+        group.bench_function(
+            format!("read_horizon/{finished}_finished/x{MANAGER_CALLS}"),
+            |b| {
+                b.iter(|| {
+                    for _ in 0..MANAGER_CALLS {
+                        black_box(manager.read_horizon());
+                    }
+                });
+            },
+        );
     }
     // A transaction's begin and commit, with the manager's cleanup every
     // 64 commits (the default `gc_interval` is 100).
     let manager = TransactionManager::new();
     let mut commits = 0_u32;
-    group.bench_function("begin_commit", |b| {
+    group.bench_function(format!("begin_commit/x{MANAGER_CALLS}"), |b| {
         b.iter(|| {
-            let transaction = manager.begin();
-            black_box(manager.commit(transaction).expect("commit"));
-            commits += 1;
-            if commits.is_multiple_of(64) {
-                manager.gc();
+            for _ in 0..MANAGER_CALLS {
+                let transaction = manager.begin();
+                black_box(manager.commit(transaction).expect("commit"));
+                commits += 1;
+                if commits.is_multiple_of(64) {
+                    manager.gc();
+                }
             }
         });
     });
@@ -760,6 +812,9 @@ fn checkpointed_people(count: usize) -> Fixture {
 /// same writes with none running (a checkpoint that held writers off for its
 /// whole image would show here).
 fn bench_checkpoints(c: &mut Criterion) {
+    if !Storage::File.measured() {
+        return;
+    }
     let people = scaled(CHECKPOINT_PEOPLE);
     let writes = scaled(CHECKPOINT_WRITES);
     let mut group = slow_group(c, "checkpoint");

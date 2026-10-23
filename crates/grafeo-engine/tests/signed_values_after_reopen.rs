@@ -123,3 +123,41 @@ fn signed_values_survive_compact_reopen_and_an_index() {
     let db = open(&path);
     check(&db, "with the indexes after a second reopen");
 }
+
+/// An equality on `n.v` looks up the property index, and finds the signed
+/// value it asks for.
+fn check_lookup(db: &GrafeoDB, stage: &str) {
+    let query = "MATCH (n:N {v: -7}) RETURN n.v";
+    let Value::String(plan) = &row(db, &format!("EXPLAIN {query}"))[0] else {
+        panic!("{stage}: EXPLAIN returns its plan as text");
+    };
+    assert!(plan.contains("[index: v]"), "{stage}: {plan}");
+    assert_eq!(row(db, query), [Value::Int64(-7)], "{stage}: {query}");
+}
+
+/// The indexes made before the compact: the compact keeps them serving the
+/// signed values, and so do a reopen and a read-only open.
+#[test]
+fn indexes_made_before_compact_keep_serving_signed_values() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("signed_indexed.grafeo");
+    {
+        let mut db = open(&path);
+        write(&db);
+        db.execute("CREATE INDEX n_v FOR (n:N) ON (n.v)").unwrap();
+        db.execute("CREATE INDEX location_a FOR (l:Location) ON (l.a)")
+            .unwrap();
+        check_lookup(&db, "before compact");
+        db.compact().unwrap();
+        check(&db, "indexed, after compact");
+        check_lookup(&db, "after compact");
+        db.close().unwrap();
+    }
+    let db = open(&path);
+    check(&db, "indexed, after the reopen");
+    check_lookup(&db, "after the reopen");
+    db.close().unwrap();
+    let db = GrafeoDB::open_read_only(&path).unwrap();
+    check(&db, "indexed, read-only");
+    check_lookup(&db, "read-only");
+}

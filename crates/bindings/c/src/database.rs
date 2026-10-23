@@ -50,21 +50,21 @@ macro_rules! db_ref_or_null {
     }};
 }
 
-/// Serialize a `QueryResult` into a `GrafeoResult`.
+/// Serialize a `QueryResult` into a `GrafeoResult`; NULL, with the last
+/// error set, for a value no JSON form holds (an RDF term of a kind this
+/// binding does not know).
 pub(crate) fn build_result(result: &grafeo_engine::database::QueryResult) -> *mut GrafeoResult {
+    build_result_checked(result).unwrap_or(std::ptr::null_mut())
+}
+
+fn build_result_checked(
+    result: &grafeo_engine::database::QueryResult,
+) -> Result<*mut GrafeoResult, GrafeoStatus> {
     let json_rows: Vec<serde_json::Value> = result
         .rows()
         .iter()
-        .map(|row| {
-            let obj: serde_json::Map<String, serde_json::Value> = result
-                .columns
-                .iter()
-                .zip(row.iter())
-                .map(|(col, val)| (col.clone(), crate::types::value_to_json(val)))
-                .collect();
-            serde_json::Value::Object(obj)
-        })
-        .collect();
+        .map(|row| crate::types::json_object(result.columns.iter().cloned().zip(row.iter())))
+        .collect::<Result<_, _>>()?;
 
     let json_str = serde_json::to_string(&json_rows).unwrap_or_default();
     let c_json = CString::new(json_str).unwrap_or_default();
@@ -90,15 +90,15 @@ pub(crate) fn build_result(result: &grafeo_engine::database::QueryResult) -> *mu
                         .collect(),
                 ),
             );
-            let props: serde_json::Map<String, serde_json::Value> = n
-                .properties
-                .iter()
-                .map(|(k, v)| (k.as_str().to_string(), crate::types::value_to_json(v)))
-                .collect();
-            obj.insert("properties".to_string(), serde_json::Value::Object(props));
-            serde_json::Value::Object(obj)
+            let props = crate::types::json_object(
+                n.properties
+                    .iter()
+                    .map(|(k, v)| (k.as_str().to_string(), v)),
+            )?;
+            obj.insert("properties".to_string(), props);
+            Ok(serde_json::Value::Object(obj))
         })
-        .collect();
+        .collect::<Result<_, GrafeoStatus>>()?;
 
     let edges_json_val: Vec<serde_json::Value> = raw_edges
         .iter()
@@ -121,20 +121,20 @@ pub(crate) fn build_result(result: &grafeo_engine::database::QueryResult) -> *mu
                 "target_id".to_string(),
                 serde_json::json!(e.target_id.as_u64()),
             );
-            let props: serde_json::Map<String, serde_json::Value> = e
-                .properties
-                .iter()
-                .map(|(k, v)| (k.as_str().to_string(), crate::types::value_to_json(v)))
-                .collect();
-            obj.insert("properties".to_string(), serde_json::Value::Object(props));
-            serde_json::Value::Object(obj)
+            let props = crate::types::json_object(
+                e.properties
+                    .iter()
+                    .map(|(k, v)| (k.as_str().to_string(), v)),
+            )?;
+            obj.insert("properties".to_string(), props);
+            Ok(serde_json::Value::Object(obj))
         })
-        .collect();
+        .collect::<Result<_, GrafeoStatus>>()?;
 
     let nodes_str = serde_json::to_string(&nodes_json_val).unwrap_or_default();
     let edges_str = serde_json::to_string(&edges_json_val).unwrap_or_default();
 
-    Box::into_raw(Box::new(GrafeoResult {
+    Ok(Box::into_raw(Box::new(GrafeoResult {
         json: c_json,
         row_count: result.rows().len(),
         execution_time_ms: result.execution_time_ms.unwrap_or(0.0),
@@ -142,7 +142,8 @@ pub(crate) fn build_result(result: &grafeo_engine::database::QueryResult) -> *mu
         nodes_json: CString::new(nodes_str).unwrap_or_default(),
         edges_json: CString::new(edges_str).unwrap_or_default(),
         counters: result.counters,
-    }))
+        kind: result.kind,
+    })))
 }
 
 // =========================================================================
@@ -669,6 +670,23 @@ pub extern "C" fn grafeo_result_execution_time_ms(result: *const GrafeoResult) -
     unsafe { &*result }.execution_time_ms
 }
 
+/// What a result holds: 0 for rows (SPARQL SELECT and updates, and every
+/// other language), 1 for one boolean (SPARQL ASK: one row with a
+/// `boolean` column), 2 for an RDF graph (SPARQL CONSTRUCT and DESCRIBE:
+/// `subject`, `predicate` and `object` columns of RDF terms). 0 for NULL.
+#[unsafe(no_mangle)]
+pub extern "C" fn grafeo_result_kind(result: *const GrafeoResult) -> i32 {
+    if result.is_null() {
+        return 0;
+    }
+    // SAFETY: Caller guarantees valid pointer.
+    match unsafe { &*result }.kind {
+        grafeo_engine::database::ResultKind::Boolean => 1,
+        grafeo_engine::database::ResultKind::Graph => 2,
+        _ => 0,
+    }
+}
+
 /// Get estimated rows scanned.
 #[unsafe(no_mangle)]
 pub extern "C" fn grafeo_result_rows_scanned(result: *const GrafeoResult) -> u64 {
@@ -925,7 +943,10 @@ pub(crate) fn node_out(
                 .collect();
             let labels_json = CString::new(serde_json::to_string(&labels).unwrap_or_default())
                 .unwrap_or_default();
-            let properties_json = crate::types::properties_to_json(&node.properties);
+            let properties_json = match crate::types::properties_to_json(&node.properties) {
+                Ok(json) => json,
+                Err(status) => return status,
+            };
 
             let gnode = Box::new(GrafeoNode {
                 id: node.id.as_u64(),
@@ -1201,7 +1222,10 @@ pub(crate) fn edge_out(
     match edge {
         Some(edge) => {
             let edge_type = CString::new(edge.edge_type.to_string()).unwrap_or_default();
-            let properties_json = crate::types::properties_to_json(&edge.properties);
+            let properties_json = match crate::types::properties_to_json(&edge.properties) {
+                Ok(json) => json,
+                Err(status) => return status,
+            };
 
             let gedge = Box::new(GrafeoEdge {
                 id: edge.id.as_u64(),
@@ -2519,6 +2543,49 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// `grafeo_result_kind` tells a SPARQL ASK (1, one boolean) and a
+    /// CONSTRUCT (2, a graph) from rows (0: SELECT, an update, GQL), and a
+    /// NULL result is 0.
+    #[cfg(feature = "sparql")]
+    #[test]
+    fn the_result_kind_tells_a_boolean_and_a_graph_from_rows() {
+        let db = grafeo_open_memory();
+        assert!(!db.is_null());
+        let kind = |sparql: bool, query: &str| {
+            let query = CString::new(query).unwrap();
+            let result = if sparql {
+                grafeo_execute_sparql(db, query.as_ptr())
+            } else {
+                grafeo_execute(db, query.as_ptr())
+            };
+            assert!(!result.is_null(), "{query:?} failed");
+            let kind = grafeo_result_kind(result);
+            grafeo_free_result(result);
+            kind
+        };
+        assert_eq!(
+            kind(
+                true,
+                "INSERT DATA { <http://ex.org/alix> <http://ex.org/knows> <http://ex.org/gus> }"
+            ),
+            0
+        );
+        assert_eq!(kind(true, "ASK { ?s ?p ?o }"), 1);
+        assert_eq!(kind(true, "ASK { <http://ex.org/gus> ?p ?o }"), 1);
+        assert_eq!(
+            kind(
+                true,
+                "CONSTRUCT { ?o <http://ex.org/known> ?s } WHERE { ?s ?p ?o }"
+            ),
+            2
+        );
+        assert_eq!(kind(true, "DESCRIBE <http://ex.org/alix>"), 2);
+        assert_eq!(kind(true, "SELECT ?s WHERE { ?s ?p ?o }"), 0);
+        assert_eq!(kind(false, "RETURN 1 AS one"), 0);
+        assert_eq!(grafeo_result_kind(std::ptr::null()), 0);
+        grafeo_free_database(db);
+    }
+
     /// After `grafeo_close` the handle lives on until `grafeo_free_database`:
     /// the index calls on it fail, and a drop returns -1 (not 0, "nothing to
     /// drop"), which the Go, Dart and C# wrappers read as an error.
@@ -3185,6 +3252,106 @@ mod tests {
         assert!(props_str.contains("2020"));
 
         grafeo_free_edge(edge_ptr);
+        grafeo_close(db);
+        grafeo_free_database(db);
+    }
+
+    /// The rows of `query` with `params` as JSON, asserting the call succeeds.
+    fn result_json(db: *mut GrafeoDatabase, query: &str, params: &str) -> serde_json::Value {
+        let query = CString::new(query).unwrap();
+        let params = CString::new(params).unwrap();
+        let result = grafeo_execute_with_params(db, query.as_ptr(), params.as_ptr());
+        assert!(!result.is_null(), "{query:?}");
+        // SAFETY: the result is valid until grafeo_free_result
+        let json = unsafe { std::ffi::CStr::from_ptr(grafeo_result_json(result)) }
+            .to_str()
+            .unwrap()
+            .to_string();
+        grafeo_free_result(result);
+        serde_json::from_str(&json).unwrap()
+    }
+
+    /// An RDF term travels in the `$term` tag both ways, and a map with the
+    /// keys of a SPARQL JSON term (`type` and `value`) stays a map.
+    #[test]
+    fn rdf_terms_travel_in_the_term_tag_and_look_alike_maps_stay_maps() {
+        let db = grafeo_open_memory();
+        let term = serde_json::json!({
+            "$term": {"type": "literal", "value": "Pomme", "xml:lang": "fr"}
+        });
+        let rows = result_json(
+            db,
+            "RETURN $t AS t",
+            &serde_json::json!({ "t": term }).to_string(),
+        );
+        assert_eq!(rows, serde_json::json!([{ "t": term }]));
+        // A tag with a language tag in capitals reads in lowercase.
+        let upper = serde_json::json!({
+            "$term": {"type": "literal", "value": "Pomme", "xml:lang": "FR"}
+        });
+        let rows = result_json(
+            db,
+            "RETURN $t AS t",
+            &serde_json::json!({ "t": upper }).to_string(),
+        );
+        assert_eq!(rows, serde_json::json!([{ "t": term }]));
+        for map in [
+            serde_json::json!({"type": "uri", "value": "http://example.org/Paris"}),
+            serde_json::json!({"type": "literal", "value": "Pomme", "xml:lang": "fr"}),
+            serde_json::json!({"type": "bnode", "value": "b0"}),
+        ] {
+            let rows = result_json(
+                db,
+                "RETURN $m AS m, $m.type AS kind",
+                &serde_json::json!({ "m": map }).to_string(),
+            );
+            assert_eq!(rows[0]["m"], map, "{map}");
+            assert_eq!(rows[0]["kind"], map["type"], "{map}");
+        }
+        grafeo_close(db);
+        grafeo_free_database(db);
+    }
+
+    /// A SPARQL result gives each term in the `$term` tag.
+    #[cfg(feature = "sparql")]
+    #[test]
+    fn sparql_results_give_terms_in_the_term_tag() {
+        let db = grafeo_open_memory();
+        let insert = CString::new(
+            r#"INSERT DATA { <http://ex.org/apple> <http://ex.org/label> "Pomme"@fr ;
+                <http://ex.org/price> "1.50"^^<http://www.w3.org/2001/XMLSchema#decimal> . }"#,
+        )
+        .unwrap();
+        let result = grafeo_execute_sparql(db, insert.as_ptr());
+        assert!(!result.is_null());
+        grafeo_free_result(result);
+        let select =
+            CString::new("SELECT ?p ?o WHERE { <http://ex.org/apple> ?p ?o } ORDER BY ?p").unwrap();
+        let result = grafeo_execute_sparql(db, select.as_ptr());
+        assert!(!result.is_null());
+        // SAFETY: the result is valid until grafeo_free_result
+        let json = unsafe { std::ffi::CStr::from_ptr(grafeo_result_json(result)) }
+            .to_str()
+            .unwrap()
+            .to_string();
+        grafeo_free_result(result);
+        let rows: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(
+            rows,
+            serde_json::json!([
+                {
+                    "p": {"$term": {"type": "uri", "value": "http://ex.org/label"}},
+                    "o": {"$term": {"type": "literal", "value": "Pomme", "xml:lang": "fr"}},
+                },
+                {
+                    "p": {"$term": {"type": "uri", "value": "http://ex.org/price"}},
+                    "o": {"$term": {
+                        "type": "literal", "value": "1.50",
+                        "datatype": "http://www.w3.org/2001/XMLSchema#decimal",
+                    }},
+                },
+            ])
+        );
         grafeo_close(db);
         grafeo_free_database(db);
     }

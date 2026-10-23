@@ -138,10 +138,13 @@ tests:
       rows:
         - [0, 1, 0, 180, true, true]
 
+  # exp() is a transcendental function: its last bit depends on the
+  # platform's libm (WASM's differs from e by one ulp at 1), so exp(1) is
+  # compared with e() to within 1e-15, not for equality.
   - name: the_constants_pi_and_e
     variants:
-      gql: "RETURN pi() > 3.14159e0 AND pi() < 3.1416e0 AS pi, e() > 2.71828e0 AND e() < 2.7183e0 AS e, exp(1) = e() AS exp_one"
-      cypher: "RETURN pi() > 3.14159 AND pi() < 3.1416 AS pi, e() > 2.71828 AND e() < 2.7183 AS e, exp(1) = e() AS exp_one"
+      gql: "RETURN pi() > 3.14159e0 AND pi() < 3.1416e0 AS pi, e() > 2.71828e0 AND e() < 2.7183e0 AS e, abs(exp(1) - e()) < 1.0e-15 AS exp_one"
+      cypher: "RETURN pi() > 3.14159 AND pi() < 3.1416 AS pi, e() > 2.71828 AND e() < 2.7183 AS e, abs(exp(1) - e()) < 1.0e-15 AS exp_one"
     expect:
       rows:
         - [true, true, true]

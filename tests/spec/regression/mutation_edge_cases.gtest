@@ -136,29 +136,31 @@ tests:
       - "INSERT (:Location {lat: -33.8688, lon: 151.2093})"
     query: MATCH (l:Location) RETURN l.lat, l.lon
     expect:
-      count: 1
+      rows:
+        - [-33.8688, 151.2093]
 
   # ---------------------------------------------------------------------------
   # Multi-clause MATCH + CREATE relationship (from user josema-xyz)
   # ---------------------------------------------------------------------------
 
   - name: match_match_create_relationship
-    # MATCH(a), MATCH(b) then INSERT edge: 2 nodes, 1 edge.
+    # MATCH (a) MATCH (b) then INSERT edge: one edge between the matched nodes.
     setup:
       - "INSERT (:Person {name: 'Alix'})"
       - "INSERT (:Person {name: 'Gus'})"
-      - "MATCH (a:Person {name: 'Alix'}), (b:Person {name: 'Gus'}) INSERT (a)-[:KNOWS]->(b)"
-    query: MATCH ()-[r:KNOWS]->() RETURN count(r) AS cnt
+      - "MATCH (a:Person {name: 'Alix'}) MATCH (b:Person {name: 'Gus'}) INSERT (a)-[:KNOWS]->(b)"
+    query: MATCH (a)-[r:KNOWS]->(b) RETURN a.name, b.name
     expect:
       rows:
-        - [1]
+        - [Alix, Gus]
 
   - name: match_match_create_relationship_preserves_nodes
+    # Every node counts, not only :Person ones: a phantom node has no label.
     setup:
       - "INSERT (:Person {name: 'Alix'})"
       - "INSERT (:Person {name: 'Gus'})"
-      - "MATCH (a:Person {name: 'Alix'}), (b:Person {name: 'Gus'}) INSERT (a)-[:KNOWS]->(b)"
-    query: MATCH (n:Person) RETURN count(n) AS cnt
+      - "MATCH (a:Person {name: 'Alix'}) MATCH (b:Person {name: 'Gus'}) INSERT (a)-[:KNOWS]->(b)"
+    query: MATCH (n) RETURN count(n) AS cnt
     expect:
       rows:
         - [2]

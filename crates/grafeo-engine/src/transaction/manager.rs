@@ -388,7 +388,14 @@ pub struct TransactionManager {
     /// The history: its retention, the commit times and the floor of what a
     /// read may ask for (see `history`).
     history: History,
+    /// Change sets of ended transactions, emptied, that the next ones take
+    /// with their buffers (see [`recycle`](Self::recycle)): an autocommit
+    /// write allocates no new set. At most [`SPARE_CHANGE_SETS`].
+    spare_changes: Mutex<Vec<Arc<TransactionChanges>>>,
 }
+
+/// The most emptied change sets the manager keeps for new transactions.
+const SPARE_CHANGE_SETS: usize = 16;
 
 /// The epochs the readers that hold the read horizon back read at, each with
 /// how many such readers: open and committing transactions by their
@@ -762,6 +769,7 @@ impl TransactionManager {
             published: Condvar::new(),
             reads: Arc::new(ReadPins::default()),
             history: History::default(),
+            spare_changes: Mutex::new(Vec::new()),
         }
     }
 
@@ -853,12 +861,46 @@ impl TransactionManager {
         // published epoch under it, never passes a snapshot it has not seen.
         let mut transactions = self.transactions.write();
         let epoch = self.reads.hold_published(&self.published_epoch);
-        let changes = Arc::new(TransactionChanges::new(transaction_id, epoch));
+        let changes = self.change_set(transaction_id, epoch);
         let info = TransactionInfo::new(epoch, isolation_level, Arc::clone(&changes), private);
         transactions.insert(transaction_id, info);
         self.active_count.fetch_add(1, Ordering::Release);
         drop(transactions);
         (transaction_id, changes)
+    }
+
+    /// An empty change set for transaction `transaction_id`, which reads at
+    /// `epoch`: one an ended transaction left (see [`recycle`](Self::recycle)),
+    /// or a new one.
+    fn change_set(&self, transaction_id: TransactionId, epoch: EpochId) -> Arc<TransactionChanges> {
+        let spare = self.spare_changes.lock().pop();
+        if let Some(mut changes) = spare
+            && let Some(set) = Arc::get_mut(&mut changes)
+        {
+            set.reuse(transaction_id, epoch);
+            return changes;
+        }
+        Arc::new(TransactionChanges::new(transaction_id, epoch))
+    }
+
+    /// Keeps the change set of a transaction that ended (committed or rolled
+    /// back) for a next one, emptied: when nothing else holds it, its
+    /// buffers are not those of a large transaction, and fewer than
+    /// [`SPARE_CHANGE_SETS`] are kept. Otherwise it is dropped.
+    pub(crate) fn recycle(&self, mut changes: Arc<TransactionChanges>) {
+        let Some(set) = Arc::get_mut(&mut changes) else {
+            return;
+        };
+        if !set.is_worth_keeping() {
+            return;
+        }
+        // Emptied now, so the next transaction's begin pays nothing for
+        // what this one held.
+        set.reuse(TransactionId::INVALID, EpochId::INITIAL);
+        let mut spare = self.spare_changes.lock();
+        if spare.len() < SPARE_CHANGE_SETS {
+            spare.push(changes);
+        }
     }
 
     /// What transaction `transaction_id` changed so far, while it is open.

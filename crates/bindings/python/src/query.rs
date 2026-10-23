@@ -34,10 +34,34 @@ pub struct PyQueryResult {
     pub(crate) counters: grafeo_engine::database::WriteCounters,
     /// The operator tree of a `PROFILE` statement.
     pub(crate) profile: Option<grafeo_engine::database::QueryProfile>,
+    /// What the result holds.
+    pub(crate) kind: grafeo_engine::database::ResultKind,
 }
 
 #[pymethods]
 impl PyQueryResult {
+    /// What the result holds: `"rows"` (SPARQL SELECT and updates, and every
+    /// other language), `"boolean"` (SPARQL ASK: one row with a `boolean`
+    /// column, see `boolean`) or `"graph"` (SPARQL CONSTRUCT and DESCRIBE:
+    /// `subject`, `predicate` and `object` columns of RDF terms).
+    #[getter]
+    fn kind(&self) -> &'static str {
+        match self.kind {
+            grafeo_engine::database::ResultKind::Boolean => "boolean",
+            grafeo_engine::database::ResultKind::Graph => "graph",
+            _ => "rows",
+        }
+    }
+
+    /// The answer of a SPARQL ASK; `None` for every other result.
+    #[getter]
+    fn boolean(&self) -> Option<bool> {
+        if self.kind != grafeo_engine::database::ResultKind::Boolean {
+            return None;
+        }
+        self.rows.first()?.first()?.as_bool()
+    }
+
     /// Get column names.
     #[getter]
     fn columns(&self) -> Vec<String> {
@@ -73,7 +97,7 @@ impl PyQueryResult {
         let row = &self.rows[idx];
         let dict = pyo3::types::PyDict::new(py);
         for (col, val) in self.columns.iter().zip(row.iter()) {
-            dict.set_item(col, PyValue::to_py(val, py))?;
+            dict.set_item(col, PyValue::to_py(val, py)?)?;
         }
         Ok(dict.unbind().into_any())
     }
@@ -84,9 +108,13 @@ impl PyQueryResult {
     }
 
     /// Get next row.
-    fn __next__(mut slf: PyRefMut<'_, Self>, py: Python<'_>) -> Option<Py<PyAny>> {
+    ///
+    /// # Errors
+    ///
+    /// The error of a value that does not convert (see `PyValue::to_py`).
+    fn __next__(mut slf: PyRefMut<'_, Self>, py: Python<'_>) -> PyResult<Option<Py<PyAny>>> {
         if slf.current_row >= slf.rows.len() {
-            return None;
+            return Ok(None);
         }
 
         let idx = slf.current_row;
@@ -97,9 +125,9 @@ impl PyQueryResult {
 
         let dict = pyo3::types::PyDict::new(py);
         for (col, val) in columns.iter().zip(row.iter()) {
-            dict.set_item(col, PyValue::to_py(val, py)).ok()?;
+            dict.set_item(col, PyValue::to_py(val, py)?)?;
         }
-        Some(dict.unbind().into_any())
+        Ok(Some(dict.unbind().into_any()))
     }
 
     /// Get all nodes from the result.
@@ -114,21 +142,19 @@ impl PyQueryResult {
 
     /// Convert to list of dictionaries.
     ///
-    /// # Panics
+    /// # Errors
     ///
-    /// Panics on memory exhaustion during Python list/dict allocation.
-    fn to_list(&self, py: Python<'_>) -> Py<PyAny> {
+    /// The error of a value that does not convert (see `PyValue::to_py`).
+    fn to_list(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         let list = pyo3::types::PyList::empty(py);
         for row in &self.rows {
             let dict = pyo3::types::PyDict::new(py);
             for (col, val) in self.columns.iter().zip(row.iter()) {
-                dict.set_item(col, PyValue::to_py(val, py))
-                    .expect("dict.set_item only fails on memory exhaustion");
+                dict.set_item(col, PyValue::to_py(val, py)?)?;
             }
-            list.append(dict)
-                .expect("list.append only fails on memory exhaustion");
+            list.append(dict)?;
         }
-        list.unbind().into_any()
+        Ok(list.unbind().into_any())
     }
 
     /// Get single value (first column of first row).
@@ -141,7 +167,7 @@ impl PyQueryResult {
                 "No columns in result",
             ));
         }
-        Ok(PyValue::to_py(&self.rows[0][0], py))
+        PyValue::to_py(&self.rows[0][0], py)
     }
 
     /// Query execution time in milliseconds (if available).
@@ -230,6 +256,8 @@ impl PyQueryResult {
     ///
     /// Requires pandas to be installed (`uv add pandas`). Each column in the
     /// query result becomes a DataFrame column, preserving types where possible.
+    /// An RDF term is the native value of a literal of a known XSD type, and
+    /// its text otherwise, as in `to_arrow()`.
     ///
     /// Example:
     /// ```python
@@ -245,19 +273,7 @@ impl PyQueryResult {
             )
         })?;
 
-        // Build column-oriented data: dict of {col_name: [values...]}
-        let data = pyo3::types::PyDict::new(py);
-        for (col_idx, col_name) in self.columns.iter().enumerate() {
-            let values = pyo3::types::PyList::empty(py);
-            for row in &self.rows {
-                let val = row
-                    .get(col_idx)
-                    .map_or_else(|| py.None(), |v| PyValue::to_py(v, py));
-                values.append(val)?;
-            }
-            data.set_item(col_name, values)?;
-        }
-
+        let data = self.table_columns(py)?;
         let df = pd.call_method1("DataFrame", (data,))?;
         Ok(df.unbind())
     }
@@ -266,7 +282,8 @@ impl PyQueryResult {
     ///
     /// Requires polars to be installed (`uv add polars`). Each column in the
     /// query result becomes a DataFrame column. Values are converted to native
-    /// Python types first, then polars infers the best dtype.
+    /// Python types first (an RDF term as in `to_arrow()`), then polars infers
+    /// the best dtype.
     ///
     /// Example:
     /// ```python
@@ -282,19 +299,7 @@ impl PyQueryResult {
             )
         })?;
 
-        // Build column-oriented data: dict of {col_name: [values...]}
-        let data = pyo3::types::PyDict::new(py);
-        for (col_idx, col_name) in self.columns.iter().enumerate() {
-            let values = pyo3::types::PyList::empty(py);
-            for row in &self.rows {
-                let val = row
-                    .get(col_idx)
-                    .map_or_else(|| py.None(), |v| PyValue::to_py(v, py));
-                values.append(val)?;
-            }
-            data.set_item(col_name, values)?;
-        }
-
+        let data = self.table_columns(py)?;
         let df = pl.call_method1("DataFrame", (data,))?;
         Ok(df.unbind())
     }
@@ -325,6 +330,13 @@ impl PyQueryResult {
     /// Requires pyarrow to be installed (`uv add pyarrow`). Returns an Arrow
     /// Table that can be used directly with DuckDB, Polars, pandas, or any
     /// other Arrow-compatible tool.
+    ///
+    /// An RDF term (a SPARQL result) is the native value of a literal of a
+    /// known XSD type (`xsd:integer` an integer, `xsd:decimal` a decimal,
+    /// `xsd:double` a float, `xsd:boolean`, `xsd:date`, `xsd:dateTime`), and
+    /// text otherwise: an IRI, a blank node as `_:label`, any other literal as
+    /// its lexical form. The language tag and the datatype of a literal
+    /// exported as text are dropped.
     ///
     /// Example:
     /// ```python
@@ -369,9 +381,9 @@ impl PyQueryResult {
         let (si, pi, oi) = self.triple_column_indices();
         let mut output = String::new();
         for row in &self.rows {
-            let subj = Self::value_to_ntriples_term(&row[si]);
-            let pred = Self::value_to_ntriples_term(&row[pi]);
-            let obj = Self::value_to_ntriples_term(&row[oi]);
+            let subj = Self::value_to_ntriples_term(&row[si])?;
+            let pred = Self::value_to_ntriples_term(&row[pi])?;
+            let obj = Self::value_to_ntriples_term(&row[oi])?;
             let _ = writeln!(output, "{subj} {pred} {obj} .");
         }
         Ok(output)
@@ -400,9 +412,9 @@ impl PyQueryResult {
         let mut subject_index: HashMap<String, usize> = HashMap::new();
 
         for row in &self.rows {
-            let subj = Self::value_to_ntriples_term(&row[si]);
-            let pred = Self::value_to_ntriples_term(&row[pi]);
-            let obj = Self::value_to_ntriples_term(&row[oi]);
+            let subj = Self::value_to_ntriples_term(&row[si])?;
+            let pred = Self::value_to_ntriples_term(&row[pi])?;
+            let obj = Self::value_to_ntriples_term(&row[oi])?;
 
             if let Some(&idx) = subject_index.get(&subj) {
                 subjects[idx].1.push((pred, obj));
@@ -469,6 +481,7 @@ impl PyQueryResult {
             rows_scanned: None,
             counters: grafeo_engine::database::WriteCounters::default(),
             profile: None,
+            kind: grafeo_engine::database::ResultKind::Rows,
         }
     }
 
@@ -491,7 +504,27 @@ impl PyQueryResult {
             rows_scanned,
             counters: grafeo_engine::database::WriteCounters::default(),
             profile: None,
+            kind: grafeo_engine::database::ResultKind::Rows,
         }
+    }
+
+    /// The result as `{column: [value, ...]}` for a DataFrame: an RDF term as
+    /// its export value (see `to_arrow`).
+    fn table_columns<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, pyo3::types::PyDict>> {
+        let data = pyo3::types::PyDict::new(py);
+        for (col_idx, col_name) in self.columns.iter().enumerate() {
+            let values = pyo3::types::PyList::empty(py);
+            for row in &self.rows {
+                let val = match row.get(col_idx) {
+                    None => py.None(),
+                    Some(Value::RdfTerm(term)) => PyValue::to_py(&term.export_value(), py)?,
+                    Some(value) => PyValue::to_py(value, py)?,
+                };
+                values.append(val)?;
+            }
+            data.set_item(col_name, values)?;
+        }
+        Ok(data)
     }
 
     /// Serializes the query result to Arrow IPC stream bytes.
@@ -523,6 +556,7 @@ impl PyQueryResult {
             rows_scanned: None,
             counters: grafeo_engine::database::WriteCounters::default(),
             profile: None,
+            kind: grafeo_engine::database::ResultKind::Rows,
         }
     }
 
@@ -564,42 +598,20 @@ impl PyQueryResult {
         (si, pi, oi)
     }
 
-    /// Formats a `Value` as an N-Triples term.
+    /// A result's RDF term as N-Triples writes it, exactly: its kind,
+    /// lexical form, language tag and datatype.
     ///
-    /// IRIs are wrapped in angle brackets, strings become quoted literals,
-    /// and blank nodes are prefixed with `_:`.
-    fn value_to_ntriples_term(val: &Value) -> String {
+    /// # Errors
+    ///
+    /// `ValueError` for a value that is no RDF term (a CONSTRUCT or DESCRIBE
+    /// result holds only terms).
+    fn value_to_ntriples_term(val: &Value) -> PyResult<String> {
         match val {
-            Value::String(s) => {
-                let s_str: &str = s.as_ref();
-                if s_str.starts_with("http://")
-                    || s_str.starts_with("https://")
-                    || s_str.starts_with("urn:")
-                {
-                    // Looks like an IRI
-                    format!("<{s_str}>")
-                } else if s_str.starts_with("_:") {
-                    // Blank node
-                    s_str.to_string()
-                } else {
-                    // Plain literal: escape special characters
-                    let escaped = s_str
-                        .replace('\\', "\\\\")
-                        .replace('"', "\\\"")
-                        .replace('\n', "\\n")
-                        .replace('\r', "\\r")
-                        .replace('\t', "\\t");
-                    format!("\"{escaped}\"")
-                }
-            }
-            Value::Int64(n) => format!("\"{n}\"^^<http://www.w3.org/2001/XMLSchema#integer>"),
-            Value::Float64(f) => format!("\"{f}\"^^<http://www.w3.org/2001/XMLSchema#double>"),
-            Value::Bool(b) => format!("\"{b}\"^^<http://www.w3.org/2001/XMLSchema#boolean>"),
-            Value::Null => "\"\"".to_string(),
-            other => {
-                // Fallback: quote the display representation.
-                format!("\"{}\"", other)
-            }
+            Value::RdfTerm(term) => Ok(term.to_ntriples()),
+            other => Err(pyo3::exceptions::PyValueError::new_err(format!(
+                "to_ntriples()/to_turtle() take RDF terms, as a SPARQL CONSTRUCT \
+                 result holds them; got {other:?}"
+            ))),
         }
     }
 }

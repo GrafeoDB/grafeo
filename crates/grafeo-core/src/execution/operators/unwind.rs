@@ -25,14 +25,39 @@ pub struct UnwindOperator {
     /// list stays in scope after the UNWIND (see
     /// [`without_the_list`](Self::without_the_list)).
     passes_on_the_list: bool,
-    /// Current input chunk being processed.
-    current_chunk: Option<DataChunk>,
-    /// Current row index within the chunk.
+    /// How many rows a chunk takes (see
+    /// [`row_at_a_time`](Self::row_at_a_time)).
+    rows_per_chunk: RowsPerChunk,
+    /// The input chunk being unwound.
+    current: Option<InputChunk>,
+    /// Position in `current`'s rows.
     current_row: usize,
     /// Current index within the list being unwound.
     current_list_idx: usize,
     /// Current list being unwound.
     current_list: Option<Vec<Value>>,
+}
+
+/// How many rows an UNWIND's chunk takes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RowsPerChunk {
+    /// Up to the chunk's capacity.
+    Full,
+    /// One: each row goes out alone.
+    One,
+}
+
+/// An input chunk being unwound: its rows (the selected ones, by physical
+/// index) and the types of the rows it gives, computed once for the chunk.
+struct InputChunk {
+    chunk: DataChunk,
+    rows: Vec<usize>,
+    /// The output types: the input's copied columns keep their own types (a
+    /// node stays one, see `ColumnTypes`), the new ones have the declared
+    /// types.
+    types: Vec<LogicalType>,
+    /// How many input columns are copied.
+    copied: usize,
 }
 
 impl UnwindOperator {
@@ -61,7 +86,8 @@ impl UnwindOperator {
             emit_ordinality,
             emit_offset,
             passes_on_the_list: true,
-            current_chunk: None,
+            rows_per_chunk: RowsPerChunk::Full,
+            current: None,
             current_row: 0,
             current_list_idx: 0,
             current_list: None,
@@ -80,171 +106,198 @@ impl UnwindOperator {
         self
     }
 
+    /// Gives each row in a chunk of its own, for a statement that writes:
+    /// the rows of one chunk are computed together, before any of them
+    /// writes, while a row must see what the rows before it wrote
+    /// (`UNWIND [3, 19] AS x SET p.n = coalesce(p.n, 0) + x`, and `FOREACH`,
+    /// whose items see the updates before them). Otherwise the rows go out
+    /// in full chunks.
+    #[must_use]
+    pub fn row_at_a_time(mut self) -> Self {
+        self.rows_per_chunk = RowsPerChunk::One;
+        self
+    }
+
     /// Returns the variable name for the unwound elements.
     #[must_use]
     pub fn variable_name(&self) -> &str {
         &self.variable_name
     }
 
-    /// Advances to the next row or fetches the next chunk.
-    fn advance(&mut self) -> OperatorResult {
-        loop {
-            // If we have a current list, try to get the next element
-            if let Some(list) = &self.current_list
-                && self.current_list_idx < list.len()
-            {
-                // Still have elements in the current list
-                return Ok(Some(self.emit_row()?));
-            }
-
-            // Need to move to the next row
-            self.current_list_idx = 0;
-            self.current_list = None;
-
-            // Get the next chunk if needed
-            if self.current_chunk.is_none() {
-                self.current_chunk = self.child.next()?;
-                self.current_row = 0;
-                if self.current_chunk.is_none() {
-                    return Ok(None); // No more data
-                }
-            }
-
-            let chunk = self
-                .current_chunk
-                .as_ref()
-                .expect("current_chunk is Some: checked above");
-
-            // Find the next row with a list value
-            while self.current_row < chunk.row_count() {
-                if let Some(col) = chunk.column(self.list_col_idx)
-                    && let Some(value) = col.get_value(self.current_row)
-                {
-                    // Extract list elements from either Value::List or Value::Vector
-                    let list = match value {
-                        Value::List(list_arc) => list_arc.iter().cloned().collect::<Vec<Value>>(),
-                        Value::Vector(vec_arc) => {
-                            vec_arc.iter().map(|f| Value::Float64(*f as f64)).collect()
-                        }
-                        _ => {
-                            self.current_row += 1;
-                            continue;
-                        }
-                    };
-                    if !list.is_empty() {
-                        self.current_list = Some(list);
-                        return Ok(Some(self.emit_row()?));
-                    }
-                }
-                self.current_row += 1;
-            }
-
-            // Exhausted current chunk, get next one
-            self.current_chunk = None;
-        }
+    /// The index of the unwound element's column: after the declared input
+    /// columns, before any ordinality and offset columns.
+    fn element_col_idx(&self) -> usize {
+        let extra_cols = usize::from(self.emit_ordinality) + usize::from(self.emit_offset);
+        self.output_schema.len() - 1 - extra_cols
     }
 
-    /// Emits a single row with the current list element.
-    fn emit_row(&mut self) -> Result<DataChunk, super::OperatorError> {
-        let chunk = self
-            .current_chunk
-            .as_ref()
-            .expect("current_chunk is Some: set before emit_row call");
-        let list = self
-            .current_list
-            .as_ref()
-            .expect("current_list is Some: set before emit_row call");
-        let element = list[self.current_list_idx].clone();
-
-        // The unwound element comes after the declared input columns, followed
-        // by any ordinality/offset columns.
-        let extra_cols = usize::from(self.emit_ordinality) + usize::from(self.emit_offset);
-        let element_col_idx = self.output_schema.len() - 1 - extra_cols;
-
-        // Build output row: copy the declared input columns + add the unwound
-        // element. The copied columns keep the input's types (a node or edge
-        // stays one, see `ColumnTypes`); the new ones have the declared types.
-        // The row is as wide as the declared schema.
+    /// The input chunk `chunk` with its rows and output types.
+    fn input_chunk(&self, chunk: DataChunk) -> InputChunk {
+        let element_col_idx = self.element_col_idx();
         let mut types = chunk.column_types();
         types.truncate(element_col_idx);
         let copied = types.len();
         let mut types = copied_column_types(&types, &self.output_schema);
         types.extend(self.output_schema.iter().skip(copied).cloned());
-        // An item of a node or edge list is an ID (a returned node or edge, a
-        // map with `_id`, stands for its ID) or null; any other item goes into
-        // a column of any value, so it is never read as a node or an edge.
-        let element = entity_item(element, &self.output_schema[element_col_idx]);
-        if matches!(
-            self.output_schema[element_col_idx],
-            LogicalType::Node | LogicalType::Edge
-        ) && !matches!(element, Value::Int64(_) | Value::Null)
-        {
-            types[element_col_idx] = LogicalType::Any;
+        let rows = chunk.selected_indices().collect();
+        InputChunk {
+            chunk,
+            rows,
+            types,
+            copied,
         }
-        let mut builder = DataChunkBuilder::new(&types);
+    }
 
+    /// The list of the current row, when it holds one with elements: a
+    /// `Value::List` or a `Value::Vector`. Moves past rows without one.
+    fn next_list(&mut self) -> Option<Vec<Value>> {
+        let input = self.current.as_ref()?;
+        while let Some(&row) = input.rows.get(self.current_row) {
+            let list = match input.chunk.column(self.list_col_idx)?.get_value(row) {
+                Some(Value::List(list)) => list.iter().cloned().collect::<Vec<Value>>(),
+                Some(Value::Vector(vector)) => vector
+                    .iter()
+                    .map(|f| Value::Float64(f64::from(*f)))
+                    .collect(),
+                _ => Vec::new(),
+            };
+            if !list.is_empty() {
+                return Some(list);
+            }
+            self.current_row += 1;
+        }
+        None
+    }
+
+    /// Appends the row of the current element to `builder`, and moves to
+    /// the next element.
+    fn push_row(&mut self, builder: &mut DataChunkBuilder, element: Value) {
+        let element_col_idx = self.element_col_idx();
+        let input = self
+            .current
+            .as_ref()
+            .expect("an input chunk while its rows are unwound");
+        let row = input.rows[self.current_row];
         // Copy the input columns, the list too unless it is left out (a
         // variable that holds the list stays in scope; it read null).
-        for col_idx in 0..copied {
-            if col_idx == self.list_col_idx && !self.passes_on_the_list {
-                if let Some(out_col) = builder.column_mut(col_idx) {
-                    out_col.push_value(Value::Null);
-                }
-                continue;
-            }
-            if let Some(col) = chunk.column(col_idx)
-                && let Some(value) = col.get_value(self.current_row)
-                && let Some(out_col) = builder.column_mut(col_idx)
-            {
+        for col_idx in 0..input.copied {
+            let value = if col_idx == self.list_col_idx && !self.passes_on_the_list {
+                Value::Null
+            } else {
+                input
+                    .chunk
+                    .column(col_idx)
+                    .and_then(|col| col.get_value(row))
+                    .unwrap_or(Value::Null)
+            };
+            if let Some(out_col) = builder.column_mut(col_idx) {
                 out_col.push_value(value);
             }
         }
-
-        // Add the unwound element column.
         if let Some(out_col) = builder.column_mut(element_col_idx) {
             out_col.push_value(element);
         }
-
-        // Add ORDINALITY (1-based) if requested
+        // A list holds fewer than i64::MAX items, so its index fits.
+        let index = i64::try_from(self.current_list_idx).unwrap_or(i64::MAX);
         let mut next_col = element_col_idx + 1;
         if self.emit_ordinality {
             if let Some(out_col) = builder.column_mut(next_col) {
-                // reason: list index fits i64 for practical sizes
-                #[allow(clippy::cast_possible_wrap)]
-                out_col.push_value(Value::Int64((self.current_list_idx + 1) as i64));
+                out_col.push_value(Value::Int64(index + 1));
             }
             next_col += 1;
         }
-
-        // Add OFFSET (0-based) if requested
         if self.emit_offset
             && let Some(out_col) = builder.column_mut(next_col)
         {
-            // reason: list index fits i64 for practical sizes
-            #[allow(clippy::cast_possible_wrap)]
-            out_col.push_value(Value::Int64(self.current_list_idx as i64));
+            out_col.push_value(Value::Int64(index));
         }
-
         builder.advance_row();
-        self.current_list_idx += 1;
 
-        // If we've exhausted this list, move to the next row
-        if self.current_list_idx >= list.len() {
+        self.current_list_idx += 1;
+        if self
+            .current_list
+            .as_ref()
+            .is_some_and(|list| self.current_list_idx >= list.len())
+        {
+            self.current_list = None;
+            self.current_list_idx = 0;
             self.current_row += 1;
         }
-
-        Ok(builder.finish())
     }
 }
 
 impl Operator for UnwindOperator {
+    /// Up to a chunk of rows from one input chunk (one row with
+    /// [`row_at_a_time`](UnwindOperator::row_at_a_time)). A node or edge item that
+    /// is no ID goes into a column of any value; a chunk holds one type per
+    /// column, so such an item starts a new chunk, and so does the item
+    /// after it.
     fn next(&mut self) -> OperatorResult {
-        self.advance()
+        let element_col_idx = self.element_col_idx();
+        let entity_items = matches!(
+            self.output_schema[element_col_idx],
+            LogicalType::Node | LogicalType::Edge
+        );
+        // The rows so far, and whether their element column is of any value.
+        let mut out: Option<(DataChunkBuilder, bool)> = None;
+        loop {
+            if self.current_list.is_none() {
+                if let Some(list) = self.next_list() {
+                    self.current_list = Some(list);
+                    self.current_list_idx = 0;
+                } else {
+                    // The input chunk is done: its rows go out before the next
+                    // one, whose column types may differ.
+                    self.current = None;
+                    if let Some((builder, _)) = out.take() {
+                        return Ok(Some(builder.finish()));
+                    }
+                    match self.child.next()? {
+                        Some(chunk) => {
+                            self.current = Some(self.input_chunk(chunk));
+                            self.current_row = 0;
+                            continue;
+                        }
+                        None => return Ok(None),
+                    }
+                }
+            }
+            let list = self.current_list.as_ref().expect("a list: set above");
+            // An item of a node or edge list is an ID (a returned node or
+            // edge, a map with `_id`, stands for its ID) or null; any other
+            // item goes into a column of any value, so it is never read as a
+            // node or an edge.
+            let element = entity_item(
+                list[self.current_list_idx].clone(),
+                &self.output_schema[element_col_idx],
+            );
+            let any = entity_items && !matches!(element, Value::Int64(_) | Value::Null);
+            if out.as_ref().is_some_and(|(_, out_any)| *out_any != any) {
+                let (builder, _) = out.take().expect("checked above");
+                return Ok(Some(builder.finish()));
+            }
+            let (builder, _) = out.get_or_insert_with(|| {
+                let input = self
+                    .current
+                    .as_ref()
+                    .expect("an input chunk while its rows are unwound");
+                let mut types = input.types.clone();
+                if any {
+                    types[element_col_idx] = LogicalType::Any;
+                }
+                (DataChunkBuilder::new(&types), any)
+            });
+            self.push_row(builder, element);
+            if self.rows_per_chunk == RowsPerChunk::One || builder.is_full() {
+                let (builder, _) = out.take().expect("a builder: just filled");
+                return Ok(Some(builder.finish()));
+            }
+        }
     }
 
     fn reset(&mut self) {
         self.child.reset();
-        self.current_chunk = None;
+        self.current = None;
         self.current_row = 0;
         self.current_list_idx = 0;
         self.current_list = None;
@@ -279,6 +332,81 @@ mod tests {
     use super::*;
     use crate::execution::chunk::DataChunkBuilder;
     use std::sync::Arc;
+
+    /// The rows `unwind` gives, one chunk each, with their chunk's column
+    /// types: the tests read one row at a time.
+    fn rows_of(unwind: &mut UnwindOperator) -> Vec<DataChunk> {
+        let mut rows = Vec::new();
+        while let Some(chunk) = unwind.next().unwrap() {
+            rows.extend((0..chunk.row_count()).map(|row| chunk.slice(row, 1)));
+        }
+        rows
+    }
+
+    /// The rows of one input chunk come out together, up to a chunk's
+    /// capacity, not one chunk per item.
+    #[test]
+    fn the_items_of_an_input_chunk_come_out_in_full_chunks() {
+        use crate::execution::chunk::DEFAULT_CHUNK_SIZE;
+
+        let items = DEFAULT_CHUNK_SIZE + 100;
+        let mut builder = DataChunkBuilder::new(&[LogicalType::Any]);
+        for row in 0..2 {
+            let list: Vec<Value> = (0..items / 2 + row)
+                .map(|i| Value::Int64(i64::try_from(i).unwrap()))
+                .collect();
+            builder
+                .column_mut(0)
+                .unwrap()
+                .push_value(Value::List(list.into()));
+            builder.advance_row();
+        }
+        let child = MockOperator {
+            chunks: vec![builder.finish()],
+            position: 0,
+        };
+        let mut unwind = UnwindOperator::new(
+            Box::new(child),
+            0,
+            "x".to_string(),
+            vec![LogicalType::Any, LogicalType::Any],
+            false,
+            false,
+        );
+        let mut sizes = Vec::new();
+        while let Some(chunk) = unwind.next().unwrap() {
+            sizes.push(chunk.row_count());
+        }
+        assert_eq!(sizes, [DEFAULT_CHUNK_SIZE, items + 1 - DEFAULT_CHUNK_SIZE]);
+    }
+
+    /// In a statement that writes, every row goes out in a chunk of its own.
+    #[test]
+    fn row_at_a_time_gives_one_row_per_chunk() {
+        let mut builder = DataChunkBuilder::new(&[LogicalType::Any]);
+        builder.column_mut(0).unwrap().push_value(Value::List(
+            (0..5).map(Value::Int64).collect::<Vec<_>>().into(),
+        ));
+        builder.advance_row();
+        let child = MockOperator {
+            chunks: vec![builder.finish()],
+            position: 0,
+        };
+        let mut unwind = UnwindOperator::new(
+            Box::new(child),
+            0,
+            "x".to_string(),
+            vec![LogicalType::Any, LogicalType::Any],
+            false,
+            false,
+        )
+        .row_at_a_time();
+        let mut sizes = Vec::new();
+        while let Some(chunk) = unwind.next().unwrap() {
+            sizes.push(chunk.row_count());
+        }
+        assert_eq!(sizes, [1, 1, 1, 1, 1]);
+    }
 
     struct MockOperator {
         chunks: Vec<DataChunk>,
@@ -338,7 +466,7 @@ mod tests {
         );
 
         let mut elements = Vec::new();
-        while let Some(chunk) = unwind.next().unwrap() {
+        for chunk in rows_of(&mut unwind) {
             assert_eq!(chunk.column_types()[0], LogicalType::Node);
             assert_eq!(
                 chunk.column(0).unwrap().get_node_id(0).unwrap().as_u64(),
@@ -387,7 +515,7 @@ mod tests {
         );
 
         let mut items = Vec::new();
-        while let Some(chunk) = unwind.next().unwrap() {
+        for chunk in rows_of(&mut unwind) {
             let column = chunk.column(0).unwrap();
             items.push((
                 column.data_type().clone(),
@@ -435,7 +563,7 @@ mod tests {
         );
 
         let mut rows = Vec::new();
-        while let Some(chunk) = unwind.next().unwrap() {
+        for chunk in rows_of(&mut unwind) {
             assert_eq!(chunk.column_count(), 3);
             rows.push((
                 chunk.column(0).unwrap().get_value(0),
@@ -479,7 +607,7 @@ mod tests {
                 unwind
             };
             let mut rows = Vec::new();
-            while let Some(chunk) = unwind.next().unwrap() {
+            for chunk in rows_of(&mut unwind) {
                 rows.push((
                     chunk.column(0).unwrap().get_value(0),
                     chunk.column(1).unwrap().get_value(0),
@@ -533,7 +661,7 @@ mod tests {
 
         // Should produce 3 rows
         let mut results = Vec::new();
-        while let Ok(Some(chunk)) = unwind.next() {
+        for chunk in rows_of(&mut unwind) {
             results.push(chunk);
         }
 
@@ -564,7 +692,7 @@ mod tests {
         );
 
         let mut results = Vec::new();
-        while let Ok(Some(chunk)) = unwind.next() {
+        for chunk in rows_of(&mut unwind) {
             results.push(chunk);
         }
 
@@ -621,7 +749,7 @@ mod tests {
         );
 
         let mut count = 0;
-        while let Ok(Some(_chunk)) = unwind.next() {
+        for _chunk in rows_of(&mut unwind) {
             count += 1;
         }
 
@@ -652,7 +780,7 @@ mod tests {
         );
 
         let mut results = Vec::new();
-        while let Ok(Some(chunk)) = unwind.next() {
+        for chunk in rows_of(&mut unwind) {
             results.push(chunk);
         }
 
@@ -726,7 +854,7 @@ mod tests {
         );
 
         let mut ordinalities = Vec::new();
-        while let Ok(Some(chunk)) = unwind.next() {
+        for chunk in rows_of(&mut unwind) {
             if let Some(col) = chunk.column(1)
                 && let Some(Value::Int64(v)) = col.get_value(0)
             {
@@ -766,7 +894,7 @@ mod tests {
         );
 
         let mut offsets = Vec::new();
-        while let Ok(Some(chunk)) = unwind.next() {
+        for chunk in rows_of(&mut unwind) {
             if let Some(col) = chunk.column(1)
                 && let Some(Value::Int64(v)) = col.get_value(0)
             {

@@ -36,6 +36,18 @@ fn strings(values: &[&str]) -> Vec<Value> {
     values.iter().map(|value| Value::from(*value)).collect()
 }
 
+/// Simple RDF literals, as SPARQL results hold them.
+fn literals(values: &[&str]) -> Vec<Value> {
+    values
+        .iter()
+        .map(|value| {
+            Value::RdfTerm(std::sync::Arc::new(
+                grafeo_common::types::rdf::Term::literal(*value),
+            ))
+        })
+        .collect()
+}
+
 /// Restores `backups` to `epoch` in a new directory, opens the result with
 /// `open` and runs `check` on it, then once more on a read-only open.
 fn restored(
@@ -290,19 +302,19 @@ fn a_named_graph_modify_restores_in_its_graph() {
     restored(&backups, full, open_rdf, |db, what| {
         assert_eq!(
             statuses(db, Some("http://ex.org/g")),
-            strings(&["active"]),
+            literals(&["active"]),
             "{what}, full"
         );
     });
     restored(&backups, incremental, open_rdf, |db, what| {
         assert_eq!(
             statuses(db, Some("http://ex.org/g")),
-            strings(&["archived"]),
+            literals(&["archived"]),
             "{what}, incremental"
         );
         assert_eq!(
             statuses(db, None),
-            strings(&["default"]),
+            literals(&["default"]),
             "{what}, the default graph"
         );
     });

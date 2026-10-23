@@ -3,6 +3,7 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
+use grafeo_common::types::rdf::{Term, UnsupportedTermKind};
 use grafeo_common::types::{PropertyKey, Timestamp, Value};
 use js_sys::{Array, Float32Array, Object, Reflect, Uint8Array};
 use wasm_bindgen::prelude::*;
@@ -12,9 +13,9 @@ use wasm_bindgen::prelude::*;
 /// `Float64`; a `BigInt` follows the integer rule at any width (an `Int64`
 /// when it fits 64 bits, else an exact `Decimal` up to 38 digits); an array
 /// is a list, a `Date` a timestamp, a `Float32Array` a vector, a `Uint8Array`
-/// bytes, a `Map` or a plain object a map, and a tagged object
-/// (`{ $decimal: "1.50" }`, `{ $date: "2024-01-15" }`, ...) the value it
-/// stands for.
+/// bytes, an RDF/JS term (see [`rdfjs_term`]) that term, a `Map` or a plain
+/// object a map, and a tagged object (`{ $decimal: "1.50" }`,
+/// `{ $date: "2024-01-15" }`, ...) the value it stands for.
 ///
 /// # Errors
 ///
@@ -73,6 +74,11 @@ pub fn js_to_value(value: &JsValue) -> Result<Value, String> {
     }
     if let Some(bytes) = value.dyn_ref::<Uint8Array>() {
         return Ok(Value::Bytes(bytes.to_vec().into()));
+    }
+    // An RDF/JS term, as a SPARQL result gives it or another library makes
+    // it, is that term.
+    if let Some(term) = rdfjs_term(value)? {
+        return Ok(Value::RdfTerm(Arc::new(term)));
     }
     let Some(entries) = js_entries(value) else {
         return Err(format!(
@@ -174,8 +180,13 @@ pub fn js_rows(value: &JsValue) -> Result<Vec<Vec<(String, Value)>>, String> {
 }
 
 /// Converts a Grafeo [`Value`] to a JavaScript value.
-pub fn value_to_js(value: &Value) -> JsValue {
-    match value {
+///
+/// # Errors
+///
+/// A JS `Error` for an RDF term of a kind this binding does not know, also
+/// inside a list, a map or a path.
+pub fn value_to_js(value: &Value) -> Result<JsValue, JsValue> {
+    Ok(match value {
         Value::Null => JsValue::NULL,
         Value::Bool(b) => JsValue::from_bool(*b),
         Value::Int64(n) => {
@@ -200,14 +211,14 @@ pub fn value_to_js(value: &Value) -> JsValue {
         Value::List(items) => {
             let arr = Array::new_with_length(items.len() as u32);
             for (i, item) in items.iter().enumerate() {
-                arr.set(i as u32, value_to_js(item));
+                arr.set(i as u32, value_to_js(item)?);
             }
             arr.into()
         }
         Value::Map(map) => {
             let obj = Object::new();
             for (key, val) in map.iter() {
-                let _ = Reflect::set(&obj, &JsValue::from_str(key.as_str()), &value_to_js(val));
+                let _ = Reflect::set(&obj, &JsValue::from_str(key.as_str()), &value_to_js(val)?);
             }
             obj.into()
         }
@@ -220,11 +231,11 @@ pub fn value_to_js(value: &Value) -> JsValue {
             let obj = Object::new();
             let nodes_arr = Array::new_with_length(nodes.len() as u32);
             for (i, node) in nodes.iter().enumerate() {
-                nodes_arr.set(i as u32, value_to_js(node));
+                nodes_arr.set(i as u32, value_to_js(node)?);
             }
             let edges_arr = Array::new_with_length(edges.len() as u32);
             for (i, edge) in edges.iter().enumerate() {
-                edges_arr.set(i as u32, value_to_js(edge));
+                edges_arr.set(i as u32, value_to_js(edge)?);
             }
             let _ = Reflect::set(&obj, &JsValue::from_str("nodes"), &nodes_arr.into());
             let _ = Reflect::set(&obj, &JsValue::from_str("edges"), &edges_arr.into());
@@ -284,15 +295,144 @@ pub fn value_to_js(value: &Value) -> JsValue {
             );
             wrapper.into()
         }
+        Value::RdfTerm(term) => term_to_js(term)
+            .map_err(|error| crate::database_error(grafeo_common::utils::Error::from(error)))?,
         _ => JsValue::from_str(&value.to_string()),
+    })
+}
+
+/// The RDF term a JavaScript value of the RDF/JS data model stands for, read
+/// by its `termType` (`NamedNode`, `BlankNode` or `Literal`) and `value`,
+/// and for a literal its `language` and the `value` of its `datatype`.
+/// Properties are read as JavaScript reads them, getters included, and other
+/// keys are ignored: the terms of other libraries (N3.js, rdf-data-factory)
+/// read too. `None` for a value of another shape.
+///
+/// # Errors
+///
+/// When reading a property throws.
+pub fn rdfjs_term(value: &JsValue) -> Result<Option<Term>, String> {
+    if !value.is_object() {
+        return Ok(None);
     }
+    let text = |object: &JsValue, key: &str| {
+        Reflect::get(object, &JsValue::from_str(key))
+            .map(|value| value.as_string())
+            .map_err(|_| format!("reading '{key}' of an RDF term threw"))
+    };
+    let Some(term_type) = text(value, "termType")? else {
+        return Ok(None);
+    };
+    if !matches!(term_type.as_str(), "NamedNode" | "BlankNode" | "Literal") {
+        return Ok(None);
+    }
+    let Some(term_value) = text(value, "value")? else {
+        return Ok(None);
+    };
+    let (language, datatype) = if term_type == "Literal" {
+        let datatype = Reflect::get(value, &JsValue::from_str("datatype"))
+            .map_err(|_| "reading 'datatype' of an RDF term threw".to_string())?;
+        let datatype = if datatype.is_object() {
+            text(&datatype, "value")?
+        } else {
+            None
+        };
+        (text(value, "language")?, datatype)
+    } else {
+        (None, None)
+    };
+    Ok(grafeo_bindings_common::json::rdfjs_term(
+        &term_type,
+        &term_value,
+        language.as_deref(),
+        datatype.as_deref(),
+    ))
+}
+
+thread_local! {
+    /// The function behind every term's `equals(other)`, made once: it gets
+    /// the term itself as its first argument (see [`add_equals`]).
+    static TERM_EQUALS: js_sys::Function = {
+        let closure = Closure::<dyn Fn(JsValue, JsValue) -> bool>::new(
+            |this: JsValue, other: JsValue| {
+                matches!(
+                    (rdfjs_term(&this), rdfjs_term(&other)),
+                    (Ok(Some(own)), Ok(Some(other))) if own == other
+                )
+            },
+        );
+        let function = closure.as_ref().unchecked_ref::<js_sys::Function>().clone();
+        // The function lives as long as the module: every term may call it.
+        closure.forget();
+        function
+    };
+}
+
+/// Gives a term object the RDF/JS data model's `equals(other)`: true when
+/// `other` is a term of the same `termType` and `value`, and for a literal
+/// the same language (without case) and datatype; false for `null`,
+/// `undefined` and any other value. The method is not enumerable, so the
+/// object's keys, its JSON and a spread copy hold the term's fields only.
+fn add_equals(obj: &Object) {
+    let equals = TERM_EQUALS.with(|equals| equals.bind1(&JsValue::UNDEFINED, obj));
+    let descriptor = Object::new();
+    let _ = Reflect::set(&descriptor, &JsValue::from_str("value"), &equals);
+    Object::define_property(obj, &JsValue::from_str("equals"), &descriptor);
+}
+
+/// An RDF term as the RDF/JS data model writes it, a plain object:
+/// `{ termType: "NamedNode", value }`, `{ termType: "BlankNode", value }`
+/// (the label without `_:`), or `{ termType: "Literal", value, language,
+/// datatype: { termType: "NamedNode", value } }`, `language` `""` when the
+/// literal has none and the datatype `rdf:langString` when it has one. Each
+/// (the datatype too) has the data model's `equals(other)` method.
+///
+/// # Errors
+///
+/// [`UnsupportedTermKind`] for a term of a kind this binding does not know.
+fn term_to_js(term: &Term) -> Result<JsValue, UnsupportedTermKind> {
+    let object = |entries: &[(&str, JsValue)]| {
+        let obj = Object::new();
+        for (key, value) in entries {
+            let _ = Reflect::set(&obj, &JsValue::from_str(key), value);
+        }
+        add_equals(&obj);
+        JsValue::from(obj)
+    };
+    let named = |iri: &str| {
+        object(&[
+            ("termType", JsValue::from_str("NamedNode")),
+            ("value", JsValue::from_str(iri)),
+        ])
+    };
+    Ok(match term {
+        Term::Iri(iri) => named(iri.as_str()),
+        Term::BlankNode(node) => object(&[
+            ("termType", JsValue::from_str("BlankNode")),
+            ("value", JsValue::from_str(node.id())),
+        ]),
+        Term::Literal(literal) => object(&[
+            ("termType", JsValue::from_str("Literal")),
+            ("value", JsValue::from_str(literal.value())),
+            (
+                "language",
+                JsValue::from_str(literal.language().unwrap_or("")),
+            ),
+            ("datatype", named(literal.datatype())),
+        ]),
+        other => return Err(UnsupportedTermKind::of(other)),
+    })
 }
 
 /// Converts a row of values to a JavaScript object with column names as keys.
-pub fn row_to_js_object(columns: &[String], row: &[Value]) -> JsValue {
+///
+/// # Errors
+///
+/// As [`value_to_js`].
+pub fn row_to_js_object(columns: &[String], row: &[Value]) -> Result<JsValue, JsValue> {
     let obj = Object::new();
     for (col, val) in columns.iter().zip(row.iter()) {
-        let _ = Reflect::set(&obj, &JsValue::from_str(col), &value_to_js(val));
+        let _ = Reflect::set(&obj, &JsValue::from_str(col), &value_to_js(val)?);
     }
-    obj.into()
+    Ok(obj.into())
 }

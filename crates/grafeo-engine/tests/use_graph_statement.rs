@@ -263,12 +263,18 @@ fn concurrent_sessions_focus_on_their_own_graphs() {
     }
     let session = db.session();
     for graph in ["alpha", "beta"] {
+        // Every write of its own writer, each once: i runs over 0..WRITES.
         assert_eq!(
-            column(
-                &session,
-                &format!("USE {graph} MATCH (v:Visit) RETURN count(v), sum(v.i)")
-            ),
-            [Value::Int64(WRITES)],
+            session
+                .execute(&format!(
+                    "USE {graph} MATCH (v:Visit) RETURN count(v), sum(v.i)"
+                ))
+                .unwrap()
+                .rows(),
+            [[
+                Value::Int64(WRITES),
+                Value::Int64(WRITES * (WRITES - 1) / 2)
+            ]],
             "{graph}"
         );
     }

@@ -437,6 +437,8 @@ BS2|gql f8f0f8a302 An unknown YIELD column is a semantic error that names the pr
 BS3|cypher dfd84e4596 A function called with too few arguments is a semantic error that names the function and the arguments it takes (#588, #540); it was GRAFEO-X001.
 BS3|gql dfd84e4596 A function called with too few arguments is a semantic error that names the function and the arguments it takes (#588, #540); it was GRAFEO-X001.
 BS4|cypher 0a88e3eae7 A Cypher DELETE of a variable nothing binds names that variable (#588); it said only "DELETE requires input".
+O12|cypher 858eba8240 An UNWIND after WITH ... WHERE unwinds the rows the filter kept; it read the first rows of the chunk, so Gus (age 25) came out instead of Jules.
+O12|gql 858eba8240 An UNWIND after WITH ... WHERE unwinds the rows the filter kept; it read the first rows of the chunk, so Gus (age 25) came out instead of Jules.
 P3|cypher 36c8f2cf63 The error starts with its code, GRAFEO-Q002 (#588); the message is unchanged.
 P3|gql 36c8f2cf63 The error starts with its code, GRAFEO-Q002 (#588); the message is unchanged.
 P4|cypher 4417410084 The error starts with its code, GRAFEO-Q002 (#588); the message is unchanged.
@@ -682,3 +684,31 @@ DB2|cypher 943f1a33b7 A WITH whose alias repeats a passed-on variable is an erro
 DB2|gql 943f1a33b7 A WITH whose alias repeats a passed-on variable is an error (#371); the alias replaced the node.
 DB3|cypher 0197c21812 Cypher CREATE CONSTRAINT takes no name and gets GQL's default (#344); it was a syntax error.
 DB4|cypher 0197c21812 Cypher CREATE INDEX takes no name and gets Label_property_index (#344); it was a syntax error.
+DC1|sparql 1720bf63c2 SPARQL results hold RDF terms (#464): each IRI and literal is the exact term, with its datatype or tag, where it was a plain value or text.
+DC2|sparql 0bbb06c9ed SPARQL results hold RDF terms (#464): each IRI and literal is the exact term, with its datatype or tag, where it was a plain value or text; a typed integer orders by its value (the non-canonical "025" as 25) and keeps its text.
+DC3|sparql 2dd7aa27fd SPARQL results hold RDF terms (#464): each IRI and literal is the exact term, with its datatype or tag, where it was a plain value or text.
+DC4|sparql 683368f94a Comparing an integer with a string is a type error (SPARQL 17.3), so the FILTER drops every row; 0.5.44 compared the text.
+DC5|sparql 9b9c9377e0 SPARQL results hold RDF terms (#464): each IRI and literal is the exact term, with its datatype or tag, where it was a plain value or text; STR gives the stored lexical form "025", not the text of the value.
+DC6|sparql 68ac79ccff SPARQL results hold RDF terms (#464): each IRI and literal is the exact term, with its datatype or tag, where it was a plain value or text; a language tag is kept in lowercase (RDF 1.2), so "Lix"@FR is "Lix"@fr.
+DC7|sparql 8826f32e47 A language tag is kept in lowercase and compares without case (RDF 1.2), so "Lix"@FR matches "Lix"@fr.
+DC8|sparql decfa596aa SPARQL results hold RDF terms (#464): each IRI and literal is the exact term, with its datatype or tag, where it was a plain value or text; SUM of integers is an integer and AVG a decimal (SPARQL 18.5.1, op:numeric-divide), MIN and MAX give the stored terms.
+DC9|sparql dfe9cb3212 SUM over "abc"^^xsd:integer is an error, so the sum is unbound (SPARQL 18.5.1); it skipped the invalid literal.
+DC10|sparql 4969273b97 SPARQL results hold RDF terms (#464): each IRI and literal is the exact term, with its datatype or tag, where it was a plain value or text; the EBV of a number is whether it is non-zero, and of "abc"^^xsd:integer false (SPARQL 17.2.2); it was an error for every row.
+DC11|sparql 4e24b82f3c SPARQL results hold RDF terms (#464): each IRI and literal is the exact term, with its datatype or tag, where it was a plain value or text; ORDER BY puts IRIs before literals (SPARQL 15.1).
+DC12|sparql 2f62846bc4 SPARQL results hold RDF terms (#464): each IRI and literal is the exact term, with its datatype or tag, where it was a plain value or text; COUNT is an xsd:integer.
+DC13|sparql b42c6f53cb SPARQL results hold RDF terms (#464): each IRI and literal is the exact term, with its datatype or tag, where it was a plain value or text; UCASE keeps the argument's language tag (SPARQL 17.4.3.8).
+DC14|sparql db8875f232 A stored xsd:boolean has its value as its EBV (SPARQL 17.2.2), so FILTER(?b) keeps the true one; it found none.
+DC15|sparql 35775adbfa ASK gives its boolean; it gave a row with no column.
+DC16|sparql 3ffe38ce3a SPARQL results hold RDF terms (#464): each IRI and literal is the exact term, with its datatype or tag, where it was a plain value or text: CONSTRUCT gives the subject, predicate and object as terms; the subject was quoted text.
+DC17|sparql 897ea1cd91 SPARQL results hold RDF terms (#464): each IRI and literal is the exact term, with its datatype or tag, where it was a plain value or text; integer division and mixed arithmetic give decimals (op:numeric-divide, numeric promotion), in their canonical form: 1/2 is 0.5, 2*1.5 is 3.
+DC18|sparql a86180c8a6 A literal of an unknown datatype equals only the same term (RDFterm-equal, SPARQL 17.4.1.7), so "x"^^ex:type = "x" is an error and the row is dropped; 0.5.44 compared the text.
+DC19|sparql ed34f10eb7 SPARQL results hold RDF terms (#464): each IRI and literal is the exact term, with its datatype or tag, where it was a plain value or text; sameTerm of "025"^^xsd:integer and 25 is false, as the terms differ (SPARQL 17.4.1.8), and = is true.
+DC20|sparql 21f97a3780 SPARQL results hold RDF terms (#464): each IRI and literal is the exact term, with its datatype or tag, where it was a plain value or text.
+DC21|sparql 92edc14c6b A stored xsd:date compares as a date (SPARQL 17.3), so the later date passes the FILTER; it found none.
+DC22|sparql 4e78e35c5d SPARQL results hold RDF terms (#464): each IRI and literal is the exact term, with its datatype or tag, where it was a plain value or text; a simple literal plus a number is a type error, so the sum is unbound; 0.5.44 read the string "019" as a number.
+DC23|sparql b382577304 SPARQL results hold RDF terms (#464): each IRI and literal is the exact term, with its datatype or tag, where it was a plain value or text; a stored double keeps its text "1.7e0", and a computed one is in its canonical form "3.4E0".
+DC24|sparql bcbfa43f91 SPARQL results hold RDF terms (#464): each IRI and literal is the exact term, with its datatype or tag, where it was a plain value or text.
+DC25|sparql bfbd2af9d0 SPARQL results hold RDF terms (#464): each IRI and literal is the exact term, with its datatype or tag, where it was a plain value or text.
+DD2|sparql 98ce2165da SPARQL results hold RDF terms (#464): each IRI and literal is the exact term, with its datatype or tag, where it was a plain value or text; "01" and "1" are two terms of one value, both kept (RDF 1.1).
+DD4|sparql 164a133f26 SPARQL results hold RDF terms (#464): each IRI and literal is the exact term, with its datatype or tag, where it was a plain value or text; "01"^^xsd:integer stays a term apart from the deleted "1", and "x"@en from "x".
+DD6|sparql f8ea3699d4 SPARQL results hold RDF terms (#464): each IRI and literal is the exact term, with its datatype or tag, where it was a plain value or text; the delete of "x"@en leaves "01"^^xsd:integer and "x", each with LANG "".

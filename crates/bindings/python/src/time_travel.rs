@@ -200,10 +200,9 @@ impl PyAsOfView {
     /// A node's value of `key` as it was at the view's epoch, or None.
     fn get_node_property(&self, id: u64, key: &str, py: Python<'_>) -> PyResult<Option<Py<PyAny>>> {
         self.with_view(|view| {
-            Ok(
-                crate::error::raised(view.get_node_property(NodeId(id), key))?
-                    .map(|value| PyValue::to_py(&value, py)),
-            )
+            crate::error::raised(view.get_node_property(NodeId(id), key))?
+                .map(|value| PyValue::to_py(&value, py))
+                .transpose()
         })
     }
 

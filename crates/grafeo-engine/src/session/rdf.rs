@@ -115,7 +115,8 @@ impl Session {
     fn execute_graphql_rdf_untimed(&self, query: &str) -> Result<QueryResult> {
         use crate::query::{optimizer::Optimizer, translators::graphql_rdf};
 
-        let logical_plan = graphql_rdf::translate(query, "http://example.org/")?;
+        let mut logical_plan = graphql_rdf::translate(query, "http://example.org/")?;
+        crate::query::processor::substitute_with_defaults(&mut logical_plan, None)?;
         let active = self.active_store();
         let optimizer = Optimizer::from_graph_store(&*active);
         let optimized_plan = optimizer.optimize(logical_plan)?;
@@ -144,14 +145,14 @@ impl Session {
         params: std::collections::HashMap<String, Value>,
     ) -> Result<QueryResult> {
         use crate::query::{
-            optimizer::Optimizer, processor::substitute_params, translators::graphql_rdf,
+            optimizer::Optimizer, processor::substitute_with_defaults, translators::graphql_rdf,
         };
 
         // Parse and translate the query to a logical plan
         let mut logical_plan = graphql_rdf::translate(query, "http://example.org/")?;
 
-        // Substitute parameters
-        substitute_params(&mut logical_plan, &params)?;
+        // The query's own defaults, then the parameters given
+        substitute_with_defaults(&mut logical_plan, Some(&params))?;
 
         // Optimize the plan
         let rdf_stats = self.rdf_store.get_or_collect_statistics();
@@ -207,12 +208,9 @@ impl Session {
         query: &str,
         params: std::collections::HashMap<String, Value>,
     ) -> Result<QueryResult> {
-        use crate::query::{
-            optimizer::Optimizer, processor::substitute_params, translators::sparql,
-        };
+        use crate::query::{optimizer::Optimizer, translators::sparql};
 
-        let mut logical_plan = sparql::translate(query)?;
-        substitute_params(&mut logical_plan, &params)?;
+        let logical_plan = sparql::translate_with_bindings(query, &params)?;
 
         let rdf_stats = self.rdf_store.get_or_collect_statistics();
         let optimizer = Optimizer::from_rdf_statistics((*rdf_stats).clone());
@@ -264,7 +262,9 @@ impl Session {
 
         let deadline = self.query_deadline();
         let result = self.in_statement_transaction(mutates, || {
-            let planner = self.make_rdf_planner(deadline);
+            let planner = self
+                .make_rdf_planner(deadline)
+                .with_query_values(language == "graphql");
             if optimized_plan.profile {
                 let (mut physical_plan, entries) = planner.plan_profiled(optimized_plan)?;
                 let executor = self

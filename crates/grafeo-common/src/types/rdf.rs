@@ -11,9 +11,31 @@ use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::sync::Arc;
 
-/// An RDF term: the three kinds of RDF 1.1, matched exhaustively, so a
-/// new kind (an RDF 1.2 triple term) is handled everywhere a term is.
+/// The error of code that meets a kind of RDF term it does not handle: a
+/// kind a later release adds to [`Term`] (such as an RDF 1.2 triple term).
+/// Every place outside this crate that matches on a term's kind returns it
+/// for a kind it does not know, never a default value.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[error("unsupported RDF term kind: {0}")]
+pub struct UnsupportedTermKind(String);
+
+impl UnsupportedTermKind {
+    /// The error for `term`, which names it.
+    #[must_use]
+    pub fn of(term: &Term) -> Self {
+        Self(format!("{term:?}"))
+    }
+}
+
+impl From<UnsupportedTermKind> for crate::utils::error::Error {
+    fn from(error: UnsupportedTermKind) -> Self {
+        crate::utils::error::QueryError::unsupported(error.to_string()).into()
+    }
+}
+
+/// An RDF term.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[non_exhaustive]
 pub enum Term {
     /// An IRI (Internationalized Resource Identifier).
     Iri(Iri),
@@ -119,6 +141,43 @@ impl Term {
             Term::Literal(literal) => literal
                 .numeric_value()
                 .unwrap_or_else(|| Value::from(literal.value())),
+        }
+    }
+
+    /// The value an export to a table holds for this term: a literal of a
+    /// known XSD type as its native value (see [`Literal::native_value`]),
+    /// an IRI as its text, a blank node as `_:` and its label, and any other
+    /// literal as its lexical form, without its language tag or datatype. An
+    /// `xsd:integer` or `xsd:decimal` past the 38 digits of a decimal is its
+    /// lexical form too, which is exact where its nearest float is not.
+    #[must_use]
+    pub fn export_value(&self) -> crate::types::Value {
+        use crate::types::Value;
+        match self {
+            Term::Literal(literal) => match literal.native_value() {
+                Some(Value::Float64(_))
+                    if literal.has_numeric_datatype()
+                        && literal.datatype() != Literal::XSD_DOUBLE
+                        && literal.datatype() != "http://www.w3.org/2001/XMLSchema#float" =>
+                {
+                    Value::from(literal.value())
+                }
+                Some(native) => native,
+                None => Value::from(literal.value()),
+            },
+            other => Value::from(other.lexical_text()),
+        }
+    }
+
+    /// The text of this term without its kind: an IRI as itself, a blank
+    /// node as `_:` and its label, a literal as its lexical form (without
+    /// its language tag or datatype), so `"025"^^xsd:integer` is `025`.
+    #[must_use]
+    pub fn lexical_text(&self) -> String {
+        match self {
+            Term::Iri(iri) => iri.as_str().to_string(),
+            Term::BlankNode(node) => format!("_:{}", node.id()),
+            Term::Literal(literal) => literal.value().to_string(),
         }
     }
 
@@ -392,13 +451,44 @@ impl fmt::Display for BlankNode {
 
 /// An RDF literal (data value).
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(from = "LiteralFields")]
 pub struct Literal {
     /// The lexical form (string value).
     value: Arc<str>,
     /// The datatype IRI (e.g., xsd:string, xsd:integer).
     datatype: Arc<str>,
-    /// Optional language tag (e.g., "en", "de").
+    /// Optional language tag (e.g., "en", "de"), in lowercase (see
+    /// [`Literal::with_language`]).
     language: Option<Arc<str>>,
+}
+
+/// The fields of a [`Literal`] as serde reads them, before the tag is put in
+/// lowercase: the same shape, so the encoding does not change.
+#[derive(Deserialize)]
+struct LiteralFields {
+    value: Arc<str>,
+    datatype: Arc<str>,
+    language: Option<Arc<str>>,
+}
+
+impl From<LiteralFields> for Literal {
+    fn from(fields: LiteralFields) -> Self {
+        Self {
+            value: fields.value,
+            datatype: fields.datatype,
+            language: fields.language.map(lowercase_tag),
+        }
+    }
+}
+
+/// A language tag in lowercase: tags compare without case (BCP 47), and
+/// RDF 1.2 keeps them in lowercase, so the same tag is the same term.
+fn lowercase_tag(tag: Arc<str>) -> Arc<str> {
+    if tag.bytes().any(|byte| byte.is_ascii_uppercase()) {
+        Arc::from(tag.to_ascii_lowercase())
+    } else {
+        tag
+    }
 }
 
 impl Literal {
@@ -450,13 +540,15 @@ impl Literal {
         }
     }
 
-    /// Creates a language-tagged literal.
+    /// Creates a language-tagged literal. The tag is kept in lowercase, as
+    /// RDF 1.2 does: tags compare without case, so `"Pomme"@FR` is the term
+    /// `"Pomme"@fr`.
     #[inline]
     pub fn with_language(value: impl Into<Arc<str>>, language: impl Into<Arc<str>>) -> Self {
         Self {
             value: value.into(),
             datatype: Self::RDF_LANG_STRING.into(),
-            language: Some(language.into()),
+            language: Some(lowercase_tag(language.into())),
         }
     }
 
@@ -559,6 +651,134 @@ impl Literal {
             _ => None,
         }
     }
+
+    /// Whether the literal's datatype is a numeric type of XPath, whatever
+    /// its text: `xsd:integer` and the types derived from it,
+    /// `xsd:decimal`, `xsd:float` and `xsd:double`.
+    #[must_use]
+    pub fn has_numeric_datatype(&self) -> bool {
+        let datatype = self.datatype();
+        self.language.is_none()
+            && (crate::types::rdf_order::XSD_INTEGER_TYPES.contains(&datatype)
+                || [
+                    Self::XSD_DECIMAL,
+                    Self::XSD_DOUBLE,
+                    "http://www.w3.org/2001/XMLSchema#float",
+                ]
+                .contains(&datatype))
+    }
+
+    /// The value of the literal as a query computes with it: an
+    /// `xsd:integer` or a type derived from it as an `Int64` (a `Decimal`
+    /// past the `i64` range), an `xsd:decimal` as a `Decimal`, an
+    /// `xsd:double` or `xsd:float` as a `Float64`, an `xsd:boolean` as a
+    /// `Bool`, a simple literal or an `xsd:string` as a `String`, an
+    /// `xsd:date`, `xsd:dateTime`, `xsd:time` or `xsd:duration` as its
+    /// temporal value. `None` for a tagged literal, a literal of another
+    /// datatype, and a literal whose text is not of its type
+    /// (`"abc"^^xsd:integer`).
+    #[must_use]
+    pub fn native_value(&self) -> Option<crate::types::Value> {
+        use crate::types::{Date, Duration, Time, Value};
+        if self.language.is_some() {
+            return None;
+        }
+        if self.datatype.as_ref() == Self::XSD_STRING {
+            return Some(Value::from(self.value.as_ref()));
+        }
+        let name = self
+            .datatype
+            .strip_prefix("http://www.w3.org/2001/XMLSchema#")?;
+        let text = self.value.trim();
+        match name {
+            "integer" | "int" | "long" | "short" | "byte" | "nonNegativeInteger"
+            | "positiveInteger" | "negativeInteger" | "nonPositiveInteger" | "unsignedLong"
+            | "unsignedInt" | "unsignedShort" | "unsignedByte" => integer_value(text),
+            "decimal" => decimal_value(text),
+            "double" | "float" => double_value(text).map(Value::Float64),
+            "boolean" => match text {
+                "true" | "1" => Some(Value::Bool(true)),
+                "false" | "0" => Some(Value::Bool(false)),
+                _ => None,
+            },
+            "date" => Date::parse(text).map(Value::Date),
+            "dateTime" => datetime_value(text),
+            "time" => Time::parse(text).map(Value::Time),
+            "duration" | "dayTimeDuration" | "yearMonthDuration" => {
+                Duration::parse(text).map(Value::Duration)
+            }
+            _ => None,
+        }
+    }
+}
+
+/// An `xsd:integer` lexical form: an optional sign and digits.
+fn integer_value(text: &str) -> Option<crate::types::Value> {
+    use crate::types::{Decimal, Value};
+    let digits = text.strip_prefix(['+', '-']).unwrap_or(text);
+    if digits.is_empty() || !digits.bytes().all(|byte| byte.is_ascii_digit()) {
+        return None;
+    }
+    match text.parse::<i64>() {
+        Ok(integer) => Some(Value::Int64(integer)),
+        // XPath integers are unbounded: past i64 as an integral decimal.
+        Err(_) => Decimal::parse(text).ok().map(Value::Decimal),
+    }
+}
+
+/// An `xsd:decimal` lexical form: an optional sign, digits and at most one
+/// point, no exponent.
+fn decimal_value(text: &str) -> Option<crate::types::Value> {
+    use crate::types::{Decimal, Value};
+    let unsigned = text.strip_prefix(['+', '-']).unwrap_or(text);
+    let valid = unsigned.bytes().any(|byte| byte.is_ascii_digit())
+        && unsigned
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || byte == b'.')
+        && unsigned.bytes().filter(|&byte| byte == b'.').count() <= 1;
+    if !valid {
+        return None;
+    }
+    match Decimal::parse(text) {
+        Ok(decimal) => Some(Value::Decimal(decimal)),
+        // More than 38 digits: still a number, the nearest double.
+        Err(_) => text.parse::<f64>().ok().map(Value::Float64),
+    }
+}
+
+/// An `xsd:double` lexical form: a decimal with an optional exponent, `INF`,
+/// `+INF`, `-INF` or `NaN`.
+fn double_value(text: &str) -> Option<f64> {
+    match text {
+        "INF" | "+INF" => return Some(f64::INFINITY),
+        "-INF" => return Some(f64::NEG_INFINITY),
+        "NaN" => return Some(f64::NAN),
+        _ => {}
+    }
+    let valid = text.bytes().any(|byte| byte.is_ascii_digit())
+        && text
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || matches!(byte, b'+' | b'-' | b'.' | b'e' | b'E'));
+    if valid {
+        text.parse::<f64>().ok()
+    } else {
+        None
+    }
+}
+
+/// An `xsd:dateTime`: zoned when it has an offset, local otherwise.
+fn datetime_value(text: &str) -> Option<crate::types::Value> {
+    use crate::types::{Date, Time, Timestamp, Value, ZonedDatetime};
+    if let Some(zoned) = ZonedDatetime::parse(text) {
+        return Some(Value::ZonedDatetime(zoned));
+    }
+    let pos = text.find('T')?;
+    let date = Date::parse(&text[..pos])?;
+    let time = Time::parse(&text[pos + 1..])?;
+    if time.offset_seconds().is_some() {
+        return None;
+    }
+    Some(Value::Timestamp(Timestamp::from_date_time(date, time)))
 }
 
 impl fmt::Display for Literal {
@@ -616,7 +836,7 @@ impl From<&TermRecord> for Term {
             } => Self::Literal(Literal {
                 value: value.as_str().into(),
                 datatype: datatype.as_str().into(),
-                language: language.as_deref().map(Into::into),
+                language: language.as_deref().map(|tag| lowercase_tag(tag.into())),
             }),
         }
     }
@@ -674,6 +894,23 @@ pub mod testing {
 mod tests {
     use super::testing::{escaped, unusual_terms};
     use super::*;
+
+    #[test]
+    fn an_unsupported_term_kind_is_an_error_that_names_the_term() {
+        let error = UnsupportedTermKind::of(&Term::iri("http://example.org/a"));
+        let message = error.to_string();
+        assert!(
+            message.starts_with("unsupported RDF term kind: "),
+            "{message}"
+        );
+        assert!(message.contains("http://example.org/a"), "{message}");
+        let error = crate::utils::error::Error::from(error);
+        assert_eq!(error.error_code().as_str(), "GRAFEO-Q004", "{error}");
+        assert!(
+            error.to_string().contains("unsupported RDF term kind"),
+            "{error}"
+        );
+    }
     use crate::types::{Decimal, Value};
 
     #[test]
@@ -757,6 +994,49 @@ mod tests {
         assert_eq!(lit.value(), "Bonjour");
         assert_eq!(lit.language(), Some("fr"));
         assert!(lit.is_lang_string());
+    }
+
+    /// A tag is kept in lowercase, however it is written or read back, so
+    /// the same tag in another case is the same term (RDF 1.2).
+    #[test]
+    fn a_language_tag_is_kept_in_lowercase() {
+        let upper = Term::lang_literal("Pomme", "FR-be");
+        assert_eq!(upper, Term::lang_literal("Pomme", "fr-BE"));
+        assert_eq!(
+            upper.as_literal().and_then(Literal::language),
+            Some("fr-be")
+        );
+        assert_eq!(
+            Term::from_ntriples(r#""Pomme"@FR"#).unwrap(),
+            Term::lang_literal("Pomme", "fr")
+        );
+        let record = TermRecord::from(&upper);
+        assert_eq!(Term::from(&record), upper, "a WAL record");
+
+        // serde reads a tag another writer kept in its case.
+        #[derive(Serialize)]
+        struct Written<'a> {
+            value: &'a str,
+            datatype: &'a str,
+            language: Option<&'a str>,
+        }
+        let config = bincode::config::standard();
+        let bytes = bincode::serde::encode_to_vec(
+            Written {
+                value: "Pomme",
+                datatype: Literal::RDF_LANG_STRING,
+                language: Some("NL"),
+            },
+            config,
+        )
+        .unwrap();
+        let (read, _): (Literal, usize) =
+            bincode::serde::decode_from_slice(&bytes, config).unwrap();
+        assert_eq!(read.language(), Some("nl"));
+        let again = bincode::serde::encode_to_vec(&read, config).unwrap();
+        let (back, _): (Literal, usize) =
+            bincode::serde::decode_from_slice(&again, config).unwrap();
+        assert_eq!(back, read, "the encoding is the derived one");
     }
 
     #[test]

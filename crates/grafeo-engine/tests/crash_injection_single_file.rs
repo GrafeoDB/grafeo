@@ -9,8 +9,9 @@
 //!   that a panic during close or a checkpoint leaves a usable database that
 //!   holds every write.
 //! - In a child process that exits at the crash point without running any
-//!   destructor (`wal_disabled_crash_during_checkpoint_recovers` here, and the
-//!   sweeps `crash_at_every_step_of_the_first_checkpoint` and
+//!   destructor (`wal_disabled_crash_during_checkpoint_recovers` and
+//!   `wal_disabled_crash_in_close_with_an_open_transaction_keeps_only_committed_data`
+//!   here, and the sweeps `crash_at_every_step_of_the_first_checkpoint` and
 //!   `crash_at_every_step_of_a_later_checkpoint` in `checkpoint_replay.rs`):
 //!   these reopen from the files a crash leaves, and so test recovery,
 //!   including the sidecar WAL replay.
@@ -589,6 +590,8 @@ const NEW_HEADER_WRITTEN: u64 = 6;
 
 const CHILD_POINT_VAR: &str = "GRAFEO_CRASH_SINGLE_FILE_POINT";
 const CHILD_PATH_VAR: &str = "GRAFEO_CRASH_SINGLE_FILE_PATH";
+/// Set when the child also leaves a transaction open before its `close()`.
+const CHILD_OPEN_TRANSACTION_VAR: &str = "GRAFEO_CRASH_SINGLE_FILE_OPEN_TRANSACTION";
 /// Exit code of a child whose `close()` crashed.
 const CRASHED: i32 = 3;
 
@@ -596,13 +599,25 @@ const CRASHED: i32 = 3;
 /// node and crashes at `crash_point` inside `close()`. Returns whether the
 /// close completed.
 fn close_in_child(crash_point: u64, path: &std::path::Path) -> bool {
-    let status = child_process::run(
-        std::process::Command::new(std::env::current_exe().unwrap())
-            .args(["--exact", "close_child", "--nocapture"])
-            .env(CHILD_POINT_VAR, crash_point.to_string())
-            .env(CHILD_PATH_VAR, path),
-    )
-    .unwrap();
+    run_close_child(crash_point, path, false)
+}
+
+/// As [`close_in_child`], with a transaction that inserted Django still open
+/// when `close()` starts.
+fn close_with_an_open_transaction_in_child(crash_point: u64, path: &std::path::Path) -> bool {
+    run_close_child(crash_point, path, true)
+}
+
+fn run_close_child(crash_point: u64, path: &std::path::Path, open_transaction: bool) -> bool {
+    let mut command = std::process::Command::new(std::env::current_exe().unwrap());
+    command
+        .args(["--exact", "close_child", "--nocapture"])
+        .env(CHILD_POINT_VAR, crash_point.to_string())
+        .env(CHILD_PATH_VAR, path);
+    if open_transaction {
+        command.env(CHILD_OPEN_TRANSACTION_VAR, "1");
+    }
+    let status = child_process::run(&mut command).unwrap();
     match status.code() {
         Some(0) => true,
         Some(CRASHED) => false,
@@ -610,7 +625,8 @@ fn close_in_child(crash_point: u64, path: &std::path::Path) -> bool {
     }
 }
 
-/// Child-process entry for [`close_in_child`]; a no-op when run directly.
+/// Child-process entry for [`close_in_child`] and
+/// [`close_with_an_open_transaction_in_child`]; a no-op when run directly.
 #[test]
 fn close_child() {
     let (Ok(point), Some(path)) = (
@@ -623,6 +639,12 @@ fn close_child() {
     db.session()
         .execute("INSERT (:Person {name: 'Mia'})")
         .unwrap();
+    // Kept until the exit: the transaction is still open when close() runs.
+    let mut open = db.session();
+    if std::env::var_os(CHILD_OPEN_TRANSACTION_VAR).is_some() {
+        open.begin_transaction().unwrap();
+        open.execute("INSERT (:Person {name: 'Django'})").unwrap();
+    }
     let target = AssertUnwindSafe(&db);
     let result = with_crash_at(point.parse().unwrap(), move || target.close());
     // Exit without running destructors, like a crash.
@@ -635,11 +657,13 @@ fn close_child() {
     }
 }
 
-/// With WAL disabled, uncommitted transaction data should not be persisted.
-/// If the process crashes (or simply drops) before committing, the
-/// checkpoint-on-close only captures committed state.
+/// With WAL disabled, a panic at the first point of `close()` while a
+/// transaction is open: the panic drops the database, whose `Drop` closes it
+/// again, and that checkpoint holds only committed state. This is a clean
+/// close with an open transaction, not a crash; the crash is
+/// [`wal_disabled_crash_in_close_with_an_open_transaction_keeps_only_committed_data`].
 #[test]
-fn wal_disabled_uncommitted_data_lost_on_crash() {
+fn a_panic_in_close_with_an_open_transaction_keeps_only_committed_data() {
     let dir = tempfile::TempDir::new().unwrap();
     let path = dir.path().join("wal_off_uncommitted.grafeo");
 
@@ -651,8 +675,8 @@ fn wal_disabled_uncommitted_data_lost_on_crash() {
         db.close().unwrap();
     }
 
-    // Phase 2: Reopen, start an explicit transaction, write data, crash
-    // without committing
+    // Phase 2: Reopen, start an explicit transaction, write data, panic in
+    // close() without committing (the drop then closes the database)
     {
         let db = GrafeoDB::with_config(wal_disabled_config(&path)).unwrap();
         let mut session = db.session();
@@ -689,7 +713,7 @@ fn wal_disabled_uncommitted_data_lost_on_crash() {
     );
     assert!(
         !names.contains(&"Django".to_string()),
-        "uncommitted data (Django) must NOT be present after crash"
+        "uncommitted data (Django) must NOT be present after the close"
     );
     assert_eq!(
         db.node_count().unwrap(),
@@ -698,6 +722,41 @@ fn wal_disabled_uncommitted_data_lost_on_crash() {
     );
 
     db.close().unwrap();
+}
+
+/// With WAL disabled, a crash at each point of `close()` while a transaction
+/// is open, in a child process that exits without running a destructor.
+/// Django, inserted by the open transaction, is never in the file; Mia,
+/// committed in the same process, is in it once the new image's header was
+/// written; Butch, from an earlier clean close, always is.
+#[test]
+fn wal_disabled_crash_in_close_with_an_open_transaction_keeps_only_committed_data() {
+    for crash_point in 1..=count(&WAL_DISABLED_CLOSE_POINTS) + 1 {
+        let point = point_name(&WAL_DISABLED_CLOSE_POINTS, crash_point);
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("wal_off_open_transaction.grafeo");
+        {
+            let db = GrafeoDB::with_config(wal_disabled_config(&path)).unwrap();
+            db.execute("INSERT (:Person {name: 'Butch'})").unwrap();
+            db.close().unwrap();
+        }
+
+        let completed = close_with_an_open_transaction_in_child(crash_point, &path);
+        assert_eq!(
+            completed,
+            crash_point > count(&WAL_DISABLED_CLOSE_POINTS),
+            "crash_point={crash_point} ({point})"
+        );
+
+        let db = GrafeoDB::with_config(wal_disabled_config(&path)).unwrap();
+        let names = extract_strings(db.execute("MATCH (p:Person) RETURN p.name").unwrap().rows());
+        let mut expected = vec!["Butch"];
+        if crash_point >= NEW_HEADER_WRITTEN {
+            expected.push("Mia");
+        }
+        assert_eq!(names, expected, "crash_point={crash_point} ({point})");
+        db.close().unwrap();
+    }
 }
 
 // =========================================================================

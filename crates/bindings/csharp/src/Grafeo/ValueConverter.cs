@@ -54,6 +54,7 @@ internal static class ValueConverter
             double d => JsonValue.Create(d),
             string s => JsonValue.Create(s),
             GrafeoDecimal g => new JsonObject { ["$decimal"] = g.Text },
+            RdfTerm term => term.ToJson(),
             decimal m => new JsonObject
             {
                 ["$decimal"] = m.ToString(System.Globalization.CultureInfo.InvariantCulture)
@@ -210,6 +211,10 @@ internal static class ValueConverter
 
     private static object? ParseJsonObject(JsonElement element)
     {
+        // An RDF term: the "$term" tag as the object's only key
+        if (RdfTerm.FromJson(element) is { } term)
+            return term;
+
         // An exact decimal: the "$decimal" tag as the object's only key
         if (element.TryGetProperty("$decimal", out var decimalElement)
             && element.EnumerateObject().Count() == 1

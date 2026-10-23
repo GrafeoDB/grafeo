@@ -160,7 +160,9 @@ pub enum Value {
     ///
     /// Key: replica ID string. Value: that replica's running total (grows
     /// monotonically).
-    GCounter(Arc<std::collections::HashMap<String, u64>>),
+    GCounter(
+        #[serde(serialize_with = "sorted_counts")] Arc<std::collections::HashMap<String, u64>>,
+    ),
 
     /// Positive-negative counter (ON-Counter) for distributed increment and
     /// decrement.
@@ -170,9 +172,11 @@ pub enum Value {
     /// per-replica max on each map independently.
     OnCounter {
         /// Per-replica positive contributions (increments).
+        #[serde(serialize_with = "sorted_counts")]
         pos: Arc<std::collections::HashMap<String, u64>>,
         /// Per-replica negative contributions (decrements, stored as positive
         /// magnitudes).
+        #[serde(serialize_with = "sorted_counts")]
         neg: Arc<std::collections::HashMap<String, u64>>,
     },
     /// Exact decimal number, at most 38 digits, with the scale it was written
@@ -183,6 +187,16 @@ pub enum Value {
     /// language tag), as SPARQL results carry it. Equal and hashed by term
     /// identity (SPARQL `sameTerm`). After `Decimal`, for the same reason.
     RdfTerm(Arc<Term>),
+}
+
+/// Serializes a counter's per-replica map in replica order, so the same counter
+/// always serializes to the same bytes (a `HashMap` iterates in its random
+/// hash order). It stays a map, so its encoding and its decoding are unchanged.
+fn sorted_counts<S: serde::Serializer>(
+    counts: &Arc<std::collections::HashMap<String, u64>>,
+    serializer: S,
+) -> Result<S::Ok, S::Error> {
+    serializer.collect_map(counts.iter().collect::<BTreeMap<_, _>>())
 }
 
 impl Value {
@@ -2350,5 +2364,41 @@ mod tests {
             let bytes = value.serialize().unwrap();
             assert_eq!(Value::deserialize(&bytes).unwrap(), value);
         }
+    }
+
+    /// A counter serializes the same whatever order its replicas were added
+    /// in: a `HashMap` iterates in its random hash order, and a snapshot must
+    /// not depend on it (exports of the same data compare byte for byte).
+    #[test]
+    fn a_counter_serializes_in_replica_order() {
+        let replicas = [
+            "Alix", "Gus", "Vincent", "Jules", "Mia", "Butch", "Django", "Hans",
+        ];
+        let counts = |names: &mut dyn Iterator<Item = &&str>| {
+            Arc::new(
+                names
+                    .map(|name| ((*name).to_string(), name.len() as u64))
+                    .collect::<std::collections::HashMap<_, _>>(),
+            )
+        };
+        let forward = counts(&mut replicas.iter());
+        let backward = counts(&mut replicas.iter().rev());
+        let encode = |value: &Value| {
+            bincode::serde::encode_to_vec(value, bincode::config::standard()).unwrap()
+        };
+        assert_eq!(
+            encode(&Value::GCounter(Arc::clone(&forward))),
+            encode(&Value::GCounter(Arc::clone(&backward)))
+        );
+        let on = |pos: &Arc<std::collections::HashMap<String, u64>>| Value::OnCounter {
+            pos: Arc::clone(pos),
+            neg: Arc::clone(pos),
+        };
+        assert_eq!(encode(&on(&forward)), encode(&on(&backward)));
+        // Still a map: it decodes to the same counter.
+        let bytes = encode(&Value::GCounter(Arc::clone(&forward)));
+        let (decoded, _): (Value, usize) =
+            bincode::serde::decode_from_slice(&bytes, bincode::config::standard()).unwrap();
+        assert_eq!(decoded, Value::GCounter(forward));
     }
 }

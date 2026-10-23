@@ -376,3 +376,24 @@ tests:
     expect:
       rows:
         - [4]
+
+  # The same updates in GQL, as the #374 reporter ran them, read through the
+  # index by a top-k on the similarity: node 4 ranks at its last vector.
+  - name: repeated_gql_vector_update_ranks_the_node_at_its_last_vector
+    setup:
+      - "INSERT (:Doc {id: 1, embedding: vector([1.0, 0.0, 0.0])}), (:Doc {id: 2, embedding: vector([1.0, 0.1, 0.0])}), (:Doc {id: 3, embedding: vector([1.0, 0.2, 0.0])})"
+      - "INSERT (:Doc {id: 4, embedding: vector([1.0, 0.3, 0.0])}), (:Doc {id: 5, embedding: vector([1.0, 0.4, 0.0])}), (:Doc {id: 6, embedding: vector([1.0, 0.5, 0.0])})"
+      - "CREATE VECTOR INDEX doc_emb ON :Doc(embedding) DIMENSION 3"
+      - "MATCH (d:Doc {id: 4}) SET d.embedding = vector([0.0, 1.0, 0.0])"
+      - "MATCH (d:Doc {id: 4}) SET d.embedding = vector([1.0, 0.0, 0.0])"
+      - "MATCH (d:Doc {id: 4}) SET d.embedding = vector([1.0, 0.53, 0.0])"
+    query: "MATCH (d:Doc) RETURN d.id ORDER BY cosine_similarity(d.embedding, [1.0, 0.0, 0.0]) DESC LIMIT 6"
+    expect:
+      ordered: true
+      rows:
+        - [1]
+        - [2]
+        - [3]
+        - [5]
+        - [6]
+        - [4]

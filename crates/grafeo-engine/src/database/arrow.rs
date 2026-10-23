@@ -21,6 +21,17 @@
 //!   room for its largest integer part (an integer takes 19 digits); a column
 //!   that needs more than 38 digits is text, and a float among decimals makes
 //!   the column `Float64`.
+//! - an RDF term (a SPARQL result) is its native value when it is a literal
+//!   of a known XSD type (`xsd:integer` an `Int64`, `xsd:decimal` a decimal,
+//!   `xsd:double` and `xsd:float` a `Float64`, `xsd:boolean`, `xsd:date`,
+//!   `xsd:dateTime` and the others as their types), and text otherwise: an
+//!   IRI as itself, a blank node as `_:` and its label, any other literal as
+//!   its lexical form, without its language tag or datatype (see
+//!   [`Term::export_value`](grafeo_common::types::rdf::Term::export_value)).
+//!   An `xsd:integer` or `xsd:decimal` past 38 digits is its text, so the
+//!   column of it is text. In a text column every term is its lexical form
+//!   ([`Term::lexical_text`](grafeo_common::types::rdf::Term::lexical_text)),
+//!   so `"025"^^xsd:integer` is `025`, exact.
 //!
 //! Nulls are null at every level. Values of different types in one column
 //! (or one list) are written as their GQL text in a `Utf8` column, except
@@ -526,8 +537,46 @@ pub fn query_result_to_record_batch(
 
     for (col_idx, col_name) in columns.iter().enumerate() {
         let logical_type = column_types.get(col_idx).unwrap_or(&LogicalType::Any);
-        let values = &col_values[col_idx];
+        // RDF terms go out as their export values (see the module docs).
+        let exported: Option<Vec<Value>> = col_values[col_idx]
+            .iter()
+            .any(|value| matches!(value, Value::RdfTerm(_)))
+            .then(|| {
+                col_values[col_idx]
+                    .iter()
+                    .map(|value| match value {
+                        Value::RdfTerm(term) => term.export_value(),
+                        other => (*other).clone(),
+                    })
+                    .collect()
+            });
+        let exported_refs: Vec<&Value>;
+        let values = match &exported {
+            Some(exported) => {
+                exported_refs = exported.iter().collect();
+                &exported_refs
+            }
+            None => &col_values[col_idx],
+        };
         let arrow_type = infer_column_type(logical_type, values);
+
+        // A text column holds each term's lexical form, not the text of its
+        // value, so it is exact.
+        let texts: Vec<Value>;
+        let text_refs: Vec<&Value>;
+        let values = if exported.is_some() && arrow_type == DataType::Utf8 {
+            texts = col_values[col_idx]
+                .iter()
+                .map(|value| match value {
+                    Value::RdfTerm(term) => Value::from(term.lexical_text()),
+                    other => (*other).clone(),
+                })
+                .collect();
+            text_refs = texts.iter().collect();
+            &text_refs
+        } else {
+            values
+        };
 
         fields.push(Field::new(col_name.as_str(), arrow_type.clone(), true));
         arrays.push(build_array(values, &arrow_type)?);
@@ -1178,6 +1227,206 @@ mod tests {
         assert_eq!(rows, ["{k: 0.5}"]);
     }
 
+    /// An `xsd:decimal` or `xsd:integer` past 38 digits is its exact text,
+    /// so its column is text, decimals included; and a text column holds each
+    /// term's lexical form, not the text of its value.
+    #[test]
+    fn rdf_terms_past_a_decimal_and_in_a_text_column_keep_their_text() {
+        use grafeo_common::types::rdf::Term;
+        const XSD: &str = "http://www.w3.org/2001/XMLSchema#";
+        let typed = |text: &str, datatype: &str| {
+            Value::RdfTerm(StdArc::new(Term::typed_literal(
+                text,
+                format!("{XSD}{datatype}"),
+            )))
+        };
+        let huge = "123456789012345678901234567890123456789.5";
+        let (data_type, rows) = column(
+            LogicalType::Any,
+            vec![typed(huge, "decimal"), typed("1.50", "decimal")],
+        );
+        assert_eq!(data_type, DataType::Utf8);
+        assert_eq!(
+            rows,
+            [format!("'{huge}'"), "'1.50'".to_string()],
+            "exact, not the nearest float"
+        );
+        let (data_type, rows) = column(
+            LogicalType::Any,
+            vec![typed("1234567890123456789012345678901234567890", "integer")],
+        );
+        assert_eq!(data_type, DataType::Utf8);
+        assert_eq!(rows, ["'1234567890123456789012345678901234567890'"]);
+
+        let (data_type, rows) = column(
+            LogicalType::Any,
+            vec![
+                typed("025", "integer"),
+                typed("1.50", "decimal"),
+                typed("true", "boolean"),
+                Value::RdfTerm(StdArc::new(Term::lang_literal("Pomme", "fr"))),
+            ],
+        );
+        assert_eq!(data_type, DataType::Utf8);
+        assert_eq!(rows, ["'025'", "'1.50'", "'true'", "'Pomme'"]);
+    }
+
+    /// An RDF term exports as the native value of a literal of a known XSD
+    /// type, and as text otherwise (the IRI, `_:` and the label, the lexical
+    /// form): a SPARQL result goes to Arrow as numbers, booleans and dates.
+    #[test]
+    fn rdf_terms_export_as_native_values_or_text() {
+        use grafeo_common::types::rdf::{Literal, Term};
+        const XSD: &str = "http://www.w3.org/2001/XMLSchema#";
+        let term = |term: Term| Value::RdfTerm(StdArc::new(term));
+        let typed = |text: &str, datatype: &str| {
+            term(Term::typed_literal(text, format!("{XSD}{datatype}")))
+        };
+
+        let (data_type, rows) = column(
+            LogicalType::Any,
+            vec![
+                term(Term::Literal(Literal::integer(30))),
+                typed("025", "integer"),
+                Value::Null,
+            ],
+        );
+        assert_eq!(data_type, DataType::Int64);
+        assert_eq!(rows, ["30", "25", "null"]);
+        let (data_type, _) = column(
+            LogicalType::Any,
+            vec![typed("1.50", "decimal"), typed("12.5", "decimal")],
+        );
+        assert_eq!(data_type, DataType::Decimal128(4, 2));
+        let (data_type, rows) = column(
+            LogicalType::Any,
+            vec![typed("1.5e0", "double"), typed("2", "float")],
+        );
+        assert_eq!(data_type, DataType::Float64);
+        assert_eq!(rows, ["1.5", "2.0"]);
+        let (data_type, rows) = column(
+            LogicalType::Any,
+            vec![typed("true", "boolean"), typed("0", "boolean")],
+        );
+        assert_eq!(data_type, DataType::Boolean);
+        assert_eq!(rows, ["true", "false"]);
+        let (data_type, _) = column(LogicalType::Any, vec![typed("2026-01-15", "date")]);
+        assert_eq!(data_type, DataType::Date32);
+        let (data_type, _) = column(
+            LogicalType::Any,
+            vec![typed("2026-01-15T10:30:00Z", "dateTime")],
+        );
+        assert_eq!(
+            data_type,
+            DataType::Timestamp(arrow_schema::TimeUnit::Microsecond, Some("UTC".into()))
+        );
+
+        let (data_type, rows) = column(
+            LogicalType::Any,
+            vec![
+                term(Term::iri("http://ex.org/apple")),
+                term(Term::blank("b0")),
+                term(Term::lang_literal("Pomme", "fr")),
+                term(Term::typed_literal("x", "http://ex.org/dt")),
+                term(Term::literal("Apple")),
+                typed("abc", "integer"),
+            ],
+        );
+        assert_eq!(data_type, DataType::Utf8);
+        assert_eq!(
+            rows,
+            [
+                "'http://ex.org/apple'",
+                "'_:b0'",
+                "'Pomme'",
+                "'x'",
+                "'Apple'",
+                "'abc'"
+            ]
+        );
+    }
+
+    /// The edges of the native export: an integer past 64 bits is a decimal
+    /// with every digit; an integer or decimal past 38 digits makes its
+    /// column text, every cell its lexical form, so no digit is lost; NaN and
+    /// INF stay doubles; a column mixing kinds is text holding each term's
+    /// lexical form (`025`, not `25`).
+    #[test]
+    fn rdf_term_edge_cases_keep_their_values_or_text() {
+        use arrow_array::Decimal128Array;
+        use grafeo_common::types::rdf::Term;
+        const XSD: &str = "http://www.w3.org/2001/XMLSchema#";
+        let term = |term: Term| Value::RdfTerm(StdArc::new(term));
+        let typed = |text: &str, datatype: &str| {
+            term(Term::typed_literal(text, format!("{XSD}{datatype}")))
+        };
+        let decimals = |values: Vec<Value>| -> (DataType, Vec<String>) {
+            let rows: Vec<Vec<Value>> = values.into_iter().map(|value| vec![value]).collect();
+            let batch =
+                query_result_to_record_batch(&["c".to_string()], &[LogicalType::Any], &rows)
+                    .unwrap();
+            let array = batch.column(0);
+            let decimals = array.as_any().downcast_ref::<Decimal128Array>().unwrap();
+            let texts = (0..decimals.len())
+                .map(|row| decimals.value_as_string(row))
+                .collect();
+            (array.data_type().clone(), texts)
+        };
+
+        // Past 64 bits, within 38 digits: a decimal, exact.
+        let wide = "123456789012345678901234567890";
+        let (data_type, texts) = decimals(vec![typed(wide, "integer"), typed("7", "integer")]);
+        assert_eq!(data_type, DataType::Decimal128(30, 0));
+        assert_eq!(texts, [wide, "7"]);
+
+        // Past 38 digits: the whole column is text, each cell as written.
+        let huge = "1234567890123456789012345678901234567890";
+        let (data_type, rows) = column(
+            LogicalType::Any,
+            vec![
+                typed(huge, "integer"),
+                typed("1.50", "decimal"),
+                Value::Null,
+            ],
+        );
+        assert_eq!(data_type, DataType::Utf8);
+        assert_eq!(rows, [format!("'{huge}'"), "'1.50'".into(), "null".into()]);
+        let (data_type, rows) = column(
+            LogicalType::Any,
+            vec![
+                typed(&format!("{huge}.5"), "decimal"),
+                typed("2.5", "decimal"),
+            ],
+        );
+        assert_eq!(data_type, DataType::Utf8);
+        assert_eq!(rows, [format!("'{huge}.5'"), "'2.5'".into()]);
+
+        // NaN and INF stay doubles.
+        let (data_type, rows) = column(
+            LogicalType::Any,
+            vec![
+                typed("NaN", "double"),
+                typed("INF", "double"),
+                typed("-INF", "double"),
+            ],
+        );
+        assert_eq!(data_type, DataType::Float64);
+        assert_eq!(rows, ["NaN", "inf", "-inf"]);
+
+        // A mix of kinds is text, each cell the term's lexical form.
+        let (data_type, rows) = column(
+            LogicalType::Any,
+            vec![
+                typed("025", "integer"),
+                typed("1", "boolean"),
+                typed("1.0e0", "double"),
+                term(Term::iri("http://ex.org/a")),
+            ],
+        );
+        assert_eq!(data_type, DataType::Utf8);
+        assert_eq!(rows, ["'025'", "'1'", "'1.0e0'", "'http://ex.org/a'"]);
+    }
+
     #[test]
     fn values_of_different_types_in_one_column() {
         // Integers and floats are floats.
@@ -1408,6 +1657,8 @@ mod tests {
         /// Old code reserved these bare names, causing silent data loss.
         #[test]
         fn test_nodes_property_named_id_preserved() {
+            use arrow_array::cast::AsArray;
+            use arrow_array::types::UInt64Type;
             let mut node = make_node(1, &["Method"]);
             node.properties
                 .insert(PropertyKey::new("id"), Value::String("custom-uuid".into()));
@@ -1431,6 +1682,14 @@ mod tests {
                 names.contains(&"labels".to_string()),
                 "property 'labels' must be preserved"
             );
+            // Each column keeps its own value: the properties do not take the
+            // structural columns' place, nor the other way around.
+            let cell = |name: &str| render(batch.column_by_name(name).unwrap(), 0);
+            assert_eq!(cell("id"), "'custom-uuid'");
+            assert_eq!(cell("labels"), "'meta'");
+            assert_eq!(cell("_labels"), "['Method']");
+            let structural_id = batch.column_by_name("_id").unwrap();
+            assert_eq!(structural_id.as_primitive::<UInt64Type>().value(0), 1);
         }
 
         #[test]
@@ -1477,6 +1736,8 @@ mod tests {
         /// Old code reserved these bare names, causing silent data loss.
         #[test]
         fn test_edges_property_named_source_preserved() {
+            use arrow_array::cast::AsArray;
+            use arrow_array::types::UInt64Type;
             let mut edge = make_edge(1, 10, 20, "CALLS");
             edge.properties
                 .insert(PropertyKey::new("source"), Value::String("jdt".into()));
@@ -1497,6 +1758,20 @@ mod tests {
                 "property 'source' must be preserved"
             );
             assert!(names.contains(&"confidence".to_string()));
+            // The property and the structural ends keep their own values.
+            assert_eq!(render(batch.column_by_name("source").unwrap(), 0), "'jdt'");
+            assert_eq!(
+                render(batch.column_by_name("confidence").unwrap(), 0),
+                "0.9"
+            );
+            let end = |name: &str| {
+                batch
+                    .column_by_name(name)
+                    .unwrap()
+                    .as_primitive::<UInt64Type>()
+                    .value(0)
+            };
+            assert_eq!((end("_id"), end("_source"), end("_target")), (1, 10, 20));
         }
 
         /// Regression: boolean properties must appear in Arrow export.

@@ -1,6 +1,6 @@
 {
   "name": "@grafeo-db/js-win32-x64-msvc",
-  "version": "0.6.0-beta.1",
+  "version": "0.6.0",
   "os": [
     "win32"
   ],

@@ -7,7 +7,7 @@ use crate::execution::pipeline::{ChunkSizeHint, PushOperator, Sink};
 use crate::execution::selection::SelectionVector;
 use crate::execution::vector::ValueVector;
 use grafeo_common::types::Value;
-use std::collections::HashSet;
+use grafeo_common::utils::hash::FxHashSet as HashSet;
 
 /// Push-based distinct operator.
 ///
@@ -26,7 +26,7 @@ impl DistinctPushOperator {
     pub fn new() -> Self {
         Self {
             columns: None,
-            seen: HashSet::new(),
+            seen: HashSet::default(),
         }
     }
 
@@ -34,7 +34,7 @@ impl DistinctPushOperator {
     pub fn on_columns(columns: Vec<usize>) -> Self {
         Self {
             columns: Some(columns),
-            seen: HashSet::new(),
+            seen: HashSet::default(),
         }
     }
 
@@ -117,7 +117,7 @@ impl DistinctMaterializingOperator {
         Self {
             columns: None,
             rows: Vec::new(),
-            seen: HashSet::new(),
+            seen: HashSet::default(),
             num_columns: None,
         }
     }
@@ -127,7 +127,7 @@ impl DistinctMaterializingOperator {
         Self {
             columns: Some(columns),
             rows: Vec::new(),
-            seen: HashSet::new(),
+            seen: HashSet::default(),
             num_columns: None,
         }
     }

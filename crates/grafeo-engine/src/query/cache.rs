@@ -36,15 +36,22 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use crate::query::plan::LogicalPlan;
 use crate::query::processor::QueryLanguage;
 
-/// Cache key combining query text, language, and active graph.
+/// Cache key combining query text, language, and the session's current
+/// schema and graph: what a plan is made for besides the text.
 #[derive(Clone, Eq, PartialEq, Hash)]
 pub struct CacheKey {
     /// The query string (normalized).
     query: String,
     /// The query language.
     language: QueryLanguage,
+    /// Current schema (`None` = default schema): graph names resolve in it,
+    /// and the optimizer reads the statistics of the store they name.
+    schema: Option<String>,
     /// Active graph name (`None` = default graph).
     graph: Option<String>,
+    /// Whether the plan keeps the statement's parameters, to be filled in on
+    /// each call (a prepared plan), or holds no parameter.
+    prepared: bool,
 }
 
 impl CacheKey {
@@ -54,7 +61,9 @@ impl CacheKey {
         Self {
             query: normalize_query(&query.into()),
             language,
+            schema: None,
             graph: None,
+            prepared: false,
         }
     }
 
@@ -68,7 +77,37 @@ impl CacheKey {
         Self {
             query: normalize_query(&query.into()),
             language,
+            schema: None,
             graph,
+            prepared: false,
+        }
+    }
+
+    /// Creates a cache key for a session whose current schema is `schema`
+    /// and current graph `graph` (`None`: the defaults).
+    #[must_use]
+    pub fn in_scope(
+        query: impl Into<String>,
+        language: QueryLanguage,
+        schema: Option<String>,
+        graph: Option<String>,
+    ) -> Self {
+        Self {
+            query: normalize_query(&query.into()),
+            language,
+            schema,
+            graph,
+            prepared: false,
+        }
+    }
+
+    /// The key of the same statement's prepared plan: optimized once with
+    /// its parameters in, which each call fills with its values.
+    #[must_use]
+    pub fn prepared(&self) -> Self {
+        Self {
+            prepared: true,
+            ..self.clone()
         }
     }
 
@@ -85,12 +124,17 @@ impl CacheKey {
     }
 }
 
-/// Normalizes a query string for caching.
+/// The text a statement is cached by: the whole text but the whitespace
+/// around it.
 ///
-/// Removes extra whitespace and normalizes case for keywords.
+/// Whitespace inside it is kept: inside a string, a quoted name or a
+/// comment it is part of the statement (`RETURN 'a  b'` is not
+/// `RETURN 'a b'`), and telling those apart from whitespace between tokens
+/// would take each language's lexer. Two texts that differ only in the
+/// spacing between tokens are planned apart, which costs a miss, never a
+/// wrong answer.
 fn normalize_query(query: &str) -> String {
-    // Simple normalization: collapse whitespace
-    query.split_whitespace().collect::<Vec<_>>().join(" ")
+    query.trim().to_string()
 }
 
 /// Entry in the cache with metadata.
@@ -499,11 +543,15 @@ mod tests {
 
     #[test]
     fn test_cache_key_normalization() {
-        let key1 = CacheKey::new("MATCH  (n)  RETURN n", test_language());
+        // The whitespace around a statement goes; inside, a literal's own
+        // spacing is the statement's, so the text is kept as written.
+        let key1 = CacheKey::new("  MATCH (n) RETURN n ", test_language());
         let key2 = CacheKey::new("MATCH (n) RETURN n", test_language());
-
-        // Both should normalize to the same key
         assert_eq!(key1.query(), key2.query());
+        let spaced = CacheKey::new("RETURN 'a  b'", test_language());
+        let single = CacheKey::new("RETURN 'a b'", test_language());
+        assert_eq!(spaced.query(), "RETURN 'a  b'");
+        assert_ne!(spaced.query(), single.query());
     }
 
     #[test]

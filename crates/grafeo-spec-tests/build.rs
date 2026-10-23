@@ -122,6 +122,9 @@ struct Expect {
     hash: Option<String>,
     precision: Option<u32>,
     columns: Vec<String>,
+    /// Rows of RDF terms in N-Triples form, each cell compared as the exact
+    /// term (kind, lexical form, datatype and language); see `assert_terms`.
+    terms: Vec<Vec<String>>,
 }
 
 fn parse_gtest_file(path: &Path) -> Result<GtestFile, String> {
@@ -354,6 +357,9 @@ fn parse_single_test(lines: &[&str], idx: &mut usize) -> Result<TestCase, String
 
 fn parse_expect(lines: &[&str], idx: &mut usize) -> Result<Expect, String> {
     let mut expect = Expect::default();
+    // The indent of the expectation's own keys: a line indented less is the
+    // test's next key (a `skip:`, `params:` or `note:` after `expect:`).
+    let mut child_indent: Option<usize> = None;
 
     while *idx < lines.len() {
         let trimmed = lines[*idx].trim();
@@ -365,6 +371,10 @@ fn parse_expect(lines: &[&str], idx: &mut usize) -> Result<Expect, String> {
 
         // End if we hit a non-indented line or next test
         if trimmed.starts_with("- name:") {
+            break;
+        }
+        let indent = lines[*idx].len() - lines[*idx].trim_start().len();
+        if indent < *child_indent.get_or_insert(indent) {
             break;
         }
 
@@ -411,9 +421,13 @@ fn parse_expect(lines: &[&str], idx: &mut usize) -> Result<Expect, String> {
                     *idx += 1;
                     expect.rows = parse_rows(lines, idx);
                 }
-                _ => {
+                "terms" => {
                     *idx += 1;
+                    expect.terms = parse_rows(lines, idx);
                 }
+                // A key no runner reads would leave a test that checks
+                // nothing and passes.
+                other => return Err(format!("unknown expect key '{other}'")),
             }
         } else {
             // Could be a continuation or unknown
@@ -1539,6 +1553,26 @@ fn generate_execute_and_assert(
             output,
             "        assert_hash(&result, \"{}\");",
             escape_rust_string(hash)
+        )
+        .unwrap();
+        return;
+    }
+
+    // Terms check
+    if !expect.terms.is_empty() {
+        writeln!(output, "        let expected: Vec<Vec<String>> = vec![").unwrap();
+        for row in &expect.terms {
+            let cols: Vec<String> = row
+                .iter()
+                .map(|c| format!("\"{}\".to_string()", escape_rust_string(c)))
+                .collect();
+            writeln!(output, "            vec![{}],", cols.join(", ")).unwrap();
+        }
+        writeln!(output, "        ];").unwrap();
+        writeln!(
+            output,
+            "        assert_terms(&result, &expected, {});",
+            expect.ordered
         )
         .unwrap();
         return;

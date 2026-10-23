@@ -1095,6 +1095,7 @@ public sealed class GrafeoDB : IGrafeoDB, IDisposable, IAsyncDisposable
 
             return new QueryResult(columns, rows, nodes, edges, executionTimeMs, rowsScanned)
             {
+                Kind = (ResultKind)NativeMethods.grafeo_result_kind(resultPtr),
                 Counters = new WriteCounters(
                     (long)NativeMethods.grafeo_result_nodes_created(resultPtr),
                     (long)NativeMethods.grafeo_result_nodes_deleted(resultPtr),

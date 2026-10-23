@@ -170,7 +170,7 @@ impl Database {
             .session()
             .execute_at_epoch_with_params(query, epoch, params)
             .map_err(database_error)?;
-        Ok(rows_to_js(&result))
+        rows_to_js(&result)
     }
 }
 
@@ -229,7 +229,7 @@ impl AsOfView {
     /// The query's errors, an error for a query that writes, and after
     /// `close()`.
     pub fn execute(&self, query: &str) -> Result<JsValue, JsValue> {
-        Ok(rows_to_js(&self.run(query, None)?))
+        rows_to_js(&self.run(query, None)?)
     }
 
     /// Runs a GQL query with parameters at the view's epoch.
@@ -239,7 +239,7 @@ impl AsOfView {
     /// As `execute`, and for parameters that are not an object.
     #[wasm_bindgen(js_name = "executeWithParams")]
     pub fn execute_with_params(&self, query: &str, params: JsValue) -> Result<JsValue, JsValue> {
-        Ok(rows_to_js(&self.run(query, Some(params))?))
+        rows_to_js(&self.run(query, Some(params))?)
     }
 
     /// Runs a GQL query at the view's epoch and returns raw columns, rows and
@@ -250,7 +250,7 @@ impl AsOfView {
     /// As `execute`.
     #[wasm_bindgen(js_name = "executeRaw")]
     pub fn execute_raw(&self, query: &str) -> Result<JsValue, JsValue> {
-        Ok(raw_result_to_js(&self.run(query, None)?))
+        raw_result_to_js(&self.run(query, None)?)
     }
 
     /// Releases the view and the history it keeps; later calls throw.

@@ -37,16 +37,27 @@ use super::DistanceMetric;
 // ============================================================================
 
 /// Returns true if AVX2 instructions are available.
+///
+/// The build of CodSpeed's simulation (`--cfg grafeo_codspeed`) takes the
+/// build's target features instead of the runner's CPU, so the kernel a
+/// benchmark measures does not change with the machine it runs on.
 #[cfg(target_arch = "x86_64")]
 #[inline]
 pub fn has_avx2() -> bool {
+    if cfg!(grafeo_codspeed) {
+        return cfg!(all(target_feature = "avx2", target_feature = "fma"));
+    }
     std::arch::is_x86_feature_detected!("avx2") && std::arch::is_x86_feature_detected!("fma")
 }
 
-/// Returns true if SSE instructions are available.
+/// Returns true if SSE instructions are available (as [`has_avx2`] decides
+/// in the CodSpeed build).
 #[cfg(target_arch = "x86_64")]
 #[inline]
 pub fn has_sse() -> bool {
+    if cfg!(grafeo_codspeed) {
+        return cfg!(target_feature = "sse");
+    }
     std::arch::is_x86_feature_detected!("sse")
 }
 

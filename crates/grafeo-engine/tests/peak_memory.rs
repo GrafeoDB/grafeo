@@ -673,9 +673,11 @@ fn checkpoint_and_open_memory_does_not_grow_with_rdf_triples() {
     assert_flat(
         "RDF triples",
         SCALE,
-        // A reference to every triple, sorted (8 bytes a triple).
+        // A reference to every triple, sorted (8 bytes a triple), and the
+        // file number of every dictionary term (4 bytes a term: a subject and
+        // a literal a triple here, the predicate is one term).
         Documented {
-            checkpoint: 8,
+            checkpoint: 8 + 2 * 4,
             open: 0,
         },
         &|db, triples| {

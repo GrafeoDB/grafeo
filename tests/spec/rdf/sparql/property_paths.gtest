@@ -1206,3 +1206,54 @@ tests:
         - [http://ex.org/d]
         - [http://ex.org/g]
         - [http://ex.org/h]
+
+  # ---------------------------------------------------------------------------
+  # Fully bound paths (#369)
+  # ---------------------------------------------------------------------------
+
+  - name: one_or_more_fully_bound_projects_unbound_variable
+    # A path with both ends bound is one solution when it holds, and a
+    # variable the pattern does not bind stays unbound in it.
+    setup:
+      - |
+        INSERT DATA {
+          <http://ex.org/a> <http://ex.org/p> <http://ex.org/b> .
+          <http://ex.org/b> <http://ex.org/p> <http://ex.org/c> .
+          <http://ex.org/c> <http://ex.org/p> <http://ex.org/d> .
+        }
+    query: |
+      SELECT ?s WHERE { <http://ex.org/a> <http://ex.org/p>+ <http://ex.org/d> }
+    expect:
+      columns: [s]
+      rows:
+        - [null]
+
+  - name: one_or_more_fully_bound_unreachable_is_empty
+    setup:
+      - |
+        INSERT DATA {
+          <http://ex.org/a> <http://ex.org/p> <http://ex.org/b> .
+          <http://ex.org/c> <http://ex.org/p> <http://ex.org/d> .
+        }
+    query: |
+      SELECT ?s WHERE { <http://ex.org/a> <http://ex.org/p>+ <http://ex.org/d> }
+    expect:
+      empty: true
+
+  - name: one_or_more_order_by_limit_offset
+    setup:
+      - |
+        INSERT DATA {
+          <http://ex.org/a> <http://ex.org/p> <http://ex.org/b> .
+          <http://ex.org/b> <http://ex.org/p> <http://ex.org/c> .
+          <http://ex.org/c> <http://ex.org/p> <http://ex.org/d> .
+          <http://ex.org/d> <http://ex.org/p> <http://ex.org/e> .
+        }
+    query: |
+      SELECT ?o WHERE { <http://ex.org/a> <http://ex.org/p>+ ?o } ORDER BY ?o LIMIT 2 OFFSET 1
+    expect:
+      ordered: true
+      columns: [o]
+      rows:
+        - [http://ex.org/c]
+        - [http://ex.org/d]

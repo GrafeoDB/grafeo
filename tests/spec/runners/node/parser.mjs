@@ -243,11 +243,14 @@ function parseSingleTest(ctx) {
 // ---------------------------------------------------------------------------
 
 function makeExpect() {
-  return { rows: [], ordered: false, count: null, empty: false, error: null, gqlStatus: null, hash: null, precision: null, columns: [] }
+  return { rows: [], ordered: false, count: null, empty: false, error: null, gqlStatus: null, hash: null, precision: null, columns: [], terms: [] }
 }
 
 function parseExpectBlock(ctx) {
   const expect = makeExpect()
+  // The indent of the expectation's own keys: a line indented less is the
+  // test's next key (a `skip:` or `note:` after `expect:`).
+  let childIndent = null
   while (ctx.idx < ctx.lines.length) {
     const line = ctx.lines[ctx.idx]
     const trimmed = line.trim()
@@ -255,6 +258,9 @@ function parseExpectBlock(ctx) {
     if (trimmed.startsWith('- name:')) break
     if (!line.startsWith(' ') && !line.startsWith('\t') && trimmed) break
     if (!trimmed) { ctx.idx++; continue }
+    const indent = line.length - line.trimStart().length
+    if (childIndent === null) childIndent = indent
+    if (indent < childIndent) break
 
     const kv = parseKV(trimmed)
     if (!kv) break
@@ -269,7 +275,9 @@ function parseExpectBlock(ctx) {
       case 'precision': expect.precision = parseInt(value, 10); ctx.idx++; break
       case 'columns': expect.columns = parseYamlList(value); ctx.idx++; break
       case 'rows': ctx.idx++; expect.rows = parseRows(ctx); break
-      default: ctx.idx++
+      case 'terms': ctx.idx++; expect.terms = parseRows(ctx); break
+      // A key no runner reads would leave a test that checks nothing.
+      default: throw new Error(`unknown expect key '${key}'`)
     }
   }
   return expect

@@ -175,12 +175,12 @@ block.
 |-------|------|---------|-------------|
 | 1 | `CATALOG` | 2 | Schema definitions, index definitions and index names, as [records](#catalog-records) |
 | 2 | `LPG_STORE` | 3 | Nodes, edges, properties, named graphs |
-| 3 | `RDF_STORE` | 3 | RDF triples, named graphs |
+| 3 | `RDF_STORE` | 4 | RDF triples, named graphs, their term table |
 | 4 | `COMPACT_STORE` | - | Reserved, never written: the columnar base that `compact()` of 0.5.40 to 0.5.44 wrote to a 0.5.x file, which an open folds into the LPG store |
 | 5 | `OVERLAY_DELETIONS` | - | Reserved, never written: the base nodes and edges deleted after that `compact()` (0.5.42 to 0.5.44), as `COMPACT_STORE` |
 | 10 | `VECTOR_STORE` | 3 | HNSW topology of each vector index (the embeddings are node properties) |
 | 11 | `TEXT_INDEX` | 2 | BM25 document lengths and posting lists |
-| 12 | `RDF_RING` | 3 | Term dictionary, wavelet trees and permutations of the RDF ring |
+| 12 | `RDF_RING` | 4 | Term dictionary, wavelet trees and permutations of the RDF ring |
 | 20 | `PROPERTY_INDEX` | - | Reserved, never written |
 
 **Type ranges:**
@@ -486,37 +486,76 @@ not ascend or reach the next graph id, two named graphs of one name, and per
 dictionary ids that do not ascend or reach its next id, or a name listed
 twice.
 
-#### `RDF_STORE` (version 3)
+#### `RDF_STORE` (version 4)
 
 The section starts with its metadata chunk, little-endian:
 
 | Field | Encoding |
 |-------|----------|
-| layout | `u8`, `1` |
+| layout | `u8`, `2` |
 | `max_rows`, `max_bytes` | `u32` each: the caps |
+| terms | `u64`: the rows of the term table |
 | graphs | A count `u32`, then per graph its name (a length `u32` and UTF-8, empty for graph 0) and its number of triples `u64` |
 
 Graph 0 is the default graph, then come the named graphs in name order; a
 graph's id is its position, and a named graph with an empty name stays apart
-from the default graph. Then, per graph in id order, its triple table: one row
-per triple, from row 0, in a fixed order (by subject, predicate and object).
-Its columns are 0 (subject), 1 (predicate) and 2 (object), and each value is
-the term in N-Triples syntax, as a `String`. Their chunks are therefore `Dict`
-chunks, each holding the dictionary of its own terms, and the section has no
-term table of its own. The three columns share their chunk boundaries: their
-chunks come as three in a row with one range, and every row has a value. A
-graph without triples writes no chunk; the metadata lists it, so an open
-creates it.
+from the default graph.
 
-A reader refuses, naming the graph and the rows: a first chunk other than the
+Then the **term table**, the chunks of graph id `0xFFFFFFFF` (no graph has it):
+one row per term, from row 0, with columns 3 (the kind, an `Int64`: 0 IRI, 1
+blank node, 2 simple literal, 3 typed literal, 4 tagged literal), 4 (the IRI,
+the blank node's label or the literal's lexical form, a `String`) and 5 (a
+typed literal's datatype IRI or a tagged literal's tag, a `String`, empty for
+the other kinds). A term's row is its file index. The writer numbers the terms
+by their first use in the order the triples are written, so the same triples
+give the same bytes, and a term no triple uses is not written.
+
+Then, per graph in id order, its **triple table**: one row per triple, from row
+0, in a fixed order (by subject, predicate and object). Its columns are 0
+(subject), 1 (predicate) and 2 (object), and each value is a term id, the 64
+bits of the id in an `Int64`: a 4-bit tag and a 60-bit payload.
+
+| Tag | Term | Payload |
+| --- | --- | --- |
+| 0 | the term of the term table's row | the row |
+| 1 | `xsd:integer` in canonical form, within ±2^59 | the value, two's complement |
+| 2 | `xsd:decimal` in canonical form (its scale kept), a mantissa within ±2^51 and a scale of at most 15 | mantissa (52 bits) and scale (4 bits) |
+| 3 | `xsd:boolean`, `true` or `false` | 0 or 1 |
+| 4 | `xsd:date` of a year from 1 to 9999, without an offset, canonical | days from 1970-01-01 |
+| 5 | `xsd:dateTime` of a year from 1 to 9999, without an offset or with `Z`, canonical, whole microseconds | a `Z` bit and microseconds from 1970-01-01T00:00:00 |
+| 6 | a simple literal of at most 7 UTF-8 bytes | the length (3 bits) and the bytes |
+
+A literal is inlined (tags 1 to 6) only in the canonical form of its value, so
+its id gives the term back exactly (`"019"^^xsd:integer` is a row of the term
+table); every term has one id. Tag 15 is the id of a term only a query made,
+which a file never holds; tags 7 to 14 are unused.
+
+The term table's three columns and each triple table's three columns share
+their chunk boundaries: their chunks come as three in a row with one range,
+and every row has a value. A graph without triples writes no chunk; the
+metadata lists it, so an open creates it.
+
+A reader refuses, naming the table and the rows: a first chunk other than the
 metadata chunk, or a second metadata chunk; a chunk of another kind than
-`Column`; a graph the metadata does not list, or whose chunks come after those
-of a later graph; a range that does not start where the graph's rows before it
-end, holds more than `max_rows` rows, crosses a row group or reaches past the
-graph's number of triples; a subject chunk not followed by the predicate and
-object chunks of its range; epochs, a row without a value, or a value that is
-not a string holding an N-Triples term; and a graph whose rows stop short of
-its number of triples.
+`Column`; a term table that does not come first, or whose rows stop short of
+the metadata's count; a row of the term table of an unknown kind, or with a
+datatype or tag for a kind that has none; a graph the metadata does not list,
+or whose chunks come after those of a later graph; a range that does not start
+where the table's rows before it end, holds more than `max_rows` rows, crosses
+a row group or reaches past the table's rows; a first chunk not followed by
+the other two of its range; epochs or a row without a value; a cell that is no
+term id, an id of an unused tag or of a query's own term, or a row past the
+term table; and a graph whose rows stop short of its number of triples.
+
+**Version 3** (0.6.0-beta.1) has no term table: metadata layout `1` without
+the term count, and each triple table cell is the term in N-Triples syntax, as
+a `String`. A read-write open of a file with an RDF or ring section of version
+3 keeps a copy of the file and of its sidecar WAL as `<file>.pre-0.6.0` (and
+`<file>.pre-0.6.0.wal`), each copied to a `.partial` name, synced and renamed,
+then writes both sections in version 4 with a checkpoint as soon as the
+database is open; a copy that exists is never replaced, so a crash at any
+point is finished by the next read-write open. A read-only open reads version
+3 as it is.
 
 ### Stream Sections
 
@@ -572,11 +611,16 @@ record: an open restores a stream into an index with the record's tokenizer
 and stop words, and builds the index from the data instead when the stream's
 k1 or b are not the record's.
 
-**`RDF_RING` (version 3).** The metadata holds the number of triples. Streams
-0 to 5 hold the six parts of the ring, each in its packed format: the term
-dictionary, the wavelet trees of the subjects, predicates and objects, and the
+**`RDF_RING` (version 4).** The metadata holds the number of triples. Stream 0
+holds the ring's terms in ring id order as term ids: a count `u64`, then an id
+`u64` per term, little-endian, a dictionary term's id naming its row of the
+`RDF_STORE` term table (which an open reads just before), an inlined literal's
+id itself. Streams 1 to 5 hold the other parts of the ring, each in its packed
+format: the wavelet trees of the subjects, predicates and objects, and the
 permutations from SPO to POS and to OSP order. A store without a ring writes no
-`RDF_RING` section.
+`RDF_RING` section. In version 3 (0.6.0-beta.1) stream 0 holds the packed term
+dictionary of N-Triples strings, read as it is and rewritten in version 4 (see
+`RDF_STORE` above).
 
 **`CATALOG` (version 2).** The metadata holds the byte cap. Stream 0 holds the
 [catalog records](#catalog-records). A catalog without entries is its metadata

@@ -1,0 +1,416 @@
+# SPARQL keeps each RDF term exact (SPARQL 1.1 sec 15.1, 17.3, 17.4.1, 18.2.5)
+#
+# Covers: DELETE DATA, DELETE WHERE and DELETE/INSERT WHERE of typed,
+# non-canonical and tagged literals; operators on terms of different types
+# (a type error drops the FILTER row); ORDER BY on numbers, mixed kinds and
+# function calls; GROUP BY on a function call; custom datatypes; sameTerm and
+# STR of a non-canonical lexical form; templates that write blank nodes and
+# IRIs of any scheme.
+
+meta:
+  language: sparql
+  model: rdf
+  section: "17.3"
+  title: Exact RDF terms
+  dataset: empty
+  requires: [sparql, rdf]
+
+tests:
+
+  # ---------------------------------------------------------------------------
+  # DELETE matches the stored term
+  # ---------------------------------------------------------------------------
+
+  - name: delete_data_removes_typed_and_tagged_literals
+    setup:
+      - |
+        PREFIX xsd: <http://www.w3.org/2001/XMLSchema#>
+        INSERT DATA {
+          <http://ex.org/alix> <http://ex.org/v> 42, true, "2026-01-15"^^xsd:date,
+            "x"^^<http://ex.org/dt>, "01"^^xsd:integer, "Pomme"@fr .
+        }
+      - |
+        PREFIX xsd: <http://www.w3.org/2001/XMLSchema#>
+        DELETE DATA {
+          <http://ex.org/alix> <http://ex.org/v> 42, true, "2026-01-15"^^xsd:date,
+            "x"^^<http://ex.org/dt>, "01"^^xsd:integer, "Pomme"@fr .
+        }
+    query: |
+      SELECT ?o WHERE { <http://ex.org/alix> <http://ex.org/v> ?o }
+    expect:
+      count: 0
+
+  - name: delete_where_removes_typed_and_tagged_literals
+    setup:
+      - |
+        PREFIX xsd: <http://www.w3.org/2001/XMLSchema#>
+        INSERT DATA {
+          <http://ex.org/alix> <http://ex.org/v> 42, true, "2026-01-15"^^xsd:date,
+            "x"^^<http://ex.org/dt>, "01"^^xsd:integer, "Pomme"@fr .
+          <http://ex.org/gus> <http://ex.org/v> "kept" .
+        }
+      - |
+        DELETE WHERE { <http://ex.org/alix> <http://ex.org/v> ?o }
+    query: |
+      SELECT ?s ?o WHERE { ?s <http://ex.org/v> ?o }
+    expect:
+      columns: [s, o]
+      terms:
+        - ['<http://ex.org/gus>', '"kept"']
+
+  - name: delete_insert_where_moves_typed_and_tagged_literals
+    setup:
+      - |
+        PREFIX xsd: <http://www.w3.org/2001/XMLSchema#>
+        INSERT DATA {
+          <http://ex.org/alix> <http://ex.org/v> 42, true, "2026-01-15"^^xsd:date,
+            "x"^^<http://ex.org/dt>, "01"^^xsd:integer, "Pomme"@fr .
+        }
+      - |
+        DELETE { ?s <http://ex.org/v> ?o } INSERT { ?s <http://ex.org/w> ?o }
+        WHERE { ?s <http://ex.org/v> ?o }
+    query: |
+      PREFIX xsd: <http://www.w3.org/2001/XMLSchema#>
+      SELECT (COUNT(?old) AS ?left) (COUNT(?new) AS ?moved) (SUM(IF(isNumeric(?new), 1, 0)) AS ?numbers)
+        (SUM(IF(LANG(?new) = "fr", 1, 0)) AS ?tagged) (SUM(IF(DATATYPE(?new) = <http://ex.org/dt>, 1, 0)) AS ?custom)
+        (SUM(IF(DATATYPE(?new) = xsd:date, 1, 0)) AS ?dates)
+      WHERE {
+        { <http://ex.org/alix> <http://ex.org/v> ?old } UNION { <http://ex.org/alix> <http://ex.org/w> ?new }
+      }
+    expect:
+      rows:
+        - [0, 6, 2, 1, 1, 1]
+
+  - name: delete_data_of_a_canonical_form_keeps_a_non_canonical_one
+    # "1"^^xsd:integer and "01"^^xsd:integer are equal values but different
+    # terms, so deleting one leaves the other.
+    setup:
+      - |
+        PREFIX xsd: <http://www.w3.org/2001/XMLSchema#>
+        INSERT DATA { <http://ex.org/alix> <http://ex.org/v> "01"^^xsd:integer }
+      - |
+        PREFIX xsd: <http://www.w3.org/2001/XMLSchema#>
+        DELETE DATA { <http://ex.org/alix> <http://ex.org/v> "1"^^xsd:integer }
+    query: |
+      SELECT (STR(?o) AS ?text) WHERE { <http://ex.org/alix> <http://ex.org/v> ?o }
+    expect:
+      rows:
+        - ["01"]
+
+  # ---------------------------------------------------------------------------
+  # Operators on terms (17.3)
+  # ---------------------------------------------------------------------------
+
+  - name: filter_drops_a_string_compared_with_a_number
+    setup:
+      - |
+        INSERT DATA {
+          <http://ex.org/alix> <http://ex.org/score> "42" .
+          <http://ex.org/gus> <http://ex.org/score> 42 .
+        }
+    query: |
+      SELECT ?s WHERE { ?s <http://ex.org/score> ?v FILTER(?v = 42) }
+    expect:
+      columns: [s]
+      rows:
+        - [http://ex.org/gus]
+
+  - name: filter_compares_numeric_looking_strings_as_strings
+    setup:
+      - |
+        INSERT DATA {
+          <http://ex.org/alix> <http://ex.org/code> "9" .
+          <http://ex.org/gus> <http://ex.org/code> 9 .
+        }
+    query: |
+      SELECT ?s WHERE { ?s <http://ex.org/code> ?v FILTER(?v < "10" || ?v < 10) }
+    expect:
+      columns: [s]
+      rows:
+        - [http://ex.org/gus]
+
+  - name: numbers_compare_across_integer_decimal_and_double
+    query: |
+      SELECT (1 = 1.0 AS ?decimal) (1 = 1e0 AS ?double) (1.0 = 1e0 AS ?both) (2 > 1.5 AS ?greater) WHERE {}
+    expect:
+      rows:
+        - [true, true, true, true]
+
+  - name: booleans_compare_as_booleans
+    setup:
+      - |
+        INSERT DATA {
+          <http://ex.org/alix> <http://ex.org/active> true .
+          <http://ex.org/gus> <http://ex.org/active> false .
+          <http://ex.org/mia> <http://ex.org/active> "true" .
+        }
+    query: |
+      SELECT ?s WHERE { ?s <http://ex.org/active> ?a FILTER(?a = true) }
+    expect:
+      columns: [s]
+      rows:
+        - [http://ex.org/alix]
+
+  - name: a_tagged_literal_differs_from_a_plain_string
+    setup:
+      - |
+        INSERT DATA {
+          <http://ex.org/apple> <http://ex.org/label> "Pomme"@fr .
+          <http://ex.org/pear> <http://ex.org/label> "Pomme" .
+        }
+    query: |
+      SELECT ?s WHERE { ?s <http://ex.org/label> ?l FILTER(?l = "Pomme") }
+    expect:
+      columns: [s]
+      rows:
+        - [http://ex.org/pear]
+
+  # ---------------------------------------------------------------------------
+  # ORDER BY (15.1) and GROUP BY on expressions
+  # ---------------------------------------------------------------------------
+
+  - name: order_by_sorts_numbers_by_value
+    setup:
+      - |
+        INSERT DATA {
+          <http://ex.org/a> <http://ex.org/n> 10 .
+          <http://ex.org/b> <http://ex.org/n> 9 .
+          <http://ex.org/c> <http://ex.org/n> 2.5 .
+          <http://ex.org/d> <http://ex.org/n> 1e2 .
+        }
+    query: |
+      SELECT ?s WHERE { ?s <http://ex.org/n> ?n } ORDER BY ?n
+    expect:
+      ordered: true
+      columns: [s]
+      rows:
+        - [http://ex.org/c]
+        - [http://ex.org/b]
+        - [http://ex.org/a]
+        - [http://ex.org/d]
+
+  - name: order_by_puts_kinds_in_sparql_order
+    # Unbound, then blank nodes, then IRIs, then literals.
+    setup:
+      - |
+        INSERT DATA {
+          <http://ex.org/a> <http://ex.org/o> "text" .
+          <http://ex.org/b> <http://ex.org/o> <http://ex.org/thing> .
+          <http://ex.org/c> <http://ex.org/o> _:node .
+          <http://ex.org/d> <http://ex.org/other> 1 .
+        }
+    query: |
+      SELECT ?s (isBlank(?o) AS ?blank) WHERE {
+        ?s ?p ?any OPTIONAL { ?s <http://ex.org/o> ?o }
+      }
+      ORDER BY ?o
+    expect:
+      ordered: true
+      columns: [s, blank]
+      terms:
+        - ['<http://ex.org/d>', null]
+        - ['<http://ex.org/c>', '"true"^^xsd:boolean']
+        - ['<http://ex.org/b>', '"false"^^xsd:boolean']
+        - ['<http://ex.org/a>', '"false"^^xsd:boolean']
+
+  - name: order_by_a_function_call_sorts_on_its_value
+    setup:
+      - |
+        INSERT DATA {
+          <http://ex.org/b> <http://ex.org/n> 3 .
+          <http://ex.org/c> <http://ex.org/n> 1 .
+          <http://ex.org/a> <http://ex.org/n> 2 .
+        }
+    query: |
+      SELECT ?s WHERE { ?s <http://ex.org/n> ?n } ORDER BY DESC(STR(?s))
+    expect:
+      ordered: true
+      columns: [s]
+      rows:
+        - [http://ex.org/c]
+        - [http://ex.org/b]
+        - [http://ex.org/a]
+
+  - name: order_by_arithmetic_sorts_on_the_result
+    setup:
+      - |
+        INSERT DATA {
+          <http://ex.org/a> <http://ex.org/n> 10 .
+          <http://ex.org/b> <http://ex.org/n> 9 .
+          <http://ex.org/c> <http://ex.org/n> -3 .
+        }
+    query: |
+      SELECT ?s WHERE { ?s <http://ex.org/n> ?n } ORDER BY (?n * -2)
+    expect:
+      ordered: true
+      columns: [s]
+      rows:
+        - [http://ex.org/a]
+        - [http://ex.org/b]
+        - [http://ex.org/c]
+
+  - name: a_group_alias_is_read_by_having_and_order_by
+    # GROUP BY (expr AS ?v) binds ?v for the SELECT, HAVING and ORDER BY
+    # (18.2.4.1).
+    setup:
+      - |
+        INSERT DATA {
+          <http://ex.org/alix> <http://ex.org/city> "Amsterdam"@nl, "Amsterdam"@en .
+          <http://ex.org/gus> <http://ex.org/city> "Berlin"@de .
+          <http://ex.org/mia> <http://ex.org/city> "Paris"@fr .
+        }
+    query: |
+      SELECT ?name (COUNT(*) AS ?n) WHERE { ?s <http://ex.org/city> ?c }
+      GROUP BY (STR(?c) AS ?name)
+      HAVING (?name != "Paris")
+      ORDER BY DESC(?name)
+    expect:
+      ordered: true
+      columns: [name, n]
+      rows:
+        - [Berlin, 1]
+        - [Amsterdam, 2]
+
+  - name: group_by_a_function_call_groups_on_its_value
+    setup:
+      - |
+        INSERT DATA {
+          <http://ex.org/alix> <http://ex.org/city> "Amsterdam"@nl, "Amsterdam"@en .
+          <http://ex.org/gus> <http://ex.org/city> "Berlin"@de .
+        }
+    query: |
+      SELECT ?name (COUNT(*) AS ?n) WHERE { ?s <http://ex.org/city> ?c }
+      GROUP BY (STR(?c) AS ?name)
+      ORDER BY ?name
+    expect:
+      ordered: true
+      columns: [name, n]
+      rows:
+        - [Amsterdam, 2]
+        - [Berlin, 1]
+
+  # ---------------------------------------------------------------------------
+  # Datatypes and lexical forms (17.4.1, 18.2.5)
+  # ---------------------------------------------------------------------------
+
+  - name: a_custom_datatype_is_kept
+    setup:
+      - |
+        PREFIX xsd: <http://www.w3.org/2001/XMLSchema#>
+        INSERT DATA {
+          <http://ex.org/a> <http://ex.org/v> "x"^^<http://ex.org/dt> .
+          <http://ex.org/b> <http://ex.org/v> "2026"^^xsd:gYear .
+          <http://ex.org/c> <http://ex.org/v> "http://ex.org/"^^xsd:anyURI .
+        }
+    query: |
+      SELECT ?s (STR(DATATYPE(?o)) AS ?type) WHERE { ?s <http://ex.org/v> ?o } ORDER BY ?s
+    expect:
+      ordered: true
+      columns: [s, type]
+      rows:
+        - [http://ex.org/a, http://ex.org/dt]
+        - [http://ex.org/b, http://www.w3.org/2001/XMLSchema#gYear]
+        - [http://ex.org/c, http://www.w3.org/2001/XMLSchema#anyURI]
+
+  - name: a_custom_datatype_literal_does_not_match_its_plain_text
+    setup:
+      - |
+        INSERT DATA { <http://ex.org/a> <http://ex.org/v> "x"^^<http://ex.org/dt> }
+    query: |
+      SELECT ?kind WHERE {
+        { ?s <http://ex.org/v> "x" BIND("plain" AS ?kind) }
+        UNION
+        { ?s <http://ex.org/v> "x"^^<http://ex.org/dt> BIND("typed" AS ?kind) }
+      }
+    expect:
+      columns: [kind]
+      rows:
+        - [typed]
+
+  - name: str_keeps_a_non_canonical_lexical_form
+    # STR gives the stored text; ?o + 0 is a value (op:numeric-add), written
+    # in its canonical form, as the W3C results give it.
+    setup:
+      - |
+        PREFIX xsd: <http://www.w3.org/2001/XMLSchema#>
+        INSERT DATA { <http://ex.org/a> <http://ex.org/v> "019"^^xsd:integer, "1.50"^^xsd:decimal }
+    query: |
+      SELECT (STR(?o) AS ?text) (?o + 0 AS ?value) WHERE { <http://ex.org/a> <http://ex.org/v> ?o } ORDER BY ?o
+    expect:
+      ordered: true
+      columns: [text, value]
+      terms:
+        - ['"1.50"', '"1.5"^^xsd:decimal']
+        - ['"019"', '"19"^^xsd:integer']
+
+  - name: same_term_of_stored_literals_tells_lexical_forms_apart
+    setup:
+      - |
+        PREFIX xsd: <http://www.w3.org/2001/XMLSchema#>
+        INSERT DATA {
+          <http://ex.org/a> <http://ex.org/v> "01"^^xsd:integer .
+          <http://ex.org/b> <http://ex.org/v> "1"^^xsd:integer .
+        }
+    query: |
+      SELECT (sameTerm(?x, ?y) AS ?same) (?x = ?y AS ?equal) WHERE {
+        <http://ex.org/a> <http://ex.org/v> ?x . <http://ex.org/b> <http://ex.org/v> ?y
+      }
+    expect:
+      rows:
+        - [false, true]
+
+  # ---------------------------------------------------------------------------
+  # Templates write the bound term
+  # ---------------------------------------------------------------------------
+
+  - name: insert_where_copies_blank_nodes_and_iris_of_any_scheme
+    setup:
+      - |
+        INSERT DATA {
+          <http://ex.org/alix> <http://ex.org/contact> <mailto:alix@ex.org>, <tag:ex.org,2026:alix>, _:card .
+        }
+      - |
+        INSERT { ?s <http://ex.org/copy> ?o } WHERE { ?s <http://ex.org/contact> ?o }
+    query: |
+      SELECT (SUM(IF(isIRI(?o), 1, 0)) AS ?iris) (SUM(IF(isBlank(?o), 1, 0)) AS ?blanks) (SUM(IF(isLiteral(?o), 1, 0)) AS ?literals)
+      WHERE { <http://ex.org/alix> <http://ex.org/copy> ?o }
+    expect:
+      rows:
+        - [2, 1, 0]
+
+  - name: delete_where_removes_iris_of_any_scheme
+    setup:
+      - |
+        INSERT DATA {
+          <http://ex.org/alix> <http://ex.org/contact> <mailto:alix@ex.org>, <file:///tmp/alix> .
+        }
+      - |
+        DELETE { ?s <http://ex.org/contact> ?o } WHERE { ?s <http://ex.org/contact> ?o }
+    query: |
+      SELECT ?o WHERE { <http://ex.org/alix> <http://ex.org/contact> ?o }
+    expect:
+      count: 0
+
+  - name: construct_writes_iris_of_any_scheme_as_iris
+    setup:
+      - |
+        INSERT DATA { <http://ex.org/alix> <http://ex.org/contact> <mailto:alix@ex.org> }
+    query: |
+      CONSTRUCT { ?o <http://ex.org/of> ?s } WHERE { ?s <http://ex.org/contact> ?o }
+    expect:
+      columns: [subject, predicate, object]
+      terms:
+        - ['<mailto:alix@ex.org>', '<http://ex.org/of>', '<http://ex.org/alix>']
+
+  - name: a_language_tag_is_the_same_tag_in_any_case
+    # Language tags compare without case, and RDF 1.2 keeps them in
+    # lowercase: "Pomme"@FR is the term "Pomme"@fr, stored once.
+    setup:
+      - |
+        INSERT DATA { <http://ex.org/a> <http://ex.org/v> "Pomme"@FR, "Pomme"@fr . }
+    query: |
+      SELECT (LANG(?o) AS ?tag) (sameTerm(?o, "Pomme"@Fr) AS ?same) WHERE { <http://ex.org/a> <http://ex.org/v> ?o }
+    expect:
+      columns: [tag, same]
+      rows:
+        - [fr, true]

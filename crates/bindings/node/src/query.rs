@@ -39,6 +39,7 @@ pub struct QueryResult {
     pub(crate) rows_scanned: Option<u64>,
     pub(crate) counters: grafeo_engine::database::WriteCounters,
     pub(crate) profile: Option<grafeo_engine::database::QueryProfile>,
+    pub(crate) kind: grafeo_engine::database::ResultKind,
 }
 
 /// The operators of a `PROFILE` statement as a tree.
@@ -137,6 +138,29 @@ impl QueryResult {
         self.rows_scanned.map(|r| r as f64)
     }
 
+    /// What the result holds: `"rows"` (SPARQL SELECT and updates, and every
+    /// other language), `"boolean"` (SPARQL ASK: one row with a `boolean`
+    /// column, see `boolean`) or `"graph"` (SPARQL CONSTRUCT and DESCRIBE:
+    /// `subject`, `predicate` and `object` columns of RDF/JS terms).
+    #[napi(getter, ts_return_type = "'rows' | 'boolean' | 'graph'")]
+    pub fn kind(&self) -> String {
+        match self.kind {
+            grafeo_engine::database::ResultKind::Boolean => "boolean",
+            grafeo_engine::database::ResultKind::Graph => "graph",
+            _ => "rows",
+        }
+        .to_string()
+    }
+
+    /// The answer of a SPARQL ASK; `null` for every other result.
+    #[napi(getter)]
+    pub fn boolean(&self) -> Option<bool> {
+        if self.kind != grafeo_engine::database::ResultKind::Boolean {
+            return None;
+        }
+        self.rows.first()?.first()?.as_bool()
+    }
+
     /// What the query's writes changed: nodes and edges created and deleted,
     /// properties set, labels added and removed.
     #[napi(getter)]
@@ -155,7 +179,7 @@ impl QueryResult {
     }
 
     /// Get a single row by index as a plain object.
-    #[napi]
+    #[napi(ts_return_type = "Record<string, GrafeoValue>")]
     pub fn get(&self, env: Env, index: u32) -> Result<Object<'_>> {
         let idx = index as usize;
         if idx >= self.rows.len() {
@@ -168,7 +192,10 @@ impl QueryResult {
     }
 
     /// Get all rows as an array of objects.
-    #[napi(js_name = "toArray")]
+    #[napi(
+        js_name = "toArray",
+        ts_return_type = "Array<Record<string, GrafeoValue>>"
+    )]
     pub fn to_array(&self, env: Env) -> Result<Vec<Object<'_>>> {
         let mut result = Vec::with_capacity(self.rows.len());
         for i in 0..self.rows.len() {
@@ -178,7 +205,7 @@ impl QueryResult {
     }
 
     /// Get first column of first row (single value).
-    #[napi]
+    #[napi(ts_return_type = "GrafeoValue")]
     pub fn scalar(&self, env: Env) -> Result<Unknown<'_>> {
         if self.rows.is_empty() {
             return Err(napi::Error::new(
@@ -219,7 +246,7 @@ impl QueryResult {
     }
 
     /// Get all rows as an array of arrays (no column names).
-    #[napi]
+    #[napi(ts_return_type = "Array<Array<GrafeoValue>>")]
     pub fn rows(&self, env: Env) -> Result<Object<'_>> {
         let env_raw = env.raw();
         let mut arr = std::ptr::null_mut();
@@ -320,6 +347,7 @@ impl QueryResult {
             rows_scanned: None,
             counters: grafeo_engine::database::WriteCounters::default(),
             profile: None,
+            kind: grafeo_engine::database::ResultKind::Rows,
         }
     }
 
@@ -340,6 +368,7 @@ impl QueryResult {
             rows_scanned,
             counters: grafeo_engine::database::WriteCounters::default(),
             profile: None,
+            kind: grafeo_engine::database::ResultKind::Rows,
         }
     }
 
@@ -350,6 +379,13 @@ impl QueryResult {
         profile: Option<grafeo_engine::database::QueryProfile>,
     ) -> Self {
         self.profile = profile;
+        self
+    }
+
+    /// Sets what the result holds.
+    #[must_use]
+    pub(crate) fn with_kind(mut self, kind: grafeo_engine::database::ResultKind) -> Self {
+        self.kind = kind;
         self
     }
 
@@ -373,6 +409,7 @@ impl QueryResult {
             rows_scanned: None,
             counters: grafeo_engine::database::WriteCounters::default(),
             profile: None,
+            kind: grafeo_engine::database::ResultKind::Rows,
         }
     }
 }

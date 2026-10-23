@@ -31,6 +31,20 @@ tests:
       rows:
         - [true, true, false, true]
 
+  # An undirected match binds the edge from both of its ends; startNode and
+  # endNode keep the direction it was stored with on both rows.
+  - name: a_start_node_keeps_the_stored_direction_on_an_undirected_match
+    setup:
+      - "INSERT (:P {name: 'Alix'})-[:KNOWS]->(:P {name: 'Gus'})"
+    variants:
+      gql: "MATCH (x:P)-[r:KNOWS]-(y:P) RETURN x.name AS x, startNode(r).name AS s, endNode(r).name AS e, startNode(r) = x AS from_x ORDER BY x"
+      cypher: "MATCH (x:P)-[r:KNOWS]-(y:P) RETURN x.name AS x, startNode(r).name AS s, endNode(r).name AS e, startNode(r) = x AS from_x ORDER BY x"
+    expect:
+      ordered: true
+      rows:
+        - [Alix, Alix, Gus, true]
+        - [Gus, Alix, Gus, false]
+
   - name: a_node_is_in_a_list_of_nodes
     setup:
       - "INSERT (:P {name: 'Alix'})-[:KNOWS]->(:P {name: 'Gus'})"

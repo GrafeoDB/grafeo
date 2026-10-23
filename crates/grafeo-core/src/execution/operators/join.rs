@@ -5,7 +5,9 @@
 //! - `NestedLoopJoinOperator`: General-purpose join for any condition
 
 use std::cmp::Ordering;
-use std::collections::{HashMap, VecDeque};
+use std::collections::VecDeque;
+
+use grafeo_common::utils::hash::FxHashMap as HashMap;
 use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 
@@ -410,7 +412,7 @@ impl HashJoinOperator {
             output_schema,
             probe_types: ColumnTypes::default(),
             build_types: ColumnTypes::default(),
-            hash_table: HashMap::new(),
+            hash_table: HashMap::default(),
             build_chunks: Vec::new(),
             build_complete: false,
             current_probe_chunk: None,

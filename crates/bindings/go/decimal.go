@@ -53,7 +53,8 @@ func (d Decimal) MarshalJSON() ([]byte, error) {
 }
 
 // decodeTags turns every {"$decimal": "..."} map (the tag as its only key)
-// inside value into a Decimal, through lists and maps.
+// inside value into a Decimal, and every {"$term": {...}} map into an
+// RdfTerm, through lists and maps.
 func decodeTags(value any) any {
 	switch v := value.(type) {
 	case map[string]any:
@@ -61,6 +62,9 @@ func decodeTags(value any) any {
 			if d, err := ParseDecimal(text); err == nil {
 				return d
 			}
+		}
+		if term, ok := rdfTermOf(v); ok {
+			return term
 		}
 		for key, item := range v {
 			v[key] = decodeTags(item)

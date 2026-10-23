@@ -820,6 +820,22 @@ impl ChangeSet {
             .filter(move |change| change.graph() == slot)
     }
 
+    /// Empties the set, as a new one: no graph, no entry, nothing held; its
+    /// buffers stay, for the entries of the next transaction that takes it.
+    pub fn clear(&mut self) {
+        self.graphs.clear();
+        self.slots.clear();
+        self.entries.clear();
+        self.bulk_rows.clear();
+        self.held = Held::default();
+    }
+
+    /// How many entries the set holds room for without growing.
+    #[must_use]
+    pub fn capacity(&self) -> usize {
+        self.entries.capacity()
+    }
+
     /// The position after the last entry, for a savepoint.
     #[must_use]
     pub fn mark(&self) -> ChangeMark {
@@ -1619,6 +1635,43 @@ mod tests {
         .unwrap();
         assert_eq!(kinds(&set.split_off(statement)), [16]);
         assert_eq!(set.graphs(), [lpg(None), lpg(Some("trips"))], "slots stay");
+    }
+
+    /// A cleared set is as a new one: no graph, no entry, nothing held; the
+    /// next graph takes the first slot again, and the set takes entries as
+    /// before.
+    #[test]
+    fn a_cleared_set_is_as_a_new_one() {
+        let mut set = ChangeSet::new();
+        let new = set.approx_bytes();
+        let trips = set.slot(lpg(Some("trips"))).unwrap();
+        let notes = Value::from("Amsterdam ".repeat(100).as_str());
+        for id in [3, 19] {
+            set.push(
+                trips,
+                set_node_property(id, "notes", notes.clone()),
+                Before::Value(None),
+                Created,
+            )
+            .unwrap();
+        }
+        assert!(set.approx_bytes() > new);
+
+        set.clear();
+        assert!(set.is_empty());
+        assert!(set.graphs().is_empty(), "no graph: {:?}", set.graphs());
+        assert_eq!(set.approx_bytes(), new, "nothing held");
+        let default = set.slot(lpg(None)).unwrap();
+        assert_eq!(set.graphs(), [lpg(None)], "the first slot again");
+        assert_eq!(set.graph(default), Some(&lpg(None)));
+        set.push(
+            default,
+            create_node(88, &["City"], Vec::new()),
+            Before::Absent,
+            Created,
+        )
+        .unwrap();
+        assert_eq!(set.entries().len(), 1);
     }
 
     /// The estimate grows with what entries hold, counts a large payload

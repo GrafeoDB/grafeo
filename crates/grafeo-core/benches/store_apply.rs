@@ -119,6 +119,21 @@ fn people(store: &dyn Store) -> Vec<NodeId> {
     ids
 }
 
+/// Writes per measured iteration of the write cases: a whole cycle of the
+/// collect they call now and then ([`COLLECT_EVERY`]), so every iteration does
+/// the same work. CodSpeed's simulation runs a benchmark once: one write
+/// measured that way is a cold call that may or may not take the periodic
+/// collect, and the same code reported changes of 10% and more from run to
+/// run.
+const WRITES_PER_ITERATION: u32 = COLLECT_EVERY;
+
+/// Runs `write` [`WRITES_PER_ITERATION`] times.
+fn batch<T>(mut write: impl FnMut() -> T) {
+    for _ in 0..WRITES_PER_ITERATION {
+        black_box(write());
+    }
+}
+
 /// Calls `collect` every [`COLLECT_EVERY`] calls, counted in `calls`.
 fn collect_now_and_then<S>(store: &S, collect: fn(&S), calls: &mut u32) {
     *calls += 1;
@@ -147,37 +162,47 @@ fn cases<S: Indexed + 'static>(
 
         let store = make();
         people(&store);
-        group.bench_function(format!("immediate_create_node/{images}"), |b| {
-            b.iter(|| {
-                let id = NodeId::new(store.reserve_node_ids(1).expect("an id").start);
-                let op = DataOp::CreateNode {
-                    id,
-                    labels: [ArcStr::from("Person")].into_iter().collect(),
-                    properties: vec![
-                        (PropertyKey::new("name"), Value::from("Gus")),
-                        (PropertyKey::new("age"), Value::Int64(3)),
-                    ],
-                };
-                black_box(immediate(&store, &op, before_images))
-            });
-        });
+        group.bench_function(
+            format!("immediate_create_node/{images}/x{WRITES_PER_ITERATION}"),
+            |b| {
+                b.iter(|| {
+                    batch(|| {
+                        let id = NodeId::new(store.reserve_node_ids(1).expect("an id").start);
+                        let op = DataOp::CreateNode {
+                            id,
+                            labels: [ArcStr::from("Person")].into_iter().collect(),
+                            properties: vec![
+                                (PropertyKey::new("name"), Value::from("Gus")),
+                                (PropertyKey::new("age"), Value::Int64(3)),
+                            ],
+                        };
+                        black_box(immediate(&store, &op, before_images))
+                    });
+                });
+            },
+        );
 
         let store = make();
         let ids = people(&store);
         let mut row = 0_usize;
         let mut calls = 0;
-        group.bench_function(format!("immediate_set_node_property/{images}"), |b| {
-            b.iter(|| {
-                collect_now_and_then(&store, collect, &mut calls);
-                row = (row + 1) % ids.len();
-                let op = DataOp::SetNodeProperty {
-                    id: ids[row],
-                    key: PropertyKey::new("age"),
-                    value: Value::Int64(i64::try_from(row).unwrap_or(0)),
-                };
-                black_box(immediate(&store, &op, before_images))
-            });
-        });
+        group.bench_function(
+            format!("immediate_set_node_property/{images}/x{WRITES_PER_ITERATION}"),
+            |b| {
+                b.iter(|| {
+                    batch(|| {
+                        collect_now_and_then(&store, collect, &mut calls);
+                        row = (row + 1) % ids.len();
+                        let op = DataOp::SetNodeProperty {
+                            id: ids[row],
+                            key: PropertyKey::new("age"),
+                            value: Value::Int64(i64::try_from(row).unwrap_or(0)),
+                        };
+                        black_box(immediate(&store, &op, before_images))
+                    });
+                });
+            },
+        );
 
         // The same writes while no reader reads before their epoch: each
         // keeps what it replaces, and the collect after it drops that once a
@@ -186,18 +211,20 @@ fn cases<S: Indexed + 'static>(
         let ids = people(&store);
         let mut row = 0_usize;
         group.bench_function(
-            format!("immediate_set_node_property_no_older_reader/{images}"),
+            format!("immediate_set_node_property_no_older_reader/{images}/x{WRITES_PER_ITERATION}"),
             |b| {
                 b.iter(|| {
-                    row = (row + 1) % ids.len();
-                    let op = DataOp::SetNodeProperty {
-                        id: ids[row],
-                        key: PropertyKey::new("age"),
-                        value: Value::Int64(i64::try_from(row).unwrap_or(0)),
-                    };
-                    let applied = immediate(&store, &op, before_images);
-                    collect(&store);
-                    black_box(applied)
+                    batch(|| {
+                        row = (row + 1) % ids.len();
+                        let op = DataOp::SetNodeProperty {
+                            id: ids[row],
+                            key: PropertyKey::new("age"),
+                            value: Value::Int64(i64::try_from(row).unwrap_or(0)),
+                        };
+                        let applied = immediate(&store, &op, before_images);
+                        collect(&store);
+                        black_box(applied)
+                    });
                 });
             },
         );
@@ -205,42 +232,52 @@ fn cases<S: Indexed + 'static>(
         let store = make();
         let ids = people(&store);
         let mut row = 0_usize;
-        group.bench_function(format!("immediate_create_edge/{images}"), |b| {
-            b.iter(|| {
-                row = (row + 1) % ids.len();
-                let id = EdgeId::new(store.reserve_edge_ids(1).expect("an id").start);
-                let op = DataOp::CreateEdge {
-                    id,
-                    src: ids[row],
-                    dst: ids[(row * 7 + 3) % ids.len()],
-                    edge_type: ArcStr::from("KNOWS"),
-                    properties: Vec::new(),
-                };
-                black_box(immediate(&store, &op, before_images))
-            });
-        });
+        group.bench_function(
+            format!("immediate_create_edge/{images}/x{WRITES_PER_ITERATION}"),
+            |b| {
+                b.iter(|| {
+                    batch(|| {
+                        row = (row + 1) % ids.len();
+                        let id = EdgeId::new(store.reserve_edge_ids(1).expect("an id").start);
+                        let op = DataOp::CreateEdge {
+                            id,
+                            src: ids[row],
+                            dst: ids[(row * 7 + 3) % ids.len()],
+                            edge_type: ArcStr::from("KNOWS"),
+                            properties: Vec::new(),
+                        };
+                        black_box(immediate(&store, &op, before_images))
+                    });
+                });
+            },
+        );
 
         let store = make();
         let ids = people(&store);
         let mut row = 0_usize;
         let mut calls = 0;
-        group.bench_function(format!("immediate_label_add_and_remove/{images}"), |b| {
-            b.iter(|| {
-                collect_now_and_then(&store, collect, &mut calls);
-                row = (row + 1) % ids.len();
-                let label = ArcStr::from("Traveller");
-                let add = DataOp::AddNodeLabel {
-                    id: ids[row],
-                    label: label.clone(),
-                };
-                let remove = DataOp::RemoveNodeLabel {
-                    id: ids[row],
-                    label,
-                };
-                black_box(immediate(&store, &add, before_images));
-                black_box(immediate(&store, &remove, before_images))
-            });
-        });
+        group.bench_function(
+            format!("immediate_label_add_and_remove/{images}/x{WRITES_PER_ITERATION}"),
+            |b| {
+                b.iter(|| {
+                    batch(|| {
+                        collect_now_and_then(&store, collect, &mut calls);
+                        row = (row + 1) % ids.len();
+                        let label = ArcStr::from("Traveller");
+                        let add = DataOp::AddNodeLabel {
+                            id: ids[row],
+                            label: label.clone(),
+                        };
+                        let remove = DataOp::RemoveNodeLabel {
+                            id: ids[row],
+                            label,
+                        };
+                        black_box(immediate(&store, &add, before_images));
+                        black_box(immediate(&store, &remove, before_images))
+                    });
+                });
+            },
+        );
     }
 
     // A transaction of one write: apply as the transaction, record the
@@ -250,36 +287,41 @@ fn cases<S: Indexed + 'static>(
     let ids = people(&store);
     let mut row = 0_usize;
     let mut transaction = 1_000_u64;
-    group.bench_function("transaction_set_node_property_and_stamp", |b| {
-        b.iter(|| {
-            row = (row + 1) % ids.len();
-            transaction += 1;
-            let id = TransactionId::new(transaction);
-            let handle = store.begin(id, store.epoch()).expect("a transaction");
-            let writer = handle.writer();
-            let op = DataOp::SetNodeProperty {
-                id: ids[row],
-                key: PropertyKey::new("age"),
-                value: Value::Int64(i64::try_from(row).unwrap_or(0)),
-            };
-            let mut set = ChangeSet::new();
-            let slot = set
-                .slot(GraphRef {
-                    model: DataModel::Lpg,
-                    key: None,
-                })
-                .expect("a slot");
-            if let Applied::Changed { before, version } =
-                store.apply(&op, writer).expect("the write applies")
-            {
-                set.push(slot, op, before, version).expect("the entry");
-            }
-            store
-                .commit(handle, &mut set.entries().iter(), next_epoch(&store))
-                .expect("the commit");
-            collect(&store);
-        });
-    });
+    group.bench_function(
+        format!("transaction_set_node_property_and_stamp/x{WRITES_PER_ITERATION}"),
+        |b| {
+            b.iter(|| {
+                batch(|| {
+                    row = (row + 1) % ids.len();
+                    transaction += 1;
+                    let id = TransactionId::new(transaction);
+                    let handle = store.begin(id, store.epoch()).expect("a transaction");
+                    let writer = handle.writer();
+                    let op = DataOp::SetNodeProperty {
+                        id: ids[row],
+                        key: PropertyKey::new("age"),
+                        value: Value::Int64(i64::try_from(row).unwrap_or(0)),
+                    };
+                    let mut set = ChangeSet::new();
+                    let slot = set
+                        .slot(GraphRef {
+                            model: DataModel::Lpg,
+                            key: None,
+                        })
+                        .expect("a slot");
+                    if let Applied::Changed { before, version } =
+                        store.apply(&op, writer).expect("the write applies")
+                    {
+                        set.push(slot, op, before, version).expect("the entry");
+                    }
+                    store
+                        .commit(handle, &mut set.entries().iter(), next_epoch(&store))
+                        .expect("the commit");
+                    collect(&store);
+                });
+            });
+        },
+    );
 
     // The same transaction on a store with an index on the key it writes:
     // the index keeps the old value for older readers until the collect.
@@ -287,36 +329,41 @@ fn cases<S: Indexed + 'static>(
     store.create_property_index("age");
     let ids = people(&store);
     let mut row = 0_usize;
-    group.bench_function("transaction_set_indexed_property_and_stamp", |b| {
-        b.iter(|| {
-            row = (row + 1) % ids.len();
-            transaction += 1;
-            let id = TransactionId::new(transaction);
-            let handle = store.begin(id, store.epoch()).expect("a transaction");
-            let writer = handle.writer();
-            let op = DataOp::SetNodeProperty {
-                id: ids[row],
-                key: PropertyKey::new("age"),
-                value: Value::Int64(i64::try_from(row).unwrap_or(0)),
-            };
-            let mut set = ChangeSet::new();
-            let slot = set
-                .slot(GraphRef {
-                    model: DataModel::Lpg,
-                    key: None,
-                })
-                .expect("a slot");
-            if let Applied::Changed { before, version } =
-                store.apply(&op, writer).expect("the write applies")
-            {
-                set.push(slot, op, before, version).expect("the entry");
-            }
-            store
-                .commit(handle, &mut set.entries().iter(), next_epoch(&store))
-                .expect("the commit");
-            collect(&store);
-        });
-    });
+    group.bench_function(
+        format!("transaction_set_indexed_property_and_stamp/x{WRITES_PER_ITERATION}"),
+        |b| {
+            b.iter(|| {
+                batch(|| {
+                    row = (row + 1) % ids.len();
+                    transaction += 1;
+                    let id = TransactionId::new(transaction);
+                    let handle = store.begin(id, store.epoch()).expect("a transaction");
+                    let writer = handle.writer();
+                    let op = DataOp::SetNodeProperty {
+                        id: ids[row],
+                        key: PropertyKey::new("age"),
+                        value: Value::Int64(i64::try_from(row).unwrap_or(0)),
+                    };
+                    let mut set = ChangeSet::new();
+                    let slot = set
+                        .slot(GraphRef {
+                            model: DataModel::Lpg,
+                            key: None,
+                        })
+                        .expect("a slot");
+                    if let Applied::Changed { before, version } =
+                        store.apply(&op, writer).expect("the write applies")
+                    {
+                        set.push(slot, op, before, version).expect("the entry");
+                    }
+                    store
+                        .commit(handle, &mut set.entries().iter(), next_epoch(&store))
+                        .expect("the commit");
+                    collect(&store);
+                });
+            });
+        },
+    );
 
     // Lookups through an index on `name` (one node per name): without a
     // view, at a transaction's view, and maybe-equal at the view.

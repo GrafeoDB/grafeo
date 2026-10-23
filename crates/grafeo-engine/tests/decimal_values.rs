@@ -20,7 +20,9 @@ fn d(text: &str) -> Value {
 }
 
 /// The rows of `query` with `params`, each value as `Debug` prints it (a
-/// decimal as `Decimal(1.50)`, so the scale shows).
+/// decimal as `Decimal(1.50)`, so the scale shows), and an RDF term of a
+/// SPARQL result in N-Triples with `xsd:` for the XSD namespace
+/// (`"1.50"^^xsd:decimal`).
 fn rows(db: &GrafeoDB, language: &str, query: &str, params: &[(&str, Value)]) -> Vec<String> {
     let params: HashMap<String, Value> = params
         .iter()
@@ -32,7 +34,18 @@ fn rows(db: &GrafeoDB, language: &str, query: &str, params: &[(&str, Value)]) ->
         .iter()
         .map(|row| {
             row.iter()
-                .map(|value| format!("{value:?}"))
+                .map(|value| match value {
+                    Value::RdfTerm(term) => {
+                        let text = term.to_string();
+                        match text.split_once("^^<http://www.w3.org/2001/XMLSchema#") {
+                            Some((lexical, datatype)) => {
+                                format!("{lexical}^^xsd:{}", datatype.trim_end_matches('>'))
+                            }
+                            None => text,
+                        }
+                    }
+                    other => format!("{other:?}"),
+                })
                 .collect::<Vec<_>>()
                 .join(", ")
         })
@@ -434,47 +447,54 @@ fn sql_pgq_literals_and_casts() {
 fn sparql_numbers_follow_xsd_promotion() {
     let db = GrafeoDB::new_in_memory();
     for (expression, expected) in [
-        ("0.1 + 0.2", "Decimal(0.3)"),
-        ("1.50", "Decimal(1.50)"),
-        ("1.5e0", "Float64(1.5)"),
-        ("1.5 + 1", "Decimal(2.5)"),
-        ("1.5 * 2.0e0", "Float64(3)"),
-        ("7 - 2", "Int64(5)"),
-        ("5 / 2", "Decimal(2.500000000000000)"),
-        ("1 / 3", "Decimal(0.3333333333333333)"),
-        ("\"2.50\"^^xsd:decimal", "Decimal(2.50)"),
-        ("xsd:decimal(\"1.25\")", "Decimal(1.25)"),
-        ("xsd:decimal(1.5e0)", "Decimal(1.5)"),
-        ("xsd:decimal(3)", "Decimal(3)"),
-        ("STRDT(\"1.25\", xsd:decimal)", "Decimal(1.25)"),
-        ("xsd:double(1.5)", "Float64(1.5)"),
-        ("xsd:integer(2.5)", "Int64(2)"),
+        ("0.1 + 0.2", "\"0.3\"^^xsd:decimal"),
+        ("1.50", "\"1.50\"^^xsd:decimal"),
+        ("1.5e0", "\"1.5e0\"^^xsd:double"),
+        ("1.5 + 1", "\"2.5\"^^xsd:decimal"),
+        ("1.5 * 2.0e0", "\"3.0E0\"^^xsd:double"),
+        ("7 - 2", "\"5\"^^xsd:integer"),
+        ("5 / 2", "\"2.5\"^^xsd:decimal"),
+        ("1 / 3", "\"0.3333333333333333\"^^xsd:decimal"),
+        ("\"2.50\"^^xsd:decimal", "\"2.50\"^^xsd:decimal"),
+        ("xsd:decimal(\"1.25\")", "\"1.25\"^^xsd:decimal"),
+        ("xsd:decimal(1.5e0)", "\"1.5\"^^xsd:decimal"),
+        ("xsd:decimal(3)", "\"3\"^^xsd:decimal"),
+        ("STRDT(\"1.25\", xsd:decimal)", "\"1.25\"^^xsd:decimal"),
+        ("xsd:double(1.5)", "\"1.5E0\"^^xsd:double"),
+        ("xsd:integer(2.5)", "\"2\"^^xsd:integer"),
         (
             "DATATYPE(1.5)",
-            "String(\"http://www.w3.org/2001/XMLSchema#decimal\")",
+            "<http://www.w3.org/2001/XMLSchema#decimal>",
         ),
         (
             "DATATYPE(5 / 2)",
-            "String(\"http://www.w3.org/2001/XMLSchema#decimal\")",
+            "<http://www.w3.org/2001/XMLSchema#decimal>",
         ),
-        ("ISNUMERIC(1.5)", "Bool(true)"),
-        ("ABS(-1.5)", "Decimal(1.5)"),
-        ("ROUND(2.5)", "Decimal(3)"),
-        ("CEIL(2.1)", "Decimal(3)"),
-        ("FLOOR(-2.1)", "Decimal(-3)"),
-        ("STR(1.50)", "String(\"1.50\")"),
-        ("1.5 = 1.50", "Bool(true)"),
-        ("1.5 < 2", "Bool(true)"),
-        ("0.1 + 0.2 = 0.3", "Bool(true)"),
+        ("ISNUMERIC(1.5)", "\"true\"^^xsd:boolean"),
+        ("ABS(-1.5)", "\"1.5\"^^xsd:decimal"),
+        ("ROUND(2.5)", "\"3\"^^xsd:decimal"),
+        ("CEIL(2.1)", "\"3\"^^xsd:decimal"),
+        ("FLOOR(-2.1)", "\"-3\"^^xsd:decimal"),
+        ("STR(1.50)", "\"1.50\""),
+        ("1.5 = 1.50", "\"true\"^^xsd:boolean"),
+        ("1.5 < 2", "\"true\"^^xsd:boolean"),
+        ("0.1 + 0.2 = 0.3", "\"true\"^^xsd:boolean"),
         // An integer past the i64 range goes on as a decimal.
-        ("9223372036854775807 + 1", "Decimal(9223372036854775808)"),
-        ("-9223372036854775807 * 2", "Decimal(-18446744073709551614)"),
+        (
+            "9223372036854775807 + 1",
+            "\"9223372036854775808\"^^xsd:decimal",
+        ),
+        (
+            "-9223372036854775807 * 2",
+            "\"-18446744073709551614\"^^xsd:decimal",
+        ),
         // A value that does not cast, or a lexical form of another type.
         ("xsd:integer(\"abc\")", "Null"),
         ("xsd:decimal(\"1e3\")", "Null"),
-        ("xsd:decimal(\"1e3\"^^xsd:double)", "Decimal(1000)"),
-        ("xsd:boolean(\"1\")", "Bool(true)"),
-        ("xsd:string(1.50)", "String(\"1.50\")"),
+        ("xsd:decimal(\"1e3\"^^xsd:double)", "\"1000\"^^xsd:decimal"),
+        ("xsd:boolean(\"1\")", "\"true\"^^xsd:boolean"),
+        // A computed value is written in its canonical form.
+        ("xsd:string(1.50)", "\"1.5\""),
     ] {
         let query = format!(
             "PREFIX xsd: <http://www.w3.org/2001/XMLSchema#> \
@@ -510,13 +530,10 @@ fn sparql_filters_stored_decimals_by_value() {
     };
     assert_eq!(
         names("?p > 1.5"),
-        [
-            "String(\"http://ex.org/cake\")",
-            "String(\"http://ex.org/tea\")"
-        ]
+        ["<http://ex.org/cake>", "<http://ex.org/tea>"]
     );
-    assert_eq!(names("?p = 2.5"), ["String(\"http://ex.org/tea\")"]);
-    assert_eq!(names("?p <= 0.50"), ["String(\"http://ex.org/water\")"]);
+    assert_eq!(names("?p = 2.5"), ["<http://ex.org/tea>"]);
+    assert_eq!(names("?p <= 0.50"), ["<http://ex.org/water>"]);
 }
 
 /// A decimal written into the store is an `xsd:decimal` literal with its
@@ -536,7 +553,7 @@ fn sparql_writes_decimals_as_xsd_decimal_literals() {
             "SELECT (DATATYPE(?o) AS ?d) (STR(?o) AS ?s) WHERE { ?f <http://ex.org/amount> ?o }",
             &[]
         ),
-        "String(\"http://www.w3.org/2001/XMLSchema#decimal\"), String(\"1.50\")"
+        "<http://www.w3.org/2001/XMLSchema#decimal>, \"1.50\""
     );
 }
 
@@ -561,10 +578,10 @@ fn sparql_deletes_the_typed_literals_it_wrote() {
     let db = GrafeoDB::new_in_memory();
     db.execute_sparql(&data.replacen('{', "INSERT DATA {", 1))
         .unwrap();
-    assert_eq!(count(&db), "Int64(3)");
+    assert_eq!(count(&db), "\"3\"^^xsd:integer");
     db.execute_sparql(&data.replacen('{', "DELETE DATA {", 1))
         .unwrap();
-    assert_eq!(count(&db), "Int64(0)", "DELETE DATA");
+    assert_eq!(count(&db), "\"0\"^^xsd:integer", "DELETE DATA");
 
     db.execute_sparql(&data.replacen('{', "INSERT DATA {", 1))
         .unwrap();
@@ -573,16 +590,18 @@ fn sparql_deletes_the_typed_literals_it_wrote() {
          DELETE { ?s ?p ?o } WHERE { ?s ?p ?o }",
     )
     .unwrap();
-    assert_eq!(count(&db), "Int64(0)", "DELETE WHERE");
+    assert_eq!(count(&db), "\"0\"^^xsd:integer", "DELETE WHERE");
 }
 
-/// A triple scan gives a numeric literal as a number of its XSD type (#610):
-/// `xsd:integer` and the integer types derived from it as integers, an
-/// `xsd:decimal` as an exact decimal with its scale, `xsd:double` and
-/// `xsd:float` as floats. A plain literal and an ill-typed one stay strings.
+/// A triple scan gives each literal as it is stored, with its text and its
+/// datatype (#464), and arithmetic reads it as a number of its XSD type
+/// (#610): `xsd:integer` and the integer types derived from it as integers,
+/// an `xsd:decimal` as an exact decimal with its scale, `xsd:double` and
+/// `xsd:float` as doubles. A plain literal and an ill-typed one are no
+/// numbers.
 #[cfg(all(feature = "sparql", feature = "triple-store"))]
 #[test]
-fn sparql_scans_give_numbers_of_their_type() {
+fn sparql_scans_give_literals_as_stored_and_numbers_of_their_type() {
     let db = GrafeoDB::new_in_memory();
     db.execute_sparql(
         r#"PREFIX xsd: <http://www.w3.org/2001/XMLSchema#>
@@ -616,32 +635,32 @@ fn sparql_scans_give_numbers_of_their_type() {
     assert_eq!(
         values("?v"),
         [
-            "Int64(30)",
-            "Int64(7)",
-            "Decimal(2.50)",
-            "Float64(1.5)",
-            "Float64(0.25)",
-            "String(\"30\")",
-            "String(\"abc\")",
+            "\"30\"^^xsd:integer",
+            "\"7\"^^xsd:int",
+            "\"2.50\"^^xsd:decimal",
+            "\"1.5E0\"^^xsd:double",
+            "\"0.25\"^^xsd:float",
+            "\"30\"",
+            "\"abc\"^^xsd:integer",
         ]
     );
     // Arithmetic on stored numbers follows their types.
     assert_eq!(
         values("(?v * 2 AS ?x)")[..5],
         [
-            "Int64(60)",
-            "Int64(14)",
-            "Decimal(5.00)",
-            "Float64(3)",
-            "Float64(0.5)",
+            "\"60\"^^xsd:integer",
+            "\"14\"^^xsd:integer",
+            "\"5\"^^xsd:decimal",
+            "\"3.0E0\"^^xsd:double",
+            "\"5.0E-1\"^^xsd:double",
         ]
     );
     // STR gives the lexical form, DATATYPE the type.
     assert_eq!(
         values("(STR(?v) AS ?t) (DATATYPE(?v) AS ?d)")[2],
-        "String(\"2.50\"), String(\"http://www.w3.org/2001/XMLSchema#decimal\")"
+        "\"2.50\", <http://www.w3.org/2001/XMLSchema#decimal>"
     );
-    // A sum of stored decimals is exact.
+    // A sum of stored decimals is exact, and a value in its canonical form.
     assert_eq!(
         one(
             &db,
@@ -651,6 +670,6 @@ fn sparql_scans_give_numbers_of_their_type() {
              FILTER(DATATYPE(?v) = xsd:decimal) }",
             &[]
         ),
-        "Decimal(2.50)"
+        "\"2.5\"^^xsd:decimal"
     );
 }

@@ -113,6 +113,12 @@ type Expect struct {
 	Hash      *string
 	Precision *int
 	Columns   []string
+	// Terms are rows of RDF terms in N-Triples form, each cell compared as
+	// the exact term (see assertTerms).
+	Terms [][]string
+	// UnknownKey is an expect key no runner reads: the test fails on it, as
+	// it would otherwise check nothing.
+	UnknownKey string
 }
 
 // ---------------------------------------------------------------------------
@@ -326,6 +332,12 @@ func valueToString(v interface{}) string {
 		return strconv.FormatInt(val, 10)
 	case string:
 		return val
+	case grafeo.RdfTerm:
+		// An RDF term as its lexical form, a blank node as "_:" and its label
+		if val.Type == grafeo.BlankNode {
+			return "_:" + val.Value
+		}
+		return val.Value
 	case []interface{}:
 		parts := make([]string, len(val))
 		for i, item := range val {
@@ -864,6 +876,9 @@ func parseSingleTest(ctx *parseContext) TestCase {
 
 func parseExpectBlock(ctx *parseContext) Expect {
 	exp := Expect{}
+	// The indent of the expectation's own keys: a line indented less is the
+	// test's next key (a skip: or note: after expect:).
+	childIndent := -1
 	for ctx.idx < len(ctx.lines) {
 		line := ctx.lines[ctx.idx]
 		trimmed := strings.TrimSpace(line)
@@ -880,6 +895,13 @@ func parseExpectBlock(ctx *parseContext) Expect {
 		if trimmed == "" {
 			ctx.idx++
 			continue
+		}
+		indent := len(line) - len(strings.TrimLeft(line, " \t"))
+		if childIndent < 0 {
+			childIndent = indent
+		}
+		if indent < childIndent {
+			break
 		}
 
 		kv := parseKV(trimmed)
@@ -922,7 +944,13 @@ func parseExpectBlock(ctx *parseContext) Expect {
 		case "rows":
 			ctx.idx++
 			exp.Rows = parseRows(ctx)
+		case "terms":
+			ctx.idx++
+			exp.Terms = parseRows(ctx)
 		default:
+			if exp.UnknownKey == "" {
+				exp.UnknownKey = key
+			}
 			ctx.idx++
 		}
 	}
@@ -1339,6 +1367,9 @@ func runSingleTest(t *testing.T, gf *GtestFile, tc TestCase, variantLang, varian
 	}
 
 	exp := tc.Expect
+	if exp.UnknownKey != "" {
+		t.Fatalf("unknown expect key %q", exp.UnknownKey)
+	}
 
 	// Type the params and pass them as JSON (every statement gets them)
 	paramsJSON, err := coerceParamsToJSON(tc.Params)
@@ -1397,6 +1428,8 @@ func runSingleTest(t *testing.T, gf *GtestFile, tc TestCase, variantLang, varian
 		assertCount(t, result, *exp.Count)
 	case exp.Hash != nil:
 		assertHash(t, result, *exp.Hash)
+	case len(exp.Terms) > 0:
+		assertTerms(t, result, exp.Terms, exp.Ordered)
 	case len(expRows) > 0:
 		if exp.Precision != nil {
 			assertRowsWithPrecision(t, result, expRows, *exp.Precision)
@@ -1482,4 +1515,158 @@ func isUnsupportedLanguageError(err error) bool {
 		strings.Contains(msg, "not available") ||
 		strings.Contains(msg, "not supported") ||
 		strings.Contains(msg, "unknown language")
+}
+
+// ---------------------------------------------------------------------------
+// RDF terms (mirrors term_to_string, normalize_expected_term and assert_terms
+// in grafeo-spec-tests/src/lib.rs)
+// ---------------------------------------------------------------------------
+
+const (
+	xsdNamespace = "http://www.w3.org/2001/XMLSchema#"
+	rdfNamespace = "http://www.w3.org/1999/02/22-rdf-syntax-ns#"
+)
+
+var lexicalEscaper = strings.NewReplacer(`\`, `\\`, `"`, `\"`, "\n", `\n`, "\r", `\r`, "\t", `\t`)
+
+// termToString gives a result cell as the N-Triples form of the RDF term it
+// holds: <iri>, _:label, "text" (an xsd:string), "text"@tag or
+// "text"^^<datatype>; null when unbound. ok is false for a value that is not
+// an RDF term: a terms: expectation compares terms only.
+func termToString(v interface{}) (string, bool) {
+	var term grafeo.RdfTerm
+	switch value := v.(type) {
+	case nil:
+		return "null", true
+	case grafeo.RdfTerm:
+		term = value
+	case *grafeo.RdfTerm:
+		term = *value
+	default:
+		return fmt.Sprintf("%#v", v), false
+	}
+	term = term.Normalized()
+	switch term.Type {
+	case grafeo.IRI:
+		return "<" + term.Value + ">", true
+	case grafeo.BlankNode:
+		return "_:" + term.Value, true
+	case grafeo.Literal:
+		text := lexicalEscaper.Replace(term.Value)
+		switch {
+		case term.Language != "":
+			return `"` + text + `"@` + strings.ToLower(term.Language), true
+		case term.Datatype == "" || term.Datatype == xsdNamespace+"string":
+			return `"` + text + `"`, true
+		default:
+			return `"` + text + `"^^<` + term.Datatype + `>`, true
+		}
+	}
+	return fmt.Sprintf("%#v", v), false
+}
+
+// normalizeExpectedTerm gives an expected term in the form termToString
+// gives: an xsd: or rdf: datatype expanded, an explicit xsd:string dropped and
+// a language tag lowercased.
+func normalizeExpectedTerm(expected string) string {
+	if expected == "" || expected == "null" {
+		return "null"
+	}
+	if !strings.HasPrefix(expected, `"`) {
+		return expected
+	}
+	end := strings.LastIndex(expected, `"`)
+	if end == 0 {
+		return expected
+	}
+	text, suffix := expected[1:end], expected[end+1:]
+	if strings.HasPrefix(suffix, "@") {
+		return `"` + text + `"@` + strings.ToLower(suffix[1:])
+	}
+	if strings.HasPrefix(suffix, "^^") {
+		datatype := suffix[2:]
+		var iri string
+		switch {
+		case strings.HasPrefix(datatype, "xsd:"):
+			iri = xsdNamespace + datatype[4:]
+		case strings.HasPrefix(datatype, "rdf:"):
+			iri = rdfNamespace + datatype[4:]
+		default:
+			iri = strings.TrimSuffix(strings.TrimPrefix(datatype, "<"), ">")
+		}
+		if iri == xsdNamespace+"string" {
+			return `"` + text + `"`
+		}
+		return `"` + text + `"^^<` + iri + `>`
+	}
+	return expected
+}
+
+// assertTerms asserts that each cell holds the exact RDF term expected names,
+// in order when ordered, as a multiset otherwise. A blank node matches a blank
+// node; in order, the labels must also correspond one to one.
+func assertTerms(t *testing.T, result *grafeo.QueryResult, expected [][]string, ordered bool) {
+	t.Helper()
+	actual := make([][]string, len(result.Rows))
+	for i, row := range result.Rows {
+		cells := make([]string, len(result.Columns))
+		for j, col := range result.Columns {
+			cell, ok := termToString(row[col])
+			if !ok {
+				t.Fatalf("a terms: expectation got a value that is not an RDF term: %s", cell)
+			}
+			cells[j] = cell
+		}
+		actual[i] = cells
+	}
+	want := make([][]string, len(expected))
+	for i, row := range expected {
+		cells := make([]string, len(row))
+		for j, cell := range row {
+			cells[j] = normalizeExpectedTerm(cell)
+		}
+		want[i] = cells
+	}
+	withoutLabels := func(rows [][]string) []string {
+		keys := make([]string, len(rows))
+		for i, row := range rows {
+			cells := make([]string, len(row))
+			for j, cell := range row {
+				if strings.HasPrefix(cell, "_:") {
+					cell = "_:"
+				}
+				cells[j] = cell
+			}
+			key, _ := json.Marshal(cells)
+			keys[i] = string(key)
+		}
+		return keys
+	}
+	got, exp := withoutLabels(actual), withoutLabels(want)
+	if !ordered {
+		sort.Strings(got)
+		sort.Strings(exp)
+	}
+	if strings.Join(got, "\n") != strings.Join(exp, "\n") {
+		t.Fatalf("terms differ\nactual:   %v\nexpected: %v", actual, want)
+	}
+	if ordered {
+		pairs := map[string]string{}
+		back := map[string]string{}
+		for i, row := range actual {
+			for j, a := range row {
+				if !strings.HasPrefix(a, "_:") {
+					continue
+				}
+				e := want[i][j]
+				if seen, ok := pairs[e]; ok && seen != a {
+					t.Fatalf("%s names two blank nodes\nactual: %v", e, actual)
+				}
+				if seen, ok := back[a]; ok && seen != e {
+					t.Fatalf("blank node %s has two names\nactual: %v", a, actual)
+				}
+				pairs[e], back[a] = a, e
+			}
+		}
+	}
 }

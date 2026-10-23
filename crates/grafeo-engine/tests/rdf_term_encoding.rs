@@ -53,10 +53,10 @@ fn assert_found(db: &GrafeoDB, how: &str) {
     }
     let motto =
         rows("SELECT ?m WHERE { <http://example.org/amsterdam> <http://example.org/motto> ?m }");
-    assert_eq!(motto, [vec![Value::from("🚲 naar Amsterdam")]], "{how}");
+    assert_eq!(motto, [vec![literal("🚲 naar Amsterdam")]], "{how}");
     let population =
         rows("SELECT ?p WHERE { <http://example.org/Kraków> <http://example.org/population> ?p }");
-    assert_eq!(population, [vec![Value::from("883193")]], "{how}");
+    assert_eq!(population, [vec![literal("883193")]], "{how}");
 }
 
 fn rdf_in_memory() -> GrafeoDB {
@@ -75,6 +75,13 @@ fn rdf_file_config(path: &std::path::Path) -> Config {
     Config::persistent(path)
         .with_graph_model(GraphModel::Rdf)
         .with_storage_format(StorageFormat::Auto)
+}
+
+/// A simple literal as a SPARQL result holds it.
+fn literal(text: &str) -> Value {
+    Value::RdfTerm(std::sync::Arc::new(
+        grafeo_common::types::rdf::Term::literal(text),
+    ))
 }
 
 /// A close writes the RDF section in chunks (tiny caps make many) and the
@@ -107,11 +114,18 @@ fn non_ascii_terms_survive_a_close_and_reopen() {
             Ok((source.section_version(), source.chunks().len()))
         })
         .unwrap();
-    assert_eq!(version, 3, "the RDF section in chunks");
-    // In row groups of 2: the metadata chunk, then 3 chunks (subject,
-    // predicate, object) for each of the 3 ranges of the 6 triples of the
-    // default graph and the 1 range of the named graph.
-    assert_eq!(chunks, 1 + 3 * (3 + 1), "the tiny caps cut the triples");
+    assert_eq!(version, 4, "the RDF section in chunks");
+    // In row groups of 2: the metadata chunk, then 3 chunks (kind, value,
+    // datatype or tag) for each of the 6 ranges of the term table's 12 terms
+    // (8 IRIs and the 4 literals the ids do not inline: "Kraków" and
+    // "883193" are short strings), then 3 chunks (subject, predicate,
+    // object) for each of the 3 ranges of the 6 triples of the default graph
+    // and the 1 range of the named graph.
+    assert_eq!(
+        chunks,
+        1 + 3 * 6 + 3 * (3 + 1),
+        "the tiny caps cut the triples"
+    );
     assert_found(&db, "after a reopen");
 }
 
@@ -227,7 +241,7 @@ fn a_snapshot_with_a_term_that_does_not_parse_changes_nothing() {
         .unwrap();
     assert_eq!(
         names.rows(),
-        [vec![Value::from("Gus")]],
+        [vec![literal("Gus")]],
         "the refused restore changed nothing"
     );
 }

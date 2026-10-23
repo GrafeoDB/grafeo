@@ -553,3 +553,122 @@ fn an_error_shows_its_cause() {
         "{stderr}"
     );
 }
+
+/// The two Arrow IPC streams of an Arrow dump (nodes, then edges), each after
+/// its length as four little-endian bytes: per stream, its column names and
+/// each column's values as the `Debug` text of the array.
+#[cfg(feature = "arrow-export")]
+fn arrow_dump(file: &Path) -> Vec<Vec<(String, String)>> {
+    let bytes = std::fs::read(file).unwrap();
+    let mut rest = bytes.as_slice();
+    let mut streams = Vec::new();
+    while !rest.is_empty() {
+        let (length, tail) = rest.split_at(4);
+        let length = usize::try_from(u32::from_le_bytes(length.try_into().unwrap())).unwrap();
+        let (stream, tail) = tail.split_at(length);
+        rest = tail;
+        let reader = arrow_ipc::reader::StreamReader::try_new(stream, None).unwrap();
+        let mut columns = Vec::new();
+        for batch in reader {
+            let batch = batch.unwrap();
+            for (field, column) in batch.schema().fields().iter().zip(batch.columns()) {
+                columns.push((field.name().clone(), format!("{column:?}")));
+            }
+        }
+        streams.push(columns);
+    }
+    streams
+}
+
+/// #254 through the CLI: `grafeo data dump --export-format arrow` writes each
+/// structural column once, with the node's and edge's own ids and ends, and
+/// keeps a property named like one without the underscore (`id`, `source`);
+/// a property named like a structural column (`_id`, `_source`) is left out
+/// rather than repeating the column.
+#[cfg(feature = "arrow-export")]
+#[test]
+fn an_arrow_dump_keeps_each_structural_column_once() {
+    let dir = tempfile::tempdir().unwrap();
+    let db_path = dir.path().join("graph.grafeo");
+    let (alix, gus) = {
+        let db = GrafeoDB::open(&db_path).unwrap();
+        let alix = db
+            .create_node_with_props(
+                &["Person"],
+                [
+                    ("name", Value::from("Alix")),
+                    ("id", Value::from("custom")),
+                    ("_id", Value::Int64(999)),
+                ],
+            )
+            .unwrap();
+        let gus = db
+            .create_node_with_props(&["Person"], [("name", Value::from("Gus"))])
+            .unwrap();
+        db.create_edge_with_props(
+            alix,
+            gus,
+            "CALLS",
+            [
+                ("source", Value::from("jdt")),
+                ("_source", Value::Int64(999)),
+                ("weight", Value::Float64(0.5)),
+            ],
+        )
+        .unwrap();
+        db.close().unwrap();
+        (alix.as_u64(), gus.as_u64())
+    };
+    let out = dir.path().join("graph.arrow");
+    grafeo(&[
+        "data",
+        "dump",
+        db_path.to_str().unwrap(),
+        "--output",
+        out.to_str().unwrap(),
+        "--export-format",
+        "arrow",
+    ]);
+
+    let streams = arrow_dump(&out);
+    assert_eq!(streams.len(), 2, "a node stream and an edge stream");
+    let names = |stream: &[(String, String)]| -> Vec<String> {
+        stream.iter().map(|(name, _)| name.clone()).collect()
+    };
+    let column = |stream: &[(String, String)], name: &str| -> String {
+        stream
+            .iter()
+            .find(|(column, _)| column == name)
+            .unwrap_or_else(|| panic!("no column {name}"))
+            .1
+            .clone()
+    };
+    let (nodes, edges) = (&streams[0], &streams[1]);
+    assert_eq!(names(nodes), ["_id", "_labels", "id", "name"]);
+    assert_eq!(
+        names(edges),
+        ["_id", "_source", "_target", "_type", "source", "weight"]
+    );
+    // Each column holds the entities' own values, the structural ones their
+    // ids and ends, never the 999 of a property named like them.
+    let (alix, gus) = (alix.to_string(), gus.to_string());
+    assert_eq!(values(&column(nodes, "_id")), [alix.as_str(), gus.as_str()]);
+    assert_eq!(values(&column(nodes, "id")), ["\"custom\"", "null"]);
+    assert_eq!(values(&column(nodes, "name")), ["\"Alix\"", "\"Gus\""]);
+    assert_eq!(values(&column(edges, "_source")), [alix.as_str()]);
+    assert_eq!(values(&column(edges, "_target")), [gus.as_str()]);
+    assert_eq!(values(&column(edges, "_type")), ["\"CALLS\""]);
+    assert_eq!(values(&column(edges, "source")), ["\"jdt\""]);
+    assert_eq!(values(&column(edges, "weight")), ["0.5"]);
+}
+
+/// The values of a flat array's `Debug` text, which lists them one per line
+/// inside brackets, indented and each with a trailing comma.
+#[cfg(feature = "arrow-export")]
+fn values(debug: &str) -> Vec<&str> {
+    debug
+        .lines()
+        .filter(|line| line.starts_with("  "))
+        .map(|line| line.trim().trim_end_matches(','))
+        .collect()
+}

@@ -124,33 +124,53 @@ impl Inner {
     fn nodes_with_labels_at(&self, label_ids: &[u32], read: Read) -> Vec<NodeId> {
         let mut ids = Vec::new();
         for (index, group) in &self.nodes {
-            // The rows the newest label bitmaps hold that `read` sees.
-            let newest = label_ids
-                .iter()
-                .filter_map(|label| group.labels.get(label))
-                .flat_map(|rows| group.versions.visible_of(rows, read));
+            let base = index * ROWS_PER_GROUP;
             let changed = group.label_updates.rows();
-            let mut rows: Vec<usize> = match &changed {
-                None => newest.collect(),
-                Some(changed) => {
-                    let mut rows: Vec<usize> = newest.filter(|row| !changed.get(*row)).collect();
-                    rows.extend(changed.rows().filter(|row| {
-                        group.version(*row).visible(read)
-                            && label_ids
-                                .iter()
-                                .any(|label| group.has_label_at(*row, *label, read))
-                    }));
-                    rows
+            // One label and no label chain, the common case: the rows of
+            // its bitmap `read` sees are the answer, ascending and once.
+            if changed.is_none()
+                && let [label] = label_ids
+            {
+                if let Some(rows) = group.labels.get(label) {
+                    group.versions.for_each_visible(rows, read, |row| {
+                        ids.push(NodeId::new(base + row as u64));
+                    });
                 }
-            };
-            if label_ids.len() > 1 || changed.is_some() {
-                rows.sort_unstable();
-                rows.dedup();
+                continue;
             }
-            ids.extend(
-                rows.into_iter()
-                    .map(|row| NodeId::new(index * ROWS_PER_GROUP + row as u64)),
-            );
+            // The rows the newest label bitmaps hold that `read` sees, but
+            // those a label chain holds, which are read at the view.
+            let mut rows = Vec::new();
+            for label_rows in label_ids.iter().filter_map(|label| group.labels.get(label)) {
+                group.versions.for_each_visible(label_rows, read, |row| {
+                    if changed.as_ref().is_none_or(|changed| !changed.get(row)) {
+                        rows.push(row);
+                    }
+                });
+            }
+            if let Some(changed) = &changed {
+                rows.extend(changed.rows().filter(|row| {
+                    group.version(*row).visible(read)
+                        && label_ids
+                            .iter()
+                            .any(|label| group.has_label_at(*row, *label, read))
+                }));
+            }
+            rows.sort_unstable();
+            rows.dedup();
+            ids.extend(rows.into_iter().map(|row| NodeId::new(base + row as u64)));
+        }
+        ids
+    }
+
+    /// Every node `read` sees, ascending, a word of rows at a time.
+    fn visible_node_ids(&self, read: Read) -> Vec<NodeId> {
+        let mut ids = Vec::new();
+        for (index, group) in &self.nodes {
+            let base = index * ROWS_PER_GROUP;
+            group.versions.for_each_visible_row(read, |row| {
+                ids.push(NodeId::new(base + row as u64));
+            });
         }
         ids
     }
@@ -252,12 +272,18 @@ impl Inner {
     }
 
     /// Calls `seen` with each edge of `node` in `direction`, of one of the
-    /// edge type ids or of all (`None`), that `read` sees and whose other
-    /// end it sees, as (other node, edge), in the order of
-    /// [`entries_in`](Self::entries_in); `Both` lists a self-loop once, as
-    /// outgoing (its incoming entry is the same edge). Nothing for a node
-    /// `read` does not see. No list is built: a count or a collect reads
-    /// the adjacency once.
+    /// edge type ids or of all (`None`), that `read` sees, as (other node,
+    /// edge), in the order of [`entries_in`](Self::entries_in); `Both` lists
+    /// a self-loop once, as outgoing (its incoming entry is the same edge).
+    /// Nothing for a node `read` does not see. No list is built: a count or
+    /// a collect reads the adjacency once.
+    ///
+    /// The other end of an edge `read` sees is one it sees too, by
+    /// construction: an edge's create needs both ends where its writer reads
+    /// them, the engine's claims let no transaction commit an edge to a node
+    /// a concurrent one deletes (first writer wins, and at commit), a delete
+    /// of a node with an edge its writer sees is refused, and a load leaves
+    /// out an edge without its ends. So no end is checked here.
     fn each_seen(
         &self,
         node: NodeId,
@@ -278,10 +304,7 @@ impl Inner {
             {
                 return;
             }
-            // A self-loop's other end is the node, seen above.
-            if self.edge_visible(adjacent.edge, read)
-                && (self_loop || self.node_visible(adjacent.other, read))
-            {
+            if self.edge_visible(adjacent.edge, read) {
                 seen(NodeId::new(adjacent.other), EdgeId::new(adjacent.edge));
             }
         };
@@ -320,9 +343,9 @@ impl Inner {
     }
 
     /// The edges of `node` in `direction` of one of `types` (every type
-    /// when empty) that `read` sees and whose other end it sees, as
-    /// (other node, edge); `Both` lists a self-loop once. Empty for a node
-    /// `read` does not see, and for types the store has no edge of.
+    /// when empty) that `read` sees, as (other node, edge); `Both` lists a
+    /// self-loop once. Empty for a node `read` does not see, and for types
+    /// the store has no edge of.
     fn edges_seen(
         &self,
         node: NodeId,
@@ -334,6 +357,23 @@ impl Inner {
         if ids.as_ref().is_some_and(SmallVec::is_empty) {
             return Vec::new();
         }
+        if ids.is_none()
+            && let Some((group, row, outgoing)) = self.kept_direction(node, direction, read)
+        {
+            let adjacency = group.adjacency(outgoing);
+            let mut edges = Vec::new();
+            for adjacent in adjacency.of(row) {
+                if self.edge_visible(adjacent.edge, read) {
+                    edges.push((NodeId::new(adjacent.other), EdgeId::new(adjacent.edge)));
+                }
+            }
+            return edges;
+        }
+        if ids.is_none() && direction == Direction::Incoming && !self.keeps_incoming() {
+            let mut edges = Vec::new();
+            self.each_incoming_by_scan(node, read, |other, edge| edges.push((other, edge)));
+            return edges;
+        }
         let mut edges = Vec::new();
         self.each_seen(node, direction, ids.as_deref(), read, |other, edge| {
             edges.push((other, edge));
@@ -344,6 +384,18 @@ impl Inner {
     /// How many edges [`edges_seen`](Self::edges_seen) lists for `node` in
     /// `direction` of every type, counted without the list.
     fn degree_seen(&self, node: NodeId, direction: Direction, read: Read) -> usize {
+        if let Some((group, row, outgoing)) = self.kept_direction(node, direction, read) {
+            return group
+                .adjacency(outgoing)
+                .of(row)
+                .filter(|adjacent| self.edge_visible(adjacent.edge, read))
+                .count();
+        }
+        if direction == Direction::Incoming && !self.keeps_incoming() {
+            let mut count = 0;
+            self.each_incoming_by_scan(node, read, |_, _| count += 1);
+            return count;
+        }
         let mut count = 0;
         self.each_seen(node, direction, None, read, |_, _| count += 1);
         count
@@ -357,25 +409,59 @@ impl Inner {
         nodes
     }
 
-    /// How many edges a committed reader or transaction `read` sees, of
-    /// those whose two ends it sees: what the edges of every node it sees
-    /// add up to, from their sources.
+    /// How many edges a committed reader or transaction `read` sees: what
+    /// the edges of every node it sees add up to, from their sources (their
+    /// ends are seen too, see [`each_seen`](Self::each_seen)).
     fn edges_seen_count(&self, read: Read) -> usize {
         self.edges
             .values()
-            .map(|group| {
-                group
-                    .versions
-                    .rows()
-                    .filter(|(row, version)| {
-                        let (src, dst, _) = group.ends(*row);
-                        version.visible(read)
-                            && self.node_visible(src, read)
-                            && self.node_visible(dst, read)
-                    })
-                    .count()
-            })
+            .map(|group| group.versions.count_visible(read))
             .sum()
+    }
+
+    /// Calls `seen` with each edge into `node` that `read` sees, as (source,
+    /// edge), by edge id, for a store that keeps no incoming adjacency: a
+    /// plain loop over each edge group's target column, the version read in
+    /// the edge's own group. Nothing for a node `read` does not see.
+    fn each_incoming_by_scan(
+        &self,
+        node: NodeId,
+        read: Read,
+        mut seen: impl FnMut(NodeId, EdgeId),
+    ) {
+        let raw = node.as_u64();
+        if self.node_seen(raw, read).is_none() {
+            return;
+        }
+        for (index, group) in &self.edges {
+            let base = index * ROWS_PER_GROUP;
+            for (row, &dst) in group.dst.iter().enumerate() {
+                if dst == raw && group.versions.visible(row, read) {
+                    seen(NodeId::new(group.src[row]), EdgeId::new(base + row as u64));
+                }
+            }
+        }
+    }
+
+    /// For a read of one direction of `node` whose adjacency the store keeps
+    /// (outgoing, or incoming with the incoming edges kept): the node's group
+    /// and row, if `read` sees it, and whether the direction is outgoing.
+    /// `None` for both directions and for incoming edges read from the edge
+    /// table, which take the general path. A read of the one direction is a
+    /// plain loop over the node's adjacency.
+    fn kept_direction(
+        &self,
+        node: NodeId,
+        direction: Direction,
+        read: Read,
+    ) -> Option<(&super::NodeGroup, usize, bool)> {
+        let outgoing = match direction {
+            Direction::Outgoing => true,
+            Direction::Incoming if self.keeps_incoming() => false,
+            Direction::Incoming | Direction::Both => return None,
+        };
+        let (group, row) = self.node_seen(node.as_u64(), read)?;
+        Some((group, row, outgoing))
     }
 
     /// Whether some node's or edge's (`nodes` false) column of `property`
@@ -637,11 +723,7 @@ impl GraphStore for RowGroupStore {
     }
 
     fn node_ids(&self, view: ReadView) -> Result<Vec<NodeId>> {
-        let read = Read::view(view);
-        Ok(self
-            .inner
-            .read()
-            .node_rows(|_, group, row| group.version(row).visible(read)))
+        Ok(self.inner.read().visible_node_ids(Read::view(view)))
     }
 
     fn nodes_by_label(&self, label: &str, view: ReadView) -> Result<Vec<NodeId>> {
@@ -689,8 +771,10 @@ impl GraphStore for RowGroupStore {
         }
         let read = Read::view(view);
         Ok(inner
-            .node_rows(|_, group, row| group.version(row).visible(read))
-            .len())
+            .nodes
+            .values()
+            .map(|group| group.versions.count_visible(read))
+            .sum())
     }
 
     /// From the count the store keeps when it answers for `view`, by a scan

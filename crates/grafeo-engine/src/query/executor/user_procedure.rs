@@ -11,7 +11,8 @@ use grafeo_common::types::{EpochId, TransactionId, Value};
 use grafeo_common::utils::error::{Error, Result};
 use grafeo_core::execution::DataChunk;
 use grafeo_core::execution::operators::{
-    Operator, OperatorError, OperatorResult, ReadCounter, Recording, WriteCounter,
+    Operator, OperatorError, OperatorResult, ReadCounter, Recording, SessionContext,
+    StatementClock, WriteCounter,
 };
 use grafeo_core::graph::GraphBackend;
 use grafeo_core::graph::GraphStore;
@@ -86,6 +87,9 @@ pub struct ProcedureContext {
     /// The database's projections, so a `CALL ... {projection: ...}` in the
     /// body runs as it does at the top level.
     pub projections: Option<crate::session::ProjectionRegistry>,
+    /// The calling statement's clock: the body's clock functions read the
+    /// instant the statement started.
+    pub statement_clock: StatementClock,
 }
 
 /// An operator that executes a user-defined stored procedure.
@@ -122,6 +126,8 @@ pub struct UserProcedureOperator {
     recording: Option<Recording>,
     /// The database's projections, for `CALL ... {projection: ...}` in the body.
     projections: Option<crate::session::ProjectionRegistry>,
+    /// The calling statement's clock.
+    statement_clock: StatementClock,
     /// Buffered result rows from execution.
     result_rows: Option<Vec<Vec<Value>>>,
     /// Current row index into buffered results.
@@ -158,6 +164,7 @@ impl UserProcedureOperator {
             read_counter: ctx.read_counter,
             recording: ctx.recording,
             projections: ctx.projections,
+            statement_clock: ctx.statement_clock,
             result_rows: None,
             row_index: 0,
             output_columns,
@@ -189,7 +196,11 @@ impl UserProcedureOperator {
             p
         }
         .with_write_counter(Arc::clone(&self.write_counter))
-        .with_read_counter(Arc::clone(&self.read_counter));
+        .with_read_counter(Arc::clone(&self.read_counter))
+        .with_session_context(SessionContext {
+            statement_clock: self.statement_clock,
+            ..SessionContext::default()
+        });
         let planner = match &self.projections {
             Some(projections) => planner.with_projections(Arc::clone(projections)),
             None => planner,

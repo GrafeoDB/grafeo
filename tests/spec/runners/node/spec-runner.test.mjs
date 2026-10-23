@@ -13,7 +13,7 @@ vi.setConfig({ testTimeout: 60_000 })
 import { readFileSync, readdirSync, statSync, existsSync } from 'fs'
 import { join, relative, resolve } from 'path'
 import { parseGtestFile, coerceParams, paramValue } from './parser.mjs'
-import { assertRowsSorted, assertRowsOrdered, assertRowsWithPrecision, assertHash, describeError, assertGqlStatus } from './comparator.mjs'
+import { assertRowsSorted, assertRowsOrdered, assertRowsWithPrecision, assertHash, describeError, assertGqlStatus, assertTerms } from './comparator.mjs'
 
 // ---------------------------------------------------------------------------
 // Import GrafeoDB (skip all tests gracefully if unavailable)
@@ -313,6 +313,12 @@ async function runTestCase(db, tc, language, setupLanguage) {
   // Hash check
   if (exp.hash) {
     assertHash(result, exp.hash)
+    return
+  }
+
+  // Terms check
+  if (exp.terms.length > 0) {
+    assertTerms(result, exp.terms, exp.ordered)
     return
   }
 

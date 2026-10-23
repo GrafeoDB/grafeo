@@ -92,9 +92,10 @@ pub struct AggregateExpr {
     pub percentile: Option<f64>,
     /// Separator string for GROUP_CONCAT / LISTAGG.
     pub separator: Option<String>,
-    /// Whether the operands are RDF literals held as text (SPARQL): MIN and
-    /// MAX then compare two strings that read as numbers by those numbers.
-    /// Otherwise MIN and MAX order their values as ORDER BY does.
+    /// Whether this is SPARQL's SUM or AVG: the operands are the numbers of
+    /// RDF terms, an operand that is no number makes the result unbound
+    /// (an unbound operand, NULL, is skipped), AVG divides by XPath's rules,
+    /// and a group without operands gives 0.
     pub rdf_literals: bool,
 }
 

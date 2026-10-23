@@ -142,4 +142,5 @@ class BaseTransactionsTest(ABC):
             count_value = first_value if isinstance(first_value, (int, float)) else len(rows)
         else:
             count_value = len(rows)
-        assert count_value >= 3
+        # A SPARQL count is an xsd:integer literal, a str of its digits.
+        assert int(count_value) >= 3

@@ -6,7 +6,7 @@
 //! The operator that writes a record reads it back within the same query: the
 //! bytes are temporary, not a database format.
 
-use std::collections::HashSet;
+use grafeo_common::utils::hash::FxHashSet as HashSet;
 use std::io::{Read, Write};
 
 use grafeo_common::types::Value;
@@ -42,14 +42,14 @@ mod tags {
     pub const BIVARIATE: u8 = 22;
     pub const SAMPLE: u8 = 23;
     pub const DISTINCT: u8 = 24;
-    pub const MIN_OF_RDF_LITERALS: u8 = 25;
-    pub const MAX_OF_RDF_LITERALS: u8 = 26;
+    // 25 and 26 were the MIN and MAX of RDF literals held as text.
     pub const SUM_DECIMAL: u8 = 27;
     pub const AVG_DECIMAL: u8 = 28;
     pub const SUM_DURATION: u8 = 29;
     pub const AVG_DURATION: u8 = 30;
     pub const INVALID_OPERAND: u8 = 31;
-    pub const READS_NUMERIC_TEXT: u8 = 32;
+    pub const SPARQL_NUMBERS: u8 = 32;
+    pub const SPARQL_ERROR: u8 = 33;
 }
 
 fn invalid(message: &str) -> std::io::Error {
@@ -208,8 +208,6 @@ fn write_accumulator(w: &mut dyn Write, accumulator: &AggregateState) -> std::io
         AggregateState::AvgDistinct(..) => tags::AVG_DISTINCT,
         AggregateState::Min(_) => tags::MIN,
         AggregateState::Max(_) => tags::MAX,
-        AggregateState::MinOfRdfLiterals(_) => tags::MIN_OF_RDF_LITERALS,
-        AggregateState::MaxOfRdfLiterals(_) => tags::MAX_OF_RDF_LITERALS,
         AggregateState::First(_) => tags::FIRST,
         AggregateState::Last(_) => tags::LAST,
         AggregateState::Collect(_) => tags::COLLECT,
@@ -228,7 +226,8 @@ fn write_accumulator(w: &mut dyn Write, accumulator: &AggregateState) -> std::io
         AggregateState::SumDuration(..) => tags::SUM_DURATION,
         AggregateState::AvgDuration(..) => tags::AVG_DURATION,
         AggregateState::InvalidOperand(_) => tags::INVALID_OPERAND,
-        AggregateState::ReadsNumericText(_) => tags::READS_NUMERIC_TEXT,
+        AggregateState::SparqlNumbers(_) => tags::SPARQL_NUMBERS,
+        AggregateState::SparqlError => tags::SPARQL_ERROR,
     };
     w.write_all(&[tag])?;
     match accumulator {
@@ -259,8 +258,6 @@ fn write_accumulator(w: &mut dyn Write, accumulator: &AggregateState) -> std::io
         }
         AggregateState::Min(value)
         | AggregateState::Max(value)
-        | AggregateState::MinOfRdfLiterals(value)
-        | AggregateState::MaxOfRdfLiterals(value)
         | AggregateState::First(value)
         | AggregateState::Last(value)
         | AggregateState::Sample(value) => {
@@ -329,12 +326,16 @@ fn write_accumulator(w: &mut dyn Write, accumulator: &AggregateState) -> std::io
             w.write_all(&count.to_le_bytes())?;
         }
         AggregateState::InvalidOperand(message) => write_string(w, message)?,
-        AggregateState::ReadsNumericText(inner) => {
-            if matches!(**inner, AggregateState::ReadsNumericText(_)) {
-                return Err(invalid("a numeric text aggregate state wraps another"));
+        AggregateState::SparqlNumbers(inner) => {
+            if matches!(
+                **inner,
+                AggregateState::SparqlNumbers(_) | AggregateState::SparqlError
+            ) {
+                return Err(invalid("a SPARQL numbers aggregate state wraps another"));
             }
             write_accumulator(w, inner)?;
         }
+        AggregateState::SparqlError => {}
     }
     match accumulator {
         AggregateState::CountDistinct(_, seen)
@@ -420,13 +421,7 @@ fn read_tagged_accumulator(r: &mut dyn Read, tag: u8) -> std::io::Result<Aggrega
                 AggregateState::AvgDecimal(total, count)
             }
         }
-        tags::MIN
-        | tags::MAX
-        | tags::MIN_OF_RDF_LITERALS
-        | tags::MAX_OF_RDF_LITERALS
-        | tags::FIRST
-        | tags::LAST
-        | tags::SAMPLE => {
+        tags::MIN | tags::MAX | tags::FIRST | tags::LAST | tags::SAMPLE => {
             let value = if read_flag(r)? {
                 Some(deserialize_value(r)?)
             } else {
@@ -435,8 +430,6 @@ fn read_tagged_accumulator(r: &mut dyn Read, tag: u8) -> std::io::Result<Aggrega
             match tag {
                 tags::MIN => AggregateState::Min(value),
                 tags::MAX => AggregateState::Max(value),
-                tags::MIN_OF_RDF_LITERALS => AggregateState::MinOfRdfLiterals(value),
-                tags::MAX_OF_RDF_LITERALS => AggregateState::MaxOfRdfLiterals(value),
                 tags::FIRST => AggregateState::First(value),
                 tags::LAST => AggregateState::Last(value),
                 _ => AggregateState::Sample(value),
@@ -521,13 +514,14 @@ fn read_tagged_accumulator(r: &mut dyn Read, tag: u8) -> std::io::Result<Aggrega
             }
         }
         tags::INVALID_OPERAND => AggregateState::InvalidOperand(read_string(r)?),
-        tags::READS_NUMERIC_TEXT => {
+        tags::SPARQL_NUMBERS => {
             let inner_tag = read_tag(r)?;
-            if inner_tag == tags::READS_NUMERIC_TEXT {
-                return Err(invalid("a numeric text aggregate state wraps another"));
+            if inner_tag == tags::SPARQL_NUMBERS || inner_tag == tags::SPARQL_ERROR {
+                return Err(invalid("a SPARQL numbers aggregate state wraps another"));
             }
-            AggregateState::ReadsNumericText(Box::new(read_tagged_accumulator(r, inner_tag)?))
+            AggregateState::SparqlNumbers(Box::new(read_tagged_accumulator(r, inner_tag)?))
         }
+        tags::SPARQL_ERROR => AggregateState::SparqlError,
         _ => return Err(invalid("unknown aggregate state tag")),
     })
 }
@@ -536,8 +530,8 @@ fn read_tagged_accumulator(r: &mut dyn Read, tag: u8) -> std::io::Result<Aggrega
 mod tests {
     use super::*;
 
-    /// A duration sum or average, a failed operand and a SPARQL sum spill and
-    /// come back as they were.
+    /// A duration sum or average, a failed operand, a SPARQL sum and a
+    /// SPARQL sum that met an error spill and come back as they were.
     #[test]
     fn duration_invalid_and_numeric_text_states_round_trip() {
         use grafeo_common::types::Duration;
@@ -548,7 +542,8 @@ mod tests {
                 AggregateState::SumDuration(Some(total), 3),
                 AggregateState::AvgDuration(None, 4),
                 AggregateState::InvalidOperand("sum takes numbers".to_string()),
-                AggregateState::ReadsNumericText(Box::new(AggregateState::SumInt(7, 2))),
+                AggregateState::SparqlNumbers(Box::new(AggregateState::SumInt(7, 2))),
+                AggregateState::SparqlError,
             ],
         };
         let mut bytes = Vec::new();
@@ -566,6 +561,7 @@ mod tests {
         assert!(printed[1].contains("Err"), "{}", printed[1]);
         assert!(printed[2].contains("sum takes numbers"), "{}", printed[2]);
         assert_eq!(printed[3], format!("{:?}", Ok::<_, ()>(Value::Int64(7))));
+        assert_eq!(printed[4], format!("{:?}", Ok::<_, ()>(Value::Null)));
     }
 
     /// A decimal sum or average spills and comes back with its exact sum
@@ -620,7 +616,7 @@ mod tests {
         assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
 
         let distinct = |inner| AggregateState::Distinct {
-            seen: HashSet::new(),
+            seen: HashSet::default(),
             inner: Box::new(inner),
         };
         let group = GroupState {

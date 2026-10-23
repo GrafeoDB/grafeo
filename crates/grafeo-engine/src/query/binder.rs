@@ -197,6 +197,10 @@ pub struct Binder {
     /// they are in the outer query: a parameter scan after a `WITH` in its
     /// body that leaves one out brings it back as that.
     imports: BindingContext,
+    /// Whether a WITH or RETURN item is a parameter alone, which a
+    /// statement with literal values binds by the value: its alias takes the
+    /// value's type and an unaliased item is named after the value's text.
+    projects_a_parameter: bool,
 }
 
 impl Binder {
@@ -206,6 +210,25 @@ impl Binder {
         Self {
             context: BindingContext::new(),
             imports: BindingContext::new(),
+            projects_a_parameter: false,
+        }
+    }
+
+    /// Whether binding the plan with values in place of its parameters may
+    /// answer differently from binding it with the parameters: a WITH or
+    /// RETURN item of the plan bound last is a parameter alone (see
+    /// `projects_a_parameter`). Every other check takes a parameter as it
+    /// takes a literal, so a plan for which this is `false` binds alike for
+    /// every value.
+    #[must_use]
+    pub fn binds_by_value(&self) -> bool {
+        self.projects_a_parameter
+    }
+
+    /// Notes a WITH or RETURN item that is a parameter alone.
+    fn note_projected(&mut self, expression: &LogicalExpression) {
+        if matches!(expression, LogicalExpression::Parameter(_)) {
+            self.projects_a_parameter = true;
         }
     }
 
@@ -255,6 +278,7 @@ impl Binder {
                     Self::check_unique_projection_names(&project.projections)?;
                 }
                 for projection in &project.projections {
+                    self.note_projected(&projection.expression);
                     self.validate_expression(&projection.expression)?;
                     // Add the projection alias to the context (for WITH clause support)
                     if let Some(ref alias) = projection.alias {
@@ -1286,6 +1310,7 @@ impl Binder {
         // Validate all return expressions and register aliases
         // (aliases must be visible to parent Sort for ORDER BY resolution)
         for item in &ret.items {
+            self.note_projected(&item.expression);
             self.validate_return_item(item)?;
             if let Some(ref alias) = item.alias {
                 let data_type = self.infer_expression_type(&item.expression);

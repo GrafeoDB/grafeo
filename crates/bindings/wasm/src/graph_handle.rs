@@ -116,7 +116,7 @@ impl GraphHandle {
     ///
     /// Returns `JsError` if the query fails or the graph no longer exists.
     pub fn execute(&self, query: &str) -> Result<JsValue, JsValue> {
-        Ok(rows_to_js(&self.query(query, "gql", None)?))
+        rows_to_js(&self.query(query, "gql", None)?)
     }
 
     /// Runs a GQL query with parameters in this graph.
@@ -126,7 +126,7 @@ impl GraphHandle {
     /// Returns `JsError` if the query fails or the graph no longer exists.
     #[wasm_bindgen(js_name = "executeWithParams")]
     pub fn execute_with_params(&self, query: &str, params: JsValue) -> Result<JsValue, JsValue> {
-        Ok(rows_to_js(&self.query(query, "gql", Some(params))?))
+        rows_to_js(&self.query(query, "gql", Some(params))?)
     }
 
     /// Runs a query in a named language (for example `"cypher"`) in this
@@ -138,7 +138,7 @@ impl GraphHandle {
     /// or the graph no longer exists.
     #[wasm_bindgen(js_name = "executeWithLanguage")]
     pub fn execute_with_language(&self, query: &str, language: &str) -> Result<JsValue, JsValue> {
-        Ok(rows_to_js(&self.query(query, language, None)?))
+        rows_to_js(&self.query(query, language, None)?)
     }
 
     /// Runs a query in a named language with parameters in this graph.
@@ -154,7 +154,7 @@ impl GraphHandle {
         language: &str,
         params: JsValue,
     ) -> Result<JsValue, JsValue> {
-        Ok(rows_to_js(&self.query(query, language, Some(params))?))
+        rows_to_js(&self.query(query, language, Some(params))?)
     }
 
     /// Runs a GQL query in this graph; `{columns, rows, executionTimeMs,
@@ -165,7 +165,7 @@ impl GraphHandle {
     /// Returns `JsError` if the query fails or the graph no longer exists.
     #[wasm_bindgen(js_name = "executeRaw")]
     pub fn execute_raw(&self, query: &str) -> Result<JsValue, JsValue> {
-        Ok(raw_result_to_js(&self.query(query, "gql", None)?))
+        raw_result_to_js(&self.query(query, "gql", None)?)
     }
 
     /// Runs a GQL query with parameters in this graph, raw.
@@ -179,7 +179,7 @@ impl GraphHandle {
         query: &str,
         params: JsValue,
     ) -> Result<JsValue, JsValue> {
-        Ok(raw_result_to_js(&self.query(query, "gql", Some(params))?))
+        raw_result_to_js(&self.query(query, "gql", Some(params))?)
     }
 
     /// Runs a query in a named language in this graph, raw.
@@ -194,7 +194,7 @@ impl GraphHandle {
         query: &str,
         language: &str,
     ) -> Result<JsValue, JsValue> {
-        Ok(raw_result_to_js(&self.query(query, language, None)?))
+        raw_result_to_js(&self.query(query, language, None)?)
     }
 
     /// Runs a query in a named language with parameters in this graph, raw.
@@ -210,11 +210,7 @@ impl GraphHandle {
         language: &str,
         params: JsValue,
     ) -> Result<JsValue, JsValue> {
-        Ok(raw_result_to_js(&self.query(
-            query,
-            language,
-            Some(params),
-        )?))
+        raw_result_to_js(&self.query(query, language, Some(params))?)
     }
 
     /// `Database.batchCreateNodesWithProps` in this graph.

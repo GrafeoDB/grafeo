@@ -168,7 +168,44 @@ enum Inserts {
     /// Every row that exists has this stamp (DuckDB's same inserted id).
     Constant(u64),
     /// A stamp per row.
-    PerRow(Box<[u64]>),
+    PerRow(Box<PerRowInserts>),
+}
+
+/// The create stamps of a vector whose rows have more than one creator.
+#[derive(Debug)]
+struct PerRowInserts {
+    /// A stamp per row, [`ABSENT`] where none exists.
+    stamps: [u64; VECTOR_ROWS],
+    /// The rows whose stamp may be one a reader does not see yet, a bit
+    /// each: the rows that existed when the vector took a stamp per row
+    /// (they kept the constant stamp, which may be an open transaction's)
+    /// and every row a create stamped since. The rows outside it hold every
+    /// reader's stamp, so whether the vector is settled costs what its
+    /// writes did, not its rows (see [`Stamped::settled_by_written`]).
+    written: [u64; WORDS],
+}
+
+impl PerRowInserts {
+    /// The stamps of a vector whose rows `exists` all have `constant`.
+    fn of(exists: &Bitset, constant: u64) -> Box<Self> {
+        let mut inserts = Box::new(Self {
+            stamps: [ABSENT; VECTOR_ROWS],
+            written: [0; WORDS],
+        });
+        for row in exists.rows() {
+            inserts.stamps[row] = constant;
+        }
+        for (at, word) in inserts.written.iter_mut().enumerate() {
+            *word = exists.word(at);
+        }
+        inserts
+    }
+
+    /// Stamps `row`.
+    fn set(&mut self, row: usize, stamp: u64) {
+        self.stamps[row] = stamp;
+        self.written[row / 64] |= 1 << (row % 64);
+    }
 }
 
 /// The stamps of a vector's rows.
@@ -183,10 +220,11 @@ struct Stamped {
 }
 
 impl Stamped {
-    /// The stamps of the rows of `exists`, every reader's.
-    fn from_flat(exists: &Bitset) -> Self {
+    /// The stamps of the rows of `exists`, every reader's: the flat
+    /// vector's bits move in, nothing is copied.
+    fn from_flat(exists: Bitset) -> Self {
         Self {
-            exists: exists.clone(),
+            exists,
             created: Inserts::Constant(ALWAYS.created),
             deleted: None,
         }
@@ -196,7 +234,7 @@ impl Stamped {
     fn creator(&self, row: usize) -> u64 {
         match &self.created {
             Inserts::Constant(stamp) => *stamp,
-            Inserts::PerRow(stamps) => stamps[row],
+            Inserts::PerRow(inserts) => inserts.stamps[row],
         }
     }
 
@@ -241,19 +279,16 @@ impl Stamped {
 
     fn set_created(&mut self, row: usize, stamp: u64) {
         match &mut self.created {
-            Inserts::PerRow(stamps) => stamps[row] = stamp,
+            Inserts::PerRow(inserts) => inserts.set(row, stamp),
             Inserts::Constant(constant) => {
                 let constant = *constant;
                 if self.others_created_by(row, stamp) {
                     self.created = Inserts::Constant(stamp);
                 } else {
                     // Rows of two creators: a stamp per row from now on.
-                    let mut stamps = stamp_array();
-                    for other in self.exists.rows() {
-                        stamps[other] = constant;
-                    }
-                    stamps[row] = stamp;
-                    self.created = Inserts::PerRow(stamps);
+                    let mut inserts = PerRowInserts::of(&self.exists, constant);
+                    inserts.set(row, stamp);
+                    self.created = Inserts::PerRow(inserts);
                 }
             }
         }
@@ -274,8 +309,8 @@ impl Stamped {
 
     fn remove(&mut self, row: usize) {
         self.exists.clear(row);
-        if let Inserts::PerRow(stamps) = &mut self.created {
-            stamps[row] = ABSENT;
+        if let Inserts::PerRow(inserts) = &mut self.created {
+            inserts.stamps[row] = ABSENT;
         }
         if let Some(deletes) = &mut self.deleted {
             deletes.set(row, ABSENT);
@@ -296,11 +331,11 @@ impl Stamped {
                     .collect()
             }
             Inserts::Constant(_) => Vec::new(),
-            Inserts::PerRow(stamps) => {
+            Inserts::PerRow(inserts) => {
                 let mut committed = Vec::new();
                 for row in rows {
-                    if stamps[row] == from {
-                        stamps[row] = to;
+                    if inserts.stamps[row] == from {
+                        inserts.set(row, to);
                         committed.push(row);
                     }
                 }
@@ -310,12 +345,43 @@ impl Stamped {
     }
 
     /// Whether every stamp of a row that exists is a commit at or before
-    /// `horizon`.
+    /// `horizon`, reading the rows a create stamped since the vector took a
+    /// stamp per row (`PerRowInserts::written`) and the rows with a delete
+    /// stamp alone: what [`settled_by`](Self::settled_by) answers, in what
+    /// the vector's writes cost.
+    fn settled_by_written(&self, horizon: u64) -> bool {
+        let settled = |stamp: u64| stamp & PENDING == 0 && stamp <= horizon;
+        let created = match &self.created {
+            Inserts::Constant(stamp) => self.exists.is_empty() || settled(*stamp),
+            Inserts::PerRow(inserts) => inserts.written.iter().enumerate().all(|(at, written)| {
+                let mut bits = written & self.exists.word(at);
+                while bits != 0 {
+                    let bit = bits.trailing_zeros() as usize;
+                    bits &= bits - 1;
+                    if !settled(inserts.stamps[at * 64 + bit]) {
+                        return false;
+                    }
+                }
+                true
+            }),
+        };
+        created
+            && self.deleted.as_ref().is_none_or(|deletes| {
+                deletes
+                    .of(&self.exists)
+                    .all(|(_, stamp)| stamp == ABSENT || settled(stamp))
+            })
+    }
+
+    /// Whether every stamp of a row that exists is a commit at or before
+    /// `horizon`, every row read: the reference of the collect of every
+    /// vector ([`Versions::collapse`]), which
+    /// [`settled_by_written`](Self::settled_by_written) must answer alike.
     fn settled_by(&self, horizon: u64) -> bool {
         let settled = |stamp: u64| stamp & PENDING == 0 && stamp <= horizon;
         let created = match &self.created {
             Inserts::Constant(stamp) => self.exists.is_empty() || settled(*stamp),
-            Inserts::PerRow(stamps) => self.exists.rows().all(|row| settled(stamps[row])),
+            Inserts::PerRow(inserts) => self.exists.rows().all(|row| settled(inserts.stamps[row])),
         };
         created
             && self.deleted.as_ref().is_none_or(|deletes| {
@@ -326,12 +392,11 @@ impl Stamped {
     }
 
     fn heap_bytes(&self) -> usize {
-        let array = |stamps: &[u64]| std::mem::size_of_val::<[u64]>(stamps);
         std::mem::size_of::<Self>()
             + self.exists.heap_bytes()
             + match &self.created {
                 Inserts::Constant(_) => 0,
-                Inserts::PerRow(stamps) => array(stamps),
+                Inserts::PerRow(_) => std::mem::size_of::<PerRowInserts>(),
             }
             + self
                 .deleted
@@ -385,6 +450,7 @@ impl Versions {
         }
         let vector = &mut self.vectors[index];
         if let Vector::Flat(exists) = vector {
+            let exists = std::mem::take(exists);
             *vector = Vector::Stamped(Box::new(Stamped::from_flat(exists)));
         }
         match vector {
@@ -423,44 +489,73 @@ impl Versions {
         }
     }
 
-    /// The rows of `rows` that `read` sees, ascending: a word of bits at a
-    /// time where a vector's rows are seen alike (a flat vector, or a
-    /// stamped one whose rows share one version), row by row in the others.
-    pub(super) fn visible_of<'a>(
-        &'a self,
-        rows: &'a Bitset,
-        read: Read,
-    ) -> impl Iterator<Item = usize> + 'a {
-        const WORDS: usize = VECTOR_ROWS / 64;
-        rows.words()
-            .iter()
-            .enumerate()
-            .flat_map(move |(index, word)| {
-                let (exists, per_row) = match self.vectors.get(index / WORDS) {
-                    None => (0, None),
-                    Some(Vector::Flat(exists)) => (exists.word(index % WORDS), None),
-                    Some(Vector::Stamped(stamped)) => {
-                        let exists = stamped.exists.word(index % WORDS);
-                        match stamped.uniform() {
-                            Some(version) if version.visible(read) => (exists, None),
-                            Some(_) => (0, None),
-                            None => (exists, Some(&**stamped)),
+    /// Of the rows in the 64-row word `index` that `asked` names, those
+    /// `read` sees, as a mask: the word itself where the vector's rows are
+    /// seen alike (a flat vector, or a stamped one whose rows share one
+    /// version), a row at a time in the others.
+    fn visible_word(&self, index: usize, asked: u64, read: Read) -> u64 {
+        if asked == 0 {
+            return 0;
+        }
+        match self.vectors.get(index / WORDS) {
+            None => 0,
+            Some(Vector::Flat(exists)) => asked & exists.word(index % WORDS),
+            Some(Vector::Stamped(stamped)) => {
+                let exists = asked & stamped.exists.word(index % WORDS);
+                match stamped.uniform() {
+                    Some(version) if version.visible(read) => exists,
+                    Some(_) => 0,
+                    None => {
+                        let offset = (index % WORDS) * 64;
+                        let mut seen = 0_u64;
+                        let mut rest = exists;
+                        while rest != 0 {
+                            let bit = rest.trailing_zeros();
+                            rest &= rest - 1;
+                            if stamped.get(offset + bit as usize).visible(read) {
+                                seen |= 1 << bit;
+                            }
                         }
+                        seen
                     }
-                };
-                let offset = (index % WORDS) * 64;
-                let mut bits = word & exists;
-                std::iter::from_fn(move || {
-                    while bits != 0 {
-                        let bit = bits.trailing_zeros() as usize;
-                        bits &= bits - 1;
-                        if per_row.is_none_or(|stamped| stamped.get(offset + bit).visible(read)) {
-                            return Some(index * 64 + bit);
-                        }
-                    }
-                    None
-                })
-            })
+                }
+            }
+        }
+    }
+
+    /// Calls `seen` with each row of `rows` that `read` sees, ascending, a
+    /// word of rows at a time (see [`visible_word`](Self::visible_word)).
+    /// The loop is internal, so a scan compiles to two plain loops: an
+    /// external iterator here cost a scan of 10k rows about 10 us.
+    pub(super) fn for_each_visible(&self, rows: &Bitset, read: Read, mut seen: impl FnMut(usize)) {
+        for (index, &asked) in rows.words().iter().enumerate() {
+            let mut bits = self.visible_word(index, asked, read);
+            while bits != 0 {
+                let bit = bits.trailing_zeros() as usize;
+                bits &= bits - 1;
+                seen(index * 64 + bit);
+            }
+        }
+    }
+
+    /// Calls `seen` with every row `read` sees, ascending, a word of rows
+    /// at a time.
+    pub(super) fn for_each_visible_row(&self, read: Read, mut seen: impl FnMut(usize)) {
+        for index in 0..self.vectors.len() * WORDS {
+            let mut bits = self.visible_word(index, u64::MAX, read);
+            while bits != 0 {
+                let bit = bits.trailing_zeros() as usize;
+                bits &= bits - 1;
+                seen(index * 64 + bit);
+            }
+        }
+    }
+
+    /// How many rows `read` sees.
+    pub(super) fn count_visible(&self, read: Read) -> usize {
+        (0..self.vectors.len() * WORDS)
+            .map(|index| self.visible_word(index, u64::MAX, read).count_ones() as usize)
+            .sum()
     }
 
     /// Sets who created `row`: its vector holds stamps from then on.
@@ -564,10 +659,41 @@ impl Versions {
         gone
     }
 
-    /// [`collapse`](Self::collapse) of vector `index` alone.
+    /// [`collapse`](Self::collapse) of vector `index` alone, in what its
+    /// writes cost: whether it is settled reads the rows its creates and
+    /// deletes stamped (`Stamped::settled_by_written`), and the vector keeps
+    /// its bits and clears the rows deleted, where `collapse` builds them
+    /// anew from every row (the reference this must equal, which the collect
+    /// of every vector keeps).
     pub(super) fn collapse_vector(&mut self, index: usize, horizon: u64) -> Vec<usize> {
         let mut gone = Vec::new();
-        self.collapse_into(index, horizon, &mut gone);
+        let Some(vector) = self.vectors.get_mut(index) else {
+            return gone;
+        };
+        let Vector::Stamped(stamped) = vector else {
+            return gone;
+        };
+        if !stamped.settled_by_written(horizon) {
+            return gone;
+        }
+        let mut exists = std::mem::take(&mut stamped.exists);
+        if let Some(deletes) = &stamped.deleted {
+            let base = index * VECTOR_ROWS;
+            for (at, rows) in deletes.rows.iter().enumerate() {
+                let mut bits = rows & exists.word(at);
+                while bits != 0 {
+                    let bit = bits.trailing_zeros() as usize;
+                    bits &= bits - 1;
+                    if deletes.get(at * 64 + bit) != ABSENT {
+                        exists.clear(at * 64 + bit);
+                        gone.push(base + at * 64 + bit);
+                    }
+                }
+            }
+        }
+        // As the rebuild leaves it: no word past the last row.
+        exists.trim();
+        *vector = Vector::Flat(exists);
         gone
     }
 
@@ -697,78 +823,133 @@ mod tests {
     /// The bytes of a bit per row of a vector.
     const BITS: usize = VECTOR_ROWS / 8;
 
-    /// `visible_of` gives the rows a reader sees, ascending, alike for a
-    /// flat vector (every row that exists), a stamped vector whose rows
-    /// share one creator (all of them or none, by that creator) and a
-    /// stamped vector read row by row (a pending create seen by its own
-    /// transaction alone, a delete hiding its row from a reader after it).
+    /// The rows a reader sees, by the word-at-a-time scans, are exactly
+    /// what `visible` says row by row, in every shape a vector takes: flat,
+    /// stamped with one shared version (seen, and not yet seen), stamped
+    /// row by row with committed, deleted and pending rows of two
+    /// transactions, and absent; for committed readers at several epochs
+    /// and of now, and for the transactions at their snapshots.
     #[test]
-    fn visible_of_gives_the_rows_a_reader_sees() {
+    fn the_word_scans_see_what_each_row_says_in_every_vector_shape() {
+        use grafeo_common::types::{EpochId, TransactionId};
+
         let mut versions = Versions::default();
-        // Vector 0: flat, rows 1, 3 and 70.
-        for row in [1, 3, 70] {
+        // Vector 0: flat.
+        for row in [1, 3, 63, 64, 70, VECTOR_ROWS - 1] {
             versions.set_always(row);
         }
-        // Vector 1: rows created at epoch 5 alone.
+        // Vector 1: one shared version, created at epoch 5.
         let shared = VECTOR_ROWS;
-        for row in [shared, shared + 2, shared + 65] {
+        for row in [shared, shared + 2, shared + 65, shared + 2047] {
             versions.set_created(row, 5);
         }
-        // Vector 2: created at 2, deleted at 6, pending by transaction 19.
-        let mixed = 2 * VECTOR_ROWS;
-        let transaction = 19;
+        // Vector 2: one shared version a reader before epoch 9 does not see.
+        let later = 2 * VECTOR_ROWS;
+        for row in [later, later + 64] {
+            versions.set_created(row, 9);
+        }
+        // Vector 3: a version per row: committed, deleted, deleted later,
+        // and pending creates and deletes of transactions 19 and 20.
+        let mixed = 3 * VECTOR_ROWS;
+        let (alix, gus) = (19, 20);
         versions.set_created(mixed, 2);
         versions.set_created(mixed + 1, 2);
         versions.set_deleted(mixed + 1, 6);
-        versions.set_created(mixed + 2, PENDING | transaction);
+        versions.set_created(mixed + 2, PENDING | alix);
+        versions.set_created(mixed + 3, 4);
+        versions.set_deleted(mixed + 3, PENDING | gus);
+        versions.set_created(mixed + 64, PENDING | gus);
+        versions.set_created(mixed + 130, 7);
+        // Vector 4 is absent; vector 5 holds one flat row past the gap.
+        let past = 5 * VECTOR_ROWS + 9;
+        versions.set_always(past);
 
+        assert!(!versions.is_stamped(0), "vector 0 is flat");
+        assert!(versions.is_stamped(1) && versions.is_stamped(2) && versions.is_stamped(3));
+
+        let reads = [
+            Read::at(EpochId::new(1)),
+            Read::at(EpochId::new(4)),
+            Read::at(EpochId::new(5)),
+            Read::at(EpochId::new(6)),
+            Read::at(EpochId::new(9)),
+            Read::at(EpochId::new(u64::MAX)),
+            Read::transaction(TransactionId::new(alix), EpochId::new(6)),
+            Read::transaction(TransactionId::new(gus), EpochId::new(9)),
+            Read::transaction(TransactionId::new(21), EpochId::new(3)),
+        ];
+        let every_row = 0..6 * VECTOR_ROWS;
         let mut asked = Bitset::default();
-        for row in [0, 1, 3, 70, 71]
-            .into_iter()
-            .chain([shared, shared + 1, shared + 2, shared + 65])
-            .chain([mixed, mixed + 1, mixed + 2, mixed + 3])
-            .chain([3 * VECTOR_ROWS])
-        {
+        for row in (0..6 * VECTOR_ROWS).step_by(3).chain([
+            1,
+            64,
+            70,
+            shared,
+            shared + 65,
+            later,
+            mixed + 1,
+            mixed + 2,
+            mixed + 64,
+            past,
+        ]) {
             asked.set(row);
         }
-        let seen = |read: Read| -> Vec<usize> { versions.visible_of(&asked, read).collect() };
-        // Each answer is what `visible` says row by row.
-        let one_by_one = |read: Read| -> Vec<usize> {
-            asked
+        for read in reads {
+            let one_by_one: Vec<usize> = every_row
+                .clone()
+                .filter(|&row| versions.visible(row, read))
+                .collect();
+            let mut scanned = Vec::new();
+            versions.for_each_visible_row(read, |row| scanned.push(row));
+            assert_eq!(scanned, one_by_one, "every row, {read:?}");
+            assert_eq!(versions.count_visible(read), one_by_one.len(), "{read:?}");
+
+            let of_set: Vec<usize> = asked
                 .rows()
                 .filter(|&row| versions.visible(row, read))
-                .collect()
-        };
-
-        let before = Read::at(EpochId::new(4));
-        assert_eq!(seen(before), [1, 3, 70, mixed, mixed + 1]);
-        let between = Read::at(EpochId::new(5));
-        assert_eq!(
-            seen(between),
-            [1, 3, 70, shared, shared + 2, shared + 65, mixed, mixed + 1]
-        );
-        let after = Read::at(EpochId::new(6));
-        assert_eq!(
-            seen(after),
-            [1, 3, 70, shared, shared + 2, shared + 65, mixed],
-            "the delete at 6 hides its row"
-        );
-        let own = Read::transaction(TransactionId::new(transaction), EpochId::new(6));
-        assert_eq!(
-            seen(own),
-            [1, 3, 70, shared, shared + 2, shared + 65, mixed, mixed + 2],
-            "a transaction sees its own pending create"
-        );
-        let other = Read::transaction(TransactionId::new(20), EpochId::new(4));
-        assert_eq!(seen(other), [1, 3, 70, mixed, mixed + 1]);
-        for read in [before, between, after, own, other] {
-            assert_eq!(seen(read), one_by_one(read), "{read:?}");
+                .collect();
+            let mut scanned = Vec::new();
+            versions.for_each_visible(&asked, read, |row| scanned.push(row));
+            assert_eq!(scanned, of_set, "the rows of a set, {read:?}");
         }
+
+        // The answers themselves, for the readers that tell the shapes apart.
+        let seen = |read: Read| {
+            let mut rows = Vec::new();
+            versions.for_each_visible_row(read, |row| rows.push(row));
+            rows
+        };
+        let flat = [1, 3, 63, 64, 70, VECTOR_ROWS - 1];
+        let at = |epoch: u64| Read::at(EpochId::new(epoch));
         assert_eq!(
-            versions.visible_of(&Bitset::default(), after).count(),
-            0,
-            "no rows asked, none seen"
+            seen(at(4)),
+            [&flat[..], &[mixed, mixed + 1, mixed + 3, past]].concat()
         );
+        assert_eq!(
+            seen(at(9)),
+            [
+                &flat[..],
+                &[shared, shared + 2, shared + 65, shared + 2047],
+                &[later, later + 64],
+                &[mixed, mixed + 3, mixed + 130, past],
+            ]
+            .concat(),
+            "the shared versions at 5 and 9 are seen, the delete at 6 hides its row"
+        );
+        assert_eq!(
+            seen(Read::transaction(TransactionId::new(gus), EpochId::new(9))),
+            [
+                &flat[..],
+                &[shared, shared + 2, shared + 65, shared + 2047],
+                &[later, later + 64],
+                &[mixed, mixed + 64, mixed + 130, past],
+            ]
+            .concat(),
+            "a transaction sees its own pending create and not the row it deletes"
+        );
+        let mut none = Vec::new();
+        versions.for_each_visible(&Bitset::default(), at(9), |row| none.push(row));
+        assert!(none.is_empty(), "no rows asked, none seen");
     }
 
     #[test]
@@ -886,12 +1067,20 @@ mod tests {
         }
         let own = Read::transaction(TransactionId::new(id), EpochId::new(3));
         assert_eq!(
-            versions.visible_of(&rows, own).collect::<Vec<_>>(),
+            {
+                let mut seen = Vec::new();
+                versions.for_each_visible(&rows, own, |row| seen.push(row));
+                seen
+            },
             [0, 63, 64, 700, VECTOR_ROWS + 1, VECTOR_ROWS + 64]
         );
         let committed = Read::at(EpochId::new(3));
         assert_eq!(
-            versions.visible_of(&rows, committed).collect::<Vec<_>>(),
+            {
+                let mut seen = Vec::new();
+                versions.for_each_visible(&rows, committed, |row| seen.push(row));
+                seen
+            },
             [0, 63, 64, 700],
             "the pending rows are the transaction's alone"
         );

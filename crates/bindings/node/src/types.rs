@@ -12,6 +12,7 @@
 //! | `Date`           | `Timestamp`   | Millisecond precision          |
 //! | `BigInt`         | `Int64/Decimal` | Past 64 bits an exact `Decimal`, past 38 digits an error |
 //! | `Float32Array`   | `Vector`      |                                |
+//! | RDF/JS term      | `RdfTerm`     | `{ termType, value, language, datatype, equals }`, as results give it; read by `termType` and `value` |
 
 use std::collections::{BTreeMap, HashMap};
 use std::ffi::CString;
@@ -20,6 +21,7 @@ use std::sync::Arc;
 use napi::bindgen_prelude::*;
 use napi::{JsDate, JsString, JsValue, ValueType, sys};
 
+use grafeo_common::types::rdf::{Term, UnsupportedTermKind};
 use grafeo_common::types::{PropertyKey, Timestamp, Value};
 
 /// The entries of a JavaScript object (not an array), each converted by
@@ -277,6 +279,12 @@ fn js_object_to_value(env: &Env, obj: &Object<'_>) -> Result<Value> {
         }
     }
 
+    // An RDF/JS term, as a SPARQL result gives it or another library makes
+    // it, is that term.
+    if let Some(term) = rdfjs_term(obj)? {
+        return Ok(Value::RdfTerm(Arc::new(term)));
+    }
+
     // Plain object -> Map
     let keys = obj.get_property_names()?;
     let len = keys.get_array_length()?;
@@ -291,6 +299,174 @@ fn js_object_to_value(env: &Env, obj: &Object<'_>) -> Result<Value> {
     // ...) is the value it stands for, as in the JSON the other bindings send.
     Ok(grafeo_bindings_common::json::tagged_value(&map)
         .unwrap_or_else(|| Value::Map(Arc::new(map))))
+}
+
+/// The RDF term an object in the RDF/JS data model stands for, read by its
+/// `termType` (`NamedNode`, `BlankNode` or `Literal`) and `value`, and for
+/// a literal its `language` and the `value` of its `datatype`. Properties
+/// are read as JavaScript reads them, getters included, and other keys are
+/// ignored: the terms of other libraries (N3.js, rdf-data-factory) read too.
+/// `None` for an object of another shape.
+fn rdfjs_term(obj: &Object<'_>) -> Result<Option<Term>> {
+    let Some(term_type) = string_property(obj, "termType")? else {
+        return Ok(None);
+    };
+    if !matches!(term_type.as_str(), "NamedNode" | "BlankNode" | "Literal") {
+        return Ok(None);
+    }
+    let Some(value) = string_property(obj, "value")? else {
+        return Ok(None);
+    };
+    let (language, datatype) = if term_type == "Literal" {
+        let datatype: Unknown<'_> = obj.get_named_property("datatype")?;
+        let datatype = if datatype.get_type()? == ValueType::Object {
+            // SAFETY: the type was checked as Object above
+            let datatype: Object<'_> = unsafe { datatype.cast()? };
+            string_property(&datatype, "value")?
+        } else {
+            None
+        };
+        (string_property(obj, "language")?, datatype)
+    } else {
+        (None, None)
+    };
+    Ok(grafeo_bindings_common::json::rdfjs_term(
+        &term_type,
+        &value,
+        language.as_deref(),
+        datatype.as_deref(),
+    ))
+}
+
+/// The string an object holds under `key`; `None` when it holds another
+/// type or nothing.
+fn string_property(obj: &Object<'_>, key: &str) -> Result<Option<String>> {
+    let value: Unknown<'_> = obj.get_named_property(key)?;
+    if value.get_type()? != ValueType::String {
+        return Ok(None);
+    }
+    Ok(Some(value.coerce_to_string()?.into_utf8()?.into_owned()?))
+}
+
+/// The RDF term a raw JavaScript value stands for (see [`rdfjs_term`]);
+/// `None` for a value that is no object or no term.
+fn term_of(env: sys::napi_env, value: sys::napi_value) -> Result<Option<Term>> {
+    if value.is_null() {
+        return Ok(None);
+    }
+    // SAFETY: env and value come from napi for this call
+    let value = unsafe { Unknown::from_raw_unchecked(env, value) };
+    if value.get_type()? != ValueType::Object {
+        return Ok(None);
+    }
+    // SAFETY: the type was checked as Object above
+    let obj: Object<'_> = unsafe { value.cast()? };
+    rdfjs_term(&obj)
+}
+
+/// `term.equals(other)` of the RDF/JS data model: true when `other` is a
+/// term of the same `termType` and `value`, and for a literal the same
+/// language (without case) and datatype; false for `null`, `undefined` and
+/// any other value.
+///
+/// # Safety
+///
+/// napi calls it with the call's env and callback info.
+unsafe extern "C" fn term_equals(
+    env: sys::napi_env,
+    info: sys::napi_callback_info,
+) -> sys::napi_value {
+    let equal = || -> Result<bool> {
+        let mut argc = 1_usize;
+        let mut argv = [std::ptr::null_mut(); 1];
+        let mut this = std::ptr::null_mut();
+        // SAFETY: napi passes a valid env and info; the out-pointers hold one argument
+        check_napi(unsafe {
+            sys::napi_get_cb_info(
+                env,
+                info,
+                &raw mut argc,
+                argv.as_mut_ptr(),
+                &raw mut this,
+                std::ptr::null_mut(),
+            )
+        })?;
+        if argc == 0 {
+            return Ok(false);
+        }
+        let Some(own) = term_of(env, this)? else {
+            return Ok(false);
+        };
+        Ok(term_of(env, argv[0])? == Some(own))
+    };
+    let mut result = std::ptr::null_mut();
+    match equal() {
+        Ok(equal) => {
+            // SAFETY: env is valid; napi_get_boolean writes to our out-pointer
+            if unsafe { sys::napi_get_boolean(env, equal, &raw mut result) } != sys::Status::napi_ok
+            {
+                return std::ptr::null_mut();
+            }
+            result
+        }
+        Err(error) => {
+            // A getter that threw left its exception pending: it propagates.
+            if let Ok(message) = CString::new(error.reason) {
+                // SAFETY: env is valid and the message a C string
+                unsafe { sys::napi_throw_error(env, std::ptr::null(), message.as_ptr()) };
+            }
+            std::ptr::null_mut()
+        }
+    }
+}
+
+/// The `equals` function every term object shares, made once per
+/// environment and kept in its instance data.
+struct TermEquals(sys::napi_ref);
+
+/// The shared `equals` function of [`TermEquals`].
+fn equals_function(env: sys::napi_env) -> Result<sys::napi_value> {
+    let wrapper = Env::from_raw(env);
+    let mut function = std::ptr::null_mut();
+    if let Some(TermEquals(reference)) = wrapper.get_instance_data::<TermEquals>()? {
+        // SAFETY: the reference was made in this env and is never deleted
+        check_napi(unsafe { sys::napi_get_reference_value(env, *reference, &raw mut function) })?;
+        return Ok(function);
+    }
+    // SAFETY: env is valid; the name is a C string of 6 bytes and the
+    // callback has napi's signature
+    check_napi(unsafe {
+        sys::napi_create_function(
+            env,
+            c"equals".as_ptr(),
+            6,
+            Some(term_equals),
+            std::ptr::null_mut(),
+            &raw mut function,
+        )
+    })?;
+    let mut reference = std::ptr::null_mut();
+    // SAFETY: env and function are valid; the reference keeps the function alive
+    check_napi(unsafe { sys::napi_create_reference(env, function, 1, &raw mut reference) })?;
+    wrapper.set_instance_data(TermEquals(reference), (), |_| {})?;
+    Ok(function)
+}
+
+/// Gives a term object its `equals` method, not enumerable, so that the
+/// object's keys, its JSON and a spread copy hold the term's fields only.
+fn add_equals(env: sys::napi_env, obj: sys::napi_value) -> Result<()> {
+    let descriptor = sys::napi_property_descriptor {
+        utf8name: c"equals".as_ptr(),
+        name: std::ptr::null_mut(),
+        method: None,
+        getter: None,
+        setter: None,
+        value: equals_function(env)?,
+        attributes: sys::PropertyAttributes::default,
+        data: std::ptr::null_mut(),
+    };
+    // SAFETY: env and obj are valid; the descriptor lives through the call
+    check_napi(unsafe { sys::napi_define_properties(env, obj, 1, &raw const descriptor) })
 }
 
 /// Helper to check napi_status and convert to Result.
@@ -494,6 +670,7 @@ pub fn value_to_napi(env: sys::napi_env, value: &Value) -> Result<sys::napi_valu
             check_napi(unsafe { sys::napi_set_named_property(env, obj, key.as_ptr(), text_val) })?;
             Ok(obj)
         }
+        Value::RdfTerm(term) => term_to_napi(env, term),
         Value::OnCounter { pos, neg } => {
             let mut obj = std::ptr::null_mut();
             // SAFETY: env is valid; napi_create_object writes to our out-pointer
@@ -528,6 +705,172 @@ pub fn value_to_napi(env: sys::napi_env, value: &Value) -> Result<sys::napi_valu
             let s = value.to_string();
             // SAFETY: env is a valid napi_env passed by the caller
             unsafe { <&str as ToNapiValue>::to_napi_value(env, &s) }
+        }
+    }
+}
+
+/// A JavaScript object with the string properties `entries`.
+fn string_object(env: sys::napi_env, entries: &[(&str, &str)]) -> Result<sys::napi_value> {
+    let mut obj = std::ptr::null_mut();
+    // SAFETY: env is valid; napi_create_object writes to our out-pointer
+    check_napi(unsafe { sys::napi_create_object(env, &raw mut obj) })?;
+    for (key, text) in entries {
+        // SAFETY: env is a valid napi_env passed by the caller
+        let text_val = unsafe { <&str as ToNapiValue>::to_napi_value(env, text) }?;
+        let key = CString::new(*key).expect("static string has no null bytes");
+        // SAFETY: env, obj, and text_val are valid
+        check_napi(unsafe { sys::napi_set_named_property(env, obj, key.as_ptr(), text_val) })?;
+    }
+    Ok(obj)
+}
+
+/// An RDF term as the RDF/JS data model writes it, a plain object:
+/// `{ termType: "NamedNode", value }`, `{ termType: "BlankNode", value }`
+/// (the label without `_:`), or `{ termType: "Literal", value, language,
+/// datatype: { termType: "NamedNode", value } }`, `language` `""` when the
+/// literal has none and the datatype `rdf:langString` when it has one. Each
+/// (the datatype too) has the data model's `equals(other)` method.
+///
+/// # Errors
+///
+/// For a term of a kind this binding does not know.
+fn term_to_napi(env: sys::napi_env, term: &Term) -> Result<sys::napi_value> {
+    let obj = match term {
+        Term::Iri(iri) => {
+            string_object(env, &[("termType", "NamedNode"), ("value", iri.as_str())])?
+        }
+        Term::BlankNode(node) => {
+            string_object(env, &[("termType", "BlankNode"), ("value", node.id())])?
+        }
+        Term::Literal(literal) => {
+            let obj = string_object(
+                env,
+                &[
+                    ("termType", "Literal"),
+                    ("value", literal.value()),
+                    ("language", literal.language().unwrap_or("")),
+                ],
+            )?;
+            let datatype = string_object(
+                env,
+                &[("termType", "NamedNode"), ("value", literal.datatype())],
+            )?;
+            add_equals(env, datatype)?;
+            let key = CString::new("datatype").expect("static string has no null bytes");
+            // SAFETY: env, obj, and datatype are valid
+            check_napi(unsafe { sys::napi_set_named_property(env, obj, key.as_ptr(), datatype) })?;
+            obj
+        }
+        other => {
+            return Err(napi::Error::new(
+                napi::Status::GenericFailure,
+                UnsupportedTermKind::of(other).to_string(),
+            ));
+        }
+    };
+    add_equals(env, obj)?;
+    Ok(obj)
+}
+
+/// A value converted off the JavaScript thread and made into JavaScript on
+/// it, for the rows of `executeStream` and the properties of change events:
+/// the JSON form of `grafeo_bindings_common::json` (`{ $date: ... }`,
+/// `{ $decimal: ... }`), with each RDF term as the RDF/JS term object that
+/// `execute` gives.
+pub enum JsonWithTerms {
+    /// A value without RDF terms, as JSON.
+    Json(serde_json::Value),
+    /// An RDF term.
+    Term(Arc<Term>),
+    /// A list.
+    List(Vec<JsonWithTerms>),
+    /// An object, its entries in order.
+    Object(Vec<(String, JsonWithTerms)>),
+}
+
+impl JsonWithTerms {
+    /// The form of `value`.
+    ///
+    /// # Errors
+    ///
+    /// For an RDF term of a kind this binding does not know.
+    pub fn of(value: &Value) -> Result<Self> {
+        let list = |items: &[Value]| -> Result<Self> {
+            Ok(Self::List(
+                items.iter().map(Self::of).collect::<Result<_>>()?,
+            ))
+        };
+        Ok(match value {
+            Value::RdfTerm(term) => Self::Term(Arc::clone(term)),
+            Value::List(items) => list(items)?,
+            Value::Map(map) => Self::Object(
+                map.iter()
+                    .map(|(key, value)| Ok((key.as_str().to_string(), Self::of(value)?)))
+                    .collect::<Result<_>>()?,
+            ),
+            Value::Path { nodes, edges } => Self::Object(vec![(
+                "$path".to_string(),
+                Self::Object(vec![
+                    ("nodes".to_string(), list(nodes)?),
+                    ("edges".to_string(), list(edges)?),
+                ]),
+            )]),
+            other => Self::Json(grafeo_bindings_common::json::value_to_json(other).map_err(
+                |error| napi::Error::new(napi::Status::GenericFailure, error.to_string()),
+            )?),
+        })
+    }
+}
+
+impl TypeName for JsonWithTerms {
+    fn type_name() -> &'static str {
+        "any"
+    }
+
+    fn value_type() -> ValueType {
+        ValueType::Unknown
+    }
+}
+
+impl ToNapiValue for JsonWithTerms {
+    unsafe fn to_napi_value(env: sys::napi_env, val: Self) -> Result<sys::napi_value> {
+        match val {
+            // SAFETY: napi calls this with a valid env
+            Self::Json(json) => unsafe { serde_json::Value::to_napi_value(env, json) },
+            Self::Term(term) => term_to_napi(env, &term),
+            Self::List(items) => {
+                let mut arr = std::ptr::null_mut();
+                // SAFETY: env is valid; napi_create_array_with_length writes to our out-pointer
+                check_napi(unsafe {
+                    sys::napi_create_array_with_length(env, items.len(), &raw mut arr)
+                })?;
+                for (i, item) in items.into_iter().enumerate() {
+                    let index = u32::try_from(i).map_err(|_| {
+                        napi::Error::from_reason("a list longer than a JavaScript array holds")
+                    })?;
+                    // SAFETY: napi calls this with a valid env
+                    let item = unsafe { Self::to_napi_value(env, item) }?;
+                    // SAFETY: env, arr, and item are valid napi values
+                    check_napi(unsafe { sys::napi_set_element(env, arr, index, item) })?;
+                }
+                Ok(arr)
+            }
+            Self::Object(entries) => {
+                let mut obj = std::ptr::null_mut();
+                // SAFETY: env is valid; napi_create_object writes to our out-pointer
+                check_napi(unsafe { sys::napi_create_object(env, &raw mut obj) })?;
+                for (key, value) in entries {
+                    let key =
+                        CString::new(key).map_err(|e| napi::Error::from_reason(e.to_string()))?;
+                    // SAFETY: napi calls this with a valid env
+                    let value = unsafe { Self::to_napi_value(env, value) }?;
+                    // SAFETY: env, obj, key, and value are valid
+                    check_napi(unsafe {
+                        sys::napi_set_named_property(env, obj, key.as_ptr(), value)
+                    })?;
+                }
+                Ok(obj)
+            }
         }
     }
 }

@@ -6,7 +6,7 @@ Dart FFI bindings for the [Grafeo](https://grafeo.dev) graph database. Wraps the
 
 ```yaml
 dependencies:
-  grafeo: ^0.6.0-beta.1
+  grafeo: ^0.6.0
 ```
 
 You also need the `grafeo-c` native library for your platform. See [Building from Source](#building-from-source) below.

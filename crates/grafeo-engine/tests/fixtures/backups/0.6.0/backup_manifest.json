@@ -1,0 +1,32 @@
+{
+  "version": 2,
+  "segments": [
+    {
+      "kind": "Full",
+      "filename": "backup_full_0000.grafeo",
+      "start_epoch": 0,
+      "end_epoch": 3,
+      "checksum": 575459565,
+      "size_bytes": 73728,
+      "created_at_ms": 1792760326257
+    },
+    {
+      "kind": "Incremental",
+      "filename": "backup_incr_0001.wal",
+      "start_epoch": 4,
+      "end_epoch": 4,
+      "checksum": 1798007264,
+      "size_bytes": 269,
+      "created_at_ms": 1792760326294
+    },
+    {
+      "kind": "Incremental",
+      "filename": "backup_incr_0002.wal",
+      "start_epoch": 5,
+      "end_epoch": 7,
+      "checksum": 4277141914,
+      "size_bytes": 427,
+      "created_at_ms": 1792760326327
+    }
+  ]
+}

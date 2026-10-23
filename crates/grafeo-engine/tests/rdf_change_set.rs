@@ -160,20 +160,27 @@ fn a_transaction_counts_its_own_rdf_writes() {
     };
     assert_eq!(
         count(&session, "SELECT (COUNT(*) AS ?n) WHERE { ?s ?p ?o }"),
-        grafeo_common::types::Value::Int64(2)
+        integer(2)
     );
     assert_eq!(
         count(
             &session,
             "SELECT (COUNT(*) AS ?n) WHERE { ?s <http://example.org/knows> ?o }"
         ),
-        grafeo_common::types::Value::Int64(2)
+        integer(2)
     );
     assert_eq!(
         count(&db.session(), "SELECT (COUNT(*) AS ?n) WHERE { ?s ?p ?o }"),
-        grafeo_common::types::Value::Int64(1),
+        integer(1),
         "another session counts the committed triple only"
     );
+}
+
+/// An `xsd:integer` as a SPARQL result holds it.
+fn integer(n: i64) -> grafeo_common::types::Value {
+    grafeo_common::types::Value::RdfTerm(std::sync::Arc::new(
+        grafeo_common::types::rdf::Term::Literal(grafeo_common::types::rdf::Literal::integer(n)),
+    ))
 }
 
 #[test]

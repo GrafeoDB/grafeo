@@ -164,6 +164,7 @@ macro_rules! __conformance_cases {
             an_immediate_write_is_seen_at_its_epoch_through_every_read_path,
             an_immediate_write_keeps_the_old_value_for_an_older_reader,
             a_property_set_to_null_is_removed,
+            no_edge_read_shows_an_end_the_reader_does_not_see,
         }
     };
     (@each tests($store:ty, $make:expr, $gaps:expr); $($case:ident),* $(,)?) => {

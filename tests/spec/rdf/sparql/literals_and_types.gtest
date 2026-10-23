@@ -218,7 +218,7 @@ tests:
     query: |
       SELECT ?age WHERE {
         ?person <http://ex.org/age> ?age .
-        FILTER(?age > "30")
+        FILTER(?age > 30)
       }
     expect:
       count: 2
@@ -351,7 +351,24 @@ tests:
     query: |
       SELECT ?score WHERE {
         ?s <http://ex.org/score> ?score .
-        FILTER(?score <= "85")
+        FILTER(?score <= 85)
       }
     expect:
       count: 3
+
+  - name: an_integer_and_a_string_do_not_compare
+    # An integer and a plain literal are of two types (SPARQL 1.1 17.3): <=
+    # between them is an error, and the FILTER drops every row.
+    setup:
+      - |
+        INSERT DATA {
+          <http://ex.org/alix> <http://ex.org/score> 70 .
+          <http://ex.org/gus> <http://ex.org/score> 85 .
+        }
+    query: |
+      SELECT ?score WHERE {
+        ?s <http://ex.org/score> ?score .
+        FILTER(?score <= "85")
+      }
+    expect:
+      empty: true

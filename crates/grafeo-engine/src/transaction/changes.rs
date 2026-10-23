@@ -94,6 +94,10 @@ struct Bound {
     transaction: BackendTransaction,
 }
 
+/// The most entries a change set kept for another transaction has room for
+/// (see [`TransactionChanges::is_worth_keeping`]).
+const SPARE_ENTRIES: usize = 4_096;
+
 impl TransactionChanges {
     /// The changes of transaction `id`, which reads at `snapshot`: none yet.
     pub(crate) fn new(id: TransactionId, snapshot: EpochId) -> Self {
@@ -111,6 +115,30 @@ impl TransactionChanges {
                 triples: super::rdf::PendingTriples::default(),
             }),
         }
+    }
+
+    /// Makes this set, emptied, the changes of transaction `id`, which
+    /// reads at `snapshot`, as [`new`](Self::new) makes them: the buffers
+    /// of the transaction that had it stay (see
+    /// [`TransactionManager::recycle`](super::TransactionManager::recycle)).
+    pub(crate) fn reuse(&mut self, id: TransactionId, snapshot: EpochId) {
+        let state = self.state.get_mut();
+        let mut set = std::mem::take(&mut state.set);
+        let mut targets = std::mem::take(&mut state.targets);
+        set.clear();
+        targets.clear();
+        *self = Self::new(id, snapshot);
+        let state = self.state.get_mut();
+        state.start = set.mark();
+        state.set = set;
+        state.targets = targets;
+    }
+
+    /// Whether the set's buffers are small enough to keep for another
+    /// transaction: a large transaction's are dropped, so a spare set holds
+    /// no more than a few thousand entries' room.
+    pub(crate) fn is_worth_keeping(&mut self) -> bool {
+        self.state.get_mut().set.capacity() <= SPARE_ENTRIES
     }
 
     /// The transaction.
@@ -1228,7 +1256,6 @@ mod path_overlay_tests {
             min_hops: false,
             path: PathStep::Predicate("p".into()),
             graph: RdfPathGraph::Default,
-            companions: false,
             transaction_id: None,
             chunk_capacity: 16,
         };

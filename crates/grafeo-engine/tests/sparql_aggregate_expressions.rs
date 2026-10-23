@@ -21,6 +21,22 @@ mod sparql_aggregate_expression_tests {
         GrafeoDB::new_in_memory()
     }
 
+    /// A simple literal as a SPARQL result holds it.
+    fn literal(text: &str) -> grafeo_common::types::Value {
+        grafeo_common::types::Value::RdfTerm(std::sync::Arc::new(
+            grafeo_common::types::rdf::Term::literal(text),
+        ))
+    }
+
+    /// An `xsd:integer` as a SPARQL result holds it.
+    fn integer(n: i64) -> grafeo_common::types::Value {
+        grafeo_common::types::Value::RdfTerm(std::sync::Arc::new(
+            grafeo_common::types::rdf::Term::Literal(grafeo_common::types::rdf::Literal::integer(
+                n,
+            )),
+        ))
+    }
+
     fn insert_sample_triples(db: &GrafeoDB) {
         db.execute_sparql(
             r#"INSERT DATA {
@@ -33,29 +49,37 @@ mod sparql_aggregate_expression_tests {
         .unwrap();
     }
 
-    /// GROUP BY (STR(?s)): expression-based grouping should not panic.
-    /// STR() on RDF IRI subjects currently produces identical strings for
-    /// different subjects (expression evaluation limitation), so the group
-    /// count may be less than expected.
+    /// An IRI as a SPARQL result holds it.
+    fn iri(text: &str) -> grafeo_common::types::Value {
+        grafeo_common::types::Value::RdfTerm(std::sync::Arc::new(
+            grafeo_common::types::rdf::Term::iri(text),
+        ))
+    }
+
+    /// GROUP BY (STR(?s)) makes one group per subject: STR of two IRIs is
+    /// two strings.
     #[test]
     fn sparql_group_by_str_with_count() {
         let db = rdf_db();
         insert_sample_triples(&db);
 
-        let result = db.execute_sparql(
-            "SELECT (STR(?s) AS ?subject) (COUNT(*) AS ?cnt) WHERE { ?s ?p ?o } GROUP BY (STR(?s))",
-        );
-
-        // Must not panic or error. The store plumbing is now in place.
-        let qr = result.unwrap();
-        assert!(
-            qr.row_count() >= 1,
-            "GROUP BY STR(?s) should produce at least 1 group, got {}",
-            qr.row_count()
+        let qr = db
+            .execute_sparql(
+                "SELECT ?subject (COUNT(*) AS ?cnt) WHERE { ?s ?p ?o } GROUP BY (STR(?s) AS ?subject)",
+            )
+            .unwrap();
+        let mut rows = qr.rows().to_vec();
+        rows.sort_by_key(|row| row[0].to_string());
+        assert_eq!(
+            rows,
+            vec![
+                vec![literal("http://ex.org/alix"), integer(2)],
+                vec![literal("http://ex.org/gus"), integer(2)],
+            ]
         );
     }
 
-    /// ORDER BY ASC(STR(?s)): expression-based sorting should work.
+    /// ORDER BY ASC(STR(?s)) sorts on the text of each IRI.
     #[test]
     fn sparql_order_by_str() {
         let db = rdf_db();
@@ -65,32 +89,36 @@ mod sparql_aggregate_expression_tests {
             .execute_sparql("SELECT ?s WHERE { ?s <http://ex.org/name> ?o } ORDER BY ASC(STR(?s))")
             .unwrap();
         assert_eq!(
-            qr.row_count(),
-            2,
-            "ORDER BY ASC(STR(?s)) should return 2 rows"
+            qr.rows(),
+            [
+                vec![iri("http://ex.org/alix")],
+                vec![iri("http://ex.org/gus")]
+            ]
         );
     }
 
-    /// Both GROUP BY and ORDER BY with STR(): combined complex expressions.
+    /// GROUP BY and ORDER BY on the same STR() expression: one group per
+    /// subject, in the order of their text.
     #[test]
     fn sparql_group_by_and_order_by_both_complex() {
         let db = rdf_db();
         insert_sample_triples(&db);
 
-        let result = db.execute_sparql(
-            "SELECT (STR(?s) AS ?subject) (COUNT(*) AS ?cnt) WHERE { ?s ?p ?o } GROUP BY (STR(?s)) ORDER BY (STR(?s))",
-        );
-
-        // Must not panic or error. STR() on IRIs may collapse groups (see above).
-        let qr = result.unwrap();
-        assert!(
-            qr.row_count() >= 1,
-            "GROUP BY + ORDER BY STR(?s) should produce at least 1 group, got {}",
-            qr.row_count()
+        let qr = db
+            .execute_sparql(
+                "SELECT ?subject (COUNT(*) AS ?cnt) WHERE { ?s ?p ?o } GROUP BY (STR(?s) AS ?subject) ORDER BY DESC(?subject)",
+            )
+            .unwrap();
+        assert_eq!(
+            qr.rows(),
+            [
+                vec![literal("http://ex.org/gus"), integer(2)],
+                vec![literal("http://ex.org/alix"), integer(2)],
+            ]
         );
     }
 
-    /// ORDER BY DESC(STR(?s)): descending with a function expression.
+    /// ORDER BY DESC(STR(?s)) sorts on the text of each IRI, descending.
     #[test]
     fn sparql_order_by_desc_str() {
         let db = rdf_db();
@@ -100,9 +128,11 @@ mod sparql_aggregate_expression_tests {
             .execute_sparql("SELECT ?s WHERE { ?s <http://ex.org/name> ?o } ORDER BY DESC(STR(?s))")
             .unwrap();
         assert_eq!(
-            qr.row_count(),
-            2,
-            "ORDER BY DESC(STR(?s)) should return 2 rows"
+            qr.rows(),
+            [
+                vec![iri("http://ex.org/gus")],
+                vec![iri("http://ex.org/alix")]
+            ]
         );
     }
 
@@ -186,48 +216,17 @@ mod sparql_aggregate_expression_tests {
             qr.columns
         );
 
-        let name_idx = qr.columns.iter().position(|c| c == "name").unwrap();
-        let len_idx = qr.columns.iter().position(|c| c == "len").unwrap();
-
-        for row in qr.iter() {
-            let name_val = &row[name_idx];
-            let len_val = &row[len_idx];
-
-            // Extract the actual string content (without Display quotes)
-            let name_content = match name_val {
-                grafeo_common::types::Value::String(s) => s.as_str(),
-                other => panic!("Expected String for ?name, got: {other:?}"),
-            };
-            let expected_len = name_content.len() as i64;
-
-            match len_val {
-                grafeo_common::types::Value::Int64(n) => {
-                    assert_eq!(
-                        *n, expected_len,
-                        "STRLEN(\"{name_content}\") should be {expected_len}, got {n}"
-                    );
-                }
-                grafeo_common::types::Value::Float64(f) => {
-                    assert_eq!(
-                        *f as i64, expected_len,
-                        "STRLEN(\"{name_content}\") should be {expected_len}, got {f}"
-                    );
-                }
-                grafeo_common::types::Value::String(s) => {
-                    let parsed: i64 = s.parse().unwrap_or(-1);
-                    assert_eq!(
-                        parsed, expected_len,
-                        "STRLEN(\"{name_content}\") should be {expected_len}, got \"{s}\""
-                    );
-                }
-                grafeo_common::types::Value::Null => {
-                    panic!("STRLEN should not return Null now that RdfProjectOperator is used");
-                }
-                other => {
-                    panic!("STRLEN should return a numeric or Null value, got: {other:?}");
-                }
-            }
-        }
+        // Each name with its length in characters, an xsd:integer.
+        let mut rows: Vec<Vec<grafeo_common::types::Value>> = qr.rows().to_vec();
+        rows.sort_by_key(|row| row[0].to_string());
+        assert_eq!(qr.columns, ["name", "len"]);
+        assert_eq!(
+            rows,
+            [
+                vec![literal("Alix"), integer(4)],
+                vec![literal("Gus"), integer(3)],
+            ]
+        );
     }
 
     // ---------------------------------------------------------------
@@ -266,51 +265,22 @@ mod sparql_aggregate_expression_tests {
             qr.columns
         );
 
-        let cnt_idx = qr.columns.iter().position(|c| c == "cnt").unwrap();
-        for row in qr.iter() {
-            let cnt_val = &row[cnt_idx];
-            // Each subject (alix, gus) has exactly 2 triples
-            match cnt_val {
-                grafeo_common::types::Value::Int64(n) => {
-                    assert_eq!(*n, 2, "Each subject group should have count=2, got {n}");
-                }
-                grafeo_common::types::Value::Float64(f) => {
-                    assert_eq!(
-                        *f as i64, 2,
-                        "Each subject group should have count=2, got {f}"
-                    );
-                }
-                grafeo_common::types::Value::String(s) => {
-                    let parsed: i64 = s.parse().unwrap_or(-1);
-                    assert_eq!(
-                        parsed, 2,
-                        "Each subject group should have count=2, got \"{s}\""
-                    );
-                }
-                other => {
-                    panic!("COUNT should return a numeric value, got: {other:?}");
-                }
-            }
-        }
-
-        // The group key column is "s" (from GROUP BY ?s); the alias "name"
-        // from the SELECT expression is not propagated through the aggregate
-        // operator. Verify that the subject IRIs are present in the output.
-        let subject_col = if qr.columns.contains(&"name".to_string()) {
-            "name"
-        } else {
-            "s"
-        };
-        let subj_idx = qr.columns.iter().position(|c| c == subject_col).unwrap();
-        let mut subjects: Vec<String> = qr.iter().map(|row| row[subj_idx].to_string()).collect();
-        subjects.sort();
-        assert!(
-            subjects.iter().any(|n| n.contains("alix")),
-            "Expected a group key containing 'alix', got: {subjects:?}"
-        );
-        assert!(
-            subjects.iter().any(|n| n.contains("gus")),
-            "Expected a group key containing 'gus', got: {subjects:?}"
+        // One group per subject, each with its two triples; STR of the
+        // subject is its IRI's text.
+        let mut rows: Vec<Vec<grafeo_common::types::Value>> = qr.rows().to_vec();
+        rows.sort_by_key(|row| row[0].to_string());
+        let name = qr.columns.iter().position(|c| c == "name").unwrap();
+        let cnt = qr.columns.iter().position(|c| c == "cnt").unwrap();
+        let groups: Vec<_> = rows
+            .iter()
+            .map(|row| (row[name].clone(), row[cnt].clone()))
+            .collect();
+        assert_eq!(
+            groups,
+            [
+                (literal("http://ex.org/alix"), integer(2)),
+                (literal("http://ex.org/gus"), integer(2)),
+            ]
         );
     }
 

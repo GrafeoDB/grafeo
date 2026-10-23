@@ -1029,7 +1029,9 @@ impl super::GrafeoDB {
         refuse_unreadable_snapshot(&decoded, "import")?;
         let db = Self::new_in_memory();
         let root = db.lpg_store()?;
-        row_groups::restore(&db.snapshot_parts(&root), data, "import")?;
+        // Restored from the snapshot as decoded: decoding it again would
+        // cost as much as the rest of a small import.
+        row_groups::restore_decoded(&db.snapshot_parts(&root), decoded)?;
         // The database continues at the snapshot's epoch.
         Self::continue_epochs(&root, &db.transaction_manager);
         Ok(db)
@@ -1087,6 +1089,9 @@ impl super::GrafeoDB {
         // The database continues at the snapshot's epoch, or above it when
         // it had committed further (epochs never go back).
         Self::continue_epochs(&root, &self.transaction_manager);
+        // Its graphs, indexes and types are the snapshot's now: no cached
+        // plan was made for them.
+        self.query_cache.clear();
         Ok(())
     }
 
@@ -1364,6 +1369,18 @@ pub(super) mod row_groups {
     pub(in crate::database) fn restore(parts: &Parts<'_>, data: &[u8], action: &str) -> Result<()> {
         let decoded = decode_snapshot(data, action)?;
         refuse_unreadable_snapshot(&decoded, action)?;
+        restore_decoded(parts, decoded)
+    }
+
+    /// As [`restore`], for a snapshot already decoded and checked for data
+    /// this build cannot read (`refuse_unreadable_snapshot`): validates its
+    /// rows before anything changes, then replaces the database's contents.
+    ///
+    /// # Errors
+    ///
+    /// As [`restore`], except the decoding and the refusal, which the
+    /// caller did.
+    pub(super) fn restore_decoded(parts: &Parts<'_>, decoded: DecodedSnapshot) -> Result<()> {
         let DecodedSnapshot { snapshot, records } = decoded;
         validate_snapshot_data(&snapshot.nodes, &snapshot.edges)?;
         for graph in &snapshot.named_graphs {

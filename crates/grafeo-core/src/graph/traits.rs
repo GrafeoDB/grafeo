@@ -49,8 +49,18 @@ pub type Labels = grafeo_common::change::Labels;
 ///
 /// - The view decides existence, values, labels and adjacency alike: a
 ///   node the view does not see has no values, labels or edges for it.
-/// - [`edges`](Self::edges) lists only the edges the view sees whose other
-///   end it sees too, and lists a self-loop once with [`Direction::Both`].
+/// - [`edges`](Self::edges) lists the edges the view sees, a self-loop once
+///   with [`Direction::Both`], and the other end of each is a node the view
+///   sees too. For a store the engine writes ([`GraphBackend`]) that holds by
+///   construction: an edge's create claims its two ends against a concurrent
+///   delete in the transaction manager (first writer wins, and at commit the
+///   later one loses), and a delete of a node with an edge its writer sees
+///   is refused, so no committed edge outlives an end and a store need not
+///   check the other end on a read. A store with data of its own
+///   (`GrafeoDB::with_read_store`) must not hold an edge without its ends,
+///   or must leave it out of its reads.
+///
+/// [`GraphBackend`]: crate::graph::GraphBackend
 /// - Edge types and labels are matched exactly, as stored: the engine
 ///   resolves a query's names to the stored ones before it reads.
 /// - The defaults are exact by construction: each answers what the required
@@ -292,9 +302,10 @@ pub trait GraphStore: Send + Sync {
     // --- Traversal ---
 
     /// The edges of `node` in `direction` of one of `types` (every type when
-    /// empty) that `view` sees and whose other end it sees too, each as
-    /// (other node, edge). [`Direction::Both`] lists a self-loop once. Types
-    /// match exactly. Empty for a node the view does not see.
+    /// empty) that `view` sees, each as (other node, edge); the view sees
+    /// each other end too (see "What the engine relies on").
+    /// [`Direction::Both`] lists a self-loop once. Types match exactly.
+    /// Empty for a node the view does not see.
     ///
     /// # Errors
     ///

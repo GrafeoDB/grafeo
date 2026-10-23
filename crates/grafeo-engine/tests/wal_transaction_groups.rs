@@ -662,7 +662,10 @@ mod tests {
                 .rows()
                 .iter()
                 .map(|row| match &row[0] {
-                    Value::String(s) => s.to_string(),
+                    Value::RdfTerm(term) => match term.as_ref() {
+                        grafeo_common::types::rdf::Term::Iri(iri) => iri.as_str().to_string(),
+                        other => format!("{other:?}"),
+                    },
                     other => format!("{other:?}"),
                 })
                 .collect()

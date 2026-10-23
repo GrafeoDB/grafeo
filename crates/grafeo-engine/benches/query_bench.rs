@@ -9,14 +9,15 @@
 // carry doc comments on the generated wrapper functions.
 #![allow(missing_docs)]
 
+use std::collections::HashMap;
 use std::hint::black_box;
 
 use criterion::{Criterion, criterion_group, criterion_main};
 
+use grafeo_common::types::Value;
 use grafeo_engine::GrafeoDB;
 #[cfg(all(feature = "sparql", feature = "triple-store"))]
 use {
-    grafeo_common::types::Value,
     grafeo_engine::{Config, GraphModel},
     std::fmt::Write,
 };
@@ -144,6 +145,34 @@ fn bench_fan_out_expand_1k(c: &mut Criterion) {
     });
 }
 
+/// A two-node lookup through an index with parameters, each call with
+/// another pair of ids: the statement is optimized once with its parameters
+/// in and each call fills a copy of that plan with its values, so a call
+/// costs its lookups and its planning, not a scan.
+fn bench_two_node_match_params(c: &mut Criterion) {
+    let db = setup_social_graph(1_000, 5);
+    db.create_property_index("id").unwrap();
+    let session = db.session();
+
+    let mut call = 0_i64;
+    c.bench_function("query_two_node_match_params", |b| {
+        b.iter(|| {
+            call += 1;
+            let params = HashMap::from([
+                ("a".to_string(), Value::Int64(call % 1_000)),
+                ("b".to_string(), Value::Int64((call * 7 + 13) % 1_000)),
+            ]);
+            let result = session
+                .execute_with_params(
+                    "MATCH (a:Person {id: $a}), (b:Person {id: $b}) RETURN a.name, b.name",
+                    params,
+                )
+                .unwrap();
+            black_box(result)
+        });
+    });
+}
+
 fn bench_insert_single_node(c: &mut Criterion) {
     let db = GrafeoDB::new_in_memory();
     let session = db.session();
@@ -167,6 +196,7 @@ criterion_group!(
     bench_fan_out_expand_1k,
     bench_aggregation_count,
     bench_filter_range,
+    bench_two_node_match_params,
     bench_insert_single_node,
 );
 
@@ -404,10 +434,11 @@ fn assert_rdf_path_endpoints(
         .iter()
         .map(|row| {
             assert_eq!(row.len(), 1);
-            match &row[0] {
-                Value::String(value) => value.to_string(),
-                other => panic!("expected an endpoint IRI, got {other:?}"),
-            }
+            let iri = match &row[0] {
+                Value::RdfTerm(term) => term.as_iri().map(|iri| iri.as_str().to_string()),
+                _ => None,
+            };
+            iri.unwrap_or_else(|| panic!("expected an endpoint IRI, got {:?}", row[0]))
         })
         .collect();
     actual.sort_unstable();
@@ -657,6 +688,109 @@ fn bench_rdf_join_optional_10k(c: &mut Criterion) {
     });
 }
 
+/// 10K persons with an `xsd:integer` score, a name and one of five cities:
+/// the terms the numeric, DISTINCT and CONSTRUCT benches read.
+#[cfg(all(feature = "sparql", feature = "triple-store"))]
+fn setup_rdf_term_dataset(person_count: usize) -> GrafeoDB {
+    let db = GrafeoDB::with_config(Config::in_memory().with_graph_model(GraphModel::Rdf)).unwrap();
+    let session = db.session();
+
+    let mut triples = String::from("INSERT DATA {\n");
+    for i in 0..person_count {
+        // A score that is not in insertion order, so the sort has work to do
+        let score = (i * 7919) % person_count;
+        let city = ["Amsterdam", "Berlin", "Paris", "Prague", "Barcelona"][i % 5];
+        let _ = writeln!(
+            triples,
+            "  <http://ex.org/p{i}> <http://ex.org/score> {score} ; \
+             <http://ex.org/name> \"User{i}\" ; <http://ex.org/city> \"{city}\"@en ."
+        );
+    }
+    triples.push('}');
+    session.execute_sparql(&triples).unwrap();
+    db
+}
+
+/// A numeric FILTER over 10K typed literals (half pass).
+#[cfg(all(feature = "sparql", feature = "triple-store"))]
+fn bench_rdf_filter_numeric(c: &mut Criterion) {
+    let db = setup_rdf_term_dataset(10_000);
+    let session = db.session();
+
+    c.bench_function("rdf_filter_numeric", |b| {
+        b.iter(|| {
+            let result = session
+                .execute_sparql(
+                    r#"SELECT ?s WHERE {
+                        ?s <http://ex.org/score> ?n FILTER(?n >= 5000)
+                    }"#,
+                )
+                .unwrap();
+            black_box(result)
+        });
+    });
+}
+
+/// ORDER BY on 10K typed literals, by their value.
+#[cfg(all(feature = "sparql", feature = "triple-store"))]
+fn bench_rdf_order_by_numeric(c: &mut Criterion) {
+    let db = setup_rdf_term_dataset(10_000);
+    let session = db.session();
+
+    c.bench_function("rdf_order_by_numeric", |b| {
+        b.iter(|| {
+            let result = session
+                .execute_sparql(
+                    r#"SELECT ?s ?n WHERE {
+                        ?s <http://ex.org/score> ?n
+                    } ORDER BY DESC(?n)"#,
+                )
+                .unwrap();
+            black_box(result)
+        });
+    });
+}
+
+/// DISTINCT over 10K tagged literals of five values.
+#[cfg(all(feature = "sparql", feature = "triple-store"))]
+fn bench_rdf_distinct_10k(c: &mut Criterion) {
+    let db = setup_rdf_term_dataset(10_000);
+    let session = db.session();
+
+    c.bench_function("rdf_distinct_10k", |b| {
+        b.iter(|| {
+            let result = session
+                .execute_sparql(
+                    r#"SELECT DISTINCT ?city WHERE {
+                        ?s <http://ex.org/city> ?city
+                    }"#,
+                )
+                .unwrap();
+            black_box(result)
+        });
+    });
+}
+
+/// CONSTRUCT of 10K triples from a two-pattern join.
+#[cfg(all(feature = "sparql", feature = "triple-store"))]
+fn bench_rdf_construct_10k(c: &mut Criterion) {
+    let db = setup_rdf_term_dataset(10_000);
+    let session = db.session();
+
+    c.bench_function("rdf_construct_10k", |b| {
+        b.iter(|| {
+            let result = session
+                .execute_sparql(
+                    r#"CONSTRUCT { ?s <http://ex.org/label> ?name ; <http://ex.org/rank> ?n } WHERE {
+                        ?s <http://ex.org/name> ?name ; <http://ex.org/score> ?n
+                    }"#,
+                )
+                .unwrap();
+            black_box(result)
+        });
+    });
+}
+
 #[cfg(all(feature = "sparql", feature = "triple-store"))]
 criterion_group!(
     rdf_benches,
@@ -689,7 +823,22 @@ criterion_group!(
 );
 
 #[cfg(all(feature = "sparql", feature = "triple-store"))]
-criterion_main!(lpg_benches, rdf_benches, rdf_join_benches, rdf_path_benches);
+criterion_group!(
+    rdf_term_benches,
+    bench_rdf_filter_numeric,
+    bench_rdf_order_by_numeric,
+    bench_rdf_distinct_10k,
+    bench_rdf_construct_10k,
+);
+
+#[cfg(all(feature = "sparql", feature = "triple-store"))]
+criterion_main!(
+    lpg_benches,
+    rdf_benches,
+    rdf_join_benches,
+    rdf_path_benches,
+    rdf_term_benches
+);
 
 #[cfg(not(all(feature = "sparql", feature = "triple-store")))]
 criterion_main!(lpg_benches);

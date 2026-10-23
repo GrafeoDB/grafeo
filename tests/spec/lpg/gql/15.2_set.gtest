@@ -170,6 +170,15 @@ tests:
       - "FOR i IN range(1, 5000) INSERT (:Node:Tagged {i: i})"
     statements:
       - "MATCH (n:Tagged) REMOVE n:Tagged RETURN count(*) AS a, count(n) AS b"
+    expect:
+      rows:
+        - [5000, 5000]
+
+  - name: count_after_remove_label_over_many_chunks_untags_every_node
+    setup:
+      - "FOR i IN range(1, 5000) INSERT (:Node:Tagged {i: i})"
+    statements:
+      - "MATCH (n:Tagged) REMOVE n:Tagged"
       - "MATCH (n:Tagged) RETURN count(*) AS left_tagged"
     expect:
       rows:

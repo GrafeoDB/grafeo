@@ -34,7 +34,7 @@
 //! }
 //! ```
 
-mod chunked;
+pub(crate) mod chunked;
 mod dictionary;
 mod graph_store_adapter;
 pub mod nquads;
@@ -56,7 +56,7 @@ pub mod turtle;
 #[cfg(feature = "shacl")]
 pub mod shacl;
 
-pub use dictionary::TermDictionary;
+pub use dictionary::{DictionaryEntry, DictionaryFull, TermDictionary};
 pub use graph_store_adapter::RdfGraphStoreAdapter;
 pub use section::RdfStoreSection;
 pub use sink::{BatchInsertSink, CountSink, TripleSink, VecSink};

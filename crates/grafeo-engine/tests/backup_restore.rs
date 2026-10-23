@@ -519,7 +519,7 @@ fn multiple_incremental_backups_in_sequence() {
     session
         .execute("INSERT (:Person {name: 'Alix'})")
         .expect("insert");
-    db.backup_full(&backup_dir).expect("full backup");
+    let full = db.backup_full(&backup_dir).expect("full backup");
 
     // First incremental
     session
@@ -548,6 +548,20 @@ fn multiple_incremental_backups_in_sequence() {
     );
 
     db.close().expect("close");
+
+    // Each backup restores the people of its epoch.
+    assert_eq!(
+        restored_people(&backup_dir, full.end_epoch),
+        names(&["Alix"])
+    );
+    assert_eq!(
+        restored_people(&backup_dir, incr1.end_epoch),
+        names(&["Alix", "Gus"])
+    );
+    assert_eq!(
+        restored_people(&backup_dir, incr2.end_epoch),
+        names(&["Alix", "Gus", "Vincent"])
+    );
 }
 
 // ── Backups while other sessions write ────────────────────────────
@@ -852,5 +866,85 @@ fn a_backup_directory_of_0_5_44_takes_new_backups() {
             person("Vincent", "Paris")
         ],
         "the new segments restore"
+    );
+}
+
+// ── Backups taken by 0.6.0 ────────────────────────────────────────
+
+/// A copy of the backup chain that 0.6.0 wrote (`fixtures/backups/0.6.0`,
+/// see its README): the same steps as 0.5.44's chain, under a JSON manifest
+/// of version 2, with incremental backups of version 2 (the WAL's segments).
+/// The manifest keeps its name (JSON text, with a final newline).
+fn backups_of_0_6_0(dir: &Path) -> PathBuf {
+    let source = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/backups/0.6.0");
+    let backups = dir.join("backups");
+    std::fs::create_dir_all(&backups).expect("create backup directory");
+    for entry in std::fs::read_dir(&source).expect("read fixture") {
+        let entry = entry.expect("fixture entry");
+        std::fs::copy(entry.path(), backups.join(entry.file_name())).expect("copy fixture");
+    }
+    backups
+}
+
+/// A backup chain taken by 0.6.0 restores to each epoch it covers, and its
+/// files are of the versions 0.6.0 writes: a manifest of version 2, and
+/// incremental backups that start with `GBAK` and version 2.
+#[test]
+fn a_backup_chain_taken_by_0_6_0_restores() {
+    let dir = tempfile::tempdir().expect("create temp dir");
+    let backups = backups_of_0_6_0(dir.path());
+    assert_eq!(segments(&backups), segments_of_0_5_44(), "the same chain");
+    let manifest = GrafeoDB::read_backup_manifest(&backups)
+        .expect("read manifest")
+        .expect("a manifest");
+    assert_eq!(manifest.version, 2, "the manifest's version");
+    for incremental in ["backup_incr_0001.wal", "backup_incr_0002.wal"] {
+        let bytes = std::fs::read(backups.join(incremental)).expect("read the backup");
+        assert_eq!(&bytes[..4], b"GBAK", "{incremental}: magic");
+        assert_eq!(
+            u32::from_le_bytes(bytes[4..8].try_into().unwrap()),
+            2,
+            "{incremental}: version"
+        );
+    }
+
+    let restore = |epoch: u64| {
+        let path = dir.path().join(format!("restored_at_{epoch}.grafeo"));
+        GrafeoDB::restore_to_epoch(&backups, EpochId::new(epoch), &path)
+            .unwrap_or_else(|e| panic!("restore to epoch {epoch}: {e}"));
+        people_and_friendships(&path)
+    };
+    assert_eq!(
+        restore(3),
+        (
+            vec![person("Alix", "Amsterdam"), person("Gus", "Berlin")],
+            vec![knows("Alix", "Gus", 2019)]
+        ),
+        "the full backup alone"
+    );
+    assert_eq!(
+        restore(4),
+        (
+            vec![
+                person("Alix", "Amsterdam"),
+                person("Gus", "Berlin"),
+                person("Vincent", "Paris")
+            ],
+            vec![knows("Alix", "Gus", 2019)]
+        ),
+        "with the first incremental backup"
+    );
+    assert_eq!(
+        restore(7),
+        (
+            vec![
+                person("Alix", "Amsterdam"),
+                person("Gus", "Barcelona"),
+                person("Mia", "Prague"),
+                person("Vincent", "Paris")
+            ],
+            vec![knows("Mia", "Alix", 1988), knows("Alix", "Gus", 2019)]
+        ),
+        "with both incremental backups"
     );
 }

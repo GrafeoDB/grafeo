@@ -41,6 +41,8 @@ tags:
 | `local_datetime()` | Current local datetime |
 | `zoned_datetime(str)` | Parse zoned datetime |
 
+The clock functions without arguments (`now()`, `current_timestamp()`, `timestamp()`, `current_date()`, `current_time()`, `date()`, `time()`, `datetime()`, `localdatetime()` and the zoned forms) read one instant per statement: every row of a statement, and two calls in one row, see the time the statement started.
+
 ## Current Date and Time
 
 ```sql

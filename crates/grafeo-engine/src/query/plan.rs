@@ -47,6 +47,31 @@ impl CountExpr {
         }
     }
 
+    /// The count a SKIP or LIMIT value gives, written as a literal or given
+    /// as a parameter alike: a non-negative integer. A negative integer is
+    /// the negative-limit error (ISO GQL 22G02), any other value an invalid
+    /// value type (22G03), with the same message whichever way it came.
+    ///
+    /// # Errors
+    ///
+    /// As above.
+    pub fn count_of(value: &Value) -> grafeo_common::utils::error::Result<usize> {
+        use grafeo_common::utils::error::{Error, QueryError, QueryErrorKind};
+
+        match value {
+            Value::Int64(n) => usize::try_from(*n).map_err(|_| {
+                Error::from(QueryError::new(
+                    QueryErrorKind::NegativeLimit,
+                    format!("SKIP/LIMIT must be non-negative, got {n}"),
+                ))
+            }),
+            other => Err(Error::from(QueryError::new(
+                QueryErrorKind::InvalidValueType,
+                format!("SKIP/LIMIT must be an integer, got {other}"),
+            ))),
+        }
+    }
+
     /// Returns the count as f64 for cardinality estimation (defaults to 10 for unresolved params).
     pub fn estimate(&self) -> f64 {
         match self {

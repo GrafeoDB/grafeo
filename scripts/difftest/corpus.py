@@ -22,7 +22,9 @@ CYPHER = ("cypher",)
 BOTH = ("gql", "cypher")
 # SQL/PGQ, for its own cases (`parity` compares GQL and Cypher only)
 SQL = ("sql",)
-LANGUAGES = frozenset(BOTH + SQL)
+# SPARQL, on the RDF fixtures
+SPARQL = ("sparql",)
+LANGUAGES = frozenset(BOTH + SQL + SPARQL)
 
 
 @dataclass(frozen=True)
@@ -287,8 +289,43 @@ def mixed_indexed(grafeo):
 # before them left: the only fixtures a case may write to, each with the sections
 # whose cases use it. Every other fixture is built once and shared, so a write would
 # change what later cases see.
+# The prefixes of the SPARQL cases.
+RDF_PREFIXES = (
+    "PREFIX ex: <http://ex.org/> PREFIX xsd: <http://www.w3.org/2001/XMLSchema#> "
+)
+
+
+def rdf(grafeo):
+    """Three people with literals of several kinds: plain, tagged (in two cases of one
+    tag), typed (a non-canonical integer and decimal, a double, booleans, a date, an
+    integer that is not one, a custom datatype), an IRI and a blank node as objects."""
+    db = grafeo.GrafeoDB()
+    db.execute_sparql(
+        RDF_PREFIXES
+        + """INSERT DATA {
+        ex:alix ex:name "Alix" ; ex:age 30 ; ex:score "1.50"^^xsd:decimal ;
+            ex:height 1.7e0 ; ex:active true ; ex:nick "Lix"@en, "Lix"@FR ;
+            ex:city ex:amsterdam ; ex:joined "2020-01-15"^^xsd:date .
+        ex:gus ex:name "Gus" ; ex:age "025"^^xsd:integer ; ex:score 2 ;
+            ex:active "false"^^xsd:boolean ; ex:city ex:berlin ; ex:code "019" .
+        ex:vincent ex:name "Vincent" ; ex:age 40 ; ex:score "abc"^^xsd:integer ;
+            ex:custom "x"^^ex:type ; ex:knows _:b1 .
+        _:b1 ex:name "Blank" .
+        ex:amsterdam ex:label "Amsterdam"@nl .
+        ex:berlin ex:label "Berlin" .
+        }"""
+    )
+    return db
+
+
+def rdf_writes(grafeo):
+    """An empty RDF database, for the SPARQL writes of section DD."""
+    return grafeo.GrafeoDB()
+
+
 WRITE_FIXTURES = {
     "writes": {"BR", "BS", "BU", "CT", "DB"},
+    "rdf_writes": {"DD"},
     "merges": {"CC"},
     "leads": {"CF"},
     "quoted": {"CK"},
@@ -297,6 +334,8 @@ WRITE_FIXTURES = {
 }
 
 FIXTURES = {
+    "rdf": rdf,
+    "rdf_writes": rdf_writes,
     "social": social,
     "chain": chain,
     "empty": empty,
@@ -654,6 +693,8 @@ for case_id, query in [
     ("O9", "MATCH (a:Person)-[r:KNOWS]->() WITH a, count(r) AS n RETURN a, n"),
     ("O10", "MATCH ()-[r:LIVES_IN]->() WITH collect(r) AS rs UNWIND rs AS e MATCH (x)-[e]->(y) RETURN x.name AS x, y.name AS y"),
     ("O11", "MATCH ()-[r:KNOWS {w: 5}]->() WITH collect(r) AS rs RETURN rs[0].w AS w, rs[-1].since AS since"),
+    # An UNWIND after WITH ... WHERE unwinds the rows the filter kept (0.5.44 read the first rows of the chunk)
+    ("O12", "MATCH (a:Person) WITH a.name AS n, a.age AS age, [a.age, a.age + 1] AS l WHERE age >= 30 UNWIND l AS v RETURN n, v"),
 ]:
     case(case_id, query)
 
@@ -2016,5 +2057,51 @@ for case_id, query in [
     ("DB4", "CREATE INDEX FOR (p:Person) ON (p.name)"),
 ]:
     case(case_id, query, CYPHER, "writes")
+
+# DC: SPARQL terms and operators (#464): results hold exact terms (kind, lexical form,
+#     datatype, tag); numbers compare and sort by value, strings as strings, and a string
+#     with a number is a type error; EBV, aggregates, GROUP BY, ORDER BY over mixed kinds,
+#     ASK and CONSTRUCT. A blank node is tested with isBlank (its label is the store's).
+for case_id, query in [
+    ("DC1", "SELECT ?s ?o WHERE { ?s ex:name ?o FILTER(isIRI(?s)) }"),
+    ("DC2", "SELECT ?s ?a WHERE { ?s ex:age ?a } ORDER BY ?a"),
+    ("DC3", "SELECT ?s WHERE { ?s ex:age ?a FILTER(?a > 26) }"),
+    ("DC4", "SELECT ?s WHERE { ?s ex:age ?a FILTER(?a > \"26\") }"),
+    ("DC5", "SELECT (STR(?a) AS ?t) (DATATYPE(?a) AS ?d) WHERE { ex:gus ex:age ?a }"),
+    ("DC6", "SELECT ?n (LANG(?n) AS ?l) WHERE { ex:alix ex:nick ?n } ORDER BY ?l"),
+    ("DC7", "SELECT ?s WHERE { ?s ex:nick ?n FILTER(?n = \"Lix\"@fr) }"),
+    ("DC8", "SELECT (SUM(?a) AS ?s) (AVG(?a) AS ?avg) (MIN(?a) AS ?lo) (MAX(?a) AS ?hi) WHERE { ?x ex:age ?a }"),
+    ("DC9", "SELECT (SUM(?v) AS ?s) WHERE { ?x ex:score ?v }"),
+    ("DC10", "SELECT ?x (IF(?v, \"t\", \"f\") AS ?e) WHERE { ?x ex:score ?v } ORDER BY ?x"),
+    ("DC11", "SELECT ?o WHERE { ?s ex:city|ex:name|ex:label ?o } ORDER BY ?o"),
+    ("DC12", "SELECT ?c (COUNT(?s) AS ?n) WHERE { ?s ex:city ?c } GROUP BY ?c ORDER BY ?c"),
+    ("DC13", "SELECT (UCASE(?l) AS ?u) (LANG(UCASE(?l)) AS ?t) WHERE { ex:amsterdam ex:label ?l }"),
+    ("DC14", "SELECT ?x WHERE { ?x ex:active ?b FILTER(?b) }"),
+    ("DC15", "ASK { ex:alix ex:age 30 }"),
+    ("DC16", "CONSTRUCT { ?s ex:aged ?a } WHERE { ?s ex:age ?a }"),
+    ("DC17", "SELECT (2.5e0 < 3 AS ?lt) (1/2 AS ?half) (2*1.5 AS ?prod) (1 + 1.0 AS ?sum) WHERE {}"),
+    ("DC18", "SELECT ?x WHERE { ?x ex:custom ?c FILTER(?c = \"x\") }"),
+    ("DC19", "SELECT (sameTerm(?a, 25) AS ?same) (?a = 25 AS ?eq) WHERE { ex:gus ex:age ?a }"),
+    ("DC20", "SELECT (isBlank(?k) AS ?blank) (isIRI(?k) AS ?iri) WHERE { ex:vincent ex:knows ?k }"),
+    ("DC21", "SELECT ?d WHERE { ex:alix ex:joined ?d FILTER(?d > \"2019-01-01\"^^xsd:date) }"),
+    ("DC22", "SELECT ?code (?code + 0 AS ?n) WHERE { ex:gus ex:code ?code }"),
+    ("DC23", "SELECT ?h (?h * 2 AS ?d) WHERE { ex:alix ex:height ?h }"),
+    ("DC24", "SELECT (GROUP_CONCAT(?n; SEPARATOR=\",\") AS ?all) WHERE { ex:alix ex:nick ?n }"),
+]:
+    case(case_id, RDF_PREFIXES + query, SPARQL, "rdf")
+ordered("DC25", RDF_PREFIXES + "SELECT ?n WHERE { ?s ex:name ?n } ORDER BY DESC(?n) LIMIT 2 OFFSET 1", SPARQL, "rdf")
+
+# DD: SPARQL writes keep and remove exact terms (#464): a typed literal is removed only by
+#     itself (01 and 1 are two terms), a tagged one only with its tag (the reads are
+#     unordered: an ORDER BY of mixed literals is what DC tests)
+for case_id, query in [
+    ("DD1", "INSERT DATA { ex:a ex:v \"01\"^^xsd:integer, \"1\"^^xsd:integer, \"x\"@en, \"x\" }"),
+    ("DD2", "SELECT ?v (DATATYPE(?v) AS ?d) WHERE { ex:a ex:v ?v }"),
+    ("DD3", "DELETE DATA { ex:a ex:v 1 }"),
+    ("DD4", "SELECT ?v WHERE { ex:a ex:v ?v }"),
+    ("DD5", "DELETE WHERE { ex:a ex:v \"x\"@en }"),
+    ("DD6", "SELECT ?v (LANG(?v) AS ?l) WHERE { ex:a ex:v ?v }"),
+]:
+    case(case_id, RDF_PREFIXES + query, SPARQL, "rdf_writes")
 
 # fmt: on

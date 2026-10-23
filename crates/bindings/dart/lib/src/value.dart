@@ -1,7 +1,7 @@
 /// Bidirectional conversion between Dart types and Grafeo's JSON wire format.
 ///
 /// Follows the `grafeo-bindings-common` markers: `$timestamp_us`, `$date`,
-/// `$time`, `$duration` and `$decimal` ([GrafeoDecimal]).
+/// `$time`, `$duration`, `$decimal` ([GrafeoDecimal]) and `$term` ([RdfTerm]).
 library;
 
 import 'dart:convert';
@@ -74,6 +74,7 @@ dynamic _encodeValue(dynamic value) {
     double d => d,
     String s => s,
     GrafeoDecimal d => {r'$decimal': d.text},
+    RdfTerm t => t.toJson(),
     DateTime dt => {r'$timestamp_us': dt.toUtc().microsecondsSinceEpoch},
     Duration dur => {r'$duration': _formatIsoDuration(dur)},
     Float32List vec => vec.toList(),
@@ -207,6 +208,9 @@ dynamic _decodeValue(dynamic value) {
 }
 
 dynamic _decodeMap(Map m) {
+  // An RDF term: the `$term` tag as the map's only key
+  final term = RdfTerm.fromJson(m);
+  if (term != null) return term;
   // An exact decimal: the `$decimal` tag as the map's only key
   if (m.length == 1 && m[r'$decimal'] is String) {
     return GrafeoDecimal(m[r'$decimal'] as String);

@@ -1,4 +1,4 @@
-# A backup chain under a bincode manifest
+# Backup chains of released versions
 
 `tests/backup_restore.rs` restores these. Up to 0.5.44 the backup manifest, `backup_manifest.json`, held bincode,
 despite its name; 0.6 writes it as JSON and still reads the bincode manifest, so a backup directory of 0.5.x restores
@@ -6,9 +6,12 @@ and takes new backups. Each directory holds one backup directory, written by `wr
 wheel (the command is in the script):
 
 - `0.5.44/`: written by the `grafeo==0.5.44` wheel (a bincode manifest and a 0.5.x full backup).
+- `0.6.0/`: written by the 0.6.0 release (a JSON manifest of version 2, a full backup in the 0.6 file format, and
+  incremental backups of version 2, which copy the WAL's segments).
 
-The manifest is kept as `backup_manifest.bincode`, so the end-of-file and whitespace hooks, which take a `.json` file
-for text, leave its bytes alone; the tests copy it back as `backup_manifest.json`.
+0.5.44's manifest is kept as `backup_manifest.bincode`, so the end-of-file and whitespace hooks, which take a `.json`
+file for text, leave its bytes alone; the tests copy it back as `backup_manifest.json`. 0.6.0's manifest is JSON text
+and keeps its name, with the final newline the end-of-file hook would add.
 
 The source database went through these steps, each followed by its backup into the chain:
 

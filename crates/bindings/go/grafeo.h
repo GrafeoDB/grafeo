@@ -128,10 +128,21 @@ GrafeoResult* grafeo_execute_language(GrafeoDatabase* db, const char* language, 
 
 /* ---- Result access ------------------------------------------------------- */
 
+/* The rows as a JSON array of objects. Values JSON has no literal for are tagged
+ * objects, each tag the object's only key, both here and in params and properties
+ * JSON: {"$timestamp_us": 1700000000000000}, {"$date": "2024-01-15"}, {"$time": ...},
+ * {"$duration": ...}, {"$zoned_datetime": ...}, {"$decimal": "1.50"}, and an RDF term
+ * {"$term": {"type": "uri" | "bnode" | "literal", "value": ...}}, a literal with
+ * "xml:lang" (a lowercase language tag) or "datatype" (any but xsd:string). A tagged
+ * object with other keys, or one whose content does not read, is a map. */
 const char* grafeo_result_json(const GrafeoResult* result);
 size_t      grafeo_result_row_count(const GrafeoResult* result);
 double      grafeo_result_execution_time_ms(const GrafeoResult* result);
 uint64_t    grafeo_result_rows_scanned(const GrafeoResult* result);
+/* What the result holds: 0 rows (SPARQL SELECT and updates, every other
+   language), 1 one boolean (SPARQL ASK), 2 an RDF graph (SPARQL CONSTRUCT and
+   DESCRIBE); 0 for NULL. */
+int32_t     grafeo_result_kind(const GrafeoResult* result);
 /* What the statement wrote; 0 for a read and for NULL. */
 uint64_t    grafeo_result_nodes_created(const GrafeoResult* result);
 uint64_t    grafeo_result_nodes_deleted(const GrafeoResult* result);

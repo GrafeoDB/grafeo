@@ -76,6 +76,7 @@ tests:
         - [Berlijn]
 
   - name: lang_matches_of_a_variable_bound_by_bind
+    # LANG gives the tag in lowercase, as RDF 1.2 keeps it.
     setup:
       - |
         INSERT DATA {
@@ -90,7 +91,7 @@ tests:
       }
     expect:
       rows:
-        - [Parijs, nl-BE]
+        - [Parijs, nl-be]
 
   - name: coalesce_passes_the_tag_of_the_value_it_takes
     setup:

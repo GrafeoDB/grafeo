@@ -16,6 +16,11 @@ Each layout gets the same changes in two sessions: `first_half`, a reopen, then
 The files go to `crates/grafeo-engine/tests/fixtures/released/<version>/`. Regenerate a
 version only to add content; the tests describe what each file holds.
 
+From 0.6 a release creates no WAL directories, so it writes `closed.grafeo` and
+`unflushed.grafeo` only, and the database holds what 0.6 adds (see `WRITES_0_6`). Run it
+with the release's wheel, or with a build of the release's tree (`maturin develop --release`
+in `crates/bindings/python`).
+
 `compacted.grafeo` (0.5.44) holds a compacted base under writes made after `compact()`. It is
 added on its own, without touching the other files:
 
@@ -116,6 +121,25 @@ SECOND_HALF_SPARQL = [
 ]
 
 
+# From 0.6 a release writes more than 0.5.x could: values of the 0.6 kinds (an RDF term as
+# a property, an exact decimal) and a database that keeps its history (`history_retention`),
+# so its file holds the time index. It no longer creates WAL directories.
+WRITES_0_6 = tuple(int(part) for part in grafeo.__version__.split(".")[:2]) >= (0, 6)
+
+
+def first_half_0_6(db: grafeo.GrafeoDB) -> None:
+    from decimal import Decimal
+
+    db.execute(
+        "INSERT (:Concept {name: 'apple', label: $label, iri: $iri, price: $price})",
+        {
+            "label": grafeo.Literal("Pomme", language="fr"),
+            "iri": grafeo.IRI("http://example.org/apple"),
+            "price": Decimal("19.50"),
+        },
+    )
+
+
 def run(db: grafeo.GrafeoDB, statements: list[str]) -> None:
     for statement in statements:
         db.execute(statement)
@@ -128,6 +152,8 @@ def run_sparql(db: grafeo.GrafeoDB, statements: list[str]) -> None:
 
 def first_half(db: grafeo.GrafeoDB) -> None:
     run(db, FIRST_HALF)
+    if WRITES_0_6:
+        first_half_0_6(db)
     run_sparql(db, FIRST_HALF_SPARQL)
     db.set_graph("trips")
     run(db, FIRST_HALF_IN_TRIPS)
@@ -143,7 +169,12 @@ def second_half(db: grafeo.GrafeoDB) -> None:
 
 
 def write(path: Path, *, close_at_end: bool) -> None:
-    db = grafeo.GrafeoDB(str(path))
+    # The retention is stored in the file, so the reopen keeps the history too.
+    db = (
+        grafeo.GrafeoDB(str(path), history_retention="forever")
+        if WRITES_0_6
+        else grafeo.GrafeoDB(str(path))
+    )
     first_half(db)
     db.close()
     db = grafeo.GrafeoDB(str(path))
@@ -200,7 +231,8 @@ def main() -> None:
         shutil.rmtree(out)
     out.mkdir(parents=True)
     write(out / "closed.grafeo", close_at_end=True)
-    write(out / "directory", close_at_end=True)
+    if not WRITES_0_6:
+        write(out / "directory", close_at_end=True)
     subprocess.run(
         [sys.executable, __file__, "--unflushed", str(out / "unflushed.grafeo")],
         check=True,

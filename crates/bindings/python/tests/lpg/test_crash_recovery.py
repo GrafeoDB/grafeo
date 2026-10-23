@@ -48,6 +48,29 @@ def test_a_crash_after_wal_checkpoint_keeps_each_edge_once(tmp_path):
     db.close()
 
 
+def test_a_crash_after_wal_checkpoint_keeps_each_named_graph_edge_once(tmp_path):
+    path = str(tmp_path / "server.grafeo")
+    crash_after(
+        path,
+        'db.create_graph("trips")\n'
+        'db.set_graph("trips")\n'
+        "db.execute(\"INSERT (:Person {name: 'Alix'})-[:KNOWS]->(:Person {name: 'Gus'})\")\n"
+        "db.wal_checkpoint()\n"
+        "db.execute(\"INSERT (:Person {name: 'Vincent'})\")",
+    )
+    for _ in range(2):
+        crash_after(path, "pass")
+
+    for opener in (GrafeoDB.open_read_only, GrafeoDB):
+        db = opener(path)
+        assert knows(db) == [], "the default graph holds none of them"
+        db.set_graph("trips")
+        assert knows(db) == [("Alix", "Gus")]
+        people = db.execute("MATCH (p:Person) RETURN p.name AS name ORDER BY name")
+        assert [row["name"] for row in people] == ["Alix", "Gus", "Vincent"]
+        db.close()
+
+
 def test_an_edge_deleted_after_the_checkpoint_stays_deleted(tmp_path):
     path = str(tmp_path / "server.grafeo")
     crash_after(

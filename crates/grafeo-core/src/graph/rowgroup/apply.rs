@@ -35,7 +35,7 @@ use super::checkpoint::Marks;
 use super::column::Columns;
 use super::versions::VECTOR_ROWS;
 use super::{
-    ABSENT, Adjacent, Inner, PENDING, ROWS_PER_GROUP, Read, RowGroupStore, label_ids, locate,
+    ABSENT, Adjacent, Inner, PENDING, ROWS_PER_GROUP, Read, RowGroupStore, kept_label_ids, locate,
 };
 use crate::graph::apply::{Applied, ApplyError, BackendTransaction, GraphBackend, Writer};
 
@@ -780,9 +780,10 @@ impl Inner {
         let version = match mode.keeps(created) {
             Some((stamp, snapshot)) => {
                 let labels = &group.labels;
-                if group.label_updates.keep(row, stamp, snapshot, || {
-                    label_ids(labels, row).into_boxed_slice()
-                }) {
+                if group
+                    .label_updates
+                    .keep(row, stamp, snapshot, || kept_label_ids(labels, row))
+                {
                     PendingVersion::Created
                 } else {
                     PendingVersion::Replaced

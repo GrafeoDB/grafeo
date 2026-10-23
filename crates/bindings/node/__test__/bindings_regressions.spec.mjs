@@ -3,17 +3,32 @@
 // - #638: a property index survives a close and a reopen, and is used;
 // - #245: setSchema of a missing schema throws and keeps the schema;
 // - #268 and #335: nodes and edges in results carry their values, an edge
-//   its type and stored endpoints, and ORDER BY ... LIMIT returns the node;
+//   its type and stored endpoints (GQL and Cypher), and ORDER BY ... LIMIT
+//   returns the node;
 // - #302: nodes and edges written after compact() are visible, also after
 //   a reopen.
 
+import { spawnSync } from 'node:child_process'
 import { mkdtempSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { join, dirname } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { describe, it, expect } from 'vitest'
 import { GrafeoDB } from '../grafeo.js'
 
 const tempPath = (name) => join(mkdtempSync(join(tmpdir(), 'grafeo-node-')), name)
+const here = dirname(fileURLToPath(import.meta.url))
+
+// Opens `path` with `opener` ('open' or 'openReadOnly') in a child Node.js
+// process: its exit status and error output.
+function openInAnotherProcess(path, opener) {
+  const script = `
+    const { GrafeoDB } = require(${JSON.stringify(join(here, '..', 'grafeo.js'))})
+    const db = GrafeoDB.${opener}(${JSON.stringify(path)})
+    db.close()
+  `
+  return spawnSync(process.execPath, ['-e', script], { encoding: 'utf8' })
+}
 
 async function rows(db, query) {
   return (await db.execute(query)).toArray()
@@ -30,6 +45,23 @@ describe('one writer per database file (#405)', () => {
       const first = GrafeoDB.create(path)
       await first.execute("INSERT (:Person {name: 'A'})")
       expect(() => GrafeoDB.open(path)).toThrow(/locked/)
+      await first.execute("INSERT (:Person {name: 'B'})")
+      first.close()
+
+      const reopened = GrafeoDB.open(path)
+      expect(await names(reopened)).toEqual(['A', 'B'])
+      reopened.close()
+    })
+
+    it(`refuses an open from another process, read-only too (${name})`, async () => {
+      const path = tempPath(name)
+      const first = GrafeoDB.create(path)
+      await first.execute("INSERT (:Person {name: 'A'})")
+      for (const opener of ['open', 'openReadOnly']) {
+        const child = openInAnotherProcess(path, opener)
+        expect(child.status, `${opener} opened a locked file`).not.toBe(0)
+        expect(child.stderr).toMatch(/locked/)
+      }
       await first.execute("INSERT (:Person {name: 'B'})")
       first.close()
 
@@ -67,21 +99,26 @@ describe('setSchema (#245)', () => {
 })
 
 describe('nodes and edges in results (#268, #335)', () => {
-  for (const query of [
-    "MATCH (a:Person {name: 'Alix'})-[r:KNOWS]->(b) RETURN a, r, b",
-    "MATCH (b)<-[r:KNOWS]-(a:Person {name: 'Alix'}) RETURN a, r, b",
+  for (const [language, run] of [
+    ['GQL', (db, query) => db.execute(query)],
+    ['Cypher', (db, query) => db.executeCypher(query)],
   ]) {
-    it(`an edge names its type and stored endpoints: ${query}`, async () => {
-      const db = GrafeoDB.create()
-      await db.execute("INSERT (:Person {name: 'Alix'})-[:KNOWS {since: 2020}]->(:Person {name: 'Gus'})")
-      const result = await rows(db, query)
-      expect(result).toHaveLength(1)
-      const { a, r, b } = result[0]
-      expect([a.name, a._labels]).toEqual(['Alix', ['Person']])
-      expect([b.name, b._labels]).toEqual(['Gus', ['Person']])
-      expect([r._type, r.since]).toEqual(['KNOWS', 2020])
-      expect([r._source, r._target]).toEqual([a._id, b._id])
-    })
+    for (const query of [
+      "MATCH (a:Person {name: 'Alix'})-[r:KNOWS]->(b) RETURN a, r, b",
+      "MATCH (b)<-[r:KNOWS]-(a:Person {name: 'Alix'}) RETURN a, r, b",
+    ]) {
+      it(`an edge names its type and stored endpoints (${language}): ${query}`, async () => {
+        const db = GrafeoDB.create()
+        await db.execute("INSERT (:Person {name: 'Alix'})-[:KNOWS {since: 2020}]->(:Person {name: 'Gus'})")
+        const result = (await run(db, query)).toArray()
+        expect(result).toHaveLength(1)
+        const { a, r, b } = result[0]
+        expect([a.name, a._labels]).toEqual(['Alix', ['Person']])
+        expect([b.name, b._labels]).toEqual(['Gus', ['Person']])
+        expect([r._type, r.since]).toEqual(['KNOWS', 2020])
+        expect([r._source, r._target]).toEqual([a._id, b._id])
+      })
+    }
   }
 
   it('ORDER BY ... LIMIT returns the nodes', async () => {

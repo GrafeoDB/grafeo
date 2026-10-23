@@ -1,11 +1,12 @@
 {
   "name": "@grafeo-db/js",
-  "version": "0.6.0-beta.1",
+  "version": "0.6.0",
   "description": "Node.js/TypeScript bindings for Grafeo - a high-performance embeddable graph database",
   "main": "grafeo.js",
   "types": "grafeo.d.ts",
   "napi": {
     "binaryName": "grafeo",
+    "dtsHeaderFile": "dts-header.d.ts",
     "targets": [
       "x86_64-apple-darwin",
       "x86_64-pc-windows-msvc",
@@ -23,12 +24,12 @@
     "grafeo.d.ts"
   ],
   "optionalDependencies": {
-    "@grafeo-db/js-darwin-x64": "0.6.0-beta.1",
-    "@grafeo-db/js-win32-x64-msvc": "0.6.0-beta.1",
-    "@grafeo-db/js-linux-x64-gnu": "0.6.0-beta.1",
-    "@grafeo-db/js-darwin-arm64": "0.6.0-beta.1",
-    "@grafeo-db/js-linux-arm64-gnu": "0.6.0-beta.1",
-    "@grafeo-db/js-linux-arm64-musl": "0.6.0-beta.1"
+    "@grafeo-db/js-darwin-x64": "0.6.0",
+    "@grafeo-db/js-win32-x64-msvc": "0.6.0",
+    "@grafeo-db/js-linux-x64-gnu": "0.6.0",
+    "@grafeo-db/js-darwin-arm64": "0.6.0",
+    "@grafeo-db/js-linux-arm64-gnu": "0.6.0",
+    "@grafeo-db/js-linux-arm64-musl": "0.6.0"
   },
   "keywords": [
     "graph",

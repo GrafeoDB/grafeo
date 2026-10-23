@@ -1,9 +1,10 @@
 //! The order of RDF terms in SPARQL `ORDER BY` (SPARQL 1.1 section 15.1).
 
 use std::cmp::Ordering;
+use std::sync::Arc;
 
 use super::rdf::{Literal, Term};
-use super::{Date, Decimal, ZonedDatetime};
+use super::{Date, Decimal, TermId, Value, ZonedDatetime};
 
 const XSD_FLOAT: &str = "http://www.w3.org/2001/XMLSchema#float";
 const XSD_DATE: &str = "http://www.w3.org/2001/XMLSchema#date";
@@ -57,7 +58,7 @@ fn term_rank(term: &Term) -> u8 {
 /// A number, kept exact: a decimal where it fits one, otherwise an integer
 /// of 39 digits or a float (an infinity, NaN, or a float whose value no
 /// decimal of 38 digits holds).
-#[derive(Clone, Copy)]
+#[derive(Debug, Clone, Copy)]
 enum Number {
     Decimal(Decimal),
     Integer(i128),
@@ -65,8 +66,8 @@ enum Number {
 }
 
 impl Number {
-    fn of_integer(integer: i128) -> Self {
-        Decimal::new(integer, 0).map_or(Self::Integer(integer), Self::Decimal)
+    const fn of_integer(integer: i128) -> Self {
+        Self::Integer(integer)
     }
 
     fn of_float(float: f64) -> Self {
@@ -87,13 +88,18 @@ impl Number {
             (Self::Integer(x), Self::Float(y)) => compare_integer_float(x, y),
             (Self::Float(x), Self::Integer(y)) => compare_integer_float(y, x).reverse(),
             // An integer that is no decimal has 39 digits: beyond every decimal
-            (Self::Decimal(_), Self::Integer(y)) => 0.cmp(&y),
-            (Self::Integer(x), Self::Decimal(_)) => x.cmp(&0),
+            (Self::Decimal(x), Self::Integer(y)) => {
+                Decimal::new(y, 0).map_or_else(|_| 0.cmp(&y), |y| x.cmp(&y))
+            }
+            (Self::Integer(x), Self::Decimal(y)) => {
+                Decimal::new(x, 0).map_or_else(|_| x.cmp(&0), |x| x.cmp(&y))
+            }
         }
     }
 }
 
 /// A literal's value, for the literals whose value orders them.
+#[derive(Debug, Clone)]
 enum LiteralKey {
     Number(Number),
     DateTime(ZonedDatetime),
@@ -129,6 +135,20 @@ impl LiteralKey {
         Self::Other
     }
 
+    /// The key of a literal whose value [`Literal::native_value`] gives as
+    /// `native`: the same key [`of`](Self::of) parses from its text.
+    fn of_native(native: &Value) -> Self {
+        match native {
+            Value::Int64(integer) => Self::Number(Number::of_integer(i128::from(*integer))),
+            Value::Decimal(decimal) => Self::Number(Number::Decimal(*decimal)),
+            Value::Float64(float) => Self::Number(Number::of_float(*float)),
+            Value::ZonedDatetime(datetime) => Self::DateTime(*datetime),
+            Value::Date(date) => Self::Date(*date),
+            // A boolean, a string, a local dateTime, a time or a duration
+            _ => Self::Other,
+        }
+    }
+
     fn group(&self) -> u8 {
         match self {
             Self::Number(_) => 0,
@@ -146,20 +166,150 @@ fn float_key(text: &str) -> LiteralKey {
 }
 
 fn compare_literals(a: &Literal, b: &Literal) -> Ordering {
-    let (key_a, key_b) = (LiteralKey::of(a), LiteralKey::of(b));
+    compare_literal_keys(a, &LiteralKey::of(a), b, &LiteralKey::of(b))
+}
+
+fn compare_literal_keys(
+    a: &Literal,
+    key_a: &LiteralKey,
+    b: &Literal,
+    key_b: &LiteralKey,
+) -> Ordering {
+    compare_values(key_a, key_b).then_with(|| compare_lexical(a, b))
+}
+
+/// The group and the value of two literals' keys.
+fn compare_values(key_a: &LiteralKey, key_b: &LiteralKey) -> Ordering {
     key_a
         .group()
         .cmp(&key_b.group())
-        .then_with(|| match (&key_a, &key_b) {
+        .then_with(|| match (key_a, key_b) {
             (LiteralKey::Number(x), LiteralKey::Number(y)) => x.order(*y),
             (LiteralKey::DateTime(x), LiteralKey::DateTime(y)) => x.cmp(y),
             (LiteralKey::Date(x), LiteralKey::Date(y)) => x.cmp(y),
             _ => Ordering::Equal,
         })
-        .then_with(|| a.value().cmp(b.value()))
+}
+
+/// The tie of two literals of equal values: lexical form, datatype, tag.
+fn compare_lexical(a: &Literal, b: &Literal) -> Ordering {
+    a.value()
+        .cmp(b.value())
         .then_with(|| a.datatype().cmp(b.datatype()))
         .then_with(|| a.language().cmp(&b.language()))
 }
+
+/// A term's place in the SPARQL order ([`sparql_order`]), with a literal's
+/// value parsed once: a sort of many terms computes each term's key once,
+/// where comparing terms parses both literals at every comparison.
+#[derive(Debug, Clone)]
+pub struct SparqlOrderKey {
+    source: KeySource,
+    literal: Option<LiteralKey>,
+}
+
+/// What a key orders: a term, or a literal an id inlines (whose text is made
+/// only to break a tie of equal values).
+#[derive(Debug, Clone)]
+enum KeySource {
+    Term(Arc<Term>),
+    Inline(TermId),
+}
+
+impl SparqlOrderKey {
+    /// The key of `term`.
+    #[must_use]
+    pub fn new(term: Arc<Term>) -> Self {
+        let literal = term.as_literal().map(LiteralKey::of);
+        Self {
+            source: KeySource::Term(term),
+            literal,
+        }
+    }
+
+    /// The key of `term`, whose value [`Literal::native_value`] gives as
+    /// `native` (computed once, as a dictionary keeps it): a literal with a
+    /// value is keyed without parsing its text again.
+    #[must_use]
+    pub fn with_native(term: Arc<Term>, native: Option<&Value>) -> Self {
+        let literal = term.as_literal().map(|literal| match native {
+            Some(native) => LiteralKey::of_native(native),
+            None => LiteralKey::of(literal),
+        });
+        Self {
+            source: KeySource::Term(term),
+            literal,
+        }
+    }
+
+    /// The key of the literal an inlined id holds, without making the term;
+    /// `None` for a dictionary or query id.
+    #[must_use]
+    pub fn of_inline(id: TermId) -> Option<Self> {
+        let native = id.inline_value()?;
+        Some(Self {
+            source: KeySource::Inline(id),
+            literal: Some(LiteralKey::of_native(&native)),
+        })
+    }
+
+    /// Runs `f` with the term, made for an inlined id.
+    fn with_term<R>(&self, f: impl FnOnce(&Term) -> R) -> R {
+        match &self.source {
+            KeySource::Term(term) => f(term),
+            KeySource::Inline(id) => f(&id
+                .inline_term()
+                .expect("a key of an inlined id has its term")),
+        }
+    }
+
+    fn rank(&self) -> u8 {
+        match &self.source {
+            KeySource::Term(term) => term_rank(term),
+            KeySource::Inline(_) => 2,
+        }
+    }
+}
+
+impl Ord for SparqlOrderKey {
+    /// The order [`sparql_order`] gives the two terms.
+    fn cmp(&self, other: &Self) -> Ordering {
+        self.rank().cmp(&other.rank()).then_with(|| {
+            if let (Some(key_a), Some(key_b)) = (&self.literal, &other.literal) {
+                return compare_values(key_a, key_b).then_with(|| {
+                    self.with_term(|a| {
+                        other.with_term(|b| match (a, b) {
+                            (Term::Literal(x), Term::Literal(y)) => compare_lexical(x, y),
+                            _ => Ordering::Equal,
+                        })
+                    })
+                });
+            }
+            self.with_term(|a| {
+                other.with_term(|b| match (a, b) {
+                    (Term::BlankNode(x), Term::BlankNode(y)) => x.id().cmp(y.id()),
+                    (Term::Iri(x), Term::Iri(y)) => x.as_str().cmp(y.as_str()),
+                    (Term::Literal(x), Term::Literal(y)) => compare_literals(x, y),
+                    _ => Ordering::Equal,
+                })
+            })
+        })
+    }
+}
+
+impl PartialOrd for SparqlOrderKey {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl PartialEq for SparqlOrderKey {
+    fn eq(&self, other: &Self) -> bool {
+        self.cmp(other).is_eq()
+    }
+}
+
+impl Eq for SparqlOrderKey {}
 
 /// Floats numerically, NaN after every number; `-0.0` equals `0.0`.
 fn compare_floats(a: f64, b: f64) -> Ordering {
@@ -197,7 +347,7 @@ fn compare_integer_float(integer: i128, float: f64) -> Ordering {
 
 #[cfg(test)]
 mod tests {
-    use super::sparql_order;
+    use super::{SparqlOrderKey, sparql_order};
     use crate::types::rdf::{Literal, Term};
     use std::cmp::Ordering;
 
@@ -420,5 +570,72 @@ mod tests {
             ])),
             vec!["9", "9.0", "9E0"]
         );
+    }
+
+    /// Keys order every pair of terms as `sparql_order` does.
+    #[test]
+    fn order_keys_agree_with_sparql_order() {
+        let terms = vec![
+            Term::blank("b1"),
+            Term::blank("a0"),
+            Term::iri("http://example.org/b"),
+            Term::iri("http://example.org/a"),
+            typed("10", "integer"),
+            typed("9", "integer"),
+            typed("09", "integer"),
+            typed("2.50", "decimal"),
+            typed("2.5", "decimal"),
+            typed("1e1", "double"),
+            typed("NaN", "double"),
+            typed("abc", "integer"),
+            typed("2026-01-15", "date"),
+            typed("2026-01-15T10:30:00Z", "dateTime"),
+            Term::literal("Alix"),
+            Term::lang_literal("Alix", "en"),
+            typed("x", "http://example.org/dt"),
+            typed("INF", "double"),
+            typed("-INF", "double"),
+            typed("+5", "integer"),
+            typed(".5", "decimal"),
+            typed("1.5e0", "decimal"),
+            typed("123456789012345678901234567890", "integer"),
+            typed("1234567890123456789012345678901234567890", "integer"),
+            typed("true", "boolean"),
+            typed("2026-01-15T10:30:00", "dateTime"),
+            typed("10:30:00", "time"),
+            typed("5", "int"),
+        ];
+        let parsed: Vec<SparqlOrderKey> = terms
+            .iter()
+            .map(|term| SparqlOrderKey::new(std::sync::Arc::new(term.clone())))
+            .collect();
+        let native: Vec<SparqlOrderKey> = terms
+            .iter()
+            .map(|term| {
+                let value = term.as_literal().and_then(Literal::native_value);
+                SparqlOrderKey::with_native(std::sync::Arc::new(term.clone()), value.as_ref())
+            })
+            .collect();
+        let inline: Vec<SparqlOrderKey> = terms
+            .iter()
+            .map(|term| {
+                let id = super::super::TermId::inline(term);
+                id.and_then(SparqlOrderKey::of_inline)
+                    .unwrap_or_else(|| SparqlOrderKey::new(std::sync::Arc::new(term.clone())))
+            })
+            .collect();
+        assert!(
+            terms
+                .iter()
+                .any(|term| super::super::TermId::inline(term).is_some()),
+            "some keys are of inlined ids"
+        );
+        for keys in [&parsed, &native, &inline] {
+            for (a, key_a) in terms.iter().zip(keys) {
+                for (b, key_b) in terms.iter().zip(keys) {
+                    assert_eq!(key_a.cmp(key_b), sparql_order(a, b), "{a} vs {b}");
+                }
+            }
+        }
     }
 }

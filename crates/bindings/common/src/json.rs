@@ -7,6 +7,7 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
+use grafeo_common::types::rdf::{Literal, Term, UnsupportedTermKind};
 use grafeo_common::types::{PropertyKey, Value};
 
 /// Convert a `serde_json::Value` to a Grafeo [`Value`].
@@ -53,12 +54,20 @@ pub fn json_to_value(v: &serde_json::Value) -> Result<Value, String> {
 /// The value a tagged map stands for, the encoding JSON and JavaScript use
 /// for the types they have no literal for: `{ "$timestamp_us": 1700000000000000 }`
 /// (used by the C binding), `{ "$date": "2024-01-15" }`, `{ "$time": ... }`,
-/// `{ "$duration": ... }`, `{ "$zoned_datetime": ... }`, and
-/// `{ "$decimal": "1.50" }` as the map's only key (with other keys it is a
-/// map). `None` when the map is none of these, or its text does not parse.
+/// `{ "$duration": ... }`, `{ "$zoned_datetime": ... }`,
+/// `{ "$decimal": "1.50" }` and an RDF term `{ "$term": { "type": "uri",
+/// "value": ... } }` (see [`term_to_json`]), these two as the map's only key
+/// (with other keys it is a map). `None` when the map is none of these, or
+/// its content does not read.
 #[must_use]
 pub fn tagged_value(map: &BTreeMap<PropertyKey, Value>) -> Option<Value> {
     let text = |key: &str| map.get(&PropertyKey::new(key)).and_then(Value::as_str);
+    if map.len() == 1
+        && let Some(Value::Map(term)) = map.get(&PropertyKey::new(TERM_TAG))
+        && let Some(term) = json_term(term)
+    {
+        return Some(Value::RdfTerm(Arc::new(term)));
+    }
     if let Some(Value::Int64(micros)) = map.get(&PropertyKey::new("$timestamp_us")) {
         return Some(Value::Timestamp(
             grafeo_common::types::Timestamp::from_micros(*micros),
@@ -85,14 +94,114 @@ pub fn tagged_value(map: &BTreeMap<PropertyKey, Value>) -> Option<Value> {
     None
 }
 
+/// The key of the tag an RDF term travels in as JSON (see [`term_to_json`]).
+pub const TERM_TAG: &str = "$term";
+
+/// A language tag as a term holds it: in lowercase, as tags compare without
+/// case (RDF 1.1 Concepts, section 3.3).
+fn language_tag(tag: &str) -> String {
+    tag.to_lowercase()
+}
+
+/// The RDF term the content of a `$term` tag stands for: `type` (`uri`,
+/// `literal` or `bnode`) and `value`, and for a literal an optional
+/// `xml:lang` or `datatype`, and no other key.
+fn json_term(map: &BTreeMap<PropertyKey, Value>) -> Option<Term> {
+    let text = |key: &str| map.get(&PropertyKey::new(key)).and_then(Value::as_str);
+    let known = ["type", "value", "xml:lang", "datatype"];
+    if !map.keys().all(|key| known.contains(&key.as_str())) {
+        return None;
+    }
+    let value = text("value")?;
+    Some(match text("type")? {
+        "uri" if map.len() == 2 => Term::iri(value),
+        "bnode" if map.len() == 2 => Term::blank(value),
+        "literal" => match (text("xml:lang"), text("datatype")) {
+            (Some(lang), None) => Term::lang_literal(value, language_tag(lang)),
+            (None, Some(datatype)) => Term::typed_literal(value, datatype),
+            (None, None) if map.len() == 2 => Term::literal(value),
+            _ => return None,
+        },
+        _ => return None,
+    })
+}
+
+/// An RDF term as JSON: the `$term` tag, as the object's only key, holding
+/// the term form of the SPARQL 1.1 Query Results JSON format (section
+/// 3.2.2): `{"$term": {"type": "uri", "value": ...}}`, `{"$term": {"type":
+/// "bnode", "value": <label>}}`, `{"$term": {"type": "literal", "value":
+/// ...}}` with `xml:lang` for a tagged literal and `datatype` for a typed one
+/// other than `xsd:string`. The tag keeps a map that has the SPARQL form's
+/// keys a map, as `$date` and `$decimal` do for their types.
+///
+/// # Errors
+///
+/// [`UnsupportedTermKind`] for a term of a kind this binding does not know.
+pub fn term_to_json(term: &Term) -> Result<serde_json::Value, UnsupportedTermKind> {
+    let term = match term {
+        Term::Iri(iri) => serde_json::json!({ "type": "uri", "value": iri.as_str() }),
+        Term::BlankNode(node) => serde_json::json!({ "type": "bnode", "value": node.id() }),
+        Term::Literal(literal) => match literal.language() {
+            Some(lang) => serde_json::json!({
+                "type": "literal",
+                "value": literal.value(),
+                "xml:lang": lang,
+            }),
+            None if literal.datatype() == Literal::XSD_STRING => {
+                serde_json::json!({ "type": "literal", "value": literal.value() })
+            }
+            None => serde_json::json!({
+                "type": "literal",
+                "value": literal.value(),
+                "datatype": literal.datatype(),
+            }),
+        },
+        other => return Err(UnsupportedTermKind::of(other)),
+    };
+    Ok(serde_json::json!({ TERM_TAG: term }))
+}
+
+/// The RDF term an object in the RDF/JS data model stands for (the form
+/// the Node.js and WASM bindings return terms in, and other libraries make
+/// them in), from its parts: `termType` `NamedNode` or `BlankNode` with a
+/// `value`, or `Literal` with a `value`, a `language` (`""` or none for no
+/// tag) and the `value` of its `datatype`. A literal with a language is a
+/// tagged literal, whatever its datatype, and its tag is kept in lowercase;
+/// one without a datatype is a simple literal. `None` for another
+/// `termType` (`Variable`, `DefaultGraph`, `Quad`).
+#[must_use]
+pub fn rdfjs_term(
+    term_type: &str,
+    value: &str,
+    language: Option<&str>,
+    datatype: Option<&str>,
+) -> Option<Term> {
+    Some(match term_type {
+        "NamedNode" => Term::iri(value),
+        "BlankNode" => Term::blank(value),
+        "Literal" => match (language, datatype) {
+            (Some(lang), _) if !lang.is_empty() => Term::lang_literal(value, language_tag(lang)),
+            (_, Some(datatype)) => Term::typed_literal(value, datatype),
+            _ => Term::literal(value),
+        },
+        _ => return None,
+    })
+}
+
 /// Convert a Grafeo [`Value`] to a `serde_json::Value`.
 ///
 /// Timestamps are encoded as `{ "$timestamp_us": <micros> }`, decimals as
-/// `{ "$decimal": "1.50" }` (the text with its scale).
+/// `{ "$decimal": "1.50" }` (the text with its scale), RDF terms as
+/// `{ "$term": { "type": ..., "value": ... } }` (see [`term_to_json`]).
 /// Bytes are encoded as a JSON array of integers for lossless roundtrip.
 /// Vectors are encoded as a JSON array of floats.
-pub fn value_to_json(v: &Value) -> serde_json::Value {
-    match v {
+///
+/// # Errors
+///
+/// [`UnsupportedTermKind`] for an RDF term of a kind this binding does not
+/// know, also inside a list, a map or a path.
+pub fn value_to_json(v: &Value) -> Result<serde_json::Value, UnsupportedTermKind> {
+    Ok(match v {
         Value::Null => serde_json::Value::Null,
         Value::Bool(b) => serde_json::Value::Bool(*b),
         Value::Int64(i) => serde_json::json!(*i),
@@ -122,12 +231,14 @@ pub fn value_to_json(v: &Value) -> serde_json::Value {
         Value::Duration(d) => serde_json::json!({ "$duration": d.to_string() }),
         Value::ZonedDatetime(zdt) => serde_json::json!({ "$zoned_datetime": zdt.to_string() }),
         Value::Decimal(d) => serde_json::json!({ "$decimal": d.to_string() }),
-        Value::List(items) => serde_json::Value::Array(items.iter().map(value_to_json).collect()),
+        Value::List(items) => {
+            serde_json::Value::Array(items.iter().map(value_to_json).collect::<Result<_, _>>()?)
+        }
         Value::Map(map) => {
-            let obj: serde_json::Map<String, serde_json::Value> = map
+            let obj = map
                 .iter()
-                .map(|(k, v)| (k.as_str().to_string(), value_to_json(v)))
-                .collect();
+                .map(|(k, v)| Ok((k.as_str().to_string(), value_to_json(v)?)))
+                .collect::<Result<serde_json::Map<String, serde_json::Value>, _>>()?;
             serde_json::Value::Object(obj)
         }
         Value::Vector(vec) => {
@@ -136,8 +247,8 @@ pub fn value_to_json(v: &Value) -> serde_json::Value {
         Value::Path { nodes, edges } => {
             serde_json::json!({
                 "$path": {
-                    "nodes": nodes.iter().map(value_to_json).collect::<Vec<_>>(),
-                    "edges": edges.iter().map(value_to_json).collect::<Vec<_>>(),
+                    "nodes": nodes.iter().map(value_to_json).collect::<Result<Vec<_>, _>>()?,
+                    "edges": edges.iter().map(value_to_json).collect::<Result<Vec<_>, _>>()?,
                 }
             })
         }
@@ -164,8 +275,9 @@ pub fn value_to_json(v: &Value) -> serde_json::Value {
                 }
             })
         }
+        Value::RdfTerm(term) => term_to_json(term)?,
         _ => serde_json::Value::String(v.to_string()),
-    }
+    })
 }
 
 /// Convert a JSON params object to a `HashMap<String, Value>`.
@@ -204,6 +316,124 @@ mod tests {
     /// [`super::json_to_value`] for a value that has one.
     fn json_to_value(v: &serde_json::Value) -> Value {
         super::json_to_value(v).unwrap()
+    }
+
+    /// [`super::value_to_json`] for a value of a kind it knows.
+    fn value_to_json(v: &Value) -> serde_json::Value {
+        super::value_to_json(v).unwrap()
+    }
+
+    fn term(term: Term) -> Value {
+        Value::RdfTerm(Arc::new(term))
+    }
+
+    /// Each kind of term as the `$term` tag, and back.
+    #[test]
+    fn rdf_terms_round_trip_as_term_tags() {
+        let xsd_date = "http://www.w3.org/2001/XMLSchema#date";
+        let tagged = |term: serde_json::Value| serde_json::json!({ "$term": term });
+        for (value, json) in [
+            (
+                term(Term::iri("http://example.org/Kraków")),
+                tagged(serde_json::json!({"type": "uri", "value": "http://example.org/Kraków"})),
+            ),
+            (
+                term(Term::blank("b0")),
+                tagged(serde_json::json!({"type": "bnode", "value": "b0"})),
+            ),
+            (
+                term(Term::literal("Apple")),
+                tagged(serde_json::json!({"type": "literal", "value": "Apple"})),
+            ),
+            (
+                term(Term::lang_literal("Pomme", "fr")),
+                tagged(serde_json::json!({"type": "literal", "value": "Pomme", "xml:lang": "fr"})),
+            ),
+            (
+                term(Term::typed_literal("2026-01-15", xsd_date)),
+                tagged(serde_json::json!({
+                    "type": "literal", "value": "2026-01-15", "datatype": xsd_date
+                })),
+            ),
+        ] {
+            assert_eq!(value_to_json(&value), json, "{value}");
+            assert_eq!(json_to_value(&json), value, "{json}");
+        }
+        // A tag is read without the case of its language tag.
+        assert_eq!(
+            json_to_value(&tagged(
+                serde_json::json!({"type": "literal", "value": "Pomme", "xml:lang": "FR"})
+            )),
+            term(Term::lang_literal("Pomme", "fr"))
+        );
+        // A tag with a datatype of xsd:string is the simple literal.
+        assert_eq!(
+            json_to_value(&tagged(serde_json::json!({
+                "type": "literal", "value": "Apple",
+                "datatype": "http://www.w3.org/2001/XMLSchema#string"
+            }))),
+            term(Term::literal("Apple"))
+        );
+    }
+
+    /// A map with the keys of a SPARQL JSON term is a map: only the `$term`
+    /// tag makes a term, and a tag with other keys, another type or other
+    /// content is a map too.
+    #[test]
+    fn maps_shaped_like_terms_stay_maps() {
+        for json in [
+            serde_json::json!({"type": "uri", "value": "http://example.org/Paris"}),
+            serde_json::json!({"type": "literal", "value": "Pomme", "xml:lang": "fr"}),
+            serde_json::json!({"type": "bnode", "value": "b0"}),
+            serde_json::json!({"$term": {"type": "uri", "value": "x"}, "other": 1}),
+            serde_json::json!({"$term": {"type": "page", "value": "x"}}),
+            serde_json::json!({"$term": {"type": "uri", "value": "x", "xml:lang": "en"}}),
+            serde_json::json!({"$term": {"type": "uri", "value": "x", "extra": 1}}),
+            serde_json::json!({"$term": "http://example.org/Paris"}),
+        ] {
+            let value = json_to_value(&json);
+            assert!(matches!(value, Value::Map(_)), "{json}");
+            assert_eq!(value_to_json(&value), json, "{json}");
+        }
+    }
+
+    /// An RDF/JS object (the Node.js and WASM result form) reads as its term.
+    #[test]
+    fn rdf_js_objects_read_as_terms() {
+        let xsd = |name: &str| format!("http://www.w3.org/2001/XMLSchema#{name}");
+        let lang_string = "http://www.w3.org/1999/02/22-rdf-syntax-ns#langString";
+        assert_eq!(
+            rdfjs_term("NamedNode", "http://example.org/a", None, None),
+            Some(Term::iri("http://example.org/a"))
+        );
+        assert_eq!(
+            rdfjs_term("BlankNode", "b0", None, None),
+            Some(Term::blank("b0"))
+        );
+        assert_eq!(
+            rdfjs_term("Literal", "x", Some(""), Some(&xsd("string"))),
+            Some(Term::literal("x"))
+        );
+        assert_eq!(
+            rdfjs_term("Literal", "x", None, None),
+            Some(Term::literal("x"))
+        );
+        assert_eq!(
+            rdfjs_term("Literal", "x", Some("nl"), Some(lang_string)),
+            Some(Term::lang_literal("x", "nl"))
+        );
+        // A tag is kept in lowercase, as tags compare without case.
+        assert_eq!(
+            rdfjs_term("Literal", "x", Some("en-GB"), Some(lang_string)),
+            Some(Term::lang_literal("x", "en-gb"))
+        );
+        assert_eq!(
+            rdfjs_term("Literal", "x", Some(""), Some(&xsd("integer"))),
+            Some(Term::typed_literal("x", xsd("integer")))
+        );
+        for term_type in ["Quad", "Variable", "DefaultGraph"] {
+            assert_eq!(rdfjs_term(term_type, "x", None, None), None, "{term_type}");
+        }
     }
 
     /// JSON text read as the C binding and LOAD DATA read it.

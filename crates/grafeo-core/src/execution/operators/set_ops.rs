@@ -3,7 +3,7 @@
 //! These operators implement the GQL composite query operations for
 //! combining result sets with set semantics.
 
-use std::collections::HashSet;
+use grafeo_common::utils::hash::FxHashSet as HashSet;
 
 use grafeo_common::types::{LogicalType, Value};
 
@@ -97,7 +97,7 @@ impl ExceptOperator {
         } else {
             // EXCEPT DISTINCT: remove all matching rows
             let right_set: HashSet<RowKey> = right_rows.into_iter().map(|row| row.key).collect();
-            let mut seen = HashSet::new();
+            let mut seen = HashSet::default();
             let result: Vec<Row> = left_rows
                 .into_iter()
                 .filter(|row| !right_set.contains(&row.key) && seen.insert(row.key.clone()))
@@ -190,7 +190,7 @@ impl IntersectOperator {
         } else {
             // INTERSECT DISTINCT: rows present in both, deduplicated
             let right_set: HashSet<RowKey> = right_rows.into_iter().map(|row| row.key).collect();
-            let mut seen = HashSet::new();
+            let mut seen = HashSet::default();
             let result: Vec<Row> = left_rows
                 .into_iter()
                 .filter(|row| right_set.contains(&row.key) && seen.insert(row.key.clone()))

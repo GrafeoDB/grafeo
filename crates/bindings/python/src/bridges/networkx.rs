@@ -217,10 +217,10 @@ impl PyNetworkXAdapter {
                 // Add properties (skip _networkx_id from exported attrs)
                 for (key, value) in &node.properties {
                     if key.as_str() == "_networkx_id" {
-                        nx_id = crate::types::PyValue::to_py(value, py);
+                        nx_id = crate::types::PyValue::to_py(value, py)?;
                         continue;
                     }
-                    attrs.set_item(key.as_str(), crate::types::PyValue::to_py(value, py))?;
+                    attrs.set_item(key.as_str(), crate::types::PyValue::to_py(value, py)?)?;
                 }
 
                 id_map.insert(node_id.0, nx_id.clone_ref(py));
@@ -241,7 +241,7 @@ impl PyNetworkXAdapter {
 
                     // Add properties
                     for (key, value) in &edge.properties {
-                        attrs.set_item(key.as_str(), crate::types::PyValue::to_py(value, py))?;
+                        attrs.set_item(key.as_str(), crate::types::PyValue::to_py(value, py)?)?;
                     }
 
                     let src_nx = id_map.get(&node_id.0).map_or_else(
@@ -597,7 +597,7 @@ impl PyNetworkXAdapter {
                 if let Some(edge) = raised(store.edge(edge_id, view))? {
                     attrs.set_item("type", edge.edge_type.to_string())?;
                     for (key, value) in &edge.properties {
-                        attrs.set_item(key.as_str(), crate::types::PyValue::to_py(value, py))?;
+                        attrs.set_item(key.as_str(), crate::types::PyValue::to_py(value, py)?)?;
                     }
                 }
                 inner.set_item(neighbor.0, attrs)?;
@@ -642,7 +642,7 @@ impl PyNetworkXAdapter {
                 let labels: Vec<String> = node.labels.iter().map(|s| s.to_string()).collect();
                 attrs.set_item("labels", labels)?;
                 for (key, value) in &node.properties {
-                    attrs.set_item(key.as_str(), crate::types::PyValue::to_py(value, py))?;
+                    attrs.set_item(key.as_str(), crate::types::PyValue::to_py(value, py)?)?;
                 }
                 graph.call_method("add_node", (node_id,), Some(&attrs))?;
             }
@@ -658,7 +658,7 @@ impl PyNetworkXAdapter {
                     let attrs = PyDict::new(py);
                     attrs.set_item("type", edge.edge_type.to_string())?;
                     for (key, value) in &edge.properties {
-                        attrs.set_item(key.as_str(), crate::types::PyValue::to_py(value, py))?;
+                        attrs.set_item(key.as_str(), crate::types::PyValue::to_py(value, py)?)?;
                     }
                     graph.call_method("add_edge", (node_id, neighbor.0), Some(&attrs))?;
                 }

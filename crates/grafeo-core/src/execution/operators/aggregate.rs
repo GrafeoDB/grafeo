@@ -7,8 +7,8 @@
 //! Shared types ([`AggregateFunction`], [`AggregateExpr`], [`HashableValue`]) live in
 //! the [`super::accumulator`] module.
 
+use grafeo_common::utils::hash::FxHashSet as HashSet;
 use indexmap::IndexMap;
-use std::collections::HashSet;
 
 use grafeo_common::types::{Decimal, Duration, LogicalType, Value};
 
@@ -56,11 +56,6 @@ pub enum AggregateState {
     Min(Option<Value>),
     /// Max state: the greatest value, in the order of ORDER BY.
     Max(Option<Value>),
-    /// SPARQL MIN state: RDF literals held as text, where two that read as
-    /// numbers compare by those numbers (see [`AggregateExpr::rdf_literals`]).
-    MinOfRdfLiterals(Option<Value>),
-    /// SPARQL MAX state, see [`AggregateState::MinOfRdfLiterals`].
-    MaxOfRdfLiterals(Option<Value>),
     /// First state.
     First(Option<Value>),
     /// Last state.
@@ -117,10 +112,14 @@ pub enum AggregateState {
     /// fails with this message as a type error (22G03), as openCypher makes
     /// it.
     InvalidOperand(String),
-    /// SPARQL's SUM and AVG (see [`AggregateExpr::rdf_literals`]): a literal
-    /// held as text that reads as a number is that number, and any other
-    /// value that is neither a number nor a duration is skipped.
-    ReadsNumericText(Box<AggregateState>),
+    /// SPARQL's SUM and AVG (see [`AggregateExpr::rdf_literals`]): the
+    /// numbers go to `inner`, an unbound operand is skipped, and an operand
+    /// that is no number is an error that makes the group's result unbound
+    /// ([`SparqlError`](Self::SparqlError)), as SPARQL 1.1 section 18.5
+    /// defines aggregate errors.
+    SparqlNumbers(Box<AggregateState>),
+    /// A SPARQL SUM or AVG that met an error: its result is unbound.
+    SparqlError,
 }
 
 /// The decimal of a float sum that holds a whole number exactly (a sum of
@@ -159,7 +158,7 @@ fn exact_whole(sum: f64) -> Option<Decimal> {
 
 impl AggregateState {
     /// Creates the initial state of `expr`'s aggregate: [`new`](Self::new)
-    /// with its parameters, and MIN and MAX of RDF literals for SPARQL.
+    /// with its parameters, and SPARQL's SUM and AVG for RDF operands.
     #[must_use]
     pub fn for_expr(expr: &AggregateExpr) -> Self {
         let state = Self::new(
@@ -169,21 +168,19 @@ impl AggregateState {
             expr.separator.as_deref(),
         );
         match state {
-            AggregateState::Min(min) if expr.rdf_literals => AggregateState::MinOfRdfLiterals(min),
-            AggregateState::Max(max) if expr.rdf_literals => AggregateState::MaxOfRdfLiterals(max),
             // SPARQL's AVG divides by XPath's rules: the average of integers
             // and decimals is a decimal (a double operand makes it a double).
-            AggregateState::Avg(..) if expr.rdf_literals => AggregateState::ReadsNumericText(
+            AggregateState::Avg(..) if expr.rdf_literals => AggregateState::SparqlNumbers(
                 Box::new(AggregateState::AvgDecimal(Some(Decimal::from_i64(0)), 0)),
             ),
             AggregateState::AvgDistinct(..) if expr.rdf_literals => {
-                AggregateState::ReadsNumericText(Box::new(AggregateState::Distinct {
-                    seen: HashSet::new(),
+                AggregateState::SparqlNumbers(Box::new(AggregateState::Distinct {
+                    seen: HashSet::default(),
                     inner: Box::new(AggregateState::AvgDecimal(Some(Decimal::from_i64(0)), 0)),
                 }))
             }
             AggregateState::AvgDecimal(..) if expr.rdf_literals => {
-                AggregateState::ReadsNumericText(Box::new(state))
+                AggregateState::SparqlNumbers(Box::new(state))
             }
             state
                 if expr.rdf_literals
@@ -192,7 +189,7 @@ impl AggregateState {
                         AggregateFunction::Sum | AggregateFunction::Avg
                     ) =>
             {
-                AggregateState::ReadsNumericText(Box::new(state))
+                AggregateState::SparqlNumbers(Box::new(state))
             }
             state => state,
         }
@@ -221,7 +218,7 @@ impl AggregateState {
             )
         {
             AggregateState::Distinct {
-                seen: HashSet::new(),
+                seen: HashSet::default(),
                 inner: Box::new(state),
             }
         } else {
@@ -244,19 +241,23 @@ impl AggregateState {
                 AggregateState::Count(0)
             }
             (AggregateFunction::Count | AggregateFunction::CountNonNull, true) => {
-                AggregateState::CountDistinct(0, HashSet::new())
+                AggregateState::CountDistinct(0, HashSet::default())
             }
             (AggregateFunction::Sum, false) => AggregateState::SumInt(0, 0),
-            (AggregateFunction::Sum, true) => AggregateState::SumIntDistinct(0, 0, HashSet::new()),
+            (AggregateFunction::Sum, true) => {
+                AggregateState::SumIntDistinct(0, 0, HashSet::default())
+            }
             (AggregateFunction::Avg, false) => AggregateState::Avg(0.0, 0),
-            (AggregateFunction::Avg, true) => AggregateState::AvgDistinct(0.0, 0, HashSet::new()),
+            (AggregateFunction::Avg, true) => {
+                AggregateState::AvgDistinct(0.0, 0, HashSet::default())
+            }
             (AggregateFunction::Min, _) => AggregateState::Min(None), // MIN/MAX don't need distinct
             (AggregateFunction::Max, _) => AggregateState::Max(None),
             (AggregateFunction::First, _) => AggregateState::First(None),
             (AggregateFunction::Last, _) => AggregateState::Last(None),
             (AggregateFunction::Collect, false) => AggregateState::Collect(Vec::new()),
             (AggregateFunction::Collect, true) => {
-                AggregateState::CollectDistinct(Vec::new(), HashSet::new())
+                AggregateState::CollectDistinct(Vec::new(), HashSet::default())
             }
             // Statistical functions (Welford's algorithm for online computation)
             (AggregateFunction::StdDev, _) => AggregateState::StdDev {
@@ -283,7 +284,7 @@ impl AggregateState {
             (AggregateFunction::GroupConcat, true) => AggregateState::GroupConcatDistinct(
                 Vec::new(),
                 separator.unwrap_or(" ").to_string(),
-                HashSet::new(),
+                HashSet::default(),
             ),
             (AggregateFunction::Sample, _) => AggregateState::Sample(None),
             // Binary set functions (all share the same Bivariate state)
@@ -526,24 +527,6 @@ impl AggregateState {
                     *max = Some(v);
                 }
             }
-            AggregateState::MinOfRdfLiterals(min) => {
-                if let Some(v) = value
-                    && min.as_ref().is_none_or(|current| {
-                        compare_values(&v, current) == Some(std::cmp::Ordering::Less)
-                    })
-                {
-                    *min = Some(v);
-                }
-            }
-            AggregateState::MaxOfRdfLiterals(max) => {
-                if let Some(v) = value
-                    && max.as_ref().is_none_or(|current| {
-                        compare_values(&v, current) == Some(std::cmp::Ordering::Greater)
-                    })
-                {
-                    *max = Some(v);
-                }
-            }
             AggregateState::First(first) => {
                 if first.is_none() {
                     *first = value;
@@ -628,18 +611,13 @@ impl AggregateState {
                 }
             }
             AggregateState::InvalidOperand(_) => {}
-            AggregateState::ReadsNumericText(inner) => match value {
-                Some(Value::String(ref text)) => {
-                    if let Some(number) = value_to_f64(&Value::String(text.clone())) {
-                        inner.update(Some(Value::Float64(number)));
-                    }
+            AggregateState::SparqlNumbers(inner) => match value {
+                Some(Value::Int64(_) | Value::Float64(_) | Value::Decimal(_)) | None => {
+                    inner.update(value);
                 }
-                Some(
-                    Value::Int64(_) | Value::Float64(_) | Value::Decimal(_) | Value::Duration(_),
-                ) => inner.update(value),
-                Some(_) => {}
-                None => inner.update(None),
+                Some(_) => *self = AggregateState::SparqlError,
             },
+            AggregateState::SparqlError => {}
         }
     }
 
@@ -788,7 +766,7 @@ impl AggregateState {
             AggregateState::SumDuration(_, count) | AggregateState::AvgDuration(_, count) => {
                 Some(*count)
             }
-            AggregateState::Distinct { inner, .. } | AggregateState::ReadsNumericText(inner) => {
+            AggregateState::Distinct { inner, .. } | AggregateState::SparqlNumbers(inner) => {
                 inner.value_count()
             }
             _ => None,
@@ -848,7 +826,8 @@ impl AggregateState {
             AggregateState::InvalidOperand(message) => {
                 return Err(OperatorError::invalid_value_type(message.clone()));
             }
-            AggregateState::ReadsNumericText(inner) => return inner.finalize(),
+            AggregateState::SparqlNumbers(inner) => return inner.finalize(),
+            AggregateState::SparqlError => Value::Null,
             AggregateState::SumDecimal(total, _) => {
                 Value::Decimal(total.ok_or_else(decimal_sum_out_of_range)?)
             }
@@ -861,10 +840,9 @@ impl AggregateState {
                         .map_err(|_| decimal_sum_out_of_range())?,
                 )
             }
-            AggregateState::Min(extreme)
-            | AggregateState::Max(extreme)
-            | AggregateState::MinOfRdfLiterals(extreme)
-            | AggregateState::MaxOfRdfLiterals(extreme) => extreme.clone().unwrap_or(Value::Null),
+            AggregateState::Min(extreme) | AggregateState::Max(extreme) => {
+                extreme.clone().unwrap_or(Value::Null)
+            }
             AggregateState::First(first) => first.clone().unwrap_or(Value::Null),
             AggregateState::Last(last) => last.clone().unwrap_or(Value::Null),
             AggregateState::Collect(list) | AggregateState::CollectDistinct(list, _) => {
@@ -1059,7 +1037,7 @@ impl AggregateState {
     }
 }
 
-use super::value_utils::{compare_floats, compare_values, compare_values_total, value_to_f64};
+use super::value_utils::{compare_floats, compare_values_total, value_to_f64};
 
 /// Converts a Value to its string representation for GROUP_CONCAT.
 fn agg_value_to_string(val: &Value) -> String {
@@ -1618,7 +1596,8 @@ mod tests {
         let error = agg.next().unwrap_err().to_string();
         assert!(error.contains("sum takes numbers or durations"), "{error}");
 
-        // SPARQL reads RDF literals held as text that read as numbers
+        // SPARQL: an operand that is no number is an error, and the sum is
+        // unbound (the RDF planner gives SUM the numbers of its terms).
         let mut sparql_sum = AggregateExpr::sum(0);
         sparql_sum.rdf_literals = true;
         let mut agg = SimpleAggregateOperator::new(
@@ -1628,7 +1607,7 @@ mod tests {
         );
         let result = agg.next().unwrap().unwrap();
         assert_eq!(result.row_count(), 1);
-        assert_eq!(result.column(0).unwrap().get_float64(0), Some(90.0));
+        assert_eq!(result.column(0).unwrap().get_value(0), Some(Value::Null));
     }
 
     #[test]
@@ -2615,13 +2594,27 @@ mod tests {
     /// SPARQL's MIN and MAX compare RDF literals held as text by their
     /// numbers when both read as numbers.
     #[test]
-    fn min_and_max_of_rdf_literals_compare_numbers_in_text() {
+    fn min_and_max_of_rdf_terms_follow_the_sparql_order() {
+        use grafeo_common::types::rdf::{Literal, Term};
+        let term = |term: Term| Value::RdfTerm(std::sync::Arc::new(term));
+        let nine = term(Term::typed_literal("9", Literal::XSD_INTEGER));
+        let ten = term(Term::typed_literal("10", Literal::XSD_INTEGER));
+        let iri = term(Term::iri("http://example.org/a"));
         assert_eq!(
-            extremes(
-                &[Value::String("9".into()), Value::String("10".into())],
-                true
-            ),
-            [Value::String("9".into()), Value::String("10".into())]
+            extremes(&[ten.clone(), iri.clone(), nine], false),
+            [iri, ten]
+        );
+    }
+
+    /// A SPARQL SUM or AVG meets an operand that is no number: the group's
+    /// result is unbound, whatever comes after it.
+    #[test]
+    fn a_sparql_sum_of_a_term_that_is_no_number_is_unbound() {
+        let text = Some(Value::String("9".into()));
+        let one = Some(Value::Int64(1));
+        assert_eq!(
+            sum_and_avg(&[one.clone(), text, one], true, false),
+            [Value::Null, Value::Null]
         );
     }
 

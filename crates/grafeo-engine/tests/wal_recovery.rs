@@ -853,8 +853,18 @@ mod wal {
                 )
                 .unwrap();
             assert_eq!(result.rows().len(), 2, "RDF triples should survive restart");
-            assert_eq!(result.rows()[0][0], Value::String("Alix".into()));
-            assert_eq!(result.rows()[1][0], Value::String("Gus".into()));
+            assert_eq!(
+                result.rows()[0][0],
+                Value::RdfTerm(std::sync::Arc::new(
+                    grafeo_common::types::rdf::Term::literal("Alix")
+                ))
+            );
+            assert_eq!(
+                result.rows()[1][0],
+                Value::RdfTerm(std::sync::Arc::new(
+                    grafeo_common::types::rdf::Term::literal("Gus")
+                ))
+            );
             db.close().expect("close");
         }
     }
@@ -899,7 +909,12 @@ mod wal {
                 1,
                 "RDF named graph should survive restart"
             );
-            assert_eq!(result.rows()[0][0], Value::String("Alix".into()));
+            assert_eq!(
+                result.rows()[0][0],
+                Value::RdfTerm(std::sync::Arc::new(
+                    grafeo_common::types::rdf::Term::literal("Alix")
+                ))
+            );
             db.close().expect("close");
         }
     }
@@ -942,7 +957,12 @@ mod wal {
                 .execute_sparql("SELECT ?name WHERE { ?s <http://ex.org/name> ?name }")
                 .unwrap();
             assert_eq!(result.rows().len(), 1, "delete should persist");
-            assert_eq!(result.rows()[0][0], Value::String("Alix".into()));
+            assert_eq!(
+                result.rows()[0][0],
+                Value::RdfTerm(std::sync::Arc::new(
+                    grafeo_common::types::rdf::Term::literal("Alix")
+                ))
+            );
             db.close().expect("close");
         }
     }
@@ -1063,7 +1083,12 @@ mod wal {
             .execute_sparql("SELECT ?name WHERE { ?s <http://ex.org/name> ?name }")
             .unwrap();
         assert_eq!(result.rows().len(), 1, "default RDF graph saved");
-        assert_eq!(result.rows()[0][0], Value::String("Alix".into()));
+        assert_eq!(
+            result.rows()[0][0],
+            Value::RdfTerm(std::sync::Arc::new(
+                grafeo_common::types::rdf::Term::literal("Alix")
+            ))
+        );
 
         let result = session2
             .execute_sparql(
@@ -1073,7 +1098,12 @@ mod wal {
             )
             .unwrap();
         assert_eq!(result.rows().len(), 1, "named RDF graph saved");
-        assert_eq!(result.rows()[0][0], Value::String("Gus".into()));
+        assert_eq!(
+            result.rows()[0][0],
+            Value::RdfTerm(std::sync::Arc::new(
+                grafeo_common::types::rdf::Term::literal("Gus")
+            ))
+        );
         restored.close().expect("close");
     }
 

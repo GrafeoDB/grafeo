@@ -48,13 +48,15 @@ tests:
   # xsd:decimal
   # ---------------------------------------------------------------------------
 
-  - name: xsd_decimal_keeps_the_scale_of_its_text
+  # A cast gives a value, written in the canonical form (XML Schema 1.1):
+  # no trailing zeros, no point in a whole number.
+  - name: xsd_decimal_reads_its_text
     query: |
       PREFIX xsd: <http://www.w3.org/2001/XMLSchema#>
       SELECT (xsd:decimal("1.50") AS ?scaled) (xsd:decimal(" 2.5 ") AS ?spaced) (xsd:decimal(2) AS ?int) (xsd:decimal(false) AS ?no) WHERE {}
     expect:
       rows:
-        - [1.50, 2.5, 2, 0]
+        - [1.5, 2.5, 2, 0]
 
   - name: xsd_decimal_of_a_double_is_its_shortest_text
     query: |
@@ -82,8 +84,8 @@ tests:
       PREFIX xsd: <http://www.w3.org/2001/XMLSchema#>
       SELECT (xsd:double("1e3") AS ?exponent) (xsd:double("INF") AS ?inf) (xsd:double("-INF") AS ?neg) (xsd:double("NaN") AS ?nan) WHERE {}
     expect:
-      rows:
-        - [1000, Infinity, -Infinity, NaN]
+      terms:
+        - ['"1.0E3"^^xsd:double', '"INF"^^xsd:double', '"-INF"^^xsd:double', '"NaN"^^xsd:double']
 
   - name: xsd_double_of_numbers_and_of_what_is_no_number
     query: |
@@ -91,7 +93,7 @@ tests:
       SELECT (xsd:double(2) AS ?int) (xsd:double(1.50) AS ?decimal) (xsd:double("Vincent") AS ?text) WHERE {}
     expect:
       rows:
-        - [2, 1.5, null]
+        - ["2.0E0", "1.5E0", null]
 
   # ---------------------------------------------------------------------------
   # xsd:boolean and xsd:string
@@ -119,7 +121,7 @@ tests:
       SELECT (xsd:string(19) AS ?int) (xsd:string(1.50) AS ?decimal) (xsd:string(true) AS ?bool) (xsd:string("Mia") AS ?text) WHERE {}
     expect:
       rows:
-        - ["19", "1.50", "true", Mia]
+        - ["19", "1.5", "true", Mia]
 
   # ---------------------------------------------------------------------------
   # Dates, times and dateTimes
@@ -248,12 +250,7 @@ tests:
       rows:
         - [false, true]
 
-  # ---------------------------------------------------------------------------
-  # Known gaps
-  # ---------------------------------------------------------------------------
-
   - name: same_term_tells_lexical_forms_apart
-    skip: "a numeric literal reads as its value, so sameTerm(\"1\"^^xsd:integer, \"01\"^^xsd:integer) is true (inbox rdf/same-term-of-numeric-literals.md)"
     query: |
       PREFIX xsd: <http://www.w3.org/2001/XMLSchema#>
       SELECT (sameTerm("1"^^xsd:integer, "01"^^xsd:integer) AS ?lexical) (sameTerm("1"^^xsd:integer, "1"^^xsd:integer) AS ?same) WHERE {}

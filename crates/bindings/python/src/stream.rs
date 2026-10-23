@@ -14,8 +14,8 @@ use std::sync::Arc;
 use parking_lot::RwLock;
 use pyo3::prelude::*;
 
+use grafeo_engine::OwnedRowIterator;
 use grafeo_engine::database::GrafeoDB;
-use grafeo_engine::{OwnedResultStream, OwnedRowIterator};
 
 use crate::error::PyGrafeoError;
 use crate::types::PyValue;
@@ -37,7 +37,13 @@ pub struct PyResultStream {
 }
 
 impl PyResultStream {
-    pub(crate) fn new(database: Arc<RwLock<GrafeoDB>>, stream: OwnedResultStream) -> Self {
+    /// The stream `execute_lazy()` returns, a GQL query's (only a build with
+    /// GQL has it).
+    #[cfg(feature = "gql")]
+    pub(crate) fn new(
+        database: Arc<RwLock<GrafeoDB>>,
+        stream: grafeo_engine::OwnedResultStream,
+    ) -> Self {
         let columns = stream.columns().to_vec();
         Self {
             _database: database,
@@ -79,7 +85,7 @@ impl PyResultStream {
             Some(Ok(values)) => {
                 let dict = pyo3::types::PyDict::new(py);
                 for (col, val) in slf.columns.iter().zip(values.iter()) {
-                    dict.set_item(col, PyValue::to_py(val, py))?;
+                    dict.set_item(col, PyValue::to_py(val, py)?)?;
                 }
                 Ok(Some(dict.unbind().into_any()))
             }

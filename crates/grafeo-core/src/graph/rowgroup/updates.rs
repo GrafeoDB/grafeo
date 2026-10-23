@@ -819,7 +819,17 @@ mod tests {
         }
     }
 
-    const LABELS: [&str; 3] = ["Person", "Traveller", "Employee"];
+    /// Up to seven labels a row: past the four a label chain keeps in
+    /// place, so the kept label sets of some writes go to the heap.
+    const LABELS: [&str; 7] = [
+        "Person",
+        "Traveller",
+        "Employee",
+        "Driver",
+        "Pilot",
+        "Chef",
+        "Writer",
+    ];
     const CITIES: [&str; 3] = ["Amsterdam", "Berlin", "Paris"];
 
     /// One reader's view.
@@ -936,10 +946,10 @@ mod tests {
                     age: (!offset.is_multiple_of(3))
                         .then(|| i64::try_from(offset % 88).expect("age")),
                     city: Some(CITIES[usize::try_from(offset % 3).expect("an index")].to_string()),
-                    labels: if offset.is_multiple_of(2) {
-                        BTreeSet::from(["Person"])
-                    } else {
-                        BTreeSet::from(["Person", "Employee"])
+                    labels: match offset % 4 {
+                        0 | 2 => BTreeSet::from(["Person"]),
+                        1 => BTreeSet::from(["Person", "Employee"]),
+                        _ => BTreeSet::from(["Person", "Employee", "Driver", "Pilot", "Chef"]),
                     },
                 };
                 let mut values = vec![("city", Value::from(state.city.clone().expect("city")))];
@@ -1030,7 +1040,7 @@ mod tests {
                                 writes.city = Written::To(None);
                             }
                             _ => {
-                                let label = LABELS[1 + rng.below(2)];
+                                let label = LABELS[1 + rng.below(LABELS.len() - 1)];
                                 let mut set = base.labels.clone();
                                 if set.contains(label) {
                                     tx.remove_label(id, label).expect("remove a label");
@@ -1090,7 +1100,7 @@ mod tests {
                                 value: Value::Int64(age),
                             }
                         } else {
-                            let label = LABELS[1 + rng.below(2)];
+                            let label = LABELS[1 + rng.below(LABELS.len() - 1)];
                             if state.labels.remove(label) {
                                 DataOp::RemoveNodeLabel {
                                     id,

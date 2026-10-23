@@ -1013,7 +1013,7 @@ dependencies = [
  "bitflags",
  "crossterm_winapi",
  "document-features",
- "parking_lot",
+ "parking_lot 0.12.5",
  "rustix",
  "winapi",
 ]
@@ -1065,9 +1065,9 @@ dependencies = [
 
 [[package]]
 name = "ctutils"
-version = "0.4.2"
+version = "0.4.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7d5515a3834141de9eafb9717ad39eea8247b5674e6066c404e8c4b365d2a29e"
+checksum = "38d28fb6aa7dd680b3ffd1a3e64e115c177bdba63c0ae7f9cd48129ff05c4fa0"
 dependencies = [
  "cmov",
 ]
@@ -1131,9 +1131,9 @@ dependencies = [
  "cfg-if 1.0.4",
  "crossbeam-utils",
  "hashbrown 0.14.5",
- "lock_api",
+ "lock_api 0.4.14",
  "once_cell",
- "parking_lot_core",
+ "parking_lot_core 0.9.12",
 ]
 
 [[package]]
@@ -1536,7 +1536,7 @@ dependencies = [
 
 [[package]]
 name = "grafeo"
-version = "0.6.0-beta.1"
+version = "0.6.0"
 dependencies = [
  "grafeo-adapters",
  "grafeo-common",
@@ -1548,13 +1548,13 @@ dependencies = [
 
 [[package]]
 name = "grafeo-adapters"
-version = "0.6.0-beta.1"
+version = "0.6.0"
 dependencies = [
  "bincode",
  "grafeo-common",
  "grafeo-core",
  "hashbrown 0.17.1",
- "parking_lot",
+ "parking_lot 0.13.0",
  "rayon",
  "serde",
  "serde_json",
@@ -1566,7 +1566,7 @@ dependencies = [
 
 [[package]]
 name = "grafeo-bindings-common"
-version = "0.6.0-beta.1"
+version = "0.6.0"
 dependencies = [
  "grafeo-common",
  "grafeo-engine",
@@ -1575,21 +1575,22 @@ dependencies = [
 
 [[package]]
 name = "grafeo-c"
-version = "0.6.0-beta.1"
+version = "0.6.0"
 dependencies = [
  "grafeo-bindings-common",
  "grafeo-common",
  "grafeo-core",
  "grafeo-engine",
- "parking_lot",
+ "parking_lot 0.13.0",
  "serde_json",
 ]
 
 [[package]]
 name = "grafeo-cli"
-version = "0.6.0-beta.1"
+version = "0.6.0"
 dependencies = [
  "anyhow",
+ "arrow-ipc",
  "clap",
  "clap_complete",
  "comfy-table",
@@ -1608,7 +1609,7 @@ dependencies = [
 
 [[package]]
 name = "grafeo-common"
-version = "0.6.0-beta.1"
+version = "0.6.0"
 dependencies = [
  "aes-gcm",
  "arcstr",
@@ -1620,10 +1621,11 @@ dependencies = [
  "codspeed-criterion-compat",
  "dashmap",
  "foldhash",
+ "getrandom 0.4.3",
  "hashbrown 0.17.1",
  "hkdf",
  "indexmap",
- "parking_lot",
+ "parking_lot 0.13.0",
  "rand 0.10.3",
  "serde",
  "sha2",
@@ -1636,7 +1638,7 @@ dependencies = [
 
 [[package]]
 name = "grafeo-core"
-version = "0.6.0-beta.1"
+version = "0.6.0"
 dependencies = [
  "arcstr",
  "bincode",
@@ -1651,7 +1653,7 @@ dependencies = [
  "hashbrown 0.17.1",
  "indexmap",
  "ordered-float",
- "parking_lot",
+ "parking_lot 0.13.0",
  "parquet",
  "rand 0.10.3",
  "rayon",
@@ -1667,7 +1669,7 @@ dependencies = [
 
 [[package]]
 name = "grafeo-engine"
-version = "0.6.0-beta.1"
+version = "0.6.0"
 dependencies = [
  "arcstr",
  "arrow-array",
@@ -1687,7 +1689,7 @@ dependencies = [
  "md5",
  "memmap2",
  "ort",
- "parking_lot",
+ "parking_lot 0.13.0",
  "proptest",
  "regex",
  "regex-lite",
@@ -1705,14 +1707,14 @@ dependencies = [
 
 [[package]]
 name = "grafeo-examples"
-version = "0.6.0-beta.1"
+version = "0.6.0"
 dependencies = [
  "grafeo",
 ]
 
 [[package]]
 name = "grafeo-node"
-version = "0.6.0-beta.1"
+version = "0.6.0"
 dependencies = [
  "grafeo-adapters",
  "grafeo-bindings-common",
@@ -1722,7 +1724,7 @@ dependencies = [
  "napi",
  "napi-build",
  "napi-derive",
- "parking_lot",
+ "parking_lot 0.13.0",
  "serde_json",
  "thiserror",
  "tokio",
@@ -1730,14 +1732,14 @@ dependencies = [
 
 [[package]]
 name = "grafeo-python"
-version = "0.6.0-beta.1"
+version = "0.6.0"
 dependencies = [
  "grafeo-adapters",
  "grafeo-bindings-common",
  "grafeo-common",
  "grafeo-core",
  "grafeo-engine",
- "parking_lot",
+ "parking_lot 0.13.0",
  "pyo3",
  "pyo3-async-runtimes",
  "serde_json",
@@ -1747,7 +1749,7 @@ dependencies = [
 
 [[package]]
 name = "grafeo-spec-tests"
-version = "0.6.0-beta.1"
+version = "0.6.0"
 dependencies = [
  "grafeo-common",
  "grafeo-engine",
@@ -1757,7 +1759,7 @@ dependencies = [
 
 [[package]]
 name = "grafeo-storage"
-version = "0.6.0-beta.1"
+version = "0.6.0"
 dependencies = [
  "bincode",
  "byteorder",
@@ -1768,7 +1770,7 @@ dependencies = [
  "fs2",
  "grafeo-common",
  "memmap2",
- "parking_lot",
+ "parking_lot 0.13.0",
  "serde",
  "serde_json",
  "tempfile",
@@ -1779,7 +1781,7 @@ dependencies = [
 
 [[package]]
 name = "grafeo-wasm"
-version = "0.6.0-beta.1"
+version = "0.6.0"
 dependencies = [
  "console_error_panic_hook",
  "getrandom 0.4.3",
@@ -2379,9 +2381,9 @@ checksum = "bbd2bcb4c963f2ddae06a2efc7e9f3591312473c50c6685e1f298068316e66fe"
 
 [[package]]
 name = "libc"
-version = "0.2.186"
+version = "0.2.191"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "68ab91017fe16c622486840e4c83c9a37afeff978bd239b5293d61ece587de66"
+checksum = "65cd87c9a6d60536580b316ad985726104730a5151c99845f2490428ef91240a"
 
 [[package]]
 name = "libloading"
@@ -2457,6 +2459,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "lock_api"
+version = "0.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "65d91b22da179613dcf4d6ec8349563f52a363f6849e03b00dd0a185ec4a59af"
+dependencies = [
+ "scopeguard",
+]
+
+[[package]]
 name = "log"
 version = "0.4.29"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2526,9 +2537,9 @@ checksum = "f8ca58f447f06ed17d5fc4043ce1b10dd205e060fb3ce5b979b8ed8e59ff3f79"
 
 [[package]]
 name = "memmap2"
-version = "0.9.11"
+version = "0.9.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d1219ed1b7f229ee7104d281dd01d6802fe28bb6e95d292942c4daacdeb798c0"
+checksum = "6b0ca1155a9ecc25aa12e8313a119f32edf0255fea2f44839c4ac0a12b2ac157"
 dependencies = [
  "libc",
 ]
@@ -2918,8 +2929,18 @@ version = "0.12.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "93857453250e3077bd71ff98b6a65ea6621a19bb0f559a85248955ac12c45a1a"
 dependencies = [
- "lock_api",
- "parking_lot_core",
+ "lock_api 0.4.14",
+ "parking_lot_core 0.9.12",
+]
+
+[[package]]
+name = "parking_lot"
+version = "0.13.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a9cf937ca4e1d0b7578784559063422fc39ae7c5a00f02471f2614d5486fd226"
+dependencies = [
+ "lock_api 0.5.0",
+ "parking_lot_core 0.10.0",
 ]
 
 [[package]]
@@ -2930,7 +2951,19 @@ checksum = "2621685985a2ebf1c516881c026032ac7deafcda1a2c9b7850dc81e3dfcb64c1"
 dependencies = [
  "cfg-if 1.0.4",
  "libc",
- "redox_syscall",
+ "redox_syscall 0.5.18",
+ "smallvec",
+ "windows-link",
+]
+
+[[package]]
+name = "parking_lot_core"
+version = "0.10.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9cfff060068cc18aa7815010fcaf80c68c7fb9e85fc7f5c0f9bf142c21d19826"
+dependencies = [
+ "libc",
+ "redox_syscall 0.9.5",
  "smallvec",
  "windows-link",
 ]
@@ -3431,6 +3464,15 @@ name = "redox_syscall"
 version = "0.5.18"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ed2bf2547551a7053d6fdfafda3f938979645c44812fbfcda098faae3f1a362d"
+dependencies = [
+ "bitflags",
+]
+
+[[package]]
+name = "redox_syscall"
+version = "0.9.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "580c875845b41ecb1564ad1ae4703044cef774145e3d7a94dc2b3fa7c97868fd"
 dependencies = [
  "bitflags",
 ]

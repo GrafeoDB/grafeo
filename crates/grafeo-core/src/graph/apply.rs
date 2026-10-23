@@ -291,6 +291,14 @@ impl BackendTransaction {
 /// second commit fails is half done. The transaction manager's claims let
 /// one transaction at a time write an entity, so the newest pending version
 /// of an entity, key or label set is the one a change wrote.
+///
+/// The engine also keeps every edge's ends alive, for every backend: an
+/// edge's create claims its two ends and a node's delete claims the node,
+/// so of an edge's create and a concurrent delete of one of its ends only
+/// the first writer commits (the other gets the retryable conflict, also at
+/// commit when the delete committed after it began), and `apply` sees a
+/// node's delete only once its writer sees no edge of it. A backend's reads
+/// therefore need not check an edge's other end (see `GraphStore::edges`).
 pub trait GraphBackend: GraphStore {
     /// Reserves `count` consecutive node ids, never handed out again (also
     /// not after a rollback).

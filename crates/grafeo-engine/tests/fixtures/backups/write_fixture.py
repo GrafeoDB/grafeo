@@ -2,7 +2,8 @@
 
 Up to 0.5.44 the backup manifest (`backup_manifest.json`) held bincode; 0.6 writes
 JSON and still reads the bincode manifest. The manifest is kept as
-`backup_manifest.bincode`, so text hooks leave its bytes alone; `tests/backup_restore.rs`
+`backup_manifest.bincode` (0.5.x), so text hooks leave its bytes alone (0.6's JSON
+manifest keeps its name, with a final newline); `tests/backup_restore.rs`
 copies it back under its real name and restores the chain; its tests describe what
 it holds. Run this with the released wheel, from the
 repository root:
@@ -68,7 +69,18 @@ def main() -> None:
             epochs.append(db.current_epoch())
         db.close()
         shutil.copytree(backups, out)
-    (out / "backup_manifest.json").rename(out / "backup_manifest.bincode")
+    version = tuple(int(part) for part in grafeo.__version__.split(".")[:2])
+    writes_json = version >= (0, 6)
+    manifest = out / "backup_manifest.json"
+    if writes_json:
+        # JSON text: given the final newline the end-of-file hook would add, which JSON
+        # ignores, so the committed bytes are the ones written here.
+        text = manifest.read_bytes()
+        if not text.endswith(b"\n"):
+            manifest.write_bytes(text + b"\n")
+    else:
+        # Bincode in a `.json` file: kept under a name text hooks leave alone.
+        manifest.rename(out / "backup_manifest.bincode")
     for path in sorted(out.iterdir()):
         print(path, path.stat().st_size)
     print("epochs after each backup:", epochs)

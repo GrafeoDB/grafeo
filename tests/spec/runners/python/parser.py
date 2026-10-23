@@ -58,7 +58,29 @@ class Expect:
     gql_status: str | None = None
     hash: str | None = None
     precision: int | None = None
+    # Rows of RDF terms in N-Triples form (``None`` for unbound), each cell
+    # compared as the exact term: see ``comparator.assert_terms``.
+    terms: list[list[str | None]] = field(default_factory=list)
+
     columns: list[str] = field(default_factory=list)
+
+
+# The keys an expectation may have: any other is an error, as a key no runner
+# reads would leave a test that checks nothing.
+EXPECT_KEYS = frozenset(
+    {
+        "rows",
+        "ordered",
+        "count",
+        "empty",
+        "error",
+        "gql_status",
+        "hash",
+        "precision",
+        "columns",
+        "terms",
+    }
+)
 
 
 @dataclass
@@ -225,7 +247,13 @@ def _parse_test_dict(d: dict) -> TestCase:
 
 
 def _parse_expect_dict(d: dict) -> Expect:
+    unknown = sorted(set(d) - EXPECT_KEYS)
+    if unknown:
+        raise ValueError(f"unknown expect key {unknown[0]!r}")
     e = Expect()
+    for raw_row in d.get("terms", []) or []:
+        cells = raw_row if isinstance(raw_row, list) else [raw_row]
+        e.terms.append([None if cell is None else str(cell) for cell in cells])
     e.ordered = bool(d.get("ordered", False))
     e.empty = bool(d.get("empty", False))
 
@@ -400,6 +428,9 @@ def _lb_parse_single_test(lines: list[str], idx: int) -> tuple:
 
 def _lb_parse_expect(lines: list[str], idx: int) -> tuple:
     e = Expect()
+    # The indent of the expectation's own keys: a line indented less is the
+    # test's next key (a ``skip:`` or ``note:`` after ``expect:``).
+    child_indent = None
     while idx < len(lines):
         trimmed = lines[idx].strip()
         if not trimmed or trimmed.startswith("#"):
@@ -408,6 +439,11 @@ def _lb_parse_expect(lines: list[str], idx: int) -> tuple:
         if trimmed.startswith("- name:"):
             break
         if not lines[idx][0].isspace():
+            break
+        indent = len(lines[idx]) - len(lines[idx].lstrip())
+        if child_indent is None:
+            child_indent = indent
+        if indent < child_indent:
             break
 
         key, value = _lb_parse_kv(trimmed)
@@ -438,8 +474,14 @@ def _lb_parse_expect(lines: list[str], idx: int) -> tuple:
         elif key == "rows":
             idx += 1
             e.rows, idx = _lb_parse_rows(lines, idx)
+        elif key == "terms":
+            idx += 1
+            rows, idx = _lb_parse_rows(lines, idx)
+            e.terms = [
+                [None if cell == "null" else cell for cell in row] for row in rows
+            ]
         else:
-            break
+            raise ValueError(f"unknown expect key {key!r}")
     return e, idx
 
 

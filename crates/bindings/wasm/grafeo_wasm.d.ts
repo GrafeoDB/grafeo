@@ -18,10 +18,68 @@ export interface WriteCounters {
   labelsRemoved: number;
 }
 
+/**
+ * Any object of the RDF/JS data model that a term parameter or property
+ * takes: the terms of these results, and the terms of other libraries
+ * (N3.js, rdf-data-factory), read by `termType` and `value`, and for a
+ * literal `language` and the `value` of `datatype`.
+ */
+export interface RdfTermLike {
+  termType: string;
+  value: string;
+  language?: string;
+  datatype?: { value: string };
+}
+
+/** An IRI in the RDF/JS data model. */
+export interface NamedNode {
+  termType: 'NamedNode';
+  value: string;
+  /** True when `other` is a term with the same `termType` and `value`. */
+  equals(other: RdfTermLike | null | undefined): boolean;
+}
+
+/** A blank node in the RDF/JS data model: `value` is its label, without `_:`. */
+export interface BlankNode {
+  termType: 'BlankNode';
+  value: string;
+  /** True when `other` is a term with the same `termType` and `value`. */
+  equals(other: RdfTermLike | null | undefined): boolean;
+}
+
+/**
+ * A literal in the RDF/JS data model: `language` is the tag in lowercase,
+ * `''` when it has none, and `datatype` is `rdf:langString` for a tagged
+ * literal, `xsd:string` for a simple one.
+ */
+export interface Literal {
+  termType: 'Literal';
+  value: string;
+  language: string;
+  datatype: NamedNode;
+  /**
+   * True when `other` is a literal with the same `value`, the same language
+   * (tags compare without case) and an equal datatype.
+   */
+  equals(other: RdfTermLike | null | undefined): boolean;
+}
+
+/** An RDF term, as SPARQL results hold them and parameters take them. */
+export type RdfTerm = NamedNode | BlankNode | Literal;
+
 /** The result of the `executeRaw*` methods. */
 export interface RawResult {
   columns: string[];
   rows: unknown[][];
+  /**
+   * What the result holds: `'rows'` (SPARQL SELECT and updates, and every
+   * other language), `'boolean'` (SPARQL ASK, see `boolean`) or `'graph'`
+   * (SPARQL CONSTRUCT and DESCRIBE: `subject`, `predicate` and `object`
+   * columns of RDF terms).
+   */
+  kind: 'rows' | 'boolean' | 'graph';
+  /** The answer of a SPARQL ASK; absent for every other result. */
+  boolean?: boolean;
   executionTimeMs?: number;
   counters: WriteCounters;
 }

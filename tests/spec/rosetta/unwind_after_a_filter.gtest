@@ -1,0 +1,51 @@
+# Rosetta: an UNWIND after a filter unwinds the rows the filter kept
+#
+# A WITH ... WHERE before UNWIND (GQL FOR) keeps some rows of a chunk and
+# drops the others without moving them. UNWIND read the chunk's rows by
+# position, so it unwound the first rows of the chunk whether the filter kept
+# them or not: `WHERE size(l) = 2` over lists of 2, 1, 2 and 1 items gave the
+# items of the first two lists instead of the first and the third.
+
+meta:
+  model: lpg
+  section: rosetta
+  title: UNWIND after a filter
+  dataset: empty
+  requires: [cypher]
+
+tests:
+
+  - name: unwind_after_with_where_reads_the_kept_rows
+    setup:
+      - "INSERT (:P {k: 1, l: [10, 11]}), (:P {k: 2, l: [20]}), (:P {k: 3, l: [30, 31]}), (:P {k: 4, l: [40]})"
+    variants:
+      gql: "MATCH (n:P) WITH n, n.l AS l WHERE size(l) = 2 UNWIND l AS v RETURN v"
+      cypher: "MATCH (n:P) WITH n, n.l AS l WHERE size(l) = 2 UNWIND l AS v RETURN v"
+    expect:
+      rows:
+        - [10]
+        - [11]
+        - [30]
+        - [31]
+
+  - name: unwind_after_with_where_keeps_the_other_columns_of_its_row
+    setup:
+      - "INSERT (:P {k: 1, l: [10, 11]}), (:P {k: 2, l: [20]}), (:P {k: 3, l: [30, 31]}), (:P {k: 4, l: [40]})"
+    variants:
+      gql: "MATCH (n:P) WITH n.k AS k, n.l AS l WHERE k > 2 UNWIND l AS v RETURN k, v"
+      cypher: "MATCH (n:P) WITH n.k AS k, n.l AS l WHERE k > 2 UNWIND l AS v RETURN k, v"
+    expect:
+      rows:
+        - [3, 30]
+        - [3, 31]
+        - [4, 40]
+
+  - name: for_after_with_where_reads_the_kept_rows
+    setup:
+      - "INSERT (:P {k: 1, l: [10, 11]}), (:P {k: 2, l: [20]}), (:P {k: 3, l: [30, 31]}), (:P {k: 4, l: [40]})"
+    variants:
+      gql: "MATCH (n:P) WITH n, n.l AS l WHERE size(l) = 1 FOR v IN l RETURN v"
+    expect:
+      rows:
+        - [20]
+        - [40]

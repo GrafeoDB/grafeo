@@ -105,6 +105,9 @@ pub struct ProfileEntry {
     /// Whether a fast path of the operator above absorbed this one (see
     /// [`absorbed`](Self::absorbed)).
     pub absorbed: bool,
+    /// Whether the operator was planned as its input (see
+    /// [`folded`](Self::folded)).
+    pub folded: bool,
 }
 
 impl ProfileEntry {
@@ -116,6 +119,7 @@ impl ProfileEntry {
             label,
             stats: Arc::clone(&stats),
             absorbed: false,
+            folded: false,
         };
         (entry, stats)
     }
@@ -127,6 +131,16 @@ impl ProfileEntry {
     pub fn absorbed(name: &str, label: String) -> Self {
         let (mut entry, _stats) = Self::new(name, label);
         entry.absorbed = true;
+        entry
+    }
+
+    /// The entry of a logical operator planned as its one input, as it is
+    /// (a projection of the input's columns in their order): it runs
+    /// nothing, and the profile tree shows the input in its place.
+    #[must_use]
+    pub fn folded(label: String) -> Self {
+        let (mut entry, _stats) = Self::new("", label);
+        entry.folded = true;
         entry
     }
 }
@@ -161,6 +175,12 @@ pub fn build_profile_tree(
             logical.display_label(),
         )
     });
+
+    // An operator planned as its input has no line: the input takes its
+    // place.
+    if entry.folded && built.len() == 1 {
+        return built.into_iter().next().expect("one child");
+    }
 
     // An absorbed child ran as part of this operator: its children become
     // this one's, and this operator's detail names it.
@@ -312,6 +332,31 @@ mod tests {
         assert_eq!(self_time_ns(filter), 150);
         // Leaf has no children, so self = own time.
         assert_eq!(self_time_ns(scan), 100);
+    }
+
+    /// An operator planned as its input has no node: its input takes its
+    /// place under the operator above, with the input's own stats.
+    #[test]
+    fn a_folded_operator_leaves_its_input_in_its_place() {
+        let plan = three_level_plan();
+        let (scan_entry, scan_stats) = ProfileEntry::new("NodeScan", "n:Person".to_string());
+        let (return_entry, _) = ProfileEntry::new("Return", "n".to_string());
+        scan_stats.lock().rows_out = 10;
+
+        let mut iter = vec![
+            scan_entry,
+            ProfileEntry::folded("true".to_string()),
+            return_entry,
+        ]
+        .into_iter();
+        let root = build_profile_tree(&plan, &mut iter);
+
+        assert_eq!(root.name, "Return");
+        assert_eq!(root.children.len(), 1);
+        let scan = &root.children[0];
+        assert_eq!(scan.name, "NodeScan");
+        assert_eq!(scan.stats.lock().rows_out, 10);
+        assert!(iter.next().is_none(), "every entry is read");
     }
 
     /// Sanity check for the formatted output produced by `profile_result`.

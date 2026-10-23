@@ -268,7 +268,7 @@ impl Database {
         self.check_open()?;
         let result = self.run_query(query)?;
 
-        Ok(rows_to_js(&result))
+        rows_to_js(&result)
     }
 
     /// Executes a GQL query and returns raw columns, rows, and metadata.
@@ -289,7 +289,7 @@ impl Database {
         self.check_open()?;
         let result = self.run_query(query)?;
 
-        Ok(raw_result_to_js(&result))
+        raw_result_to_js(&result)
     }
 
     /// The edges of a node as `[neighborId, edgeId]` pairs, without a query:
@@ -1089,7 +1089,7 @@ impl Database {
         self.check_open()?;
         // In the open transaction, if there is one, like the other execute methods.
         let result = self.run_language_query(query, language, None)?;
-        Ok(raw_result_to_js(&result))
+        raw_result_to_js(&result)
     }
 
     /// Executes a GQL query with parameters and returns raw columns, rows, and
@@ -1136,7 +1136,7 @@ impl Database {
         self.check_open()?;
         let param_map = Self::convert_params(Some(params))?;
         let result = self.run_language_query(query, language, param_map)?;
-        Ok(raw_result_to_js(&result))
+        raw_result_to_js(&result)
     }
 
     /// Batch-imports LPG (Labeled Property Graph) data from a structured object.
@@ -1616,7 +1616,7 @@ impl Database {
         let param_map = Self::convert_params(params)?;
         let result = self.run_language_query(query, language, param_map)?;
 
-        Ok(rows_to_js(&result))
+        rows_to_js(&result)
     }
 
     /// Converts a JS params value (object or null/undefined) to an optional
@@ -1691,12 +1691,16 @@ fn operator_profile_to_js(operator: &grafeo_engine::database::OperatorProfile) -
 
 /// A query result's rows as an array of objects keyed by column name, the
 /// shape of the `execute*` methods.
-fn rows_to_js(result: &grafeo_engine::database::QueryResult) -> JsValue {
+///
+/// # Errors
+///
+/// A JS `Error` for an RDF term of a kind this binding does not know.
+fn rows_to_js(result: &grafeo_engine::database::QueryResult) -> Result<JsValue, JsValue> {
     let rows = Array::new_with_length(result.rows().len() as u32);
     for (i, row) in result.rows().iter().enumerate() {
-        rows.set(i as u32, types::row_to_js_object(&result.columns, row));
+        rows.set(i as u32, types::row_to_js_object(&result.columns, row)?);
     }
-    rows.into()
+    Ok(rows.into())
 }
 
 /// What a write statement changed, as `{nodesCreated, nodesDeleted,
@@ -1725,10 +1729,15 @@ fn counters_to_js(counters: &grafeo_engine::database::WriteCounters) -> JsValue 
     obj.into()
 }
 
-/// Converts a query result to `{ columns: string[], rows: any[][], executionTimeMs?: number,
-/// counters, profile? }`, the shape of the `executeRaw*` methods (`profile` for a `PROFILE`
-/// statement only).
-fn raw_result_to_js(result: &grafeo_engine::database::QueryResult) -> JsValue {
+/// Converts a query result to `{ columns: string[], rows: any[][], kind, boolean?,
+/// executionTimeMs?: number, counters, profile? }`, the shape of the `executeRaw*` methods
+/// (`kind` `"rows"`, `"boolean"` for a SPARQL ASK with its `boolean`, or `"graph"` for
+/// CONSTRUCT and DESCRIBE; `profile` for a `PROFILE` statement only).
+///
+/// # Errors
+///
+/// A JS `Error` for an RDF term of a kind this binding does not know.
+fn raw_result_to_js(result: &grafeo_engine::database::QueryResult) -> Result<JsValue, JsValue> {
     let obj = js_sys::Object::new();
 
     // columns: string[]
@@ -1743,11 +1752,28 @@ fn raw_result_to_js(result: &grafeo_engine::database::QueryResult) -> JsValue {
     for (i, row) in result.rows().iter().enumerate() {
         let js_row = Array::new_with_length(row.len() as u32);
         for (j, val) in row.iter().enumerate() {
-            js_row.set(j as u32, types::value_to_js(val));
+            js_row.set(j as u32, types::value_to_js(val)?);
         }
         rows.set(i as u32, js_row.into());
     }
     let _ = js_sys::Reflect::set(&obj, &JsValue::from_str("rows"), &rows);
+
+    // kind: "rows" | "boolean" | "graph", and boolean for a SPARQL ASK
+    let kind = match result.kind {
+        grafeo_engine::database::ResultKind::Boolean => "boolean",
+        grafeo_engine::database::ResultKind::Graph => "graph",
+        _ => "rows",
+    };
+    let _ = js_sys::Reflect::set(&obj, &JsValue::from_str("kind"), &JsValue::from_str(kind));
+    if result.kind == grafeo_engine::database::ResultKind::Boolean
+        && let Some(answer) = result.rows().first().and_then(|row| row.first()?.as_bool())
+    {
+        let _ = js_sys::Reflect::set(
+            &obj,
+            &JsValue::from_str("boolean"),
+            &JsValue::from_bool(answer),
+        );
+    }
 
     // executionTimeMs?: number
     if let Some(ms) = result.execution_time_ms {
@@ -1780,7 +1806,7 @@ fn raw_result_to_js(result: &grafeo_engine::database::QueryResult) -> JsValue {
         let _ = js_sys::Reflect::set(&obj, &JsValue::from_str("profile"), &js_profile);
     }
 
-    obj.into()
+    Ok(obj.into())
 }
 
 // ---------------------------------------------------------------------------

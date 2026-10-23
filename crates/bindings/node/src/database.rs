@@ -1290,8 +1290,8 @@ impl JsGrafeoDB {
     }
 
     /// Returns the full change history for a node.
-    #[napi(js_name = "nodeHistory")]
-    pub async fn node_history(&self, node_id: f64) -> Result<Vec<serde_json::Value>> {
+    #[napi(js_name = "nodeHistory", ts_return_type = "Promise<Array<any>>")]
+    pub async fn node_history(&self, node_id: f64) -> Result<Vec<crate::types::JsonWithTerms>> {
         let id = validate_node_id(node_id)?;
         let db = self.inner.clone();
         tokio::task::spawn_blocking(move || {
@@ -1300,15 +1300,15 @@ impl JsGrafeoDB {
                 .history(id)
                 .map_err(NodeGrafeoError::from)
                 .map_err(napi::Error::from)?;
-            Ok(events.iter().map(change_event_to_json).collect())
+            events.iter().map(change_event_to_json).collect()
         })
         .await
         .map_err(|e| napi::Error::from_reason(e.to_string()))?
     }
 
     /// Returns the full change history for an edge.
-    #[napi(js_name = "edgeHistory")]
-    pub async fn edge_history(&self, edge_id: f64) -> Result<Vec<serde_json::Value>> {
+    #[napi(js_name = "edgeHistory", ts_return_type = "Promise<Array<any>>")]
+    pub async fn edge_history(&self, edge_id: f64) -> Result<Vec<crate::types::JsonWithTerms>> {
         let id = validate_edge_id(edge_id)?;
         let db = self.inner.clone();
         tokio::task::spawn_blocking(move || {
@@ -1317,19 +1317,19 @@ impl JsGrafeoDB {
                 .history(id)
                 .map_err(NodeGrafeoError::from)
                 .map_err(napi::Error::from)?;
-            Ok(events.iter().map(change_event_to_json).collect())
+            events.iter().map(change_event_to_json).collect()
         })
         .await
         .map_err(|e| napi::Error::from_reason(e.to_string()))?
     }
 
     /// Returns change events for a node since a given epoch.
-    #[napi(js_name = "nodeHistorySince")]
+    #[napi(js_name = "nodeHistorySince", ts_return_type = "Promise<Array<any>>")]
     pub async fn node_history_since(
         &self,
         node_id: f64,
         since_epoch: f64,
-    ) -> Result<Vec<serde_json::Value>> {
+    ) -> Result<Vec<crate::types::JsonWithTerms>> {
         let id = validate_node_id(node_id)?;
         let epoch = validate_epoch(since_epoch)?;
         let db = self.inner.clone();
@@ -1339,19 +1339,19 @@ impl JsGrafeoDB {
                 .history_since(id, epoch)
                 .map_err(NodeGrafeoError::from)
                 .map_err(napi::Error::from)?;
-            Ok(events.iter().map(change_event_to_json).collect())
+            events.iter().map(change_event_to_json).collect()
         })
         .await
         .map_err(|e| napi::Error::from_reason(e.to_string()))?
     }
 
     /// Returns all change events across entities in an epoch range.
-    #[napi(js_name = "changesBetween")]
+    #[napi(js_name = "changesBetween", ts_return_type = "Promise<Array<any>>")]
     pub async fn changes_between(
         &self,
         start_epoch: f64,
         end_epoch: f64,
-    ) -> Result<Vec<serde_json::Value>> {
+    ) -> Result<Vec<crate::types::JsonWithTerms>> {
         let start = validate_epoch(start_epoch)?;
         let end = validate_epoch(end_epoch)?;
         let db = self.inner.clone();
@@ -1361,7 +1361,7 @@ impl JsGrafeoDB {
                 .changes_between(start, end)
                 .map_err(NodeGrafeoError::from)
                 .map_err(napi::Error::from)?;
-            Ok(events.iter().map(change_event_to_json).collect())
+            events.iter().map(change_event_to_json).collect()
         })
         .await
         .map_err(|e| napi::Error::from_reason(e.to_string()))?
@@ -1736,6 +1736,7 @@ pub(crate) fn js_result(mut result: EngineQueryResult) -> QueryResult {
     let scanned = result.rows_scanned;
     let counters = result.counters;
     let profile = result.profile.take();
+    let kind = result.kind;
     QueryResult::with_metrics(
         columns,
         result.into_rows(),
@@ -1746,6 +1747,7 @@ pub(crate) fn js_result(mut result: EngineQueryResult) -> QueryResult {
     )
     .with_counters(counters)
     .with_profile(profile)
+    .with_kind(kind)
 }
 
 /// A node of the engine as a JavaScript node.
@@ -1782,10 +1784,45 @@ fn entities(result: &EngineQueryResult) -> (Vec<JsNode>, Vec<JsEdge>) {
     )
 }
 
-/// Convert a CDC ChangeEvent to a JSON object (the shape every binding returns).
+/// Convert a CDC ChangeEvent to an object of the shape every binding
+/// returns, with each RDF term in `before` and `after` an RDF/JS term
+/// object, as `execute` gives it.
 #[cfg(feature = "cdc")]
-fn change_event_to_json(event: &grafeo_engine::cdc::ChangeEvent) -> serde_json::Value {
-    grafeo_bindings_common::cdc::event_to_json(event)
+fn change_event_to_json(
+    event: &grafeo_engine::cdc::ChangeEvent,
+) -> napi::Result<crate::types::JsonWithTerms> {
+    use crate::types::JsonWithTerms;
+    let json = grafeo_bindings_common::cdc::event_to_json(event)
+        .map_err(|error| napi::Error::new(napi::Status::GenericFailure, error.to_string()))?;
+    let serde_json::Value::Object(fields) = json else {
+        return Ok(JsonWithTerms::Json(json));
+    };
+    let properties = |properties: &Option<HashMap<String, Value>>| -> napi::Result<JsonWithTerms> {
+        properties.as_ref().map_or(
+            Ok(JsonWithTerms::Json(serde_json::Value::Null)),
+            |properties| {
+                Ok(JsonWithTerms::Object(
+                    properties
+                        .iter()
+                        .map(|(key, value)| Ok((key.clone(), JsonWithTerms::of(value)?)))
+                        .collect::<napi::Result<_>>()?,
+                ))
+            },
+        )
+    };
+    Ok(JsonWithTerms::Object(
+        fields
+            .into_iter()
+            .map(|(key, value)| {
+                let value = match key.as_str() {
+                    "before" => properties(&event.before)?,
+                    "after" => properties(&event.after)?,
+                    _ => JsonWithTerms::Json(value),
+                };
+                Ok((key, value))
+            })
+            .collect::<napi::Result<_>>()?,
+    ))
 }
 
 // After `JsGrafeoDB`: napi-derive records a struct's `js_name` when it expands

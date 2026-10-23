@@ -73,6 +73,7 @@ pub(crate) fn query_result(mut result: QueryResult) -> PyQueryResult {
     let rows_scanned = result.rows_scanned;
     let counters = result.counters;
     let profile = result.profile.take();
+    let kind = result.kind;
     let mut query_result = PyQueryResult::with_metrics(
         columns,
         result.into_rows(),
@@ -83,6 +84,7 @@ pub(crate) fn query_result(mut result: QueryResult) -> PyQueryResult {
     );
     query_result.counters = counters;
     query_result.profile = profile;
+    query_result.kind = kind;
     query_result
 }
 

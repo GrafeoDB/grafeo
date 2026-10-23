@@ -18,8 +18,10 @@ use crate::query::plan::{
 use grafeo_adapters::query::sparql::{self, ast};
 use grafeo_common::storage::log_record::RdfGraphTarget;
 use grafeo_common::types::Value;
+use grafeo_common::types::rdf::Term;
 use grafeo_common::utils::error::{Error, QueryError, QueryErrorKind, Result};
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
 
 /// Global counter for generating unique query IDs (blank node scoping).
@@ -31,6 +33,22 @@ static QUERY_ID_COUNTER: AtomicU32 = AtomicU32::new(0);
 ///
 /// Returns an error if the query cannot be parsed or translated.
 pub fn translate(query: &str) -> Result<LogicalPlan> {
+    translate_with_bindings(query, &HashMap::new())
+}
+
+/// Translates a SPARQL query whose variables `bindings` binds before it is
+/// evaluated: a parameter `x` binds `?x` (or `$x`, the same variable) in the
+/// WHERE clause of the query, as if a one-row `VALUES` for them came first
+/// (the initial bindings of Jena and RDF4J). A name may start with `?` or
+/// `$`; a NULL binds nothing. SPARQL has no parameter syntax of its own.
+///
+/// # Errors
+///
+/// As [`translate`].
+pub fn translate_with_bindings(
+    query: &str,
+    bindings: &HashMap<String, Value>,
+) -> Result<LogicalPlan> {
     // Check for EXPLAIN [ANALYZE] prefix (case-insensitive, non-standard extension).
     // EXPLAIN: show physical plan without executing.
     // EXPLAIN ANALYZE: execute with profiling, show actual vs estimated stats.
@@ -61,6 +79,16 @@ pub fn translate(query: &str) -> Result<LogicalPlan> {
 
     let sparql_query = sparql::parse(actual_query)?;
     let mut translator = SparqlTranslator::new();
+    let mut bound: Vec<(String, Value)> = bindings
+        .iter()
+        .filter(|(_, value)| !matches!(value, Value::Null))
+        .map(|(name, value)| {
+            let name = name.strip_prefix(['?', '$']).unwrap_or(name);
+            (name.to_string(), value.clone())
+        })
+        .collect();
+    bound.sort_by(|a, b| a.0.cmp(&b.0));
+    translator.initial_bindings = (!bound.is_empty()).then_some(bound);
     let plan = translator.translate_query(&sparql_query)?;
     let mut plan = crate::query::limits::check_plan_depth(plan)?;
     plan.explain = explain;
@@ -82,6 +110,13 @@ struct SparqlTranslator {
     query_id: u32,
     /// Dataset restriction from FROM / FROM NAMED clauses, if any.
     dataset: Option<DatasetRestriction>,
+    /// The variables the caller binds (see [`translate_with_bindings`]),
+    /// taken by the first graph pattern translated: the WHERE clause of the
+    /// query form.
+    initial_bindings: Option<Vec<(String, Value)>>,
+    /// The row of the initial bindings, which the outermost group joins
+    /// first.
+    group_start: Option<LogicalOperator>,
 }
 
 impl SparqlTranslator {
@@ -93,6 +128,8 @@ impl SparqlTranslator {
             graph_context_stack: Vec::new(),
             query_id: QUERY_ID_COUNTER.fetch_add(1, Ordering::Relaxed),
             dataset: None,
+            initial_bindings: None,
+            group_start: None,
         }
     }
 
@@ -140,10 +177,27 @@ impl SparqlTranslator {
 
             // Get explicit GROUP BY expressions, or empty vec for whole-dataset aggregation
             let group_by_exprs = if let Some(group_by) = &select.solution_modifiers.group_by {
-                group_by
-                    .iter()
-                    .map(|g| self.translate_group_condition(g))
-                    .collect::<Result<Vec<_>>>()?
+                let mut keys = Vec::with_capacity(group_by.len());
+                for condition in group_by {
+                    // `GROUP BY (expr AS ?v)` extends the solutions with ?v and
+                    // groups on it (SPARQL 1.1, 18.2.4.1), so the SELECT, the
+                    // HAVING and the ORDER BY read ?v.
+                    if let ast::GroupCondition::Expression {
+                        expression,
+                        alias: Some(alias),
+                    } = condition
+                    {
+                        plan = LogicalOperator::Bind(BindOp {
+                            expression: self.translate_expression(expression)?,
+                            variable: alias.clone(),
+                            input: Box::new(plan),
+                        });
+                        keys.push(LogicalExpression::Variable(alias.clone()));
+                    } else {
+                        keys.push(self.translate_group_condition(condition)?);
+                    }
+                }
+                keys
             } else {
                 // No GROUP BY means aggregate over entire dataset (empty group_by)
                 Vec::new()
@@ -426,23 +480,39 @@ impl SparqlTranslator {
         // Apply dataset restriction from FROM / FROM NAMED clauses
         self.dataset = self.translate_dataset_clause(&describe.dataset);
 
-        // DESCRIBE implements Concise Bounded Description (CBD):
-        // Return all triples where the described resource is the subject.
+        // DESCRIBE implements Concise Bounded Description (CBD): the
+        // triples whose subject is the described resource, as a graph.
+        let subject_var = format!("__describe_s{}", self.next_anon());
         let pred_var = format!("__describe_p{}", self.next_anon());
         let obj_var = format!("__describe_o{}", self.next_anon());
 
         let mut cbd_scans: Vec<LogicalOperator> = Vec::new();
         for resource in &describe.resources {
-            let subject = match resource {
-                ast::VariableOrIri::Iri(iri) => TripleComponent::Iri(self.resolve_iri(iri)),
-                ast::VariableOrIri::Variable(name) => TripleComponent::Variable(name.clone()),
+            let (subject, bound) = match resource {
+                ast::VariableOrIri::Iri(iri) => {
+                    let iri = self.resolve_iri(iri);
+                    (
+                        TripleComponent::Iri(iri.clone()),
+                        LogicalExpression::Literal(iri_term(&iri)),
+                    )
+                }
+                ast::VariableOrIri::Variable(name) => (
+                    TripleComponent::Variable(name.clone()),
+                    LogicalExpression::Variable(name.clone()),
+                ),
             };
-            cbd_scans.push(self.make_triple_scan(
+            let scan = self.make_triple_scan(
                 subject,
                 TripleComponent::Variable(pred_var.clone()),
                 TripleComponent::Variable(obj_var.clone()),
                 None,
-            ));
+            );
+            // Every branch binds the resource to one variable, the template's subject.
+            cbd_scans.push(LogicalOperator::Bind(BindOp {
+                expression: bound,
+                variable: subject_var.clone(),
+                input: Box::new(scan),
+            }));
         }
 
         let cbd_plan = if cbd_scans.len() == 1 {
@@ -461,7 +531,16 @@ impl SparqlTranslator {
         // Clear dataset after translating the WHERE clause
         self.dataset = None;
 
-        Ok(LogicalPlan::new(plan))
+        Ok(LogicalPlan::new(LogicalOperator::Construct(ConstructOp {
+            templates: vec![TripleTemplate {
+                subject: TripleComponent::Variable(subject_var),
+                predicate: TripleComponent::Variable(pred_var),
+                object: TripleComponent::Variable(obj_var),
+                graph: None,
+            }],
+            input: Box::new(plan),
+        }))
+        .with_result_kind(ResultKind::Graph))
     }
 
     // ==================== SPARQL Update Translation ====================
@@ -880,7 +959,33 @@ impl SparqlTranslator {
         }
     }
 
+    /// Translates `pattern`; the outermost one (the query's WHERE clause)
+    /// joins the initial bindings first, as a `VALUES` row at the start of
+    /// its group would be, so the group's filters see them.
     fn translate_graph_pattern(&mut self, pattern: &ast::GraphPattern) -> Result<LogicalOperator> {
+        let Some(bindings) = self.initial_bindings.take() else {
+            return self.translate_graph_pattern_unbound(pattern);
+        };
+        let mut row = LogicalOperator::Empty;
+        for (variable, value) in bindings {
+            row = LogicalOperator::Bind(BindOp {
+                expression: LogicalExpression::Literal(value),
+                variable,
+                input: Box::new(row),
+            });
+        }
+        if matches!(pattern, ast::GraphPattern::Group(_)) {
+            self.group_start = Some(row);
+            return self.translate_graph_pattern_unbound(pattern);
+        }
+        let plan = self.translate_graph_pattern_unbound(pattern)?;
+        self.join_patterns(row, plan)
+    }
+
+    fn translate_graph_pattern_unbound(
+        &mut self,
+        pattern: &ast::GraphPattern,
+    ) -> Result<LogicalOperator> {
         match pattern {
             ast::GraphPattern::Basic(triples) => self.translate_basic_pattern(triples),
 
@@ -894,7 +999,9 @@ impl SparqlTranslator {
                 let mut not_exists_patterns: Vec<&ast::GraphPattern> = Vec::new();
                 let mut exists_patterns: Vec<&ast::GraphPattern> = Vec::new();
 
-                let mut plan = LogicalOperator::Empty;
+                // The initial bindings start the outermost group, so its
+                // filters see them (a `VALUES` row in the group would).
+                let mut plan = self.group_start.take().unwrap_or(LogicalOperator::Empty);
 
                 for p in patterns {
                     match p {
@@ -1182,9 +1289,9 @@ impl SparqlTranslator {
                 } else {
                     // Complex path (ZeroOrMore, OneOrMore, etc.): recurse
                     let sub_triple = ast::TriplePattern {
-                        subject: self.triple_component_to_term(&current_subject),
+                        subject: self.triple_component_to_term(&current_subject)?,
                         predicate: path.clone(),
-                        object: self.triple_component_to_term(&next_object),
+                        object: self.triple_component_to_term(&next_object)?,
                     };
                     self.translate_triple_pattern(&sub_triple)?
                 };
@@ -1262,17 +1369,7 @@ impl SparqlTranslator {
         match term {
             ast::TripleTerm::Variable(name) => Ok(TripleComponent::Variable(name.clone())),
             ast::TripleTerm::Iri(iri) => Ok(TripleComponent::Iri(self.resolve_iri(iri))),
-            ast::TripleTerm::Literal(lit) => {
-                if let Some(lang) = &lit.language {
-                    Ok(TripleComponent::LangLiteral {
-                        value: lit.value.clone(),
-                        lang: lang.clone(),
-                    })
-                } else {
-                    let value = self.literal_to_value(lit);
-                    Ok(TripleComponent::Literal(value))
-                }
-            }
+            ast::TripleTerm::Literal(lit) => Ok(TripleComponent::Literal(self.literal_value(lit))),
             ast::TripleTerm::BlankNode(bnode) => {
                 // Treat blank nodes as variables, scoped by query_id
                 match bnode {
@@ -1301,10 +1398,31 @@ impl SparqlTranslator {
     }
 
     /// Converts a `TripleComponent` back to an AST `TripleTerm` for recursive translation.
-    fn triple_component_to_term(&self, component: &TripleComponent) -> ast::TripleTerm {
-        match component {
+    ///
+    /// # Errors
+    ///
+    /// For a constant term of a kind the translator does not know.
+    fn triple_component_to_term(&self, component: &TripleComponent) -> Result<ast::TripleTerm> {
+        Ok(match component {
             TripleComponent::Variable(name) => ast::TripleTerm::Variable(name.clone()),
             TripleComponent::Iri(iri) => ast::TripleTerm::Iri(ast::Iri(iri.clone())),
+            TripleComponent::Literal(Value::RdfTerm(term)) => match term.as_ref() {
+                Term::Literal(literal) => ast::TripleTerm::Literal(ast::Literal {
+                    value: literal.value().to_string(),
+                    datatype: literal
+                        .language()
+                        .is_none()
+                        .then(|| ast::Iri(literal.datatype().to_string())),
+                    language: literal.language().map(str::to_string),
+                }),
+                Term::Iri(iri) => ast::TripleTerm::Iri(ast::Iri(iri.as_str().to_string())),
+                Term::BlankNode(node) => {
+                    ast::TripleTerm::BlankNode(ast::BlankNode::Labeled(node.id().to_string()))
+                }
+                other => {
+                    return Err(grafeo_common::types::rdf::UnsupportedTermKind::of(other).into());
+                }
+            },
             TripleComponent::Literal(val) => ast::TripleTerm::Literal(ast::Literal {
                 value: val.to_string(),
                 datatype: None,
@@ -1320,7 +1438,7 @@ impl SparqlTranslator {
             TripleComponent::BlankNode(label) => {
                 ast::TripleTerm::BlankNode(ast::BlankNode::Labeled(label.clone()))
             }
-        }
+        })
     }
 
     fn translate_property_path(&mut self, path: &ast::PropertyPath) -> Result<TripleComponent> {
@@ -1342,26 +1460,13 @@ impl SparqlTranslator {
         match expr {
             ast::Expression::Variable(name) => Ok(LogicalExpression::Variable(name.clone())),
 
-            ast::Expression::Iri(iri) => Ok(LogicalExpression::Literal(Value::String(
-                self.resolve_iri(iri).into(),
-            ))),
-
-            // A language-tagged literal keeps its tag as STRLANG(value, tag):
-            // its value is the text, and LANG, DATATYPE and BIND read the tag
-            // from the call (comparisons with one are rewritten above).
-            ast::Expression::Literal(lit) if lit.language.is_some() => {
-                Ok(LogicalExpression::SparqlCall {
-                    name: "STRLANG".to_string(),
-                    args: vec![
-                        LogicalExpression::Literal(Value::String(lit.value.clone().into())),
-                        LogicalExpression::Literal(Value::String(
-                            lit.language.clone().unwrap_or_default().into(),
-                        )),
-                    ],
-                })
+            // A constant is the exact term written: an IRI, or a literal with
+            // its lexical form and its datatype or language tag.
+            ast::Expression::Iri(iri) => {
+                Ok(LogicalExpression::Literal(iri_term(&self.resolve_iri(iri))))
             }
             ast::Expression::Literal(lit) => {
-                Ok(LogicalExpression::Literal(self.literal_to_value(lit)))
+                Ok(LogicalExpression::Literal(self.literal_value(lit)))
             }
 
             ast::Expression::Binary {
@@ -1369,18 +1474,6 @@ impl SparqlTranslator {
                 operator,
                 right,
             } => {
-                // Detect language-tagged literal comparisons: ?var = "value"@lang
-                // or "value"@lang = ?var. Rewrite to check both lexical value and
-                // language tag so that "Barcelona"@es does not match "Barcelona"@ca.
-                if matches!(
-                    operator,
-                    ast::BinaryOperator::Equal | ast::BinaryOperator::NotEqual
-                ) && let Some(expanded) =
-                    self.try_expand_lang_comparison(left, *operator, right)?
-                {
-                    return Ok(expanded);
-                }
-
                 let left = self.translate_expression(left)?;
                 let right = self.translate_expression(right)?;
                 let op = self.translate_binary_op(*operator);
@@ -1976,156 +2069,32 @@ impl SparqlTranslator {
         iri_str.to_string()
     }
 
-    /// Rewrites `?var = "value"@lang` to `?var = "value" AND LANG(?var) = "lang"`,
-    /// and `?var != "value"@lang` to `?var != "value" OR LANG(?var) != "lang"`.
-    ///
-    /// Returns `None` when neither side is a language-tagged literal (the caller
-    /// falls through to the normal binary translation path).
-    fn try_expand_lang_comparison(
-        &mut self,
-        left: &ast::Expression,
-        operator: ast::BinaryOperator,
-        right: &ast::Expression,
-    ) -> Result<Option<LogicalExpression>> {
-        // Detect which side is the language-tagged literal and which is a variable.
-        let (var_expr, lang_lit) = match (left, right) {
-            (_, ast::Expression::Literal(lit)) if lit.language.is_some() => (left, lit),
-            (ast::Expression::Literal(lit), _) if lit.language.is_some() => (right, lit),
-            _ => return Ok(None),
-        };
-
-        let lang_tag = lang_lit.language.as_ref().expect("checked above");
-        let translated_var = self.translate_expression(var_expr)?;
-        let value_literal =
-            LogicalExpression::Literal(Value::String(lang_lit.value.clone().into()));
-        let lang_literal = LogicalExpression::Literal(Value::String(lang_tag.clone().into()));
-
-        // Build LANG(?var)
-        let lang_call = LogicalExpression::SparqlCall {
-            name: "LANG".to_string(),
-            args: vec![translated_var.clone()],
-        };
-
-        let (value_op, lang_op, combine_op) = if operator == ast::BinaryOperator::Equal {
-            (BinaryOp::Eq, BinaryOp::Eq, BinaryOp::And)
-        } else {
-            // NotEqual: either value differs OR lang tag differs
-            (BinaryOp::Ne, BinaryOp::Ne, BinaryOp::Or)
-        };
-
-        let value_cmp = LogicalExpression::Binary {
-            left: Box::new(translated_var),
-            op: value_op,
-            right: Box::new(value_literal),
-        };
-        let lang_cmp = LogicalExpression::Binary {
-            left: Box::new(lang_call),
-            op: lang_op,
-            right: Box::new(lang_literal),
-        };
-
-        Ok(Some(LogicalExpression::Binary {
-            left: Box::new(value_cmp),
-            op: combine_op,
-            right: Box::new(lang_cmp),
-        }))
-    }
-
-    fn literal_to_value(&self, lit: &ast::Literal) -> Value {
-        // Check for typed literals
-        if let Some(datatype) = &lit.datatype {
-            let dt = self.resolve_iri(datatype);
-            match dt.as_str() {
-                "http://www.w3.org/2001/XMLSchema#integer"
-                | "http://www.w3.org/2001/XMLSchema#int"
-                | "http://www.w3.org/2001/XMLSchema#long" => {
-                    if let Ok(n) = lit.value.parse::<i64>() {
-                        return Value::Int64(n);
-                    }
-                }
-                "http://www.w3.org/2001/XMLSchema#decimal" => {
-                    if let Ok(d) = grafeo_common::types::Decimal::parse(&lit.value) {
-                        return Value::Decimal(d);
-                    }
-                }
-                "http://www.w3.org/2001/XMLSchema#double"
-                | "http://www.w3.org/2001/XMLSchema#float" => {
-                    if let Ok(n) = lit.value.parse::<f64>() {
-                        return Value::Float64(n);
-                    }
-                }
-                "http://www.w3.org/2001/XMLSchema#boolean" => {
-                    return Value::Bool(lit.value == "true" || lit.value == "1");
-                }
-                "http://www.w3.org/2001/XMLSchema#date" => {
-                    if let Some(d) = grafeo_common::types::Date::parse(&lit.value) {
-                        return Value::Date(d);
-                    }
-                }
-                "http://www.w3.org/2001/XMLSchema#time" => {
-                    if let Some(t) = grafeo_common::types::Time::parse(&lit.value) {
-                        return Value::Time(t);
-                    }
-                }
-                "http://www.w3.org/2001/XMLSchema#duration"
-                | "http://www.w3.org/2001/XMLSchema#dayTimeDuration"
-                | "http://www.w3.org/2001/XMLSchema#yearMonthDuration" => {
-                    if let Some(d) = grafeo_common::types::Duration::parse(&lit.value) {
-                        return Value::Duration(d);
-                    }
-                }
-                "http://www.w3.org/2001/XMLSchema#dateTime" => {
-                    // Prefer ZonedDatetime when the value has an explicit offset,
-                    // so that local date/time and timezone are preserved for
-                    // YEAR/MONTH/DAY/HOURS/MINUTES/SECONDS/TIMEZONE/TZ functions.
-                    if let Some(zdt) = grafeo_common::types::ZonedDatetime::parse(&lit.value) {
-                        return Value::ZonedDatetime(zdt);
-                    }
-                    // Fall back to Timestamp for values without offset
-                    if let Some(pos) = lit.value.find('T')
-                        && let (Some(d), Some(t)) = (
-                            grafeo_common::types::Date::parse(&lit.value[..pos]),
-                            grafeo_common::types::Time::parse(&lit.value[pos + 1..]),
-                        )
-                    {
-                        return Value::Timestamp(grafeo_common::types::Timestamp::from_date_time(
-                            d, t,
-                        ));
-                    }
-                }
-                _ => {}
+    /// The term of a literal as written: its lexical form with its language
+    /// tag, its datatype (a prefixed name resolved), or neither (a simple
+    /// literal), so `"5"^^xsd:int` stays an `xsd:int` and `"01"` keeps its
+    /// text.
+    fn literal_value(&self, lit: &ast::Literal) -> Value {
+        let term = match (&lit.language, &lit.datatype) {
+            (Some(lang), _) => Term::lang_literal(lit.value.as_str(), lang.as_str()),
+            (None, Some(datatype)) => {
+                Term::typed_literal(lit.value.as_str(), self.resolve_iri(datatype))
             }
-        }
-
-        // Default to string
-        Value::String(lit.value.clone().into())
+            (None, None) => Term::literal(lit.value.as_str()),
+        };
+        Value::RdfTerm(Arc::new(term))
     }
 
-    /// Converts a SPARQL `DataValue` (from VALUES inline data) to a `Value`.
-    /// The expression a VALUES entry binds: its value, and for a
-    /// language-tagged literal `STRLANG(value, tag)`, so the tag reaches the
-    /// variable's `__lang_` companion as a BIND of it does.
+    /// The expression a VALUES entry binds: the exact term written.
     fn data_value_expression(&self, dv: &ast::DataValue) -> LogicalExpression {
-        match dv {
-            ast::DataValue::Literal(lit) if lit.language.is_some() => {
-                LogicalExpression::SparqlCall {
-                    name: "STRLANG".to_string(),
-                    args: vec![
-                        LogicalExpression::Literal(Value::String(lit.value.clone().into())),
-                        LogicalExpression::Literal(Value::String(
-                            lit.language.clone().unwrap_or_default().into(),
-                        )),
-                    ],
-                }
-            }
-            _ => LogicalExpression::Literal(self.data_value_to_value(dv)),
-        }
+        LogicalExpression::Literal(self.data_value_to_value(dv))
     }
 
+    /// The term of a VALUES entry, as [`literal_value`](Self::literal_value)
+    /// reads a literal.
     fn data_value_to_value(&self, dv: &ast::DataValue) -> Value {
         match dv {
-            ast::DataValue::Iri(iri) => Value::String(self.resolve_iri(iri).into()),
-            ast::DataValue::Literal(lit) => self.literal_to_value(lit),
+            ast::DataValue::Iri(iri) => iri_term(&self.resolve_iri(iri)),
+            ast::DataValue::Literal(lit) => self.literal_value(lit),
         }
     }
 
@@ -2180,8 +2149,8 @@ impl SparqlTranslator {
                 .map(|iri| LogicalExpression::Binary {
                     left: Box::new(LogicalExpression::Variable(pred_var.clone())),
                     op: BinaryOp::Ne,
-                    right: Box::new(LogicalExpression::Literal(Value::String(
-                        translator.resolve_iri(iri).into(),
+                    right: Box::new(LogicalExpression::Literal(iri_term(
+                        &translator.resolve_iri(iri),
                     ))),
                 })
                 .collect();
@@ -2489,15 +2458,13 @@ impl SparqlTranslator {
     fn triple_component_to_expression(&self, component: &TripleComponent) -> LogicalExpression {
         match component {
             TripleComponent::Variable(name) => LogicalExpression::Variable(name.clone()),
-            TripleComponent::Iri(iri) => {
-                LogicalExpression::Literal(Value::String(iri.clone().into()))
-            }
+            TripleComponent::Iri(iri) => LogicalExpression::Literal(iri_term(iri)),
             TripleComponent::Literal(val) => LogicalExpression::Literal(val.clone()),
-            TripleComponent::LangLiteral { value, .. } => {
-                LogicalExpression::Literal(Value::String(value.clone().into()))
-            }
+            TripleComponent::LangLiteral { value, lang } => LogicalExpression::Literal(
+                Value::RdfTerm(Arc::new(Term::lang_literal(value.as_str(), lang.as_str()))),
+            ),
             TripleComponent::BlankNode(label) => {
-                LogicalExpression::Literal(Value::String(format!("_:{label}").into()))
+                LogicalExpression::Literal(Value::RdfTerm(Arc::new(Term::blank(label.as_str()))))
             }
         }
     }
@@ -2554,6 +2521,11 @@ impl SparqlTranslator {
         self.anon_counter += 1;
         n
     }
+}
+
+/// An IRI as the constant of an expression.
+fn iri_term(iri: &str) -> Value {
+    Value::RdfTerm(Arc::new(Term::iri(iri)))
 }
 
 #[cfg(test)]

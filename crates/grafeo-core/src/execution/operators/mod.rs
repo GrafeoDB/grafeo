@@ -82,7 +82,7 @@ pub use factorized_filter::{
 };
 pub use filter::{
     BinaryFilterOp, ExpressionPredicate, FilterExpression, FilterOperator, LazyValue,
-    ListPredicateKind, Predicate, SessionContext, UnaryFilterOp,
+    ListPredicateKind, Predicate, SessionContext, StatementClock, UnaryFilterOp,
 };
 pub use functions::{
     Arity, BuiltinFunction, FunctionGroup, FunctionSupport, REGEX_SUPPORT, Volatility,
@@ -472,6 +472,12 @@ impl OperatorError {
 impl From<grafeo_common::utils::error::Error> for OperatorError {
     fn from(error: grafeo_common::utils::error::Error) -> Self {
         Self::Wrapped(Box::new(error))
+    }
+}
+
+impl From<grafeo_common::types::rdf::UnsupportedTermKind> for OperatorError {
+    fn from(error: grafeo_common::types::rdf::UnsupportedTermKind) -> Self {
+        grafeo_common::utils::error::Error::from(error).into()
     }
 }
 

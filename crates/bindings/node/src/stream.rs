@@ -32,16 +32,14 @@
 
 use std::sync::Arc;
 
+use grafeo_engine::database::GrafeoDB;
+use grafeo_engine::{OwnedResultStream, OwnedRowIterator};
 use napi::bindgen_prelude::*;
 use napi_derive::napi;
 use parking_lot::{Mutex, RwLock};
-use serde_json::{Map as JsonMap, Value as JsonValue};
-
-use grafeo_bindings_common::json::value_to_json;
-use grafeo_engine::database::GrafeoDB;
-use grafeo_engine::{OwnedResultStream, OwnedRowIterator};
 
 use crate::error::NodeGrafeoError;
+use crate::types::JsonWithTerms;
 
 /// Async cursor over the rows of a lazy GQL query.
 ///
@@ -86,23 +84,25 @@ impl JsResultStream {
     /// Values follow the Grafeo JSON convention: strings, numbers, booleans,
     /// and `null` map directly; temporal and complex types use the tagged
     /// form documented in `grafeo-bindings-common::json` (e.g. `{ "$date": ... }`).
-    #[napi(ts_return_type = "Promise<Record<string, unknown> | null>")]
-    pub async fn next(&self) -> Result<Option<JsonValue>> {
+    /// An RDF term is an RDF/JS term object, as `execute` gives it.
+    #[napi(ts_return_type = "Promise<Record<string, GrafeoValue> | null>")]
+    pub async fn next(&self) -> Result<Option<JsonWithTerms>> {
         let iter = Arc::clone(&self.iter);
         let columns = Arc::clone(&self.columns);
 
-        tokio::task::spawn_blocking(move || -> Result<Option<JsonValue>> {
+        tokio::task::spawn_blocking(move || -> Result<Option<JsonWithTerms>> {
             let mut guard = iter.lock();
             let Some(iter_mut) = guard.as_mut() else {
                 return Ok(None);
             };
             match iter_mut.next() {
                 Some(Ok(values)) => {
-                    let mut obj = JsonMap::with_capacity(columns.len());
-                    for (col, val) in columns.iter().zip(values.iter()) {
-                        obj.insert(col.clone(), value_to_json(val));
-                    }
-                    Ok(Some(JsonValue::Object(obj)))
+                    let row = columns
+                        .iter()
+                        .zip(values.iter())
+                        .map(|(col, val)| Ok((col.clone(), JsonWithTerms::of(val)?)))
+                        .collect::<Result<_>>()?;
+                    Ok(Some(JsonWithTerms::Object(row)))
                 }
                 Some(Err(err)) => {
                     *guard = None;

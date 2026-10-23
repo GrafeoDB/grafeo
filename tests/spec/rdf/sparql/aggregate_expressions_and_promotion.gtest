@@ -112,12 +112,14 @@ tests:
         - [true, true]
 
   - name: avg_with_a_double_is_a_double
+    # A computed double is written in its canonical form (XML Schema 1.1):
+    # one digit before the point, then E and the exponent.
     query: |
       PREFIX xsd: <http://www.w3.org/2001/XMLSchema#>
       SELECT (AVG(?x) AS ?a) (DATATYPE(AVG(?x)) = xsd:double AS ?double) WHERE { VALUES ?x { 1 2.0e0 } }
     expect:
       rows:
-        - [1.5, true]
+        - ["1.5E0", true]
 
   - name: avg_of_distinct_integers_is_a_decimal
     query: |
@@ -192,15 +194,13 @@ tests:
     expect:
       empty: true
 
-  # ---------------------------------------------------------------------------
-  # Known gaps
-  # ---------------------------------------------------------------------------
-
-
   - name: sum_with_a_non_numeric_value_is_unbound
-    skip: "SUM skips a value that is no number; SPARQL 1.1 makes the aggregate an error, so unbound (inbox sparql/aggregates-of-empty-and-non-numeric-groups.md)"
+    # A value that is no number makes SUM and AVG an error (18.5), so the
+    # variable is unbound. An unbound value is skipped, so SUM of 1 and UNDEF
+    # is 1: a deliberate reading, as the major engines do, where 18.5 leaves
+    # the case open (SPARQL 1.1 errata, query-6).
     query: |
-      SELECT (SUM(?x) AS ?s) WHERE { VALUES ?x { 1 "Alix" } }
+      SELECT (SUM(?x) AS ?s) (AVG(?x) AS ?a) (SUM(?y) AS ?t) WHERE { VALUES (?x ?y) { (1 1) ("Alix" UNDEF) } }
     expect:
-      rows:
-        - [null]
+      terms:
+        - [null, null, '"1"^^xsd:integer']

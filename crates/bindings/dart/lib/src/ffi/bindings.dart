@@ -178,6 +178,11 @@ final class GrafeoBindings {
       Uint64 Function(Pointer<Void>),
       int Function(Pointer<Void>)>('grafeo_result_rows_scanned');
 
+  /// What a result holds: 0 rows, 1 one boolean (SPARQL ASK), 2 an RDF graph.
+  late final grafeoResultKind = library.lookupFunction<
+      Int32 Function(Pointer<Void>),
+      int Function(Pointer<Void>)>('grafeo_result_kind');
+
   /// Write counter: nodes created.
   late final grafeoResultNodesCreated = library.lookupFunction<
       Uint64 Function(Pointer<Void>),

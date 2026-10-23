@@ -7,14 +7,14 @@
 //! every chunk at a `u64` file offset. This test writes a database whose LPG
 //! section alone holds about 4.6 GiB: large text and bytes values on 1,490 of
 //! 190,388 nodes, with their edges and a named graph, and a vector and a text
-//! index (when the build has them), whose sections a checkpoint writes after
-//! the LPG section, so past 4 GiB. It checkpoints the database with
+//! index (when the build has them), which an open builds from the data (a
+//! checkpoint writes no section for them). It checkpoints the database with
 //! `close()`, reads every chunk of the file back against its checksum,
 //! reopens it read-write and compares every node, edge and index with what
 //! was written. Then it changes a few values and closes again: the second
-//! image goes into free pages (copy-on-write), which apart from a few at the
-//! front lie after the first image, from about 4.6 to 9.2 GiB, and a
-//! read-only reopen checks everything once more.
+//! image keeps the first image's chunks that did not change and writes the
+//! others into free pages (copy-on-write), past the end of the first image,
+//! so past 4 GiB, and a read-only reopen checks everything once more.
 //!
 //! It holds about 5 GiB in memory, needs about 15 GiB of free disk and
 //! writes about 14 GiB (the WAL, then two images), so it is ignored in
@@ -437,24 +437,23 @@ fn check(db: &GrafeoDB, ids: &Ids, round: Round, what: &str) {
     }
 }
 
-/// What the indexes of a database hold, in the builds that have them.
+/// What the indexes of a database hold, in the builds that have them. An
+/// open builds both from the data, so they hold what was written when the
+/// data came back whole.
 #[derive(PartialEq)]
 struct IndexState {
-    /// The HNSW graph of the vector index: a rebuild draws other levels, so
-    /// an equal topology after a reopen was read from the section.
+    /// The nodes in the HNSW graph of the vector index, by id. A rebuild
+    /// draws other levels, so its topology is not compared.
     #[cfg(feature = "vector-index")]
-    topology: Topology,
-    /// What the text index finds for "Prague".
+    nodes: Vec<NodeId>,
+    /// What the text index finds for "Prague", with the bits of each score.
     #[cfg(feature = "text-index")]
     mottos: Vec<(NodeId, u64)>,
 }
 
+/// The nodes in the HNSW graph of the vector index of `db`, by id.
 #[cfg(feature = "vector-index")]
-type Topology = (Option<NodeId>, usize, Vec<(NodeId, Vec<Vec<NodeId>>)>);
-
-/// The HNSW graph of the vector index of `db`.
-#[cfg(feature = "vector-index")]
-fn topology(db: &GrafeoDB) -> Topology {
+fn vector_nodes(db: &GrafeoDB) -> Vec<NodeId> {
     use grafeo_core::index::vector::VectorIndexKind;
 
     let index = db
@@ -462,9 +461,23 @@ fn topology(db: &GrafeoDB) -> Topology {
         .unwrap()
         .get_vector_index("Person", "embedding")
         .expect("the vector index");
-    match &*index {
+    let (_entry, _levels, nodes) = match &*index {
         VectorIndexKind::Hnsw(hnsw) => hnsw.snapshot_topology(),
         VectorIndexKind::Quantized(_) => panic!("the index was created without quantization"),
+    };
+    let mut nodes: Vec<NodeId> = nodes.into_iter().map(|(node, _)| node).collect();
+    nodes.sort_unstable();
+    nodes
+}
+
+/// What the indexes of `db` hold.
+fn index_state(db: &GrafeoDB) -> IndexState {
+    let _ = db;
+    IndexState {
+        #[cfg(feature = "vector-index")]
+        nodes: vector_nodes(db),
+        #[cfg(feature = "text-index")]
+        mottos: text_index_matches(db),
     }
 }
 
@@ -486,35 +499,6 @@ fn text_index_matches(db: &GrafeoDB) -> Vec<(NodeId, u64)> {
         db.text_search("Person", "motto", "Prague", 100_000, None)
             .unwrap(),
     )
-}
-
-/// The matches of the text index decoded from the section of the active
-/// image itself. When the section does not decode, a reopen builds the index
-/// from the data instead, with the same matches: only decoding the section
-/// shows that it holds the index.
-#[cfg(feature = "text-index")]
-fn text_section_matches(db: &GrafeoDB) -> Vec<(NodeId, u64)> {
-    use std::sync::Arc;
-
-    use grafeo_common::storage::{Section, SectionType};
-    use grafeo_core::index::text::{BM25Config, InvertedIndex, TextIndexSection};
-
-    let shell = Arc::new(parking_lot::RwLock::new(InvertedIndex::new(
-        BM25Config::default(),
-    )));
-    db.file_manager()
-        .expect("a database file")
-        .read_image(|image| {
-            let source = image
-                .section_source(SectionType::TextIndex)
-                .expect("a text index section");
-            TextIndexSection::new(vec![("Person:motto".to_string(), Arc::clone(&shell))])
-                .read_from(&*source)
-        })
-        .unwrap_or_else(|error| panic!("the text index section decodes: {error}"));
-    let matches = shell.read().search("Prague", 100_000);
-    assert!(!matches.is_empty(), "the decoded text index finds Prague");
-    prague_mottos(matches)
 }
 
 // --- The file -----------------------------------------------------------------------
@@ -592,8 +576,8 @@ fn image_layout(path: &Path, what: &str) -> BTreeMap<String, Placement> {
     layout
 }
 
-/// Asserts that the LPG section alone holds more than 4 GiB and that it and
-/// the index sections written after it have chunks past 4 GiB.
+/// Asserts that the LPG section alone holds more than 4 GiB and has chunks
+/// past 4 GiB.
 fn assert_past_4_gib(layout: &BTreeMap<String, Placement>, what: &str) {
     let limit = u64::from(u32::MAX);
     let lpg = &layout["LpgStore"];
@@ -601,20 +585,10 @@ fn assert_past_4_gib(layout: &BTreeMap<String, Placement>, what: &str) {
         lpg.bytes > limit,
         "{what}: the LPG section alone holds more than 4 GiB: {layout:?}"
     );
-    let mut past = vec!["LpgStore"];
-    if cfg!(feature = "vector-index") {
-        past.push("VectorStore");
-    }
-    if cfg!(feature = "text-index") {
-        past.push("TextIndex");
-    }
-    for name in past {
-        let last = layout.get(name).and_then(|placement| placement.last);
-        assert!(
-            last.is_some_and(|offset| offset > limit),
-            "{what}: the {name} section has chunks past 4 GiB: {layout:?}"
-        );
-    }
+    assert!(
+        lpg.last.is_some_and(|offset| offset > limit),
+        "{what}: the LPG section has chunks past 4 GiB: {layout:?}"
+    );
 }
 
 // --- The machine --------------------------------------------------------------------
@@ -771,12 +745,7 @@ fn a_database_over_4_gib_round_trips_through_checkpoints_and_reopens() {
         let db = GrafeoDB::with_config(Config::persistent(&path)).unwrap();
         let ids = write(&db);
         step("written");
-        let written = IndexState {
-            #[cfg(feature = "vector-index")]
-            topology: topology(&db),
-            #[cfg(feature = "text-index")]
-            mottos: text_index_matches(&db),
-        };
+        let written = index_state(&db);
         db.close()
             .expect("the checkpoint of more than 4 GiB succeeds");
         step("closed");
@@ -798,22 +767,10 @@ fn a_database_over_4_gib_round_trips_through_checkpoints_and_reopens() {
         });
         step("reopened");
         check(&db, &ids, Round::Written, "reopened");
-        let reopened = IndexState {
-            #[cfg(feature = "vector-index")]
-            topology: topology(&db),
-            #[cfg(feature = "text-index")]
-            mottos: text_section_matches(&db),
-        };
         assert!(
-            reopened == written,
-            "reopened: the vector index has the topology written (read from its section past 4 \
-             GiB, not rebuilt) and the text index section finds what the index found"
-        );
-        #[cfg(feature = "text-index")]
-        assert_eq!(
-            text_index_matches(&db),
-            written.mottos,
-            "reopened: the text index"
+            index_state(&db) == written,
+            "reopened: the vector index holds the nodes written, and the text index finds \
+             what it found, with the same scores"
         );
         step("checked");
         change(&db, &mut ids);
@@ -834,15 +791,9 @@ fn a_database_over_4_gib_round_trips_through_checkpoints_and_reopens() {
     });
     step("reopened read-only");
     check(&db, &ids, Round::Changed, "after the second checkpoint");
-    let reopened = IndexState {
-        #[cfg(feature = "vector-index")]
-        topology: topology(&db),
-        #[cfg(feature = "text-index")]
-        mottos: text_section_matches(&db),
-    };
     assert!(
-        reopened == written,
-        "after the second checkpoint: the indexes are the ones written"
+        index_state(&db) == written,
+        "after the second checkpoint: the indexes hold what was written"
     );
     drop(db);
     step("checked again");

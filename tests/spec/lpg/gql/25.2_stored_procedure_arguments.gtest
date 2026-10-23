@@ -95,3 +95,13 @@ tests:
     expect:
       rows:
         - [true]
+
+  # A procedure body reads the calling statement's clock (#179): 5,000 calls
+  # see one instant, the statement's own.
+  - name: a_procedure_body_reads_the_calling_statements_clock
+    setup:
+      - "CREATE PROCEDURE stamp() RETURNS (t ANY) AS { RETURN localdatetime() AS t }"
+    query: "FOR i IN range(1, 5000) CALL stamp() YIELD t RETURN count(DISTINCT t) AS instants, max(t) = localdatetime() AS same"
+    expect:
+      rows:
+        - [1, true]

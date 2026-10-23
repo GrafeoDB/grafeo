@@ -399,6 +399,163 @@ pub fn assert_error(result: Result<QueryResult>, message: Option<&str>, gql_stat
     }
 }
 
+/// The XSD namespace an expected `xsd:` datatype stands for.
+const XSD: &str = "http://www.w3.org/2001/XMLSchema#";
+/// The RDF namespace an expected `rdf:` datatype stands for.
+const RDF: &str = "http://www.w3.org/1999/02/22-rdf-syntax-ns#";
+
+/// A literal's text as N-Triples writes it, between the quotes.
+fn escape_lexical(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    for c in text.chars() {
+        match c {
+            '\\' => out.push_str("\\\\"),
+            '"' => out.push_str("\\\""),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            other => out.push(other),
+        }
+    }
+    out
+}
+
+/// A result cell as the N-Triples form of the RDF term it holds: `<iri>`,
+/// `_:label`, `"text"` (an `xsd:string`), `"text"@tag` or `"text"^^<datatype>`;
+/// `null` when unbound.
+///
+/// # Panics
+///
+/// On a value that is not an RDF term, and on a term of a kind the runner
+/// does not know: a `terms:` expectation compares terms only.
+#[must_use]
+pub fn term_to_string(value: &Value) -> String {
+    use grafeo_common::types::rdf::{Literal, Term};
+    let term = match value {
+        Value::Null => return "null".to_string(),
+        Value::RdfTerm(term) => term,
+        other => panic!("a `terms:` expectation got a value that is not an RDF term: {other:?}"),
+    };
+    match term.as_ref() {
+        Term::Iri(iri) => format!("<{}>", iri.as_str()),
+        Term::BlankNode(node) => format!("_:{}", node.id()),
+        Term::Literal(literal) => {
+            let text = escape_lexical(literal.value());
+            match literal.language() {
+                Some(tag) => format!("\"{text}\"@{}", tag.to_lowercase()),
+                None if literal.datatype() == Literal::XSD_STRING => format!("\"{text}\""),
+                None => format!("\"{text}\"^^<{}>", literal.datatype()),
+            }
+        }
+        other => panic!(
+            "{}",
+            grafeo_common::types::rdf::UnsupportedTermKind::of(other)
+        ),
+    }
+}
+
+/// An expected term written for a `terms:` expectation, in the form
+/// [`term_to_string`] gives: an `xsd:` or `rdf:` datatype expanded, an
+/// explicit `xsd:string` dropped (it is the simple literal) and a language
+/// tag lowercased.
+#[must_use]
+pub fn normalize_expected_term(expected: &str) -> String {
+    let Some(rest) = expected.strip_prefix('"') else {
+        return expected.to_string();
+    };
+    // The closing quote is the last one: a datatype or tag has none.
+    let Some(end) = rest.rfind('"') else {
+        return expected.to_string();
+    };
+    let (text, suffix) = (&rest[..end], &rest[end + 1..]);
+    if let Some(tag) = suffix.strip_prefix('@') {
+        return format!("\"{text}\"@{}", tag.to_lowercase());
+    }
+    if let Some(datatype) = suffix.strip_prefix("^^") {
+        let iri = if let Some(local) = datatype.strip_prefix("xsd:") {
+            format!("{XSD}{local}")
+        } else if let Some(local) = datatype.strip_prefix("rdf:") {
+            format!("{RDF}{local}")
+        } else {
+            datatype
+                .trim_start_matches('<')
+                .trim_end_matches('>')
+                .to_string()
+        };
+        if iri == format!("{XSD}string") {
+            return format!("\"{text}\"");
+        }
+        return format!("\"{text}\"^^<{iri}>");
+    }
+    expected.to_string()
+}
+
+/// Assert that each cell holds the exact RDF term `expected` names (see
+/// [`term_to_string`] and [`normalize_expected_term`]), in order when
+/// `ordered`, as a multiset otherwise. A blank node matches a blank node; in
+/// order, the labels must also correspond one to one, as `_:a` and `_:b` in
+/// the expectation name two different nodes.
+///
+/// # Panics
+///
+/// When a row or a cell differs, or a cell holds no RDF term.
+pub fn assert_terms(result: &QueryResult, expected: &[Vec<String>], ordered: bool) {
+    let actual: Vec<Vec<String>> = result
+        .rows()
+        .iter()
+        .map(|row| row.iter().map(term_to_string).collect())
+        .collect();
+    let expected: Vec<Vec<String>> = expected
+        .iter()
+        .map(|row| {
+            row.iter()
+                .map(|cell| normalize_expected_term(cell))
+                .collect()
+        })
+        .collect();
+    let blank = |cell: &String| {
+        if cell.starts_with("_:") {
+            "_:".to_string()
+        } else {
+            cell.clone()
+        }
+    };
+    let without_labels = |rows: &[Vec<String>]| -> Vec<Vec<String>> {
+        rows.iter()
+            .map(|row| row.iter().map(blank).collect())
+            .collect()
+    };
+    let (mut got, mut want) = (without_labels(&actual), without_labels(&expected));
+    if !ordered {
+        got.sort();
+        want.sort();
+    }
+    assert_eq!(
+        got, want,
+        "terms differ\nactual:   {actual:?}\nexpected: {expected:?}"
+    );
+    if ordered {
+        let mut pairs: std::collections::HashMap<&str, &str> = std::collections::HashMap::new();
+        let mut back: std::collections::HashMap<&str, &str> = std::collections::HashMap::new();
+        for (row_a, row_e) in actual.iter().zip(&expected) {
+            for (a, e) in row_a.iter().zip(row_e) {
+                if a.starts_with("_:") {
+                    assert_eq!(
+                        *pairs.entry(e.as_str()).or_insert(a.as_str()),
+                        a.as_str(),
+                        "{e} names two blank nodes\nactual: {actual:?}"
+                    );
+                    assert_eq!(
+                        *back.entry(a.as_str()).or_insert(e.as_str()),
+                        e.as_str(),
+                        "blank node {a} is named both {e} and another label\nactual: {actual:?}"
+                    );
+                }
+            }
+        }
+    }
+}
+
 // Include the generated test code
 #[cfg(test)]
 mod generated {

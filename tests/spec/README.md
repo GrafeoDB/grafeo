@@ -87,6 +87,32 @@ The `skip:` field keeps CI green while documenting the expected behavior. When t
 | `columns` | Expected column names: `[name, age]` |
 | `hash` | MD5 hex digest of sorted pipe-delimited rows |
 | `precision` | Float tolerance: cells compared within `10^(-precision)` |
+| `terms` | Expected rows of RDF terms, each cell compared as the exact term (see below). Sorted comparison unless `ordered: true` |
+
+Any other key under `expect:` fails the test in every runner, so a misspelled key cannot pass without checking anything.
+
+### RDF terms
+
+`rows` compares a SPARQL cell by its plain value, so it cannot tell an IRI from a string with the same text, or `"1"^^xsd:integer` from `"1"`. Use `terms` when the kind of term, the datatype or the language tag is what the test is about. Each cell is the term in N-Triples form, quoted in YAML:
+
+| Term | Written as | Example |
+|------|------------|---------|
+| IRI | `<iri>` | `'<http://example.org/alix>'` |
+| Blank node | `_:label` | `'_:b0'` |
+| Simple literal (xsd:string) | `"text"` | `'"Alix"'` |
+| Language-tagged literal | `"text"@tag` | `'"Amsterdam"@nl'` |
+| Typed literal | `"text"^^<datatype>` or `"text"^^xsd:name` | `'"1.0E3"^^xsd:double'` |
+| Unbound | `null` | `null` |
+
+The lexical form is compared exactly, so `"025"^^xsd:integer` is not `"25"^^xsd:integer`. A language tag compares without case, and `"text"^^xsd:string` is the same as `"text"`. The `xsd:` and `rdf:` prefixes expand to their namespaces. A blank node matches any blank node; with `ordered: true` the labels must also correspond one to one between the expected and the actual rows.
+
+```yaml
+expect:
+  ordered: true
+  terms:
+    - ['<http://example.org/alix>', '"Alix"@en']
+    - ['_:b0', '"30"^^xsd:integer']
+```
 
 ### Parameter values
 

@@ -240,8 +240,8 @@ tests:
   - name: double_division_by_zero_is_infinity
     query: "SELECT (1.0e0 / 0 AS ?pos) (-1.0e0 / 0 AS ?neg) WHERE {}"
     expect:
-      rows:
-        - [INF, -INF]
+      terms:
+        - ['"INF"^^xsd:double', '"-INF"^^xsd:double']
 
   - name: a_nan_is_neither_less_nor_greater_than_a_number
     # op:numeric-less-than and op:numeric-greater-than are false when an

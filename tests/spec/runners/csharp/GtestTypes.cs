@@ -27,6 +27,12 @@ public sealed class Expect
     public string? Hash { get; set; }
     public int? Precision { get; set; }
     public List<string> Columns { get; set; } = [];
+
+    /// <summary>Rows of RDF terms in N-Triples form, each cell compared as the exact term.</summary>
+    public List<List<string>> Terms { get; set; } = [];
+
+    /// <summary>An expect key no runner reads: the test fails on it, as it would otherwise check nothing.</summary>
+    public string? UnknownKey { get; set; }
 }
 
 /// <summary>A single test case within a .gtest file.</summary>

@@ -2543,6 +2543,49 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// `grafeo_result_kind` tells a SPARQL ASK (1, one boolean) and a
+    /// CONSTRUCT (2, a graph) from rows (0: SELECT, an update, GQL), and a
+    /// NULL result is 0.
+    #[cfg(feature = "sparql")]
+    #[test]
+    fn the_result_kind_tells_a_boolean_and_a_graph_from_rows() {
+        let db = grafeo_open_memory();
+        assert!(!db.is_null());
+        let kind = |sparql: bool, query: &str| {
+            let query = CString::new(query).unwrap();
+            let result = if sparql {
+                grafeo_execute_sparql(db, query.as_ptr())
+            } else {
+                grafeo_execute(db, query.as_ptr())
+            };
+            assert!(!result.is_null(), "{query:?} failed");
+            let kind = grafeo_result_kind(result);
+            grafeo_free_result(result);
+            kind
+        };
+        assert_eq!(
+            kind(
+                true,
+                "INSERT DATA { <http://ex.org/alix> <http://ex.org/knows> <http://ex.org/gus> }"
+            ),
+            0
+        );
+        assert_eq!(kind(true, "ASK { ?s ?p ?o }"), 1);
+        assert_eq!(kind(true, "ASK { <http://ex.org/gus> ?p ?o }"), 1);
+        assert_eq!(
+            kind(
+                true,
+                "CONSTRUCT { ?o <http://ex.org/known> ?s } WHERE { ?s ?p ?o }"
+            ),
+            2
+        );
+        assert_eq!(kind(true, "DESCRIBE <http://ex.org/alix>"), 2);
+        assert_eq!(kind(true, "SELECT ?s WHERE { ?s ?p ?o }"), 0);
+        assert_eq!(kind(false, "RETURN 1 AS one"), 0);
+        assert_eq!(grafeo_result_kind(std::ptr::null()), 0);
+        grafeo_free_database(db);
+    }
+
     /// After `grafeo_close` the handle lives on until `grafeo_free_database`:
     /// the index calls on it fail, and a drop returns -1 (not 0, "nothing to
     /// drop"), which the Go, Dart and C# wrappers read as an error.

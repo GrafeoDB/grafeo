@@ -1,0 +1,142 @@
+# SPARQL term comparisons, run by every binding (#464)
+#
+# Language tags compare without case and are kept in lowercase (RDF 1.1 3.3);
+# the effective boolean value of each kind of term (17.2.2), an invalid
+# numeric or boolean form included; NaN under =, != and < (op:numeric-equal
+# and op:numeric-less-than are false with a NaN, not an error); literals of a
+# datatype the engine does not know: equal when they are the same term, a
+# type error otherwise (RDFterm-equal, 17.4.1.7). A type error leaves the
+# variable unbound (null).
+
+meta:
+  language: sparql
+  model: rdf
+  section: "17.4"
+  title: Term comparisons
+  dataset: empty
+  requires: [sparql, rdf]
+
+tests:
+
+  # ---------------------------------------------------------------------------
+  # Language tags
+  # ---------------------------------------------------------------------------
+
+  - name: tags_compare_without_case
+    query: |
+      SELECT ("x"@EN = "x"@en AS ?eq) (sameTerm("x"@EN, "x"@en) AS ?same) (LANG("x"@EN) AS ?tag) ("x"@en = "x"@fr AS ?other) WHERE {}
+    expect:
+      terms:
+        - ['"true"^^xsd:boolean', '"true"^^xsd:boolean', '"en"', '"false"^^xsd:boolean']
+
+  - name: a_stored_tag_is_kept_in_lowercase_and_matches_any_case
+    setup:
+      - 'INSERT DATA { <http://ex.org/alix> <http://ex.org/nick> "Lix"@FR }'
+    query: |
+      SELECT ?n WHERE { <http://ex.org/alix> <http://ex.org/nick> ?n FILTER(?n = "Lix"@fr) }
+    expect:
+      terms:
+        - ['"Lix"@fr']
+
+  - name: a_tagged_literal_is_not_its_plain_text
+    query: |
+      SELECT (sameTerm("x"@en, "x") AS ?same) (STR("x"@en) = "x" AS ?text) WHERE {}
+    expect:
+      terms:
+        - ['"false"^^xsd:boolean', '"true"^^xsd:boolean']
+
+  # ---------------------------------------------------------------------------
+  # Effective boolean value (17.2.2)
+  # ---------------------------------------------------------------------------
+
+  - name: the_effective_boolean_value_of_each_kind_of_literal
+    query: |
+      PREFIX xsd: <http://www.w3.org/2001/XMLSchema#>
+      SELECT (IF("abc"^^xsd:integer, "t", "f") AS ?bad_int)
+             (IF("nottrue"^^xsd:boolean, "t", "f") AS ?bad_bool)
+             (IF("0"^^xsd:integer, "t", "f") AS ?zero)
+             (IF("1.0e0"^^xsd:double, "t", "f") AS ?one)
+             (IF("NaN"^^xsd:double, "t", "f") AS ?nan)
+             (IF("", "t", "f") AS ?empty)
+             (IF("x", "t", "f") AS ?text)
+             (IF("x"@en, "t", "f") AS ?tagged)
+             (IF("true"^^xsd:boolean, "t", "f") AS ?yes)
+      WHERE {}
+    expect:
+      terms:
+        - ['"f"', '"f"', '"f"', '"t"', '"f"', '"f"', '"t"', '"t"', '"t"']
+
+  - name: an_invalid_numeric_form_negates_to_true
+    query: |
+      PREFIX xsd: <http://www.w3.org/2001/XMLSchema#>
+      SELECT (!("abc"^^xsd:integer) AS ?not_bad) (!("nottrue"^^xsd:boolean) AS ?not_bad_bool) WHERE {}
+    expect:
+      terms:
+        - ['"true"^^xsd:boolean', '"true"^^xsd:boolean']
+
+  - name: an_iri_and_an_unknown_datatype_have_no_effective_boolean_value
+    query: |
+      SELECT (IF(<http://ex.org/a>, "t", "f") AS ?iri) (IF("x"^^<http://ex.org/dt>, "t", "f") AS ?custom) WHERE {}
+    expect:
+      terms:
+        - [null, null]
+
+  # ---------------------------------------------------------------------------
+  # NaN
+  # ---------------------------------------------------------------------------
+
+  - name: nan_is_equal_to_nothing_and_orders_before_nothing
+    query: |
+      PREFIX xsd: <http://www.w3.org/2001/XMLSchema#>
+      SELECT (xsd:double("NaN") = xsd:double("NaN") AS ?eq)
+             (xsd:double("NaN") != xsd:double("NaN") AS ?ne)
+             (xsd:double("NaN") < 1 AS ?lt)
+             (1 < xsd:double("NaN") AS ?gt)
+             (sameTerm(xsd:double("NaN"), xsd:double("NaN")) AS ?same)
+      WHERE {}
+    expect:
+      terms:
+        - ['"false"^^xsd:boolean', '"true"^^xsd:boolean', '"false"^^xsd:boolean', '"false"^^xsd:boolean', '"true"^^xsd:boolean']
+
+  # ---------------------------------------------------------------------------
+  # Literals of an unknown datatype (RDFterm-equal, 17.4.1.7)
+  # ---------------------------------------------------------------------------
+
+  - name: unknown_datatype_literals_are_equal_only_as_the_same_term
+    query: |
+      SELECT ("x"^^<http://ex.org/dt> = "x"^^<http://ex.org/dt> AS ?same)
+             ("x"^^<http://ex.org/dt> = "y"^^<http://ex.org/dt> AS ?other)
+             ("x"^^<http://ex.org/dt> = "x" AS ?plain)
+             ("x"^^<http://ex.org/dt> != "y"^^<http://ex.org/dt> AS ?ne)
+             (<http://ex.org/a> = "x"^^<http://ex.org/dt> AS ?iri)
+      WHERE {}
+    expect:
+      terms:
+        - ['"true"^^xsd:boolean', null, null, null, '"false"^^xsd:boolean']
+
+  - name: an_unknown_datatype_literal_is_kept_as_it_is
+    setup:
+      - 'INSERT DATA { <http://ex.org/a> <http://ex.org/v> "x"^^<http://ex.org/dt> }'
+    query: |
+      SELECT ?v (DATATYPE(?v) AS ?d) WHERE { <http://ex.org/a> <http://ex.org/v> ?v }
+    expect:
+      terms:
+        - ['"x"^^<http://ex.org/dt>', '<http://ex.org/dt>']
+
+  # ---------------------------------------------------------------------------
+  # Argument compatibility (17.4.3.1.1)
+  # ---------------------------------------------------------------------------
+
+  # A second argument may be simple, or tagged with the first one's tag; a
+  # tagged second argument after a simple first one, or one of another tag,
+  # is an error.
+  - name: string_arguments_must_be_compatible
+    query: |
+      SELECT (STRSTARTS("Amsterdam"@en, "Am") AS ?simple_after_tagged)
+             (STRSTARTS("Amsterdam"@en, "Am"@EN) AS ?same_tag)
+             (STRSTARTS("Amsterdam", "Am"@en) AS ?tagged_after_simple)
+             (CONTAINS("Amsterdam"@en, "dam"@nl) AS ?other_tag)
+      WHERE {}
+    expect:
+      terms:
+        - ['"true"^^xsd:boolean', '"true"^^xsd:boolean', null, null]

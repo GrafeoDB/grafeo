@@ -1346,6 +1346,87 @@ mod tests {
         );
     }
 
+    /// The edges of the native export: an integer past 64 bits is a decimal
+    /// with every digit; an integer or decimal past 38 digits makes its
+    /// column text, every cell its lexical form, so no digit is lost; NaN and
+    /// INF stay doubles; a column mixing kinds is text holding each term's
+    /// lexical form (`025`, not `25`).
+    #[test]
+    fn rdf_term_edge_cases_keep_their_values_or_text() {
+        use arrow_array::Decimal128Array;
+        use grafeo_common::types::rdf::Term;
+        const XSD: &str = "http://www.w3.org/2001/XMLSchema#";
+        let term = |term: Term| Value::RdfTerm(StdArc::new(term));
+        let typed = |text: &str, datatype: &str| {
+            term(Term::typed_literal(text, format!("{XSD}{datatype}")))
+        };
+        let decimals = |values: Vec<Value>| -> (DataType, Vec<String>) {
+            let rows: Vec<Vec<Value>> = values.into_iter().map(|value| vec![value]).collect();
+            let batch =
+                query_result_to_record_batch(&["c".to_string()], &[LogicalType::Any], &rows)
+                    .unwrap();
+            let array = batch.column(0);
+            let decimals = array.as_any().downcast_ref::<Decimal128Array>().unwrap();
+            let texts = (0..decimals.len())
+                .map(|row| decimals.value_as_string(row))
+                .collect();
+            (array.data_type().clone(), texts)
+        };
+
+        // Past 64 bits, within 38 digits: a decimal, exact.
+        let wide = "123456789012345678901234567890";
+        let (data_type, texts) = decimals(vec![typed(wide, "integer"), typed("7", "integer")]);
+        assert_eq!(data_type, DataType::Decimal128(30, 0));
+        assert_eq!(texts, [wide, "7"]);
+
+        // Past 38 digits: the whole column is text, each cell as written.
+        let huge = "1234567890123456789012345678901234567890";
+        let (data_type, rows) = column(
+            LogicalType::Any,
+            vec![
+                typed(huge, "integer"),
+                typed("1.50", "decimal"),
+                Value::Null,
+            ],
+        );
+        assert_eq!(data_type, DataType::Utf8);
+        assert_eq!(rows, [format!("'{huge}'"), "'1.50'".into(), "null".into()]);
+        let (data_type, rows) = column(
+            LogicalType::Any,
+            vec![
+                typed(&format!("{huge}.5"), "decimal"),
+                typed("2.5", "decimal"),
+            ],
+        );
+        assert_eq!(data_type, DataType::Utf8);
+        assert_eq!(rows, [format!("'{huge}.5'"), "'2.5'".into()]);
+
+        // NaN and INF stay doubles.
+        let (data_type, rows) = column(
+            LogicalType::Any,
+            vec![
+                typed("NaN", "double"),
+                typed("INF", "double"),
+                typed("-INF", "double"),
+            ],
+        );
+        assert_eq!(data_type, DataType::Float64);
+        assert_eq!(rows, ["NaN", "inf", "-inf"]);
+
+        // A mix of kinds is text, each cell the term's lexical form.
+        let (data_type, rows) = column(
+            LogicalType::Any,
+            vec![
+                typed("025", "integer"),
+                typed("1", "boolean"),
+                typed("1.0e0", "double"),
+                term(Term::iri("http://ex.org/a")),
+            ],
+        );
+        assert_eq!(data_type, DataType::Utf8);
+        assert_eq!(rows, ["'025'", "'1'", "'1.0e0'", "'http://ex.org/a'"]);
+    }
+
     #[test]
     fn values_of_different_types_in_one_column() {
         // Integers and floats are floats.

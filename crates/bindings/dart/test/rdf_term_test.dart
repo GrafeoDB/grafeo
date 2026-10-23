@@ -134,6 +134,99 @@ void main() {
       expect(back, equals(RdfTerm.literal('Pomme', language: 'fr')));
       expect(back.language, equals('fr'));
     });
+
+    test('a SPARQL SELECT gives every kind of term exactly', () {
+      db.executeSparql('''INSERT DATA {
+        <http://ex.org/apple> <http://ex.org/label> "Pomme"@FR ;
+          <http://ex.org/price> "1.50"^^<${_xsd}decimal> ;
+          <http://ex.org/stock> "025"^^<${_xsd}integer> ;
+          <http://ex.org/note> "fresh" ;
+          <http://ex.org/kind> "x"^^<http://ex.org/unknown> ;
+          <http://ex.org/grower> _:farm .
+      }''');
+      final result = db.executeSparql(
+        'SELECT ?p ?o WHERE { <http://ex.org/apple> ?p ?o }',
+      );
+      expect(result.kind, equals(ResultKind.rows));
+      expect(result.boolean, isNull);
+      final objects = {
+        for (final row in result.rows)
+          (row['p'] as RdfTerm).value: row['o'] as RdfTerm,
+      };
+      for (final row in result.rows) {
+        final predicate = row['p'] as RdfTerm;
+        expect(predicate, equals(RdfTerm.iri(predicate.value)));
+      }
+      expect(
+        objects['http://ex.org/label'],
+        equals(RdfTerm.literal('Pomme', language: 'fr')),
+      );
+      expect(
+        objects['http://ex.org/label']!.literalDatatype,
+        equals(RdfTerm.rdfLangString),
+      );
+      expect(
+        objects['http://ex.org/price'],
+        equals(RdfTerm.literal('1.50', datatype: '${_xsd}decimal')),
+      );
+      // The lexical form is kept, not the value.
+      expect(
+        objects['http://ex.org/stock'],
+        equals(RdfTerm.literal('025', datatype: '${_xsd}integer')),
+      );
+      expect(objects['http://ex.org/note'], equals(RdfTerm.literal('fresh')));
+      expect(
+        objects['http://ex.org/note']!.literalDatatype,
+        equals(RdfTerm.xsdString),
+      );
+      expect(
+        objects['http://ex.org/kind'],
+        equals(RdfTerm.literal('x', datatype: 'http://ex.org/unknown')),
+      );
+      final grower = objects['http://ex.org/grower']!;
+      expect(grower.type, equals(RdfTermType.blankNode));
+      expect(grower.value, isNot(startsWith('_:')));
+    });
+
+    test('a SPARQL ASK is one boolean and CONSTRUCT a graph', () {
+      db.executeSparql(
+        'INSERT DATA { <http://ex.org/apple> '
+        '<http://ex.org/label> "Pomme"@fr }',
+      );
+      final yes = db.executeSparql(
+        'ASK { ?s <http://ex.org/label> "Pomme"@FR }',
+      );
+      expect(yes.kind, equals(ResultKind.boolean));
+      expect(yes.boolean, isTrue);
+      expect(
+        db.executeSparql('ASK { ?s <http://ex.org/label> "Pomme"@en }').boolean,
+        isFalse,
+      );
+      final graph = db.executeSparql(
+        'CONSTRUCT { ?s ?p ?o } WHERE { ?s ?p ?o }',
+      );
+      expect(graph.kind, equals(ResultKind.graph));
+      expect(graph.boolean, isNull);
+      expect(graph.columns, equals(['subject', 'predicate', 'object']));
+      expect(
+        graph.rows.single['object'],
+        equals(RdfTerm.literal('Pomme', language: 'fr')),
+      );
+    });
+
+    test('a SPARQL parameter is an initial binding of a term', () {
+      db.executeSparql(
+        'INSERT DATA { <http://ex.org/apple> '
+        '<http://ex.org/label> "Pomme"@fr . <http://ex.org/pear> '
+        '<http://ex.org/label> "Poire"@fr }',
+      );
+      final rows = db.executeSparqlWithParams(
+        'SELECT ?s WHERE { ?s <http://ex.org/label> ?label }',
+        {'label': RdfTerm.literal('Poire', language: 'FR')},
+      ).rows;
+      expect(rows, hasLength(1));
+      expect(rows.single['s'], equals(RdfTerm.iri('http://ex.org/pear')));
+    });
   });
 
   group('ResultKind', () {

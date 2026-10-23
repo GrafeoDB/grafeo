@@ -295,3 +295,106 @@ def assert_hash(
     assert actual_hash == expected_hash, (
         f"Hash mismatch: got '{actual_hash}', expected '{expected_hash}'\nRows: {rows}"
     )
+
+
+# ---------------------------------------------------------------------------
+# RDF terms (mirrors term_to_string, normalize_expected_term and assert_terms
+# in grafeo-spec-tests/src/lib.rs)
+# ---------------------------------------------------------------------------
+
+XSD = "http://www.w3.org/2001/XMLSchema#"
+RDF = "http://www.w3.org/1999/02/22-rdf-syntax-ns#"
+
+
+def _escape_lexical(text: str) -> str:
+    """A literal's text as N-Triples writes it, between the quotes."""
+    escapes = {"\\": "\\\\", '"': '\\"', "\n": "\\n", "\r": "\\r", "\t": "\\t"}
+    return "".join(escapes.get(c, c) for c in text)
+
+
+def term_to_string(val: Any) -> str:
+    """A result cell as the N-Triples form of the RDF term it holds: ``<iri>``,
+    ``_:label``, ``"text"`` (an xsd:string), ``"text"@tag`` or ``"text"^^<datatype>``;
+    ``null`` when unbound. Anything that is not a ``grafeo`` term fails: a ``terms:``
+    expectation compares terms only."""
+    if val is None:
+        return "null"
+    kind = type(val).__name__
+    if type(val).__module__ != "grafeo.terms" or kind not in (
+        "IRI",
+        "BlankNode",
+        "Literal",
+    ):
+        raise AssertionError(
+            f"a terms: expectation got a value that is not an RDF term: {val!r}"
+        )
+    if kind == "IRI":
+        return f"<{val}>"
+    if kind == "BlankNode":
+        return f"_:{val}"
+    text = _escape_lexical(str(val))
+    if val.language:
+        return f'"{text}"@{str(val.language).lower()}'
+    if str(val.datatype) == XSD + "string":
+        return f'"{text}"'
+    return f'"{text}"^^<{val.datatype}>'
+
+
+def normalize_expected_term(expected: str | None) -> str:
+    """An expected term in the form ``term_to_string`` gives: an ``xsd:`` or ``rdf:``
+    datatype expanded, an explicit xsd:string dropped and a language tag lowercased."""
+    if expected is None or expected == "null":
+        return "null"
+    if not expected.startswith('"'):
+        return expected
+    end = expected.rfind('"')
+    if end == 0:
+        return expected
+    text, suffix = expected[1:end], expected[end + 1 :]
+    if suffix.startswith("@"):
+        return f'"{text}"@{suffix[1:].lower()}'
+    if suffix.startswith("^^"):
+        datatype = suffix[2:]
+        if datatype.startswith("xsd:"):
+            iri = XSD + datatype[4:]
+        elif datatype.startswith("rdf:"):
+            iri = RDF + datatype[4:]
+        else:
+            iri = datatype.removeprefix("<").removesuffix(">")
+        if iri == XSD + "string":
+            return f'"{text}"'
+        return f'"{text}"^^<{iri}>'
+    return expected
+
+
+def assert_terms(result, expected: list[list[str | None]], ordered: bool) -> None:
+    """Assert that each cell holds the exact RDF term ``expected`` names, in order
+    when ``ordered``, as a multiset otherwise. A blank node matches a blank node; in
+    order, the labels must also correspond one to one."""
+    cols = list(result.columns)
+    actual = [
+        [term_to_string(result[i].get(col)) for col in cols] for i in range(len(result))
+    ]
+    want = [[normalize_expected_term(cell) for cell in row] for row in expected]
+
+    def without_labels(rows):
+        return [
+            ["_:" if cell.startswith("_:") else cell for cell in row] for row in rows
+        ]
+
+    got, exp = without_labels(actual), without_labels(want)
+    if not ordered:
+        got, exp = sorted(got), sorted(exp)
+    assert got == exp, f"terms differ\nactual:   {actual}\nexpected: {want}"
+    if ordered:
+        pairs: dict[str, str] = {}
+        back: dict[str, str] = {}
+        for row_a, row_e in zip(actual, want):
+            for a, e in zip(row_a, row_e):
+                if a.startswith("_:"):
+                    assert pairs.setdefault(e, a) == a, (
+                        f"{e} names two blank nodes\nactual: {actual}"
+                    )
+                    assert back.setdefault(a, e) == e, (
+                        f"blank node {a} has two names\nactual: {actual}"
+                    )

@@ -34,6 +34,22 @@ GRAFEO_WRITE_RDF_FIXTURE=$PWD/crates/grafeo-engine/tests/fixtures/rdf/0.6.0/trip
   cargo test -p grafeo-engine --all-features --test rdf_file_without_triple_store write_the_fixture
 ```
 
+## `0.6.0-beta.1/crashed.grafeo`: a beta file with a commit in its WAL
+
+Written by the 0.6.0-beta.1 release (tag `v0.6.0-beta.1`, with `sparql`, `triple-store`, `ring-index`, `wal` and
+`gql`), with its sidecar WAL `crashed.grafeo.wal/`. `tests/rdf_term_ids_on_disk.rs`
+(`a_beta_file_with_a_wal_keeps_both`) opens it: the upgrade keeps the file and the WAL, each byte for byte, as
+`<path>.pre-0.6.0` and `<path>.pre-0.6.0.wal`. Never write it again. The steps, in a persistent database:
+
+1. `INSERT (:Person {name: 'Alix'})-[:KNOWS]->(:Person {name: 'Gus'})`.
+2. A SPARQL `INSERT DATA` of every kind of term for `http://example.org/alix` (integers, a decimal, a boolean, a date,
+   a dateTime, strings, a tagged literal, a literal of an unknown datatype, a double, a blank node), and two triples
+   of that blank node in the named graph `http://example.org/trips`. 0.6.0-beta.1 stores them as it read them: the
+   unknown datatype dropped, the decimal and the double as doubles, the integers in canonical form.
+3. `rdf_store().rebuild_ring()`, then `wal_checkpoint()`.
+4. A SPARQL `INSERT DATA` of four triples for `http://example.org/gus` (its `rank` among them), which stays in the WAL.
+5. An exit without `close()`.
+
 ## `0.6.0/terms.grafeo`: the golden fixture of the term ids
 
 `tests/rdf_term_ids_on_disk.rs` pins the format of the RDF and ring sections with it: every kind of term (each

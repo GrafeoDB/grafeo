@@ -55,8 +55,8 @@ tests:
       SELECT ?s ?o WHERE { ?s <http://ex.org/v> ?o }
     expect:
       columns: [s, o]
-      rows:
-        - [http://ex.org/gus, kept]
+      terms:
+        - ['<http://ex.org/gus>', '"kept"']
 
   - name: delete_insert_where_moves_typed_and_tagged_literals
     setup:
@@ -207,11 +207,11 @@ tests:
     expect:
       ordered: true
       columns: [s, blank]
-      rows:
-        - [http://ex.org/d, null]
-        - [http://ex.org/c, true]
-        - [http://ex.org/b, false]
-        - [http://ex.org/a, false]
+      terms:
+        - ['<http://ex.org/d>', null]
+        - ['<http://ex.org/c>', '"true"^^xsd:boolean']
+        - ['<http://ex.org/b>', '"false"^^xsd:boolean']
+        - ['<http://ex.org/a>', '"false"^^xsd:boolean']
 
   - name: order_by_a_function_call_sorts_on_its_value
     setup:
@@ -339,9 +339,9 @@ tests:
     expect:
       ordered: true
       columns: [text, value]
-      rows:
-        - ["1.50", "1.5"]
-        - ["019", 19]
+      terms:
+        - ['"1.50"', '"1.5"^^xsd:decimal']
+        - ['"019"', '"19"^^xsd:integer']
 
   - name: same_term_of_stored_literals_tells_lexical_forms_apart
     setup:
@@ -399,8 +399,8 @@ tests:
       CONSTRUCT { ?o <http://ex.org/of> ?s } WHERE { ?s <http://ex.org/contact> ?o }
     expect:
       columns: [subject, predicate, object]
-      rows:
-        - ["mailto:alix@ex.org", http://ex.org/of, http://ex.org/alix]
+      terms:
+        - ['<mailto:alix@ex.org>', '<http://ex.org/of>', '<http://ex.org/alix>']
 
   - name: a_language_tag_is_the_same_tag_in_any_case
     # Language tags compare without case, and RDF 1.2 keeps them in

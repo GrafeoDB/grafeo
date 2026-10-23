@@ -346,8 +346,8 @@ tests:
       } GROUP BY ?dept
       HAVING (AVG(?p) > 80)
     expect:
-      rows:
-        - [Engineering, true]
+      terms:
+        - ['"Engineering"', '"true"^^xsd:boolean']
 
   - name: the_average_of_plain_strings_has_no_value
     # A plain literal is no number, though its text reads as one: SUM and

@@ -202,5 +202,5 @@ tests:
     query: |
       SELECT (SUM(?x) AS ?s) (AVG(?x) AS ?a) (SUM(?y) AS ?t) WHERE { VALUES (?x ?y) { (1 1) ("Alix" UNDEF) } }
     expect:
-      rows:
-        - [null, null, 1]
+      terms:
+        - [null, null, '"1"^^xsd:integer']

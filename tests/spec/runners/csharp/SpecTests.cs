@@ -148,6 +148,7 @@ public class SpecTests : IDisposable
             var parameters = CoerceParams(tc.Params);
 
             var expect = tc.Expect;
+            Assert.True(expect.UnknownKey is null, $"unknown expect key '{expect.UnknownKey}'");
 
             // Error tests
             if (expect.Error is not null || expect.GqlStatus is not null)
@@ -179,6 +180,10 @@ public class SpecTests : IDisposable
             else if (expect.Hash is not null)
             {
                 AssertHash(result, expect.Hash);
+            }
+            else if (expect.Terms.Count > 0)
+            {
+                AssertTerms(result, expect.Terms, expect.Ordered);
             }
             else if (expect.Rows.Count > 0)
             {
@@ -714,6 +719,110 @@ public class SpecTests : IDisposable
     // =========================================================================
     // Assertions
     // =========================================================================
+
+    // =========================================================================
+    // RDF terms (mirrors term_to_string, normalize_expected_term and assert_terms
+    // in grafeo-spec-tests/src/lib.rs)
+    // =========================================================================
+
+    private const string Xsd = "http://www.w3.org/2001/XMLSchema#";
+    private const string Rdf = "http://www.w3.org/1999/02/22-rdf-syntax-ns#";
+
+    /// <summary>A literal's text as N-Triples writes it, between the quotes.</summary>
+    private static string EscapeLexical(string text) =>
+        text.Replace("\\", "\\\\").Replace("\"", "\\\"").Replace("\n", "\\n").Replace("\r", "\\r").Replace("\t", "\\t");
+
+    /// <summary>
+    /// A result cell as the N-Triples form of the RDF term it holds: &lt;iri&gt;, _:label,
+    /// "text" (an xsd:string), "text"@tag or "text"^^&lt;datatype&gt;; null when unbound.
+    /// Anything that is not an RDF term fails: a terms: expectation compares terms only.
+    /// </summary>
+    private static string TermToString(object? value)
+    {
+        if (value is null) return "null";
+        Assert.True(value is RdfTerm, $"a terms: expectation got a value that is not an RDF term: {value}");
+        var term = (RdfTerm)value;
+        switch (term.Type)
+        {
+            case RdfTermType.Iri:
+                return $"<{term.Value}>";
+            case RdfTermType.BlankNode:
+                return $"_:{term.Value}";
+            case RdfTermType.Literal:
+                var text = EscapeLexical(term.Value);
+                if (!string.IsNullOrEmpty(term.Language)) return $"\"{text}\"@{term.Language.ToLowerInvariant()}";
+                var datatype = term.LiteralDatatype ?? Xsd + "string";
+                return datatype == Xsd + "string" ? $"\"{text}\"" : $"\"{text}\"^^<{datatype}>";
+            default:
+                Assert.True(false, $"an RDF term of an unknown kind: {term}");
+                return "";
+        }
+    }
+
+    /// <summary>
+    /// An expected term in the form <see cref="TermToString"/> gives: an xsd: or rdf:
+    /// datatype expanded, an explicit xsd:string dropped and a language tag lowercased.
+    /// </summary>
+    private static string NormalizeExpectedTerm(string expected)
+    {
+        if (string.IsNullOrEmpty(expected) || expected == "null") return "null";
+        if (!expected.StartsWith('"')) return expected;
+        var end = expected.LastIndexOf('"');
+        if (end == 0) return expected;
+        var text = expected[1..end];
+        var suffix = expected[(end + 1)..];
+        if (suffix.StartsWith('@')) return $"\"{text}\"@{suffix[1..].ToLowerInvariant()}";
+        if (suffix.StartsWith("^^"))
+        {
+            var datatype = suffix[2..];
+            string iri;
+            if (datatype.StartsWith("xsd:")) iri = Xsd + datatype[4..];
+            else if (datatype.StartsWith("rdf:")) iri = Rdf + datatype[4..];
+            else iri = datatype.TrimStart('<').TrimEnd('>');
+            return iri == Xsd + "string" ? $"\"{text}\"" : $"\"{text}\"^^<{iri}>";
+        }
+        return expected;
+    }
+
+    /// <summary>
+    /// Assert that each cell holds the exact RDF term <paramref name="expected"/> names,
+    /// in order when <paramref name="ordered"/>, as a multiset otherwise. A blank node
+    /// matches a blank node; in order, the labels must also correspond one to one.
+    /// </summary>
+    private static void AssertTerms(QueryResult result, List<List<string>> expected, bool ordered)
+    {
+        var actual = result.Rows
+            .Select(row => result.Columns.Select(col => TermToString(row.TryGetValue(col, out var v) ? v : null)).ToList())
+            .ToList();
+        var want = expected.Select(row => row.Select(NormalizeExpectedTerm).ToList()).ToList();
+        static List<string> WithoutLabels(List<List<string>> rows) =>
+            rows.Select(row => string.Join("\u0001", row.Select(cell => cell.StartsWith("_:") ? "_:" : cell))).ToList();
+        var got = WithoutLabels(actual);
+        var exp = WithoutLabels(want);
+        if (!ordered)
+        {
+            got.Sort(StringComparer.Ordinal);
+            exp.Sort(StringComparer.Ordinal);
+        }
+        Assert.True(got.SequenceEqual(exp),
+            $"terms differ\nactual:   {string.Join(" | ", actual.Select(r => string.Join(", ", r)))}\nexpected: {string.Join(" | ", want.Select(r => string.Join(", ", r)))}");
+        if (!ordered) return;
+        var pairs = new Dictionary<string, string>();
+        var back = new Dictionary<string, string>();
+        for (var i = 0; i < actual.Count; i++)
+        {
+            for (var j = 0; j < actual[i].Count; j++)
+            {
+                var a = actual[i][j];
+                if (!a.StartsWith("_:")) continue;
+                var e = want[i][j];
+                Assert.True(!pairs.TryGetValue(e, out var seenA) || seenA == a, $"{e} names two blank nodes");
+                Assert.True(!back.TryGetValue(a, out var seenE) || seenE == e, $"blank node {a} has two names");
+                pairs[e] = a;
+                back[a] = e;
+            }
+        }
+    }
 
     private static void AssertRowsSorted(QueryResult result, List<List<string>> expected)
     {

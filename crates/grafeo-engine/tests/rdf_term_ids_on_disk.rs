@@ -38,6 +38,9 @@ const CLOSE_COMPLETED: i32 = 3;
 const GOLDEN: &str = "tests/fixtures/rdf/0.6.0/terms.grafeo";
 /// A 0.6.0-beta.1 file: version 3 RDF and ring sections.
 const BETA: &str = "tests/fixtures/rdf/0.6.0-beta.1/triples.grafeo";
+/// A file the 0.6.0-beta.1 release wrote and left with a commit in its
+/// sidecar WAL (a crash after a checkpoint).
+const BETA_WITH_WAL: &str = "tests/fixtures/rdf/0.6.0-beta.1/crashed.grafeo";
 
 /// Every kind of term: each literal the ids inline (an integer, a decimal, a
 /// boolean, a date, dateTimes with `Z` and without an offset, a short
@@ -530,6 +533,81 @@ fn a_read_only_open_leaves_a_beta_file_alone() {
     drop(db);
     assert_eq!(std::fs::read(&path).unwrap(), original);
     assert!(!with_suffix(&path, ".pre-0.6.0").exists());
+}
+
+/// The files under `path` (a file, or a directory such as a sidecar WAL),
+/// each with its path under `path` and its bytes, sorted.
+fn file_contents(path: &Path) -> Vec<(String, Vec<u8>)> {
+    if !path.is_dir() {
+        return vec![(String::new(), std::fs::read(path).unwrap())];
+    }
+    let mut files = Vec::new();
+    for entry in std::fs::read_dir(path).unwrap() {
+        let entry = entry.unwrap();
+        let name = entry.file_name().to_string_lossy().into_owned();
+        for (below, bytes) in file_contents(&entry.path()) {
+            files.push((format!("{name}/{below}"), bytes));
+        }
+    }
+    files.sort();
+    files
+}
+
+/// A copy of fixture `fixture` and of its sidecar WAL directory in a new
+/// directory, and the path of the copy.
+fn copy_with_wal(fixture: &str) -> (tempfile::TempDir, PathBuf) {
+    let (dir, path) = copy_of(fixture);
+    let from = with_suffix(&Path::new(env!("CARGO_MANIFEST_DIR")).join(fixture), ".wal");
+    let to = with_suffix(&path, ".wal");
+    std::fs::create_dir(&to).unwrap();
+    for entry in std::fs::read_dir(&from).unwrap() {
+        let entry = entry.unwrap();
+        std::fs::copy(entry.path(), to.join(entry.file_name())).unwrap();
+    }
+    (dir, path)
+}
+
+/// The first read-write open of a beta.1 file whose WAL still holds a commit
+/// keeps the file and the WAL, each byte for byte, replays the commit and
+/// writes the current version: it holds what a read-only open reads from the
+/// beta file and its WAL.
+#[test]
+fn a_beta_file_with_a_wal_keeps_both() {
+    let (_dir, path) = copy_with_wal(BETA_WITH_WAL);
+    let wal = with_suffix(&path, ".wal");
+    let original = file_contents(&path);
+    let original_wal = file_contents(&wal);
+    let db = GrafeoDB::with_config(Config::read_only(&path)).unwrap();
+    let held = every_triple(&db);
+    drop(db);
+    assert!(
+        held.iter()
+            .any(|line| line.contains("<http://example.org/gus> <http://example.org/rank>")),
+        "the read-only open replays the WAL's commit: {held:?}"
+    );
+
+    let db = open(&path);
+    assert_eq!(every_triple(&db), held);
+    db.close().unwrap();
+    drop(db);
+    assert_eq!(
+        file_contents(&with_suffix(&path, ".pre-0.6.0")),
+        original,
+        "the kept copy is the old file"
+    );
+    assert_eq!(
+        file_contents(&with_suffix(&path, ".pre-0.6.0.wal")),
+        original_wal,
+        "the kept WAL is the old one"
+    );
+    assert!(
+        section_versions(&path)
+            .iter()
+            .all(|(_, version)| *version == 4)
+    );
+    let db = open(&path);
+    assert_eq!(every_triple(&db), held, "after a reopen");
+    db.close().unwrap();
 }
 
 /// A crash at any point of the first open of a beta.1 file leaves either the

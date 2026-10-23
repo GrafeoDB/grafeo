@@ -177,6 +177,9 @@ public static class GtestParser
     private static Expect ParseExpectBlock(ParseContext ctx)
     {
         var expect = new Expect();
+        // The indent of the expectation's own keys: a line indented less is the
+        // test's next key (a skip: or note: after expect:).
+        int? childIndent = null;
 
         while (!ctx.AtEnd)
         {
@@ -187,6 +190,9 @@ public static class GtestParser
             if (trimmed.StartsWith("- name:")) break;
             if (!line.StartsWith(' ') && !line.StartsWith('\t') && !string.IsNullOrEmpty(trimmed)) break;
             if (string.IsNullOrEmpty(trimmed)) { ctx.Idx++; continue; }
+            var indent = line.Length - line.TrimStart().Length;
+            childIndent ??= indent;
+            if (indent < childIndent) break;
 
             var kv = ParseKV(trimmed);
             if (kv == null) break;
@@ -214,7 +220,10 @@ public static class GtestParser
                     expect.Columns = ParseYamlList(value); ctx.Idx++; break;
                 case "rows":
                     ctx.Idx++; expect.Rows = ParseRows(ctx); break;
+                case "terms":
+                    ctx.Idx++; expect.Terms = ParseRows(ctx); break;
                 default:
+                    expect.UnknownKey ??= key;
                     ctx.Idx++; break;
             }
         }

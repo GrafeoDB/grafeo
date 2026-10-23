@@ -229,3 +229,103 @@ export function assertGqlStatus(err, expected) {
     throw new Error(`Error '${err.message}' has GQLSTATUS ${status}, expected ${expected}`)
   }
 }
+
+// ---------------------------------------------------------------------------
+// RDF terms (mirrors term_to_string, normalize_expected_term and assert_terms
+// in grafeo-spec-tests/src/lib.rs)
+// ---------------------------------------------------------------------------
+
+const XSD = 'http://www.w3.org/2001/XMLSchema#'
+const RDF = 'http://www.w3.org/1999/02/22-rdf-syntax-ns#'
+const ESCAPES = { '\\': '\\\\', '"': '\\"', '\n': '\\n', '\r': '\\r', '\t': '\\t' }
+
+/** A literal's text as N-Triples writes it, between the quotes. */
+function escapeLexical(text) {
+  return [...text].map((c) => ESCAPES[c] ?? c).join('')
+}
+
+/**
+ * A result cell as the N-Triples form of the RDF/JS term it holds: `<iri>`,
+ * `_:label`, `"text"` (an xsd:string), `"text"@tag` or `"text"^^<datatype>`;
+ * `null` when unbound. Anything that is not an RDF/JS term fails: a `terms:`
+ * expectation compares terms only.
+ */
+export function termToString(val) {
+  if (val === null || val === undefined) return 'null'
+  switch (val.termType) {
+    case 'NamedNode':
+      return `<${val.value}>`
+    case 'BlankNode':
+      return `_:${val.value}`
+    case 'Literal': {
+      const text = escapeLexical(val.value)
+      if (val.language) return `"${text}"@${val.language.toLowerCase()}`
+      const datatype = val.datatype?.value ?? `${XSD}string`
+      if (datatype === `${XSD}string`) return `"${text}"`
+      return `"${text}"^^<${datatype}>`
+    }
+    default:
+      throw new Error(`a terms: expectation got a value that is not an RDF term: ${JSON.stringify(val)}`)
+  }
+}
+
+/**
+ * An expected term in the form `termToString` gives: an `xsd:` or `rdf:`
+ * datatype expanded, an explicit xsd:string dropped and a language tag
+ * lowercased.
+ */
+export function normalizeExpectedTerm(expected) {
+  if (expected === null || expected === undefined || expected === 'null') return 'null'
+  if (!expected.startsWith('"')) return expected
+  const end = expected.lastIndexOf('"')
+  if (end === 0) return expected
+  const text = expected.slice(1, end)
+  const suffix = expected.slice(end + 1)
+  if (suffix.startsWith('@')) return `"${text}"@${suffix.slice(1).toLowerCase()}`
+  if (suffix.startsWith('^^')) {
+    const datatype = suffix.slice(2)
+    let iri
+    if (datatype.startsWith('xsd:')) iri = XSD + datatype.slice(4)
+    else if (datatype.startsWith('rdf:')) iri = RDF + datatype.slice(4)
+    else iri = datatype.replace(/^</, '').replace(/>$/, '')
+    if (iri === `${XSD}string`) return `"${text}"`
+    return `"${text}"^^<${iri}>`
+  }
+  return expected
+}
+
+/**
+ * Assert that each cell holds the exact RDF term `expected` names, in order
+ * when `ordered`, as a multiset otherwise. A blank node matches a blank node;
+ * in order, the labels must also correspond one to one.
+ */
+export function assertTerms(result, expected, ordered) {
+  const columns = result.columns
+  const actual = result.toArray().map((row) => columns.map((col) => termToString(row[col])))
+  const want = expected.map((row) => row.map(normalizeExpectedTerm))
+  const withoutLabels = (rows) => rows.map((row) => row.map((cell) => (cell.startsWith('_:') ? '_:' : cell)))
+  let got = withoutLabels(actual)
+  let exp = withoutLabels(want)
+  if (!ordered) {
+    const key = (row) => JSON.stringify(row)
+    got = got.map(key).sort()
+    exp = exp.map(key).sort()
+  }
+  if (JSON.stringify(got) !== JSON.stringify(exp)) {
+    throw new Error(`terms differ\nactual:   ${JSON.stringify(actual)}\nexpected: ${JSON.stringify(want)}`)
+  }
+  if (ordered) {
+    const pairs = new Map()
+    const back = new Map()
+    actual.forEach((row, i) => {
+      row.forEach((a, j) => {
+        if (!a.startsWith('_:')) return
+        const e = want[i][j]
+        if ((pairs.get(e) ?? a) !== a) throw new Error(`${e} names two blank nodes\nactual: ${JSON.stringify(actual)}`)
+        if ((back.get(a) ?? e) !== e) throw new Error(`blank node ${a} has two names\nactual: ${JSON.stringify(actual)}`)
+        pairs.set(e, a)
+        back.set(a, e)
+      })
+    })
+  }
+}

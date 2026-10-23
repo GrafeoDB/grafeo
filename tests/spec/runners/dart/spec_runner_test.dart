@@ -321,6 +321,132 @@ String _durationToIso(int totalMonths, int days, int nanos) {
   return result == 'P' ? 'P0D' : result;
 }
 
+// =============================================================================
+// RDF terms (mirrors term_to_string, normalize_expected_term and assert_terms
+// in grafeo-spec-tests/src/lib.rs)
+// =============================================================================
+
+const _xsd = 'http://www.w3.org/2001/XMLSchema#';
+const _rdf = 'http://www.w3.org/1999/02/22-rdf-syntax-ns#';
+
+/// A literal's text as N-Triples writes it, between the quotes.
+String _escapeLexical(String text) => text
+    .replaceAll('\\', '\\\\')
+    .replaceAll('"', '\\"')
+    .replaceAll('\n', '\\n')
+    .replaceAll('\r', '\\r')
+    .replaceAll('\t', '\\t');
+
+/// A result cell as the N-Triples form of the RDF term it holds: `<iri>`,
+/// `_:label`, `"text"` (an xsd:string), `"text"@tag` or `"text"^^<datatype>`;
+/// `null` when unbound. Anything that is not an RDF term fails: a `terms:`
+/// expectation compares terms only.
+String _termToString(dynamic val) {
+  if (val == null) return 'null';
+  if (val is! RdfTerm) {
+    fail('a terms: expectation got a value that is not an RDF term: $val');
+  }
+  switch (val.type) {
+    case RdfTermType.iri:
+      return '<${val.value}>';
+    case RdfTermType.blankNode:
+      return '_:${val.value}';
+    case RdfTermType.literal:
+      final text = _escapeLexical(val.value);
+      final language = val.language;
+      if (language != null && language.isNotEmpty) {
+        return '"$text"@${language.toLowerCase()}';
+      }
+      final datatype = val.literalDatatype ?? '${_xsd}string';
+      return datatype == '${_xsd}string' ? '"$text"' : '"$text"^^<$datatype>';
+  }
+}
+
+/// An expected term in the form [_termToString] gives: an `xsd:` or `rdf:`
+/// datatype expanded, an explicit xsd:string dropped and a language tag
+/// lowercased.
+String _normalizeExpectedTerm(String expected) {
+  if (expected.isEmpty || expected == 'null') return 'null';
+  if (!expected.startsWith('"')) return expected;
+  final end = expected.lastIndexOf('"');
+  if (end == 0) return expected;
+  final text = expected.substring(1, end);
+  final suffix = expected.substring(end + 1);
+  if (suffix.startsWith('@'))
+    return '"$text"@${suffix.substring(1).toLowerCase()}';
+  if (suffix.startsWith('^^')) {
+    final datatype = suffix.substring(2);
+    final String iri;
+    if (datatype.startsWith('xsd:')) {
+      iri = _xsd + datatype.substring(4);
+    } else if (datatype.startsWith('rdf:')) {
+      iri = _rdf + datatype.substring(4);
+    } else {
+      iri = datatype
+          .replaceFirst(RegExp(r'^<'), '')
+          .replaceFirst(RegExp(r'>$'), '');
+    }
+    return iri == '${_xsd}string' ? '"$text"' : '"$text"^^<$iri>';
+  }
+  return expected;
+}
+
+/// Assert that each cell holds the exact RDF term [expected] names, in order
+/// when [ordered], as a multiset otherwise. A blank node matches a blank node;
+/// in order, the labels must also correspond one to one.
+void _assertTerms(
+  QueryResult result,
+  List<List<String>> expected,
+  bool ordered,
+) {
+  final columns = result.columns;
+  final actual = [
+    for (final row in result.rows)
+      [for (final col in columns) _termToString(row[col])],
+  ];
+  final want = [
+    for (final row in expected)
+      [for (final cell in row) _normalizeExpectedTerm(cell)],
+  ];
+  List<String> withoutLabels(List<List<String>> rows) => [
+    for (final row in rows)
+      [
+        for (final cell in row) cell.startsWith('_:') ? '_:' : cell,
+      ].join('\u0001'),
+  ];
+  final got = withoutLabels(actual);
+  final exp = withoutLabels(want);
+  if (!ordered) {
+    got.sort();
+    exp.sort();
+  }
+  expect(
+    got,
+    equals(exp),
+    reason: 'terms differ\nactual:   $actual\nexpected: $want',
+  );
+  if (!ordered) return;
+  final pairs = <String, String>{};
+  final back = <String, String>{};
+  for (var i = 0; i < actual.length; i++) {
+    for (var j = 0; j < actual[i].length; j++) {
+      final a = actual[i][j];
+      if (!a.startsWith('_:')) continue;
+      final e = want[i][j];
+      expect(
+        pairs.putIfAbsent(e, () => a),
+        equals(a),
+        reason: '$e names two blank nodes',
+      );
+      expect(
+        back.putIfAbsent(a, () => e),
+        equals(e),
+        reason: 'blank node $a has two names',
+      );
+    }
+  }
+}
+
 /// Convert a QueryResult to rows of canonical strings.
 List<List<String>> _resultToRows(QueryResult result) {
   final columns = result.columns;
@@ -488,6 +614,13 @@ class _Expect {
   String? hash;
   int? precision;
   List<String> columns;
+
+  /// Rows of RDF terms in N-Triples form, each cell compared as the exact term.
+  List<List<String>> terms = [];
+
+  /// An expect key no runner reads: the test fails on it, as it would
+  /// otherwise check nothing.
+  String? unknownKey;
 
   _Expect({
     List<List<String>>? rows,
@@ -709,6 +842,9 @@ _TestCase _parseSingleTest(_ParseContext ctx) {
 
 _Expect _parseExpectBlock(_ParseContext ctx) {
   final e = _Expect();
+  // The indent of the expectation's own keys: a line indented less is the
+  // test's next key (a skip: or note: after expect:).
+  int? childIndent;
   while (ctx.idx < ctx.lines.length) {
     final line = ctx.lines[ctx.idx];
     final trimmed = line.trim();
@@ -724,6 +860,9 @@ _Expect _parseExpectBlock(_ParseContext ctx) {
       ctx.idx++;
       continue;
     }
+    final indent = line.length - line.trimLeft().length;
+    childIndent ??= indent;
+    if (indent < childIndent) break;
 
     final kv = _parseKV(trimmed);
     if (kv == null) break;
@@ -756,7 +895,11 @@ _Expect _parseExpectBlock(_ParseContext ctx) {
       case 'rows':
         ctx.idx++;
         e.rows = _parseRows(ctx);
+      case 'terms':
+        ctx.idx++;
+        e.terms = _parseRows(ctx);
       default:
+        e.unknownKey ??= key;
         ctx.idx++;
     }
   }
@@ -1051,6 +1194,9 @@ void _runTestCase(GrafeoDB db, _TestCase tc, String language,
   }
 
   final exp = tc.expect;
+  if (exp.unknownKey != null) {
+    fail("unknown expect key '${exp.unknownKey}'");
+  }
 
   // Determine queries
   final queries = tc.statements.isNotEmpty
@@ -1100,6 +1246,12 @@ void _runTestCase(GrafeoDB db, _TestCase tc, String language,
   // Hash check
   if (exp.hash != null) {
     _assertHash(result, exp.hash!);
+    return;
+  }
+
+  // Terms check
+  if (exp.terms.isNotEmpty) {
+    _assertTerms(result, exp.terms, exp.ordered);
     return;
   }
 

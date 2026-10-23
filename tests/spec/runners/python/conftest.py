@@ -29,6 +29,7 @@ from comparator import (
     assert_rows_ordered,
     assert_rows_sorted,
     assert_rows_with_precision,
+    assert_terms,
 )
 from parser import GtestFile, TestCase, coerce_params, parse_gtest_file
 
@@ -237,6 +238,8 @@ class GtestItem(pytest.Item):
             assert_count(result, expect.count)
         elif expect.hash is not None:
             assert_hash(result, expect.hash)
+        elif expect.terms:
+            assert_terms(result, expect.terms, expect.ordered)
         elif expect.rows:
             if expect.precision is not None:
                 assert_rows_with_precision(result, expect.rows, expect.precision)

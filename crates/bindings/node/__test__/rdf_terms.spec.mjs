@@ -151,4 +151,31 @@ describe('RDF terms', () => {
     expect(created.after.term.equals(term)).toBe(true)
     expect(created.after.terms[0].equals(term)).toBe(true)
   })
+
+  it('executeStream gives every kind of term as execute does', async () => {
+    const db = GrafeoDB.create()
+    const terms = [
+      namedNode('http://ex.org/Kraków'),
+      { termType: 'BlankNode', value: 'b0' },
+      literal('Pomme', 'fr', RDF_LANG_STRING),
+      literal('025', '', `${XSD}integer`),
+      literal('fresh', '', `${XSD}string`),
+      literal('x', '', 'http://ex.org/unknown'),
+    ]
+    for (const [n, term] of terms.entries()) {
+      await db.execute('INSERT (:Concept {n: $n, term: $term})', { n, term })
+    }
+    // A stream takes no ORDER BY: both sides are sorted by n here.
+    const query = 'MATCH (c:Concept) RETURN c.n AS n, c.term AS term'
+    const byN = (rows) => rows.sort((a, b) => a.n - b.n)
+    const executed = byN((await db.execute(query)).toArray())
+    const streamed = []
+    const stream = await db.executeStream(query)
+    let row
+    while ((row = await stream.next()) !== null) streamed.push(row)
+    byN(streamed)
+    expect(streamed).toEqual(executed)
+    expect(streamed.map((r) => r.term)).toEqual(terms)
+    for (const [n, r] of streamed.entries()) expect(r.term.equals(terms[n])).toBe(true)
+  })
 })

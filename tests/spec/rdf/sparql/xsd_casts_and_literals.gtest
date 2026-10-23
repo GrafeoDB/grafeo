@@ -84,8 +84,8 @@ tests:
       PREFIX xsd: <http://www.w3.org/2001/XMLSchema#>
       SELECT (xsd:double("1e3") AS ?exponent) (xsd:double("INF") AS ?inf) (xsd:double("-INF") AS ?neg) (xsd:double("NaN") AS ?nan) WHERE {}
     expect:
-      rows:
-        - ["1.0E3", INF, -INF, NaN]
+      terms:
+        - ['"1.0E3"^^xsd:double', '"INF"^^xsd:double', '"-INF"^^xsd:double', '"NaN"^^xsd:double']
 
   - name: xsd_double_of_numbers_and_of_what_is_no_number
     query: |

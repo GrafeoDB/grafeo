@@ -168,6 +168,18 @@ tests:
       error: "must be non-negative, got -1"
       gql_status: "22G02"
 
+  # The parser folds `-1` into one literal; a minus before a parenthesized
+  # literal stays a negation, which takes the same rule.
+  - name: a_negated_limit_literal
+    setup:
+      - "INSERT (:Person {name: 'Alix'})"
+    variants:
+      gql: "MATCH (n:Person) RETURN n.name AS name LIMIT -(1)"
+      cypher: "MATCH (n:Person) RETURN n.name AS name LIMIT -(1)"
+    expect:
+      error: "must be non-negative, got -1"
+      gql_status: "22G02"
+
   - name: a_limit_literal_that_is_text
     setup:
       - "INSERT (:Person {name: 'Alix'})"

@@ -4,7 +4,7 @@ build-backend = "maturin"
 
 [project]
 name = "grafeo"
-version = "0.6.0-beta.1"
+version = "0.6.0"
 description = "A high-performance, embeddable graph database with Python bindings"
 readme = "README.md"
 license = { text = "Apache-2.0" }
@@ -42,7 +42,7 @@ Issues = "https://github.com/GrafeoDB/grafeo/issues"
 
 [project.optional-dependencies]
 cli = [
-    "grafeo-cli>=0.5.40,<0.6",
+    "grafeo-cli>=0.6.0,<0.7",
 ]
 dev = [
     "pytest>=9",

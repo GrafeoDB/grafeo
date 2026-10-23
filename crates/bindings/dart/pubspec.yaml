@@ -1,5 +1,5 @@
 name: grafeo
-version: 0.6.0-beta.1
+version: 0.6.0
 description: >-
   High-performance embeddable graph database with GQL support.
   Dart bindings for grafeo-c via dart:ffi.

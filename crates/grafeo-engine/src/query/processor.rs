@@ -915,6 +915,7 @@ fn format_physical_node(out: &mut String, node: &crate::query::profile::ProfileN
 /// # Errors
 ///
 /// As [`substitute_params`].
+#[cfg(feature = "triple-store")]
 pub(crate) fn substitute_with_defaults(
     plan: &mut LogicalPlan,
     params: Option<&QueryParams>,

@@ -32,6 +32,10 @@ bytes.workspace = true
 # Concurrency
 parking_lot.workspace = true
 
+# The seed of the random functions, from the operating system's entropy
+# (the `os-entropy` feature)
+getrandom = { workspace = true, optional = true }
+
 # Observability (optional)
 tracing = { workspace = true, optional = true }
 
@@ -56,6 +60,12 @@ testing-crash-injection = []
 testing-statement-injection = []
 # RDF term fixtures (`types::rdf::testing`) for the tests of crates that depend on this one.
 testing-rdf-terms = []
+# The seed of the random functions (`utils::random`) from the operating
+# system's entropy. grafeo-core turns it on for every native target; in WASM
+# the binding does, as getrandom there needs its `wasm_js` backend, which only
+# an application can choose. Without it the seed is the clock and the hasher
+# keys of std (see `utils::random`).
+os-entropy = ["dep:getrandom"]
 encryption = ["dep:aes-gcm", "dep:hkdf", "dep:argon2", "dep:zeroize", "dep:sha2", "dep:rand"]
 
 [dev-dependencies]

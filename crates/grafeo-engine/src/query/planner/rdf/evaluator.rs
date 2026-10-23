@@ -1129,28 +1129,14 @@ fn hash_hex(name: &str, bytes: &[u8]) -> Option<String> {
     })
 }
 
-/// 64 bits that differ on every call (a counter mixed with the clock).
+/// 64 bits that differ on every call (see [`grafeo_common::utils::random`]).
 fn random_bits() -> u64 {
-    use std::collections::hash_map::DefaultHasher;
-    use std::hash::{Hash, Hasher};
-    use std::sync::atomic::{AtomicU64, Ordering};
-    static STATE: AtomicU64 = AtomicU64::new(0);
-    let mut hasher = DefaultHasher::new();
-    STATE.fetch_add(1, Ordering::Relaxed).hash(&mut hasher);
-    grafeo_common::clock::SystemTime::now()
-        .duration_since(grafeo_common::clock::UNIX_EPOCH)
-        .map_or(0, |d| d.as_nanos())
-        .hash(&mut hasher);
-    hasher.finish()
+    grafeo_common::utils::random::next_u64()
 }
 
 /// A double in `[0, 1)`.
-#[allow(
-    clippy::cast_precision_loss,
-    reason = "53 random bits are exact in a double"
-)]
 fn random_unit() -> f64 {
-    (random_bits() >> 11) as f64 / (1u64 << 53) as f64
+    grafeo_common::utils::random::next_f64()
 }
 
 /// A version 4 UUID (RFC 9562) in its hyphenated form.

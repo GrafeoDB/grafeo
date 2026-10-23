@@ -269,3 +269,28 @@ fn foreach_that_starts_a_query_keeps_its_one_row() {
     );
     assert_eq!(written(&session), int(3));
 }
+
+/// An `UNWIND` before a `SET` of one node: each row's update sees the rows
+/// before it, as `FOREACH`'s items do, while a read of the same `UNWIND`
+/// gets its rows together.
+#[test]
+fn an_unwind_before_a_set_sees_the_rows_before_it() {
+    let db = GrafeoDB::new_in_memory();
+    let session = db.session();
+    run(&session, "CREATE (:Person {name: 'Vincent'})");
+    run(
+        &session,
+        "MATCH (p:Person) UNWIND [3, 19, 88] AS x SET p.n = coalesce(p.n, 0) + x",
+    );
+    assert_eq!(
+        run(&session, "MATCH (p:Person) RETURN p.n AS n"),
+        [[int(110)]]
+    );
+    assert_eq!(
+        run(
+            &session,
+            "UNWIND range(1, 5000) AS i RETURN count(i) AS n, sum(i) AS total"
+        ),
+        [[int(5000), int(12_502_500)]]
+    );
+}

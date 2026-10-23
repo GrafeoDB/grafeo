@@ -44,6 +44,10 @@ anyhow = "1.0"
 parking_lot = "0.13"
 # The host's clock on wasm32, where std::time panics (grafeo_common::clock)
 web-time = "1.1.0"
+# Operating-system entropy for the seed of the random functions
+# (grafeo_common::utils::random, its os-entropy feature); the WASM binding
+# turns on its wasm_js backend
+getrandom = "0.4"
 crossbeam = "0.8"
 rayon = "1"
 

@@ -14,7 +14,8 @@ crate-type = ["cdylib", "rlib"]
 [dependencies]
 grafeo-engine = { workspace = true, features = ["gql", "regex-lite"] }
 grafeo-core = { workspace = true, default-features = false, optional = true }
-grafeo-common.workspace = true
+# The seed of rand() from the browser's crypto (with getrandom's wasm_js below)
+grafeo-common = { workspace = true, features = ["os-entropy"] }
 grafeo-bindings-common = { path = "../common", default-features = false }
 
 # WASM bindings
@@ -34,7 +35,7 @@ hmac = "0.13"
 sha2 = { workspace = true }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
-getrandom = { version = "0.4", features = ["wasm_js"] }
+getrandom = { workspace = true, features = ["wasm_js"] }
 
 [dev-dependencies]
 wasm-bindgen-test = "0.3"

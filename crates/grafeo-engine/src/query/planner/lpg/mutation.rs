@@ -435,11 +435,19 @@ impl super::Planner {
         // list on; a list computed for the UNWIND alone (a constant, or an
         // expression in a column of its own) stays out of them.
         let list_is_a_variable = !unwinds_a_constant && list_col_idx.is_some();
-        let operator: Box<dyn Operator> = Box::new(if list_is_a_variable {
+        let unwind_op = if list_is_a_variable {
             unwind_op
         } else {
             unwind_op.without_the_list()
-        });
+        };
+        // In a statement that writes, a row sees the writes of the rows before
+        // it, so the rows go one at a time; a read gets them in full chunks.
+        let operator: Box<dyn Operator> =
+            Box::new(if self.statement_writes.get().unwrap_or(true) {
+                unwind_op.row_at_a_time()
+            } else {
+                unwind_op
+            });
 
         Ok((operator, columns))
     }

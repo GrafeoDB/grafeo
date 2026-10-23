@@ -3538,19 +3538,8 @@ impl ExpressionPredicate {
                 };
                 Some(Value::Float64(base.powf(exponent)))
             }
-            BuiltinFunction::Rand => {
-                use std::hash::{Hash, Hasher};
-                let mut hasher = std::collections::hash_map::DefaultHasher::new();
-                row.hash(&mut hasher);
-                grafeo_common::clock::SystemTime::now()
-                    .duration_since(grafeo_common::clock::UNIX_EPOCH)
-                    .ok()?
-                    .as_nanos()
-                    .hash(&mut hasher);
-                let hash = hasher.finish();
-                let random = (hash as f64) / (u64::MAX as f64);
-                Some(Value::Float64(random))
-            }
+            // A new value on every call, in [0, 1).
+            BuiltinFunction::Rand => Some(Value::Float64(grafeo_common::utils::random::next_f64())),
             BuiltinFunction::Ln => {
                 if args.len() != 1 {
                     return None;

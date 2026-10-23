@@ -10,6 +10,8 @@
 //! their documentation has a `# Stability: Experimental` section: see
 //! <https://grafeo.dev/stability/>.
 
+#[cfg(any(feature = "gql", feature = "cypher", feature = "sql-pgq"))]
+mod prepared;
 #[cfg(feature = "triple-store")]
 mod rdf;
 
@@ -1479,7 +1481,11 @@ impl Session {
             self.store.as_ref(),
             &self.catalog,
             &self.transaction_manager,
-        )
+        )?;
+        // As the database's: every cached plan is made again after a change
+        // of the catalog.
+        self.query_cache.clear();
+        Ok(())
     }
 
     /// The store a statement reads: the graph it names for itself
@@ -3134,8 +3140,7 @@ impl Session {
         })?;
 
         use crate::query::{
-            binder::Binder, cache::CacheKey, optimizer::Optimizer, processor::QueryLanguage,
-            translators::gql,
+            binder::Binder, optimizer::Optimizer, processor::QueryLanguage, translators::gql,
         };
 
         let _span = grafeo_info_span!(
@@ -3166,25 +3171,25 @@ impl Session {
             Ok(())
         };
 
-        // A statement without parameters whose optimized plan is cached
-        // skips the parse and translation: a translation depends on the text
-        // alone, and only plans are cached, never session or schema commands.
-        let cache_key = CacheKey::with_graph(query, QueryLanguage::Gql, self.current_graph());
-        let cached = params
-            .is_none()
-            .then(|| self.query_cache.get_optimized(&cache_key))
-            .flatten();
+        // A statement whose optimized plan is cached skips the parse and
+        // translation: a translation depends on the text alone, and only
+        // plans are cached, never session or schema commands. A statement
+        // with values takes its prepared plan, which keeps the parameters,
+        // and fills a copy of it with this call's values (`fill_prepared`).
+        let cache_key = self.plan_cache_key(query, QueryLanguage::Gql);
+        let cached = self.cached_plan(&cache_key, params);
         // The graph a `USE g` focuses the statement on, from here to its end.
         let mut _focus = None;
         let optimized_plan = if let Some(plan) = cached {
             _focus = self.focus_statement(plan.graph.as_deref())?;
             check_writes(&plan)?;
-            plan
+            Self::fill_prepared(plan, params)?
         } else {
-            // A parameterized statement reuses its parsed plan: the parameters
-            // are filled into a copy on every call, before optimizing, so the
-            // optimizer and planner see the values and no cached plan keeps them.
+            // A statement with values that binds by value keeps its parsed
+            // plan, which each call fills, binds and optimizes with its values
+            // (`plan_with_values`).
             let parsed = params.and_then(|_| self.query_cache.get_parsed(&cache_key));
+            let bound_by_value = parsed.is_some();
             let mut logical_plan = match parsed {
                 Some(plan) => plan,
                 None => match gql::translate_full(query)? {
@@ -3195,12 +3200,7 @@ impl Session {
                         self.check_schema_command(&cmd)?;
                         return self.execute_schema_command(cmd);
                     }
-                    gql::GqlTranslationResult::Plan(plan) => {
-                        if params.is_some() {
-                            self.query_cache.put_parsed(cache_key.clone(), plan.clone());
-                        }
-                        plan
-                    }
+                    gql::GqlTranslationResult::Plan(plan) => plan,
                 },
             };
             _focus = self.focus_statement(logical_plan.graph.as_deref())?;
@@ -3211,7 +3211,8 @@ impl Session {
             let given = params.is_some();
             let params = params_to_fill(&mut logical_plan, params)?;
             if let Some(params) = params {
-                self.optimize_with_params(logical_plan, params)?
+                let active = self.active_store();
+                self.plan_with_values(&cache_key, logical_plan, params, &*active, bound_by_value)?
             } else if given && let Some(cached_plan) = self.query_cache.get_optimized(&cache_key) {
                 cached_plan
             } else {
@@ -3396,8 +3397,7 @@ impl Session {
         Option<crate::transaction::ReadPin>,
     )> {
         use crate::query::{
-            binder::Binder, cache::CacheKey, optimizer::Optimizer, processor::QueryLanguage,
-            translators::gql,
+            binder::Binder, optimizer::Optimizer, processor::QueryLanguage, translators::gql,
         };
 
         self.require_lpg("GQL")?;
@@ -3448,10 +3448,15 @@ impl Session {
         self.check_graph_access(false)?;
 
         // Cache + bind + optimize (same path as execute).
-        let cache_key = CacheKey::with_graph(query, QueryLanguage::Gql, self.current_graph());
+        let cache_key = self.plan_cache_key(query, QueryLanguage::Gql);
         let optimized_plan = if let Some(cached) = self.query_cache.get_optimized(&cache_key) {
             cached
         } else {
+            // A stream takes no parameters: the plan's defaults fill what they
+            // can and a parameter nobody supplied fails here, as `execute`
+            // fails, so the plan it caches holds no parameter.
+            let mut logical_plan = logical_plan;
+            params_to_fill(&mut logical_plan, None)?;
             let mut binder = Binder::new();
             let _binding_context = binder.bind(&logical_plan)?;
             let active = self.active_store();
@@ -3580,34 +3585,6 @@ impl Session {
         self.timed(|| self.execute_gql(query, Some(&params)))
     }
 
-    /// Fills `params` (over the plan's own defaults) into a parsed plan, then
-    /// binds and optimizes it, so the optimizer sees the values as it does in
-    /// a statement with literals.
-    #[cfg(any(feature = "gql", feature = "cypher", feature = "sql-pgq"))]
-    fn optimize_with_params(
-        &self,
-        mut plan: crate::query::plan::LogicalPlan,
-        params: &std::collections::HashMap<String, Value>,
-    ) -> Result<crate::query::plan::LogicalPlan> {
-        use crate::query::{binder::Binder, optimizer::Optimizer, processor::substitute_params};
-
-        if plan.default_params.is_empty() {
-            substitute_params(&mut plan, params)?;
-        } else {
-            let mut merged = plan.default_params.clone();
-            merged.extend(
-                params
-                    .iter()
-                    .map(|(name, value)| (name.clone(), value.clone())),
-            );
-            substitute_params(&mut plan, &merged)?;
-        }
-        let mut binder = Binder::new();
-        let _binding_context = binder.bind(&plan)?;
-        let active = self.active_store();
-        Optimizer::from_graph_store(&*active).optimize(plan)
-    }
-
     /// Executes a GQL query with parameters.
     ///
     /// # Errors
@@ -3673,24 +3650,22 @@ impl Session {
         params: Option<&std::collections::HashMap<String, Value>>,
     ) -> Result<QueryResult> {
         use crate::query::{
-            binder::Binder, cache::CacheKey, optimizer::Optimizer, processor::QueryLanguage,
-            translators::cypher,
+            binder::Binder, optimizer::Optimizer, processor::QueryLanguage, translators::cypher,
         };
 
         let start_time = Instant::now();
 
         // A statement without parameters whose optimized plan is cached
         // skips the parse and translation (see execute_gql).
-        let cache_key = CacheKey::with_graph(query, QueryLanguage::Cypher, self.current_graph());
-        let cached = params
-            .is_none()
-            .then(|| self.query_cache.get_optimized(&cache_key))
-            .flatten();
+        let cache_key = self.plan_cache_key(query, QueryLanguage::Cypher);
+        let cached = self.cached_plan(&cache_key, params);
         let optimized_plan = if let Some(plan) = cached {
-            plan
+            Self::fill_prepared(plan, params)?
         } else {
-            // A parameterized statement reuses its parsed plan (see execute_gql).
+            // A statement that binds by value keeps its parsed plan (see
+            // execute_gql).
             let parsed = params.and_then(|_| self.query_cache.get_parsed(&cache_key));
+            let bound_by_value = parsed.is_some();
             let mut logical_plan = match parsed {
                 Some(plan) => plan,
                 // Schema DDL and SHOW commands run before the normal query path.
@@ -3708,19 +3683,23 @@ impl Session {
                     cypher::CypherTranslationResult::ShowCurrentGraphType => {
                         return self.execute_show_current_graph_type();
                     }
-                    cypher::CypherTranslationResult::Plan(plan) => {
-                        if params.is_some() {
-                            self.query_cache.put_parsed(cache_key.clone(), plan.clone());
-                        }
-                        plan
-                    }
+                    cypher::CypherTranslationResult::Plan(plan) => plan,
                 },
             };
 
             let given = params.is_some();
             let params = params_to_fill(&mut logical_plan, params)?;
             if let Some(params) = params {
-                self.optimize_with_params(logical_plan, params)?
+                {
+                    let active = self.active_store();
+                    self.plan_with_values(
+                        &cache_key,
+                        logical_plan,
+                        params,
+                        &*active,
+                        bound_by_value,
+                    )?
+                }
             } else if given && let Some(cached_plan) = self.query_cache.get_optimized(&cache_key) {
                 cached_plan
             } else {
@@ -4184,8 +4163,8 @@ impl Session {
         params: Option<&std::collections::HashMap<String, Value>>,
     ) -> Result<QueryResult> {
         use crate::query::{
-            binder::Binder, cache::CacheKey, optimizer::Optimizer, plan::LogicalOperator,
-            processor::QueryLanguage, translators::sql_pgq,
+            binder::Binder, optimizer::Optimizer, plan::LogicalOperator, processor::QueryLanguage,
+            translators::sql_pgq,
         };
 
         #[cfg(feature = "metrics")]
@@ -4194,16 +4173,15 @@ impl Session {
         // A statement without parameters whose optimized plan is cached
         // skips the parse and translation (see execute_gql); DDL is never
         // cached.
-        let cache_key = CacheKey::with_graph(query, QueryLanguage::SqlPgq, self.current_graph());
-        let cached = params
-            .is_none()
-            .then(|| self.query_cache.get_optimized(&cache_key))
-            .flatten();
+        let cache_key = self.plan_cache_key(query, QueryLanguage::SqlPgq);
+        let cached = self.cached_plan(&cache_key, params);
         let optimized_plan = if let Some(plan) = cached {
-            plan
+            Self::fill_prepared(plan, params)?
         } else {
-            // A parameterized statement reuses its parsed plan (see execute_gql).
+            // A statement that binds by value keeps its parsed plan (see
+            // execute_gql).
             let parsed = params.and_then(|_| self.query_cache.get_parsed(&cache_key));
+            let bound_by_value = parsed.is_some();
             let mut logical_plan = match parsed {
                 Some(plan) => plan,
                 None => {
@@ -4223,10 +4201,6 @@ impl Session {
                         // graphs to declare or drop.
                         _ => {}
                     }
-                    if params.is_some() {
-                        self.query_cache
-                            .put_parsed(cache_key.clone(), logical_plan.clone());
-                    }
                     logical_plan
                 }
             };
@@ -4234,7 +4208,17 @@ impl Session {
             let given = params.is_some();
             let params = params_to_fill(&mut logical_plan, params)?;
             if let Some(params) = params {
-                self.optimize_with_params(logical_plan, params)?
+                {
+                    // `GRAPH_TABLE (g ...)` is optimized for the graph it reads.
+                    let active = self.statement_store(logical_plan.graph.as_deref())?;
+                    self.plan_with_values(
+                        &cache_key,
+                        logical_plan,
+                        params,
+                        &*active,
+                        bound_by_value,
+                    )?
+                }
             } else if given && let Some(cached_plan) = self.query_cache.get_optimized(&cache_key) {
                 cached_plan
             } else {

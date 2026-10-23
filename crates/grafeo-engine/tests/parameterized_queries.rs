@@ -424,3 +424,298 @@ fn dotted_access_on_a_node_expression_reads_the_node() {
         "{err}"
     );
 }
+
+/// The people of three cities, for the grouping cases: Amsterdam three,
+/// Berlin two, Paris one; `x` and `y` with `y = 2x`.
+fn cities() -> GrafeoDB {
+    let db = GrafeoDB::new_in_memory();
+    for (name, city, x) in [
+        ("Alix", "Amsterdam", 1),
+        ("Gus", "Amsterdam", 2),
+        ("Vincent", "Amsterdam", 3),
+        ("Jules", "Berlin", 1),
+        ("Mia", "Berlin", 2),
+        ("Butch", "Paris", 1),
+    ] {
+        db.execute_with_params(
+            "INSERT (:P {name: $name, city: $city, x: $x, y: $y})",
+            params(&[
+                ("name", Value::from(name)),
+                ("city", Value::from(city)),
+                ("x", Value::Int64(x)),
+                ("y", Value::Int64(2 * x)),
+            ]),
+        )
+        .unwrap();
+    }
+    db
+}
+
+/// A parameter in a HAVING condition is filled in: in GQL and SQL/PGQ it
+/// reached the planner unresolved ("Unresolved parameter"); each call reads
+/// its own value.
+#[test]
+fn a_having_condition_takes_parameters() {
+    let db = cities();
+    for (least, expected) in [(1, vec!["Amsterdam", "Berlin"]), (2, vec!["Amsterdam"])] {
+        let rows = db
+            .execute_with_params(
+                "MATCH (p:P) RETURN p.city AS city GROUP BY city HAVING count(*) > $least \
+                 ORDER BY city",
+                params(&[("least", Value::Int64(least))]),
+            )
+            .unwrap()
+            .rows()
+            .to_vec();
+        let expected: Vec<Vec<Value>> = expected.iter().map(|c| vec![Value::from(*c)]).collect();
+        assert_eq!(rows, expected, "GQL, more than {least}");
+        #[cfg(feature = "sql-pgq")]
+        {
+            let rows = db
+                .execute_sql_with_params(
+                    "SELECT city FROM GRAPH_TABLE (MATCH (p:P) COLUMNS (p.city AS city)) \
+                     GROUP BY city HAVING COUNT(*) > $least ORDER BY city",
+                    params(&[("least", Value::Int64(least))]),
+                )
+                .unwrap()
+                .rows()
+                .to_vec();
+            assert_eq!(rows, expected, "SQL/PGQ, more than {least}");
+        }
+    }
+}
+
+/// A parameter in the second argument of a binary set function
+/// (`covar_pop(y, x)`) is filled in: it reached the planner unresolved.
+#[cfg(feature = "cypher")]
+#[test]
+fn the_second_argument_of_a_binary_set_function_takes_parameters() {
+    let db = cities();
+    // Amsterdam's x are 1, 2, 3 and y = 2x: covar_pop(y, x) is 4/3, and
+    // covar_pop(y, k * x) is k times that.
+    for k in [1_i64, 3] {
+        let rows = db
+            .execute_cypher_with_params(
+                "MATCH (p:P {city: 'Amsterdam'}) RETURN covar_pop(p.y, p.x * $k)",
+                params(&[("k", Value::Int64(k))]),
+            )
+            .unwrap()
+            .rows()
+            .to_vec();
+        let Value::Float64(covariance) = rows[0][0] else {
+            panic!("a covariance, not {rows:?}");
+        };
+        let expected = 4.0 / 3.0 * k as f64;
+        assert!(
+            (covariance - expected).abs() < 1e-9,
+            "k = {k}: {covariance}"
+        );
+    }
+}
+
+/// A parameter in the WHERE of a pattern comprehension is filled in, with
+/// each call's value.
+#[cfg(feature = "cypher")]
+#[test]
+fn the_where_of_a_pattern_comprehension_takes_parameters() {
+    let db = GrafeoDB::new_in_memory();
+    db.execute_cypher(
+        "CREATE (a:P {name: 'Alix'}), (a)-[:KNOWS]->(:P {name: 'Gus', age: 25}), \
+         (a)-[:KNOWS]->(:P {name: 'Mia', age: 40})",
+    )
+    .unwrap();
+    for (least, expected) in [(30, vec!["Mia"]), (20, vec!["Gus", "Mia"])] {
+        let rows = db
+            .execute_cypher_with_params(
+                "MATCH (a:P {name: 'Alix'}) \
+                 RETURN [(a)-[:KNOWS]->(b) WHERE b.age > $least | b.name] AS names",
+                params(&[("least", Value::Int64(least))]),
+            )
+            .unwrap()
+            .rows()
+            .to_vec();
+        let Value::List(names) = &rows[0][0] else {
+            panic!("a list, not {rows:?}");
+        };
+        let mut names: Vec<Value> = names.to_vec();
+        names.sort_by_key(|name| name.to_string());
+        let expected: Vec<Value> = expected.iter().map(|n| Value::from(*n)).collect();
+        assert_eq!(names, expected, "older than {least}");
+    }
+}
+
+/// A streamed statement with a parameter nobody supplied fails as `execute`
+/// does, and leaves nothing in the plan cache that a later call would run:
+/// it cached the plan with the parameter unresolved, so the next `execute`
+/// of the same text failed with an internal error.
+#[test]
+fn a_streamed_statement_fails_on_a_missing_parameter_as_execute_does() {
+    let db = GrafeoDB::new_in_memory();
+    db.execute("INSERT (:P {x: 1})").unwrap();
+    let session = db.session();
+    let query = "MATCH (n:P) WHERE n.x = $x RETURN n.x";
+    let streamed = session
+        .execute_streaming(query)
+        .err()
+        .expect("a missing parameter fails")
+        .to_string();
+    assert!(streamed.contains("Missing parameter: $x"), "{streamed}");
+    let executed = session.execute(query).unwrap_err().to_string();
+    assert!(executed.contains("Missing parameter: $x"), "{executed}");
+    let rows = session
+        .execute_with_params(query, params(&[("x", Value::Int64(1))]))
+        .unwrap()
+        .rows()
+        .to_vec();
+    assert_eq!(rows, [vec![Value::Int64(1)]]);
+}
+
+/// The hits and misses of the optimized-plan cache so far.
+fn plan_lookups(db: &GrafeoDB) -> (u64, u64) {
+    let stats = db.query_cache().stats();
+    (stats.optimized_hits, stats.optimized_misses)
+}
+
+/// An index created or dropped through the API, by the database or by a
+/// session, makes every cached plan again: the optimizer's choices depend on
+/// the indexes (an expand starts at the end an index seeks).
+#[test]
+fn an_index_change_through_the_api_makes_the_plans_again() {
+    let db = GrafeoDB::new_in_memory();
+    db.execute("INSERT (:Person {name: 'Alix'})-[:KNOWS]->(:Person {name: 'Gus'})")
+        .unwrap();
+    let session = db.session();
+    let query = "MATCH (a:Person)-[:KNOWS]->(b:Person {name: 'Gus'}) RETURN a.name";
+    let run = || {
+        let rows = session.execute(query).unwrap().rows().to_vec();
+        assert_eq!(rows, [vec![Value::from("Alix")]]);
+    };
+    run();
+    let (hits, misses) = plan_lookups(&db);
+    run();
+    assert_eq!(plan_lookups(&db), (hits + 1, misses), "cached");
+    let changes: [(&str, Box<dyn Fn()>); 4] = [
+        (
+            "the database creates",
+            Box::new(|| db.create_property_index("name").unwrap()),
+        ),
+        (
+            "the database drops",
+            Box::new(|| assert!(db.drop_property_index("name").unwrap())),
+        ),
+        (
+            "a session creates",
+            Box::new(|| session.create_property_index("name").unwrap()),
+        ),
+        (
+            "a session drops",
+            Box::new(|| assert!(session.drop_property_index("name").unwrap())),
+        ),
+    ];
+    for (what, change) in changes {
+        change();
+        let (hits, misses) = plan_lookups(&db);
+        run();
+        assert_eq!(
+            plan_lookups(&db),
+            (hits, misses + 1),
+            "after {what} an index"
+        );
+    }
+}
+
+/// The plan cache keeps a plan per current schema: the same text in another
+/// schema is planned for that schema's graphs, and each schema's plan is
+/// found again.
+#[test]
+fn a_plan_is_cached_per_schema() {
+    let db = GrafeoDB::new_in_memory();
+    let session = db.session();
+    session.execute("CREATE SCHEMA reports").unwrap();
+    session.execute("INSERT (:Row {q: 1})").unwrap();
+    let query = "MATCH (r:Row) RETURN count(r)";
+    let count = || session.execute(query).unwrap().rows()[0][0].clone();
+    assert_eq!(count(), Value::Int64(1));
+    session.execute("SESSION SET SCHEMA reports").unwrap();
+    let (hits, misses) = plan_lookups(&db);
+    assert_eq!(count(), Value::Int64(0), "the schema's own default graph");
+    assert_eq!(
+        plan_lookups(&db),
+        (hits, misses + 1),
+        "planned for the schema"
+    );
+    assert_eq!(count(), Value::Int64(0));
+    assert_eq!(plan_lookups(&db), (hits + 1, misses + 1), "found again");
+    // The session command is looked up too (a miss: it is never cached).
+    session.execute("SESSION RESET SCHEMA").unwrap();
+    let (hits, misses) = plan_lookups(&db);
+    assert_eq!(count(), Value::Int64(1));
+    assert_eq!(
+        plan_lookups(&db),
+        (hits + 1, misses),
+        "the default schema's plan"
+    );
+}
+
+/// Two statements that differ only inside a string, a quoted name or a
+/// comment are two statements: the plan cache kept one plan for both when
+/// it collapsed the whitespace of the whole text, so `RETURN 'a  b'` after
+/// `RETURN 'a b'` returned "a b". Each pair runs in both orders, through
+/// GQL and Cypher, with and without values.
+#[test]
+fn texts_that_differ_inside_a_literal_are_planned_apart() {
+    let pairs: [(&str, &str, Value, Value); 4] = [
+        (
+            "RETURN 'a b' AS s",
+            "RETURN 'a  b' AS s",
+            Value::from("a b"),
+            Value::from("a  b"),
+        ),
+        (
+            "RETURN \"x\ty\" AS s",
+            "RETURN \"x y\" AS s",
+            Value::from("x\ty"),
+            Value::from("x y"),
+        ),
+        (
+            "MATCH (p:P) RETURN p.`a b` AS v",
+            "MATCH (p:P) RETURN p.`a  b` AS v",
+            Value::Int64(1),
+            Value::Int64(2),
+        ),
+        (
+            "RETURN 'a b' AS s /* don't */",
+            "RETURN 'a  b' AS s /* don't */",
+            Value::from("a b"),
+            Value::from("a  b"),
+        ),
+    ];
+    for (first, second, first_value, second_value) in pairs {
+        for (a, b, a_value, b_value) in [
+            (first, second, &first_value, &second_value),
+            (second, first, &second_value, &first_value),
+        ] {
+            let db = GrafeoDB::new_in_memory();
+            db.execute("INSERT (:P {`a  b`: 2, `a b`: 1})").unwrap();
+            for (query, value) in [(a, a_value), (b, b_value), (a, a_value)] {
+                let gql = db.execute(query).unwrap().rows().to_vec();
+                assert_eq!(gql, [vec![value.clone()]], "GQL `{query}`");
+                let with_values = db
+                    .execute_with_params(query, params(&[("unused", Value::Int64(0))]))
+                    .unwrap()
+                    .rows()
+                    .to_vec();
+                assert_eq!(
+                    with_values,
+                    [vec![value.clone()]],
+                    "GQL with values `{query}`"
+                );
+                #[cfg(feature = "cypher")]
+                {
+                    let cypher = db.execute_cypher(query).unwrap().rows().to_vec();
+                    assert_eq!(cypher, [vec![value.clone()]], "Cypher `{query}`");
+                }
+            }
+        }
+    }
+}

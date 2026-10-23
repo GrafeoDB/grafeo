@@ -1010,9 +1010,15 @@ fn substitute_in_operator(op: &mut LogicalOperator, params: &QueryParams) -> Res
                 substitute_in_expression(expr, params)?;
             }
             for agg_expr in &mut agg.aggregates {
-                if let Some(expr) = &mut agg_expr.expression {
+                for expr in [&mut agg_expr.expression, &mut agg_expr.expression2]
+                    .into_iter()
+                    .flatten()
+                {
                     substitute_in_expression(expr, params)?;
                 }
+            }
+            if let Some(having) = &mut agg.having {
+                substitute_in_expression(having, params)?;
             }
             substitute_in_operator(&mut agg.input, params)?;
         }

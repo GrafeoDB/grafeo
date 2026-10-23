@@ -9,14 +9,15 @@
 // carry doc comments on the generated wrapper functions.
 #![allow(missing_docs)]
 
+use std::collections::HashMap;
 use std::hint::black_box;
 
 use criterion::{Criterion, criterion_group, criterion_main};
 
+use grafeo_common::types::Value;
 use grafeo_engine::GrafeoDB;
 #[cfg(all(feature = "sparql", feature = "triple-store"))]
 use {
-    grafeo_common::types::Value,
     grafeo_engine::{Config, GraphModel},
     std::fmt::Write,
 };
@@ -144,6 +145,34 @@ fn bench_fan_out_expand_1k(c: &mut Criterion) {
     });
 }
 
+/// A two-node lookup through an index with parameters, each call with
+/// another pair of ids: the statement is optimized once with its parameters
+/// in and each call fills a copy of that plan with its values, so a call
+/// costs its lookups and its planning, not a scan.
+fn bench_two_node_match_params(c: &mut Criterion) {
+    let db = setup_social_graph(1_000, 5);
+    db.create_property_index("id").unwrap();
+    let session = db.session();
+
+    let mut call = 0_i64;
+    c.bench_function("query_two_node_match_params", |b| {
+        b.iter(|| {
+            call += 1;
+            let params = HashMap::from([
+                ("a".to_string(), Value::Int64(call % 1_000)),
+                ("b".to_string(), Value::Int64((call * 7 + 13) % 1_000)),
+            ]);
+            let result = session
+                .execute_with_params(
+                    "MATCH (a:Person {id: $a}), (b:Person {id: $b}) RETURN a.name, b.name",
+                    params,
+                )
+                .unwrap();
+            black_box(result)
+        });
+    });
+}
+
 fn bench_insert_single_node(c: &mut Criterion) {
     let db = GrafeoDB::new_in_memory();
     let session = db.session();
@@ -167,6 +196,7 @@ criterion_group!(
     bench_fan_out_expand_1k,
     bench_aggregation_count,
     bench_filter_range,
+    bench_two_node_match_params,
     bench_insert_single_node,
 );
 

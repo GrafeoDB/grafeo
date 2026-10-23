@@ -3023,7 +3023,12 @@ impl GrafeoDB {
             self.store.as_ref(),
             &self.catalog,
             &self.transaction_manager,
-        )
+        )?;
+        // A graph, index, constraint or type changed: a cached plan may have
+        // been optimized for what was there before (an index it now lacks or
+        // could use), so every plan is made again.
+        self.query_cache.clear();
+        Ok(())
     }
 
     /// Registers storage sections as [`MemoryConsumer`]s with the BufferManager.

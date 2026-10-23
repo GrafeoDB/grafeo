@@ -1600,3 +1600,50 @@ fn test_a_search_filter_follows_the_integer_rule() {
         assert_eq!(js_sys::Array::from(&hits).length(), 1);
     }
 }
+
+/// A statement called again with other values answers for those values: the
+/// engine optimizes it once with its parameters in and fills a copy of that
+/// plan with each call's values, here through the WASM binding.
+#[wasm_bindgen_test]
+fn test_a_prepared_statement_takes_each_calls_values() {
+    let db = Database::new().expect("create db");
+    for (name, age) in [("Alix", 30), ("Gus", 25), ("Vincent", 41), ("Mia", 25)] {
+        let params = to_js(&serde_json::json!({ "name": name, "age": age })).unwrap();
+        db.execute_with_params("INSERT (:Person {name: $name, age: $age})", params)
+            .expect("insert");
+    }
+    let rows = |query: &str, params: serde_json::Value| -> serde_json::Value {
+        let result = db
+            .execute_with_params(query, to_js(&params).unwrap())
+            .expect("query");
+        serde_wasm_bindgen::from_value(result).unwrap()
+    };
+    let lookup = "MATCH (p:Person) WHERE p.name = $name RETURN p.age AS age";
+    for (name, expected) in [
+        ("Gus", serde_json::json!([{ "age": 25 }])),
+        ("Alix", serde_json::json!([{ "age": 30 }])),
+        ("Nobody", serde_json::json!([])),
+        ("Gus", serde_json::json!([{ "age": 25 }])),
+    ] {
+        assert_eq!(
+            rows(lookup, serde_json::json!({ "name": name })),
+            expected,
+            "{name}"
+        );
+    }
+    let page = "MATCH (p:Person) RETURN p.name AS name ORDER BY p.name SKIP $skip LIMIT $limit";
+    let names = ["Alix", "Gus", "Mia", "Vincent"];
+    for (skip, limit) in [(0_usize, 1_usize), (1, 2), (3, 5), (0, 4)] {
+        let expected: Vec<serde_json::Value> = names
+            .iter()
+            .skip(skip)
+            .take(limit)
+            .map(|name| serde_json::json!({ "name": name }))
+            .collect();
+        assert_eq!(
+            rows(page, serde_json::json!({ "skip": skip, "limit": limit })),
+            serde_json::Value::Array(expected),
+            "skip {skip} limit {limit}"
+        );
+    }
+}

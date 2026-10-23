@@ -1089,6 +1089,9 @@ impl super::GrafeoDB {
         // The database continues at the snapshot's epoch, or above it when
         // it had committed further (epochs never go back).
         Self::continue_epochs(&root, &self.transaction_manager);
+        // Its graphs, indexes and types are the snapshot's now: no cached
+        // plan was made for them.
+        self.query_cache.clear();
         Ok(())
     }
 

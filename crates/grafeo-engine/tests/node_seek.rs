@@ -178,7 +178,7 @@ fn a_labeled_point_lookup_does_not_grow_with_the_label() {
         ))
         .unwrap();
     }
-    db.create_property_index("id");
+    db.create_property_index("id").unwrap();
     // The fastest of five batches, to keep a busy machine out of the ratio.
     let time = |query: &str| -> Duration {
         (0..5)

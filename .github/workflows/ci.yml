@@ -284,6 +284,40 @@ jobs:
           npm install
           npx vitest run
 
+  # The spec tests on the rdf persona (SPARQL, RDF terms), which the edge build
+  # above leaves out: without this job no WASM SPARQL case runs in CI. The edge
+  # job's size gate guards the browser bundle, so this build has none; its size
+  # is in the log.
+  wasm-spec-rdf:
+    name: WASM Spec Tests (rdf)
+    needs: [rust-check, rust-spec]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '22'
+      - uses: dtolnay/rust-toolchain@1.99.0
+        with:
+          targets: wasm32-unknown-unknown
+      - uses: cargo-bins/cargo-binstall@main
+      - run: cargo binstall wasm-bindgen-cli@0.2.118 --no-confirm
+      - uses: actions/cache@v6
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-wasmspec-rdf-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-wasmspec-rdf-
+      - name: Build WASM (rdf)
+        run: bash scripts/build-wasm.sh --features rdf --no-size-gate
+      - name: Run spec tests
+        working-directory: tests/spec/runners/wasm
+        run: |
+          npm install
+          npx vitest run
+
   # ── Full test matrices (gated by rust-check) ────────────────────
 
   # Rust tests (debug, all platforms)
@@ -1070,6 +1104,15 @@ jobs:
       - name: Clippy (wasm32)
         run: cargo clippy -p grafeo-wasm --target wasm32-unknown-unknown --all-targets -- -D warnings
 
+      # The facade for wasm32 outside our binding, as an application builds it:
+      # it has no getrandom wasm_js backend (our binding and .cargo/config.toml
+      # choose one), so grafeo-common's os-entropy stays off there and nothing
+      # may need it. RUSTFLAGS replaces the config's flags.
+      - name: Check the facade for wasm32 without the binding
+        env:
+          RUSTFLAGS: "-C target-feature=+simd128"
+        run: cargo check -p grafeo --target wasm32-unknown-unknown --no-default-features --features gql
+
       # WASM profile: delegates to build-wasm.sh which compiles grafeo-wasm
       # with only the gql feature (no threads, no native allocators).
       - name: Build WASM
@@ -1273,6 +1316,7 @@ jobs:
       - csharp-spec
       - dart-spec
       - wasm-spec
+      - wasm-spec-rdf
       - rust-test
       - rust-test-release
       - minimal-features

@@ -6,6 +6,7 @@
 #   ./scripts/build-wasm.sh --features ai              # GQL + AI search
 #   ./scripts/build-wasm.sh --features full            # all languages + AI
 #   ./scripts/build-wasm.sh --out-dir path/to/output   # custom output directory
+#   ./scripts/build-wasm.sh --features rdf --no-size-gate  # report the size, apply no limit
 #   ./scripts/build-wasm.sh --target bundler --scope grafeo-db
 #
 # Requirements: rustup target wasm32-unknown-unknown, wasm-bindgen-cli
@@ -18,6 +19,7 @@ PROFILE="minimal-size"
 TARGET="web"
 SCOPE=""
 FEATURES=""
+SIZE_GATE="yes"
 PKG_NAME="@grafeo-db/wasm"
 
 while [[ $# -gt 0 ]]; do
@@ -28,6 +30,7 @@ while [[ $# -gt 0 ]]; do
         --out-dir)  OUT_DIR="$2"; shift 2 ;;
         --name)     PKG_NAME="$2"; shift 2 ;;
         --release)  PROFILE="release"; shift ;;
+        --no-size-gate) SIZE_GATE="no"; shift ;;
         *)          echo "Unknown option: $1"; exit 1 ;;
     esac
 done
@@ -165,7 +168,11 @@ else
     LABEL="browser profile"
 fi
 
-if [[ "$GZ_SIZE" -gt "$FAIL_THRESHOLD" ]]; then
+# A build no size limit applies to (the rdf spec job in CI): its size is
+# reported above, for the record.
+if [[ "${SIZE_GATE:-yes}" == "no" ]]; then
+    echo "  No size gate: ${GZ_SIZE} bytes gzipped"
+elif [[ "$GZ_SIZE" -gt "$FAIL_THRESHOLD" ]]; then
     echo "  ERROR: ${GZ_SIZE} bytes gzipped exceeds $(( FAIL_THRESHOLD / 1024 )) KB limit (${LABEL})"
     exit 1
 elif [[ "$GZ_SIZE" -gt "$WARN_THRESHOLD" ]]; then

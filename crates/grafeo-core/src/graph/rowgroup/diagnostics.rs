@@ -151,9 +151,13 @@ impl Inner {
             memory.node_tables_bytes += size_of::<u64>() + size_of::<NodeGroup>();
             memory.node_versions_bytes += group.versions.heap_bytes()
                 + group.columns.updates_bytes()
-                + group
-                    .label_updates
-                    .heap_bytes(|ids| std::mem::size_of_val::<[u32]>(ids));
+                + group.label_updates.heap_bytes(|ids| {
+                    if ids.spilled() {
+                        ids.capacity() * size_of::<u32>()
+                    } else {
+                        0
+                    }
+                });
             memory.label_bitmaps_bytes +=
                 group.labels.values().map(Bitset::heap_bytes).sum::<usize>()
                     + group.labels.capacity() * (size_of::<u32>() + size_of::<Bitset>());
@@ -705,6 +709,34 @@ mod tests {
             "no edge was added"
         );
         assert_eq!(grown.total_bytes(), store.heap_bytes());
+    }
+
+    /// A label write keeps the row's label set in its chain until a collect:
+    /// in place up to four labels, so the figures grow by the chain alone,
+    /// and on the heap past that, which they count too.
+    #[test]
+    fn a_kept_label_set_counts_its_heap_past_four_labels() {
+        let kept_bytes = |labels: &[&str]| {
+            let store = RowGroupStore::new();
+            let mut tx = Tx::begin(&store, 10);
+            let id = tx.create_node(labels, &[]).unwrap();
+            tx.commit().unwrap();
+            let before = store.memory().node_versions_bytes;
+            let mut tx = Tx::begin(&store, 11);
+            tx.add_label(id, "Traveller").unwrap();
+            store.memory().node_versions_bytes - before
+        };
+        let one = kept_bytes(&["Person"]);
+        let four = kept_bytes(&["Person", "Employee", "Driver", "Pilot"]);
+        let five = kept_bytes(&["Person", "Employee", "Driver", "Pilot", "Chef"]);
+        assert_eq!(
+            one, four,
+            "up to four kept labels take no heap of their own"
+        );
+        assert!(
+            five >= four + 5 * size_of::<u32>(),
+            "five kept labels are counted on the heap: {five} against {four}"
+        );
     }
 
     /// `collect` shrinks the figures: a vector's version info collapses,

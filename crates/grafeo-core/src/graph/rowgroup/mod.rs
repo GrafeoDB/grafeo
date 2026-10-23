@@ -80,6 +80,7 @@ use grafeo_common::change::{EdgeImage, Labels, NodeImage, Properties};
 use grafeo_common::types::{EdgeId, EpochId, NodeId, PropertyKey, PropertyMap, ReadView, Value};
 use grafeo_common::utils::hash::FxHashMap;
 use parking_lot::RwLock;
+use smallvec::SmallVec;
 
 use self::adjacency::{Adjacency, Adjacent};
 use self::bitset::Bitset;
@@ -188,6 +189,23 @@ fn grow<T: Clone>(values: &mut Vec<T>, row: usize, filler: T) {
     }
 }
 
+/// The label ids a row held before a label write, ascending, as a label
+/// chain keeps them: up to four in place, so the chain of a label write
+/// keeps them without an allocation (a row rarely has more).
+type LabelIds = SmallVec<[u32; 4]>;
+
+/// The ids of the labels whose bitmaps hold `row`, ascending, as a label
+/// chain keeps them.
+fn kept_label_ids(labels: &FxHashMap<u32, Bitset>, row: usize) -> LabelIds {
+    let mut ids: LabelIds = labels
+        .iter()
+        .filter(|(_, rows)| rows.get(row))
+        .map(|(id, _)| *id)
+        .collect();
+    ids.sort_unstable();
+    ids
+}
+
 /// The ids of the labels whose bitmaps hold `row`, ascending.
 fn label_ids(labels: &FxHashMap<u32, Bitset>, row: usize) -> Vec<u32> {
     let mut ids: Vec<u32> = labels
@@ -207,7 +225,7 @@ struct NodeGroup {
     labels: FxHashMap<u32, Bitset>,
     /// The label ids rows had before the label writes some readers must not
     /// see, ascending.
-    label_updates: Updates<Box<[u32]>>,
+    label_updates: Updates<LabelIds>,
     columns: Columns,
     /// The rows' outgoing edges.
     outgoing: Adjacency,

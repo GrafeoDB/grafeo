@@ -84,7 +84,8 @@ use super::adjacency::{Adjacency, Adjacent};
 use super::adjacency_chunk;
 use super::checkpoint::{CheckpointSnapshot, GraphMarks, Marks};
 use super::{
-    ABSENT, IncomingEdges, Inner, PENDING, ROWS_PER_GROUP, Read, RowGroupStore, RowVersion, locate,
+    ABSENT, IncomingEdges, Inner, LabelIds, PENDING, ROWS_PER_GROUP, Read, RowGroupStore,
+    RowVersion, locate,
 };
 use crate::codec::column_chunk::{
     ChunkCodec, chunk_overhead, decode_column_chunk_bytes, encode_column_chunk, value_bound,
@@ -2033,7 +2034,7 @@ struct LoadedHistory {
     node_versions: Vec<(u64, u64, u64)>,
     edge_versions: Vec<(u64, u64, u64)>,
     /// Per node row and label write: its epoch and the label ids before.
-    labels: Vec<(u64, u64, Box<[u32]>)>,
+    labels: Vec<(u64, u64, LabelIds)>,
     /// Per row, key and value write: the key, the row, the write's epoch and
     /// the value before.
     node_values: Vec<(u32, u64, u64, Option<Value>)>,
@@ -2217,7 +2218,7 @@ impl LoadedHistory {
                 .ok_or_else(|| format!("row {id} is no edge of its group"))?;
             restore_version(&mut group.versions, row, created, deleted);
         }
-        let mut labels: BTreeMap<u64, Vec<(usize, u64, Box<[u32]>)>> = BTreeMap::new();
+        let mut labels: BTreeMap<u64, Vec<(usize, u64, LabelIds)>> = BTreeMap::new();
         for (id, at, kept) in history.labels {
             let (group, row) = locate(id);
             labels.entry(group).or_default().push((row, at, kept));
@@ -2276,11 +2277,11 @@ fn restore_version(
 fn label_ids_of(
     kept: &Value,
     dictionary: &NameDictionary,
-) -> std::result::Result<Box<[u32]>, String> {
+) -> std::result::Result<LabelIds, String> {
     let Value::List(items) = kept else {
         return Err(format!("{kept:?} where label ids are"));
     };
-    let mut ids: Vec<u32> = Vec::with_capacity(items.len());
+    let mut ids = LabelIds::with_capacity(items.len());
     for item in items.iter() {
         let id = match item {
             Value::Int64(id) => u32::try_from(*id).ok(),
@@ -2293,7 +2294,7 @@ fn label_ids_of(
         }
         ids.push(id);
     }
-    Ok(ids.into_boxed_slice())
+    Ok(ids)
 }
 
 /// Where a chunk is, for an error.

@@ -198,6 +198,14 @@ opt-level = 1
 lto = "thin"
 codegen-units = 1
 
+# Release tests in CI: the release profile's optimizations and checks without
+# link-time optimization, which every test binary pays for again (the release
+# test job builds over 300 of them, each linking the whole engine)
+[profile.ci-release]
+inherits = "release"
+lto = false
+codegen-units = 16
+
 # Profiling: release performance with debug symbols for flamegraphs
 [profile.profiling]
 inherits = "release"

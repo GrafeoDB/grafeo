@@ -549,26 +549,32 @@ jobs:
       - name: Configure sccache
         uses: mozilla-actions/sccache-action@v0.0.11
 
+      # Crate sources only, as in the debug job: sccache keeps the compiled
+      # crates between runs.
       - name: Cache cargo registry
         uses: actions/cache@v6
         with:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
-            target
-          key: ${{ runner.os }}-cargo-release-${{ hashFiles('**/Cargo.lock') }}
+          key: ${{ runner.os }}-cargo-registry-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: |
-            ${{ runner.os }}-cargo-release-
+            ${{ runner.os }}-cargo-registry-
 
+      # The ci-release profile is the release profile without link-time
+      # optimization: building the tests is the cost of this job, and with LTO
+      # every test binary pays it again.
       - name: Run tests (release)
-        run: cargo nextest run --all-features --workspace --exclude grafeo-spec-tests --release
+        run: cargo nextest run --all-features --workspace --exclude grafeo-spec-tests --cargo-profile ci-release
         env:
           RUSTC_WRAPPER: sccache
+          SCCACHE_GHA_ENABLED: "true"
 
       - name: Run doc-tests (release)
-        run: cargo test --all-features --workspace --doc --release
+        run: cargo test --all-features --workspace --doc --profile ci-release
         env:
           RUSTC_WRAPPER: sccache
+          SCCACHE_GHA_ENABLED: "true"
 
   # Feature matrix: test individual feature combinations that --all-features
   # masks. Catches per-feature cfg bugs, missing imports, and conditional

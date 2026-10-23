@@ -17,7 +17,7 @@
   "license": "Apache-2.0",
   "repository": {
     "type": "git",
-    "url": "https://github.com/GrafeoDB/grafeo.git",
+    "url": "git+https://github.com/GrafeoDB/grafeo.git",
     "directory": "crates/bindings/wasm"
   },
   "homepage": "https://grafeo.dev",

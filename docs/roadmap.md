@@ -19,32 +19,33 @@ For what has shipped, see the [CHANGELOG](changelog.md).
 
 ---
 
-## Planned: the rest of 0.6
+## Planned
 
-Fixes first, then proof that the storage format holds, then the new execution engine, one last format revision, the language features on top of both, and a feature freeze before the release candidate.
+First we fix what 0.6.0 got wrong and prove that its storage holds up. Then comes a faster query engine, the remaining query language and protocol work, and binding parity. 0.7.0 is the one remaining release that changes the file format, followed by the features that build on it, and then 1.0.
 
 | Release | Focus |
 | --- | --- |
-| [**0.6.1**](https://github.com/GrafeoDB/grafeo/milestone/4) | Fixes only, for problems found in 0.6.0: backups, long statements, decimal arithmetic, time travel and transaction edge cases, docs that overstate guarantees |
-| [**0.6.2**](https://github.com/GrafeoDB/grafeo/milestone/5) | Stability: power-loss, fuzz and concurrency testing of the storage format and transactions, and store memory bounded by the memory limit |
-| [**0.6.3**](https://github.com/GrafeoDB/grafeo/milestone/6) | Push-only execution engine with benchmark-gated parallelism, one memory-accounting model for operators, a plan cache bounded in bytes, Serializable that records reads |
-| [**0.6.4**](https://github.com/GrafeoDB/grafeo/milestone/7) | The last format revision before 1.0: type inheritance, the RDF 1.2 data model, GQL vector types |
-| [**0.6.5**](https://github.com/GrafeoDB/grafeo/milestone/11) | Languages and protocols: SPARQL 1.2, SPARQL 1.1 Protocol and Graph Store Protocol, polymorphic matching in GQL and Cypher, language completeness |
-| [**0.6.6**](https://github.com/GrafeoDB/grafeo/milestone/12) | Feature freeze: API parity across bindings, the ADBC driver, feature flag cleanup, test depth, an audit of every documented guarantee, the stability levels for 1.0 |
+| [**0.6.1**](https://github.com/GrafeoDB/grafeo/milestone/4) | Fixes for problems found in 0.6.0: backups, very long queries, decimal arithmetic, time travel and transaction edge cases, and docs that promise too much |
+| [**0.6.2**](https://github.com/GrafeoDB/grafeo/milestone/5) | Stability: test storage and transactions against power loss, damaged files and heavy concurrency, and keep the store within its memory limit |
+| [**0.6.3**](https://github.com/GrafeoDB/grafeo/milestone/6) | A new query engine that can use several cores, query memory kept within the limit, a smarter plan cache, and real `Serializable` isolation |
+| [**0.6.4**](https://github.com/GrafeoDB/grafeo/milestone/7) | Languages and protocols that need no file format change: the SPARQL 1.1 Protocol and Graph Store Protocol, missing GQL syntax, and more complete GQL, Cypher, SQL/PGQ, GraphQL and Gremlin support |
+| [**0.6.5**](https://github.com/GrafeoDB/grafeo/milestone/11) | The same API in every binding, the ADBC driver, simpler feature flags, deeper tests, and a check that every documented guarantee holds |
+| [**0.7.0**](https://github.com/GrafeoDB/grafeo/milestone/8) | The data model release: type inheritance, the RDF 1.2 data model and GQL vector types in one file format change, and the removal of everything 0.6 deprecated |
+| [**0.7.1**](https://github.com/GrafeoDB/grafeo/milestone/12) | Features on the new data model: SPARQL 1.2, and queries that match a type together with the types that extend it |
+| [**0.7.2**](https://github.com/GrafeoDB/grafeo/milestone/13), [**0.7.3**](https://github.com/GrafeoDB/grafeo/milestone/15) | Room for work not planned yet, with no file format changes |
+| [**1.0**](https://github.com/GrafeoDB/grafeo/milestone/14) | Stable: no new features, the public API and file format frozen, semantic versioning from here on |
 
-0.6.4 is the last planned format change before 1.0: files from 0.5.x and earlier 0.6 releases are converted automatically on their first read-write open, and the old file is kept next to the new one (see [Versioning](versioning.md)). After 0.6.4 the format is frozen.
+0.7.0 is the last planned file format change before 1.0. Files from 0.5.x and 0.6.x are converted automatically the first time they are opened for writing, and the old file is kept next to the new one (see [Versioning](versioning.md)).
 
 ---
 
-## Next
+## After 1.0
 
 | Release | Focus |
 | --- | --- |
-| [**0.7.0**](https://github.com/GrafeoDB/grafeo/milestone/8) | Release candidate: no new features, removal of what 0.6.x deprecated, final audit and blocker review. If it works in 0.7, it works in 1.0 |
-| [**0.8.0**](https://github.com/GrafeoDB/grafeo/milestone/9) | Per-graph access control with pluggable authentication (JWT, OIDC), reactive event bus |
-| **1.0** | Stable: semantic versioning commitment, public API frozen |
+| [**1.1**](https://github.com/GrafeoDB/grafeo/milestone/9) | Enterprise features: per-graph access control with pluggable authentication (JWT, OIDC), enterprise authorization (row-level security, property masking, `GRANT` and `REVOKE`), a reactive event bus, and inbound connectors starting with Kafka |
 
-**Later, not scheduled**: enterprise authorization (row-level security, property masking, `GRANT`/`REVOKE`, LDAP and SAML), inbound connectors starting with Kafka, distributed deployment, more language bindings.
+**Later, not scheduled**: distributed deployment, more language bindings.
 
 ---
 

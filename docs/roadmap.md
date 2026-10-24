@@ -35,7 +35,7 @@ First we fix what 0.6.0 got wrong and prove that its storage holds up. Then come
 | [**0.7.2**](https://github.com/GrafeoDB/grafeo/milestone/13), [**0.7.3**](https://github.com/GrafeoDB/grafeo/milestone/15) | Room for work not planned yet, with no file format changes |
 | [**1.0**](https://github.com/GrafeoDB/grafeo/milestone/14) | Stable: no new features, the public API and file format frozen, semantic versioning from here on |
 
-0.7.0 is the last planned file format change before 1.0. Files from 0.5.x and 0.6.x are converted automatically the first time they are opened for writing, and the old file is kept next to the new one (see [Versioning](versioning.md)).
+0.7.0 is the last planned file format change before 1.0. A 0.6 database is converted automatically the first time 0.7 opens it for writing, and the old file is kept next to the new one (see [Versioning](versioning.md)). 0.7 no longer opens 0.5.x databases: open each one for writing with 0.6 first.
 
 ---
 

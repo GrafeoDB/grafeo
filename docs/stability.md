@@ -71,7 +71,9 @@ Everything else on the public surface is stable, among others:
 
 **0.7** is the next release that may break stable APIs. It removes what 0.6.x deprecated (each deprecation names its
 replacement and says "removed in 0.7.0"), and it no longer opens 0.5.x databases: open each one for writing with
-0.6 first, which migrates it. Its upgrade guide lists every breaking change with the code to change.
+0.6 first, which migrates it. It also changes the database file format once: a 0.6 database is migrated the first
+time 0.7 opens it for writing, with a copy of the old file kept. Its upgrade guide lists every breaking change with
+the code to change.
 
 **1.0** keeps these two levels and moves the rules up one level: stable APIs then break only in a major release
 (`1.x` to `2.0`), and a minor release (`1.1`) only adds and deprecates. Experimental APIs stay exempt until they are

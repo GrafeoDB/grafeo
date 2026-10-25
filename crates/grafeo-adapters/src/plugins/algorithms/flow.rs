@@ -8,7 +8,7 @@ use std::sync::OnceLock;
 
 #[cfg(test)]
 use grafeo_common::types::PropertyKey;
-use grafeo_common::types::{EdgeId, NodeId, Value};
+use grafeo_common::types::{NodeId, Value};
 use grafeo_common::utils::error::Error;
 use grafeo_common::utils::hash::FxHashMap;
 use grafeo_core::graph::Direction;
@@ -19,50 +19,6 @@ use grafeo_core::graph::rowgroup::RowGroupStore;
 
 use super::super::{AlgorithmResult, ParameterDef, ParameterType};
 use super::traits::{impl_algorithm, node_id_from_param};
-
-// ============================================================================
-// Property Extraction
-// ============================================================================
-
-/// Extracts capacity from an edge property.
-fn extract_capacity(
-    store: &super::traits::GraphView<'_>,
-    edge_id: EdgeId,
-    capacity_prop: Option<&str>,
-) -> f64 {
-    if let Some(prop_name) = capacity_prop
-        && let Some(edge) = store.edge(edge_id)
-        && let Some(value) = edge.get_property(prop_name)
-    {
-        return match value {
-            Value::Int64(i) => *i as f64,
-            Value::Float64(f) => *f,
-            Value::Decimal(d) => d.to_f64(),
-            _ => 1.0,
-        };
-    }
-    1.0
-}
-
-/// Extracts cost from an edge property.
-fn extract_cost(
-    store: &super::traits::GraphView<'_>,
-    edge_id: EdgeId,
-    cost_prop: Option<&str>,
-) -> f64 {
-    if let Some(prop_name) = cost_prop
-        && let Some(edge) = store.edge(edge_id)
-        && let Some(value) = edge.get_property(prop_name)
-    {
-        return match value {
-            Value::Int64(i) => *i as f64,
-            Value::Float64(f) => *f,
-            Value::Decimal(d) => d.to_f64(),
-            _ => 0.0,
-        };
-    }
-    0.0
-}
 
 // ============================================================================
 // Max Flow Result
@@ -160,7 +116,7 @@ pub(crate) fn max_flow_on(
     for (i, &node) in nodes.iter().enumerate() {
         for (neighbor, edge_id) in store.edges(node, Direction::Outgoing) {
             if let Some(&j) = node_to_idx.get(&neighbor) {
-                let cap = extract_capacity(store, edge_id, capacity_property);
+                let cap = store.edge_number(edge_id, capacity_property, 1.0);
                 *capacity[i].entry(j).or_insert(0.0) += cap;
             }
         }
@@ -348,8 +304,8 @@ pub(crate) fn min_cost_max_flow_on(
     for (i, &node) in nodes.iter().enumerate() {
         for (neighbor, edge_id) in store.edges(node, Direction::Outgoing) {
             if let Some(&j) = node_to_idx.get(&neighbor) {
-                let cap = extract_capacity(store, edge_id, capacity_property);
-                let edge_cost = extract_cost(store, edge_id, cost_property);
+                let cap = store.edge_number(edge_id, capacity_property, 1.0);
+                let edge_cost = store.edge_number(edge_id, cost_property, 0.0);
                 *capacity[i].entry(j).or_insert(0.0) += cap;
                 *cost[i].entry(j).or_insert(0.0) = edge_cost;
             }

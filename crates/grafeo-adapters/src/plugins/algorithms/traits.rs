@@ -106,6 +106,27 @@ impl<'a> GraphView<'a> {
         self.read(self.store.edge(id, self.view), None)
     }
 
+    /// The number in the property `property` of edge `id` as a float (an
+    /// integer, a float or a decimal), the weight, capacity or cost an
+    /// algorithm reads; `default` without a property name, or when the edge
+    /// has no such property or it holds no number.
+    #[must_use]
+    pub fn edge_number(&self, id: EdgeId, property: Option<&str>, default: f64) -> f64 {
+        let Some(name) = property else {
+            return default;
+        };
+        match self
+            .edge(id)
+            .as_ref()
+            .and_then(|edge| edge.get_property(name))
+        {
+            Some(Value::Int64(i)) => *i as f64,
+            Some(Value::Float64(f)) => *f,
+            Some(Value::Decimal(d)) => d.to_f64(),
+            _ => default,
+        }
+    }
+
     /// The edges from `node` in `direction` the view sees, each with the
     /// node at its other end, which the view sees too (see
     /// [`GraphStore::edges`]).

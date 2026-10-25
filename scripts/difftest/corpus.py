@@ -249,6 +249,18 @@ def weighted(grafeo):
     return db
 
 
+def decimal_weights(grafeo):
+    """Three nodes s (0), m (1) and t (2) with edges whose weights, capacities and costs are
+    decimals: s -> m (w 0.25, cap 2.5, cost 0.5), m -> t (w 0.5, cap 4.5, cost 0.25) and
+    s -> t (w 1.0, cap 2.0, cost 3.0). For section DE."""
+    db = grafeo.GrafeoDB()
+    db.execute(
+        "INSERT (s:N)-[:R {w: 0.25, cap: 2.5, cost: 0.5}]->(m:N), "
+        "(m)-[:R {w: 0.5, cap: 4.5, cost: 0.25}]->(t:N), (s)-[:R {w: 1.0, cap: 2.0, cost: 3.0}]->(t)"
+    )
+    return db
+
+
 def leads(grafeo):
     """Node type `Customer (spend FLOAT64)` and two leads with an integer `spend`, for
     section CF, whose cases add the label in order."""
@@ -351,6 +363,7 @@ FIXTURES = {
     "loops": loops,
     "merges": merges,
     "weighted": weighted,
+    "decimal_weights": decimal_weights,
     "leads": leads,
     "quoted": quoted,
     "graphs": graphs,
@@ -2105,5 +2118,16 @@ for case_id, query in [
     ("DD6", "SELECT ?v (LANG(?v) AS ?l) WHERE { ex:a ex:v ?v }"),
 ]:
     case(case_id, RDF_PREFIXES + query, SPARQL, "rdf_writes")
+
+# DE: graph algorithms read decimal weights, capacities and costs (0.6.0 read them as 1.0,
+#     a cost as 0.0): the route through m (DE1), the spanning tree (DE2), the flow (DE3) and
+#     its cost (DE4)
+for case_id, query in [
+    ("DE1", "CALL grafeo.dijkstra({source: 0, weight: 'w'}) YIELD node_id, distance RETURN node_id, distance ORDER BY node_id"),
+    ("DE2", "CALL grafeo.kruskal({weight: 'w'}) YIELD source, target, weight RETURN source, target, weight ORDER BY weight"),
+    ("DE3", "CALL grafeo.max_flow({source: 0, sink: 2, capacity: 'cap'}) YIELD source, target, flow, max_flow RETURN source, target, flow, max_flow ORDER BY source, target"),
+    ("DE4", "CALL grafeo.min_cost_max_flow({source: 0, sink: 2, capacity: 'cap', cost: 'cost'}) YIELD source, target, flow, cost RETURN source, target, flow, cost ORDER BY source, target"),
+]:
+    ordered(case_id, query, GQL, "decimal_weights")
 
 # fmt: on

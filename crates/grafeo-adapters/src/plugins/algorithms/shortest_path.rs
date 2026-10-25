@@ -21,32 +21,6 @@ use super::super::{AlgorithmResult, ParameterDef, ParameterType, Parameters};
 use super::traits::{GraphAlgorithm, MinScored, impl_algorithm, int_value, node_id_from_param};
 
 // ============================================================================
-// Edge Weight Extraction
-// ============================================================================
-
-/// Extracts edge weight from a property value.
-///
-/// Supports Int64, Float64 and Decimal values, defaulting to 1.0 if no weight property.
-fn extract_weight(
-    store: &super::traits::GraphView<'_>,
-    edge_id: grafeo_common::types::EdgeId,
-    weight_prop: Option<&str>,
-) -> f64 {
-    if let Some(prop_name) = weight_prop
-        && let Some(edge) = store.edge(edge_id)
-        && let Some(value) = edge.get_property(prop_name)
-    {
-        return match value {
-            Value::Int64(i) => *i as f64,
-            Value::Float64(f) => *f,
-            Value::Decimal(d) => d.to_f64(),
-            _ => 1.0,
-        };
-    }
-    1.0
-}
-
-// ============================================================================
 // Dijkstra's Algorithm
 // ============================================================================
 
@@ -148,7 +122,7 @@ pub(crate) fn dijkstra_on(
 
         // Explore neighbors
         for (neighbor, edge_id) in store.edges(node, Direction::Outgoing) {
-            let weight = extract_weight(store, edge_id, weight_property);
+            let weight = store.edge_number(edge_id, weight_property, 1.0);
             let new_dist = dist + weight;
 
             let is_better = distances
@@ -231,7 +205,7 @@ pub(crate) fn dijkstra_path_on(
 
         // Explore neighbors
         for (neighbor, edge_id) in store.edges(node, Direction::Outgoing) {
-            let weight = extract_weight(store, edge_id, weight_property);
+            let weight = store.edge_number(edge_id, weight_property, 1.0);
             let new_dist = dist + weight;
 
             let is_better = distances
@@ -332,7 +306,7 @@ where
 
         // Explore neighbors
         for (neighbor, edge_id) in store.edges(node, Direction::Outgoing) {
-            let weight = extract_weight(store, edge_id, weight_property);
+            let weight = store.edge_number(edge_id, weight_property, 1.0);
             let tentative_g = current_g + weight;
 
             let is_better = g_score
@@ -463,7 +437,7 @@ pub(crate) fn bellman_ford_on(
         let mut changed = false;
         for &(u, v, edge_id) in &edges {
             if let Some(&dist_u) = distances.get(&u) {
-                let weight = extract_weight(store, edge_id, weight_property);
+                let weight = store.edge_number(edge_id, weight_property, 1.0);
                 let new_dist = dist_u + weight;
 
                 let is_better = distances
@@ -486,7 +460,7 @@ pub(crate) fn bellman_ford_on(
     let mut has_negative_cycle = false;
     for &(u, v, edge_id) in &edges {
         if let Some(&dist_u) = distances.get(&u) {
-            let weight = extract_weight(store, edge_id, weight_property);
+            let weight = store.edge_number(edge_id, weight_property, 1.0);
             if let Some(&dist_v) = distances.get(&v)
                 && dist_u + weight < dist_v
             {
@@ -625,7 +599,7 @@ pub(crate) fn floyd_warshall_on(
     for (idx, &node) in nodes.iter().enumerate() {
         for (neighbor, edge_id) in store.edges(node, Direction::Outgoing) {
             if let Some(&neighbor_idx) = node_to_index.get(&neighbor) {
-                let weight = extract_weight(store, edge_id, weight_property);
+                let weight = store.edge_number(edge_id, weight_property, 1.0);
                 if weight < distances[idx][neighbor_idx] {
                     distances[idx][neighbor_idx] = weight;
                     next[idx][neighbor_idx] = Some(neighbor_idx);

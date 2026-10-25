@@ -6,7 +6,7 @@ All notable changes to Grafeo, for future reference (and enjoyment).
 
 ### Fixed
 
-- **Decimal algorithm weights** ([#678](https://github.com/GrafeoDB/grafeo/issues/678), item 3): shortest paths, spanning trees and flow algorithms use decimal weights, capacities and costs instead of defaults.
+- **Decimal weights in graph algorithms** ([#678](https://github.com/GrafeoDB/grafeo/issues/678)): shortest paths, spanning trees and flow algorithms read a weight, capacity or cost written as a decimal (`{w: 0.25}`, a decimal since 0.6.0); they read it as 1.0 (a cost as 0.0), which gave wrong paths, trees and flows.
 - **Long statements no longer abort the process** ([#668](https://github.com/GrafeoDB/grafeo/issues/668)): thousands of conditions on a variable-length path, and a Gremlin `coalesce()` of thousands of branches, run instead of overflowing the stack; a long Gremlin traversal with a step that cannot be translated fails with an error.
 - **Gremlin branching steps run for each traverser** ([#668](https://github.com/GrafeoDB/grafeo/issues/668)): `coalesce()`, `optional()`, `choose()`, `union()` and `bothV()` plan their input once, so a chain of them no longer takes exponential time and memory to plan (20 steps took 30 s and 5 GB). `coalesce()` and `optional()` now choose a branch per traverser instead of once for all of them, so `g.V().coalesce(out('E'), constant('none'))` keeps the vertices without an `E` edge.
 - **A subquery that returns an edge in one part and a node in another** (`CALL (a) { ... RETURN r AS x UNION ALL ... RETURN b AS x }`, GQL and Cypher) returns each as what it is; the node came back as the edge with its ID.

@@ -517,6 +517,21 @@ impl ColumnTypes {
         }
     }
 
+    /// Whether adding `chunk` would put node or edge IDs in a column with
+    /// values of another type: the column would then be of any type, and its
+    /// IDs plain integers that no longer say whether they are nodes or edges.
+    pub(crate) fn mixes_ids(&self, chunk: &DataChunk) -> bool {
+        let is_id = |kind: &LogicalType| matches!(kind, LogicalType::Node | LogicalType::Edge);
+        match &self.types {
+            Some(types) if self.from_rows && chunk.row_count() > 0 => {
+                types.iter().zip(chunk.columns()).any(|(known, column)| {
+                    known != column.data_type() && (is_id(known) || is_id(column.data_type()))
+                })
+            }
+            _ => false,
+        }
+    }
+
     /// The column types of the chunks seen so far (none before the first).
     pub(crate) fn types(&self) -> &[LogicalType] {
         self.types.as_deref().unwrap_or(&[])

@@ -49,6 +49,8 @@ pub struct ApplyOperator {
     outer_chunks: Option<VecDeque<DataChunk>>,
     /// Buffered outer rows waiting to be combined with inner results.
     state: ApplyState,
+    /// Output chunks built and not yet returned, in order.
+    ready: VecDeque<DataChunk>,
 }
 
 /// What the Apply makes of an outer row, given the rows the inner plan
@@ -107,6 +109,7 @@ impl ApplyOperator {
             outer_first: false,
             outer_chunks: None,
             state: ApplyState::Init,
+            ready: VecDeque::new(),
         }
     }
 
@@ -129,6 +132,7 @@ impl ApplyOperator {
             outer_first: false,
             outer_chunks: None,
             state: ApplyState::Init,
+            ready: VecDeque::new(),
         }
     }
 
@@ -253,6 +257,9 @@ impl ApplyOperator {
 
 impl Operator for ApplyOperator {
     fn next(&mut self) -> OperatorResult {
+        if let Some(chunk) = self.ready.pop_front() {
+            return Ok(Some(chunk));
+        }
         if self.outer_first && self.outer_chunks.is_none() {
             let mut chunks = VecDeque::new();
             while let Some(chunk) = self.outer.next()? {
@@ -335,6 +342,16 @@ impl Operator for ApplyOperator {
                             RowMode::Join | RowMode::Optional { .. } => {
                                 let pre_len = output.len();
                                 while let Some(inner_chunk) = self.inner.next()? {
+                                    // Node and edge IDs in one column would
+                                    // lose which is which (a UNION of the
+                                    // two): the rows so far go out first.
+                                    if !output.is_empty() && inner_types.mixes_ids(&inner_chunk) {
+                                        let types =
+                                            Self::output_types(self.mode, outer_chunk, inner_types);
+                                        self.ready.push_back(Self::build_chunk(output, &types));
+                                        output.clear();
+                                        *inner_types = ColumnTypes::default();
+                                    }
                                     inner_types.add(&inner_chunk);
                                     for inner_row in inner_chunk.selected_indices() {
                                         let inner_values =
@@ -365,9 +382,11 @@ impl Operator for ApplyOperator {
                         // Flush when we have enough rows
                         if output.len() >= 1024 {
                             let types = Self::output_types(self.mode, outer_chunk, inner_types);
-                            let chunk = Self::build_chunk(output, &types);
+                            self.ready.push_back(Self::build_chunk(output, &types));
                             output.clear();
                             *inner_types = ColumnTypes::default();
+                        }
+                        if let Some(chunk) = self.ready.pop_front() {
                             return Ok(Some(chunk));
                         }
                     }
@@ -375,8 +394,10 @@ impl Operator for ApplyOperator {
                     // Finished this outer chunk; flush any remaining output
                     if !output.is_empty() {
                         let types = Self::output_types(self.mode, outer_chunk, inner_types);
-                        let chunk = Self::build_chunk(output, &types);
+                        self.ready.push_back(Self::build_chunk(output, &types));
                         output.clear();
+                    }
+                    if let Some(chunk) = self.ready.pop_front() {
                         self.state = ApplyState::Init;
                         return Ok(Some(chunk));
                     }
@@ -394,6 +415,7 @@ impl Operator for ApplyOperator {
         self.inner.reset();
         self.outer_chunks = None;
         self.state = ApplyState::Init;
+        self.ready.clear();
     }
 
     fn name(&self) -> &'static str {

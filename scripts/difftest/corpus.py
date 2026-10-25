@@ -677,6 +677,8 @@ for case_id, query in [
     ("N9", "MATCH (a:Person)-[r]->() WITH a, count(r) AS n RETURN a.name AS a, a.w AS w, n"),
     ("N10", "MATCH ()-[r:KNOWS]->() WITH r, count(*) AS n RETURN r.w AS w, n"),
     ("N11", "MATCH (c:City) OPTIONAL MATCH (p:Person)-[:LIVES_IN]->(c) RETURN c.name AS c, c.w AS w, p.name AS p"),
+    # An edge from one part of a subquery and a node from the other stay what they are (0.6.0 read the node as an edge)
+    ("N12", "MATCH (a:Person {name: 'Alix'}) CALL { WITH a MATCH (a)-[r:KNOWS]->() RETURN r AS x UNION ALL WITH a MATCH (a)-[:KNOWS]->(b) RETURN b AS x } RETURN x.w AS w"),
 ]:
     case(case_id, query)
 

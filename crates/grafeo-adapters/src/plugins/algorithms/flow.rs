@@ -37,6 +37,7 @@ fn extract_capacity(
         return match value {
             Value::Int64(i) => *i as f64,
             Value::Float64(f) => *f,
+            Value::Decimal(d) => d.to_f64(),
             _ => 1.0,
         };
     }
@@ -56,6 +57,7 @@ fn extract_cost(
         return match value {
             Value::Int64(i) => *i as f64,
             Value::Float64(f) => *f,
+            Value::Decimal(d) => d.to_f64(),
             _ => 0.0,
         };
     }

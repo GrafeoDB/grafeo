@@ -26,7 +26,7 @@ use super::traits::{GraphAlgorithm, MinScored, impl_algorithm, int_value, node_i
 
 /// Extracts edge weight from a property value.
 ///
-/// Supports Int64 and Float64 values, defaulting to 1.0 if no weight property.
+/// Supports Int64, Float64 and Decimal values, defaulting to 1.0 if no weight property.
 fn extract_weight(
     store: &super::traits::GraphView<'_>,
     edge_id: grafeo_common::types::EdgeId,
@@ -39,6 +39,7 @@ fn extract_weight(
         return match value {
             Value::Int64(i) => *i as f64,
             Value::Float64(f) => *f,
+            Value::Decimal(d) => d.to_f64(),
             _ => 1.0,
         };
     }
@@ -1056,6 +1057,65 @@ mod tests {
         );
 
         store
+    }
+
+    #[test]
+    fn decimal_weights_choose_the_astar_route() {
+        use grafeo_common::types::Decimal;
+
+        for (weight, distance) in [
+            (Decimal::new(2500, 4).unwrap(), 0.75),
+            (Decimal::new(0, 4).unwrap(), 0.5),
+        ] {
+            let store = RowGroupStore::new();
+            let source = store.create_node(&["Node"]);
+            let via = store.create_node(&["Node"]);
+            let target = store.create_node(&["Node"]);
+            for (from, to, value) in [
+                (source, via, Value::Decimal(weight)),
+                (via, target, Value::Float64(0.5)),
+                (source, target, Value::Int64(1)),
+            ] {
+                store.create_edge_with_props(from, to, "R", &[(PropertyKey::new("w"), value)]);
+            }
+            assert_eq!(
+                astar(
+                    &store,
+                    ReadView::latest(),
+                    source,
+                    target,
+                    Some("w"),
+                    |_| 0.0
+                )
+                .unwrap(),
+                Some((distance, vec![source, via, target]))
+            );
+        }
+    }
+
+    #[test]
+    fn decimal_weights_keep_zero_and_negative_distances() {
+        use grafeo_common::types::Decimal;
+
+        let store = RowGroupStore::new();
+        let source = store.create_node(&["Node"]);
+        let via = store.create_node(&["Node"]);
+        let target = store.create_node(&["Node"]);
+        for (from, to, value) in [
+            (source, via, Value::Decimal(Decimal::new(-25, 2).unwrap())),
+            (via, target, Value::Decimal(Decimal::new(0, 3).unwrap())),
+            (source, target, Value::Int64(1)),
+        ] {
+            store.create_edge_with_props(from, to, "R", &[(PropertyKey::new("w"), value)]);
+        }
+        let single = bellman_ford(&store, ReadView::latest(), source, Some("w")).unwrap();
+        assert!(!single.has_negative_cycle);
+        assert_eq!(single.distances.get(&target).copied(), Some(-0.25));
+        assert_eq!(single.path_to(target), Some(vec![source, via, target]));
+        let all = floyd_warshall(&store, ReadView::latest(), Some("w")).unwrap();
+        assert!(!all.has_negative_cycle());
+        assert_eq!(all.distance(source, target), Some(-0.25));
+        assert_eq!(all.path(source, target), Some(vec![source, via, target]));
     }
 
     #[test]

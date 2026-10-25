@@ -52,7 +52,7 @@ pub fn check_plan_depth(plan: LogicalPlan) -> Result<LogicalPlan> {
 /// [`MAX_PLAN_DEPTH`] already, and then takes it apart (leaving
 /// [`LogicalOperator::Empty`]). A translator checks its plan before each
 /// clause, as translating a clause may walk the plan below it recursively.
-#[cfg(any(feature = "gql", feature = "sparql"))]
+#[cfg(any(feature = "gql", feature = "sparql", feature = "gremlin"))]
 pub(crate) fn check_partial_plan_depth(plan: &mut LogicalOperator) -> Result<()> {
     if plan_depth(plan, MAX_PLAN_DEPTH + 1) <= MAX_PLAN_DEPTH {
         return Ok(());

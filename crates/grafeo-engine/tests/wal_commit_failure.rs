@@ -388,3 +388,125 @@ mod tests {
         }
     }
 }
+
+#[cfg(all(
+    feature = "wal",
+    feature = "grafeo-file",
+    feature = "sparql",
+    feature = "triple-store",
+    feature = "testing-crash-injection"
+))]
+mod rdf_commit_failure {
+    use grafeo_common::testing::crash::with_failure_at;
+    use grafeo_common::types::Value;
+    use grafeo_common::types::rdf::Term;
+    use grafeo_common::utils::error::{Error, TransactionError};
+    use grafeo_engine::config::DurabilityMode;
+    use grafeo_engine::{Config, GrafeoDB, GraphModel};
+    use std::path::Path;
+
+    /// A rejected SPARQL commit publishes nothing, can be retried in a fresh
+    /// transaction, and cannot reappear behind a later committed WAL group.
+    #[test]
+    fn a_sparql_transaction_whose_group_is_not_written_is_retryable() {
+        fn open(path: &Path) -> GrafeoDB {
+            GrafeoDB::with_config(
+                Config::persistent(path)
+                    .with_graph_model(GraphModel::Rdf)
+                    .with_wal_durability(DurabilityMode::Sync),
+            )
+            .unwrap()
+        }
+        fn triples(db: &GrafeoDB) -> Vec<Vec<Value>> {
+            db.execute_sparql("SELECT ?s ?p ?o WHERE { ?s ?p ?o } ORDER BY ?s ?p ?o")
+                .unwrap()
+                .rows()
+                .to_vec()
+        }
+        fn term(value: Term) -> Value {
+            Value::RdfTerm(std::sync::Arc::new(value))
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        // Find the real write boundary, as the existing LPG controls do;
+        // never accept an injection consumed by another operation.
+        let (db, epoch, error) = (1..=40)
+            .find_map(|count| {
+                let db = open(&dir.path().join(format!("rdf-{count}.grafeo")));
+                db.execute_sparql(
+                    r#"INSERT DATA { <http://example.org/seed> <http://example.org/state> "ready" . }"#,
+                )
+                .unwrap();
+                let epoch = db.current_epoch();
+                let mut transaction = db.session();
+                transaction.begin_transaction().unwrap();
+                transaction.execute_sparql(
+                    r#"INSERT DATA { <http://example.org/rejected> <http://example.org/state> "uncommitted" . }"#,
+                ).unwrap();
+                let result = with_failure_at(count, || transaction.commit());
+                drop(transaction);
+                match result {
+                    Err(error) if error.to_string().contains("injected failure at: wal:write") => {
+                        Some((db, epoch, error))
+                    }
+                    Err(_) => None,
+                    Ok(()) => panic!("the SPARQL commit never reached wal:write ({count} tries)"),
+                }
+            })
+            .expect("an injected failure must hit the SPARQL commit's WAL write");
+        assert!(
+            matches!(
+                error,
+                Error::Transaction(TransactionError::LogWriteFailed(_))
+            ),
+            "{error}"
+        );
+        assert!(error.to_string().contains("GRAFEO-T009"), "{error}");
+        assert_eq!(
+            db.current_epoch(),
+            epoch,
+            "a rejected commit publishes no epoch"
+        );
+        let seed = vec![
+            term(Term::iri("http://example.org/seed")),
+            term(Term::iri("http://example.org/state")),
+            term(Term::literal("ready")),
+        ];
+        assert_eq!(
+            triples(&db),
+            vec![seed.clone()],
+            "rejected triples stay unpublished"
+        );
+
+        let mut retry = db.session();
+        retry.begin_transaction().unwrap();
+        retry.execute_sparql(
+            r#"INSERT DATA { <http://example.org/kept> <http://example.org/state> "committed"@en . }"#,
+        ).unwrap();
+        retry.commit().unwrap();
+        drop(retry);
+        let committed_epoch = db.current_epoch();
+        assert!(committed_epoch > epoch);
+        let kept = vec![
+            term(Term::iri("http://example.org/kept")),
+            term(Term::iri("http://example.org/state")),
+            term(Term::lang_literal("committed", "en")),
+        ];
+        let expected = vec![kept, seed];
+        assert_eq!(
+            triples(&db),
+            expected,
+            "only successful transactions publish"
+        );
+        let path = db.path().unwrap().to_path_buf();
+        db.close().unwrap();
+        drop(db);
+        let reopened = open(&path);
+        assert_eq!(reopened.current_epoch(), committed_epoch);
+        assert_eq!(
+            triples(&reopened),
+            expected,
+            "a later commit cannot resurrect the rejected group"
+        );
+    }
+}

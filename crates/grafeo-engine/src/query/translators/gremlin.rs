@@ -104,6 +104,31 @@ fn negate_null_safe(pred: LogicalExpression) -> LogicalExpression {
     }
 }
 
+/// The first of `branches` that produces rows, as a balanced tree of
+/// `Otherwise` operators in their order, or `None` when there are none.
+///
+/// Grouping does not change the result (the first non-empty branch is
+/// used either way), and a balanced tree is as deep as the logarithm of the
+/// branch count, so a `coalesce()` of thousands of branches stays shallow.
+fn balanced_otherwise(branches: Vec<LogicalOperator>) -> Option<LogicalOperator> {
+    let mut layer = branches;
+    while layer.len() > 1 {
+        let mut joined = Vec::with_capacity(layer.len().div_ceil(2));
+        let mut branches = layer.into_iter();
+        while let Some(left) = branches.next() {
+            joined.push(match branches.next() {
+                Some(right) => LogicalOperator::Otherwise(OtherwiseOp {
+                    left: Box::new(left),
+                    right: Box::new(right),
+                }),
+                None => left,
+            });
+        }
+        layer = joined;
+    }
+    layer.pop()
+}
+
 impl GremlinTranslator {
     fn new() -> Self {
         Self {
@@ -670,6 +695,9 @@ impl GremlinTranslator {
         current_var: &str,
         is_edge: bool,
     ) -> Result<(LogicalOperator, Option<String>)> {
+        // A step may walk the plan below it: refuse one already too deep.
+        let mut input = input;
+        crate::query::limits::check_partial_plan_depth(&mut input)?;
         match step {
             // Navigation steps
             ast::Step::Out(labels) => {
@@ -1679,24 +1707,17 @@ impl GremlinTranslator {
 
             // coalesce(): return first non-empty traversal
             ast::Step::Coalesce(traversals) => {
-                // Build a right-nested chain of OtherwiseOp so each branch is
-                // tried in order: use the first one that produces results.
+                // The branches are tried in order: the first one that
+                // produces results is used.
                 let alias = self.var_gen.next();
                 let branches = self.translate_branches(traversals, &input, current_var, &alias)?;
-                let mut iter = branches.into_iter().rev();
-                let mut accumulator = iter.next().ok_or_else(|| {
+                let plan = balanced_otherwise(branches).ok_or_else(|| {
                     Error::from(QueryError::new(
                         QueryErrorKind::Semantic,
                         "coalesce() requires at least one traversal",
                     ))
                 })?;
-                for branch in iter {
-                    accumulator = LogicalOperator::Otherwise(OtherwiseOp {
-                        left: Box::new(branch),
-                        right: Box::new(accumulator),
-                    });
-                }
-                Ok((accumulator, Some(alias)))
+                Ok((plan, Some(alias)))
             }
 
             // sideEffect(): perform inner traversal for side effects, pass

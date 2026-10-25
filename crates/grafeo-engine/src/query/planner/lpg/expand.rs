@@ -138,14 +138,8 @@ impl super::Planner {
                     }
                     predicates.push(condition.predicate);
                 }
-                let predicate = predicates
-                    .into_iter()
-                    .reduce(|left, right| LogicalExpression::Binary {
-                        left: Box::new(left),
-                        op: crate::query::plan::BinaryOp::And,
-                        right: Box::new(right),
-                    })
-                    .expect("at least one condition");
+                let predicate =
+                    LogicalExpression::conjunction(predicates).expect("at least one condition");
                 let predicate = grafeo_core::execution::operators::ExpressionPredicate::new(
                     self.convert_expression(&predicate)?,
                     variable_columns,

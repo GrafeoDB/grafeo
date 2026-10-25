@@ -4,6 +4,11 @@ All notable changes to Grafeo, for future reference (and enjoyment).
 
 ## [0.6.1] - Unreleased
 
+### Fixed
+
+- **Long statements no longer abort the process** ([#668](https://github.com/GrafeoDB/grafeo/issues/668)): thousands of conditions on a variable-length path, and a Gremlin `coalesce()` of thousands of branches, run instead of overflowing the stack; a long Gremlin traversal with a step that cannot be translated fails with an error.
+- **Gremlin branching steps run for each traverser** ([#668](https://github.com/GrafeoDB/grafeo/issues/668)): `coalesce()`, `optional()`, `choose()`, `union()` and `bothV()` plan their input once, so a chain of them no longer takes exponential time and memory to plan (20 steps took 30 s and 5 GB). `coalesce()` and `optional()` now choose a branch per traverser instead of once for all of them, so `g.V().coalesce(out('E'), constant('none'))` keeps the vertices without an `E` edge.
+
 ## [0.6.0] - 2026-10-23
 
 Storage release: a new single-file format on a new storage engine, with online checkpoints and backups, snapshot isolation on every read path and time travel over a retained history. Plus exact decimals, a store contract for backends of your own, binding parity across C, Go, C#, Dart, Node.js and WASM, and a large round of correctness fixes in GQL, Cypher, SQL/PGQ and SPARQL.

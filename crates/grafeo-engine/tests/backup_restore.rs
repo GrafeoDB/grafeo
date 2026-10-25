@@ -948,3 +948,89 @@ fn a_backup_chain_taken_by_0_6_0_restores() {
         "with both incremental backups"
     );
 }
+
+/// A full backup to another directory must not make an older chain skip WAL.
+#[cfg(feature = "gql")]
+#[test]
+fn incremental_backup_refuses_a_cursor_from_another_directory() {
+    use grafeo_common::utils::error::{Error, ErrorCode};
+    use std::collections::BTreeMap;
+
+    fn directory_bytes(path: &Path) -> BTreeMap<PathBuf, Vec<u8>> {
+        std::fs::read_dir(path)
+            .unwrap()
+            .map(|entry| {
+                let path = entry.unwrap().path();
+                let bytes = std::fs::read(&path).unwrap();
+                (path, bytes)
+            })
+            .collect()
+    }
+
+    fn people(db: &GrafeoDB) -> Vec<Value> {
+        db.execute("MATCH (p:Person) RETURN p.name AS name ORDER BY name")
+            .unwrap()
+            .rows()
+            .iter()
+            .map(|row| row[0].clone())
+            .collect()
+    }
+
+    let dir = tempfile::tempdir().unwrap();
+    let source = dir.path().join("source.grafeo");
+    let backups_a = dir.path().join("backups_a");
+    let backups_b = dir.path().join("backups_b");
+    let db = GrafeoDB::open(&source).unwrap();
+    db.execute("INSERT (:Person {name: 'Alix'})").unwrap();
+    let full_a = db.backup_full(&backups_a).unwrap();
+    db.execute("INSERT (:Person {name: 'Gus'})").unwrap();
+    let full_b = db.backup_full(&backups_b).unwrap();
+    assert!(full_b.end_epoch > full_a.end_epoch);
+    db.execute("INSERT (:Person {name: 'Mia'})").unwrap();
+
+    let mut wal_name = source.as_os_str().to_os_string();
+    wal_name.push(".wal");
+    let cursor_path = PathBuf::from(wal_name).join("backup_cursor.meta");
+    let cursor_before = std::fs::read(&cursor_path).unwrap();
+    assert_eq!(
+        db.backup_cursor().unwrap().backed_up_epoch,
+        full_b.end_epoch,
+        "the sealed cursor is the one written by B's full backup"
+    );
+    let a_before = directory_bytes(&backups_a);
+
+    let error = db.backup_incremental(&backups_a).unwrap_err();
+    assert_eq!(error.error_code(), ErrorCode::InvalidInput);
+    let Error::InvalidValue(message) = error else {
+        panic!("wrong backup chain must be InvalidValue, got {error:?}");
+    };
+    assert!(message.contains(backups_a.to_str().unwrap()), "{message}");
+    for epoch in [full_a.end_epoch, full_b.end_epoch] {
+        assert!(
+            message.contains(&format!("epoch {}", epoch.as_u64())),
+            "the error must name the manifest and cursor epochs: {message}"
+        );
+    }
+    assert_eq!(directory_bytes(&backups_a), a_before);
+    assert_eq!(std::fs::read(&cursor_path).unwrap(), cursor_before);
+    assert_eq!(
+        restored_people(&backups_b, full_b.end_epoch),
+        names(&["Alix", "Gus"]),
+        "the rejected A backup leaves B restorable"
+    );
+
+    let incremental = db.backup_incremental(&backups_b).unwrap();
+    assert_eq!(
+        incremental.start_epoch.as_u64(),
+        full_b.end_epoch.as_u64() + 1
+    );
+    db.close().unwrap();
+    let restored_path = dir.path().join("restored_b.grafeo");
+    GrafeoDB::restore_to_epoch(&backups_b, incremental.end_epoch, &restored_path).unwrap();
+    let expected = names(&["Alix", "Gus", "Mia"]);
+    for _ in 0..2 {
+        let restored = GrafeoDB::open(&restored_path).unwrap();
+        assert_eq!(people(&restored), expected);
+        restored.close().unwrap();
+    }
+}

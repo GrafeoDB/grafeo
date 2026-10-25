@@ -1057,15 +1057,14 @@ fn a_long_gremlin_traversal_that_fails_to_translate_fails_with_an_error() {
     assert!(names_limit(&chain, MAX_PLAN_DEPTH), "{chain}");
 }
 
-/// The length of the plan `EXPLAIN` shows for the Gremlin `statement`.
+/// The length of the plan tree the Gremlin `statement` translates to.
 #[cfg(feature = "gremlin")]
-fn explained_length(statement: &str) -> usize {
-    let db = GrafeoDB::new_in_memory();
-    let rows = execute(&db, Language::Gremlin, &format!("EXPLAIN {statement}")).unwrap();
-    match rows.first().and_then(|row| row.first()) {
-        Some(Value::String(plan)) => plan.len(),
-        other => panic!("{statement}: the plan as a string, not {other:?}"),
-    }
+fn plan_length(statement: &str) -> usize {
+    grafeo_engine::query::translate_gremlin(statement)
+        .unwrap_or_else(|e| panic!("{statement}: {e}"))
+        .root
+        .explain_tree()
+        .len()
 }
 
 #[cfg(feature = "gremlin")]
@@ -1079,7 +1078,7 @@ fn gremlin_branching_steps_grow_the_plan_by_one_step_at_a_time() {
         ".outE('E').bothV()",
     ];
     for step in steps {
-        let plan = |count: usize| explained_length(&format!("g.V(){}", step.repeat(count)));
+        let plan = |count: usize| plan_length(&format!("g.V(){}", step.repeat(count)));
         let (one, twelve) = (plan(1), plan(12));
         assert!(
             twelve < 24 * one,

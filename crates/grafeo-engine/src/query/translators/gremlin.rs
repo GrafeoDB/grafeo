@@ -6,7 +6,7 @@ use super::common::{VarGen, wrap_filter, wrap_limit, wrap_return, wrap_skip, wra
 use crate::query::plan::BuiltinFunction;
 use crate::query::plan::{
     AggregateExpr, AggregateFunction, AggregateOp, ApplyOp, BinaryOp, CreateEdgeOp, CreateNodeOp,
-    DeleteNodeOp, DistinctOp, ExpandDirection, ExpandOp, FilterOp, JoinOp, JoinType, LeftJoinOp,
+    DeleteNodeOp, DistinctOp, ExpandDirection, ExpandOp, FilterOp, JoinOp, JoinType,
     LogicalExpression, LogicalOperator, LogicalPlan, MapCollectOp, NodeScanOp, OtherwiseOp,
     ParameterScanOp, PathMode, ProjectOp, Projection, ReturnItem, SetPropertyOp, SortKey,
     SortOrder, UnaryOp, UnionOp, UnwindOp,
@@ -283,28 +283,14 @@ impl GremlinTranslator {
                 }
                 ast::Step::BothV => {
                     if let Some(ctx) = edge_ctx.take() {
-                        // bothV = emit both endpoints via Union
+                        // bothV = emit both endpoints of each edge
                         let alias = self.var_gen.next();
-                        plan = LogicalOperator::Union(UnionOp {
-                            inputs: vec![
-                                LogicalOperator::Project(ProjectOp {
-                                    projections: vec![Projection {
-                                        expression: LogicalExpression::Variable(ctx.source_var),
-                                        alias: Some(alias.clone()),
-                                    }],
-                                    input: Box::new(plan.clone()),
-                                    pass_through_input: false,
-                                }),
-                                LogicalOperator::Project(ProjectOp {
-                                    projections: vec![Projection {
-                                        expression: LogicalExpression::Variable(ctx.target_var),
-                                        alias: Some(alias.clone()),
-                                    }],
-                                    input: Box::new(plan),
-                                    pass_through_input: false,
-                                }),
-                            ],
+                        let endpoint =
+                            |var: String| self.translate_branch(&[], row_scan(), &var, &alias);
+                        let endpoints = LogicalOperator::Union(UnionOp {
+                            inputs: vec![endpoint(ctx.source_var)?, endpoint(ctx.target_var)?],
                         });
+                        plan = per_row(plan, endpoints);
                         current_var = alias;
                     }
                     continue;
@@ -3139,6 +3125,8 @@ mod tests {
             LogicalOperator::Return(r) => find_union(&r.input),
             LogicalOperator::Filter(f) => find_union(&f.input),
             LogicalOperator::Project(p) => find_union(&p.input),
+            // A branching step runs its branches per row.
+            LogicalOperator::Apply(a) => find_union(&a.subplan),
             _ => None,
         }
     }
@@ -3362,20 +3350,21 @@ mod tests {
             "bothV() Union should have 2 branches (source and target)"
         );
 
-        // Each branch should be a Project referencing a variable
+        // Each branch should return one endpoint variable of the current row
         for (i, branch) in union.inputs.iter().enumerate() {
             match branch {
-                LogicalOperator::Project(proj) => {
-                    assert_eq!(proj.projections.len(), 1);
+                LogicalOperator::Return(ret) => {
+                    assert_eq!(ret.items.len(), 1);
                     assert!(
-                        matches!(
-                            &proj.projections[0].expression,
-                            LogicalExpression::Variable(_)
-                        ),
-                        "Branch {i} should project a Variable"
+                        matches!(&ret.items[0].expression, LogicalExpression::Variable(_)),
+                        "Branch {i} should return a Variable"
+                    );
+                    assert!(
+                        matches!(ret.input.as_ref(), LogicalOperator::ParameterScan(_)),
+                        "Branch {i} should start from the current row"
                     );
                 }
-                other => panic!("Expected Project in bothV() Union branch {i}, got: {other:?}"),
+                other => panic!("Expected Return in bothV() Union branch {i}, got: {other:?}"),
             }
         }
     }
@@ -3419,11 +3408,11 @@ mod tests {
         let union = find_union(&plan.root).expect("Expected Union for union()");
         assert_eq!(union.inputs.len(), 2, "union() should have 2 branches");
 
-        // Each branch should end with a Project (for alias alignment)
-        // wrapping an Expand
+        // Each branch should end with a Return (for alias alignment)
+        // over an Expand
         for (i, branch) in union.inputs.iter().enumerate() {
             match branch {
-                LogicalOperator::Project(proj) => {
+                LogicalOperator::Return(proj) => {
                     // The input should contain an Expand
                     fn has_expand(op: &LogicalOperator) -> bool {
                         match op {
@@ -3438,7 +3427,7 @@ mod tests {
                         "Branch {i} should contain an Expand"
                     );
                 }
-                other => panic!("Expected Project wrapping branch {i}, got: {other:?}"),
+                other => panic!("Expected Return wrapping branch {i}, got: {other:?}"),
             }
         }
     }

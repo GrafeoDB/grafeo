@@ -1656,6 +1656,15 @@ impl TransactionManager {
         EpochId::new(self.published_epoch.load(Ordering::Acquire))
     }
 
+    /// The epoch a read asked for at `epoch` reads at: `epoch`, or the
+    /// [current epoch](Self::current_epoch) when that is earlier, so a read
+    /// never sees a commit that is not complete (one still in progress, or
+    /// one that failed partway). Every read at a chosen epoch goes through it.
+    #[must_use]
+    pub fn readable_epoch(&self, epoch: EpochId) -> EpochId {
+        epoch.min(self.current_epoch())
+    }
+
     /// Synchronizes the epoch counter to at least the given value.
     ///
     /// Used after snapshot import and WAL recovery to align the
@@ -1727,7 +1736,7 @@ impl TransactionManager {
         if epoch < self.history.floor() {
             return Err(self.history.before_floor(epoch));
         }
-        let epoch = epoch.min(EpochId::new(self.published_epoch.load(Ordering::Acquire)));
+        let epoch = self.readable_epoch(epoch);
         ReadPins::hold_at(&mut epochs, epoch.as_u64());
         Ok(ReadPin {
             pins: Arc::clone(&self.reads),

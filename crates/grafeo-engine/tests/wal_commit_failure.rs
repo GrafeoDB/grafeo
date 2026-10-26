@@ -462,6 +462,7 @@ mod rdf_commit_failure {
             "{error}"
         );
         assert!(error.to_string().contains("GRAFEO-T009"), "{error}");
+        assert!(error.error_code().is_retryable(), "{error}");
         assert_eq!(
             db.current_epoch(),
             epoch,

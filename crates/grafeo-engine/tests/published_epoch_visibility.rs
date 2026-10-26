@@ -261,14 +261,12 @@ fn paused_commit_keeps_future_reads_at_the_published_epoch(caller: Caller, reque
     reopened.close().expect("close reopened source");
 }
 
-fn incomplete_commit_keeps_future_reads_at_the_published_epoch(request: Requested) {
-    let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("source.grafeo");
-    let db = open(&path);
-    let base = baseline(&db);
+/// Stages a change on `db` and commits it with a panic injected after the
+/// commit is stamped and its WAL group synced, before it is published.
+/// Returns the writer's session.
+fn interrupt_commit(db: &GrafeoDB, base: NodeId) -> Session {
     let before = db.current_epoch();
-    let requested = request.epoch(before);
-    let mut writer = stage_change(&db, base);
+    let mut writer = stage_change(db, base);
     let (sender, hook_ran) = mpsc::channel();
     after_next_commit_stamped(move || {
         sender.send(()).expect("record the stamped hook");
@@ -287,10 +285,33 @@ fn incomplete_commit_keeps_future_reads_at_the_published_epoch(request: Requeste
         before,
         "the failed commit was not published"
     );
+    writer
+}
+
+fn incomplete_commit_keeps_future_reads_at_the_published_epoch(request: Requested) {
+    let dir = tempfile::tempdir().unwrap();
+    let db = open(&dir.path().join("source.grafeo"));
+    let base = baseline(&db);
+    let requested = request.epoch(db.current_epoch());
+    let writer = interrupt_commit(&db, base);
     for caller in CALLERS {
         let reader = Reader::new(&db, caller, requested);
         assert_baseline(&observe(&reader, &db));
     }
+    drop(writer);
+}
+
+/// A commit whose caller saw a panic after its WAL group was synced comes
+/// back whole on reopen: the group is on disk, so recovery replays it, as it
+/// replays any synced group (this is recovery, not a rollback of the group).
+/// The open database refuses to close cleanly over it.
+#[test]
+fn a_synced_commit_whose_caller_panicked_is_replayed_whole_on_reopen() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("source.grafeo");
+    let db = open(&path);
+    let base = baseline(&db);
+    let writer = interrupt_commit(&db, base);
     let error = db.close().expect_err("close reports the incomplete commit");
     assert!(
         matches!(
@@ -301,13 +322,11 @@ fn incomplete_commit_keeps_future_reads_at_the_published_epoch(request: Requeste
     );
     drop(writer);
     drop(db);
-    // The WAL was synced before the stamped hook. A normal reopen replays
-    // the whole logged commit; this is recovery, not rollback of that group.
     for _ in 0..2 {
         let reopened = open(&path);
         for caller in CALLERS {
             assert_completed(&observe(
-                &Reader::new(&reopened, caller, requested),
+                &Reader::new(&reopened, caller, EpochId::new(u64::MAX)),
                 &reopened,
             ));
         }
@@ -380,12 +399,12 @@ fn database_at_maximum_does_not_see_a_stamped_commit() {
 }
 
 #[test]
-fn finite_future_does_not_see_an_incomplete_commit_and_reopen_recovers_it_whole() {
+fn finite_future_does_not_see_an_incomplete_commit() {
     incomplete_commit_keeps_future_reads_at_the_published_epoch(Requested::FiniteFuture);
 }
 
 #[test]
-fn maximum_does_not_see_an_incomplete_commit_and_reopen_recovers_it_whole() {
+fn maximum_does_not_see_an_incomplete_commit() {
     incomplete_commit_keeps_future_reads_at_the_published_epoch(Requested::Maximum);
 }
 

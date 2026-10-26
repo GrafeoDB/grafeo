@@ -955,8 +955,10 @@ impl Session {
     /// Sets a viewing epoch override for time-travel queries.
     ///
     /// While set, all queries on this session see the database as it existed
-    /// at the given epoch. Use [`clear_viewing_epoch`](Self::clear_viewing_epoch)
-    /// to return to normal behavior.
+    /// at the given epoch; an epoch after the current one reads at the
+    /// current one, so a commit that is not complete stays out of sight. Use
+    /// [`clear_viewing_epoch`](Self::clear_viewing_epoch) to return to normal
+    /// behavior.
     pub fn set_viewing_epoch(&self, epoch: EpochId) {
         *self.viewing_epoch_override.lock() = Some(epoch);
     }
@@ -3534,7 +3536,8 @@ impl Session {
     /// Executes a GQL query with visibility at the specified epoch.
     ///
     /// This enables time-travel queries: the query sees the database
-    /// as it existed at the given epoch.
+    /// as it existed at the given epoch. An epoch after the current one reads
+    /// at the current one.
     ///
     /// # Errors
     ///
@@ -5539,8 +5542,7 @@ impl Session {
     fn get_transaction_context(&self) -> (EpochId, Option<TransactionId>) {
         // Time-travel override takes precedence (read-only, no tx context)
         if let Some(epoch) = *self.viewing_epoch_override.lock() {
-            // Stamped versions are visible only once their commit is published.
-            return (epoch.min(self.transaction_manager.current_epoch()), None);
+            return (self.transaction_manager.readable_epoch(epoch), None);
         }
 
         if let Some(transaction_id) = *self.current_transaction.lock() {
@@ -6419,7 +6421,7 @@ impl Session {
         end_epoch: EpochId,
     ) -> Result<Vec<crate::cdc::ChangeEvent>> {
         self.require_permission(crate::auth::StatementKind::Read)?;
-        let end_epoch = end_epoch.min(self.transaction_manager.current_epoch());
+        let end_epoch = self.transaction_manager.readable_epoch(end_epoch);
         Ok(self.cdc_log.changes_between(start_epoch, end_epoch))
     }
 }

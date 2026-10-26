@@ -1034,3 +1034,44 @@ fn incremental_backup_refuses_a_cursor_from_another_directory() {
         restored.close().unwrap();
     }
 }
+
+/// A change that is logged without a commit epoch of its own (a graph
+/// command, a schema statement, the index API) between two full backups
+/// leaves the same gap: the chains end at the same epoch, but the cursor is
+/// further along the log than the other chain, so an incremental there
+/// would leave the change out.
+#[test]
+fn incremental_backup_refuses_a_cursor_further_along_the_log_at_the_same_epoch() {
+    use grafeo_common::utils::error::{Error, ErrorCode};
+
+    let dir = tempfile::tempdir().unwrap();
+    let source = dir.path().join("source.grafeo");
+    let backups_a = dir.path().join("backups_a");
+    let backups_b = dir.path().join("backups_b");
+    let db = GrafeoDB::open(&source).unwrap();
+    db.execute("INSERT (:Person {name: 'Alix'})").unwrap();
+    let full_a = db.backup_full(&backups_a).unwrap();
+    db.execute("CREATE GRAPH other").unwrap();
+    let full_b = db.backup_full(&backups_b).unwrap();
+    assert_eq!(
+        full_b.end_epoch, full_a.end_epoch,
+        "CREATE GRAPH is logged without an epoch of its own"
+    );
+    db.execute("INSERT (:Person {name: 'Gus'})").unwrap();
+
+    let error = db.backup_incremental(&backups_a).unwrap_err();
+    assert_eq!(error.error_code(), ErrorCode::InvalidInput);
+    let Error::InvalidValue(message) = error else {
+        panic!("a chain behind the cursor must be InvalidValue, got {error:?}");
+    };
+    assert!(message.contains(backups_a.to_str().unwrap()), "{message}");
+
+    // The chain the cursor belongs to takes the incremental, with the graph.
+    let incremental = db.backup_incremental(&backups_b).unwrap();
+    db.close().unwrap();
+    let restored_path = dir.path().join("restored_b.grafeo");
+    GrafeoDB::restore_to_epoch(&backups_b, incremental.end_epoch, &restored_path).unwrap();
+    let restored = GrafeoDB::open(&restored_path).unwrap();
+    assert!(restored.list_graphs().contains(&"other".to_string()));
+    restored.close().unwrap();
+}

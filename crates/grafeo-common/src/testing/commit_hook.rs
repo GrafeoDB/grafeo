@@ -35,6 +35,8 @@ mod inner {
         static AFTER_WRITTEN: RefCell<Option<Hook>> = const { RefCell::new(None) };
         static AFTER_STAMPED: RefCell<Option<Hook>> = const { RefCell::new(None) };
         static AFTER_LOGGED: RefCell<Option<Hook>> = const { RefCell::new(None) };
+        static AFTER_BACKUP_STATE_READ: RefCell<Option<Hook>> = const { RefCell::new(None) };
+        static BEFORE_BACKUP_WAIT: RefCell<Option<Hook>> = const { RefCell::new(None) };
         static DURING_CHECKPOINT: RefCell<Option<Hook>> = const { RefCell::new(None) };
         static DURING_CHECKPOINT_WRITE: RefCell<Option<Hook>> = const { RefCell::new(None) };
         static DURING_HELD_CHANGE: RefCell<Option<Hook>> = const { RefCell::new(None) };
@@ -76,6 +78,34 @@ mod inner {
     /// complete.
     pub fn after_next_commit_logged(hook: impl FnOnce() + 'static) {
         AFTER_LOGGED.with(|slot| *slot.borrow_mut() = Some(Box::new(hook)));
+    }
+
+    /// Arms `hook` to run once after the next backup on this thread reads
+    /// the state and selects the file it will write, before that write.
+    pub fn after_next_backup_state_read(hook: impl FnOnce() + 'static) {
+        AFTER_BACKUP_STATE_READ.with(|slot| *slot.borrow_mut() = Some(Box::new(hook)));
+    }
+
+    /// Runs the backup state-read hook armed on this thread, if any.
+    #[inline]
+    pub fn run_after_backup_state_read() {
+        if let Some(hook) = AFTER_BACKUP_STATE_READ.with(|slot| slot.borrow_mut().take()) {
+            hook();
+        }
+    }
+
+    /// Arms `hook` to run once before the next backup on this thread waits
+    /// for another backup on the same database to finish.
+    pub fn before_next_backup_wait(hook: impl FnOnce() + 'static) {
+        BEFORE_BACKUP_WAIT.with(|slot| *slot.borrow_mut() = Some(Box::new(hook)));
+    }
+
+    /// Runs the backup wait hook after contention, before waiting.
+    #[inline]
+    pub fn run_before_backup_wait() {
+        if let Some(hook) = BEFORE_BACKUP_WAIT.with(|slot| slot.borrow_mut().take()) {
+            hook();
+        }
     }
 
     /// Arms `hook` to run once, inside the next checkpoint on this thread,
@@ -208,6 +238,20 @@ mod inner {
     /// No-op when injection is disabled.
     #[inline]
     pub fn run_after_commit_logged() {}
+
+    /// No-op when injection is disabled.
+    pub fn after_next_backup_state_read(_hook: impl FnOnce() + 'static) {}
+
+    /// No-op when injection is disabled.
+    #[inline]
+    pub fn run_after_backup_state_read() {}
+
+    /// No-op when injection is disabled.
+    pub fn before_next_backup_wait(_hook: impl FnOnce() + 'static) {}
+
+    /// No-op when injection is disabled.
+    #[inline]
+    pub fn run_before_backup_wait() {}
 
     /// No-op when injection is disabled.
     pub fn during_next_checkpoint(_hook: impl FnOnce() + 'static) {}

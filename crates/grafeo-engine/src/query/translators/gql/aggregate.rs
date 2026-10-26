@@ -9,11 +9,24 @@ pub(super) use crate::query::translators::common::HavingScope;
 struct AggregateLetBinding {
     name: String,
     value: ast::Expression,
-    // Fully resolved in the binding's original input scope, independently
-    // of the lexical value retained for the scalar result.
-    input_value: ast::Expression,
+    // Values read the enclosing scope, before simultaneous names bind.
+    outer_scope: Option<usize>,
     local_origin: Option<String>,
     used: std::rc::Rc<std::cell::Cell<bool>>,
+}
+
+// Keep original simultaneous frames for the shared logical LET inliner.
+// Only input values that cannot be duplicated need a cached projection.
+struct AggregateInputScope {
+    bindings: Vec<(String, LogicalExpression)>,
+    projected: std::cell::RefCell<HashMap<String, String>>,
+}
+
+struct AggregateExtraction<'a> {
+    counter: &'a mut u32,
+    aggregates: &'a mut Vec<AggregateExpr>,
+    input: &'a mut LogicalOperator,
+    let_scopes: Vec<AggregateInputScope>,
 }
 
 #[derive(Clone, Copy)]
@@ -355,6 +368,7 @@ impl GqlTranslator {
         &self,
         items: &[ast::ReturnItem],
         explicit_group_by: bool,
+        input: &mut LogicalOperator,
     ) -> Result<(
         Vec<AggregateExpr>,
         Vec<LogicalExpression>,
@@ -392,6 +406,7 @@ impl GqlTranslator {
                     &item.expression,
                     &mut agg_counter,
                     &mut aggregates,
+                    input,
                 )?;
                 // Unaliased, the column is named after the written expression
                 // (`sum(n.v) + 1`), not the substitute (`_agg_0 + 1`).
@@ -622,12 +637,17 @@ impl GqlTranslator {
         expr: &ast::Expression,
         agg_counter: &mut u32,
         aggregates_out: &mut Vec<AggregateExpr>,
+        input: &mut LogicalOperator,
     ) -> Result<LogicalExpression> {
         let mut rewritten = expr.clone();
         self.substitute_aggregate_calls(
             &mut rewritten,
-            agg_counter,
-            aggregates_out,
+            &mut AggregateExtraction {
+                counter: agg_counter,
+                aggregates: aggregates_out,
+                input,
+                let_scopes: Vec::new(),
+            },
             &[],
             &[],
             AggregateSubstitutionMode::Scalar,
@@ -640,8 +660,7 @@ impl GqlTranslator {
     fn substitute_aggregate_calls(
         &self,
         expr: &mut ast::Expression,
-        agg_counter: &mut u32,
-        aggregates_out: &mut Vec<AggregateExpr>,
+        extraction: &mut AggregateExtraction<'_>,
         bindings: &[AggregateLetBinding],
         locals: &[(String, String)],
         mode: AggregateSubstitutionMode,
@@ -658,12 +677,11 @@ impl GqlTranslator {
                             format!("Aggregate cannot read locally bound variable '{name}'"),
                         )));
                     }
-                    // Resolve aliases only for the input expression. Scalar
-                    // LET references keep an ordinary lexical binding below.
+                    // Validate lexical origins before normalizing the logical
+                    // input with the shared scalar LET inliner.
                     self.substitute_aggregate_calls(
                         arg,
-                        agg_counter,
-                        aggregates_out,
+                        extraction,
                         bindings,
                         locals,
                         AggregateSubstitutionMode::Argument {
@@ -672,68 +690,50 @@ impl GqlTranslator {
                     )?;
                 }
             }
-            while self.names.is_written(&format!("_agg_{agg_counter}")) {
-                *agg_counter += 1;
+            while self
+                .names
+                .is_written(&format!("_agg_{}", extraction.counter))
+            {
+                *extraction.counter += 1;
             }
-            let alias = format!("_agg_{agg_counter}");
-            if let Some(aggregate) = self.try_extract_aggregate(expr, &Some(alias.clone()))? {
-                *agg_counter += 1;
-                aggregates_out.push(aggregate);
+            let alias = format!("_agg_{}", extraction.counter);
+            if let Some(mut aggregate) = self.try_extract_aggregate(expr, &Some(alias.clone()))? {
+                for argument in aggregate
+                    .expression
+                    .iter_mut()
+                    .chain(&mut aggregate.expression2)
+                {
+                    *argument = self.resolve_aggregate_input(
+                        argument.clone(),
+                        &extraction.let_scopes,
+                        extraction.input,
+                    )?;
+                }
+                *extraction.counter += 1;
+                extraction.aggregates.push(aggregate);
                 *expr = ast::Expression::Variable(alias);
                 return Ok(());
             }
         }
         let mut substitute = |child: &mut ast::Expression| {
-            self.substitute_aggregate_calls(
-                child,
-                agg_counter,
-                aggregates_out,
-                bindings,
-                locals,
-                mode,
-            )
+            self.substitute_aggregate_calls(child, extraction, bindings, locals, mode)
         };
         match expr {
-            ast::Expression::Variable(name) => {
+            ast::Expression::Variable(name)
+            | ast::Expression::PropertyAccess { variable: name, .. } => {
                 if let Some(binding) = bindings.iter().rev().find(|binding| binding.name == *name) {
                     if take_aggregates {
                         binding.used.set(true);
-                    } else {
-                        let mut input = binding.input_value.clone();
+                    } else if let Some(outer_scope) = binding.outer_scope {
+                        // Validate opaque dependencies before a projected input
+                        // can hide them. Do not substitute aliases in the AST.
                         self.substitute_aggregate_calls(
-                            &mut input,
-                            agg_counter,
-                            aggregates_out,
-                            &[],
+                            &mut binding.value.clone(),
+                            extraction,
+                            &bindings[..outer_scope],
                             locals,
                             mode,
                         )?;
-                        *expr = input;
-                    }
-                }
-            }
-            ast::Expression::PropertyAccess { variable, property } => {
-                if let Some(binding) = bindings
-                    .iter()
-                    .rev()
-                    .find(|binding| binding.name == *variable)
-                {
-                    if take_aggregates {
-                        binding.used.set(true);
-                    } else {
-                        let mut input = binding.input_value.clone();
-                        self.substitute_aggregate_calls(
-                            &mut input,
-                            agg_counter,
-                            aggregates_out,
-                            &[],
-                            locals,
-                            mode,
-                        )?;
-                        *expr = ast::Expression::MapAccess {
-                            base: Box::new(input),
-                            key: property.clone(),
-                        };
                     }
                 }
             }
@@ -794,23 +794,9 @@ impl GqlTranslator {
                 let mut locals = locals.to_vec();
                 *variable = self.aggregate_local_binding(variable, &mut bindings, &mut locals);
                 if let Some(filter) = filter_expr {
-                    self.substitute_aggregate_calls(
-                        filter,
-                        agg_counter,
-                        aggregates_out,
-                        &bindings,
-                        &locals,
-                        mode,
-                    )?;
+                    self.substitute_aggregate_calls(filter, extraction, &bindings, &locals, mode)?;
                 }
-                self.substitute_aggregate_calls(
-                    map_expr,
-                    agg_counter,
-                    aggregates_out,
-                    &bindings,
-                    &locals,
-                    mode,
-                )?;
+                self.substitute_aggregate_calls(map_expr, extraction, &bindings, &locals, mode)?;
             }
             ast::Expression::ListPredicate {
                 variable,
@@ -822,14 +808,7 @@ impl GqlTranslator {
                 let mut bindings = bindings.to_vec();
                 let mut locals = locals.to_vec();
                 *variable = self.aggregate_local_binding(variable, &mut bindings, &mut locals);
-                self.substitute_aggregate_calls(
-                    predicate,
-                    agg_counter,
-                    aggregates_out,
-                    &bindings,
-                    &locals,
-                    mode,
-                )?;
+                self.substitute_aggregate_calls(predicate, extraction, &bindings, &locals, mode)?;
             }
             ast::Expression::Reduce {
                 accumulator,
@@ -845,14 +824,7 @@ impl GqlTranslator {
                 *accumulator =
                     self.aggregate_local_binding(accumulator, &mut bindings, &mut locals);
                 *variable = self.aggregate_local_binding(variable, &mut bindings, &mut locals);
-                self.substitute_aggregate_calls(
-                    expression,
-                    agg_counter,
-                    aggregates_out,
-                    &bindings,
-                    &locals,
-                    mode,
-                )?;
+                self.substitute_aggregate_calls(expression, extraction, &bindings, &locals, mode)?;
             }
             ast::Expression::LetIn {
                 bindings: let_bindings,
@@ -865,29 +837,11 @@ impl GqlTranslator {
                     bindings.iter().map(|binding| binding.used.get()).collect();
                 let mut lexical = Vec::with_capacity(let_bindings.len());
                 for (name, value) in let_bindings.iter_mut() {
-                    self.substitute_aggregate_calls(
-                        value,
-                        agg_counter,
-                        aggregates_out,
-                        bindings,
-                        locals,
-                        mode,
-                    )?;
-                    let mut input_value = value.clone();
-                    self.substitute_aggregate_calls(
-                        &mut input_value,
-                        agg_counter,
-                        aggregates_out,
-                        bindings,
-                        locals,
-                        AggregateSubstitutionMode::Argument {
-                            crosses_local_binding: false,
-                        },
-                    )?;
+                    self.substitute_aggregate_calls(value, extraction, bindings, locals, mode)?;
                     lexical.push(AggregateLetBinding {
                         name: name.clone(),
                         value: value.clone(),
-                        input_value,
+                        outer_scope: Some(bindings.len()),
                         local_origin: self.aggregate_local_origin(value, bindings, locals)?,
                         used: std::rc::Rc::new(std::cell::Cell::new(false)),
                     });
@@ -897,33 +851,40 @@ impl GqlTranslator {
                 for (binding, used) in bindings.iter().zip(used_before) {
                     binding.used.set(used);
                 }
+                extraction.let_scopes.push(AggregateInputScope {
+                    bindings: lexical
+                        .iter()
+                        .map(|binding| {
+                            Ok((
+                                binding.name.clone(),
+                                self.translate_expression(&binding.value)?,
+                            ))
+                        })
+                        .collect::<Result<_>>()?,
+                    projected: std::cell::RefCell::new(HashMap::new()),
+                });
                 let mut enclosing = bindings.to_vec();
                 enclosing.extend(lexical.iter().cloned());
-                self.substitute_aggregate_calls(
-                    body,
-                    agg_counter,
-                    aggregates_out,
-                    &enclosing,
-                    locals,
-                    mode,
-                )?;
-                // A binding read only by an extracted aggregate is no longer
-                // a scalar input: retaining it could read an ungrouped column.
-                lexical.retain(|binding| binding.used.get());
-                for binding in &mut lexical {
-                    self.substitute_aggregate_calls(
-                        &mut binding.value,
-                        agg_counter,
-                        aggregates_out,
-                        bindings,
-                        locals,
-                        mode,
-                    )?;
+                self.substitute_aggregate_calls(body, extraction, &enclosing, locals, mode)?;
+                extraction.let_scopes.pop();
+                if take_aggregates {
+                    // A binding read only by an extracted aggregate is no longer
+                    // a scalar input: retaining it could read an ungrouped column.
+                    lexical.retain(|binding| binding.used.get());
+                    for binding in &mut lexical {
+                        self.substitute_aggregate_calls(
+                            &mut binding.value,
+                            extraction,
+                            bindings,
+                            locals,
+                            mode,
+                        )?;
+                    }
+                    *let_bindings = lexical
+                        .into_iter()
+                        .map(|binding| (binding.name, binding.value))
+                        .collect();
                 }
-                *let_bindings = lexical
-                    .into_iter()
-                    .map(|binding| (binding.name, binding.value))
-                    .collect();
             }
             ast::Expression::ExistsSubquery { .. }
             | ast::Expression::CountSubquery { .. }
@@ -950,6 +911,62 @@ impl GqlTranslator {
             ast::Expression::Literal(_) | ast::Expression::Parameter(_) => {}
         }
         Ok(())
+    }
+
+    /// Resolve input aliases with the scalar LET inliner. Volatile or opaque
+    /// values are projected once per binding, before the Aggregate, so distinct
+    /// argument expressions share one evaluation and retain lexical scope.
+    fn resolve_aggregate_input(
+        &self,
+        mut expression: LogicalExpression,
+        scopes: &[AggregateInputScope],
+        input: &mut LogicalOperator,
+    ) -> Result<LogicalExpression> {
+        for (index, scope) in scopes.iter().enumerate().rev() {
+            let mut reads = HashSet::new();
+            collect_expression_variables(&expression, &mut reads);
+            let mut bindings: Vec<_> = scope
+                .bindings
+                .iter()
+                .filter(|(name, _)| reads.contains(name))
+                .cloned()
+                .collect();
+            for (name, value) in &mut bindings {
+                if !reads.contains(name)
+                    || inline_let_expression(value.clone(), &[], &HashSet::new(), true).is_some()
+                {
+                    continue;
+                }
+                let cached = scope.projected.borrow().get(name).cloned();
+                let alias = match cached {
+                    Some(alias) => alias,
+                    None => {
+                        // A simultaneous value excludes its own frame. Earlier
+                        // frames reuse their caches, including volatile aliases.
+                        let value =
+                            self.resolve_aggregate_input(value.clone(), &scopes[..index], input)?;
+                        let alias = self.names.next("_aggregate_input_");
+                        let previous = std::mem::replace(input, LogicalOperator::Empty);
+                        *input = LogicalOperator::Project(ProjectOp {
+                            projections: vec![Projection {
+                                expression: value,
+                                alias: Some(alias.clone()),
+                            }],
+                            pass_through_input: true,
+                            input: Box::new(previous),
+                        });
+                        scope
+                            .projected
+                            .borrow_mut()
+                            .insert(name.clone(), alias.clone());
+                        alias
+                    }
+                };
+                *value = LogicalExpression::Variable(alias);
+            }
+            expression = self.substitute_let_bindings(expression, &bindings)?;
+        }
+        Ok(expression)
     }
 
     /// Resolve an argument's original lexical origin before expanding aliases.
@@ -986,7 +1003,7 @@ impl GqlTranslator {
         bindings.push(AggregateLetBinding {
             name: name.clone(),
             value: ast::Expression::Variable(name.clone()),
-            input_value: ast::Expression::Variable(name.clone()),
+            outer_scope: None,
             local_origin: Some(name.clone()),
             used: std::rc::Rc::new(std::cell::Cell::new(false)),
         });

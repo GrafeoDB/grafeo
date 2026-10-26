@@ -2328,7 +2328,6 @@ impl CypherTranslator {
             agg_counter,
             aggregates_out,
             &[],
-            &[],
             AggregateSubstitutionMode::Scalar,
         )?;
         self.translate_expression(&rewritten)
@@ -2341,22 +2340,20 @@ impl CypherTranslator {
         expr: &mut ast::Expression,
         agg_counter: &mut u32,
         aggregates_out: &mut Vec<AggregateExpr>,
-        bindings: &[(String, ast::Expression)],
-        locals: &[(String, String)],
+        locals: &[String],
         mode: AggregateSubstitutionMode,
     ) -> Result<()> {
         if matches!(mode, AggregateSubstitutionMode::Scalar)
             && matches!(expr, ast::Expression::FunctionCall { name, .. } if is_aggregate_function(name))
         {
-            // Resolve LET aliases and local names in the arguments without
-            // taking another aggregate out of this aggregate's argument.
+            // Visit local scopes in each argument without extracting an
+            // aggregate nested inside this aggregate's argument.
             if let ast::Expression::FunctionCall { args, .. } = expr {
                 for arg in args {
                     self.substitute_aggregate_calls(
                         arg,
                         agg_counter,
                         aggregates_out,
-                        bindings,
                         locals,
                         AggregateSubstitutionMode::Argument {
                             crosses_local_binding: !locals.is_empty(),
@@ -2373,7 +2370,7 @@ impl CypherTranslator {
                 for argument in aggregate.expression.iter().chain(&aggregate.expression2) {
                     collect_expression_variables(argument, &mut reads);
                 }
-                if let Some((name, _)) = locals.iter().find(|(_, local)| reads.contains(local)) {
+                if let Some(name) = locals.iter().find(|local| reads.contains(*local)) {
                     return Err(Error::from(QueryError::new(
                         QueryErrorKind::Semantic,
                         format!("Aggregate cannot read locally bound variable '{name}'"),
@@ -2386,25 +2383,9 @@ impl CypherTranslator {
             }
         }
         let mut substitute = |child: &mut ast::Expression| {
-            self.substitute_aggregate_calls(
-                child,
-                agg_counter,
-                aggregates_out,
-                bindings,
-                locals,
-                mode,
-            )
+            self.substitute_aggregate_calls(child, agg_counter, aggregates_out, locals, mode)
         };
         match expr {
-            ast::Expression::Variable(name) => {
-                if let Some((_, value)) = bindings
-                    .iter()
-                    .rev()
-                    .find(|(binding, _)| binding.as_str() == name.as_str())
-                {
-                    *expr = value.clone();
-                }
-            }
             ast::Expression::PropertyAccess { base, .. } => {
                 substitute(base)?;
             }
@@ -2458,15 +2439,13 @@ impl CypherTranslator {
                 projection,
             } => {
                 substitute(list)?;
-                let mut bindings = bindings.to_vec();
                 let mut locals = locals.to_vec();
-                *variable = self.aggregate_local_binding(variable, &mut bindings, &mut locals);
+                locals.push(variable.clone());
                 for body in [filter, projection].into_iter().flatten() {
                     self.substitute_aggregate_calls(
                         body,
                         agg_counter,
                         aggregates_out,
-                        &bindings,
                         &locals,
                         mode,
                     )?;
@@ -2479,14 +2458,12 @@ impl CypherTranslator {
                 ..
             } => {
                 substitute(list)?;
-                let mut bindings = bindings.to_vec();
                 let mut locals = locals.to_vec();
-                *variable = self.aggregate_local_binding(variable, &mut bindings, &mut locals);
+                locals.push(variable.clone());
                 self.substitute_aggregate_calls(
                     predicate,
                     agg_counter,
                     aggregates_out,
-                    &bindings,
                     &locals,
                     mode,
                 )?;
@@ -2500,28 +2477,18 @@ impl CypherTranslator {
             } => {
                 substitute(initial)?;
                 substitute(list)?;
-                let mut bindings = bindings.to_vec();
                 let mut locals = locals.to_vec();
-                *accumulator =
-                    self.aggregate_local_binding(accumulator, &mut bindings, &mut locals);
-                *variable = self.aggregate_local_binding(variable, &mut bindings, &mut locals);
+                locals.push(accumulator.clone());
+                locals.push(variable.clone());
                 self.substitute_aggregate_calls(
                     expression,
                     agg_counter,
                     aggregates_out,
-                    &bindings,
                     &locals,
                     mode,
                 )?;
             }
-            ast::Expression::MapProjection { base, entries } => {
-                if let Some((_, ast::Expression::Variable(local))) = bindings
-                    .iter()
-                    .rev()
-                    .find(|(binding, _)| binding.as_str() == base.as_str())
-                {
-                    *base = local.clone();
-                }
+            ast::Expression::MapProjection { entries, .. } => {
                 for entry in entries {
                     if let ast::MapProjectionEntry::LiteralEntry(_, value) = entry {
                         substitute(value)?;
@@ -2543,23 +2510,11 @@ impl CypherTranslator {
                     )));
                 }
             }
-            ast::Expression::Literal(_) | ast::Expression::Parameter(_) => {}
+            ast::Expression::Variable(_)
+            | ast::Expression::Literal(_)
+            | ast::Expression::Parameter(_) => {}
         }
         Ok(())
-    }
-
-    /// A local keeps its spelling in nested correlated query scopes. The
-    /// scope list still prevents lifting an aggregate that reads that local.
-    fn aggregate_local_binding(
-        &self,
-        name: &str,
-        bindings: &mut Vec<(String, ast::Expression)>,
-        locals: &mut Vec<(String, String)>,
-    ) -> String {
-        let local = name.to_string();
-        bindings.push((name.to_string(), ast::Expression::Variable(local.clone())));
-        locals.push((name.to_string(), local.clone()));
-        local
     }
 
     /// Tries to extract an aggregate expression from an AST expression.

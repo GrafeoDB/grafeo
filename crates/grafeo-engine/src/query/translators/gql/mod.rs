@@ -714,6 +714,7 @@ impl GqlTranslator {
                     .extract_aggregates_and_groups(
                         &return_clause.items,
                         !return_clause.group_by.is_empty(),
+                        &mut plan,
                     )?;
                 // Explicit GROUP BY wins over the keys implied by the items.
                 let (group_by, imports_read) = if return_clause.group_by.is_empty() {
@@ -1218,6 +1219,7 @@ impl GqlTranslator {
                 .extract_aggregates_and_groups(
                     &return_items,
                     !query.return_clause.group_by.is_empty() || having_aggregates,
+                    &mut plan,
                 )?;
             // HAVING's aggregates are numbered after the `_agg_N` ones of the
             // RETURN list (which skip the names the statement spells, so the
@@ -1267,6 +1269,7 @@ impl GqlTranslator {
                         condition,
                         &mut having_counter,
                         &mut aggregates,
+                        &mut plan,
                     )?))
                 }
                 Some(condition) => {
@@ -1900,7 +1903,7 @@ impl GqlTranslator {
 
             if has_aggregates {
                 let (aggregates, auto_group_by, mut post_return) =
-                    self.extract_aggregates_and_groups(&items, false)?;
+                    self.extract_aggregates_and_groups(&items, false, &mut plan)?;
                 let imports_read = super::common::resolve_implicitly_grouped(
                     "WITH",
                     post_return.as_deref_mut().unwrap_or_default(),

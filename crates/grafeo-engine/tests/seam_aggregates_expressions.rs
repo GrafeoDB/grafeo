@@ -743,7 +743,6 @@ fn horizontal_wrapper_traversal_keeps_a_shadowing_local() {
     );
 }
 
-// Append to seam_aggregates_expressions.rs; existing db()/Value imports remain.
 #[cfg(feature = "gql")]
 #[test]
 fn gql_let_capture_keeps_a_correlated_shadowing_local() {
@@ -819,13 +818,14 @@ mod aggregate_discovery_539_local_subquery_guard {
     }
 }
 
-// Append to seam_aggregates_expressions.rs; existing db()/Value imports remain.
 #[cfg(feature = "gql")]
 #[test]
 fn gql_aggregate_let_liveness_and_simultaneous_bindings() {
     let db = db();
     for (expression, expected) in [
         ("LET x = n IN LET y = x IN sum(y) END END", 6),
+        ("sum(LET x = n IN x END)", 6),
+        ("LET x = n IN sum(LET y = x + 1 IN y END) END", 9),
         ("LET x = n, y = n + 1 IN sum(x) + sum(y) END", 15),
         // Both values read incoming n; the scalar n is then bound to 10.
         ("LET n = 10, x = n IN sum(x) + n END", 16),
@@ -923,6 +923,137 @@ mod gql_shared_let_scope {
                 .collect::<Vec<_>>()
                 .into(),
         )
+    }
+
+    #[test]
+    fn aggregate_let_alias_keeps_outer_nodes_inside_a_shadowing_comprehension() {
+        use grafeo_common::types::NodeId;
+
+        let db = db();
+        let a = db
+            .create_node_with_props(&["P"], [("name", Value::from("A"))])
+            .unwrap();
+        let b = db
+            .create_node_with_props(&["P"], [("name", Value::from("B"))])
+            .unwrap();
+        let node_id = |id: NodeId| Value::Int64(i64::try_from(id.as_u64()).unwrap());
+        // Nested comprehensions expose node IDs. Derive them from the public
+        // creation API, independently of query translation or scan order.
+        let expected = Value::List(
+            vec![
+                Value::List(vec![node_id(a), node_id(a)].into()),
+                Value::List(vec![node_id(b), node_id(b)].into()),
+            ]
+            .into(),
+        );
+        let query = "MATCH (n:P) WITH n ORDER BY n.name RETURN LET x = n IN collect([n IN [1,2] | x]) END AS values";
+        let result = db.execute_language(query, "gql", None).unwrap();
+        assert_eq!(result.columns, ["values"]);
+        assert_eq!(result.rows(), &[vec![expected]], "{query}");
+        let query = "MATCH (n:P) WITH n ORDER BY n.name RETURN LET x = n IN collect([n IN [1,2] | x.name]) END AS values";
+        let expected = Value::List(
+            vec![
+                Value::List(vec![Value::from("A"), Value::from("A")].into()),
+                Value::List(vec![Value::from("B"), Value::from("B")].into()),
+            ]
+            .into(),
+        );
+        assert_eq!(
+            db.execute(query)
+                .unwrap_or_else(|error| panic!("`{query}`: {error}"))
+                .rows(),
+            &[vec![expected]],
+            "{query}"
+        );
+    }
+
+    #[test]
+    fn unused_local_let_binding_does_not_escape_into_aggregate_input() {
+        let query = "UNWIND [7] AS n RETURN [p IN [1] | LET x = n, unused = p IN sum([n IN [1,2] | x][0]) END] AS values";
+        assert_eq!(rows(query), vec![vec![ints(&[7])]]);
+    }
+
+    #[test]
+    fn multiple_aggregates_share_one_volatile_let_binding() {
+        for expression in [
+            "LET x = rand() IN [min(x), max(-x)] END",
+            "LET x = rand() IN LET y = rand() + x IN [min(y), max(-y)] END END",
+            "LET x = rand() IN LET x = x + 1, y = x IN [min(y), max(-y)] END END",
+        ] {
+            let query = format!("UNWIND [1] AS n RETURN {expression} AS bounds");
+            let result = rows(&query);
+            let [row] = result.as_slice() else {
+                panic!("`{query}`: expected exactly one row, got {result:?}");
+            };
+            let [Value::List(bounds)] = row.as_slice() else {
+                panic!("`{query}`: expected one list column, got {row:?}");
+            };
+            let [Value::Float64(lower), Value::Float64(upper)] = bounds.as_ref() else {
+                panic!("`{query}`: expected two float extrema, got {bounds:?}");
+            };
+            // One input has one bound random value, so both extrema equal it.
+            assert!(lower.is_finite(), "`{query}`: rand() must be finite");
+            assert_eq!(
+                *lower, -*upper,
+                "`{query}`: both aggregates must reuse one binding"
+            );
+        }
+    }
+
+    #[test]
+    fn aggregate_let_inputs_work_in_with_having_and_procedure_returns() {
+        let db = db();
+        db.create_node(&["P"]).unwrap();
+        for (query, expected) in [
+            (
+                "UNWIND [1] AS n WITH LET x = rand() IN min(x) = -max(-x) END AS same RETURN same",
+                Value::Bool(true),
+            ),
+            #[cfg(feature = "algos")]
+            (
+                "CALL db.labels() YIELD label RETURN LET x = rand() IN min(x) = -max(-x) END AS same",
+                Value::Bool(true),
+            ),
+            (
+                "UNWIND [1] AS n RETURN count(*) AS c HAVING LET x = rand() IN min(x) = -max(-x) END",
+                Value::Int64(1),
+            ),
+        ] {
+            assert_eq!(
+                db.execute(query)
+                    .unwrap_or_else(|error| panic!("`{query}`: {error}"))
+                    .rows(),
+                &[vec![expected]],
+                "{query}"
+            );
+        }
+    }
+
+    #[test]
+    fn aggregate_let_alias_keeps_the_subquery_capability_boundary() {
+        use grafeo_common::utils::error::{Error, QueryErrorKind};
+
+        let db = db();
+        for expression in [
+            "LET x = EXISTS { MATCH (p:P) } IN collect(x) END",
+            "LET x = EXISTS { MATCH (p:P) } IN LET y = x IN collect(y) END END",
+        ] {
+            let query = format!("UNWIND [1] AS n RETURN {expression} AS values");
+            match db.execute(&query) {
+                Err(Error::Query(error)) => {
+                    assert_eq!(error.kind, QueryErrorKind::Unsupported, "{query}: {error}");
+                    assert!(
+                        error
+                            .message
+                            .contains("cannot be lifted across a local binding"),
+                        "{query}: {error}"
+                    );
+                }
+                other => {
+                    panic!("`{query}`: expected the explicit subquery boundary, got {other:?}")
+                }
+            }
+        }
     }
 
     #[test]

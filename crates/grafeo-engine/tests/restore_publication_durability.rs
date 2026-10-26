@@ -14,7 +14,7 @@
 
 #[cfg(feature = "encryption")]
 use grafeo_common::encryption::KeyChain;
-use grafeo_common::testing::crash::with_failure_at;
+use grafeo_common::testing::crash::{maybe_fail, with_failure_at};
 use grafeo_common::types::{EpochId, Value};
 use grafeo_common::utils::error::{Error, Result};
 #[cfg(feature = "encryption")]
@@ -365,9 +365,19 @@ fn a_staging_removal_failure_keeps_the_complete_restore() {
     for case in [Case::Full, Case::Incremental] {
         let fixture = Fixture::new(case);
         let before = fixture.inputs();
+        let mut completed_after_failure = false;
         for count in 1..=64 {
             let output = fixture.output(&format!("staging-{count}"));
-            let result = with_failure_at(count, || fixture.restore(&output));
+            let result = with_failure_at(count, || {
+                let result = fixture.restore(&output);
+                if result.is_ok() {
+                    // At the first success, an unconsumed countdown would
+                    // fire here instead of inside the restore.
+                    maybe_fail("test:after_restore")
+                        .expect("successful restore must have consumed an injected failure");
+                }
+                result
+            });
             assert_eq!(fixture.inputs(), before, "restore changed its inputs");
             match result {
                 Err(error) => {
@@ -381,10 +391,15 @@ fn a_staging_removal_failure_keeps_the_complete_restore() {
                 }
                 Ok(()) => {
                     fixture.assert_two_reopens(&output, case);
+                    completed_after_failure = true;
                     break;
                 }
             }
         }
+        assert!(
+            completed_after_failure,
+            "{case:?}: no successful restore within the failure sweep"
+        );
     }
 }
 

@@ -1233,12 +1233,16 @@ impl RestoreOutput {
         std::fs::rename(image, &self.image)?;
         self.owns_image = true;
         sync_backup_entry(&self.image, "restore:output_directory_sync")?;
-        grafeo_common::testing::crash::maybe_fail("restore:staging_removal")?;
-        std::fs::remove_dir_all(&self.staging)?;
-        self.owns_staging = false;
         // The caller owns the complete result after all publication barriers.
         self.owns_image = false;
         self.owns_sidecar = false;
+        // Staging cleanup cannot undo a durable published restore. Drop retries
+        // only the staging directory if this best-effort removal fails.
+        if grafeo_common::testing::crash::maybe_fail("restore:staging_removal").is_ok()
+            && std::fs::remove_dir_all(&self.staging).is_ok()
+        {
+            self.owns_staging = false;
+        }
         Ok(())
     }
 

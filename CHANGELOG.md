@@ -7,10 +7,17 @@ All notable changes to Grafeo, for future reference (and enjoyment).
 ### Fixed
 
 - **Aggregates in composite expressions** ([#539](https://github.com/GrafeoDB/grafeo/issues/539)): GQL and Cypher accept `collect(n)[0]`, maps and other wrappers while preserving grouping, local bindings and per-path aggregation.
+- **Backups and restores survive a crash** ([#667](https://github.com/GrafeoDB/grafeo/issues/667)): a backup is on disk before the database lets go of the log it covers, and a restore leaves either a complete database or nothing at the output path, so a failed restore can be retried to the same path.
+- **An incremental backup into the wrong directory is refused** ([#667](https://github.com/GrafeoDB/grafeo/issues/667)): after a full backup to one directory, an incremental backup to another one fails with an error naming it, instead of writing a chain with a gap that only the restore found, also when a schema statement or graph command came between the two.
 - **Decimal weights in graph algorithms** ([#678](https://github.com/GrafeoDB/grafeo/issues/678)): shortest paths, spanning trees and flow algorithms read a weight, capacity or cost written as a decimal (`{w: 0.25}`, a decimal since 0.6.0); they read it as 1.0 (a cost as 0.0), which gave wrong paths, trees and flows.
 - **Long statements no longer abort the process** ([#668](https://github.com/GrafeoDB/grafeo/issues/668)): thousands of conditions on a variable-length path, and a Gremlin `coalesce()` of thousands of branches, run instead of overflowing the stack; a long Gremlin traversal with a step that cannot be translated fails with an error.
 - **Gremlin branching steps run for each traverser** ([#668](https://github.com/GrafeoDB/grafeo/issues/668)): `coalesce()`, `optional()`, `choose()`, `union()` and `bothV()` plan their input once, so a chain of them no longer takes exponential time and memory to plan (20 steps took 30 s and 5 GB). `coalesce()` and `optional()` now choose a branch per traverser instead of once for all of them, so `g.V().coalesce(out('E'), constant('none'))` keeps the vertices without an `E` edge.
 - **A subquery that returns an edge in one part and a node in another** (`CALL (a) { ... RETURN r AS x UNION ALL ... RETURN b AS x }`, GQL and Cypher) returns each as what it is; the node came back as the edge with its ID.
+- **Time-travel reads at a future epoch no longer see a commit in progress** ([#670](https://github.com/GrafeoDB/grafeo/issues/670)): `execute_at_epoch` and `set_viewing_epoch` read at the latest completed commit, also while a commit is running or after one failed partway; they could see part of it.
+
+### Contributors
+
+- Thanks to [temporaryfix](https://github.com/temporaryfix) for decimal weights in the graph algorithms ([#681](https://github.com/GrafeoDB/grafeo/pull/681)), the test of a failed RDF commit ([#683](https://github.com/GrafeoDB/grafeo/pull/683)), the refusal of an incremental backup with a gap ([#684](https://github.com/GrafeoDB/grafeo/pull/684)), crash-safe backups ([#685](https://github.com/GrafeoDB/grafeo/pull/685)) and restores ([#687](https://github.com/GrafeoDB/grafeo/pull/687)), and time-travel reads that never see a commit in progress ([#686](https://github.com/GrafeoDB/grafeo/pull/686)).
 
 ## [0.6.0] - 2026-10-23
 

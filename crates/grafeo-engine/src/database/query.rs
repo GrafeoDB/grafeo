@@ -80,7 +80,8 @@ impl super::GrafeoDB {
     /// Executes a GQL query with visibility at the specified epoch.
     ///
     /// This enables time-travel queries: the query sees the database
-    /// as it existed at the given epoch.
+    /// as it existed at the given epoch. An epoch after the
+    /// [current one](Self::current_epoch) reads at the current one.
     ///
     /// # Errors
     ///

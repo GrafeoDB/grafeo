@@ -28,7 +28,7 @@ serde_json = { version = "1", features = ["arbitrary_precision"] }
 is-terminal = "0.4"
 
 # REPL
-rustyline = "18"
+rustyline = "19"
 
 # Progress bars
 indicatif = "0.18"

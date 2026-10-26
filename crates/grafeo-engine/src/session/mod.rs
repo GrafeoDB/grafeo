@@ -5539,7 +5539,8 @@ impl Session {
     fn get_transaction_context(&self) -> (EpochId, Option<TransactionId>) {
         // Time-travel override takes precedence (read-only, no tx context)
         if let Some(epoch) = *self.viewing_epoch_override.lock() {
-            return (epoch, None);
+            // Stamped versions are visible only once their commit is published.
+            return (epoch.min(self.transaction_manager.current_epoch()), None);
         }
 
         if let Some(transaction_id) = *self.current_transaction.lock() {

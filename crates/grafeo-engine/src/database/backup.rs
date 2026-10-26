@@ -73,6 +73,11 @@ pub struct BackupSegment {
     pub size_bytes: u64,
     /// Timestamp when this backup was created (ms since UNIX epoch).
     pub created_at_ms: u64,
+    /// The log position the segment ends at: every WAL group before it is in
+    /// the chain up to this segment, and the next incremental backup starts
+    /// there. `None` in a manifest written before 0.6.1.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub end_wal_lsn: Option<u64>,
 }
 
 /// Tracks the full backup chain for a database.
@@ -480,6 +485,7 @@ mod bincode_0_5 {
                     checksum: segment.checksum,
                     size_bytes: segment.size_bytes,
                     created_at_ms: segment.created_at_ms,
+                    end_wal_lsn: None,
                 })
                 .collect(),
         })
@@ -703,6 +709,7 @@ pub(super) fn do_backup_full(
         checksum,
         size_bytes: file_size,
         created_at_ms: now_ms(),
+        end_wal_lsn: Some(wal_lsn),
     };
 
     manifest.segments.push(segment.clone());
@@ -780,8 +787,8 @@ fn copied_header(file_data: &[u8], path: &Path) -> Result<DbHeaderV3> {
 /// # Errors
 ///
 /// Returns an error if no full backup exists, the cursor is of the earlier
-/// WAL format, nothing was logged since the last backup, or the segments
-/// after the cursor were removed.
+/// WAL format, the cursor is ahead of the chain's end epoch, nothing was
+/// logged since the last backup, or the segments after the cursor were removed.
 pub(super) fn do_backup_incremental(
     backup_dir: &Path,
     wal: &Wal,
@@ -806,6 +813,30 @@ pub(super) fn do_backup_incremental(
                 .to_string(),
         )
     })?;
+
+    // An incremental backup copies the log from the cursor on, so the chain
+    // must reach the cursor: one that ends before it would miss what lies
+    // between. A read-only full backup can lead the writer's cursor:
+    // overlapping WAL groups are valid. The log position decides; the epoch
+    // alone misses a change logged without an epoch of its own (a graph
+    // command, a schema statement, the index API), and is all a manifest
+    // written before 0.6.1 has.
+    if let Some(last) = manifest.segments.last() {
+        let behind = match last.end_wal_lsn {
+            Some(chain_end) => chain_end < from,
+            None => last.end_epoch < cursor.backed_up_epoch,
+        };
+        if behind {
+            return Err(Error::InvalidValue(format!(
+                "backup chain {} ends at epoch {}, but the database backup cursor is at epoch {} \
+                 and further along the log; run a full backup in this directory before taking \
+                 an incremental backup",
+                backup_dir.display(),
+                last.end_epoch.as_u64(),
+                cursor.backed_up_epoch.as_u64(),
+            )));
+        }
+    }
 
     // Seal the active segment first: every group logged so far is then in a
     // segment before `sealed`, and groups logged from now on go to later
@@ -888,6 +919,7 @@ pub(super) fn do_backup_incremental(
         checksum: crc32fast::hash(&output),
         size_bytes: output.len() as u64,
         created_at_ms: now_ms(),
+        end_wal_lsn: Some(sealed),
     };
 
     let mut manifest = manifest;
@@ -1380,6 +1412,7 @@ mod tests {
             checksum: 12345,
             size_bytes: 1024,
             created_at_ms: 1000,
+            end_wal_lsn: None,
         });
         manifest.segments.push(BackupSegment {
             kind: BackupKind::Incremental,
@@ -1389,6 +1422,7 @@ mod tests {
             checksum: 67890,
             size_bytes: 256,
             created_at_ms: 2000,
+            end_wal_lsn: None,
         });
 
         let full = manifest.latest_full().unwrap();
@@ -1415,6 +1449,7 @@ mod tests {
             checksum: 88,
             size_bytes: 4096,
             created_at_ms: 1_791_331_200_000,
+            end_wal_lsn: None,
         });
         manifest.segments.push(BackupSegment {
             kind: BackupKind::Incremental,
@@ -1424,6 +1459,7 @@ mod tests {
             checksum: 3,
             size_bytes: 319,
             created_at_ms: 1_791_331_288_000,
+            end_wal_lsn: None,
         });
         manifest
     }

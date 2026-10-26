@@ -16,6 +16,7 @@
 //! To restore to epoch 750: load full snapshot (epoch 100), replay
 //! incrementals 1-7, stop at epoch 750.
 
+use std::io::Write;
 use std::path::Path;
 
 use grafeo_common::types::EpochId;
@@ -244,21 +245,23 @@ fn decode_manifest(data: &[u8]) -> std::result::Result<BackupManifest, ManifestD
 ///
 /// Returns an error if the manifest cannot be written.
 pub fn write_manifest(backup_dir: &Path, manifest: &BackupManifest) -> Result<()> {
-    std::fs::create_dir_all(backup_dir)
-        .map_err(|e| Error::Internal(format!("failed to create backup directory: {e}")))?;
+    prepare_backup_directory(backup_dir)?;
+    write_prepared_manifest(backup_dir, manifest)
+}
 
+/// Writes a manifest after this operation has prepared the backup directory.
+fn write_prepared_manifest(backup_dir: &Path, manifest: &BackupManifest) -> Result<()> {
     let path = backup_dir.join(MANIFEST_FILENAME);
-    let temp_path = backup_dir.join(format!("{MANIFEST_FILENAME}.tmp"));
-
     let data = serde_json::to_vec_pretty(manifest)
         .map_err(|e| Error::Internal(format!("failed to serialize backup manifest: {e}")))?;
 
-    std::fs::write(&temp_path, data)
-        .map_err(|e| Error::Internal(format!("failed to write backup manifest: {e}")))?;
-    std::fs::rename(&temp_path, &path)
-        .map_err(|e| Error::Internal(format!("failed to finalize backup manifest: {e}")))?;
-
-    Ok(())
+    write_metadata(
+        &path,
+        &data,
+        "manifest",
+        "backup:manifest_sync",
+        "backup:manifest_directory_sync",
+    )
 }
 
 // ── Backup cursor I/O ──────────────────────────────────────────────
@@ -304,16 +307,122 @@ fn decode_cursor(data: &[u8]) -> std::result::Result<BackupCursor, String> {
 /// Returns an error if the cursor cannot be written.
 pub fn write_backup_cursor(wal_dir: &Path, cursor: &BackupCursor) -> Result<()> {
     let path = wal_dir.join(BACKUP_CURSOR_FILENAME);
-    let temp_path = wal_dir.join(format!("{BACKUP_CURSOR_FILENAME}.tmp"));
-
     let data = serde_json::to_vec_pretty(cursor)
         .map_err(|e| Error::Internal(format!("failed to serialize backup cursor: {e}")))?;
 
-    std::fs::write(&temp_path, &data)
-        .map_err(|e| Error::Internal(format!("failed to write backup cursor: {e}")))?;
-    std::fs::rename(&temp_path, &path)
-        .map_err(|e| Error::Internal(format!("failed to finalize backup cursor: {e}")))?;
+    write_metadata(
+        &path,
+        &data,
+        "cursor",
+        "backup:cursor_sync",
+        "backup:cursor_directory_sync",
+    )
+}
 
+/// Publishes synced metadata, then makes its renamed directory entry durable.
+fn write_metadata(
+    path: &Path,
+    data: &[u8],
+    kind: &str,
+    sync_point: &str,
+    directory_sync_point: &str,
+) -> Result<()> {
+    let mut temp_path = path.as_os_str().to_owned();
+    temp_path.push(".tmp");
+    let temp_path = std::path::PathBuf::from(temp_path);
+    let mut file = std::fs::File::create(&temp_path).map_err(|e| {
+        Error::Internal(format!(
+            "failed to create backup {kind} {}: {e}",
+            temp_path.display()
+        ))
+    })?;
+    file.write_all(data).map_err(|e| {
+        Error::Internal(format!(
+            "failed to write backup {kind} {}: {e}",
+            temp_path.display()
+        ))
+    })?;
+    grafeo_common::testing::crash::maybe_fail(sync_point)?;
+    file.sync_all().map_err(|e| {
+        Error::Internal(format!(
+            "failed to sync backup {kind} {}: {e}",
+            temp_path.display()
+        ))
+    })?;
+    drop(file);
+    std::fs::rename(&temp_path, path).map_err(|e| {
+        Error::Internal(format!(
+            "failed to finalize backup {kind} {}: {e}",
+            path.display()
+        ))
+    })?;
+    sync_backup_entry(path, directory_sync_point)
+}
+
+/// Persists the directory entry of a backup file or directory. This retains
+/// the platform floor of `flush::sync_parent_dir`: no directory fsync off Unix.
+fn sync_backup_entry(path: &Path, sync_point: &str) -> Result<()> {
+    #[cfg(unix)]
+    grafeo_common::testing::crash::maybe_fail(sync_point)?;
+    #[cfg(not(unix))]
+    let _ = sync_point;
+    super::flush::sync_parent_dir(path).map_err(|e| {
+        Error::Internal(format!(
+            "failed to sync directory containing backup {}: {e}",
+            path.display()
+        ))
+    })
+}
+
+/// Prepares the directory once per backup. Sync the existing directory's
+/// parent once, also repairing an entry left by a failed earlier attempt;
+/// then persist each new directory entry before creating its children.
+/// Keep lexical paths so symlinks and `..` resolve as they do in create_dir_all.
+fn prepare_backup_directory(directory: &Path) -> Result<()> {
+    let mut existing = if directory.as_os_str().is_empty() {
+        Path::new(".")
+    } else {
+        directory
+    };
+    let mut missing = Vec::new();
+    loop {
+        match std::fs::metadata(existing) {
+            Ok(metadata) if metadata.is_dir() => break,
+            Ok(_) => {
+                return Err(Error::Internal(format!(
+                    "backup directory {} is not a directory",
+                    existing.display()
+                )));
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                missing.push(existing);
+                existing = existing
+                    .parent()
+                    .filter(|parent| !parent.as_os_str().is_empty())
+                    .unwrap_or_else(|| Path::new("."));
+            }
+            Err(e) => {
+                return Err(Error::Internal(format!(
+                    "failed to inspect backup directory {}: {e}",
+                    existing.display()
+                )));
+            }
+        }
+    }
+    sync_backup_entry(existing, "backup:directory_sync")?;
+    for directory in missing.into_iter().rev() {
+        match std::fs::create_dir(directory) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists && directory.is_dir() => {}
+            Err(e) => {
+                return Err(Error::Internal(format!(
+                    "failed to create backup directory {}: {e}",
+                    directory.display()
+                )));
+            }
+        }
+        sync_backup_entry(directory, "backup:new_directory_sync")?;
+    }
     Ok(())
 }
 
@@ -587,8 +696,7 @@ pub(super) fn do_backup_full(
     wal: Option<&Wal>,
     log_end: impl FnOnce() -> Result<u64>,
 ) -> Result<BackupSegment> {
-    std::fs::create_dir_all(backup_dir)
-        .map_err(|e| Error::Internal(format!("failed to create backup directory: {e}")))?;
+    prepare_backup_directory(backup_dir)?;
 
     // Determine backup filename
     let mut manifest = read_manifest(backup_dir)?.unwrap_or_default();
@@ -634,7 +742,7 @@ pub(super) fn do_backup_full(
     };
 
     manifest.segments.push(segment.clone());
-    write_manifest(backup_dir, &manifest)?;
+    write_prepared_manifest(backup_dir, &manifest)?;
     grafeo_common::testing::crash::maybe_crash("backup:after_manifest");
 
     // Every WAL group before the image's log position is in the image, and
@@ -759,6 +867,8 @@ pub(super) fn do_backup_incremental(
         }
     }
 
+    sync_backup_entry(backup_dir, "backup:directory_sync")?;
+
     // Seal the active segment first: every group logged so far is then in a
     // segment before `sealed`, and groups logged from now on go to later
     // ones, which the next incremental backup reads. Reading the active
@@ -810,8 +920,29 @@ pub(super) fn do_backup_incremental(
 
     let segment_idx = manifest.segments.len();
     let filename = format!("backup_incr_{segment_idx:04}.wal");
-    std::fs::write(backup_dir.join(&filename), &output)
-        .map_err(|e| Error::Internal(format!("failed to write incremental backup: {e}")))?;
+    let path = backup_dir.join(&filename);
+    let mut file = std::fs::File::create(&path).map_err(|e| {
+        Error::Internal(format!(
+            "failed to create incremental backup {}: {e}",
+            path.display()
+        ))
+    })?;
+    file.write_all(&output).map_err(|e| {
+        Error::Internal(format!(
+            "failed to write incremental backup {}: {e}",
+            path.display()
+        ))
+    })?;
+    grafeo_common::testing::crash::maybe_fail("backup:incremental_sync")?;
+    file.sync_all().map_err(|e| {
+        Error::Internal(format!(
+            "failed to sync incremental backup {}: {e}",
+            path.display()
+        ))
+    })?;
+    drop(file);
+    sync_backup_entry(&path, "backup:incremental_directory_sync")?;
+    grafeo_common::testing::crash::maybe_crash("backup:after_incremental_file");
 
     let segment = BackupSegment {
         kind: BackupKind::Incremental,
@@ -826,7 +957,8 @@ pub(super) fn do_backup_incremental(
 
     let mut manifest = manifest;
     manifest.segments.push(segment.clone());
-    write_manifest(backup_dir, &manifest)?;
+    write_prepared_manifest(backup_dir, &manifest)?;
+    grafeo_common::testing::crash::maybe_crash("backup:after_incremental_manifest");
 
     write_backup_cursor(
         wal.dir(),
@@ -837,6 +969,7 @@ pub(super) fn do_backup_incremental(
             timestamp_ms: now_ms(),
         },
     )?;
+    grafeo_common::testing::crash::maybe_crash("backup:after_incremental_cursor");
 
     Ok(segment)
 }

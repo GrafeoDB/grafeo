@@ -390,7 +390,7 @@ fn write_copy_into(
 /// Makes a rename in the directory holding `path` durable. Windows has no
 /// directory handles to sync; its directory changes are metadata-journaled.
 #[cfg(feature = "grafeo-file")]
-fn sync_parent_dir(path: &std::path::Path) -> Result<()> {
+pub(super) fn sync_parent_dir(path: &std::path::Path) -> Result<()> {
     #[cfg(unix)]
     if let Some(parent) = path.parent() {
         let parent = if parent.as_os_str().is_empty() {

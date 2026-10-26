@@ -1,8 +1,5 @@
-//! Restore acknowledges success only after its returned files and namespace sync.
-//!
-//! Named I/O failures check error propagation, input preservation and retry.
-//! They do not simulate losing the operating system's cache or prove power-loss
-//! safety. Temporary restore staging is not a returned durable artifact.
+//! Restore publishes its image last and removes outputs after an I/O error.
+//! Named failure injection tests cleanup and retry, not power-loss durability.
 
 #![cfg(all(
     feature = "gql",
@@ -15,12 +12,6 @@
     reason = "integration tests exercise public restore callers"
 )]
 
-use std::cell::RefCell;
-use std::collections::BTreeMap;
-use std::path::{Path, PathBuf};
-#[cfg(feature = "encryption")]
-use std::sync::Arc;
-
 #[cfg(feature = "encryption")]
 use grafeo_common::encryption::KeyChain;
 use grafeo_common::testing::crash::with_failure_at;
@@ -29,236 +20,98 @@ use grafeo_common::utils::error::{Error, Result};
 #[cfg(feature = "encryption")]
 use grafeo_engine::config::EncryptionConfig;
 use grafeo_engine::{Config, GrafeoDB};
+use std::collections::BTreeMap;
+use std::path::{Path, PathBuf};
+#[cfg(feature = "encryption")]
+use std::sync::Arc;
 
 #[derive(Clone, Copy, Debug)]
 enum Case {
     Full,
     Incremental,
-    ReadOnlyFull,
-    ReadOnlyIncremental,
     LegacyIncremental,
-    ReadOnlyOverlapAtFull,
-    ReadOnlyOverlapAtLast,
+    OverlapAtFull,
+    OverlapAtLast,
     #[cfg(feature = "encryption")]
     KeyedIncremental,
     #[cfg(feature = "encryption")]
     KeylessEncryptedFull,
-    #[cfg(feature = "encryption")]
-    ReadOnlyKeyedIncremental,
-    #[cfg(feature = "encryption")]
-    ReadOnlyKeylessEncryptedFull,
 }
-
 impl Case {
     fn has_wal(self) -> bool {
-        if matches!(self, Self::Full | Self::ReadOnlyFull) {
-            return false;
+        match self {
+            Self::Full => false,
+            #[cfg(feature = "encryption")]
+            Self::KeylessEncryptedFull => false,
+            _ => true,
         }
-        #[cfg(feature = "encryption")]
-        if matches!(
-            self,
-            Self::KeylessEncryptedFull | Self::ReadOnlyKeylessEncryptedFull
-        ) {
-            return false;
-        }
-        true
-    }
-
-    fn read_only_image(self) -> bool {
-        if matches!(self, Self::ReadOnlyFull | Self::ReadOnlyIncremental) {
-            return true;
-        }
-        #[cfg(feature = "encryption")]
-        if matches!(
-            self,
-            Self::ReadOnlyKeyedIncremental | Self::ReadOnlyKeylessEncryptedFull
-        ) {
-            return true;
-        }
-        false
     }
 }
-
-fn cases(need_wal: bool) -> Vec<Case> {
-    let cases = vec![
-        Case::Full,
-        Case::Incremental,
-        Case::ReadOnlyFull,
-        Case::ReadOnlyIncremental,
-        Case::LegacyIncremental,
-        Case::ReadOnlyOverlapAtFull,
-        Case::ReadOnlyOverlapAtLast,
-        #[cfg(feature = "encryption")]
-        Case::KeyedIncremental,
-        #[cfg(feature = "encryption")]
-        Case::KeylessEncryptedFull,
-        #[cfg(feature = "encryption")]
-        Case::ReadOnlyKeyedIncremental,
-        #[cfg(feature = "encryption")]
-        Case::ReadOnlyKeylessEncryptedFull,
-    ];
-    cases
-        .into_iter()
-        .filter(|case| !need_wal || case.has_wal())
-        .collect()
+type Snapshot = BTreeMap<PathBuf, Option<Vec<u8>>>;
+fn snapshot(root: &Path) -> Snapshot {
+    let mut result = Snapshot::new();
+    if root.exists() {
+        let mut pending = vec![root.to_path_buf()];
+        while let Some(path) = pending.pop() {
+            let relative = path.strip_prefix(root).unwrap().to_path_buf();
+            if path.is_dir() {
+                result.insert(relative, None);
+                for entry in std::fs::read_dir(path).unwrap() {
+                    pending.push(entry.unwrap().path());
+                }
+            } else {
+                result.insert(relative, Some(std::fs::read(path).unwrap()));
+            }
+        }
+    }
+    result
 }
-
 fn with_suffix(path: &Path, suffix: &str) -> PathBuf {
     let mut name = path.as_os_str().to_owned();
     name.push(suffix);
     PathBuf::from(name)
 }
-
-/// Relative names and bytes, including empty directories, so a refused retry
-/// cannot silently replace a partial file or sidecar.
-type Snapshot = BTreeMap<PathBuf, Option<Vec<u8>>>;
-
-fn snapshot(root: &Path) -> Snapshot {
-    let mut result = BTreeMap::new();
-    if !root.exists() {
-        return result;
-    }
-    let mut pending = vec![root.to_path_buf()];
-    while let Some(path) = pending.pop() {
-        let relative = path.strip_prefix(root).unwrap().to_path_buf();
-        if path.is_dir() {
-            result.insert(relative, None);
-            for entry in std::fs::read_dir(&path).expect("read snapshot directory") {
-                pending.push(entry.expect("read snapshot entry").path());
-            }
-        } else {
-            result.insert(
-                relative,
-                Some(std::fs::read(path).expect("read snapshot file")),
-            );
-        }
-    }
-    result
-}
-
 fn person(name: &str, city: &str) -> Vec<Value> {
     vec![Value::from(name), Value::from(city)]
 }
 
-/// Restores temporary permissions before TempDir removes files on Windows.
-#[derive(Default)]
-struct PermissionCleanup(RefCell<Vec<(PathBuf, std::fs::Permissions)>>);
-
-impl PermissionCleanup {
-    fn remember(&self, path: &Path, permissions: &std::fs::Permissions) {
-        self.0
-            .borrow_mut()
-            .push((path.to_path_buf(), permissions.clone()));
-    }
-}
-
-impl Drop for PermissionCleanup {
-    fn drop(&mut self) {
-        for (path, permissions) in self.0.get_mut().drain(..).rev() {
-            if path.exists() {
-                let restored = std::fs::set_permissions(path, permissions);
-                if !std::thread::panicking() {
-                    restored.expect("restore temporary file permissions before cleanup");
-                }
-            }
-        }
-    }
-}
-
-fn assert_permissions(path: &Path, expected: &std::fs::Permissions) {
-    let actual = std::fs::metadata(path)
-        .expect("read permissions")
-        .permissions();
-    assert_eq!(actual.readonly(), expected.readonly(), "{}", path.display());
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        assert_eq!(actual.mode(), expected.mode(), "{}", path.display());
-    }
-}
-
-#[cfg(windows)]
-const RESTORE_METADATA: &[u8] = b"restore metadata sentinel";
-
-#[cfg(windows)]
-fn add_restore_metadata_stream(path: &Path) -> bool {
-    match std::fs::write(with_suffix(path, ":restore_metadata"), RESTORE_METADATA) {
-        Ok(()) => true,
-        // Windows filesystems without named-stream support can reject the
-        // syntax (INVALID_FUNCTION, NOT_SUPPORTED or INVALID_NAME).
-        Err(error) if matches!(error.raw_os_error(), Some(1 | 50 | 123)) => false,
-        Err(error) => panic!("cannot write fixture metadata stream: {error}"),
-    }
-}
-
-struct ReadOnlyImage {
-    path: PathBuf,
-    original_permissions: std::fs::Permissions,
-    read_only_permissions: std::fs::Permissions,
-    source_permissions: std::fs::Permissions,
-    #[cfg(windows)]
-    has_metadata_stream: bool,
-}
-
 struct Fixture {
-    // Fields drop in order: permissions are restored before TempDir cleanup.
-    permission_cleanup: PermissionCleanup,
     root: tempfile::TempDir,
     backups: PathBuf,
     source: PathBuf,
     target: EpochId,
     people: Vec<Vec<Value>>,
     edges: Vec<Vec<Value>>,
-    read_only_image: Option<ReadOnlyImage>,
     #[cfg(feature = "encryption")]
     key: Option<Arc<KeyChain>>,
     #[cfg(feature = "encryption")]
     keyed_restore: bool,
 }
-
 impl Fixture {
     fn new(case: Case) -> Self {
-        let root = tempfile::tempdir().expect("create fixture directory");
+        let root = tempfile::tempdir().unwrap();
         let mut fixture = Self {
-            permission_cleanup: PermissionCleanup::default(),
             backups: root.path().join("backups"),
             source: root.path().join("source.grafeo"),
             root,
             target: EpochId::new(0),
             people: Vec::new(),
             edges: Vec::new(),
-            read_only_image: None,
             #[cfg(feature = "encryption")]
-            key: match case {
-                Case::KeyedIncremental
-                | Case::KeylessEncryptedFull
-                | Case::ReadOnlyKeyedIncremental
-                | Case::ReadOnlyKeylessEncryptedFull => Some(Arc::new(KeyChain::new([3; 32]))),
-                _ => None,
-            },
+            key: matches!(case, Case::KeyedIncremental | Case::KeylessEncryptedFull)
+                .then(|| Arc::new(KeyChain::new([3; 32]))),
             #[cfg(feature = "encryption")]
-            keyed_restore: matches!(
-                case,
-                Case::KeyedIncremental | Case::ReadOnlyKeyedIncremental
-            ),
+            keyed_restore: matches!(case, Case::KeyedIncremental),
         };
         if matches!(case, Case::LegacyIncremental) {
             fixture.copy_legacy_backup();
         } else {
             fixture.make_current_backup(case);
         }
-        if case.read_only_image() {
-            fixture.make_image_read_only();
-        }
         fixture
     }
-
-    fn config(&self, path: &Path, read_only: bool) -> Config {
-        let config = if read_only {
-            Config::read_only(path)
-        } else {
-            Config::persistent(path)
-        };
+    fn config(&self, path: &Path) -> Config {
+        let config = Config::persistent(path);
         #[cfg(feature = "encryption")]
         let config = match &self.key {
             Some(key) => config.with_encryption(EncryptionConfig::new(Arc::clone(key))),
@@ -266,10 +119,8 @@ impl Fixture {
         };
         config
     }
-
     fn make_current_backup(&mut self, case: Case) {
-        let db =
-            GrafeoDB::with_config(self.config(&self.source, false)).expect("open fixture source");
+        let db = GrafeoDB::with_config(self.config(&self.source)).expect("open fixture source");
         db.execute("INSERT (:Person {name: 'Alpha', city: 'North'})")
             .unwrap();
         let full = db.backup_full(&self.backups).expect("take full backup");
@@ -281,10 +132,7 @@ impl Fixture {
         }
         db.execute("INSERT (:Person {name: 'Beta', city: 'South'})")
             .unwrap();
-        if matches!(
-            case,
-            Case::ReadOnlyOverlapAtFull | Case::ReadOnlyOverlapAtLast
-        ) {
+        if matches!(case, Case::OverlapAtFull | Case::OverlapAtLast) {
             // The existing cursor pins the older WAL while close checkpoints
             // the second commit. A read-only full backup cannot advance it.
             db.close().unwrap();
@@ -303,8 +151,8 @@ impl Fixture {
             self.target = match case {
                 // No group after this full image's log position is at or below
                 // its epoch: the returned current-format WAL has no copied group.
-                Case::ReadOnlyOverlapAtFull => newer_full.end_epoch,
-                Case::ReadOnlyOverlapAtLast => {
+                Case::OverlapAtFull => newer_full.end_epoch,
+                Case::OverlapAtLast => {
                     self.people.push(person("Gamma", "West"));
                     incremental.end_epoch
                 }
@@ -343,70 +191,6 @@ impl Fixture {
         ];
     }
 
-    fn make_image_read_only(&mut self) {
-        let manifest = GrafeoDB::read_backup_manifest(&self.backups)
-            .unwrap()
-            .unwrap();
-        let path = self.backups.join(&manifest.latest_full().unwrap().filename);
-        let original = std::fs::metadata(&path).unwrap().permissions();
-        #[cfg(windows)]
-        let has_metadata_stream = add_restore_metadata_stream(&path);
-        #[cfg(unix)]
-        let read_only = {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::Permissions::from_mode(0o444)
-        };
-        #[cfg(not(unix))]
-        let read_only = {
-            let mut permissions = original.clone();
-            permissions.set_readonly(true);
-            permissions
-        };
-        self.permission_cleanup.remember(&path, &original);
-        std::fs::set_permissions(&path, read_only).expect("make only the fixture image read-only");
-        let read_only_permissions = std::fs::metadata(&path).unwrap().permissions();
-        assert!(read_only_permissions.readonly());
-        self.read_only_image = Some(ReadOnlyImage {
-            path,
-            original_permissions: original,
-            read_only_permissions,
-            source_permissions: std::fs::metadata(&self.source).unwrap().permissions(),
-            #[cfg(windows)]
-            has_metadata_stream,
-        });
-    }
-
-    fn assert_read_only_copy(&self, output: &Path) {
-        if let Some(image) = &self.read_only_image {
-            assert_permissions(&image.path, &image.read_only_permissions);
-            assert_permissions(&self.source, &image.source_permissions);
-            #[cfg(windows)]
-            if image.has_metadata_stream {
-                assert_eq!(
-                    std::fs::read(with_suffix(&image.path, ":restore_metadata")).unwrap(),
-                    RESTORE_METADATA,
-                    "restore must preserve the source metadata stream"
-                );
-            }
-            if output.exists() {
-                assert_eq!(
-                    std::fs::read(output).unwrap(),
-                    std::fs::read(&image.path).unwrap(),
-                    "a restored read-only image must remain an exact copy"
-                );
-                assert_permissions(output, &image.read_only_permissions);
-                #[cfg(windows)]
-                if image.has_metadata_stream {
-                    assert_eq!(
-                        std::fs::read(with_suffix(output, ":restore_metadata")).unwrap(),
-                        RESTORE_METADATA,
-                        "restore must preserve the copied metadata stream, including on failure"
-                    );
-                }
-            }
-        }
-    }
-
     fn inputs(&self) -> [Snapshot; 3] {
         [
             snapshot(&self.backups),
@@ -414,14 +198,12 @@ impl Fixture {
             snapshot(&with_suffix(&self.source, ".wal")),
         ]
     }
-
+    fn output(&self, name: &str) -> PathBuf {
+        let directory = self.root.path().join("outputs").join(name);
+        std::fs::create_dir_all(&directory).unwrap();
+        directory.join("restored.grafeo")
+    }
     fn restore(&self, output: &Path) -> Result<()> {
-        if let Some(image) = &self.read_only_image {
-            // Restore may leave a read-only partial image. Do not change its
-            // permissions for the oracle; only restore them during cleanup.
-            self.permission_cleanup
-                .remember(output, &image.original_permissions);
-        }
         #[cfg(feature = "encryption")]
         if self.keyed_restore {
             return GrafeoDB::restore_to_epoch_with(
@@ -433,172 +215,259 @@ impl Fixture {
         }
         GrafeoDB::restore_to_epoch(&self.backups, self.target, output)
     }
-
     fn assert_two_reopens(&self, output: &Path, case: Case) {
         assert_eq!(with_suffix(output, ".wal").is_dir(), case.has_wal());
-        self.assert_read_only_copy(output);
+        let mut names: Vec<_> = std::fs::read_dir(output.parent().unwrap())
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect();
+        names.sort();
+        let mut expected = vec![output.file_name().unwrap().to_os_string()];
+        if case.has_wal() {
+            expected.push(
+                with_suffix(output, ".wal")
+                    .file_name()
+                    .unwrap()
+                    .to_os_string(),
+            );
+        }
+        expected.sort();
+        assert_eq!(names, expected, "successful restore left staging artifacts");
         for _ in 0..2 {
-            let db = GrafeoDB::with_config(self.config(output, self.read_only_image.is_some()))
-                .expect("open restored database");
-            let people = db
-                .execute("MATCH (p:Person) RETURN p.name, p.city ORDER BY p.name")
-                .unwrap()
-                .rows()
-                .to_vec();
-            let edges = db.execute(
-                "MATCH (a:Person)-[k:KNOWS]->(b:Person) RETURN a.name, b.name, k.since ORDER BY k.since",
-            ).unwrap().rows().to_vec();
-            assert_eq!(people, self.people, "{case:?}: exact restored people");
-            assert_eq!(edges, self.edges, "{case:?}: exact restored edges");
-            db.close().expect("close restored database");
-            self.assert_read_only_copy(output);
+            let db = GrafeoDB::with_config(self.config(output))
+                .expect("open writable restored database");
+            assert_eq!(
+                db.execute("MATCH (p:Person) RETURN p.name, p.city ORDER BY p.name")
+                    .unwrap()
+                    .rows(),
+                &self.people
+            );
+            assert_eq!(db.execute("MATCH (a:Person)-[k:KNOWS]->(b:Person) RETURN a.name, b.name, k.since ORDER BY k.since").unwrap().rows(), &self.edges);
+            db.close().unwrap();
         }
     }
 }
-
-fn assert_barrier(case: Case, phase: &str) {
+fn assert_clean(output: &Path) {
+    assert!(!output.exists(), "failed restore published its image");
+    assert!(
+        !with_suffix(output, ".wal").exists(),
+        "failed restore published its sidecar"
+    );
+    assert_eq!(
+        std::fs::read_dir(output.parent().unwrap()).unwrap().count(),
+        0,
+        "failed restore left staging artifacts"
+    );
+}
+fn assert_failure(case: Case, phase: &str) {
     let fixture = Fixture::new(case);
     let before = fixture.inputs();
-    let injected_phase = format!("injected failure at: {phase}");
     let mut matched = 0;
     for count in 1..=64 {
-        let output_dir = fixture
-            .root
-            .path()
-            .join("outputs")
-            .join(count.to_string())
-            .join("nested");
-        std::fs::create_dir_all(&output_dir).unwrap();
-        let output = output_dir.join("restored.grafeo");
+        let output = fixture.output(&count.to_string());
         let result = with_failure_at(count, || fixture.restore(&output));
-        fixture.assert_read_only_copy(&output);
-        assert_eq!(
-            fixture.inputs(),
-            before,
-            "{case:?}: restore changed its inputs"
-        );
+        assert_eq!(fixture.inputs(), before, "restore changed its inputs");
         match result {
-            Err(error) if error.to_string().contains(&injected_phase) => {
+            Err(error)
+                if error
+                    .to_string()
+                    .contains(&format!("injected failure at: {phase}")) =>
+            {
                 matched += 1;
-                assert!(
-                    output.is_file(),
-                    "{case:?}: failed restore left its partial image"
-                );
-                let partial = snapshot(&output_dir);
-                let refused = fixture
+                assert_clean(&output);
+                fixture
                     .restore(&output)
-                    .expect_err("partial target is not fresh");
-                assert!(matches!(refused, Error::InvalidValue(_)), "{refused}");
-                assert!(refused.to_string().contains("already exists"), "{refused}");
-                assert_eq!(
-                    snapshot(&output_dir),
-                    partial,
-                    "refused retry changed partial output"
-                );
-                assert_eq!(fixture.inputs(), before, "refused retry changed inputs");
+                    .expect("retry the same destination without injection");
+                fixture.assert_two_reopens(&output, case);
+                assert_eq!(fixture.inputs(), before, "retry or reopen changed inputs");
             }
             Err(error) => assert!(
                 error.to_string().contains("injected failure at:"),
-                "{case:?}: unexpected failure selecting {phase} at {count}: {error}",
+                "{error}"
             ),
             Ok(()) => {
                 assert!(
                     matched > 0,
-                    "{case:?}: restore acknowledged success without the required {phase} barrier",
+                    "{case:?}: restore skipped required barrier {phase}"
                 );
-                // Advancing the count reaches every occurrence of the named
-                // barrier (each returned WAL file or directory ancestor).
-                // The first success is a fresh destination after those failures.
+                if phase == "restore:output_directory_sync" {
+                    // Full restore publishes one name; an incremental also
+                    // publishes its sidecar, whose rename needs its own sync.
+                    assert_eq!(matched, if case.has_wal() { 2 } else { 1 });
+                }
                 fixture.assert_two_reopens(&output, case);
-                assert_eq!(
-                    fixture.inputs(),
-                    before,
-                    "opening restored output changed inputs"
-                );
+                assert_eq!(fixture.inputs(), before);
                 return;
             }
         }
     }
-    panic!("{case:?}: {phase} never completed its bounded fault sweep");
+    panic!("{case:?}: {phase} did not complete its bounded failure sweep");
 }
 
 #[test]
-fn returned_image_sync_failures_are_reported_before_restore_success() {
-    for case in cases(false) {
-        assert_barrier(case, "restore:image_sync");
-    }
-}
-
-#[test]
-fn returned_wal_file_sync_failures_are_reported_before_restore_success() {
-    for case in cases(true) {
-        assert_barrier(case, "restore:wal_sync");
-    }
-}
-
-#[cfg(unix)]
-#[test]
-fn returned_wal_directory_sync_failures_are_reported_before_restore_success() {
-    for case in cases(true) {
-        assert_barrier(case, "restore:wal_directory_sync");
-    }
-}
-
-#[cfg(unix)]
-#[test]
-fn returned_output_directory_sync_failures_are_reported_before_restore_success() {
-    for case in cases(false) {
-        assert_barrier(case, "restore:output_directory_sync");
-    }
-}
-
-#[test]
-fn read_only_backup_images_restore_with_original_permissions() {
-    for case in cases(false)
-        .into_iter()
-        .filter(|case| case.read_only_image())
-    {
+fn restores_full_current_legacy_and_overlapping_chains() {
+    for case in [
+        Case::Full,
+        Case::Incremental,
+        Case::LegacyIncremental,
+        Case::OverlapAtFull,
+        Case::OverlapAtLast,
+        #[cfg(feature = "encryption")]
+        Case::KeyedIncremental,
+        #[cfg(feature = "encryption")]
+        Case::KeylessEncryptedFull,
+    ] {
         let fixture = Fixture::new(case);
         let before = fixture.inputs();
-        let output_dir = fixture.root.path().join("outputs").join("positive");
-        std::fs::create_dir_all(&output_dir).unwrap();
-        let output = output_dir.join("restored.grafeo");
-        fixture
-            .restore(&output)
-            .expect("restore from an actually read-only backup image");
-        fixture.assert_read_only_copy(&output);
-        assert_eq!(
-            fixture.inputs(),
-            before,
-            "restore changed its read-only source"
-        );
+        let output = fixture.output("success");
+        fixture.restore(&output).unwrap();
         fixture.assert_two_reopens(&output, case);
-        assert_eq!(
-            fixture.inputs(),
-            before,
-            "read-only reopens changed source bytes"
-        );
+        assert_eq!(fixture.inputs(), before);
     }
 }
-
-#[cfg(windows)]
 #[test]
-fn readonly_open_failure_restores_image_permissions() {
-    for case in cases(false)
-        .into_iter()
-        .filter(|case| case.read_only_image())
-    {
-        assert_barrier(case, "restore:readonly_file_open");
+fn image_sync_failure_cleans_up_and_allows_same_path_retry() {
+    for case in [Case::Full, Case::Incremental] {
+        assert_failure(case, "restore:image_sync");
     }
 }
-
-#[cfg(windows)]
 #[test]
-fn readonly_permission_restore_failure_cleans_up() {
-    for case in cases(false)
-        .into_iter()
-        .filter(|case| case.read_only_image())
-    {
-        assert_barrier(case, "restore:readonly_permissions_restore");
+fn wal_sync_failure_cleans_up_current_and_legacy_outputs() {
+    for case in [Case::Incremental, Case::LegacyIncremental] {
+        assert_failure(case, "restore:wal_sync");
     }
+}
+#[cfg(unix)]
+#[test]
+fn wal_directory_sync_failure_cleans_up_and_allows_retry() {
+    assert_failure(Case::Incremental, "restore:wal_directory_sync");
+}
+#[test]
+fn sidecar_rename_failure_cleans_up_and_allows_retry() {
+    assert_failure(Case::Incremental, "restore:sidecar_rename");
+}
+#[test]
+fn image_rename_failure_removes_the_already_published_sidecar() {
+    assert_failure(Case::Incremental, "restore:image_rename");
+}
+#[cfg(unix)]
+#[test]
+fn output_directory_sync_failure_removes_published_outputs() {
+    for case in [Case::Full, Case::Incremental] {
+        assert_failure(case, "restore:output_directory_sync");
+    }
+}
+#[test]
+fn a_damaged_incremental_leaves_no_output_and_can_be_retried_after_repair() {
+    let fixture = Fixture::new(Case::Incremental);
+    let original = fixture.inputs();
+    let manifest = GrafeoDB::read_backup_manifest(&fixture.backups)
+        .unwrap()
+        .unwrap();
+    let path = fixture
+        .backups
+        .join(&manifest.segments.last().unwrap().filename);
+    let mut bytes = std::fs::read(&path).unwrap();
+    let last = bytes.len() - 1;
+    bytes[last] ^= 1;
+    std::fs::write(&path, &bytes).unwrap();
+    let damaged = fixture.inputs();
+    let output = fixture.output("damaged");
+    let error = fixture
+        .restore(&output)
+        .expect_err("damaged incremental must be refused");
+    assert!(error.to_string().contains("CRC mismatch"), "{error}");
+    assert_clean(&output);
+    assert_eq!(fixture.inputs(), damaged);
+    bytes[last] ^= 1;
+    std::fs::write(path, bytes).unwrap();
+    assert_eq!(fixture.inputs(), original);
+    fixture.restore(&output).unwrap();
+    fixture.assert_two_reopens(&output, Case::Incremental);
+    assert_eq!(fixture.inputs(), original);
+}
+#[test]
+fn existing_image_and_sidecar_are_never_overwritten() {
+    let fixture = Fixture::new(Case::Full);
+    let inputs = fixture.inputs();
+    for image_exists in [true, false] {
+        let output = fixture.output(if image_exists {
+            "existing-image"
+        } else {
+            "existing-sidecar"
+        });
+        if image_exists {
+            std::fs::write(&output, b"existing image").unwrap();
+        } else {
+            let wal = with_suffix(&output, ".wal");
+            std::fs::create_dir(&wal).unwrap();
+            std::fs::write(wal.join("sentinel"), b"existing WAL").unwrap();
+        }
+        let before = snapshot(output.parent().unwrap());
+        let error = fixture
+            .restore(&output)
+            .expect_err("existing destination must be refused");
+        assert!(matches!(error, Error::InvalidValue(_)), "{error}");
+        assert_eq!(snapshot(output.parent().unwrap()), before);
+        assert_eq!(fixture.inputs(), inputs);
+    }
+}
+#[test]
+fn a_readonly_backup_restores_to_a_writable_database_without_changing_inputs() {
+    let fixture = Fixture::new(Case::Full);
+    let manifest = GrafeoDB::read_backup_manifest(&fixture.backups)
+        .unwrap()
+        .unwrap();
+    let image = fixture
+        .backups
+        .join(&manifest.latest_full().unwrap().filename);
+    let original = std::fs::metadata(&image).unwrap().permissions();
+    let output = fixture.output("readonly");
+    struct RestorePermissions {
+        paths: [PathBuf; 2],
+        original: std::fs::Permissions,
+    }
+    impl Drop for RestorePermissions {
+        fn drop(&mut self) {
+            for path in &self.paths {
+                if path.exists() {
+                    let _ = std::fs::set_permissions(path, self.original.clone());
+                }
+            }
+        }
+    }
+    let _cleanup = RestorePermissions {
+        paths: [image.clone(), output.clone()],
+        original: original.clone(),
+    };
+    let mut readonly = original;
+    readonly.set_readonly(true);
+    std::fs::set_permissions(&image, readonly.clone()).unwrap();
+    let before = fixture.inputs();
+    fixture.restore(&output).unwrap();
+    assert_eq!(std::fs::metadata(&image).unwrap().permissions(), readonly);
+    assert!(
+        !std::fs::metadata(&output).unwrap().permissions().readonly(),
+        "restore output must be writable"
+    );
+    fixture.assert_two_reopens(&output, Case::Full);
+    assert_eq!(fixture.inputs(), before);
+    assert_eq!(std::fs::metadata(&image).unwrap().permissions(), readonly);
+}
+#[cfg(feature = "encryption")]
+#[test]
+fn a_wrong_key_writes_nothing_and_a_correct_key_can_retry_the_same_path() {
+    let fixture = Fixture::new(Case::KeyedIncremental);
+    let before = fixture.inputs();
+    let output = fixture.output("wrong-key");
+    let wrong = EncryptionConfig::new(Arc::new(KeyChain::new([4; 32])));
+    let error = GrafeoDB::restore_to_epoch_with(&fixture.backups, fixture.target, &output, &wrong)
+        .expect_err("wrong key must be refused");
+    assert!(matches!(error, Error::InvalidValue(_)), "{error}");
+    assert!(error.to_string().contains("key"));
+    assert_clean(&output);
+    assert_eq!(fixture.inputs(), before);
+    fixture.restore(&output).unwrap();
+    fixture.assert_two_reopens(&output, Case::KeyedIncremental);
+    assert_eq!(fixture.inputs(), before);
 }

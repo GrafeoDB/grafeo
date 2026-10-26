@@ -844,13 +844,15 @@ fn groups_between(wal: &Wal, from: u64, until: u64) -> Result<u64> {
 /// 1. Finds the most recent full backup with `end_epoch <= target_epoch`
 ///    and the incremental segments after it, and checks `keys` against the
 ///    full backup ([`restore_ciphers`]).
-/// 2. Copies the full backup to `output_path`.
+/// 2. Copies the full backup into a writable file in a temporary sibling directory.
 /// 3. Writes the WAL groups of the incremental segments up to `target_epoch`
 ///    as the sidecar WAL of the restored file, which its next open replays.
 ///    For an encrypted backup the segments are read, and that WAL written,
 ///    with the WAL key of the backup's database. A chain of the earlier WAL
 ///    format (0.5.x, 0.6.0-beta.1) is restored as that format, which the
 ///    open replays once and retires.
+/// 4. Syncs the image and WAL, publishes the sidecar before the image, and
+///    syncs their parent. On error, removes the artifacts this attempt owns.
 ///
 /// # Errors
 ///
@@ -863,17 +865,7 @@ pub(super) fn do_restore_to_epoch(
     output_path: &Path,
     keys: &DatabaseKeys,
 ) -> Result<()> {
-    // Restore must target a fresh path: the copy below overwrites
-    // `output_path` and the sidecar handling deletes `<output_path>.wal/`,
-    // which would destroy a live database and its unflushed WAL.
-    let sidecar_dir = format!("{}.wal", output_path.display());
-    if output_path.exists() || Path::new(&sidecar_dir).exists() {
-        return Err(Error::InvalidValue(format!(
-            "restore output path already exists: {} (restore must target a fresh path; \
-             move or remove the existing database and its {sidecar_dir} sidecar first)",
-            output_path.display(),
-        )));
-    }
+    ensure_restore_fresh(output_path)?;
 
     let manifest = read_manifest(backup_dir)?
         .ok_or_else(|| Error::Internal("no backup manifest found".to_string()))?;
@@ -908,185 +900,238 @@ pub(super) fn do_restore_to_epoch(
     let full_path = backup_dir.join(&full.filename);
     let ciphers = restore_ciphers(&full_path, keys, !incrementals.is_empty())?;
 
-    // Copy full backup to output path
-    std::fs::copy(&full_path, output_path)
-        .map_err(|e| Error::Internal(format!("failed to copy full backup to output: {e}")))?;
+    // Keep every intermediate artifact under one owned directory beside the
+    // destination, so publication stays on the same filesystem.
+    let mut output = RestoreOutput::new(output_path)?;
+    let image_path = output.staging.join("image.grafeo");
+    let result = (|| {
+        let mut image = std::fs::File::create_new(&image_path)?;
+        std::io::copy(&mut std::fs::File::open(&full_path)?, &mut image)
+            .map_err(|e| Error::Internal(format!("failed to copy full backup to output: {e}")))?;
 
-    if incrementals.is_empty() {
-        // Full backup already covers the target epoch
-        return sync_restored_output(output_path);
+        if !incrementals.is_empty() {
+            let mut segments = Vec::with_capacity(incrementals.len());
+            for incr in &incrementals {
+                let incr_data = std::fs::read(backup_dir.join(&incr.filename)).map_err(|e| {
+                    Error::Internal(format!(
+                        "failed to read incremental backup {}: {e}",
+                        incr.filename
+                    ))
+                })?;
+                let actual_crc = crc32fast::hash(&incr_data);
+                if actual_crc != incr.checksum {
+                    return Err(Error::Internal(format!(
+                        "incremental backup {} CRC mismatch: expected {:08x}, got {actual_crc:08x}",
+                        incr.filename, incr.checksum,
+                    )));
+                }
+                let version = backup_version(&incr_data)?;
+                segments.push((incr.filename.as_str(), version, incr_data));
+            }
+
+            match segments.iter().map(|(_, version, _)| *version).max() {
+                Some(FIRST_FORMAT_VERSION)
+                    if incrementals
+                        .iter()
+                        .any(|incremental| incremental.start_epoch <= full.end_epoch) =>
+                {
+                    Err(Error::Internal(format!(
+                        "the incremental backups after the full backup {} start before its epoch {} in \
+                         the WAL format before 0.6.0, which cannot replay from it",
+                        full.filename,
+                        full.end_epoch.as_u64()
+                    )))
+                }
+                Some(FIRST_FORMAT_VERSION) => {
+                    restore_first_format(&segments, target_epoch, &image_path, ciphers)
+                }
+                _ if segments
+                    .iter()
+                    .any(|(_, version, _)| *version == FIRST_FORMAT_VERSION) =>
+                {
+                    Err(Error::Internal(
+                        "the incremental backups after the full backup mix two WAL formats"
+                            .to_string(),
+                    ))
+                }
+                _ => restore_segments(&segments, target_epoch, &image_path, ciphers.segments),
+            }?;
+        }
+
+        grafeo_common::testing::crash::maybe_fail("restore:image_sync")?;
+        image.sync_all()?;
+        // Windows needs writable handles for sync and closed handles for rename.
+        // The copy owns this handle and never inherits the source's READONLY bit.
+        drop(image);
+        output.publish(&image_path)
+    })();
+    if let Err(error) = result {
+        return match output.cleanup() {
+            Ok(()) => Err(error),
+            Err(cleanup) => Err(Error::Internal(format!("{error}; {cleanup}"))),
+        };
     }
-
-    let mut segments = Vec::with_capacity(incrementals.len());
-    for incr in &incrementals {
-        let incr_path = backup_dir.join(&incr.filename);
-        let incr_data = std::fs::read(&incr_path).map_err(|e| {
-            Error::Internal(format!(
-                "failed to read incremental backup {}: {e}",
-                incr.filename
-            ))
-        })?;
-
-        // Validate checksum
-        let actual_crc = crc32fast::hash(&incr_data);
-        if actual_crc != incr.checksum {
-            return Err(Error::Internal(format!(
-                "incremental backup {} CRC mismatch: expected {:08x}, got {actual_crc:08x}",
-                incr.filename, incr.checksum,
-            )));
-        }
-        let version = backup_version(&incr_data)?;
-        segments.push((incr.filename.as_str(), version, incr_data));
-    }
-
-    match segments.iter().map(|(_, version, _)| *version).max() {
-        // That format's records replay by epoch, from the first: they would
-        // apply again what the image holds.
-        Some(FIRST_FORMAT_VERSION)
-            if incrementals
-                .iter()
-                .any(|incremental| incremental.start_epoch <= full.end_epoch) =>
-        {
-            Err(Error::Internal(format!(
-                "the incremental backups after the full backup {} start before its epoch {} in \
-                 the WAL format before 0.6.0, which cannot replay from it",
-                full.filename,
-                full.end_epoch.as_u64()
-            )))
-        }
-        Some(FIRST_FORMAT_VERSION) => {
-            restore_first_format(&segments, target_epoch, output_path, ciphers)
-        }
-        _ if segments
-            .iter()
-            .any(|(_, version, _)| *version == FIRST_FORMAT_VERSION) =>
-        {
-            Err(Error::Internal(
-                "the incremental backups after the full backup mix two WAL formats".to_string(),
-            ))
-        }
-        _ => restore_segments(&segments, target_epoch, output_path, ciphers.segments),
-    }?;
-    sync_restored_output(output_path)
+    Ok(())
 }
 
-/// Makes every returned restore artifact durable before acknowledging success.
-/// Staging files have already been removed and are not part of that result.
-fn sync_restored_output(output_path: &Path) -> Result<()> {
-    sync_restored_file(output_path, "restore:image_sync")?;
-    let sidecar = std::path::PathBuf::from(format!("{}.wal", output_path.display()));
-    match std::fs::read_dir(&sidecar) {
-        Ok(entries) => {
-            for entry in entries {
+fn restore_sidecar(path: &Path) -> std::path::PathBuf {
+    let mut sidecar = path.as_os_str().to_owned();
+    sidecar.push(".wal");
+    sidecar.into()
+}
+
+/// Refuse existing entries, including dangling symlinks. The destination must
+/// remain unused by other writers until restore finishes.
+fn ensure_restore_fresh(output: &Path) -> Result<()> {
+    let sidecar = restore_sidecar(output);
+    for path in [output, sidecar.as_path()] {
+        match std::fs::symlink_metadata(path) {
+            Ok(_) => {
+                return Err(Error::InvalidValue(format!(
+                    "restore output path already exists: {} (restore must target a fresh path; \
+                     move or remove the existing database and its {} sidecar first)",
+                    output.display(),
+                    sidecar.display(),
+                )));
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.into()),
+        }
+    }
+    Ok(())
+}
+
+/// Owns only this attempt's temporary directory and successfully published names.
+/// Ordinary failures clean them; an OS failure during cleanup reports the path.
+struct RestoreOutput {
+    staging: std::path::PathBuf,
+    image: std::path::PathBuf,
+    sidecar: std::path::PathBuf,
+    owns_staging: bool,
+    owns_image: bool,
+    owns_sidecar: bool,
+}
+
+impl RestoreOutput {
+    fn new(image: &Path) -> Result<Self> {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static NEXT: AtomicU64 = AtomicU64::new(0);
+        let parent = image
+            .parent()
+            .filter(|p| !p.as_os_str().is_empty())
+            .unwrap_or(Path::new("."));
+        for _ in 0..64 {
+            let staging = parent.join(format!(
+                ".grafeo-restore-{}-{}",
+                std::process::id(),
+                NEXT.fetch_add(1, Ordering::Relaxed)
+            ));
+            #[cfg(unix)]
+            let created = {
+                use std::os::unix::fs::DirBuilderExt;
+                std::fs::DirBuilder::new().mode(0o700).create(&staging)
+            };
+            #[cfg(not(unix))]
+            let created = std::fs::create_dir(&staging);
+            match created {
+                Ok(()) => {
+                    return Ok(Self {
+                        staging,
+                        image: image.to_path_buf(),
+                        sidecar: restore_sidecar(image),
+                        owns_staging: true,
+                        owns_image: false,
+                        owns_sidecar: false,
+                    });
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+                Err(error) => return Err(error.into()),
+            }
+        }
+        Err(Error::Internal(
+            "no unused restore staging directory".to_string(),
+        ))
+    }
+
+    fn publish(&mut self, image: &Path) -> Result<()> {
+        let sidecar = restore_sidecar(image);
+        let has_wal = sidecar.try_exists()?;
+        if has_wal {
+            for entry in std::fs::read_dir(&sidecar)? {
                 let entry = entry?;
                 if entry.file_type()?.is_file() {
-                    sync_restored_file(&entry.path(), "restore:wal_sync")?;
+                    let file = std::fs::OpenOptions::new().write(true).open(entry.path())?;
+                    grafeo_common::testing::crash::maybe_fail("restore:wal_sync")?;
+                    file.sync_all()?;
                 }
             }
-            sync_restored_directory(&sidecar, "restore:wal_directory_sync")?;
+            #[cfg(unix)]
+            {
+                grafeo_common::testing::crash::maybe_fail("restore:wal_directory_sync")?;
+                std::fs::File::open(&sidecar)?.sync_all()?;
+            }
         }
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-        Err(error) => return Err(error.into()),
+        ensure_restore_fresh(&self.image)?;
+        if has_wal {
+            grafeo_common::testing::crash::maybe_fail("restore:sidecar_rename")?;
+            std::fs::rename(&sidecar, &self.sidecar)?;
+            self.owns_sidecar = true;
+            sync_restore_parent(&self.sidecar)?;
+        }
+        grafeo_common::testing::crash::maybe_fail("restore:image_rename")?;
+        std::fs::rename(image, &self.image)?;
+        self.owns_image = true;
+        sync_restore_parent(&self.image)?;
+        std::fs::remove_dir_all(&self.staging)?;
+        self.owns_staging = false;
+        // The caller owns the complete result after all publication barriers.
+        self.owns_image = false;
+        self.owns_sidecar = false;
+        Ok(())
     }
-    // Sync existing ancestors too: an earlier failed attempt may have created
-    // them without publishing their names. Retain lexical prefixes so symlinks
-    // and `..` keep their normal path resolution.
-    if let Some(parent) = output_path.parent() {
-        for prefix in parent.ancestors() {
-            let prefix = if prefix.as_os_str().is_empty() {
-                Path::new(".")
+
+    fn cleanup(&mut self) -> Result<()> {
+        let mut errors = Vec::new();
+        for (path, directory, owned) in [
+            (&self.image, false, &mut self.owns_image),
+            (&self.sidecar, true, &mut self.owns_sidecar),
+            (&self.staging, true, &mut self.owns_staging),
+        ] {
+            if !*owned {
+                continue;
+            }
+            let result = if directory {
+                std::fs::remove_dir_all(path)
             } else {
-                prefix
+                std::fs::remove_file(path)
             };
-            sync_restored_directory(prefix, "restore:output_directory_sync")?;
-            if prefix == Path::new(".") {
-                break;
+            match result {
+                Ok(()) => *owned = false,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => *owned = false,
+                Err(error) => errors.push(format!(
+                    "failed to remove restore output {}: {error}",
+                    path.display()
+                )),
             }
         }
-    }
-    Ok(())
-}
-
-fn sync_restored_file(path: &Path, sync_point: &str) -> Result<()> {
-    // Unix permits syncing a readable descriptor, preserving copied readonly
-    // permissions. Windows FlushFileBuffers requires a writable handle.
-    #[cfg(not(windows))]
-    let file = std::fs::File::open(path)?;
-    #[cfg(windows)]
-    let file = open_restored_file_for_sync(path)?;
-    grafeo_common::testing::crash::maybe_fail(sync_point)?;
-    file.sync_all().map_err(|error| {
-        Error::Internal(format!(
-            "failed to sync restored file {}: {error}",
-            path.display()
-        ))
-    })
-}
-
-/// Keeps native copying (including metadata streams) and the copied READONLY
-/// attribute. Only that attribute is briefly cleared to acquire the handle;
-/// permissions are restored before the file can be synced or success returned.
-#[cfg(windows)]
-fn open_restored_file_for_sync(path: &Path) -> Result<std::fs::File> {
-    let permissions = std::fs::metadata(path)?.permissions();
-    if !permissions.readonly() {
-        return Ok(std::fs::OpenOptions::new().write(true).open(path)?);
-    }
-
-    struct RestorePermissions<'a> {
-        path: &'a Path,
-        permissions: Option<std::fs::Permissions>,
-    }
-
-    impl Drop for RestorePermissions<'_> {
-        fn drop(&mut self) {
-            if let Some(permissions) = self.permissions.take() {
-                // A failed open/restore never acknowledges success. Retry the
-                // original attribute on failure or unwinding as best effort.
-                let _ = std::fs::set_permissions(self.path, permissions);
-            }
+        if errors.is_empty() {
+            Ok(())
+        } else {
+            Err(Error::Internal(errors.join("; ")))
         }
     }
-
-    let mut restore = RestorePermissions {
-        path,
-        permissions: Some(permissions.clone()),
-    };
-    let mut writable = permissions.clone();
-    writable.set_readonly(false);
-    std::fs::set_permissions(path, writable)?;
-    let opened =
-        grafeo_common::testing::crash::maybe_fail("restore:readonly_file_open").and_then(|()| {
-            std::fs::OpenOptions::new()
-                .write(true)
-                .open(path)
-                .map_err(Error::from)
-        });
-    grafeo_common::testing::crash::maybe_fail("restore:readonly_permissions_restore")?;
-    match &opened {
-        Ok(file) => file.set_permissions(permissions),
-        Err(_) => std::fs::set_permissions(path, permissions),
-    }
-    .map_err(|error| {
-        Error::Internal(format!(
-            "failed to restore copied permissions for {}: {error}",
-            path.display()
-        ))
-    })?;
-    restore.permissions = None;
-    opened
 }
 
-/// Other platforms retain the existing directory-sync floor: no directory fsync.
-fn sync_restored_directory(directory: &Path, sync_point: &str) -> Result<()> {
+impl Drop for RestoreOutput {
+    fn drop(&mut self) {
+        let _ = self.cleanup();
+    }
+}
+
+fn sync_restore_parent(path: &Path) -> Result<()> {
     #[cfg(unix)]
-    {
-        grafeo_common::testing::crash::maybe_fail(sync_point)?;
-        std::fs::File::open(directory)?.sync_all()?;
-    }
-    #[cfg(not(unix))]
-    let _ = (directory, sync_point);
-    Ok(())
+    grafeo_common::testing::crash::maybe_fail("restore:output_directory_sync")?;
+    super::flush::sync_parent_dir(path)
 }
 
 /// Writes the WAL groups of the version 2 incremental backups `segments`, up
@@ -1118,7 +1163,7 @@ fn restore_segments(
         }
     }
 
-    let sidecar = std::path::PathBuf::from(format!("{}.wal", output_path.display()));
+    let sidecar = restore_sidecar(output_path);
     copy_groups_until(
         &staging,
         &sidecar,
@@ -1301,8 +1346,8 @@ fn restore_first_format(
         .map_err(|e| Error::Internal(format!("failed to remove restore WAL directory: {e}")))?;
 
     // Move the trimmed WAL to the sidecar location
-    let sidecar_dir = format!("{}.wal", output_path.display());
-    let sidecar_path = std::path::Path::new(&sidecar_dir);
+    let sidecar_dir = restore_sidecar(output_path);
+    let sidecar_path = sidecar_dir.as_path();
     if sidecar_path.exists() {
         std::fs::remove_dir_all(sidecar_path)
             .map_err(|e| Error::Internal(format!("failed to remove existing sidecar WAL: {e}")))?;

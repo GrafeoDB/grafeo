@@ -900,7 +900,7 @@ pub(super) fn do_restore_to_epoch(
 
     if incrementals.is_empty() {
         // Full backup already covers the target epoch
-        return Ok(());
+        return sync_restored_output(output_path);
     }
 
     let mut segments = Vec::with_capacity(incrementals.len());
@@ -952,7 +952,127 @@ pub(super) fn do_restore_to_epoch(
             ))
         }
         _ => restore_segments(&segments, target_epoch, output_path, ciphers.segments),
+    }?;
+    sync_restored_output(output_path)
+}
+
+/// Makes every returned restore artifact durable before acknowledging success.
+/// Staging files have already been removed and are not part of that result.
+fn sync_restored_output(output_path: &Path) -> Result<()> {
+    sync_restored_file(output_path, "restore:image_sync")?;
+    let sidecar = std::path::PathBuf::from(format!("{}.wal", output_path.display()));
+    match std::fs::read_dir(&sidecar) {
+        Ok(entries) => {
+            for entry in entries {
+                let entry = entry?;
+                if entry.file_type()?.is_file() {
+                    sync_restored_file(&entry.path(), "restore:wal_sync")?;
+                }
+            }
+            sync_restored_directory(&sidecar, "restore:wal_directory_sync")?;
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error.into()),
     }
+    // Sync existing ancestors too: an earlier failed attempt may have created
+    // them without publishing their names. Retain lexical prefixes so symlinks
+    // and `..` keep their normal path resolution.
+    if let Some(parent) = output_path.parent() {
+        for prefix in parent.ancestors() {
+            let prefix = if prefix.as_os_str().is_empty() {
+                Path::new(".")
+            } else {
+                prefix
+            };
+            sync_restored_directory(prefix, "restore:output_directory_sync")?;
+            if prefix == Path::new(".") {
+                break;
+            }
+        }
+    }
+    Ok(())
+}
+
+fn sync_restored_file(path: &Path, sync_point: &str) -> Result<()> {
+    // Unix permits syncing a readable descriptor, preserving copied readonly
+    // permissions. Windows FlushFileBuffers requires a writable handle.
+    #[cfg(not(windows))]
+    let file = std::fs::File::open(path)?;
+    #[cfg(windows)]
+    let file = open_restored_file_for_sync(path)?;
+    grafeo_common::testing::crash::maybe_fail(sync_point)?;
+    file.sync_all().map_err(|error| {
+        Error::Internal(format!(
+            "failed to sync restored file {}: {error}",
+            path.display()
+        ))
+    })
+}
+
+/// Keeps native copying (including metadata streams) and the copied READONLY
+/// attribute. Only that attribute is briefly cleared to acquire the handle;
+/// permissions are restored before the file can be synced or success returned.
+#[cfg(windows)]
+fn open_restored_file_for_sync(path: &Path) -> Result<std::fs::File> {
+    let permissions = std::fs::metadata(path)?.permissions();
+    if !permissions.readonly() {
+        return Ok(std::fs::OpenOptions::new().write(true).open(path)?);
+    }
+
+    struct RestorePermissions<'a> {
+        path: &'a Path,
+        permissions: Option<std::fs::Permissions>,
+    }
+
+    impl Drop for RestorePermissions<'_> {
+        fn drop(&mut self) {
+            if let Some(permissions) = self.permissions.take() {
+                // A failed open/restore never acknowledges success. Retry the
+                // original attribute on failure or unwinding as best effort.
+                let _ = std::fs::set_permissions(self.path, permissions);
+            }
+        }
+    }
+
+    let mut restore = RestorePermissions {
+        path,
+        permissions: Some(permissions.clone()),
+    };
+    let mut writable = permissions.clone();
+    writable.set_readonly(false);
+    std::fs::set_permissions(path, writable)?;
+    let opened =
+        grafeo_common::testing::crash::maybe_fail("restore:readonly_file_open").and_then(|()| {
+            std::fs::OpenOptions::new()
+                .write(true)
+                .open(path)
+                .map_err(Error::from)
+        });
+    grafeo_common::testing::crash::maybe_fail("restore:readonly_permissions_restore")?;
+    match &opened {
+        Ok(file) => file.set_permissions(permissions),
+        Err(_) => std::fs::set_permissions(path, permissions),
+    }
+    .map_err(|error| {
+        Error::Internal(format!(
+            "failed to restore copied permissions for {}: {error}",
+            path.display()
+        ))
+    })?;
+    restore.permissions = None;
+    opened
+}
+
+/// Other platforms retain the existing directory-sync floor: no directory fsync.
+fn sync_restored_directory(directory: &Path, sync_point: &str) -> Result<()> {
+    #[cfg(unix)]
+    {
+        grafeo_common::testing::crash::maybe_fail(sync_point)?;
+        std::fs::File::open(directory)?.sync_all()?;
+    }
+    #[cfg(not(unix))]
+    let _ = (directory, sync_point);
+    Ok(())
 }
 
 /// Writes the WAL groups of the version 2 incremental backups `segments`, up

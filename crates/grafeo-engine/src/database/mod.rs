@@ -2194,7 +2194,7 @@ impl GrafeoDB {
             transaction_manager: Arc::clone(&self.transaction_manager),
             query_cache: Arc::clone(&self.query_cache),
             catalog: Arc::clone(&self.catalog),
-            #[cfg(query_language)]
+            #[cfg(lpg_language)]
             factorized_execution: self.config.factorized_execution(),
             #[cfg(query_language)]
             shuffle_unordered: self.config.shuffle_unordered(),
@@ -2210,7 +2210,7 @@ impl GrafeoDB {
             gc_interval: self.config.gc_interval(),
             read_only: self.read_only || force_read_only,
             identity: identity.clone(),
-            #[cfg(query_language)]
+            #[cfg(lpg_language)]
             projections: Arc::clone(&self.projections),
         };
 
@@ -3396,6 +3396,8 @@ impl GrafeoDB {
             ))
         })?;
 
+        // A refused backup leaves the destination as it was.
+        self.transaction_manager.check_no_incomplete_commit()?;
         let _destination = backup::lock_backup_directory(backup_dir, true)?;
         let sources = self.checkpoint_sources()?;
 

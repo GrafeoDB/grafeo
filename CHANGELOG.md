@@ -6,7 +6,7 @@ All notable changes to Grafeo, for future reference (and enjoyment).
 
 ### Fixed
 
-- **Concurrent backups keep a complete chain** ([#667](https://github.com/GrafeoDB/grafeo/issues/667)): full and incremental backups on one database wait for each other before reading backup state; another database or process using the same backup directory receives a busy error.
+- **Concurrent backups no longer overwrite each other** ([#667](https://github.com/GrafeoDB/grafeo/issues/667)): backups of one database run one at a time, also to different directories, and a backup directory in use by another process gives a busy error.
 - **Backups and restores survive a crash** ([#667](https://github.com/GrafeoDB/grafeo/issues/667)): a backup is on disk before the database lets go of the log it covers, and a restore leaves either a complete database or nothing at the output path, so a failed restore can be retried to the same path.
 - **An incremental backup into the wrong directory is refused** ([#667](https://github.com/GrafeoDB/grafeo/issues/667)): after a full backup to one directory, an incremental backup to another one fails with an error naming it, instead of writing a chain with a gap that only the restore found, also when a schema statement or graph command came between the two.
 - **Decimal weights in graph algorithms** ([#678](https://github.com/GrafeoDB/grafeo/issues/678)): shortest paths, spanning trees and flow algorithms read a weight, capacity or cost written as a decimal (`{w: 0.25}`, a decimal since 0.6.0); they read it as 1.0 (a cost as 0.0), which gave wrong paths, trees and flows.
@@ -17,7 +17,7 @@ All notable changes to Grafeo, for future reference (and enjoyment).
 
 ### Contributors
 
-- Thanks to [temporaryfix](https://github.com/temporaryfix) for decimal weights in the graph algorithms ([#681](https://github.com/GrafeoDB/grafeo/pull/681)), the test of a failed RDF commit ([#683](https://github.com/GrafeoDB/grafeo/pull/683)), the refusal of an incremental backup with a gap ([#684](https://github.com/GrafeoDB/grafeo/pull/684)), crash-safe backups ([#685](https://github.com/GrafeoDB/grafeo/pull/685)) and restores ([#687](https://github.com/GrafeoDB/grafeo/pull/687)), and time-travel reads that never see a commit in progress ([#686](https://github.com/GrafeoDB/grafeo/pull/686)).
+- Thanks to [temporaryfix](https://github.com/temporaryfix) for decimal weights in the graph algorithms ([#681](https://github.com/GrafeoDB/grafeo/pull/681)), the test of a failed RDF commit ([#683](https://github.com/GrafeoDB/grafeo/pull/683)), the refusal of an incremental backup with a gap ([#684](https://github.com/GrafeoDB/grafeo/pull/684)), crash-safe backups ([#685](https://github.com/GrafeoDB/grafeo/pull/685)) and restores ([#687](https://github.com/GrafeoDB/grafeo/pull/687), [#689](https://github.com/GrafeoDB/grafeo/pull/689)), backups that run one at a time ([#690](https://github.com/GrafeoDB/grafeo/pull/690)), and time-travel reads that never see a commit in progress ([#686](https://github.com/GrafeoDB/grafeo/pull/686)).
 
 ## [0.6.0] - 2026-10-23
 

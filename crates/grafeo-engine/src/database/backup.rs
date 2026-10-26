@@ -433,31 +433,15 @@ pub(super) fn lock_backup_directory(backup_dir: &Path, create: bool) -> Result<s
     if create {
         prepare_backup_directory(backup_dir)?;
     }
-    let file = std::fs::OpenOptions::new()
-        .read(true)
-        .write(true)
-        .create(true)
-        .truncate(false)
-        .open(backup_dir.join("backup.lock"))
-        .map_err(|error| {
-            if !create && error.kind() == std::io::ErrorKind::NotFound {
-                Error::Internal("no backup manifest found; run a full backup first".to_string())
-            } else {
-                Error::Io(error)
-            }
-        })?;
-    grafeo_common::testing::child_process::take_lock(
-        || file.try_lock(),
-        |error| matches!(error, std::fs::TryLockError::WouldBlock),
-    )
+    grafeo_storage::lock::try_lock_file(&backup_dir.join("backup.lock"), || {
+        format!("backup directory is busy: {}", backup_dir.display())
+    })
     .map_err(|error| match error {
-        std::fs::TryLockError::WouldBlock => Error::Internal(format!(
-            "backup directory is busy: {}",
-            backup_dir.display()
-        )),
-        std::fs::TryLockError::Error(error) => Error::Io(error),
-    })?;
-    Ok(file)
+        Error::Io(error) if !create && error.kind() == std::io::ErrorKind::NotFound => {
+            Error::Internal("no backup manifest found; run a full backup first".to_string())
+        }
+        other => other,
+    })
 }
 
 /// The manifest and cursor as 0.5.x wrote them: bincode 2 with the standard

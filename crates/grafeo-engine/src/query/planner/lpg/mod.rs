@@ -604,7 +604,7 @@ impl Planner {
     /// [`reachability`] allows it (the default); off, every walk is
     /// enumerated, which tests compare with.
     #[must_use]
-    #[cfg(query_language)]
+    #[cfg(lpg_language)]
     pub(crate) fn with_reachability(mut self, enabled: bool) -> Self {
         self.reachability_expands = std::cell::RefCell::new(enabled.then(Vec::new));
         self

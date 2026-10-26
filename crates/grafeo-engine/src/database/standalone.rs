@@ -258,7 +258,7 @@ fn built_in<'s, S: RootStore>(store: Option<&'s Arc<S>>, op: &StandaloneOp) -> R
 ///
 /// As [`commit`]; a copied entity that does not apply poisons the database
 /// (the graph is new and empty, so it cannot conflict).
-#[cfg(query_language)]
+#[cfg(feature = "gql")]
 pub(crate) fn commit_copy<S: RootStore>(
     change: StandaloneChange,
     _held: &CommitsHeld<'_>,
@@ -304,7 +304,7 @@ pub(crate) fn commit_copy<S: RootStore>(
 ///
 /// As [`log`].
 #[cfg(feature = "wal")]
-#[cfg(query_language)]
+#[cfg(feature = "gql")]
 fn log_copy<S: RootStore>(
     wal: &grafeo_storage::wal::Wal,
     change: &StandaloneChange,

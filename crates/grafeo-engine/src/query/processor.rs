@@ -683,6 +683,8 @@ impl QueryProcessor {
                 // Default namespace for GraphQL-RDF queries
                 graphql_rdf::translate(query, "http://example.org/")
             }
+            // Only a build with a property graph language has other ones.
+            #[cfg(lpg_language)]
             _ => Err(Error::Internal(format!(
                 "Language {:?} is not an RDF language",
                 language

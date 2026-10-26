@@ -76,13 +76,13 @@ pub(crate) fn graph_storage_key(schema: Option<&str>, graph: Option<&str>) -> Op
 /// drops, when it goes back to the one before (a statement run inside
 /// another, as a procedure body is, focuses on its own graph and then leaves
 /// the outer one's).
-#[cfg(query_language)]
+#[cfg(feature = "gql")]
 struct StatementFocus<'a> {
     session: &'a Session,
     previous: Option<String>,
 }
 
-#[cfg(query_language)]
+#[cfg(feature = "gql")]
 impl Drop for StatementFocus<'_> {
     fn drop(&mut self) {
         *self.session.statement_graph.lock() = self.previous.take();
@@ -103,7 +103,7 @@ enum AfterSchemaChange {
 /// Handles string literals (single- or double-quoted), integers, floats,
 /// decimals (spelled with the suffix `M`), booleans (`true`/`false`), and
 /// `NULL`.
-#[cfg(query_language)]
+#[cfg(feature = "gql")]
 fn parse_default_literal(text: &str) -> Value {
     if text.eq_ignore_ascii_case("null") {
         return Value::Null;
@@ -191,6 +191,7 @@ fn typed_properties(
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct PlanOptions {
     /// Whether to use factorized execution for multi-hop queries.
+    #[cfg(lpg_language)]
     pub factorized_execution: bool,
     /// Whether queries without `ORDER BY` return their rows in random order
     /// (the `shuffle_unordered` test option).
@@ -198,6 +199,7 @@ pub(crate) struct PlanOptions {
     /// Whether a variable-length expand whose rows only reach a consumer that
     /// ignores duplicate rows runs as a reachability search. Always on; tests
     /// turn it off to compare with the plan that enumerates every walk.
+    #[cfg(lpg_language)]
     pub reachability: bool,
     /// The bytes one path search may hold (`Config::path_search_budget`).
     pub path_search_budget: usize,
@@ -211,7 +213,7 @@ pub(crate) struct SessionConfig {
     pub transaction_manager: Arc<TransactionManager>,
     pub query_cache: Arc<QueryCache>,
     pub catalog: Arc<Catalog>,
-    #[cfg(query_language)]
+    #[cfg(lpg_language)]
     pub factorized_execution: bool,
     #[cfg(query_language)]
     pub shuffle_unordered: bool,
@@ -232,7 +234,7 @@ pub(crate) struct SessionConfig {
     /// The identity bound to this session (for permission checks).
     pub identity: crate::auth::Identity,
     /// Named graph projections shared with the database.
-    #[cfg(query_language)]
+    #[cfg(lpg_language)]
     pub projections: Arc<
         parking_lot::RwLock<
             std::collections::HashMap<String, Arc<grafeo_core::graph::GraphProjection>>,
@@ -347,7 +349,7 @@ pub struct Session {
     #[cfg(feature = "metrics")]
     tx_start_time: parking_lot::Mutex<Option<Instant>>,
     /// Named graph projections shared with the database.
-    #[cfg(query_language)]
+    #[cfg(lpg_language)]
     projections: Arc<
         parking_lot::RwLock<
             std::collections::HashMap<String, Arc<grafeo_core::graph::GraphProjection>>,
@@ -385,8 +387,10 @@ impl Session {
             auto_commit: true,
             #[cfg(query_language)]
             plan_options: PlanOptions {
+                #[cfg(lpg_language)]
                 factorized_execution: cfg.factorized_execution,
                 shuffle_unordered: cfg.shuffle_unordered,
+                #[cfg(lpg_language)]
                 reachability: true,
                 path_search_budget: cfg.path_search_budget,
             },
@@ -420,7 +424,7 @@ impl Session {
             metrics: None,
             #[cfg(feature = "metrics")]
             tx_start_time: parking_lot::Mutex::new(None),
-            #[cfg(query_language)]
+            #[cfg(lpg_language)]
             projections: cfg.projections,
         }
     }
@@ -443,7 +447,7 @@ impl Session {
     /// # Errors
     ///
     /// On a session on a backend of one's own.
-    #[cfg(query_language)]
+    #[cfg(feature = "gql")]
     fn require_root_store(&self, what: &str) -> Result<Arc<RowGroupStore>> {
         self.root_store().ok_or_else(|| {
             grafeo_common::utils::error::Error::from(
@@ -559,8 +563,10 @@ impl Session {
             auto_commit: true,
             #[cfg(query_language)]
             plan_options: PlanOptions {
+                #[cfg(lpg_language)]
                 factorized_execution: cfg.factorized_execution,
                 shuffle_unordered: cfg.shuffle_unordered,
+                #[cfg(lpg_language)]
                 reachability: true,
                 path_search_budget: cfg.path_search_budget,
             },
@@ -594,7 +600,7 @@ impl Session {
             metrics: None,
             #[cfg(feature = "metrics")]
             tx_start_time: parking_lot::Mutex::new(None),
-            #[cfg(query_language)]
+            #[cfg(lpg_language)]
             projections: cfg.projections,
         })
     }
@@ -650,7 +656,7 @@ impl Session {
     ///
     /// Per ISO/IEC 39075 Section 17.2, graphs resolve relative to the current schema.
     /// Uses `/` as separator since it is invalid in GQL identifiers.
-    #[cfg(query_language)]
+    #[cfg(any(feature = "gql", feature = "sql-pgq"))]
     fn effective_graph_key(&self, graph_name: &str) -> String {
         let schema = self.current_schema.lock().clone();
         match schema {
@@ -662,7 +668,7 @@ impl Session {
     /// Computes the effective storage key for a type, accounting for schema context.
     ///
     /// Mirrors `effective_graph_key()`: types resolve relative to the current schema.
-    #[cfg(query_language)]
+    #[cfg(any(feature = "gql", feature = "sql-pgq"))]
     fn effective_type_key(&self, type_name: &str) -> String {
         let schema = self.current_schema.lock().clone();
         match schema {
@@ -723,7 +729,7 @@ impl Session {
     ///
     /// An invalid reference when no graph has that name, and a permission
     /// error when the user may not read it.
-    #[cfg(query_language)]
+    #[cfg(feature = "gql")]
     fn focus_statement(&self, graph: Option<&str>) -> Result<Option<StatementFocus<'_>>> {
         use grafeo_common::utils::error::{Error, QueryError, QueryErrorKind};
 
@@ -783,7 +789,7 @@ impl Session {
     /// Returns the writable store for the active graph, if available.
     ///
     /// Returns `None` for read-only databases.
-    #[cfg(query_language)]
+    #[cfg(lpg_language)]
     fn active_write_store(&self) -> Option<Arc<dyn GraphBackend>> {
         self.write_store_for_key(self.active_graph_storage_key().as_deref())
     }
@@ -888,7 +894,7 @@ impl Session {
     /// How this session compares a zoned datetime or time with a local one:
     /// openCypher keeps the types apart, GQL and SQL/PGQ read the local one
     /// at the session time zone (UTC without one).
-    #[cfg(query_language)]
+    #[cfg(lpg_language)]
     fn temporal_comparison(&self, open_cypher: bool) -> grafeo_common::types::TemporalComparison {
         use grafeo_common::types::TemporalComparison;
         if open_cypher {
@@ -997,7 +1003,7 @@ impl Session {
     }
 
     /// Checks that the session's graph model supports LPG operations.
-    #[cfg(query_language)]
+    #[cfg(feature = "gql")]
     fn require_lpg(&self, language: &str) -> Result<()> {
         if self.graph_model == GraphModel::Rdf {
             return Err(grafeo_common::utils::error::Error::from(
@@ -2736,7 +2742,7 @@ impl Session {
     }
 
     /// Returns a table of all indexes from the catalog.
-    #[cfg(query_language)]
+    #[cfg(feature = "gql")]
     fn execute_show_indexes(&self) -> Result<QueryResult> {
         let indexes = self.catalog.all_indexes();
         let columns = vec![
@@ -2773,7 +2779,7 @@ impl Session {
     }
 
     /// Returns a table of all constraints (currently metadata-only).
-    #[cfg(query_language)]
+    #[cfg(feature = "gql")]
     fn execute_show_constraints(&self) -> Result<QueryResult> {
         let rows = self
             .catalog
@@ -2802,7 +2808,7 @@ impl Session {
     }
 
     /// Returns a table of all registered node types in the current schema.
-    #[cfg(query_language)]
+    #[cfg(feature = "gql")]
     fn execute_show_node_types(&self) -> Result<QueryResult> {
         let columns = vec![
             "name".to_string(),
@@ -2858,7 +2864,7 @@ impl Session {
     }
 
     /// Returns a table of all registered edge types in the current schema.
-    #[cfg(query_language)]
+    #[cfg(feature = "gql")]
     fn execute_show_edge_types(&self) -> Result<QueryResult> {
         let columns = vec![
             "name".to_string(),
@@ -2913,7 +2919,7 @@ impl Session {
     }
 
     /// Returns a table of all registered graph types in the current schema.
-    #[cfg(query_language)]
+    #[cfg(feature = "gql")]
     fn execute_show_graph_types(&self) -> Result<QueryResult> {
         let columns = vec![
             "name".to_string(),
@@ -2971,7 +2977,7 @@ impl Session {
     /// When a session schema is set, only graphs belonging to that schema are
     /// shown (their compound prefix is stripped). When no schema is set, graphs
     /// without a schema prefix are shown (the default schema).
-    #[cfg(query_language)]
+    #[cfg(feature = "gql")]
     fn execute_show_graphs(&self) -> Result<QueryResult> {
         let schema = self.current_schema.lock().clone();
         let all_names = self
@@ -3002,7 +3008,7 @@ impl Session {
     }
 
     /// Returns the list of all schema namespaces.
-    #[cfg(query_language)]
+    #[cfg(feature = "gql")]
     fn execute_show_schemas(&self) -> Result<QueryResult> {
         let mut names = self.catalog.schema_names();
         names.sort();
@@ -3016,7 +3022,7 @@ impl Session {
     }
 
     /// Returns detailed info for a specific graph type.
-    #[cfg(query_language)]
+    #[cfg(feature = "gql")]
     fn execute_show_graph_type(&self, name: &str) -> Result<QueryResult> {
         use grafeo_common::utils::error::{Error, QueryError, QueryErrorKind};
 
@@ -3048,7 +3054,7 @@ impl Session {
     }
 
     /// Returns the graph type bound to the current graph.
-    #[cfg(query_language)]
+    #[cfg(feature = "gql")]
     fn execute_show_current_graph_type(&self) -> Result<QueryResult> {
         let graph_name = self
             .current_graph()
@@ -3237,45 +3243,8 @@ impl Session {
         // Resolve the active store for query execution
         let active = self.active_store();
 
-        // EXPLAIN: annotate pushdown hints and return the plan tree
-        if optimized_plan.explain {
-            use crate::query::processor::{annotate_pushdown_hints, explain_result};
-            self.check_graph_access(self.plan_writes(&optimized_plan.root))?;
-            let mut plan = optimized_plan;
-            annotate_pushdown_hints(&mut plan.root, active.as_ref());
-            return Ok(explain_result(&plan));
-        }
-
-        // PROFILE: execute with per-operator instrumentation
-        if optimized_plan.profile {
-            let has_mutations = self.plan_writes(&optimized_plan.root);
-            return self.with_auto_commit(has_mutations, || {
-                let (viewing_epoch, transaction_id) = self.get_transaction_context();
-                let planner = self.create_planner_for_store(
-                    Arc::clone(&active),
-                    viewing_epoch,
-                    transaction_id,
-                    false,
-                )?;
-                let (mut physical_plan, entries) = planner.plan_profiled(&optimized_plan)?;
-
-                let executor = self
-                    .make_executor(physical_plan.columns.clone())
-                    .with_write_counter(planner.write_counter())
-                    .with_read_counter(planner.read_counter());
-                let _result = executor.execute(physical_plan.operator.as_mut())?;
-
-                let total_time_ms = start_time.elapsed().as_secs_f64() * 1000.0;
-
-                let profile_tree = crate::query::profile::build_profile_tree(
-                    &optimized_plan.root,
-                    &mut entries.into_iter(),
-                );
-                Ok(crate::query::profile::profile_result(
-                    &profile_tree,
-                    total_time_ms,
-                ))
-            });
+        if let Some(answer) = self.explain_or_profile(&optimized_plan, &active, false, start_time) {
+            return answer;
         }
 
         let has_mutations = self.plan_writes(&optimized_plan.root);
@@ -3730,45 +3699,8 @@ impl Session {
         // Resolve the active store for query execution
         let active = self.active_store();
 
-        // EXPLAIN
-        if optimized_plan.explain {
-            use crate::query::processor::{annotate_pushdown_hints, explain_result};
-            self.check_graph_access(self.plan_writes(&optimized_plan.root))?;
-            let mut plan = optimized_plan;
-            annotate_pushdown_hints(&mut plan.root, active.as_ref());
-            return Ok(explain_result(&plan));
-        }
-
-        // PROFILE
-        if optimized_plan.profile {
-            let has_mutations = self.plan_writes(&optimized_plan.root);
-            return self.with_auto_commit(has_mutations, || {
-                let (viewing_epoch, transaction_id) = self.get_transaction_context();
-                let planner = self.create_planner_for_store(
-                    Arc::clone(&active),
-                    viewing_epoch,
-                    transaction_id,
-                    true,
-                )?;
-                let (mut physical_plan, entries) = planner.plan_profiled(&optimized_plan)?;
-
-                let executor = self
-                    .make_executor(physical_plan.columns.clone())
-                    .with_write_counter(planner.write_counter())
-                    .with_read_counter(planner.read_counter());
-                let _result = executor.execute(physical_plan.operator.as_mut())?;
-
-                let total_time_ms = start_time.elapsed().as_secs_f64() * 1000.0;
-
-                let profile_tree = crate::query::profile::build_profile_tree(
-                    &optimized_plan.root,
-                    &mut entries.into_iter(),
-                );
-                Ok(crate::query::profile::profile_result(
-                    &profile_tree,
-                    total_time_ms,
-                ))
-            });
+        if let Some(answer) = self.explain_or_profile(&optimized_plan, &active, true, start_time) {
+            return answer;
         }
 
         let has_mutations = self.plan_writes(&optimized_plan.root);
@@ -3839,7 +3771,6 @@ impl Session {
             translators::gremlin,
         };
 
-        #[cfg(feature = "metrics")]
         let start_time = Instant::now();
 
         // Parse and translate the query to a logical plan
@@ -3860,6 +3791,9 @@ impl Session {
         let has_mutations = self.plan_writes(&optimized_plan.root);
         if has_mutations {
             self.require_permission(crate::auth::StatementKind::Write)?;
+        }
+        if let Some(answer) = self.explain_or_profile(&optimized_plan, &active, false, start_time) {
+            return answer;
         }
 
         let result = self.with_auto_commit(has_mutations, || {
@@ -3918,7 +3852,6 @@ impl Session {
             translators::gremlin,
         };
 
-        #[cfg(feature = "metrics")]
         let start_time = Instant::now();
 
         // Parse and translate the query to a logical plan
@@ -3939,6 +3872,9 @@ impl Session {
         let has_mutations = self.plan_writes(&optimized_plan.root);
         if has_mutations {
             self.require_permission(crate::auth::StatementKind::Write)?;
+        }
+        if let Some(answer) = self.explain_or_profile(&optimized_plan, &active, false, start_time) {
+            return answer;
         }
 
         let result = self.with_auto_commit(has_mutations, || {
@@ -5592,11 +5528,64 @@ impl Session {
         self.plan_options.reachability = enabled;
     }
 
+    /// What an `EXPLAIN` (the plan, with its pushdown hints) or a `PROFILE`
+    /// (a run of `plan` that returns its operator tree) of `plan` answers, or
+    /// `None` for a plan that runs as usual. Every language that takes the
+    /// prefixes answers them here. `open_cypher` is the planner's mode (see
+    /// [`create_planner_for_store`](Self::create_planner_for_store)), and
+    /// `started` when the statement began, for the profile's total time.
+    #[cfg(any(feature = "gql", feature = "gremlin"))]
+    fn explain_or_profile(
+        &self,
+        plan: &crate::query::plan::LogicalPlan,
+        active: &Arc<dyn GraphStore>,
+        open_cypher: bool,
+        started: Instant,
+    ) -> Option<Result<QueryResult>> {
+        if plan.explain {
+            use crate::query::processor::{annotate_pushdown_hints, explain_result};
+            return Some(
+                self.check_graph_access(self.plan_writes(&plan.root))
+                    .map(|()| {
+                        let mut plan = plan.clone();
+                        annotate_pushdown_hints(&mut plan.root, active.as_ref());
+                        explain_result(&plan)
+                    }),
+            );
+        }
+        if !plan.profile {
+            return None;
+        }
+        let has_mutations = self.plan_writes(&plan.root);
+        Some(self.with_auto_commit(has_mutations, || {
+            let (viewing_epoch, transaction_id) = self.get_transaction_context();
+            let planner = self.create_planner_for_store(
+                Arc::clone(active),
+                viewing_epoch,
+                transaction_id,
+                open_cypher,
+            )?;
+            let (mut physical_plan, entries) = planner.plan_profiled(plan)?;
+            let executor = self
+                .make_executor(physical_plan.columns.clone())
+                .with_write_counter(planner.write_counter())
+                .with_read_counter(planner.read_counter());
+            let _result = executor.execute(physical_plan.operator.as_mut())?;
+            let total_time_ms = started.elapsed().as_secs_f64() * 1000.0;
+            let profile_tree =
+                crate::query::profile::build_profile_tree(&plan.root, &mut entries.into_iter());
+            Ok(crate::query::profile::profile_result(
+                &profile_tree,
+                total_time_ms,
+            ))
+        }))
+    }
+
     /// Creates a planner with transaction context and constraint validator.
     ///
     /// The `store` parameter is the graph store to plan against (use
     /// `self.active_store()` for graph-aware execution).
-    #[cfg(query_language)]
+    #[cfg(lpg_language)]
     fn create_planner_for_store(
         &self,
         store: Arc<dyn GraphStore>,
@@ -5620,7 +5609,7 @@ impl Session {
     ///
     /// Fails when the open transaction wrote the active graph through
     /// another store: the graph was dropped and created again since.
-    #[cfg(query_language)]
+    #[cfg(lpg_language)]
     fn create_planner_for_store_with_read_only(
         &self,
         store: Arc<dyn GraphStore>,
@@ -5780,7 +5769,7 @@ impl Session {
     }
 
     /// Builds a `Value::Map` for the `info()` introspection function.
-    #[cfg(query_language)]
+    #[cfg(lpg_language)]
     fn build_info_value(store: &dyn GraphStore, view: ReadView) -> Result<Value> {
         use grafeo_common::types::PropertyKey;
         use std::collections::BTreeMap;
@@ -5803,7 +5792,7 @@ impl Session {
     }
 
     /// Builds a `Value::Map` for the `schema()` introspection function.
-    #[cfg(query_language)]
+    #[cfg(lpg_language)]
     fn build_schema_value(store: &dyn GraphStore) -> Result<Value> {
         use grafeo_common::types::PropertyKey;
         use std::collections::BTreeMap;

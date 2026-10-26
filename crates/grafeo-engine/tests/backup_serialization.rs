@@ -379,6 +379,18 @@ fn files_under(directory: &Path) -> Files {
             for entry in std::fs::read_dir(path).unwrap() {
                 pending.push(entry.unwrap().path());
             }
+        } else if path.file_name().is_some_and(|name| name == "backup.lock") {
+            // Always empty, and another process's lock on it keeps it from
+            // being read on Windows: its size says what its bytes would.
+            assert_eq!(
+                std::fs::metadata(&path).unwrap().len(),
+                0,
+                "backup.lock is empty"
+            );
+            files.insert(
+                path.strip_prefix(directory).unwrap().to_path_buf(),
+                Vec::new(),
+            );
         } else {
             files.insert(
                 path.strip_prefix(directory).unwrap().to_path_buf(),

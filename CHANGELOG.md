@@ -6,6 +6,7 @@ All notable changes to Grafeo, for future reference (and enjoyment).
 
 ### Fixed
 
+- **Concurrent backups keep a complete chain** ([#667](https://github.com/GrafeoDB/grafeo/issues/667)): full and incremental backups on one database wait for each other before reading backup state; another database or process using the same backup directory receives a busy error.
 - **Backups and restores survive a crash** ([#667](https://github.com/GrafeoDB/grafeo/issues/667)): a backup is on disk before the database lets go of the log it covers, and a restore leaves either a complete database or nothing at the output path, so a failed restore can be retried to the same path.
 - **An incremental backup into the wrong directory is refused** ([#667](https://github.com/GrafeoDB/grafeo/issues/667)): after a full backup to one directory, an incremental backup to another one fails with an error naming it, instead of writing a chain with a gap that only the restore found, also when a schema statement or graph command came between the two.
 - **Decimal weights in graph algorithms** ([#678](https://github.com/GrafeoDB/grafeo/issues/678)): shortest paths, spanning trees and flow algorithms read a weight, capacity or cost written as a decimal (`{w: 0.25}`, a decimal since 0.6.0); they read it as 1.0 (a cost as 0.0), which gave wrong paths, trees and flows.

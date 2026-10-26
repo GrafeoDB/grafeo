@@ -920,7 +920,10 @@ impl GqlTranslator {
                         mode,
                     )?;
                 }
-                *expr = self.lower_aggregate_let(lexical, *body.clone())?;
+                *let_bindings = lexical
+                    .into_iter()
+                    .map(|binding| (binding.name, binding.value))
+                    .collect();
             }
             ast::Expression::ExistsSubquery { .. }
             | ast::Expression::CountSubquery { .. }
@@ -989,52 +992,6 @@ impl GqlTranslator {
         });
         locals.push((name.clone(), name.clone()));
         name
-    }
-
-    /// Lower LET through existing lexical expression forms. Taking element
-    /// zero of a one-element comprehension preserves its scalar result.
-    fn lower_aggregate_let(
-        &self,
-        bindings: Vec<AggregateLetBinding>,
-        mut body: ast::Expression,
-    ) -> Result<ast::Expression> {
-        let scalar = |variable, value, body| ast::Expression::IndexAccess {
-            base: Box::new(ast::Expression::ListComprehension {
-                variable,
-                list_expr: Box::new(ast::Expression::List(vec![value])),
-                filter_expr: None,
-                map_expr: Box::new(body),
-            }),
-            index: Box::new(ast::Expression::Literal(ast::Literal::Integer(0))),
-        };
-        if bindings.len() == 1 {
-            let binding = bindings.into_iter().next().expect("one binding");
-            return Ok(scalar(binding.name, binding.value, body));
-        }
-        if bindings.is_empty() {
-            return Ok(body);
-        }
-        // Store all values before binding any names, preserving LET's
-        // simultaneous/enclosing-scope semantics even when names shadow.
-        let values_name = self.names.next("_agg_let_values_");
-        let values = bindings
-            .iter()
-            .map(|binding| binding.value.clone())
-            .collect();
-        for (index, binding) in bindings.into_iter().enumerate().rev() {
-            let index = i64::try_from(index).map_err(|_| {
-                Error::from(QueryError::new(
-                    QueryErrorKind::Semantic,
-                    "Too many LET bindings",
-                ))
-            })?;
-            let value = ast::Expression::IndexAccess {
-                base: Box::new(ast::Expression::Variable(values_name.clone())),
-                index: Box::new(ast::Expression::Literal(ast::Literal::Integer(index))),
-            };
-            body = scalar(binding.name, value, body);
-        }
-        Ok(scalar(values_name, ast::Expression::List(values), body))
     }
 
     /// Tries to extract an aggregate expression from an AST expression.

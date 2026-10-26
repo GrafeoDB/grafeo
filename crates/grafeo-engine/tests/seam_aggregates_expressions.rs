@@ -900,3 +900,222 @@ mod aggregate_discovery_539_subquery_arguments {
         check("cypher", "CREATE (a:P)-[:R]->(:Q), (:P)");
     }
 }
+
+#[cfg(feature = "gql")]
+mod gql_shared_let_scope {
+    use super::*;
+    use grafeo_common::types::PropertyKey;
+    use std::collections::BTreeMap;
+
+    fn rows(query: &str) -> Vec<Vec<Value>> {
+        db().execute_language(query, "gql", None)
+            .unwrap_or_else(|error| panic!("`{query}`: {error}"))
+            .rows()
+            .to_vec()
+    }
+
+    fn ints(values: &[i64]) -> Value {
+        Value::List(
+            values
+                .iter()
+                .copied()
+                .map(Value::Int64)
+                .collect::<Vec<_>>()
+                .into(),
+        )
+    }
+
+    #[test]
+    fn ordinary_let_substitutes_map_index_and_slice() {
+        let query = "RETURN LET x = [1, 2, 3], i = 1 IN {picked: x[i], part: x[0..2], length: size(x)} END AS value";
+        let expected = Value::Map(
+            BTreeMap::from([
+                (PropertyKey::new("picked"), Value::Int64(2)),
+                (PropertyKey::new("part"), ints(&[1, 2])),
+                (PropertyKey::new("length"), Value::Int64(3)),
+            ])
+            .into(),
+        );
+        assert_eq!(rows(query), vec![vec![expected]]);
+    }
+
+    #[test]
+    fn ordinary_let_substitutes_an_indexed_list_per_input() {
+        let query = "UNWIND [3, 1, 2] AS n RETURN n AS input, LET x = n IN [x][0] END AS value ORDER BY input";
+        assert_eq!(
+            rows(query),
+            vec![
+                vec![Value::Int64(1), Value::Int64(1)],
+                vec![Value::Int64(2), Value::Int64(2)],
+                vec![Value::Int64(3), Value::Int64(3)],
+            ]
+        );
+    }
+
+    #[test]
+    fn ordinary_simultaneous_let_values_read_the_enclosing_scope() {
+        let query = "UNWIND [3, 1, 2] AS n RETURN n AS input, LET n = 10, x = n IN x + n END AS value ORDER BY input";
+        assert_eq!(
+            rows(query),
+            vec![
+                vec![Value::Int64(1), Value::Int64(11)],
+                vec![Value::Int64(2), Value::Int64(12)],
+                vec![Value::Int64(3), Value::Int64(13)],
+            ]
+        );
+    }
+
+    #[test]
+    fn ordinary_nested_let_preserves_shadowed_binding_values() {
+        let query = "UNWIND [3, 1, 2] AS n RETURN n AS input, LET x = n IN LET x = x + 10, y = x IN [x, y] END END AS value ORDER BY input";
+        assert_eq!(
+            rows(query),
+            vec![
+                vec![Value::Int64(1), ints(&[11, 1])],
+                vec![Value::Int64(2), ints(&[12, 2])],
+                vec![Value::Int64(3), ints(&[13, 3])],
+            ]
+        );
+    }
+
+    #[test]
+    fn ordinary_let_alias_is_not_captured_by_a_comprehension() {
+        let query = "UNWIND [3, 1, 2] AS n RETURN n AS input, LET x = n IN [n IN [10] | x + n] END AS value ORDER BY input";
+        assert_eq!(
+            rows(query),
+            vec![
+                vec![Value::Int64(1), ints(&[11])],
+                vec![Value::Int64(2), ints(&[12])],
+                vec![Value::Int64(3), ints(&[13])],
+            ]
+        );
+    }
+
+    #[test]
+    fn ordinary_let_alias_is_not_captured_by_a_predicate() {
+        let query = "UNWIND [3, 1, 2] AS n RETURN n AS input, LET x = n IN any(n IN [10] WHERE n > x) END AS value ORDER BY input";
+        assert_eq!(
+            rows(query),
+            vec![
+                vec![Value::Int64(1), Value::Bool(true)],
+                vec![Value::Int64(2), Value::Bool(true)],
+                vec![Value::Int64(3), Value::Bool(true)],
+            ]
+        );
+    }
+
+    #[test]
+    fn ordinary_let_alias_is_not_captured_by_a_reduce_accumulator() {
+        let query = "UNWIND [3, 1, 2] AS n RETURN n AS input, LET x = n IN reduce(n = 0, p IN [10] | n + p + x) END AS value ORDER BY input";
+        assert_eq!(
+            rows(query),
+            vec![
+                vec![Value::Int64(1), Value::Int64(11)],
+                vec![Value::Int64(2), Value::Int64(12)],
+                vec![Value::Int64(3), Value::Int64(13)],
+            ]
+        );
+    }
+
+    #[test]
+    fn unused_let_input_does_not_become_a_grouping_key() {
+        let query = "UNWIND [1, 2, 3] AS n RETURN LET unused = n IN sum(n) END AS value";
+        assert_eq!(rows(query), vec![vec![Value::Int64(6)]]);
+    }
+
+    #[test]
+    fn order_by_wrapped_alias_uses_its_projected_value() {
+        let query = "UNWIND [1, 3, 2] AS n RETURN -n AS n ORDER BY [n][0]";
+        assert_eq!(
+            rows(query),
+            vec![
+                vec![Value::Int64(-3)],
+                vec![Value::Int64(-2)],
+                vec![Value::Int64(-1)],
+            ]
+        );
+    }
+
+    #[test]
+    fn let_binding_evaluates_a_volatile_value_once() {
+        for (query, count) in [
+            (
+                "UNWIND [1, 2, 3] AS n RETURN LET x = rand() IN x = x END AS same",
+                3,
+            ),
+            (
+                "UNWIND [1, 2, 3] AS n RETURN LET x = rand() IN count(*) > 0 AND x = x END AS same",
+                1,
+            ),
+            (
+                "UNWIND [1, 2, 3] AS n RETURN LET x = abs(rand()) IN x = x END AS same",
+                3,
+            ),
+            (
+                "UNWIND [1, 2, 3] AS n RETURN LET x = abs(rand()) IN count(*) > 0 AND x = x END AS same",
+                1,
+            ),
+        ] {
+            // rand() returns a finite value: reusing one binding compares
+            // that same value with itself, for every input and aggregate row.
+            assert_eq!(rows(query), vec![vec![Value::Bool(true)]; count], "{query}");
+        }
+    }
+    #[test]
+    fn order_by_keeps_input_columns_with_unrelated_outputs() {
+        for query in [
+            "UNWIND [2, 1] AS n RETURN n + 10 AS value, rand() AS unused ORDER BY n NEXT RETURN value",
+            "UNWIND [2, 1] AS n RETURN n + 10 AS value ORDER BY 0 * rand(), n NEXT RETURN value",
+            "UNWIND [2, 1] AS n RETURN n + 10 AS value, 0 * rand() AS r ORDER BY r, n NEXT RETURN value",
+        ] {
+            assert_eq!(
+                rows(query),
+                vec![vec![Value::Int64(11)], vec![Value::Int64(12)]],
+                "{query}"
+            );
+        }
+    }
+    #[test]
+    fn order_by_keeps_input_columns_beside_an_opaque_key() {
+        let db = db();
+        db.execute_language("INSERT (:P {v: 2}), (:P {v: 1})", "gql", None)
+            .unwrap();
+        for query in [
+            "MATCH (n:P) RETURN n.v + 10 AS value, EXISTS { MATCH (n)-[:R]->() } AS unused ORDER BY n.v NEXT RETURN value",
+            "MATCH (n:P) RETURN n.v + 10 AS value ORDER BY EXISTS { MATCH (n)-[:R]->() }, n.v NEXT RETURN value",
+        ] {
+            let result = db
+                .execute_language(query, "gql", None)
+                .unwrap_or_else(|error| panic!("`{query}`: {error}"));
+            assert_eq!(
+                result.rows(),
+                &[vec![Value::Int64(11)], vec![Value::Int64(12)]],
+                "{query}"
+            );
+        }
+    }
+
+    #[test]
+    fn lexical_let_grouping_keeps_the_same_key_across_translation() {
+        let query = "UNWIND [1, 1, 2] AS n RETURN LET x = toInteger(0 * rand()), y = n IN x + y END AS k, count(*) AS c GROUP BY k ORDER BY k";
+        assert_eq!(
+            rows(query),
+            vec![
+                vec![Value::Int64(1), Value::Int64(2)],
+                vec![Value::Int64(2), Value::Int64(1)]
+            ]
+        );
+    }
+    #[test]
+    fn nested_lexical_lets_keep_enclosing_values_and_reserved_names() {
+        let query = "UNWIND [3, 1, 2] AS _let_values_0 RETURN _let_values_0 AS input, LET x = toInteger(0 * rand()), y = _let_values_0 IN LET x = toInteger(0 * rand()), z = x + y IN [x, z, y] END END AS value ORDER BY input";
+        assert_eq!(
+            rows(query),
+            vec![
+                vec![Value::Int64(1), ints(&[0, 1, 1])],
+                vec![Value::Int64(2), ints(&[0, 2, 2])],
+                vec![Value::Int64(3), ints(&[0, 3, 3])],
+            ]
+        );
+    }
+}

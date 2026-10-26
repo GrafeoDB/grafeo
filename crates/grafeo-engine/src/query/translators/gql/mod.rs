@@ -20,18 +20,20 @@ use super::common::{
 };
 use crate::query::plan::{
     self as plan, AddLabelOp, AggregateExpr, AggregateFunction, AggregateOp, ApplyOp, BinaryOp,
-    CallProcedureOp, CountExpr, CreateElement, CreateOp, DeleteNodeOp, EntityKind, ExceptOp,
-    ExpandDirection, ExpandOp, HorizontalAggregateOp, IntersectOp, JoinCondition, JoinOp, JoinType,
-    LeftJoinOp, LoadDataFormat, LoadDataOp, LogicalExpression, LogicalOperator, LogicalPlan,
-    MergeOp, NodeScanOp, NullsOrdering, OtherwiseOp, ParameterScanOp, PathMode, ProcedureYield,
-    ProjectOp, Projection, RemoveLabelOp, ReturnItem, ReturnOp, SetPropertyOp,
-    ShortestPathEdgeCondition, ShortestPathOp, SortKey, SortOrder, UnaryOp, UnionOp, UnwindOp,
+    CallProcedureOp, Callee, CountExpr, CreateElement, CreateOp, DeleteNodeOp, EntityKind,
+    ExceptOp, ExpandDirection, ExpandOp, HorizontalAggregateOp, IntersectOp, JoinCondition, JoinOp,
+    JoinType, LeftJoinOp, LoadDataFormat, LoadDataOp, LogicalExpression, LogicalOperator,
+    LogicalPlan, MapProjectionEntry, MergeOp, NodeScanOp, NullsOrdering, OtherwiseOp,
+    ParameterScanOp, PathMode, ProcedureYield, ProjectOp, Projection, RemoveLabelOp, ReturnItem,
+    ReturnOp, SetPropertyOp, ShortestPathEdgeCondition, ShortestPathOp, SortKey, SortOrder,
+    UnaryOp, UnionOp, UnwindOp,
 };
 #[cfg(test)]
 use crate::query::plan::{FilterOp, LimitOp, SkipOp};
 use grafeo_adapters::query::gql::{self, ast};
 use grafeo_common::types::Value;
 use grafeo_common::utils::error::{Error, QueryError, QueryErrorKind, Result};
+use grafeo_core::execution::operators::Volatility;
 
 /// Result of translating a GQL query: either a logical plan, session command, or schema command.
 #[derive(Debug)]
@@ -96,6 +98,8 @@ struct GqlTranslator {
     /// pattern. An aggregate over one is computed per row
     /// (see `take_horizontal_aggregates`).
     group_list_variables: std::cell::RefCell<HashMap<String, String>>,
+    /// A reserved lexical temporary, stable when a group key is translated again.
+    let_values_name: std::cell::OnceCell<String>,
     /// The variables of the row the `CALL` subquery being translated runs
     /// for (`None` outside one, or when they are not known): what a nested
     /// subquery's `RETURN *` leaves out.
@@ -197,6 +201,219 @@ fn return_as_with(plan: LogicalOperator) -> LogicalOperator {
     }
 }
 
+/// Inline simultaneous bindings only when substitution preserves lexical scope
+/// and evaluation count. Unsafe substitutions retain their lexical bindings.
+fn try_inline_let_bindings(
+    expr: LogicalExpression,
+    bindings: &[(String, LogicalExpression)],
+) -> Option<LogicalExpression> {
+    inline_let_expression(expr, bindings, &HashSet::new(), false)
+}
+
+fn inline_let_expression(
+    expr: LogicalExpression,
+    bindings: &[(String, LogicalExpression)],
+    bound: &HashSet<String>,
+    duplicated: bool,
+) -> Option<LogicalExpression> {
+    let rewrite = |expr| inline_let_expression(expr, bindings, bound, duplicated);
+    let rename = |name: String| match rewrite(LogicalExpression::Variable(name))? {
+        LogicalExpression::Variable(name) => Some(name),
+        _ => None,
+    };
+    Some(match expr {
+        LogicalExpression::Variable(name) => {
+            if let Some((_, value)) = bindings
+                .iter()
+                .find(|(binding, _)| binding == &name && !bound.contains(binding))
+            {
+                // Only a replacement is duplicated. An unrelated return alias
+                // or an existing volatile sort key need not block substitution.
+                // Do not apply this LET's bindings to an enclosing-scope value.
+                inline_let_expression(value.clone(), &[], &HashSet::new(), true)?;
+                let mut free = HashSet::new();
+                collect_expression_variables(value, &mut free);
+                if !free.is_disjoint(bound) {
+                    return None;
+                }
+                value.clone()
+            } else {
+                LogicalExpression::Variable(name)
+            }
+        }
+        LogicalExpression::Literal(_) | LogicalExpression::Parameter(_) => expr,
+        LogicalExpression::Property { variable, property } => LogicalExpression::Property {
+            variable: rename(variable)?,
+            property,
+        },
+        LogicalExpression::Labels(name) => LogicalExpression::Labels(rename(name)?),
+        LogicalExpression::Type(name) => LogicalExpression::Type(rename(name)?),
+        LogicalExpression::Id(name) => LogicalExpression::Id(rename(name)?),
+        LogicalExpression::Binary { left, op, right } => LogicalExpression::Binary {
+            left: Box::new(rewrite(*left)?),
+            op,
+            right: Box::new(rewrite(*right)?),
+        },
+        LogicalExpression::Unary { op, operand } => LogicalExpression::Unary {
+            op,
+            operand: Box::new(rewrite(*operand)?),
+        },
+        LogicalExpression::FunctionCall {
+            callee,
+            name,
+            args,
+            distinct,
+        } => {
+            if duplicated
+                && matches!(callee, Callee::Builtin(function)
+                if function.volatility(args.len()) == Volatility::Volatile)
+            {
+                return None;
+            }
+            LogicalExpression::FunctionCall {
+                callee,
+                name,
+                distinct,
+                args: args.into_iter().map(rewrite).collect::<Option<_>>()?,
+            }
+        }
+        LogicalExpression::SparqlCall { name, args } => LogicalExpression::SparqlCall {
+            name,
+            args: args.into_iter().map(rewrite).collect::<Option<_>>()?,
+        },
+        LogicalExpression::List(items) => {
+            LogicalExpression::List(items.into_iter().map(rewrite).collect::<Option<_>>()?)
+        }
+        LogicalExpression::Map(entries) => LogicalExpression::Map(
+            entries
+                .into_iter()
+                .map(|(key, value)| Some((key, rewrite(value)?)))
+                .collect::<Option<_>>()?,
+        ),
+        LogicalExpression::IndexAccess { base, index } => LogicalExpression::IndexAccess {
+            base: Box::new(rewrite(*base)?),
+            index: Box::new(rewrite(*index)?),
+        },
+        LogicalExpression::MapAccess { base, key } => LogicalExpression::MapAccess {
+            base: Box::new(rewrite(*base)?),
+            key,
+        },
+        LogicalExpression::SliceAccess { base, start, end } => LogicalExpression::SliceAccess {
+            base: Box::new(rewrite(*base)?),
+            start: match start {
+                Some(expr) => Some(Box::new(rewrite(*expr)?)),
+                None => None,
+            },
+            end: match end {
+                Some(expr) => Some(Box::new(rewrite(*expr)?)),
+                None => None,
+            },
+        },
+        LogicalExpression::Case {
+            operand,
+            when_clauses,
+            else_clause,
+        } => LogicalExpression::Case {
+            operand: match operand {
+                Some(expr) => Some(Box::new(rewrite(*expr)?)),
+                None => None,
+            },
+            when_clauses: when_clauses
+                .into_iter()
+                .map(|(when, then)| Some((rewrite(when)?, rewrite(then)?)))
+                .collect::<Option<_>>()?,
+            else_clause: match else_clause {
+                Some(expr) => Some(Box::new(rewrite(*expr)?)),
+                None => None,
+            },
+        },
+        LogicalExpression::ListComprehension {
+            variable,
+            list_expr,
+            filter_expr,
+            map_expr,
+        } => {
+            let list_expr = Box::new(rewrite(*list_expr)?);
+            let mut local = bound.clone();
+            local.insert(variable.clone());
+            let rewrite_body = |expr| inline_let_expression(expr, bindings, &local, duplicated);
+            LogicalExpression::ListComprehension {
+                variable,
+                list_expr,
+                filter_expr: match filter_expr {
+                    Some(expr) => Some(Box::new(rewrite_body(*expr)?)),
+                    None => None,
+                },
+                map_expr: Box::new(rewrite_body(*map_expr)?),
+            }
+        }
+        LogicalExpression::ListPredicate {
+            kind,
+            variable,
+            list_expr,
+            predicate,
+        } => {
+            let list_expr = Box::new(rewrite(*list_expr)?);
+            let mut local = bound.clone();
+            local.insert(variable.clone());
+            LogicalExpression::ListPredicate {
+                kind,
+                variable,
+                list_expr,
+                predicate: Box::new(inline_let_expression(
+                    *predicate, bindings, &local, duplicated,
+                )?),
+            }
+        }
+        LogicalExpression::Reduce {
+            accumulator,
+            initial,
+            variable,
+            list,
+            expression,
+        } => {
+            let initial = Box::new(rewrite(*initial)?);
+            let list = Box::new(rewrite(*list)?);
+            let mut local = bound.clone();
+            local.insert(accumulator.clone());
+            local.insert(variable.clone());
+            LogicalExpression::Reduce {
+                accumulator,
+                initial,
+                variable,
+                list,
+                expression: Box::new(inline_let_expression(
+                    *expression,
+                    bindings,
+                    &local,
+                    duplicated,
+                )?),
+            }
+        }
+        LogicalExpression::MapProjection { base, entries } => LogicalExpression::MapProjection {
+            base: rename(base)?,
+            entries: entries
+                .into_iter()
+                .map(|entry| {
+                    Some(match entry {
+                        MapProjectionEntry::LiteralEntry(key, value) => {
+                            MapProjectionEntry::LiteralEntry(key, rewrite(value)?)
+                        }
+                        MapProjectionEntry::PropertySelector(_)
+                        | MapProjectionEntry::AllProperties => entry,
+                    })
+                })
+                .collect::<Option<_>>()?,
+        },
+        // These plans own scopes and may correlate with a LET binding. Keep
+        // lexical names intact instead of guessing at their free variables.
+        LogicalExpression::ExistsSubquery(_)
+        | LogicalExpression::CountSubquery(_)
+        | LogicalExpression::ValueSubquery(_)
+        | LogicalExpression::PatternComprehension { .. } => return None,
+    })
+}
+
 /// The sort `keys` of a `RETURN` rewritten to read the `RETURN`'s input: each
 /// alias replaced by its expression (a property of an alias that is a
 /// variable by that variable's property). `None` when a key still reads an
@@ -216,7 +433,7 @@ fn keys_before_return(keys: &[SortKey], ret: &ReturnOp) -> Option<Vec<SortKey>> 
     keys.iter()
         .map(|key| {
             let expression =
-                GqlTranslator::substitute_let_bindings(key.expression.clone(), &aliases);
+                GqlTranslator::substitute_return_aliases(key.expression.clone(), &aliases);
             let mut read = HashSet::new();
             collect_expression_variables(&expression, &mut read);
             let reads_an_alias = read.iter().any(|name| {
@@ -343,6 +560,7 @@ impl GqlTranslator {
     fn new(query: &str) -> Self {
         Self {
             group_list_variables: std::cell::RefCell::new(HashMap::new()),
+            let_values_name: std::cell::OnceCell::new(),
             call_scope: std::cell::RefCell::new(None),
             names: GeneratedNames::new(query),
             call_imports: CallImports::default(),
@@ -1191,7 +1409,9 @@ impl GqlTranslator {
         })
     }
 
-    fn substitute_let_bindings(
+    // Preserve ORDER BY's existing alias rewrite and sort placement. Return
+    // aliases belong to a projection; they are not lexical LET bindings.
+    fn substitute_return_aliases(
         expr: LogicalExpression,
         bindings: &[(String, LogicalExpression)],
     ) -> LogicalExpression {
@@ -1217,13 +1437,13 @@ impl GqlTranslator {
                 _ => expr,
             },
             LogicalExpression::Binary { left, op, right } => LogicalExpression::Binary {
-                left: Box::new(Self::substitute_let_bindings(*left, bindings)),
+                left: Box::new(Self::substitute_return_aliases(*left, bindings)),
                 op,
-                right: Box::new(Self::substitute_let_bindings(*right, bindings)),
+                right: Box::new(Self::substitute_return_aliases(*right, bindings)),
             },
             LogicalExpression::Unary { op, operand } => LogicalExpression::Unary {
                 op,
-                operand: Box::new(Self::substitute_let_bindings(*operand, bindings)),
+                operand: Box::new(Self::substitute_return_aliases(*operand, bindings)),
             },
             LogicalExpression::FunctionCall {
                 callee,
@@ -1235,12 +1455,64 @@ impl GqlTranslator {
                 name,
                 args: args
                     .into_iter()
-                    .map(|a| Self::substitute_let_bindings(a, bindings))
+                    .map(|a| Self::substitute_return_aliases(a, bindings))
                     .collect(),
                 distinct,
             },
             other => other,
         }
+    }
+
+    /// Share LET semantics between scalar expressions and extracted aggregates.
+    fn substitute_let_bindings(
+        &self,
+        body: LogicalExpression,
+        bindings: &[(String, LogicalExpression)],
+    ) -> Result<LogicalExpression> {
+        if let Some(inlined) = try_inline_let_bindings(body.clone(), bindings) {
+            return Ok(inlined);
+        }
+        // A lexical binding avoids capture and evaluates each value once.
+        // Retain the written name so correlated subplans see the same scope.
+        let scalar = |variable, value, body| LogicalExpression::IndexAccess {
+            base: Box::new(LogicalExpression::ListComprehension {
+                variable,
+                list_expr: Box::new(LogicalExpression::List(vec![value])),
+                filter_expr: None,
+                map_expr: Box::new(body),
+            }),
+            index: Box::new(LogicalExpression::Literal(Value::Int64(0))),
+        };
+        if let [(name, value)] = bindings {
+            return Ok(scalar(name.clone(), value.clone(), body));
+        }
+        if bindings.is_empty() {
+            return Ok(body);
+        }
+        // Evaluate every value in the enclosing scope, before any names bind.
+        // Each fallback closes over its own temporary. Reusing the reserved
+        // name is safe in nested scopes and keeps GROUP BY expression identity
+        // stable across repeated translations of the same written expression.
+        let values_name = self
+            .let_values_name
+            .get_or_init(|| self.names.next("_let_values_"))
+            .clone();
+        let values = bindings.iter().map(|(_, value)| value.clone()).collect();
+        let mut body = body;
+        for (index, (name, _)) in bindings.iter().enumerate().rev() {
+            let index = i64::try_from(index).map_err(|_| {
+                Error::from(QueryError::new(
+                    QueryErrorKind::Semantic,
+                    "Too many LET bindings",
+                ))
+            })?;
+            let value = LogicalExpression::IndexAccess {
+                base: Box::new(LogicalExpression::Variable(values_name.clone())),
+                index: Box::new(LogicalExpression::Literal(Value::Int64(index))),
+            };
+            body = scalar(name.clone(), value, body);
+        }
+        Ok(scalar(values_name, LogicalExpression::List(values), body))
     }
 
     /// Extracts all named variables from a GQL AST pattern.

@@ -95,6 +95,50 @@ fn test_csv_quoted_commas() {
     assert_eq!(r.rows()[0][0], Value::String("likes cats, dogs".into()));
 }
 
+#[test]
+fn csv_quoted_line_breaks_keep_exact_rows_and_values() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("multiline.csv");
+    std::fs::write(
+        &file,
+        "name,bio\r\nAlix,\"first\r\n\r\nsaid \"\"hi\"\"\"\r\nGus,quiet",
+    )
+    .unwrap();
+    let path = file.to_string_lossy().replace('\\', "/");
+    let db = GrafeoDB::new_in_memory();
+    let check = |language: &str, query: &str| {
+        for _ in 0..2 {
+            let result = db.execute_language(query, language, None).unwrap();
+            assert_eq!(
+                result.rows(),
+                &[
+                    vec![
+                        Value::String("Alix".into()),
+                        Value::String("first\r\n\r\nsaid \"hi\"".into())
+                    ],
+                    vec![Value::String("Gus".into()), Value::String("quiet".into())],
+                ],
+                "{language}"
+            );
+        }
+    };
+    check(
+        "gql",
+        &format!(
+            "LOAD DATA FROM '{path}' FORMAT CSV WITH HEADERS AS row \
+         RETURN row.name, row.bio ORDER BY row.name"
+        ),
+    );
+    #[cfg(feature = "cypher")]
+    check(
+        "cypher",
+        &format!(
+            "LOAD CSV WITH HEADERS FROM '{path}' AS row \
+         RETURN row.name, row.bio ORDER BY row.name"
+        ),
+    );
+}
+
 // ---------------------------------------------------------------------------
 // CSV with empty file (headers only, no data rows)
 // ---------------------------------------------------------------------------

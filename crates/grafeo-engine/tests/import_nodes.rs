@@ -138,6 +138,52 @@ fn a_quoted_header_holding_the_delimiter_is_one_column() {
 }
 
 #[test]
+fn csv_quoted_line_breaks_preserve_imported_names_values_and_count() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = file(
+        &dir,
+        "multiline.csv",
+        "\u{feff}name,\"home\ncity\",note\r\nAlix,\"Amsterdam\r\nNL\",\"said \"\"hi\"\"\nthen bye\"\r\nGus,Berlin,quiet",
+    );
+    let db = GrafeoDB::new_in_memory();
+    assert_eq!(import(&db, &path, "Person", CSV), 2);
+    assert_eq!(
+        properties(&db, "Person"),
+        [
+            node(&[
+                ("home\ncity", "Amsterdam\r\nNL"),
+                ("name", "Alix"),
+                ("note", "said \"hi\"\nthen bye")
+            ]),
+            node(&[("home\ncity", "Berlin"), ("name", "Gus"), ("note", "quiet")]),
+        ]
+    );
+}
+
+#[test]
+fn csv_quoted_line_breaks_preserve_headerless_import_width() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = file(
+        &dir,
+        "raw.csv",
+        "\"first\nlast\";value\nnext;\"said \"\"hi\"\"\"",
+    );
+    let db = GrafeoDB::new_in_memory();
+    let format = ImportFormat::Csv {
+        headers: false,
+        delimiter: Some(';'),
+    };
+    assert_eq!(import(&db, &path, "Row", format), 2);
+    assert_eq!(
+        properties(&db, "Row"),
+        [
+            node(&[("column0", "first\nlast"), ("column1", "value")]),
+            node(&[("column0", "next"), ("column1", "said \"hi\"")]),
+        ]
+    );
+}
+
+#[test]
 fn an_empty_field_sets_no_property() {
     let dir = tempfile::tempdir().unwrap();
     let path = file(&dir, "gaps.csv", "name,city\nVincent,\n");

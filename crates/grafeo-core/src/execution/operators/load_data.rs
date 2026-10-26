@@ -95,14 +95,10 @@ impl LoadDataOperator {
         let mut reader = BufReader::new(file);
 
         if self.format == LoadDataFormat::Csv && self.with_headers {
-            let mut header_line = String::new();
-            reader.read_line(&mut header_line).map_err(|e| {
-                OperatorError::Execution(format!("Failed to read CSV headers: {e}"))
-            })?;
-            // Strip BOM if present
-            let header_line = header_line.strip_prefix('\u{feff}').unwrap_or(&header_line);
-            let header_line = header_line.trim_end_matches(['\r', '\n']);
-            self.headers = Some(parse_csv_row(header_line, self.delimiter));
+            let record = read_csv_record(&mut reader, self.delimiter, true)
+                .map_err(|e| OperatorError::Execution(format!("Failed to read CSV headers: {e}")))?
+                .unwrap_or_default();
+            self.headers = Some(parse_csv_row(&record, self.delimiter));
         }
 
         self.reader = Some(reader);
@@ -117,23 +113,18 @@ impl LoadDataOperator {
             .as_mut()
             .ok_or_else(|| OperatorError::Internal("CSV reader not initialized".to_string()))?;
 
-        let mut line = String::new();
         loop {
-            line.clear();
-            let bytes_read = reader
-                .read_line(&mut line)
-                .map_err(|e| OperatorError::Execution(format!("Failed to read CSV line: {e}")))?;
-
-            if bytes_read == 0 {
+            let Some(record) = read_csv_record(reader, self.delimiter, false)
+                .map_err(|e| OperatorError::Execution(format!("Failed to read CSV line: {e}")))?
+            else {
                 return Ok(None); // EOF
-            }
+            };
 
-            let trimmed = line.trim_end_matches(['\r', '\n']);
-            if trimmed.is_empty() {
+            if record.is_empty() {
                 continue; // skip blank lines
             }
 
-            let fields = parse_csv_row(trimmed, self.delimiter);
+            let fields = parse_csv_row(&record, self.delimiter);
 
             let row_value = if let Some(headers) = &self.headers {
                 // WITH HEADERS: produce a Map
@@ -361,7 +352,52 @@ fn build_single_row_chunk(value: Value) -> crate::execution::DataChunk {
     builder.finish()
 }
 
-/// Parses a single CSV row into fields, respecting quoted fields.
+/// Reads a complete CSV record, including line breaks inside quoted fields.
+/// The BOM is removed only when reading headers, as before.
+fn read_csv_record(
+    reader: &mut impl BufRead,
+    delimiter: u8,
+    strip_bom: bool,
+) -> std::io::Result<Option<String>> {
+    let mut record = String::new();
+    let mut quoted = false;
+    let mut field_start = true;
+    loop {
+        let start = record.len();
+        if reader.read_line(&mut record)? == 0 {
+            // Keep the field parser's lenient handling of an unclosed quote.
+            return Ok((!record.is_empty()).then_some(record));
+        }
+        if strip_bom && start == 0 && record.starts_with('\u{feff}') {
+            record.replace_range(..'\u{feff}'.len_utf8(), "");
+        }
+        let mut chars = record[start..].chars().peekable();
+        while let Some(c) = chars.next() {
+            match c {
+                '"' if quoted => {
+                    if chars.peek() == Some(&'"') {
+                        chars.next(); // Escaped quote, not the end of the field.
+                    } else {
+                        quoted = false;
+                    }
+                }
+                '"' if field_start => {
+                    quoted = true;
+                    field_start = false;
+                }
+                c if !quoted && c == char::from(delimiter) => field_start = true,
+                _ => field_start = false,
+            }
+        }
+        if !quoted {
+            let end = record.trim_end_matches(['\r', '\n']).len();
+            record.truncate(end);
+            return Ok(Some(record));
+        }
+    }
+}
+
+/// Parses a complete CSV record into fields, respecting quoted fields.
 ///
 /// Handles:
 /// - Unquoted fields separated by the delimiter
@@ -672,6 +708,110 @@ mod tests {
         );
         let any = Box::new(op).into_any();
         assert!(any.downcast::<LoadDataOperator>().is_ok());
+    }
+
+    mod csv_records {
+        use super::*;
+
+        fn operator(
+            content: &str,
+            headers: bool,
+            delimiter: Option<char>,
+        ) -> (tempfile::NamedTempFile, LoadDataOperator) {
+            let file = tempfile::NamedTempFile::new().unwrap();
+            std::fs::write(file.path(), content).unwrap();
+            let op = LoadDataOperator::new(
+                file.path().to_str().unwrap().to_string(),
+                LoadDataFormat::Csv,
+                headers,
+                delimiter,
+                "row".to_string(),
+            );
+            (file, op)
+        }
+
+        fn records(op: &mut LoadDataOperator) -> Vec<Value> {
+            let mut rows = Vec::new();
+            while let Some(chunk) = op.next().unwrap() {
+                assert_eq!(chunk.row_count(), 1);
+                rows.push(chunk.column(0).unwrap().get_value(0).unwrap());
+            }
+            rows
+        }
+
+        fn list(values: &[&str]) -> Value {
+            Value::List(Arc::from(
+                values
+                    .iter()
+                    .map(|value| Value::String((*value).into()))
+                    .collect::<Vec<_>>(),
+            ))
+        }
+
+        #[test]
+        fn quoted_line_breaks_and_escaped_quotes_form_one_record() {
+            for ending in ["\n", "\r\n"] {
+                let note = format!("first{ending}{ending}said \"hi\"");
+                let content = format!(
+                    "{ending}Alix;\"first{ending}{ending}said \"\"hi\"\"\"{ending}Gus;quiet"
+                );
+                let (_file, mut op) = operator(&content, false, Some(';'));
+                assert_eq!(
+                    records(&mut op),
+                    [list(&["Alix", &note]), list(&["Gus", "quiet"])],
+                    "line ending {ending:?}"
+                );
+            }
+        }
+
+        #[test]
+        fn multiline_headers_keep_bom_handling_and_column_names() {
+            let (_file, mut op) = operator(
+                "\u{feff}\"home\ncity\",\"note\r\ntext\"\r\nAmsterdam,\"first\nlast\"",
+                true,
+                None,
+            );
+            assert_eq!(
+                records(&mut op),
+                [Value::Map(Arc::new(BTreeMap::from([
+                    (
+                        PropertyKey::from("home\ncity"),
+                        Value::String("Amsterdam".into())
+                    ),
+                    (
+                        PropertyKey::from("note\r\ntext"),
+                        Value::String("first\nlast".into())
+                    ),
+                ])))]
+            );
+        }
+
+        #[test]
+        fn reset_replays_records_larger_than_the_reader_buffer() {
+            let text = format!("{}\n{}", "x".repeat(9_000), "y".repeat(9_000));
+            let content = format!("\"{text}\",last\nnext,row\n");
+            let (_file, mut op) = operator(&content, false, None);
+            let expected = [list(&[&text, "last"]), list(&["next", "row"])];
+            assert_eq!(records(&mut op), expected);
+            assert!(op.next().unwrap().is_none());
+            op.reset();
+            assert_eq!(records(&mut op), expected);
+        }
+
+        #[test]
+        fn unquoted_quotes_do_not_consume_the_next_record() {
+            let (_file, mut op) = operator("a\"b,c\nnext,row", false, None);
+            assert_eq!(
+                records(&mut op),
+                [list(&["a\"b", "c"]), list(&["next", "row"])]
+            );
+        }
+
+        #[test]
+        fn an_unclosed_quote_at_eof_keeps_the_existing_lenient_result() {
+            let (_file, mut op) = operator("\"unfinished", false, None);
+            assert_eq!(records(&mut op), [list(&["unfinished"])]);
+        }
     }
 
     #[cfg(feature = "jsonl-import")]

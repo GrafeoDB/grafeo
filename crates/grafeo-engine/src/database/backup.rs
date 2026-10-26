@@ -701,8 +701,8 @@ fn copied_header(file_data: &[u8], path: &Path) -> Result<DbHeaderV3> {
 /// # Errors
 ///
 /// Returns an error if no full backup exists, the cursor is of the earlier
-/// WAL format, nothing was logged since the last backup, or the segments
-/// after the cursor were removed.
+/// WAL format, the cursor is ahead of the chain's end epoch, nothing was
+/// logged since the last backup, or the segments after the cursor were removed.
 pub(super) fn do_backup_incremental(
     backup_dir: &Path,
     wal: &Wal,
@@ -727,6 +727,20 @@ pub(super) fn do_backup_incremental(
                 .to_string(),
         )
     })?;
+
+    // A read-only full backup can lead the writer's cursor: overlapping WAL
+    // groups are valid. A cursor ahead of this chain would leave a gap.
+    if let Some((_, chain_end)) = manifest.epoch_range()
+        && chain_end < cursor.backed_up_epoch
+    {
+        return Err(Error::InvalidValue(format!(
+            "backup chain {} ends at epoch {}, but the database backup cursor is at epoch {}; \
+             run a full backup in this directory before taking an incremental backup",
+            backup_dir.display(),
+            chain_end.as_u64(),
+            cursor.backed_up_epoch.as_u64(),
+        )));
+    }
 
     // Seal the active segment first: every group logged so far is then in a
     // segment before `sealed`, and groups logged from now on go to later

@@ -357,6 +357,37 @@ fn output_directory_sync_failure_removes_published_outputs() {
         assert_failure(case, "restore:output_directory_sync");
     }
 }
+/// Removing the staging directory comes after the restore is complete and
+/// synced: a failure there keeps the restored database, and the restore
+/// reports success.
+#[test]
+fn a_staging_removal_failure_keeps_the_complete_restore() {
+    for case in [Case::Full, Case::Incremental] {
+        let fixture = Fixture::new(case);
+        let before = fixture.inputs();
+        for count in 1..=64 {
+            let output = fixture.output(&format!("staging-{count}"));
+            let result = with_failure_at(count, || fixture.restore(&output));
+            assert_eq!(fixture.inputs(), before, "restore changed its inputs");
+            match result {
+                Err(error) => {
+                    let message = error.to_string();
+                    assert!(
+                        !message.contains("restore:staging_removal"),
+                        "{case:?}: a complete restore failed: {message}"
+                    );
+                    assert!(message.contains("injected failure at:"), "{message}");
+                    assert_clean(&output);
+                }
+                Ok(()) => {
+                    fixture.assert_two_reopens(&output, case);
+                    break;
+                }
+            }
+        }
+    }
+}
+
 #[test]
 fn a_damaged_incremental_leaves_no_output_and_can_be_retried_after_repair() {
     let fixture = Fixture::new(Case::Incremental);

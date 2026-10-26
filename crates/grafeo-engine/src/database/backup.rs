@@ -359,7 +359,7 @@ fn write_metadata(
     sync_backup_entry(path, directory_sync_point)
 }
 
-/// Persists the directory entry of a backup file or directory. This retains
+/// Persists the directory entry of a backup or restore file or directory. This retains
 /// the platform floor of `flush::sync_parent_dir`: no directory fsync off Unix.
 fn sync_backup_entry(path: &Path, sync_point: &str) -> Result<()> {
     #[cfg(unix)]
@@ -368,7 +368,7 @@ fn sync_backup_entry(path: &Path, sync_point: &str) -> Result<()> {
     let _ = sync_point;
     super::flush::sync_parent_dir(path).map_err(|e| {
         Error::Internal(format!(
-            "failed to sync directory containing backup {}: {e}",
+            "failed to sync the directory containing {}: {e}",
             path.display()
         ))
     })
@@ -1227,12 +1227,13 @@ impl RestoreOutput {
             grafeo_common::testing::crash::maybe_fail("restore:sidecar_rename")?;
             std::fs::rename(&sidecar, &self.sidecar)?;
             self.owns_sidecar = true;
-            sync_restore_parent(&self.sidecar)?;
+            sync_backup_entry(&self.sidecar, "restore:output_directory_sync")?;
         }
         grafeo_common::testing::crash::maybe_fail("restore:image_rename")?;
         std::fs::rename(image, &self.image)?;
         self.owns_image = true;
-        sync_restore_parent(&self.image)?;
+        sync_backup_entry(&self.image, "restore:output_directory_sync")?;
+        grafeo_common::testing::crash::maybe_fail("restore:staging_removal")?;
         std::fs::remove_dir_all(&self.staging)?;
         self.owns_staging = false;
         // The caller owns the complete result after all publication barriers.
@@ -1277,12 +1278,6 @@ impl Drop for RestoreOutput {
     fn drop(&mut self) {
         let _ = self.cleanup();
     }
-}
-
-fn sync_restore_parent(path: &Path) -> Result<()> {
-    #[cfg(unix)]
-    grafeo_common::testing::crash::maybe_fail("restore:output_directory_sync")?;
-    super::flush::sync_parent_dir(path)
 }
 
 /// Writes the WAL groups of the version 2 incremental backups `segments`, up

@@ -1,0 +1,8 @@
+# Reviewed differences between 0.6.0 and 0.6.1: case key, fingerprint of the reviewed result, why it changed.
+# A `~` before the fingerprint: the case's result in 0.6.0 varies from run to run, so it may also not differ.
+DE1|gql 5103ef079d Shortest paths read a decimal edge weight; 0.6.0 read it as 1.0 (#678).
+DE2|gql 003bcbe071 Spanning trees read a decimal edge weight; 0.6.0 read it as 1.0, so it kept the wrong edges (#678).
+DE3|gql 57bb8d0e4e Max flow reads a decimal capacity; 0.6.0 read it as 1.0 (#678).
+DE4|gql 3369869dd8 Min-cost flow reads decimal capacities and costs; 0.6.0 read them as 1.0 and 0.0 (#678).
+N12|cypher 603b79d5f3 A subquery that returns an edge in one part and a node in another returns each as what it is; 0.6.0 read the node as the edge with its ID (#668).
+N12|gql 603b79d5f3 A subquery that returns an edge in one part and a node in another returns each as what it is; 0.6.0 read the node as the edge with its ID (#668).

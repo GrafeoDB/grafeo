@@ -426,6 +426,24 @@ fn prepare_backup_directory(directory: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Holds a destination for one complete backup. The empty lock file stays
+/// in place: unlinking or replacing it would let writers lock different files.
+/// Incremental calls never create the destination directory.
+pub(super) fn lock_backup_directory(backup_dir: &Path, create: bool) -> Result<std::fs::File> {
+    if create {
+        prepare_backup_directory(backup_dir)?;
+    }
+    grafeo_storage::lock::try_lock_file(&backup_dir.join("backup.lock"), || {
+        format!("backup directory is busy: {}", backup_dir.display())
+    })
+    .map_err(|error| match error {
+        Error::Io(error) if !create && error.kind() == std::io::ErrorKind::NotFound => {
+            Error::Internal("no backup manifest found; run a full backup first".to_string())
+        }
+        other => other,
+    })
+}
+
 /// The manifest and cursor as 0.5.x wrote them: bincode 2 with the standard
 /// configuration, which has no field names, so these frozen copies of the
 /// 0.5.x layout read them whatever fields the current types gain. Removed in
@@ -696,13 +714,14 @@ pub(super) fn do_backup_full(
     wal: Option<&Wal>,
     log_end: impl FnOnce() -> Result<u64>,
 ) -> Result<BackupSegment> {
-    prepare_backup_directory(backup_dir)?;
+    grafeo_common::testing::pause::maybe_pause("backup:before_manifest");
 
     // Determine backup filename
     let mut manifest = read_manifest(backup_dir)?.unwrap_or_default();
     let segment_idx = manifest.segments.len();
     let filename = format!("backup_full_{segment_idx:04}.grafeo");
     let dest_path = backup_dir.join(&filename);
+    grafeo_common::testing::commit_hook::run_after_backup_state_read();
     // The name follows the manifest's segments, so a file under it is none
     // the manifest lists: the image of a backup a crash or an error cut off
     // before its manifest entry, which no restore reads.
@@ -921,6 +940,7 @@ pub(super) fn do_backup_incremental(
     let segment_idx = manifest.segments.len();
     let filename = format!("backup_incr_{segment_idx:04}.wal");
     let path = backup_dir.join(&filename);
+    grafeo_common::testing::commit_hook::run_after_backup_state_read();
     let mut file = std::fs::File::create(&path).map_err(|e| {
         Error::Internal(format!(
             "failed to create incremental backup {}: {e}",

@@ -2207,3 +2207,37 @@ fn an_unsupported_step_in_a_predicate_is_an_error() {
         .to_string();
     assert!(error.contains("outE"), "{error}");
 }
+
+// ============================================================================
+// EXPLAIN and EXPLAIN ANALYZE
+// ============================================================================
+
+#[test]
+fn explain_returns_the_plan_without_running_the_traversal() {
+    let db = GrafeoDB::new_in_memory();
+    let params = std::collections::HashMap::from([("name".to_string(), Value::from("Alix"))]);
+    for result in [
+        db.execute_gremlin("EXPLAIN g.addV('Person').property('name', 'Alix')")
+            .unwrap(),
+        db.session()
+            .execute_gremlin_with_params("EXPLAIN g.addV('Person').property('name', $name)", params)
+            .unwrap(),
+    ] {
+        assert_eq!(result.columns, ["plan"]);
+        let Value::String(plan) = &result.rows()[0][0] else {
+            panic!("the plan as a string, not {:?}", result.rows());
+        };
+        assert!(plan.contains("CreateNode"), "{plan}");
+    }
+    assert_eq!(db.node_count().unwrap(), 0, "EXPLAIN writes nothing");
+}
+
+#[test]
+fn explain_analyze_returns_the_profile() {
+    let db = create_social_network();
+    let result = db
+        .execute_gremlin("EXPLAIN ANALYZE g.V().hasLabel('Person')")
+        .unwrap();
+    assert_eq!(result.columns, ["profile"]);
+    assert!(result.profile.is_some(), "the operator tree as data");
+}

@@ -377,6 +377,7 @@ pub(crate) fn with_imports(
 /// its value before planning, which renames its column after the value
 /// (`3`, not `$x`), so a reference by name would no longer find it; the value
 /// is the same on every row of the group, so reading it again is the key.
+#[cfg(feature = "gql")]
 pub(crate) fn group_key_reference(key: &LogicalExpression) -> LogicalExpression {
     match key {
         LogicalExpression::Parameter(_) => key.clone(),

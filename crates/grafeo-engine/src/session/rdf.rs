@@ -60,8 +60,10 @@ impl Session {
             auto_commit: true,
             #[cfg(query_language)]
             plan_options: super::PlanOptions {
+                #[cfg(lpg_language)]
                 factorized_execution: cfg.factorized_execution,
                 shuffle_unordered: cfg.shuffle_unordered,
+                #[cfg(lpg_language)]
                 reachability: true,
                 path_search_budget: cfg.path_search_budget,
             },
@@ -95,7 +97,7 @@ impl Session {
             metrics: None,
             #[cfg(feature = "metrics")]
             tx_start_time: parking_lot::Mutex::new(None),
-            #[cfg(query_language)]
+            #[cfg(lpg_language)]
             projections: cfg.projections,
         }
     }

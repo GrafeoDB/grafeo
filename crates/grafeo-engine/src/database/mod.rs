@@ -173,6 +173,9 @@ pub struct GrafeoDB {
     pub(super) commit_counter: Arc<AtomicUsize>,
     /// Whether the database is open.
     pub(super) is_open: RwLock<bool>,
+    /// Serializes backups, including their shared WAL cursor.
+    #[cfg(feature = "wal")]
+    backup_lock: parking_lot::Mutex<()>,
     /// Change data capture log for tracking mutations.
     #[cfg(feature = "cdc")]
     pub(super) cdc_log: Arc<crate::cdc::CdcLog>,
@@ -909,6 +912,8 @@ impl GrafeoDB {
             query_cache,
             commit_counter: Arc::new(AtomicUsize::new(0)),
             is_open: RwLock::new(true),
+            #[cfg(feature = "wal")]
+            backup_lock: parking_lot::Mutex::new(()),
             #[cfg(feature = "cdc")]
             cdc_log: Arc::new(crate::cdc::CdcLog::with_retention(cdc_retention)),
             #[cfg(feature = "cdc")]
@@ -1141,6 +1146,8 @@ impl GrafeoDB {
             query_cache,
             commit_counter: Arc::new(AtomicUsize::new(0)),
             is_open: RwLock::new(true),
+            #[cfg(feature = "wal")]
+            backup_lock: parking_lot::Mutex::new(()),
             #[cfg(feature = "cdc")]
             cdc_log: Arc::new(crate::cdc::CdcLog::new()),
             #[cfg(feature = "cdc")]
@@ -1249,6 +1256,8 @@ impl GrafeoDB {
             query_cache,
             commit_counter: Arc::new(AtomicUsize::new(0)),
             is_open: RwLock::new(true),
+            #[cfg(feature = "wal")]
+            backup_lock: parking_lot::Mutex::new(()),
             #[cfg(feature = "cdc")]
             cdc_log: Arc::new(crate::cdc::CdcLog::new()),
             #[cfg(feature = "cdc")]
@@ -2185,7 +2194,7 @@ impl GrafeoDB {
             transaction_manager: Arc::clone(&self.transaction_manager),
             query_cache: Arc::clone(&self.query_cache),
             catalog: Arc::clone(&self.catalog),
-            #[cfg(query_language)]
+            #[cfg(lpg_language)]
             factorized_execution: self.config.factorized_execution(),
             #[cfg(query_language)]
             shuffle_unordered: self.config.shuffle_unordered(),
@@ -2201,7 +2210,7 @@ impl GrafeoDB {
             gc_interval: self.config.gc_interval(),
             read_only: self.read_only || force_read_only,
             identity: identity.clone(),
-            #[cfg(query_language)]
+            #[cfg(lpg_language)]
             projections: Arc::clone(&self.projections),
         };
 
@@ -3363,7 +3372,10 @@ impl GrafeoDB {
     /// manifest. Commits wait only while the snapshot is taken and the
     /// catalog and RDF data are copied, and go on while the graphs are
     /// written; the image holds exactly the commits up to E. The database's
-    /// own file is not checkpointed. Subsequent incremental backups hold the
+    /// own file is not checkpointed. Backups on this database wait for one
+    /// another, also across destinations. Another database or process using
+    /// the destination makes the call fail with a busy error.
+    /// Subsequent incremental backups hold the
     /// commits after E. A read-only database writes what it sees, the
     /// commits it replayed from the WAL included.
     ///
@@ -3376,12 +3388,18 @@ impl GrafeoDB {
     #[cfg(all(feature = "wal", feature = "grafeo-file"))]
     pub fn backup_full(&self, backup_dir: &std::path::Path) -> Result<backup::BackupSegment> {
         let _open = self.hold_open()?;
-        let sources = self.checkpoint_sources()?;
+        let _backup = self.hold_backup();
+        self.lpg_store()?;
         let fm = self.file_manager.as_ref().ok_or_else(|| {
             Error::from(grafeo_common::utils::error::QueryError::unsupported(
                 "a backup needs a persistent database",
             ))
         })?;
+
+        // A refused backup leaves the destination as it was.
+        self.transaction_manager.check_no_incomplete_commit()?;
+        let _destination = backup::lock_backup_directory(backup_dir, true)?;
+        let sources = self.checkpoint_sources()?;
 
         // An image of the state at an epoch, written with commits going on
         // (#362).
@@ -3393,7 +3411,9 @@ impl GrafeoDB {
 
     /// Creates an incremental backup containing WAL records since the last backup.
     ///
-    /// Requires a prior full backup in the backup directory.
+    /// Requires a prior full backup in the backup directory. Backups on
+    /// this database wait for one another; a destination in use by another
+    /// database or process fails with a busy error.
     ///
     /// # Errors
     ///
@@ -3408,6 +3428,7 @@ impl GrafeoDB {
         backup_dir: &std::path::Path,
     ) -> Result<backup::BackupSegment> {
         let _open = self.hold_open()?;
+        let _backup = self.hold_backup();
         // A backend's own log follows no full backup.
         self.lpg_store()?;
         let wal = self.wal.as_ref().ok_or_else(|| {
@@ -3416,8 +3437,18 @@ impl GrafeoDB {
             ))
         })?;
 
+        let _destination = backup::lock_backup_directory(backup_dir, false)?;
         let current_epoch = self.transaction_manager.current_epoch();
         backup::do_backup_incremental(backup_dir, wal, current_epoch)
+    }
+
+    /// Waits for the previous backup before capturing any backup state.
+    #[cfg(feature = "wal")]
+    fn hold_backup(&self) -> parking_lot::MutexGuard<'_, ()> {
+        self.backup_lock.try_lock().unwrap_or_else(|| {
+            grafeo_common::testing::commit_hook::run_before_backup_wait();
+            self.backup_lock.lock()
+        })
     }
 
     /// Returns the backup manifest for a backup directory, if one exists.

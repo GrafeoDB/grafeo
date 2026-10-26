@@ -991,7 +991,7 @@ mod gql_shared_let_scope {
             let [Value::Float64(lower), Value::Float64(upper)] = bounds.as_ref() else {
                 panic!("`{query}`: expected two float extrema, got {bounds:?}");
             };
-            // One input has one bound random value, so both extrema equal it.
+            // With one input, min(value) must equal -max(-value).
             assert!(lower.is_finite(), "`{query}`: rand() must be finite");
             assert_eq!(
                 *lower, -*upper,

@@ -4345,10 +4345,13 @@ impl Session {
     /// Begins a transaction with a specific isolation level.
     ///
     /// See [`begin_transaction`](Self::begin_transaction) for the default (`SnapshotIsolation`).
+    /// A supported level inside an open transaction creates a savepoint.
     ///
     /// # Errors
     ///
-    /// Returns an error if a transaction is already active.
+    /// `Serializable` returns `GRAFEO-Q004`, including inside an open transaction:
+    /// queries do not yet record the reads it needs. Use `SnapshotIsolation`.
+    /// Creating a nested savepoint may also fail.
     pub fn begin_transaction_with_isolation(
         &mut self,
         isolation_level: crate::transaction::IsolationLevel,
@@ -4363,6 +4366,12 @@ impl Session {
         isolation_level: Option<crate::transaction::IsolationLevel>,
     ) -> Result<()> {
         let _span = grafeo_debug_span!("grafeo::tx::begin", read_only);
+        if isolation_level == Some(crate::transaction::IsolationLevel::Serializable) {
+            return Err(grafeo_common::utils::error::QueryError::unsupported(
+                "Serializable isolation needs query read tracking (#400); use SnapshotIsolation instead",
+            )
+            .into());
+        }
         let mut current = self.current_transaction.lock();
         if current.is_some() {
             // Nested transaction: create an auto-savepoint instead of a new tx.
@@ -4447,10 +4456,9 @@ impl Session {
         })?;
 
         let changes = self.changes.lock().take();
-        // Until `commit.complete()`, the commit holds its writes, readers do
-        // not see its epoch, and no other commit or transaction start can
-        // run: the versions, events and WAL records below are complete
-        // before anything that comes after the commit (#548).
+        // The assigned epoch stays invisible until publication completes.
+        // Commits write in epoch order; a new transaction can still begin
+        // with the last published snapshot while this commit is being written.
         let commit = match self.transaction_manager.start_commit(transaction_id) {
             Ok(commit) => commit,
             Err(e) => {
@@ -7929,15 +7937,18 @@ mod tests {
         }
 
         #[test]
-        fn test_start_transaction_with_isolation_level() {
+        fn test_start_transaction_refuses_serializable() {
             let db = GrafeoDB::new_in_memory();
             let session = db.session();
 
-            session
+            let error = session
                 .execute("START TRANSACTION ISOLATION LEVEL SERIALIZABLE")
-                .unwrap();
-            assert!(session.in_transaction());
-            session.execute("ROLLBACK").unwrap();
+                .unwrap_err();
+            assert_eq!(
+                error.error_code(),
+                grafeo_common::utils::error::ErrorCode::QueryUnsupported
+            );
+            assert!(!session.in_transaction());
         }
 
         #[test]

@@ -3389,4 +3389,36 @@ mod tests {
         grafeo_close(db);
         grafeo_free_database(db);
     }
+
+    #[test]
+    fn serializable_is_refused_without_blocking_supported_transactions() {
+        let db = grafeo_open_memory();
+        assert!(!db.is_null());
+        crate::error::grafeo_clear_error();
+        let refused = grafeo_begin_transaction_with_isolation(db, 2);
+        assert!(
+            refused.is_null(),
+            "Serializable must not return a transaction"
+        );
+        let error = crate::error::grafeo_last_error();
+        assert!(!error.is_null());
+        // SAFETY: the thread-local error remains valid until the next C call.
+        let message = unsafe { std::ffi::CStr::from_ptr(error) }
+            .to_string_lossy()
+            .into_owned();
+        assert!(message.contains("GRAFEO-Q004"), "{message}");
+
+        let tx = grafeo_begin_transaction(db);
+        assert!(!tx.is_null(), "default isolation remains supported");
+        assert_eq!(grafeo_rollback(tx), GrafeoStatus::Ok);
+        grafeo_free_transaction(tx);
+        for level in [0, 1] {
+            let tx = grafeo_begin_transaction_with_isolation(db, level);
+            assert!(!tx.is_null(), "supported isolation level {level}");
+            assert_eq!(grafeo_rollback(tx), GrafeoStatus::Ok);
+            grafeo_free_transaction(tx);
+        }
+        assert_eq!(grafeo_close(db), GrafeoStatus::Ok);
+        grafeo_free_database(db);
+    }
 }

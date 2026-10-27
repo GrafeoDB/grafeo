@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"sync"
 	"testing"
 )
@@ -378,21 +379,30 @@ func TestTransactionIsolation(t *testing.T) {
 	defer db.Close()
 
 	tx, err := db.BeginTransactionWith(Serializable)
-	if err != nil {
-		t.Fatal(err)
+	if tx != nil {
+		_ = tx.Rollback()
+		t.Fatal("Serializable unexpectedly started a transaction")
+	}
+	var refusal *Error
+	if !errors.As(err, &refusal) || !strings.Contains(refusal.Message, "GRAFEO-Q004") {
+		t.Fatalf("expected GRAFEO-Q004, got %v", err)
 	}
 
-	_, err = tx.Execute("INSERT (:Isolated {val: 1})")
-	if err != nil {
-		t.Fatal(err)
+	for _, level := range []IsolationLevel{ReadCommitted, SnapshotIsolation} {
+		tx, err := db.BeginTransactionWith(level)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := tx.Execute("INSERT (:Isolated {val: 1})"); err != nil {
+			_ = tx.Rollback()
+			t.Fatal(err)
+		}
+		if err := tx.Commit(); err != nil {
+			t.Fatal(err)
+		}
 	}
-
-	if err := tx.Commit(); err != nil {
-		t.Fatal(err)
-	}
-
-	if mustCount(t, db.NodeCount) != 1 {
-		t.Errorf("expected 1 node, got %d", mustCount(t, db.NodeCount))
+	if got := mustCount(t, db.NodeCount); got != 2 {
+		t.Errorf("expected 2 nodes, got %d", got)
 	}
 }
 

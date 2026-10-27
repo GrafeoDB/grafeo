@@ -132,16 +132,21 @@ class TestGQLTransactionIsolationLevels:
         rows = list(result)
         assert len(rows) == 1
 
-    def test_isolation_level_serializable(self, db):
-        """Explicit serializable isolation level."""
-        tx = db.begin_transaction(isolation_level="serializable")
-        assert tx.isolation_level == "serializable"
-        tx.execute("INSERT (:IsoSet {name: 'set_test'})")
-        tx.commit()
+    def test_isolation_level_serializable_is_refused(self, db):
+        """Unsupported isolation fails before starting a transaction."""
+        import pytest
+        from grafeo import GrafeoError
 
-        result = db.execute("MATCH (n:IsoSet) RETURN n.name")
-        rows = list(result)
-        assert len(rows) == 1
+        with pytest.raises(GrafeoError, match="GRAFEO-Q004") as refusal:
+            db.begin_transaction(isolation_level="serializable")
+        assert refusal.value.error_code == "GRAFEO-Q004"
+
+        with db.begin_transaction(isolation_level="snapshot") as tx:
+            tx.execute("INSERT (:IsoSet {name: 'set_test'})")
+            tx.commit()
+
+        rows = list(db.execute("MATCH (n:IsoSet) RETURN n.name AS name"))
+        assert rows == [{"name": "set_test"}]
 
     def test_isolation_level_invalid(self, db):
         """Unknown isolation level raises ValueError."""

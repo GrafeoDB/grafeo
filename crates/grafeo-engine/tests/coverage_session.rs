@@ -169,10 +169,9 @@ fn test_release_savepoint_via_api() {
 // ---------------------------------------------------------------------------
 
 #[test]
-fn test_begin_transaction_with_serializable_isolation() {
+fn test_begin_transaction_with_default_isolation() {
     let db = setup();
     let mut session = db.session();
-    // Use GQL SET SESSION to test serializable isolation
     session.begin_transaction().unwrap();
     session
         .execute("MATCH (p:Person) RETURN count(p) AS cnt")
@@ -456,9 +455,15 @@ fn test_begin_transaction_with_read_committed() {
 fn test_begin_transaction_with_serializable() {
     let db = setup();
     let mut session = db.session();
-    session
+    let error = session
         .begin_transaction_with_isolation(grafeo_engine::transaction::IsolationLevel::Serializable)
-        .unwrap();
+        .unwrap_err();
+    assert_eq!(
+        error.error_code(),
+        grafeo_common::utils::error::ErrorCode::QueryUnsupported
+    );
+    assert!(!session.in_transaction());
+    session.begin_transaction().unwrap();
     let r = session.execute("MATCH (p:Person) RETURN count(p)").unwrap();
     assert_eq!(r.rows()[0][0], Value::Int64(2));
     session.commit().unwrap();

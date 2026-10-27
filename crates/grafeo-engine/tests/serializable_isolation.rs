@@ -1,19 +1,14 @@
-//! Serializable isolation prevents write skew; snapshot isolation does not
-//! (#400).
+//! Serializable requests are refused until query reads are tracked (#671).
 //!
-//! `IsolationLevel::Serializable` is documented as serializable snapshot
-//! isolation: besides write-write conflicts it detects read-write ones, so
-//! of two transactions that each read what the other then writes, one
-//! fails with a serialization failure. The reporter's case is "insert if
-//! absent": each transaction reads that no node has the key and inserts
-//! one. Today query reads never enter the transaction's read set
-//! (`TransactionManager::record_read` has no caller outside its unit
-//! tests), so every such transaction commits; those tests are ignored
-//! until #400 is fixed. Snapshot isolation allows write skew, as
-//! documented. A UNIQUE constraint keeps a concurrent duplicate out at any
-//! level: the second insert or its commit fails with the retryable write
-//! conflict on the key (or the constraint violation, once the first one is
-//! committed and seen), and one node is left.
+//! The ignored tests retain the future read-tracking acceptance (#400):
+//! interleaved and concurrent insert-if-absent transactions, and two-row
+//! write skew. They currently fail at admission with GRAFEO-Q004; they do
+//! not establish a Serializable guarantee. Query execution does not call
+//! `TransactionManager::record_read` yet.
+//!
+//! Active controls show snapshot isolation allowing write skew and a
+//! UNIQUE constraint preventing duplicate keys. Run the future acceptance
+//! explicitly while implementing #400:
 //!
 //! ```bash
 //! cargo test -p grafeo-engine --all-features --test serializable_isolation -- --include-ignored

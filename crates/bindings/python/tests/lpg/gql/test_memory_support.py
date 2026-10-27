@@ -322,10 +322,18 @@ class TestTransactions:
         assert len(list(result)) == 0
 
     def test_isolation_levels(self, db):
-        for level in ["read_committed", "snapshot", "serializable"]:
+        from grafeo import GrafeoError
+
+        with pytest.raises(GrafeoError, match="GRAFEO-Q004") as refusal:
+            db.begin_transaction("serializable")
+        assert refusal.value.error_code == "GRAFEO-Q004"
+
+        for level in ["read_committed", "snapshot"]:
             with db.begin_transaction(level) as tx:
-                tx.execute("MATCH (n) RETURN n LIMIT 1")
+                tx.execute(f"INSERT (:Isolation {{level: '{level}'}})")
                 tx.commit()
+        rows = list(db.execute("MATCH (n:Isolation) RETURN n.level AS level ORDER BY level"))
+        assert rows == [{"level": "read_committed"}, {"level": "snapshot"}]
 
     def test_context_manager_auto_commits(self, db):
         """Clean exit from context manager auto-commits."""

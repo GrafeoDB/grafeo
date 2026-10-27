@@ -4363,6 +4363,18 @@ impl Session {
         isolation_level: Option<crate::transaction::IsolationLevel>,
     ) -> Result<()> {
         let _span = grafeo_debug_span!("grafeo::tx::begin", read_only);
+        // Serializable needs the reads of queries recorded to catch write
+        // skew, and they are not yet: refuse it rather than run snapshot
+        // isolation under its name.
+        if isolation_level == Some(crate::transaction::IsolationLevel::Serializable) {
+            return Err(grafeo_common::utils::error::Error::from(
+                grafeo_common::utils::error::QueryError::unsupported(
+                    "the SERIALIZABLE isolation level is not available yet: queries do not record \
+                 their reads, so it could not prevent write skew; snapshot isolation (the \
+                 default) is the strongest level",
+                ),
+            ));
+        }
         let mut current = self.current_transaction.lock();
         if current.is_some() {
             // Nested transaction: create an auto-savepoint instead of a new tx.
@@ -7934,7 +7946,7 @@ mod tests {
             let session = db.session();
 
             session
-                .execute("START TRANSACTION ISOLATION LEVEL SERIALIZABLE")
+                .execute("START TRANSACTION ISOLATION LEVEL SNAPSHOT ISOLATION")
                 .unwrap();
             assert!(session.in_transaction());
             session.execute("ROLLBACK").unwrap();

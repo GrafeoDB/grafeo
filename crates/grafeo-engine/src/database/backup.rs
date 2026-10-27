@@ -171,7 +171,7 @@ pub struct BackupCursor {
 // ── Manifest I/O ───────────────────────────────────────────────────
 
 const MANIFEST_FILENAME: &str = "backup_manifest.json";
-const BACKUP_CURSOR_FILENAME: &str = "backup_cursor.meta";
+const BACKUP_CURSOR_FILENAME: &str = grafeo_storage::wal::BACKUP_CURSOR_FILE;
 
 /// The format version of the JSON manifest (0.5.x wrote version 1, in
 /// bincode).

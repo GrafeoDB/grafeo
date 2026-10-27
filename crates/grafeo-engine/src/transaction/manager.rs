@@ -40,7 +40,10 @@ pub enum TransactionState {
 /// |-------|-------------|----------------------|---------------|------------|
 /// | ReadCommitted | No | Yes | Yes | Yes |
 /// | SnapshotIsolation | No | No | No | Yes |
-/// | Serializable | No | No | No | No |
+/// | Serializable | No | No | No | No, once queries record their reads (#400) |
+///
+/// A session refuses `Serializable` until then (`GRAFEO-Q004`): with no reads
+/// recorded it could not prevent write skew.
 ///
 /// # Performance
 ///
@@ -65,11 +68,12 @@ pub enum IsolationLevel {
     #[default]
     SnapshotIsolation,
 
-    /// Serializable Snapshot Isolation (SSI): provides full serializability
-    /// by detecting read-write conflicts in addition to write-write conflicts.
+    /// Serializable Snapshot Isolation (SSI): serializability by detecting
+    /// read-write conflicts in addition to write-write conflicts.
     ///
-    /// Prevents all anomalies including write skew, but may abort more
-    /// transactions due to stricter conflict detection.
+    /// Not available yet: queries do not record their reads, so a session
+    /// refuses this level (`GRAFEO-Q004`) rather than run snapshot isolation
+    /// under its name (#400).
     Serializable,
 }
 
@@ -329,19 +333,18 @@ pub struct TransactionManager {
     /// [`begin`](Self::begin) and [`begin_private`](Self::begin_private), so
     /// no transaction starts while such a call runs.
     ///
-    /// Lock order: the idle gate before the commit lock (`begin` and such a
-    /// call take both, in that order).
+    /// Lock order: the idle gate before the commit lock (such a call takes
+    /// both, in that order; `begin` takes only the idle gate).
     idle_gate: Mutex<()>,
     /// Held by a commit from its epoch until it is complete (see
     /// [`CommitGuard`]), by a change outside a commit (a schema statement, a
     /// graph command, a direct call that commits at once) while it runs, by
     /// a checkpoint or a copy of the store
     /// while it builds its image (see [`hold_commits`](Self::hold_commits)),
-    /// and briefly by every [`begin`](Self::begin) and
-    /// [`begin_private`](Self::begin_private) and by
-    /// [`close_for_writes`](Self::close_for_writes): commits complete one at a
-    /// time, in epoch order, no transaction starts in the middle of one, and
-    /// no image holds part of one.
+    /// and by [`close_for_writes`](Self::close_for_writes): commits complete
+    /// one at a time, in epoch order, and no image holds part of one. A
+    /// [`begin`](Self::begin) does not take it: its snapshot is the published
+    /// epoch, which holds only complete commits.
     ///
     /// Lock order: a checkpoint takes the file's checkpoint guard before this
     /// lock, and the idle gate comes before it too; the write freeze comes
@@ -1230,7 +1233,9 @@ impl TransactionManager {
     ///
     /// - **Serializable only**: Read-write conflicts (SSI validation) are additionally
     ///   checked. If transaction T1 read an entity that another transaction T2 wrote,
-    ///   and T2 committed after T1 started, T1 will abort. This prevents write skew.
+    ///   and T2 committed after T1 started, T1 will abort. This prevents write skew
+    ///   for the reads recorded with [`record_read`](Self::record_read); queries
+    ///   record none yet (#400), which is why a session refuses this level.
     ///
     /// # Errors
     ///

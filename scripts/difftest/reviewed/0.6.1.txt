@@ -10,5 +10,10 @@ DF2|cypher acc98a6eac An index of and a map of an aggregate aggregate; 0.6.0 ref
 DF2|gql acc98a6eac An index of and a map of an aggregate aggregate; 0.6.0 refused them (#539).
 DF3|gql 9d0b9d9057 An aggregate over a LET variable aggregates; 0.6.0 refused it (#539).
 DF4|gql 236cddc851 A LET variable inside a list, a map and CASE reads its value; 0.6.0 failed with an undefined variable (#539).
+DG1|cypher bb358ef914 A doubled backtick in a Cypher delimited name is one backtick; 0.6.0 failed with a syntax error (#579).
+DG2|cypher 1f8ab4f00d size() of a vector is its dimension; 0.6.0 returned null (#585).
+DG2|gql 1f8ab4f00d size() of a vector is its dimension; 0.6.0 returned null (#585).
+DG3|cypher 4b4e4c2b02 toList() of a vector is the list of its elements; 0.6.0 wrapped the vector in a list (#585).
+DG3|gql 4b4e4c2b02 toList() of a vector is the list of its elements; 0.6.0 wrapped the vector in a list (#585).
 N12|cypher 603b79d5f3 A subquery that returns an edge in one part and a node in another returns each as what it is; 0.6.0 read the node as the edge with its ID (#668).
 N12|gql 603b79d5f3 A subquery that returns an edge in one part and a node in another returns each as what it is; 0.6.0 read the node as the edge with its ID (#668).

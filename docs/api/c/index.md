@@ -350,7 +350,7 @@ GrafeoTransaction* grafeo_begin_transaction(GrafeoDatabase* db);
 GrafeoTransaction* grafeo_begin_transaction_with_isolation(GrafeoDatabase* db, GrafeoIsolationLevel isolation);
 ```
 
-Isolation levels: `GRAFEO_ISOLATION_READ_COMMITTED` (0), `GRAFEO_ISOLATION_SNAPSHOT` (1), `GRAFEO_ISOLATION_SERIALIZABLE` (2).
+Isolation levels: `GRAFEO_ISOLATION_READ_COMMITTED` (0), `GRAFEO_ISOLATION_SNAPSHOT` (1), `GRAFEO_ISOLATION_SERIALIZABLE` (2, refused for now: snapshot isolation is the strongest level until queries record their reads: the call returns `NULL` with the error).
 
 ### Execute Within a Transaction
 

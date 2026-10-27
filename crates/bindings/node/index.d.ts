@@ -200,7 +200,8 @@ export declare class GrafeoDB {
   /**
    * Begin a transaction with an optional isolation level.
    *
-   * Isolation levels: "read_committed", "snapshot" (default), "serializable".
+   * Isolation levels: "read_committed", "snapshot" (default), "serializable" (refused for now:
+   * snapshot isolation is the strongest level until queries record their reads).
    */
   beginTransaction(isolationLevel?: string | undefined | null): Transaction
   /** Create a vector similarity index on a node property. */

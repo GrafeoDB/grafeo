@@ -259,11 +259,11 @@ Start a new transaction with an optional isolation level.
 beginTransaction(isolationLevel?: string): Transaction
 ```
 
-Isolation levels: `"read_committed"`, `"snapshot"` (default), `"serializable"`.
+Isolation levels: `"read_committed"`, `"snapshot"` (default); `"serializable"` is refused for now: snapshot isolation is the strongest level until queries record their reads.
 
 ```typescript
 const tx = db.beginTransaction();
-const tx = db.beginTransaction('serializable');
+const tx = db.beginTransaction('read_committed');
 ```
 
 ## Named Graphs

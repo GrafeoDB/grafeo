@@ -162,21 +162,27 @@ public sealed class TransactionTests : IDisposable
     }
 
     [Fact]
-    public void BeginsTransactionWithSerializableString()
+    public void RefusesSerializableUntilQueriesRecordTheirReads()
     {
         using var db = GrafeoDB.Memory();
-        using var tx = db.BeginTransaction("serializable");
-        tx.Execute("INSERT (:Person {name: 'Vincent'})");
-        tx.Commit();
+        foreach (var begin in new System.Func<Transaction>[]
+        {
+            () => db.BeginTransaction("serializable"),
+            () => db.BeginTransaction(IsolationLevel.Serializable),
+        })
+        {
+            var error = Assert.Throws<TransactionException>(begin);
+            Assert.Contains("snapshot isolation", error.Message);
+        }
 
-        Assert.Equal(1, db.NodeCount);
+        Assert.Equal(0, db.NodeCount);
     }
 
     [Fact]
     public void BeginsTransactionWithEnum()
     {
         using var db = GrafeoDB.Memory();
-        using var tx = db.BeginTransaction(IsolationLevel.Serializable);
+        using var tx = db.BeginTransaction(IsolationLevel.Snapshot);
         tx.Execute("INSERT (:Person {name: 'Jules'})");
         tx.Commit();
 

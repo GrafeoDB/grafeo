@@ -18,7 +18,8 @@ public enum IsolationLevel
     /// <summary>Snapshot isolation: the transaction sees a consistent snapshot taken at begin.</summary>
     Snapshot = 1,
 
-    /// <summary>Serializable: full serializability, the strongest isolation guarantee.</summary>
+    /// <summary>Serializable: not available yet. Beginning a transaction at this level fails with an
+    /// error naming snapshot isolation, the strongest level, until queries record their reads.</summary>
     Serializable = 2,
 }
 
@@ -314,7 +315,7 @@ public sealed class GrafeoDB : IGrafeoDB, IDisposable, IAsyncDisposable
     /// <param name="isolationLevel">
     /// Accepted values (case-insensitive): "read_committed" / "ReadCommitted",
     /// "snapshot" / "Snapshot" / "snapshot_isolation" / "SnapshotIsolation",
-    /// "serializable" / "Serializable".
+    /// "serializable" / "Serializable" (refused for now, see <see cref="IsolationLevel.Serializable"/>).
     /// </param>
     public Transaction BeginTransaction(string isolationLevel)
     {

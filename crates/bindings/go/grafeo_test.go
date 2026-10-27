@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"sync"
 	"testing"
 )
@@ -370,7 +371,8 @@ func TestTransactionRollback(t *testing.T) {
 	}
 }
 
-func TestTransactionIsolation(t *testing.T) {
+// Serializable is refused until queries record their reads (#671).
+func TestSerializableIsRefused(t *testing.T) {
 	db, err := OpenInMemory()
 	if err != nil {
 		t.Fatal(err)
@@ -378,6 +380,23 @@ func TestTransactionIsolation(t *testing.T) {
 	defer db.Close()
 
 	tx, err := db.BeginTransactionWith(Serializable)
+	if err == nil {
+		tx.Rollback()
+		t.Fatal("Serializable began")
+	}
+	if !strings.Contains(err.Error(), "snapshot isolation") {
+		t.Errorf("the error names snapshot isolation: %v", err)
+	}
+}
+
+func TestTransactionIsolation(t *testing.T) {
+	db, err := OpenInMemory()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	tx, err := db.BeginTransactionWith(SnapshotIsolation)
 	if err != nil {
 		t.Fatal(err)
 	}

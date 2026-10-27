@@ -45,7 +45,7 @@ With explicit resource management, the transaction auto-rolls back if `commit()`
 const tx = db.beginTransaction();
 
 // Explicit isolation level
-const tx = db.beginTransaction('serializable');
+const tx = db.beginTransaction('read_committed');
 ```
 
 Available levels:
@@ -54,7 +54,7 @@ Available levels:
 | ----- | ----------- |
 | `read_committed` | See committed data from other transactions |
 | `snapshot` (default) | See a consistent snapshot from transaction start |
-| `serializable` | Full serializability, detects write conflicts |
+| `serializable` | Not available yet: refused for now: snapshot isolation is the strongest level until queries record their reads |
 
 ## Query Languages in Transactions
 

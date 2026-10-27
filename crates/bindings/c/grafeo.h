@@ -51,7 +51,7 @@ typedef enum {
 typedef enum {
     GRAFEO_ISOLATION_READ_COMMITTED = 0,
     GRAFEO_ISOLATION_SNAPSHOT       = 1,
-    GRAFEO_ISOLATION_SERIALIZABLE   = 2
+    GRAFEO_ISOLATION_SERIALIZABLE   = 2  /* refused for now: snapshot isolation is the strongest level */
 } GrafeoIsolationLevel;
 
 typedef enum {

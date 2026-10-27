@@ -82,7 +82,7 @@ with db.begin_transaction() as tx:
 
 # With isolation levels (string or enum)
 from grafeo import IsolationLevel
-with db.begin_transaction(IsolationLevel.SERIALIZABLE) as tx:
+with db.begin_transaction(IsolationLevel.READ_COMMITTED) as tx:
     tx.execute("MATCH (n:Person) SET n.verified = true")
     tx.commit()
 

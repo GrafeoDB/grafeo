@@ -62,7 +62,9 @@ const (
 	// SnapshotIsolation (default) sees a consistent snapshot as of transaction start.
 	SnapshotIsolation IsolationLevel = 1
 
-	// Serializable provides full serializability via SSI conflict detection.
+	// Serializable is not available yet: beginning a transaction at this level
+	// fails with an error naming snapshot isolation, the strongest level, until
+	// queries record their reads.
 	Serializable IsolationLevel = 2
 )
 

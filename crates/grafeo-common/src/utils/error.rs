@@ -476,6 +476,8 @@ pub enum TransactionError {
     ///
     /// Occurs when running at Serializable isolation level and a read-write
     /// conflict is detected (we read data that another committed transaction wrote).
+    /// Not raised yet: a session refuses Serializable until queries record their
+    /// reads (#400).
     SerializationFailure(String),
 
     /// Deadlock detected.

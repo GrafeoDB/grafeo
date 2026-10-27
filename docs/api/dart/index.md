@@ -334,7 +334,7 @@ Transaction beginTransactionWithIsolation(IsolationLevel isolationLevel)
 ```
 
 ```dart
-final tx = db.beginTransactionWithIsolation(IsolationLevel.serializable);
+final tx = db.beginTransactionWithIsolation(IsolationLevel.readCommitted);
 ```
 
 ### Node CRUD
@@ -883,7 +883,7 @@ enum IsolationLevel {
 |-------|------|-------------|
 | `readCommitted` | 0 | Reads see only committed data; no dirty reads |
 | `snapshotIsolation` | 1 | Reads use a consistent snapshot taken at transaction start |
-| `serializable` | 2 | Full serializability; transactions appear to execute sequentially |
+| `serializable` | 2 | Not available yet: refused for now: snapshot isolation is the strongest level until queries record their reads |
 
 ## Data Types
 

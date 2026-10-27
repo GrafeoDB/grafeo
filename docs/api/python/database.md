@@ -957,7 +957,7 @@ def rebuild_text_index(self, label: str, property: str) -> None
 
 ### begin_transaction()
 
-Start a new transaction. Returns a `Transaction` object that can be used as a context manager. The `isolation_level` parameter accepts a string (e.g., `"snapshot"`, `"serializable"`).
+Start a new transaction. Returns a `Transaction` object that can be used as a context manager. The `isolation_level` parameter accepts a string: `"read_committed"` or `"snapshot"` (the default); `"serializable"` is refused for now: snapshot isolation is the strongest level until queries record their reads.
 
 ```python
 def begin_transaction(self, isolation_level: Optional[str] = None) -> Transaction
@@ -970,7 +970,7 @@ with db.begin_transaction() as tx:
     tx.commit()  # both nodes created atomically
 
 # With explicit isolation level
-with db.begin_transaction("serializable") as tx:
+with db.begin_transaction("read_committed") as tx:
     tx.execute("MATCH (n:Counter) SET n.val = n.val + 1")
     tx.commit()
 ```

@@ -1917,7 +1917,8 @@ pub extern "C" fn grafeo_begin_transaction(db: *mut GrafeoDatabase) -> *mut Graf
 }
 
 /// Begin a transaction with a specific isolation level.
-/// Levels: 0 = ReadCommitted, 1 = SnapshotIsolation, 2 = Serializable.
+/// Levels: 0 = ReadCommitted, 1 = SnapshotIsolation, 2 = Serializable. Serializable is
+/// refused (NULL, with the error) until queries record their reads.
 #[unsafe(no_mangle)]
 pub extern "C" fn grafeo_begin_transaction_with_isolation(
     db: *mut GrafeoDatabase,
@@ -2778,6 +2779,25 @@ mod tests {
         assert_eq!(grafeo_close(db), GrafeoStatus::Ok, "a second close");
         grafeo_free_database(db);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Serializable (2) is refused until queries record their reads (#671):
+    /// NULL, with an error that names snapshot isolation; snapshot (1) begins.
+    #[test]
+    fn serializable_is_refused_with_an_error() {
+        let db = grafeo_open_memory();
+        let tx = grafeo_begin_transaction_with_isolation(db, 2);
+        assert!(tx.is_null(), "Serializable began");
+        // SAFETY: grafeo_last_error returns NULL or a NUL-terminated string.
+        let error = unsafe { std::ffi::CStr::from_ptr(crate::error::grafeo_last_error()) }
+            .to_string_lossy()
+            .into_owned();
+        assert!(error.contains("snapshot isolation"), "{error}");
+        let tx = grafeo_begin_transaction_with_isolation(db, 1);
+        assert!(!tx.is_null());
+        assert_eq!(grafeo_rollback(tx), GrafeoStatus::Ok);
+        grafeo_free_transaction(tx);
+        grafeo_free_database(db);
     }
 
     #[test]

@@ -21,26 +21,27 @@ db.execute("CREATE (n:Person {name: 'Vincent'})")  # Commits immediately
 
 ## Isolation Levels
 
-Grafeo supports three isolation levels, configurable per transaction:
+Grafeo supports two isolation levels, configurable per transaction:
 
 | Level | Description |
 |-------|-------------|
 | `read_committed` | See committed data; non-repeatable reads possible |
-| `snapshot` | Default: consistent snapshot at transaction start |
-| `serializable` | Full SSI with read-write conflict detection |
+| `snapshot` | Default: consistent snapshot at transaction start; the strongest level |
+
+`serializable` is not available yet. Preventing write skew (two transactions that each read the same data and then each change something different based on it) needs the reads of queries recorded, and they are not yet, so asking for `serializable` fails with `GRAFEO-Q004` instead of running snapshot isolation under its name. Until then, a `UNIQUE` constraint keeps concurrent duplicates out, and a transaction that writes the data it decided on conflicts with one that writes it too.
 
 ```python
 # Default (snapshot isolation)
 tx = db.begin_transaction()
 
 # Explicit isolation level
-tx = db.begin_transaction(isolation_level="serializable")
+tx = db.begin_transaction(isolation_level="read_committed")
 ```
 
 ```rust
 use grafeo::IsolationLevel;
 
-let tx = session.begin_transaction_with_isolation(IsolationLevel::Serializable)?;
+let tx = session.begin_transaction_with_isolation(IsolationLevel::ReadCommitted)?;
 ```
 
 ## Read-Only Transactions
@@ -363,7 +364,7 @@ RELEASE SAVEPOINT my_save
 tx = db.begin_transaction()
 
 # With isolation level
-tx = db.begin_transaction(isolation_level="serializable")
+tx = db.begin_transaction(isolation_level="read_committed")
 
 # Execute within transaction
 result = tx.execute("MATCH (n) RETURN n")
@@ -393,7 +394,7 @@ tx.execute("RELEASE SAVEPOINT sp1")
 session.begin_transaction()?;
 
 // With isolation level
-session.begin_transaction_with_isolation(IsolationLevel::Serializable)?;
+session.begin_transaction_with_isolation(IsolationLevel::ReadCommitted)?;
 
 // Execute queries
 let result = session.execute("MATCH (n) RETURN n")?;

@@ -547,7 +547,8 @@ impl JsGrafeoDB {
 
     /// Begin a transaction with an optional isolation level.
     ///
-    /// Isolation levels: "read_committed", "snapshot" (default), "serializable".
+    /// Isolation levels: "read_committed", "snapshot" (default), "serializable" (refused for now:
+    /// snapshot isolation is the strongest level until queries record their reads).
     #[napi(js_name = "beginTransaction")]
     pub fn begin_transaction(&self, isolation_level: Option<String>) -> Result<Transaction> {
         Transaction::new(self.inner.clone(), isolation_level.as_deref())

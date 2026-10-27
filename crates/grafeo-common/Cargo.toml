@@ -69,7 +69,7 @@ os-entropy = ["dep:getrandom"]
 encryption = ["dep:aes-gcm", "dep:hkdf", "dep:argon2", "dep:zeroize", "dep:sha2", "dep:rand"]
 
 [dev-dependencies]
-bigdecimal.workspace = true
+num-bigint.workspace = true
 proptest.workspace = true
 criterion.workspace = true
 

@@ -4,5 +4,11 @@ DE1|gql 5103ef079d Shortest paths read a decimal edge weight; 0.6.0 read it as 1
 DE2|gql 003bcbe071 Spanning trees read a decimal edge weight; 0.6.0 read it as 1.0, so it kept the wrong edges (#678).
 DE3|gql 57bb8d0e4e Max flow reads a decimal capacity; 0.6.0 read it as 1.0 (#678).
 DE4|gql 3369869dd8 Min-cost flow reads decimal capacities and costs; 0.6.0 read them as 1.0 and 0.0 (#678).
+DF1|cypher 41c2268601 A key read of an aggregate (head(collect(p)).name) aggregates; 0.6.0 refused it (#539).
+DF1|gql 41c2268601 A key read of an aggregate (head(collect(p)).name) aggregates; 0.6.0 refused it (#539).
+DF2|cypher acc98a6eac An index of and a map of an aggregate aggregate; 0.6.0 refused them (#539).
+DF2|gql acc98a6eac An index of and a map of an aggregate aggregate; 0.6.0 refused them (#539).
+DF3|gql 9d0b9d9057 An aggregate over a LET variable aggregates; 0.6.0 refused it (#539).
+DF4|gql 236cddc851 A LET variable inside a list, a map and CASE reads its value; 0.6.0 failed with an undefined variable (#539).
 N12|cypher 603b79d5f3 A subquery that returns an edge in one part and a node in another returns each as what it is; 0.6.0 read the node as the edge with its ID (#668).
 N12|gql 603b79d5f3 A subquery that returns an edge in one part and a node in another returns each as what it is; 0.6.0 read the node as the edge with its ID (#668).

@@ -230,7 +230,6 @@ enum ClaimUndo {
     Delete(GraphEntity),
     Endpoint(GraphEntity),
     Key(KeyClaim),
-    ResetWrites(FxHashSet<GraphEntity>),
 }
 
 impl TransactionInfo {
@@ -1685,9 +1684,6 @@ impl TransactionManager {
                 Some(ClaimUndo::Key(key)) => {
                     info.key_set.remove(&key);
                 }
-                Some(ClaimUndo::ResetWrites(writes)) => {
-                    info.write_set = writes;
-                }
                 None => break,
             }
         }
@@ -1710,33 +1706,6 @@ impl TransactionManager {
             ))
         })?;
         Ok(info.write_set.clone())
-    }
-
-    /// Replaces the write set of a transaction (used for savepoint rollback).
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the transaction is not found.
-    pub fn reset_write_set(
-        &self,
-        transaction_id: TransactionId,
-        write_set: FxHashSet<GraphEntity>,
-    ) -> Result<()> {
-        let mut txns = self.transactions.write();
-        let info = txns.get_mut(&transaction_id).ok_or_else(|| {
-            Error::Transaction(TransactionError::InvalidState(
-                "Transaction not found".to_string(),
-            ))
-        })?;
-        if let Some(undo) = &mut info.claim_undo {
-            undo.push(ClaimUndo::ResetWrites(std::mem::replace(
-                &mut info.write_set,
-                write_set,
-            )));
-        } else {
-            info.write_set = write_set;
-        }
-        Ok(())
     }
 
     /// Aborts all active transactions.
@@ -2364,30 +2333,6 @@ mod tests {
         assert_eq!(info.delete_set, FxHashSet::from_iter([deleted]));
         assert_eq!(info.endpoint_set, FxHashSet::from_iter([endpoint]));
         assert_eq!(info.key_set, FxHashSet::from_iter([claim_key(1)]));
-    }
-
-    #[test]
-    fn claim_marks_undo_write_set_replacement_in_order() {
-        let mgr = TransactionManager::new();
-        let tx = mgr.begin();
-        let original = GraphEntity::from(NodeId::new(1));
-        let replacement = GraphEntity::from(NodeId::new(2));
-        mgr.record_delete(tx, original.clone()).unwrap();
-        let mark = mgr.mark_claims(tx).unwrap();
-        mgr.reset_write_set(tx, FxHashSet::from_iter([replacement.clone()]))
-            .unwrap();
-        mgr.record_write(tx, original.clone()).unwrap();
-        mgr.reset_write_set(tx, FxHashSet::default()).unwrap();
-        mgr.record_write(tx, replacement).unwrap();
-        mgr.restore_claims(tx, mark).unwrap();
-        assert_eq!(
-            mgr.get_write_set(tx).unwrap(),
-            FxHashSet::from_iter([original.clone()])
-        );
-        assert_eq!(
-            mgr.transactions.read()[&tx].delete_set,
-            FxHashSet::from_iter([original])
-        );
     }
 
     #[test]

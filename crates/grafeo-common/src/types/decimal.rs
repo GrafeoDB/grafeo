@@ -1268,7 +1268,7 @@ mod tests {
 
     mod wide_arithmetic {
         use super::*;
-        use bigdecimal::{BigDecimal, RoundingMode};
+        use num_bigint::BigInt;
         use proptest::prelude::*;
         use proptest::test_runner::{Config, RngSeed};
 
@@ -1390,17 +1390,34 @@ mod tests {
             }
         }
 
-        fn reference_value((mantissa, scale): (i128, u8)) -> BigDecimal {
-            BigDecimal::new(mantissa.into(), i64::from(scale))
+        /// `value` exactly, as a mantissa and its scale.
+        fn reference_value((mantissa, scale): (i128, u8)) -> (BigInt, u32) {
+            (BigInt::from(mantissa), u32::from(scale))
         }
 
-        fn reference_coefficient(value: &BigDecimal, scale: u8) -> Option<i128> {
-            let rounded = value.with_scale_round(i64::from(scale), RoundingMode::HalfUp);
-            let (coefficient, actual_scale) = rounded.as_bigint_and_exponent();
-            assert_eq!(actual_scale, i64::from(scale));
-            coefficient
-                .to_string()
-                .parse::<i128>()
+        /// The mantissa of `value` at `scale`, rounded half away from zero,
+        /// when it has at most 38 digits.
+        fn reference_coefficient(
+            (mantissa, exact_scale): &(BigInt, u32),
+            scale: u8,
+        ) -> Option<i128> {
+            let scale = u32::from(scale);
+            let rounded = if scale >= *exact_scale {
+                mantissa * BigInt::from(10).pow(scale - exact_scale)
+            } else {
+                let divisor = BigInt::from(10).pow(exact_scale - scale);
+                let (quotient, remainder): (BigInt, BigInt) =
+                    (mantissa / &divisor, mantissa % &divisor);
+                let twice = remainder * BigInt::from(2);
+                let zero = BigInt::from(0);
+                let twice = if twice < zero { -twice } else { twice };
+                if twice >= divisor {
+                    quotient + BigInt::from(if *mantissa < zero { -1 } else { 1 })
+                } else {
+                    quotient
+                }
+            };
+            i128::try_from(&rounded)
                 .ok()
                 .filter(|mantissa| -COEFFICIENT_LIMIT < *mantissa && *mantissa < COEFFICIENT_LIMIT)
         }
@@ -1409,7 +1426,9 @@ mod tests {
             left: (i128, u8),
             right: (i128, u8),
         ) -> Result<(i128, u8), DecimalError> {
-            let exact = reference_value(left) * reference_value(right);
+            let ((left_mantissa, left_scale), (right_mantissa, right_scale)) =
+                (reference_value(left), reference_value(right));
+            let exact = (left_mantissa * right_mantissa, left_scale + right_scale);
             // Choose the greatest fitting scale by rounding the exact value
             // afresh at each scale, never a previously rounded candidate.
             for scale in (0..=(left.1 + right.1).min(38)).rev() {
@@ -1427,8 +1446,13 @@ mod tests {
             if right.0 == 0 {
                 return Err(DecimalError::DivisionByZero);
             }
-            let exact = reference_value(left) % reference_value(right);
             let scale = left.1.max(right.1);
+            // Both at the larger scale, the remainder is exact there, with
+            // the sign of the dividend (as Rust's `%`).
+            let aligned = |value: (i128, u8)| {
+                BigInt::from(value.0) * BigInt::from(10).pow(u32::from(scale - value.1))
+            };
+            let exact = (aligned(left) % aligned(right), u32::from(scale));
             let mantissa = reference_coefficient(&exact, scale)
                 .expect("the exact remainder fits at the larger operand scale");
             Ok((mantissa, scale))
@@ -1463,7 +1487,7 @@ mod tests {
             })]
 
             #[test]
-            fn multiplication_matches_bigdecimal(left in decimal_input(), right in decimal_input()) {
+            fn multiplication_matches_exact_arithmetic(left in decimal_input(), right in decimal_input()) {
                 let actual = Decimal::new(left.0, left.1).unwrap()
                     .checked_mul(&Decimal::new(right.0, right.1).unwrap())
                     .map(|value| (value.mantissa(), value.scale()));
@@ -1471,7 +1495,7 @@ mod tests {
             }
 
             #[test]
-            fn remainder_matches_bigdecimal(left in decimal_input(), right in decimal_input()) {
+            fn remainder_matches_exact_arithmetic(left in decimal_input(), right in decimal_input()) {
                 let actual = Decimal::new(left.0, left.1).unwrap()
                     .checked_rem(&Decimal::new(right.0, right.1).unwrap())
                     .map(|value| (value.mantissa(), value.scale()));

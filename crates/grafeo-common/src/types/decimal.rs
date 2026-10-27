@@ -289,28 +289,62 @@ impl Decimal {
         )
     }
 
-    /// The product, at the sum of the scales (at most 38, rounded half away
-    /// from zero beyond that).
+    /// The product, at the sum of the scales, reduced as needed to keep at
+    /// most 38 digits and a scale at most 38. Rounds half away from zero.
     ///
     /// # Errors
     ///
-    /// [`DecimalError::Overflow`] when the product needs more than 38 digits.
+    /// [`DecimalError::Overflow`] when the integer part needs more than 38
+    /// digits, including after rounding.
     pub fn checked_mul(&self, other: &Self) -> Result<Self, DecimalError> {
         let negative = (self.mantissa() < 0) != (other.mantissa() < 0);
-        let product = self
-            .mantissa()
-            .unsigned_abs()
-            .checked_mul(other.mantissa().unsigned_abs())
-            .ok_or(DecimalError::Overflow)?;
+        let left = self.mantissa().unsigned_abs();
+        let right = other.mantissa().unsigned_abs();
         let scale = self.scale + other.scale;
-        let (magnitude, scale) = if scale > MAX_DECIMAL_DIGITS {
-            (
-                round_off(product, scale - MAX_DECIMAL_DIGITS),
-                MAX_DECIMAL_DIGITS,
-            )
-        } else {
-            (product, scale)
-        };
+        if let Some(product) = left.checked_mul(right) {
+            let mut dropped = scale.saturating_sub(MAX_DECIMAL_DIGITS);
+            let mut magnitude = round_off(product, dropped);
+            if magnitude >= LIMIT {
+                if dropped == scale {
+                    return Err(DecimalError::Overflow);
+                }
+                // u128 holds at most 39 decimal digits, so at most one
+                // extra fractional digit must go. Round the original value.
+                dropped += 1;
+                magnitude = round_off(product, dropped);
+            }
+            return Self::from_magnitude(magnitude, negative, scale - dropped);
+        }
+        let product = U256::product(left, right);
+
+        // Choose the final scale before rounding: rounding one digit at a
+        // time can round the same value twice. A product has at most 76
+        // digits, so it and every boundary here fit in U256.
+        let mut dropped = scale.saturating_sub(MAX_DECIMAL_DIGITS);
+        let mut boundary = U256::from(LIMIT).times_pow10(dropped);
+        while product >= boundary {
+            if dropped == scale {
+                return Err(DecimalError::Overflow);
+            }
+            dropped += 1;
+            boundary = boundary.times_pow10(1);
+        }
+        let divisor = U256::from(1u128).times_pow10(dropped);
+        let (quotient, remainder) = product.div_rem(&divisor);
+        let mut magnitude = quotient.to_u128().ok_or(DecimalError::Overflow)?;
+        if remainder >= divisor.minus(&remainder) {
+            magnitude += 1;
+        }
+        let mut scale = scale - dropped;
+        if magnitude == LIMIT {
+            if scale == 0 {
+                return Err(DecimalError::Overflow);
+            }
+            // A rounding carry is an exact power of ten. Dropping its zero
+            // keeps the value, without a second rounding of the product.
+            magnitude /= 10;
+            scale -= 1;
+        }
         Self::from_magnitude(magnitude, negative, scale)
     }
 
@@ -378,14 +412,29 @@ impl Decimal {
     ///
     /// # Errors
     ///
-    /// [`DecimalError::DivisionByZero`], or [`DecimalError::Overflow`] when
-    /// aligning the scales needs more than 38 digits.
+    /// [`DecimalError::DivisionByZero`] when `other` is zero.
     pub fn checked_rem(&self, other: &Self) -> Result<Self, DecimalError> {
         if other.mantissa() == 0 {
             return Err(DecimalError::DivisionByZero);
         }
-        let (left, right, scale) = self.aligned(other)?;
-        Self::new(left % right, scale)
+        let scale = self.scale.max(other.scale);
+        let left = self.mantissa().unsigned_abs();
+        let right = other.mantissa().unsigned_abs();
+        let magnitude = match (
+            left.checked_mul(pow10(scale - self.scale)),
+            right.checked_mul(pow10(scale - other.scale)),
+        ) {
+            (Some(left), Some(right)) => left % right,
+            _ => {
+                let left = U256::from(left).times_pow10(scale - self.scale);
+                let right = U256::from(right).times_pow10(scale - other.scale);
+                let (_, remainder) = left.div_rem(&right);
+                // One operand already has the larger scale. The remainder
+                // is bounded by that operand, whose mantissa fits Decimal.
+                remainder.to_u128().ok_or(DecimalError::Overflow)?
+            }
+        };
+        Self::from_magnitude(magnitude, self.mantissa() < 0, scale)
     }
 
     /// The value with the opposite sign.
@@ -714,9 +763,8 @@ impl<'de> serde::Deserialize<'de> for DecimalType {
     }
 }
 
-/// An unsigned 256-bit integer, enough for a 38-digit mantissa times `10^38`
-/// (the operands of a division at a common scale) and ten times its
-/// remainder.
+/// An unsigned 256-bit integer, enough for the product of two 38-digit
+/// mantissas, operands at a common scale, and ten times a division remainder.
 #[derive(Clone, Copy, PartialEq, Eq)]
 struct U256 {
     /// Little-endian 64-bit limbs.
@@ -732,6 +780,23 @@ impl From<u128> for U256 {
 }
 
 impl U256 {
+    /// The full product of two 128-bit magnitudes.
+    fn product(left: u128, right: u128) -> Self {
+        let left = [low_word(left), low_word(left >> 64)];
+        let right = [low_word(right), low_word(right >> 64)];
+        let mut limbs = [0u64; 4];
+        for (i, &a) in left.iter().enumerate() {
+            let mut carry = 0u128;
+            for (j, &b) in right.iter().enumerate() {
+                let value = u128::from(a) * u128::from(b) + u128::from(limbs[i + j]) + carry;
+                limbs[i + j] = low_word(value);
+                carry = value >> 64;
+            }
+            limbs[i + 2] = low_word(carry);
+        }
+        Self { limbs }
+    }
+
     /// `self * 10^n`; every caller stays below `10^77 < 2^256`.
     fn times_pow10(mut self, n: u8) -> Self {
         for _ in 0..n {
@@ -741,7 +806,7 @@ impl U256 {
                 *limb = low_word(product);
                 carry = product >> 64;
             }
-            debug_assert_eq!(carry, 0, "a decimal division stays below 2^256");
+            debug_assert_eq!(carry, 0, "decimal intermediates stay below 2^256");
         }
         self
     }
@@ -1199,5 +1264,219 @@ mod tests {
     fn the_type_is_eight_byte_aligned_and_small() {
         assert_eq!(std::mem::align_of::<Decimal>(), 8);
         assert_eq!(std::mem::size_of::<Decimal>(), 24);
+    }
+
+    mod wide_arithmetic {
+        use super::*;
+        use bigdecimal::{BigDecimal, RoundingMode};
+        use proptest::prelude::*;
+        use proptest::test_runner::{Config, RngSeed};
+
+        const COEFFICIENT_LIMIT: i128 = 10_i128.pow(38);
+
+        #[test]
+        fn multiplication_reduces_a_product_wider_than_u128() {
+            let value = d("1.00000000000000000001");
+            assert_eq!(
+                value.checked_mul(&value).unwrap().to_string(),
+                "1.0000000000000000000200000000000000000"
+            );
+        }
+
+        #[test]
+        fn multiplication_reduces_precision_when_the_scales_already_fit() {
+            let value = d("1.0000000000000000001");
+            assert_eq!(
+                value.checked_mul(&value).unwrap().to_string(),
+                "1.0000000000000000002000000000000000000"
+            );
+        }
+
+        #[test]
+        fn multiplication_rounds_from_the_full_product_once() {
+            // The exact tail is ...0456. Rounding first to scale 38 and
+            // then to 37 would incorrectly round the final digit up.
+            for (left, expected) in [
+                (
+                    "1.00000000000000000012",
+                    "1.0000000000000000005000000000000000000",
+                ),
+                (
+                    "-1.00000000000000000012",
+                    "-1.0000000000000000005000000000000000000",
+                ),
+            ] {
+                assert_eq!(
+                    d(left)
+                        .checked_mul(&d("1.00000000000000000038"))
+                        .unwrap()
+                        .to_string(),
+                    expected,
+                    "{left} * 1.00000000000000000038"
+                );
+            }
+        }
+
+        #[test]
+        fn multiplication_retries_precision_after_rounding_carries() {
+            // (10^18 + 10^-19) * (10^18 - 10^-19) = 10^36 - 10^-38.
+            // At scale 2 rounding carries to a 39-digit coefficient;
+            // scale 1 holds the rounded result.
+            for sign in [1, -1] {
+                let left = Decimal::new(sign * (10_i128.pow(37) + 1), 19).unwrap();
+                let right = Decimal::new(10_i128.pow(37) - 1, 19).unwrap();
+                let product = left.checked_mul(&right).unwrap();
+                assert_eq!(
+                    (product.mantissa(), product.scale()),
+                    (sign * 10_i128.pow(37), 1)
+                );
+            }
+        }
+
+        #[test]
+        fn multiplication_still_rejects_a_genuine_integer_overflow() {
+            for (left, right) in [
+                ("10000000000000000000", "10000000000000000000"),
+                ("99999999999999999999999999999999999999", "2"),
+                ("-99999999999999999999999999999999999999", "2"),
+            ] {
+                assert_eq!(
+                    d(left).checked_mul(&d(right)),
+                    Err(DecimalError::Overflow),
+                    "{left} * {right}"
+                );
+            }
+        }
+
+        #[test]
+        fn remainder_keeps_exact_values_across_wide_scale_alignment() {
+            for ((left, left_scale), (right, right_scale), expected) in [
+                // The issue's exact zero, and a nonzero wide remainder.
+                ((10_i128.pow(31), 1), (1, 8), (0, 8)),
+                ((10_i128.pow(31) + 1, 1), (3, 8), (2, 8)),
+                // Aligning either operand can require up to 76 digits.
+                ((COEFFICIENT_LIMIT - 1, 0), (7, 38), (2, 38)),
+                ((7, 38), (COEFFICIENT_LIMIT - 1, 0), (7, 38)),
+            ] {
+                for (left_sign, right_sign) in [(1, 1), (1, -1), (-1, 1), (-1, -1)] {
+                    let left = Decimal::new(left_sign * left, left_scale).unwrap();
+                    let right = Decimal::new(right_sign * right, right_scale).unwrap();
+                    let remainder = left.checked_rem(&right).unwrap();
+                    assert_eq!(
+                        (remainder.mantissa(), remainder.scale()),
+                        (left_sign * expected.0, expected.1),
+                        "{left} % {right}"
+                    );
+                }
+            }
+        }
+
+        #[test]
+        fn remainder_by_zero_keeps_its_error_at_any_scale() {
+            for left in [
+                d("0"),
+                d("7.50"),
+                d("-7.50"),
+                d("99999999999999999999999999999999999999"),
+            ] {
+                for scale in [0, 38] {
+                    let zero = Decimal::new(0, scale).unwrap();
+                    assert_eq!(
+                        left.checked_rem(&zero),
+                        Err(DecimalError::DivisionByZero),
+                        "{left} % {zero}"
+                    );
+                }
+            }
+        }
+
+        fn reference_value((mantissa, scale): (i128, u8)) -> BigDecimal {
+            BigDecimal::new(mantissa.into(), i64::from(scale))
+        }
+
+        fn reference_coefficient(value: &BigDecimal, scale: u8) -> Option<i128> {
+            let rounded = value.with_scale_round(i64::from(scale), RoundingMode::HalfUp);
+            let (coefficient, actual_scale) = rounded.as_bigint_and_exponent();
+            assert_eq!(actual_scale, i64::from(scale));
+            coefficient
+                .to_string()
+                .parse::<i128>()
+                .ok()
+                .filter(|mantissa| -COEFFICIENT_LIMIT < *mantissa && *mantissa < COEFFICIENT_LIMIT)
+        }
+
+        fn reference_product(
+            left: (i128, u8),
+            right: (i128, u8),
+        ) -> Result<(i128, u8), DecimalError> {
+            let exact = reference_value(left) * reference_value(right);
+            // Choose the greatest fitting scale by rounding the exact value
+            // afresh at each scale, never a previously rounded candidate.
+            for scale in (0..=(left.1 + right.1).min(38)).rev() {
+                if let Some(mantissa) = reference_coefficient(&exact, scale) {
+                    return Ok((mantissa, scale));
+                }
+            }
+            Err(DecimalError::Overflow)
+        }
+
+        fn reference_remainder(
+            left: (i128, u8),
+            right: (i128, u8),
+        ) -> Result<(i128, u8), DecimalError> {
+            if right.0 == 0 {
+                return Err(DecimalError::DivisionByZero);
+            }
+            let exact = reference_value(left) % reference_value(right);
+            let scale = left.1.max(right.1);
+            let mantissa = reference_coefficient(&exact, scale)
+                .expect("the exact remainder fits at the larger operand scale");
+            Ok((mantissa, scale))
+        }
+
+        fn decimal_input() -> impl Strategy<Value = (i128, u8)> {
+            let coefficient = prop_oneof![
+                4 => prop::sample::select(vec![
+                    0, 1, -1, 5, -5,
+                    COEFFICIENT_LIMIT - 1, -(COEFFICIENT_LIMIT - 1),
+                    COEFFICIENT_LIMIT / 2, -COEFFICIENT_LIMIT / 2,
+                    10_i128.pow(19) - 1, 10_i128.pow(19) + 1,
+                    -(10_i128.pow(19) + 1),
+                    10_i128.pow(20) + 1, -(10_i128.pow(20) + 1),
+                    10_i128.pow(37) - 1, 10_i128.pow(37) + 1,
+                ]),
+                6 => (-COEFFICIENT_LIMIT + 1)..COEFFICIENT_LIMIT,
+            ];
+            let scale = prop_oneof![
+                4 => prop::sample::select(vec![0_u8, 1, 18, 19, 20, 37, 38]),
+                6 => 0_u8..=38,
+            ];
+            (coefficient, scale)
+        }
+
+        proptest! {
+            #![proptest_config(Config {
+                cases: 512,
+                failure_persistence: None,
+                rng_seed: RngSeed::Fixed(0x6690_0000_0000_0001),
+                ..Config::default()
+            })]
+
+            #[test]
+            fn multiplication_matches_bigdecimal(left in decimal_input(), right in decimal_input()) {
+                let actual = Decimal::new(left.0, left.1).unwrap()
+                    .checked_mul(&Decimal::new(right.0, right.1).unwrap())
+                    .map(|value| (value.mantissa(), value.scale()));
+                prop_assert_eq!(actual, reference_product(left, right), "left={:?}, right={:?}", left, right);
+            }
+
+            #[test]
+            fn remainder_matches_bigdecimal(left in decimal_input(), right in decimal_input()) {
+                let actual = Decimal::new(left.0, left.1).unwrap()
+                    .checked_rem(&Decimal::new(right.0, right.1).unwrap())
+                    .map(|value| (value.mantissa(), value.scale()));
+                prop_assert_eq!(actual, reference_remainder(left, right), "left={:?}, right={:?}", left, right);
+            }
+        }
     }
 }

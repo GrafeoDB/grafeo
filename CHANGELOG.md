@@ -6,6 +6,7 @@ All notable changes to Grafeo, for future reference (and enjoyment).
 
 ### Fixed
 
+- **Decimal multiplication and remainder accept results that fit** ([#669](https://github.com/GrafeoDB/grafeo/issues/669)): multiplication rounds the full product once to 38 digits, and remainder aligns scales without overflowing an intermediate value.
 - **Concurrent backups no longer overwrite each other** ([#667](https://github.com/GrafeoDB/grafeo/issues/667)): backups of one database run one at a time, also to different directories, and a backup directory in use by another process gives a busy error.
 - **Aggregates in composite expressions** ([#539](https://github.com/GrafeoDB/grafeo/issues/539)): GQL and Cypher accept `collect(n)[0]`, maps and other wrappers while preserving grouping, local bindings and per-path aggregation.
 - **Backups and restores survive a crash** ([#667](https://github.com/GrafeoDB/grafeo/issues/667)): a backup is on disk before the database lets go of the log it covers, and a restore leaves either a complete database or nothing at the output path, so a failed restore can be retried to the same path.

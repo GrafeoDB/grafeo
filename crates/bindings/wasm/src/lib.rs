@@ -154,7 +154,7 @@ impl Database {
     /// # Errors
     ///
     /// Returns `JsError` if the database is closed, no transaction is active,
-    /// or the commit fails (e.g., serializable-isolation conflict).
+    /// or the commit fails (e.g., a write conflict).
     #[wasm_bindgen(js_name = "commitTransaction")]
     pub fn commit_transaction(&self) -> Result<(), JsValue> {
         self.check_open()?;

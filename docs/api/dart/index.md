@@ -334,7 +334,7 @@ Transaction beginTransactionWithIsolation(IsolationLevel isolationLevel)
 ```
 
 ```dart
-final tx = db.beginTransactionWithIsolation(IsolationLevel.serializable);
+final tx = db.beginTransactionWithIsolation(IsolationLevel.snapshotIsolation);
 ```
 
 ### Node CRUD
@@ -883,7 +883,7 @@ enum IsolationLevel {
 |-------|------|-------------|
 | `readCommitted` | 0 | Reads see only committed data; no dirty reads |
 | `snapshotIsolation` | 1 | Reads use a consistent snapshot taken at transaction start |
-| `serializable` | 2 | Full serializability; transactions appear to execute sequentially |
+| `serializable` | 2 | Recognized but unavailable: `GRAFEO-Q004` until [query read tracking (#400)](https://github.com/GrafeoDB/grafeo/issues/400) is implemented |
 
 ## Data Types
 

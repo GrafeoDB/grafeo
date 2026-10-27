@@ -21,26 +21,29 @@ db.execute("CREATE (n:Person {name: 'Vincent'})")  # Commits immediately
 
 ## Isolation Levels
 
-Grafeo supports three isolation levels, configurable per transaction:
+Transaction isolation is selected per transaction:
 
 | Level | Description |
 |-------|-------------|
 | `read_committed` | See committed data; non-repeatable reads possible |
 | `snapshot` | Default: consistent snapshot at transaction start |
-| `serializable` | Full SSI with read-write conflict detection |
+| `serializable` | Unavailable: requests fail with `GRAFEO-Q004` |
+
+`serializable` is refused because queries do not yet track their reads for Serializable Snapshot Isolation ([#400](https://github.com/GrafeoDB/grafeo/issues/400)). Use `snapshot` (`IsolationLevel::SnapshotIsolation` in Rust). It can still permit write skew, as shown below.
 
 ```python
 # Default (snapshot isolation)
 tx = db.begin_transaction()
 
 # Explicit isolation level
-tx = db.begin_transaction(isolation_level="serializable")
+tx = db.begin_transaction(isolation_level="snapshot")
 ```
 
 ```rust
-use grafeo::IsolationLevel;
+// Requires grafeo-engine as a direct dependency.
+use grafeo_engine::transaction::IsolationLevel;
 
-let tx = session.begin_transaction_with_isolation(IsolationLevel::Serializable)?;
+session.begin_transaction_with_isolation(IsolationLevel::SnapshotIsolation)?;
 ```
 
 ## Read-Only Transactions
@@ -363,7 +366,7 @@ RELEASE SAVEPOINT my_save
 tx = db.begin_transaction()
 
 # With isolation level
-tx = db.begin_transaction(isolation_level="serializable")
+tx = db.begin_transaction(isolation_level="snapshot")
 
 # Execute within transaction
 result = tx.execute("MATCH (n) RETURN n")
@@ -393,7 +396,7 @@ tx.execute("RELEASE SAVEPOINT sp1")
 session.begin_transaction()?;
 
 // With isolation level
-session.begin_transaction_with_isolation(IsolationLevel::Serializable)?;
+session.begin_transaction_with_isolation(IsolationLevel::SnapshotIsolation)?;
 
 // Execute queries
 let result = session.execute("MATCH (n) RETURN n")?;

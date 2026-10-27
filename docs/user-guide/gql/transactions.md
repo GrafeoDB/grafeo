@@ -31,18 +31,19 @@ START TRANSACTION READ ONLY
 Specify the isolation level when starting a transaction:
 
 ```sql
--- Read committed (default)
+-- Read committed
 START TRANSACTION ISOLATION LEVEL READ COMMITTED
 
--- Snapshot isolation (repeatable reads)
+-- Snapshot isolation (default; repeatable reads)
 START TRANSACTION ISOLATION LEVEL SNAPSHOT ISOLATION
 
--- Serializable (strongest isolation)
-START TRANSACTION ISOLATION LEVEL SERIALIZABLE
+-- SERIALIZABLE is recognized but refused with GRAFEO-Q004.
 
 -- Combine with access mode
-START TRANSACTION READ ONLY ISOLATION LEVEL SERIALIZABLE
+START TRANSACTION READ ONLY ISOLATION LEVEL SNAPSHOT ISOLATION
 ```
+
+Serializable requests, including `READ ONLY`, fail with `GRAFEO-Q004` until [query read tracking (#400)](https://github.com/GrafeoDB/grafeo/issues/400) is implemented. Use snapshot isolation.
 
 ### Committing and Rolling Back
 

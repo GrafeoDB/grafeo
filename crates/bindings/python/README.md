@@ -74,15 +74,16 @@ db.delete_edge(edge_id)
 
 ### Transactions
 
+Serializable requests are recognized but return `GRAFEO-Q004` until [query read tracking (#400)](https://github.com/GrafeoDB/grafeo/issues/400) is implemented. Use snapshot isolation.
+
 ```python
 # Context manager (auto-rollback on exception)
 with db.begin_transaction() as tx:
     tx.execute("INSERT (:Person {name: 'Harm'})")
     tx.commit()
 
-# With isolation levels (string or enum)
-from grafeo import IsolationLevel
-with db.begin_transaction(IsolationLevel.SERIALIZABLE) as tx:
+# With an explicit supported isolation level
+with db.begin_transaction("snapshot") as tx:
     tx.execute("MATCH (n:Person) SET n.verified = true")
     tx.commit()
 

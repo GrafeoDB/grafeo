@@ -45,16 +45,16 @@ With explicit resource management, the transaction auto-rolls back if `commit()`
 const tx = db.beginTransaction();
 
 // Explicit isolation level
-const tx = db.beginTransaction('serializable');
+const tx = db.beginTransaction('snapshot');
 ```
 
-Available levels:
+Isolation selectors:
 
 | Level | Description |
 | ----- | ----------- |
 | `read_committed` | See committed data from other transactions |
 | `snapshot` (default) | See a consistent snapshot from transaction start |
-| `serializable` | Full serializability, detects write conflicts |
+| `serializable` | Recognized but unavailable: `GRAFEO-Q004` until [query read tracking (#400)](https://github.com/GrafeoDB/grafeo/issues/400) is implemented |
 
 ## Query Languages in Transactions
 

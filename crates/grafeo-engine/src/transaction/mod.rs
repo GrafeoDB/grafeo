@@ -2,13 +2,15 @@
 //!
 //! # Isolation Levels
 //!
-//! Grafeo supports multiple isolation levels to balance consistency vs. performance:
+//! Sessions accept `ReadCommitted` and the default `SnapshotIsolation`.
+//! They refuse `Serializable` with `GRAFEO-Q004` until query read tracking
+//! is implemented (#400).
 //!
-//! | Level | Anomalies Prevented | Use Case |
-//! |-------|---------------------|----------|
-//! | [`ReadCommitted`](IsolationLevel::ReadCommitted) | Dirty reads | High throughput, relaxed consistency |
-//! | [`SnapshotIsolation`](IsolationLevel::SnapshotIsolation) | + Non-repeatable reads, phantom reads | Default - good balance |
-//! | [`Serializable`](IsolationLevel::Serializable) | + Write skew | Full ACID, financial/critical workloads |
+//! | Level | Session behavior |
+//! |-------|------------------|
+//! | [`ReadCommitted`](IsolationLevel::ReadCommitted) | Accepted; queries use the transaction's snapshot |
+//! | [`SnapshotIsolation`](IsolationLevel::SnapshotIsolation) | Default; a consistent snapshot, with write skew possible |
+//! | [`Serializable`](IsolationLevel::Serializable) | Refused until query read tracking is available |
 //!
 //! The default is **Snapshot Isolation (SI)**, which offers strong consistency
 //! guarantees while maintaining high concurrency. Each transaction sees a consistent
@@ -18,8 +20,8 @@
 //!
 //! - **Read Consistency**: A transaction always reads the same values for the same
 //!   entities throughout its lifetime (repeatable reads).
-//! - **Write-Write Conflict Detection**: If two concurrent transactions write to the
-//!   same entity, the second to commit will be aborted.
+//! - **Write-Write Conflict Detection**: A conflicting write is refused before
+//!   mutation; commit also checks writes committed after the transaction began.
 //! - **No Dirty Reads**: A transaction never sees uncommitted changes from other
 //!   transactions.
 //! - **No Lost Updates**: Write-write conflicts prevent the lost update anomaly.
@@ -56,10 +58,10 @@
 //! ## Epoch-Based Versioning
 //!
 //! Grafeo uses epoch-based MVCC where:
-//! - Each commit advances the global epoch
-//! - Transactions read data visible at their start epoch
+//! - A commit reserves an epoch, published only when the commit completes
+//! - Transactions read data visible at their start epoch and their own writes
 //! - Version chains store multiple versions for concurrent access
-//! - Garbage collection removes versions no longer needed by active transactions
+//! - Garbage collection retains versions needed by transactions and registered read pins
 //!
 //! # Implementation guide for contributors
 //!
@@ -70,37 +72,24 @@
 //!
 //! ## Visibility invariants
 //!
-//! Every version carries a [`VersionInfo`] with two epoch slots:
-//! `created_epoch` and `deleted_epoch`
-//! (`Option<EpochId>`). Two free functions decide visibility, and they
-//! have different callers for a reason:
-//!
-//! - **`VersionInfo::is_visible_at(viewing_epoch)`** is the *snapshot*
-//!   check. It ignores transaction identity entirely: a version is
-//!   visible if `created_epoch <= viewing_epoch` and it is not deleted
-//!   at or before `viewing_epoch`. Callers: GC ("is any active
-//!   transaction still able to see this?") and epoch-scoped scans.
-//!
-//! - **`VersionInfo::is_visible_to(viewing_epoch, viewing_tx)`** layers
-//!   "read your own writes" on top. It first rules out versions the
-//!   current transaction has deleted (even before commit), then treats
-//!   own-writes as visible regardless of epoch, and otherwise falls
-//!   through to `is_visible_at`. Callers: every read on the hot path
-//!   inside an active transaction.
-//!
-//! The two functions share the epoch check to keep the semantics in
-//! sync; when you need to change one, inspect both.
+//! The common [`VersionInfo`] helper records `created_epoch` and an
+//! optional `deleted_epoch`. Its `is_visible_at` checks committed epoch
+//! visibility; `is_visible_to` also checks transaction ownership for reading
+//! one's own writes and deletes. These helpers serve the common version
+//! chains; they are not the built-in store's row format or its hot-path reads.
 //!
 //! ## Uncommitted writes and `EpochId::PENDING`
 //!
-//! An active transaction stamps its own versions with
-//! [`grafeo_common::types::EpochId::PENDING`] (`= u64::MAX`) as their
-//! `created_epoch`. This is the dirty-read
-//! guard: any external reader (different transaction, or a snapshot at
-//! a real epoch) performs `created_epoch <= viewing_epoch`, and since
-//! `u64::MAX` is always greater than any real epoch, the version is
-//! filtered out. The owning transaction still sees it because
-//! `is_visible_to` short-circuits on `created_by == viewing_tx`.
+//! Common version chains use [`grafeo_common::types::EpochId::PENDING`]
+//! (`u64::MAX`) for uncommitted creation epochs. Their owner-aware helper
+//! admits the writer's own versions while the committed-epoch check excludes
+//! pending versions.
+//!
+//! The built-in [`RowGroupStore`](grafeo_core::graph::rowgroup::RowGroupStore)
+//! instead encodes a pending transaction id in a stamp with its high bit set
+//! (`1 << 63`). Its transaction reader sees its own pending stamps; a committed
+//! reader sees only committed stamps at or before its selected epoch. The
+//! store's `u64::MAX` stamp means absent, not a pending creation epoch.
 //!
 //! Every write of a transaction is recorded in its change set (see
 //! `TransactionChanges`): the op with its after-image, what it replaced,
@@ -120,49 +109,49 @@
 //! `record_endpoints`), which enforces **first-writer-wins**: if another
 //! active transaction already has the entity in its write set, the current
 //! transaction fails with `OperatorError::WriteConflict` before the store
-//! mutates. Direct calls of the database are private transactions of their
-//! own (`TransactionManager::begin_private`), so they conflict with open
-//! transactions, and the other way round. A node a write creates is not
+//! mutates. A direct database call uses a private transaction while other
+//! transactions are open, so their claims conflict in either direction.
+//! With none open it can hold the idle gate and write at once; no transaction
+//! can start until that call ends. A node a write creates is not
 //! claimed: no other transaction knows its id before the commit.
 //!
-//! This is a commit-time contract, not a best-effort check: the
-//! mutation is refused synchronously, so the overlay store never
-//! contains state from a doomed transaction. Snapshot isolation
-//! (the default) validates only the write-set; `Serializable` also
-//! validates the read-set at commit via the same machinery.
+//! Write claims refuse a conflicting mutation synchronously; commit-time
+//! validation also checks transactions that committed since the snapshot.
+//! The low-level manager can validate entity reads supplied explicitly through
+//! [`TransactionManager::record_read`]. Queries do not supply those reads yet,
+//! so sessions refuse `Serializable`; manual read-set validation is not a
+//! query serializability guarantee.
 //!
 //! ## Epoch lifecycle
 //!
-//! The manager owns a single `AtomicU64` current epoch, observed by
-//! every reader via `TransactionManager::current_epoch()`. The
-//! lifecycle for a transaction touching epoch `E`:
+//! The manager keeps separate assigned and published epochs. A reserved
+//! epoch does not become a read snapshot until its commit completes:
 //!
-//! 1. **Allocation**: `begin()` stamps the new transaction with the
-//!    current epoch as its `start_epoch`. Reads during the transaction
-//!    use this epoch for `is_visible_at`.
-//! 2. **Write**: new versions get `EpochId::PENDING`. Writes are
-//!    recorded via `record_write` for conflict detection.
-//! 3. **Commit**: a successful commit fetches a new epoch via
-//!    `fetch_add(1)`, finalises every pending version to that epoch,
-//!    and records `(transaction_id -> commit_epoch)` for post-hoc
-//!    conflict checks from transactions whose `start_epoch` preceded
-//!    the commit.
-//! 4. **GC**: after immediate calls and commits (every one: the row-group
-//!    store collects when a collect is due for it; see `database::collect`),
-//!    and
-//!    in [`GrafeoDB::gc()`](crate::GrafeoDB::gc), the engine polls
-//!    `collect_horizon()`: `read_horizon()`, the oldest epoch a reader may
-//!    still read at (open and committing transactions' snapshots and reads
-//!    outside a transaction pinned for their run, each counted by its epoch,
-//!    or the published epoch), or the start of the history retention window
-//!    when that is older (H2c), and prunes the versions no reader at it or
-//!    later can see. The horizon becomes the history floor: a time-travel
-//!    read before it is refused. The same epoch drives CDC
-//!    retention (see [`crate::cdc`]) so both subsystems agree on
-//!    "how old is safely-forgotten."
+//! 1. **Begin**: the transaction snapshots the latest published epoch. Its
+//!    snapshot is read and counted under the read-pins lock, so collection
+//!    cannot pass a reader that registration has not counted yet.
+//! 2. **Write**: the store records pending versions owned by the transaction,
+//!    while the change recorder keeps its operations and undo information.
+//! 3. **Commit decision**: conflict validation reserves the next assigned
+//!    epoch under the commit lock and leaves the transaction `Committing`.
+//!    New transactions may still begin at the published epoch.
+//! 4. **Log and publication**: when logging, a session writes its WAL group
+//!    before stamping or reporting the changes. Once written, the commit lock may be released
+//!    while publication waits for lower epochs. In its publication turn the
+//!    engine stamps the recorded changes and reports events, then publishes
+//!    the completed epoch and releases the transaction's snapshot. A failed
+//!    incomplete commit prevents publication at it or any higher epoch.
+//! 5. **GC**: after writes and in [`GrafeoDB::gc()`](crate::GrafeoDB::gc),
+//!    `collect_horizon()` chooses the older of the read horizon and the history
+//!    retention window. The read horizon counts open/committing transaction
+//!    snapshots and all registered read pins, including historical overrides
+//!    inside transactions, and never passes the published epoch. Collection
+//!    keeps versions needed at that horizon or later and advances the history
+//!    floor. CDC retention uses the same epoch (see [`crate::cdc`]).
 //!
-//! Every epoch the manager advances is visible to every reader once
-//! the atomic store retires; there is no separate publication step.
+//! Readers use the completed published epoch, not an assigned epoch or a
+//! store's local stamp. Reserving an epoch and publishing it are separate
+//! steps; an atomic update of the assigned counter alone publishes nothing.
 //!
 //! ## Where to look next
 //!

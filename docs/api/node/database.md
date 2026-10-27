@@ -259,11 +259,11 @@ Start a new transaction with an optional isolation level.
 beginTransaction(isolationLevel?: string): Transaction
 ```
 
-Isolation levels: `"read_committed"`, `"snapshot"` (default), `"serializable"`.
+Isolation selectors: `"read_committed"`, `"snapshot"` (default), `"serializable"`. Serializable requests return `GRAFEO-Q004` until [query read tracking (#400)](https://github.com/GrafeoDB/grafeo/issues/400) is implemented; use `"snapshot"`.
 
 ```typescript
 const tx = db.beginTransaction();
-const tx = db.beginTransaction('serializable');
+const tx = db.beginTransaction('snapshot');
 ```
 
 ## Named Graphs

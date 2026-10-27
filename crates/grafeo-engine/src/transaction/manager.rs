@@ -32,29 +32,26 @@ pub enum TransactionState {
 
 /// Transaction isolation level.
 ///
-/// Controls the consistency guarantees and performance tradeoffs for transactions.
+/// Selects a transaction's isolation mode.
 ///
-/// # Comparison
+/// # Session support
 ///
-/// | Level | Dirty Reads | Non-Repeatable Reads | Phantom Reads | Write Skew |
-/// |-------|-------------|----------------------|---------------|------------|
-/// | ReadCommitted | No | Yes | Yes | Yes |
-/// | SnapshotIsolation | No | No | No | Yes |
-/// | Serializable | No | No | No | No |
+/// | Level | Current behavior |
+/// |-------|------------------|
+/// | ReadCommitted | Accepted; session queries use the transaction snapshot |
+/// | SnapshotIsolation | Default; fixed snapshot and write-conflict checks |
+/// | Serializable | Refused with `GRAFEO-Q004` until query read tracking (#400) |
 ///
-/// # Performance
-///
-/// Higher isolation levels require more bookkeeping:
-/// - `ReadCommitted`: Only tracks writes
-/// - `SnapshotIsolation`: Tracks writes + snapshot versioning
-/// - `Serializable`: Tracks writes + reads + SSI validation
+/// The low-level manager retains manual read-set validation through
+/// [`TransactionManager::record_read`]. It does not track query reads or
+/// predicates, and does not by itself provide query serializability.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 #[non_exhaustive]
 pub enum IsolationLevel {
-    /// Read Committed: sees only committed data, but may see different
-    /// versions of the same row within a transaction.
+    /// Read Committed selector, accepted by sessions.
     ///
-    /// Lowest overhead, highest throughput, but weaker consistency.
+    /// Session queries currently use the transaction's start snapshot;
+    /// selecting this mode does not refresh it for each statement.
     ReadCommitted,
 
     /// Snapshot Isolation (default): each transaction sees a consistent
@@ -65,11 +62,11 @@ pub enum IsolationLevel {
     #[default]
     SnapshotIsolation,
 
-    /// Serializable Snapshot Isolation (SSI): provides full serializability
-    /// by detecting read-write conflicts in addition to write-write conflicts.
+    /// Serializable selector, refused by sessions with `GRAFEO-Q004` until
+    /// query read tracking is implemented (#400).
     ///
-    /// Prevents all anomalies including write skew, but may abort more
-    /// transactions due to stricter conflict detection.
+    /// The low-level manager accepts this value for manually recorded entity
+    /// reads; that scaffold does not guarantee serializability for queries.
     Serializable,
 }
 
@@ -329,19 +326,17 @@ pub struct TransactionManager {
     /// [`begin`](Self::begin) and [`begin_private`](Self::begin_private), so
     /// no transaction starts while such a call runs.
     ///
-    /// Lock order: the idle gate before the commit lock (`begin` and such a
-    /// call take both, in that order).
+    /// Lock order: an immediate call takes the idle gate before the commit
+    /// lock. `begin` and `begin_private` take only this gate to register.
     idle_gate: Mutex<()>,
-    /// Held by a commit from its epoch until it is complete (see
-    /// [`CommitGuard`]), by a change outside a commit (a schema statement, a
-    /// graph command, a direct call that commits at once) while it runs, by
-    /// a checkpoint or a copy of the store
-    /// while it builds its image (see [`hold_commits`](Self::hold_commits)),
-    /// and briefly by every [`begin`](Self::begin) and
-    /// [`begin_private`](Self::begin_private) and by
-    /// [`close_for_writes`](Self::close_for_writes): commits complete one at a
-    /// time, in epoch order, no transaction starts in the middle of one, and
-    /// no image holds part of one.
+    /// Held while a commit assigns its epoch and writes its group, until
+    /// [`CommitGuard::written`] or completion; written commits then publish
+    /// in epoch order. Also held by changes outside a commit, by a checkpoint
+    /// or copy while it waits for written commits and builds its image (see
+    /// [`hold_commits`](Self::hold_commits)), and by
+    /// [`close_for_writes`](Self::close_for_writes).
+    /// Transaction registration does not take this lock: it can begin during
+    /// a commit and reads at the latest completed published epoch.
     ///
     /// Lock order: a checkpoint takes the file's checkpoint guard before this
     /// lock, and the idle gate comes before it too; the write freeze comes
@@ -391,8 +386,9 @@ pub struct TransactionManager {
     published: Condvar,
     /// The readers that hold the read horizon back, by the epoch each reads
     /// at: the snapshot of every open and committing transaction, and every
-    /// read outside a transaction that runs now (see
-    /// [`pin_read`](Self::pin_read)). The read horizon is its oldest epoch,
+    /// registered read pin, including a historical override inside a
+    /// transaction (see [`pin_read`](Self::pin_read) and `pin_read_at`).
+    /// The read horizon is its oldest epoch,
     /// or the published epoch when it holds none, so it never walks the
     /// finished transactions.
     ///
@@ -520,8 +516,9 @@ impl Drop for ReadPin {
 }
 
 /// Commits held off (see [`TransactionManager::hold_commits`]): while this
-/// lives, no commit is between its epoch and its completion, and no commit,
-/// transaction start or write outside a transaction can begin. Held for a
+/// lives, no commit is between its epoch and its completion, and no commit
+/// or write outside a transaction can begin. Transactions may still start at
+/// the published epoch. Held for a
 /// checkpoint or a copy of the store, it also freezes the store: no store
 /// change of an open transaction is in progress or can begin.
 #[must_use = "commits are held off only while the guard lives"]
@@ -538,8 +535,9 @@ pub(crate) struct CommitsHeld<'a> {
 /// still conflict with other transactions' writes, and readers do not see
 /// its epoch yet.
 ///
-/// The guard holds the commit lock: no other commit takes an epoch, and no
-/// [`begin`](TransactionManager::begin) runs. It ends in one of three ways:
+/// The guard holds the commit lock: no other commit takes an epoch.
+/// [`begin`](TransactionManager::begin) may still register a snapshot at the
+/// published epoch. The guard ends in one of three ways:
 ///
 /// - [`abort`](Self::abort): the commit's log write failed and nothing of it
 ///   remains. The epoch goes back, and the transaction is active again for
@@ -549,7 +547,7 @@ pub(crate) struct CommitsHeld<'a> {
 ///   [`Publish`] publishes this one in its turn.
 /// - [`complete`](Self::complete): both at once, while the lock is held.
 ///
-/// A guard dropped without any of them (only when the commit code panics)
+/// A guard dropped without any of them, on an error or unwind,
 /// does not report the transaction as committed and does not publish its
 /// epoch: it stays `Committing`, so its half-written entities stay locked
 /// against other writers, and only the commit lock is released. It also
@@ -806,6 +804,10 @@ impl TransactionManager {
     }
 
     /// Begins a new transaction with the specified isolation level.
+    ///
+    /// This infallible low-level entry point retains manual read-set
+    /// validation through [`record_read`](Self::record_read). It does not
+    /// collect query reads; sessions refuse `Serializable` until #400.
     pub fn begin_with_isolation(&self, isolation_level: IsolationLevel) -> TransactionId {
         // Wait for a direct call that commits at once (it needs no open
         // transaction), not for a commit in progress: the snapshot is the
@@ -1194,7 +1196,11 @@ impl TransactionManager {
         Ok(())
     }
 
-    /// Records a read operation for the transaction (for serializable isolation).
+    /// Records an entity read explicitly for the manager's read-set checks.
+    ///
+    /// Query execution does not call this yet (#400). Manually recording
+    /// entities does not track predicates or provide query serializability;
+    /// sessions refuse `Serializable` until those reads are tracked.
     ///
     /// # Errors
     ///
@@ -1225,19 +1231,21 @@ impl TransactionManager {
     ///
     /// # Conflict Detection
     ///
-    /// - **All isolation levels**: Write-write conflicts (two transactions writing
-    ///   to the same entity) are always detected and cause the second committer to abort.
+    /// - **All modes**: checks recorded writes against transactions committed
+    ///   since the snapshot. Write claims can already refuse a conflicting
+    ///   mutation before commit.
     ///
-    /// - **Serializable only**: Read-write conflicts (SSI validation) are additionally
-    ///   checked. If transaction T1 read an entity that another transaction T2 wrote,
-    ///   and T2 committed after T1 started, T1 will abort. This prevents write skew.
+    /// - **Manually selected Serializable**: checks entity reads explicitly
+    ///   supplied through [`record_read`](Self::record_read) against writes
+    ///   committed since the snapshot. Query execution supplies no such reads
+    ///   yet; this is not a query serializability guarantee.
     ///
     /// # Errors
     ///
     /// Returns an error if:
     /// - The transaction is not active
     /// - There's a write-write conflict with another committed transaction
-    /// - (Serializable only) There's a read-write conflict (SSI violation)
+    /// - A manually recorded Serializable entity read conflicts with a write
     /// - An earlier commit did not complete (see [`TransactionManager`]): no
     ///   transaction commits until the database is reopened
     /// - The database is closed: `close()` of a persistent database started
@@ -1380,7 +1388,8 @@ impl TransactionManager {
             }
         }
 
-        // SSI validation for Serializable isolation level.
+        // Validate entity reads recorded manually for Serializable mode.
+        // Query execution does not populate this read set yet (#400).
         // Check for read-write conflicts: if we read an entity that another
         // transaction (that committed after we started) wrote, we have a
         // "rw-antidependency" which can cause write skew.
@@ -1412,8 +1421,8 @@ impl TransactionManager {
             }
         }
 
-        // Commit successful: advance epoch atomically.
-        // SeqCst ensures all threads see commits in a consistent total order.
+        // Conflict checks succeeded: reserve the next assigned epoch.
+        // It stays unpublished until the commit's ordered completion.
         let commit_epoch = EpochId::new(self.assigned_epoch.fetch_add(1, Ordering::SeqCst) + 1);
 
         // Update state and record commit epoch atomically (both write locks
@@ -1439,8 +1448,9 @@ impl TransactionManager {
 
     /// Holds commits off for a checkpoint or a copy of the store: while the
     /// returned guard lives, no commit is between its epoch and its
-    /// completion, and no commit, transaction start or write outside a
-    /// transaction can begin. It also freezes the store (see `write_freeze`):
+    /// completion, and no commit or write outside a transaction can begin.
+    /// Transactions may still start at the published epoch. It also freezes
+    /// the store (see `write_freeze`):
     /// no store change of an open transaction, a write or the undo of a
     /// rollback, is in progress or can begin, so the image is read from a
     /// store and change logs that do not move. Waits for a commit in
@@ -1774,11 +1784,10 @@ impl TransactionManager {
     /// the horizon or later can see (`gc_versions`, `collect`).
     ///
     /// It is the oldest of: the snapshot of every open transaction and of
-    /// every committing one (a commit whose publish has not come, or never
-    /// comes after an unknown outcome, still reads at its snapshot and its
-    /// versions stay pending), the epoch of every read pinned outside a
-    /// transaction (`pin_read`: every read statement outside a transaction
-    /// pins for its run), and the published epoch, at which every reader
+    /// every committing one (until it publishes or aborts, including an
+    /// incomplete commit whose versions may already be stamped), the epoch
+    /// of every registered read pin (including historical overrides inside
+    /// transactions), and the published epoch, at which every reader
     /// that starts from now on reads.
     ///
     /// Each of them is counted by the epoch it reads at as it begins (a

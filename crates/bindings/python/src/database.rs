@@ -2313,7 +2313,7 @@ impl PyGrafeoDB {
     ///     tx.commit()  # Both nodes created atomically
     ///
     /// # With explicit isolation level
-    /// with db.begin_transaction("serializable") as tx:
+    /// with db.begin_transaction("snapshot") as tx:
     ///     tx.execute("MATCH (n:Counter) SET n.val = n.val + 1")
     ///     tx.commit()
     /// ```
@@ -3886,10 +3886,12 @@ fn extract_isolation_level(value: Option<&Bound<'_, PyAny>>) -> PyResult<Option<
 ///
 /// ```python
 /// from grafeo import IsolationLevel
-/// tx = db.begin_transaction(IsolationLevel.SERIALIZABLE)
+/// tx = db.begin_transaction(IsolationLevel.SNAPSHOT)
 /// ```
 ///
-/// String values ``"read_committed"``, ``"snapshot"``, ``"serializable"`` are also accepted.
+/// String selectors ``"read_committed"``, ``"snapshot"``, ``"serializable"`` are
+/// recognized. Serializable requests fail with ``GRAFEO-Q004``; use ``SNAPSHOT``
+/// until query read tracking is implemented (#400).
 #[pyclass(
     name = "IsolationLevel",
     eq,
@@ -3903,7 +3905,7 @@ pub enum PyIsolationLevel {
     ReadCommitted = 0,
     /// The transaction sees a consistent snapshot taken at begin time.
     Snapshot = 1,
-    /// Full serializability with conflict detection.
+    /// Unavailable (GRAFEO-Q004); use Snapshot until query read tracking (#400).
     Serializable = 2,
 }
 
@@ -4036,7 +4038,7 @@ impl PyTransaction {
 impl PyTransaction {
     /// The isolation level of this transaction.
     ///
-    /// Returns one of: ``"read_committed"``, ``"snapshot"``, ``"serializable"``.
+    /// Returns ``"read_committed"`` or ``"snapshot"``. Serializable requests are refused.
     #[getter]
     fn isolation_level(&self) -> &str {
         &self.isolation_level_name

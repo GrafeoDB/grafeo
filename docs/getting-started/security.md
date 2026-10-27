@@ -132,6 +132,14 @@ let keys = KeyChain::new(*master_key);
 
 An encrypted database writes no spill files: spill files are not encrypted, so it gets no spill path (`<file>.spill/` for other databases), and `Config::validate` refuses an explicit `spill_path`, or a section pinned to `TierOverride::ForceDisk`, together with `encryption`. In 0.6.0 a memory limit therefore cannot move the data of an encrypted database to disk.
 
+### Protection and Limits
+
+Encryption keeps the data confidential from someone without the key. AES-GCM also authenticates each encrypted payload and its associated metadata: modified ciphertext fails authentication. This does not authenticate the database's complete state or prove that it is the latest state.
+
+The plaintext container headers use CRC checksums, which an attacker can recompute. Recovery can fall back to the other valid database header. Someone who can replace or delete files may replay an older valid database and WAL, or remove a WAL tail, without forging encrypted payloads. Some damage is detected, but encryption does not guarantee that all committed data is still present.
+
+Header authentication is planned in [#676](https://github.com/GrafeoDB/grafeo/issues/676). Even authenticated headers would not prevent replay of a complete older database and WAL. Detecting that rollback requires an external trusted record of which state is current, outside the attacker's control. Protect the database files, WAL, backups and keys with access controls.
+
 ### Keys
 
 The key chain derives the keys with HKDF-SHA256, one per database and component: `"grafeo-container"` for the file, with the database id from the file header, and `"grafeo-wal-segment"` for each segment of its WAL, with the database id and the segment's random salt. Two databases configured with the same master key therefore have different keys, and a copy made with `save()` gets a new database id and keys of its own.

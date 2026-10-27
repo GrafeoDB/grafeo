@@ -957,7 +957,7 @@ def rebuild_text_index(self, label: str, property: str) -> None
 
 ### begin_transaction()
 
-Start a new transaction. Returns a `Transaction` object that can be used as a context manager. The `isolation_level` parameter accepts a string (e.g., `"snapshot"`, `"serializable"`).
+Start a new transaction. Returns a `Transaction` object that can be used as a context manager. The `isolation_level` parameter accepts a string, such as `"snapshot"`. The `"serializable"` selector is recognized but returns `GRAFEO-Q004` until [query read tracking (#400)](https://github.com/GrafeoDB/grafeo/issues/400) is implemented.
 
 ```python
 def begin_transaction(self, isolation_level: Optional[str] = None) -> Transaction
@@ -970,7 +970,7 @@ with db.begin_transaction() as tx:
     tx.commit()  # both nodes created atomically
 
 # With explicit isolation level
-with db.begin_transaction("serializable") as tx:
+with db.begin_transaction("snapshot") as tx:
     tx.execute("MATCH (n:Counter) SET n.val = n.val + 1")
     tx.commit()
 ```

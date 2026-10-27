@@ -10,7 +10,7 @@ Grafeo is designed for applications that need graph database capabilities withou
 - **High Performance**: Vectorized execution, SIMD, columnar storage
 - **Pure Rust**: Memory-safe, fearless concurrency
 - **Multi-Language Bindings**: Python (PyO3), Node.js/TypeScript (napi-rs), Go (CGO), WebAssembly (wasm-bindgen), C (FFI)
-- **ACID Transactions**: MVCC-based snapshot isolation with serializable option
+- **ACID Transactions**: MVCC-based snapshot isolation; Serializable requests return `GRAFEO-Q004` until [query read tracking (#400)](https://github.com/GrafeoDB/grafeo/issues/400) is implemented
 - **Vector Search**: HNSW index with quantization, filtered search, MMR
 - **Text Search**: BM25 inverted index with Unicode tokenizer
 - **Hybrid Search**: Combined text + vector search with reciprocal rank fusion

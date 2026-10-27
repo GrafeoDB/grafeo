@@ -62,7 +62,8 @@ const (
 	// SnapshotIsolation (default) sees a consistent snapshot as of transaction start.
 	SnapshotIsolation IsolationLevel = 1
 
-	// Serializable provides full serializability via SSI conflict detection.
+	// Serializable is unavailable (GRAFEO-Q004); use SnapshotIsolation until
+	// query read tracking is implemented (#400).
 	Serializable IsolationLevel = 2
 )
 

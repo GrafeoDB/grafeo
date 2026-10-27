@@ -90,7 +90,7 @@ Per the standard, minimum conformance requires:
 |---------|--------|-------|
 | START TRANSACTION | Supported | |
 | READ ONLY / READ WRITE mode | Supported | |
-| ISOLATION LEVEL | Supported | READ COMMITTED, SNAPSHOT, SERIALIZABLE |
+| ISOLATION LEVEL | Partial | READ COMMITTED and SNAPSHOT are accepted; SERIALIZABLE is recognized but returns `GRAFEO-Q004` until [#400](https://github.com/GrafeoDB/grafeo/issues/400) |
 | COMMIT | Supported | |
 | ROLLBACK | Supported | |
 | SAVEPOINT | Supported | Named savepoints within transactions |

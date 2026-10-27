@@ -7,7 +7,7 @@ using Grafeo.Native;
 namespace Grafeo;
 
 /// <summary>
-/// Transaction isolation levels supported by Grafeo.
+/// Transaction isolation selectors. Serializable is currently unavailable.
 /// Values match the <c>GrafeoIsolationLevel</c> C enum.
 /// </summary>
 public enum IsolationLevel
@@ -18,7 +18,7 @@ public enum IsolationLevel
     /// <summary>Snapshot isolation: the transaction sees a consistent snapshot taken at begin.</summary>
     Snapshot = 1,
 
-    /// <summary>Serializable: full serializability, the strongest isolation guarantee.</summary>
+    /// <summary>Unavailable (GRAFEO-Q004); use Snapshot until query read tracking is implemented (#400).</summary>
     Serializable = 2,
 }
 
@@ -312,9 +312,9 @@ public sealed class GrafeoDB : IGrafeoDB, IDisposable, IAsyncDisposable
 
     /// <summary>Begin a transaction with a specific isolation level.</summary>
     /// <param name="isolationLevel">
-    /// Accepted values (case-insensitive): "read_committed" / "ReadCommitted",
+    /// Recognized values (case-insensitive): "read_committed" / "ReadCommitted",
     /// "snapshot" / "Snapshot" / "snapshot_isolation" / "SnapshotIsolation",
-    /// "serializable" / "Serializable".
+    /// "serializable" / "Serializable" are recognized but rejected with GRAFEO-Q004; use "snapshot".
     /// </param>
     public Transaction BeginTransaction(string isolationLevel)
     {

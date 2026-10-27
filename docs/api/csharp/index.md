@@ -130,7 +130,7 @@ tx.Execute("INSERT (:Person {name: 'Gus'})");
 tx.Commit();
 
 // With isolation level
-using var tx = db.BeginTransaction("serializable");
+using var tx = db.BeginTransaction("snapshot");
 ```
 
 | Method | Returns | Description |
@@ -138,6 +138,8 @@ using var tx = db.BeginTransaction("serializable");
 | `BeginTransaction()` | `Transaction` | Begin with default isolation (snapshot) |
 | `BeginTransaction(string)` | `Transaction` | Begin with isolation level: `"read_committed"`, `"snapshot"`, `"serializable"` |
 | `BeginTransaction(IsolationLevel)` | `Transaction` | Type-safe overload: `IsolationLevel.ReadCommitted`, `.Snapshot`, `.Serializable` |
+
+The `"serializable"` and `IsolationLevel.Serializable` selectors return `GRAFEO-Q004` until [query read tracking (#400)](https://github.com/GrafeoDB/grafeo/issues/400) is implemented. Use snapshot isolation.
 
 ### Node CRUD
 

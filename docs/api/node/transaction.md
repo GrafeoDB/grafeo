@@ -14,14 +14,14 @@ A database transaction with explicit commit/rollback. Transactions provide ACID 
 
 ```typescript
 const tx = db.beginTransaction();
-const tx = db.beginTransaction('serializable');
+const tx = db.beginTransaction('snapshot');
 ```
 
 | Isolation Level | Description |
 |----------------|-------------|
 | `"snapshot"` | Default. Reads see a consistent snapshot at transaction start |
 | `"read_committed"` | Reads see the latest committed data |
-| `"serializable"` | Full serialization of concurrent transactions |
+| `"serializable"` | Unavailable: requests return `GRAFEO-Q004` until [query read tracking (#400)](https://github.com/GrafeoDB/grafeo/issues/400) is implemented |
 
 ## Methods
 
@@ -94,8 +94,8 @@ try {
   tx.rollback();  // Discard all changes on error
 }
 
-// Serializable transaction
-const tx = db.beginTransaction('serializable');
+// Explicit snapshot transaction
+const tx = db.beginTransaction('snapshot');
 await tx.execute("MATCH (p:Person) SET p.verified = true");
 tx.commit();
 

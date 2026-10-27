@@ -101,13 +101,13 @@ Grafeo's approach to handling concurrent transactions. Each transaction sees a c
 A logical timestamp representing a point in database history. Each committed transaction increments the epoch.
 
 ### Snapshot Isolation
-The default isolation level where transactions see a consistent snapshot of the database from their start time. Changes made by other transactions aren't visible until commit.
+The default isolation level: a transaction sees the database as of its start and its own writes. Later commits from other transactions do not change that snapshot. Snapshot isolation can permit write skew.
 
 ### Write-Write Conflict
 When two transactions try to modify the same entity. The second transaction to commit will fail and must retry.
 
 ### SSI (Serializable Snapshot Isolation)
-The strongest isolation level, detecting potential anomalies like write skew. Enabled with `Serializable` isolation.
+Isolation that tracks read-write dependencies to prevent anomalies such as write skew. Grafeo does not yet provide it: `Serializable` requests fail with `GRAFEO-Q004`. Use snapshot isolation until query read tracking is implemented ([#400](https://github.com/GrafeoDB/grafeo/issues/400)).
 
 ---
 

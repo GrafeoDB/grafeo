@@ -57,6 +57,8 @@ Safe to remove: versions with deleted_txn < 100
 - Writes never block reads
 - Write conflicts detected at commit
 
+`SnapshotIsolation` is the default. It does not prevent write skew: transactions can read the same data and successfully write different entities. `Serializable` requests fail with `GRAFEO-Q004`; use `SnapshotIsolation` until query read tracking is implemented ([#400](https://github.com/GrafeoDB/grafeo/issues/400)).
+
 ### Phenomena Prevented
 
 | Phenomenon | Prevented? |
@@ -64,7 +66,7 @@ Safe to remove: versions with deleted_txn < 100
 | Dirty Read | Yes |
 | Non-Repeatable Read | Yes |
 | Phantom Read | Yes |
-| Write Skew | Partially |
+| Write Skew | No |
 
 ## Conflict Detection
 

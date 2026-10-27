@@ -6,6 +6,8 @@ All notable changes to Grafeo, for future reference (and enjoyment).
 
 ### Fixed
 
+- **CSV imports keep quoted line breaks** ([#678](https://github.com/GrafeoDB/grafeo/issues/678)): `LOAD DATA`, `LOAD CSV` and node imports read one row per record, including multiline headers, instead of splitting it at each line break.
+- **Concurrent backups no longer overwrite each other** ([#667](https://github.com/GrafeoDB/grafeo/issues/667)): backups of one database run one at a time, also to different directories, and a backup directory in use by another process gives a busy error.
 - **Backups and restores survive a crash** ([#667](https://github.com/GrafeoDB/grafeo/issues/667)): a backup is on disk before the database lets go of the log it covers, and a restore leaves either a complete database or nothing at the output path, so a failed restore can be retried to the same path.
 - **An incremental backup into the wrong directory is refused** ([#667](https://github.com/GrafeoDB/grafeo/issues/667)): after a full backup to one directory, an incremental backup to another one fails with an error naming it, instead of writing a chain with a gap that only the restore found, also when a schema statement or graph command came between the two.
 - **Concurrent backups no longer overwrite each other** ([#667](https://github.com/GrafeoDB/grafeo/issues/667)): backups of one database run one at a time, also to different directories, and a backup directory in use by another process gives a busy error.

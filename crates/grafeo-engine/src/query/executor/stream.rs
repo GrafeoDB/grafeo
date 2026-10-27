@@ -62,7 +62,7 @@ pub struct ResultStream<'session> {
     deadline: Option<Instant>,
     exhausted: bool,
     _guard: StreamGuard<'session>,
-    /// The pin of a stream read outside a transaction, held while it lives.
+    /// The stream's committed snapshot pin, including a historical override.
     _pin: Option<ReadPin>,
 }
 
@@ -226,7 +226,7 @@ pub struct OwnedResultStream {
     column_types: Vec<LogicalType>,
     deadline: Option<Instant>,
     exhausted: bool,
-    /// The pin of a stream read outside a transaction, held while it lives.
+    /// The stream's committed snapshot pin, including a historical override.
     _pin: Option<ReadPin>,
 }
 

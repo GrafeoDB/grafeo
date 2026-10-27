@@ -474,9 +474,8 @@ impl ReadPins {
     }
 }
 
-/// A read outside any transaction, pinned at the epoch it reads at from
-/// [`TransactionManager::pin_read`] until it is dropped (also by the unwind
-/// of a panic in the read): the read horizon stays at that epoch or before,
+/// A committed read, including a historical override inside a transaction,
+/// pinned at its epoch until it is dropped (also by the unwind of a panic): the read horizon stays at that epoch or before,
 /// so garbage collection keeps every version the read may still need (#412
 /// decision Q6: every read statement outside a transaction pins its epoch
 /// for its run).
@@ -487,8 +486,8 @@ pub(crate) struct ReadPin {
 }
 
 impl ReadPin {
-    /// The epoch the read is pinned at: the published epoch when it was
-    /// pinned.
+    /// The epoch the read is pinned at: its selected historical epoch or
+    /// the published epoch when it was pinned.
     #[must_use]
     pub(crate) fn epoch(&self) -> EpochId {
         self.epoch

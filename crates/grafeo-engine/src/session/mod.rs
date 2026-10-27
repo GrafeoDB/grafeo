@@ -3253,7 +3253,7 @@ impl Session {
 
         let result = self.with_auto_commit(has_mutations, || {
             // Get transaction context for MVCC visibility
-            let (viewing_epoch, transaction_id) = self.get_transaction_context();
+            let (viewing_epoch, transaction_id, _view_pin) = self.get_transaction_context()?;
 
             // Convert to physical plan with transaction context
             // (Physical planning cannot be cached as it depends on transaction state)
@@ -3353,8 +3353,8 @@ impl Session {
 
     /// Builds a pull-based physical pipeline for streaming, returning the
     /// root operator and metadata needed to wrap it in a `ResultStream` or
-    /// `OwnedResultStream`, with the pin of its read outside a transaction
-    /// (`None` inside one), which the stream holds.
+    /// `OwnedResultStream`. The stream holds its committed snapshot pin;
+    /// an ordinary transaction already owns its snapshot.
     ///
     /// Rejects session/schema commands, mutations, EXPLAIN/PROFILE, and plans
     /// that require a push-based pipeline. Used by both
@@ -3451,15 +3451,10 @@ impl Session {
         // Plan to physical operators.
         let active = self.active_store();
         let has_active_tx = self.current_transaction.lock().is_some();
-        // Outside a transaction the stream reads at the published epoch for
-        // as long as it lives: pinned until it is dropped (#412 decision Q6);
-        // a time-travel stream at its epoch.
-        let pin = if has_active_tx {
-            None
-        } else {
-            Some(self.pin_read_statement()?)
-        };
-        let (viewing_epoch, transaction_id) = self.get_transaction_context();
+        // An ordinary transaction owns its snapshot. A historical stream,
+        // including one inside a transaction, holds its own epoch until drop.
+        let (view, pin) = self.read_view()?;
+        let (viewing_epoch, transaction_id) = (view.epoch, view.transaction);
         let planner = self
             .create_planner_for_store_with_read_only(
                 Arc::clone(&active),
@@ -3709,7 +3704,7 @@ impl Session {
 
         let result = self.with_auto_commit(has_mutations, || {
             // Get transaction context for MVCC visibility
-            let (viewing_epoch, transaction_id) = self.get_transaction_context();
+            let (viewing_epoch, transaction_id, _view_pin) = self.get_transaction_context()?;
 
             // Convert to physical plan with transaction context
             let planner = self.create_planner_for_store(
@@ -3800,7 +3795,7 @@ impl Session {
 
         let result = self.with_auto_commit(has_mutations, || {
             // Get transaction context for MVCC visibility
-            let (viewing_epoch, transaction_id) = self.get_transaction_context();
+            let (viewing_epoch, transaction_id, _view_pin) = self.get_transaction_context()?;
 
             // Convert to physical plan with transaction context
             let planner = self.create_planner_for_store(
@@ -3880,7 +3875,7 @@ impl Session {
         }
 
         let result = self.with_auto_commit(has_mutations, || {
-            let (viewing_epoch, transaction_id) = self.get_transaction_context();
+            let (viewing_epoch, transaction_id, _view_pin) = self.get_transaction_context()?;
             let planner = self.create_planner_for_store(
                 Arc::clone(&active),
                 viewing_epoch,
@@ -3962,7 +3957,7 @@ impl Session {
         }
 
         let result = self.with_auto_commit(has_mutations, || {
-            let (viewing_epoch, transaction_id) = self.get_transaction_context();
+            let (viewing_epoch, transaction_id, _view_pin) = self.get_transaction_context()?;
             let planner = self.create_planner_for_store(
                 Arc::clone(&active),
                 viewing_epoch,
@@ -4042,7 +4037,7 @@ impl Session {
         }
 
         let result = self.with_auto_commit(has_mutations, || {
-            let (viewing_epoch, transaction_id) = self.get_transaction_context();
+            let (viewing_epoch, transaction_id, _view_pin) = self.get_transaction_context()?;
             let planner = self.create_planner_for_store(
                 Arc::clone(&active),
                 viewing_epoch,
@@ -4181,7 +4176,7 @@ impl Session {
         }
 
         let result = self.with_auto_commit(has_mutations, || {
-            let (viewing_epoch, transaction_id) = self.get_transaction_context();
+            let (viewing_epoch, transaction_id, _view_pin) = self.get_transaction_context()?;
             let planner = self.create_planner_for_store(
                 Arc::clone(&active),
                 viewing_epoch,
@@ -5226,9 +5221,9 @@ impl Session {
     /// (`has_mutations`) outside a transaction in one of its own, which
     /// commits when `body` succeeds and rolls back when it fails; inside the
     /// open transaction, whose writes from `body` are undone when it fails,
-    /// and which goes on. A read runs as it is, outside a transaction pinned
-    /// at the published epoch for its run (#412 decision Q6), so garbage
-    /// collection keeps what it reads.
+    /// and which goes on. A read outside a transaction pins the published
+    /// epoch for its run (#412 decision Q6). A historical override pins its
+    /// selected epoch even inside a transaction, so collection keeps it.
     pub(super) fn in_statement_transaction<T, F>(&self, has_mutations: bool, body: F) -> Result<T>
     where
         F: FnOnce() -> Result<T>,
@@ -5253,9 +5248,10 @@ impl Session {
             // Before `body` reads the published epoch: it reads there or
             // later; a time-travel read at its epoch, refused before the
             // history floor. Dropped when `body` returns or unwinds.
-            let _pin = match transaction {
-                Some(_) => None,
-                None => Some(self.pin_read_statement()?),
+            let _pin = if transaction.is_none() || self.viewing_epoch().is_some() {
+                Some(self.pin_read_statement()?)
+            } else {
+                None
             };
             let start = transaction
                 .filter(|_| has_mutations)
@@ -5487,34 +5483,35 @@ impl Session {
         }
     }
 
-    /// Returns the current transaction context for MVCC visibility.
-    ///
-    /// Returns `(viewing_epoch, transaction_id)` where:
-    /// - `viewing_epoch` is the epoch at which to check version visibility
-    /// - `transaction_id` is the current transaction ID (if in a transaction)
-    #[must_use]
-    fn get_transaction_context(&self) -> (EpochId, Option<TransactionId>) {
-        // Time-travel override takes precedence (read-only, no tx context)
+    /// The MVCC epoch and transaction, plus a pin for a historical override.
+    /// Keep the pin through planning and execution: the override may name an
+    /// epoch older than the open transaction's snapshot, or change meanwhile.
+    fn get_transaction_context(
+        &self,
+    ) -> Result<(
+        EpochId,
+        Option<TransactionId>,
+        Option<crate::transaction::ReadPin>,
+    )> {
+        // A historical override reads committed data, excluding pending writes.
         if let Some(epoch) = *self.viewing_epoch_override.lock() {
-            return (self.transaction_manager.readable_epoch(epoch), None);
+            let pin = self.transaction_manager.pin_read_at(epoch)?;
+            return Ok((pin.epoch(), None, Some(pin)));
         }
 
         if let Some(transaction_id) = *self.current_transaction.lock() {
-            // In a transaction: use the transaction's start epoch
             let epoch = self
                 .transaction_manager
                 .start_epoch(transaction_id)
                 .unwrap_or_else(|| self.transaction_manager.current_epoch());
-            (epoch, Some(transaction_id))
+            Ok((epoch, Some(transaction_id), None))
         } else {
-            // No transaction: use current epoch
-            (self.transaction_manager.current_epoch(), None)
+            Ok((self.transaction_manager.current_epoch(), None, None))
         }
     }
 
-    /// The pin of a read outside a transaction, for its run: at the epoch
-    /// the session was set to read at (a time-travel read, H2c), or at the
-    /// published epoch.
+    /// Pins the epoch selected for a statement, including a historical
+    /// override inside a transaction, or the published epoch otherwise.
     ///
     /// # Errors
     ///
@@ -5528,13 +5525,17 @@ impl Session {
         }
     }
 
-    /// The view the session's direct reads read at: its transaction at its
-    /// snapshot, or committed at the published epoch (or the epoch it was
-    /// set to read at), never a stamped commit that has not published.
-    #[must_use]
-    fn read_view(&self) -> ReadView {
-        let (epoch, transaction_id) = self.get_transaction_context();
-        ReadView::new(epoch, transaction_id)
+    /// Captures and pins the view for direct reads and streams. The open
+    /// transaction owns an ordinary snapshot; committed reads retain their
+    /// selected epoch until materialization or stream drop.
+    fn read_view(&self) -> Result<(ReadView, Option<crate::transaction::ReadPin>)> {
+        let (epoch, transaction_id, pin) = self.get_transaction_context()?;
+        if transaction_id.is_some() || pin.is_some() {
+            Ok((ReadView::new(epoch, transaction_id), pin))
+        } else {
+            let pin = self.transaction_manager.pin_read();
+            Ok((ReadView::committed(pin.epoch()), Some(pin)))
+        }
     }
 
     /// Turns the reachability search of variable-length expands on (the
@@ -5576,7 +5577,7 @@ impl Session {
         }
         let has_mutations = self.plan_writes(&plan.root);
         Some(self.with_auto_commit(has_mutations, || {
-            let (viewing_epoch, transaction_id) = self.get_transaction_context();
+            let (viewing_epoch, transaction_id, _view_pin) = self.get_transaction_context()?;
             let planner = self.create_planner_for_store(
                 Arc::clone(active),
                 viewing_epoch,
@@ -5761,7 +5762,7 @@ impl Session {
                     grafeo_common::utils::error::TransactionError::ReadOnly,
                 ),
             )?;
-            let (epoch, transaction_id) = self.get_transaction_context();
+            let (epoch, transaction_id, _view_pin) = self.get_transaction_context()?;
             // The graph the writes land in: the active one, or the default
             // graph when no graph of that name exists. The auto-commit opened
             // a transaction when none was open.
@@ -6073,8 +6074,9 @@ impl Session {
     ///
     /// The error of a read the store cannot do.
     pub fn find_nodes_by_property(&self, property: &str, value: &Value) -> Result<Vec<NodeId>> {
+        let (view, _pin) = self.read_view()?;
         self.active_store()
-            .find_nodes_by_property(property, value, self.read_view())
+            .find_nodes_by_property(property, value, view)
     }
 
     /// Creates an index on a node property of the session's graph. Commits
@@ -6147,7 +6149,6 @@ impl Session {
     /// # Performance
     ///
     /// - Time complexity: O(1) average case
-    /// - No lock contention (uses DashMap internally)
     /// - ~20-30x faster than equivalent MATCH query
     ///
     /// # Example
@@ -6165,10 +6166,11 @@ impl Session {
     ///
     /// # Errors
     ///
-    /// The error of a read the store cannot do: a read that fails is never
-    /// an absent node.
+    /// The error of a read the store cannot do, or an epoch before retained
+    /// history. A read that fails is never an absent node.
     pub fn get_node(&self, id: NodeId) -> Result<Option<Node>> {
-        self.active_store().node(id, self.read_view())
+        let (view, _pin) = self.read_view()?;
+        self.active_store().node(id, view)
     }
 
     /// Gets a single property from a node by ID, bypassing query planning.
@@ -6199,7 +6201,8 @@ impl Session {
     ///
     /// As [`get_node`](Self::get_node).
     pub fn get_node_property(&self, id: NodeId, key: &str) -> Result<Option<Value>> {
-        self.active_store().node_property(id, key, self.read_view())
+        let (view, _pin) = self.read_view()?;
+        self.active_store().node_property(id, key, view)
     }
 
     /// Gets an edge by ID directly, bypassing query planning.
@@ -6207,13 +6210,13 @@ impl Session {
     /// # Performance
     ///
     /// - Time complexity: O(1) average case
-    /// - No lock contention
     ///
     /// # Errors
     ///
     /// As [`get_node`](Self::get_node).
     pub fn get_edge(&self, id: EdgeId) -> Result<Option<Edge>> {
-        self.active_store().edge(id, self.read_view())
+        let (view, _pin) = self.read_view()?;
+        self.active_store().edge(id, view)
     }
 
     /// The edges of a node in `direction` as `(neighbor, edge)` pairs, as the
@@ -6231,12 +6234,13 @@ impl Session {
         direction: Direction,
         edge_types: &[&str],
     ) -> Result<Vec<(NodeId, EdgeId)>> {
+        let (view, _pin) = self.read_view()?;
         crate::database::direct::node_edges(
             &*self.active_store(),
             node,
             direction,
             edge_types,
-            self.read_view(),
+            view,
         )
     }
 
@@ -6323,7 +6327,8 @@ impl Session {
     ///
     /// As [`get_node`](Self::get_node).
     pub fn node_exists(&self, id: NodeId) -> Result<bool> {
-        self.active_store().is_node_visible(id, self.read_view())
+        let (view, _pin) = self.read_view()?;
+        self.active_store().is_node_visible(id, view)
     }
 
     /// Checks if an edge exists, bypassing query planning.
@@ -6332,7 +6337,8 @@ impl Session {
     ///
     /// As [`get_node`](Self::get_node).
     pub fn edge_exists(&self, id: EdgeId) -> Result<bool> {
-        self.active_store().is_edge_visible(id, self.read_view())
+        let (view, _pin) = self.read_view()?;
+        self.active_store().is_edge_visible(id, view)
     }
 
     /// Gets the degree (number of edges) of a node.
@@ -6343,7 +6349,7 @@ impl Session {
     ///
     /// As [`get_node`](Self::get_node).
     pub fn get_degree(&self, node: NodeId) -> Result<(usize, usize)> {
-        let view = self.read_view();
+        let (view, _pin) = self.read_view()?;
         let active = self.active_store();
         let out = active.degree(node, Direction::Outgoing, view)?;
         let in_degree = active.degree(node, Direction::Incoming, view)?;
@@ -6364,7 +6370,7 @@ impl Session {
     ///
     /// As [`get_node`](Self::get_node).
     pub fn get_nodes_batch(&self, ids: &[NodeId]) -> Result<Vec<Option<Node>>> {
-        let view = self.read_view();
+        let (view, _pin) = self.read_view()?;
         let active = self.active_store();
         ids.iter().map(|&id| active.node(id, view)).collect()
     }
@@ -6587,19 +6593,19 @@ mod tests {
         let mut session = db.session();
 
         // Without transaction - context should have current epoch and no transaction_id
-        let (_epoch1, transaction_id1) = session.get_transaction_context();
+        let (_epoch1, transaction_id1, _pin1) = session.get_transaction_context().unwrap();
         assert!(transaction_id1.is_none());
 
         // Start a transaction
         session.begin_transaction().unwrap();
-        let (epoch2, transaction_id2) = session.get_transaction_context();
+        let (epoch2, transaction_id2, _pin2) = session.get_transaction_context().unwrap();
         assert!(transaction_id2.is_some());
         // Transaction should have a valid epoch
         let _ = epoch2; // Use the variable
 
         // Commit and verify
         session.commit().unwrap();
-        let (epoch3, tx_id3) = session.get_transaction_context();
+        let (epoch3, tx_id3, _pin3) = session.get_transaction_context().unwrap();
         assert!(tx_id3.is_none());
         // Epoch should have advanced after commit
         assert!(epoch3.as_u64() >= epoch2.as_u64());
@@ -6636,6 +6642,104 @@ mod tests {
         });
         assert!(failed.is_err());
         assert_eq!(manager.read_horizon(), manager.current_epoch());
+    }
+
+    #[cfg(feature = "gql")]
+    #[test]
+    fn historical_statement_in_transaction_pins_until_return_error_or_unwind() {
+        use grafeo_common::utils::error::{Error, Result};
+        use std::panic::{AssertUnwindSafe, catch_unwind};
+
+        for outcome in 0..3 {
+            let db = GrafeoDB::new_in_memory();
+            db.execute("INSERT (:Person {name: 'Alix'})").unwrap();
+            let earlier = db.current_epoch();
+            let bootstrap = db.as_of(earlier).unwrap();
+            db.execute("INSERT (:Person {name: 'Gus'})").unwrap();
+            let snapshot = db.current_epoch();
+            let mut session = db.session();
+            session.begin_transaction().unwrap();
+            session.set_viewing_epoch(earlier);
+            let manager = &db.transaction_manager;
+
+            let result = catch_unwind(AssertUnwindSafe(|| {
+                session.in_statement_transaction(false, || -> Result<()> {
+                    drop(bootstrap);
+                    db.execute("INSERT (:Person {name: 'Mia'})").unwrap();
+                    db.gc();
+                    assert_eq!(manager.read_horizon(), earlier, "the historical statement");
+                    assert_eq!(manager.history_floor(), earlier);
+                    match outcome {
+                        0 => Ok(()),
+                        1 => Err(Error::Internal("read failed".to_string())),
+                        _ => panic!("historical statement unwinds"),
+                    }
+                })
+            }));
+            match outcome {
+                0 => result.unwrap().unwrap(),
+                1 => assert!(
+                    matches!(result.unwrap(), Err(Error::Internal(message)) if message == "read failed")
+                ),
+                _ => {
+                    let panic = result.unwrap_err();
+                    assert_eq!(
+                        panic.downcast_ref::<&str>(),
+                        Some(&"historical statement unwinds")
+                    );
+                }
+            }
+            assert!(session.in_transaction());
+            assert_eq!(
+                manager.read_horizon(),
+                snapshot,
+                "only the transaction remains"
+            );
+            session.clear_viewing_epoch();
+            db.gc();
+            assert_eq!(manager.history_floor(), snapshot);
+            assert!(db.as_of(earlier).is_err());
+            session.rollback().unwrap();
+            assert_eq!(manager.read_horizon(), manager.current_epoch());
+        }
+    }
+
+    #[cfg(feature = "gql")]
+    #[test]
+    fn historical_context_keeps_its_epoch_when_override_is_cleared() {
+        let db = GrafeoDB::new_in_memory();
+        let result = db
+            .execute("INSERT (p:Person {age: 1}) RETURN id(p)")
+            .unwrap();
+        let Value::Int64(id) = result.rows()[0][0] else {
+            panic!("expected a node ID");
+        };
+        let id = grafeo_common::types::NodeId::new(u64::try_from(id).unwrap());
+        let earlier = db.current_epoch();
+        let bootstrap = db.as_of(earlier).unwrap();
+        db.execute("MATCH (p:Person) SET p.age = 2").unwrap();
+        let snapshot = db.current_epoch();
+        let mut session = db.session();
+        session.begin_transaction().unwrap();
+        session.set_viewing_epoch(earlier);
+        {
+            let (epoch, transaction, _pin) = session.get_transaction_context().unwrap();
+            drop(bootstrap);
+            session.clear_viewing_epoch();
+            db.execute("MATCH (p:Person) SET p.age = 3").unwrap();
+            db.gc();
+            assert_eq!(db.transaction_manager.history_floor(), earlier);
+            assert_eq!(
+                db.store()
+                    .unwrap()
+                    .node_property(id, "age", ReadView::new(epoch, transaction))
+                    .unwrap(),
+                Some(Value::Int64(1))
+            );
+        }
+        db.gc();
+        assert_eq!(db.transaction_manager.history_floor(), snapshot);
+        session.rollback().unwrap();
     }
 
     /// A stream read outside a transaction holds the read horizon at its

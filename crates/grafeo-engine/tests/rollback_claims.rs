@@ -260,7 +260,7 @@ fn savepoint_claims_keep_named_graph_identity() {
     let db = GrafeoDB::new_in_memory();
     for graph in ["left", "right"] {
         db.execute(&format!("CREATE GRAPH {graph}")).unwrap();
-        let mut session = db.session();
+        let session = db.session();
         session.use_graph(graph);
         session.execute("INSERT (:Item {v: 0})").unwrap();
     }

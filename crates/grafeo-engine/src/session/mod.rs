@@ -5233,6 +5233,10 @@ impl Session {
     where
         F: FnOnce() -> Result<T>,
     {
+        // Refuse a fenced write before creating a savepoint or executing it.
+        if has_mutations {
+            self.transaction_manager.check_no_incomplete_commit()?;
+        }
         if self.needs_auto_commit(has_mutations) {
             self.begin_transaction_inner(false, None)?;
             match body() {

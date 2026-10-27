@@ -2104,7 +2104,8 @@ mod tests {
             let endpoint = GraphEntity::from(NodeId::new(offset + 2));
             mgr.record_endpoints(tx, [endpoint.clone(), endpoint])
                 .unwrap();
-            mgr.record_key(tx, claim_key(offset as i64)).unwrap();
+            mgr.record_key(tx, claim_key(i64::try_from(offset).unwrap()))
+                .unwrap();
         }
 
         #[test]

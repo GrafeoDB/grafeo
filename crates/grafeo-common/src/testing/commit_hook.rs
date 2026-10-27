@@ -13,7 +13,8 @@
 //! inside a change outside any commit (a schema statement, a graph command, an
 //! RDF update, a direct write, a direct graph or index call, an import or an
 //! RDF batch insert) once it holds commits off and before it changes anything
-//! ([`during_next_held_change`]).
+//! ([`during_next_held_change`]), or after a backend write has been applied
+//! and recorded ([`after_next_data_write`]).
 //! [`checkpoints_started`] counts the checkpoints started on a database
 //! file, from any thread (the engine calls [`count_checkpoint`]).
 //!
@@ -29,9 +30,12 @@ mod inner {
     use std::sync::Mutex;
 
     type Hook = Box<dyn FnOnce()>;
+    type WriteHook =
+        Box<dyn FnOnce() -> Result<(), crate::testing::statement_failure::InjectedFailure>>;
 
     thread_local! {
         static AFTER_EPOCH: RefCell<Option<Hook>> = const { RefCell::new(None) };
+        static AFTER_DATA_WRITE: RefCell<Option<WriteHook>> = const { RefCell::new(None) };
         static AFTER_WRITTEN: RefCell<Option<Hook>> = const { RefCell::new(None) };
         static AFTER_STAMPED: RefCell<Option<Hook>> = const { RefCell::new(None) };
         static AFTER_LOGGED: RefCell<Option<Hook>> = const { RefCell::new(None) };
@@ -40,6 +44,29 @@ mod inner {
         static DURING_CHECKPOINT: RefCell<Option<Hook>> = const { RefCell::new(None) };
         static DURING_CHECKPOINT_WRITE: RefCell<Option<Hook>> = const { RefCell::new(None) };
         static DURING_HELD_CHANGE: RefCell<Option<Hook>> = const { RefCell::new(None) };
+    }
+
+    /// Arms a one-shot hook after the next changed backend write is recorded
+    /// on this thread. Returning an error or panicking exercises the caller's
+    /// cleanup after a completed write, before the rest of its operation.
+    pub fn after_next_data_write(
+        hook: impl FnOnce() -> Result<(), crate::testing::statement_failure::InjectedFailure> + 'static,
+    ) {
+        AFTER_DATA_WRITE.with(|slot| *slot.borrow_mut() = Some(Box::new(hook)));
+    }
+
+    /// Runs the data-write hook armed on this thread, if any.
+    ///
+    /// # Errors
+    ///
+    /// Returns the armed hook's injected failure.
+    #[inline]
+    pub fn run_after_data_write() -> Result<(), crate::testing::statement_failure::InjectedFailure>
+    {
+        match AFTER_DATA_WRITE.with(|slot| slot.borrow_mut().take()) {
+            Some(hook) => hook(),
+            None => Ok(()),
+        }
     }
 
     /// The checkpoints started on each database file.
@@ -210,6 +237,23 @@ mod inner {
 #[cfg(not(feature = "testing-statement-injection"))]
 mod inner {
     use std::path::Path;
+
+    /// No-op when injection is disabled.
+    pub fn after_next_data_write(
+        _hook: impl FnOnce() -> Result<(), crate::testing::statement_failure::InjectedFailure> + 'static,
+    ) {
+    }
+
+    /// No-op when injection is disabled.
+    ///
+    /// # Errors
+    ///
+    /// Always succeeds without the test feature.
+    #[inline]
+    pub fn run_after_data_write() -> Result<(), crate::testing::statement_failure::InjectedFailure>
+    {
+        Ok(())
+    }
 
     /// No-op when injection is disabled.
     pub fn after_next_commit_epoch(_hook: impl FnOnce() + 'static) {}

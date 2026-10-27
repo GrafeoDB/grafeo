@@ -43,16 +43,11 @@ pub(super) struct CheckpointSources {
 }
 
 impl CheckpointSources {
-    /// The epoch a checkpoint or copy of the database records, which a
-    /// reopen continues from: the root store's, which follows every commit,
-    /// or the transaction manager's when that is ahead (`restore_snapshot`
-    /// resets the store's epoch, and a direct write that fails still takes
-    /// its epoch), so the file never names an epoch below one the database
-    /// published. Taken while commits are held, both are the epoch of the
-    /// last complete commit.
+    /// The last published epoch, recorded while commits are held off.
+    /// A store may have advanced for a call that was undone before publication;
+    /// a checkpoint or copy must not promote that unpublished epoch on reopen.
     pub fn epoch(&self) -> u64 {
-        let published = self.transaction_manager.current_epoch();
-        self.store.current_epoch().max(published).as_u64()
+        self.transaction_manager.current_epoch().as_u64()
     }
 
     /// The default graph's committed nodes and edges, for the header.

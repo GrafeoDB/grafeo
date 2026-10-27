@@ -337,6 +337,28 @@ fn a_missing_file_is_an_io_error() {
 }
 
 #[test]
+fn an_unterminated_csv_field_refuses_the_import_without_partial_nodes() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = GrafeoDB::new_in_memory();
+    for (content, format, line) in [
+        ("name\nAlix\n\"unfinished\nlast", CSV, 3),
+        ("Alix\n\"unfinished\nlast", RAW_CSV, 2),
+        ("\"unfinished\nheader", CSV, 1),
+    ] {
+        let path = file(&dir, "unterminated.csv", content);
+        let error = import_nodes(&db.session(), &path, "Person", format).unwrap_err();
+        assert!(
+            error.to_string().contains(&format!(
+                "unterminated quoted field starting at line {line}"
+            )),
+            "{error}"
+        );
+        let nodes = properties(&db, "Person");
+        assert!(nodes.is_empty(), "{nodes:?}");
+    }
+}
+
+#[test]
 fn an_empty_label_is_refused() {
     let dir = tempfile::tempdir().unwrap();
     let path = file(&dir, "people.csv", "name\nJules\n");

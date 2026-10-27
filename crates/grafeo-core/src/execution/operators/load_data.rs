@@ -44,7 +44,7 @@ pub struct LoadDataOperator {
     delimiter: u8,
     /// Whether the file has been opened.
     opened: bool,
-    /// The number of the last line read (JSONL), for errors.
+    /// The number of the last physical line read (CSV/JSONL), for errors.
     line: u64,
     /// Buffered Parquet rows (read all upfront, then iterate).
     #[cfg(feature = "parquet-import")]
@@ -95,7 +95,7 @@ impl LoadDataOperator {
         let mut reader = BufReader::new(file);
 
         if self.format == LoadDataFormat::Csv && self.with_headers {
-            let record = read_csv_record(&mut reader, self.delimiter, true)
+            let record = read_csv_record(&mut reader, self.delimiter, true, &mut self.line)
                 .map_err(|e| OperatorError::Execution(format!("Failed to read CSV headers: {e}")))?
                 .unwrap_or_default();
             self.headers = Some(parse_csv_row(&record, self.delimiter));
@@ -114,7 +114,7 @@ impl LoadDataOperator {
             .ok_or_else(|| OperatorError::Internal("CSV reader not initialized".to_string()))?;
 
         loop {
-            let Some(record) = read_csv_record(reader, self.delimiter, false)
+            let Some(record) = read_csv_record(reader, self.delimiter, false, &mut self.line)
                 .map_err(|e| OperatorError::Execution(format!("Failed to read CSV line: {e}")))?
             else {
                 return Ok(None); // EOF
@@ -358,16 +358,24 @@ fn read_csv_record(
     reader: &mut impl BufRead,
     delimiter: u8,
     strip_bom: bool,
+    line: &mut u64,
 ) -> std::io::Result<Option<String>> {
     let mut record = String::new();
     let mut quoted = false;
+    let mut quoted_start = 0;
     let mut field_start = true;
     loop {
         let start = record.len();
         if reader.read_line(&mut record)? == 0 {
-            // Keep the field parser's lenient handling of an unclosed quote.
+            if quoted {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!("unterminated quoted field starting at line {quoted_start}"),
+                ));
+            }
             return Ok((!record.is_empty()).then_some(record));
         }
+        *line += 1;
         if strip_bom && start == 0 && record.starts_with('\u{feff}') {
             record.replace_range(..'\u{feff}'.len_utf8(), "");
         }
@@ -383,6 +391,7 @@ fn read_csv_record(
                 }
                 '"' if field_start => {
                     quoted = true;
+                    quoted_start = *line;
                     field_start = false;
                 }
                 c if !quoted && c == char::from(delimiter) => field_start = true,
@@ -808,9 +817,42 @@ mod tests {
         }
 
         #[test]
-        fn an_unclosed_quote_at_eof_keeps_the_existing_lenient_result() {
-            let (_file, mut op) = operator("\"unfinished", false, None);
-            assert_eq!(records(&mut op), [list(&["unfinished"])]);
+        fn an_unclosed_quote_reports_its_opening_line() {
+            for ending in ["\n", "\r\n"] {
+                for (content, headers, delimiter, line) in [
+                    ("\"unfinished", false, None, 1),
+                    ("\"unfinished\nmore\n", false, None, 1),
+                    ("first,row\n\n\"unfinished", false, None, 3),
+                    ("name,note\nAlix,\"unfinished\nmore", true, None, 2),
+                    ("\u{feff}\"unfinished", true, None, 1),
+                    (
+                        "\"multi\nline\",note\nAlix,ok\n\nGus,\"unfinished\nlast",
+                        true,
+                        None,
+                        5,
+                    ),
+                    ("a;\"ok\nstill\";\"unfinished\nend", false, Some(';'), 2),
+                ] {
+                    let content = content.replace('\n', ending);
+                    let (_file, mut op) = operator(&content, headers, delimiter);
+                    for _ in 0..2 {
+                        let error = loop {
+                            match op.next() {
+                                Ok(Some(_)) => {}
+                                Ok(None) => panic!("unterminated field accepted: {content:?}"),
+                                Err(error) => break error,
+                            }
+                        };
+                        assert!(
+                            error.to_string().contains(&format!(
+                                "unterminated quoted field starting at line {line}"
+                            )),
+                            "{content:?}: {error}"
+                        );
+                        op.reset();
+                    }
+                }
+            }
         }
     }
 

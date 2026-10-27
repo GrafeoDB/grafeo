@@ -139,6 +139,38 @@ fn csv_quoted_line_breaks_keep_exact_rows_and_values() {
     );
 }
 
+#[test]
+fn csv_unterminated_quotes_report_the_field_starting_line() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("unterminated.csv");
+    let path = file.to_string_lossy().replace('\\', "/");
+    let db = GrafeoDB::new_in_memory();
+    for (content, line) in [
+        ("\u{feff}\"unfinished\nheader", 1),
+        ("name,bio\r\nAlix,ok\r\n\r\nGus,\"unfinished\r\nlast", 4),
+    ] {
+        std::fs::write(&file, content).unwrap();
+        let check = |language: &str, query: &str| {
+            let error = db.execute_language(query, language, None).unwrap_err();
+            assert!(
+                error.to_string().contains(&format!(
+                    "unterminated quoted field starting at line {line}"
+                )),
+                "{language}: {error}"
+            );
+        };
+        check(
+            "gql",
+            &format!("LOAD DATA FROM '{path}' FORMAT CSV WITH HEADERS AS row RETURN row"),
+        );
+        #[cfg(feature = "cypher")]
+        check(
+            "cypher",
+            &format!("LOAD CSV WITH HEADERS FROM '{path}' AS row RETURN row"),
+        );
+    }
+}
+
 // ---------------------------------------------------------------------------
 // CSV with empty file (headers only, no data rows)
 // ---------------------------------------------------------------------------

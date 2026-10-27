@@ -364,6 +364,8 @@ struct SavepointState {
     name: String,
     /// The position in the transaction's change set.
     mark: grafeo_common::change::ChangeMark,
+    /// The same boundary in the transaction's conflict claims.
+    claims: crate::transaction::ClaimMark,
 }
 
 impl Session {
@@ -4783,22 +4785,27 @@ impl Session {
             )
         })?;
 
-        let _ = tx_id;
-        self.savepoints.lock().push(self.capture_savepoint(name));
+        let state = self.capture_savepoint(tx_id, name)?;
+        self.savepoints.lock().push(state);
         Ok(())
     }
 
     /// The state a savepoint named `name` restores: how far the open
     /// transaction's changes reach.
-    fn capture_savepoint(&self, name: &str) -> SavepointState {
+    fn capture_savepoint(
+        &self,
+        transaction_id: TransactionId,
+        name: &str,
+    ) -> Result<SavepointState> {
         let mark = self.changes.lock().as_ref().map_or_else(
             || grafeo_common::change::ChangeSet::new().mark(),
             |changes| changes.mark(),
         );
-        SavepointState {
+        Ok(SavepointState {
             name: name.to_string(),
             mark,
-        }
+            claims: self.transaction_manager.mark_claims(transaction_id)?,
+        })
     }
 
     /// Rolls back to a named savepoint, undoing all writes made after it.
@@ -4851,17 +4858,20 @@ impl Session {
         transaction_id: TransactionId,
         sp_state: &SavepointState,
     ) -> Result<()> {
+        // A failed undo already removed its change-set tail. A retry must
+        // not mistake that empty tail for successful undo and release claims.
+        self.transaction_manager.check_no_incomplete_commit()?;
         let changes = self.changes.lock().clone();
         // A store change in progress: a checkpoint never reads the store or
         // the change sets halfway through it.
-        let undone = match &changes {
-            Some(changes) => {
-                let _writing = self.transaction_manager.write_in_progress();
-                changes.rollback_to(sp_state.mark)
-            }
-            None => Ok(()),
-        };
-        undone.map_err(|failure| self.rollback_failed(transaction_id, &failure))
+        let _writing = self.transaction_manager.write_in_progress();
+        if let Some(changes) = &changes {
+            changes
+                .rollback_to(sp_state.mark)
+                .map_err(|failure| self.rollback_failed(transaction_id, &failure))?;
+        }
+        self.transaction_manager
+            .restore_claims(transaction_id, sp_state.claims)
     }
 
     /// Releases (removes) a named savepoint without rolling back.
@@ -5223,6 +5233,10 @@ impl Session {
     where
         F: FnOnce() -> Result<T>,
     {
+        // Refuse a fenced write before creating a savepoint or executing it.
+        if has_mutations {
+            self.transaction_manager.check_no_incomplete_commit()?;
+        }
         if self.needs_auto_commit(has_mutations) {
             self.begin_transaction_inner(false, None)?;
             match body() {
@@ -5245,7 +5259,11 @@ impl Session {
             };
             let start = transaction
                 .filter(|_| has_mutations)
-                .map(|tx| (tx, self.capture_savepoint("statement")));
+                .map(|tx| {
+                    self.capture_savepoint(tx, "statement")
+                        .map(|state| (tx, state))
+                })
+                .transpose()?;
             match (body(), &start) {
                 (Err(error), Some((tx, start))) => Err(with_failed_rollback(
                     error,

@@ -1,0 +1,114 @@
+# Aggregate discovery and replacement through expression wrappers (#539).
+# Input is sorted before collecting; output order is explicit for grouped rows.
+meta:
+  language: gql
+  model: lpg
+  section: regression
+  title: Aggregate expression wrappers
+  dataset: empty
+
+tests:
+
+  - name: collect_without_a_wrapper
+    query: "UNWIND [{name: 'Gus', meta: {route: 'B2'}}, {name: 'Alix', meta: {route: 'A1'}}] AS n WITH n ORDER BY n.name RETURN collect(n.name) AS names"
+    expect:
+      ordered: true
+      rows:
+        - ["[Alix, Gus]"]
+
+  - name: scalar_function_around_collect
+    query: "UNWIND [{name: 'Gus', meta: {route: 'B2'}}, {name: 'Alix', meta: {route: 'A1'}}] AS n WITH n ORDER BY n.name RETURN size(collect(n.name)) AS count"
+    expect:
+      ordered: true
+      rows:
+        - [2]
+
+  - name: index_around_collect
+    query: "UNWIND [{name: 'Gus', meta: {route: 'B2'}}, {name: 'Alix', meta: {route: 'A1'}}] AS n WITH n ORDER BY n.name RETURN collect(n.name)[0] AS first"
+    expect:
+      ordered: true
+      rows:
+        - ["Alix"]
+
+  - name: slice_around_collect
+    query: "UNWIND [{name: 'Gus', meta: {route: 'B2'}}, {name: 'Alix', meta: {route: 'A1'}}] AS n WITH n ORDER BY n.name RETURN collect(n.name)[0..1] AS first"
+    expect:
+      ordered: true
+      rows:
+        - ["[Alix]"]
+
+  - name: map_literal_around_collect
+    query: "UNWIND [{name: 'Gus', meta: {route: 'B2'}}, {name: 'Alix', meta: {route: 'A1'}}] AS n WITH n ORDER BY n.name RETURN {names: collect(n.name)} AS names"
+    expect:
+      ordered: true
+      rows:
+        - ["{names: [Alix, Gus]}"]
+
+  - name: property_of_a_collected_map
+    query: "UNWIND [{name: 'Gus', meta: {route: 'B2'}}, {name: 'Alix', meta: {route: 'A1'}}] AS n WITH n ORDER BY n.name RETURN head(collect(n.meta)).route AS route"
+    expect:
+      ordered: true
+      rows:
+        - ["A1"]
+
+  - name: map_and_index_around_collect
+    query: "UNWIND [{name: 'Gus', meta: {route: 'B2'}}, {name: 'Alix', meta: {route: 'A1'}}] AS n WITH n ORDER BY n.name RETURN {first: collect(n.name)[0]} AS first"
+    expect:
+      ordered: true
+      rows:
+        - ["{first: Alix}"]
+
+  - name: aggregates_in_base_and_index
+    query: "UNWIND [{name: 'Gus', meta: {route: 'B2'}}, {name: 'Alix', meta: {route: 'A1'}}] AS n WITH n ORDER BY n.name RETURN collect(n.name)[size(collect(n.name)) - 1] AS last"
+    expect:
+      ordered: true
+      rows:
+        - ["Gus"]
+
+  - name: wrapped_aggregate_with_grouping_key
+    query: "UNWIND [{city: 'A', name: 'Gus'}, {city: 'B', name: 'Mia'}, {city: 'A', name: 'Alix'}] AS n WITH n ORDER BY n.city, n.name RETURN n.city AS city, collect(n.name)[0] AS first ORDER BY city"
+    expect:
+      ordered: true
+      rows:
+        - ["A", "Alix"]
+        - ["B", "Mia"]
+
+  - name: aggregate_in_comprehension_source
+    query: "UNWIND [3, 1, 2] AS n WITH n ORDER BY n RETURN [x IN collect(n) | x + 1] AS values"
+    expect:
+      ordered: true
+      rows:
+        - ["[2, 3, 4]"]
+
+  - name: aggregate_in_predicate_source
+    query: "UNWIND [3, 1, 2] AS n RETURN all(x IN collect(n) WHERE x > 0) AS positive"
+    expect:
+      ordered: true
+      rows:
+        - [true]
+
+  - name: aggregate_in_reduce_source
+    query: "UNWIND [3, 1, 2] AS n RETURN reduce(total = 0, x IN collect(n) | total + x) AS total"
+    expect:
+      ordered: true
+      rows:
+        - [6]
+
+  - name: empty_input_has_one_aggregate_row
+    query: "UNWIND [] AS n RETURN collect(n)[0] AS first, collect(n)[..] AS values"
+    expect:
+      ordered: true
+      rows:
+        - [null, "[]"]
+
+  - name: aggregate_in_let_binding
+    query: "UNWIND [{name: 'Gus', meta: {route: 'B2'}}, {name: 'Alix', meta: {route: 'A1'}}] AS n WITH n ORDER BY n.name RETURN LET names = collect(n.name) IN names[0] END AS first"
+    expect:
+      ordered: true
+      rows:
+        - ["Alix"]
+
+  - name: aggregate_cannot_capture_shadowing_comprehension_variable
+    query: "UNWIND [3, 1, 2] AS x RETURN [x IN [1, 2] | sum(x)] AS values"
+    expect:
+      error: "locally bound variable 'x'"

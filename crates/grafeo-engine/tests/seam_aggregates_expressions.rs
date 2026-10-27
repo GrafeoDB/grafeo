@@ -414,3 +414,839 @@ mod type_coercion {
         );
     }
 }
+
+// Aggregates inside a composite projection must be evaluated over the input,
+// before the surrounding expression runs (#539).
+#[cfg(all(feature = "gql", feature = "cypher"))]
+mod aggregate_discovery_539 {
+    use super::*;
+    use std::collections::BTreeMap;
+
+    fn list(values: Vec<Value>) -> Value {
+        Value::List(values.into())
+    }
+
+    fn map(fields: Vec<(&str, Value)>) -> Value {
+        Value::Map(
+            fields
+                .into_iter()
+                .map(|(key, value)| (key.into(), value))
+                .collect::<BTreeMap<_, _>>()
+                .into(),
+        )
+    }
+
+    fn rows(db: &GrafeoDB, language: &str, query: &str) -> Vec<Vec<Value>> {
+        db.execute_language(query, language, None)
+            .unwrap_or_else(|error| panic!("{language} `{query}`: {error}"))
+            .rows()
+            .to_vec()
+    }
+
+    fn projection(language: &str, expression: &str, expected: Value) {
+        let db = db();
+        let query = format!("UNWIND [3, 1, 2] AS n WITH n ORDER BY n RETURN {expression} AS value");
+        assert_eq!(
+            rows(&db, language, &query),
+            vec![vec![expected]],
+            "{language} `{query}`"
+        );
+    }
+
+    macro_rules! language_cases {
+        ($module:ident, $language:literal) => {
+            mod $module {
+                use super::*;
+
+                #[test]
+                fn aggregate_in_index_base() {
+                    projection($language, "collect(n)[0]", Value::Int64(1));
+                }
+
+                #[test]
+                fn aggregate_in_index_expression() {
+                    projection($language, "['zero', 'one', 'two'][count(n) - 1]", Value::from("two"));
+                }
+
+                #[test]
+                fn aggregate_in_slice_base() {
+                    projection($language, "collect(n)[1..]", list(vec![Value::Int64(2), Value::Int64(3)]));
+                }
+
+                #[test]
+                fn aggregate_in_slice_bounds() {
+                    projection($language, "[10, 20, 30][count(n) - 2..count(n)]", list(vec![Value::Int64(20), Value::Int64(30)]));
+                }
+
+                #[test]
+                fn aggregate_in_map_literal() {
+                    projection($language, "{names: collect(n)}", map(vec![("names", list(vec![Value::Int64(1), Value::Int64(2), Value::Int64(3)]))]));
+                }
+
+                #[test]
+                fn property_access_on_collected_maps() {
+                    let db = db();
+                    let query = "UNWIND [{route: 'A1'}, {route: 'B2'}] AS n WITH n ORDER BY n.route RETURN head(collect(n)).route AS route";
+                    assert_eq!(rows(&db, $language, query), vec![vec![Value::from("A1")]]);
+                }
+
+                #[test]
+                fn aggregates_in_a_list_literal() {
+                    projection($language, "[collect(n)[0], count(n)]", list(vec![Value::Int64(1), Value::Int64(3)]));
+                }
+
+                #[test]
+                fn multiple_aggregates_in_nested_wrappers() {
+                    projection($language, "{first: collect(n)[0], last: collect(n)[size(collect(n)) - 1]}", map(vec![("first", Value::Int64(1)), ("last", Value::Int64(3))]));
+                }
+
+                #[test]
+                fn wrapped_aggregate_with_a_grouping_key() {
+                    let db = db();
+                    let query = "UNWIND [{city: 'A', name: 'Alix'}, {city: 'A', name: 'Gus'}, {city: 'B', name: 'Mia'}] AS n WITH n ORDER BY n.city, n.name RETURN n.city AS city, collect(n.name)[0] AS first ORDER BY city";
+                    assert_eq!(rows(&db, $language, query), vec![vec![Value::from("A"), Value::from("Alix")], vec![Value::from("B"), Value::from("Mia")]]);
+                }
+
+                #[test]
+                fn wrapped_aggregate_on_empty_input() {
+                    let db = db();
+                    let query = "UNWIND [] AS n RETURN collect(n)[0] AS first, collect(n)[..] AS all_values";
+                    assert_eq!(rows(&db, $language, query), vec![vec![Value::Null, list(vec![])]]);
+                }
+
+                #[test]
+                fn aggregate_in_a_comprehension_source() {
+                    projection($language, "[x IN collect(n) | x + 1]", list(vec![Value::Int64(2), Value::Int64(3), Value::Int64(4)]));
+                }
+
+                #[test]
+                fn aggregate_in_a_list_predicate_source() {
+                    projection($language, "all(x IN collect(n) WHERE x > 0)", Value::Bool(true));
+                }
+
+                #[test]
+                fn aggregate_in_a_reduce_source() {
+                    projection($language, "reduce(total = 0, x IN collect(n) | total + x)", Value::Int64(6));
+                }
+
+                #[test]
+                fn outer_aggregates_in_locally_bound_bodies() {
+                    projection($language, "[x IN [10] | sum(n) + x]", list(vec![Value::Int64(16)]));
+                    projection($language, "all(x IN [1, 2] WHERE x < sum(n))", Value::Bool(true));
+                    projection($language, "reduce(total = 0, x IN [1, 2] | total + x + sum(n))", Value::Int64(15));
+                }
+
+                #[test]
+                fn an_aggregate_cannot_capture_a_shadowing_local() {
+                    use grafeo_common::utils::error::{Error, QueryErrorKind};
+                    let db = db();
+                    for (expression, name) in [
+                        ("[x IN [1, 2] | sum(x)]", "x"),
+                        ("all(x IN [1, 2] WHERE sum(x) > 0)", "x"),
+                        ("reduce(total = 0, x IN [1, 2] | total + sum(x))", "x"),
+                        ("reduce(total = 0, x IN [1, 2] | sum(total) + x)", "total"),
+                    ] {
+                        let query = format!("UNWIND [3, 1, 2] AS x RETURN {expression} AS value");
+                        match db.execute_language(&query, $language, None) {
+                            Err(Error::Query(error)) => {
+                                assert_eq!(error.kind, QueryErrorKind::Semantic, "{query}");
+                                assert!(error.message.contains(&format!("locally bound variable '{name}'")), "{query}: {error}");
+                            }
+                            other => panic!("{} `{query}`: expected a binding error, got {other:?}", $language),
+                        }
+                    }
+                }
+            }
+        };
+    }
+
+    language_cases!(gql, "gql");
+    language_cases!(cypher, "cypher");
+
+    #[test]
+    fn gql_aggregate_in_a_let_binding() {
+        projection(
+            "gql",
+            "LET names = collect(n) IN names[0] END",
+            Value::Int64(1),
+        );
+    }
+
+    #[test]
+    fn cypher_aggregate_in_a_map_projection() {
+        let db = db();
+        db.execute("INSERT (:P {name: 'Alix'}), (:P {name: 'Gus'})")
+            .unwrap();
+        let query = "MATCH (n:P) WITH n, n { .name, names: collect(n.name) } AS projected RETURN projected.name AS name, projected.names AS names ORDER BY name";
+        assert_eq!(
+            rows(&db, "cypher", query),
+            vec![
+                vec![Value::from("Alix"), list(vec![Value::from("Alix")])],
+                vec![Value::from("Gus"), list(vec![Value::from("Gus")])]
+            ]
+        );
+    }
+
+    #[test]
+    fn gql_let_aliases_keep_their_enclosing_binding() {
+        projection("gql", "LET x = n IN sum(x) END", Value::Int64(6));
+        projection(
+            "gql",
+            "LET x = n IN [n IN [10] | sum(x) + n] END",
+            list(vec![Value::Int64(16)]),
+        );
+    }
+
+    #[test]
+    fn gql_a_let_alias_does_not_hide_a_local_aggregate_argument() {
+        use grafeo_common::utils::error::{Error, QueryErrorKind};
+        let db = db();
+        let query = "UNWIND [3, 1, 2] AS x RETURN [x IN [1, 2] | LET y = x IN sum(y) END] AS value";
+        match db.execute_language(query, "gql", None) {
+            Err(Error::Query(error)) => {
+                assert_eq!(error.kind, QueryErrorKind::Semantic);
+                assert!(
+                    error.message.contains("locally bound variable 'x'"),
+                    "{error}"
+                );
+            }
+            other => panic!("expected a local binding error, got {other:?}"),
+        }
+    }
+}
+
+#[cfg(all(feature = "gql", feature = "cypher"))]
+mod aggregate_discovery_539_correlated_scope {
+    use super::*;
+
+    fn check(language: &str, setup: &str) {
+        let db = db();
+        db.execute_language(setup, language, None).unwrap();
+        for (query, expected) in [
+            (
+                "MATCH (n:P) RETURN n, size([p IN [n] WHERE EXISTS { MATCH (p)-[:R]->() } | p]) AS score",
+                vec![0, 1],
+            ),
+            (
+                "MATCH (n:P) RETURN n, count(*) + size([p IN [n] WHERE EXISTS { MATCH (p)-[:R]->() } | p]) AS score",
+                vec![1, 2],
+            ),
+        ] {
+            let result = db
+                .execute_language(query, language, None)
+                .unwrap_or_else(|error| panic!("{language} `{query}`: {error}"));
+            assert_eq!(result.rows().len(), 2, "{language} `{query}`");
+            let mut scores: Vec<i64> = result
+                .rows()
+                .iter()
+                .map(|row| {
+                    assert_eq!(row.len(), 2, "{language} `{query}`");
+                    match &row[1] {
+                        Value::Int64(score) => *score,
+                        other => {
+                            panic!("{language} `{query}`: expected integer score, got {other:?}")
+                        }
+                    }
+                })
+                .collect();
+            scores.sort_unstable();
+            assert_eq!(scores, expected, "{language} `{query}`");
+        }
+    }
+
+    #[test]
+    fn gql_wrapped_aggregate_keeps_a_correlated_comprehension_binding() {
+        check("gql", "INSERT (a:P)-[:R]->(:Q), (:P)");
+    }
+
+    #[test]
+    fn cypher_wrapped_aggregate_keeps_a_correlated_comprehension_binding() {
+        check("cypher", "CREATE (a:P)-[:R]->(:Q), (:P)");
+    }
+}
+
+#[cfg(feature = "gql")]
+#[test]
+fn horizontal_sum_stays_per_path_inside_a_map() {
+    use grafeo_common::types::{PropertyKey, Value};
+    use grafeo_engine::GrafeoDB;
+    use std::collections::BTreeMap;
+
+    let db = GrafeoDB::new_in_memory();
+    db.execute("INSERT (:P)-[:R {w: 2}]->(:P), (:P)-[:R {w: 3}]->(:P)")
+        .unwrap();
+
+    let bare = db
+        .execute("MATCH (a:P)-[e:R]->{1,1}(b:P) RETURN sum(e.w) AS total ORDER BY total")
+        .unwrap();
+    assert_eq!(bare.columns, ["total"]);
+    assert_eq!(bare.rows(), &[vec![Value::Int64(2)], vec![Value::Int64(3)]]);
+
+    let wrapped = db
+        .execute("MATCH (a:P)-[e:R]->{1,1}(b:P) RETURN {total: sum(e.w)} AS result")
+        .unwrap();
+    assert_eq!(wrapped.columns, ["result"]);
+    let mut rows = wrapped.rows().to_vec();
+    rows.sort_by_key(|row| format!("{row:?}"));
+    let expected: Vec<Vec<Value>> = [2, 3]
+        .into_iter()
+        .map(|total| {
+            vec![Value::Map(
+                BTreeMap::from([(PropertyKey::new("total"), Value::Int64(total))]).into(),
+            )]
+        })
+        .collect();
+    assert_eq!(rows, expected);
+}
+
+#[cfg(feature = "gql")]
+#[test]
+fn horizontal_sum_stays_per_path_through_nested_wrappers() {
+    use grafeo_common::types::Value;
+    use grafeo_engine::GrafeoDB;
+
+    let db = GrafeoDB::new_in_memory();
+    db.execute("INSERT (:P)-[:R {w: 2}]->(:P), (:P)-[:R {w: 3}]->(:P)")
+        .unwrap();
+    for expression in [
+        "{total: sum(e.w)}.total",
+        "[sum(e.w)][0]",
+        "[sum(e.w)][0..1][0]",
+        "LET total = sum(e.w) IN total END",
+        "LET path = e IN sum(path.w) END",
+    ] {
+        let query =
+            format!("MATCH (a:P)-[e:R]->{{1,1}}(b:P) RETURN {expression} AS total ORDER BY total");
+        let result = db.execute(&query).unwrap();
+        assert_eq!(result.columns, ["total"], "{query}");
+        assert_eq!(
+            result.rows(),
+            &[vec![Value::Int64(2)], vec![Value::Int64(3)]],
+            "{query}"
+        );
+    }
+}
+
+#[cfg(feature = "gql")]
+#[test]
+fn horizontal_wrapper_traversal_keeps_a_shadowing_local() {
+    use grafeo_engine::GrafeoDB;
+
+    let db = GrafeoDB::new_in_memory();
+    db.execute("INSERT (:P)-[:R {w: 2}]->(:P)").unwrap();
+    let error = db
+        .execute("MATCH (a:P)-[e:R]->{1,1}(b:P) RETURN [e IN [{w: 7}] | sum(e.w)] AS values")
+        .unwrap_err();
+    assert!(
+        error.to_string().contains("locally bound variable 'e'"),
+        "{error}"
+    );
+}
+
+#[cfg(feature = "gql")]
+#[test]
+fn gql_let_capture_keeps_a_correlated_shadowing_local() {
+    let db = db();
+    db.execute("INSERT (a:P)-[:R]->(:Q), (:P)").unwrap();
+    for (query, expected) in [
+        (
+            "MATCH (n:P), (other:P) WHERE n <> other RETURN n, other, size([p IN [other] WHERE EXISTS { MATCH (p)-[:R]->() } | p]) AS score ORDER BY id(n)",
+            vec![0, 1],
+        ),
+        (
+            "MATCH (n:P), (other:P) WHERE n <> other RETURN n, other, LET source = n IN count(*) + size([n IN [other] WHERE EXISTS { MATCH (n)-[:R]->() } | source]) END AS score ORDER BY id(n)",
+            vec![1, 2],
+        ),
+    ] {
+        let result = db
+            .execute(query)
+            .unwrap_or_else(|error| panic!("`{query}`: {error}"));
+        assert_eq!(result.rows().len(), 2, "{query}");
+        let scores: Vec<i64> = result
+            .rows()
+            .iter()
+            .map(|row| {
+                assert_eq!(row.len(), 3, "{query}");
+                match &row[2] {
+                    Value::Int64(score) => *score,
+                    other => panic!("`{query}`: expected integer score, got {other:?}"),
+                }
+            })
+            .collect();
+        // Keep query order: sorting these scores would hide swapped bindings.
+        assert_eq!(scores, expected, "{query}");
+    }
+}
+
+#[cfg(all(feature = "gql", feature = "cypher"))]
+mod aggregate_discovery_539_local_subquery_guard {
+    use super::*;
+    use grafeo_common::utils::error::{Error, QueryErrorKind};
+
+    fn check(language: &str, setup: &str) {
+        let db = db();
+        db.execute_language(setup, language, None).unwrap();
+        let query = "MATCH (n:P) RETURN n, [p IN [n] | sum(CASE WHEN EXISTS { MATCH (p)-[:R]->() } THEN 1 ELSE 0 END)] AS values";
+        match db.execute_language(query, language, None) {
+            Err(Error::Query(error)) => {
+                assert_eq!(
+                    error.kind,
+                    QueryErrorKind::Unsupported,
+                    "{language} `{query}`: {error}"
+                );
+                assert!(
+                    error
+                        .message
+                        .contains("cannot be lifted across a local binding"),
+                    "{language} `{query}`: {error}"
+                );
+            }
+            other => panic!(
+                "{language} `{query}`: expected an unsupported local/subquery aggregate error, got {other:?}"
+            ),
+        }
+    }
+
+    #[test]
+    fn gql_aggregate_cannot_capture_a_local_through_a_correlated_subquery() {
+        check("gql", "INSERT (a:P)-[:R]->(:Q), (:P)");
+    }
+
+    #[test]
+    fn cypher_aggregate_cannot_capture_a_local_through_a_correlated_subquery() {
+        check("cypher", "CREATE (a:P)-[:R]->(:Q), (:P)");
+    }
+}
+
+#[cfg(feature = "gql")]
+#[test]
+fn gql_aggregate_let_liveness_and_simultaneous_bindings() {
+    let db = db();
+    for (expression, expected) in [
+        ("LET x = n IN LET y = x IN sum(y) END END", 6),
+        ("sum(LET x = n IN x END)", 6),
+        ("LET x = n IN sum(LET y = x + 1 IN y END) END", 9),
+        ("LET x = n, y = n + 1 IN sum(x) + sum(y) END", 15),
+        // Both values read incoming n; the scalar n is then bound to 10.
+        ("LET n = 10, x = n IN sum(x) + n END", 16),
+    ] {
+        let query = format!("UNWIND [1, 2, 3] AS n RETURN {expression} AS value");
+        let result = db
+            .execute(&query)
+            .unwrap_or_else(|error| panic!("`{query}`: {error}"));
+        assert_eq!(result.rows(), &[vec![Value::Int64(expected)]], "{query}");
+    }
+}
+
+#[cfg(all(feature = "gql", feature = "cypher"))]
+mod aggregate_discovery_539_subquery_arguments {
+    use super::*;
+    use grafeo_common::utils::error::{Error, QueryErrorKind};
+
+    fn check(language: &str, setup: &str) {
+        let db = db();
+        db.execute_language(setup, language, None).unwrap();
+        for (query, expected) in [
+            (
+                "MATCH (n:P) RETURN n, sum(CASE WHEN EXISTS { MATCH (n)-[:R]->() } THEN 1 ELSE 0 END) AS score ORDER BY id(n)",
+                vec![1, 0],
+            ),
+            (
+                "MATCH (n:P) RETURN sum(size([p IN [n] WHERE EXISTS { MATCH (p)-[:R]->() } | p])) AS score",
+                vec![1],
+            ),
+            (
+                "UNWIND [1, 2, 3] AS n RETURN sum(reduce(total = 0, x IN [n] | total + x)) AS score",
+                vec![6],
+            ),
+        ] {
+            let result = db
+                .execute_language(query, language, None)
+                .unwrap_or_else(|error| panic!("{language} `{query}`: {error}"));
+            let scores: Vec<_> = result
+                .rows()
+                .iter()
+                .map(|row| row.last().unwrap().clone())
+                .collect();
+            let expected: Vec<_> = expected.into_iter().map(Value::Int64).collect();
+            assert_eq!(scores, expected, "{language} `{query}`");
+        }
+        let query = "MATCH (n:P) RETURN [p IN collect(n) | sum(CASE WHEN EXISTS { MATCH (x:Q) } THEN 1 ELSE 0 END)] AS values";
+        match db.execute_language(query, language, None) {
+            Err(Error::Query(error)) => {
+                assert_eq!(
+                    error.kind,
+                    QueryErrorKind::Unsupported,
+                    "{language}: {error}"
+                );
+                assert!(
+                    error
+                        .message
+                        .contains("cannot be lifted across a local binding"),
+                    "{language}: {error}"
+                );
+            }
+            other => panic!("expected the explicit local/subquery capability boundary: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn gql_keeps_supported_subquery_aggregate_arguments() {
+        check("gql", "INSERT (a:P)-[:R]->(:Q), (:P)");
+    }
+
+    #[test]
+    fn cypher_keeps_supported_subquery_aggregate_arguments() {
+        check("cypher", "CREATE (a:P)-[:R]->(:Q), (:P)");
+    }
+}
+
+#[cfg(feature = "gql")]
+mod gql_shared_let_scope {
+    use super::*;
+    use grafeo_common::types::PropertyKey;
+    use std::collections::BTreeMap;
+
+    fn rows(query: &str) -> Vec<Vec<Value>> {
+        db().execute_language(query, "gql", None)
+            .unwrap_or_else(|error| panic!("`{query}`: {error}"))
+            .rows()
+            .to_vec()
+    }
+
+    fn ints(values: &[i64]) -> Value {
+        Value::List(
+            values
+                .iter()
+                .copied()
+                .map(Value::Int64)
+                .collect::<Vec<_>>()
+                .into(),
+        )
+    }
+
+    #[test]
+    fn aggregate_let_alias_keeps_outer_nodes_inside_a_shadowing_comprehension() {
+        use grafeo_common::types::NodeId;
+
+        let db = db();
+        let a = db
+            .create_node_with_props(&["P"], [("name", Value::from("A"))])
+            .unwrap();
+        let b = db
+            .create_node_with_props(&["P"], [("name", Value::from("B"))])
+            .unwrap();
+        let node_id = |id: NodeId| Value::Int64(i64::try_from(id.as_u64()).unwrap());
+        // Nested comprehensions expose node IDs. Derive them from the public
+        // creation API, independently of query translation or scan order.
+        let expected = Value::List(
+            vec![
+                Value::List(vec![node_id(a), node_id(a)].into()),
+                Value::List(vec![node_id(b), node_id(b)].into()),
+            ]
+            .into(),
+        );
+        let query = "MATCH (n:P) WITH n ORDER BY n.name RETURN LET x = n IN collect([n IN [1,2] | x]) END AS values";
+        let result = db.execute_language(query, "gql", None).unwrap();
+        assert_eq!(result.columns, ["values"]);
+        assert_eq!(result.rows(), &[vec![expected]], "{query}");
+        let query = "MATCH (n:P) WITH n ORDER BY n.name RETURN LET x = n IN collect([n IN [1,2] | x.name]) END AS values";
+        let expected = Value::List(
+            vec![
+                Value::List(vec![Value::from("A"), Value::from("A")].into()),
+                Value::List(vec![Value::from("B"), Value::from("B")].into()),
+            ]
+            .into(),
+        );
+        assert_eq!(
+            db.execute(query)
+                .unwrap_or_else(|error| panic!("`{query}`: {error}"))
+                .rows(),
+            &[vec![expected]],
+            "{query}"
+        );
+    }
+
+    #[test]
+    fn unused_local_let_binding_does_not_escape_into_aggregate_input() {
+        let query = "UNWIND [7] AS n RETURN [p IN [1] | LET x = n, unused = p IN sum([n IN [1,2] | x][0]) END] AS values";
+        assert_eq!(rows(query), vec![vec![ints(&[7])]]);
+    }
+
+    #[test]
+    fn multiple_aggregates_share_one_volatile_let_binding() {
+        for expression in [
+            "LET x = rand() IN [min(x), max(-x)] END",
+            "LET x = rand() IN LET y = rand() + x IN [min(y), max(-y)] END END",
+            "LET x = rand() IN LET x = x + 1, y = x IN [min(y), max(-y)] END END",
+        ] {
+            let query = format!("UNWIND [1] AS n RETURN {expression} AS bounds");
+            let result = rows(&query);
+            let [row] = result.as_slice() else {
+                panic!("`{query}`: expected exactly one row, got {result:?}");
+            };
+            let [Value::List(bounds)] = row.as_slice() else {
+                panic!("`{query}`: expected one list column, got {row:?}");
+            };
+            let [Value::Float64(lower), Value::Float64(upper)] = bounds.as_ref() else {
+                panic!("`{query}`: expected two float extrema, got {bounds:?}");
+            };
+            // With one input, min(value) must equal -max(-value).
+            assert!(lower.is_finite(), "`{query}`: rand() must be finite");
+            assert_eq!(
+                *lower, -*upper,
+                "`{query}`: both aggregates must reuse one binding"
+            );
+        }
+    }
+
+    #[test]
+    fn aggregate_let_inputs_work_in_with_having_and_procedure_returns() {
+        let db = db();
+        db.create_node(&["P"]).unwrap();
+        for (query, expected) in [
+            (
+                "UNWIND [1] AS n WITH LET x = rand() IN min(x) = -max(-x) END AS same RETURN same",
+                Value::Bool(true),
+            ),
+            #[cfg(feature = "algos")]
+            (
+                "CALL db.labels() YIELD label RETURN LET x = rand() IN min(x) = -max(-x) END AS same",
+                Value::Bool(true),
+            ),
+            (
+                "UNWIND [1] AS n RETURN count(*) AS c HAVING LET x = rand() IN min(x) = -max(-x) END",
+                Value::Int64(1),
+            ),
+        ] {
+            assert_eq!(
+                db.execute(query)
+                    .unwrap_or_else(|error| panic!("`{query}`: {error}"))
+                    .rows(),
+                &[vec![expected]],
+                "{query}"
+            );
+        }
+    }
+
+    #[test]
+    fn aggregate_let_alias_keeps_the_subquery_capability_boundary() {
+        use grafeo_common::utils::error::{Error, QueryErrorKind};
+
+        let db = db();
+        for expression in [
+            "LET x = EXISTS { MATCH (p:P) } IN collect(x) END",
+            "LET x = EXISTS { MATCH (p:P) } IN LET y = x IN collect(y) END END",
+        ] {
+            let query = format!("UNWIND [1] AS n RETURN {expression} AS values");
+            match db.execute(&query) {
+                Err(Error::Query(error)) => {
+                    assert_eq!(error.kind, QueryErrorKind::Unsupported, "{query}: {error}");
+                    assert!(
+                        error
+                            .message
+                            .contains("cannot be lifted across a local binding"),
+                        "{query}: {error}"
+                    );
+                }
+                other => {
+                    panic!("`{query}`: expected the explicit subquery boundary, got {other:?}")
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn ordinary_let_substitutes_map_index_and_slice() {
+        let query = "RETURN LET x = [1, 2, 3], i = 1 IN {picked: x[i], part: x[0..2], length: size(x)} END AS value";
+        let expected = Value::Map(
+            BTreeMap::from([
+                (PropertyKey::new("picked"), Value::Int64(2)),
+                (PropertyKey::new("part"), ints(&[1, 2])),
+                (PropertyKey::new("length"), Value::Int64(3)),
+            ])
+            .into(),
+        );
+        assert_eq!(rows(query), vec![vec![expected]]);
+    }
+
+    #[test]
+    fn ordinary_let_substitutes_an_indexed_list_per_input() {
+        let query = "UNWIND [3, 1, 2] AS n RETURN n AS input, LET x = n IN [x][0] END AS value ORDER BY input";
+        assert_eq!(
+            rows(query),
+            vec![
+                vec![Value::Int64(1), Value::Int64(1)],
+                vec![Value::Int64(2), Value::Int64(2)],
+                vec![Value::Int64(3), Value::Int64(3)],
+            ]
+        );
+    }
+
+    #[test]
+    fn ordinary_simultaneous_let_values_read_the_enclosing_scope() {
+        let query = "UNWIND [3, 1, 2] AS n RETURN n AS input, LET n = 10, x = n IN x + n END AS value ORDER BY input";
+        assert_eq!(
+            rows(query),
+            vec![
+                vec![Value::Int64(1), Value::Int64(11)],
+                vec![Value::Int64(2), Value::Int64(12)],
+                vec![Value::Int64(3), Value::Int64(13)],
+            ]
+        );
+    }
+
+    #[test]
+    fn ordinary_nested_let_preserves_shadowed_binding_values() {
+        let query = "UNWIND [3, 1, 2] AS n RETURN n AS input, LET x = n IN LET x = x + 10, y = x IN [x, y] END END AS value ORDER BY input";
+        assert_eq!(
+            rows(query),
+            vec![
+                vec![Value::Int64(1), ints(&[11, 1])],
+                vec![Value::Int64(2), ints(&[12, 2])],
+                vec![Value::Int64(3), ints(&[13, 3])],
+            ]
+        );
+    }
+
+    #[test]
+    fn ordinary_let_alias_is_not_captured_by_a_comprehension() {
+        let query = "UNWIND [3, 1, 2] AS n RETURN n AS input, LET x = n IN [n IN [10] | x + n] END AS value ORDER BY input";
+        assert_eq!(
+            rows(query),
+            vec![
+                vec![Value::Int64(1), ints(&[11])],
+                vec![Value::Int64(2), ints(&[12])],
+                vec![Value::Int64(3), ints(&[13])],
+            ]
+        );
+    }
+
+    #[test]
+    fn ordinary_let_alias_is_not_captured_by_a_predicate() {
+        let query = "UNWIND [3, 1, 2] AS n RETURN n AS input, LET x = n IN any(n IN [10] WHERE n > x) END AS value ORDER BY input";
+        assert_eq!(
+            rows(query),
+            vec![
+                vec![Value::Int64(1), Value::Bool(true)],
+                vec![Value::Int64(2), Value::Bool(true)],
+                vec![Value::Int64(3), Value::Bool(true)],
+            ]
+        );
+    }
+
+    #[test]
+    fn ordinary_let_alias_is_not_captured_by_a_reduce_accumulator() {
+        let query = "UNWIND [3, 1, 2] AS n RETURN n AS input, LET x = n IN reduce(n = 0, p IN [10] | n + p + x) END AS value ORDER BY input";
+        assert_eq!(
+            rows(query),
+            vec![
+                vec![Value::Int64(1), Value::Int64(11)],
+                vec![Value::Int64(2), Value::Int64(12)],
+                vec![Value::Int64(3), Value::Int64(13)],
+            ]
+        );
+    }
+
+    #[test]
+    fn unused_let_input_does_not_become_a_grouping_key() {
+        let query = "UNWIND [1, 2, 3] AS n RETURN LET unused = n IN sum(n) END AS value";
+        assert_eq!(rows(query), vec![vec![Value::Int64(6)]]);
+    }
+
+    #[test]
+    fn order_by_wrapped_alias_uses_its_projected_value() {
+        let query = "UNWIND [1, 3, 2] AS n RETURN -n AS n ORDER BY [n][0]";
+        assert_eq!(
+            rows(query),
+            vec![
+                vec![Value::Int64(-3)],
+                vec![Value::Int64(-2)],
+                vec![Value::Int64(-1)],
+            ]
+        );
+    }
+
+    #[test]
+    fn let_binding_evaluates_a_volatile_value_once() {
+        for (query, count) in [
+            (
+                "UNWIND [1, 2, 3] AS n RETURN LET x = rand() IN x = x END AS same",
+                3,
+            ),
+            (
+                "UNWIND [1, 2, 3] AS n RETURN LET x = rand() IN count(*) > 0 AND x = x END AS same",
+                1,
+            ),
+            (
+                "UNWIND [1, 2, 3] AS n RETURN LET x = abs(rand()) IN x = x END AS same",
+                3,
+            ),
+            (
+                "UNWIND [1, 2, 3] AS n RETURN LET x = abs(rand()) IN count(*) > 0 AND x = x END AS same",
+                1,
+            ),
+        ] {
+            // rand() returns a finite value: reusing one binding compares
+            // that same value with itself, for every input and aggregate row.
+            assert_eq!(rows(query), vec![vec![Value::Bool(true)]; count], "{query}");
+        }
+    }
+    #[test]
+    fn order_by_keeps_input_columns_with_unrelated_outputs() {
+        for query in [
+            "UNWIND [2, 1] AS n RETURN n + 10 AS value, rand() AS unused ORDER BY n NEXT RETURN value",
+            "UNWIND [2, 1] AS n RETURN n + 10 AS value ORDER BY 0 * rand(), n NEXT RETURN value",
+            "UNWIND [2, 1] AS n RETURN n + 10 AS value, 0 * rand() AS r ORDER BY r, n NEXT RETURN value",
+        ] {
+            assert_eq!(
+                rows(query),
+                vec![vec![Value::Int64(11)], vec![Value::Int64(12)]],
+                "{query}"
+            );
+        }
+    }
+    #[test]
+    fn order_by_keeps_input_columns_beside_an_opaque_key() {
+        let db = db();
+        db.execute_language("INSERT (:P {v: 2}), (:P {v: 1})", "gql", None)
+            .unwrap();
+        for query in [
+            "MATCH (n:P) RETURN n.v + 10 AS value, EXISTS { MATCH (n)-[:R]->() } AS unused ORDER BY n.v NEXT RETURN value",
+            "MATCH (n:P) RETURN n.v + 10 AS value ORDER BY EXISTS { MATCH (n)-[:R]->() }, n.v NEXT RETURN value",
+        ] {
+            let result = db
+                .execute_language(query, "gql", None)
+                .unwrap_or_else(|error| panic!("`{query}`: {error}"));
+            assert_eq!(
+                result.rows(),
+                &[vec![Value::Int64(11)], vec![Value::Int64(12)]],
+                "{query}"
+            );
+        }
+    }
+
+    #[test]
+    fn lexical_let_grouping_keeps_the_same_key_across_translation() {
+        let query = "UNWIND [1, 1, 2] AS n RETURN LET x = toInteger(0 * rand()), y = n IN x + y END AS k, count(*) AS c GROUP BY k ORDER BY k";
+        assert_eq!(
+            rows(query),
+            vec![
+                vec![Value::Int64(1), Value::Int64(2)],
+                vec![Value::Int64(2), Value::Int64(1)]
+            ]
+        );
+    }
+    #[test]
+    fn nested_lexical_lets_keep_enclosing_values_and_reserved_names() {
+        let query = "UNWIND [3, 1, 2] AS _let_values_0 RETURN _let_values_0 AS input, LET x = toInteger(0 * rand()), y = _let_values_0 IN LET x = toInteger(0 * rand()), z = x + y IN [x, z, y] END END AS value ORDER BY input";
+        assert_eq!(
+            rows(query),
+            vec![
+                vec![Value::Int64(1), ints(&[0, 1, 1])],
+                vec![Value::Int64(2), ints(&[0, 2, 2])],
+                vec![Value::Int64(3), ints(&[0, 3, 3])],
+            ]
+        );
+    }
+}

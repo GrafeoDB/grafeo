@@ -214,8 +214,8 @@ pub(crate) use changes::{StreamingChanges, TransactionChanges};
 pub(crate) use history::HistoryImage;
 #[cfg(feature = "wal")]
 pub(crate) use manager::CommitGuard;
-pub(crate) use manager::CommitsHeld;
 pub(crate) use manager::ReadPin;
+pub(crate) use manager::{ClaimMark, CommitsHeld};
 pub use manager::{
     EntityId, GraphEntity, IsolationLevel, KeyClaim, TransactionInfo, TransactionManager,
     TransactionState,

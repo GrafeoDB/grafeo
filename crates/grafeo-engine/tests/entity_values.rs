@@ -536,24 +536,19 @@ fn functions_read_a_node_or_edge_taken_from_a_value() {
 }
 
 /// A key read of an aggregate in the same clause (`head(collect(n)).name`)
-/// is an error that says how to write it, never a null per row: the
-/// aggregate inside it would not be computed.
+/// computes the aggregate first, then reads the collected node's property.
 #[test]
-fn a_key_read_of_an_aggregate_in_the_same_clause_is_an_error() {
+fn a_key_read_of_an_aggregate_in_the_same_clause_reads_the_collected_node() {
     let db = people();
     for language in ["gql", "cypher"] {
         for query in [
-            "MATCH (n:Person) RETURN head(collect(n)).name AS first",
-            "MATCH (n:Person) RETURN collect(n)[0].name AS first",
+            "MATCH (n:Person) WITH n ORDER BY n.name RETURN head(collect(n)).name AS first",
+            "MATCH (n:Person) WITH n ORDER BY n.name RETURN collect(n)[0].name AS first",
         ] {
-            let result = match language {
-                "gql" => db.execute(query),
-                _ => db.execute_cypher(query),
-            };
-            let error = result.expect_err(query).to_string();
-            assert!(
-                error.contains("reads an aggregate, so .name cannot read from it"),
-                "{language}: {query}: {error}"
+            assert_eq!(
+                rows_in(&db, language, query),
+                vec![vec!["'Alix'".to_string()]],
+                "{language}: {query}"
             );
         }
     }

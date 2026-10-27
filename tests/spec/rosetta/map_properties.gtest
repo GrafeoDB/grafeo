@@ -121,16 +121,17 @@ tests:
       rows:
         - [a, b]
 
-  # On an aggregate in the same clause it is an error, never a silent null:
-  # name the aggregate with WITH first.
-  - name: dot_access_on_a_collected_node_is_an_error
+  # Aggregate before reading the property of the collected node, including
+  # when collection and property access occur in the same clause.
+  - name: dot_access_on_a_collected_node_reads_the_node
     setup:
       - "INSERT (:A {id: 'a'})"
     variants:
       gql: "MATCH (n:A) RETURN head(collect(n)).id"
       cypher: "MATCH (n:A) RETURN collect(n)[0].id"
     expect:
-      error: "reads an aggregate"
+      rows:
+        - [a]
 
   - name: dot_access_on_a_collected_node_after_with
     setup:

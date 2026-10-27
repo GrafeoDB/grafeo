@@ -2130,4 +2130,16 @@ for case_id, query in [
 ]:
     ordered(case_id, query, GQL, "decimal_weights")
 
+# DF: an aggregate inside another expression aggregates (#539; 0.6.0 refused it or gave a
+#     row per input row): a key read of a collected node (DF1), an index of and a map of a
+#     collect (DF2), an aggregate over a LET variable (DF3); a LET variable inside a list,
+#     a map and CASE reads its value (DF4)
+for case_id, query, languages in [
+    ("DF1", "MATCH (p:Person) WITH p ORDER BY p.name RETURN head(collect(p)).name AS first", BOTH),
+    ("DF2", "MATCH (p:Person) WITH p ORDER BY p.name RETURN collect(p.name)[0] AS first, {names: collect(p.name)} AS m", BOTH),
+    ("DF3", "MATCH (p:Person) RETURN LET x = p.age IN max(x) END AS oldest", GQL),
+    ("DF4", "MATCH (p:Person {name: 'Alix'}) RETURN LET x = p.age IN [x, {age: x}, CASE WHEN x > 18 THEN x END] END AS l", GQL),
+]:
+    case(case_id, query, languages)
+
 # fmt: on

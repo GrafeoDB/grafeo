@@ -999,14 +999,15 @@ pub(crate) fn every_edge_matches(
 /// Dotted access `base.key` into a map value (`n.meta.route`), or into a node
 /// or edge that is not a pattern variable (`startNode(r).name`,
 /// `head(rs).w`, `x.msg.id` of `{msg: m}`), for the GQL and Cypher
-/// translators.
+/// translators. Aggregate bases such as `head(collect(n)).name` and
+/// `collect(n)[0].name` are supported after the translator extracts the
+/// aggregate and replaces it with a reference to its result.
 ///
 /// # Errors
 ///
-/// Returns an error when `base` can be neither a map nor a node or edge (a
-/// number, a string), or reads an aggregate (`head(collect(n)).name`, whose
-/// aggregate the translators do not take out of a key read), so the read
-/// would give null without saying why.
+/// Returns an error when `base` cannot be a map, a node or an edge (for
+/// example, a number or a string), or still contains an unresolved aggregate.
+/// These bases cannot be evaluated as a property read at this stage.
 #[cfg(any(feature = "gql", feature = "cypher", feature = "sql-pgq", test))]
 pub(crate) fn map_access(base: LogicalExpression, key: &str) -> Result<LogicalExpression> {
     if calls_an_aggregate(&base) {

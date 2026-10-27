@@ -673,3 +673,74 @@ fn sparql_scans_give_literals_as_stored_and_numbers_of_their_type() {
         "\"2.5\"^^xsd:decimal"
     );
 }
+
+// Regression cases for #669: the exact inputs and rounded results fit Decimal.
+#[test]
+fn decimal_products_fit_after_rounding_to_precision() {
+    let db = GrafeoDB::new_in_memory();
+    for language in LANGUAGES {
+        for (left, right, expected) in [
+            (
+                "1.00000000000000000001",
+                "1.00000000000000000001",
+                "Decimal(1.0000000000000000000200000000000000000)",
+            ),
+            (
+                "1.0000000000000000001",
+                "1.0000000000000000001",
+                "Decimal(1.0000000000000000002000000000000000000)",
+            ),
+            (
+                "0.99999999999999999999",
+                "1.00000000000000000001",
+                "Decimal(1.0000000000000000000000000000000000000)",
+            ),
+        ] {
+            assert_eq!(
+                one(
+                    &db,
+                    language,
+                    "RETURN $a * $b AS x",
+                    &[("a", d(left)), ("b", d(right))]
+                ),
+                expected,
+                "{language}: {left} * {right}"
+            );
+        }
+    }
+}
+
+#[test]
+fn decimal_remainders_allow_wide_scale_alignment() {
+    let db = GrafeoDB::new_in_memory();
+    for language in LANGUAGES {
+        for (left, right, expected) in [
+            (
+                "1000000000000000000000000000000.0",
+                "0.00000001",
+                "Decimal(0.00000000)",
+            ),
+            (
+                "10000000000000000000000000000000000000",
+                "0.00000000000000000000000000000000000003",
+                "Decimal(0.00000000000000000000000000000000000001)",
+            ),
+            (
+                "-10000000000000000000000000000000000000",
+                "0.00000000000000000000000000000000000003",
+                "Decimal(-0.00000000000000000000000000000000000001)",
+            ),
+        ] {
+            assert_eq!(
+                one(
+                    &db,
+                    language,
+                    "RETURN $a % $b AS x",
+                    &[("a", d(left)), ("b", d(right))]
+                ),
+                expected,
+                "{language}: {left} % {right}"
+            );
+        }
+    }
+}

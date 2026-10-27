@@ -378,7 +378,7 @@ struct AddedColumn<'a> {
 /// with the parameters at its start, the variables they bring are bound, and
 /// the cycle pass turns a pattern variable bound again into a check that it
 /// is the same.
-fn seed_with_row(
+pub(super) fn seed_with_row(
     outer_columns: &[String],
     subplan: LogicalOperator,
 ) -> Result<(LogicalOperator, Vec<String>)> {
@@ -557,6 +557,7 @@ fn seed_with_parameters(plan: &mut LogicalOperator, parameters: LogicalOperator)
             }
         },
         LogicalOperator::Expand(expand) => seed_with_parameters(&mut expand.input, parameters),
+        LogicalOperator::ShortestPath(path) => seed_with_parameters(&mut path.input, parameters),
         LogicalOperator::Filter(filter) => seed_with_parameters(&mut filter.input, parameters),
         LogicalOperator::Project(project) => seed_with_parameters(&mut project.input, parameters),
         LogicalOperator::Return(ret) => seed_with_parameters(&mut ret.input, parameters),
@@ -647,6 +648,12 @@ fn bound_names(plan: &LogicalOperator, names: &mut HashSet<String>) {
             names.extend(expand.edge_variable.iter().cloned());
             names.extend(expand.path_alias.iter().cloned());
         }
+        LogicalOperator::ShortestPath(path) => {
+            names.insert(path.source_var.clone());
+            names.insert(path.target_var.clone());
+            names.insert(path.path_alias.clone());
+            names.extend(path.edge_variable.iter().cloned());
+        }
         LogicalOperator::Project(project) => {
             names.extend(project.projections.iter().filter_map(|p| p.alias.clone()));
         }
@@ -700,6 +707,16 @@ fn plan_names(plan: &LogicalOperator, names: &mut HashSet<String>) -> bool {
             names.extend(expand.edge_variable.iter().cloned());
             names.extend(expand.path_alias.iter().cloned());
             plan_names(&expand.input, names)
+        }
+        LogicalOperator::ShortestPath(path) => {
+            names.insert(path.source_var.clone());
+            names.insert(path.target_var.clone());
+            names.insert(path.path_alias.clone());
+            names.extend(path.edge_variable.iter().cloned());
+            path.edge_condition
+                .as_ref()
+                .is_none_or(|condition| expression_names(&condition.predicate, names))
+                && plan_names(&path.input, names)
         }
         LogicalOperator::Filter(filter) => {
             expression_names(&filter.predicate, names) && plan_names(&filter.input, names)

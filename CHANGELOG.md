@@ -6,6 +6,7 @@ All notable changes to Grafeo, for future reference (and enjoyment).
 
 ### Fixed
 
+- **Optional matches preserve correlated paths and unmatched rows** ([#678](https://github.com/GrafeoDB/grafeo/issues/678)): GQL and Cypher optional shortest paths use variables bound earlier in the query when evaluating edge conditions. An attached `WHERE EXISTS` retains unmatched rows. `PROFILE` measures the correlated optional pattern as one subplan.
 - Failed direct calls keep no partial changes published; checkpoints and copies retain the published epoch (#670).
 - **Backups and restores survive a crash** ([#667](https://github.com/GrafeoDB/grafeo/issues/667)): a backup is on disk before the database lets go of the log it covers, and a restore leaves either a complete database or nothing at the output path, so a failed restore can be retried to the same path.
 - **An incremental backup into the wrong directory is refused** ([#667](https://github.com/GrafeoDB/grafeo/issues/667)): after a full backup to one directory, an incremental backup to another one fails with an error naming it, instead of writing a chain with a gap that only the restore found, also when a schema statement or graph command came between the two.

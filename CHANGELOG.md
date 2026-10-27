@@ -14,6 +14,7 @@ All notable changes to Grafeo, for future reference (and enjoyment).
 - **Gremlin branching steps run for each traverser** ([#668](https://github.com/GrafeoDB/grafeo/issues/668)): `coalesce()`, `optional()`, `choose()`, `union()` and `bothV()` plan their input once, so a chain of them no longer takes exponential time and memory to plan (20 steps took 30 s and 5 GB). `coalesce()` and `optional()` now choose a branch per traverser instead of once for all of them, so `g.V().coalesce(out('E'), constant('none'))` keeps the vertices without an `E` edge.
 - **A subquery that returns an edge in one part and a node in another** (`CALL (a) { ... RETURN r AS x UNION ALL ... RETURN b AS x }`, GQL and Cypher) returns each as what it is; the node came back as the edge with its ID.
 - **Time-travel reads at a future epoch no longer see a commit in progress** ([#670](https://github.com/GrafeoDB/grafeo/issues/670)): `execute_at_epoch` and `set_viewing_epoch` read at the latest completed commit, also while a commit is running or after one failed partway; they could see part of it.
+- **Rolled-back writes no longer block other transactions** ([#670](https://github.com/GrafeoDB/grafeo/issues/670)): rolling back to a savepoint or undoing a failed statement releases only its new write, delete, edge-endpoint and unique-key claims. Earlier writes stay protected; a backend that cannot undo keeps its claims and poisons the database.
 
 ### Contributors
 

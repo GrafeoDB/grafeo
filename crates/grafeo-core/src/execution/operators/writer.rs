@@ -1332,16 +1332,21 @@ fn record_applied(
     op: DataOp,
     applied: Applied,
 ) -> Result<bool, OperatorError> {
-    match applied {
+    let changed = match applied {
         Applied::Changed { before, version } => {
             recording.recorder.record(op, before, version)?;
-            Ok(true)
+            true
         }
-        Applied::Unchanged => Ok(false),
+        Applied::Unchanged => false,
         // Committed at once without a before-image (an immediate write whose
         // entries nothing reads): nothing to record.
-        Applied::Committed => Ok(true),
+        Applied::Committed => true,
+    };
+    if changed {
+        grafeo_common::testing::commit_hook::run_after_data_write()
+            .map_err(|_| OperatorError::Execution("injected data-write failure".to_string()))?;
     }
+    Ok(changed)
 }
 
 /// The statement error of a write the graph's backend refused: a node

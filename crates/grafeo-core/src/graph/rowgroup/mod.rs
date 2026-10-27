@@ -626,6 +626,9 @@ pub struct RowGroupStore {
     next_edge_id: AtomicU64,
     /// The latest epoch a write was stamped at.
     epoch: AtomicU64,
+    /// The latest epoch of a completed raw operation, including a no-op.
+    /// Separate from `epoch`, which also follows backend writes.
+    raw_write_epoch: AtomicU64,
     /// Whether the store lists a vector (`collect`): a collect while it
     /// lists none returns at once, without taking the lock.
     has_listed: AtomicBool,

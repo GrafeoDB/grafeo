@@ -630,7 +630,110 @@ impl GraphBackend for RowGroupStore {
     }
 }
 
+/// Which versions a rollback takes back. Immediate epochs are valid only
+/// while the engine still holds off publication and every other writer.
+#[derive(Clone, Copy)]
+enum UndoMode {
+    Pending(u64),
+    Immediate(u64),
+}
+
+impl UndoMode {
+    fn stamp(self) -> u64 {
+        match self {
+            Self::Pending(stamp) | Self::Immediate(stamp) => stamp,
+        }
+    }
+
+    fn is_immediate(self) -> bool {
+        matches!(self, Self::Immediate(_))
+    }
+}
+
 impl RowGroupStore {
+    /// Undoes a direct call's recorded immediate writes, last to first.
+    ///
+    /// The caller must hold the database's idle and commit gates for this
+    /// entire call. `epoch` must not have been published or written as a WAL
+    /// group whose outcome may be unknown; nothing may write or collect these
+    /// versions meanwhile. `changes` must be the complete applied prefix for
+    /// this store's one graph, including every before-image. IDs and interned
+    /// names remain allocated, and the store's epoch never moves backwards.
+    ///
+    /// # Stability: Experimental
+    ///
+    /// Internal core-to-engine rollback support, experimental through 0.6.x.
+    ///
+    /// # Errors
+    ///
+    /// Refuses an invalid or superseded epoch, mixed graphs, bulk ranges or
+    /// RDF changes, and any entry whose version is not this call's. A failure
+    /// during undo can leave a partially restored store: the caller must
+    /// poison the database before releasing its gates, and never retry undo.
+    pub fn rollback_immediate(&self, epoch: EpochId, changes: &[Change]) -> Result<(), ApplyError> {
+        if epoch.as_u64() == 0 || epoch.as_u64() >= PENDING {
+            return Err(ApplyError::Refused(format!(
+                "epoch {} is not an immediate write epoch",
+                epoch.as_u64()
+            )));
+        }
+        let mut graph = None;
+        for change in changes {
+            match change {
+                Change::Data {
+                    graph: slot, op, ..
+                } => {
+                    if graph
+                        .replace(*slot)
+                        .is_some_and(|previous| previous != *slot)
+                    {
+                        return Err(ApplyError::Refused(
+                            "immediate rollback needs one graph's changes".to_string(),
+                        ));
+                    }
+                    if matches!(
+                        op,
+                        DataOp::InsertTriple { .. } | DataOp::DeleteTriple { .. }
+                    ) {
+                        return Err(refuse_triple(op));
+                    }
+                }
+                Change::Bulk(_) => {
+                    return Err(ApplyError::Refused(
+                        "immediate rollback does not take bulk ranges".to_string(),
+                    ));
+                }
+            }
+        }
+        self.refuse_if_dropped()?;
+        if changes.is_empty() {
+            return Ok(());
+        }
+        let mut inner = self.inner.write();
+        if self.current_epoch() != epoch {
+            return Err(ApplyError::Refused(format!(
+                "immediate rollback epoch {} does not match store epoch {}",
+                epoch.as_u64(),
+                self.current_epoch().as_u64()
+            )));
+        }
+        for change in changes.iter().rev() {
+            if let Change::Data {
+                op,
+                before,
+                version,
+                ..
+            } = change
+            {
+                // Mark before removing a row, while its endpoints still exist.
+                // Extra dirty chunks are safe; earlier dirty work must stay.
+                inner.mark_op(op);
+                inner.undo_op(op, before, *version, UndoMode::Immediate(epoch.as_u64()))?;
+            }
+        }
+        Ok(())
+    }
+
     /// Undoes `transaction`'s `entries`, last to first: drops the version an
     /// entry created, writes the before-image back into one it replaced; a
     /// bulk range drops its pending ids.
@@ -648,7 +751,7 @@ impl RowGroupStore {
                     before,
                     version,
                     ..
-                } => inner.undo_op(op, before, *version, pending)?,
+                } => inner.undo_op(op, before, *version, UndoMode::Pending(pending))?,
                 Change::Bulk(range) => inner.undo_bulk(range, pending),
             }
         }
@@ -997,84 +1100,140 @@ impl Inner {
         }
     }
 
-    /// Undoes one entry of transaction `pending`, which did `version` to the
-    /// transaction's version of what it wrote.
+    /// Undoes one recorded entry of a transaction or unpublished immediate
+    /// call. Only immediate writes moved committed counts while applying.
     fn undo_op(
         &mut self,
         op: &DataOp,
         before: &Before,
         version: PendingVersion,
-        pending: u64,
+        mode: UndoMode,
     ) -> Result<(), ApplyError> {
+        let stamp = mode.stamp();
+        let immediate = mode.is_immediate();
         match (op, before) {
-            (DataOp::CreateNode { id, .. }, Before::Absent) => {
+            (DataOp::CreateNode { id, labels, .. }, Before::Absent) => {
                 let created = self
                     .node(id.as_u64())
                     .map(|(group, row)| group.version(row).created);
-                if created != Some(pending) {
+                if created != Some(stamp) {
                     return Err(not_pending(Entity::Node(*id), "create"));
                 }
+                let labels = if immediate {
+                    self.known_label_ids(labels)?
+                } else {
+                    Vec::new()
+                };
                 self.remove_node_row(id.as_u64());
+                if immediate {
+                    self.counts.nodes -= 1;
+                    for label in labels {
+                        self.counts.label(label, -1);
+                    }
+                }
             }
             (DataOp::CreateEdge { id, .. }, Before::Absent) => {
-                let created = self
+                let (group, row) = self
                     .edge(id.as_u64())
-                    .map(|(group, row)| group.version(row).created);
-                if created != Some(pending) {
+                    .ok_or_else(|| not_pending(Entity::Edge(*id), "create"))?;
+                if group.version(row).created != stamp {
                     return Err(not_pending(Entity::Edge(*id), "create"));
                 }
+                let edge_type = group.ends(row).2;
                 self.remove_edge_row(id.as_u64());
+                if immediate {
+                    self.counts.edges -= 1;
+                    self.counts.edge_type(edge_type, -1);
+                }
             }
-            (DataOp::DeleteNode { id }, Before::Node(_)) => {
+            (DataOp::DeleteNode { id }, Before::Node(image)) => {
+                let labels = if immediate {
+                    self.known_label_ids(&image.labels)?
+                } else {
+                    Vec::new()
+                };
                 let (group, row) = self
                     .node_mut(id.as_u64())
                     .ok_or_else(|| not_pending(Entity::Node(*id), "delete"))?;
-                if group.versions.deleted(row) != pending {
+                if group.versions.deleted(row) != stamp {
                     return Err(not_pending(Entity::Node(*id), "delete"));
                 }
                 group.versions.set_deleted(row, ABSENT);
+                if immediate {
+                    self.counts.nodes += 1;
+                    for label in labels {
+                        self.counts.label(label, 1);
+                    }
+                }
             }
             (DataOp::DeleteEdge { id }, Before::Edge(_)) => {
                 let (group, row) = self
                     .edge_mut(id.as_u64())
                     .ok_or_else(|| not_pending(Entity::Edge(*id), "delete"))?;
-                if group.versions.deleted(row) != pending {
+                if group.versions.deleted(row) != stamp {
                     return Err(not_pending(Entity::Edge(*id), "delete"));
                 }
+                let edge_type = group.ends(row).2;
                 group.versions.set_deleted(row, ABSENT);
+                if immediate {
+                    self.counts.edges += 1;
+                    self.counts.edge_type(edge_type, 1);
+                }
             }
             (
                 DataOp::SetNodeProperty { id, key, .. } | DataOp::RemoveNodeProperty { id, key },
                 Before::Value(old),
-            ) => self.restore_value(Entity::Node(*id), key, old.as_ref(), version, pending)?,
+            ) => self.restore_value(Entity::Node(*id), key, old.as_ref(), version, stamp)?,
             (
                 DataOp::SetEdgeProperty { id, key, .. } | DataOp::RemoveEdgeProperty { id, key },
                 Before::Value(old),
-            ) => self.restore_value(Entity::Edge(*id), key, old.as_ref(), version, pending)?,
+            ) => self.restore_value(Entity::Edge(*id), key, old.as_ref(), version, stamp)?,
             (
-                DataOp::AddNodeLabel { id, .. } | DataOp::RemoveNodeLabel { id, .. },
+                DataOp::AddNodeLabel { id, label } | DataOp::RemoveNodeLabel { id, label },
                 Before::Labels(labels),
             ) => {
                 let entity = Entity::Node(*id);
                 let label_ids = self.known_label_ids(labels)?;
+                let changed_label = if immediate {
+                    Some(self.label_id(label).ok_or_else(|| {
+                        ApplyError::Refused(format!("label {label} is not in the dictionary"))
+                    })?)
+                } else {
+                    None
+                };
                 let (group, row) = self
                     .node_mut(id.as_u64())
                     .ok_or(ApplyError::Missing(entity))?;
-                // A replaced version keeps its node: the before-image is
-                // the transaction's own labels. A created one gives back
-                // what its node kept, unless the transaction created the
-                // row and kept nothing.
+                if immediate
+                    && group.version(row).created != stamp
+                    && group
+                        .label_updates
+                        .kept_stamped(row)
+                        .last()
+                        .map(|(stamp, _)| stamp)
+                        != Some(stamp)
+                {
+                    return Err(not_pending(entity, "label"));
+                }
                 let restored = match version {
                     PendingVersion::Replaced => label_ids,
-                    PendingVersion::Created => match group.label_updates.undo(row, pending) {
+                    PendingVersion::Created => match group.label_updates.undo(row, stamp) {
                         Some(kept) => kept.into_vec(),
-                        None if group.version(row).created == pending => label_ids,
+                        None if group.version(row).created == stamp => label_ids,
                         None => return Err(not_pending(entity, "label")),
                     },
                 };
                 group.set_labels(row, &restored);
                 if !self.indexes.is_empty() {
                     self.index_labels(id.as_u64(), None);
+                }
+                if let Some(label) = changed_label {
+                    let delta = if matches!(op, DataOp::AddNodeLabel { .. }) {
+                        -1
+                    } else {
+                        1
+                    };
+                    self.counts.label(label, delta);
                 }
             }
             (DataOp::InsertTriple { .. } | DataOp::DeleteTriple { .. }, _) => {
@@ -1103,6 +1262,12 @@ impl Inner {
         })?;
         let indexed = matches!(entity, Entity::Node(_)) && !self.indexes.is_empty();
         let (columns, row, created, _) = self.columns_mut(entity)?;
+        if pending & PENDING == 0
+            && created != pending
+            && columns.kept(key_id, row).last().map(|(stamp, _)| stamp) != Some(pending)
+        {
+            return Err(not_pending(entity, "value"));
+        }
         // The value undone, which the indexes may lose.
         let undone = if indexed {
             columns.get(key_id, row)
@@ -1149,5 +1314,354 @@ impl Inner {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod immediate_undo_tests {
+    use super::*;
+    use crate::graph::Direction;
+    use crate::graph::conformance::{Tx, labels, properties};
+    use crate::graph::traits::GraphStore;
+    use grafeo_common::change::{ChangeSet, DataModel, GraphRef};
+    use grafeo_common::types::ReadView;
+
+    fn write(store: &RowGroupStore, epoch: EpochId, changes: &mut ChangeSet, op: DataOp) {
+        let slot = changes
+            .slot(GraphRef {
+                model: DataModel::Lpg,
+                key: None,
+            })
+            .unwrap();
+        match store
+            .apply(
+                &op,
+                Writer::Immediate {
+                    epoch,
+                    before_images: true,
+                },
+            )
+            .unwrap()
+        {
+            Applied::Changed { before, version } => {
+                changes.push(slot, op, before, version).unwrap();
+            }
+            other => panic!("expected a recorded change, got {other:?}"),
+        }
+    }
+
+    fn set_age(id: NodeId, age: i64) -> DataOp {
+        DataOp::SetNodeProperty {
+            id,
+            key: PropertyKey::new("age"),
+            value: Value::Int64(age),
+        }
+    }
+
+    #[test]
+    fn immediate_undo_restores_repeated_values_labels_counts_indexes_and_edges() {
+        let store = RowGroupStore::new();
+        let mut seed = Tx::begin(&store, 19);
+        let a = seed
+            .create_node(&["Base"], &[("age", Value::Int64(1))])
+            .unwrap();
+        let b = seed.create_node(&["Other"], &[]).unwrap();
+        let victim = seed.create_node(&["Victim"], &[]).unwrap();
+        let first = seed
+            .create_edge(a, b, "REL", &[("weight", Value::Int64(1))])
+            .unwrap();
+        let parallel = seed.create_edge(a, b, "REL", &[]).unwrap();
+        let loop_edge = seed.create_edge(a, a, "LOOP", &[]).unwrap();
+        let deleted_edge = seed.create_edge(victim, b, "TOUCH", &[]).unwrap();
+        let old = seed.commit().unwrap();
+        let mut later = Tx::begin(&store, 20);
+        later.change(set_age(a, 2)).unwrap();
+        later
+            .change(DataOp::AddNodeLabel {
+                id: a,
+                label: ArcStr::from("Kept"),
+            })
+            .unwrap();
+        let before = later.commit().unwrap();
+        store.create_property_index("age");
+        let epoch = before.next();
+        let fresh = NodeId::new(store.reserve_node_ids(1).unwrap().start);
+        let fresh_edge = EdgeId::new(store.reserve_edge_ids(1).unwrap().start);
+        let mut changes = ChangeSet::new();
+        for op in [
+            set_age(a, 10),
+            set_age(a, 20),
+            DataOp::RemoveNodeProperty {
+                id: a,
+                key: PropertyKey::new("age"),
+            },
+            set_age(a, 30),
+            DataOp::AddNodeLabel {
+                id: a,
+                label: ArcStr::from("Temporary"),
+            },
+            DataOp::RemoveNodeLabel {
+                id: a,
+                label: ArcStr::from("Kept"),
+            },
+            DataOp::AddNodeLabel {
+                id: a,
+                label: ArcStr::from("Kept"),
+            },
+            DataOp::RemoveNodeLabel {
+                id: a,
+                label: ArcStr::from("Temporary"),
+            },
+            DataOp::AddNodeLabel {
+                id: a,
+                label: ArcStr::from("Final"),
+            },
+            DataOp::SetEdgeProperty {
+                id: first,
+                key: PropertyKey::new("weight"),
+                value: Value::Int64(10),
+            },
+            DataOp::RemoveEdgeProperty {
+                id: first,
+                key: PropertyKey::new("weight"),
+            },
+            DataOp::SetEdgeProperty {
+                id: first,
+                key: PropertyKey::new("weight"),
+                value: Value::Int64(20),
+            },
+            DataOp::DeleteEdge { id: deleted_edge },
+            DataOp::DeleteNode { id: victim },
+            DataOp::CreateNode {
+                id: fresh,
+                labels: labels(&["Fresh"]),
+                properties: properties(&[("age", Value::Int64(99))]),
+            },
+            set_age(fresh, 100),
+            DataOp::AddNodeLabel {
+                id: fresh,
+                label: ArcStr::from("Extra"),
+            },
+            DataOp::CreateEdge {
+                id: fresh_edge,
+                src: a,
+                dst: fresh,
+                edge_type: ArcStr::from("NEW"),
+                properties: properties(&[]),
+            },
+        ] {
+            write(&store, epoch, &mut changes, op);
+        }
+        store.rollback_immediate(epoch, changes.entries()).unwrap();
+        let now = ReadView::committed(epoch);
+        assert_eq!(store.node_count(now).unwrap(), 3);
+        assert_eq!(store.edge_count(now).unwrap(), 4);
+        assert_eq!(store.nodes_by_label_count("Base", now).unwrap(), 1);
+        assert_eq!(store.nodes_by_label_count("Kept", now).unwrap(), 1);
+        for label in ["Temporary", "Final", "Fresh", "Extra"] {
+            assert_eq!(
+                store.nodes_by_label_count(label, now).unwrap(),
+                0,
+                "{label}"
+            );
+        }
+        assert!(store.node(fresh, now).unwrap().is_none());
+        assert!(store.edge(fresh_edge, now).unwrap().is_none());
+        assert!(store.node(victim, now).unwrap().is_some());
+        assert!(store.edge(deleted_edge, now).unwrap().is_some());
+        assert_eq!(
+            store
+                .edge(first, now)
+                .unwrap()
+                .unwrap()
+                .get_property("weight"),
+            Some(&Value::Int64(1))
+        );
+        for (at, age, kept) in [(old, 1, false), (before, 2, true), (epoch, 2, true)] {
+            let view = ReadView::committed(at);
+            assert_eq!(
+                store.node_property(a, "age", view).unwrap(),
+                Some(Value::Int64(age))
+            );
+            assert_eq!(
+                store.node(a, view).unwrap().unwrap().has_label("Kept"),
+                kept
+            );
+            assert_eq!(
+                store
+                    .find_nodes_by_property("age", &Value::Int64(age), view)
+                    .unwrap(),
+                [a]
+            );
+        }
+        for age in [10, 20, 30, 99, 100] {
+            assert!(
+                store
+                    .find_nodes_by_property("age", &Value::Int64(age), now)
+                    .unwrap()
+                    .is_empty(),
+                "age {age}"
+            );
+            assert!(
+                store
+                    .property_index_entries("age", &Value::Int64(age))
+                    .unwrap_or_default()
+                    .is_empty(),
+                "index age {age}"
+            );
+        }
+        let mut adjacent = store.edges(a, Direction::Both, &[], now).unwrap();
+        adjacent.sort_by_key(|(node, edge)| (node.as_u64(), edge.as_u64()));
+        let mut expected = vec![(b, first), (b, parallel), (a, loop_edge)];
+        expected.sort_by_key(|(node, edge)| (node.as_u64(), edge.as_u64()));
+        assert_eq!(adjacent, expected);
+        assert_eq!(store.degree(a, Direction::Outgoing, now).unwrap(), 3);
+        assert_eq!(store.degree(a, Direction::Incoming, now).unwrap(), 1);
+        assert_eq!(store.current_epoch(), epoch);
+        assert!(store.reserve_node_ids(1).unwrap().start > fresh.as_u64());
+        assert!(store.reserve_edge_ids(1).unwrap().start > fresh_edge.as_u64());
+        let inner = store.inner.read();
+        let marks = &inner.nodes[&locate(a.as_u64()).0].marks;
+        assert!(marks.rows && marks.outgoing && marks.incoming);
+        drop(inner);
+        let mut pending = Tx::begin(&store, 21);
+        pending.change(set_age(a, 40)).unwrap();
+        pending
+            .change(DataOp::RemoveNodeLabel {
+                id: a,
+                label: ArcStr::from("Kept"),
+            })
+            .unwrap();
+        pending.roll_back().unwrap();
+        assert_eq!(
+            store.node_property(a, "age", now).unwrap(),
+            Some(Value::Int64(2))
+        );
+        assert_eq!(store.nodes_by_label_count("Kept", now).unwrap(), 1);
+    }
+
+    #[test]
+    fn immediate_undo_balances_create_then_delete_in_one_epoch() {
+        let store = RowGroupStore::new();
+        let epoch = EpochId::new(1);
+        let a = NodeId::new(store.reserve_node_ids(1).unwrap().start);
+        let edge = EdgeId::new(store.reserve_edge_ids(1).unwrap().start);
+        let mut changes = ChangeSet::new();
+        for op in [
+            DataOp::CreateNode {
+                id: a,
+                labels: labels(&["Fresh"]),
+                properties: properties(&[("age", Value::Int64(1))]),
+            },
+            DataOp::AddNodeLabel {
+                id: a,
+                label: ArcStr::from("Extra"),
+            },
+            set_age(a, 2),
+            DataOp::CreateEdge {
+                id: edge,
+                src: a,
+                dst: a,
+                edge_type: ArcStr::from("SELF"),
+                properties: properties(&[]),
+            },
+            DataOp::DeleteEdge { id: edge },
+            DataOp::DeleteNode { id: a },
+        ] {
+            write(&store, epoch, &mut changes, op);
+        }
+        store.rollback_immediate(epoch, changes.entries()).unwrap();
+        let view = ReadView::committed(epoch);
+        assert_eq!(store.node_count(view).unwrap(), 0);
+        assert_eq!(store.edge_count(view).unwrap(), 0);
+        assert_eq!(store.nodes_by_label_count("Fresh", view).unwrap(), 0);
+        assert_eq!(store.nodes_by_label_count("Extra", view).unwrap(), 0);
+        assert!(store.node(a, view).unwrap().is_none());
+        assert!(store.edge(edge, view).unwrap().is_none());
+        let inner = store.inner.read();
+        assert!(inner.counts.edge_types.iter().all(|count| *count == 0));
+    }
+
+    #[test]
+    fn immediate_undo_refuses_invalid_epochs_stamps_and_bulk_before_mutation() {
+        let store = RowGroupStore::new();
+        let epoch = EpochId::new(1);
+        let a = NodeId::new(store.reserve_node_ids(1).unwrap().start);
+        let mut changes = ChangeSet::new();
+        write(
+            &store,
+            epoch,
+            &mut changes,
+            DataOp::CreateNode {
+                id: a,
+                labels: labels(&["Fresh"]),
+                properties: properties(&[("age", Value::Int64(1))]),
+            },
+        );
+        assert!(
+            store
+                .rollback_immediate(EpochId::new(0), changes.entries())
+                .is_err()
+        );
+        assert!(
+            store
+                .rollback_immediate(EpochId::new(PENDING), changes.entries())
+                .is_err()
+        );
+        assert!(
+            store
+                .rollback_immediate(epoch.next(), changes.entries())
+                .is_err()
+        );
+        let mut with_bulk = changes.entries().to_vec();
+        with_bulk.push(Change::Bulk(BulkRange {
+            graph: changes.entries()[0].graph(),
+            table: Table::Nodes,
+            ids: 10..11,
+        }));
+        assert!(store.rollback_immediate(epoch, &with_bulk).is_err());
+        assert_eq!(store.node_count(ReadView::committed(epoch)).unwrap(), 1);
+        store.sync_epoch(epoch.next());
+        assert!(
+            store
+                .rollback_immediate(epoch.next(), changes.entries())
+                .is_err(),
+            "the entry belongs to the earlier stamp"
+        );
+        assert!(
+            store
+                .node(a, ReadView::committed(epoch.next()))
+                .unwrap()
+                .is_some()
+        );
+        let mut updated = ChangeSet::new();
+        write(&store, epoch.next(), &mut updated, set_age(a, 2));
+        let wrong_epoch = epoch.next().next();
+        store.sync_epoch(wrong_epoch);
+        let wrong_stamp = Change::Data {
+            graph: changes.entries()[0].graph(),
+            op: set_age(a, 4),
+            before: Before::Value(Some(Value::Int64(1))),
+            version: PendingVersion::Replaced,
+        };
+        let error = store
+            .rollback_immediate(wrong_epoch, &[wrong_stamp])
+            .expect_err("a real property's history belongs to an earlier stamp");
+        assert!(
+            matches!(error, ApplyError::Refused(ref message) if message.contains("no pending value")),
+            "{error:?}"
+        );
+        assert_eq!(
+            store
+                .node_property(a, "age", ReadView::committed(wrong_epoch))
+                .unwrap(),
+            Some(Value::Int64(2))
+        );
+        assert_eq!(
+            store
+                .node_property(a, "age", ReadView::committed(epoch))
+                .unwrap(),
+            Some(Value::Int64(1))
+        );
     }
 }

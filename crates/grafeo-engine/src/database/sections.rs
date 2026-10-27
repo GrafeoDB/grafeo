@@ -43,16 +43,32 @@ pub(super) struct CheckpointSources {
 }
 
 impl CheckpointSources {
-    /// The epoch a checkpoint or copy of the database records, which a
-    /// reopen continues from: the root store's, which follows every commit,
-    /// or the transaction manager's when that is ahead (`restore_snapshot`
-    /// resets the store's epoch, and a direct write that fails still takes
-    /// its epoch), so the file never names an epoch below one the database
-    /// published. Taken while commits are held, both are the epoch of the
-    /// last complete commit.
+    /// The last published epoch, after a capture has also adopted successful
+    /// raw writes. A store may have advanced for a call that was undone before
+    /// publication; its allocator epoch alone must not become an image's epoch.
     pub fn epoch(&self) -> u64 {
+        self.transaction_manager.current_epoch().as_u64()
+    }
+
+    /// Adopts successful raw writes before taking an image's epoch or read pin.
+    /// The caller holds commits off: the hold first waits for written commits
+    /// to publish, so raising both manager counters cannot publish one early,
+    /// and the next engine commit takes an epoch above the raw writes too.
+    /// This does not coordinate raw writes racing the capture: they bypass
+    /// the database's transactions, as documented by `GrafeoDB::store`.
+    pub(super) fn capture_epoch(&self, commits: &CommitsHeld<'_>) -> grafeo_common::types::EpochId {
+        let _ = commits;
         let published = self.transaction_manager.current_epoch();
-        self.store.current_epoch().max(published).as_u64()
+        let mut epoch = published.max(self.store.raw_write_epoch());
+        for name in self.store.graph_names() {
+            if let Some(graph) = self.store.graph(&name) {
+                epoch = epoch.max(graph.raw_write_epoch());
+            }
+        }
+        if epoch > published {
+            self.transaction_manager.sync_epoch(epoch);
+        }
+        epoch
     }
 
     /// The default graph's committed nodes and edges, for the header.
@@ -88,7 +104,17 @@ impl CheckpointSources {
     /// the indexes take what transactions write as they write it, and the
     /// load builds them from the rows (see
     /// `row_group_sections::load_row_group_sections`).
+    #[cfg(any(test, not(feature = "grafeo-file")))]
     pub fn sections(&self, commits: &CommitsHeld<'_>) -> Vec<Box<dyn Section>> {
+        let epoch = self.capture_epoch(commits);
+        self.sections_at(commits, epoch)
+    }
+
+    fn sections_at(
+        &self,
+        commits: &CommitsHeld<'_>,
+        epoch: grafeo_common::types::EpochId,
+    ) -> Vec<Box<dyn Section>> {
         // The hold is what makes the sections consistent; nothing reads it.
         let _ = commits;
         let mut sections: Vec<Box<dyn Section>> = Vec::new();
@@ -99,8 +125,7 @@ impl CheckpointSources {
             Arc::clone(&self.store),
             move || transaction_manager.current_epoch().as_u64(),
         )));
-        let section = RowGroupStoreSection::new(Arc::clone(&self.store))
-            .at(grafeo_common::types::EpochId::new(self.epoch()));
+        let section = RowGroupStoreSection::new(Arc::clone(&self.store)).at(epoch);
         let section = if self.transaction_manager.history_image().is_some() {
             section.with_history_from(self.transaction_manager.history_floor())
         } else {
@@ -190,7 +215,7 @@ impl CheckpointSources {
         commits: &CommitsHeld<'_>,
         copy: bool,
     ) -> grafeo_common::utils::error::Result<CheckpointImage> {
-        let epoch = grafeo_common::types::EpochId::new(self.epoch());
+        let epoch = self.capture_epoch(commits);
         let history_from = self
             .transaction_manager
             .history_image()
@@ -206,7 +231,7 @@ impl CheckpointSources {
         } else {
             CheckpointSnapshot::take(&self.store, epoch, history_from)
         });
-        for section in self.sections(commits) {
+        for section in self.sections_at(commits, epoch) {
             if section.section_type() == SectionType::LpgStore {
                 after.push(Box::new(RowGroupStoreSection::from_snapshot(
                     Arc::clone(&self.store),

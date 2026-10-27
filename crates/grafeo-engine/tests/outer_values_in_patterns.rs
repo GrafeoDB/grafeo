@@ -505,3 +505,333 @@ fn a_where_on_a_second_part_and_earlier_values_keeps_its_rows() {
         &[&["Gus", "19", "Amsterdam"], &["Gus", "88", "Berlin"]],
     );
 }
+
+// ---------------------------------------------------------------------------
+// OPTIONAL MATCH: shortest edge conditions and EXISTS read the optional row
+// ---------------------------------------------------------------------------
+
+/// The people graph with a second Alix-to-Gus edge, so EXISTS must not
+/// multiply a row and ANY SHORTEST must choose one path to each endpoint.
+fn parallel_knows_graph(indexed: bool) -> GrafeoDB {
+    let db = graph(indexed);
+    db.execute(
+        "MATCH (a:Person {name: 'Alix'}), (b:Person {name: 'Gus'}) \
+         INSERT (a)-[:KNOWS {since: 3}]->(b)",
+    )
+    .unwrap();
+    db
+}
+
+fn assert_optional_shortest_edge_map(cypher: bool) {
+    let query = if cypher {
+        "UNWIND [3, 19] AS x MATCH (a:Person {id: 3}) \
+         OPTIONAL MATCH p = shortestPath((a)-[e:KNOWS* {since: x}]->(b:Person)) \
+         RETURN x, b.name, length(p)"
+    } else {
+        "UNWIND [3, 19] AS x MATCH (a:Person {id: 3}) \
+         OPTIONAL MATCH p = ANY SHORTEST (a)-[e:KNOWS {since: x}]->+(b:Person) \
+         RETURN x, b.name, length(p)"
+    };
+    let want = expected(&[
+        &["3", "Gus", "1"],
+        &["3", "Vincent", "2"],
+        &["19", "null", "null"],
+    ]);
+    for indexed in [false, true] {
+        let db = parallel_knows_graph(indexed);
+        assert_eq!(
+            rows(&db, cypher, query),
+            want,
+            "Cypher: {cypher}, index: {indexed}: {query}"
+        );
+        let repeated = query.replacen("UNWIND [3, 19] AS x", "UNWIND [3, 19, 3] AS x", 1);
+        assert_eq!(
+            rows(&db, cypher, &repeated),
+            expected(&[
+                &["3", "Gus", "1"],
+                &["3", "Gus", "1"],
+                &["3", "Vincent", "2"],
+                &["3", "Vincent", "2"],
+                &["19", "null", "null"],
+            ]),
+            "repeated correlation value; Cypher: {cypher}, index: {indexed}"
+        );
+    }
+}
+
+/// GQL: an earlier edge value is checked during the optional shortest search;
+/// no matching edge gives one null row, despite parallel alternatives.
+#[test]
+fn optional_shortest_edge_map_reads_an_earlier_value_gql() {
+    assert_optional_shortest_edge_map(false);
+}
+
+/// Cypher: shortestPath has the same earlier-edge-value and null behavior.
+#[test]
+fn optional_shortest_edge_map_reads_an_earlier_value_cypher() {
+    assert_optional_shortest_edge_map(true);
+}
+
+fn assert_optional_where_exists(cypher: bool) {
+    let matching = "MATCH (a:Person) OPTIONAL MATCH (a)-[r:KNOWS]->(b) \
+                    WHERE EXISTS { MATCH ()-[:KNOWS]->(b) } RETURN a.name, b.name";
+    let never_matching = "MATCH (a:Person) OPTIONAL MATCH (a)-[r:KNOWS]->(b) \
+                          WHERE EXISTS { MATCH (b)-[:MISSING]->() } RETURN a.name, b.name";
+    for indexed in [false, true] {
+        let db = parallel_knows_graph(indexed);
+        // Ordinary EXISTS is a boolean: parallel witnesses do not multiply
+        // the two Alix-to-Gus matches of the outer pattern.
+        assert_eq!(
+            rows(
+                &db,
+                cypher,
+                "MATCH (a:Person)-[r:KNOWS]->(b) \
+                 WHERE EXISTS { MATCH ()-[:KNOWS]->(b) } RETURN a.name, b.name",
+            ),
+            expected(&[&["Alix", "Gus"], &["Alix", "Gus"], &["Gus", "Vincent"],]),
+            "ordinary EXISTS; Cypher: {cypher}, index: {indexed}"
+        );
+        assert_eq!(
+            rows(&db, cypher, matching),
+            expected(&[
+                &["Alix", "Gus"],
+                &["Alix", "Gus"],
+                &["Gus", "Vincent"],
+                &["Vincent", "null"],
+            ]),
+            "optional EXISTS; Cypher: {cypher}, index: {indexed}"
+        );
+        assert_eq!(
+            rows(&db, cypher, never_matching),
+            expected(&[&["Alix", "null"], &["Gus", "null"], &["Vincent", "null"],]),
+            "false optional EXISTS; Cypher: {cypher}, index: {indexed}"
+        );
+    }
+}
+
+/// GQL: EXISTS belongs to the optional pattern, preserving unmatched left rows
+/// and exactly the multiplicity of its parallel edges.
+#[test]
+fn optional_where_exists_keeps_null_and_parallel_rows_gql() {
+    assert_optional_where_exists(false);
+}
+
+/// Cypher: the optional EXISTS keeps the same null and parallel-edge rows.
+#[test]
+fn optional_where_exists_keeps_null_and_parallel_rows_cypher() {
+    assert_optional_where_exists(true);
+}
+
+/// These queries have RETURN -> LeftJoin -> [left input, optional pattern].
+/// Physical operators may differ, but each logical position must retain the
+/// rows of its own operator. The right pattern does not produce the join's
+/// fallback null row. This catches shifted PROFILE entries as well as wrong
+/// counts at the statement root.
+fn assert_optional_profile_counts(
+    db: &GrafeoDB,
+    cypher: bool,
+    query: &str,
+    root_rows: u64,
+    left_rows: u64,
+    right_rows: u64,
+    returned_aliases: &str,
+) {
+    let query = format!("PROFILE {query}");
+    let result = if cypher {
+        db.execute_cypher(&query)
+    } else {
+        db.execute(&query)
+    }
+    .unwrap_or_else(|error| panic!("Cypher: {cypher}: {query}: {error}"));
+    let profile = result.profile().expect("PROFILE carries the public tree");
+    let root = &profile.root;
+    assert_eq!(root.rows, root_rows, "statement rows: {profile:#?}");
+    assert_eq!(root.detail, returned_aliases, "RETURN entry: {profile:#?}");
+    assert_eq!(
+        root.children.len(),
+        1,
+        "RETURN reads the LeftJoin: {profile:#?}"
+    );
+    let optional = &root.children[0];
+    assert_eq!(optional.rows, root_rows, "optional rows: {profile:#?}");
+    assert_eq!(optional.children.len(), 2, "LeftJoin inputs: {profile:#?}");
+    assert_eq!(
+        optional.children[0].rows, left_rows,
+        "left input rows: {profile:#?}"
+    );
+    assert_eq!(
+        optional.children[1].rows, right_rows,
+        "right pattern rows: {profile:#?}"
+    );
+}
+
+#[test]
+fn optional_shortest_profile_counts_the_original_join_and_result_rows() {
+    for indexed in [false, true] {
+        for cypher in [false, true] {
+            let db = parallel_knows_graph(indexed);
+            let query = if cypher {
+                "UNWIND [3, 19] AS x MATCH (a:Person {id: 3}) \
+                 OPTIONAL MATCH p = shortestPath((a)-[e:KNOWS* {since: x}]->(b:Person)) \
+                 RETURN x AS original, b.name AS target, length(p) AS hops"
+            } else {
+                "UNWIND [3, 19] AS x MATCH (a:Person {id: 3}) \
+                 OPTIONAL MATCH p = ANY SHORTEST (a)-[e:KNOWS {since: x}]->+(b:Person) \
+                 RETURN x AS original, b.name AS target, length(p) AS hops"
+            };
+            assert_eq!(
+                rows(&db, cypher, query),
+                expected(&[
+                    &["3", "Gus", "1"],
+                    &["3", "Vincent", "2"],
+                    &["19", "null", "null"],
+                ]),
+            );
+            // Two imported x rows, two actual paths, one optional fallback.
+            assert_optional_profile_counts(&db, cypher, query, 3, 2, 2, "original, target, hops");
+        }
+    }
+}
+
+#[test]
+fn optional_exists_profile_counts_the_original_join_and_result_rows() {
+    let query = "MATCH (a:Person) OPTIONAL MATCH (a)-[r:KNOWS]->(b) \
+                 WHERE EXISTS { MATCH ()-[:KNOWS]->(b) } \
+                 RETURN a.name AS source, b.name AS target";
+    for indexed in [false, true] {
+        for cypher in [false, true] {
+            let db = parallel_knows_graph(indexed);
+            assert_eq!(
+                rows(&db, cypher, query),
+                expected(&[
+                    &["Alix", "Gus"],
+                    &["Alix", "Gus"],
+                    &["Gus", "Vincent"],
+                    &["Vincent", "null"],
+                ]),
+            );
+            // Three people, three matching edges, one optional fallback.
+            assert_optional_profile_counts(&db, cypher, query, 4, 3, 3, "source, target");
+        }
+    }
+}
+
+#[test]
+fn ordinary_optional_profile_keeps_its_hash_join_row_counts() {
+    let query = "MATCH (a:Person) OPTIONAL MATCH (a)-[r:KNOWS]->(b) \
+                 RETURN a.name AS source, b.name AS target";
+    for indexed in [false, true] {
+        for cypher in [false, true] {
+            let db = parallel_knows_graph(indexed);
+            assert_eq!(rows(&db, cypher, query).len(), 4);
+            assert_optional_profile_counts(&db, cypher, query, 4, 3, 3, "source, target");
+        }
+    }
+}
+
+fn assert_optional_exists_imports_scalar(cypher: bool) {
+    let query = "UNWIND [19, 88, 3, 19] AS x MATCH (a:Person {id: 3}) \
+                 OPTIONAL MATCH (a)-[r:KNOWS]->(b) \
+                 WHERE EXISTS { MATCH (b:Person {id: x}) } RETURN x, b.name";
+    for indexed in [false, true] {
+        assert_eq!(
+            rows(&parallel_knows_graph(indexed), cypher, query),
+            expected(&[
+                &["19", "Gus"],
+                &["19", "Gus"],
+                &["19", "Gus"],
+                &["19", "Gus"],
+                &["88", "null"],
+                &["3", "null"],
+            ]),
+            "scalar used only inside EXISTS; Cypher: {cypher}, index: {indexed}"
+        );
+    }
+}
+
+#[test]
+fn optional_exists_imports_earlier_scalar_gql() {
+    assert_optional_exists_imports_scalar(false);
+}
+
+#[test]
+fn optional_exists_imports_earlier_scalar_cypher() {
+    assert_optional_exists_imports_scalar(true);
+}
+
+/// The first optional row must see the person created by the second row.
+/// The attached EXISTS selects the new per-row route, whose outer input must
+/// finish every write before any inner scan or index lookup runs.
+#[test]
+fn optional_exists_sees_later_rows_of_its_writing_input() {
+    for indexed in [false, true] {
+        for cypher in [false, true] {
+            let db = GrafeoDB::new_in_memory();
+            if indexed {
+                db.create_property_index("id").unwrap();
+            }
+            let query = if cypher {
+                "UNWIND [1, 2] AS x CREATE (:Person {id: x}) WITH x \
+                 OPTIONAL MATCH (b:Person {id: 3 - x}) \
+                 WHERE EXISTS { MATCH (b:Person) } RETURN x, b.id"
+            } else {
+                // Keep x in its original scope: GQL does not need an
+                // intervening WITH before this optional pattern's WHERE.
+                "UNWIND [1, 2] AS x INSERT (:Person {id: x}) \
+                 OPTIONAL MATCH (b:Person {id: 3 - x}) \
+                 WHERE EXISTS { MATCH (b:Person) } RETURN x, b.id"
+            };
+            assert_eq!(
+                rows(&db, cypher, query),
+                expected(&[&["1", "2"], &["2", "1"]]),
+                "Cypher: {cypher}, index: {indexed}: {query}",
+            );
+            assert_eq!(
+                rows(&db, cypher, "MATCH (p:Person) RETURN p.id"),
+                expected(&[&["1"], &["2"]]),
+                "both writing rows completed exactly once",
+            );
+        }
+    }
+}
+
+/// Row 1 writes since=2, but must find the since=1 edge row 2 writes. The
+/// earlier scalar inside the edge condition selects the correlated search
+/// route; every path has one hop and the target remains free.
+#[test]
+fn optional_shortest_sees_later_rows_of_its_writing_input() {
+    for indexed in [false, true] {
+        for cypher in [false, true] {
+            let db = GrafeoDB::new_in_memory();
+            if indexed {
+                db.create_property_index("id").unwrap();
+            }
+            db.execute("INSERT (:Anchor {id: 0})").unwrap();
+            let query = if cypher {
+                "MATCH (s:Anchor {id: 0}) UNWIND [1, 2] AS x \
+                 CREATE (s)-[:R {since: 3 - x}]->(:Person {id: x}) WITH s, x \
+                 OPTIONAL MATCH p = shortestPath((s)-[:R* {since: x}]->(b:Person)) \
+                 RETURN x, b.id, length(p)"
+            } else {
+                "MATCH (s:Anchor {id: 0}) FOR x IN [1, 2] \
+                 INSERT (s)-[:R {since: 3 - x}]->(:Person {id: x}) WITH s, x \
+                 OPTIONAL MATCH p = ANY SHORTEST (s)-[:R {since: x}]->+(b:Person) \
+                 RETURN x, b.id, length(p)"
+            };
+            assert_eq!(
+                rows(&db, cypher, query),
+                expected(&[&["1", "2", "1"], &["2", "1", "1"]]),
+                "Cypher: {cypher}, index: {indexed}: {query}",
+            );
+            assert_eq!(
+                rows(
+                    &db,
+                    cypher,
+                    "MATCH (:Anchor)-[r:R]->(b:Person) RETURN b.id, r.since"
+                ),
+                expected(&[&["1", "2"], &["2", "1"]]),
+                "both writing rows created exactly their own edge",
+            );
+        }
+    }
+}

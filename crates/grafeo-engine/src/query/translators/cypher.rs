@@ -1351,16 +1351,11 @@ impl CypherTranslator {
         // predicate so right-side references become join conditions rather
         // than post-filters (which would incorrectly eliminate NULL rows).
         if let LogicalOperator::LeftJoin(left_join) = input {
-            let (join, post_filter) = build_left_join_with_predicates(
+            Ok(build_left_join_with_predicates(
                 left_join,
                 Some(predicate),
                 self.call_scope.borrow().as_ref(),
-            );
-            if let Some(pf) = post_filter {
-                Ok(wrap_filter(join, pf))
-            } else {
-                Ok(join)
-            }
+            ))
         } else {
             Ok(wrap_filter(input, predicate))
         }

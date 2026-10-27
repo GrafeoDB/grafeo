@@ -233,6 +233,30 @@ impl super::Planner {
         let (left_op, left_columns) = self.plan_input(&left_join.left)?;
         // After a write the right side reads the store as the write left it.
         let left_writes = super::after_write::right_side_runs_after_a_write(&left_join.left);
+        #[cfg(any(feature = "gql", feature = "cypher"))]
+        {
+            use crate::query::translators::common;
+
+            let left_vars = left_columns.iter().cloned().collect();
+            let right_vars = left_join.right.bound_variables(None).unwrap_or_default();
+            // A shortest edge condition must read the earlier row during
+            // search. A subquery condition likewise runs before deciding
+            // whether that row has an optional match, not above the join.
+            let reads_earlier = common::comma_part_reads_earlier_rows(
+                &left_join.right,
+                &right_vars,
+                &left_vars,
+                &std::collections::HashSet::new(),
+            );
+            if reads_earlier
+                || left_join
+                    .condition
+                    .as_ref()
+                    .is_some_and(common::has_subquery)
+            {
+                return self.plan_optional_per_row(left_join, left_op, left_columns, left_writes);
+            }
+        }
         let (right_op, right_columns) = self.plan_after_a_write(left_writes, &left_join.right)?;
         let left_types = self.derive_schema_from_columns(&left_columns);
         let right_types = self.derive_schema_from_columns(&right_columns);
@@ -284,6 +308,124 @@ impl super::Planner {
         );
 
         Ok((join_op, join_columns))
+    }
+
+    /// The optional pattern once per left row, with its values available
+    /// during shortest-path search and while evaluating subquery predicates.
+    #[cfg(any(feature = "gql", feature = "cypher"))]
+    fn plan_optional_per_row(
+        &self,
+        left_join: &LeftJoinOp,
+        left_op: Box<dyn Operator>,
+        left_columns: Vec<String>,
+        left_writes: bool,
+    ) -> Result<(Box<dyn Operator>, Vec<String>)> {
+        use crate::query::plan::FilterOp;
+        use grafeo_core::execution::operators::{ApplyOperator, ParameterState};
+
+        // The ordinary filter planner can run both the one-edge EXISTS
+        // check and lifted subqueries before Apply emits nulls. Include the
+        // condition before seeding: it can read an earlier value that the
+        // right pattern itself does not name.
+        let inner = match &left_join.condition {
+            Some(condition) => LogicalOperator::Filter(FilterOp {
+                predicate: condition.clone(),
+                input: left_join.right.clone(),
+                pushdown_hint: None,
+            }),
+            None => left_join.right.as_ref().clone(),
+        };
+        let (inner, shared) = super::subquery::seed_with_row(&left_columns, inner)?;
+        let state = if shared.is_empty() {
+            None
+        } else {
+            Some(Arc::new(ParameterState::new(shared.clone())))
+        };
+        let indices = shared
+            .iter()
+            .map(|name| {
+                left_columns
+                    .iter()
+                    .position(|column| column == name)
+                    .ok_or_else(|| {
+                        Error::Internal(format!(
+                            "optional pattern imports '{name}', which is not a column of its left row"
+                        ))
+                    })
+            })
+            .collect::<Result<Vec<_>>>()?;
+        // Seeding adds parameter scans and may add cycle filters. Their
+        // profile entries do not correspond to the original logical RHS.
+        // Measure this whole correlated subplan instead, retaining the
+        // original left/join/RETURN entries and their distinct row counts.
+        let profiling = self.profiling.replace(false);
+        let planned = match &state {
+            Some(state) => {
+                let previous = self.correlated_param_state.replace(Some(Arc::clone(state)));
+                let planned = self.plan_after_a_write(left_writes, &inner);
+                *self.correlated_param_state.borrow_mut() = previous;
+                planned
+            }
+            None => self.plan_after_a_write(left_writes, &inner),
+        };
+        self.profiling.set(profiling);
+        let (mut right_op, right_columns) = planned?;
+        if profiling {
+            use crate::query::profile::ProfileEntry;
+
+            // Preserve one entry per original logical node in postorder.
+            // Descendants are explicitly absorbed, with their work measured
+            // by the real wrapper around the complete physical subplan.
+            fn absorb_descendants(plan: &LogicalOperator, entries: &mut Vec<ProfileEntry>) {
+                for child in plan.children() {
+                    absorb_descendants(child, entries);
+                    entries.push(ProfileEntry::absorbed("Pattern", child.display_label()));
+                }
+            }
+
+            let mut entries = self.profile_entries.borrow_mut();
+            absorb_descendants(&left_join.right, &mut entries);
+            let (entry, stats) =
+                ProfileEntry::new("CorrelatedSubplan", left_join.right.display_label());
+            entries.push(entry);
+            right_op = Box::new(grafeo_core::execution::ProfiledOperator::new(
+                right_op, stats,
+            ));
+        }
+        let mut apply = match state {
+            Some(state) => ApplyOperator::new_correlated(left_op, right_op, state, indices),
+            None => ApplyOperator::new(left_op, right_op),
+        }
+        .with_optional(right_columns.len());
+        if left_writes {
+            apply = apply.with_outer_first();
+        }
+
+        // As for the hash left join, keep left columns, then only right
+        // columns not already on the left. Use the planned columns, including
+        // hidden path lengths and edge/node lists; do not materialize node
+        // and edge references or register the subplan's outputs as scalars.
+        let mut columns = left_columns.clone();
+        let mut keep: Vec<usize> = (0..left_columns.len()).collect();
+        let mut types = self.derive_schema_from_columns(&left_columns);
+        let right_types = self.derive_schema_from_columns(&right_columns);
+        for (index, name) in right_columns.iter().enumerate() {
+            if !left_columns.contains(name) {
+                keep.push(left_columns.len() + index);
+                columns.push(name.clone());
+                types.push(right_types[index].clone());
+            }
+        }
+        let operator: Box<dyn Operator> = Box::new(apply);
+        if keep.len() == left_columns.len() + right_columns.len() {
+            Ok((operator, columns))
+        } else {
+            let projections = keep.into_iter().map(ProjectExpr::Column).collect();
+            Ok((
+                Box::new(ProjectOperator::new(operator, projections, types)),
+                columns,
+            ))
+        }
     }
 
     /// Plans an ANTI JOIN operator (for WHERE NOT EXISTS patterns).

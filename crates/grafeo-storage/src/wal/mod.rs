@@ -38,7 +38,7 @@
 //!
 //! ## WAL v2
 //!
-//! The 0.6 log, not yet used by the engine: segment files named after the
+//! The 0.6 log used by the engine: segment files named after the
 //! log position (LSN) of their first frame, each with a 128-byte header that
 //! names its database ([`SegmentHeader`]), holding frames with a 25-byte
 //! header ([`FrameHeader`]). A transaction is one contiguous group of frames,

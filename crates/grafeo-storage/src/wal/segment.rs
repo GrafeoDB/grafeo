@@ -634,7 +634,7 @@ mod tests {
         for lsn in [88u64, 3, 1988] {
             std::fs::write(dir.path().join(segment_file_name(lsn)), b"").unwrap();
         }
-        std::fs::write(dir.path().join("backup.cursor"), b"").unwrap();
+        std::fs::write(dir.path().join("backup_cursor.meta"), b"").unwrap();
         std::fs::write(dir.path().join("wal_00000001.log"), b"").unwrap();
         std::fs::create_dir(dir.path().join(segment_file_name(19))).unwrap();
         let listing = list_wal_directory(dir.path()).unwrap();
@@ -648,7 +648,7 @@ mod tests {
         assert_eq!(
             others,
             [
-                "backup.cursor",
+                "backup_cursor.meta",
                 "wal_00000000000000000019.log",
                 "wal_00000001.log"
             ],

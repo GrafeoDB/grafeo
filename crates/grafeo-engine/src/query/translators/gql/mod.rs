@@ -2123,14 +2123,43 @@ impl GqlTranslator {
         // Each query combined in the body starts from the same outer row,
         // with the same imports.
         let translate_part = |part: &ast::QueryStatement| -> Result<LogicalOperator> {
-            let mut plan = self
+            let plan = self
                 .call_imports
                 .within(imports.clone(), || {
                     self.translate_query_from(part, input.clone())
                 })?
                 .root;
-            expand_subquery_return_star(&mut plan, outer_names.as_ref())?;
-            Ok(plan)
+            // An uncorrelated procedure body has only the procedure's result
+            // columns. Pass those on directly: their default names may not be
+            // known until planning, and YIELD aliases keep their order and
+            // spelling, also when they start with an underscore.
+            let procedure_result = match &plan {
+                LogicalOperator::Return(ret) => match ret.input.as_ref() {
+                    LogicalOperator::CallProcedure(_) => true,
+                    LogicalOperator::Filter(filter) => {
+                        matches!(filter.input.as_ref(), LogicalOperator::CallProcedure(_))
+                    }
+                    _ => false,
+                },
+                _ => false,
+            };
+            match plan {
+                LogicalOperator::Return(ret)
+                    if imports.is_empty()
+                        && procedure_result
+                        && !ret.distinct
+                        && matches!(ret.items.as_slice(), [item]
+                            if item.alias.is_none()
+                                && matches!(&item.expression,
+                                    LogicalExpression::Variable(name) if name == "*")) =>
+                {
+                    Ok(*ret.input)
+                }
+                mut plan => {
+                    expand_subquery_return_star(&mut plan, outer_names.as_ref())?;
+                    Ok(plan)
+                }
+            }
         };
         let inner = translate_part(subquery).and_then(|first| {
             combined.iter().try_fold(first, |plan, (op, part)| {

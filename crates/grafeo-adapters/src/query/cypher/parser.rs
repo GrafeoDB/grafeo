@@ -2353,14 +2353,16 @@ impl<'a> Parser<'a> {
         )
     }
 
-    /// Get the text of the current token as an identifier.
+    /// Get the text of the current token as an identifier: a quoted one
+    /// without its backticks, and a doubled backtick inside is one backtick
+    /// (`` `a``b` `` is ``a`b``).
     fn get_identifier_text(&self) -> String {
-        let mut text = self.current.text.clone();
-        // Remove backticks from quoted identifier
+        let text = &self.current.text;
         if self.current.kind == TokenKind::QuotedIdentifier {
-            text = text[1..text.len() - 1].to_string();
+            text[1..text.len() - 1].replace("``", "`")
+        } else {
+            text.clone()
         }
-        text
     }
 
     fn peek_kind(&mut self) -> TokenKind {

@@ -254,7 +254,9 @@ pub extern "C" fn grafeo_open_single_file(path: *const c_char) -> *mut GrafeoDat
     }
 }
 
-/// Close the database, flushing pending writes.
+/// Close the database, flushing pending writes and releasing its file. A
+/// second call does nothing and returns `Ok`; the handle stays valid until
+/// `grafeo_free_database`, and every other call on it fails.
 #[unsafe(no_mangle)]
 pub extern "C" fn grafeo_close(db: *mut GrafeoDatabase) -> GrafeoStatus {
     if db.is_null() {
@@ -268,7 +270,10 @@ pub extern "C" fn grafeo_close(db: *mut GrafeoDatabase) -> GrafeoStatus {
     }
 }
 
-/// Free a database handle. Must be called after `grafeo_close`.
+/// Free a database handle, closing the database first when it is still open
+/// (its error is not reported: call `grafeo_close` first to see it); a graph
+/// handle keeps the database open until it is freed too. Call it exactly
+/// once per handle: a second call is undefined behavior, as with `free()`.
 #[unsafe(no_mangle)]
 pub extern "C" fn grafeo_free_database(db: *mut GrafeoDatabase) {
     if !db.is_null() {
@@ -2744,6 +2749,35 @@ mod tests {
         assert_eq!(grafeo_drop_projection(db, std::ptr::null()), -1);
         grafeo_close(db);
         grafeo_free_database(db);
+    }
+
+    /// `grafeo_free_database` closes a database still open, so its writes
+    /// are kept without a `grafeo_close` first, and `grafeo_close` twice is
+    /// the same as once (#467).
+    #[test]
+    fn free_without_close_keeps_the_writes_and_a_second_close_is_harmless() {
+        let dir = std::env::temp_dir().join(format!("grafeo-c-free-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = CString::new(dir.join("amsterdam.grafeo").to_str().unwrap()).unwrap();
+        let labels = CString::new(r#"["Person"]"#).unwrap();
+        let props = CString::new(r#"{"name":"Alix"}"#).unwrap();
+
+        let db = grafeo_open(path.as_ptr());
+        assert!(!db.is_null());
+        assert_ne!(
+            grafeo_create_node(db, labels.as_ptr(), props.as_ptr()),
+            u64::MAX
+        );
+        grafeo_free_database(db);
+
+        let db = grafeo_open(path.as_ptr());
+        assert!(!db.is_null(), "the file was released by the free");
+        assert_eq!(crate::database::counted(grafeo_node_count, db), 1);
+        assert_eq!(grafeo_close(db), GrafeoStatus::Ok);
+        assert_eq!(grafeo_close(db), GrafeoStatus::Ok, "a second close");
+        grafeo_free_database(db);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

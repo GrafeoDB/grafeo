@@ -2742,6 +2742,14 @@ impl ExpressionPredicate {
                 match val {
                     Value::List(_) => Some(val),
                     Value::Null => Some(Value::Null),
+                    // A vector is the list of its elements.
+                    Value::Vector(elements) => Some(Value::List(
+                        elements
+                            .iter()
+                            .map(|element| Value::Float64(f64::from(*element)))
+                            .collect::<Vec<_>>()
+                            .into(),
+                    )),
                     other => Some(Value::List(vec![other].into())),
                 }
             }
@@ -2822,6 +2830,8 @@ impl ExpressionPredicate {
                     // reason: path lengths fit i64 for practical sizes
                     #[allow(clippy::cast_possible_wrap)]
                     Value::Path { edges, .. } => Some(Value::Int64(edges.len() as i64)),
+                    // A vector's size is its dimension.
+                    Value::Vector(elements) => i64::try_from(elements.len()).ok().map(Value::Int64),
                     _ => None,
                 }
             }

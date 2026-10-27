@@ -984,3 +984,45 @@ fn path_length_is_the_number_of_edges_of_a_path() {
         "a fixed-length path"
     );
 }
+
+/// A vector's `size` is its dimension, and `toList` of a vector is the list
+/// of its elements (#585), in GQL and Cypher, stored or built in the query.
+#[test]
+fn size_and_to_list_read_a_vector_by_its_elements() {
+    let elements = || {
+        Value::List(
+            [0.5_f32, 0.25, 2.0]
+                .iter()
+                .map(|x| Value::Float64(f64::from(*x)))
+                .collect::<Vec<_>>()
+                .into(),
+        )
+    };
+    let db = GrafeoDB::new_in_memory();
+    db.execute("INSERT (:P {v: vector([0.5, 0.25, 2.0])})")
+        .unwrap();
+    for (language, query, expected) in [
+        ("gql", "MATCH (n:P) RETURN size(n.v)", Value::Int64(3)),
+        ("cypher", "MATCH (n:P) RETURN size(n.v)", Value::Int64(3)),
+        (
+            "gql",
+            "MATCH (n:P) RETURN size(toList(n.v))",
+            Value::Int64(3),
+        ),
+        ("gql", "MATCH (n:P) RETURN toList(n.v)", elements()),
+        ("cypher", "MATCH (n:P) RETURN toList(n.v)", elements()),
+        ("gql", "RETURN size(vector([1.0, 2.0]))", Value::Int64(2)),
+        (
+            "gql",
+            "MATCH (n:P) RETURN toList(n.v)[2]",
+            Value::Float64(2.0),
+        ),
+    ] {
+        let result = match language {
+            "gql" => db.execute(query),
+            _ => db.execute_cypher(query),
+        }
+        .unwrap_or_else(|e| panic!("{language}: {query}: {e}"));
+        assert_eq!(column(&result), [expected], "{language}: {query}");
+    }
+}

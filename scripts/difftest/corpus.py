@@ -2142,4 +2142,13 @@ for case_id, query, languages in [
 ]:
     case(case_id, query, languages)
 
+# DG: a doubled backtick in a Cypher delimited name is one backtick (DG1, #579; a syntax
+#     error in 0.6.0); size and toList of a vector read its elements (DG2, DG3, #585)
+for case_id, query, languages in [
+    ("DG1", "RETURN 1 AS `a``b`", CYPHER),
+    ("DG2", "RETURN size(vector([1.0, 2.0, 3.0])) AS n", BOTH),
+    ("DG3", "RETURN toList(vector([0.5, 0.25])) AS l", BOTH),
+]:
+    case(case_id, query, languages)
+
 # fmt: on

@@ -28,6 +28,13 @@ use grafeo_common::utils::error::{Error, QueryError, QueryErrorKind, Result};
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 
+/// Whether aggregate substitution is reading a scalar wrapper or an argument.
+#[derive(Clone, Copy)]
+enum AggregateSubstitutionMode {
+    Scalar,
+    Argument { crosses_local_binding: bool },
+}
+
 /// Result of translating a Cypher query: either a plan or a schema DDL command.
 #[non_exhaustive]
 pub enum CypherTranslationResult {
@@ -2315,106 +2322,199 @@ impl CypherTranslator {
         agg_counter: &mut u32,
         aggregates_out: &mut Vec<AggregateExpr>,
     ) -> Result<LogicalExpression> {
-        match expr {
-            ast::Expression::FunctionCall { name, args, .. } => {
-                // Check if the function itself is an aggregate. Its column
-                // gets a name the statement does not spell (a grouping key
-                // named `_agg_0` stays the user's).
-                while self.names.is_written(&format!("_agg_{agg_counter}")) {
-                    *agg_counter += 1;
-                }
-                let alias = format!("_agg_{agg_counter}");
-                if let Some(agg) = self.try_extract_aggregate(expr, &Some(alias.clone()))? {
-                    *agg_counter += 1;
-                    aggregates_out.push(agg);
-                    return Ok(LogicalExpression::Variable(alias));
-                }
-                // Non-aggregate function wrapping aggregate arguments,
-                // e.g. size(collect(DISTINCT n.v)). Recurse into each argument.
-                let mut translated_args = Vec::with_capacity(args.len());
+        let mut rewritten = expr.clone();
+        self.substitute_aggregate_calls(
+            &mut rewritten,
+            agg_counter,
+            aggregates_out,
+            &[],
+            AggregateSubstitutionMode::Scalar,
+        )?;
+        self.translate_expression(&rewritten)
+    }
+
+    /// Replaces aggregate calls before the normal expression translator handles
+    /// their wrappers. Nested queries keep their own aggregation scope.
+    fn substitute_aggregate_calls(
+        &self,
+        expr: &mut ast::Expression,
+        agg_counter: &mut u32,
+        aggregates_out: &mut Vec<AggregateExpr>,
+        locals: &[String],
+        mode: AggregateSubstitutionMode,
+    ) -> Result<()> {
+        if matches!(mode, AggregateSubstitutionMode::Scalar)
+            && matches!(expr, ast::Expression::FunctionCall { name, .. } if is_aggregate_function(name))
+        {
+            // Visit local scopes in each argument without extracting an
+            // aggregate nested inside this aggregate's argument.
+            if let ast::Expression::FunctionCall { args, .. } = expr {
                 for arg in args {
-                    if contains_aggregate(arg) {
-                        translated_args.push(self.extract_wrapped_aggregates(
-                            arg,
-                            agg_counter,
-                            aggregates_out,
-                        )?);
-                    } else {
-                        translated_args.push(self.translate_expression(arg)?);
-                    }
+                    self.substitute_aggregate_calls(
+                        arg,
+                        agg_counter,
+                        aggregates_out,
+                        locals,
+                        AggregateSubstitutionMode::Argument {
+                            crosses_local_binding: !locals.is_empty(),
+                        },
+                    )?;
                 }
-                resolve_cypher_call(name, translated_args)
             }
-            ast::Expression::Binary { left, op, right } => {
-                let binary_op = self.translate_binary_op(*op)?;
-                let left_sub = if contains_aggregate(left) {
-                    self.extract_wrapped_aggregates(left, agg_counter, aggregates_out)?
-                } else {
-                    self.translate_expression(left)?
-                };
-                let right_sub = if contains_aggregate(right) {
-                    self.extract_wrapped_aggregates(right, agg_counter, aggregates_out)?
-                } else {
-                    self.translate_expression(right)?
-                };
-                Ok(LogicalExpression::Binary {
-                    left: Box::new(left_sub),
-                    op: binary_op,
-                    right: Box::new(right_sub),
-                })
+            while self.names.is_written(&format!("_agg_{agg_counter}")) {
+                *agg_counter += 1;
             }
-            ast::Expression::Unary { op, operand } => {
-                let sub = self.extract_wrapped_aggregates(operand, agg_counter, aggregates_out)?;
-                let unary_op = self.translate_unary_op(*op)?;
-                Ok(LogicalExpression::Unary {
-                    op: unary_op,
-                    operand: Box::new(sub),
-                })
+            let alias = format!("_agg_{agg_counter}");
+            if let Some(aggregate) = self.try_extract_aggregate(expr, &Some(alias.clone()))? {
+                let mut reads = HashSet::new();
+                for argument in aggregate.expression.iter().chain(&aggregate.expression2) {
+                    collect_expression_variables(argument, &mut reads);
+                }
+                if let Some(name) = locals.iter().find(|local| reads.contains(*local)) {
+                    return Err(Error::from(QueryError::new(
+                        QueryErrorKind::Semantic,
+                        format!("Aggregate cannot read locally bound variable '{name}'"),
+                    )));
+                }
+                *agg_counter += 1;
+                aggregates_out.push(aggregate);
+                *expr = ast::Expression::Variable(alias);
+                return Ok(());
+            }
+        }
+        let mut substitute = |child: &mut ast::Expression| {
+            self.substitute_aggregate_calls(child, agg_counter, aggregates_out, locals, mode)
+        };
+        match expr {
+            ast::Expression::PropertyAccess { base, .. } => {
+                substitute(base)?;
+            }
+            ast::Expression::FunctionCall { args, .. } | ast::Expression::List(args) => {
+                for arg in args {
+                    substitute(arg)?;
+                }
+            }
+            ast::Expression::Binary { left, right, .. }
+            | ast::Expression::IndexAccess {
+                base: left,
+                index: right,
+            } => {
+                substitute(left)?;
+                substitute(right)?;
+            }
+            ast::Expression::Unary { operand, .. } => {
+                substitute(operand)?;
+            }
+            ast::Expression::SliceAccess { base, start, end } => {
+                substitute(base)?;
+                for bound in [start, end].into_iter().flatten() {
+                    substitute(bound)?;
+                }
+            }
+            ast::Expression::Map(entries) => {
+                for (_, value) in entries {
+                    substitute(value)?;
+                }
             }
             ast::Expression::Case {
                 input,
                 whens,
                 else_clause,
             } => {
-                let operand = match input {
-                    Some(inp) if contains_aggregate(inp) => Some(Box::new(
-                        self.extract_wrapped_aggregates(inp, agg_counter, aggregates_out)?,
-                    )),
-                    Some(inp) => Some(Box::new(self.translate_expression(inp)?)),
-                    None => None,
-                };
-                let mut when_clauses = Vec::with_capacity(whens.len());
-                for (cond, then) in whens {
-                    let cond_expr = if contains_aggregate(cond) {
-                        self.extract_wrapped_aggregates(cond, agg_counter, aggregates_out)?
-                    } else {
-                        self.translate_expression(cond)?
-                    };
-                    let then_expr = if contains_aggregate(then) {
-                        self.extract_wrapped_aggregates(then, agg_counter, aggregates_out)?
-                    } else {
-                        self.translate_expression(then)?
-                    };
-                    when_clauses.push((cond_expr, then_expr));
+                if let Some(input) = input {
+                    substitute(input)?;
                 }
-                let else_expr = match else_clause {
-                    Some(el) if contains_aggregate(el) => Some(Box::new(
-                        self.extract_wrapped_aggregates(el, agg_counter, aggregates_out)?,
-                    )),
-                    Some(el) => Some(Box::new(self.translate_expression(el)?)),
-                    None => None,
-                };
-                Ok(LogicalExpression::Case {
-                    operand,
-                    when_clauses,
-                    else_clause: else_expr,
-                })
+                for (condition, value) in whens {
+                    substitute(condition)?;
+                    substitute(value)?;
+                }
+                if let Some(value) = else_clause {
+                    substitute(value)?;
+                }
             }
-            _ => Err(Error::from(QueryError::new(
-                QueryErrorKind::Unsupported,
-                "Unsupported expression wrapping an aggregate",
-            ))),
+            ast::Expression::ListComprehension {
+                variable,
+                list,
+                filter,
+                projection,
+            } => {
+                substitute(list)?;
+                let mut locals = locals.to_vec();
+                locals.push(variable.clone());
+                for body in [filter, projection].into_iter().flatten() {
+                    self.substitute_aggregate_calls(
+                        body,
+                        agg_counter,
+                        aggregates_out,
+                        &locals,
+                        mode,
+                    )?;
+                }
+            }
+            ast::Expression::ListPredicate {
+                variable,
+                list,
+                predicate,
+                ..
+            } => {
+                substitute(list)?;
+                let mut locals = locals.to_vec();
+                locals.push(variable.clone());
+                self.substitute_aggregate_calls(
+                    predicate,
+                    agg_counter,
+                    aggregates_out,
+                    &locals,
+                    mode,
+                )?;
+            }
+            ast::Expression::Reduce {
+                accumulator,
+                initial,
+                variable,
+                list,
+                expression,
+            } => {
+                substitute(initial)?;
+                substitute(list)?;
+                let mut locals = locals.to_vec();
+                locals.push(accumulator.clone());
+                locals.push(variable.clone());
+                self.substitute_aggregate_calls(
+                    expression,
+                    agg_counter,
+                    aggregates_out,
+                    &locals,
+                    mode,
+                )?;
+            }
+            ast::Expression::MapProjection { entries, .. } => {
+                for entry in entries {
+                    if let ast::MapProjectionEntry::LiteralEntry(_, value) = entry {
+                        substitute(value)?;
+                    }
+                }
+            }
+            ast::Expression::Exists(_)
+            | ast::Expression::CountSubquery(_)
+            | ast::Expression::PatternComprehension { .. } => {
+                if matches!(
+                    mode,
+                    AggregateSubstitutionMode::Argument {
+                        crosses_local_binding: true
+                    }
+                ) {
+                    return Err(Error::from(QueryError::new(
+                        QueryErrorKind::Unsupported,
+                        "Aggregate arguments containing a subquery cannot be lifted across a local binding",
+                    )));
+                }
+            }
+            ast::Expression::Variable(_)
+            | ast::Expression::Literal(_)
+            | ast::Expression::Parameter(_) => {}
         }
+        Ok(())
     }
 
     /// Tries to extract an aggregate expression from an AST expression.
@@ -3851,10 +3951,18 @@ fn contains_aggregate(expr: &ast::Expression) -> bool {
         ast::Expression::FunctionCall { name, args, .. } => {
             is_aggregate_function(name) || args.iter().any(contains_aggregate)
         }
-        ast::Expression::Binary { left, right, .. } => {
-            contains_aggregate(left) || contains_aggregate(right)
-        }
+        ast::Expression::Binary { left, right, .. }
+        | ast::Expression::IndexAccess {
+            base: left,
+            index: right,
+        } => contains_aggregate(left) || contains_aggregate(right),
         ast::Expression::Unary { operand, .. } => contains_aggregate(operand),
+        ast::Expression::PropertyAccess { base, .. } => contains_aggregate(base),
+        ast::Expression::SliceAccess { base, start, end } => {
+            contains_aggregate(base)
+                || start.as_deref().is_some_and(contains_aggregate)
+                || end.as_deref().is_some_and(contains_aggregate)
+        }
         ast::Expression::Case {
             input,
             whens,
@@ -3867,13 +3975,41 @@ fn contains_aggregate(expr: &ast::Expression) -> bool {
                 || else_clause.as_deref().is_some_and(contains_aggregate)
         }
         ast::Expression::List(items) => items.iter().any(contains_aggregate),
+        ast::Expression::Map(entries) => entries.iter().any(|(_, value)| contains_aggregate(value)),
         ast::Expression::ListComprehension {
-            filter, projection, ..
+            list,
+            filter,
+            projection,
+            ..
         } => {
-            filter.as_deref().is_some_and(contains_aggregate)
+            contains_aggregate(list)
+                || filter.as_deref().is_some_and(contains_aggregate)
                 || projection.as_deref().is_some_and(contains_aggregate)
         }
-        _ => false,
+        ast::Expression::ListPredicate {
+            list, predicate, ..
+        } => contains_aggregate(list) || contains_aggregate(predicate),
+        ast::Expression::Reduce {
+            initial,
+            list,
+            expression,
+            ..
+        } => {
+            contains_aggregate(initial)
+                || contains_aggregate(list)
+                || contains_aggregate(expression)
+        }
+        ast::Expression::MapProjection { entries, .. } => entries.iter().any(|entry| match entry {
+            ast::MapProjectionEntry::LiteralEntry(_, value) => contains_aggregate(value),
+            ast::MapProjectionEntry::PropertySelector(_)
+            | ast::MapProjectionEntry::AllProperties => false,
+        }),
+        ast::Expression::Literal(_)
+        | ast::Expression::Variable(_)
+        | ast::Expression::Parameter(_)
+        | ast::Expression::Exists(_)
+        | ast::Expression::CountSubquery(_)
+        | ast::Expression::PatternComprehension { .. } => false,
     }
 }
 

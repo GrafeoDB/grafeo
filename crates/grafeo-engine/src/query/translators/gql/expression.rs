@@ -259,13 +259,14 @@ impl GqlTranslator {
             }
             ast::Expression::LetIn { bindings, body } => {
                 // LET x = expr1, y = expr2 IN body END
-                // Translate each binding, then inline-substitute into the body.
+                // All values read the enclosing scope; the shared path then
+                // substitutes safely or retains one lexical binding per value.
                 let binding_exprs: Vec<(String, LogicalExpression)> = bindings
                     .iter()
                     .map(|(name, expr)| Ok((name.clone(), self.translate_expression(expr)?)))
                     .collect::<Result<_>>()?;
                 let body_expr = self.translate_expression(body)?;
-                Ok(Self::substitute_let_bindings(body_expr, &binding_exprs))
+                self.substitute_let_bindings(body_expr, &binding_exprs)
             }
         }
     }

@@ -873,12 +873,13 @@ impl super::GrafeoDB {
         commits: &crate::transaction::CommitsHeld<'_>,
     ) -> Result<grafeo_common::storage::MemoryImage> {
         let mut image = grafeo_common::storage::MemoryImage::new();
-        // The epoch of the commits the copy holds, for `to_memory` to
-        // continue from once its stores are loaded.
+        // Building the sections adopts successful raw writes before the
+        // target takes the epoch it continues from once its stores are loaded.
+        let sections = sources.sections(commits);
         target
             .transaction_manager
             .sync_epoch(EpochId::new(sources.epoch()));
-        for section in sources.sections(commits) {
+        for section in sections {
             image.begin_section(section.section_type(), section.version())?;
             section.write_to(&mut image)?;
         }
@@ -975,7 +976,7 @@ impl super::GrafeoDB {
         let sources = self.checkpoint_sources()?;
         let commits = self.transaction_manager.hold_commits()?;
         let root = std::sync::Arc::clone(&sources.store);
-        let epoch = EpochId::new(sources.epoch());
+        let epoch = sources.capture_epoch(&commits);
         // The graphs are read at the epoch with commits going on, while a
         // read pinned at it keeps their versions (#362); the rest is taken
         // under the hold.

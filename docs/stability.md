@@ -50,6 +50,7 @@ The implementation crates (`grafeo-common`, `grafeo-core`, `grafeo-storage`, `gr
 | The operator tree of a `PROFILE` statement: `QueryResult::profile`, `QueryProfile` and `OperatorProfile`, the Python and Node.js `profile` and the WASM `profile` key | New in 0.6.0; its operators and fields may still change |
 | A store of one's own: `GrafeoDB::with_store` and `GrafeoDB::with_read_store`, implementing `GraphStore` or `GraphBackend`, and the `store::conformance` suite that checks an implementation | The write contract is new in 0.6.0, and no backend outside Grafeo has run it yet: a required method may be added within 0.6.x. Calling the traits is stable |
 | `GrafeoDB::store()`: the built-in row-group store itself | For admin work; the row-group store's own methods follow the storage engine |
+| Immediate-write undo: `RowGroupStore::rollback_immediate` | Takes the engine's unpublished change records; the record and undo contract may change within 0.6.x |
 
 ## Stable APIs
 

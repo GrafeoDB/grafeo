@@ -3452,8 +3452,16 @@ impl Session {
         let active = self.active_store();
         let has_active_tx = self.current_transaction.lock().is_some();
         // An ordinary transaction owns its snapshot. A historical stream,
-        // including one inside a transaction, holds its own epoch until drop.
-        let (view, pin) = self.read_view()?;
+        // including one inside a transaction, holds its own epoch until drop,
+        // and so does one outside a transaction at the published epoch (a
+        // read statement pins its epoch for its run).
+        let (view, pin) = match self.read_view()? {
+            (view, None) if view.transaction.is_none() => {
+                let pin = self.transaction_manager.pin_read();
+                (ReadView::committed(pin.epoch()), Some(pin))
+            }
+            read => read,
+        };
         let (viewing_epoch, transaction_id) = (view.epoch, view.transaction);
         let planner = self
             .create_planner_for_store_with_read_only(
@@ -5493,13 +5501,19 @@ impl Session {
         Option<TransactionId>,
         Option<crate::transaction::ReadPin>,
     )> {
-        // A historical override reads committed data, excluding pending writes.
-        if let Some(epoch) = *self.viewing_epoch_override.lock() {
+        let viewing = *self.viewing_epoch_override.lock();
+        let transaction = *self.current_transaction.lock();
+        // A historical override reads committed data, excluding pending
+        // writes, and inside a transaction no later than its snapshot.
+        if let Some(epoch) = viewing {
+            let epoch = transaction
+                .and_then(|transaction_id| self.transaction_manager.start_epoch(transaction_id))
+                .map_or(epoch, |start| epoch.min(start));
             let pin = self.transaction_manager.pin_read_at(epoch)?;
             return Ok((pin.epoch(), None, Some(pin)));
         }
 
-        if let Some(transaction_id) = *self.current_transaction.lock() {
+        if let Some(transaction_id) = transaction {
             let epoch = self
                 .transaction_manager
                 .start_epoch(transaction_id)
@@ -5525,17 +5539,13 @@ impl Session {
         }
     }
 
-    /// Captures and pins the view for direct reads and streams. The open
-    /// transaction owns an ordinary snapshot; committed reads retain their
-    /// selected epoch until materialization or stream drop.
+    /// The view the session's direct reads and streams read at: its
+    /// transaction at its snapshot, committed at the published epoch, or
+    /// committed at a viewing epoch, which the returned pin holds until the
+    /// read is done (see [`get_transaction_context`](Self::get_transaction_context)).
     fn read_view(&self) -> Result<(ReadView, Option<crate::transaction::ReadPin>)> {
         let (epoch, transaction_id, pin) = self.get_transaction_context()?;
-        if transaction_id.is_some() || pin.is_some() {
-            Ok((ReadView::new(epoch, transaction_id), pin))
-        } else {
-            let pin = self.transaction_manager.pin_read();
-            Ok((ReadView::committed(pin.epoch()), Some(pin)))
-        }
+        Ok((ReadView::new(epoch, transaction_id), pin))
     }
 
     /// Turns the reachability search of variable-length expands on (the
@@ -6149,6 +6159,7 @@ impl Session {
     /// # Performance
     ///
     /// - Time complexity: O(1) average case
+    /// - No lock contention (uses DashMap internally)
     /// - ~20-30x faster than equivalent MATCH query
     ///
     /// # Example
@@ -6210,6 +6221,7 @@ impl Session {
     /// # Performance
     ///
     /// - Time complexity: O(1) average case
+    /// - No lock contention
     ///
     /// # Errors
     ///

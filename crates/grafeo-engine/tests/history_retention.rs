@@ -852,3 +852,32 @@ mod crash {
         assert!(completed, "a checkpoint has fewer than 16 crash points");
     }
 }
+
+/// A viewing epoch inside an open transaction reads no later than the
+/// transaction's own snapshot: a commit made after the transaction began
+/// stays out of sight, as it does without the viewing epoch.
+#[test]
+fn transaction_history_never_reads_past_the_transaction_snapshot() {
+    let (db, id, _) = transaction_history_fixture(HistoryRetention::Forever);
+    let mut session = db.session();
+    session.begin_transaction().unwrap();
+    db.execute("MATCH (p:Person) SET p.age = 9").unwrap();
+    for epoch in [db.current_epoch(), EpochId::new(u64::MAX)] {
+        session.set_viewing_epoch(epoch);
+        assert_eq!(
+            session
+                .execute("MATCH (p:Person) RETURN p.age")
+                .unwrap()
+                .rows(),
+            &[vec![Value::Int64(5)]],
+            "a query at {epoch:?}"
+        );
+        assert_eq!(
+            session.get_node_property(id, "age").unwrap(),
+            Some(Value::Int64(5)),
+            "a direct read at {epoch:?}"
+        );
+    }
+    session.clear_viewing_epoch();
+    session.rollback().unwrap();
+}

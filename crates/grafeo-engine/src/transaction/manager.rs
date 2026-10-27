@@ -475,10 +475,10 @@ impl ReadPins {
 }
 
 /// A committed read, including a historical override inside a transaction,
-/// pinned at its epoch until it is dropped (also by the unwind of a panic): the read horizon stays at that epoch or before,
-/// so garbage collection keeps every version the read may still need (#412
-/// decision Q6: every read statement outside a transaction pins its epoch
-/// for its run).
+/// pinned at its epoch until it is dropped (also by the unwind of a panic):
+/// the read horizon stays at that epoch or before, so garbage collection
+/// keeps every version the read may still need (every read statement
+/// outside a transaction pins its epoch for its run).
 #[must_use = "a read is pinned only while the pin lives"]
 pub(crate) struct ReadPin {
     pins: Arc<ReadPins>,

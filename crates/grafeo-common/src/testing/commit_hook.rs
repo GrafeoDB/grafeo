@@ -14,7 +14,8 @@
 //! RDF update, a direct write, a direct graph or index call, an import or an
 //! RDF batch insert) once it holds commits off and before it changes anything
 //! ([`during_next_held_change`]), or after a backend write has been applied
-//! and recorded ([`after_next_data_write`]).
+//! and recorded ([`after_next_data_write`]). [`fail_next_change_record`]
+//! makes the recording of a direct write's change fail.
 //! [`checkpoints_started`] counts the checkpoints started on a database
 //! file, from any thread (the engine calls [`count_checkpoint`]).
 //!
@@ -36,6 +37,7 @@ mod inner {
     thread_local! {
         static AFTER_EPOCH: RefCell<Option<Hook>> = const { RefCell::new(None) };
         static AFTER_DATA_WRITE: RefCell<Option<WriteHook>> = const { RefCell::new(None) };
+        static FAIL_RECORD: RefCell<bool> = const { RefCell::new(false) };
         static AFTER_WRITTEN: RefCell<Option<Hook>> = const { RefCell::new(None) };
         static AFTER_STAMPED: RefCell<Option<Hook>> = const { RefCell::new(None) };
         static AFTER_LOGGED: RefCell<Option<Hook>> = const { RefCell::new(None) };
@@ -67,6 +69,21 @@ mod inner {
             Some(hook) => hook(),
             None => Ok(()),
         }
+    }
+
+    /// Makes the next change a direct write records on this thread fail to
+    /// be recorded, after the write is applied: the failure that poisons the
+    /// database, since the log would miss the write.
+    pub fn fail_next_change_record() {
+        FAIL_RECORD.with(|slot| *slot.borrow_mut() = true);
+    }
+
+    /// Whether a recording of a change on this thread was armed to fail
+    /// ([`fail_next_change_record`]), once.
+    #[inline]
+    #[must_use]
+    pub fn run_change_record() -> bool {
+        FAIL_RECORD.with(|slot| std::mem::take(&mut *slot.borrow_mut()))
     }
 
     /// The checkpoints started on each database file.
@@ -253,6 +270,16 @@ mod inner {
     pub fn run_after_data_write() -> Result<(), crate::testing::statement_failure::InjectedFailure>
     {
         Ok(())
+    }
+
+    /// No-op when injection is disabled.
+    pub fn fail_next_change_record() {}
+
+    /// Always `false` when injection is disabled.
+    #[inline]
+    #[must_use]
+    pub fn run_change_record() -> bool {
+        false
     }
 
     /// No-op when injection is disabled.

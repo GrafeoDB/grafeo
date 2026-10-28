@@ -43,7 +43,7 @@ use crate::graph::{Direction, GraphStore};
 
 /// The property name of a map assignment: `SET n = {...}` or `SET n += {...}`
 /// arrive as one `("*", map)` pair.
-const MAP_ASSIGNMENT: &str = "*";
+pub const MAP_ASSIGNMENT: &str = "*";
 
 /// A node or an edge, for the writes both have.
 #[derive(Clone, Copy)]

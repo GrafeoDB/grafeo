@@ -316,28 +316,23 @@ impl<T> Updates<T> {
         Some(before)
     }
 
-    /// Takes `row` out of the newest node that holds it, when `stamp` made
-    /// that node, and returns what the row held before the write. The stamp
-    /// is a pending transaction's, or an unpublished immediate call's epoch.
-    /// A node left empty goes, and a chain left empty.
-    pub(super) fn undo(&mut self, row: usize, stamp: u64) -> Option<T> {
+    /// Takes `row` out of the newest node that holds it, when transaction
+    /// stamp `pending` made that node, and returns what the row held before
+    /// the transaction wrote it: a rollback of the transaction's first
+    /// write of the row. A node left empty goes, and a chain left empty.
+    pub(super) fn undo(&mut self, row: usize, pending: u64) -> Option<T> {
         let at = offset(row);
         let (place, chain) = self.chain_mut(row)?;
         let index = chain.newest_with(at)?;
-        if chain.nodes[index].stamp != stamp {
+        if chain.nodes[index].stamp != pending {
             return None;
         }
         let node = &mut chain.nodes[index];
         let position = node.find(at).ok()?;
         let (_, saved) = node.rows.remove(position);
         if node.rows.is_empty() {
-            let removed = chain.nodes.remove(index);
-            if removed.is_pending() {
-                chain.pending -= 1;
-            } else {
-                // A committed node contributes to newest, not pending.
-                chain.recount();
-            }
+            chain.nodes.remove(index);
+            chain.pending -= 1;
         }
         if chain.nodes.is_empty() {
             self.remove_chain(place, vector_of(row));
@@ -580,41 +575,6 @@ mod tests {
                 None => self.value[row],
             }
         }
-    }
-
-    #[test]
-    fn undoing_an_immediate_epoch_recounts_committed_chains_and_keeps_older_reads() {
-        let mut column = Column::new(2);
-        assert!(column.write(0, 10, 1, 1));
-        assert!(column.write(0, 20, 2, 2));
-        assert!(column.write(1, 30, 2, 2));
-        assert!(!column.write(0, 21, 2, 2));
-        // The caller restores a replaced write before removing the epoch's
-        // first kept image. Another row still keeps this node alive.
-        column.value[0] = Some(20);
-        column.value[0] = column.updates.undo(0, 2).unwrap();
-        assert_eq!(column.read(0, Read::At(0)), Some(0));
-        assert_eq!(column.read(0, Read::At(1)), Some(10));
-        assert_eq!(column.updates.chain(0).unwrap().newest, 2);
-        assert_eq!(column.updates.chain(0).unwrap().pending, 0);
-        column.value[1] = column.updates.undo(1, 2).unwrap();
-        assert_eq!(column.read(1, Read::At(2)), Some(0));
-        assert_eq!(column.updates.chain(0).unwrap().newest, 1);
-        assert_eq!(column.updates.chain(0).unwrap().pending, 0);
-        let pending = PENDING | 9;
-        assert!(column.write(0, 40, pending, 2));
-        assert!(
-            column.updates.undo(0, 1).is_none(),
-            "never remove another writer's newer node"
-        );
-        column.value[0] = column.updates.undo(0, pending).unwrap();
-        assert_eq!(column.updates.chain(0).unwrap().pending, 0);
-        assert_eq!(column.updates.chain(0).unwrap().newest, 1);
-        assert_eq!(column.read(0, Read::At(0)), Some(0));
-        assert_eq!(column.read(0, Read::At(2)), Some(10));
-        column.value[0] = column.updates.undo(0, 1).unwrap();
-        assert_eq!(column.value, [Some(0), Some(0)]);
-        assert!(column.updates.is_empty());
     }
 
     /// A vector without a chain reads the column; a write keeps the value

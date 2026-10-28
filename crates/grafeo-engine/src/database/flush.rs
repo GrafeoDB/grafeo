@@ -14,6 +14,7 @@
 //! which holds the committed state at E.
 
 use grafeo_common::storage::Section;
+use grafeo_common::types::EpochId;
 use grafeo_common::utils::error::Result;
 
 #[cfg(feature = "grafeo-file")]
@@ -406,15 +407,15 @@ pub(super) fn sync_parent_dir(path: &std::path::Path) -> Result<()> {
 }
 
 impl CheckpointSources {
-    /// The header values of the checkpoint.
-    pub fn context(&self) -> FlushContext {
+    /// The header values of the checkpoint taken at `epoch`.
+    pub fn context(&self, epoch: EpochId) -> FlushContext {
         let transaction_id = self
             .transaction_manager
             .last_assigned_transaction_id()
             .map_or(0, |t| t.0);
         let (nodes, edges) = self.counts();
         FlushContext {
-            epoch: self.epoch(),
+            epoch: epoch.as_u64(),
             transaction_id,
             node_count: nodes as u64,
             edge_count: edges as u64,

@@ -1110,6 +1110,13 @@ jobs:
       - name: Clippy (wasm32)
         run: cargo clippy -p grafeo-wasm --target wasm32-unknown-unknown --all-targets -- -D warnings
 
+      # The WASM binding's own tests (tests/web.rs), run in Node by
+      # wasm-bindgen-test-runner, which wasm-bindgen-cli installs.
+      - name: Test the WASM binding (wasm32)
+        env:
+          CARGO_TARGET_WASM32_UNKNOWN_UNKNOWN_RUNNER: wasm-bindgen-test-runner
+        run: cargo test -p grafeo-wasm --target wasm32-unknown-unknown --test web
+
       # The facade for wasm32 outside our binding, as an application builds it:
       # it has no getrandom wasm_js backend (our binding and .cargo/config.toml
       # choose one), so grafeo-common's os-entropy stays off there and nothing

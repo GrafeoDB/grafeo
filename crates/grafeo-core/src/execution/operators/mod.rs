@@ -137,7 +137,7 @@ pub use variable_length_expand::{
     DEFAULT_PATH_SEARCH_BUDGET, PathMode as ExecutionPathMode, VariableLengthExpandOperator,
 };
 pub use vector_join::VectorJoinOperator;
-pub use writer::{GraphWriter, NewEdge, Recording, WriteCounter, WriteCounters};
+pub use writer::{GraphWriter, MAP_ASSIGNMENT, NewEdge, Recording, WriteCounter, WriteCounters};
 
 use std::ops::Range;
 

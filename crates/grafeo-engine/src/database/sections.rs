@@ -8,6 +8,7 @@ use grafeo_common::storage::Section;
 #[cfg(feature = "ring-index")]
 use grafeo_common::storage::{ChunkMeta, SectionSource};
 use grafeo_common::storage::{ImageSource, SectionType};
+use grafeo_common::types::EpochId;
 use grafeo_common::utils::error::Result;
 
 use crate::transaction::CommitsHeld;
@@ -43,32 +44,27 @@ pub(super) struct CheckpointSources {
 }
 
 impl CheckpointSources {
-    /// The last published epoch, after a capture has also adopted successful
-    /// raw writes. A store may have advanced for a call that was undone before
-    /// publication; its allocator epoch alone must not become an image's epoch.
-    pub fn epoch(&self) -> u64 {
-        self.transaction_manager.current_epoch().as_u64()
-    }
-
-    /// Adopts successful raw writes before taking an image's epoch or read pin.
-    /// The caller holds commits off: the hold first waits for written commits
-    /// to publish, so raising both manager counters cannot publish one early,
-    /// and the next engine commit takes an epoch above the raw writes too.
-    /// This does not coordinate raw writes racing the capture: they bypass
-    /// the database's transactions, as documented by `GrafeoDB::store`.
-    pub(super) fn capture_epoch(&self, commits: &CommitsHeld<'_>) -> grafeo_common::types::EpochId {
+    /// The epoch a checkpoint or copy of the database records, which a
+    /// reopen continues from, taken while commits are held (`commits`): the
+    /// latest one any graph's store was stamped at, or the transaction
+    /// manager's when that is ahead (`restore_snapshot` resets the store's
+    /// epoch), so the file never names an epoch below one the database
+    /// published.
+    ///
+    /// A raw write through `GrafeoDB::store()` stamps a store without
+    /// publishing, so the manager adopts the epoch here: a read pinned at it
+    /// sees those writes, and the next commit takes an epoch above it, which
+    /// a WAL replay after this checkpoint would otherwise skip. The hold
+    /// first waits for written commits to publish, so raising the manager's
+    /// epoch publishes none of them early.
+    pub fn epoch(&self, commits: &CommitsHeld<'_>) -> EpochId {
         let _ = commits;
         let published = self.transaction_manager.current_epoch();
-        let mut epoch = published.max(self.store.raw_write_epoch());
-        for name in self.store.graph_names() {
-            if let Some(graph) = self.store.graph(&name) {
-                epoch = epoch.max(graph.raw_write_epoch());
-            }
+        let stamped = self.store.latest_epoch();
+        if stamped > published {
+            self.transaction_manager.sync_epoch(stamped);
         }
-        if epoch > published {
-            self.transaction_manager.sync_epoch(epoch);
-        }
-        epoch
+        stamped.max(published)
     }
 
     /// The default graph's committed nodes and edges, for the header.
@@ -104,17 +100,10 @@ impl CheckpointSources {
     /// the indexes take what transactions write as they write it, and the
     /// load builds them from the rows (see
     /// `row_group_sections::load_row_group_sections`).
-    #[cfg(any(test, not(feature = "grafeo-file")))]
-    pub fn sections(&self, commits: &CommitsHeld<'_>) -> Vec<Box<dyn Section>> {
-        let epoch = self.capture_epoch(commits);
-        self.sections_at(commits, epoch)
-    }
-
-    fn sections_at(
-        &self,
-        commits: &CommitsHeld<'_>,
-        epoch: grafeo_common::types::EpochId,
-    ) -> Vec<Box<dyn Section>> {
+    ///
+    /// `epoch` is the capture's, from [`epoch`](Self::epoch) under the same
+    /// hold: one capture takes one epoch.
+    pub fn sections_at(&self, commits: &CommitsHeld<'_>, epoch: EpochId) -> Vec<Box<dyn Section>> {
         // The hold is what makes the sections consistent; nothing reads it.
         let _ = commits;
         let mut sections: Vec<Box<dyn Section>> = Vec::new();
@@ -157,6 +146,12 @@ impl CheckpointSources {
         }
 
         sections
+    }
+
+    /// The sections at the capture's epoch, for tests.
+    #[cfg(test)]
+    pub fn sections(&self, commits: &CommitsHeld<'_>) -> Vec<Box<dyn Section>> {
+        self.sections_at(commits, self.epoch(commits))
     }
 
     /// Takes what a checkpoint writes, while the caller holds commits off
@@ -215,7 +210,7 @@ impl CheckpointSources {
         commits: &CommitsHeld<'_>,
         copy: bool,
     ) -> grafeo_common::utils::error::Result<CheckpointImage> {
-        let epoch = self.capture_epoch(commits);
+        let epoch = self.epoch(commits);
         let history_from = self
             .transaction_manager
             .history_image()
@@ -246,7 +241,7 @@ impl CheckpointSources {
         Ok(CheckpointImage {
             sections: held,
             held: held_count,
-            context: self.context(),
+            context: self.context(epoch),
             lpg,
             _pin: pin,
         })

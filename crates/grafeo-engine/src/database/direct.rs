@@ -5,10 +5,16 @@
 //! transaction manager's idle gate, so no transaction can begin meanwhile
 //! and there is nothing it could conflict with, and its writes are applied
 //! and stamped at its new epoch as they happen ([`Writer::Immediate`], the
-//! path replay takes, lenient), which it publishes when done. Every check of
-//! a single call runs before it writes. Its changes retain before-images
-//! until the call succeeds: an error or panic undoes them before the epoch
-//! is published, and writes no WAL group or change events.
+//! path replay takes, lenient), which it publishes when done. Such a call
+//! applies one write, and every check runs before it, so it applies or it
+//! does not; should it ever fail after the write, what it wrote is committed
+//! and logged, so the WAL matches memory. The one write it could not log is
+//! one it could not record: it is not published, and the database is
+//! poisoned. A call that fails still uses up its epoch.
+//!
+//! A call that applies more than one write (a detach delete, a map
+//! assignment, a label whose node type converts the node's values) could
+//! fail between them, so it runs as a private transaction, as a batch does.
 //!
 //! While a transaction is open, and for every batch, a call is a private
 //! transaction: one without a session, registered with the transaction
@@ -47,8 +53,8 @@ use grafeo_common::types::{
 };
 use grafeo_common::utils::error::{Error, QueryError, QueryErrorKind, Result};
 use grafeo_core::execution::operators::{
-    ChangeRecorder, GraphWriter, NewEdge, OperatorError, Recording, WriteClaim, WriteClaims,
-    WriteInProgress,
+    ChangeRecorder, GraphWriter, MAP_ASSIGNMENT, NewEdge, OperatorError, Recording, WriteClaim,
+    WriteClaims, WriteInProgress,
 };
 use grafeo_core::graph::apply::{GraphBackend, Writer};
 use grafeo_core::graph::lpg::{Edge, Node};
@@ -60,47 +66,21 @@ use crate::catalog::CatalogConstraintValidator;
 use crate::session::graph_storage_key;
 use crate::transaction::{CommitsHeld, TransactionChanges, TransactionManager};
 
-/// Keep small-call buffers warm without retaining a large detach's log.
-const CACHED_IMMEDIATE_ENTRIES: usize = 64;
-
 /// The recorder of the direct call that commits at once ([`Writer::Immediate`]):
 /// one per database, used only by the call that holds the transaction
 /// manager's idle gate. It claims nothing (no transaction is open), and keeps
-/// the entries until the call succeeds or its writes have been undone.
+/// the entries only when the WAL or change data capture reads them.
 pub(crate) struct ImmediateRecorder {
     manager: Arc<TransactionManager>,
     /// The running call's epoch.
     epoch: AtomicU64,
-    /// Whether a call is recording entries and their before-images.
+    /// Whether the running call keeps its entries (and builds their
+    /// before-images).
     keep: AtomicBool,
-    /// A backend apply was entered but has not supplied its undo entry.
-    unrecorded: AtomicBool,
     /// The running call's entries and its graph's slot, while it keeps them.
     entries: parking_lot::Mutex<(ChangeSet, Option<GraphSlot>)>,
-}
-
-/// The completed call's changes, held in their reusable buffer until its
-/// logging or rollback finishes. Every exit releases their values.
-struct ImmediateChanges<'a> {
-    entries: parking_lot::MutexGuard<'a, (ChangeSet, Option<GraphSlot>)>,
-}
-
-impl std::ops::Deref for ImmediateChanges<'_> {
-    type Target = ChangeSet;
-
-    fn deref(&self) -> &Self::Target {
-        &self.entries.0
-    }
-}
-
-impl Drop for ImmediateChanges<'_> {
-    fn drop(&mut self) {
-        if self.entries.0.capacity() > CACHED_IMMEDIATE_ENTRIES {
-            self.entries.0 = ChangeSet::new();
-        } else {
-            self.entries.0.clear();
-        }
-    }
+    /// Whether the running call applied a write it could not record.
+    lost: AtomicBool,
 }
 
 impl ImmediateRecorder {
@@ -110,34 +90,40 @@ impl ImmediateRecorder {
             manager,
             epoch: AtomicU64::new(0),
             keep: AtomicBool::new(false),
-            unrecorded: AtomicBool::new(false),
             entries: parking_lot::Mutex::new((ChangeSet::new(), None)),
+            lost: AtomicBool::new(false),
         }
     }
 
-    /// Starts a call at `epoch` in the graph with storage key `graph`,
-    /// retaining its undo entries until success or rollback.
-    fn start(&self, epoch: EpochId, graph: Option<&str>) -> Result<()> {
+    /// Starts a call that commits at `epoch` in the graph with storage key
+    /// `graph`, keeping its entries when `keep`.
+    fn start(&self, epoch: EpochId, graph: Option<&str>, keep: bool) -> Result<()> {
         self.epoch.store(epoch.as_u64(), Ordering::Release);
-        self.unrecorded.store(false, Ordering::Release);
-        let mut entries = self.entries.lock();
-        debug_assert!(entries.0.is_empty());
-        let slot = entries.0.slot(GraphRef {
-            model: DataModel::Lpg,
-            key: graph.map(ArcStr::from),
-        })?;
-        entries.1 = Some(slot);
-        self.keep.store(true, Ordering::Release);
+        self.keep.store(keep, Ordering::Release);
+        if keep {
+            let mut entries = self.entries.lock();
+            let mut set = ChangeSet::new();
+            let slot = set.slot(GraphRef {
+                model: DataModel::Lpg,
+                key: graph.map(ArcStr::from),
+            })?;
+            *entries = (set, Some(slot));
+        }
         Ok(())
     }
 
-    /// Ends recording and borrows the call's entries until logging or undo
-    /// finishes. Dropping the guard clears or releases the reusable buffer.
-    fn finish(&self) -> ImmediateChanges<'_> {
-        self.keep.store(false, Ordering::Release);
+    /// The running call's entries, taken out (none when it kept none), or
+    /// `None` when it applied a write it could not record: its log group
+    /// would miss that write.
+    fn finish(&self) -> Option<ChangeSet> {
+        let lost = self.lost.swap(false, Ordering::AcqRel);
+        if !self.keep.swap(false, Ordering::AcqRel) {
+            return (!lost).then(ChangeSet::new);
+        }
         let mut entries = self.entries.lock();
         entries.1 = None;
-        ImmediateChanges { entries }
+        let changes = std::mem::take(&mut entries.0);
+        (!lost).then_some(changes)
     }
 }
 
@@ -156,9 +142,6 @@ impl WriteClaims for ImmediateRecorder {
 
 impl ChangeRecorder for ImmediateRecorder {
     fn writer(&self) -> Writer {
-        // GraphWriter asks for this immediately before applying an operation.
-        // If it unwinds before record(), its undo authority is incomplete.
-        self.unrecorded.store(true, Ordering::Release);
         Writer::Immediate {
             epoch: EpochId::new(self.epoch.load(Ordering::Acquire)),
             before_images: self.keep.load(Ordering::Acquire),
@@ -179,17 +162,27 @@ impl ChangeRecorder for ImmediateRecorder {
         let Some(slot) = *slot else {
             return Ok(());
         };
-        let recorded = set.push(slot, op, before, version).map_err(|error| {
-            // Applied already: an incomplete undo log cannot restore it.
+        // Tests make the record fail in place of the push, as a full change
+        // set would.
+        #[cfg(feature = "testing-statement-injection")]
+        let pushed = if grafeo_common::testing::commit_hook::run_change_record() {
+            Err(Error::Internal(
+                "injected change record failure".to_string(),
+            ))
+        } else {
+            set.push(slot, op, before, version)
+        };
+        #[cfg(not(feature = "testing-statement-injection"))]
+        let pushed = set.push(slot, op, before, version);
+        pushed.map_err(|error| {
+            // Applied already, and the log would miss it: the call is not
+            // published (see `finish_immediate`), and nothing commits after it.
+            self.lost.store(true, Ordering::Release);
             self.manager.poison(&format!(
                 "a direct write could not record a change it applied: {error}"
             ));
             OperatorError::Internal(error.to_string())
-        });
-        if recorded.is_ok() {
-            self.unrecorded.store(false, Ordering::Release);
-        }
-        recorded
+        })
     }
 }
 
@@ -371,63 +364,15 @@ impl GrafeoDB {
     ) -> Result<T> {
         // Only this shell is generic: one copy per kind of call.
         let call = self.start_immediate(store, graph)?;
+        // A panic in the call is handled like an error, then raised again:
+        // what it wrote is committed and logged first.
         let outcome =
             std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| write(&call.writer)));
+        self.finish_immediate(call, store)?;
         match outcome {
-            Ok(Ok(value)) => {
-                self.finish_immediate(call, store)?;
-                Ok(value)
-            }
-            Ok(Err(error)) => {
-                let error = crate::query::executor::convert_operator_error(error);
-                match self.rollback_immediate(call, store) {
-                    Ok(()) => Err(error),
-                    Err(undo) => Err(Error::Internal(format!("{error}; {undo}"))),
-                }
-            }
-            Err(panic) => {
-                if self.immediate_recorder().unrecorded.load(Ordering::Acquire) {
-                    self.transaction_manager
-                        .poison("a direct write panicked before its applied change was recorded");
-                }
-                let _ = self.rollback_immediate(call, store);
-                std::panic::resume_unwind(panic)
-            }
+            Ok(result) => result.map_err(crate::query::executor::convert_operator_error),
+            Err(panic) => std::panic::resume_unwind(panic),
         }
-    }
-
-    /// Undoes an unsuccessful call while its epoch is still unpublished.
-    /// A failed undo fences later writes; it is never reported as success.
-    fn rollback_immediate(
-        &self,
-        call: ImmediateCall<'_>,
-        store: &Arc<RowGroupStore>,
-    ) -> Result<()> {
-        let ImmediateCall {
-            commits,
-            root: _,
-            epoch,
-            writer,
-        } = call;
-        drop(writer);
-        let changes = self.immediate_recorder().finish();
-        // A recording failure may have omitted an applied operation. Do not
-        // mistake undoing its recorded prefix for a complete rollback.
-        let undone =
-            self.transaction_manager
-                .check_no_incomplete_commit()
-                .and_then(|()| {
-                    store.rollback_immediate(epoch, changes.entries()).map_err(|failure| {
-                    let message = format!(
-                        "the rollback of a direct write could not undo its changes: {failure}"
-                    );
-                    self.transaction_manager.poison(&message);
-                    Error::Internal(message)
-                })
-                });
-        drop(changes);
-        drop(commits);
-        undone
     }
 
     /// Starts a direct call that commits at once (see
@@ -451,7 +396,7 @@ impl GrafeoDB {
         grafeo_common::testing::commit_hook::run_during_held_change();
 
         let recorder = self.immediate_recorder();
-        recorder.start(epoch, graph)?;
+        recorder.start(epoch, graph, self.reads_committed_rows())?;
         let writer = self.direct_writer(
             store,
             graph,
@@ -461,9 +406,6 @@ impl GrafeoDB {
                 recorder: Arc::clone(recorder) as Arc<dyn ChangeRecorder>,
             },
         );
-        // GraphWriter construction reads the writer context too; no apply
-        // has run at this point. Subsequent writer() calls precede applies.
-        recorder.unrecorded.store(false, Ordering::Release);
         Ok(ImmediateCall {
             commits,
             root,
@@ -481,7 +423,9 @@ impl GrafeoDB {
     /// written or not made durable: its writes are applied and stamped at an
     /// epoch nobody reads, and cannot be taken back, so the epoch is not
     /// published and the database is poisoned; a reopen decides from the log
-    /// whether the call happened.
+    /// whether the call happened. An internal error when the call applied a
+    /// write it could not record: the log would miss it, so the epoch is not
+    /// published either, and the database is poisoned.
     ///
     /// [`TransactionError::CommitOutcomeUnknown`]: grafeo_common::utils::error::TransactionError::CommitOutcomeUnknown
     fn finish_immediate(&self, call: ImmediateCall<'_>, store: &Arc<RowGroupStore>) -> Result<()> {
@@ -492,7 +436,16 @@ impl GrafeoDB {
             writer,
         } = call;
         drop(writer);
-        let changes = self.immediate_recorder().finish();
+        // A write the call could not record is applied at an epoch nobody
+        // reads: published, a read would see what the log misses, so the
+        // epoch is not published, as for a group the log did not take. The
+        // database is poisoned already.
+        let Some(changes) = self.immediate_recorder().finish() else {
+            return Err(Error::Internal(format!(
+                "a direct write at epoch {epoch:?} could not record a change it applied: it \
+                 is not published"
+            )));
+        };
         // While the database keeps history, the time of the call: its WAL
         // group carries it, and the time index records it once published.
         let at = self.transaction_manager.commit_time();
@@ -517,6 +470,8 @@ impl GrafeoDB {
         if self.cdc_active() {
             self.cdc_log.record_commit(&changes, epoch);
         }
+        // A build without the log and change data capture keeps no entries.
+        #[cfg(not(any(feature = "wal", feature = "cdc")))]
         drop(changes);
         self.transaction_manager.sync_epoch(epoch);
         if let Some(at) = at {
@@ -587,8 +542,8 @@ impl GrafeoDB {
 
     /// Whether a commit of the direct API reads what its writes did after
     /// they are applied: when it logs them to the WAL or reports them to
-    /// change data capture. Without, a batch keeps no rows for commit;
-    /// immediate calls still retain before-images until success or rollback.
+    /// change data capture. Without, a call keeps no before-images (one that
+    /// commits at once) and no rows of a batch.
     fn reads_committed_rows(&self) -> bool {
         #[cfg(feature = "wal")]
         let wal = self.wal.is_some();
@@ -784,6 +739,39 @@ impl GrafeoDB {
         Ok(())
     }
 
+    /// Converts the lists of numbers that `property` holds on the nodes with
+    /// `label` in `store` (the graph with storage key `graph`) to vectors,
+    /// before a vector index of `dimensions` is built on them (see
+    /// [`vector_index_lists`](crate::database::index::vector_index_lists)),
+    /// as one private transaction: all or none, conflicting with an open
+    /// transaction that wrote one of the nodes.
+    ///
+    /// # Errors
+    ///
+    /// The check that refuses the index, or the conversion's error.
+    #[cfg(feature = "vector-index")]
+    pub(crate) fn convert_vector_lists(
+        &self,
+        store: &Arc<RowGroupStore>,
+        graph: Option<&str>,
+        label: &str,
+        property: &str,
+        dimensions: Option<usize>,
+    ) -> Result<()> {
+        use crate::database::index::{convert_vector_lists, vector_index_lists};
+
+        if !self.writes_privately() {
+            return Ok(());
+        }
+        let lists = vector_index_lists(&**store, label, property, dimensions)?;
+        if lists.is_empty() {
+            return Ok(());
+        }
+        self.write_private(store, graph, |writer| {
+            convert_vector_lists(writer, property, lists)
+        })
+    }
+
     /// Rolls the private transaction `transaction` back: undoes `changes`,
     /// last to first, and aborts it.
     ///
@@ -820,8 +808,10 @@ impl DirectCalls<'_> {
         self.db.write_direct(self.target, false, write)
     }
 
-    /// A batch: one call, all of its rows or none, so always a private
-    /// transaction, which can undo the rows before a failing one.
+    /// A batch, or a call that applies more than one write: all of them or
+    /// none, so always a private transaction, which can undo the writes
+    /// before a failing one. A call of one write commits at once (see
+    /// [`write`](Self::write)): it either applies or does not.
     fn write_batch<T>(
         &self,
         write: impl FnOnce(&GraphWriter) -> std::result::Result<T, OperatorError>,
@@ -856,11 +846,22 @@ impl DirectCalls<'_> {
     }
 
     pub(crate) fn set_node_property(&self, id: NodeId, key: &str, value: Value) -> Result<()> {
-        self.write(|writer| set_node_property(writer, id, key, value))
+        // A map assignment sets every entry: one write each.
+        let write = |writer: &GraphWriter| set_node_property(writer, id, key, value);
+        if key == MAP_ASSIGNMENT {
+            self.write_batch(write)
+        } else {
+            self.write(write)
+        }
     }
 
     pub(crate) fn set_edge_property(&self, id: EdgeId, key: &str, value: Value) -> Result<()> {
-        self.write(|writer| set_edge_property(writer, id, key, value))
+        let write = |writer: &GraphWriter| set_edge_property(writer, id, key, value);
+        if key == MAP_ASSIGNMENT {
+            self.write_batch(write)
+        } else {
+            self.write(write)
+        }
     }
 
     pub(crate) fn remove_node_property(&self, id: NodeId, key: &str) -> Result<bool> {
@@ -888,7 +889,14 @@ impl DirectCalls<'_> {
     }
 
     pub(crate) fn add_node_label(&self, id: NodeId, label: &str) -> Result<bool> {
-        self.write(|writer| add_node_label(writer, id, label))
+        // A node type of the new label may convert the node's values (an
+        // integer of a FLOAT64 property): one write each, besides the label.
+        let write = |writer: &GraphWriter| add_node_label(writer, id, label);
+        if self.db.catalog.has_node_types() {
+            self.write_batch(write)
+        } else {
+            self.write(write)
+        }
     }
 
     pub(crate) fn remove_node_label(&self, id: NodeId, label: &str) -> Result<bool> {
@@ -899,8 +907,9 @@ impl DirectCalls<'_> {
         self.write(|writer| writer.delete_node(id, false))
     }
 
+    /// Its edges, then the node: several writes, all or none.
     pub(crate) fn detach_delete_node(&self, id: NodeId) -> Result<bool> {
-        self.write(|writer| writer.delete_node(id, true))
+        self.write_batch(|writer| writer.delete_node(id, true))
     }
 
     pub(crate) fn delete_edge(&self, id: EdgeId) -> Result<bool> {
@@ -1134,9 +1143,10 @@ mod tests {
     /// process, where its database is.
     const CHILD_PATH_VAR: &str = "GRAFEO_DIRECT_PANICKING_CALL_PATH";
 
-    /// A batch or single call that panics leaves nothing: its changes are
-    /// undone, and the next call writes none of its WAL records or events.
-    /// The calls run in a child
+    /// A batch that panics leaves nothing: its versions are gone, and the
+    /// next call writes none of its WAL records or change events. A single
+    /// call writes in place, so what it wrote before the panic is committed,
+    /// as after an error: the WAL matches memory. The calls run in a child
     /// process that exits without `close()`, so the reopen replays the WAL.
     #[test]
     fn a_panicking_call_leaves_nothing_for_the_next() {
@@ -1170,7 +1180,10 @@ mod tests {
         let labels = db
             .execute("MATCH (n) RETURN labels(n)[0] AS label ORDER BY label")
             .unwrap();
-        assert_eq!(labels.rows(), [[Value::from("Person")]]);
+        assert_eq!(
+            labels.rows(),
+            [[Value::from("Person")], [Value::from("Single")]]
+        );
         db.close().unwrap();
     }
 
@@ -1187,141 +1200,13 @@ mod tests {
             db.get_node(batch).unwrap().is_none(),
             "the batch's node is discarded"
         );
-        assert!(db.get_node(single).unwrap().is_none());
+        assert!(db.get_node(single).unwrap().is_some());
         let events: Vec<EntityId> = db
             .changes_between(EpochId::new(0), db.current_epoch())
             .unwrap()
             .into_iter()
             .map(|event| event.entity_id)
             .collect();
-        assert_eq!(events, [EntityId::Node(alix)]);
-    }
-}
-
-#[cfg(test)]
-mod immediate_failure_controls {
-    use super::*;
-
-    #[test]
-    fn finished_changes_release_values_and_bound_capacity_on_every_exit() {
-        for count in [1_u64, 65] {
-            for outcome in 0..3 {
-                let recorder = ImmediateRecorder::new(Arc::new(TransactionManager::new()));
-                recorder.start(EpochId::new(1), None).unwrap();
-                let payload = Arc::new(std::collections::BTreeMap::from([(
-                    PropertyKey::new("kept"),
-                    Value::from("x".repeat(300)),
-                )]));
-                for raw in 1..=count {
-                    recorder
-                        .record(
-                            DataOp::SetNodeProperty {
-                                id: NodeId::new(raw),
-                                key: PropertyKey::new("value"),
-                                value: Value::Map(Arc::clone(&payload)),
-                            },
-                            Before::Value(None),
-                            PendingVersion::Created,
-                        )
-                        .unwrap();
-                }
-                let result =
-                    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| -> Result<()> {
-                        let changes = recorder.finish();
-                        assert_eq!(changes.entries().len(), usize::try_from(count).unwrap());
-                        assert_eq!(
-                            Arc::strong_count(&payload),
-                            usize::try_from(count).unwrap() + 1
-                        );
-                        match outcome {
-                            0 => Ok(()),
-                            1 => Err(Error::Internal("finished call failed".to_string())),
-                            _ => panic!("finished call unwinds"),
-                        }
-                    }));
-                match outcome {
-                    0 => result.unwrap().unwrap(),
-                    1 => assert!(matches!(
-                        result.unwrap(),
-                        Err(Error::Internal(message)) if message == "finished call failed"
-                    )),
-                    _ => assert_eq!(
-                        result.unwrap_err().downcast_ref::<&str>(),
-                        Some(&"finished call unwinds")
-                    ),
-                }
-                assert_eq!(Arc::strong_count(&payload), 1);
-                let cached = recorder.entries.lock();
-                assert!(cached.0.is_empty());
-                assert_eq!(cached.0.graphs(), []);
-                assert!(cached.0.capacity() <= CACHED_IMMEDIATE_ENTRIES);
-                assert!(cached.1.is_none());
-            }
-        }
-    }
-
-    #[test]
-    fn a_large_direct_call_releases_its_undo_capacity() {
-        let db = GrafeoDB::new_in_memory();
-        let a = db.create_node(&["A"]).unwrap();
-        let b = db.create_node(&["B"]).unwrap();
-        for _ in 0..80 {
-            db.create_edge(a, b, "REL").unwrap();
-        }
-        db.detach_delete_node(a).unwrap();
-        assert_eq!(db.edge_count().unwrap(), 0);
-        assert!(db.immediate_recorder().entries.lock().0.capacity() <= CACHED_IMMEDIATE_ENTRIES);
-        db.create_node(&["Next"]).unwrap();
-        assert!(db.immediate_recorder().entries.lock().0.capacity() <= CACHED_IMMEDIATE_ENTRIES);
-    }
-
-    #[test]
-    fn a_panic_before_any_apply_leaves_the_database_usable() {
-        let db = GrafeoDB::new_in_memory();
-        let before = db.current_epoch();
-        let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            db.write_direct::<()>(DirectTarget::Current, false, |_| panic!("before apply"))
-        }));
-        assert!(panic.is_err());
-        assert_eq!(db.current_epoch(), before);
-        assert_eq!(db.node_count().unwrap(), 0);
-        db.create_node(&["After"]).unwrap();
-        assert_eq!(db.node_count().unwrap(), 1);
-    }
-
-    #[test]
-    fn an_unrecorded_backend_panic_fences_later_writes() {
-        let db = GrafeoDB::new_in_memory();
-        let before = db.current_epoch();
-        let store = db.lpg_store().unwrap();
-        let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            db.write_direct::<()>(DirectTarget::Current, false, |_| {
-                let id = NodeId::new(store.reserve_node_ids(1).unwrap().start);
-                store
-                    .apply(
-                        &DataOp::CreateNode {
-                            id,
-                            labels: vec![ArcStr::from("Unrecorded")].into(),
-                            properties: Vec::new(),
-                        },
-                        db.immediate_recorder().writer(),
-                    )
-                    .unwrap();
-                panic!("backend unwinds before recording");
-            })
-        }));
-        assert!(panic.is_err());
-        assert_eq!(db.current_epoch(), before);
-        assert_eq!(
-            db.node_count().unwrap(),
-            0,
-            "the unpublished node is hidden"
-        );
-        assert!(matches!(
-            db.create_node(&["Refused"]),
-            Err(Error::Transaction(
-                grafeo_common::utils::error::TransactionError::IncompleteCommit
-            ))
-        ));
+        assert_eq!(events, [EntityId::Node(single), EntityId::Node(alix)]);
     }
 }

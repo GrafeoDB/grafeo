@@ -159,6 +159,17 @@ def search(grafeo):
     return db
 
 
+def list_embeddings(grafeo):
+    """A 3-dimensional cosine vector index on `Doc.emb`, `Doc` Amsterdam with the vector
+    [0, 0, 1] and `Doc` Lisbon without an `emb` (#587)."""
+    db = grafeo.GrafeoDB()
+    db.execute(
+        "INSERT (:Doc {name: 'Amsterdam', emb: vector([0.0, 0.0, 1.0])}), (:Doc {name: 'Lisbon'})"
+    )
+    db.execute("CREATE VECTOR INDEX doc_emb ON :Doc(emb) DIMENSION 3 METRIC 'cosine'")
+    return db
+
+
 def typed(grafeo):
     """Type DDL and the writes after it: `City` with a node type default (`country`
     'NL'), `ROUTE` between cities with an edge type default (`km` 88), Paris to Prague
@@ -356,6 +367,7 @@ FIXTURES = {
     "labels_indexed": labels_indexed,
     "labels_compacted": labels_compacted,
     "search": search,
+    "list_embeddings": list_embeddings,
     "typed": typed,
     "mixed": mixed,
     "mixed_indexed": mixed_indexed,
@@ -2150,5 +2162,21 @@ for case_id, query, languages in [
     ("DG3", "RETURN toList(vector([0.5, 0.25])) AS l", BOTH),
 ]:
     case(case_id, query, languages)
+
+# DH: a numeric list written to a vector-indexed property is a VECTOR the index finds (#587;
+#     0.6.0 stored a LIST the search left out): a GQL float list (DH1), a SET of integers
+#     (DH2), a Cypher CREATE (DH3); a list of another size fails as a vector of that size does
+#     (DH4); without an index a list stays a LIST (DH5); the stored types (DH6) and a search
+#     that finds all four vectors (DH7)
+for case_id, query, languages in [
+    ("DH1", "INSERT (:Doc {name: 'Rome', emb: [0.6, 0.8, 0.0]})", GQL),
+    ("DH2", "MATCH (d:Doc {name: 'Lisbon'}) SET d.emb = [0, 1, 0]", GQL),
+    ("DH3", "CREATE (:Doc {name: 'Vienna', emb: [1, 0, 0]})", CYPHER),
+    ("DH4", "INSERT (:Doc {name: 'Oslo', emb: [1.0, 0.0]})", GQL),
+    ("DH5", "INSERT (:Draft {name: 'Madrid', emb: [1.0, 0.0]})", GQL),
+]:
+    case(case_id, query, languages, "list_embeddings")
+ordered("DH6", "MATCH (d) WHERE d.emb IS NOT NULL RETURN d.name AS name, d.emb IS TYPED LIST AS list ORDER BY name", GQL, "list_embeddings")
+ordered("DH7", "CALL grafeo.search.vector('Doc', 'emb', [0.6, 0.8, 0.0], 10) YIELD node_id RETURN node_id ORDER BY node_id", BOTH, "list_embeddings")
 
 # fmt: on

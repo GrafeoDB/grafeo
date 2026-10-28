@@ -726,22 +726,41 @@ describe('advanced type round-trips', () => {
     expect([...result]).toEqual([1, 2, 3, 4, 5])
   })
 
+  it.each([
+    ['Float32Array', new Float32Array([0.5, 0.1, 2])],
+    ['Float64Array', new Float64Array([0.5, 0.1, 2])],
+  ])('takes a %s parameter as a vector', async (_kind, vec) => {
+    // #586: a typed array parameter is a VECTOR. 0.1 is exact in neither
+    // width: a Float64Array element becomes the nearest 32-bit float.
+    const result = await db.execute('RETURN $v AS v, size($v) AS n', { v: vec })
+    const row = result.toArray()[0]
+    expect(row.n).toBe(3)
+    const v = row.v
+    expect(v).toBeInstanceOf(Float32Array)
+    expect([...v]).toEqual([...new Float32Array([0.5, 0.1, 2])])
+  })
+
   it('should round-trip Float32Array/vector values', () => {
     const node = db.createNode(['Test'])
     const vec = new Float32Array([1.0, 2.0, 3.0])
     db.setNodeProperty(node.id, 'embedding', vec)
     const fetched = db.getNode(node.id)
     const result = fetched.get('embedding')
-    // napi-rs returns the vector data as a buffer; reconstruct Float32Array
-    const floats = new Float32Array(
-      result.buffer ?? result,
-      result.byteOffset ?? 0,
-      3
-    )
-    expect(floats.length).toBe(3)
-    expect(floats[0]).toBeCloseTo(1.0)
-    expect(floats[1]).toBeCloseTo(2.0)
-    expect(floats[2]).toBeCloseTo(3.0)
+    // A vector, not the bytes of one (#586: Node-API calls every typed array
+    // a buffer, and the property was stored as BYTES).
+    expect(result).toBeInstanceOf(Float32Array)
+    expect([...result]).toEqual([1, 2, 3])
+  })
+
+  it.each([
+    ['Buffer', Buffer.from([1, 2, 3])],
+    ['Uint8Array', new Uint8Array([1, 2, 3])],
+  ])('keeps a %s parameter as bytes', async (_kind, bytes) => {
+    const result = await db.execute('RETURN $b AS b, $b IS TYPED BYTES AS isBytes', { b: bytes })
+    const row = result.toArray()[0]
+    expect(row.isBytes).toBe(true)
+    expect(Buffer.isBuffer(row.b)).toBe(true)
+    expect([...row.b]).toEqual([1, 2, 3])
   })
 
   it('should round-trip BigInt values', () => {
@@ -1370,6 +1389,52 @@ describe('vector operations', () => {
     )
     expect(results.length).toBe(1)
     expect(results[0].length).toBe(2)
+    db.close()
+  })
+
+  it.each([
+    ['Float32Array', (xs) => new Float32Array(xs)],
+    ['Float64Array', (xs) => new Float64Array(xs)],
+  ])('indexes %s embeddings from createNode and setNodeProperty', async (_kind, make) => {
+    // #586: a typed array embedding is a VECTOR, so the index finds it.
+    const db = GrafeoDB.create()
+    const first = db.createNode(['Doc'], { embedding: make([1, 0, 0]) })
+    const second = db.createNode(['Doc'])
+    db.setNodeProperty(second.id, 'embedding', make([0, 1, 0]))
+    await db.createVectorIndex('Doc', 'embedding', 3, 'cosine')
+    const results = await db.vectorSearch('Doc', 'embedding', [1, 0, 0], 5)
+    expect(results.map(([id]) => id).sort()).toEqual([first.id, second.id].sort())
+    expect(results[0][0]).toBe(first.id)
+    expect(results[0][1]).toBeLessThan(0.01)
+    db.close()
+  })
+
+  it('indexes plain array embeddings and refuses another dimension', async () => {
+    // #587: a JavaScript array of numbers on an indexed property is a VECTOR
+    // (it used to be stored as a LIST the index left out, with no error).
+    const db = GrafeoDB.create()
+    db.createNode(['Doc'], { name: 'anchor', embedding: new Float32Array([0, 0, 1]) })
+    await db.createVectorIndex('Doc', 'embedding', 3, 'cosine')
+    const alix = db.createNode(['Doc'], { name: 'Alix', embedding: [1, 0, 0] })
+    const gus = db.createNode(['Doc'], { name: 'Gus' })
+    db.setNodeProperty(gus.id, 'embedding', [0, 0.5, 0])
+    await db.execute("INSERT (:Doc {name: 'Vincent', embedding: $e})", { e: [1, 1, 0] })
+    const nearest = async (query) => {
+      const [[id, distance]] = await db.vectorSearch('Doc', 'embedding', query, 1)
+      expect(distance).toBeLessThan(1e-6)
+      return db.getNode(id).get('name')
+    }
+    expect(await nearest([1, 0, 0])).toBe('Alix')
+    expect(await nearest([0, 1, 0])).toBe('Gus')
+    expect(await nearest([1, 1, 0])).toBe('Vincent')
+    expect(db.getNode(alix.id).get('embedding')).toBeInstanceOf(Float32Array)
+
+    expect(() => db.createNode(['Doc'], { name: 'Mia', embedding: [1, 0] })).toThrow(
+      /has a vector index of 3 dimensions, got a vector of 2/
+    )
+    // Without a vector index an array stays a list.
+    const draft = db.createNode(['Draft'], { embedding: [1, 0, 0] })
+    expect(db.getNode(draft.id).get('embedding')).toEqual([1, 0, 0])
     db.close()
   })
 

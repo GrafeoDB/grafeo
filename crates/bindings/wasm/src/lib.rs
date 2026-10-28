@@ -344,6 +344,28 @@ impl Database {
         Ok(array.into())
     }
 
+    /// Deletes a node and all its incident edges in one operation.
+    ///
+    /// Uses the active transaction when there is one, so the deletion can
+    /// be committed or rolled back. Returns `false` if the node is absent.
+    ///
+    /// # Errors
+    ///
+    /// Returns `JsError` if the database is closed, the ID is not a
+    /// nonnegative safe integer, or the engine rejects the write.
+    #[wasm_bindgen(js_name = "detachDeleteNode")]
+    pub fn detach_delete_node(&self, id: f64) -> Result<bool, JsValue> {
+        self.check_open()?;
+        let id = node_id(id)?;
+        let tx_slot = self.tx.borrow();
+        if let Some(session) = tx_slot.as_ref() {
+            session.detach_delete_node(id).map_err(database_error)
+        } else {
+            drop(tx_slot);
+            self.db().detach_delete_node(id).map_err(database_error)
+        }
+    }
+
     /// Returns the number of nodes in the database.
     ///
     /// # Errors
@@ -1855,7 +1877,6 @@ struct NodeEdgesOptions {
 const MAX_SAFE_ID: u64 = (1 << 53) - 1;
 
 /// A node ID from a JS number: whole and at least 0.
-#[cfg(feature = "lpg-model")]
 fn node_id(id: f64) -> Result<grafeo_common::types::NodeId, JsValue> {
     if id.fract() != 0.0 || !(0.0..=9_007_199_254_740_991.0).contains(&id) {
         return Err(js_error(&format!("{id} is not a node ID")));

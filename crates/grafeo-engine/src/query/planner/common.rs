@@ -247,13 +247,28 @@ pub(crate) fn build_anti_join(
     right_columns: &[String],
     schema: Vec<LogicalType>,
 ) -> (Box<dyn Operator>, Vec<String>) {
-    let (probe_keys, build_keys) = find_shared_join_keys(&left_columns, right_columns);
-
     // No shared variables: MINUS is a no-op (keep all left rows).
-    if probe_keys.is_empty() {
+    if find_shared_join_keys(&left_columns, right_columns)
+        .0
+        .is_empty()
+    {
         return (left, left_columns);
     }
+    build_not_exists_join(left, right, left_columns, right_columns, schema)
+}
 
+/// Builds the ANTI JOIN of `FILTER NOT EXISTS`: the left rows that no right
+/// row matches on the shared variables. Unlike MINUS, a right side that
+/// shares no variable matches every left row, so any right row removes them
+/// all (`{ FILTER NOT EXISTS { P } }` is empty when P has a solution).
+pub(crate) fn build_not_exists_join(
+    left: Box<dyn Operator>,
+    right: Box<dyn Operator>,
+    left_columns: Vec<String>,
+    right_columns: &[String],
+    schema: Vec<LogicalType>,
+) -> (Box<dyn Operator>, Vec<String>) {
+    let (probe_keys, build_keys) = find_shared_join_keys(&left_columns, right_columns);
     let operator: Box<dyn Operator> = Box::new(HashJoinOperator::new(
         left,
         right,
@@ -350,6 +365,89 @@ pub(crate) fn build_left_join(
     } else {
         (join_op, output_columns, join_schema)
     }
+}
+
+/// Builds a SPARQL join (`PhysicalJoinType::Inner`) or left join
+/// (`PhysicalJoinType::Left`) where the shared variables in `loose` may be
+/// unbound on a side: two rows are compatible when they agree on the shared
+/// variables both bind (SPARQL 1.1 sec 18.3). It hashes on the other shared
+/// variables, checks the loose ones per pair (an unbound one agrees with any
+/// value) and outputs the bound value of each; `residual` must hold for a
+/// pair too. The output is the left columns, then the right ones the left
+/// does not have.
+#[cfg(feature = "triple-store")]
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the two sides of the join and how they meet"
+)]
+pub(crate) fn build_compatible_join(
+    left: Box<dyn Operator>,
+    right: Box<dyn Operator>,
+    left_columns: &[String],
+    right_columns: &[String],
+    left_types: &[LogicalType],
+    right_types: &[LogicalType],
+    loose: &[String],
+    join_type: PhysicalJoinType,
+    residual: Option<Box<dyn grafeo_core::execution::operators::JoinCondition>>,
+) -> (Box<dyn Operator>, Vec<String>, Vec<LogicalType>) {
+    let mut probe_keys = Vec::new();
+    let mut build_keys = Vec::new();
+    let mut pairs = Vec::new();
+    for (right_index, name) in right_columns.iter().enumerate() {
+        if let Some(left_index) = left_columns.iter().position(|c| c == name) {
+            if loose.contains(name) {
+                pairs.push((left_index, right_index));
+            } else {
+                probe_keys.push(left_index);
+                build_keys.push(right_index);
+            }
+        }
+    }
+    let mut join_schema = left_types.to_vec();
+    join_schema.extend(right_types.iter().cloned());
+    let condition = grafeo_core::execution::operators::CompatibleCondition::new(pairs, residual);
+    let join_op: Box<dyn Operator> = Box::new(
+        HashJoinOperator::new(
+            left,
+            right,
+            probe_keys,
+            build_keys,
+            join_type,
+            join_schema.clone(),
+        )
+        .with_residual(Box::new(condition)),
+    );
+
+    let width = left_columns.len();
+    let mut projections = Vec::new();
+    let mut output_columns = Vec::new();
+    let mut output_types = Vec::new();
+    for (left_index, name) in left_columns.iter().enumerate() {
+        let shared = right_columns.iter().position(|c| c == name);
+        projections.push(match shared {
+            Some(right_index) if loose.contains(name) => ProjectExpr::Coalesce {
+                first: left_index,
+                second: width + right_index,
+            },
+            _ => ProjectExpr::Column(left_index),
+        });
+        output_columns.push(name.clone());
+        output_types.push(join_schema[left_index].clone());
+    }
+    for (right_index, name) in right_columns.iter().enumerate() {
+        if !left_columns.contains(name) {
+            projections.push(ProjectExpr::Column(width + right_index));
+            output_columns.push(name.clone());
+            output_types.push(join_schema[width + right_index].clone());
+        }
+    }
+    let operator = Box::new(ProjectOperator::new(
+        join_op,
+        projections,
+        output_types.clone(),
+    ));
+    (operator, output_columns, output_types)
 }
 
 /// Finds shared variable names between two column lists and returns

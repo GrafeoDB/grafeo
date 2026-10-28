@@ -7,13 +7,14 @@ use super::common::{
 };
 use crate::database::ResultKind;
 use crate::query::plan::Callee;
+use crate::query::plan::always_bound;
 use crate::query::plan::{
     AddGraphOp, AggregateExpr, AggregateFunction, AggregateOp, AntiJoinOp, BinaryOp, BindOp,
     ClearGraphOp, ConstructOp, CopyGraphOp, CreateGraphOp, DatasetRestriction, DeleteTripleOp,
     DropGraphOp, FilterOp, InsertTripleOp, JoinCondition, JoinOp, JoinType, LeftJoinOp,
-    LoadGraphOp, LogicalExpression, LogicalOperator, LogicalPlan, ModifyOp, MoveGraphOp, ProjectOp,
-    Projection, SortKey, SortOrder, TripleComponent, TripleScanOp, TripleTemplate, UnaryOp,
-    UnionOp,
+    LoadGraphOp, LogicalExpression, LogicalOperator, LogicalPlan, ModifyOp, MoveGraphOp,
+    NamedGraphsOp, ProjectOp, Projection, SortKey, SortOrder, TripleComponent, TripleScanOp,
+    TripleTemplate, UnaryOp, UnionOp,
 };
 use grafeo_adapters::query::sparql::{self, ast};
 use grafeo_common::storage::log_record::RdfGraphTarget;
@@ -117,6 +118,9 @@ struct SparqlTranslator {
     /// The row of the initial bindings, which the outermost group joins
     /// first.
     group_start: Option<LogicalOperator>,
+    /// The empty group's one solution inside `GRAPH ?g`, when the pattern
+    /// there leaves ?g unbound: one row per named graph (see [`Self::unit`]).
+    graph_unit: Option<NamedGraphsOp>,
 }
 
 impl SparqlTranslator {
@@ -130,6 +134,7 @@ impl SparqlTranslator {
             dataset: None,
             initial_bindings: None,
             group_start: None,
+            graph_unit: None,
         }
     }
 
@@ -982,6 +987,199 @@ impl SparqlTranslator {
         self.join_patterns(row, plan)
     }
 
+    /// Translates the elements of a group, with its FILTERs left out: they
+    /// scope over the whole group, so they are returned for the caller to
+    /// apply (a group filters its result; an OPTIONAL makes them the
+    /// condition of its left join). FILTER EXISTS and NOT EXISTS are applied
+    /// here.
+    fn translate_group(
+        &mut self,
+        patterns: &[ast::GraphPattern],
+    ) -> Result<(LogicalOperator, Vec<LogicalExpression>)> {
+        // Process patterns in document order so that BIND, OPTIONAL,
+        // MINUS, etc. see the variables introduced by preceding
+        // patterns. FILTER and FILTER NOT EXISTS/EXISTS scope over
+        // the entire group (SPARQL spec), so they are collected and
+        // applied last.
+        let mut filter_exprs: Vec<&ast::Expression> = Vec::new();
+        let mut exists_filters: Vec<&ast::Expression> = Vec::new();
+
+        // The initial bindings start the outermost group, so its
+        // filters see them (a `VALUES` row in the group would).
+        let mut plan = match self.group_start.take() {
+            Some(start) => start,
+            None => self.unit(),
+        };
+
+        for p in patterns {
+            match p {
+                ast::GraphPattern::Filter(expr) => {
+                    // Collect filters for group-level application
+                    match expr {
+                        ast::Expression::NotExists(_) | ast::Expression::Exists(_) => {
+                            exists_filters.push(expr);
+                        }
+                        _ => filter_exprs.push(expr),
+                    }
+                }
+                ast::GraphPattern::Bind {
+                    expression,
+                    variable,
+                } => {
+                    let expr = self.translate_expression(expression)?;
+                    plan = LogicalOperator::Bind(BindOp {
+                        expression: expr,
+                        variable: variable.clone(),
+                        input: Box::new(plan),
+                    });
+                }
+                ast::GraphPattern::Optional(inner) => {
+                    plan = self.translate_optional(plan, inner)?;
+                }
+                ast::GraphPattern::Minus(inner) => {
+                    let inner_plan = self.translate_graph_pattern(inner)?;
+                    // Minus(Z, P) is Z; MINUS removes a solution only through
+                    // a variable both sides bind.
+                    if !self.is_unit(&plan) && self.share_a_pattern_variable(&plan, &inner_plan) {
+                        plan = LogicalOperator::AntiJoin(AntiJoinOp {
+                            left: Box::new(plan),
+                            right: Box::new(inner_plan),
+                        });
+                    }
+                }
+                // InlineData with UNDEF entries: translate as a Union of
+                // filtered copies of the base plan.
+                ast::GraphPattern::InlineData(data)
+                    if data
+                        .values
+                        .iter()
+                        .any(|row| row.iter().any(Option::is_none)) =>
+                {
+                    if self.is_unit(&plan) {
+                        let values = self.translate_graph_pattern(
+                            &ast::GraphPattern::InlineData(data.clone()),
+                        )?;
+                        plan = self.join_patterns(plan, values)?;
+                    } else {
+                        let mut branches = Vec::new();
+                        for row in &data.values {
+                            let mut conditions: Vec<LogicalExpression> = Vec::new();
+                            for (var, val) in data.variables.iter().zip(row.iter()) {
+                                if let Some(dv) = val {
+                                    let value = self.data_value_to_value(dv);
+                                    conditions.push(LogicalExpression::Binary {
+                                        left: Box::new(LogicalExpression::Variable(var.clone())),
+                                        op: BinaryOp::Eq,
+                                        right: Box::new(LogicalExpression::Literal(value)),
+                                    });
+                                }
+                            }
+                            if conditions.is_empty() {
+                                branches.push(plan.clone());
+                            } else {
+                                let combined = LogicalExpression::conjunction(conditions)
+                                    .expect("conditions non-empty");
+                                branches.push(wrap_filter(plan.clone(), combined));
+                            }
+                        }
+                        plan = if branches.len() == 1 {
+                            branches.into_iter().next().expect("single branch")
+                        } else {
+                            LogicalOperator::Union(UnionOp { inputs: branches })
+                        };
+                    }
+                }
+                _ => {
+                    let p_plan = self.translate_graph_pattern(p)?;
+                    plan = self.join_patterns(plan, p_plan)?;
+                }
+            }
+        }
+
+        // Each FILTER EXISTS or NOT EXISTS filters the group on its own: the
+        // planner runs it as a semi or anti join, which keeps or drops rows
+        // and never adds one or a variable (a FILTER binds nothing). An
+        // empty group so far is Z, one solution, which the filter keeps or
+        // drops as any other.
+        for expr in exists_filters {
+            let predicate = self.translate_expression(expr)?;
+            plan = wrap_filter(plan, predicate);
+        }
+
+        let filters = filter_exprs
+            .into_iter()
+            .map(|e| self.translate_expression(e))
+            .collect::<Result<Vec<_>>>()?;
+        Ok((plan, filters))
+    }
+
+    /// `OPTIONAL { P }` after `left`, the group so far, is LeftJoin(left, P,
+    /// F) (SPARQL 1.1 sec 18.2.2.6), F the FILTERs at the top of P's group.
+    /// F decides which pairs match over the merged solution, so it reads the
+    /// variables bound before the OPTIONAL too; a FILTER with an EXISTS stays
+    /// inside P, where it runs as a join. An empty `left` is Z, the empty
+    /// group's one solution: an OPTIONAL that opens a group keeps it when P
+    /// has no solution.
+    fn translate_optional(
+        &mut self,
+        left: LogicalOperator,
+        inner: &ast::GraphPattern,
+    ) -> Result<LogicalOperator> {
+        let (right, condition) = if let ast::GraphPattern::Group(patterns) = inner {
+            let (plan, filters) = self.translate_group(patterns)?;
+            let (inside, merged): (Vec<_>, Vec<_>) = filters
+                .into_iter()
+                .partition(crate::query::plan::has_subquery);
+            let plan = match LogicalExpression::conjunction(inside) {
+                Some(predicate) => wrap_filter(plan, predicate),
+                None => plan,
+            };
+            (plan, LogicalExpression::conjunction(merged))
+        } else {
+            (self.translate_graph_pattern(inner)?, None)
+        };
+        Ok(LogicalOperator::LeftJoin(LeftJoinOp {
+            left: Box::new(left),
+            right: Box::new(right),
+            condition,
+        }))
+    }
+
+    /// The empty group's one solution: Z, or inside a `GRAPH ?g` whose
+    /// pattern leaves ?g unbound, one row per named graph with ?g bound.
+    fn unit(&self) -> LogicalOperator {
+        match &self.graph_unit {
+            Some(graphs) => LogicalOperator::NamedGraphs(graphs.clone()),
+            None => LogicalOperator::Empty,
+        }
+    }
+
+    /// Whether `plan` is [`Self::unit`].
+    fn is_unit(&self, plan: &LogicalOperator) -> bool {
+        match plan {
+            LogicalOperator::Empty => true,
+            LogicalOperator::NamedGraphs(graphs) => self
+                .graph_unit
+                .as_ref()
+                .is_some_and(|unit| unit.variable == graphs.variable),
+            _ => false,
+        }
+    }
+
+    /// Whether `left` and `right` share a variable of the pattern. Inside
+    /// `GRAPH ?g`, ?g names the graph the pattern is evaluated in, not a
+    /// variable of it (sec 18.6): sharing it alone is sharing none.
+    fn share_a_pattern_variable(&self, left: &LogicalOperator, right: &LogicalOperator) -> bool {
+        let right_variables = Self::collect_operator_variables(right);
+        Self::collect_operator_variables(left).iter().any(|name| {
+            right_variables.contains(name)
+                && !self
+                    .graph_context_stack
+                    .iter()
+                    .any(|graph| graph.as_variable() == Some(name.as_str()))
+        })
+    }
+
     fn translate_graph_pattern_unbound(
         &mut self,
         pattern: &ast::GraphPattern,
@@ -990,154 +1188,18 @@ impl SparqlTranslator {
             ast::GraphPattern::Basic(triples) => self.translate_basic_pattern(triples),
 
             ast::GraphPattern::Group(patterns) => {
-                // Process patterns in document order so that BIND, OPTIONAL,
-                // MINUS, etc. see the variables introduced by preceding
-                // patterns. FILTER and FILTER NOT EXISTS/EXISTS scope over
-                // the entire group (SPARQL spec), so they are collected and
-                // applied last.
-                let mut filter_exprs: Vec<&ast::Expression> = Vec::new();
-                let mut not_exists_patterns: Vec<&ast::GraphPattern> = Vec::new();
-                let mut exists_patterns: Vec<&ast::GraphPattern> = Vec::new();
-
-                // The initial bindings start the outermost group, so its
-                // filters see them (a `VALUES` row in the group would).
-                let mut plan = self.group_start.take().unwrap_or(LogicalOperator::Empty);
-
-                for p in patterns {
-                    match p {
-                        ast::GraphPattern::Filter(expr) => {
-                            // Collect filters for group-level application
-                            match expr {
-                                ast::Expression::NotExists(inner) => {
-                                    not_exists_patterns.push(inner);
-                                }
-                                ast::Expression::Exists(inner) => {
-                                    exists_patterns.push(inner);
-                                }
-                                _ => filter_exprs.push(expr),
-                            }
-                        }
-                        ast::GraphPattern::Bind {
-                            expression,
-                            variable,
-                        } => {
-                            let expr = self.translate_expression(expression)?;
-                            plan = LogicalOperator::Bind(BindOp {
-                                expression: expr,
-                                variable: variable.clone(),
-                                input: Box::new(plan),
-                            });
-                        }
-                        ast::GraphPattern::Optional(inner) => {
-                            let inner_plan = self.translate_graph_pattern(inner)?;
-                            if matches!(plan, LogicalOperator::Empty) {
-                                plan = inner_plan;
-                            } else {
-                                plan = LogicalOperator::LeftJoin(LeftJoinOp {
-                                    left: Box::new(plan),
-                                    right: Box::new(inner_plan),
-                                    condition: None,
-                                });
-                            }
-                        }
-                        ast::GraphPattern::Minus(inner) => {
-                            let inner_plan = self.translate_graph_pattern(inner)?;
-                            if !matches!(plan, LogicalOperator::Empty) {
-                                plan = LogicalOperator::AntiJoin(AntiJoinOp {
-                                    left: Box::new(plan),
-                                    right: Box::new(inner_plan),
-                                });
-                            }
-                        }
-                        // InlineData with UNDEF entries: translate as a Union of
-                        // filtered copies of the base plan.
-                        ast::GraphPattern::InlineData(data)
-                            if data
-                                .values
-                                .iter()
-                                .any(|row| row.iter().any(Option::is_none)) =>
-                        {
-                            if matches!(plan, LogicalOperator::Empty) {
-                                plan = self.translate_graph_pattern(
-                                    &ast::GraphPattern::InlineData(data.clone()),
-                                )?;
-                            } else {
-                                let mut branches = Vec::new();
-                                for row in &data.values {
-                                    let mut conditions: Vec<LogicalExpression> = Vec::new();
-                                    for (var, val) in data.variables.iter().zip(row.iter()) {
-                                        if let Some(dv) = val {
-                                            let value = self.data_value_to_value(dv);
-                                            conditions.push(LogicalExpression::Binary {
-                                                left: Box::new(LogicalExpression::Variable(
-                                                    var.clone(),
-                                                )),
-                                                op: BinaryOp::Eq,
-                                                right: Box::new(LogicalExpression::Literal(value)),
-                                            });
-                                        }
-                                    }
-                                    if conditions.is_empty() {
-                                        branches.push(plan.clone());
-                                    } else {
-                                        let combined = LogicalExpression::conjunction(conditions)
-                                            .expect("conditions non-empty");
-                                        branches.push(wrap_filter(plan.clone(), combined));
-                                    }
-                                }
-                                plan = if branches.len() == 1 {
-                                    branches.into_iter().next().expect("single branch")
-                                } else {
-                                    LogicalOperator::Union(UnionOp { inputs: branches })
-                                };
-                            }
-                        }
-                        _ => {
-                            let p_plan = self.translate_graph_pattern(p)?;
-                            plan = self.join_patterns(plan, p_plan)?;
-                        }
-                    }
-                }
-
-                // Apply FILTER NOT EXISTS as anti joins
-                for inner in not_exists_patterns {
-                    let inner_plan = self.translate_graph_pattern(inner)?;
-                    if !matches!(plan, LogicalOperator::Empty) {
-                        plan = LogicalOperator::AntiJoin(AntiJoinOp {
-                            left: Box::new(plan),
-                            right: Box::new(inner_plan),
-                        });
-                    }
-                }
-
-                // 4c. Apply FILTER EXISTS as semi joins (inner join)
-                for inner in exists_patterns {
-                    let inner_plan = self.translate_graph_pattern(inner)?;
-                    if !matches!(plan, LogicalOperator::Empty) {
-                        plan = self.join_patterns(plan, inner_plan)?;
-                    }
-                }
-
-                // 5. Apply FILTER expressions last (they scope over entire group)
-                if !filter_exprs.is_empty() {
-                    let predicates: Vec<LogicalExpression> = filter_exprs
-                        .into_iter()
-                        .map(|e| self.translate_expression(e))
-                        .collect::<Result<Vec<_>>>()?;
-
-                    // Combine all predicates with AND
-                    let combined = LogicalExpression::conjunction(predicates)
-                        .expect("predicates non-empty after is_empty check");
-
-                    plan = wrap_filter(plan, combined);
-                }
-
-                Ok(plan)
+                let (plan, filters) = self.translate_group(patterns)?;
+                Ok(match LogicalExpression::conjunction(filters) {
+                    Some(predicate) => wrap_filter(plan, predicate),
+                    None => plan,
+                })
             }
 
             ast::GraphPattern::Optional(inner) => {
-                // Standalone OPTIONAL - handled in Group translation, but support direct call
-                self.translate_graph_pattern(inner)
+                // `{ OPTIONAL { P } }`, a group of one, which the parser
+                // collapses: LeftJoin(Z, P), Z the empty group's one solution.
+                let unit = self.unit();
+                self.translate_optional(unit, inner)
             }
 
             ast::GraphPattern::Union(alternatives) => {
@@ -1150,15 +1212,19 @@ impl SparqlTranslator {
             }
 
             ast::GraphPattern::Minus(inner) => {
-                // Standalone MINUS - handled in Group translation, but support direct call
-                self.translate_graph_pattern(inner)
+                // `{ MINUS { P } }`, a group of one: Minus(Z, P) is Z, the
+                // empty group's one solution, as it shares no variable with a
+                // solution of P (SPARQL 1.1 sec 18.5). P is still translated,
+                // so a pattern this build refuses is refused here too.
+                self.translate_graph_pattern(inner)?;
+                Ok(self.unit())
             }
 
             ast::GraphPattern::Filter(expr) => {
                 // Standalone FILTER - handled in Group translation, but support direct call
                 // This can happen when Filter is the top-level pattern
                 let predicate = self.translate_expression(expr)?;
-                Ok(wrap_filter(LogicalOperator::Empty, predicate))
+                Ok(wrap_filter(self.unit(), predicate))
             }
 
             ast::GraphPattern::Bind {
@@ -1170,7 +1236,7 @@ impl SparqlTranslator {
                 Ok(LogicalOperator::Bind(BindOp {
                     expression: expr,
                     variable: variable.clone(),
-                    input: Box::new(LogicalOperator::Empty),
+                    input: Box::new(self.unit()),
                 }))
             }
 
@@ -1180,7 +1246,25 @@ impl SparqlTranslator {
                     ast::VariableOrIri::Iri(iri) => TripleComponent::Iri(self.resolve_iri(iri)),
                 };
                 self.graph_context_stack.push(graph_component);
-                let plan = self.translate_graph_pattern(pattern);
+                let outer_unit = self.graph_unit.take();
+                let plan = match (self.translate_graph_pattern(pattern), graph) {
+                    // SPARQL evaluates P once per named graph (sec 18.6), so
+                    // a solution of P that binds no ?g (the empty group's,
+                    // which an OPTIONAL or MINUS can keep) belongs to every
+                    // graph: P is translated again with that solution as one
+                    // row per named graph.
+                    (Ok(plan), ast::VariableOrIri::Variable(name))
+                        if !always_bound(&plan).is_none_or(|bound| bound.contains(name)) =>
+                    {
+                        self.graph_unit = Some(NamedGraphsOp {
+                            variable: name.clone(),
+                            dataset: self.dataset.clone(),
+                        });
+                        self.translate_graph_pattern(pattern)
+                    }
+                    (plan, _) => plan,
+                };
+                self.graph_unit = outer_unit;
                 self.graph_context_stack.pop();
                 plan
             }
@@ -1217,7 +1301,7 @@ impl SparqlTranslator {
                 }
                 let mut branches = Vec::new();
                 for row in &data.values {
-                    let mut plan = LogicalOperator::Empty;
+                    let mut plan = self.unit();
                     for (var, val) in data.variables.iter().zip(row.iter()) {
                         if let Some(dv) = val {
                             plan = LogicalOperator::Bind(BindOp {
@@ -1246,7 +1330,7 @@ impl SparqlTranslator {
         triples: &[ast::TriplePattern],
     ) -> Result<LogicalOperator> {
         if triples.is_empty() {
-            return Ok(LogicalOperator::Empty);
+            return Ok(self.unit());
         }
 
         let mut plan = LogicalOperator::Empty;
@@ -1985,6 +2069,11 @@ impl SparqlTranslator {
 
     fn collect_variables_recursive(op: &LogicalOperator, vars: &mut Vec<String>) {
         match op {
+            LogicalOperator::NamedGraphs(graphs) => {
+                if !vars.contains(&graphs.variable) {
+                    vars.push(graphs.variable.clone());
+                }
+            }
             LogicalOperator::PropertyPath(path) => {
                 for component in [Some(&path.subject), Some(&path.object), path.graph.as_ref()]
                     .into_iter()

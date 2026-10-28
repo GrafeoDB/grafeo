@@ -683,28 +683,42 @@ impl<'a> Parser<'a> {
     fn parse_group_graph_pattern(&mut self) -> Result<GraphPattern> {
         self.expect(TokenKind::LeftBrace)?;
 
-        let mut patterns = Vec::new();
-
         self.enter_group()?;
+        let patterns = self.parse_group_elements()?;
+        self.exit_group();
+
+        self.expect(TokenKind::RightBrace)?;
+        Ok(group_of(patterns))
+    }
+
+    /// Parses the elements of a group up to its closing brace. The target of
+    /// a `BIND` must not be in scope from the elements before it in the group
+    /// (SPARQL 1.1 sec 10.1 and 18.2.1): `{ ?s :p ?o BIND(1 AS ?o) }` is an
+    /// error, not a rebinding of ?o.
+    fn parse_group_elements(&mut self) -> Result<Vec<GraphPattern>> {
+        let mut patterns = Vec::new();
+        let mut in_scope = std::collections::HashSet::new();
         while self.current.kind != TokenKind::RightBrace {
             if self.current.kind == TokenKind::Eof {
                 return Err(self.error("unexpected end of input in graph pattern"));
             }
-
-            patterns.push(self.parse_graph_pattern_element()?);
+            // A nested `{ BIND(...) }` of one element comes back as a bare
+            // BIND too, but its group starts with nothing in scope.
+            let written_here = self.current.kind == TokenKind::Bind;
+            let element = self.parse_graph_pattern_element()?;
+            if written_here
+                && let GraphPattern::Bind { variable, .. } = &element
+                && in_scope.contains(variable)
+            {
+                return Err(self.error(&format!(
+                    "the target of BIND must be a fresh variable, but '?{variable}' is already \
+                     in scope in its group (SPARQL 1.1 sec 18.2.1)"
+                )));
+            }
+            collect_in_scope_variables(&element, &mut in_scope);
+            patterns.push(element);
         }
-        self.exit_group();
-
-        self.expect(TokenKind::RightBrace)?;
-
-        if patterns.len() == 1 {
-            Ok(patterns
-                .into_iter()
-                .next()
-                .expect("len == 1 guarantees at least one element"))
-        } else {
-            Ok(GraphPattern::Group(patterns))
-        }
+        Ok(patterns)
     }
 
     fn parse_graph_pattern_element(&mut self) -> Result<GraphPattern> {
@@ -798,23 +812,9 @@ impl<'a> Parser<'a> {
             }
 
             // Regular group pattern - parse contents
-            let mut patterns = Vec::new();
-            while self.current.kind != TokenKind::RightBrace {
-                if self.current.kind == TokenKind::Eof {
-                    return Err(self.error("unexpected end of input in graph pattern"));
-                }
-                patterns.push(self.parse_graph_pattern_element()?);
-            }
+            let patterns = self.parse_group_elements()?;
             self.expect(TokenKind::RightBrace)?;
-
-            if patterns.len() == 1 {
-                Ok(patterns
-                    .into_iter()
-                    .next()
-                    .expect("len == 1 guarantees at least one element"))
-            } else {
-                Ok(GraphPattern::Group(patterns))
-            }
+            Ok(group_of(patterns))
         } else {
             Err(self.error("expected '{'"))
         }
@@ -2393,6 +2393,18 @@ impl<'a> Parser<'a> {
                 .with_span(self.current.span)
                 .with_source(self.source.to_string()),
         )
+    }
+}
+
+/// The pattern of a group of `patterns`. A group of one element is that
+/// element, except a group: `{ { P FILTER(F) } }` keeps its inner group,
+/// whose FILTER scopes over P alone, so an OPTIONAL of it is
+/// LeftJoin(G, Filter(F, P)), not LeftJoin(G, P, F) (SPARQL 1.1 sec 18.2.2.6).
+fn group_of(patterns: Vec<GraphPattern>) -> GraphPattern {
+    match <[GraphPattern; 1]>::try_from(patterns) {
+        Ok([GraphPattern::Group(inner)]) => GraphPattern::Group(vec![GraphPattern::Group(inner)]),
+        Ok([only]) => only,
+        Err(patterns) => GraphPattern::Group(patterns),
     }
 }
 

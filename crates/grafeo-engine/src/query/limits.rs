@@ -217,6 +217,7 @@ fn operator_expressions<'a>(
         | LogicalOperator::Empty
         | LogicalOperator::TripleScan(_)
         | LogicalOperator::PropertyPath(_)
+        | LogicalOperator::NamedGraphs(_)
         | LogicalOperator::Union(_)
         | LogicalOperator::AntiJoin(_)
         | LogicalOperator::Construct(_)
@@ -412,6 +413,7 @@ fn take_operator_expressions(op: &mut LogicalOperator, out: &mut Vec<LogicalExpr
         | LogicalOperator::Empty
         | LogicalOperator::TripleScan(_)
         | LogicalOperator::PropertyPath(_)
+        | LogicalOperator::NamedGraphs(_)
         | LogicalOperator::Union(_)
         | LogicalOperator::AntiJoin(_)
         | LogicalOperator::Construct(_)

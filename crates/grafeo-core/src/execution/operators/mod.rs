@@ -90,8 +90,8 @@ pub use functions::{
 };
 pub use horizontal_aggregate::{EntityKind, HorizontalAggregateOperator};
 pub use join::{
-    EqualityCondition, HashJoinOperator, HashKey, JoinCondition, JoinType, JoinedRowCondition,
-    NestedLoopJoinOperator,
+    CompatibleCondition, EqualityCondition, HashJoinOperator, HashKey, JoinCondition, JoinType,
+    JoinedRowCondition, NestedLoopJoinOperator,
 };
 pub use leapfrog_join::LeapfrogJoinOperator;
 pub use limit::{LimitOperator, LimitSkipOperator, SkipOperator};

@@ -32,6 +32,7 @@ use crate::query::planner::{PhysicalPlan, convert_aggregate_function, convert_fi
 use crate::transaction::RdfWriter;
 
 mod evaluator;
+mod named_graphs;
 mod order;
 mod term_ids;
 mod terms;
@@ -339,6 +340,19 @@ impl RdfPlanner {
         let result = match op {
             LogicalOperator::TripleScan(scan) => self.plan_triple_scan(scan),
             LogicalOperator::PropertyPath(path) => self.plan_property_path(path),
+            LogicalOperator::NamedGraphs(graphs) => {
+                let op: Box<dyn Operator> = Box::new(named_graphs::NamedGraphsOperator::new(
+                    Arc::clone(&self.store),
+                    self.writer.clone(),
+                    graphs.dataset.clone(),
+                    Arc::clone(&self.terms),
+                ));
+                Ok((
+                    op,
+                    vec![graphs.variable.clone()],
+                    vec![LogicalType::RdfTermId],
+                ))
+            }
             LogicalOperator::Filter(filter) => self.plan_filter(filter),
             LogicalOperator::Project(project) => self.plan_project(project),
             LogicalOperator::Limit(limit) => self.plan_limit(limit),
@@ -597,7 +611,7 @@ impl RdfPlanner {
 
         // Use Anti for NOT EXISTS, Semi for EXISTS
         let (result_op, result_columns) = if is_negated {
-            common::build_anti_join(
+            common::build_not_exists_join(
                 left_op,
                 right_op,
                 left_columns,
@@ -1193,6 +1207,25 @@ impl RdfPlanner {
         use crate::query::planner::common;
         let (left_op, left_columns, left_types) = self.plan_operator(&join.left)?;
         let (right_op, right_columns, right_types) = self.plan_operator(&join.right)?;
+        let loose = loosely_shared(
+            crate::query::plan::always_bound(&join.left),
+            crate::query::plan::always_bound(&join.right),
+            &left_columns,
+            &right_columns,
+        );
+        if !loose.is_empty() {
+            return Ok(common::build_compatible_join(
+                left_op,
+                right_op,
+                &left_columns,
+                &right_columns,
+                &left_types,
+                &right_types,
+                &loose,
+                grafeo_core::execution::operators::JoinType::Inner,
+                None,
+            ));
+        }
 
         // Estimate cardinalities for build-side selection
         let cardinalities = estimate_operator_cardinality(&join.left, &self.store)
@@ -1210,13 +1243,57 @@ impl RdfPlanner {
     }
 
     /// Plans a LEFT JOIN operator (for SPARQL OPTIONAL) using HashJoin.
+    ///
+    /// The condition (the FILTERs of `OPTIONAL { P FILTER(F) }`) decides which
+    /// pairs are matches over the merged solution (LeftJoin, SPARQL 1.1 sec
+    /// 18.5), so a left row none of whose pairs pass it is kept alone. It
+    /// reads the joined row: the left columns, then the right ones (a name
+    /// both sides have reads the left one, which the join keys make equal).
     fn plan_left_join(
         &self,
         join: &LeftJoinOp,
     ) -> Result<(Box<dyn Operator>, Vec<String>, Vec<LogicalType>)> {
         use crate::query::planner::common;
+        use grafeo_core::execution::operators::{JoinCondition, JoinedRowCondition};
         let (left_op, left_columns, left_types) = self.plan_operator(&join.left)?;
         let (right_op, right_columns, right_types) = self.plan_operator(&join.right)?;
+        let residual = match &join.condition {
+            Some(condition) => {
+                let mut variable_columns: HashMap<String, usize> = HashMap::new();
+                for (i, name) in left_columns.iter().chain(&right_columns).enumerate() {
+                    variable_columns.entry(name.clone()).or_insert(i);
+                }
+                let predicate = RdfExpressionPredicate::new(
+                    convert_filter_expression(condition)?,
+                    variable_columns,
+                    Arc::clone(&self.terms),
+                    self.clock,
+                );
+                let condition: Box<dyn JoinCondition> =
+                    Box::new(JoinedRowCondition::new(Box::new(predicate)));
+                Some(condition)
+            }
+            None => None,
+        };
+        let loose = loosely_shared(
+            crate::query::plan::always_bound(&join.left),
+            crate::query::plan::always_bound(&join.right),
+            &left_columns,
+            &right_columns,
+        );
+        if !loose.is_empty() {
+            return Ok(common::build_compatible_join(
+                left_op,
+                right_op,
+                &left_columns,
+                &right_columns,
+                &left_types,
+                &right_types,
+                &loose,
+                grafeo_core::execution::operators::JoinType::Left,
+                residual,
+            ));
+        }
         Ok(common::build_left_join(
             left_op,
             right_op,
@@ -1224,11 +1301,17 @@ impl RdfPlanner {
             &right_columns,
             &left_types,
             &right_types,
-            std::convert::identity,
+            |join| match residual {
+                Some(residual) => join.with_residual(residual),
+                None => join,
+            },
         ))
     }
 
     /// Plans an ANTI JOIN operator (for SPARQL MINUS).
+    ///
+    /// A shared variable a side may leave unbound still hashes here (see
+    /// [`loosely_shared`] for the joins that check it per pair).
     fn plan_anti_join(
         &self,
         join: &AntiJoinOp,
@@ -1270,30 +1353,62 @@ impl RdfPlanner {
         }
 
         // Plan all inputs and estimate cardinalities
-        let mut planned: Vec<(Box<dyn Operator>, Vec<String>, Vec<LogicalType>, f64)> = Vec::new();
+        type Planned = (
+            Box<dyn Operator>,
+            Vec<String>,
+            Vec<LogicalType>,
+            f64,
+            Option<std::collections::HashSet<String>>,
+        );
+        let mut planned: Vec<Planned> = Vec::new();
         for input in &mwj.inputs {
             let (op, cols, types) = self.plan_operator(input)?;
             let card = estimate_operator_cardinality(input, &self.store).unwrap_or(1000.0);
-            planned.push((op, cols, types, card));
+            let bound = crate::query::plan::always_bound(input);
+            planned.push((op, cols, types, card, bound));
         }
 
         // Sort by cardinality (smallest first) so we build on smaller inputs
         planned.sort_by(|a, b| a.3.partial_cmp(&b.3).unwrap_or(std::cmp::Ordering::Equal));
 
-        // Fold left-to-right with pairwise hash joins
-        let (mut current_op, mut current_cols, mut current_types, mut current_card) =
+        // Fold left-to-right with pairwise hash joins; a shared variable a
+        // side may leave unbound is checked per pair (see `loosely_shared`).
+        let (mut current_op, mut current_cols, mut current_types, mut current_card, mut bound) =
             planned.remove(0);
-        for (right_op, right_cols, right_types, right_card) in planned {
-            let cardinalities = Some((current_card, right_card));
-            let (joined_op, joined_cols, joined_types) = common::build_inner_join(
-                current_op,
-                right_op,
+        for (right_op, right_cols, right_types, right_card, right_bound) in planned {
+            let loose = loosely_shared(
+                bound.clone(),
+                right_bound.clone(),
                 &current_cols,
                 &right_cols,
-                &current_types,
-                &right_types,
-                cardinalities,
             );
+            let (joined_op, joined_cols, joined_types) = if loose.is_empty() {
+                common::build_inner_join(
+                    current_op,
+                    right_op,
+                    &current_cols,
+                    &right_cols,
+                    &current_types,
+                    &right_types,
+                    Some((current_card, right_card)),
+                )
+            } else {
+                common::build_compatible_join(
+                    current_op,
+                    right_op,
+                    &current_cols,
+                    &right_cols,
+                    &current_types,
+                    &right_types,
+                    &loose,
+                    grafeo_core::execution::operators::JoinType::Inner,
+                    None,
+                )
+            };
+            bound = bound.zip(right_bound).map(|(mut left, right)| {
+                left.extend(right);
+                left
+            });
             // Rough estimate for cascaded join output
             current_card = (current_card * right_card * 0.1).max(1.0);
             current_op = joined_op;
@@ -3430,6 +3545,26 @@ use crate::query::planner::common::{
 // ============================================================================
 // Tests
 // ============================================================================
+
+/// The shared columns of a join that a side may leave unbound: those not in
+/// both sides' [`always_bound`](crate::query::plan::always_bound) sets. An
+/// operator the analysis does not know counts as binding all its columns.
+fn loosely_shared(
+    left: Option<std::collections::HashSet<String>>,
+    right: Option<std::collections::HashSet<String>>,
+    left_columns: &[String],
+    right_columns: &[String],
+) -> Vec<String> {
+    let bound = |side: &Option<std::collections::HashSet<String>>, name: &String| {
+        side.as_ref().is_none_or(|bound| bound.contains(name))
+    };
+    left_columns
+        .iter()
+        .filter(|name| right_columns.contains(name))
+        .filter(|name| !(bound(&left, name) && bound(&right, name)))
+        .cloned()
+        .collect()
+}
 
 #[cfg(test)]
 mod tests {

@@ -2223,4 +2223,27 @@ for case_id, query, fixture in [
 ]:
     case(case_id, query, GQL, fixture)
 
+# DL: SPARQL group algebra. A FILTER inside OPTIONAL reads the joined solution (DL1 to DL3,
+#     #701; 0.6.0 read the optional pattern alone); a group that opens with MINUS or with
+#     an OPTIONAL without a match is one empty solution (DL4 to DL6, #702; 0.6.0 gave the
+#     inner pattern); a BIND to a variable in scope is a syntax error (DL7, #703; 0.6.0
+#     overwrote it); FILTER EXISTS keeps a row once and binds nothing (DL8), NOT EXISTS
+#     without a shared variable removes every row when its pattern matches (DL9, DL10); a
+#     variable an OPTIONAL left unbound is compatible with every value of a later pattern
+#     (DL6, DL11)
+for case_id, query in [
+    ("DL1", "SELECT ?n ?c WHERE { ?s ex:name ?n OPTIONAL { ?s ex:city ?c FILTER(!BOUND(?n)) } }"),
+    ("DL2", "SELECT ?s ?l WHERE { ?s ex:city ?c OPTIONAL { ?c ex:label ?l FILTER(STRENDS(STR(?s), \"alix\")) } }"),
+    ("DL3", "SELECT (COUNT(?c) AS ?k) WHERE { ?s ex:name ?n OPTIONAL { ?s ex:city ?c FILTER(!BOUND(?n)) } }"),
+    ("DL4", "SELECT (COUNT(*) AS ?c) WHERE { MINUS { ?s ex:name ?n } }"),
+    ("DL5", "SELECT (COUNT(*) AS ?c) WHERE { OPTIONAL { ?s ex:none ?o } }"),
+    ("DL6", "SELECT ?s WHERE { OPTIONAL { ?s ex:none ?o } ?s ex:age 40 }"),
+    ("DL7", "SELECT ?s ?n WHERE { ?s ex:name ?n BIND(\"x\" AS ?n) }"),
+    ("DL8", "SELECT * WHERE { ?s ex:name ?n FILTER EXISTS { ?s ex:nick ?k } }"),
+    ("DL9", "SELECT (COUNT(*) AS ?c) WHERE { ?s ex:name ?n FILTER NOT EXISTS { ?x ex:label ?l } }"),
+    ("DL10", "ASK { FILTER NOT EXISTS { ?s ex:name ?n } }"),
+    ("DL11", "SELECT ?n ?c WHERE { ?s ex:name ?n OPTIONAL { ?s ex:city ?c } ?c ex:label ?l }"),
+]:
+    case(case_id, RDF_PREFIXES + query, SPARQL, "rdf")
+
 # fmt: on

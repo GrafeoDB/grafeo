@@ -465,6 +465,20 @@ impl Binder {
 
             // RDF/SPARQL operators
             LogicalOperator::TripleScan(scan) => self.bind_triple_scan(scan),
+            LogicalOperator::NamedGraphs(graphs) => {
+                if !self.context.contains(&graphs.variable) {
+                    self.context.add_variable(
+                        graphs.variable.clone(),
+                        VariableInfo {
+                            name: graphs.variable.clone(),
+                            data_type: LogicalType::Any,
+                            is_node: false,
+                            is_edge: false,
+                        },
+                    );
+                }
+                Ok(())
+            }
             LogicalOperator::PropertyPath(path) => {
                 for component in [Some(&path.subject), Some(&path.object), path.graph.as_ref()]
                     .into_iter()

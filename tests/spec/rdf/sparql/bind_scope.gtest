@@ -1,0 +1,245 @@
+# SPARQL BIND to a variable already in scope is a syntax error
+#
+# SPARQL 1.1 Query 10.1: "The variable introduced by the BIND clause must not
+# have been used in the group graph pattern up to the point of use in BIND",
+# and 18.2.1 lists what puts a variable in scope: a triple pattern, VALUES
+# and OPTIONAL do (an OPTIONAL's variables even where it binds nothing); a
+# FILTER and a MINUS do not, and a sub-SELECT puts in only what it projects.
+# Such a query was accepted and the BIND overwrote the binding (#703).
+
+meta:
+  language: sparql
+  model: rdf
+  section: bind
+  title: BIND scope
+  dataset: empty
+  requires: [sparql, rdf]
+
+tests:
+
+  # ---------------------------------------------------------------------------
+  # Refused: the target is in scope
+  # ---------------------------------------------------------------------------
+
+  - name: bind_to_a_variable_of_a_triple_pattern_is_refused
+    setup:
+      - |
+        INSERT DATA {
+          <http://ex.org/alix> <http://ex.org/name> "Alix" .
+        }
+    query: |
+      SELECT ?s ?n WHERE {
+        ?s <http://ex.org/name> ?n
+        BIND(<http://ex.org/other> AS ?n)
+      }
+    expect:
+      error: "?n"
+      gql_status: "42001"
+
+  - name: bind_to_a_variable_of_values_is_refused
+    query: |
+      SELECT ?city WHERE {
+        VALUES ?city { "Amsterdam" }
+        BIND("Berlin" AS ?city)
+      }
+    expect:
+      error: "?city"
+      gql_status: "42001"
+
+  - name: bind_to_a_variable_of_an_optional_is_refused
+    # The OPTIONAL's ?c is in scope though it binds nothing here.
+    setup:
+      - |
+        INSERT DATA {
+          <http://ex.org/alix> <http://ex.org/name> "Alix" .
+        }
+    query: |
+      SELECT ?c WHERE {
+        ?s <http://ex.org/name> ?n
+        OPTIONAL { ?s <http://ex.org/city> ?c }
+        BIND("Berlin" AS ?c)
+      }
+    expect:
+      error: "?c"
+      gql_status: "42001"
+
+  - name: bind_to_a_variable_of_a_nested_group_before_it_is_refused
+    # The shape of the W3C negative test syntax-BINDscope7.
+    query: |
+      SELECT * WHERE {
+        { <http://ex.org/alix> <http://ex.org/age> ?a .
+          <http://ex.org/alix> <http://ex.org/next> ?b . }
+        BIND((1 + ?a) AS ?b)
+      }
+    expect:
+      error: "?b"
+      gql_status: "42001"
+
+  - name: bind_to_a_variable_of_a_union_before_it_is_refused
+    # The shape of the W3C negative test syntax-BINDscope8.
+    query: |
+      SELECT * WHERE {
+        { { <http://ex.org/alix> <http://ex.org/age> ?y }
+          UNION
+          { <http://ex.org/alix> <http://ex.org/age> ?z } }
+        BIND(1 AS ?y)
+      }
+    expect:
+      error: "?y"
+      gql_status: "42001"
+
+  - name: bind_to_a_graph_variable_after_its_graph_pattern_is_refused
+    # GRAPH ?g { P } puts ?g in scope, as well as P's variables.
+    setup:
+      - |
+        INSERT DATA {
+          GRAPH <http://ex.org/people> { <http://ex.org/alix> <http://ex.org/name> "Alix" . }
+        }
+    query: |
+      SELECT ?g WHERE {
+        GRAPH ?g { ?s <http://ex.org/name> ?n }
+        BIND(<http://ex.org/staff> AS ?g)
+      }
+    expect:
+      error: "?g"
+      gql_status: "42001"
+
+  - name: bind_inside_an_optional_to_a_variable_bound_there_is_refused
+    # The OPTIONAL's group is a group of its own: its triple pattern puts ?c
+    # in scope before the BIND.
+    setup:
+      - |
+        INSERT DATA {
+          <http://ex.org/alix> <http://ex.org/name> "Alix" .
+        }
+    query: |
+      SELECT ?n ?c WHERE {
+        ?s <http://ex.org/name> ?n
+        OPTIONAL { ?s <http://ex.org/city> ?c BIND("Berlin" AS ?c) }
+      }
+    expect:
+      error: "?c"
+      gql_status: "42001"
+
+  # ---------------------------------------------------------------------------
+  # Accepted: the target is not in scope
+  # ---------------------------------------------------------------------------
+
+  - name: bind_in_a_union_branch_of_a_variable_the_other_branch_binds
+    # Each branch is a group of its own (the W3C positive test
+    # syntax-BINDscope5).
+    setup:
+      - |
+        INSERT DATA {
+          <http://ex.org/alix> <http://ex.org/name> "Alix" .
+          <http://ex.org/gus> <http://ex.org/name> "Gus" .
+        }
+    query: |
+      SELECT ?n WHERE {
+        { ?s <http://ex.org/name> ?n }
+        UNION
+        { BIND("Mia" AS ?n) }
+      }
+    expect:
+      rows:
+        - [Alix]
+        - [Gus]
+        - [Mia]
+
+  - name: bind_after_a_filter_that_mentions_the_variable
+    # A FILTER puts nothing in scope; it applies to the whole group, so it
+    # reads ?f as the BIND set it.
+    setup:
+      - |
+        INSERT DATA {
+          <http://ex.org/alix> <http://ex.org/name> "Alix" .
+          <http://ex.org/gus> <http://ex.org/name> "Gus" .
+        }
+    query: |
+      SELECT ?n ?f WHERE {
+        ?s <http://ex.org/name> ?n
+        FILTER(?f = "y")
+        BIND("y" AS ?f)
+      }
+    expect:
+      rows:
+        - [Alix, y]
+        - [Gus, y]
+
+  - name: bind_after_a_minus_whose_pattern_binds_the_variable
+    # A MINUS puts nothing in scope. It removes Alix, who has a city.
+    setup:
+      - |
+        INSERT DATA {
+          <http://ex.org/alix> <http://ex.org/name> "Alix" .
+          <http://ex.org/alix> <http://ex.org/city> "Amsterdam" .
+          <http://ex.org/gus> <http://ex.org/name> "Gus" .
+          <http://ex.org/vincent> <http://ex.org/name> "Vincent" .
+        }
+    query: |
+      SELECT ?n ?c WHERE {
+        ?s <http://ex.org/name> ?n
+        MINUS { ?s <http://ex.org/city> ?c }
+        BIND("Berlin" AS ?c)
+      }
+    expect:
+      rows:
+        - [Gus, Berlin]
+        - [Vincent, Berlin]
+
+  - name: bind_in_a_nested_group_of_a_variable_a_later_sibling_binds
+    # The BIND's group holds nothing before it; the triple pattern comes
+    # after the group in the outer group, and joins on ?n.
+    setup:
+      - |
+        INSERT DATA {
+          <http://ex.org/alix> <http://ex.org/name> "Alix" .
+          <http://ex.org/gus> <http://ex.org/name> "Gus" .
+        }
+    query: |
+      SELECT ?s WHERE {
+        { BIND("Alix" AS ?n) }
+        ?s <http://ex.org/name> ?n
+      }
+    expect:
+      rows:
+        - [http://ex.org/alix]
+
+  - name: bind_of_a_variable_a_sub_select_uses_but_does_not_project
+    # The sub-SELECT puts only ?n in scope.
+    setup:
+      - |
+        INSERT DATA {
+          <http://ex.org/alix> <http://ex.org/name> "Alix" .
+          <http://ex.org/alix> <http://ex.org/age> 30 .
+          <http://ex.org/gus> <http://ex.org/name> "Gus" .
+          <http://ex.org/gus> <http://ex.org/age> 40 .
+        }
+    query: |
+      SELECT ?n ?a WHERE {
+        { SELECT ?n WHERE { ?s <http://ex.org/name> ?n . ?s <http://ex.org/age> ?a } }
+        BIND("none" AS ?a)
+      }
+    expect:
+      rows:
+        - [Alix, none]
+        - [Gus, none]
+
+  - name: bind_before_the_pattern_that_uses_the_variable
+    # The shape of the W3C positive test syntax-BINDscope1: the triple
+    # pattern after the BIND joins on its value.
+    setup:
+      - |
+        INSERT DATA {
+          <http://ex.org/alix> <http://ex.org/age> 30 .
+          <http://ex.org/alix> <http://ex.org/next> 31 .
+        }
+    query: |
+      SELECT ?b WHERE {
+        <http://ex.org/alix> <http://ex.org/age> ?a .
+        BIND((1 + ?a) AS ?b)
+        <http://ex.org/alix> <http://ex.org/next> ?b
+      }
+    expect:
+      rows:
+        - [31]

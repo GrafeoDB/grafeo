@@ -1162,6 +1162,54 @@ impl JoinCondition for EqualityCondition {
     }
 }
 
+/// A condition that holds when, for each pair of columns, the two values are
+/// equal or one of them is null: compatible SPARQL solutions (SPARQL 1.1
+/// sec 18.3), where a variable one side leaves unbound agrees with any
+/// value. `then`, when given, must hold for the pair as well.
+pub struct CompatibleCondition {
+    /// The (left column, right column) pairs of the shared variables.
+    pairs: Vec<(usize, usize)>,
+    /// A further condition on the pair.
+    then: Option<Box<dyn JoinCondition>>,
+}
+
+impl CompatibleCondition {
+    /// Creates the condition over the column pairs, with a further one.
+    pub fn new(pairs: Vec<(usize, usize)>, then: Option<Box<dyn JoinCondition>>) -> Self {
+        Self { pairs, then }
+    }
+}
+
+impl JoinCondition for CompatibleCondition {
+    fn evaluate(
+        &self,
+        left_chunk: &DataChunk,
+        left_row: usize,
+        right_chunk: &DataChunk,
+        right_row: usize,
+    ) -> Result<bool, OperatorError> {
+        let value = |chunk: &DataChunk, column: usize, row: usize| {
+            chunk
+                .column(column)
+                .and_then(|c| c.get_value(row))
+                .filter(|value| !value.is_null())
+        };
+        for &(left_column, right_column) in &self.pairs {
+            if let (Some(l), Some(r)) = (
+                value(left_chunk, left_column, left_row),
+                value(right_chunk, right_column, right_row),
+            ) && l != r
+            {
+                return Ok(false);
+            }
+        }
+        match &self.then {
+            Some(then) => then.evaluate(left_chunk, left_row, right_chunk, right_row),
+            None => Ok(true),
+        }
+    }
+}
+
 impl NestedLoopJoinOperator {
     /// Creates a new nested loop join operator.
     pub fn new(

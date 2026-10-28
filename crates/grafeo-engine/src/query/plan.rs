@@ -10,6 +10,11 @@ use std::fmt;
 use grafeo_common::types::Value;
 pub use grafeo_core::execution::operators::BuiltinFunction;
 
+#[cfg(any(feature = "sparql", feature = "triple-store"))]
+mod always_bound;
+#[cfg(any(feature = "sparql", feature = "triple-store"))]
+pub(crate) use always_bound::always_bound;
+
 /// A count expression for SKIP/LIMIT: either a resolved literal or an unresolved parameter.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
@@ -243,6 +248,9 @@ pub enum LogicalOperator {
     /// Unbounded RDF endpoint reachability through a finite property path.
     PropertyPath(PropertyPathOp),
 
+    /// The named graphs of the dataset, one row per graph.
+    NamedGraphs(NamedGraphsOp),
+
     /// Union of multiple result sets.
     Union(UnionOp),
 
@@ -432,6 +440,7 @@ impl LogicalOperator {
 
             // Leaf operators (read-only)
             Self::PropertyPath(_)
+            | Self::NamedGraphs(_)
             | Self::Empty
             | Self::ParameterScan(_)
             | Self::CallProcedure(_)
@@ -502,6 +511,7 @@ impl LogicalOperator {
             // Leaf operators
             Self::Empty
             | Self::PropertyPath(_)
+            | Self::NamedGraphs(_)
             | Self::ParameterScan(_)
             | Self::CallProcedure(_)
             | Self::ClearGraph(_)
@@ -716,6 +726,7 @@ impl LogicalOperator {
             // Leaf operators
             leaf @ (Self::Empty
             | Self::PropertyPath(_)
+            | Self::NamedGraphs(_)
             | Self::ParameterScan(_)
             | Self::CallProcedure(_)
             | Self::ClearGraph(_)
@@ -736,6 +747,7 @@ impl LogicalOperator {
     #[must_use]
     pub fn display_label(&self) -> String {
         match self {
+            Self::NamedGraphs(op) => format!("GRAPH ?{}", op.variable),
             Self::PropertyPath(op) => format!(
                 "{} {:?}{} {}",
                 fmt_triple_component(&op.subject),
@@ -1148,6 +1160,7 @@ impl LogicalOperator {
             }
             // RDF and graph management plans have no node patterns to close.
             Self::PropertyPath(_)
+            | Self::NamedGraphs(_)
             | Self::TripleScan(_)
             | Self::Construct(_)
             | Self::InsertTriple(_)
@@ -2475,6 +2488,17 @@ pub struct PropertyPathOp {
     /// Active named graph or graph variable; absent for the default graph.
     pub graph: Option<TripleComponent>,
     /// Dataset restriction from FROM / FROM NAMED.
+    pub dataset: Option<DatasetRestriction>,
+}
+
+/// The named graphs of the dataset, one row per graph with `variable` bound
+/// to its IRI: the one solution of an empty pattern in `GRAPH ?g { ... }`,
+/// which SPARQL evaluates once per named graph (SPARQL 1.1 sec 18.6).
+#[derive(Debug, Clone)]
+pub struct NamedGraphsOp {
+    /// The graph variable.
+    pub variable: String,
+    /// FROM NAMED: when it lists graphs, those are the named graphs.
     pub dataset: Option<DatasetRestriction>,
 }
 

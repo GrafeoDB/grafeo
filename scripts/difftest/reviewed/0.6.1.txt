@@ -34,3 +34,12 @@ DK5|gql 6354c87d40 An unbounded GQL walk has no hop cap; 0.6.0 stopped after min
 DK6|gql 1dc1b27e0f An unbounded GQL walk has no hop cap; 0.6.0 stopped after min + 100 hops (#678).
 N12|cypher 603b79d5f3 A subquery that returns an edge in one part and a node in another returns each as what it is; 0.6.0 read the node as the edge with its ID (#668).
 N12|gql 603b79d5f3 A subquery that returns an edge in one part and a node in another returns each as what it is; 0.6.0 read the node as the edge with its ID (#668).
+DL1|sparql 6527675bc9 A FILTER inside OPTIONAL reads the joined solution, so !BOUND of an outer variable keeps the OPTIONAL from extending; 0.6.0 read the optional pattern alone (#701).
+DL2|sparql cc3ebc43e3 A FILTER inside OPTIONAL reads the outer pattern's variables; 0.6.0 found them unbound and dropped the extension (#701).
+DL3|sparql 317dd143a9 A FILTER inside OPTIONAL reads the joined solution, so a count over the optional variable sees no extension; 0.6.0 counted 2 (#701).
+DL4|sparql cd2c972924 A group that opens with MINUS is one empty solution; 0.6.0 gave the MINUS pattern's solutions (#702).
+DL5|sparql cd2c972924 A group that opens with an OPTIONAL without a match is one empty solution; 0.6.0 gave none (#702).
+DL7|sparql 209042b955 A BIND to a variable already in scope is a syntax error; 0.6.0 overwrote the variable (#703).
+DL8|sparql fe72c08082 FILTER EXISTS keeps a solution once and binds none of its pattern's variables; 0.6.0 gave one row per match with the pattern's variables.
+DL9|sparql 97f0e95745 FILTER NOT EXISTS without a shared variable removes every solution when its pattern matches; 0.6.0 kept them.
+DL10|sparql 1a5ada6bbb A group of only FILTER NOT EXISTS is false when its pattern matches; 0.6.0 gave true.

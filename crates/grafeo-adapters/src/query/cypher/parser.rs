@@ -2950,6 +2950,72 @@ impl<'a> Parser<'a> {
         })
     }
 
+    /// Reads the same scalar, temporal and nested list property types as GQL.
+    /// List levels are counted rather than recursed into, and use the same
+    /// depth limit as stored property values. Quoted names remain one name.
+    fn parse_property_type_name(&mut self) -> Result<String> {
+        use grafeo_common::storage::value_codec::MAX_PROPERTY_VALUE_DEPTH;
+
+        let mut levels = 0;
+        let mut data_type = loop {
+            let quoted = self.current.kind == TokenKind::QuotedIdentifier;
+            let mut name = self.expect_identifier()?;
+            if !quoted && name.eq_ignore_ascii_case("LIST") && self.current.kind == TokenKind::Lt {
+                levels += 1;
+                if levels > MAX_PROPERTY_VALUE_DEPTH {
+                    return Err(self.error(&format!(
+                        "A property type nests at most {MAX_PROPERTY_VALUE_DEPTH} LIST<...> levels"
+                    )));
+                }
+                self.advance(); // <
+                continue;
+            }
+            if !quoted && (name.eq_ignore_ascii_case("ZONED") || name.eq_ignore_ascii_case("LOCAL"))
+            {
+                let prefix = name.to_ascii_uppercase();
+                if !self.is_contextual("DATETIME") {
+                    return Err(self.error(&format!("Expected DATETIME after {prefix}")));
+                }
+                self.advance();
+                break format!("{prefix} DATETIME");
+            }
+            if crate::query::schema::property_type_kind(&name).is_none() {
+                return Err(self.error(&crate::query::schema::unknown_property_type(&name)));
+            }
+            // DECIMAL(precision[, scale]), spelled as the catalog prints it.
+            if self.current.kind == TokenKind::LParen
+                && grafeo_common::types::DecimalType::from_name(&name) == Some(None)
+            {
+                let mut written = format!("{name}(");
+                self.advance();
+                while !matches!(self.current.kind, TokenKind::RParen | TokenKind::Eof) {
+                    written.push_str(&self.current.text);
+                    self.advance();
+                }
+                self.expect(TokenKind::RParen)?;
+                written.push(')');
+                name = match grafeo_common::types::DecimalType::from_name(&written) {
+                    Some(Some(decimal)) => decimal.to_string(),
+                    _ => {
+                        return Err(self.error(&format!(
+                            "{written}: {}",
+                            grafeo_common::types::DecimalError::InvalidPrecision
+                        )));
+                    }
+                };
+            }
+            break name;
+        };
+        for _ in 0..levels {
+            if self.current.kind != TokenKind::Gt {
+                return Err(self.error(&format!("Expected '>' to close LIST<{data_type}")));
+            }
+            self.advance();
+            data_type = format!("LIST<{data_type}>");
+        }
+        Ok(data_type)
+    }
+
     /// Parses inline property definitions: `{ prop TYPE [NOT NULL], ... }`
     ///
     /// Supports both GQL-style (`prop TYPE`) and Neo4j-style (`prop :: TYPE`).
@@ -2971,34 +3037,7 @@ impl<'a> Parser<'a> {
                 self.advance(); // consume second :
             }
 
-            // A type Grafeo supports, as in GQL's type DDL: any other name
-            // used to declare an `ANY` property.
-            let mut data_type = self.expect_identifier()?;
-            if crate::query::schema::property_type_kind(&data_type).is_none() {
-                return Err(self.error(&crate::query::schema::unknown_property_type(&data_type)));
-            }
-            // DECIMAL(precision[, scale]), spelled as the catalog prints it
-            if self.current.kind == TokenKind::LParen
-                && grafeo_common::types::DecimalType::from_name(&data_type) == Some(None)
-            {
-                let mut written = format!("{data_type}(");
-                self.advance();
-                while !matches!(self.current.kind, TokenKind::RParen | TokenKind::Eof) {
-                    written.push_str(&self.current.text);
-                    self.advance();
-                }
-                self.expect(TokenKind::RParen)?;
-                written.push(')');
-                data_type = match grafeo_common::types::DecimalType::from_name(&written) {
-                    Some(Some(decimal)) => decimal.to_string(),
-                    _ => {
-                        return Err(self.error(&format!(
-                            "{written}: {}",
-                            grafeo_common::types::DecimalError::InvalidPrecision
-                        )));
-                    }
-                };
-            }
+            let data_type = self.parse_property_type_name()?;
 
             // Optional NOT NULL
             let nullable = if self.current.kind == TokenKind::Not {
@@ -5135,6 +5174,150 @@ mod tests {
             };
             let text = format!("{statement:?}");
             assert!(text.contains("OptionalMatch"), "{query}: {text}");
+        }
+    }
+
+    #[test]
+    fn compound_property_types_in_cypher_inline_ddl() {
+        use crate::query::schema::{InlineElementType, SchemaStatement};
+
+        let statement = parse_ok(
+            "ALTER CURRENT GRAPH TYPE SET {
+                (:Event {at zoned datetime, seen :: local datetime,
+                         tags list<list<STRING>> NOT NULL}),
+                (:Event)-[:BOOKED {times :: LIST<LOCAL DATETIME>,
+                                  fees LIST<DEC(6,2)>, note STRING}]->(:Event)
+            }",
+        );
+        let Statement::Schema(SchemaStatement::CreateGraphType(create)) = statement else {
+            panic!("expected a graph type");
+        };
+        let InlineElementType::Node { properties, .. } = &create.inline_types[0] else {
+            panic!("expected a node type");
+        };
+        assert_eq!(
+            properties
+                .iter()
+                .map(|property| (
+                    property.name.as_str(),
+                    property.data_type.as_str(),
+                    property.nullable
+                ))
+                .collect::<Vec<_>>(),
+            [
+                ("at", "ZONED DATETIME", true),
+                ("seen", "LOCAL DATETIME", true),
+                ("tags", "LIST<LIST<STRING>>", false),
+            ]
+        );
+        let InlineElementType::Edge { properties, .. } = &create.inline_types[1] else {
+            panic!("expected an edge type");
+        };
+        assert_eq!(
+            properties
+                .iter()
+                .map(|property| (
+                    property.name.as_str(),
+                    property.data_type.as_str(),
+                    property.nullable
+                ))
+                .collect::<Vec<_>>(),
+            [
+                ("times", "LIST<LOCAL DATETIME>", true),
+                ("fees", "LIST<DECIMAL(6,2)>", true),
+                ("note", "STRING", true),
+            ]
+        );
+    }
+
+    #[test]
+    fn cypher_property_types_preserve_aliases_bare_and_quoted_names() {
+        use crate::query::schema::{InlineElementType, SchemaStatement};
+
+        let statement = parse_ok(
+            "ALTER CURRENT GRAPH TYPE SET {
+                (:T {a `STRING` NOT NULL, b ZONED_DATETIME, c LOCAL_DATETIME,
+                     d LIST, e ARRAY, f DECIMAL(6,2), g :: DEC(5,1),
+                     h `ZONED DATETIME`, i `LOCAL DATETIME`})
+            }",
+        );
+        let Statement::Schema(SchemaStatement::CreateGraphType(create)) = statement else {
+            panic!("expected a graph type");
+        };
+        let InlineElementType::Node { properties, .. } = &create.inline_types[0] else {
+            panic!("expected a node type");
+        };
+        assert_eq!(
+            properties
+                .iter()
+                .map(|property| property.data_type.as_str())
+                .collect::<Vec<_>>(),
+            [
+                "STRING",
+                "ZONED_DATETIME",
+                "LOCAL_DATETIME",
+                "LIST",
+                "ARRAY",
+                "DECIMAL(6,2)",
+                "DECIMAL(5,1)",
+                "ZONED DATETIME",
+                "LOCAL DATETIME"
+            ]
+        );
+        assert!(
+            !properties[0].nullable,
+            "NOT NULL belongs to the whole property type"
+        );
+        assert!(properties[1..].iter().all(|property| property.nullable));
+    }
+
+    #[test]
+    fn cypher_property_type_errors_and_list_depth_are_bounded() {
+        use crate::query::schema::{InlineElementType, SchemaStatement};
+
+        for data_type in [
+            "ZONED",
+            "LOCAL STRING",
+            "LIST<>",
+            "LIST<STRING",
+            "LIST<STRING>>",
+            "LIST<UNKNOWN_TYPE>",
+            "LIST<DECIMAL(0,0)>",
+            "`LIST<STRING>`",
+            "`LIST`<STRING>",
+            "`ZONED` DATETIME",
+            "`LOCAL` DATETIME",
+        ] {
+            parse_err(&format!(
+                "ALTER CURRENT GRAPH TYPE SET {{ (:T {{a {data_type}}}) }}"
+            ));
+        }
+        let nested = |depth: usize| format!("{}INT64{}", "LIST<".repeat(depth), ">".repeat(depth));
+        let deepest = nested(128);
+        let statement = parse_ok(&format!(
+            "ALTER CURRENT GRAPH TYPE SET {{ (:T {{a {deepest} NOT NULL}}) }}"
+        ));
+        let Statement::Schema(SchemaStatement::CreateGraphType(create)) = statement else {
+            panic!("expected a graph type");
+        };
+        let InlineElementType::Node { properties, .. } = &create.inline_types[0] else {
+            panic!("expected a node type");
+        };
+        assert_eq!(properties[0].data_type, deepest);
+        assert!(
+            !properties[0].nullable,
+            "NOT NULL follows the outermost list"
+        );
+        for depth in [129, 100_000] {
+            let query = format!(
+                "ALTER CURRENT GRAPH TYPE SET {{ (:T {{a {}}}) }}",
+                nested(depth)
+            );
+            let error = Parser::new(&query).parse().unwrap_err().to_string();
+            assert!(
+                error.contains("A property type nests at most 128 LIST<...> levels"),
+                "depth {depth}: {error}"
+            );
         }
     }
 }

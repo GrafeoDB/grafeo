@@ -24,6 +24,7 @@ All notable changes to Grafeo, for future reference (and enjoyment).
 - **Long statements no longer abort the process** ([#668](https://github.com/GrafeoDB/grafeo/issues/668)): thousands of conditions on a variable-length path, and a Gremlin `coalesce()` of thousands of branches, run instead of overflowing the stack; a long Gremlin traversal with a step that cannot be translated fails with an error.
 - **Gremlin branching steps run for each traverser** ([#668](https://github.com/GrafeoDB/grafeo/issues/668)): `coalesce()`, `optional()`, `choose()`, `union()` and `bothV()` plan their input once, so a chain of them no longer takes exponential time and memory to plan (20 steps took 30 s and 5 GB). `coalesce()` and `optional()` now choose a branch per traverser instead of once for all of them, so `g.V().coalesce(out('E'), constant('none'))` keeps the vertices without an `E` edge.
 - **A subquery that returns an edge in one part and a node in another** (`CALL (a) { ... RETURN r AS x UNION ALL ... RETURN b AS x }`, GQL and Cypher) returns each as what it is; the node came back as the edge with its ID.
+- **Compound property types in Cypher DDL** ([#678](https://github.com/GrafeoDB/grafeo/issues/678)): `ALTER CURRENT GRAPH TYPE SET`, `ADD` and `DROP` read `ZONED DATETIME`, `LOCAL DATETIME` and nested `LIST<...>` property types. SET declarations retain write validation and reopen behavior.
 
 ### Contributors
 

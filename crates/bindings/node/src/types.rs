@@ -12,6 +12,7 @@
 //! | `Date`           | `Timestamp`   | Millisecond precision          |
 //! | `BigInt`         | `Int64/Decimal` | Past 64 bits an exact `Decimal`, past 38 digits an error |
 //! | `Float32Array`   | `Vector`      |                                |
+//! | `Float64Array`   | `Vector`      | Each element the nearest 32-bit float |
 //! | RDF/JS term      | `RdfTerm`     | `{ termType, value, language, datatype, equals }`, as results give it; read by `termType` and `value` |
 
 use std::collections::{BTreeMap, HashMap};
@@ -248,6 +249,31 @@ fn js_object_to_value(env: &Env, obj: &Object<'_>) -> Result<Value> {
         return Ok(Value::List(items.into()));
     }
 
+    // A Float32Array or Float64Array is a vector. This comes before the
+    // buffer check: Node-API reports every typed array as a buffer.
+    if obj.is_typedarray()? {
+        // SAFETY: obj.is_typedarray() returned true, and env/obj are valid in this scope
+        let ta: TypedArray<'_> =
+            unsafe { Unknown::from_raw_unchecked(env.raw(), obj.raw()).cast()? };
+        if ta.typed_array_type == TypedArrayType::Float32 {
+            // SAFETY: typed array type was verified as Float32, and env/obj are valid
+            let f32arr: Float32Array =
+                unsafe { Unknown::from_raw_unchecked(env.raw(), obj.raw()).cast()? };
+            return Ok(Value::Vector(f32arr.to_vec().into()));
+        }
+        if ta.typed_array_type == TypedArrayType::Float64 {
+            // SAFETY: typed array type was verified as Float64, and env/obj are valid
+            let f64arr: Float64Array =
+                unsafe { Unknown::from_raw_unchecked(env.raw(), obj.raw()).cast()? };
+            #[allow(
+                clippy::cast_possible_truncation,
+                reason = "a vector holds 32-bit floats: each element is the nearest one, as vector() makes it"
+            )]
+            let elements: Vec<f32> = f64arr.iter().map(|x| *x as f32).collect();
+            return Ok(Value::Vector(elements.into()));
+        }
+    }
+
     if obj.is_buffer()? {
         // SAFETY: env and obj are valid napi values within this callback scope
         let unknown = unsafe { Unknown::from_raw_unchecked(env.raw(), obj.raw()) };
@@ -264,19 +290,6 @@ fn js_object_to_value(env: &Env, obj: &Object<'_>) -> Result<Value> {
         #[allow(clippy::cast_possible_truncation)]
         let micros = (ms * 1000.0) as i64;
         return Ok(Value::Timestamp(Timestamp::from_micros(micros)));
-    }
-
-    // Check for TypedArray (Float32Array for vectors)
-    if obj.is_typedarray()? {
-        // SAFETY: obj.is_typedarray() returned true, and env/obj are valid in this scope
-        let ta: TypedArray<'_> =
-            unsafe { Unknown::from_raw_unchecked(env.raw(), obj.raw()).cast()? };
-        if ta.typed_array_type == TypedArrayType::Float32 {
-            // SAFETY: typed array type was verified as Float32, and env/obj are valid
-            let f32arr: Float32Array =
-                unsafe { Unknown::from_raw_unchecked(env.raw(), obj.raw()).cast()? };
-            return Ok(Value::Vector(f32arr.to_vec().into()));
-        }
     }
 
     // An RDF/JS term, as a SPARQL result gives it or another library makes

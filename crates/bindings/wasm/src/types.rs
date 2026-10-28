@@ -5,14 +5,15 @@ use std::sync::Arc;
 
 use grafeo_common::types::rdf::{Term, UnsupportedTermKind};
 use grafeo_common::types::{PropertyKey, Timestamp, Value};
-use js_sys::{Array, Float32Array, Object, Reflect, Uint8Array};
+use js_sys::{Array, Float32Array, Float64Array, Object, Reflect, Uint8Array};
 use wasm_bindgen::prelude::*;
 
 /// Converts a JavaScript value to a Grafeo [`Value`], as the Node.js binding
 /// does: a whole number below 2^53 is an `Int64` and any other number a
 /// `Float64`; a `BigInt` follows the integer rule at any width (an `Int64`
 /// when it fits 64 bits, else an exact `Decimal` up to 38 digits); an array
-/// is a list, a `Date` a timestamp, a `Float32Array` a vector, a `Uint8Array`
+/// is a list, a `Date` a timestamp, a `Float32Array` or `Float64Array` a
+/// vector (of 32-bit floats, as vectors are stored), a `Uint8Array`
 /// bytes, an RDF/JS term (see [`rdfjs_term`]) that term, a `Map` or a plain
 /// object a map, and a tagged object (`{ $decimal: "1.50" }`,
 /// `{ $date: "2024-01-15" }`, ...) the value it stands for.
@@ -71,6 +72,14 @@ pub fn js_to_value(value: &JsValue) -> Result<Value, String> {
     }
     if let Some(vector) = value.dyn_ref::<Float32Array>() {
         return Ok(Value::Vector(vector.to_vec().into()));
+    }
+    if let Some(vector) = value.dyn_ref::<Float64Array>() {
+        #[allow(
+            clippy::cast_possible_truncation,
+            reason = "a vector holds 32-bit floats: each element is the nearest one, as vector() makes it"
+        )]
+        let elements: Vec<f32> = vector.to_vec().into_iter().map(|x| x as f32).collect();
+        return Ok(Value::Vector(elements.into()));
     }
     if let Some(bytes) = value.dyn_ref::<Uint8Array>() {
         return Ok(Value::Bytes(bytes.to_vec().into()));

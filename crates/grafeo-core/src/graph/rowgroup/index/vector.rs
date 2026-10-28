@@ -316,6 +316,14 @@ impl Inner {
         found
     }
 
+    /// Whether a vector index on `property` exists, for any label.
+    pub(in crate::graph::rowgroup) fn has_vector_index_on(&self, property: &str) -> bool {
+        self.indexes
+            .vector
+            .values()
+            .any(|entry| entry.property.as_str() == property)
+    }
+
     /// The configuration of the vector index on `label` and `property`.
     pub(in crate::graph::rowgroup) fn vector_index_config(
         &self,

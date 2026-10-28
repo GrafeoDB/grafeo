@@ -1885,6 +1885,9 @@ impl Session {
             _ => {}
         }
 
+        // A vector index takes the lists of numbers already written as
+        // vectors: they are converted first, in a transaction of their own.
+        self.convert_vector_index_lists(&cmd)?;
         // DROP SCHEMA drops the schema's default graph: it also keeps the
         // writes of open transactions out while it checks them (see
         // `GrafeoDB::drop_graph`).
@@ -2640,6 +2643,70 @@ impl Session {
                 "a SHOW statement changes nothing: it runs before the hold".to_string(),
             )),
         }
+    }
+
+    /// Before `cmd` builds a vector index in the active graph, converts the
+    /// lists of numbers its property holds on the label's nodes to vectors,
+    /// and refuses the statement for a list or vector the index could not
+    /// take (see `database::index::vector_index_lists`). The conversion is an
+    /// implicit transaction, all or none, committed before the index, which
+    /// takes effect at once: inside an open transaction, whose rollback
+    /// would undo the conversion and keep the index, a statement with lists
+    /// to convert is refused.
+    ///
+    /// # Errors
+    ///
+    /// The check that refuses the index, the refusal inside a transaction,
+    /// or the conversion's error.
+    #[cfg(feature = "gql")]
+    fn convert_vector_index_lists(
+        &self,
+        cmd: &grafeo_adapters::query::gql::ast::SchemaStatement,
+    ) -> Result<()> {
+        #[cfg(feature = "vector-index")]
+        {
+            use crate::database::index::{convert_vector_lists, vector_index_lists};
+            use grafeo_adapters::query::gql::ast::{IndexKind, SchemaStatement};
+
+            let targets: Vec<(&str, &str, Option<usize>)> = match cmd {
+                SchemaStatement::CreateVectorIndex(stmt) => {
+                    vec![(&stmt.node_label, &stmt.property, stmt.dimensions)]
+                }
+                SchemaStatement::CreateIndex(stmt) if stmt.index_kind == IndexKind::Vector => stmt
+                    .properties
+                    .iter()
+                    .map(|property| {
+                        (
+                            stmt.label.as_str(),
+                            property.as_str(),
+                            stmt.options.dimensions,
+                        )
+                    })
+                    .collect(),
+                _ => return Ok(()),
+            };
+            let Some(store) = self.active_lpg_store() else {
+                return Ok(());
+            };
+            for (label, property, dimensions) in targets {
+                let lists = vector_index_lists(&*store, label, property, dimensions)?;
+                if lists.is_empty() {
+                    continue;
+                }
+                if self.in_transaction() {
+                    return Err(grafeo_common::utils::error::Error::Transaction(
+                        grafeo_common::utils::error::TransactionError::InvalidState(format!(
+                            "a vector index on :{label}({property}) converts {} lists to vectors, \
+                             which cannot run inside a transaction: create it outside one",
+                            lists.len()
+                        )),
+                    ));
+                }
+                self.write(|writer| convert_vector_lists(writer, property, lists))?;
+            }
+        }
+        let _ = cmd;
+        Ok(())
     }
 
     /// Adds to `change` the put of a vector index of `property` on the nodes

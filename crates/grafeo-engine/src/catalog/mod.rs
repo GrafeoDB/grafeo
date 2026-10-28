@@ -2555,6 +2555,40 @@ impl CatalogConstraintValidator {
     }
 }
 
+impl CatalogConstraintValidator {
+    /// Whether `value` is a list a vector index on `key` may take as a
+    /// vector, for some label: a write of it then needs the node's labels.
+    fn indexes_list(&self, key: &str, value: &Value) -> bool {
+        #[cfg(feature = "vector-index")]
+        if let (Value::List(_), Some(store)) = (value, &self.store) {
+            return store.has_vector_index_on(key);
+        }
+        let _ = (key, value);
+        false
+    }
+
+    /// The vector a node with `labels` stores for a list of numbers written
+    /// to `key` when one of its labels has a vector index on it (#587): an
+    /// embedding written as a list, by a list literal, a parameter or an
+    /// import, is the vector of the nearest 32-bit floats, as `vector()`
+    /// makes it, so the index takes it. Its size and values are then checked
+    /// as a vector's ([`validate_node_property`](ConstraintValidator::validate_node_property)).
+    #[cfg(feature = "vector-index")]
+    fn list_as_vector(&self, labels: &[String], key: &str, value: &Value) -> Option<Value> {
+        let (Value::List(items), Some(store)) = (value, &self.store) else {
+            return None;
+        };
+        if !labels
+            .iter()
+            .any(|label| store.vector_index_config(label, key).is_some())
+        {
+            return None;
+        }
+        let vector: Option<Vec<f32>> = items.iter().map(Value::as_vector_component).collect();
+        vector.map(|vector| Value::Vector(vector.into()))
+    }
+}
+
 impl ConstraintValidator for CatalogConstraintValidator {
     fn validate_node_property(
         &self,
@@ -2562,6 +2596,25 @@ impl ConstraintValidator for CatalogConstraintValidator {
         key: &str,
         value: &Value,
     ) -> Result<(), OperatorError> {
+        // A vector index on the property takes a list of numbers as a vector
+        // (`convert_node_property`); a list still a list has an element that
+        // is not a number, which the index could not see (#587).
+        #[cfg(feature = "vector-index")]
+        if let (Value::List(items), Some(store)) = (value, &self.store)
+            && let Some(label) = labels
+                .iter()
+                .find(|label| store.vector_index_config(label, key).is_some())
+            && let Some((position, item)) = items
+                .iter()
+                .enumerate()
+                .find(|(_, item)| item.as_vector_component().is_none())
+        {
+            return Err(OperatorError::limit_violation(format!(
+                "property '{key}' on :{label} has a vector index, which takes a list of numbers: \
+                 got {} at position {position}",
+                item.type_name()
+            )));
+        }
         // A vector index on the property fixes the vector's size, and takes
         // only values it can measure a distance to (#593).
         #[cfg(feature = "vector-index")]
@@ -3021,10 +3074,12 @@ impl ConstraintValidator for CatalogConstraintValidator {
         })
     }
 
-    fn constrains_node_property(&self, _key: &str, value: &Value) -> bool {
-        // A vector index on (label, key) fixes a vector's size; the node
-        // types and a closed graph type hold every other constraint.
+    fn constrains_node_property(&self, key: &str, value: &Value) -> bool {
+        // A vector index on (label, key) fixes a vector's size and takes a
+        // list as a vector; the node types and a closed graph type hold every
+        // other constraint.
         matches!(value, Value::Vector(_))
+            || self.indexes_list(key, value)
             || self.catalog.has_node_types()
             || self
                 .closed_type
@@ -3033,14 +3088,23 @@ impl ConstraintValidator for CatalogConstraintValidator {
     }
 
     fn convert_node_property(&self, labels: &[String], key: &str, value: &Value) -> Option<Value> {
-        if value.is_null() || !self.catalog.has_node_types() {
+        if value.is_null() {
             return None;
         }
-        labels.iter().find_map(|label| {
-            let type_def = self.node_type(label)?;
-            let typed = type_def.properties.iter().find(|p| p.name == key)?;
-            typed.data_type.convert(value)
-        })
+        let typed = if self.catalog.has_node_types() {
+            labels.iter().find_map(|label| {
+                let type_def = self.node_type(label)?;
+                let typed = type_def.properties.iter().find(|p| p.name == key)?;
+                typed.data_type.convert(value)
+            })
+        } else {
+            None
+        };
+        #[cfg(feature = "vector-index")]
+        if let Some(vector) = self.list_as_vector(labels, key, typed.as_ref().unwrap_or(value)) {
+            return Some(vector);
+        }
+        typed
     }
 
     fn convert_edge_property(&self, edge_type: &str, key: &str, value: &Value) -> Option<Value> {

@@ -1137,21 +1137,15 @@ impl SqlPgqTranslator {
                 args,
                 distinct,
             } => {
-                // Special handling for path functions in SQL context
+                // LENGTH reads a scalar path column. NODES and EDGES keep their
+                // typed calls so projection resolves the ids to entity values.
                 if args.len() == 1
                     && let ast::Expression::Variable(var_name) = &args[0]
+                    && BuiltinFunction::from_name(name) == Some(BuiltinFunction::Size)
                 {
-                    let column = match BuiltinFunction::from_name(name) {
-                        Some(BuiltinFunction::Size) => Some("length"),
-                        Some(BuiltinFunction::Nodes) => Some("nodes"),
-                        Some(BuiltinFunction::Edges) => Some("edges"),
-                        _ => None,
-                    };
-                    if let Some(column) = column {
-                        return Ok(LogicalExpression::Variable(format!(
-                            "_path_{column}_{var_name}"
-                        )));
-                    }
+                    return Ok(LogicalExpression::Variable(format!(
+                        "_path_length_{var_name}"
+                    )));
                 }
 
                 let translated_args: Vec<LogicalExpression> = args
@@ -1247,22 +1241,15 @@ impl SqlPgqTranslator {
                 args,
                 distinct,
             } => {
-                // Special handling for path functions: LENGTH(p), NODES(p), EDGES(p)
-                // These reference path variables and are translated to internal column names
+                // LENGTH reads a scalar path column. NODES and EDGES keep their
+                // typed calls so projection resolves the ids to entity values.
                 if args.len() == 1
                     && let ast::Expression::Variable(var_name) = &args[0]
+                    && BuiltinFunction::from_name(name) == Some(BuiltinFunction::Size)
                 {
-                    let column = match BuiltinFunction::from_name(name) {
-                        Some(BuiltinFunction::Size) => Some("length"),
-                        Some(BuiltinFunction::Nodes) => Some("nodes"),
-                        Some(BuiltinFunction::Edges) => Some("edges"),
-                        _ => None,
-                    };
-                    if let Some(column) = column {
-                        return Ok(LogicalExpression::Variable(format!(
-                            "_path_{column}_{var_name}"
-                        )));
-                    }
+                    return Ok(LogicalExpression::Variable(format!(
+                        "_path_length_{var_name}"
+                    )));
                 }
 
                 let translated_args: Vec<LogicalExpression> = args
@@ -1942,14 +1929,19 @@ mod tests {
         };
         assert_eq!(ret.items.len(), 2);
 
-        // NODES(p) → _path_nodes_p
-        assert!(
-            matches!(&ret.items[0].expression, LogicalExpression::Variable(v) if v == "_path_nodes_p")
-        );
-        // EDGES(p) → _path_edges_p
-        assert!(
-            matches!(&ret.items[1].expression, LogicalExpression::Variable(v) if v == "_path_edges_p")
-        );
+        use crate::query::plan::Callee;
+
+        for (item, function) in ret
+            .items
+            .iter()
+            .zip([BuiltinFunction::Nodes, BuiltinFunction::Edges])
+        {
+            let LogicalExpression::FunctionCall { callee, args, .. } = &item.expression else {
+                panic!("path components keep their typed calls");
+            };
+            assert_eq!(*callee, Callee::Builtin(function));
+            assert!(matches!(args.as_slice(), [LogicalExpression::Variable(v)] if v == "p"));
+        }
     }
 
     // === Outer Aggregate Tests ===

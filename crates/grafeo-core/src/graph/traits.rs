@@ -675,6 +675,16 @@ pub trait GraphStore: Send + Sync {
         self.vector_index_config(label, property).is_some()
     }
 
+    /// Whether the store keeps a vector index on `property` for any label: a
+    /// writer then reads the labels of a node it writes a list to, which the
+    /// index may take as a vector. A store that keeps vector indexes
+    /// implements it with [`vector_index_config`](Self::vector_index_config).
+    #[cfg(feature = "vector-index")]
+    fn has_vector_index_on(&self, property: &str) -> bool {
+        let _ = property;
+        false
+    }
+
     /// The configuration of the vector index on `label` and `property`, if
     /// any: an index whose metric differs from a query's cannot serve it.
     #[cfg(feature = "vector-index")]

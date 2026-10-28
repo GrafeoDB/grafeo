@@ -972,6 +972,11 @@ impl GraphStore for RowGroupStore {
     }
 
     #[cfg(feature = "vector-index")]
+    fn has_vector_index_on(&self, property: &str) -> bool {
+        self.inner.read().has_vector_index_on(property)
+    }
+
+    #[cfg(feature = "vector-index")]
     fn vector_index_config(&self, label: &str, property: &str) -> Option<HnswConfig> {
         self.inner.read().vector_index_config(label, property)
     }

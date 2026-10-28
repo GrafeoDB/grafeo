@@ -252,6 +252,13 @@ export class Database {
     options?: { direction?: "out" | "in" | "both"; edgeTypes?: string[] },
   ): [number, number][];
 
+  /**
+   * Deletes a node and all its incident edges in one operation. Uses the active
+   * transaction, if any; rollback restores the node and edges. Returns false if
+   * the node is absent. The ID must be a nonnegative safe integer.
+   */
+  detachDeleteNode(id: number): boolean;
+
   /** Returns the number of nodes in the database. */
   nodeCount(): number;
 

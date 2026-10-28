@@ -8,7 +8,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use grafeo_common::types::{EpochId, TransactionId, Value};
-use grafeo_common::utils::error::{Error, Result};
+use grafeo_common::utils::error::{Error, QueryError, Result};
 use grafeo_core::execution::DataChunk;
 use grafeo_core::execution::operators::{
     Operator, OperatorError, OperatorResult, ReadCounter, Recording, SessionContext,
@@ -229,7 +229,34 @@ impl UserProcedureOperator {
                 .collect::<Vec<_>>()
         };
 
-        // If no columns matched, return all result columns
+        // Keep name-first projection and the positional fallback when no
+        // names match, but both must agree with the advertised output width.
+        // Check metadata even when the body returned no rows.
+        let body_width = result.columns.len();
+        let projected_width = if column_indices.is_empty() {
+            body_width
+        } else {
+            column_indices.len()
+        };
+        let output_width = self.output_columns.len();
+        if projected_width != output_width {
+            return Err(Error::from(QueryError::semantic(format!(
+                "stored procedure output has {projected_width} columns, but its declaration or YIELD lists {output_width}"
+            )))
+            .into());
+        }
+
+        // Body rows must agree with their own header before indexed
+        // projection. A malformed row must produce an error, not a panic.
+        if let Some(row) = result.rows.iter().find(|row| row.len() != body_width) {
+            return Err(Error::from(QueryError::semantic(format!(
+                "stored procedure body has {body_width} output columns, but a row has {} values",
+                row.len()
+            )))
+            .into());
+        }
+
+        // If no columns matched, return the same-width positional result.
         let rows = if column_indices.is_empty() {
             result.rows
         } else {
@@ -265,10 +292,7 @@ impl Operator for UserProcedureOperator {
         let end = (self.row_index + CHUNK_SIZE).min(rows.len());
         let chunk_rows = end - self.row_index;
 
-        let col_count = self
-            .output_columns
-            .len()
-            .max(rows.first().map_or(self.output_columns.len(), |r| r.len()));
+        let col_count = self.output_columns.len();
 
         let types: Vec<grafeo_common::types::LogicalType> =
             vec![grafeo_common::types::LogicalType::Any; col_count];

@@ -597,9 +597,12 @@ impl GrafeoDB {
         match outcome {
             Ok(Ok(value)) => {
                 self.commit_private(transaction, &changes, store)?;
+                // Committed: the set, emptied, is the next call's, with its
+                // buffers (as a session's, see `TransactionManager::recycle`).
+                self.transaction_manager.recycle(changes);
                 Ok(value)
             }
-            Ok(Err(error)) => Err(self.fail_private(transaction, &changes, error)),
+            Ok(Err(error)) => Err(self.fail_private(transaction, changes, error)),
             Err(panic) => {
                 let _ = self.rollback_private(transaction, &changes);
                 std::panic::resume_unwind(panic)
@@ -639,16 +642,20 @@ impl GrafeoDB {
     }
 
     /// Rolls back the private transaction `transaction` whose call failed
-    /// with `error`; the error to return.
+    /// with `error`; the error to return. Undone, its set is the next
+    /// call's.
     fn fail_private(
         &self,
         transaction: TransactionId,
-        changes: &TransactionChanges,
+        changes: Arc<TransactionChanges>,
         error: OperatorError,
     ) -> Error {
         let error = crate::query::executor::convert_operator_error(error);
-        match self.rollback_private(transaction, changes) {
-            Ok(()) => error,
+        match self.rollback_private(transaction, &changes) {
+            Ok(()) => {
+                self.transaction_manager.recycle(changes);
+                error
+            }
             Err(undo) => Error::Internal(format!("{error}; {undo}")),
         }
     }

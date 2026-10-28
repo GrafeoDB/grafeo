@@ -914,8 +914,8 @@ impl TransactionManager {
             return;
         }
         // Emptied now, so the next transaction's begin pays nothing for
-        // what this one held.
-        set.reuse(TransactionId::INVALID, EpochId::INITIAL);
+        // what this one held: it only names itself (`change_set`).
+        set.empty();
         let mut spare = self.spare_changes.lock();
         if spare.len() < SPARE_CHANGE_SETS {
             spare.push(changes);

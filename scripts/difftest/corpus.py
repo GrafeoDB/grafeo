@@ -352,6 +352,7 @@ WRITE_FIXTURES = {
     "merges": {"CC"},
     "leads": {"CF"},
     "quoted": {"CK"},
+    "list_embeddings": {"DH"},
     # CP1 runs after BB and its insert is refused, so BB reads the fixture as built
     "typed": {"BB", "CP"},
 }

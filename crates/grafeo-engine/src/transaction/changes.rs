@@ -117,21 +117,26 @@ impl TransactionChanges {
         }
     }
 
-    /// Makes this set, emptied, the changes of transaction `id`, which
-    /// reads at `snapshot`, as [`new`](Self::new) makes them: the buffers
-    /// of the transaction that had it stay (see
-    /// [`TransactionManager::recycle`](super::TransactionManager::recycle)).
+    /// Empties this set in place for another transaction, as the one that
+    /// had it ends: no entry, graph or pending triple, with the buffers kept
+    /// (see [`TransactionManager::recycle`](super::TransactionManager::recycle)).
+    pub(crate) fn empty(&mut self) {
+        let state = self.state.get_mut();
+        state.set.clear();
+        state.targets.clear();
+        state.start = state.set.mark();
+        #[cfg(feature = "triple-store")]
+        {
+            state.triples = super::rdf::PendingTriples::default();
+        }
+    }
+
+    /// Makes this set, [emptied](Self::empty), the changes of transaction
+    /// `id`, which reads at `snapshot`, as [`new`](Self::new) makes them.
     pub(crate) fn reuse(&mut self, id: TransactionId, snapshot: EpochId) {
-        let state = self.state.get_mut();
-        let mut set = std::mem::take(&mut state.set);
-        let mut targets = std::mem::take(&mut state.targets);
-        set.clear();
-        targets.clear();
-        *self = Self::new(id, snapshot);
-        let state = self.state.get_mut();
-        state.start = set.mark();
-        state.set = set;
-        state.targets = targets;
+        self.id = id;
+        self.snapshot = snapshot;
+        *self.keeps_bulk_rows.get_mut() = true;
     }
 
     /// Whether the set's buffers are small enough to keep for another

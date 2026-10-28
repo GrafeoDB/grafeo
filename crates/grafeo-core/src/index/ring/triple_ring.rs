@@ -154,8 +154,8 @@ impl TermDictionary {
     ///
     /// # Errors
     ///
-    /// [`TripleRingInvariantError::DictionaryOverflow`] for a new term past
-    /// the ids a dictionary gives (see [`Self::next_id`]).
+    /// [`TripleRingInvariantError::DictionaryOverflow`] for a new term when
+    /// the dictionary already holds `u32::MAX` terms (ids are `u32`).
     pub fn get_or_insert(&mut self, term: Term) -> Result<u32, TripleRingInvariantError> {
         let term = Arc::new(term);
         if let Some(&id) = self.term_to_id.get(&term) {

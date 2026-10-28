@@ -1543,11 +1543,13 @@ impl GqlTranslator {
             ast::Pattern::Quantified {
                 pattern,
                 subpath_var,
+                anchors,
                 ..
             } => {
                 if let Some(v) = subpath_var {
                     vars.insert(v.clone());
                 }
+                vars.extend(anchors.variables().cloned());
                 vars.extend(Self::pattern_variables(pattern));
             }
             ast::Pattern::Union(patterns) | ast::Pattern::MultisetUnion(patterns) => {
@@ -2353,6 +2355,311 @@ impl GqlTranslator {
         Ok(search)
     }
 
+    /// The most repetitions a quantified path pattern of more than one edge
+    /// is unrolled to (see [`translate_quantified_path`](Self::translate_quantified_path)):
+    /// its plan holds one chain per count, so it grows with the upper bound.
+    pub(crate) const MAX_UNROLLED_REPETITIONS: u32 = 16;
+
+    /// A quantified path pattern of more than one edge,
+    /// `(s)((a)-[e]->(m)-[f]->(b) WHERE ...){m,n}(t)` (G047 to G050): for each
+    /// count from `m` to `n`, one chain of the pattern repeated that many
+    /// times, the rows of all of them together (`UNION ALL`). Each repetition
+    /// starts at the last node of the one before (both `b` and `a`). The
+    /// `WHERE`, and each element's own, holds for each repetition on its
+    /// variables. Outside the pattern each inner variable is the list of its
+    /// values, one per repetition (a group variable, ISO/IEC 39075:2024
+    /// 16.7); the first and the last node are single nodes. No repetition
+    /// gives the first node as the last, with empty lists. A pattern without
+    /// an upper bound, or of more than [`Self::MAX_UNROLLED_REPETITIONS`], is
+    /// refused: a repeat operator would take it.
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "the parts of the quantified pattern and of its translation"
+    )]
+    fn translate_quantified_path(
+        &self,
+        path: &ast::PathPattern,
+        (min, max): (u32, Option<u32>),
+        where_clause: Option<&ast::Expression>,
+        anchors: &ast::QuantifiedAnchors,
+        input: Option<LogicalOperator>,
+        path_alias: Option<&str>,
+        path_mode: PathMode,
+    ) -> Result<LogicalOperator> {
+        let unsupported = |what: String| {
+            Error::from(QueryError::unsupported(format!(
+                "a quantified path pattern of more than one edge {what}"
+            )))
+        };
+        let Some(max) = max else {
+            return Err(unsupported(
+                "needs an upper bound, as in {1,3}: repeating it without one is not supported yet"
+                    .to_string(),
+            ));
+        };
+        if max > Self::MAX_UNROLLED_REPETITIONS {
+            return Err(unsupported(format!(
+                "allows at most {} repetitions",
+                Self::MAX_UNROLLED_REPETITIONS
+            )));
+        }
+        if min == 0 && path_alias.is_some() {
+            return Err(unsupported(
+                "with a path variable needs at least one repetition, as in {1,3}".to_string(),
+            ));
+        }
+        let segment = Segment::of(path);
+        let condition = segment
+            .conditions(where_clause)
+            .into_iter()
+            .map(|condition| self.translate_expression(condition))
+            .collect::<Result<Vec<_>>>()?;
+        let condition = LogicalExpression::conjunction(condition);
+        let mut first = match &anchors.source {
+            Some(anchor) => joined_node(anchor, &segment.source),
+            None => segment.source.clone(),
+        };
+        let mut last = match &anchors.target {
+            Some(anchor) => joined_node(anchor, &segment.target),
+            None => segment.target.clone(),
+        };
+        let first_name = first
+            .variable
+            .get_or_insert_with(|| self.names.next("_rep_"))
+            .clone();
+        let last_name = last
+            .variable
+            .get_or_insert_with(|| self.names.next("_rep_"))
+            .clone();
+        // The inner variables bound outside as lists: all but the first and
+        // the last node's, which name single nodes.
+        let groups: Vec<String> = segment
+            .variables()
+            .into_iter()
+            .filter(|name| *name != first_name && *name != last_name)
+            .collect();
+        // A union lines its inputs up by position: every chain keeps the
+        // same columns, in one order.
+        let mut columns: Vec<String> = match &input {
+            Some(input) => {
+                let mut bound: Vec<String> = input
+                    .bound_variables(None)
+                    .ok_or_else(|| unsupported("is not supported after this clause".to_string()))?
+                    .into_iter()
+                    .collect();
+                bound.sort();
+                bound
+            }
+            None => Vec::new(),
+        };
+        for name in [
+            Some(first_name.as_str()),
+            Some(last_name.as_str()),
+            path_alias,
+        ]
+        .into_iter()
+        .flatten()
+        {
+            if !columns.iter().any(|column| column == name) {
+                columns.push(name.to_string());
+            }
+        }
+
+        let mut branches = Vec::new();
+        for count in min..=max {
+            let (plan, repetitions) = if count == 0 {
+                let node = ast::Pattern::Node(joined_node(&first, &last));
+                let plan =
+                    self.translate_pattern_with_alias(&node, input.clone(), None, path_mode)?;
+                (plan, Vec::new())
+            } else {
+                let (chain, repetitions) = self.unrolled_chain(&segment, count, &first, &last);
+                let mut plan = self.translate_path_pattern_with_alias(
+                    &chain,
+                    input.clone(),
+                    path_alias,
+                    path_mode,
+                )?;
+                if let Some(condition) = &condition {
+                    for names in &repetitions {
+                        plan = wrap_filter(plan, bound_as(names.clone(), condition.clone()));
+                    }
+                }
+                (plan, repetitions)
+            };
+            let mut projections: Vec<Projection> = columns
+                .iter()
+                .map(|column| {
+                    // No repetition: the last node is the first.
+                    let source = if count == 0 && *column == last_name {
+                        &first_name
+                    } else {
+                        column
+                    };
+                    Projection {
+                        expression: LogicalExpression::Variable(source.clone()),
+                        alias: Some(column.clone()),
+                    }
+                })
+                .collect();
+            for group in &groups {
+                let values = repetitions
+                    .iter()
+                    .filter_map(|names| {
+                        names
+                            .iter()
+                            .find(|(name, _)| name == group)
+                            .map(|(_, column)| LogicalExpression::Variable(column.clone()))
+                    })
+                    .collect();
+                projections.push(Projection {
+                    expression: LogicalExpression::List(values),
+                    alias: Some(group.clone()),
+                });
+            }
+            branches.push(LogicalOperator::Project(ProjectOp {
+                projections,
+                input: Box::new(plan),
+                pass_through_input: false,
+            }));
+        }
+        if branches.len() == 1 {
+            return Ok(branches.remove(0));
+        }
+        Ok(LogicalOperator::Union(UnionOp { inputs: branches }))
+    }
+
+    /// The path of `segment` repeated `count` times (at least once) from
+    /// `first` to `last`, both named, and per repetition the column of each
+    /// of its variables (see [`bound_as`]). Each inner variable gets a column
+    /// of its own in each repetition; the nodes between two repetitions are
+    /// `segment.target` joined with `segment.source`.
+    fn unrolled_chain(
+        &self,
+        segment: &Segment,
+        count: u32,
+        first: &ast::NodePattern,
+        last: &ast::NodePattern,
+    ) -> (ast::PathPattern, Vec<Vec<(String, String)>>) {
+        let mut source_column = first.variable.clone();
+        let mut edges = Vec::new();
+        let mut repetitions = Vec::new();
+        for repetition in 0..count {
+            let mut names = Vec::new();
+            if let (Some(name), Some(column)) = (&segment.source.variable, &source_column) {
+                names.push((name.clone(), column.clone()));
+            }
+            for (index, inner) in segment.edges.iter().enumerate() {
+                let mut edge = inner.clone();
+                if let Some(name) = &inner.variable {
+                    let fresh = self.names.next("_rep_");
+                    names.push((name.clone(), fresh.clone()));
+                    edge.variable = Some(fresh);
+                }
+                if index + 1 < segment.edges.len() {
+                    if let Some(name) = &inner.target.variable {
+                        let fresh = self.names.next("_rep_");
+                        names.push((name.clone(), fresh.clone()));
+                        edge.target.variable = Some(fresh);
+                    }
+                } else {
+                    let target = if repetition + 1 == count {
+                        last.clone()
+                    } else {
+                        let mut joint = joined_node(&segment.target, &segment.source);
+                        joint.variable = Some(self.names.next("_rep_"));
+                        joint
+                    };
+                    if let (Some(name), Some(column)) = (&segment.target.variable, &target.variable)
+                    {
+                        names.push((name.clone(), column.clone()));
+                    }
+                    source_column.clone_from(&target.variable);
+                    edge.target = target;
+                }
+                edges.push(edge);
+            }
+            repetitions.push(names);
+        }
+        let chain = ast::PathPattern {
+            source: first.clone(),
+            edges,
+            span: None,
+        };
+        (chain, repetitions)
+    }
+
+    /// A quantified path pattern of one edge, `((a)-[e]->(b) WHERE ...){m,n}`
+    /// (G050): a variable-length edge of `m` to `n` hops, whose `WHERE` holds
+    /// for each step (ISO/IEC 39075:2024 16.7), not once for the whole path.
+    /// A condition on the step's edge alone (and outer variables) is the
+    /// edge's own `WHERE`, checked on each edge during the search; one on the
+    /// step's nodes is checked over each step of the path (see
+    /// [`every_step_matches`](crate::query::translators::common::every_step_matches)).
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "the parts of the quantified pattern and of its translation"
+    )]
+    fn translate_quantified_edge(
+        &self,
+        path: &ast::PathPattern,
+        (min, max): (u32, Option<u32>),
+        where_clause: Option<&ast::Expression>,
+        anchors: &ast::QuantifiedAnchors,
+        input: Option<LogicalOperator>,
+        path_alias: Option<&str>,
+        path_mode: PathMode,
+    ) -> Result<LogicalOperator> {
+        use crate::query::translators::common::{StepVariables, every_step_matches};
+
+        // The step's variables are the inner pattern's; the path runs from
+        // the first node (the source anchor joined with the step's source) to
+        // the last (the step's target joined with the target anchor).
+        let step = StepVariables {
+            source: path.source.variable.clone(),
+            edge: path.edges[0].variable.clone(),
+            target: path.edges[0].target.variable.clone(),
+        };
+        let mut path = path.clone();
+        if let Some(anchor) = &anchors.source {
+            path.source = joined_node(anchor, &path.source);
+        }
+        let edge = &mut path.edges[0];
+        if let Some(anchor) = &anchors.target {
+            edge.target = joined_node(anchor, &edge.target);
+        }
+        edge.min_hops = Some(min);
+        edge.max_hops = max;
+        let mut step_condition = None;
+        if let Some(where_expr) = where_clause {
+            let condition = self.translate_expression(where_expr)?;
+            let mut read = HashSet::new();
+            collect_expression_variables(&condition, &mut read);
+            let reads = |name: &Option<String>| name.as_ref().is_some_and(|n| read.contains(n));
+            if edge.variable.is_some() && !reads(&step.source) && !reads(&step.target) {
+                edge.where_clause = Some(match edge.where_clause.take() {
+                    Some(own) => ast::Expression::Binary {
+                        left: Box::new(own),
+                        op: ast::BinaryOp::And,
+                        right: Box::new(where_expr.clone()),
+                    },
+                    None => where_expr.clone(),
+                });
+            } else {
+                step_condition = Some(condition);
+            }
+        }
+        let Some(condition) = step_condition else {
+            return self.translate_path_pattern_with_alias(&path, input, path_alias, path_mode);
+        };
+        // The steps are read from the path, which needs a name.
+        let path_alias = path_alias.map_or_else(|| self.names.next("_step_path_"), String::from);
+        let plan =
+            self.translate_path_pattern_with_alias(&path, input, Some(&path_alias), path_mode)?;
+        let predicate = every_step_matches(&path_alias, self.names.next("_step_"), step, condition);
+        Ok(wrap_filter(plan, predicate))
+    }
+
     fn translate_pattern_with_alias(
         &self,
         pattern: &ast::Pattern,
@@ -2372,6 +2679,7 @@ impl GqlTranslator {
                 subpath_var,
                 path_mode: inner_path_mode,
                 where_clause,
+                anchors,
             } => {
                 // G049: Inner path mode overrides the outer path mode if set.
                 let effective_mode = inner_path_mode.as_ref().map_or(path_mode, |m| match m {
@@ -2388,39 +2696,44 @@ impl GqlTranslator {
                 // Quantified path pattern: repeat the inner pattern min..max times.
                 // For now, translate as a variable-length expansion if the inner
                 // pattern is a simple single-edge path.
-                let mut result = match pattern.as_ref() {
-                    ast::Pattern::Path(path) if path.edges.len() == 1 => {
-                        // Single-edge quantified: equivalent to variable-length edge
-                        let mut modified_path = path.clone();
-                        let edge = &mut modified_path.edges[0];
-                        edge.min_hops = Some(*min);
-                        edge.max_hops = *max;
-                        self.translate_path_pattern_with_alias(
-                            &modified_path,
+                match pattern.as_ref() {
+                    ast::Pattern::Path(path) if path.edges.len() == 1 => self
+                        .translate_quantified_edge(
+                            path,
+                            (*min, *max),
+                            where_clause.as_ref(),
+                            anchors,
                             input,
                             effective_alias,
                             effective_mode,
-                        )
-                    }
-                    _ => {
-                        // Multi-edge or complex quantified patterns: translate the
-                        // inner pattern once (future: iterate with backtracking).
-                        self.translate_pattern_with_alias(
+                        ),
+                    ast::Pattern::Path(path) => self.translate_quantified_path(
+                        path,
+                        (*min, *max),
+                        where_clause.as_ref(),
+                        anchors,
+                        input,
+                        effective_alias,
+                        effective_mode,
+                    ),
+                    // A parenthesized union or node: once, as written.
+                    _ if *min == 1 && *max == Some(1) => {
+                        let mut result = self.translate_pattern_with_alias(
                             pattern,
                             input,
                             effective_alias,
                             effective_mode,
-                        )
+                        )?;
+                        if let Some(where_expr) = where_clause {
+                            let filter_expr = self.translate_expression(where_expr)?;
+                            result = wrap_filter(result, filter_expr);
+                        }
+                        Ok(result)
                     }
-                }?;
-
-                // G050: Apply WHERE clause as a filter on the quantified pattern output
-                if let Some(where_expr) = where_clause {
-                    let filter_expr = self.translate_expression(where_expr)?;
-                    result = wrap_filter(result, filter_expr);
+                    _ => Err(Error::from(QueryError::unsupported(
+                        "a quantifier on a union or a lone node pattern is not supported yet",
+                    ))),
                 }
-
-                Ok(result)
             }
             ast::Pattern::Union(patterns) => {
                 // Union of alternative patterns: UNION ALL of each translated pattern
@@ -2760,7 +3073,12 @@ impl GqlTranslator {
                     }
                 }
             }
-            ast::Pattern::Quantified { pattern: inner, .. } => {
+            ast::Pattern::Quantified {
+                pattern: inner,
+                anchors,
+                ..
+            } => {
+                vars.extend(anchors.variables().cloned());
                 Self::collect_pattern_vars_inner(inner, vars);
             }
             ast::Pattern::Union(patterns) | ast::Pattern::MultisetUnion(patterns) => {
@@ -2811,6 +3129,119 @@ struct PathSearch {
 }
 
 use aggregate::contains_aggregate;
+
+/// The repeated part of a quantified path pattern of more than one edge,
+/// with the conditions that name its variables taken out of its elements:
+/// each repetition checks them on its own variables (see
+/// `GqlTranslator::translate_quantified_path`).
+struct Segment {
+    source: ast::NodePattern,
+    edges: Vec<ast::EdgePattern>,
+    target: ast::NodePattern,
+    /// The element `WHERE` clauses, taken out.
+    element_conditions: Vec<ast::Expression>,
+}
+
+impl Segment {
+    fn of(path: &ast::PathPattern) -> Self {
+        let mut element_conditions = Vec::new();
+        let mut take = |condition: &mut Option<ast::Expression>| {
+            if let Some(condition) = condition.take() {
+                element_conditions.push(condition);
+            }
+        };
+        let mut source = path.source.clone();
+        take(&mut source.where_clause);
+        let mut edges = path.edges.clone();
+        for edge in &mut edges {
+            take(&mut edge.where_clause);
+            take(&mut edge.target.where_clause);
+        }
+        let target = edges
+            .last()
+            .map_or_else(|| source.clone(), |edge| edge.target.clone());
+        Self {
+            source,
+            edges,
+            target,
+            element_conditions,
+        }
+    }
+
+    /// The pattern's `WHERE` and the element conditions.
+    fn conditions<'a>(
+        &'a self,
+        where_clause: Option<&'a ast::Expression>,
+    ) -> Vec<&'a ast::Expression> {
+        where_clause
+            .into_iter()
+            .chain(&self.element_conditions)
+            .collect()
+    }
+
+    /// The variables the segment names, in pattern order, each once.
+    fn variables(&self) -> Vec<String> {
+        let mut names: Vec<String> = Vec::new();
+        let elements = std::iter::once(&self.source.variable).chain(
+            self.edges
+                .iter()
+                .flat_map(|edge| [&edge.variable, &edge.target.variable]),
+        );
+        for name in elements.flatten() {
+            if !names.contains(name) {
+                names.push(name.clone());
+            }
+        }
+        names
+    }
+}
+
+/// One node of two juxtaposed node patterns (G047): the variable of the
+/// first that has one, the labels, properties and `WHERE` of both.
+fn joined_node(first: &ast::NodePattern, second: &ast::NodePattern) -> ast::NodePattern {
+    let mut node = first.clone();
+    node.variable = first.variable.clone().or_else(|| second.variable.clone());
+    for label in &second.labels {
+        if !node.labels.contains(label) {
+            node.labels.push(label.clone());
+        }
+    }
+    node.label_expression = match (node.label_expression.take(), &second.label_expression) {
+        (Some(left), Some(right)) => {
+            Some(ast::LabelExpression::Conjunction(vec![left, right.clone()]))
+        }
+        (left, right) => left.or_else(|| right.clone()),
+    };
+    node.properties.extend(second.properties.iter().cloned());
+    node.where_clause = match (node.where_clause.take(), &second.where_clause) {
+        (Some(left), Some(right)) => Some(ast::Expression::Binary {
+            left: Box::new(left),
+            op: ast::BinaryOp::And,
+            right: Box::new(right.clone()),
+        }),
+        (left, right) => left.or_else(|| right.clone()),
+    };
+    node
+}
+
+/// `predicate` with each name of `names` bound to its column, `all(name IN
+/// [column] WHERE ...)` per name: a condition written on one repetition's
+/// variables reads that repetition's columns.
+fn bound_as(names: Vec<(String, String)>, predicate: LogicalExpression) -> LogicalExpression {
+    names
+        .into_iter()
+        .rev()
+        .fold(predicate, |predicate, (name, column)| {
+            LogicalExpression::ListPredicate {
+                kind: crate::query::plan::ListPredicateKind::All,
+                variable: name,
+                list_expr: Box::new(LogicalExpression::List(vec![LogicalExpression::Variable(
+                    column,
+                )])),
+                predicate: Box::new(predicate),
+            }
+        })
+}
 
 #[cfg(test)]
 mod tests {

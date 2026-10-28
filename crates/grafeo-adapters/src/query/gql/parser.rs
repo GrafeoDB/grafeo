@@ -2049,6 +2049,7 @@ impl<'a> Parser<'a> {
                 subpath_var,
                 path_mode,
                 where_clause,
+                ..
             } = sub
             {
                 // Parse optional trailing target node: ...{2,5}(b)
@@ -2058,6 +2059,23 @@ impl<'a> Parser<'a> {
                     None
                 };
 
+                // A path pattern repeats as a whole: its anchors are the
+                // first and the last node only, and its own end nodes stay
+                // the ends of each repetition.
+                if matches!(inner.as_ref(), Pattern::Path(_)) {
+                    return Ok(Pattern::Quantified {
+                        pattern: inner,
+                        min,
+                        max,
+                        subpath_var,
+                        path_mode,
+                        where_clause,
+                        anchors: QuantifiedAnchors {
+                            source: Some(node),
+                            target: trailing_target,
+                        },
+                    });
+                }
                 // Merge outer anchors into the inner pattern:
                 // Replace inner source with `node`, replace inner last target with trailing_target.
                 let merged = self.merge_quantified_anchors(node, *inner, trailing_target);
@@ -2069,6 +2087,7 @@ impl<'a> Parser<'a> {
                     subpath_var,
                     path_mode,
                     where_clause,
+                    anchors: QuantifiedAnchors::default(),
                 })
             } else {
                 // Non-quantified parenthesized pattern after a node: treat the
@@ -2190,8 +2209,25 @@ impl<'a> Parser<'a> {
             Pattern::Union(patterns)
         };
 
-        // Check for quantifier: {min,max} or {n}
-        if self.current.kind == TokenKind::LBrace {
+        // Check for quantifier: {min,max}, {n}, or the abbreviations `*`
+        // ({0,}) and `+` ({1,}) of ISO/IEC 39075:2024 16.11.
+        let abbreviated = match self.current.kind {
+            TokenKind::Star => Some(0),
+            TokenKind::Plus => Some(1),
+            _ => None,
+        };
+        if let Some(min) = abbreviated {
+            self.advance();
+            Ok(Pattern::Quantified {
+                pattern: Box::new(inner),
+                min,
+                max: None,
+                subpath_var,
+                path_mode,
+                where_clause,
+                anchors: QuantifiedAnchors::default(),
+            })
+        } else if self.current.kind == TokenKind::LBrace {
             let (min, max) = self.parse_path_quantifier()?;
             Ok(Pattern::Quantified {
                 pattern: Box::new(inner),
@@ -2200,6 +2236,7 @@ impl<'a> Parser<'a> {
                 subpath_var,
                 path_mode,
                 where_clause,
+                anchors: QuantifiedAnchors::default(),
             })
         } else if subpath_var.is_some() || path_mode.is_some() || where_clause.is_some() {
             // Has parenthesized-pattern features but no quantifier: treat as {1,1}
@@ -2210,6 +2247,7 @@ impl<'a> Parser<'a> {
                 subpath_var,
                 path_mode,
                 where_clause,
+                anchors: QuantifiedAnchors::default(),
             })
         } else {
             // No quantifier, no extra features: just a grouped pattern (or union)

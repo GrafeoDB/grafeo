@@ -65,16 +65,11 @@ impl super::Planner {
                 1
             };
             let max_hops = if is_variable_length {
-                // An unbounded walk can go round a cycle forever, so it stops
-                // after `min + 100` hops. A path in any other mode repeats no
-                // edge (TRAIL) or node, so it ends on its own.
-                expand
-                    .max_hops
-                    .unwrap_or(if expand.path_mode == PathMode::Walk {
-                        expand.min_hops + 100
-                    } else {
-                        u32::MAX
-                    })
+                // Unbounded runs to the search's budget: a path in TRAIL,
+                // SIMPLE or ACYCLIC mode ends on its own; a walk around a
+                // cycle does not, and fails at the budget, which a path is
+                // charged for each edge (#678).
+                expand.max_hops.unwrap_or(u32::MAX)
             } else {
                 1
             };

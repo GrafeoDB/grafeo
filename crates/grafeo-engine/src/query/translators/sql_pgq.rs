@@ -1705,7 +1705,12 @@ fn pattern_names(pattern: &ast::Pattern, names: &mut HashSet<String>) {
                 names.extend(edge.target.variable.iter().cloned());
             }
         }
-        ast::Pattern::Quantified { pattern, .. } => pattern_names(pattern, names),
+        ast::Pattern::Quantified {
+            pattern, anchors, ..
+        } => {
+            names.extend(anchors.variables().cloned());
+            pattern_names(pattern, names);
+        }
         ast::Pattern::Union(patterns) | ast::Pattern::MultisetUnion(patterns) => {
             for pattern in patterns {
                 pattern_names(pattern, names);

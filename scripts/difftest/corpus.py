@@ -2208,4 +2208,19 @@ for case_id, query, languages in [
 ]:
     case(case_id, query, languages, "empty")
 
+# DK: a WHERE inside a GQL quantified pattern holds per step (#678 item 2; 0.6.0 checked it
+#     once over the edge list, and a node condition was an undefined variable): an edge
+#     condition (DK1), a node condition (DK2); a two-edge quantified pattern repeats within
+#     its bounds (DK3, DK4; 0.6.0 took the segment once); an unbounded walk has no hop cap
+#     (DK5, DK6; 0.6.0 stopped after min + 100 hops)
+for case_id, query, fixture in [
+    ("DK1", "MATCH (s:Person {name: 'Alix'})((a)-[e:KNOWS]->(b) WHERE e.w > 1){1,3}(t) RETURN t.name AS t, [x IN e | x.w] AS ws", "social"),
+    ("DK2", "MATCH (s:Person {name: 'Alix'})((a)-[e:KNOWS]->(b) WHERE a.age < b.age){1,3}(t) RETURN t.name AS t", "social"),
+    ("DK3", "MATCH (s:Person {name: 'Gus'})((a)-[:KNOWS]->(m)-[:KNOWS]->(b)){1,2}(t) RETURN t.name AS t", "social"),
+    ("DK4", "MATCH (s:Person {name: 'Gus'})((a)-[:KNOWS]->(m)-[:KNOWS]->(b)){0,1}(t) RETURN t.name AS t", "social"),
+    ("DK5", "MATCH (a:N {i: 0})-[:NEXT]->{1,}(b) RETURN count(*) AS n", "chain"),
+    ("DK6", "MATCH (a:N {i: 4800})-[*]->(b) RETURN count(*) AS n, max(b.i) AS last", "chain"),
+]:
+    case(case_id, query, GQL, fixture)
+
 # fmt: on

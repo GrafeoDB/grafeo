@@ -996,6 +996,86 @@ pub(crate) fn every_edge_matches(
     }
 }
 
+/// The variables of one step of a single-edge quantified path pattern
+/// `((source)-[edge]->(target) WHERE ...){m,n}`, each the name the pattern
+/// gives it (`None` for an anonymous element).
+#[cfg(any(feature = "gql", test))]
+pub(crate) struct StepVariables {
+    pub(crate) source: Option<String>,
+    pub(crate) edge: Option<String>,
+    pub(crate) target: Option<String>,
+}
+
+/// `predicate` for every step of `path`, the path of a single-edge quantified
+/// path pattern whose `WHERE` it is: inside the pattern its variables are one
+/// step's (ISO/IEC 39075:2024 16.7), so step `index` binds the source to node
+/// `index` of the path, the edge to its edge `index` and the target to node
+/// `index + 1`, in the order the path is walked, which holds for every
+/// direction. A path of no step meets it.
+#[cfg(any(feature = "gql", test))]
+pub(crate) fn every_step_matches(
+    path: &str,
+    index: String,
+    step: StepVariables,
+    predicate: LogicalExpression,
+) -> LogicalExpression {
+    let element = |list: BuiltinFunction, offset: i64| {
+        let position = LogicalExpression::Variable(index.clone());
+        let position = if offset == 0 {
+            position
+        } else {
+            LogicalExpression::Binary {
+                left: Box::new(position),
+                op: BinaryOp::Add,
+                right: Box::new(LogicalExpression::Literal(Value::Int64(offset))),
+            }
+        };
+        LogicalExpression::List(vec![LogicalExpression::IndexAccess {
+            base: Box::new(LogicalExpression::builtin(
+                list,
+                vec![LogicalExpression::Variable(path.to_string())],
+            )),
+            index: Box::new(position),
+        }])
+    };
+    let mut predicate = predicate;
+    for (variable, list, offset) in [
+        (step.target, BuiltinFunction::Nodes, 1),
+        (step.edge, BuiltinFunction::Edges, 0),
+        (step.source, BuiltinFunction::Nodes, 0),
+    ] {
+        if let Some(variable) = variable {
+            // One element bound under the step's name.
+            predicate = LogicalExpression::ListPredicate {
+                kind: crate::query::plan::ListPredicateKind::All,
+                variable,
+                list_expr: Box::new(element(list, offset)),
+                predicate: Box::new(predicate),
+            };
+        }
+    }
+    let last_step = LogicalExpression::Binary {
+        left: Box::new(LogicalExpression::builtin(
+            BuiltinFunction::Size,
+            vec![LogicalExpression::builtin(
+                BuiltinFunction::Edges,
+                vec![LogicalExpression::Variable(path.to_string())],
+            )],
+        )),
+        op: BinaryOp::Sub,
+        right: Box::new(LogicalExpression::Literal(Value::Int64(1))),
+    };
+    LogicalExpression::ListPredicate {
+        kind: crate::query::plan::ListPredicateKind::All,
+        variable: index,
+        list_expr: Box::new(LogicalExpression::builtin(
+            BuiltinFunction::Range,
+            vec![LogicalExpression::Literal(Value::Int64(0)), last_step],
+        )),
+        predicate: Box::new(predicate),
+    }
+}
+
 /// Dotted access `base.key` into a map value (`n.meta.route`), or into a node
 /// or edge that is not a pattern variable (`startNode(r).name`,
 /// `head(rs).w`, `x.msg.id` of `{msg: m}`), for the GQL and Cypher

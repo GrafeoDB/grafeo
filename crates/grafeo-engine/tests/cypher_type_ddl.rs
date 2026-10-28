@@ -279,7 +279,7 @@ fn malformed_and_overdeep_types_leave_the_catalog_unchanged() {
     db.execute_cypher("ALTER CURRENT GRAPH TYPE SET { (:Kept {name STRING}) }")
         .unwrap();
     let before = catalog(&db);
-    for ty in [
+    for type_name in [
         "ZONED",
         "LOCAL STRING",
         "LIST<>",
@@ -291,10 +291,10 @@ fn malformed_and_overdeep_types_leave_the_catalog_unchanged() {
     ] {
         let error = db
             .execute_cypher(&format!(
-                "ALTER CURRENT GRAPH TYPE SET {{ (:Bad {{a {ty}}}) }}"
+                "ALTER CURRENT GRAPH TYPE SET {{ (:Bad {{a {type_name}}}) }}"
             ))
             .expect_err("a malformed type must not change the catalog");
-        assert_eq!(catalog(&db), before, "{ty}: {error}");
+        assert_eq!(catalog(&db), before, "{type_name}: {error}");
     }
     let nested = |depth: usize| format!("{}INT64{}", "LIST<".repeat(depth), ">".repeat(depth));
     db.execute_cypher(&format!(
@@ -397,4 +397,64 @@ fn compound_types_survive_wal_replay() {
         },
     );
     assert_reopened_types(&db);
+}
+
+/// GQL and Cypher read a property type with the same rules (one shared
+/// grammar for the depth of `LIST<...>` and the `DATETIME` prefixes): the
+/// same depth is the deepest accepted, a deeper one is refused with the same
+/// message, and the same spellings of a two-word type are accepted, shown
+/// alike and refused alike.
+#[test]
+fn gql_and_cypher_read_property_types_by_the_same_rules() {
+    let nested = |depth: usize| format!("{}INT64{}", "LIST<".repeat(depth), ">".repeat(depth));
+    let gql = |property_type: &str| {
+        let db = GrafeoDB::new_in_memory();
+        db.execute(&format!("CREATE NODE TYPE Typed (a {property_type})"))
+            .map(|_| properties(&db, "NODE", "Typed"))
+            .map_err(|error| error.to_string())
+    };
+    let cypher = |property_type: &str| {
+        let db = GrafeoDB::new_in_memory();
+        db.execute_cypher(&format!(
+            "ALTER CURRENT GRAPH TYPE SET {{ (:Typed {{a {property_type}}}) }}"
+        ))
+        .map(|_| properties(&db, "NODE", "Typed"))
+        .map_err(|error| error.to_string())
+    };
+
+    let deepest = nested(128);
+    assert_eq!(gql(&deepest), Ok(format!("a {deepest}")));
+    assert_eq!(cypher(&deepest), Ok(format!("a {deepest}")));
+    let message = "A property type nests at most 128 LIST<...> levels";
+    for depth in [129, 100_000] {
+        for (language, result) in [
+            ("GQL", gql(&nested(depth))),
+            ("Cypher", cypher(&nested(depth))),
+        ] {
+            let error = result.expect_err(&format!("{language}, depth {depth}"));
+            assert!(
+                error.contains(message),
+                "{language}, depth {depth}: {error}"
+            );
+        }
+    }
+
+    for (spelling, shown) in [
+        ("ZONED DATETIME", "a ZONED DATETIME"),
+        ("zoned datetime", "a ZONED DATETIME"),
+        ("LOCAL DATETIME", "a LOCAL DATETIME"),
+        ("Local Datetime", "a LOCAL DATETIME"),
+    ] {
+        assert_eq!(gql(spelling).as_deref(), Ok(shown), "GQL {spelling}");
+        assert_eq!(cypher(spelling).as_deref(), Ok(shown), "Cypher {spelling}");
+    }
+    for spelling in [
+        "ZONED",
+        "LOCAL STRING",
+        "GLOBAL DATETIME",
+        "ZONED ZONED DATETIME",
+    ] {
+        assert!(gql(spelling).is_err(), "GQL accepts {spelling}");
+        assert!(cypher(spelling).is_err(), "Cypher accepts {spelling}");
+    }
 }

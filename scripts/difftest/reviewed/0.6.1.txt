@@ -19,5 +19,8 @@ DH4|gql 2803989dcf A list of another size on a vector-indexed property is refuse
 DH6|gql 87c971e8bd A numeric list written to a vector-indexed property is stored as a vector, and a list elsewhere stays a list; 0.6.0 stored every list as a list (#587).
 DH7|cypher cb0cf24801 The vector index finds embeddings written as lists; 0.6.0 left them out (#587).
 DH7|gql cb0cf24801 The vector index finds embeddings written as lists; 0.6.0 left them out (#587).
+DI1|sql 09328f6996 SQL/PGQ NODES(p) and EDGES(p) return each node and edge with its ID, labels or type, endpoints and properties; 0.6.0 returned only their IDs (#705).
+DI2|sql 3dc931f998 SQL/PGQ NODES(p) and EDGES(p) return each node and edge with its ID, labels or type, endpoints and properties; 0.6.0 returned only their IDs (#705).
+DI3|sql 6dee46b96c SQL/PGQ NODES(p) and EDGES(p) return each node and edge with its ID, labels or type, endpoints and properties; 0.6.0 returned only their IDs (#705).
 N12|cypher 603b79d5f3 A subquery that returns an edge in one part and a node in another returns each as what it is; 0.6.0 read the node as the edge with its ID (#668).
 N12|gql 603b79d5f3 A subquery that returns an edge in one part and a node in another returns each as what it is; 0.6.0 read the node as the edge with its ID (#668).

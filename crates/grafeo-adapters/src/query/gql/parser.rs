@@ -6,7 +6,6 @@ use super::lexer::{Lexer, Token, TokenKind};
 use crate::query::keywords::unescape_string;
 use crate::query::limits::{Chain, Nesting, nesting_error_message};
 use crate::query::schema::IndexOptionValue;
-use grafeo_common::storage::value_codec::MAX_PROPERTY_VALUE_DEPTH;
 use grafeo_common::types::{Decimal, DecimalError, DecimalType, MAX_DECIMAL_DIGITS};
 use grafeo_common::utils::error::{Error, QueryError, QueryErrorKind, Result, SourceSpan};
 
@@ -6509,7 +6508,8 @@ impl<'a> Parser<'a> {
     /// (#569).
     ///
     /// The `LIST<` levels are counted, not recursed into, and at most
-    /// [`MAX_PROPERTY_VALUE_DEPTH`] are accepted, as deep as a property value
+    /// [`MAX_PROPERTY_VALUE_DEPTH`](grafeo_common::storage::value_codec::MAX_PROPERTY_VALUE_DEPTH)
+    /// are accepted (see `query::schema::list_type_depth_error`), as deep as a property value
     /// may be: a type of any depth is refused without a stack overflow.
     ///
     /// A name that is not a property type Grafeo supports is refused
@@ -6517,7 +6517,9 @@ impl<'a> Parser<'a> {
     /// used to declare an `ANY` property. Returns the type's spelling and
     /// what it takes as a `DEFAULT`.
     fn parse_property_type_name(&mut self) -> Result<(String, PropertyTypeKind)> {
-        use crate::query::schema::{property_type_kind, unknown_property_type};
+        use crate::query::schema::{
+            datetime_type_prefix, list_type_depth_error, property_type_kind, unknown_property_type,
+        };
 
         let mut levels = 0;
         let (mut element, kind) = loop {
@@ -6528,18 +6530,15 @@ impl<'a> Parser<'a> {
 
             if name.eq_ignore_ascii_case("LIST") && self.peek_kind() == TokenKind::Lt {
                 levels += 1;
-                if levels > MAX_PROPERTY_VALUE_DEPTH {
-                    return Err(self.error(&format!(
-                        "A property type nests at most {MAX_PROPERTY_VALUE_DEPTH} LIST<...> levels"
-                    )));
+                if let Some(message) = list_type_depth_error(levels) {
+                    return Err(self.error(&message));
                 }
                 self.advance(); // LIST
                 self.advance(); // <
                 continue;
             }
-            if name.eq_ignore_ascii_case("ZONED") || name.eq_ignore_ascii_case("LOCAL") {
+            if let Some(prefix) = datetime_type_prefix(&name) {
                 self.advance();
-                let prefix = name.to_ascii_uppercase();
                 if !self.try_accept_identifier_keyword("DATETIME") {
                     return Err(self.error(&format!("Expected DATETIME after {prefix}")));
                 }

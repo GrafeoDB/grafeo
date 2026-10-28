@@ -2180,4 +2180,16 @@ for case_id, query, languages in [
 ordered("DH6", "MATCH (d) WHERE d.emb IS NOT NULL RETURN d.name AS name, d.emb IS TYPED LIST AS list ORDER BY name", GQL, "list_embeddings")
 ordered("DH7", "CALL grafeo.search.vector('Doc', 'emb', [0.6, 0.8, 0.0], 10) YIELD node_id RETURN node_id ORDER BY node_id", BOTH, "list_embeddings")
 
+# DI: SQL/PGQ path components (#705): NODES(p) and EDGES(p) hold every node and edge of the
+#     walk, in walk order, as COLUMNS (DI1), from a fixed start over one and two hops (DI2),
+#     for zero hops (DI3), counted in COLUMNS (DI4) and filtered in the pattern's WHERE (DI5)
+for case_id, query in [
+    ("DI1", "SELECT * FROM GRAPH_TABLE (MATCH (a:Person {name: 'Jules'})-[p:KNOWS*1..1]->(b:Person) COLUMNS (NODES(p) AS ns, EDGES(p) AS es, LENGTH(p) AS hops))"),
+    ("DI2", "SELECT * FROM GRAPH_TABLE (MATCH (a:Person {name: 'Gus'})-[p:KNOWS*1..2]->(b:Person) COLUMNS (NODES(p) AS ns, EDGES(p) AS es, LENGTH(p) AS hops)) ORDER BY hops"),
+    ("DI3", "SELECT * FROM GRAPH_TABLE (MATCH (a:Person {name: 'Mia'})-[p:KNOWS*0..0]->(b:Person) COLUMNS (NODES(p) AS ns, EDGES(p) AS es, LENGTH(p) AS hops))"),
+    ("DI4", "SELECT * FROM GRAPH_TABLE (MATCH (a:Person {name: 'Alix'})-[p:KNOWS*1..2]->(b:Person) COLUMNS (b.name AS name, CARDINALITY(NODES(p)) AS nodes, CARDINALITY(EDGES(p)) AS edges))"),
+    ("DI5", "SELECT * FROM GRAPH_TABLE (MATCH (a:Person {name: 'Alix'})-[p:KNOWS*1..2]->(b:Person) WHERE CARDINALITY(NODES(p)) = 3 COLUMNS (b.name AS name))"),
+]:
+    case(case_id, query, SQL)
+
 # fmt: on

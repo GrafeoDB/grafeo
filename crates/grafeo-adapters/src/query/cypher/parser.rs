@@ -2950,11 +2950,14 @@ impl<'a> Parser<'a> {
         })
     }
 
-    /// Reads the same scalar, temporal and nested list property types as GQL.
-    /// List levels are counted rather than recursed into, and use the same
-    /// depth limit as stored property values. Quoted names remain one name.
+    /// Reads the same scalar, temporal and nested list property types as GQL,
+    /// by the rules of `query::schema` (the depth of `LIST<...>` levels, the
+    /// two-word `DATETIME` types). List levels are counted rather than
+    /// recursed into. A quoted name stays one name.
     fn parse_property_type_name(&mut self) -> Result<String> {
-        use grafeo_common::storage::value_codec::MAX_PROPERTY_VALUE_DEPTH;
+        use crate::query::schema::{
+            datetime_type_prefix, list_type_depth_error, property_type_kind, unknown_property_type,
+        };
 
         let mut levels = 0;
         let mut data_type = loop {
@@ -2962,25 +2965,21 @@ impl<'a> Parser<'a> {
             let mut name = self.expect_identifier()?;
             if !quoted && name.eq_ignore_ascii_case("LIST") && self.current.kind == TokenKind::Lt {
                 levels += 1;
-                if levels > MAX_PROPERTY_VALUE_DEPTH {
-                    return Err(self.error(&format!(
-                        "A property type nests at most {MAX_PROPERTY_VALUE_DEPTH} LIST<...> levels"
-                    )));
+                if let Some(message) = list_type_depth_error(levels) {
+                    return Err(self.error(&message));
                 }
                 self.advance(); // <
                 continue;
             }
-            if !quoted && (name.eq_ignore_ascii_case("ZONED") || name.eq_ignore_ascii_case("LOCAL"))
-            {
-                let prefix = name.to_ascii_uppercase();
+            if !quoted && let Some(prefix) = datetime_type_prefix(&name) {
                 if !self.is_contextual("DATETIME") {
                     return Err(self.error(&format!("Expected DATETIME after {prefix}")));
                 }
                 self.advance();
                 break format!("{prefix} DATETIME");
             }
-            if crate::query::schema::property_type_kind(&name).is_none() {
-                return Err(self.error(&crate::query::schema::unknown_property_type(&name)));
+            if property_type_kind(&name).is_none() {
+                return Err(self.error(&unknown_property_type(&name)));
             }
             // DECIMAL(precision[, scale]), spelled as the catalog prints it.
             if self.current.kind == TokenKind::LParen
@@ -5177,104 +5176,12 @@ mod tests {
         }
     }
 
-    #[test]
-    fn compound_property_types_in_cypher_inline_ddl() {
-        use crate::query::schema::{InlineElementType, SchemaStatement};
-
-        let statement = parse_ok(
-            "ALTER CURRENT GRAPH TYPE SET {
-                (:Event {at zoned datetime, seen :: local datetime,
-                         tags list<list<STRING>> NOT NULL}),
-                (:Event)-[:BOOKED {times :: LIST<LOCAL DATETIME>,
-                                  fees LIST<DEC(6,2)>, note STRING}]->(:Event)
-            }",
-        );
-        let Statement::Schema(SchemaStatement::CreateGraphType(create)) = statement else {
-            panic!("expected a graph type");
-        };
-        let InlineElementType::Node { properties, .. } = &create.inline_types[0] else {
-            panic!("expected a node type");
-        };
-        assert_eq!(
-            properties
-                .iter()
-                .map(|property| (
-                    property.name.as_str(),
-                    property.data_type.as_str(),
-                    property.nullable
-                ))
-                .collect::<Vec<_>>(),
-            [
-                ("at", "ZONED DATETIME", true),
-                ("seen", "LOCAL DATETIME", true),
-                ("tags", "LIST<LIST<STRING>>", false),
-            ]
-        );
-        let InlineElementType::Edge { properties, .. } = &create.inline_types[1] else {
-            panic!("expected an edge type");
-        };
-        assert_eq!(
-            properties
-                .iter()
-                .map(|property| (
-                    property.name.as_str(),
-                    property.data_type.as_str(),
-                    property.nullable
-                ))
-                .collect::<Vec<_>>(),
-            [
-                ("times", "LIST<LOCAL DATETIME>", true),
-                ("fees", "LIST<DECIMAL(6,2)>", true),
-                ("note", "STRING", true),
-            ]
-        );
-    }
-
-    #[test]
-    fn cypher_property_types_preserve_aliases_bare_and_quoted_names() {
-        use crate::query::schema::{InlineElementType, SchemaStatement};
-
-        let statement = parse_ok(
-            "ALTER CURRENT GRAPH TYPE SET {
-                (:T {a `STRING` NOT NULL, b ZONED_DATETIME, c LOCAL_DATETIME,
-                     d LIST, e ARRAY, f DECIMAL(6,2), g :: DEC(5,1),
-                     h `ZONED DATETIME`, i `LOCAL DATETIME`})
-            }",
-        );
-        let Statement::Schema(SchemaStatement::CreateGraphType(create)) = statement else {
-            panic!("expected a graph type");
-        };
-        let InlineElementType::Node { properties, .. } = &create.inline_types[0] else {
-            panic!("expected a node type");
-        };
-        assert_eq!(
-            properties
-                .iter()
-                .map(|property| property.data_type.as_str())
-                .collect::<Vec<_>>(),
-            [
-                "STRING",
-                "ZONED_DATETIME",
-                "LOCAL_DATETIME",
-                "LIST",
-                "ARRAY",
-                "DECIMAL(6,2)",
-                "DECIMAL(5,1)",
-                "ZONED DATETIME",
-                "LOCAL DATETIME"
-            ]
-        );
-        assert!(
-            !properties[0].nullable,
-            "NOT NULL belongs to the whole property type"
-        );
-        assert!(properties[1..].iter().all(|property| property.nullable));
-    }
-
+    /// The property types the parser refuses: malformed lists, unknown or
+    /// out-of-range element types, quoted keywords, and lists nested deeper
+    /// than a value may be. What it accepts is checked end to end in the
+    /// engine's `cypher_type_ddl` tests.
     #[test]
     fn cypher_property_type_errors_and_list_depth_are_bounded() {
-        use crate::query::schema::{InlineElementType, SchemaStatement};
-
         for data_type in [
             "ZONED",
             "LOCAL STRING",
@@ -5293,21 +5200,6 @@ mod tests {
             ));
         }
         let nested = |depth: usize| format!("{}INT64{}", "LIST<".repeat(depth), ">".repeat(depth));
-        let deepest = nested(128);
-        let statement = parse_ok(&format!(
-            "ALTER CURRENT GRAPH TYPE SET {{ (:T {{a {deepest} NOT NULL}}) }}"
-        ));
-        let Statement::Schema(SchemaStatement::CreateGraphType(create)) = statement else {
-            panic!("expected a graph type");
-        };
-        let InlineElementType::Node { properties, .. } = &create.inline_types[0] else {
-            panic!("expected a node type");
-        };
-        assert_eq!(properties[0].data_type, deepest);
-        assert!(
-            !properties[0].nullable,
-            "NOT NULL follows the outermost list"
-        );
         for depth in [129, 100_000] {
             let query = format!(
                 "ALTER CURRENT GRAPH TYPE SET {{ (:T {{a {}}}) }}",

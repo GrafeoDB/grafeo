@@ -556,6 +556,28 @@ pub fn unknown_property_type(name: &str) -> String {
     )
 }
 
+/// The refusal of a property type that opens a `LIST<...>` level past
+/// `levels` (the ones open with this one), or `None` while it is within the
+/// depth a stored property value may nest to. GQL and Cypher type DDL read
+/// the levels with their own tokens and check them here.
+#[must_use]
+pub fn list_type_depth_error(levels: usize) -> Option<String> {
+    use grafeo_common::storage::value_codec::MAX_PROPERTY_VALUE_DEPTH;
+
+    (levels > MAX_PROPERTY_VALUE_DEPTH).then(|| {
+        format!("A property type nests at most {MAX_PROPERTY_VALUE_DEPTH} LIST<...> levels")
+    })
+}
+
+/// The first word of a two-word property type `<word> DATETIME`, as the
+/// catalog spells it: `ZONED` or `LOCAL` (any case), else `None`.
+#[must_use]
+pub fn datetime_type_prefix(name: &str) -> Option<&'static str> {
+    ["ZONED", "LOCAL"]
+        .into_iter()
+        .find(|prefix| prefix.eq_ignore_ascii_case(name))
+}
+
 /// An ALTER NODE TYPE or ALTER EDGE TYPE statement.
 #[derive(Debug, Clone)]
 pub struct AlterTypeStatement {

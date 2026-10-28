@@ -320,7 +320,7 @@ fn assert_over_budget(db: &GrafeoDB, language: &str, query: &str) {
         matches!(&error, Error::Query(_)),
         "{language}: {query}: a query error, got {error:?}"
     );
-    for advice in ["upper bound", "DISTINCT", "shortest"] {
+    for advice in ["bound the quantifier", "DISTINCT", "shortest"] {
         assert!(
             message.contains(advice),
             "{language}: {query}: the message names `{advice}`: {message}"

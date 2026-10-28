@@ -1065,9 +1065,9 @@ impl super::GrafeoDB {
     /// on a read-only database, and the database-closed error after `close()`
     /// of a persistent database (read-only or not).
     pub fn restore_snapshot(&self, data: &[u8]) -> Result<()> {
-        // A restore writes no WAL record: after `close()` (which releases the
-        // file) nothing would persist it, so it fails then, and `close()`
-        // waits for one in progress.
+        // A restore writes no WAL record but a checkpoint: after `close()`
+        // (which releases the file) nothing would persist it, so it fails
+        // then, and `close()` waits for one in progress.
         let _open = self.hold_open()?;
         if self.read_only {
             return Err(Error::Transaction(
@@ -1076,10 +1076,12 @@ impl super::GrafeoDB {
         }
         // A checkpoint reads the stores while it writes its image, with
         // commits going on: a restore replaces them whole, so it waits for
-        // one in progress, and the next one waits for it.
+        // one in progress, and the next one waits for it. Commits wait for
+        // the restore too, from the first store it replaces to the
+        // checkpoint that makes it durable (#677).
         #[cfg(feature = "grafeo-file")]
         let _checkpoint = self.file_manager.as_ref().map(|fm| fm.checkpoint_guard());
-        self.transaction_manager.check_no_incomplete_commit()?;
+        let commits = self.transaction_manager.hold_commits()?;
         self.transaction_manager.check_open()?;
         // Validates the snapshot and refuses data this build cannot read
         // before it changes anything (see `row_groups::restore`).
@@ -1091,6 +1093,15 @@ impl super::GrafeoDB {
         // Its graphs, indexes and types are the snapshot's now: no cached
         // plan was made for them.
         self.query_cache.clear();
+        // Durable before it returns: the file holds the restored state and
+        // the WAL starts after it, with no commit between, so a crash from
+        // here reopens what the restore put in place, not what it replaced.
+        #[cfg(feature = "grafeo-file")]
+        if let Some(fm) = &self.file_manager {
+            super::flush::flush_held(fm, &self.checkpoint_sources()?, None, commits)?;
+        }
+        #[cfg(not(feature = "grafeo-file"))]
+        drop(commits);
         Ok(())
     }
 

@@ -1426,78 +1426,7 @@ pub(crate) fn classify_optional_predicates(
     }
 }
 
-/// Whether `expr` has an `EXISTS`, `COUNT` or value subquery or a pattern
-/// comprehension, whose plan may read variables of the row that
-/// [`collect_expression_variables`] does not list.
-#[cfg(any(feature = "gql", feature = "cypher", test))]
-fn has_subquery(expr: &LogicalExpression) -> bool {
-    match expr {
-        LogicalExpression::ExistsSubquery(_)
-        | LogicalExpression::CountSubquery(_)
-        | LogicalExpression::ValueSubquery(_)
-        | LogicalExpression::PatternComprehension { .. } => true,
-        LogicalExpression::Literal(_)
-        | LogicalExpression::Variable(_)
-        | LogicalExpression::Property { .. }
-        | LogicalExpression::Parameter(_)
-        | LogicalExpression::Labels(_)
-        | LogicalExpression::Type(_)
-        | LogicalExpression::Id(_) => false,
-        LogicalExpression::Binary { left, right, .. } => has_subquery(left) || has_subquery(right),
-        LogicalExpression::Unary { operand, .. } => has_subquery(operand),
-        LogicalExpression::FunctionCall { args: items, .. }
-        | LogicalExpression::SparqlCall { args: items, .. }
-        | LogicalExpression::List(items) => {
-            items.iter().any(has_subquery)
-        }
-        LogicalExpression::Map(pairs) => pairs.iter().any(|(_, value)| has_subquery(value)),
-        LogicalExpression::IndexAccess { base, index } => has_subquery(base) || has_subquery(index),
-        LogicalExpression::MapAccess { base, .. } => has_subquery(base),
-        LogicalExpression::SliceAccess { base, start, end } => {
-            has_subquery(base)
-                || start.as_deref().is_some_and(has_subquery)
-                || end.as_deref().is_some_and(has_subquery)
-        }
-        LogicalExpression::Case {
-            operand,
-            when_clauses,
-            else_clause,
-        } => {
-            operand.as_deref().is_some_and(has_subquery)
-                || when_clauses
-                    .iter()
-                    .any(|(condition, result)| has_subquery(condition) || has_subquery(result))
-                || else_clause.as_deref().is_some_and(has_subquery)
-        }
-        LogicalExpression::ListComprehension {
-            list_expr,
-            filter_expr,
-            map_expr,
-            ..
-        } => {
-            has_subquery(list_expr)
-                || filter_expr.as_deref().is_some_and(has_subquery)
-                || has_subquery(map_expr)
-        }
-        LogicalExpression::ListPredicate {
-            list_expr,
-            predicate,
-            ..
-        } => has_subquery(list_expr) || has_subquery(predicate),
-        LogicalExpression::MapProjection { entries, .. } => entries.iter().any(|entry| {
-            matches!(
-                entry,
-                crate::query::plan::MapProjectionEntry::LiteralEntry(_, value) if has_subquery(value)
-            )
-        }),
-        LogicalExpression::Reduce {
-            initial,
-            list,
-            expression,
-            ..
-        } => has_subquery(initial) || has_subquery(list) || has_subquery(expression),
-    }
-}
+pub(crate) use crate::query::plan::has_subquery;
 
 /// Collects all variables produced by a logical operator's subtree.
 #[cfg(any(feature = "gql", feature = "cypher", test))]

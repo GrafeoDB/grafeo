@@ -113,11 +113,13 @@ fn an_unbounded_walk_around_two_cycles_fails_at_its_budget() {
 }
 
 /// One cycle: a walk around it holds one path at a time, longer each lap,
-/// so the budget is reached only if a path's length counts against it. The
-/// query must fail with the error, not run until its timeout.
+/// so the budget is reached only because a path's length counts against it.
+/// The query fails with the error, not at its timeout. (A memory limit of
+/// 256 KiB keeps it short: `count(p)` builds every path, each longer than
+/// the last.)
 #[test]
 fn an_unbounded_walk_around_one_cycle_fails_at_its_budget() {
-    let db = GrafeoDB::with_config(Config::in_memory().with_memory_limit(4 * 1024 * 1024)).unwrap();
+    let db = GrafeoDB::with_config(Config::in_memory().with_memory_limit(256 * 1024)).unwrap();
     ring(&db);
     for query in [
         "MATCH (a:N {i: 0})-[*]->(b) RETURN count(*)",
@@ -125,4 +127,23 @@ fn an_unbounded_walk_around_one_cycle_fails_at_its_budget() {
     ] {
         assert_unbounded_walk_error(&db, query);
     }
+}
+
+/// Around a cycle an unbounded walk still streams: a query that asks for a
+/// few rows gets them, also past the old cap of min + 100 hops, and stops.
+#[test]
+fn an_unbounded_walk_around_a_cycle_streams_the_rows_a_limit_asks_for() {
+    let db = GrafeoDB::with_config(Config::in_memory().with_memory_limit(256 * 1024)).unwrap();
+    ring(&db);
+    let result = db
+        .execute("MATCH p = (a:N {i: 0})-[*]->(b) RETURN length(p) AS hops, b.i AS i LIMIT 150")
+        .unwrap();
+    let rows: Vec<(i64, i64)> = result
+        .rows()
+        .iter()
+        .map(|row| (row[0].as_int64().unwrap(), row[1].as_int64().unwrap()))
+        .collect();
+    // Shortest first: hop h ends at node h mod 3.
+    let expected: Vec<(i64, i64)> = (1..=150).map(|hops| (hops, hops % 3)).collect();
+    assert_eq!(rows, expected);
 }

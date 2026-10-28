@@ -407,7 +407,7 @@ impl super::GrafeoDB {
     /// The storage key of the current graph, where the property index calls
     /// work: `None` for the default graph, also when the graph selected no
     /// longer exists (as [`current_lpg_store`](Self::current_lpg_store)).
-    fn current_graph_key(&self) -> Option<String> {
+    pub(super) fn current_graph_key(&self) -> Option<String> {
         crate::session::graph_storage_key(
             self.current_schema.read().as_deref(),
             self.current_graph.read().as_deref(),
@@ -583,8 +583,10 @@ impl super::GrafeoDB {
         #[cfg(feature = "vector-index")]
         {
             self.check_index_change()?;
-            let (graph, store) = self.index_target(None)?;
-            self.convert_vector_lists(&store, None, label, property, dimensions)?;
+            // On the current graph, as the other direct calls (#677).
+            let key = self.current_graph_key();
+            let (graph, store) = self.index_target(key.as_deref())?;
+            self.convert_vector_lists(&store, key.as_deref(), label, property, dimensions)?;
             let index = vector_index_from_data(
                 &*graph,
                 label,
@@ -595,7 +597,7 @@ impl super::GrafeoDB {
                 ef_construction,
                 quantization,
             )?;
-            let record = vector_index_record(None, label, property, &index)?;
+            let record = vector_index_record(key.as_deref(), label, property, &index)?;
             let held = self.hold_for_standalone(false)?;
             let mut change = StandaloneChange::new();
             change.push_built(
@@ -757,7 +759,7 @@ impl super::GrafeoDB {
     pub fn drop_vector_index(&self, label: &str, property: &str) -> Result<bool> {
         let held = self.hold_for_standalone(false)?;
         if self
-            .lpg_store()?
+            .current_lpg_store()?
             .get_vector_index(label, property)
             .is_none()
         {
@@ -765,7 +767,7 @@ impl super::GrafeoDB {
         }
         let mut change = StandaloneChange::new();
         change.push(drop_index(
-            None,
+            self.current_graph_key().as_deref(),
             IndexKeyRecord::Vector {
                 label: label.to_string(),
                 property: property.to_string(),
@@ -830,7 +832,7 @@ impl super::GrafeoDB {
     #[cfg(feature = "vector-index")]
     pub fn rebuild_vector_index(&self, label: &str, property: &str) -> Result<()> {
         // Preserve config and quantization type from existing index if available
-        let existing = self.lpg_store()?.get_vector_index(label, property);
+        let existing = self.current_lpg_store()?.get_vector_index(label, property);
 
         let (config, quantization_name) = if let Some(ref idx) = existing {
             let qt = idx.quantization_type().and_then(quantization_name);
@@ -926,17 +928,19 @@ impl super::GrafeoDB {
     ) -> Result<()> {
         options.check()?;
         self.check_index_change()?;
-        let (graph, _) = self.index_target(None)?;
+        // On the current graph, as the other direct calls (#677).
+        let key = self.current_graph_key();
+        let (graph, _) = self.index_target(key.as_deref())?;
         let index = text_index_from_data(&*graph, label, property, &options)?;
         let kind = text_index_kind(label, property, &options)?;
         let held = self.hold_for_standalone(false)?;
         let mut change = StandaloneChange::new();
-        change.push_built(put_index(None, kind), BuiltIndex::Text(index));
+        change.push_built(put_index(key.as_deref(), kind), BuiltIndex::Text(index));
         self.commit_standalone(change, &held)
     }
 
     /// The options of the text index on `label` and `property` of the
-    /// default graph, or `None` when there is no such index.
+    /// current graph, or `None` when there is no such index.
     #[cfg(feature = "text-index")]
     #[must_use]
     pub fn text_index_options(
@@ -945,7 +949,9 @@ impl super::GrafeoDB {
         property: &str,
     ) -> Option<grafeo_core::index::text::TextIndexOptions> {
         // A backend of its own has no text index.
-        self.root_store()?
+        self.root_store()?;
+        self.current_lpg_store()
+            .ok()?
             .get_text_index(label, property)
             .map(|index| index.read().options().clone())
     }
@@ -991,12 +997,16 @@ impl super::GrafeoDB {
     #[cfg(feature = "text-index")]
     pub fn drop_text_index(&self, label: &str, property: &str) -> Result<bool> {
         let held = self.hold_for_standalone(false)?;
-        if self.lpg_store()?.get_text_index(label, property).is_none() {
+        if self
+            .current_lpg_store()?
+            .get_text_index(label, property)
+            .is_none()
+        {
             return Ok(false);
         }
         let mut change = StandaloneChange::new();
         change.push(drop_index(
-            None,
+            self.current_graph_key().as_deref(),
             IndexKeyRecord::Text {
                 label: label.to_string(),
                 property: property.to_string(),

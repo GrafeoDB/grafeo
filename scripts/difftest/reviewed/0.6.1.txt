@@ -26,5 +26,11 @@ DJ1|gql 97aadb50f3 A decimal sum is exact in any row order and fails only when t
 DJ4|cypher 97aadb50f3 A decimal sum is exact in any row order and fails only when the final value does not fit; 0.6.0 failed when a running total passed 38 digits, so [a, a, -a] failed where [a, -a, a] did not (#669).
 DJ7|gql 0ca43c524b An average of decimals is never beyond its largest row, so it never fails; 0.6.0 failed when the sum of the rows passed 38 digits (#669).
 DJ8|cypher 0ca43c524b An average of decimals is never beyond its largest row, so it never fails; 0.6.0 failed when the sum of the rows passed 38 digits (#669).
+DK1|gql 2198066ef4 A WHERE inside a GQL quantified pattern holds for each step; 0.6.0 checked it once over the edge list and found no path (#678).
+DK2|gql abdee0974a A node condition inside a GQL quantified pattern reads the step's nodes; 0.6.0 refused it as an undefined variable (#678).
+DK3|gql ab0bd9ec5c A GQL quantified pattern of two edges repeats within its bounds; 0.6.0 took the segment once and ignored them (#678).
+DK4|gql 2aba91d6f9 A GQL quantified pattern of two edges repeats within its bounds; 0.6.0 took the segment once and ignored them (#678).
+DK5|gql 6354c87d40 An unbounded GQL walk has no hop cap; 0.6.0 stopped after min + 100 hops (#678).
+DK6|gql 1dc1b27e0f An unbounded GQL walk has no hop cap; 0.6.0 stopped after min + 100 hops (#678).
 N12|cypher 603b79d5f3 A subquery that returns an edge in one part and a node in another returns each as what it is; 0.6.0 read the node as the edge with its ID (#668).
 N12|gql 603b79d5f3 A subquery that returns an edge in one part and a node in another returns each as what it is; 0.6.0 read the node as the edge with its ID (#668).

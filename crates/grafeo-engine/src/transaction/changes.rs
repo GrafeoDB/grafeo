@@ -768,6 +768,9 @@ pub(crate) struct StreamingChanges<'wal> {
     /// The backend its ranges are in, with the graph's slot and the
     /// transaction opened there, once it reserved one.
     target: Option<Bound>,
+    /// The storage key of the graph that backend is (`None` for the
+    /// default graph), which its records name (see [`Self::in_graph`]).
+    graph: Option<ArcStr>,
     /// The WAL and the group it writes.
     #[cfg(feature = "wal")]
     log: Option<StreamedLog<'wal>>,
@@ -825,6 +828,7 @@ impl StreamingChanges<'_> {
             snapshot,
             set: ChangeSet::new(),
             target: None,
+            graph: None,
             #[cfg(feature = "wal")]
             log: None,
             finished: false,
@@ -832,8 +836,17 @@ impl StreamingChanges<'_> {
         }
     }
 
-    /// Reserves `count` consecutive ids in `table` of `target`, the default
-    /// graph's store, and records them as one entry.
+    /// The same changes, in the graph with storage key `graph` (`None` for
+    /// the default graph), whose store [`reserve`](Self::reserve) is given:
+    /// its records name that graph, so a replay applies them there.
+    pub(crate) fn in_graph(mut self, graph: Option<&str>) -> Self {
+        self.graph = graph.map(ArcStr::from);
+        self
+    }
+
+    /// Reserves `count` consecutive ids in `table` of `target`, the store of
+    /// the changes' graph (see [`in_graph`](Self::in_graph)), and records
+    /// them as one entry.
     ///
     /// # Errors
     ///
@@ -855,7 +868,7 @@ impl StreamingChanges<'_> {
             None => {
                 let slot = self.set.slot(GraphRef {
                     model: DataModel::Lpg,
-                    key: None,
+                    key: self.graph.clone(),
                 })?;
                 let transaction = target
                     .begin(self.transaction, self.snapshot)

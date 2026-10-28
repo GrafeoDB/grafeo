@@ -69,7 +69,10 @@ impl super::Planner {
         elements: &[CreateElement],
     ) -> Result<(Box<dyn Operator>, Vec<String>)> {
         let input = match input {
-            Some(input) => Some(self.plan_operator(input)?),
+            Some(input) => {
+                let (op, columns) = self.plan_operator(input)?;
+                Some((read_before_writing(op, input), columns))
+            }
             None => None,
         };
         self.build_creation(input, elements)
@@ -166,6 +169,7 @@ impl super::Planner {
         delete: &DeleteNodeOp,
     ) -> Result<(Box<dyn Operator>, Vec<String>)> {
         let (input_op, columns) = self.plan_operator(&delete.input)?;
+        let input_op = read_before_writing(input_op, &delete.input);
 
         let col_idx = columns
             .iter()
@@ -202,6 +206,7 @@ impl super::Planner {
         delete: &DeleteEdgeOp,
     ) -> Result<(Box<dyn Operator>, Vec<String>)> {
         let (input_op, columns) = self.plan_operator(&delete.input)?;
+        let input_op = read_before_writing(input_op, &delete.input);
 
         let edge_column = columns
             .iter()
@@ -1118,6 +1123,7 @@ impl super::Planner {
         add_label: &AddLabelOp,
     ) -> Result<(Box<dyn Operator>, Vec<String>)> {
         let (input_op, columns) = self.plan_operator(&add_label.input)?;
+        let input_op = read_before_writing(input_op, &add_label.input);
 
         // Find the node column
         let node_column = columns
@@ -1153,6 +1159,7 @@ impl super::Planner {
         remove_label: &RemoveLabelOp,
     ) -> Result<(Box<dyn Operator>, Vec<String>)> {
         let (input_op, columns) = self.plan_operator(&remove_label.input)?;
+        let input_op = read_before_writing(input_op, &remove_label.input);
 
         // Find the node column
         let node_column = columns
@@ -1188,6 +1195,7 @@ impl super::Planner {
         set_prop: &SetPropertyOp,
     ) -> Result<(Box<dyn Operator>, Vec<String>)> {
         let (input_op, columns) = self.plan_operator(&set_prop.input)?;
+        let input_op = read_before_writing(input_op, &set_prop.input);
 
         // Find the entity column (node or edge variable)
         let entity_column = columns
@@ -1572,6 +1580,21 @@ pub(super) fn read_first_after_a_write(
         Box::new(EagerOperator::new(op))
     } else {
         op
+    }
+}
+
+/// The planned input `op` of a write (a `CREATE`, `SET`, `REMOVE` or
+/// `DELETE`), read whole before the write's first row unless its plan
+/// `input` reads the store in one pass (see
+/// [`read_in_one_pass`](super::after_write::read_in_one_pass)): a join, an
+/// expand or a lookup per row would otherwise see the rows the write
+/// already changed, created or deleted, and match them again or not at all
+/// (#677).
+fn read_before_writing(op: Box<dyn Operator>, input: &LogicalOperator) -> Box<dyn Operator> {
+    if super::after_write::read_in_one_pass(input) {
+        op
+    } else {
+        Box::new(EagerOperator::new(op))
     }
 }
 

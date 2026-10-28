@@ -5776,10 +5776,11 @@ impl Session {
                 planner.with_recording(self.recording_for(self.active_lpg_graph_key().as_deref())?);
         }
 
-        // Attach the built-in store so CALL grafeo.search.* procedures can
-        // reach its HNSW / BM25 indexes; a backend of one's own has none.
-        if let Some(root) = self.root_store() {
-            planner = planner.with_lpg_store(root);
+        // Attach the active graph's built-in store, which the query reads, so
+        // CALL grafeo.search.* procedures reach its HNSW / BM25 indexes
+        // (#677); a backend of one's own has none.
+        if let Some(store) = self.active_lpg_store() {
+            planner = planner.with_lpg_store(store);
         } else {
             planner = planner.with_external_store();
         }

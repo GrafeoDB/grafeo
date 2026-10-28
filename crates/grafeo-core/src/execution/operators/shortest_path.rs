@@ -21,7 +21,7 @@ use std::collections::VecDeque;
 use std::sync::Arc;
 
 /// What to do about a shortest-path search over its budget.
-const SHORTEST_PATH_ADVICE: &str = "give the pattern an upper bound (`*1..5` or `{1,5}`), \
+const SHORTEST_PATH_ADVICE: &str = "bound the quantifier (`*1..5` or `{1,5}`), \
      keep fewer paths (`ANY SHORTEST` or `SHORTEST 3` instead of `ALL SHORTEST`), or search \
      walks instead of trails or simple paths";
 
@@ -2892,7 +2892,7 @@ mod tests {
         let Err(OperatorError::LimitExceeded(message)) = &result else {
             panic!("{context}: expected LimitExceeded, got {result:?}");
         };
-        for advice in ["upper bound", "ALL SHORTEST", "64 KiB"] {
+        for advice in ["bound the quantifier", "ALL SHORTEST", "64 KiB"] {
             assert!(
                 message.contains(advice),
                 "{context}: the message names `{advice}`: {message}"

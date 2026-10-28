@@ -120,6 +120,23 @@ pub(super) fn flush_covering(
     // delete WAL files this one relies on.
     let _checkpoint = fm.checkpoint_guard();
     let commits = sources.transaction_manager.hold_commits()?;
+    flush_held(fm, sources, covered_lsn, commits)
+}
+
+/// [`flush_covering`] for a caller that holds the file's checkpoint guard
+/// and `commits` already, as a restore does to make what it replaced
+/// durable before any commit or checkpoint comes between.
+///
+/// # Errors
+///
+/// As [`flush`].
+#[cfg(feature = "grafeo-file")]
+pub(super) fn flush_held(
+    fm: &GrafeoFileManager,
+    sources: &CheckpointSources,
+    covered_lsn: Option<u64>,
+    commits: CommitsHeld<'_>,
+) -> Result<FlushResult> {
     let image = sources.snapshot(&commits)?;
     let section_refs: Vec<&dyn Section> = image.sections.iter().map(AsRef::as_ref).collect();
     let held = image.held;

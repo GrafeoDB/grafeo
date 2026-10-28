@@ -543,18 +543,26 @@ mod replay {
         ] {
             assert_eq!(db.has_property_index(property), indexed, "{property}");
         }
-        let mut names: Vec<String> = rows(&db, "SHOW INDEXES")
-            .into_iter()
-            .map(|row| match &row[0] {
-                Value::String(name) => name.to_string(),
-                other => panic!("an index name: {other:?}"),
-            })
-            .collect();
-        names.sort();
+        let expected = [
+            ["", "FullText", "Doc", "body"],
+            ["", "Hash", "", "email"],
+            ["", "Vector", "Doc", "emb"],
+            ["", "Vector", "Note", "emb"],
+            ["part_serial", "Hash", "Part", "serial"],
+            ["person_bio", "FullText", "Person", "bio"],
+            ["person_city", "BTree", "Person", "city"],
+            ["person_name", "Hash", "Person", "name"],
+        ];
         assert_eq!(
-            names,
-            ["part_serial", "person_bio", "person_city", "person_name"],
-            "the names, without the one dropped"
+            rows(&db, "SHOW INDEXES"),
+            expected
+                .iter()
+                .map(|row| row
+                    .iter()
+                    .map(|value| Value::from(*value))
+                    .collect::<Vec<_>>())
+                .collect::<Vec<_>>(),
+            "catalog names and surviving physical indexes, without dropped indexes"
         );
 
         let docs = store

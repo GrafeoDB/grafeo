@@ -22,5 +22,9 @@ DH7|gql cb0cf24801 The vector index finds embeddings written as lists; 0.6.0 lef
 DI1|sql 09328f6996 SQL/PGQ NODES(p) and EDGES(p) return each node and edge with its ID, labels or type, endpoints and properties; 0.6.0 returned only their IDs (#705).
 DI2|sql 3dc931f998 SQL/PGQ NODES(p) and EDGES(p) return each node and edge with its ID, labels or type, endpoints and properties; 0.6.0 returned only their IDs (#705).
 DI3|sql 6dee46b96c SQL/PGQ NODES(p) and EDGES(p) return each node and edge with its ID, labels or type, endpoints and properties; 0.6.0 returned only their IDs (#705).
+DJ1|gql 97aadb50f3 A decimal sum is exact in any row order and fails only when the final value does not fit; 0.6.0 failed when a running total passed 38 digits, so [a, a, -a] failed where [a, -a, a] did not (#669).
+DJ4|cypher 97aadb50f3 A decimal sum is exact in any row order and fails only when the final value does not fit; 0.6.0 failed when a running total passed 38 digits, so [a, a, -a] failed where [a, -a, a] did not (#669).
+DJ7|gql 0ca43c524b An average of decimals is never beyond its largest row, so it never fails; 0.6.0 failed when the sum of the rows passed 38 digits (#669).
+DJ8|cypher 0ca43c524b An average of decimals is never beyond its largest row, so it never fails; 0.6.0 failed when the sum of the rows passed 38 digits (#669).
 N12|cypher 603b79d5f3 A subquery that returns an edge in one part and a node in another returns each as what it is; 0.6.0 read the node as the edge with its ID (#668).
 N12|gql 603b79d5f3 A subquery that returns an edge in one part and a node in another returns each as what it is; 0.6.0 read the node as the edge with its ID (#668).

@@ -315,22 +315,36 @@ impl Decimal {
             }
             return Self::from_magnitude(magnitude, negative, scale - dropped);
         }
-        let product = U256::product(left, right);
+        Self::rounded(U256::product(left, right), negative, scale)
+    }
 
+    /// The decimal nearest `magnitude / 10^scale`, negated when `negative`,
+    /// reduced as needed to keep at most 38 digits and a scale at most 38:
+    /// the fraction is rounded half away from zero to fit.
+    ///
+    /// # Errors
+    ///
+    /// [`DecimalError::Overflow`] when the integer part needs more than 38
+    /// digits, including after rounding.
+    fn rounded<const LIMBS: usize>(
+        magnitude: Wide<LIMBS>,
+        negative: bool,
+        scale: u8,
+    ) -> Result<Self, DecimalError> {
         // Choose the final scale before rounding: rounding one digit at a
-        // time can round the same value twice. A product has at most 76
-        // digits, so it and every boundary here fit in U256.
+        // time can round the same value twice. The boundary stops one digit
+        // past the magnitude, within the width of every caller's.
         let mut dropped = scale.saturating_sub(MAX_DECIMAL_DIGITS);
-        let mut boundary = U256::from(LIMIT).times_pow10(dropped);
-        while product >= boundary {
+        let mut boundary = Wide::<LIMBS>::from(LIMIT).times_pow10(dropped);
+        while magnitude >= boundary {
             if dropped == scale {
                 return Err(DecimalError::Overflow);
             }
             dropped += 1;
             boundary = boundary.times_pow10(1);
         }
-        let divisor = U256::from(1u128).times_pow10(dropped);
-        let (quotient, remainder) = product.div_rem(&divisor);
+        let divisor = Wide::<LIMBS>::from(1u128).times_pow10(dropped);
+        let (quotient, remainder) = magnitude.div_rem(&divisor);
         let mut magnitude = quotient.to_u128().ok_or(DecimalError::Overflow)?;
         if remainder >= divisor.minus(&remainder) {
             magnitude += 1;
@@ -341,7 +355,7 @@ impl Decimal {
                 return Err(DecimalError::Overflow);
             }
             // A rounding carry is an exact power of ten. Dropping its zero
-            // keeps the value, without a second rounding of the product.
+            // keeps the value, without a second rounding of the magnitude.
             magnitude /= 10;
             scale -= 1;
         }
@@ -357,7 +371,6 @@ impl Decimal {
     /// [`DecimalError::DivisionByZero`], or [`DecimalError::Overflow`] when
     /// the integer part needs more than 38 digits.
     pub fn checked_div(&self, other: &Self) -> Result<Self, DecimalError> {
-        const SIGNIFICANT: u8 = 16;
         if other.mantissa() == 0 {
             return Err(DecimalError::DivisionByZero);
         }
@@ -365,7 +378,31 @@ impl Decimal {
         // (a / 10^as) / (b / 10^bs) = (a * 10^bs) / (b * 10^as)
         let numerator = U256::from(self.mantissa().unsigned_abs()).times_pow10(other.scale);
         let denominator = U256::from(other.mantissa().unsigned_abs()).times_pow10(self.scale);
-        let (integer, mut remainder) = numerator.div_rem(&denominator);
+        Self::quotient(
+            &numerator,
+            &denominator,
+            negative,
+            self.scale.max(other.scale),
+        )
+    }
+
+    /// `numerator / denominator` (not zero), negated when `negative`, by the
+    /// rule of [`checked_div`](Self::checked_div): at least 16 significant
+    /// digits and at least `least_scale`, at most 38 digits in all, rounded
+    /// half away from zero.
+    ///
+    /// # Errors
+    ///
+    /// [`DecimalError::Overflow`] when the integer part needs more than 38
+    /// digits.
+    fn quotient<const LIMBS: usize>(
+        numerator: &Wide<LIMBS>,
+        denominator: &Wide<LIMBS>,
+        negative: bool,
+        least_scale: u8,
+    ) -> Result<Self, DecimalError> {
+        const SIGNIFICANT: u8 = 16;
+        let (integer, mut remainder) = numerator.div_rem(denominator);
         let integer = integer
             .to_u128()
             .filter(|&value| value < LIMIT)
@@ -375,8 +412,8 @@ impl Decimal {
         let mut fraction = [0u8; 39];
         for digit in &mut fraction {
             remainder = remainder.times_pow10(1);
-            while remainder >= denominator {
-                remainder = remainder.minus(&denominator);
+            while remainder >= *denominator {
+                remainder = remainder.minus(denominator);
                 *digit += 1;
             }
         }
@@ -391,8 +428,7 @@ impl Decimal {
             }
         };
         let scale = wanted
-            .max(self.scale)
-            .max(other.scale)
+            .max(least_scale)
             .min(MAX_DECIMAL_DIGITS - integer_digits);
         let kept = fraction[..usize::from(scale)]
             .iter()
@@ -763,19 +799,187 @@ impl<'de> serde::Deserialize<'de> for DecimalType {
     }
 }
 
-/// An unsigned 256-bit integer, enough for the product of two 38-digit
-/// mantissas, operands at a common scale, and ten times a division remainder.
+/// The 64-bit limbs of a [`DecimalSum`]'s magnitudes: 384 bits. A row
+/// aligned to the largest scale (at most 38) has a mantissa below `10^76`,
+/// under `2^253`, so `2^63` rows (the most an `i64` count holds) stay below
+/// `2^316`, and a sum in any order is exact.
+const SUM_LIMBS: usize = 6;
+
+/// The length of [`DecimalSum::to_le_bytes`]: the scale, then the positive
+/// and the negative magnitude.
+pub const DECIMAL_SUM_BYTES: usize = 1 + 2 * 8 * SUM_LIMBS;
+
+/// The exact sum of decimals, the same in any order (#669): the rows'
+/// positive and negative magnitudes, each aligned to the largest scale
+/// seen. A sum is checked only once it is final ([`total`](Self::total)):
+/// a step past 38 digits that later rows take back is no error.
 #[derive(Clone, Copy, PartialEq, Eq)]
-struct U256 {
-    /// Little-endian 64-bit limbs.
-    limbs: [u64; 4],
+pub struct DecimalSum {
+    positive: Wide<SUM_LIMBS>,
+    negative: Wide<SUM_LIMBS>,
+    scale: u8,
 }
 
-impl From<u128> for U256 {
-    fn from(value: u128) -> Self {
-        Self {
-            limbs: [low_word(value), low_word(value >> 64), 0, 0],
+impl Default for DecimalSum {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl fmt::Debug for DecimalSum {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self.total() {
+            Ok(total) => write!(f, "DecimalSum({total})"),
+            Err(_) => write!(f, "DecimalSum(past 38 digits, scale {})", self.scale),
         }
+    }
+}
+
+impl DecimalSum {
+    /// The sum of no rows: zero.
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            positive: Wide::from(0u128),
+            negative: Wide::from(0u128),
+            scale: 0,
+        }
+    }
+
+    /// The sum with only `value` in it, a whole number (an integer sum of
+    /// 128 bits that continues as a decimal sum).
+    #[must_use]
+    pub fn from_i128(value: i128) -> Self {
+        let mut sum = Self::new();
+        sum.add_magnitude(value.unsigned_abs(), value < 0, 0);
+        sum
+    }
+
+    /// Adds `value`.
+    pub fn add(&mut self, value: &Decimal) {
+        self.add_magnitude(
+            value.mantissa().unsigned_abs(),
+            value.mantissa() < 0,
+            value.scale,
+        );
+    }
+
+    /// Adds `magnitude / 10^scale`, negated when `negative`.
+    fn add_magnitude(&mut self, magnitude: u128, negative: bool, scale: u8) {
+        if scale > self.scale {
+            self.positive = self.positive.times_pow10(scale - self.scale);
+            self.negative = self.negative.times_pow10(scale - self.scale);
+            self.scale = scale;
+        }
+        let aligned = Wide::from(magnitude).times_pow10(self.scale - scale);
+        if negative {
+            self.negative = self.negative.plus(&aligned);
+        } else {
+            self.positive = self.positive.plus(&aligned);
+        }
+    }
+
+    /// The magnitude of the sum at its scale, and whether it is negative.
+    fn magnitude(&self) -> (Wide<SUM_LIMBS>, bool) {
+        if self.positive >= self.negative {
+            (self.positive.minus(&self.negative), false)
+        } else {
+            (self.negative.minus(&self.positive), true)
+        }
+    }
+
+    /// The sum at the largest scale of its rows, its fraction rounded half
+    /// away from zero when the value needs more than 38 digits.
+    ///
+    /// # Errors
+    ///
+    /// [`DecimalError::Overflow`] when the integer part needs more than 38
+    /// digits.
+    pub fn total(&self) -> Result<Decimal, DecimalError> {
+        let (magnitude, negative) = self.magnitude();
+        Decimal::rounded(magnitude, negative, self.scale)
+    }
+
+    /// The sum divided by `count` (the number of rows, not zero), by the
+    /// rule of [`Decimal::checked_div`]. It always fits: an average is never
+    /// beyond the largest row.
+    ///
+    /// # Errors
+    ///
+    /// [`DecimalError::DivisionByZero`] when `count` is 0.
+    pub fn average(&self, count: u64) -> Result<Decimal, DecimalError> {
+        if count == 0 {
+            return Err(DecimalError::DivisionByZero);
+        }
+        let (magnitude, negative) = self.magnitude();
+        // (s / 10^scale) / count = s / (count * 10^scale)
+        let denominator = Wide::from(u128::from(count)).times_pow10(self.scale);
+        Decimal::quotient(&magnitude, &denominator, negative, self.scale)
+    }
+
+    /// The nearest float, for a sum a float row turns into a float sum.
+    #[must_use]
+    pub fn to_f64(&self) -> f64 {
+        let (magnitude, negative) = self.magnitude();
+        let value = magnitude.to_f64() / 10f64.powi(i32::from(self.scale));
+        if negative { -value } else { value }
+    }
+
+    /// The sum as bytes, for a state written to disk while a query runs:
+    /// the scale, then the positive and the negative magnitude, limbs
+    /// little-endian.
+    #[must_use]
+    pub fn to_le_bytes(&self) -> [u8; DECIMAL_SUM_BYTES] {
+        let mut bytes = [0u8; DECIMAL_SUM_BYTES];
+        bytes[0] = self.scale;
+        let limbs = self.positive.limbs.iter().chain(&self.negative.limbs);
+        for (chunk, limb) in bytes[1..].as_chunks_mut::<8>().0.iter_mut().zip(limbs) {
+            *chunk = limb.to_le_bytes();
+        }
+        bytes
+    }
+
+    /// The sum [`to_le_bytes`](Self::to_le_bytes) wrote, or `None` for a
+    /// scale past 38.
+    #[must_use]
+    pub fn from_le_bytes(bytes: &[u8; DECIMAL_SUM_BYTES]) -> Option<Self> {
+        if bytes[0] > MAX_DECIMAL_DIGITS {
+            return None;
+        }
+        let mut limbs = [0u64; 2 * SUM_LIMBS];
+        for (limb, chunk) in limbs.iter_mut().zip(bytes[1..].as_chunks::<8>().0) {
+            *limb = u64::from_le_bytes(*chunk);
+        }
+        let mut positive = [0u64; SUM_LIMBS];
+        let mut negative = [0u64; SUM_LIMBS];
+        positive.copy_from_slice(&limbs[..SUM_LIMBS]);
+        negative.copy_from_slice(&limbs[SUM_LIMBS..]);
+        Some(Self {
+            positive: Wide { limbs: positive },
+            negative: Wide { limbs: negative },
+            scale: bytes[0],
+        })
+    }
+}
+
+/// An unsigned integer of `LIMBS` 64-bit limbs, for the intermediates of
+/// decimal arithmetic that 128 bits cannot hold.
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct Wide<const LIMBS: usize> {
+    /// Little-endian 64-bit limbs.
+    limbs: [u64; LIMBS],
+}
+
+/// 256 bits: enough for the product of two 38-digit mantissas, operands at a
+/// common scale, and ten times a division remainder.
+type U256 = Wide<4>;
+
+impl<const LIMBS: usize> From<u128> for Wide<LIMBS> {
+    fn from(value: u128) -> Self {
+        let mut limbs = [0u64; LIMBS];
+        limbs[0] = low_word(value);
+        limbs[1] = low_word(value >> 64);
+        Self { limbs }
     }
 }
 
@@ -796,8 +1000,10 @@ impl U256 {
         }
         Self { limbs }
     }
+}
 
-    /// `self * 10^n`; every caller stays below `10^77 < 2^256`.
+impl<const LIMBS: usize> Wide<LIMBS> {
+    /// `self * 10^n`; every caller stays below `2^(64 * LIMBS)`.
     fn times_pow10(mut self, n: u8) -> Self {
         for _ in 0..n {
             let mut carry = 0u128;
@@ -806,13 +1012,27 @@ impl U256 {
                 *limb = low_word(product);
                 carry = product >> 64;
             }
-            debug_assert_eq!(carry, 0, "decimal intermediates stay below 2^256");
+            debug_assert_eq!(carry, 0, "decimal intermediates stay within their width");
         }
         self
     }
 
+    /// `self + other`; every caller stays below `2^(64 * LIMBS)`.
+    fn plus(&self, other: &Self) -> Self {
+        let mut limbs = [0u64; LIMBS];
+        let mut carry = false;
+        for (index, limb) in limbs.iter_mut().enumerate() {
+            let (sum, over) = self.limbs[index].overflowing_add(other.limbs[index]);
+            let (sum, over_again) = sum.overflowing_add(u64::from(carry));
+            *limb = sum;
+            carry = over || over_again;
+        }
+        debug_assert!(!carry, "decimal intermediates stay within their width");
+        Self { limbs }
+    }
+
     fn minus(&self, other: &Self) -> Self {
-        let mut limbs = [0u64; 4];
+        let mut limbs = [0u64; LIMBS];
         let mut borrow = false;
         for (index, limb) in limbs.iter_mut().enumerate() {
             let (difference, under) = self.limbs[index].overflowing_sub(other.limbs[index]);
@@ -828,7 +1048,7 @@ impl U256 {
     }
 
     fn shifted_left_with(&self, low_bit: bool) -> Self {
-        let mut limbs = [0u64; 4];
+        let mut limbs = [0u64; LIMBS];
         let mut carry = u64::from(low_bit);
         for (index, limb) in limbs.iter_mut().enumerate() {
             *limb = (self.limbs[index] << 1) | carry;
@@ -841,7 +1061,7 @@ impl U256 {
     fn div_rem(&self, divisor: &Self) -> (Self, Self) {
         let mut quotient = Self::from(0u128);
         let mut remainder = Self::from(0u128);
-        for index in (0..256).rev() {
+        for index in (0..64 * LIMBS).rev() {
             remainder = remainder.shifted_left_with(self.bit(index));
             if remainder >= *divisor {
                 remainder = remainder.minus(divisor);
@@ -852,18 +1072,31 @@ impl U256 {
     }
 
     fn to_u128(self) -> Option<u128> {
-        (self.limbs[2] == 0 && self.limbs[3] == 0)
+        self.limbs[2..]
+            .iter()
+            .all(|&limb| limb == 0)
             .then(|| (u128::from(self.limbs[1]) << 64) | u128::from(self.limbs[0]))
+    }
+
+    /// The nearest float.
+    #[allow(
+        clippy::cast_precision_loss,
+        reason = "a float approximates the integer; the caller wants a float"
+    )]
+    fn to_f64(self) -> f64 {
+        self.limbs.iter().rev().fold(0.0, |value, &limb| {
+            value * 18_446_744_073_709_551_616.0 + limb as f64
+        })
     }
 }
 
-impl PartialOrd for U256 {
+impl<const LIMBS: usize> PartialOrd for Wide<LIMBS> {
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
         Some(self.cmp(other))
     }
 }
 
-impl Ord for U256 {
+impl<const LIMBS: usize> Ord for Wide<LIMBS> {
     fn cmp(&self, other: &Self) -> Ordering {
         self.limbs.iter().rev().cmp(other.limbs.iter().rev())
     }

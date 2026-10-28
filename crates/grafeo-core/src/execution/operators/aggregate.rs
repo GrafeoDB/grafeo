@@ -10,7 +10,7 @@
 use grafeo_common::utils::hash::FxHashSet as HashSet;
 use indexmap::IndexMap;
 
-use grafeo_common::types::{Decimal, Duration, LogicalType, Value};
+use grafeo_common::types::{Decimal, DecimalSum, Duration, LogicalType, Value};
 
 use super::accumulator::{AggregateExpr, AggregateFunction, HashableValue, RowKey};
 use super::{Operator, OperatorError, OperatorResult};
@@ -40,15 +40,14 @@ pub enum AggregateState {
     SumFloat(f64, f64, i64),
     /// Sum distinct state (float sum, compensation, count, seen values).
     SumFloatDistinct(f64, f64, i64, HashSet<HashableValue>),
-    /// Exact sum of decimals and integers (`None` once it needs more than
-    /// 38 digits, which fails at [`finalize`](Self::finalize)), count of
+    /// Exact sum of decimals and integers, the same in any order (a sum
+    /// past 38 digits fails at [`finalize`](Self::finalize)), count of
     /// values added.
-    SumDecimal(Option<Decimal>, i64),
+    SumDecimal(DecimalSum, i64),
     /// Average state (sum, count).
     Avg(f64, i64),
-    /// Exact average of decimals and integers: their sum (`None` once it
-    /// needs more than 38 digits) and count.
-    AvgDecimal(Option<Decimal>, i64),
+    /// Exact average of decimals and integers: their sum and count.
+    AvgDecimal(DecimalSum, i64),
     /// Average distinct state (sum, count, seen values).
     AvgDistinct(f64, i64, HashSet<HashableValue>),
     /// Min state: the least value, in the order of ORDER BY (openCypher
@@ -122,14 +121,7 @@ pub enum AggregateState {
     SparqlError,
 }
 
-/// The decimal of a float sum that holds a whole number exactly (a sum of
-/// integers, or no value yet): integers below 2^53 are exact in a float.
-/// An integer sum as an exact decimal, `None` past 38 digits.
-fn exact_sum(sum: i128) -> Option<Decimal> {
-    Decimal::new(sum, 0).ok()
-}
-
-/// The error of a decimal sum past 38 digits.
+/// The error of a sum of durations past the duration range.
 fn duration_sum_out_of_range() -> OperatorError {
     OperatorError::numeric_out_of_range("sum of durations past the duration range")
 }
@@ -143,10 +135,13 @@ fn checked_duration_sum(a: Duration, b: Duration) -> Option<Duration> {
     ))
 }
 
+/// The error of a decimal sum past 38 digits.
 fn decimal_sum_out_of_range() -> OperatorError {
     OperatorError::numeric_out_of_range("sum of more than 38 digits")
 }
 
+/// The decimal of a float sum that holds a whole number exactly (a sum of
+/// integers, or no value yet): integers below 2^53 are exact in a float.
 fn exact_whole(sum: f64) -> Option<Decimal> {
     const EXACT: f64 = 9_007_199_254_740_992.0;
     if sum.fract() == 0.0 && sum.abs() < EXACT {
@@ -171,12 +166,12 @@ impl AggregateState {
             // SPARQL's AVG divides by XPath's rules: the average of integers
             // and decimals is a decimal (a double operand makes it a double).
             AggregateState::Avg(..) if expr.rdf_literals => AggregateState::SparqlNumbers(
-                Box::new(AggregateState::AvgDecimal(Some(Decimal::from_i64(0)), 0)),
+                Box::new(AggregateState::AvgDecimal(DecimalSum::new(), 0)),
             ),
             AggregateState::AvgDistinct(..) if expr.rdf_literals => {
                 AggregateState::SparqlNumbers(Box::new(AggregateState::Distinct {
                     seen: HashSet::default(),
-                    inner: Box::new(AggregateState::AvgDecimal(Some(Decimal::from_i64(0)), 0)),
+                    inner: Box::new(AggregateState::AvgDecimal(DecimalSum::new(), 0)),
                 }))
             }
             AggregateState::AvgDecimal(..) if expr.rdf_literals => {
@@ -356,7 +351,8 @@ impl AggregateState {
                     *sum += i128::from(v);
                     *count += 1;
                 } else if let Some(Value::Decimal(d)) = value {
-                    let total = exact_sum(*sum).and_then(|whole| whole.checked_add(&d).ok());
+                    let mut total = DecimalSum::from_i128(*sum);
+                    total.add(&d);
                     *self = AggregateState::SumDecimal(total, *count + 1);
                 } else if let Some(Value::Float64(v)) = value {
                     // Convert to float sum, carrying count forward
@@ -376,7 +372,8 @@ impl AggregateState {
                             *sum += i128::from(*i);
                             *count += 1;
                         } else if let Value::Decimal(d) = v {
-                            let total = exact_sum(*sum).and_then(|whole| whole.checked_add(d).ok());
+                            let mut total = DecimalSum::from_i128(*sum);
+                            total.add(d);
                             *self = AggregateState::Distinct {
                                 seen: std::mem::take(seen),
                                 inner: Box::new(AggregateState::SumDecimal(total, *count + 1)),
@@ -405,18 +402,17 @@ impl AggregateState {
             }
             AggregateState::SumDecimal(total, count) => match value {
                 Some(Value::Decimal(d)) => {
-                    *total = total.and_then(|t| t.checked_add(&d).ok());
+                    total.add(&d);
                     *count += 1;
                 }
                 Some(Value::Int64(i)) => {
-                    *total = total.and_then(|t| t.checked_add(&Decimal::from_i64(i)).ok());
+                    total.add(&Decimal::from_i64(i));
                     *count += 1;
                 }
-                // A float (or an RDF numeric string) makes the sum a float;
-                // a sum past 38 digits stays null.
+                // A float (or an RDF numeric string) makes the sum a float.
                 Some(ref v) => {
-                    if let (Some(t), Some(num)) = (*total, value_to_f64(v)) {
-                        *self = AggregateState::SumFloat(t.to_f64() + num, 0.0, *count + 1);
+                    if let Some(num) = value_to_f64(v) {
+                        *self = AggregateState::SumFloat(total.to_f64() + num, 0.0, *count + 1);
                     }
                 }
                 None => {}
@@ -453,7 +449,9 @@ impl AggregateState {
                 // average becomes exact.
                 if let Some(Value::Decimal(d)) = value {
                     if let Some(whole) = exact_whole(*sum) {
-                        let total = whole.checked_add(&d).ok();
+                        let mut total = DecimalSum::new();
+                        total.add(&whole);
+                        total.add(&d);
                         *self = AggregateState::AvgDecimal(total, *count + 1);
                     } else {
                         *sum += d.to_f64();
@@ -463,16 +461,16 @@ impl AggregateState {
             }
             AggregateState::AvgDecimal(total, count) => match value {
                 Some(Value::Decimal(d)) => {
-                    *total = total.and_then(|t| t.checked_add(&d).ok());
+                    total.add(&d);
                     *count += 1;
                 }
                 Some(Value::Int64(i)) => {
-                    *total = total.and_then(|t| t.checked_add(&Decimal::from_i64(i)).ok());
+                    total.add(&Decimal::from_i64(i));
                     *count += 1;
                 }
                 Some(ref v) => {
-                    if let (Some(t), Some(num)) = (*total, value_to_f64(v)) {
-                        *self = AggregateState::Avg(t.to_f64() + num, *count + 1);
+                    if let Some(num) = value_to_f64(v) {
+                        *self = AggregateState::Avg(total.to_f64() + num, *count + 1);
                     }
                 }
                 None => {}
@@ -492,7 +490,9 @@ impl AggregateState {
                         && let Some(whole) = exact_whole(*sum)
                     {
                         if seen.insert(hashable) {
-                            let total = whole.checked_add(d).ok();
+                            let mut total = DecimalSum::new();
+                            total.add(&whole);
+                            total.add(d);
                             *self = AggregateState::Distinct {
                                 seen: std::mem::take(seen),
                                 inner: Box::new(AggregateState::AvgDecimal(total, *count + 1)),
@@ -828,18 +828,19 @@ impl AggregateState {
             }
             AggregateState::SparqlNumbers(inner) => return inner.finalize(),
             AggregateState::SparqlError => Value::Null,
+            // Checked once it is final: a step past 38 digits that later
+            // rows took back is no error (#669).
             AggregateState::SumDecimal(total, _) => {
-                Value::Decimal(total.ok_or_else(decimal_sum_out_of_range)?)
+                Value::Decimal(total.total().map_err(|_| decimal_sum_out_of_range())?)
             }
-            // The average of decimals by the rule of decimal division.
-            AggregateState::AvgDecimal(total, count) => {
-                let total = total.ok_or_else(decimal_sum_out_of_range)?;
-                Value::Decimal(
-                    total
-                        .checked_div(&Decimal::from_i64(*count))
-                        .map_err(|_| decimal_sum_out_of_range())?,
-                )
-            }
+            // The average of decimals by the rule of decimal division; it
+            // always fits, as no average is beyond the largest row.
+            AggregateState::AvgDecimal(total, count) => Value::Decimal(
+                u64::try_from(*count)
+                    .ok()
+                    .and_then(|count| total.average(count).ok())
+                    .ok_or_else(decimal_sum_out_of_range)?,
+            ),
             AggregateState::Min(extreme) | AggregateState::Max(extreme) => {
                 extreme.clone().unwrap_or(Value::Null)
             }

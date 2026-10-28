@@ -145,17 +145,17 @@ fn indexes_of<S: CatalogStore>(store: &S) -> [Vec<String>; 3] {
     let mut property = store.property_index_keys();
     #[cfg(feature = "vector-index")]
     let mut vector: Vec<String> = store
-        .vector_index_entries()
+        .vector_index_targets()
         .into_iter()
-        .map(|(key, _)| key)
+        .map(|(label, property, _)| format!("{label}:{property}"))
         .collect();
     #[cfg(not(feature = "vector-index"))]
     let mut vector: Vec<String> = Vec::new();
     #[cfg(feature = "text-index")]
     let mut text: Vec<String> = store
-        .text_index_entries()
+        .text_index_targets()
         .into_iter()
-        .map(|(key, _)| key)
+        .map(|(label, property, _)| format!("{label}:{property}"))
         .collect();
     #[cfg(not(feature = "text-index"))]
     let mut text: Vec<String> = Vec::new();

@@ -197,16 +197,27 @@ impl Fixture {
         }
     }
 
-    /// The indexes `SHOW INDEXES` lists (it leaves out vector indexes). A 0.5.43 file holds
-    /// no index definitions, so its closed file has none and its unflushed one only the index
-    /// its WAL defines; the index records of a 0.5.x WAL are replayed (#401), so a WAL
-    /// directory has all of them.
-    fn index_names(self) -> &'static [&'static str] {
-        match (self.version, self.layout) {
-            ("0.5.43", Layout::Closed) => &[],
-            ("0.5.43", Layout::Unflushed) => &["museum_name_index"],
-            _ => &["doc_content", "museum_name_index", "person_name"],
+    /// Catalog annotations and surviving physical indexes, including unnamed ones.
+    /// 0.5.43 lost its first session's names. Its closed file retains only the
+    /// global property index; its WAL replays the search indexes too.
+    fn index_rows(self) -> Vec<[&'static str; 4]> {
+        let mut indexes = match (self.version, self.layout) {
+            ("0.5.43", Layout::Closed) => vec![["", "Hash", "", "name"]],
+            ("0.5.43", Layout::Unflushed) => vec![
+                ["", "FullText", "Document", "content"],
+                ["museum_name_index", "Hash", "Museum", "name"],
+            ],
+            _ => vec![
+                ["doc_content", "FullText", "Document", "content"],
+                ["museum_name_index", "Hash", "Museum", "name"],
+                ["person_name", "Hash", "Person", "name"],
+            ],
+        };
+        if self.has_search_indexes() {
+            indexes.push(["", "Vector", "Document", "embedding"]);
         }
+        indexes.sort_unstable();
+        indexes
     }
 
     /// Whether the vector and text indexes of the first session are there. 0.5.43 wrote
@@ -939,14 +950,21 @@ fn check_indexes(fixture: Fixture, db: &GrafeoDB) {
     let as_value = |node: NodeId| Value::Int64(i64::try_from(node.as_u64()).unwrap());
     let name = fixture.name();
     let copy = unrestricted_copy(db);
+    let expected = fixture.index_rows();
     assert_eq!(
-        names(copy.as_ref().unwrap_or(db), "SHOW INDEXES"),
-        fixture.index_names(),
+        rows(copy.as_ref().unwrap_or(db), "SHOW INDEXES"),
+        expected
+            .iter()
+            .map(|row| row
+                .iter()
+                .map(|value| Value::from(*value))
+                .collect::<Vec<_>>())
+            .collect::<Vec<_>>(),
         "{name}: indexes"
     );
     // The property index `person_name` on `Person.name` is there as an index,
     // not only as a name, and an equality on `name` looks it up (#638).
-    if fixture.index_names().contains(&"person_name") {
+    if expected.iter().any(|row| row[0] == "person_name") {
         assert!(
             db.has_property_index("name"),
             "{name}: the property index on name"

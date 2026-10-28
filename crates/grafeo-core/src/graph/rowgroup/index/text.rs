@@ -311,4 +311,29 @@ impl RowGroupStore {
             .map(|(key, entry)| (key.clone(), Arc::clone(&entry.index)))
             .collect()
     }
+
+    /// Returns each text index's exact `(label, property, index)` target.
+    ///
+    /// Label and property names are copied from the stored entry, so a
+    /// colon in either name is preserved without splitting a joined key.
+    /// The index handle is shared, as in [`Self::text_index_entries`].
+    /// Entries have no guaranteed order.
+    ///
+    /// # Stability: Experimental
+    #[must_use]
+    pub fn text_index_targets(&self) -> Vec<(String, String, Arc<RwLock<InvertedIndex>>)> {
+        self.inner
+            .read()
+            .indexes
+            .text
+            .values()
+            .map(|entry| {
+                (
+                    entry.label.to_string(),
+                    entry.property.as_str().to_owned(),
+                    Arc::clone(&entry.index),
+                )
+            })
+            .collect()
+    }
 }

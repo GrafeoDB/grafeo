@@ -363,30 +363,20 @@ impl super::GrafeoDB {
         }))
     }
 
-    /// Returns detailed information about all indexes.
+    /// Returns detailed information about named and installed indexes.
+    /// An index without a catalog name has an empty `name`.
     #[must_use]
     pub fn list_indexes(&self) -> Vec<crate::admin::IndexInfo> {
-        self.catalog
-            .all_indexes()
+        let store = self.current_lpg_store().ok();
+        super::index::listed_indexes(&self.catalog, store.as_deref())
             .into_iter()
-            .map(|def| {
-                let label_name = self
-                    .catalog
-                    .get_label_name(def.label)
-                    .unwrap_or_else(|| "?".into());
-                let prop_name = self
-                    .catalog
-                    .get_property_key_name(def.property_key)
-                    .unwrap_or_else(|| "?".into());
-                crate::admin::IndexInfo {
-                    // The name `CREATE INDEX` gave it, as `SHOW INDEXES` lists it.
-                    name: def.name,
-                    index_type: format!("{:?}", def.index_type),
-                    target: format!("{}:{}", label_name, prop_name),
-                    unique: false,
-                    cardinality: None,
-                    size_bytes: None,
-                }
+            .map(|index| crate::admin::IndexInfo {
+                name: index.name,
+                index_type: index.index_type,
+                target: format!("{}:{}", index.label, index.property),
+                unique: false,
+                cardinality: None,
+                size_bytes: None,
             })
             .collect()
     }

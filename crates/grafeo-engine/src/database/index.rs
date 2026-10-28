@@ -19,12 +19,100 @@ use grafeo_common::storage::catalog_record::{
 use grafeo_common::utils::error::{Error, Result};
 #[cfg(any(feature = "vector-index", feature = "text-index"))]
 use grafeo_core::graph::GraphStore;
-#[cfg(any(feature = "vector-index", feature = "text-index"))]
 use grafeo_core::graph::rowgroup::RowGroupStore;
 
 #[cfg(any(feature = "vector-index", feature = "text-index"))]
 use crate::transaction::BuiltIndex;
 use crate::transaction::StandaloneChange;
+
+/// Display metadata shared by SHOW INDEXES and the admin inventory.
+pub(crate) struct ListedIndex {
+    pub(crate) name: String,
+    pub(crate) index_type: String,
+    pub(crate) label: String,
+    pub(crate) property: String,
+}
+
+/// Named catalog annotations and the indexes installed in the active store.
+/// An API-created index has no user name; a global property index has no
+/// label restriction. Both are represented by an empty string.
+pub(crate) fn listed_indexes(
+    catalog: &crate::catalog::Catalog,
+    store: Option<&RowGroupStore>,
+) -> Vec<ListedIndex> {
+    let mut indexes: Vec<ListedIndex> = catalog
+        .all_indexes()
+        .into_iter()
+        .map(|def| ListedIndex {
+            name: def.name,
+            index_type: format!("{:?}", def.index_type),
+            label: catalog
+                .get_label_name(def.label)
+                .map_or_else(|| "?".to_string(), |name| name.to_string()),
+            property: catalog
+                .get_property_key_name(def.property_key)
+                .map_or_else(|| "?".to_string(), |name| name.to_string()),
+        })
+        .collect();
+
+    if let Some(store) = store {
+        for property in store.property_index_keys() {
+            // Hash and BTree names annotate the same property-index family.
+            // Hash is its unnamed fallback display, not a separate physical
+            // index to add beside a named annotation.
+            if !indexes.iter().any(|index| {
+                matches!(index.index_type.as_str(), "Hash" | "BTree") && index.property == property
+            }) {
+                indexes.push(ListedIndex {
+                    name: String::new(),
+                    index_type: "Hash".to_string(),
+                    label: String::new(),
+                    property,
+                });
+            }
+        }
+        #[cfg(feature = "vector-index")]
+        for (label, property, _) in store.vector_index_targets() {
+            // Catalog IndexType has no Vector. A Hash annotation may have
+            // come from either a property index or generic USING VECTOR;
+            // it cannot truthfully supply this vector index's name.
+            indexes.push(ListedIndex {
+                name: String::new(),
+                index_type: "Vector".to_string(),
+                label,
+                property,
+            });
+        }
+        #[cfg(feature = "text-index")]
+        for (label, property, _) in store.text_index_targets() {
+            if !indexes.iter().any(|index| {
+                index.index_type == "FullText" && index.label == label && index.property == property
+            }) {
+                indexes.push(ListedIndex {
+                    name: String::new(),
+                    index_type: "FullText".to_string(),
+                    label,
+                    property,
+                });
+            }
+        }
+    }
+    indexes.sort_by(|a, b| {
+        (&a.name, &a.index_type, &a.label, &a.property).cmp(&(
+            &b.name,
+            &b.index_type,
+            &b.label,
+            &b.property,
+        ))
+    });
+    indexes.dedup_by(|a, b| {
+        a.name == b.name
+            && a.index_type == b.index_type
+            && a.label == b.label
+            && a.property == b.property
+    });
+    indexes
+}
 
 /// The distance metric `name` names for a new vector index (cosine when
 /// `None`).

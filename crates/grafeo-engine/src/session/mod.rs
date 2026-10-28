@@ -2810,10 +2810,11 @@ impl Session {
         }
     }
 
-    /// Returns a table of all indexes from the catalog.
+    /// Returns named index annotations and indexes installed in the active store.
     #[cfg(feature = "gql")]
     fn execute_show_indexes(&self) -> Result<QueryResult> {
-        let indexes = self.catalog.all_indexes();
+        let store = self.active_lpg_store();
+        let indexes = crate::database::index::listed_indexes(&self.catalog, store.as_deref());
         let columns = vec![
             "name".to_string(),
             "type".to_string(),
@@ -2822,20 +2823,12 @@ impl Session {
         ];
         let rows: Vec<Vec<Value>> = indexes
             .into_iter()
-            .map(|def| {
-                let label_name = self
-                    .catalog
-                    .get_label_name(def.label)
-                    .unwrap_or_else(|| "?".into());
-                let prop_name = self
-                    .catalog
-                    .get_property_key_name(def.property_key)
-                    .unwrap_or_else(|| "?".into());
+            .map(|index| {
                 vec![
-                    Value::from(def.name),
-                    Value::from(format!("{:?}", def.index_type)),
-                    Value::from(&*label_name),
-                    Value::from(&*prop_name),
+                    Value::from(index.name),
+                    Value::from(index.index_type),
+                    Value::from(index.label),
+                    Value::from(index.property),
                 ]
             })
             .collect();

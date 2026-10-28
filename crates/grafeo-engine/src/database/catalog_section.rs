@@ -152,17 +152,28 @@ pub(crate) trait CatalogStore: Send + Sync + 'static {
     /// The keys of the property indexes.
     fn property_index_keys(&self) -> Vec<String>;
 
-    /// The vector indexes, keyed `label:property`.
-    #[cfg(feature = "vector-index")]
+    /// The keyed handles used by legacy spill capability checks.
+    #[cfg(all(feature = "grafeo-file", feature = "vector-index"))]
     fn vector_index_entries(
         &self,
     ) -> Vec<(String, Arc<grafeo_core::index::vector::VectorIndexKind>)>;
 
-    /// The text indexes, keyed `label:property`.
-    #[cfg(feature = "text-index")]
-    fn text_index_entries(
+    /// The vector indexes, with their exact label and property.
+    #[cfg(feature = "vector-index")]
+    fn vector_index_targets(
         &self,
     ) -> Vec<(
+        String,
+        String,
+        Arc<grafeo_core::index::vector::VectorIndexKind>,
+    )>;
+
+    /// The text indexes, with their exact label and property.
+    #[cfg(feature = "text-index")]
+    fn text_index_targets(
+        &self,
+    ) -> Vec<(
+        String,
         String,
         Arc<parking_lot::RwLock<grafeo_core::index::text::InvertedIndex>>,
     )>;
@@ -189,21 +200,33 @@ macro_rules! catalog_store {
                 <$store>::property_index_keys(self)
             }
 
-            #[cfg(feature = "vector-index")]
+            #[cfg(all(feature = "grafeo-file", feature = "vector-index"))]
             fn vector_index_entries(
                 &self,
             ) -> Vec<(String, Arc<grafeo_core::index::vector::VectorIndexKind>)> {
                 <$store>::vector_index_entries(self)
             }
 
-            #[cfg(feature = "text-index")]
-            fn text_index_entries(
+            #[cfg(feature = "vector-index")]
+            fn vector_index_targets(
                 &self,
             ) -> Vec<(
                 String,
+                String,
+                Arc<grafeo_core::index::vector::VectorIndexKind>,
+            )> {
+                <$store>::vector_index_targets(self)
+            }
+
+            #[cfg(feature = "text-index")]
+            fn text_index_targets(
+                &self,
+            ) -> Vec<(
+                String,
+                String,
                 Arc<parking_lot::RwLock<grafeo_core::index::text::InvertedIndex>>,
             )> {
-                <$store>::text_index_entries(self)
+                <$store>::text_index_targets(self)
             }
         }
     };
@@ -234,20 +257,19 @@ impl GraphIndexes {
 
         #[cfg(feature = "vector-index")]
         let mut vector: Vec<VectorIndexDefinition> = store
-            .vector_index_entries()
+            .vector_index_targets()
             .into_iter()
-            .filter_map(|(key, index)| {
-                let (label, property) = key.split_once(':')?;
+            .map(|(label, property, index)| {
                 let config = index.config();
-                Some(VectorIndexDefinition {
-                    label: label.to_string(),
-                    property: property.to_string(),
+                VectorIndexDefinition {
+                    label,
+                    property,
                     dimensions: config.dimensions,
                     metric: config.metric,
                     m: config.m,
                     ef_construction: config.ef_construction,
                     quantization: index.quantization_type(),
-                })
+                }
             })
             .collect();
         #[cfg(not(feature = "vector-index"))]
@@ -256,15 +278,15 @@ impl GraphIndexes {
 
         #[cfg(feature = "text-index")]
         let mut text: Vec<TextIndexDefinition> = store
-            .text_index_entries()
+            .text_index_targets()
             .into_iter()
-            .filter_map(|(key, index)| {
-                let (label, property) = key.split_once(':')?;
-                Some(TextIndexDefinition {
-                    label: label.to_string(),
-                    property: property.to_string(),
-                    options: index.read().options().clone(),
-                })
+            .map(|(label, property, index)| {
+                let options = index.read().options().clone();
+                TextIndexDefinition {
+                    label,
+                    property,
+                    options,
+                }
             })
             .collect();
         #[cfg(not(feature = "text-index"))]

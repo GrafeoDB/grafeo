@@ -451,4 +451,29 @@ impl RowGroupStore {
             .map(|(key, entry)| (key.clone(), Arc::clone(&entry.index)))
             .collect()
     }
+
+    /// Returns each vector index's exact `(label, property, index)` target.
+    ///
+    /// Label and property names are copied from the stored entry, so a
+    /// colon in either name is preserved without splitting a joined key.
+    /// The index handle is shared, as in [`Self::vector_index_entries`].
+    /// Entries have no guaranteed order.
+    ///
+    /// # Stability: Experimental
+    #[must_use]
+    pub fn vector_index_targets(&self) -> Vec<(String, String, Arc<VectorIndexKind>)> {
+        self.inner
+            .read()
+            .indexes
+            .vector
+            .values()
+            .map(|entry| {
+                (
+                    entry.label.to_string(),
+                    entry.property.as_str().to_owned(),
+                    Arc::clone(&entry.index),
+                )
+            })
+            .collect()
+    }
 }

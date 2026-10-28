@@ -154,16 +154,20 @@ fn assert_indexes(db: &GrafeoDB, stage: &str) {
     }
 }
 
-/// The DDL index keeps its name, so `DROP INDEX` finds it.
+/// The DDL index keeps its name, and the API index is listed as unnamed.
 fn assert_named(db: &GrafeoDB, stage: &str) {
-    let names: Vec<Value> = db
-        .execute("SHOW INDEXES")
-        .unwrap()
-        .rows()
-        .iter()
-        .map(|row| row[0].clone())
-        .collect();
-    assert_eq!(names, [Value::from("person_city")], "{stage}");
+    let mut rows = db.execute("SHOW INDEXES").unwrap().rows().to_vec();
+    rows.sort_by_key(|row| row[0].to_string());
+    assert_eq!(
+        rows,
+        [
+            ["", "Hash", "", "id"].map(Value::from).to_vec(),
+            ["person_city", "Hash", "Person", "city"]
+                .map(Value::from)
+                .to_vec(),
+        ],
+        "{stage}"
+    );
 }
 
 #[test]

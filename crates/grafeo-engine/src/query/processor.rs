@@ -938,12 +938,60 @@ pub(crate) fn substitute_with_defaults(
     substitute_params(plan, &merged)
 }
 
+/// `params`, or an error when a value nests lists, maps and paths deeper
+/// than a stored value may: a query would clone, compare and drop it with a
+/// call per level, and a deep enough one overflows the stack. The refused
+/// parameters are dropped without recursion
+/// ([`Value::drop_without_recursion`]), as their drop alone would overflow
+/// it too.
+///
+/// # Errors
+///
+/// An invalid-value error naming the parameter.
+#[cfg(any(
+    feature = "gql",
+    feature = "cypher",
+    feature = "gremlin",
+    feature = "graphql",
+    feature = "sql-pgq"
+))]
+pub(crate) fn refuse_deep_params(
+    params: std::collections::HashMap<String, Value>,
+) -> Result<std::collections::HashMap<String, Value>> {
+    let Some(name) = params
+        .iter()
+        .find(|(_, value)| grafeo_common::storage::value_codec::nests_too_deep(value))
+        .map(|(name, _)| name.clone())
+    else {
+        return Ok(params);
+    };
+    for value in params.into_values() {
+        value.drop_without_recursion();
+    }
+    Err(Error::InvalidValue(format!(
+        "parameter ${name}: the value nests lists, maps and paths more than {} levels deep",
+        grafeo_common::storage::MAX_PROPERTY_VALUE_DEPTH
+    )))
+}
+
 /// Substitutes parameters in a logical plan with their values.
 ///
 /// # Errors
 ///
 /// Returns an error if a referenced parameter is not found in `params`.
 pub fn substitute_params(plan: &mut LogicalPlan, params: &QueryParams) -> Result<()> {
+    // A value nested deeper than a stored one is refused before a query
+    // clones, compares or drops it, which recurse once per level: a deep
+    // enough one would overflow the stack (and trap a WASM module).
+    if let Some((name, _)) = params
+        .iter()
+        .find(|(_, value)| grafeo_common::storage::value_codec::nests_too_deep(value))
+    {
+        return Err(Error::InvalidValue(format!(
+            "parameter ${name}: the value nests lists, maps and paths more than {} levels deep",
+            grafeo_common::storage::MAX_PROPERTY_VALUE_DEPTH
+        )));
+    }
     substitute_in_operator(&mut plan.root, params)
 }
 

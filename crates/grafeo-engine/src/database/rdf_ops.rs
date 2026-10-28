@@ -120,6 +120,12 @@ impl GrafeoDB {
         self.check_import_allowed()?;
         // Collected before commits are held off, for the same reason.
         let triples: Vec<_> = triples.into_iter().collect();
+        if let Some(triple) = triples.iter().find(|triple| !triple.is_valid()) {
+            return Err(grafeo_common::utils::error::Error::InvalidValue(format!(
+                "{triple} is no RDF triple: a subject is an IRI or a blank node, a predicate \
+                 an IRI; nothing was inserted"
+            )));
+        }
         let held = self.hold_commits_for_import()?;
         self.insert_triples_streamed(&held, triples)
     }

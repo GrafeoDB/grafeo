@@ -1469,6 +1469,17 @@ impl RdfPlanner {
         let subject = self.component_to_term(&insert.subject)?;
         let predicate = self.component_to_term(&insert.predicate)?;
         let object = self.component_to_term(&insert.object)?;
+        // A literal subject or a predicate that is not an IRI is no RDF
+        // triple: a template skips it (above), data written out is refused.
+        if !is_valid_triple(&subject, &predicate) {
+            return Err(Error::from(QueryError::new(
+                QueryErrorKind::Semantic,
+                format!(
+                    "INSERT DATA: {subject} {predicate} is not a triple's subject and predicate: \
+                     a subject is an IRI or a blank node, a predicate an IRI"
+                ),
+            )));
+        }
 
         let triple = Triple::new(subject, predicate, object);
         let operator = Box::new(RdfInsertTripleOperator::new(

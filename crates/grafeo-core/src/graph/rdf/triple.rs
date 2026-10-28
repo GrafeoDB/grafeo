@@ -78,6 +78,14 @@ impl Triple {
         }
     }
 
+    /// Whether the triple is an RDF triple: its subject an IRI or a blank
+    /// node, its predicate an IRI (RDF 1.1 Concepts 3.1). One built with
+    /// [`new_unchecked`](Self::new_unchecked) may not be.
+    #[must_use]
+    pub fn is_valid(&self) -> bool {
+        (self.subject.is_iri() || self.subject.is_blank_node()) && self.predicate.is_iri()
+    }
+
     /// Creates a new triple without validation.
     ///
     /// Use this only when you're sure the terms are valid.

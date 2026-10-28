@@ -23,6 +23,21 @@ use wasm_bindgen::prelude::*;
 /// A `BigInt` with more than 38 digits, or a value of no Grafeo type (a
 /// function, a symbol).
 pub fn js_to_value(value: &JsValue) -> Result<Value, String> {
+    js_to_value_at(value, 0)
+}
+
+/// [`js_to_value`] for a value inside `depth` arrays and objects: one
+/// nested deeper than a stored value is refused before its conversion
+/// recurses further (a deep one would overflow the stack and trap the
+/// module).
+fn js_to_value_at(value: &JsValue, depth: usize) -> Result<Value, String> {
+    use grafeo_common::storage::MAX_PROPERTY_VALUE_DEPTH;
+
+    let too_deep = || {
+        format!(
+            "the value nests arrays and objects more than {MAX_PROPERTY_VALUE_DEPTH} levels deep"
+        )
+    };
     if value.is_null() || value.is_undefined() {
         return Ok(Value::Null);
     }
@@ -52,9 +67,12 @@ pub fn js_to_value(value: &JsValue) -> Result<Value, String> {
         return Value::from_number_text(&text).map_err(|error| error.to_string());
     }
     if Array::is_array(value) {
+        if depth >= MAX_PROPERTY_VALUE_DEPTH {
+            return Err(too_deep());
+        }
         let items = Array::from(value)
             .iter()
-            .map(|item| js_to_value(&item))
+            .map(|item| js_to_value_at(&item, depth + 1))
             .collect::<Result<Vec<_>, _>>()?;
         return Ok(Value::List(items.into()));
     }
@@ -95,9 +113,13 @@ pub fn js_to_value(value: &JsValue) -> Result<Value, String> {
             value.js_typeof().as_string().unwrap_or_default()
         ));
     };
+    if depth >= MAX_PROPERTY_VALUE_DEPTH {
+        return Err(too_deep());
+    }
     let mut map = BTreeMap::new();
     for (key, item) in entries? {
-        let item = js_to_value(&item).map_err(|error| format!("key '{key}': {error}"))?;
+        let item =
+            js_to_value_at(&item, depth + 1).map_err(|error| format!("key '{key}': {error}"))?;
         map.insert(PropertyKey::new(key), item);
     }
     Ok(grafeo_bindings_common::json::tagged_value(&map)

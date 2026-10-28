@@ -1978,14 +1978,19 @@ impl GrafeoDB {
         let file = LegacyFile::open(path, None)?;
         match file.contents()? {
             LegacyContents::Empty => {}
-            LegacyContents::Snapshot(data) => Self::apply_snapshot_data(
-                path,
-                store,
-                catalog,
-                #[cfg(feature = "triple-store")]
-                rdf_store,
-                &data,
-            )?,
+            // Its indexes are built with those its WAL puts (see
+            // `LoadedSections::unbuilt_mut`).
+            LegacyContents::Snapshot(data) => {
+                let indexes = Self::apply_snapshot_data(
+                    path,
+                    store,
+                    catalog,
+                    #[cfg(feature = "triple-store")]
+                    rdf_store,
+                    &data,
+                )?;
+                loaded.unbuilt_mut().push(indexes);
+            }
             // Each section is served once and freed as soon as it is
             // loaded: a migration of a large 0.5.x file does not hold the
             // whole file's sections until the load returns.
@@ -2039,7 +2044,8 @@ impl GrafeoDB {
     }
 
     /// Applies the snapshot blob of the 0.5.x container v1 file `path` to
-    /// restore the store and catalog.
+    /// restore the store and catalog, and returns the indexes it defines,
+    /// for the load to build once the data is in.
     #[cfg(feature = "grafeo-file")]
     fn apply_snapshot_data<S: root_store::RootStore>(
         path: &std::path::Path,
@@ -2047,7 +2053,7 @@ impl GrafeoDB {
         catalog: &Arc<crate::catalog::Catalog>,
         #[cfg(feature = "triple-store")] rdf_store: &Arc<RdfStore>,
         data: &[u8],
-    ) -> Result<()> {
+    ) -> Result<catalog_section::GraphIndexes> {
         // v1 blob format: pass through to legacy loader
         persistence::load_snapshot_into_store(
             path,

@@ -3626,6 +3626,7 @@ impl Session {
         query: &str,
         params: std::collections::HashMap<String, Value>,
     ) -> Result<QueryResult> {
+        let params = crate::query::processor::refuse_deep_params(params)?;
         self.timed(|| self.execute_gql(query, Some(&params)))
     }
 
@@ -3682,6 +3683,7 @@ impl Session {
         query: &str,
         params: std::collections::HashMap<String, Value>,
     ) -> Result<QueryResult> {
+        let params = crate::query::processor::refuse_deep_params(params)?;
         self.timed(|| self.execute_cypher_inner(query, Some(&params)))
     }
 
@@ -3909,6 +3911,7 @@ impl Session {
         query: &str,
         params: std::collections::HashMap<String, Value>,
     ) -> Result<QueryResult> {
+        let params = crate::query::processor::refuse_deep_params(params)?;
         self.timed(|| self.execute_gremlin_with_params_untimed(query, params))
     }
 
@@ -4067,6 +4070,7 @@ impl Session {
         query: &str,
         params: std::collections::HashMap<String, Value>,
     ) -> Result<QueryResult> {
+        let params = crate::query::processor::refuse_deep_params(params)?;
         self.timed(|| self.execute_graphql_with_params_untimed(query, params))
     }
 
@@ -4286,6 +4290,7 @@ impl Session {
         query: &str,
         params: std::collections::HashMap<String, Value>,
     ) -> Result<QueryResult> {
+        let params = crate::query::processor::refuse_deep_params(params)?;
         self.timed(|| self.execute_sql_inner(query, Some(&params)))
     }
 

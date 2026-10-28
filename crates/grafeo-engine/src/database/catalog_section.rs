@@ -1075,19 +1075,41 @@ impl<S: CatalogStore> Section for CatalogSection<S> {
         for def in &snapshot.schema.edge_types {
             self.catalog.register_or_replace_edge_type_def(def.clone());
         }
+        // A definition that does not apply is damage; a schema listed twice
+        // is not, and a binding to a graph type the section lacks is left
+        // out (0.5.x left one behind when its graph type was dropped).
+        let damaged = |what: String| Error::corruption(format!("section Catalog: {what}"));
         for def in &snapshot.schema.graph_types {
-            let _ = self.catalog.register_graph_type(def.clone());
+            let name = def.name.clone();
+            self.catalog
+                .register_graph_type(def.clone())
+                .map_err(|error| damaged(format!("graph type '{name}': {error}")))?;
         }
         for def in &snapshot.schema.procedures {
-            self.catalog.replace_procedure(def.clone()).ok();
+            let name = def.name.clone();
+            self.catalog
+                .replace_procedure(def.clone())
+                .map_err(|error| damaged(format!("procedure '{name}': {error}")))?;
         }
         for name in &snapshot.schema.schemas {
-            let _ = self.catalog.register_schema_namespace(name.clone());
+            match self.catalog.register_schema_namespace(name.clone()) {
+                Ok(()) | Err(crate::catalog::CatalogError::SchemaAlreadyExists(_)) => {}
+                Err(error) => return Err(damaged(format!("schema '{name}': {error}"))),
+            }
             let default_key = format!("{name}/__default__");
-            let _ = self.store.create_graph(&default_key);
+            self.store.create_graph(&default_key).map_err(|error| {
+                damaged(format!("the default graph of schema '{name}': {error}"))
+            })?;
         }
         for (graph_name, type_name) in &snapshot.schema.graph_type_bindings {
-            let _ = self.catalog.bind_graph_type(graph_name, type_name.clone());
+            match self.catalog.bind_graph_type(graph_name, type_name.clone()) {
+                Ok(()) | Err(crate::catalog::CatalogError::TypeNotFound(_)) => {}
+                Err(error) => {
+                    return Err(damaged(format!(
+                        "the binding of graph '{graph_name}' to '{type_name}': {error}"
+                    )));
+                }
+            }
         }
         self.loaded_epoch = snapshot.epoch;
         // The node types restored above already hold the constraints.
@@ -1490,6 +1512,88 @@ mod tests {
                 ..GraphIndexes::default()
             }]
         );
+    }
+
+    /// The bytes of a version 1 catalog (0.5.x files) whose schema holds
+    /// open graph types of the names `graph_types` (a name given twice is
+    /// defined twice) and the graph type bindings `bindings`, and nothing
+    /// else.
+    fn version_1_catalog(graph_types: &[&str], bindings: &[(&str, &str)]) -> Vec<u8> {
+        let snapshot = CatalogSnapshot {
+            version: 1,
+            schema: SnapshotSchema {
+                graph_types: graph_types
+                    .iter()
+                    .map(|name| GraphTypeDefinition {
+                        name: (*name).to_string(),
+                        allowed_node_types: Vec::new(),
+                        allowed_edge_types: Vec::new(),
+                        open: true,
+                    })
+                    .collect(),
+                graph_type_bindings: bindings
+                    .iter()
+                    .map(|(graph, graph_type)| ((*graph).to_string(), (*graph_type).to_string()))
+                    .collect(),
+                ..SnapshotSchema::default()
+            },
+            indexes: SnapshotIndexes::default(),
+            epoch: 7,
+        };
+        bincode::serde::encode_to_vec(&snapshot, bincode::config::standard()).unwrap()
+    }
+
+    /// Control: a version 1 catalog that binds a graph to a graph type it
+    /// defines loads the binding.
+    #[test]
+    fn a_version_1_binding_to_its_graph_type_loads() {
+        let mut section = make_section();
+        section
+            .deserialize(&version_1_catalog(&["travel"], &[("trips", "travel")]))
+            .unwrap();
+        assert_eq!(
+            section.catalog.all_graph_type_bindings(),
+            [("trips".to_string(), "travel".to_string())]
+        );
+    }
+
+    /// Control: `DROP GRAPH TYPE` leaves the bindings to the type, and a
+    /// 0.5.x file wrote them (see `catalog_records`): a version 1 catalog
+    /// with a binding to a graph type it does not define still loads, the
+    /// binding left out.
+    #[test]
+    fn a_version_1_binding_a_dropped_graph_type_left_is_left_out() {
+        let mut section = make_section();
+        section
+            .deserialize(&version_1_catalog(&[], &[("trips", "dropped")]))
+            .unwrap();
+        assert_eq!(section.catalog.all_graph_type_bindings(), []);
+    }
+
+    /// A version 1 catalog that defines a graph type twice fails the load,
+    /// naming it, as a version 2 catalog refuses a repeated record: the
+    /// second definition is left out today.
+    #[test]
+    fn a_version_1_graph_type_defined_twice_fails_the_load() {
+        let mut section = make_section();
+        let error = section
+            .deserialize(&version_1_catalog(&["travel", "travel"], &[]))
+            .expect_err("a graph type the catalog defines already fails the load")
+            .to_string();
+        assert!(error.contains("travel"), "the error names it: {error}");
+    }
+
+    /// The same through the loader of a 0.5.x catalog section, as an open
+    /// of a 0.5.x file reads it.
+    #[test]
+    fn a_0_5_catalog_section_defining_a_graph_type_twice_fails_the_load() {
+        let image = MemoryImage::from_raw(vec![(
+            SectionType::Catalog,
+            version_1_catalog(&["travel", "travel"], &[]),
+        )])
+        .unwrap();
+        let error = load_error(&image);
+        assert!(error.contains("travel"), "the error names it: {error}");
     }
 
     /// Fills the catalog with every kind of entry a 0.5.x catalog holds, one

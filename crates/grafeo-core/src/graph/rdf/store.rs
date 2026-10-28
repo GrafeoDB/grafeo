@@ -363,6 +363,11 @@ impl RdfStore {
     ///
     /// Returns `true` if the triple was newly inserted, `false` if it already existed.
     pub fn insert(&self, triple: Triple) -> bool {
+        // A literal subject or a predicate that is not an IRI is no RDF
+        // triple: it is not stored (the loaders refuse it with an error).
+        if !triple.is_valid() {
+            return false;
+        }
         let triple = self.stored(triple);
 
         // Check if already exists
@@ -1241,10 +1246,13 @@ impl RdfStore {
             *self.ring.write() = None;
             return;
         }
-        let ring = crate::index::ring::TripleRing::from_triples(
+        // The ring is an index: one that cannot be built (more distinct
+        // terms than it gives ids) is left out, and queries read the triples.
+        let ring = crate::index::ring::TripleRing::try_from_triples(
             triples.iter().map(|t| t.as_ref().clone()),
-        );
-        *self.ring.write() = Some(Arc::new(ring));
+        )
+        .ok();
+        *self.ring.write() = ring.map(Arc::new);
         self.ring_stale
             .store(false, std::sync::atomic::Ordering::Relaxed);
     }
@@ -1354,10 +1362,11 @@ impl RdfStore {
         // Build Ring Index automatically during bulk load (when feature is enabled).
         #[cfg(feature = "ring-index")]
         {
-            let ring = crate::index::ring::TripleRing::from_triples(
+            let ring = crate::index::ring::TripleRing::try_from_triples(
                 self.triples.read().iter().map(|t| t.as_ref().clone()),
-            );
-            *self.ring.write() = Some(Arc::new(ring));
+            )
+            .ok();
+            *self.ring.write() = ring.map(Arc::new);
             self.ring_stale
                 .store(false, std::sync::atomic::Ordering::Relaxed);
         }
@@ -2167,6 +2176,13 @@ fn parse_ntriples_line(line: &str) -> Result<Triple, String> {
     let subject = term(subj_str, "subject")?;
     let predicate = term(pred_str, "predicate")?;
     let object = term(obj_str, "object")?;
+    // RDF 1.1: a subject is an IRI or a blank node, a predicate an IRI.
+    if !(subject.is_iri() || subject.is_blank_node()) {
+        return Err(format!("subject: {subj_str} is not an IRI or a blank node"));
+    }
+    if !predicate.is_iri() {
+        return Err(format!("predicate: {pred_str} is not an IRI"));
+    }
 
     // Expect trailing ` .`
     if !rest.trim().starts_with('.') {

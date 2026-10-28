@@ -368,6 +368,18 @@ impl Catalog {
             .is_some_and(SchemaCatalog::has_node_types)
     }
 
+    /// Forgets every definition: the indexes and their names, and the schema
+    /// (types, graph types and their bindings, schemas, constraints,
+    /// procedures), for a restore that puts the snapshot's in their place
+    /// (#677). The label, edge type and property key ids stay: the stores
+    /// keep the ids they gave out, and a name used again gets its old one.
+    pub(crate) fn clear_definitions(&self) {
+        self.indexes.clear();
+        if let Some(schema) = &self.schema {
+            schema.clear();
+        }
+    }
+
     /// Returns all registered node type names.
     #[must_use]
     pub fn all_node_type_names(&self) -> Vec<String> {
@@ -1131,6 +1143,15 @@ struct IndexCatalog {
 }
 
 impl IndexCatalog {
+    /// Forgets every index definition and name; the ids it gave out are not
+    /// given out again (see [`Catalog::clear_definitions`]).
+    fn clear(&self) {
+        self.indexes.write().clear();
+        self.label_indexes.write().clear();
+        self.label_property_indexes.write().clear();
+        self.name_index.write().clear();
+    }
+
     fn new() -> Self {
         Self {
             indexes: RwLock::new(HashMap::new()),
@@ -1699,6 +1720,20 @@ impl SchemaCatalog {
     #[must_use]
     pub fn has_node_types(&self) -> bool {
         !self.node_types.read().is_empty()
+    }
+
+    /// Forgets every definition (see [`Catalog::clear_definitions`]).
+    fn clear(&self) {
+        self.unique_constraints.write().clear();
+        self.required_properties.write().clear();
+        self.node_types.write().clear();
+        self.edge_types.write().clear();
+        self.graph_types.write().clear();
+        self.schemas.write().clear();
+        self.graph_type_bindings.write().clear();
+        self.procedures.write().clear();
+        self.constraints.write().clear();
+        self.checks.write().clear();
     }
 
     /// Gets a resolved node type with inherited properties and constraints from parents.

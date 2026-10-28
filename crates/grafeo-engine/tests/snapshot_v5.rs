@@ -153,9 +153,9 @@ fn what_version_4_lost_works_after_an_import() {
 }
 
 /// A restore into a database whose catalog holds the same definitions
-/// already applies the snapshot's catalog over it, and keeps the rest.
+/// already gives the snapshot's catalog, and its data once.
 #[test]
-fn a_restore_applies_the_catalog_over_what_is_there() {
+fn a_restore_over_the_same_catalog_gives_the_snapshots() {
     let db = with_schema();
     let bytes = db.export_snapshot().unwrap();
     let target = with_schema();
@@ -169,6 +169,291 @@ fn a_restore_applies_the_catalog_over_what_is_there() {
         Value::Int64(2),
         "the data is the snapshot's, not doubled"
     );
+}
+
+/// The database a snapshot of another catalog is taken of: a node type of
+/// its own, data a unique and a NOT NULL constraint on `Person` would
+/// refuse (two people with one email, one without a name), the documents
+/// and notes the indexes of [`SCHEMA`] index, and an untyped graph `trips`.
+const OTHER_CATALOG: &[&str] = &[
+    "CREATE NODE TYPE Place (name STRING)",
+    "INSERT (:Person {name: 'Vincent', email: 'shared@example.org'}), \
+     (:Person {name: 'Jules', email: 'shared@example.org'}), \
+     (:Person {email: 'mia@example.org'})",
+    "INSERT (:Document {title: 'Canals', content: 'boats on the canals of Paris', \
+     embedding: vector([3.0, 19.0, 88.0])})",
+    "INSERT (:Note {body: 'Berlin and Amsterdam'})",
+    "CREATE GRAPH trips",
+];
+
+fn run(db: &GrafeoDB, statements: &[&str]) {
+    for statement in statements {
+        db.execute(statement)
+            .unwrap_or_else(|error| panic!("{statement}: {error}"));
+    }
+}
+
+fn other_catalog() -> GrafeoDB {
+    let db = GrafeoDB::new_in_memory();
+    run(&db, OTHER_CATALOG);
+    db
+}
+
+/// A database with the whole catalog of [`SCHEMA`], restored from a snapshot
+/// of [`OTHER_CATALOG`], and the database the snapshot was taken of.
+fn restored_over_schema() -> (GrafeoDB, GrafeoDB) {
+    let source = other_catalog();
+    let target = with_schema();
+    target
+        .restore_snapshot(&source.export_snapshot().unwrap())
+        .expect("the restore succeeds");
+    (target, source)
+}
+
+/// The rows of `query` on `db`, one line each, sorted.
+fn rows(db: &GrafeoDB, query: &str) -> Vec<String> {
+    let mut lines: Vec<String> = db
+        .execute(query)
+        .unwrap_or_else(|error| panic!("{query}: {error}"))
+        .rows()
+        .iter()
+        .map(|row| format!("{row:?}"))
+        .collect();
+    lines.sort();
+    lines
+}
+
+/// The error of a vector search for the documents of [`SCHEMA`]'s vector
+/// index, or `None` when the search runs.
+fn vector_search_error(db: &GrafeoDB) -> Option<String> {
+    db.vector_search("Document", "embedding", &[3.0, 19.0, 88.0], 1, None, None)
+        .err()
+        .map(|error| error.to_string())
+}
+
+/// A restore replaces the catalog: the restored database lists what the
+/// snapshot's database lists, and nothing of the catalog it had before.
+#[test]
+fn a_restore_replaces_the_catalog() {
+    let (target, source) = restored_over_schema();
+    assert_eq!(shown(&target), shown(&source));
+}
+
+/// A node type the snapshot does not have is gone after a restore.
+#[test]
+fn a_restore_drops_the_node_types_the_snapshot_has_not() {
+    let (target, source) = restored_over_schema();
+    assert_eq!(
+        rows(&target, "SHOW NODE TYPES"),
+        rows(&source, "SHOW NODE TYPES")
+    );
+}
+
+/// An edge type the snapshot does not have is gone after a restore.
+#[test]
+fn a_restore_drops_the_edge_types_the_snapshot_has_not() {
+    let (target, source) = restored_over_schema();
+    assert_eq!(
+        rows(&target, "SHOW EDGE TYPES"),
+        rows(&source, "SHOW EDGE TYPES")
+    );
+}
+
+/// A graph type the snapshot does not have is gone after a restore, and so
+/// is the binding of a graph the snapshot holds untyped: `trips` takes a
+/// `Person`, which the graph type `travel` has not.
+#[test]
+fn a_restore_drops_the_graph_types_and_bindings_the_snapshot_has_not() {
+    let (target, source) = restored_over_schema();
+    assert_eq!(
+        rows(&target, "SHOW GRAPH TYPES"),
+        rows(&source, "SHOW GRAPH TYPES")
+    );
+    target
+        .graph("trips")
+        .unwrap()
+        .execute("INSERT (:Person {name: 'Gus'})")
+        .expect("trips is untyped in the snapshot");
+}
+
+/// A constraint the snapshot does not have is gone after a restore: the
+/// writes the snapshot's database takes, the restored one takes too.
+#[test]
+fn a_restore_drops_the_constraints_the_snapshot_has_not() {
+    let (target, source) = restored_over_schema();
+    assert_eq!(
+        rows(&target, "SHOW CONSTRAINTS"),
+        rows(&source, "SHOW CONSTRAINTS")
+    );
+    target
+        .execute("INSERT (:Person {name: 'Gus', email: 'shared@example.org'})")
+        .expect("no unique constraint on Person.email");
+    target
+        .execute("INSERT (:Person {email: 'gus@example.org'})")
+        .expect("no NOT NULL constraint on Person.name");
+}
+
+/// Data a unique constraint the snapshot never had would refuse restores
+/// whole, and the constraint does not come back to refuse the next write
+/// of the same kind.
+#[test]
+fn data_a_constraint_the_snapshot_never_had_would_refuse_restores() {
+    let (target, _source) = restored_over_schema();
+    assert_eq!(
+        target
+            .execute("MATCH (p:Person {email: 'shared@example.org'}) RETURN count(p)")
+            .unwrap()
+            .rows()[0][0],
+        Value::Int64(2),
+        "both people with the shared email are restored"
+    );
+    target
+        .execute("INSERT (:Person {name: 'Mia', email: 'shared@example.org'})")
+        .expect("the snapshot's database takes a third person with the email");
+}
+
+/// A procedure the snapshot does not have is gone after a restore.
+#[test]
+fn a_restore_drops_the_procedures_the_snapshot_has_not() {
+    let (target, _source) = restored_over_schema();
+    assert!(
+        target
+            .execute("CALL capitals() YIELD name RETURN name")
+            .is_err(),
+        "the procedure capitals is not in the snapshot"
+    );
+}
+
+/// A property and a text index the snapshot does not have are gone after a
+/// restore.
+#[test]
+fn a_restore_drops_the_property_and_text_indexes_the_snapshot_has_not() {
+    let (target, source) = restored_over_schema();
+    assert_eq!(rows(&target, "SHOW INDEXES"), rows(&source, "SHOW INDEXES"));
+    assert!(
+        target.execute("DROP INDEX person_name").is_err(),
+        "the index person_name is not in the snapshot"
+    );
+    assert!(
+        target
+            .text_search("Document", "content", "canals", 1, None)
+            .is_err(),
+        "the text index on Document.content is not in the snapshot"
+    );
+}
+
+/// A vector index the snapshot does not have is gone after a restore
+/// (`SHOW INDEXES` leaves vector indexes out).
+#[test]
+fn a_restore_drops_the_vector_indexes_the_snapshot_has_not() {
+    let (target, _source) = restored_over_schema();
+    let error = vector_search_error(&target);
+    assert!(
+        error
+            .as_deref()
+            .is_some_and(|error| error.contains("there is no vector index")),
+        "the vector index on Document.embedding is not in the snapshot: {error:?}"
+    );
+}
+
+/// A schema the snapshot does not have is gone after a restore.
+#[test]
+fn a_restore_drops_the_schemas_the_snapshot_has_not() {
+    let (target, source) = restored_over_schema();
+    assert_eq!(rows(&target, "SHOW SCHEMAS"), rows(&source, "SHOW SCHEMAS"));
+}
+
+/// Control: what the snapshot holds is there after a restore into a
+/// database with another catalog, and works.
+#[test]
+fn a_restore_keeps_every_definition_the_snapshot_holds() {
+    let source = with_schema();
+    let target = other_catalog();
+    target
+        .restore_snapshot(&source.export_snapshot().unwrap())
+        .unwrap();
+    let restored = shown(&target);
+    for line in shown(&source) {
+        assert!(restored.contains(&line), "{line} is restored");
+    }
+    assert_eq!(vector_search_error(&target), None);
+    assert_eq!(
+        target
+            .text_search("Note", "body", "paris", 3, None)
+            .unwrap()
+            .len(),
+        1
+    );
+    target
+        .execute("CALL capitals() YIELD name RETURN name")
+        .expect("the procedure capitals is restored");
+}
+
+/// A restore into a database file replaces its catalog for good: after a
+/// close and an open, the file lists what the snapshot's database lists,
+/// and nothing of the catalog it had before.
+#[cfg(all(feature = "wal", feature = "grafeo-file"))]
+#[test]
+fn a_restored_file_reopens_with_the_snapshots_catalog_alone() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("amsterdam.grafeo");
+    let source = other_catalog();
+    {
+        let db = GrafeoDB::with_config(grafeo_engine::Config::persistent(&path)).unwrap();
+        run(&db, SCHEMA);
+        db.restore_snapshot(&source.export_snapshot().unwrap())
+            .unwrap();
+        db.close().unwrap();
+    }
+    let reopened = GrafeoDB::open(&path).unwrap();
+    assert_eq!(shown(&reopened), shown(&source));
+    let error = vector_search_error(&reopened);
+    assert!(
+        error
+            .as_deref()
+            .is_some_and(|error| error.contains("there is no vector index")),
+        "the vector index on Document.embedding is not in the snapshot: {error:?}"
+    );
+    assert!(
+        reopened
+            .execute("CALL capitals() YIELD name RETURN name")
+            .is_err(),
+        "the procedure capitals is not in the snapshot"
+    );
+    reopened
+        .execute("INSERT (:Person {name: 'Gus', email: 'shared@example.org'})")
+        .expect("no unique constraint on Person.email");
+    reopened
+        .graph("trips")
+        .unwrap()
+        .execute("INSERT (:Person {name: 'Gus'})")
+        .expect("trips is untyped in the snapshot");
+}
+
+/// Control: a restore into a database file keeps what the snapshot holds
+/// after a close and an open.
+#[cfg(all(feature = "wal", feature = "grafeo-file"))]
+#[test]
+fn a_restored_file_reopens_with_every_definition_the_snapshot_holds() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("berlin.grafeo");
+    let source = with_schema();
+    {
+        let db = GrafeoDB::with_config(grafeo_engine::Config::persistent(&path)).unwrap();
+        run(&db, OTHER_CATALOG);
+        db.restore_snapshot(&source.export_snapshot().unwrap())
+            .unwrap();
+        db.close().unwrap();
+    }
+    let reopened = GrafeoDB::open(&path).unwrap();
+    let restored = shown(&reopened);
+    for line in shown(&source) {
+        assert!(restored.contains(&line), "{line} is restored");
+    }
+    assert_eq!(vector_search_error(&reopened), None);
+    reopened
+        .execute("CALL capitals() YIELD name RETURN name")
+        .expect("the procedure capitals is restored");
 }
 
 /// The stored configuration stays with the database file: a snapshot of a

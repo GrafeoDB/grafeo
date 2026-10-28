@@ -1426,6 +1426,7 @@ pub(crate) fn classify_optional_predicates(
     }
 }
 
+#[cfg(any(feature = "gql", feature = "cypher", test))]
 pub(crate) use crate::query::plan::has_subquery;
 
 /// Collects all variables produced by a logical operator's subtree.

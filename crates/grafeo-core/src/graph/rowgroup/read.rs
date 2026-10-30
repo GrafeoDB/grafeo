@@ -331,6 +331,47 @@ impl Inner {
         }
     }
 
+    /// Whether `read` sees an edge [`each_seen`](Self::each_seen) would
+    /// give, stopping at the first.
+    fn any_seen(
+        &self,
+        node: NodeId,
+        direction: Direction,
+        edge_types: Option<&[u32]>,
+        read: Read,
+    ) -> bool {
+        let raw = node.as_u64();
+        let Some((group, row)) = self.node_seen(raw, read) else {
+            return false;
+        };
+        let both = direction == Direction::Both;
+        let counts = |adjacent: Adjacent, outgoing: bool| {
+            let self_loop = adjacent.other == raw;
+            !((both && !outgoing && self_loop)
+                || edge_types.is_some_and(|types| !types.contains(&adjacent.edge_type)))
+                && self.edge_visible(adjacent.edge, read)
+        };
+        let directions: &[bool] = match direction {
+            Direction::Outgoing => &[true],
+            Direction::Incoming => &[false],
+            Direction::Both => &[true, false],
+        };
+        directions.iter().any(|&outgoing| {
+            if outgoing || self.keeps_incoming() {
+                let adjacency = group.adjacency(outgoing);
+                match edge_types {
+                    Some(&[edge_type]) => adjacency
+                        .of_type(row, edge_type)
+                        .any(|adjacent| counts(adjacent, outgoing)),
+                    _ => adjacency.of(row).any(|adjacent| counts(adjacent, outgoing)),
+                }
+            } else {
+                self.incoming_by_scan(raw)
+                    .any(|adjacent| counts(adjacent, outgoing))
+            }
+        })
+    }
+
     /// The type ids of `types`, the names the store has an edge type of;
     /// `None` for every type (no names). Empty when it has none of them.
     fn type_ids(&self, types: &[ArcStr]) -> Option<SmallVec<[u32; 4]>> {
@@ -613,6 +654,24 @@ impl GraphStore for RowGroupStore {
         Ok(Some(inner.label_names(&group.labels_at(row, read))))
     }
 
+    fn node_label_mask(&self, id: NodeId, view: ReadView) -> Result<Option<u64>> {
+        let (inner, read) = (self.inner.read(), Read::view(view));
+        let Some((group, row)) = inner.node(id.as_u64()) else {
+            return Ok(None);
+        };
+        if !group.version(row).visible(read) {
+            return Ok(None);
+        }
+        Ok(group.label_mask_at(row, read))
+    }
+
+    fn label_mask_names(&self, mask: u64) -> Result<Labels> {
+        let ids: Vec<u32> = (0..64).filter(|bit| mask & (1 << bit) != 0).collect();
+        let mut names = self.inner.read().label_names(&ids);
+        names.sort();
+        Ok(names)
+    }
+
     fn node_has_label(&self, id: NodeId, label: &str, view: ReadView) -> Result<Option<bool>> {
         let (inner, read) = (self.inner.read(), Read::view(view));
         let Some((group, row)) = inner.node(id.as_u64()) else {
@@ -699,6 +758,21 @@ impl GraphStore for RowGroupStore {
             .inner
             .read()
             .edges_seen(node, direction, types, Read::view(view)))
+    }
+
+    fn has_edge(
+        &self,
+        node: NodeId,
+        direction: Direction,
+        types: &[ArcStr],
+        view: ReadView,
+    ) -> Result<bool> {
+        let inner = self.inner.read();
+        let ids = inner.type_ids(types);
+        if ids.as_ref().is_some_and(SmallVec::is_empty) {
+            return Ok(false);
+        }
+        Ok(inner.any_seen(node, direction, ids.as_deref(), Read::view(view)))
     }
 
     fn degree(&self, node: NodeId, direction: Direction, view: ReadView) -> Result<usize> {

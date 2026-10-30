@@ -257,6 +257,25 @@ impl NodeGroup {
         self.labels_of(row)
     }
 
+    /// The row's labels as `read` sees them as a bit mask (bit `i` for
+    /// label id `i`), `None` for a label id of 64 or more. Reads the label
+    /// bitmaps without listing the ids.
+    fn label_mask_at(&self, row: usize, read: Read) -> Option<u64> {
+        let bit = |id: u32| (id < 64).then(|| 1_u64 << id);
+        if !self.label_updates.is_empty()
+            && let Some(kept) = self.label_updates.saved(row, read)
+        {
+            return kept.iter().try_fold(0, |mask, &id| Some(mask | bit(id)?));
+        }
+        let mut mask = 0;
+        for (&id, rows) in &self.labels {
+            if rows.get(row) {
+                mask |= bit(id)?;
+            }
+        }
+        Some(mask)
+    }
+
     /// Whether the row has label id `label` as `read` sees it.
     fn has_label_at(&self, row: usize, label: u32, read: Read) -> bool {
         if !self.label_updates.is_empty()

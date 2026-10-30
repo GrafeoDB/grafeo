@@ -186,6 +186,34 @@ pub trait GraphStore: Send + Sync {
         Ok(self.node(id, view)?.map(|node| node.labels))
     }
 
+    /// The labels of node `id` as `view` sees the node, as a bit mask: bit
+    /// `i` for the label whose id is `i` in the store. `None` when the view
+    /// does not see the node, or the store has no such mask for it (a label
+    /// id of 64 or more, or a store without label ids): `labels(n)` then
+    /// reads the names. A grouping by `labels(n)` keys its groups by the
+    /// mask, one integer, and names each group's labels once (see
+    /// [`label_mask_names`](Self::label_mask_names)).
+    ///
+    /// # Errors
+    ///
+    /// Returns the error of a read the store cannot do.
+    fn node_label_mask(&self, _id: NodeId, _view: ReadView) -> Result<Option<u64>> {
+        Ok(None)
+    }
+
+    /// The names of the labels of a mask [`node_label_mask`](Self::node_label_mask)
+    /// gave, sorted by name as `labels(n)` lists them.
+    ///
+    /// # Errors
+    ///
+    /// Returns the error of a read the store cannot do, and an internal
+    /// error from a store that gives no masks.
+    fn label_mask_names(&self, _mask: u64) -> Result<Labels> {
+        Err(grafeo_common::utils::error::Error::Internal(
+            "a label mask from a store that gives none".to_string(),
+        ))
+    }
+
     /// Whether node `id` has `label` as `view` sees the node, `None` when
     /// the view does not see it.
     ///
@@ -317,6 +345,23 @@ pub trait GraphStore: Send + Sync {
         types: &[ArcStr],
         view: ReadView,
     ) -> Result<Vec<(NodeId, EdgeId)>>;
+
+    /// Whether `view` sees an edge of `node` in `direction` of one of
+    /// `types` (any type when empty), as [`edges`](Self::edges) would list
+    /// one: an `EXISTS` of one edge needs no more than the first.
+    ///
+    /// # Errors
+    ///
+    /// Returns the error of a read the store cannot do.
+    fn has_edge(
+        &self,
+        node: NodeId,
+        direction: Direction,
+        types: &[ArcStr],
+        view: ReadView,
+    ) -> Result<bool> {
+        Ok(!self.edges(node, direction, types, view)?.is_empty())
+    }
 
     /// How many edges [`edges`](Self::edges) lists for `node` in `direction`
     /// of every type.

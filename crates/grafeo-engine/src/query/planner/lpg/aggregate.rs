@@ -142,6 +142,9 @@ impl super::Planner {
         }
         let mut extra_projections: Vec<ExtraProjection> = Vec::new();
         let mut next_col_idx = input_columns.len();
+        // The group keys that are `labels(n)` of a variable: grouped by the
+        // store's label mask, one integer, and named after the grouping.
+        let mut mask_keys: Vec<usize> = Vec::new();
 
         // Check group-by expressions for properties and complex expressions
         // (Labels, Type, FunctionCall, IndexAccess, etc.)
@@ -166,7 +169,18 @@ impl super::Planner {
                     // CASE, Binary, etc.): project as computed column
                     let col_name = resolved_column_name(expr);
                     if !variable_columns.contains_key(&col_name) {
-                        let filter_expr = self.convert_expression(expr)?;
+                        let filter_expr = match labels_of_variable(expr) {
+                            Some(variable) => {
+                                mask_keys.push(
+                                    agg.group_by
+                                        .iter()
+                                        .position(|key| std::ptr::eq(key, expr))
+                                        .expect("the key is one of the group keys"),
+                                );
+                                FilterExpression::LabelMask(variable.to_string())
+                            }
+                            None => self.convert_expression(expr)?,
+                        };
                         extra_projections.push(ExtraProjection::Expression { filter_expr });
                         variable_columns.insert(col_name, next_col_idx);
                         next_col_idx += 1;
@@ -391,6 +405,7 @@ impl super::Planner {
             self.set_column_entity(column, entity.clone());
         }
 
+        let key_types = output_schema.clone();
         // Choose operator based on whether there are group-by columns
         let mut operator: Box<dyn Operator> = if group_columns.is_empty() {
             Box::new(
@@ -408,6 +423,40 @@ impl super::Planner {
                 .with_temporal(self.session_context.temporal_comparison),
             )
         };
+
+        // The groups keyed by a label mask get their labels back, once a
+        // group, before HAVING and what follows read them.
+        if !mask_keys.is_empty() {
+            let output_variables: HashMap<String, usize> = output_columns
+                .iter()
+                .enumerate()
+                .map(|(i, name)| (name.clone(), i))
+                .collect();
+            let mut projections = Vec::with_capacity(output_columns.len());
+            let mut types = Vec::with_capacity(output_columns.len());
+            for (i, name) in output_columns.iter().enumerate() {
+                if mask_keys.contains(&i) {
+                    projections.push(ProjectExpr::Expression {
+                        expr: FilterExpression::LabelsOfMask(name.clone()),
+                        variable_columns: output_variables.clone(),
+                    });
+                    types.push(LogicalType::Any);
+                } else {
+                    projections.push(ProjectExpr::Column(i));
+                    types.push(key_types[i].clone());
+                }
+            }
+            operator = Box::new(
+                ProjectOperator::with_store(
+                    operator,
+                    projections,
+                    types,
+                    Arc::clone(&self.store) as Arc<dyn GraphStore>,
+                    self.read_view(),
+                )
+                .with_session_context(self.session_context.clone()),
+            );
+        }
 
         // Apply HAVING clause filter if present
         if let Some(having_expr) = &agg.having {
@@ -598,6 +647,24 @@ impl super::Planner {
 /// of them, a value with them inside, or any value.
 fn entity_type(entity: Option<&EntityValue>) -> LogicalType {
     entity.map_or(LogicalType::Any, EntityValue::logical_type)
+}
+
+/// The variable of a `labels(n)` group key (the function or the `Labels`
+/// expression), which groups by the store's label mask (see
+/// `FilterExpression::LabelMask`).
+fn labels_of_variable(expression: &LogicalExpression) -> Option<&str> {
+    match expression {
+        LogicalExpression::Labels(variable) => Some(variable),
+        LogicalExpression::FunctionCall {
+            callee: crate::query::plan::Callee::Builtin(crate::query::plan::BuiltinFunction::Labels),
+            args,
+            ..
+        } => match args.as_slice() {
+            [LogicalExpression::Variable(variable)] => Some(variable),
+            _ => None,
+        },
+        _ => None,
+    }
 }
 
 #[cfg(test)]

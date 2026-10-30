@@ -745,6 +745,15 @@ pub enum FilterExpression {
     Id(String),
     /// Node labels access.
     Labels(String),
+    /// The labels of a node variable as a group key: the store's label
+    /// mask of the node, one integer (see `GraphStore::node_label_mask`),
+    /// or its labels as [`Labels`](Self::Labels) gives them where the store
+    /// has no mask. A grouping by `labels(n)` groups by it.
+    LabelMask(String),
+    /// A group key [`LabelMask`](Self::LabelMask) made, read from the
+    /// column of a variable: the labels of an integer mask, sorted by name,
+    /// and any other value as it is.
+    LabelsOfMask(String),
     /// Edge type access.
     Type(String),
     /// List comprehension: [x IN list WHERE predicate | expression]
@@ -1022,6 +1031,21 @@ impl ExpressionPredicate {
             .is_some_and(|actual| edge_types.contains(&actual))
     }
 
+    /// Whether this query sees an edge of `node` in `direction` of one of
+    /// `edge_types` (any type when empty), stopping at the first (see
+    /// [`GraphStore::has_edge`]).
+    fn has_visible_edge(
+        &self,
+        node: NodeId,
+        direction: Direction,
+        edge_types: &[arcstr::ArcStr],
+    ) -> bool {
+        self.seen(
+            self.store.has_edge(node, direction, edge_types, self.view),
+            false,
+        )
+    }
+
     /// The edges of `node` in `direction` of one of `edge_types` (any type
     /// when empty) that this query sees, with the node at their other end
     /// (see [`GraphStore::edges`]): the store reads only those types' part
@@ -1115,6 +1139,11 @@ impl ExpressionPredicate {
             Bound::No => {}
         }
         match (start, end) {
+            // EXISTS of one edge from the row's node, to any node: the
+            // first edge the store finds answers it.
+            (Some(start), None) if limit == 1 && pattern.end_labels.is_none() => {
+                usize::from(self.has_visible_edge(start, pattern.direction, pattern.edge_types))
+            }
             (Some(start), end) => self
                 .visible_edges_from(start, pattern.direction, pattern.edge_types)
                 .into_iter()
@@ -1126,6 +1155,13 @@ impl ExpressionPredicate {
             (None, Some(end)) => {
                 if !self.has_labels(end, pattern.end_labels) {
                     return 0;
+                }
+                if limit == 1 {
+                    return usize::from(self.has_visible_edge(
+                        end,
+                        pattern.direction.reverse(),
+                        pattern.edge_types,
+                    ));
                 }
                 self.visible_edges_from(end, pattern.direction.reverse(), pattern.edge_types)
                     .into_iter()
@@ -1207,9 +1243,7 @@ impl ExpressionPredicate {
             }
         }
         let has_edge = |node: NodeId, direction: Direction| {
-            !self
-                .visible_edges_from(node, direction, pattern.edge_types)
-                .is_empty()
+            self.has_visible_edge(node, direction, pattern.edge_types)
         };
         match (start, end) {
             (Some(start), Some(end)) => self.reaches(start, end, pattern, max_hops),
@@ -1634,6 +1668,27 @@ impl ExpressionPredicate {
                 let col = chunk.column(col_idx)?;
                 let node_id = col.get_node_id(row)?;
                 self.labels_list(node_id)
+            }
+            FilterExpression::LabelMask(variable) => {
+                let col_idx = *self.variable_columns.get(variable)?;
+                let node_id = chunk.column(col_idx)?.get_node_id(row)?;
+                match self.seen(self.store.node_label_mask(node_id, self.view), None) {
+                    // The mask's 64 bits, kept as one integer key.
+                    Some(mask) => Some(Value::Int64(i64::from_ne_bytes(mask.to_ne_bytes()))),
+                    None => self.labels_list(node_id),
+                }
+            }
+            FilterExpression::LabelsOfMask(variable) => {
+                let col_idx = *self.variable_columns.get(variable)?;
+                match chunk.column(col_idx)?.get_value(row)? {
+                    Value::Int64(mask) => {
+                        let mask = u64::from_ne_bytes(mask.to_ne_bytes());
+                        let mut names = self.store.label_mask_names(mask).ok()?;
+                        names.sort();
+                        Some(Value::List(names.into_iter().map(Value::String).collect()))
+                    }
+                    other => Some(other),
+                }
             }
             FilterExpression::Type(variable) => {
                 let col_idx = *self.variable_columns.get(variable)?;

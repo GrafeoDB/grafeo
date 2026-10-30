@@ -17,6 +17,9 @@ Usage:
 
 The guard: the EXISTS inside an OR branch whose other conjunct is false must
 not cost more than GUARD_FACTOR times the same query without the EXISTS.
+update_nodes must not cost more than UPDATE_FACTOR times the query it
+replaces, and `MATCH (n) RETURN n` not more than RETURN_N_FACTOR times
+get_nodes_by_label (Deriva's targets; skipped on a build without the call).
 """
 
 import argparse
@@ -43,6 +46,8 @@ KINDS = {
 EXTRA_PROPERTIES = 28  # a Method has id, name, path and these: 31
 RUNS = 10
 GUARD_FACTOR = 3.0
+UPDATE_FACTOR = 1.2  # update_nodes against the UNWIND ... MATCH ... SET query
+RETURN_N_FACTOR = 1.5  # MATCH (n) RETURN n against get_nodes_by_label
 
 
 def build(seed=6):
@@ -185,8 +190,23 @@ def run():
     results["unwind_match_set"] = {
         "ms": median_ms(lambda: db.execute(set_query, {"rows": method_rows}))
     }
+    if hasattr(db, "update_nodes"):
+        results["update_nodes"] = {
+            "ms": median_ms(lambda: db.update_nodes(["Graph", "Method"], method_rows))
+        }
     results["get_nodes_by_label"] = {
         "ms": median_ms(lambda: db.get_nodes_by_label("Method"))
+    }
+    method_ids = [node_id for node_id, _ in db.get_nodes_by_label("Method")]
+    keys = ["id", "name", "path"] + [f"p{p}" for p in range(7)]
+    if hasattr(db, "get_properties_batch"):
+        results["get_properties_batch_10"] = {
+            "ms": median_ms(lambda: db.get_properties_batch(method_ids, keys))
+        }
+    results["get_property_batch_x10"] = {
+        "ms": median_ms(
+            lambda: [db.get_property_batch(method_ids, key) for key in keys]
+        )
     }
     results["match_return_n"] = {
         "ms": median_ms(lambda: list(db.execute("MATCH (n:Method) RETURN n")))
@@ -204,6 +224,18 @@ def run():
     results["upsert_nodes_with_id_index"] = {
         "ms": median_ms(lambda: db.upsert_nodes(["Graph", "Method"], method_rows))
     }
+
+    # Deriva's targets: a dedicated bulk call is at least as fast as the query
+    # it replaces, and whole nodes through the query path cost about what the
+    # direct API costs.
+    for name, against, limit in [
+        ("update_nodes", "unwind_match_set", UPDATE_FACTOR),
+        ("match_return_n", "get_nodes_by_label", RETURN_N_FACTOR),
+    ]:
+        if name in results:
+            ratio = results[name]["ms"] / max(results[against]["ms"], 1e-6)
+            if ratio > limit:
+                failures.append(f"{name}: {ratio:.1f}x {against} (limit {limit}x)")
 
     guard = results["exists_in_or_with_false_conjunct"]["ms"] / max(
         results["same_or_without_exists"]["ms"], 1e-6

@@ -6,8 +6,8 @@
 //! logged, reported to CDC and counted like any query. Rows
 //! apply in order and see the writes of the rows before them: a key repeated
 //! within one call behaves like repeated calls (the first creates, the next
-//! update). An update finds its nodes with one statement and sets them with
-//! a second, in one write (see [`GrafeoDB::update_nodes`]).
+//! update). An update finds its nodes in one map by key and sets them
+//! through the writer, in one write (see [`GrafeoDB::update_nodes`]).
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
@@ -194,78 +194,80 @@ fn upsert_nodes(
 /// matches, as `UNWIND $rows AS r MATCH (n:Labels {key: r.key}) SET n += r`
 /// does. A row whose key matches no node, or without the key, is skipped.
 ///
-/// Two statements in one write: the first finds the nodes of every row in
-/// one pass (a hash join on the key, or a seek per row when the key has a
-/// property index), the second sets each row on its nodes by ID. Statement
-/// by statement the keys would be scanned per row, as a statement that
-/// writes does not hash its input. A row writes its own key value only, so
-/// no row changes which nodes another row matches, and finding them all
-/// first gives what the rows one by one would.
+/// One write through the session's writer: the nodes of `labels` are read
+/// once into a map by their value of `key` (at the write's view, so a
+/// transaction's own nodes count), and each row is set on the nodes its key
+/// equals, as `=` finds them equal (`5` and `5.0` are). A row
+/// writes its own key value only, so no row changes which nodes another row
+/// matches, and finding them all first gives what the rows one by one would.
 fn update_nodes(
     session: &Session,
     labels: &[&str],
     key: &str,
     rows: Vec<HashMap<PropertyKey, Value>>,
 ) -> Result<UpsertSummary> {
+    use grafeo_core::execution::operators::HashKey;
+    use grafeo_core::execution::operators::value_utils::compare_values;
+
     check_name("key", key)?;
-    let label_pattern = labels
-        .iter()
-        .map(|label| check_name("label", label).map(|()| format!(":{}", quote(label))))
-        .collect::<Result<String>>()?;
+    for label in labels {
+        check_name("label", label)?;
+    }
     let total = rows.len();
     let key_property = PropertyKey::new(key);
-    let keys: Vec<Value> = rows
-        .iter()
-        .enumerate()
-        .filter_map(|(index, row)| {
-            let value = row.get(&key_property).filter(|value| !value.is_null())?;
-            Some(item(index, [("key", value.clone())]))
-        })
-        .collect();
-    if keys.is_empty() {
-        return Ok(summary(total, &BTreeSet::new(), 0));
-    }
-    let rows: Vec<Value> = rows.into_iter().map(map_value).collect();
-    let find = format!(
-        "UNWIND $rows AS item \
-         MATCH (n{label_pattern}) WHERE n.{key} = item.key \
-         RETURN item.i, id(n)",
-        key = quote(key),
-    );
-    let set = "UNWIND $rows AS item \
-               MATCH (n) WHERE id(n) = item.node \
-               SET n += item.row \
-               RETURN item.i";
-    let result = session.as_one_write(|| {
-        let found = session.execute_with_params(
-            &find,
-            HashMap::from([("rows".to_string(), Value::List(keys.into()))]),
-        )?;
-        let updates: Vec<Value> = found
-            .rows()
-            .iter()
-            .filter_map(|found| match (found.first(), found.get(1)) {
-                (Some(Value::Int64(index)), Some(node @ Value::Int64(_))) => {
-                    let index = usize::try_from(*index).ok()?;
-                    let row = rows.get(index)?.clone();
-                    Some(item(index, [("node", node.clone()), ("row", row)]))
-                }
-                _ => None,
-            })
-            .collect();
-        if updates.is_empty() {
-            return Ok(None);
+    let labels: Vec<String> = labels.iter().map(|label| (*label).to_string()).collect();
+    session.write(|writer| {
+        let store = writer.store();
+        let view = writer.view();
+        let candidates = match labels.first() {
+            Some(first) => store.nodes_by_label(first, view)?,
+            None => store.node_ids(view)?,
+        };
+        let mut by_key: HashMap<HashKey, Vec<(grafeo_common::types::NodeId, Value)>> =
+            HashMap::new();
+        for node in candidates {
+            let mut has_labels = true;
+            for label in labels.iter().skip(1) {
+                has_labels &= store.node_has_label(node, label, view)?.unwrap_or(false);
+            }
+            if !has_labels {
+                continue;
+            }
+            if let Some(value) = store.node_property(node, key, view)?
+                && let Some(hash) = HashKey::for_equality(&value)
+            {
+                by_key.entry(hash).or_default().push((node, value));
+            }
         }
-        session
-            .execute_with_params(
-                set,
-                HashMap::from([("rows".to_string(), Value::List(updates.into()))]),
-            )
-            .map(Some)
-    })?;
-    Ok(match result {
-        Some(result) => count(&result, total, 0),
-        None => summary(total, &BTreeSet::new(), 0),
+        let mut written = BTreeSet::new();
+        for (index, row) in rows.into_iter().enumerate() {
+            let Some(value) = row.get(&key_property).filter(|value| !value.is_null()) else {
+                continue;
+            };
+            let Some(nodes) = HashKey::for_equality(value).and_then(|hash| by_key.get(&hash))
+            else {
+                continue;
+            };
+            let matched: Vec<_> = nodes
+                .iter()
+                .filter(|(_, stored)| {
+                    compare_values(stored, value) == Some(std::cmp::Ordering::Equal)
+                })
+                .map(|(node, _)| *node)
+                .collect();
+            if matched.is_empty() {
+                continue;
+            }
+            let assignments: Vec<(String, Value)> = row
+                .into_iter()
+                .map(|(name, value)| (name.as_str().to_string(), value))
+                .collect();
+            for node in matched {
+                writer.set_node_properties(node, &assignments, false)?;
+            }
+            written.insert(index);
+        }
+        Ok(summary(total, &written, 0))
     })
 }
 

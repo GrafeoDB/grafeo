@@ -975,6 +975,23 @@ impl GraphStore for RowGroupStore {
         Arc::new(self.inner.read().statistics())
     }
 
+    /// From the count the statistics are built from, without building them.
+    fn label_node_estimate(&self, label: &str) -> u64 {
+        let inner = self.inner.read();
+        inner.label_id(label).map_or(0, |label| {
+            inner
+                .counts
+                .labels
+                .get(label as usize)
+                .copied()
+                .map_or(0, |count| size(count) as u64)
+        })
+    }
+
+    fn node_estimate(&self) -> u64 {
+        size(self.inner.read().counts.nodes) as u64
+    }
+
     fn committed_epoch(&self) -> EpochId {
         self.current_epoch()
     }

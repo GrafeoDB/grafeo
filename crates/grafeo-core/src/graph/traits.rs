@@ -618,9 +618,27 @@ pub trait GraphStore: Send + Sync {
 
     // --- Statistics ---
 
-    /// The statistics the cost-based optimizer plans with (a cheap `Arc`
-    /// clone): estimates, not answers.
+    /// The statistics the cost-based optimizer plans with: estimates, not
+    /// answers. A store may build them on each call (the row-group store
+    /// walks every label and edge type), so a plan of one statement reads
+    /// what it needs through [`label_node_estimate`](Self::label_node_estimate)
+    /// and [`node_estimate`](Self::node_estimate) instead.
     fn statistics(&self) -> Arc<Statistics>;
+
+    /// How many nodes have `label` by the [`statistics`](Self::statistics):
+    /// 0 for a label they do not list. The physical planner chooses scan
+    /// labels by it on every execution, so a store that keeps its counts
+    /// answers without building the statistics.
+    fn label_node_estimate(&self, label: &str) -> u64 {
+        self.statistics()
+            .get_label(label)
+            .map_or(0, |label| label.node_count)
+    }
+
+    /// How many nodes the store holds by the [`statistics`](Self::statistics).
+    fn node_estimate(&self) -> u64 {
+        self.statistics().total_nodes
+    }
 
     /// The latest epoch the store holds commits of. A database that adopts
     /// the store continues its epochs from it; the engine reads at the views

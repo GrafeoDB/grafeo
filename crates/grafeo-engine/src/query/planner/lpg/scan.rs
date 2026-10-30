@@ -49,14 +49,13 @@ pub(crate) fn with_smallest_scan_label(
     }
     let first = *checks.first()?;
     let scan_label = scan.label.as_deref().unwrap_or(first);
-    let statistics = store.statistics();
     let mut smallest = scan_label;
-    let mut fewest = label_estimate(&statistics, scan_label);
+    let mut fewest = store.label_node_estimate(scan_label);
     for label in checks {
         if fewest == 0 {
             break;
         }
-        let count = label_estimate(&statistics, label);
+        let count = store.label_node_estimate(label);
         if count < fewest {
             smallest = label;
             fewest = count;
@@ -119,8 +118,8 @@ fn with_label_union_scan(filter: &FilterOp, store: &dyn GraphStore) -> Option<Fi
     let (Some(label), None) = (scan.label.as_deref(), scan.input.as_ref()) else {
         return None;
     };
-    let (nodes, _, statistics) = fewest_label_union(&filter.predicate, &scan.variable, store)?;
-    if nodes.saturating_mul(2) > label_estimate(&statistics, label)
+    let (nodes, _) = fewest_label_union(&filter.predicate, &scan.variable, store)?;
+    if nodes.saturating_mul(2) > store.label_node_estimate(label)
         || super::seek::choose_seek(
             &filter.predicate,
             scan,
@@ -173,21 +172,18 @@ pub(crate) fn label_union(
     if scan.label.is_some() || scan.input.is_some() {
         return None;
     }
-    let (nodes, labels, statistics) = fewest_label_union(predicate, &scan.variable, store)?;
-    (nodes.saturating_mul(2) <= statistics.total_nodes).then_some(labels)
+    let (nodes, labels) = fewest_label_union(predicate, &scan.variable, store)?;
+    (nodes.saturating_mul(2) <= store.node_estimate()).then_some(labels)
 }
 
 /// Of the conjuncts of `predicate` that require an `OR` of two or more
 /// labels of `variable`, the one whose labels hold the fewest nodes: those
-/// nodes, the labels, each once, in their written order, and the store's
-/// statistics they were counted by. The statistics are read only when such
-/// a conjunct exists: building them walks every label, which a point lookup
-/// planned many times a second should not pay for.
+/// nodes and the labels, each once, in their written order.
 fn fewest_label_union(
     predicate: &LogicalExpression,
     variable: &str,
     store: &dyn GraphStore,
-) -> Option<(u64, Vec<String>, Arc<grafeo_core::statistics::Statistics>)> {
+) -> Option<(u64, Vec<String>)> {
     let mut conjuncts = Vec::new();
     and_conjuncts(predicate, &mut conjuncts);
     let unions: Vec<Vec<&str>> = conjuncts
@@ -202,25 +198,17 @@ fn fewest_label_union(
             (labels.len() >= 2).then_some(labels)
         })
         .collect();
-    if unions.is_empty() {
-        return None;
-    }
-    let statistics = store.statistics();
     let (nodes, labels) = unions
         .into_iter()
         .map(|labels| {
             let nodes: u64 = labels
                 .iter()
-                .map(|label| label_estimate(&statistics, label))
+                .map(|label| store.label_node_estimate(label))
                 .sum();
             (nodes, labels)
         })
         .reduce(|best, next| if next.0 < best.0 { next } else { best })?;
-    Some((
-        nodes,
-        labels.into_iter().map(str::to_string).collect(),
-        statistics,
-    ))
+    Some((nodes, labels.into_iter().map(str::to_string).collect()))
 }
 
 /// The check `variable:L1 OR variable:L2 ...` of the labels `predicate`
@@ -254,15 +242,6 @@ pub(crate) fn implied_label_check(
             op: BinaryOp::Or,
             right: Box::new(right),
         })
-}
-
-/// How many nodes have `label` by the store's statistics: none for a label
-/// they do not list. Plans choose by it; the reads at a view answer the
-/// same whichever label a plan scans.
-fn label_estimate(statistics: &grafeo_core::statistics::Statistics, label: &str) -> u64 {
-    statistics
-        .get_label(label)
-        .map_or(0, |label| label.node_count)
 }
 
 /// The conjuncts of an `AND` chain.

@@ -195,8 +195,7 @@ pub(crate) fn value_join(filter: &FilterOp, writes_per_row: bool) -> Option<Valu
 /// node of the label once (about 0.3 microseconds a node), so many rows
 /// against a small label (`UNWIND $rows AS r MATCH (n:Method {id: r.id})`
 /// with as many rows as Methods) join faster, while a few rows seek. An ID
-/// seek always stays. The store's statistics are read only for a filter
-/// that has both a value join and a known number of rows.
+/// seek always stays.
 pub(crate) fn beats_a_seek(
     filter: &FilterOp,
     writes_per_row: bool,
@@ -208,12 +207,9 @@ pub(crate) fn beats_a_seek(
     let Some(rows) = known_rows(join.input) else {
         return false;
     };
-    let statistics = store.statistics();
     let nodes = match &join.checked.scan.label {
-        Some(label) => statistics
-            .get_label(label)
-            .map_or(0, |label| label.node_count),
-        None => statistics.total_nodes,
+        Some(label) => store.label_node_estimate(label),
+        None => store.node_estimate(),
     };
     u64::try_from(rows).unwrap_or(u64::MAX).saturating_mul(3) > nodes
 }

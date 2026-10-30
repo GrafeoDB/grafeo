@@ -1,0 +1,282 @@
+# Rosetta: EXISTS beside other conditions in one predicate
+#
+# An EXISTS that is not alone in its WHERE (in an OR, under NOT, in a CASE,
+# in a function's argument, next to another EXISTS) gives the rows of
+# checking it for each row. A condition joined to it by AND that is false
+# for a row skips the subquery for that row: a subquery that would divide by
+# zero for those rows does not fail. A null condition does not skip it. The
+# WHERE of an OPTIONAL MATCH filters the optional part, never the rows
+# before it.
+#
+# Setup (GQL, one statement): eight Persons, `i` 1 to 8: Alix, Gus, Vincent,
+# Jules, Mia, Butch, Django, Shosanna; the odd ones active. `zero` is 1,
+# except 0 on Vincent and Jules and missing on Butch. KNOWS: Alix to Gus and
+# Vincent, Gus to Vincent, Vincent to Jules, Jules to Alix, Mia to herself,
+# Butch to Mia, Django to Gus, so Alix, Gus, Jules, Mia and Butch know an
+# active Person. LIVES_IN: Alix Amsterdam (`pop` 900), Gus and Butch Berlin
+# (3700), Vincent and Jules Paris (2100), Mia Prague (1300), Django
+# Barcelona (1600); Shosanna lives nowhere.
+
+meta:
+  model: lpg
+  section: rosetta
+  title: EXISTS beside other conditions in one predicate
+  dataset: empty
+  requires: [cypher]
+
+tests:
+
+  # ---------------------------------------------------------------------------
+  # EXISTS in OR, NOT, CASE and function arguments
+  # ---------------------------------------------------------------------------
+
+  - name: exists_in_or
+    setup:
+      - "INSERT (alix:Person {i: 1, name: 'Alix', active: true, zero: 1}), (gus:Person {i: 2, name: 'Gus', active: false, zero: 1}), (vincent:Person {i: 3, name: 'Vincent', active: true, zero: 0}), (jules:Person {i: 4, name: 'Jules', active: false, zero: 0}), (mia:Person {i: 5, name: 'Mia', active: true, zero: 1}), (butch:Person {i: 6, name: 'Butch', active: false}), (django:Person {i: 7, name: 'Django', active: true, zero: 1}), (shosanna:Person {i: 8, name: 'Shosanna', active: false, zero: 1}), (ams:City {name: 'Amsterdam', pop: 900}), (ber:City {name: 'Berlin', pop: 3700}), (par:City {name: 'Paris', pop: 2100}), (pra:City {name: 'Prague', pop: 1300}), (bcn:City {name: 'Barcelona', pop: 1600}), (alix)-[:KNOWS]->(gus), (alix)-[:KNOWS]->(vincent), (gus)-[:KNOWS]->(vincent), (vincent)-[:KNOWS]->(jules), (jules)-[:KNOWS]->(alix), (mia)-[:KNOWS]->(mia), (butch)-[:KNOWS]->(mia), (django)-[:KNOWS]->(gus), (alix)-[:LIVES_IN]->(ams), (gus)-[:LIVES_IN]->(ber), (vincent)-[:LIVES_IN]->(par), (jules)-[:LIVES_IN]->(par), (mia)-[:LIVES_IN]->(pra), (butch)-[:LIVES_IN]->(ber), (django)-[:LIVES_IN]->(bcn)"
+    variants:
+      gql: "MATCH (n:Person) WHERE n.i = 8 OR EXISTS { MATCH (n)-[:KNOWS]->(m) WHERE m.active } RETURN n.name AS name"
+      cypher: "MATCH (n:Person) WHERE n.i = 8 OR EXISTS { MATCH (n)-[:KNOWS]->(m) WHERE m.active } RETURN n.name AS name"
+    expect:
+      rows:
+        - [Alix]
+        - [Gus]
+        - [Jules]
+        - [Mia]
+        - [Butch]
+        - [Shosanna]
+
+  - name: not_exists_in_or
+    setup:
+      - "INSERT (alix:Person {i: 1, name: 'Alix', active: true, zero: 1}), (gus:Person {i: 2, name: 'Gus', active: false, zero: 1}), (vincent:Person {i: 3, name: 'Vincent', active: true, zero: 0}), (jules:Person {i: 4, name: 'Jules', active: false, zero: 0}), (mia:Person {i: 5, name: 'Mia', active: true, zero: 1}), (butch:Person {i: 6, name: 'Butch', active: false}), (django:Person {i: 7, name: 'Django', active: true, zero: 1}), (shosanna:Person {i: 8, name: 'Shosanna', active: false, zero: 1}), (ams:City {name: 'Amsterdam', pop: 900}), (ber:City {name: 'Berlin', pop: 3700}), (par:City {name: 'Paris', pop: 2100}), (pra:City {name: 'Prague', pop: 1300}), (bcn:City {name: 'Barcelona', pop: 1600}), (alix)-[:KNOWS]->(gus), (alix)-[:KNOWS]->(vincent), (gus)-[:KNOWS]->(vincent), (vincent)-[:KNOWS]->(jules), (jules)-[:KNOWS]->(alix), (mia)-[:KNOWS]->(mia), (butch)-[:KNOWS]->(mia), (django)-[:KNOWS]->(gus), (alix)-[:LIVES_IN]->(ams), (gus)-[:LIVES_IN]->(ber), (vincent)-[:LIVES_IN]->(par), (jules)-[:LIVES_IN]->(par), (mia)-[:LIVES_IN]->(pra), (butch)-[:LIVES_IN]->(ber), (django)-[:LIVES_IN]->(bcn)"
+    variants:
+      gql: "MATCH (n:Person) WHERE n.i = 1 OR NOT EXISTS { MATCH (n)-[:KNOWS]->(m) WHERE m.active } RETURN n.name AS name"
+      cypher: "MATCH (n:Person) WHERE n.i = 1 OR NOT EXISTS { MATCH (n)-[:KNOWS]->(m) WHERE m.active } RETURN n.name AS name"
+    expect:
+      rows:
+        - [Alix]
+        - [Vincent]
+        - [Django]
+        - [Shosanna]
+
+  - name: exists_in_case
+    setup:
+      - "INSERT (alix:Person {i: 1, name: 'Alix', active: true, zero: 1}), (gus:Person {i: 2, name: 'Gus', active: false, zero: 1}), (vincent:Person {i: 3, name: 'Vincent', active: true, zero: 0}), (jules:Person {i: 4, name: 'Jules', active: false, zero: 0}), (mia:Person {i: 5, name: 'Mia', active: true, zero: 1}), (butch:Person {i: 6, name: 'Butch', active: false}), (django:Person {i: 7, name: 'Django', active: true, zero: 1}), (shosanna:Person {i: 8, name: 'Shosanna', active: false, zero: 1}), (ams:City {name: 'Amsterdam', pop: 900}), (ber:City {name: 'Berlin', pop: 3700}), (par:City {name: 'Paris', pop: 2100}), (pra:City {name: 'Prague', pop: 1300}), (bcn:City {name: 'Barcelona', pop: 1600}), (alix)-[:KNOWS]->(gus), (alix)-[:KNOWS]->(vincent), (gus)-[:KNOWS]->(vincent), (vincent)-[:KNOWS]->(jules), (jules)-[:KNOWS]->(alix), (mia)-[:KNOWS]->(mia), (butch)-[:KNOWS]->(mia), (django)-[:KNOWS]->(gus), (alix)-[:LIVES_IN]->(ams), (gus)-[:LIVES_IN]->(ber), (vincent)-[:LIVES_IN]->(par), (jules)-[:LIVES_IN]->(par), (mia)-[:LIVES_IN]->(pra), (butch)-[:LIVES_IN]->(ber), (django)-[:LIVES_IN]->(bcn)"
+    variants:
+      gql: "MATCH (n:Person) WHERE CASE WHEN EXISTS { MATCH (n)-[:KNOWS]->(m) WHERE m.active } THEN n.i > 3 ELSE n.i = 8 END RETURN n.name AS name"
+      cypher: "MATCH (n:Person) WHERE CASE WHEN EXISTS { MATCH (n)-[:KNOWS]->(m) WHERE m.active } THEN n.i > 3 ELSE n.i = 8 END RETURN n.name AS name"
+    expect:
+      rows:
+        - [Jules]
+        - [Mia]
+        - [Butch]
+        - [Shosanna]
+
+  - name: exists_in_a_function_argument
+    setup:
+      - "INSERT (alix:Person {i: 1, name: 'Alix', active: true, zero: 1}), (gus:Person {i: 2, name: 'Gus', active: false, zero: 1}), (vincent:Person {i: 3, name: 'Vincent', active: true, zero: 0}), (jules:Person {i: 4, name: 'Jules', active: false, zero: 0}), (mia:Person {i: 5, name: 'Mia', active: true, zero: 1}), (butch:Person {i: 6, name: 'Butch', active: false}), (django:Person {i: 7, name: 'Django', active: true, zero: 1}), (shosanna:Person {i: 8, name: 'Shosanna', active: false, zero: 1}), (ams:City {name: 'Amsterdam', pop: 900}), (ber:City {name: 'Berlin', pop: 3700}), (par:City {name: 'Paris', pop: 2100}), (pra:City {name: 'Prague', pop: 1300}), (bcn:City {name: 'Barcelona', pop: 1600}), (alix)-[:KNOWS]->(gus), (alix)-[:KNOWS]->(vincent), (gus)-[:KNOWS]->(vincent), (vincent)-[:KNOWS]->(jules), (jules)-[:KNOWS]->(alix), (mia)-[:KNOWS]->(mia), (butch)-[:KNOWS]->(mia), (django)-[:KNOWS]->(gus), (alix)-[:LIVES_IN]->(ams), (gus)-[:LIVES_IN]->(ber), (vincent)-[:LIVES_IN]->(par), (jules)-[:LIVES_IN]->(par), (mia)-[:LIVES_IN]->(pra), (butch)-[:LIVES_IN]->(ber), (django)-[:LIVES_IN]->(bcn)"
+    variants:
+      gql: "MATCH (n:Person) WHERE coalesce(EXISTS { MATCH (n)-[:KNOWS]->(m) WHERE m.active }, false) AND n.i > 1 RETURN n.name AS name"
+      cypher: "MATCH (n:Person) WHERE coalesce(EXISTS { MATCH (n)-[:KNOWS]->(m) WHERE m.active }, false) AND n.i > 1 RETURN n.name AS name"
+    expect:
+      rows:
+        - [Gus]
+        - [Jules]
+        - [Mia]
+        - [Butch]
+
+  - name: two_exists_in_one_or
+    setup:
+      - "INSERT (alix:Person {i: 1, name: 'Alix', active: true, zero: 1}), (gus:Person {i: 2, name: 'Gus', active: false, zero: 1}), (vincent:Person {i: 3, name: 'Vincent', active: true, zero: 0}), (jules:Person {i: 4, name: 'Jules', active: false, zero: 0}), (mia:Person {i: 5, name: 'Mia', active: true, zero: 1}), (butch:Person {i: 6, name: 'Butch', active: false}), (django:Person {i: 7, name: 'Django', active: true, zero: 1}), (shosanna:Person {i: 8, name: 'Shosanna', active: false, zero: 1}), (ams:City {name: 'Amsterdam', pop: 900}), (ber:City {name: 'Berlin', pop: 3700}), (par:City {name: 'Paris', pop: 2100}), (pra:City {name: 'Prague', pop: 1300}), (bcn:City {name: 'Barcelona', pop: 1600}), (alix)-[:KNOWS]->(gus), (alix)-[:KNOWS]->(vincent), (gus)-[:KNOWS]->(vincent), (vincent)-[:KNOWS]->(jules), (jules)-[:KNOWS]->(alix), (mia)-[:KNOWS]->(mia), (butch)-[:KNOWS]->(mia), (django)-[:KNOWS]->(gus), (alix)-[:LIVES_IN]->(ams), (gus)-[:LIVES_IN]->(ber), (vincent)-[:LIVES_IN]->(par), (jules)-[:LIVES_IN]->(par), (mia)-[:LIVES_IN]->(pra), (butch)-[:LIVES_IN]->(ber), (django)-[:LIVES_IN]->(bcn)"
+    variants:
+      gql: "MATCH (n:Person) WHERE EXISTS { MATCH (n)-[:KNOWS]->(m) WHERE m.active } OR EXISTS { MATCH (n)-[:LIVES_IN]->(c) WHERE c.pop > 2000 } RETURN n.name AS name"
+      cypher: "MATCH (n:Person) WHERE EXISTS { MATCH (n)-[:KNOWS]->(m) WHERE m.active } OR EXISTS { MATCH (n)-[:LIVES_IN]->(c) WHERE c.pop > 2000 } RETURN n.name AS name"
+    expect:
+      rows:
+        - [Alix]
+        - [Gus]
+        - [Vincent]
+        - [Jules]
+        - [Mia]
+        - [Butch]
+
+  - name: exists_in_or_beside_a_top_level_exists
+    setup:
+      - "INSERT (alix:Person {i: 1, name: 'Alix', active: true, zero: 1}), (gus:Person {i: 2, name: 'Gus', active: false, zero: 1}), (vincent:Person {i: 3, name: 'Vincent', active: true, zero: 0}), (jules:Person {i: 4, name: 'Jules', active: false, zero: 0}), (mia:Person {i: 5, name: 'Mia', active: true, zero: 1}), (butch:Person {i: 6, name: 'Butch', active: false}), (django:Person {i: 7, name: 'Django', active: true, zero: 1}), (shosanna:Person {i: 8, name: 'Shosanna', active: false, zero: 1}), (ams:City {name: 'Amsterdam', pop: 900}), (ber:City {name: 'Berlin', pop: 3700}), (par:City {name: 'Paris', pop: 2100}), (pra:City {name: 'Prague', pop: 1300}), (bcn:City {name: 'Barcelona', pop: 1600}), (alix)-[:KNOWS]->(gus), (alix)-[:KNOWS]->(vincent), (gus)-[:KNOWS]->(vincent), (vincent)-[:KNOWS]->(jules), (jules)-[:KNOWS]->(alix), (mia)-[:KNOWS]->(mia), (butch)-[:KNOWS]->(mia), (django)-[:KNOWS]->(gus), (alix)-[:LIVES_IN]->(ams), (gus)-[:LIVES_IN]->(ber), (vincent)-[:LIVES_IN]->(par), (jules)-[:LIVES_IN]->(par), (mia)-[:LIVES_IN]->(pra), (butch)-[:LIVES_IN]->(ber), (django)-[:LIVES_IN]->(bcn)"
+    variants:
+      gql: "MATCH (n:Person) WHERE EXISTS { MATCH (n)-[:LIVES_IN]->(c) WHERE c.pop > 1000 } AND (n.i = 1 OR EXISTS { MATCH (n)-[:KNOWS]->(m) WHERE m.active }) RETURN n.name AS name"
+      cypher: "MATCH (n:Person) WHERE EXISTS { MATCH (n)-[:LIVES_IN]->(c) WHERE c.pop > 1000 } AND (n.i = 1 OR EXISTS { MATCH (n)-[:KNOWS]->(m) WHERE m.active }) RETURN n.name AS name"
+    expect:
+      rows:
+        - [Gus]
+        - [Jules]
+        - [Mia]
+        - [Butch]
+
+  # ---------------------------------------------------------------------------
+  # A false condition skips the subquery; a null one does not
+  # ---------------------------------------------------------------------------
+
+  # Vincent and Jules have `zero: 0`: the subquery would divide by zero for
+  # them, and `n.zero <> 0` skips it. Butch has no `zero`: the null condition
+  # does not skip, and `10 / null` matches nothing.
+  - name: a_false_condition_skips_a_subquery_that_would_fail
+    setup:
+      - "INSERT (alix:Person {i: 1, name: 'Alix', active: true, zero: 1}), (gus:Person {i: 2, name: 'Gus', active: false, zero: 1}), (vincent:Person {i: 3, name: 'Vincent', active: true, zero: 0}), (jules:Person {i: 4, name: 'Jules', active: false, zero: 0}), (mia:Person {i: 5, name: 'Mia', active: true, zero: 1}), (butch:Person {i: 6, name: 'Butch', active: false}), (django:Person {i: 7, name: 'Django', active: true, zero: 1}), (shosanna:Person {i: 8, name: 'Shosanna', active: false, zero: 1}), (ams:City {name: 'Amsterdam', pop: 900}), (ber:City {name: 'Berlin', pop: 3700}), (par:City {name: 'Paris', pop: 2100}), (pra:City {name: 'Prague', pop: 1300}), (bcn:City {name: 'Barcelona', pop: 1600}), (alix)-[:KNOWS]->(gus), (alix)-[:KNOWS]->(vincent), (gus)-[:KNOWS]->(vincent), (vincent)-[:KNOWS]->(jules), (jules)-[:KNOWS]->(alix), (mia)-[:KNOWS]->(mia), (butch)-[:KNOWS]->(mia), (django)-[:KNOWS]->(gus), (alix)-[:LIVES_IN]->(ams), (gus)-[:LIVES_IN]->(ber), (vincent)-[:LIVES_IN]->(par), (jules)-[:LIVES_IN]->(par), (mia)-[:LIVES_IN]->(pra), (butch)-[:LIVES_IN]->(ber), (django)-[:LIVES_IN]->(bcn)"
+    variants:
+      gql: "MATCH (n:Person) WHERE (n.zero <> 0 AND EXISTS { MATCH (n)-[:KNOWS]->(m) WHERE 10 / n.zero > 0 AND m.active }) OR n.i = 8 RETURN n.name AS name"
+      cypher: "MATCH (n:Person) WHERE (n.zero <> 0 AND EXISTS { MATCH (n)-[:KNOWS]->(m) WHERE 10 / n.zero > 0 AND m.active }) OR n.i = 8 RETURN n.name AS name"
+    expect:
+      rows:
+        - [Alix]
+        - [Gus]
+        - [Mia]
+        - [Shosanna]
+
+  # Butch (no `zero`, knows active Mia): NOT (null AND true) is null, so the
+  # row goes; Vincent and Jules (`zero: 0`): NOT false, so they stay.
+  - name: a_null_condition_does_not_skip_the_subquery
+    setup:
+      - "INSERT (alix:Person {i: 1, name: 'Alix', active: true, zero: 1}), (gus:Person {i: 2, name: 'Gus', active: false, zero: 1}), (vincent:Person {i: 3, name: 'Vincent', active: true, zero: 0}), (jules:Person {i: 4, name: 'Jules', active: false, zero: 0}), (mia:Person {i: 5, name: 'Mia', active: true, zero: 1}), (butch:Person {i: 6, name: 'Butch', active: false}), (django:Person {i: 7, name: 'Django', active: true, zero: 1}), (shosanna:Person {i: 8, name: 'Shosanna', active: false, zero: 1}), (ams:City {name: 'Amsterdam', pop: 900}), (ber:City {name: 'Berlin', pop: 3700}), (par:City {name: 'Paris', pop: 2100}), (pra:City {name: 'Prague', pop: 1300}), (bcn:City {name: 'Barcelona', pop: 1600}), (alix)-[:KNOWS]->(gus), (alix)-[:KNOWS]->(vincent), (gus)-[:KNOWS]->(vincent), (vincent)-[:KNOWS]->(jules), (jules)-[:KNOWS]->(alix), (mia)-[:KNOWS]->(mia), (butch)-[:KNOWS]->(mia), (django)-[:KNOWS]->(gus), (alix)-[:LIVES_IN]->(ams), (gus)-[:LIVES_IN]->(ber), (vincent)-[:LIVES_IN]->(par), (jules)-[:LIVES_IN]->(par), (mia)-[:LIVES_IN]->(pra), (butch)-[:LIVES_IN]->(ber), (django)-[:LIVES_IN]->(bcn)"
+    variants:
+      gql: "MATCH (n:Person) WHERE NOT (n.zero <> 0 AND EXISTS { MATCH (n)-[:KNOWS]->(m) WHERE m.active }) RETURN n.name AS name"
+      cypher: "MATCH (n:Person) WHERE NOT (n.zero <> 0 AND EXISTS { MATCH (n)-[:KNOWS]->(m) WHERE m.active }) RETURN n.name AS name"
+    expect:
+      rows:
+        - [Vincent]
+        - [Jules]
+        - [Django]
+        - [Shosanna]
+
+  - name: a_condition_on_another_variable_beside_exists
+    setup:
+      - "INSERT (alix:Person {i: 1, name: 'Alix', active: true, zero: 1}), (gus:Person {i: 2, name: 'Gus', active: false, zero: 1}), (vincent:Person {i: 3, name: 'Vincent', active: true, zero: 0}), (jules:Person {i: 4, name: 'Jules', active: false, zero: 0}), (mia:Person {i: 5, name: 'Mia', active: true, zero: 1}), (butch:Person {i: 6, name: 'Butch', active: false}), (django:Person {i: 7, name: 'Django', active: true, zero: 1}), (shosanna:Person {i: 8, name: 'Shosanna', active: false, zero: 1}), (ams:City {name: 'Amsterdam', pop: 900}), (ber:City {name: 'Berlin', pop: 3700}), (par:City {name: 'Paris', pop: 2100}), (pra:City {name: 'Prague', pop: 1300}), (bcn:City {name: 'Barcelona', pop: 1600}), (alix)-[:KNOWS]->(gus), (alix)-[:KNOWS]->(vincent), (gus)-[:KNOWS]->(vincent), (vincent)-[:KNOWS]->(jules), (jules)-[:KNOWS]->(alix), (mia)-[:KNOWS]->(mia), (butch)-[:KNOWS]->(mia), (django)-[:KNOWS]->(gus), (alix)-[:LIVES_IN]->(ams), (gus)-[:LIVES_IN]->(ber), (vincent)-[:LIVES_IN]->(par), (jules)-[:LIVES_IN]->(par), (mia)-[:LIVES_IN]->(pra), (butch)-[:LIVES_IN]->(ber), (django)-[:LIVES_IN]->(bcn)"
+    variants:
+      gql: "MATCH (n:Person), (c:City) WHERE c.name IN ['Paris', 'Berlin'] AND ((c.pop > 3000 AND EXISTS { MATCH (n)-[:KNOWS]->(m) WHERE m.active }) OR n.i = 8) RETURN c.name AS city, n.name AS name"
+      cypher: "MATCH (n:Person), (c:City) WHERE c.name IN ['Paris', 'Berlin'] AND ((c.pop > 3000 AND EXISTS { MATCH (n)-[:KNOWS]->(m) WHERE m.active }) OR n.i = 8) RETURN c.name AS city, n.name AS name"
+    expect:
+      rows:
+        - [Berlin, Alix]
+        - [Berlin, Gus]
+        - [Berlin, Jules]
+        - [Berlin, Mia]
+        - [Berlin, Butch]
+        - [Berlin, Shosanna]
+        - [Paris, Shosanna]
+
+  # ---------------------------------------------------------------------------
+  # Null variables, CALL and OPTIONAL MATCH
+  # ---------------------------------------------------------------------------
+
+  # Shosanna lives nowhere: her `c` is null, EXISTS over it is false and
+  # NOT EXISTS true.
+  - name: exists_in_or_over_a_null_variable
+    setup:
+      - "INSERT (alix:Person {i: 1, name: 'Alix', active: true, zero: 1}), (gus:Person {i: 2, name: 'Gus', active: false, zero: 1}), (vincent:Person {i: 3, name: 'Vincent', active: true, zero: 0}), (jules:Person {i: 4, name: 'Jules', active: false, zero: 0}), (mia:Person {i: 5, name: 'Mia', active: true, zero: 1}), (butch:Person {i: 6, name: 'Butch', active: false}), (django:Person {i: 7, name: 'Django', active: true, zero: 1}), (shosanna:Person {i: 8, name: 'Shosanna', active: false, zero: 1}), (ams:City {name: 'Amsterdam', pop: 900}), (ber:City {name: 'Berlin', pop: 3700}), (par:City {name: 'Paris', pop: 2100}), (pra:City {name: 'Prague', pop: 1300}), (bcn:City {name: 'Barcelona', pop: 1600}), (alix)-[:KNOWS]->(gus), (alix)-[:KNOWS]->(vincent), (gus)-[:KNOWS]->(vincent), (vincent)-[:KNOWS]->(jules), (jules)-[:KNOWS]->(alix), (mia)-[:KNOWS]->(mia), (butch)-[:KNOWS]->(mia), (django)-[:KNOWS]->(gus), (alix)-[:LIVES_IN]->(ams), (gus)-[:LIVES_IN]->(ber), (vincent)-[:LIVES_IN]->(par), (jules)-[:LIVES_IN]->(par), (mia)-[:LIVES_IN]->(pra), (butch)-[:LIVES_IN]->(ber), (django)-[:LIVES_IN]->(bcn)"
+    variants:
+      gql: "MATCH (n:Person) OPTIONAL MATCH (n)-[:LIVES_IN]->(c) WITH n, c WHERE n.i = 8 OR EXISTS { MATCH (c)<-[:LIVES_IN]-(o) WHERE o.active } RETURN n.name AS name"
+      cypher: "MATCH (n:Person) OPTIONAL MATCH (n)-[:LIVES_IN]->(c) WITH n, c WHERE n.i = 8 OR EXISTS { MATCH (c)<-[:LIVES_IN]-(o) WHERE o.active } RETURN n.name AS name"
+    expect:
+      rows:
+        - [Alix]
+        - [Vincent]
+        - [Jules]
+        - [Mia]
+        - [Django]
+        - [Shosanna]
+
+  - name: not_exists_in_or_over_a_null_variable
+    setup:
+      - "INSERT (alix:Person {i: 1, name: 'Alix', active: true, zero: 1}), (gus:Person {i: 2, name: 'Gus', active: false, zero: 1}), (vincent:Person {i: 3, name: 'Vincent', active: true, zero: 0}), (jules:Person {i: 4, name: 'Jules', active: false, zero: 0}), (mia:Person {i: 5, name: 'Mia', active: true, zero: 1}), (butch:Person {i: 6, name: 'Butch', active: false}), (django:Person {i: 7, name: 'Django', active: true, zero: 1}), (shosanna:Person {i: 8, name: 'Shosanna', active: false, zero: 1}), (ams:City {name: 'Amsterdam', pop: 900}), (ber:City {name: 'Berlin', pop: 3700}), (par:City {name: 'Paris', pop: 2100}), (pra:City {name: 'Prague', pop: 1300}), (bcn:City {name: 'Barcelona', pop: 1600}), (alix)-[:KNOWS]->(gus), (alix)-[:KNOWS]->(vincent), (gus)-[:KNOWS]->(vincent), (vincent)-[:KNOWS]->(jules), (jules)-[:KNOWS]->(alix), (mia)-[:KNOWS]->(mia), (butch)-[:KNOWS]->(mia), (django)-[:KNOWS]->(gus), (alix)-[:LIVES_IN]->(ams), (gus)-[:LIVES_IN]->(ber), (vincent)-[:LIVES_IN]->(par), (jules)-[:LIVES_IN]->(par), (mia)-[:LIVES_IN]->(pra), (butch)-[:LIVES_IN]->(ber), (django)-[:LIVES_IN]->(bcn)"
+    variants:
+      gql: "MATCH (n:Person) OPTIONAL MATCH (n)-[:LIVES_IN]->(c) WITH n, c WHERE n.i = 1 OR NOT EXISTS { MATCH (c)<-[:LIVES_IN]-(o) WHERE o.active } RETURN n.name AS name"
+      cypher: "MATCH (n:Person) OPTIONAL MATCH (n)-[:LIVES_IN]->(c) WITH n, c WHERE n.i = 1 OR NOT EXISTS { MATCH (c)<-[:LIVES_IN]-(o) WHERE o.active } RETURN n.name AS name"
+    expect:
+      rows:
+        - [Alix]
+        - [Gus]
+        - [Butch]
+        - [Shosanna]
+
+  - name: exists_in_or_inside_call
+    setup:
+      - "INSERT (alix:Person {i: 1, name: 'Alix', active: true, zero: 1}), (gus:Person {i: 2, name: 'Gus', active: false, zero: 1}), (vincent:Person {i: 3, name: 'Vincent', active: true, zero: 0}), (jules:Person {i: 4, name: 'Jules', active: false, zero: 0}), (mia:Person {i: 5, name: 'Mia', active: true, zero: 1}), (butch:Person {i: 6, name: 'Butch', active: false}), (django:Person {i: 7, name: 'Django', active: true, zero: 1}), (shosanna:Person {i: 8, name: 'Shosanna', active: false, zero: 1}), (ams:City {name: 'Amsterdam', pop: 900}), (ber:City {name: 'Berlin', pop: 3700}), (par:City {name: 'Paris', pop: 2100}), (pra:City {name: 'Prague', pop: 1300}), (bcn:City {name: 'Barcelona', pop: 1600}), (alix)-[:KNOWS]->(gus), (alix)-[:KNOWS]->(vincent), (gus)-[:KNOWS]->(vincent), (vincent)-[:KNOWS]->(jules), (jules)-[:KNOWS]->(alix), (mia)-[:KNOWS]->(mia), (butch)-[:KNOWS]->(mia), (django)-[:KNOWS]->(gus), (alix)-[:LIVES_IN]->(ams), (gus)-[:LIVES_IN]->(ber), (vincent)-[:LIVES_IN]->(par), (jules)-[:LIVES_IN]->(par), (mia)-[:LIVES_IN]->(pra), (butch)-[:LIVES_IN]->(ber), (django)-[:LIVES_IN]->(bcn)"
+    variants:
+      gql: "MATCH (n:Person) CALL { WITH n MATCH (n)-[:LIVES_IN]->(c) WHERE c.pop > 3000 OR EXISTS { MATCH (c)<-[:LIVES_IN]-(o) WHERE o.active AND o.i > 3 } RETURN c.name AS city } RETURN n.name AS name, city"
+      cypher: "MATCH (n:Person) CALL { WITH n MATCH (n)-[:LIVES_IN]->(c) WHERE c.pop > 3000 OR EXISTS { MATCH (c)<-[:LIVES_IN]-(o) WHERE o.active AND o.i > 3 } RETURN c.name AS city } RETURN n.name AS name, city"
+    expect:
+      rows:
+        - [Gus, Berlin]
+        - [Mia, Prague]
+        - [Butch, Berlin]
+        - [Django, Barcelona]
+
+  - name: optional_match_where_with_exists_over_the_optional_variable
+    setup:
+      - "INSERT (alix:Person {i: 1, name: 'Alix', active: true, zero: 1}), (gus:Person {i: 2, name: 'Gus', active: false, zero: 1}), (vincent:Person {i: 3, name: 'Vincent', active: true, zero: 0}), (jules:Person {i: 4, name: 'Jules', active: false, zero: 0}), (mia:Person {i: 5, name: 'Mia', active: true, zero: 1}), (butch:Person {i: 6, name: 'Butch', active: false}), (django:Person {i: 7, name: 'Django', active: true, zero: 1}), (shosanna:Person {i: 8, name: 'Shosanna', active: false, zero: 1}), (ams:City {name: 'Amsterdam', pop: 900}), (ber:City {name: 'Berlin', pop: 3700}), (par:City {name: 'Paris', pop: 2100}), (pra:City {name: 'Prague', pop: 1300}), (bcn:City {name: 'Barcelona', pop: 1600}), (alix)-[:KNOWS]->(gus), (alix)-[:KNOWS]->(vincent), (gus)-[:KNOWS]->(vincent), (vincent)-[:KNOWS]->(jules), (jules)-[:KNOWS]->(alix), (mia)-[:KNOWS]->(mia), (butch)-[:KNOWS]->(mia), (django)-[:KNOWS]->(gus), (alix)-[:LIVES_IN]->(ams), (gus)-[:LIVES_IN]->(ber), (vincent)-[:LIVES_IN]->(par), (jules)-[:LIVES_IN]->(par), (mia)-[:LIVES_IN]->(pra), (butch)-[:LIVES_IN]->(ber), (django)-[:LIVES_IN]->(bcn)"
+    variants:
+      gql: "MATCH (n:Person) OPTIONAL MATCH (n)-[:LIVES_IN]->(c) WHERE c.pop > 3000 OR EXISTS { MATCH (c)<-[:LIVES_IN]-(o) WHERE o.active AND o.i > 3 } RETURN n.name AS name, c.name AS city"
+      cypher: "MATCH (n:Person) OPTIONAL MATCH (n)-[:LIVES_IN]->(c) WHERE c.pop > 3000 OR EXISTS { MATCH (c)<-[:LIVES_IN]-(o) WHERE o.active AND o.i > 3 } RETURN n.name AS name, c.name AS city"
+    expect:
+      rows:
+        - [Alix, null]
+        - [Gus, Berlin]
+        - [Vincent, null]
+        - [Jules, null]
+        - [Mia, Prague]
+        - [Butch, Berlin]
+        - [Django, Barcelona]
+        - [Shosanna, null]
+
+  # The WHERE reads only `n`, which the OPTIONAL MATCH does not bind: it
+  # still filters the optional part, so every Person stays.
+  - name: optional_match_where_with_exists_over_the_outer_variable
+    setup:
+      - "INSERT (alix:Person {i: 1, name: 'Alix', active: true, zero: 1}), (gus:Person {i: 2, name: 'Gus', active: false, zero: 1}), (vincent:Person {i: 3, name: 'Vincent', active: true, zero: 0}), (jules:Person {i: 4, name: 'Jules', active: false, zero: 0}), (mia:Person {i: 5, name: 'Mia', active: true, zero: 1}), (butch:Person {i: 6, name: 'Butch', active: false}), (django:Person {i: 7, name: 'Django', active: true, zero: 1}), (shosanna:Person {i: 8, name: 'Shosanna', active: false, zero: 1}), (ams:City {name: 'Amsterdam', pop: 900}), (ber:City {name: 'Berlin', pop: 3700}), (par:City {name: 'Paris', pop: 2100}), (pra:City {name: 'Prague', pop: 1300}), (bcn:City {name: 'Barcelona', pop: 1600}), (alix)-[:KNOWS]->(gus), (alix)-[:KNOWS]->(vincent), (gus)-[:KNOWS]->(vincent), (vincent)-[:KNOWS]->(jules), (jules)-[:KNOWS]->(alix), (mia)-[:KNOWS]->(mia), (butch)-[:KNOWS]->(mia), (django)-[:KNOWS]->(gus), (alix)-[:LIVES_IN]->(ams), (gus)-[:LIVES_IN]->(ber), (vincent)-[:LIVES_IN]->(par), (jules)-[:LIVES_IN]->(par), (mia)-[:LIVES_IN]->(pra), (butch)-[:LIVES_IN]->(ber), (django)-[:LIVES_IN]->(bcn)"
+    variants:
+      gql: "MATCH (n:Person) OPTIONAL MATCH (n)-[:LIVES_IN]->(c) WHERE n.i = 8 OR EXISTS { MATCH (n)-[:KNOWS]->(m) WHERE m.active } RETURN n.name AS name, c.name AS city"
+      cypher: "MATCH (n:Person) OPTIONAL MATCH (n)-[:LIVES_IN]->(c) WHERE n.i = 8 OR EXISTS { MATCH (n)-[:KNOWS]->(m) WHERE m.active } RETURN n.name AS name, c.name AS city"
+    expect:
+      rows:
+        - [Alix, Amsterdam]
+        - [Gus, Berlin]
+        - [Vincent, null]
+        - [Jules, Paris]
+        - [Mia, Prague]
+        - [Butch, Berlin]
+        - [Django, null]
+        - [Shosanna, null]
+
+  - name: optional_match_where_with_count_over_the_outer_variable
+    setup:
+      - "INSERT (alix:Person {i: 1, name: 'Alix', active: true, zero: 1}), (gus:Person {i: 2, name: 'Gus', active: false, zero: 1}), (vincent:Person {i: 3, name: 'Vincent', active: true, zero: 0}), (jules:Person {i: 4, name: 'Jules', active: false, zero: 0}), (mia:Person {i: 5, name: 'Mia', active: true, zero: 1}), (butch:Person {i: 6, name: 'Butch', active: false}), (django:Person {i: 7, name: 'Django', active: true, zero: 1}), (shosanna:Person {i: 8, name: 'Shosanna', active: false, zero: 1}), (ams:City {name: 'Amsterdam', pop: 900}), (ber:City {name: 'Berlin', pop: 3700}), (par:City {name: 'Paris', pop: 2100}), (pra:City {name: 'Prague', pop: 1300}), (bcn:City {name: 'Barcelona', pop: 1600}), (alix)-[:KNOWS]->(gus), (alix)-[:KNOWS]->(vincent), (gus)-[:KNOWS]->(vincent), (vincent)-[:KNOWS]->(jules), (jules)-[:KNOWS]->(alix), (mia)-[:KNOWS]->(mia), (butch)-[:KNOWS]->(mia), (django)-[:KNOWS]->(gus), (alix)-[:LIVES_IN]->(ams), (gus)-[:LIVES_IN]->(ber), (vincent)-[:LIVES_IN]->(par), (jules)-[:LIVES_IN]->(par), (mia)-[:LIVES_IN]->(pra), (butch)-[:LIVES_IN]->(ber), (django)-[:LIVES_IN]->(bcn)"
+    variants:
+      gql: "MATCH (n:Person) OPTIONAL MATCH (n)-[:LIVES_IN]->(c) WHERE COUNT { MATCH (n)-[:KNOWS]->(m) WHERE m.active } >= 1 RETURN n.name AS name, c.name AS city"
+      cypher: "MATCH (n:Person) OPTIONAL MATCH (n)-[:LIVES_IN]->(c) WHERE COUNT { MATCH (n)-[:KNOWS]->(m) WHERE m.active } >= 1 RETURN n.name AS name, c.name AS city"
+    expect:
+      rows:
+        - [Alix, Amsterdam]
+        - [Gus, Berlin]
+        - [Vincent, null]
+        - [Jules, Paris]
+        - [Mia, Prague]
+        - [Butch, Berlin]
+        - [Django, null]
+        - [Shosanna, null]
+
+  # Mia's subquery reads `c`, bound only before the OPTIONAL MATCH: for
+  # Prague (Mia, active, past 3) the WHERE holds and her KNOWS edge is kept;
+  # for the other cities it does not, and every row stays with a null.
+  - name: optional_match_where_with_exists_over_a_variable_bound_before_it
+    skip: "an OPTIONAL MATCH WHERE whose subquery reads a variable bound only before it filters the outer rows"
+    setup:
+      - "INSERT (alix:Person {i: 1, name: 'Alix', active: true, zero: 1}), (gus:Person {i: 2, name: 'Gus', active: false, zero: 1}), (vincent:Person {i: 3, name: 'Vincent', active: true, zero: 0}), (jules:Person {i: 4, name: 'Jules', active: false, zero: 0}), (mia:Person {i: 5, name: 'Mia', active: true, zero: 1}), (butch:Person {i: 6, name: 'Butch', active: false}), (django:Person {i: 7, name: 'Django', active: true, zero: 1}), (shosanna:Person {i: 8, name: 'Shosanna', active: false, zero: 1}), (ams:City {name: 'Amsterdam', pop: 900}), (ber:City {name: 'Berlin', pop: 3700}), (par:City {name: 'Paris', pop: 2100}), (pra:City {name: 'Prague', pop: 1300}), (bcn:City {name: 'Barcelona', pop: 1600}), (alix)-[:KNOWS]->(gus), (alix)-[:KNOWS]->(vincent), (gus)-[:KNOWS]->(vincent), (vincent)-[:KNOWS]->(jules), (jules)-[:KNOWS]->(alix), (mia)-[:KNOWS]->(mia), (butch)-[:KNOWS]->(mia), (django)-[:KNOWS]->(gus), (alix)-[:LIVES_IN]->(ams), (gus)-[:LIVES_IN]->(ber), (vincent)-[:LIVES_IN]->(par), (jules)-[:LIVES_IN]->(par), (mia)-[:LIVES_IN]->(pra), (butch)-[:LIVES_IN]->(ber), (django)-[:LIVES_IN]->(bcn)"
+    variants:
+      gql: "MATCH (n:Person {name: 'Mia'}), (c:City) OPTIONAL MATCH (n)-[:KNOWS]->(m) WHERE EXISTS { MATCH (c)<-[:LIVES_IN]-(o) WHERE o.active AND o.i > 3 } RETURN c.name AS city, m.name AS knows"
+      cypher: "MATCH (n:Person {name: 'Mia'}), (c:City) OPTIONAL MATCH (n)-[:KNOWS]->(m) WHERE EXISTS { MATCH (c)<-[:LIVES_IN]-(o) WHERE o.active AND o.i > 3 } RETURN c.name AS city, m.name AS knows"
+    expect:
+      rows:
+        - [Amsterdam, null]
+        - [Berlin, null]
+        - [Paris, null]
+        - [Prague, Mia]
+        - [Barcelona, Mia]

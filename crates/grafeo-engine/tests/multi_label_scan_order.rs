@@ -88,8 +88,8 @@ fn a_two_label_pattern_in_an_exists_scans_the_smaller_label() {
             );
             assert_eq!(ids(&db, &query), FOUR.map(Value::Int64), "{query}");
             let plan = explain(&db, &query);
-            let small_scan = format!("variable: \"e\", label: Some(\"{small}\")");
-            let broad_scan = format!("variable: \"e\", label: Some(\"{broad}\")");
+            let small_scan = format!("NodeScan (e:{small})");
+            let broad_scan = format!("NodeScan (e:{broad})");
             assert!(
                 plan.contains(&small_scan) && !plan.contains(&broad_scan),
                 "{broad} broad, {small} small, {query}: {plan}"

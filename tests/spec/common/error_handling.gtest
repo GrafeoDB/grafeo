@@ -46,23 +46,53 @@ tests:
     expect:
       error: "syntax"
 
+  # `-->` is Cypher's spelling; ISO GQL writes `->`. GQL rejects `-->` from
+  # 0.7.0 (deprecated in 0.6.x, user decision 2026-10-30); Cypher keeps it.
   - name: double_arrow
-    skip: "(a)-->(b) is valid syntax in our parser"
+    skip: "`-->` in GQL is accepted until 0.7.0, deprecated in 0.6.x"
     query: "MATCH (a)-->(b) RETURN a"
     expect:
       error: "syntax"
+
+  - name: double_arrow_in_cypher
+    language: cypher
+    requires: [cypher]
+    setup:
+      - "INSERT (:P {k: 1})-[:R]->(:P {k: 2})"
+    query: "MATCH (a)-->(b) RETURN a.k AS a, b.k AS b"
+    expect:
+      rows:
+        - [1, 2]
 
   # ---------------------------------------------------------------------------
   # Semantic errors: operations on wrong types
   # ---------------------------------------------------------------------------
 
+  # ISO GQL has no `+` on strings (it concatenates with `||`): a string plus
+  # a number is an error, in either order (user decision 2026-10-30).
+  # openCypher concatenates them, in either order.
   - name: add_string_and_integer
-    skip: "string + int coercion behavior"
+    skip: "GQL concatenates a string and a number with + instead of failing"
     setup:
       - "INSERT (:N {name: 'hello', age: 30})"
     query: "MATCH (n:N) RETURN n.name + n.age AS result"
     expect:
       error: ""
+
+  - name: add_integer_and_string
+    skip: "GQL gives null for a number plus a string instead of failing"
+    query: "RETURN 30 + 'hello' AS result"
+    expect:
+      error: ""
+
+  - name: add_string_and_number_in_cypher
+    skip: "Cypher gives null for a number plus a string instead of concatenating"
+    language: cypher
+    requires: [cypher]
+    query: "RETURN 'hello' + 30 AS a, 30 + 'hello' AS b, 'v' + 1.5 AS c"
+    expect:
+      rows:
+        - [hello30, 30hello, v1.5]
 
   - name: negate_string
     setup:

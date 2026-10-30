@@ -20,6 +20,11 @@ not cost more than GUARD_FACTOR times the same query without the EXISTS.
 update_nodes must not cost more than UPDATE_FACTOR times the query it
 replaces, and `MATCH (n) RETURN n` not more than RETURN_N_FACTOR times
 get_nodes_by_label (Deriva's targets; skipped on a build without the call).
+The selector-gap shapes (0.6.1 plan) each have a guard against a reference with
+the same rows: the OR of labels under (n:Graph), labels(n) grouped, count(*)
+of a label, an edge check on nodes with many edges of other types, and a
+point lookup on two labels. With --compare, the guard rails (point lookups by
+id, expansions, two hops, writes) fail at REGRESSION_FACTOR times the baseline.
 """
 
 import argparse
@@ -41,13 +46,40 @@ KINDS = {
     "BuildModule": 200,
     "Document": 180,
     "Package": 100,
+    "TypeDefinition": 150,
     "Environment": 20,
 }
-EXTRA_PROPERTIES = 28  # a Method has id, name, path and these: 31
+EXTRA_PROPERTIES = (
+    28  # every node: id, name, path, kind, active, pagerank_percentile and these
+)
 RUNS = 10
 GUARD_FACTOR = 3.0
 UPDATE_FACTOR = 1.2  # update_nodes against the UNWIND ... MATCH ... SET query
 RETURN_N_FACTOR = 1.5  # MATCH (n) RETURN n against get_nodes_by_label
+# The selector-gap targets (0.6.1 plan): each selector shape against a reference
+# that does the least work for the same rows.
+OR_SCAN_FACTOR = (
+    1.2  # an OR of labels under (n:Graph) against the UNION of the two labels
+)
+LABELS_COUNT_FACTOR = 1.5  # labels(n) grouped against a string property grouped
+COUNT_FROM_STATS_FACTOR = 0.1  # count(*) of a label against reading its ids
+TYPED_EXISTS_FACTOR = 1.5  # an edge check on busy nodes against reading their ids
+MULTI_LABEL_SEEK_FACTOR = 1.3  # (n:Graph:Method {id}) against (n:Graph {id}), id index
+# With --compare: what Grafeo already does well must not get slower.
+GUARD_RAILS = [
+    "point_lookups_by_id",
+    "expand_one_hop",
+    "two_hops",
+    "read_ids",
+    "kind_count",
+    "same_or_without_exists",
+    "get_nodes_by_label",
+    "match_return_n",
+    "update_nodes",
+    "unwind_match_set",
+    "upsert_nodes_with_id_index",
+]
+REGRESSION_FACTOR = 1.25
 
 
 def build(seed=6):
@@ -62,13 +94,14 @@ def build(seed=6):
                 "id": f"{kind.lower()}-{i}",
                 "name": f"{kind}{i}",
                 "path": f"src/{kind.lower()}s/m{i % 37}/{kind.lower()}_{i}.py",
+                "kind": kind,
                 "active": rng.random() < 0.7,
+                "pagerank_percentile": rng.randint(0, 100),
             }
-            if kind == "Method":
-                for p in range(EXTRA_PROPERTIES):
-                    row[f"p{p}"] = (
-                        rng.randint(0, 1000) if p % 2 else f"v{rng.randint(0, 50)}"
-                    )
+            for p in range(EXTRA_PROPERTIES):
+                row[f"p{p}"] = (
+                    rng.randint(0, 1000) if p % 2 else f"v{rng.randint(0, 50)}"
+                )
             rows.append(row)
         ids[kind] = db.batch_create_nodes_with_props(["Graph", kind], rows)
 
@@ -89,6 +122,7 @@ def build(seed=6):
     link("BuildModule", "Environment", "IN_ENV", 1)
     link("Test", "Method", "COVERS", 2)
     link("Package", "File", "CONTAINS", 4)
+    link("TypeDefinition", "Class", "DEFINES", 1, 0.5)
     link("Method", "Method", "DEPRECATED_BY", 1, 0.05)
     link("File", "File", "DEPRECATED_BY", 1, 0.05)
     return db, ids
@@ -143,6 +177,25 @@ SELECTORS = [
         "MATCH (n:File) RETURN n.id AS id",
     ),
     (
+        "exists_in_or_unguarded",
+        (
+            "MATCH (n:Method) WHERE n.active "
+            "OR EXISTS { MATCH (n)-[:USES]->()-[:USES]->(m) WHERE m.active } RETURN n.id AS id"
+        ),
+        (
+            "MATCH (n:Method) WHERE n.active "
+            "OR COUNT { MATCH (n)-[:USES]->()-[:USES]->(m) WHERE m.active } > 0 RETURN n.id AS id"
+        ),
+    ),
+    (
+        "exists_in_or_per_row",
+        (
+            "MATCH (n:Method) WHERE n.active "
+            "OR COUNT { MATCH (n)-[:USES]->()-[:USES]->(m) WHERE m.active } > 0 RETURN n.id AS id"
+        ),
+        None,
+    ),
+    (
         "same_or_without_exists",
         "MATCH (n:Graph) WHERE (n.active = false AND n.active = true) OR n:File RETURN n.id AS id",
         "MATCH (n:File) RETURN n.id AS id",
@@ -178,6 +231,42 @@ def run():
             "ms": median_ms(lambda q=query: db.execute(q)),
             "rows": len(got),
         }
+
+    # The selector-gap shapes (0.6.1 plan), each checked against a reference.
+    or_selector = (
+        "MATCH (n:Graph) WHERE (n:File OR n:TypeDefinition) AND n.pagerank_percentile >= 90 "
+        "RETURN n.id AS id"
+    )
+    or_union = (
+        "MATCH (n:File) WHERE n.pagerank_percentile >= 90 RETURN n.id AS id "
+        "UNION MATCH (n:TypeDefinition) WHERE n.pagerank_percentile >= 90 RETURN n.id AS id"
+    )
+    labels_count = "MATCH (n:Graph) RETURN labels(n) AS l, count(*) AS c"
+    kind_count = "MATCH (n:Graph) RETURN n.kind AS k, count(*) AS c"
+    count_star = "MATCH (n:Graph) RETURN count(*) AS c"
+    read_ids = "MATCH (n:Graph) RETURN n.id AS id"
+    typed_exists = "MATCH (n:BuildModule) WHERE EXISTS { MATCH (n)-[:IN_ENV]->() } RETURN n.id AS id"
+    busy_ids = "MATCH (n:BuildModule) RETURN n.id AS id"
+    if rows_of(db.execute(or_selector)) != rows_of(db.execute(or_union)):
+        failures.append("or_of_labels_under_graph: not the rows of the UNION")
+    label_counts = sorted(row["c"] for row in db.execute(labels_count))
+    kind_counts = sorted(row["c"] for row in db.execute(kind_count))
+    if label_counts != kind_counts:
+        failures.append(f"labels_count: {label_counts}, by kind {kind_counts}")
+    if db.execute(count_star).to_list()[0]["c"] != sum(KINDS.values()):
+        failures.append("count_star: not the number of Graph nodes")
+    for name, query in [
+        ("or_of_labels_under_graph", or_selector),
+        ("or_of_labels_union", or_union),
+        ("labels_count", labels_count),
+        ("kind_count", kind_count),
+        ("type_count", "MATCH ()-[r]->() RETURN type(r) AS t, count(*) AS c"),
+        ("count_star", count_star),
+        ("read_ids", read_ids),
+        ("typed_exists_on_busy_nodes", typed_exists),
+        ("busy_ids", busy_ids),
+    ]:
+        results[name] = {"ms": median_ms(lambda q=query: list(db.execute(q)))}
 
     # Python bulk paths against the query path.
     method_rows = [
@@ -224,6 +313,26 @@ def run():
     results["upsert_nodes_with_id_index"] = {
         "ms": median_ms(lambda: db.upsert_nodes(["Graph", "Method"], method_rows))
     }
+    lookup_ids = [f"method-{i}" for i in range(0, KINDS["Method"], 15)]
+
+    def each_id(query):
+        return lambda: [list(db.execute(query, {"id": i})) for i in lookup_ids]
+
+    results["point_lookups_by_id"] = {
+        "ms": median_ms(each_id("MATCH (n:Graph {id: $id}) RETURN n.name AS name"))
+    }
+    results["multi_label_point_lookups"] = {
+        "ms": median_ms(
+            each_id("MATCH (n:Graph:Method {id: $id}) RETURN n.name AS name")
+        )
+    }
+    results["expand_one_hop"] = {
+        "ms": median_ms(
+            each_id("MATCH (n:Method {id: $id})-[:USES]->(m) RETURN m.id AS id")
+        )
+    }
+    two_hops = "MATCH (a:File)-[:CONTAINS]->(:Method)-[:USES]->(m) RETURN count(m) AS c"
+    results["two_hops"] = {"ms": median_ms(lambda: list(db.execute(two_hops)))}
 
     # Deriva's targets: a dedicated bulk call is at least as fast as the query
     # it replaces, and whole nodes through the query path cost about what the
@@ -231,6 +340,11 @@ def run():
     for name, against, limit in [
         ("update_nodes", "unwind_match_set", UPDATE_FACTOR),
         ("match_return_n", "get_nodes_by_label", RETURN_N_FACTOR),
+        ("or_of_labels_under_graph", "or_of_labels_union", OR_SCAN_FACTOR),
+        ("labels_count", "kind_count", LABELS_COUNT_FACTOR),
+        ("count_star", "read_ids", COUNT_FROM_STATS_FACTOR),
+        ("typed_exists_on_busy_nodes", "busy_ids", TYPED_EXISTS_FACTOR),
+        ("multi_label_point_lookups", "point_lookups_by_id", MULTI_LABEL_SEEK_FACTOR),
     ]:
         if name in results:
             ratio = results[name]["ms"] / max(results[against]["ms"], 1e-6)
@@ -267,6 +381,13 @@ def main():
     if args.save:
         with open(args.save, "w", encoding="utf-8") as f:
             json.dump(results, f, indent=1)
+    for name in GUARD_RAILS:
+        b = base.get(name, {}).get("ms")
+        if b and name in results and results[name]["ms"] > REGRESSION_FACTOR * b:
+            ratio = results[name]["ms"] / b
+            failures.append(
+                f"{name}: {ratio:.2f}x the baseline (limit {REGRESSION_FACTOR}x)"
+            )
     for failure in failures:
         print("FAIL:", failure)
     sys.exit(1 if failures else 0)

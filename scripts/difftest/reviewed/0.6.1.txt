@@ -69,3 +69,7 @@ DN16|cypher 9f11c8c76a A negative slice bound counts from the end, as openCypher
 DN16|gql 9f11c8c76a A negative slice bound counts from the end, as openCypher: [-2..] is the last two elements; 0.6.0 gave an empty list or the whole list.
 DN17|cypher 4151b9b220 A negative slice bound counts from the end also on a collected list; 0.6.0 gave an empty list or the whole list.
 DN17|gql 4151b9b220 A negative slice bound counts from the end also on a collected list; 0.6.0 gave an empty list or the whole list.
+DN25|cypher b49653534b An EXISTS beside a condition that is false for a row does not run for that row, also as a mark join, so a subquery that would divide by zero for it no longer fails; 0.6.0 failed with division by zero.
+DN25|gql b49653534b An EXISTS beside a condition that is false for a row does not run for that row, also as a mark join, so a subquery that would divide by zero for it no longer fails; 0.6.0 failed with division by zero.
+DN27|cypher a99961e4b7 The WHERE of an OPTIONAL MATCH holding a subquery over the outer rows filters the optional part, so every outer row stays, with nulls where it does not hold; 0.6.0 dropped those rows.
+DN27|gql a99961e4b7 The WHERE of an OPTIONAL MATCH holding a subquery over the outer rows filters the optional part, so every outer row stays, with nulls where it does not hold; 0.6.0 dropped those rows.

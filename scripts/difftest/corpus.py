@@ -2341,5 +2341,23 @@ for case_id, query in [
     ("DN19", "MATCH (n:Method) WHERE NOT (n.missing = 1 AND EXISTS { MATCH (n)-[:USES]->() }) RETURN n.i AS i"),
 ]:
     case(case_id, query, BOTH, "codegraph")
+# DN20 to DN27: an EXISTS that is not a top-level conjunct runs once over the distinct values
+#     it shares (a mark join), with the rows of running it per row: in OR (DN20), NOT EXISTS
+#     in OR (DN21), in CASE (DN22), two in one predicate (DN23), beside a top-level EXISTS
+#     (DN24), behind a guard on the shared variable that rejects the rows it would divide by
+#     zero for (DN25; 0.6.0 failed with division by zero), a shared variable that is null
+#     (DN26), and in the WHERE of an OPTIONAL MATCH over the outer variable, which keeps
+#     every outer row (DN27; 0.6.0 dropped the rows the WHERE rejects)
+for case_id, query in [
+    ("DN20", "MATCH (n:Method) WHERE n.i = 1006 OR EXISTS { MATCH (n)-[:USES]->(m) WHERE m.active } RETURN n.i AS i"),
+    ("DN21", "MATCH (n:Method) WHERE n.i = 1001 OR NOT EXISTS { MATCH (n)-[:USES]->(m) WHERE m.i > 1002 } RETURN n.i AS i"),
+    ("DN22", "MATCH (n:Method) WHERE CASE WHEN EXISTS { MATCH (n)-[:USES]->(m) WHERE m.active } THEN n.i > 1002 ELSE n.i = 1006 END RETURN n.i AS i"),
+    ("DN23", "MATCH (n:Method) WHERE EXISTS { MATCH (n)-[:USES]->(m) WHERE m.i > 1003 } OR EXISTS { MATCH (n)<-[:USES]-(m) WHERE m.i = 1005 } RETURN n.i AS i"),
+    ("DN24", "MATCH (n:Method) WHERE EXISTS { MATCH (n)-[:R]->(t) WHERE t.i > 1 } AND (n.i = 1006 OR EXISTS { MATCH (n)-[:USES]->(m) WHERE m.active }) RETURN n.i AS i"),
+    ("DN25", "MATCH (n:Method) WHERE (n.zero <> 0 AND EXISTS { MATCH (n)-[:USES]->(m) WHERE 10 / n.zero > 0 }) OR n.i = 1006 RETURN n.i AS i"),
+    ("DN26", "MATCH (n:Method) OPTIONAL MATCH (n)<-[:USES]-(p) WITH n, p WHERE n.i = 1006 OR EXISTS { MATCH (p)-[:USES]->(m) WHERE m.i > 1003 } RETURN n.i AS i, p.i AS p"),
+    ("DN27", "MATCH (n:Method) OPTIONAL MATCH (n)-[:R]->(t) WHERE EXISTS { MATCH (n)-[:USES]->(m) WHERE m.i > 1003 } RETURN n.i AS i, t.i AS t"),
+]:
+    case(case_id, query, BOTH, "codegraph")
 
 # fmt: on

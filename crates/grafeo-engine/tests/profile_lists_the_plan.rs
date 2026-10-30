@@ -266,7 +266,9 @@ fn profile_lists_the_whole_plan_of_the_deriva_selector() {
             "{language:?} the filters of PROFILE:\n{profile_text}"
         );
         assert!(
-            filters(&profile).iter().any(|line| line.contains("Exists")),
+            filters(&profile)
+                .iter()
+                .any(|line| line.contains("EXISTS {")),
             "{language:?} no filter holds the EXISTS:\n{profile_text}"
         );
         assert!(

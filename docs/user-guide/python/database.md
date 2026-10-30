@@ -219,6 +219,47 @@ Each column or JSON key becomes a property under the name the file gives it (`ho
 the label is used as given. A CSV without headers (`headers=False`) names its columns `column0`, `column1`, and so
 on. CSV values are strings; JSON values keep their types. An empty CSV field sets no property.
 
+### Loading typed CSV files
+
+For large files, `load_nodes_csv` and `load_edges_csv` parse the file in Rust, convert each column to its type and
+write everything in one bulk transaction: if one record cannot be loaded, nothing is.
+
+```python
+report = db.load_nodes_csv(
+    "people.csv",
+    "Person",                      # one label, or a list of labels
+    key="id",                      # present in every record, unique in the file
+    types={"id": "int64", "name": "string", "born": "date", "notes": "skip"},
+)
+print(report)  # {'rows': 3, 'created': 3, 'skipped': 0}
+
+db.load_edges_csv(
+    "knows.csv",
+    "KNOWS",
+    source=("Person", "id", "src"),  # the Person whose id equals the record's src
+    target=("Person", "id", "dst"),
+    types={"src": "int64", "dst": "int64", "since": "int64"},
+    missing="skip",                  # or "error" (the default): a key no node has
+)
+```
+
+The types are `string`, `int64`, `float64`, `bool`, `date`, `timestamp` and `skip` (a column that is not stored), in
+any case; a column `types` does not name is a string. An empty field, and any field in `nulls`, sets no property.
+An edge file's key columns are not stored on the edge, and a key read as text only finds text keys. A file without
+a header (`header=False`) takes its column names from the order of `types`. `delimiter` sets another separator.
+Errors name the file's line and column: `line 3: 'lots' in column 'score' is no FLOAT64`.
+
+The same loads run from any query language, also in grafeo-server and the other bindings:
+
+```python
+db.execute(
+    "CALL grafeo.load_nodes_csv({path: 'people.csv', labels: ['Person'], key: 'id', "
+    "types: {id: 'INT64', born: 'DATE'}}) YIELD rows, created, skipped RETURN *"
+)
+```
+
+The loader is new in 0.6.1 and [experimental](../../stability.md): formats and options may be added.
+
 ## Change Data Capture
 
 Control CDC on a per-transaction basis:

@@ -1713,7 +1713,8 @@ mod tests {
 
         proptest! {
             #![proptest_config(Config {
-                cases: 512,
+                // Miri checks memory safety; these cases test arithmetic, so a few do there.
+                cases: if cfg!(miri) { 8 } else { 512 },
                 failure_persistence: None,
                 rng_seed: RngSeed::Fixed(0x6690_0000_0000_0001),
                 ..Config::default()

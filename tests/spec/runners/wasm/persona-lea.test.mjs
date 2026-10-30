@@ -16,10 +16,14 @@ const pkg = resolve(import.meta.dirname, '..', '..', '..', '..', 'crates', 'bind
 const available = existsSync(join(pkg, 'grafeo_wasm.js')) && existsSync(join(pkg, 'grafeo_wasm_bg.wasm'))
 
 let Database
+// The checks of what the edge build leaves out run on that build only; the
+// full package (built into the same pkg/) has those features.
+let edge = false
 if (available) {
   const mod = await import('../../../../crates/bindings/wasm/pkg/grafeo_wasm.js')
   mod.initSync({ module: readFileSync(join(pkg, 'grafeo_wasm_bg.wasm')) })
   Database = mod.Database
+  edge = !new Database().info().features.includes('cypher')
 }
 
 function notes() {
@@ -126,7 +130,7 @@ describe.skipIf(!available)('persona Lea (WASM, edge build)', () => {
     expect(db.memoryUsage().total_bytes).toBeGreaterThan(5_000_000)
   })
 
-  it.each([
+  it.skipIf(!edge).each([
     ['a vector index', () => new Database().execute('CREATE VECTOR INDEX idx ON :Note(emb) DIMENSION 3'), 'vector indexes'],
     ['a procedure', () => new Database().execute("CALL grafeo.search.vector('Note', 'emb', [1.0, 0.0, 0.0], 1)"), 'procedures'],
   ])('is told the edge build has no %s', (_what, call, words) => {
@@ -135,7 +139,7 @@ describe.skipIf(!available)('persona Lea (WASM, edge build)', () => {
     expect(error.message).toContain(words)
   })
 
-  it('is told the edge build has GQL only', () => {
+  it.skipIf(!edge)('is told the edge build has GQL only', () => {
     const db = new Database()
     expect(db.info().features).toEqual(['gql'])
     const error = thrown(() => db.executeWithLanguage('MATCH (n) RETURN count(n) AS c', 'cypher'))

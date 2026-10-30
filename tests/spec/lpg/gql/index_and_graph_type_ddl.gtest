@@ -96,7 +96,6 @@ tests:
 
   - name: drop_index_of_a_vector_index_name_drops_it
     requires: [vector-index]
-    skip: "vector index names need a stored record kind (next commit)"
     setup:
       - "INSERT (:Doc {emb: vector([1.0, 0.0])})"
       - "CREATE INDEX emb_eq FOR (d:Doc) ON (d.emb)"
@@ -107,7 +106,6 @@ tests:
 
   - name: a_dropped_vector_index_no_longer_searches
     requires: [vector-index, algos]
-    skip: "vector index names need a stored record kind (next commit)"
     setup:
       - "INSERT (:Doc {emb: vector([1.0, 0.0])})"
       - "CREATE INDEX emb_eq FOR (d:Doc) ON (d.emb)"
@@ -119,7 +117,6 @@ tests:
 
   - name: dropping_a_vector_index_keeps_the_property_index_on_its_property
     requires: [vector-index]
-    skip: "vector index names need a stored record kind (next commit)"
     setup:
       - "INSERT (:Doc {emb: vector([1.0, 0.0])})"
       - "CREATE INDEX emb_eq FOR (d:Doc) ON (d.emb)"
@@ -132,7 +129,6 @@ tests:
 
   - name: show_indexes_lists_a_vector_index
     requires: [vector-index]
-    skip: "listing vector indexes: #704"
     setup:
       - "CREATE VECTOR INDEX emb_vec ON :Doc(emb) DIMENSION 2 METRIC 'cosine'"
     query: "SHOW INDEXES"

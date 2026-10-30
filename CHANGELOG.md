@@ -26,7 +26,7 @@ Queries and calls that ran in 0.6.0 and now fail, because their result was wrong
 - A restore of a snapshot whose catalog does not apply, and parameters nested more than 128 levels deep, are refused.
 - N-Triples loading, `INSERT DATA` and `batch_insert_rdf` refuse a triple with a literal subject or a predicate that is not an IRI.
 
-### WASM: faster, and larger
+### WASM: faster (and larger)
 
 - **Both WASM packages are built for speed**: queries run about 1.6 times as fast as in 0.6.0 and inserts about 4.8 times, for larger downloads: `@grafeo-db/wasm-lite` grows from about 940 KB to 1.1 MB gzipped and `@grafeo-db/wasm` from about 1.6 MB to 1.7 MB.
 - **The full WASM package uses the lightweight regex engine**, as lite does, which keeps it about 260 KB smaller: on its own that engine is about 1.5 times slower, which the faster build makes up, so `=~` and SPARQL `REGEX` run about as fast as in 0.6.0. The native bindings and grafeo-server keep the full engine.
@@ -56,6 +56,8 @@ Queries and calls that ran in 0.6.0 and now fail, because their result was wrong
 - **`SHOW NODE TYPES` writes constraints as DDL**: `UNIQUE (email)`, `NOT NULL name` and `PRIMARY KEY (id)`, where it printed internal names.
 - **Stored procedure errors say procedure**: `CREATE PROCEDURE` of a name in use and `DROP PROCEDURE` of a missing one fail with "Procedure already exists" and "Procedure not found"; they said "Type".
 - **`IS TYPED LIST<NODE>` and `LIST<EDGE>` hold for lists of nodes and edges**: `[n, m] IS TYPED LIST<NODE>` and `collect(n) IS TYPED LIST<NODE>` were false.
+- **An `EXISTS` with a condition runs once over the rows it checks**: `MATCH (n:Method) WHERE n.active AND EXISTS { MATCH (n)-[:CALLS]->(m) WHERE ... }` runs the subquery once, from the distinct `n` the other conditions keep, and joins the result back (a delim join, as DuckDB plans it); it ran over every node in the graph, so a condition such as `10 / n.zero > 0` failed on nodes the query never asked about, and a selective query read the whole graph. The same holds for `NOT EXISTS`, several `EXISTS` and a subquery that reads the row only in its `WHERE`; EXPLAIN and PROFILE show the subquery's operators.
+- **An `EXISTS` inside an `OR` runs only where it can matter**: in `(n:Environment AND EXISTS { ... }) OR n.zz = 1` the subquery no longer runs for a row whose other condition in the same `AND` is false.
 - **PROFILE shows the whole plan**: with an `EXISTS` or `COUNT` subquery the filter cannot answer from the node's own edges, PROFILE listed operators of the subquery in the places of the outer plan's and left out the filter that holds them, the `RETURN` and the sort; it now has the tree EXPLAIN shows, with the subquery's rows and time in its filter's.
 - **Negative list slice bounds count from the end**: `[1,2,3,4,5][-2..]` is `[4, 5]`, `[..-2]` is `[1, 2, 3]` and `[-3..-1]` is `[3, 4]`, in GQL and Cypher, for lists and strings, as openCypher defines them; they gave an empty or the whole list.
 - **A label check the scan already makes is no filter**: `MATCH (n:Method) WHERE 'Method' IN labels(n)` (or `n:Method`) plans no filter, and EXPLAIN shows the smaller label an `EXISTS` subquery scans.

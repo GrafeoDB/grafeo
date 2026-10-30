@@ -18,6 +18,17 @@
 
 #![deny(unsafe_code)]
 
+// SPARQL's REGEX runs on the regex backend the build chose: `regex` for
+// native builds, `regex-lite` for WASM. The triple store picks neither, so a
+// build may choose the small one.
+#[cfg(all(
+    feature = "triple-store",
+    not(any(feature = "regex", feature = "regex-lite"))
+))]
+compile_error!(
+    "the `triple-store` feature needs a regex backend: enable `regex` (native) or `regex-lite` (WASM)"
+);
+
 /// The version of the grafeo-engine crate (from Cargo.toml).
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 

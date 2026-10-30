@@ -1108,6 +1108,8 @@ pub enum IndexType {
     BTree,
     /// Full-text index for text search.
     FullText,
+    /// Vector index for similarity search.
+    Vector,
 }
 
 /// Index definition.

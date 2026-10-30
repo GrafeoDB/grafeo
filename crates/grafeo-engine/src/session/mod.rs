@@ -163,15 +163,6 @@ fn typed_property(
     })
 }
 
-/// The catalog's properties for the property definitions of one node or
-/// edge type in a type DDL statement, with their default values.
-///
-/// # Errors
-///
-/// A semantic error when the catalog refuses a property's type (one that
-/// nests too many `LIST<...>` levels), or the types nest more `LIST<...>`
-/// levels in all than the type's catalog record holds.
-#[cfg(feature = "gql")]
 /// Adds the properties of a later occurrence of node type `type_name` in a
 /// graph type to those of the earlier ones: a property declared in several
 /// is NOT NULL when one declares it so, and keeps the first default value.
@@ -208,6 +199,15 @@ fn merge_occurrence(
         .map_err(|e| Error::from(QueryError::new(QueryErrorKind::Semantic, e.to_string())))
 }
 
+/// The catalog's properties for the property definitions of one node or
+/// edge type in a type DDL statement, with their default values.
+///
+/// # Errors
+///
+/// A semantic error when the catalog refuses a property's type (one that
+/// nests too many `LIST<...>` levels), or the types nest more `LIST<...>`
+/// levels in all than the type's catalog record holds.
+#[cfg(feature = "gql")]
 fn typed_properties(
     definitions: &[grafeo_adapters::query::gql::ast::PropertyDefinition],
 ) -> Result<Vec<crate::catalog::TypedProperty>> {
@@ -2074,6 +2074,16 @@ impl Session {
                 )))
             }
             SchemaStatement::CreateVectorIndex(stmt) => {
+                use grafeo_adapters::query::gql::ast::IndexKind;
+                let properties = [stmt.property.clone()];
+                if self.index_name_in_use(
+                    &stmt.name,
+                    &stmt.node_label,
+                    &properties,
+                    IndexKind::Vector,
+                ) {
+                    return Err(semantic(format!("Index '{}' already exists", stmt.name)));
+                }
                 self.vector_index_change(
                     change,
                     &stmt.node_label,
@@ -2081,6 +2091,15 @@ impl Session {
                     stmt.dimensions,
                     stmt.metric.as_deref(),
                 )?;
+                // Its name, for SHOW INDEXES and DROP INDEX.
+                change.push(StandaloneOp::PutCatalog(CatalogRecord::IndexName(
+                    IndexNameRecord {
+                        name: stmt.name.clone(),
+                        label: stmt.node_label.clone(),
+                        property: stmt.property.clone(),
+                        kind: IndexNameKindRecord::Vector,
+                    },
+                )));
                 done(QueryResult::status(format!(
                     "Created vector index '{}'",
                     stmt.name
@@ -2120,7 +2139,12 @@ impl Session {
                 use grafeo_adapters::query::gql::ast::IndexKind;
                 // A name stands for one index definition, as `DROP INDEX`
                 // drops it; each graph may have that index.
-                if self.index_name_in_use(&stmt) {
+                if self.index_name_in_use(
+                    &stmt.name,
+                    &stmt.label,
+                    &stmt.properties,
+                    stmt.index_kind,
+                ) {
                     if stmt.if_not_exists {
                         return done(QueryResult::status("No change".to_string()));
                     }
@@ -2131,7 +2155,7 @@ impl Session {
                     IndexKind::Property => ("property", IndexNameKindRecord::Hash),
                     IndexKind::BTree => ("btree", IndexNameKindRecord::BTree),
                     IndexKind::Text => ("text", IndexNameKindRecord::FullText),
-                    IndexKind::Vector => ("vector", IndexNameKindRecord::Hash),
+                    IndexKind::Vector => ("vector", IndexNameKindRecord::Vector),
                 };
                 for prop in &stmt.properties {
                     match stmt.index_kind {
@@ -2860,24 +2884,18 @@ impl Session {
         }
     }
 
-    /// Adds to `change` the put of a text index of `property` on the nodes
-    /// with `label` in the active graph, with the text index options of
-    /// `options`, built from their text values.
-    ///
-    /// # Errors
-    ///
-    /// An invalid-value error for options no text index takes, and an error
-    /// in a build without the `text-index` feature.
-    #[cfg(feature = "gql")]
-    /// Whether `CREATE INDEX` of `stmt` would give its name a second
-    /// meaning: the name stands for another label, property set or kind, or
-    /// the active graph has the index already. The same definition in
-    /// another graph is not a second meaning: index names are the catalog's,
-    /// the indexes each graph's.
+    /// Whether creating index `name` (of `kind`, on `label` and
+    /// `properties`) would give the name a second meaning: the name stands
+    /// for another label, property set or kind, or the active graph has the
+    /// index already. The same definition in another graph is not a second
+    /// meaning: index names are the catalog's, the indexes each graph's.
     #[cfg(feature = "gql")]
     fn index_name_in_use(
         &self,
-        stmt: &grafeo_adapters::query::gql::ast::CreateIndexStatement,
+        name: &str,
+        label: &str,
+        properties: &[String],
+        kind: grafeo_adapters::query::gql::ast::IndexKind,
     ) -> bool {
         use crate::catalog::IndexType;
         use grafeo_adapters::query::gql::ast::IndexKind;
@@ -2886,27 +2904,28 @@ impl Session {
             .catalog
             .all_indexes()
             .into_iter()
-            .filter(|def| def.name == stmt.name)
+            .filter(|def| def.name == name)
             .collect();
         if named.is_empty() {
             return false;
         }
-        let index_type = match stmt.index_kind {
-            IndexKind::Property | IndexKind::Vector => IndexType::Hash,
+        let index_type = match kind {
+            IndexKind::Property => IndexType::Hash,
             IndexKind::BTree => IndexType::BTree,
             IndexKind::Text => IndexType::FullText,
+            IndexKind::Vector => IndexType::Vector,
         };
-        let same_definition = named.len() == stmt.properties.len()
+        let same_definition = named.len() == properties.len()
             && named.iter().all(|def| {
                 def.index_type == index_type
                     && self
                         .catalog
                         .get_label_name(def.label)
-                        .is_some_and(|label| *label == *stmt.label)
+                        .is_some_and(|known| *known == *label)
                     && self
                         .catalog
                         .get_property_key_name(def.property_key)
-                        .is_some_and(|key| stmt.properties.iter().any(|p| **p == *key))
+                        .is_some_and(|key| properties.iter().any(|p| **p == *key))
             });
         if !same_definition {
             return true;
@@ -2914,36 +2933,34 @@ impl Session {
         let Some(store) = self.active_lpg_store() else {
             return false;
         };
-        stmt.properties
-            .iter()
-            .all(|property| match stmt.index_kind {
-                IndexKind::Property | IndexKind::BTree => store.has_property_index(property),
-                IndexKind::Text => {
-                    #[cfg(feature = "text-index")]
-                    {
-                        store.get_text_index(&stmt.label, property).is_some()
-                    }
-                    #[cfg(not(feature = "text-index"))]
-                    {
-                        false
-                    }
+        properties.iter().all(|property| match kind {
+            IndexKind::Property | IndexKind::BTree => store.has_property_index(property),
+            IndexKind::Text => {
+                #[cfg(feature = "text-index")]
+                {
+                    store.get_text_index(label, property).is_some()
                 }
-                IndexKind::Vector => {
-                    #[cfg(feature = "vector-index")]
-                    {
-                        store.get_vector_index(&stmt.label, property).is_some()
-                    }
-                    #[cfg(not(feature = "vector-index"))]
-                    {
-                        false
-                    }
+                #[cfg(not(feature = "text-index"))]
+                {
+                    false
                 }
-            })
+            }
+            IndexKind::Vector => {
+                #[cfg(feature = "vector-index")]
+                {
+                    store.get_vector_index(label, property).is_some()
+                }
+                #[cfg(not(feature = "vector-index"))]
+                {
+                    false
+                }
+            }
+        })
     }
 
     /// Drops the index of the active graph that `def`, a named index
-    /// `DROP INDEX` drops, stands for: the text index of its label and
-    /// property for a full-text one, else the property index of its
+    /// `DROP INDEX` drops, stands for: the text or vector index of its label
+    /// and property for a full-text or vector one, else the property index of its
     /// property, unless another name still stands for that one (property
     /// indexes are per key, not per label).
     #[cfg(feature = "gql")]
@@ -2978,6 +2995,23 @@ impl Session {
                 #[cfg(not(feature = "text-index"))]
                 return;
             }
+            IndexType::Vector => {
+                #[cfg(feature = "vector-index")]
+                {
+                    let Some(label) = self.catalog.get_label_name(def.label) else {
+                        return;
+                    };
+                    if store.get_vector_index(&label, &property).is_none() {
+                        return;
+                    }
+                    IndexKeyRecord::Vector {
+                        label: label.to_string(),
+                        property: property.to_string(),
+                    }
+                }
+                #[cfg(not(feature = "vector-index"))]
+                return;
+            }
             IndexType::Hash | IndexType::BTree => {
                 let shared = self.catalog.all_indexes().into_iter().any(|other| {
                     other.name != def.name
@@ -2998,6 +3032,15 @@ impl Session {
         ));
     }
 
+    /// Adds to `change` the put of a text index of `property` on the nodes
+    /// with `label` in the active graph, with the text index options of
+    /// `options`, built from their text values.
+    ///
+    /// # Errors
+    ///
+    /// An invalid-value error for options no text index takes, and an error
+    /// in a build without the `text-index` feature.
+    #[cfg(feature = "gql")]
     fn text_index_change(
         &self,
         change: &mut crate::transaction::StandaloneChange,

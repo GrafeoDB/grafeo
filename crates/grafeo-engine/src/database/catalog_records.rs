@@ -536,6 +536,7 @@ pub(crate) fn index_name_record(name: &IndexName) -> IndexNameRecord {
             IndexType::Hash => IndexNameKindRecord::Hash,
             IndexType::BTree => IndexNameKindRecord::BTree,
             IndexType::FullText => IndexNameKindRecord::FullText,
+            IndexType::Vector => IndexNameKindRecord::Vector,
         },
     }
 }
@@ -551,6 +552,7 @@ pub(crate) fn index_name(record: IndexNameRecord) -> IndexName {
             IndexNameKindRecord::Hash => IndexType::Hash,
             IndexNameKindRecord::BTree => IndexType::BTree,
             IndexNameKindRecord::FullText => IndexType::FullText,
+            IndexNameKindRecord::Vector => IndexType::Vector,
         },
     }
 }

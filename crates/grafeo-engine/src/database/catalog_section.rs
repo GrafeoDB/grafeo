@@ -352,6 +352,7 @@ impl IndexName {
             IndexType::Hash => 0,
             IndexType::BTree => 1,
             IndexType::FullText => 2,
+            IndexType::Vector => 3,
         };
         (&self.name, &self.label, &self.property, kind)
     }

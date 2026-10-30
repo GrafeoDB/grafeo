@@ -58,7 +58,7 @@ direct-api = ["lpg-model"]  # Batches, upserts and graph handles (db.graph); not
 languages = ["gql", "cypher", "sparql", "gremlin", "graphql", "sql-pgq"]
 compact-store = []  # Deprecated since 0.6.0: enables nothing (a build that opens files reads a compacted 0.5.x one); removed in 0.7.0
 # Persona-based profiles
-lpg = ["lpg-model", "gql", "cypher", "gremlin", "sql-pgq", "grafeo-engine/regex", "direct-api"]  # Graph App Developer
+lpg = ["lpg-model", "gql", "cypher", "gremlin", "sql-pgq", "direct-api"]  # Graph App Developer; every WASM build uses regex-lite (the full regex is 160 KB gzipped for a 2x faster regex step)
 rdf = ["rdf-model", "gql", "sparql", "graphql", "grafeo-engine/regex-lite"]  # Knowledge Engineer
 ai = ["vector-index", "text-index", "hybrid-search"]  # AI/Agent Developer
 analytics = ["ai", "algos"]  # Data Scientist (ai search + graph algorithms)

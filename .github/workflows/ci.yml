@@ -701,8 +701,9 @@ jobs:
     runs-on: ubuntu-latest
     # Miri interprets every step: a test that generates many cases runs for
     # hours under it (the decimal proptests did). They take a few cases under
-    # `cfg(miri)`; this stops any other from holding the job up.
-    timeout-minutes: 60
+    # `cfg(miri)`, and the whole run took 47 minutes on a busy machine
+    # (2026-10-30); this stops any other test from holding the job up.
+    timeout-minutes: 90
     # Pinned nightly, so a Miri change cannot break CI unannounced. Cargo refuses a
     # toolchain older than `rust-version`, so the nightly's rustc must be at least
     # the MSRV: bump this pin together with `rust-version` in Cargo.toml.

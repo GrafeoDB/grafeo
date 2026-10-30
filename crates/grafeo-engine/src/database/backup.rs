@@ -438,7 +438,7 @@ pub(super) fn lock_backup_directory(backup_dir: &Path, create: bool) -> Result<s
     })
     .map_err(|error| match error {
         Error::Io(error) if !create && error.kind() == std::io::ErrorKind::NotFound => {
-            Error::Internal("no backup manifest found; run a full backup first".to_string())
+            Error::InvalidValue("no backup manifest found; run a full backup first".to_string())
         }
         other => other,
     })
@@ -843,20 +843,20 @@ pub(super) fn do_backup_incremental(
     current_epoch: EpochId,
 ) -> Result<BackupSegment> {
     let manifest = read_manifest(backup_dir)?.ok_or_else(|| {
-        Error::Internal("no backup manifest found; run a full backup first".to_string())
+        Error::InvalidValue("no backup manifest found; run a full backup first".to_string())
     })?;
 
     if manifest.latest_full().is_none() {
-        return Err(Error::Internal(
+        return Err(Error::InvalidValue(
             "no full backup in manifest; run a full backup first".to_string(),
         ));
     }
 
     let cursor = read_backup_cursor(wal.dir())?.ok_or_else(|| {
-        Error::Internal("no backup cursor found; run a full backup first".to_string())
+        Error::InvalidValue("no backup cursor found; run a full backup first".to_string())
     })?;
     let from = cursor.wal_lsn.ok_or_else(|| {
-        Error::Internal(
+        Error::InvalidValue(
             "the backup cursor is of the WAL format before 0.6.0; run a full backup first"
                 .to_string(),
         )
@@ -1039,7 +1039,7 @@ pub(super) fn do_restore_to_epoch(
     ensure_restore_fresh(output_path)?;
 
     let manifest = read_manifest(backup_dir)?
-        .ok_or_else(|| Error::Internal("no backup manifest found".to_string()))?;
+        .ok_or_else(|| Error::InvalidValue("no backup manifest found".to_string()))?;
 
     // Find the best full backup (latest one that doesn't exceed target)
     let full_index = manifest
@@ -1047,7 +1047,7 @@ pub(super) fn do_restore_to_epoch(
         .iter()
         .rposition(|s| s.kind == BackupKind::Full && s.end_epoch <= target_epoch)
         .ok_or_else(|| {
-            Error::Internal(format!(
+            Error::InvalidValue(format!(
                 "no full backup covers epoch {}",
                 target_epoch.as_u64()
             ))

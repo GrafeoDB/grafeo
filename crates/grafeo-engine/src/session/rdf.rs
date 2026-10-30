@@ -92,6 +92,7 @@ impl Session {
             viewing_epoch_override: parking_lot::Mutex::new(None),
             savepoints: parking_lot::Mutex::new(Vec::new()),
             transaction_nesting_depth: parking_lot::Mutex::new(0),
+            transaction_statements: super::TransactionStatements::Allowed,
             changes: parking_lot::Mutex::new(None),
             #[cfg(feature = "metrics")]
             metrics: None,

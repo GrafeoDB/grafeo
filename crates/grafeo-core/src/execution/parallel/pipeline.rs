@@ -222,7 +222,8 @@ impl ParallelPipeline {
         let rows_processed = Arc::new(AtomicUsize::new(0));
         let errors: Arc<Mutex<Option<OperatorError>>> = Arc::new(Mutex::new(None));
 
-        // Spawn workers
+        // Spawn workers, which work under the running query's deadline
+        let deadline = crate::execution::deadline::current();
         thread::scope(|s| {
             for worker_id in 0..self.config.num_workers {
                 let scheduler = Arc::clone(&scheduler);
@@ -234,6 +235,7 @@ impl ParallelPipeline {
                 let chunk_size = self.config.chunk_size;
 
                 s.spawn(move || {
+                    let _deadline = crate::execution::deadline::enter(deadline);
                     if let Err(e) = Self::worker_loop(
                         worker_id,
                         scheduler,
@@ -296,6 +298,7 @@ impl ParallelPipeline {
 
             // Process chunks within morsel
             while let Some(chunk) = partition.next_chunk(chunk_size)? {
+                crate::execution::deadline::check()?;
                 morsel_rows += chunk.len();
                 Self::push_through_chain(&mut operators, chunk, &mut local_sink)?;
             }

@@ -18,7 +18,7 @@ use grafeo_common::grafeo_debug_span;
 use grafeo_common::types::{LogicalType, Value};
 use grafeo_common::utils::error::{ConstraintKind, Error, QueryError, Result};
 use grafeo_core::execution::operators::{Operator, OperatorError, ReadCounter, WriteCounter};
-use grafeo_core::execution::{DataChunk, Pipeline};
+use grafeo_core::execution::{DataChunk, Pipeline, deadline};
 
 /// Executes a physical operator tree and collects results.
 pub struct Executor {
@@ -136,6 +136,16 @@ impl Executor {
         })
     }
 
+    /// The error of a failed operator: a timeout an operator raised inside
+    /// its own loop (see [`deadline`]) names the limit, as the executor's
+    /// own check does.
+    fn operator_error(&self, error: OperatorError) -> Error {
+        match error {
+            OperatorError::Timeout => self.timeout_error(),
+            other => convert_operator_error(other),
+        }
+    }
+
     /// Executes a physical operator and collects all results.
     ///
     /// # Errors
@@ -145,6 +155,8 @@ impl Executor {
         let _span = grafeo_debug_span!("grafeo::query::execute");
         let mut result = QueryResult::with_types(self.columns.clone(), self.column_types.clone())?;
         let mut types_captured = !result.column_types.iter().all(|t| *t == LogicalType::Any);
+        // The operators check the deadline in their own loops too.
+        let _deadline = deadline::enter(self.deadline);
 
         loop {
             self.check_deadline()?;
@@ -159,7 +171,7 @@ impl Executor {
                     self.collect_chunk(&chunk, &mut result)?;
                 }
                 Ok(None) => break,
-                Err(err) => return Err(convert_operator_error(err)),
+                Err(err) => return Err(self.operator_error(err)),
             }
         }
 
@@ -198,10 +210,9 @@ impl Executor {
         // Build and execute the pipeline with deadline enforcement
         let mut pipeline = Pipeline::new(source, push_ops, Box::new(collector));
         pipeline.set_deadline(self.deadline);
-        pipeline.execute().map_err(|error| match error {
-            OperatorError::Timeout => self.timeout_error(),
-            other => convert_operator_error(other),
-        })?;
+        pipeline
+            .execute()
+            .map_err(|error| self.operator_error(error))?;
 
         // Extract the sink (ChunkCollector) and get the chunks
         // Safety: we know the sink is a ChunkCollector because we just created it
@@ -238,6 +249,8 @@ impl Executor {
         let mut result = QueryResult::with_types(self.columns.clone(), self.column_types.clone())?;
         let mut collected = 0;
         let mut types_captured = !result.column_types.iter().all(|t| *t == LogicalType::Any);
+        // The operators check the deadline in their own loops too.
+        let _deadline = deadline::enter(self.deadline);
 
         loop {
             if collected >= limit {
@@ -257,7 +270,7 @@ impl Executor {
                     collected += self.collect_chunk_limited(&chunk, &mut result, remaining)?;
                 }
                 Ok(None) => break,
-                Err(err) => return Err(convert_operator_error(err)),
+                Err(err) => return Err(self.operator_error(err)),
             }
         }
 

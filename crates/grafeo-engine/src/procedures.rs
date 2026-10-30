@@ -114,6 +114,12 @@ impl<'a> ProcedureContext<'a> {
         self.snapshot.store()
     }
 
+    /// The labels, edge types and property keys in use, as
+    /// `GrafeoDB::schema` reports them.
+    fn schema(&self) -> Result<crate::admin::LpgSchemaInfo> {
+        crate::admin::LpgSchemaInfo::in_use(self.store(), self.view())
+    }
+
     /// The view the calling query reads at.
     #[must_use]
     pub fn view(&self) -> ReadView {
@@ -167,7 +173,7 @@ impl Procedure for GraphAlgorithmProcedure {
 // Catalog introspection procedures
 // ---------------------------------------------------------------------------
 
-/// `db.labels` / `grafeo.labels`: lists every label present in the graph.
+/// `db.labels` / `grafeo.labels`: lists the labels in use, sorted.
 struct LabelsProcedure;
 
 impl Procedure for LabelsProcedure {
@@ -176,7 +182,7 @@ impl Procedure for LabelsProcedure {
     }
 
     fn description(&self) -> &str {
-        "Lists every node label present in the graph"
+        "Lists the node labels some node in the graph has"
     }
 
     fn parameters(&self) -> &[ParameterDef] {
@@ -189,14 +195,15 @@ impl Procedure for LabelsProcedure {
 
     fn execute(&self, ctx: &ProcedureContext<'_>, _params: &Parameters) -> Result<AlgorithmResult> {
         let mut result = AlgorithmResult::new(vec!["label".into()]);
-        for label in ctx.store().all_labels()? {
-            result.rows.push(vec![Value::String(label.into())]);
+        for label in ctx.schema()?.labels {
+            result.rows.push(vec![Value::String(label.name.into())]);
         }
         Ok(result)
     }
 }
 
-/// `db.relationshipTypes` / `grafeo.relationshipTypes`: lists every edge type.
+/// `db.relationshipTypes` / `grafeo.relationshipTypes`: lists the edge types
+/// in use, sorted.
 struct RelationshipTypesProcedure;
 
 impl Procedure for RelationshipTypesProcedure {
@@ -205,7 +212,7 @@ impl Procedure for RelationshipTypesProcedure {
     }
 
     fn description(&self) -> &str {
-        "Lists every edge type present in the graph"
+        "Lists the edge types some edge in the graph has"
     }
 
     fn parameters(&self) -> &[ParameterDef] {
@@ -218,14 +225,15 @@ impl Procedure for RelationshipTypesProcedure {
 
     fn execute(&self, ctx: &ProcedureContext<'_>, _params: &Parameters) -> Result<AlgorithmResult> {
         let mut result = AlgorithmResult::new(vec!["relationshipType".into()]);
-        for t in ctx.store().all_edge_types()? {
-            result.rows.push(vec![Value::String(t.into())]);
+        for edge_type in ctx.schema()?.edge_types {
+            result.rows.push(vec![Value::String(edge_type.name.into())]);
         }
         Ok(result)
     }
 }
 
-/// `db.propertyKeys` / `grafeo.propertyKeys`: lists every property key.
+/// `db.propertyKeys` / `grafeo.propertyKeys`: lists the property keys in
+/// use, sorted.
 struct PropertyKeysProcedure;
 
 impl Procedure for PropertyKeysProcedure {
@@ -234,7 +242,7 @@ impl Procedure for PropertyKeysProcedure {
     }
 
     fn description(&self) -> &str {
-        "Lists every property key present in the graph"
+        "Lists the property keys some node or edge in the graph holds"
     }
 
     fn parameters(&self) -> &[ParameterDef] {
@@ -247,7 +255,7 @@ impl Procedure for PropertyKeysProcedure {
 
     fn execute(&self, ctx: &ProcedureContext<'_>, _params: &Parameters) -> Result<AlgorithmResult> {
         let mut result = AlgorithmResult::new(vec!["propertyKey".into()]);
-        for key in ctx.store().all_property_keys()? {
+        for key in ctx.schema()?.property_keys {
             result.rows.push(vec![Value::String(key.into())]);
         }
         Ok(result)

@@ -46,6 +46,33 @@ pub(crate) fn js_error(message: &str) -> JsValue {
     JsError::new(message).into()
 }
 
+/// A JS `Error` with `message` and the GQLSTATUS `status` as `gqlStatus`,
+/// for an error the binding raises itself about the state of the database
+/// or of the data it is given.
+pub(crate) fn js_error_with_status(
+    message: &str,
+    status: &grafeo_common::utils::GqlStatus,
+) -> JsValue {
+    let js = js_sys::Error::new(message);
+    // Setting a property of a new, ordinary Error object cannot fail.
+    let _ = js_sys::Reflect::set(
+        &js,
+        &JsValue::from_str("gqlStatus"),
+        &JsValue::from_str(status.as_str()),
+    );
+    js.into()
+}
+
+/// The error of a call on a closed database (GQLSTATUS 25000, as the
+/// database reports a write to a closed database).
+pub(crate) fn closed_error() -> JsValue {
+    js_error_with_status(
+        "Database is closed. Create a new instance with `new Database()` or \
+         `Database.importSnapshot()` to continue.",
+        &grafeo_common::utils::GqlStatus::INVALID_TX_STATE,
+    )
+}
+
 /// The JS `Error` of a database error: its message, and its GQLSTATUS as
 /// `gqlStatus` (`22012` for a division by zero, `42001` for a syntax error).
 pub(crate) fn database_error(error: grafeo_common::utils::Error) -> JsValue {
@@ -139,12 +166,16 @@ impl Database {
     pub fn begin_transaction(&self) -> Result<(), JsValue> {
         self.check_open()?;
         if self.tx.borrow().is_some() {
-            return Err(js_error(
+            return Err(js_error_with_status(
                 "Transaction already active. Commit or rollback before starting a new one.",
+                &grafeo_common::utils::GqlStatus::INVALID_TX_ACTIVE,
             ));
         }
         let mut session = self.db().session();
         session.begin_transaction().map_err(database_error)?;
+        // It ends with commitTransaction() or rollbackTransaction(), never
+        // with a statement.
+        session.refuse_transaction_statements();
         *self.tx.borrow_mut() = Some(session);
         Ok(())
     }
@@ -154,17 +185,25 @@ impl Database {
     /// # Errors
     ///
     /// Returns `JsError` if the database is closed, no transaction is active,
-    /// or the commit fails (e.g., a write conflict).
+    /// or the commit fails (e.g., a write conflict). A commit that fails ends
+    /// the transaction all the same: `isTransactionActive()` is `false` after
+    /// it.
     #[wasm_bindgen(js_name = "commitTransaction")]
     pub fn commit_transaction(&self) -> Result<(), JsValue> {
         self.check_open()?;
-        let mut tx_slot = self.tx.borrow_mut();
-        let session = tx_slot
-            .as_mut()
-            .ok_or_else(|| JsError::new("No active transaction to commit."))?;
-        session.commit().map_err(database_error)?;
-        *tx_slot = None;
-        Ok(())
+        let mut session = self.tx.borrow_mut().take().ok_or_else(|| {
+            js_error_with_status(
+                "No active transaction to commit.",
+                &grafeo_common::utils::GqlStatus::INVALID_TX_STATE,
+            )
+        })?;
+        let outcome = session.commit();
+        // A commit refused before it began leaves the transaction open: end
+        // it, as a failed commit does.
+        if outcome.is_err() && session.in_transaction() {
+            let _ = session.rollback();
+        }
+        outcome.map_err(database_error)
     }
 
     /// Rolls back the active transaction, discarding all pending writes.
@@ -177,9 +216,12 @@ impl Database {
     pub fn rollback_transaction(&self) -> Result<(), JsValue> {
         self.check_open()?;
         let mut tx_slot = self.tx.borrow_mut();
-        let session = tx_slot
-            .as_mut()
-            .ok_or_else(|| JsError::new("No active transaction to roll back."))?;
+        let session = tx_slot.as_mut().ok_or_else(|| {
+            js_error_with_status(
+                "No active transaction to roll back.",
+                &grafeo_common::utils::GqlStatus::INVALID_TX_STATE,
+            )
+        })?;
         session.rollback().map_err(database_error)?;
         *tx_slot = None;
         Ok(())
@@ -211,10 +253,7 @@ impl Database {
 
     fn check_open(&self) -> Result<(), JsValue> {
         if self.closed.get() {
-            return Err(js_error(
-                "Database is closed. Create a new instance with `new Database()` or \
-                 `Database.importSnapshot()` to continue.",
-            ));
+            return Err(closed_error());
         }
         Ok(())
     }
@@ -528,18 +567,23 @@ impl Database {
                 signed_snapshot::MAX_SNAPSHOT_BYTES / (1024 * 1024)
             )));
         }
-        let payload = signed_snapshot::unwrap(key, data).map_err(|msg| JsError::new(&msg))?;
+        // A snapshot that does not verify is data that is not what it should
+        // be (GQLSTATUS 22000, as a damaged file is).
+        let payload = signed_snapshot::unwrap(key, data).map_err(|message| {
+            js_error_with_status(&message, &grafeo_common::utils::GqlStatus::DATA_EXCEPTION)
+        })?;
         let inner = GrafeoDB::import_snapshot(payload).map_err(database_error)?;
         Ok(Database::from_engine(inner))
     }
 
-    /// Returns schema information about the database.
-    ///
-    /// Returns an object describing labels, edge types, and property keys.
+    /// Returns schema information: the labels, edge types and property keys
+    /// in use, each sorted by name, with each label's and edge type's
+    /// properties and the labels each edge type connects.
     ///
     /// ```js
     /// const schema = db.schema();
-    /// // { lpg: { labels: [...], edgeTypes: [...], propertyKeys: [...] } }
+    /// // { mode: "lpg", labels: [{ name, count, properties }],
+    /// //   edge_types: [{ name, count, properties, endpoints }], property_keys: [...] }
     /// ```
     ///
     /// # Errors

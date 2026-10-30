@@ -40,14 +40,17 @@ fn string_literal_value(text: &str) -> String {
 type GraphTypeBody = (Vec<String>, Vec<String>, Vec<InlineElementType>, bool);
 
 /// The names of the node types and of the edge types among `elements`, in
-/// order.
+/// order of their first occurrence, each once.
 fn element_type_names(elements: &[InlineElementType]) -> (Vec<String>, Vec<String>) {
-    let mut node_types = Vec::new();
-    let mut edge_types = Vec::new();
+    let mut node_types: Vec<String> = Vec::new();
+    let mut edge_types: Vec<String> = Vec::new();
     for element in elements {
-        match element {
-            InlineElementType::Node { name, .. } => node_types.push(name.clone()),
-            InlineElementType::Edge { name, .. } => edge_types.push(name.clone()),
+        let (names, name) = match element {
+            InlineElementType::Node { name, .. } => (&mut node_types, name),
+            InlineElementType::Edge { name, .. } => (&mut edge_types, name),
+        };
+        if !names.contains(name) {
+            names.push(name.clone());
         }
     }
     (node_types, edge_types)
@@ -1102,11 +1105,7 @@ impl<'a> Parser<'a> {
         self.expect(TokenKind::For)?;
 
         // Parse variable name
-        if !self.is_identifier() {
-            return Err(self.error("Expected variable name after FOR"));
-        }
-        let alias = self.get_identifier_name();
-        self.advance();
+        let alias = self.parse_binding_name("variable name after FOR")?;
 
         // Expect IN keyword
         self.expect(TokenKind::In)?;
@@ -1327,11 +1326,7 @@ impl<'a> Parser<'a> {
         self.advance(); // consume LET
         let mut bindings = Vec::new();
         loop {
-            if !self.is_identifier() {
-                return Err(self.error("Expected variable name in LET clause"));
-            }
-            let var = self.get_identifier_name();
-            self.advance();
+            let var = self.parse_binding_name("variable name in LET clause")?;
             self.expect(TokenKind::Eq)?;
             let expr = self.parse_expression()?;
             bindings.push((var, expr));
@@ -1974,17 +1969,19 @@ impl<'a> Parser<'a> {
         // and G050 WHERE inside `((a)-[e]->(b) WHERE e.w > 5){2,5}`.
         if self.current.kind == TokenKind::LParen {
             let peek = self.peek_kind();
-            if matches!(
+            // A path mode word is the mode of a parenthesized path pattern
+            // only when a path pattern follows it (`(TRAIL (a)-->(b))`);
+            // otherwise it names the node (`(trail:P)`), a non-reserved word.
+            let mode_starts_a_pattern = matches!(
                 peek,
-                TokenKind::LParen
-                    | TokenKind::Walk
-                    | TokenKind::Trail
-                    | TokenKind::Simple
-                    | TokenKind::Acyclic
-                    | TokenKind::Minus
-                    | TokenKind::LeftArrow
-                    | TokenKind::Tilde
-            ) {
+                TokenKind::Walk | TokenKind::Trail | TokenKind::Simple | TokenKind::Acyclic
+            ) && self.second_starts_a_path_pattern();
+            if mode_starts_a_pattern
+                || matches!(
+                    peek,
+                    TokenKind::LParen | TokenKind::Minus | TokenKind::LeftArrow | TokenKind::Tilde
+                )
+            {
                 return self.parse_parenthesized_pattern();
             }
             // G048: `(identifier = ...)` is a subpath variable declaration
@@ -2267,10 +2264,19 @@ impl<'a> Parser<'a> {
     fn parse_node_pattern(&mut self) -> Result<NodePattern> {
         self.expect(TokenKind::LParen)?;
 
-        let variable = if self.is_identifier() {
+        // `(IS Label ...)` is an anonymous node with a label expression: IS
+        // names the node only when what follows cannot start one.
+        let is_starts_labels = self.current.kind == TokenKind::Is
+            && !matches!(
+                self.peek_kind(),
+                TokenKind::Colon | TokenKind::RParen | TokenKind::LBrace | TokenKind::Where
+            );
+        let variable = if self.is_identifier() && !is_starts_labels {
             let name = self.get_identifier_name();
             self.advance();
             Some(name)
+        } else if self.is_reserved_word_name() {
+            return Err(self.not_a_name_error("node variable"));
         } else {
             None
         };
@@ -2278,7 +2284,11 @@ impl<'a> Parser<'a> {
         let mut labels = Vec::new();
         let mut label_expression = None;
 
-        if self.current.kind == TokenKind::Is {
+        // A colon takes a label expression as IS does (ISO GQL): `(n:A & B)`,
+        // `(n:A | B)`; `(n:A:B)` stays the list of labels.
+        let colon_expression =
+            self.current.kind == TokenKind::Colon && self.is_label_expression_after_colon();
+        if self.current.kind == TokenKind::Is || colon_expression {
             // GQL IS syntax: (n IS Person | Employee)
             self.advance();
             label_expression = Some(self.parse_label_expression()?);
@@ -2463,6 +2473,9 @@ impl<'a> Parser<'a> {
                     if self.current.kind == TokenKind::LBracket {
                         self.advance();
 
+                        if self.is_reserved_word_name() {
+                            return Err(self.not_a_name_error("edge variable"));
+                        }
                         // Parse variable name if present
                         // Variable is followed by : (type), * (quantifier), { (properties),
                         // WHERE (element filter), or ] (end)
@@ -2535,6 +2548,9 @@ impl<'a> Parser<'a> {
                     if self.current.kind == TokenKind::LBracket {
                         self.advance();
 
+                        if self.is_reserved_word_name() {
+                            return Err(self.not_a_name_error("edge variable"));
+                        }
                         // Parse variable name if present
                         // Variable is followed by : (type), * (quantifier), { (properties),
                         // WHERE (element filter), or ] (end)
@@ -3312,12 +3328,7 @@ impl<'a> Parser<'a> {
 
         let alias = if self.current.kind == TokenKind::As {
             self.advance();
-            if !self.is_identifier() {
-                return Err(self.error("Expected alias name"));
-            }
-            let name = self.get_identifier_name();
-            self.advance();
-            Some(name)
+            Some(self.parse_binding_name("alias name")?)
         } else {
             None
         };
@@ -3327,6 +3338,70 @@ impl<'a> Parser<'a> {
             alias,
             span: None,
         })
+    }
+
+    /// Whether the current token is a reserved word written where a name
+    /// stands, that is followed by what follows a name in a pattern (`:`,
+    /// `)`, `]`, `{` or WHERE): `(like:Person)`, `-[like:LIKES]-`.
+    fn is_reserved_word_name(&mut self) -> bool {
+        let text = &self.current.text;
+        if self.is_identifier()
+            || text.is_empty()
+            || !text.chars().all(|c| c.is_ascii_alphabetic() || c == '_')
+        {
+            return false;
+        }
+        matches!(
+            self.peek_kind(),
+            TokenKind::Colon
+                | TokenKind::RParen
+                | TokenKind::RBracket
+                | TokenKind::LBrace
+                | TokenKind::Where
+        )
+    }
+
+    /// Whether the label after the current `:` is followed by `&` or `|`, so
+    /// the colon starts a label expression.
+    fn is_label_expression_after_colon(&mut self) -> bool {
+        matches!(
+            self.peek_second_kind(),
+            TokenKind::Ampersand | TokenKind::Pipe
+        )
+    }
+
+    /// A name a clause binds (an alias after `AS`, a `LET` or `FOR`
+    /// variable): an identifier, a backquoted name, or a double-quoted one
+    /// (ISO GQL's delimited identifier, which stands where a string literal
+    /// cannot). A reserved word is an error that says to quote it; anything
+    /// else is "Expected {what}".
+    fn parse_binding_name(&mut self, what: &str) -> Result<String> {
+        if self.is_identifier() {
+            let name = self.get_identifier_name();
+            self.advance();
+            return Ok(name);
+        }
+        if self.current.kind == TokenKind::String && self.current.text.starts_with('"') {
+            let name = string_literal_value(&self.current.text);
+            self.advance();
+            return Ok(name);
+        }
+        Err(self.not_a_name_error(what))
+    }
+
+    /// The error for a token where a name stands: a reserved word (a keyword
+    /// spelled as letters) is named with how to quote it, anything else is
+    /// "Expected {what}".
+    fn not_a_name_error(&self, what: &str) -> Error {
+        let text = &self.current.text;
+        if !text.is_empty() && text.chars().all(|c| c.is_ascii_alphabetic() || c == '_') {
+            let word = text.to_lowercase();
+            self.error(&format!(
+                "'{word}' is a reserved word in GQL: quote it as `{word}` to use it as a name"
+            ))
+        } else {
+            self.error(&format!("Expected {what}"))
+        }
     }
 
     /// Parses `FETCH FIRST|NEXT n ROWS|ROW ONLY` as a LIMIT expression.
@@ -4312,11 +4387,14 @@ impl<'a> Parser<'a> {
             }
             // Handle type() function - must be checked BEFORE is_identifier() since TYPE is a contextual keyword
             TokenKind::Type => {
+                // A variable keeps its spelling (`LET TYPE = 2 RETURN TYPE`);
+                // the function is `type`.
+                let written = self.current.text.clone();
                 let name = "type".to_string();
                 self.advance();
                 if self.current.kind != TokenKind::LParen {
                     // If not followed by (, treat as identifier/variable
-                    return Ok(Expression::Variable(name));
+                    return Ok(Expression::Variable(written));
                 }
                 self.advance();
                 let mut args = Vec::new();
@@ -6022,7 +6100,6 @@ impl<'a> Parser<'a> {
     ) -> Result<Vec<InlineElementType>> {
         let mut types = Vec::new();
         // Track which node type names we've already emitted so we don't duplicate them.
-        let mut seen_node_types = std::collections::HashSet::new();
 
         while self.current.kind != close && self.current.kind != TokenKind::Eof {
             // Parse the first node pattern: (:Label {props})
@@ -6094,23 +6171,20 @@ impl<'a> Parser<'a> {
                     (vec![effective_src], vec![effective_tgt])
                 };
 
-                // Add node types (deduplicated)
-                if seen_node_types.insert(src_label.clone()) {
-                    types.push(InlineElementType::Node {
-                        name: src_label,
-                        properties: src_props,
-                        key_labels: Vec::new(),
-                        is_reference: false,
-                    });
-                }
-                if seen_node_types.insert(tgt_label.clone()) {
-                    types.push(InlineElementType::Node {
-                        name: tgt_label,
-                        properties: tgt_props,
-                        key_labels: Vec::new(),
-                        is_reference: false,
-                    });
-                }
+                // Each occurrence of a node type, with its properties: the
+                // engine merges the occurrences of one type.
+                types.push(InlineElementType::Node {
+                    name: src_label,
+                    properties: src_props,
+                    key_labels: Vec::new(),
+                    is_reference: false,
+                });
+                types.push(InlineElementType::Node {
+                    name: tgt_label,
+                    properties: tgt_props,
+                    key_labels: Vec::new(),
+                    is_reference: false,
+                });
 
                 // Add edge type
                 types.push(InlineElementType::Edge {
@@ -6123,14 +6197,12 @@ impl<'a> Parser<'a> {
                 });
             } else {
                 // Standalone node pattern
-                if seen_node_types.insert(src_label.clone()) {
-                    types.push(InlineElementType::Node {
-                        name: src_label,
-                        properties: src_props,
-                        key_labels: Vec::new(),
-                        is_reference: false,
-                    });
-                }
+                types.push(InlineElementType::Node {
+                    name: src_label,
+                    properties: src_props,
+                    key_labels: Vec::new(),
+                    is_reference: false,
+                });
             }
 
             // Optional comma separator
@@ -7050,6 +7122,18 @@ impl<'a> Parser<'a> {
             .as_ref()
             .expect("peeked_second token was just populated")
             .kind
+    }
+
+    /// Whether the token after the next one starts a path pattern after a
+    /// path mode: `(`, or the `PATH` or `PATHS` the mode may be followed by.
+    fn second_starts_a_path_pattern(&mut self) -> bool {
+        if self.peek_second_kind() == TokenKind::LParen {
+            return true;
+        }
+        self.peeked_second.as_ref().is_some_and(|token| {
+            token.kind == TokenKind::Identifier
+                && matches!(token.text.to_uppercase().as_str(), "PATH" | "PATHS")
+        })
     }
 
     /// Returns the uppercased text of the peeked token.
@@ -11478,7 +11562,10 @@ mod tests {
             assert_eq!(stmt.name, "social");
             assert!(stmt.node_types.contains(&"Person".to_string()));
             assert!(stmt.edge_types.contains(&"KNOWS".to_string()));
-            // Should have Person node type and KNOWS edge type
+            // `inline_types` holds every occurrence (the session merges a
+            // repeated type): Person as the source and as the target, then
+            // the KNOWS edge. `node_types` names Person once.
+            assert_eq!(stmt.node_types, ["Person"]);
             let node_count = stmt
                 .inline_types
                 .iter()
@@ -11489,10 +11576,7 @@ mod tests {
                 .iter()
                 .filter(|t| matches!(t, InlineElementType::Edge { .. }))
                 .count();
-            assert_eq!(
-                node_count, 1,
-                "Should have 1 node type (Person, deduplicated)"
-            );
+            assert_eq!(node_count, 2, "Person, once per occurrence");
             assert_eq!(edge_count, 1, "Should have 1 edge type (KNOWS)");
             // Check KNOWS edge has source/target
             for t in &stmt.inline_types {
@@ -11532,13 +11616,21 @@ mod tests {
             assert!(stmt.node_types.contains(&"City".to_string()));
             assert!(stmt.edge_types.contains(&"KNOWS".to_string()));
             assert!(stmt.edge_types.contains(&"LIVES_IN".to_string()));
-            // Person should appear only once despite being in two patterns
-            let node_count = stmt
-                .inline_types
-                .iter()
-                .filter(|t| matches!(t, InlineElementType::Node { .. }))
-                .count();
-            assert_eq!(node_count, 2, "Should have 2 node types (Person, City)");
+            // `inline_types` holds every occurrence, in pattern order (the
+            // session merges a repeated type); `node_types` names each once.
+            assert_eq!(stmt.node_types, ["Person", "City"]);
+            let names: Vec<&str> =
+                stmt.inline_types
+                    .iter()
+                    .map(|t| match t {
+                        InlineElementType::Node { name, .. }
+                        | InlineElementType::Edge { name, .. } => name.as_str(),
+                    })
+                    .collect();
+            assert_eq!(
+                names,
+                ["Person", "Person", "KNOWS", "Person", "City", "LIVES_IN"]
+            );
         } else {
             panic!("Expected CreateGraphType");
         }
@@ -11662,24 +11754,28 @@ mod tests {
                 } => format!("{source_node_types:?}-{name}->{target_node_types:?} {properties:?}"),
             })
             .collect();
-        assert_eq!(declared.len(), 4, "{declared:#?}");
+        // Every occurrence, in pattern order: each pattern's nodes, then its
+        // edge. The session merges the repeated City and Country.
+        assert_eq!(declared.len(), 7, "{declared:#?}");
         assert!(
             declared[0].starts_with("City ")
                 && declared[0].contains("name: \"name\"")
                 && declared[0].contains("default_value: Some(\"'NL'\")"),
             "{declared:#?}"
         );
+        assert_eq!(declared[1], "City []", "{declared:#?}");
         assert!(
-            declared[1].starts_with("[\"City\"]-ROUTE->[\"City\"]")
-                && declared[1].contains("name: \"km\""),
+            declared[2].starts_with("[\"City\"]-ROUTE->[\"City\"]")
+                && declared[2].contains("name: \"km\""),
             "{declared:#?}"
         );
         assert!(
-            declared[2].starts_with("Country ") && declared[2].contains("name: \"code\""),
+            declared[3].starts_with("Country ") && declared[3].contains("name: \"code\""),
             "{declared:#?}"
         );
-        assert!(
-            declared[3].starts_with("[\"Country\"]-CAPITAL->[\"City\"]"),
+        assert_eq!(declared[4..6], ["City []", "Country []"], "{declared:#?}");
+        assert_eq!(
+            declared[6], "[\"Country\"]-CAPITAL->[\"City\"] []",
             "{declared:#?}"
         );
     }

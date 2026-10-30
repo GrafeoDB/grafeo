@@ -53,6 +53,10 @@ pub fn translate_with_bindings(
     // Check for EXPLAIN [ANALYZE] prefix (case-insensitive, non-standard extension).
     // EXPLAIN: show physical plan without executing.
     // EXPLAIN ANALYZE: execute with profiling, show actual vs estimated stats.
+    // Written after the prologue (`PREFIX ... EXPLAIN SELECT ...`), it is
+    // read as if it came first.
+    let lifted = explain_after_prologue(query);
+    let query = lifted.as_deref().unwrap_or(query);
     let trimmed = query.trim_start();
     let (explain, profile, actual_query) = if trimmed
         .get(..7)
@@ -74,6 +78,16 @@ pub fn translate_with_bindings(
             // EXPLAIN: show plan only
             (true, false, rest)
         }
+    } else if trimmed
+        .get(..7)
+        .is_some_and(|s| s.eq_ignore_ascii_case("PROFILE"))
+        && trimmed
+            .as_bytes()
+            .get(7)
+            .is_some_and(u8::is_ascii_whitespace)
+    {
+        // PROFILE: run with profiling, as EXPLAIN ANALYZE
+        (false, true, trimmed[7..].trim_start())
     } else {
         (false, false, query)
     };
@@ -95,6 +109,39 @@ pub fn translate_with_bindings(
     plan.explain = explain;
     plan.profile = profile;
     Ok(plan)
+}
+
+/// `query` with an `EXPLAIN` or `PROFILE` that follows its prologue (`BASE`
+/// and `PREFIX` declarations) moved before it, or `None` when there is none:
+/// users write the prologue first, and the keyword is read at the start.
+fn explain_after_prologue(query: &str) -> Option<String> {
+    let starts_with_word = |text: &str, word: &str| {
+        text.get(..word.len())
+            .is_some_and(|start| start.eq_ignore_ascii_case(word))
+            && text
+                .as_bytes()
+                .get(word.len())
+                .is_some_and(u8::is_ascii_whitespace)
+    };
+    let mut rest = query.trim_start();
+    let mut prologue_end = query.len() - rest.len();
+    while starts_with_word(rest, "PREFIX") || starts_with_word(rest, "BASE") {
+        // A declaration ends with its IRI's `>`.
+        let close = rest.find('>')?;
+        rest = rest[close + 1..].trim_start();
+        prologue_end = query.len() - rest.len();
+    }
+    if prologue_end == query.len() - query.trim_start().len() {
+        return None;
+    }
+    let keyword = ["EXPLAIN", "PROFILE"]
+        .into_iter()
+        .find(|word| starts_with_word(rest, word))?;
+    Some(format!(
+        "{keyword} {}{}",
+        &query[..prologue_end],
+        &rest[keyword.len()..]
+    ))
 }
 
 /// Translator from SPARQL AST to LogicalPlan.

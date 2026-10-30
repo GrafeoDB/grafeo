@@ -3482,7 +3482,8 @@ impl GrafeoDB {
     ///
     /// Copies the full backup to `output_path`, then replays incremental
     /// WAL segments up to `target_epoch`. The restored database can be
-    /// opened with [`GrafeoDB::open`].
+    /// opened with [`GrafeoDB::open`]. An epoch past the end of the chain
+    /// restores the latest state the chain holds.
     ///
     /// The backups of an encrypted database are encrypted: a restore that
     /// needs only the full backup copies its encrypted file (open it with its

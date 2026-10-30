@@ -12,8 +12,13 @@
 //! their documentation has a `# Stability: Experimental` section: see
 //! <https://grafeo.dev/stability/>.
 
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 
+use grafeo_common::types::{NodeId, PropertyMap, ReadView};
+use grafeo_common::utils::error::Result as GrafeoResult;
+use grafeo_common::utils::hash::FxHashMap;
+use grafeo_core::graph::{Direction, GraphStore, Labels};
 use serde::{Deserialize, Serialize};
 
 /// Database mode - either LPG (Labeled Property Graph) or RDF (Triple Store).
@@ -80,15 +85,20 @@ pub struct DatabaseStats {
     pub disk_bytes: Option<usize>,
 }
 
-/// Schema information for LPG databases.
+/// Schema information for LPG databases: what the data holds, each list
+/// sorted by name.
+///
+/// Only what is in use is listed: a label no node has any more, an edge type
+/// with no edge left and a property key no node or edge holds are left out,
+/// also when a node or edge type in the catalog declares them.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[non_exhaustive]
 pub struct LpgSchemaInfo {
-    /// All labels used in the database.
+    /// The labels some node has.
     pub labels: Vec<LabelInfo>,
-    /// All edge types used in the database.
+    /// The edge types some edge has.
     pub edge_types: Vec<EdgeTypeInfo>,
-    /// All property keys used in the database.
+    /// The property keys some node or edge holds.
     pub property_keys: Vec<String>,
 }
 
@@ -100,6 +110,9 @@ pub struct LabelInfo {
     pub name: String,
     /// Number of nodes with this label.
     pub count: usize,
+    /// The properties the nodes with this label hold.
+    #[serde(default)]
+    pub properties: Vec<PropertyInfo>,
 }
 
 /// Information about an edge type.
@@ -110,6 +123,155 @@ pub struct EdgeTypeInfo {
     pub name: String,
     /// Number of edges with this type.
     pub count: usize,
+    /// The properties the edges of this type hold.
+    #[serde(default)]
+    pub properties: Vec<PropertyInfo>,
+    /// The labels the edges of this type connect, one entry per source and
+    /// target label: an edge between nodes with several labels counts in
+    /// each pair, and an end without a label is in none.
+    #[serde(default)]
+    pub endpoints: Vec<EndpointInfo>,
+}
+
+/// A property key and the types of the values written to it, as
+/// `valueType` names them (`STRING`, `INT64`, `LIST`, ...), sorted.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
+pub struct PropertyInfo {
+    /// The property key.
+    pub name: String,
+    /// The types of its values.
+    pub types: Vec<String>,
+}
+
+/// A source and a target label that edges of one type connect.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
+pub struct EndpointInfo {
+    /// A label of the source node.
+    pub source: String,
+    /// A label of the target node.
+    pub target: String,
+    /// Number of edges of the type from a node with `source` to one with
+    /// `target`.
+    pub count: usize,
+}
+
+/// The property keys of one label or edge type, with the types of the
+/// values each holds.
+#[derive(Default)]
+struct PropertyTally(BTreeMap<String, BTreeSet<&'static str>>);
+
+impl PropertyTally {
+    fn record(&mut self, properties: &PropertyMap) {
+        for (key, value) in properties.iter().filter(|(_, value)| !value.is_null()) {
+            self.0
+                .entry(key.as_str().to_string())
+                .or_default()
+                .insert(value.type_name());
+        }
+    }
+
+    fn into_infos(self) -> Vec<PropertyInfo> {
+        self.0
+            .into_iter()
+            .map(|(name, types)| PropertyInfo {
+                name,
+                types: types.into_iter().map(String::from).collect(),
+            })
+            .collect()
+    }
+}
+
+/// The keys of `properties` that hold a value.
+fn keys_in_use(properties: &PropertyMap) -> impl Iterator<Item = String> + '_ {
+    properties
+        .iter()
+        .filter(|(_, value)| !value.is_null())
+        .map(|(key, _)| key.as_str().to_string())
+}
+
+/// An edge type's count, properties and endpoint pairs, while they are read.
+type EdgeTally = (usize, PropertyTally, BTreeMap<(String, String), usize>);
+
+impl LpgSchemaInfo {
+    /// What a reader at `view` finds in `store`: one pass over the nodes and
+    /// their outgoing edges, so it reads the whole graph.
+    /// `GrafeoDB::schema` and the `db.labels`, `db.relationshipTypes` and
+    /// `db.propertyKeys` procedures read this one summary, so they agree.
+    pub(crate) fn in_use(store: &dyn GraphStore, view: ReadView) -> GrafeoResult<Self> {
+        let mut labels: BTreeMap<String, (usize, PropertyTally)> = BTreeMap::new();
+        let mut node_labels: FxHashMap<NodeId, Labels> = FxHashMap::default();
+        let mut keys: BTreeSet<String> = BTreeSet::new();
+        let node_ids = store.node_ids(view)?;
+        for &id in &node_ids {
+            let Some(node) = store.node(id, view)? else {
+                continue;
+            };
+            keys.extend(keys_in_use(&node.properties));
+            for label in &node.labels {
+                let (count, tally) = labels.entry(label.to_string()).or_default();
+                *count += 1;
+                tally.record(&node.properties);
+            }
+            node_labels.insert(id, node.labels);
+        }
+
+        let mut edge_types: BTreeMap<String, EdgeTally> = BTreeMap::new();
+        for &id in &node_ids {
+            let Some(sources) = node_labels.get(&id) else {
+                continue;
+            };
+            for (target, edge_id) in store.edges(id, Direction::Outgoing, &[], view)? {
+                let Some(edge) = store.edge(edge_id, view)? else {
+                    continue;
+                };
+                keys.extend(keys_in_use(&edge.properties));
+                let (count, tally, endpoints) =
+                    edge_types.entry(edge.edge_type.to_string()).or_default();
+                *count += 1;
+                tally.record(&edge.properties);
+                let targets = node_labels
+                    .get(&target)
+                    .map_or(&[][..], |labels| &labels[..]);
+                for source in sources {
+                    for target in targets {
+                        *endpoints
+                            .entry((source.to_string(), target.to_string()))
+                            .or_default() += 1;
+                    }
+                }
+            }
+        }
+
+        Ok(Self {
+            labels: labels
+                .into_iter()
+                .map(|(name, (count, tally))| LabelInfo {
+                    name,
+                    count,
+                    properties: tally.into_infos(),
+                })
+                .collect(),
+            edge_types: edge_types
+                .into_iter()
+                .map(|(name, (count, tally, endpoints))| EdgeTypeInfo {
+                    name,
+                    count,
+                    properties: tally.into_infos(),
+                    endpoints: endpoints
+                        .into_iter()
+                        .map(|((source, target), count)| EndpointInfo {
+                            source,
+                            target,
+                            count,
+                        })
+                        .collect(),
+                })
+                .collect(),
+            property_keys: keys.into_iter().collect(),
+        })
+    }
 }
 
 /// Schema information for RDF databases.
@@ -595,10 +757,20 @@ mod tests {
             labels: vec![LabelInfo {
                 name: "Person".to_string(),
                 count: 10,
+                properties: vec![PropertyInfo {
+                    name: "age".to_string(),
+                    types: vec!["INT64".to_string(), "STRING".to_string()],
+                }],
             }],
             edge_types: vec![EdgeTypeInfo {
                 name: "KNOWS".to_string(),
                 count: 20,
+                properties: Vec::new(),
+                endpoints: vec![EndpointInfo {
+                    source: "Person".to_string(),
+                    target: "Person".to_string(),
+                    count: 20,
+                }],
             }],
             property_keys: vec!["name".to_string(), "age".to_string()],
         });
@@ -609,6 +781,8 @@ mod tests {
                 assert_eq!(lpg.labels.len(), 1);
                 assert_eq!(lpg.labels[0].name, "Person");
                 assert_eq!(lpg.edge_types[0].count, 20);
+                assert_eq!(lpg.labels[0].properties[0].types, ["INT64", "STRING"]);
+                assert_eq!(lpg.edge_types[0].endpoints[0].target, "Person");
             }
             SchemaInfo::Rdf(_) => panic!("Expected LPG schema"),
         }

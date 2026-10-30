@@ -220,7 +220,7 @@ impl Catalog {
         self.indexes.for_label_property(label, property_key)
     }
 
-    /// Returns all index definitions.
+    /// Returns all index definitions, sorted by name.
     #[must_use]
     pub fn all_indexes(&self) -> Vec<IndexDefinition> {
         self.indexes.all()
@@ -803,6 +803,19 @@ impl Catalog {
         }
     }
 
+    /// Forgets the graph type of graph `graph_name`, as its drop does: a
+    /// graph created again under the name is untyped. Returns whether it had
+    /// one.
+    pub fn unbind_graph(&self, graph_name: &str) -> bool {
+        self.schema.as_ref().is_some_and(|schema| {
+            schema
+                .graph_type_bindings
+                .write()
+                .remove(graph_name)
+                .is_some()
+        })
+    }
+
     /// Gets the graph type binding for a graph instance.
     pub fn get_graph_type_binding(&self, graph_name: &str) -> Option<String> {
         self.schema
@@ -818,7 +831,7 @@ impl Catalog {
     /// # Errors
     ///
     /// * `CatalogError::SchemaNotEnabled` if schema is disabled.
-    /// * `CatalogError::TypeAlreadyExists` if a procedure with the same name exists.
+    /// * `CatalogError::ProcedureAlreadyExists` if a procedure with the same name exists.
     pub fn register_procedure(&self, def: ProcedureDefinition) -> Result<(), CatalogError> {
         match &self.schema {
             Some(schema) => schema.register_procedure(def),
@@ -846,7 +859,7 @@ impl Catalog {
     /// # Errors
     ///
     /// * `CatalogError::SchemaNotEnabled` if schema is disabled.
-    /// * `CatalogError::TypeNotFound` if the procedure does not exist.
+    /// * `CatalogError::ProcedureNotFound` if the procedure does not exist.
     pub fn drop_procedure(&self, name: &str) -> Result<(), CatalogError> {
         match &self.schema {
             Some(schema) => schema.drop_procedure(name),
@@ -1228,7 +1241,10 @@ impl IndexCatalog {
     }
 
     fn all(&self) -> Vec<IndexDefinition> {
-        self.indexes.read().values().cloned().collect()
+        let mut all: Vec<IndexDefinition> = self.indexes.read().values().cloned().collect();
+        // By name, then by id: one name can cover several indexes.
+        all.sort_by(|a, b| a.name.cmp(&b.name).then(a.id.cmp(&b.id)));
+        all
     }
 }
 
@@ -1343,6 +1359,18 @@ pub enum TypeConstraint {
     Unique(Vec<String>),
     /// NOT NULL constraint on a single property.
     NotNull(String),
+}
+
+/// The constraint as DDL writes it: `PRIMARY KEY (a, b)`, `UNIQUE (email)`,
+/// `NOT NULL name`.
+impl std::fmt::Display for TypeConstraint {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::PrimaryKey(keys) => write!(f, "PRIMARY KEY ({})", keys.join(", ")),
+            Self::Unique(keys) => write!(f, "UNIQUE ({})", keys.join(", ")),
+            Self::NotNull(key) => write!(f, "NOT NULL {key}"),
+        }
+    }
 }
 
 /// What a named constraint (`CREATE CONSTRAINT`) requires.
@@ -2083,11 +2111,11 @@ impl SchemaCatalog {
     ///
     /// # Errors
     ///
-    /// Returns `CatalogError::TypeAlreadyExists` if a procedure with the same name exists.
+    /// Returns `CatalogError::ProcedureAlreadyExists` if a procedure with the same name exists.
     pub fn register_procedure(&self, def: ProcedureDefinition) -> Result<(), CatalogError> {
         let mut procs = self.procedures.write();
         if procs.contains_key(&def.name) {
-            return Err(CatalogError::TypeAlreadyExists(def.name.clone()));
+            return Err(CatalogError::ProcedureAlreadyExists(def.name.clone()));
         }
         procs.insert(def.name.clone(), def);
         Ok(())
@@ -2102,11 +2130,11 @@ impl SchemaCatalog {
     ///
     /// # Errors
     ///
-    /// Returns `CatalogError::TypeNotFound` if no procedure with the given name exists.
+    /// Returns `CatalogError::ProcedureNotFound` if no procedure with the given name exists.
     pub fn drop_procedure(&self, name: &str) -> Result<(), CatalogError> {
         let mut procs = self.procedures.write();
         if procs.remove(name).is_none() {
-            return Err(CatalogError::TypeNotFound(name.to_string()));
+            return Err(CatalogError::ProcedureNotFound(name.to_string()));
         }
         Ok(())
     }
@@ -2240,6 +2268,10 @@ pub enum CatalogError {
     TypeAlreadyExists(String),
     /// No type with this name exists.
     TypeNotFound(String),
+    /// A stored procedure with this name already exists.
+    ProcedureAlreadyExists(String),
+    /// No stored procedure with this name exists.
+    ProcedureNotFound(String),
     /// A schema with this name already exists.
     SchemaAlreadyExists(String),
     /// No schema with this name exists.
@@ -2291,6 +2323,8 @@ impl std::fmt::Display for CatalogError {
             Self::IndexNotFound(id) => write!(f, "Index not found: {id}"),
             Self::TypeAlreadyExists(name) => write!(f, "Type already exists: {name}"),
             Self::TypeNotFound(name) => write!(f, "Type not found: {name}"),
+            Self::ProcedureAlreadyExists(name) => write!(f, "Procedure already exists: {name}"),
+            Self::ProcedureNotFound(name) => write!(f, "Procedure not found: {name}"),
             Self::SchemaAlreadyExists(name) => write!(f, "Schema already exists: {name}"),
             Self::SchemaNotFound(name) => write!(f, "Schema not found: {name}"),
             Self::PropertyTypeTooDeep { limit } => {
@@ -2425,9 +2459,17 @@ impl CatalogConstraintValidator {
         self
     }
 
-    /// The node type, with what it inherits, that checks nodes with `label`
-    /// in the schema written in.
+    /// The node type, with what it inherits, that checks nodes with `label`:
+    /// the one the graph's closed graph type names, else the one of the
+    /// schema written in.
     fn node_type(&self, label: &str) -> Option<NodeTypeDefinition> {
+        if let Some(name) = self
+            .closed_type
+            .as_ref()
+            .and_then(|closed| closed.node_type_names.get(label))
+        {
+            return self.catalog.resolved_node_type(name);
+        }
         match &self.schema {
             Some(schema) => self
                 .catalog
@@ -2436,9 +2478,16 @@ impl CatalogConstraintValidator {
         }
     }
 
-    /// The edge type that checks edges of `edge_type` in the schema written
-    /// in.
+    /// The edge type that checks edges of `edge_type`: the one the graph's
+    /// closed graph type names, else the one of the schema written in.
     fn edge_type(&self, edge_type: &str) -> Option<EdgeTypeDefinition> {
+        if let Some(name) = self
+            .closed_type
+            .as_ref()
+            .and_then(|closed| closed.edge_type_names.get(edge_type))
+        {
+            return self.catalog.get_edge_type_def(name);
+        }
         match &self.schema {
             Some(schema) => self
                 .catalog
@@ -3088,6 +3137,13 @@ struct ClosedGraphType {
     /// The edge types an edge may have, with their properties like
     /// `node_types`.
     edge_types: Option<HashMap<String, Option<HashSet<String>>>>,
+    /// The node type that checks each label, by its catalog name
+    /// (`schema/Type` for a type in a schema): the graph type's own, also
+    /// when the graph was created in another schema.
+    node_type_names: HashMap<String, String>,
+    /// The edge type that checks each edge type name, like
+    /// `node_type_names`.
+    edge_type_names: HashMap<String, String>,
 }
 
 impl ClosedGraphType {
@@ -3102,6 +3158,7 @@ impl ClosedGraphType {
         let declared = |properties: &[TypedProperty]| -> HashSet<String> {
             properties.iter().map(|p| p.name.clone()).collect()
         };
+        let mut node_type_names = HashMap::new();
         let node_types = (!def.allowed_node_types.is_empty()).then(|| {
             let mut labels = HashMap::new();
             for name in &def.allowed_node_types {
@@ -3115,11 +3172,18 @@ impl ClosedGraphType {
                             .entry(key_label.clone())
                             .or_insert_with(|| properties.clone());
                     }
+                    node_type_names.insert(unqualified(name).to_string(), name.clone());
                 }
                 labels.insert(unqualified(name).to_string(), properties);
             }
             labels
         });
+        let edge_type_names = def
+            .allowed_edge_types
+            .iter()
+            .filter(|name| catalog.get_edge_type_def(name).is_some())
+            .map(|name| (unqualified(name).to_string(), name.clone()))
+            .collect();
         let edge_types = (!def.allowed_edge_types.is_empty()).then(|| {
             def.allowed_edge_types
                 .iter()
@@ -3135,6 +3199,8 @@ impl ClosedGraphType {
             name: def.name,
             node_types,
             edge_types,
+            node_type_names,
+            edge_type_names,
         })
     }
 }

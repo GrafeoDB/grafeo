@@ -32,6 +32,11 @@ pub struct Parser<'a> {
     undeclared: Option<Token>,
 }
 
+/// The error for a quoted triple (`<< s p o >>`, RDF-star), wherever a
+/// term or a pattern may stand: it is SPARQL 1.2.
+const QUOTED_TRIPLES_UNSUPPORTED: &str =
+    "quoted triples (<< ... >>) are SPARQL 1.2, which this version does not support";
+
 /// The prefixes a query can use without declaring them, as Jena and GraphDB
 /// predefine them; a query's own `PREFIX` redefines one.
 pub const PREDEFINED_PREFIXES: [(&str, &str); 5] = [
@@ -392,9 +397,34 @@ impl<'a> Parser<'a> {
         })
     }
 
+    /// The quads of `INSERT DATA` or `DELETE DATA`, which hold no variables
+    /// (SPARQL 1.1 Update, QuadData): a variable is a syntax error naming it.
     fn parse_quad_data(&mut self) -> Result<Vec<QuadPattern>> {
         self.expect(TokenKind::LeftBrace)?;
         let quads = self.parse_quads()?;
+        let variable = quads.iter().find_map(|quad| {
+            let term = |term: &TripleTerm| match term {
+                TripleTerm::Variable(name) => Some(name.clone()),
+                _ => None,
+            };
+            let graph = match &quad.graph {
+                Some(VariableOrIri::Variable(name)) => Some(name.clone()),
+                _ => None,
+            };
+            let predicate = match &quad.triple.predicate {
+                PropertyPath::Variable(name) => Some(name.clone()),
+                _ => None,
+            };
+            graph
+                .or_else(|| term(&quad.triple.subject))
+                .or(predicate)
+                .or_else(|| term(&quad.triple.object))
+        });
+        if let Some(name) = variable {
+            return Err(self.error(&format!(
+                "INSERT DATA and DELETE DATA hold no variables, but '?{name}' is one: use INSERT                  or DELETE with a WHERE clause"
+            )));
+        }
         self.expect(TokenKind::RightBrace)?;
         Ok(quads)
     }
@@ -447,6 +477,8 @@ impl<'a> Parser<'a> {
                 if self.current.kind == TokenKind::Dot {
                     self.advance();
                 }
+            } else if self.current.kind == TokenKind::LessThan {
+                return Err(self.error(QUOTED_TRIPLES_UNSUPPORTED));
             } else {
                 break;
             }
@@ -829,9 +861,7 @@ impl<'a> Parser<'a> {
                 Ok(GraphPattern::SubSelect(Box::new(subquery)))
             }
             // A quoted triple (`<< s p o >>`) is SPARQL 1.2 (RDF-star).
-            TokenKind::LessThan => Err(self.error(
-                "quoted triples (<< ... >>) are SPARQL 1.2, which this version does not support",
-            )),
+            TokenKind::LessThan => Err(self.error(QUOTED_TRIPLES_UNSUPPORTED)),
             _ => {
                 // Triple patterns. A token that starts none is an error: an
                 // element that consumed nothing would be parsed again and
@@ -1003,6 +1033,7 @@ impl<'a> Parser<'a> {
                 | TokenKind::Iri
                 | TokenKind::PrefixedName
                 | TokenKind::BlankNodeLabel
+                | TokenKind::AnonymousBlank
                 | TokenKind::LeftBracket
                 | TokenKind::LeftParen
                 | TokenKind::String
@@ -1235,6 +1266,11 @@ impl<'a> Parser<'a> {
                 self.advance();
                 Ok(TripleTerm::BlankNode(BlankNode::Labeled(label)))
             }
+            // `[]` with no space inside is one token (ANON).
+            TokenKind::AnonymousBlank => {
+                self.advance();
+                Ok(TripleTerm::BlankNode(BlankNode::Anonymous(vec![])))
+            }
             TokenKind::LeftBracket => {
                 self.advance();
                 if self.current.kind == TokenKind::RightBracket {
@@ -1273,6 +1309,7 @@ impl<'a> Parser<'a> {
                 let literal = self.parse_boolean_literal()?;
                 Ok(TripleTerm::Literal(literal))
             }
+            TokenKind::LessThan => Err(self.error(QUOTED_TRIPLES_UNSUPPORTED)),
             _ => Err(self.error("expected variable, IRI, blank node, or literal")),
         }
     }

@@ -73,7 +73,7 @@ impl GraphHandle {
         call: impl FnOnce(&EngineGraphHandle<'_>) -> grafeo_common::utils::error::Result<T>,
     ) -> Result<T, JsValue> {
         if self.closed.get() {
-            return Err(js_error("Database is closed."));
+            return Err(crate::closed_error());
         }
         if self.tx.borrow().is_some() {
             return Err(js_error(&format!(

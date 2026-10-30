@@ -1031,10 +1031,10 @@ fn lock_shared(path: &Path) -> Result<SharedLock> {
         |error| matches!(error, std::fs::TryLockError::WouldBlock),
     )
     .map_err(|error| match error {
-        std::fs::TryLockError::WouldBlock => Error::Internal(format!(
-            "cannot migrate {}: the database file is locked by another process",
+        std::fs::TryLockError::WouldBlock => Error::from(StorageError::Locked(format!(
+            "cannot migrate {}: the database file is held by another process, close it there first",
             path.display()
-        )),
+        ))),
         std::fs::TryLockError::Error(error) => {
             Error::Internal(format!("cannot lock {}: {error}", path.display()))
         }

@@ -1893,6 +1893,19 @@ pub extern "C" fn grafeo_edge_count(
 // Transactions
 // =========================================================================
 
+/// The handle of the transaction `session` began. It ends with
+/// `grafeo_commit` or `grafeo_rollback`, never with a statement, so the
+/// session refuses `START TRANSACTION`, `COMMIT` and `ROLLBACK`.
+fn new_transaction(mut session: grafeo_engine::session::Session) -> GrafeoTransaction {
+    session.refuse_transaction_statements();
+    GrafeoTransaction {
+        session: parking_lot::Mutex::new(Some(session)),
+        committed: false,
+        rolled_back: false,
+        commit_failed: false,
+    }
+}
+
 /// Begin a transaction with default isolation (snapshot isolation).
 #[unsafe(no_mangle)]
 pub extern "C" fn grafeo_begin_transaction(db: *mut GrafeoDatabase) -> *mut GrafeoTransaction {
@@ -1904,11 +1917,7 @@ pub extern "C" fn grafeo_begin_transaction(db: *mut GrafeoDatabase) -> *mut Graf
     let db = unsafe { &*db };
     let mut session = db.inner.read().session();
     match session.begin_transaction() {
-        Ok(()) => Box::into_raw(Box::new(GrafeoTransaction {
-            session: parking_lot::Mutex::new(Some(session)),
-            committed: false,
-            rolled_back: false,
-        })),
+        Ok(()) => Box::into_raw(Box::new(new_transaction(session))),
         Err(e) => {
             set_error(&e);
             std::ptr::null_mut()
@@ -1943,11 +1952,7 @@ pub extern "C" fn grafeo_begin_transaction_with_isolation(
 
     let mut session = db.inner.read().session();
     match session.begin_transaction_with_isolation(level) {
-        Ok(()) => Box::into_raw(Box::new(GrafeoTransaction {
-            session: parking_lot::Mutex::new(Some(session)),
-            committed: false,
-            rolled_back: false,
-        })),
+        Ok(()) => Box::into_raw(Box::new(new_transaction(session))),
         Err(e) => {
             set_error(&e);
             std::ptr::null_mut()
@@ -2098,7 +2103,17 @@ pub extern "C" fn grafeo_commit(tx: *mut GrafeoTransaction) -> GrafeoStatus {
                 tx.committed = true;
                 GrafeoStatus::Ok
             }
-            Err(e) => set_error(&e),
+            Err(e) => {
+                // A commit that fails ends the transaction all the same
+                // (one refused before it began is rolled back here), so a
+                // rollback after it does nothing.
+                if session.in_transaction() {
+                    let _ = session.rollback();
+                }
+                *guard = None;
+                tx.commit_failed = true;
+                set_error(&e)
+            }
         }
     } else {
         set_last_error("Transaction is no longer active");
@@ -2106,7 +2121,8 @@ pub extern "C" fn grafeo_commit(tx: *mut GrafeoTransaction) -> GrafeoStatus {
     }
 }
 
-/// Rollback a transaction.
+/// Rollback a transaction. After a commit that failed it does nothing and
+/// returns `GRAFEO_OK`: that commit ended the transaction.
 #[unsafe(no_mangle)]
 pub extern "C" fn grafeo_rollback(tx: *mut GrafeoTransaction) -> GrafeoStatus {
     if tx.is_null() {
@@ -2115,6 +2131,9 @@ pub extern "C" fn grafeo_rollback(tx: *mut GrafeoTransaction) -> GrafeoStatus {
     }
     // SAFETY: Caller guarantees valid pointer.
     let tx = unsafe { &mut *tx };
+    if tx.commit_failed {
+        return GrafeoStatus::Ok;
+    }
     if tx.committed {
         set_last_error("Transaction already committed");
         return GrafeoStatus::ErrorTransaction;
@@ -2245,7 +2264,8 @@ pub extern "C" fn grafeo_backup_incremental(
     }
 }
 
-/// Restore a database to a specific epoch from a backup chain.
+/// Restore a database to a specific epoch from a backup chain. An epoch past
+/// the end of the chain restores the latest state the chain holds.
 #[unsafe(no_mangle)]
 pub extern "C" fn grafeo_restore_to_epoch(
     backup_dir: *const c_char,

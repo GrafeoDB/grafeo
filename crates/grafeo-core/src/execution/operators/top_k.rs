@@ -174,6 +174,7 @@ impl Operator for TopKOperator {
             };
 
             while let Some(chunk) = self.child.next()? {
+                crate::execution::deadline::check()?;
                 self.column_types.add(&chunk);
                 let width = self.column_types.types().len();
 

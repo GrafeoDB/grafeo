@@ -172,6 +172,42 @@ fn typed_property(
 /// nests too many `LIST<...>` levels), or the types nest more `LIST<...>`
 /// levels in all than the type's catalog record holds.
 #[cfg(feature = "gql")]
+/// Adds the properties of a later occurrence of node type `type_name` in a
+/// graph type to those of the earlier ones: a property declared in several
+/// is NOT NULL when one declares it so, and keeps the first default value.
+/// One property declared with two types is an error naming both.
+#[cfg(feature = "gql")]
+fn merge_occurrence(
+    into: &mut Vec<crate::catalog::TypedProperty>,
+    more: Vec<crate::catalog::TypedProperty>,
+    type_name: &str,
+) -> Result<()> {
+    use grafeo_common::utils::error::{Error, QueryError, QueryErrorKind};
+
+    for property in more {
+        match into.iter_mut().find(|known| known.name == property.name) {
+            Some(known) if known.data_type != property.data_type => {
+                return Err(Error::from(QueryError::new(
+                    QueryErrorKind::Semantic,
+                    format!(
+                        "node type '{type_name}' declares property '{}' as {} and as {}",
+                        property.name, known.data_type, property.data_type
+                    ),
+                )));
+            }
+            Some(known) => {
+                known.nullable &= property.nullable;
+                if known.default_value.is_none() {
+                    known.default_value = property.default_value;
+                }
+            }
+            None => into.push(property),
+        }
+    }
+    crate::catalog::TypedProperty::check_list_levels(into.as_slice())
+        .map_err(|e| Error::from(QueryError::new(QueryErrorKind::Semantic, e.to_string())))
+}
+
 fn typed_properties(
     definitions: &[grafeo_adapters::query::gql::ast::PropertyDefinition],
 ) -> Result<Vec<crate::catalog::TypedProperty>> {
@@ -240,6 +276,16 @@ pub(crate) struct SessionConfig {
             std::collections::HashMap<String, Arc<grafeo_core::graph::GraphProjection>>,
         >,
     >,
+}
+
+/// Whether a session runs the statements that start or end a transaction
+/// (see [`Session::refuse_transaction_statements`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TransactionStatements {
+    /// They run: a session of its own.
+    Allowed,
+    /// They are refused: the session of a binding's transaction object.
+    Refused,
 }
 
 /// Your handle to the database - execute queries and manage transactions.
@@ -334,6 +380,12 @@ pub struct Session {
     /// Nested `START TRANSACTION` creates an auto-savepoint; nested `COMMIT`
     /// releases it, nested `ROLLBACK` rolls back to it.
     transaction_nesting_depth: parking_lot::Mutex<u32>,
+    /// Whether the statements that start or end a transaction (`START
+    /// TRANSACTION`, `COMMIT`, `ROLLBACK`) are refused, as they are in the
+    /// session of a binding's transaction object, which ends with its own
+    /// commit or rollback call. See
+    /// [`refuse_transaction_statements`](Self::refuse_transaction_statements).
+    transaction_statements: TransactionStatements,
     /// What the current transaction changed, in every graph it wrote: its
     /// writers record into it, and its commit, rollback and savepoints work
     /// from it.
@@ -420,6 +472,7 @@ impl Session {
             viewing_epoch_override: parking_lot::Mutex::new(None),
             savepoints: parking_lot::Mutex::new(Vec::new()),
             transaction_nesting_depth: parking_lot::Mutex::new(0),
+            transaction_statements: TransactionStatements::Allowed,
             changes: parking_lot::Mutex::new(None),
             active_streams: AtomicUsize::new(0),
             #[cfg(feature = "metrics")]
@@ -596,6 +649,7 @@ impl Session {
             viewing_epoch_override: parking_lot::Mutex::new(None),
             savepoints: parking_lot::Mutex::new(Vec::new()),
             transaction_nesting_depth: parking_lot::Mutex::new(0),
+            transaction_statements: TransactionStatements::Allowed,
             changes: parking_lot::Mutex::new(None),
             active_streams: AtomicUsize::new(0),
             #[cfg(feature = "metrics")]
@@ -1368,6 +1422,23 @@ impl Session {
                 self.reset_session();
                 Ok(QueryResult::empty())
             }
+            SessionCommand::StartTransaction { .. }
+            | SessionCommand::Commit
+            | SessionCommand::Rollback
+                if self.transaction_statements == TransactionStatements::Refused =>
+            {
+                let statement = match &cmd {
+                    SessionCommand::StartTransaction { .. } => "START TRANSACTION",
+                    SessionCommand::Commit => "COMMIT",
+                    _ => "ROLLBACK",
+                };
+                Err(Error::Transaction(
+                    grafeo_common::utils::error::TransactionError::InvalidState(format!(
+                        "{statement} cannot run inside a transaction object: end the \
+                         transaction with its commit() or rollback() call instead"
+                    )),
+                ))
+            }
             SessionCommand::StartTransaction {
                 read_only,
                 isolation_level,
@@ -1938,8 +2009,8 @@ impl Session {
         use grafeo_adapters::query::gql::ast::SchemaStatement;
         use grafeo_common::change::StandaloneOp;
         use grafeo_common::storage::catalog_record::{
-            CatalogKey, CatalogRecord, IndexKeyRecord, IndexKindRecord, IndexNameKindRecord,
-            IndexNameRecord, SchemaRecord,
+            CatalogKey, CatalogRecord, IndexKindRecord, IndexNameKindRecord, IndexNameRecord,
+            SchemaRecord,
         };
         use grafeo_common::utils::error::{Error, QueryError, QueryErrorKind};
 
@@ -2047,6 +2118,14 @@ impl Session {
             }
             SchemaStatement::CreateIndex(stmt) => {
                 use grafeo_adapters::query::gql::ast::IndexKind;
+                // A name stands for one index definition, as `DROP INDEX`
+                // drops it; each graph may have that index.
+                if self.index_name_in_use(&stmt) {
+                    if stmt.if_not_exists {
+                        return done(QueryResult::status("No change".to_string()));
+                    }
+                    return Err(semantic(format!("Index '{}' already exists", stmt.name)));
+                }
                 let graph = self.active_lpg_graph_key();
                 let (index_type_str, name_kind) = match stmt.index_kind {
                     IndexKind::Property => ("property", IndexNameKindRecord::Hash),
@@ -2103,18 +2182,8 @@ impl Session {
                 change.push(StandaloneOp::DropCatalog(CatalogKey::IndexName(
                     name.clone(),
                 )));
-                if let Some(def) = self.catalog.get_index(index_id)
-                    && let Some(prop_name) = self.catalog.get_property_key_name(def.property_key)
-                    && self
-                        .active_lpg_store()
-                        .is_some_and(|store| store.has_property_index(&prop_name))
-                {
-                    change.push(crate::database::index::drop_index(
-                        self.active_lpg_graph_key().as_deref(),
-                        IndexKeyRecord::Property {
-                            key: prop_name.to_string(),
-                        },
-                    ));
+                if let Some(def) = self.catalog.get_index(index_id) {
+                    self.drop_named_index(change, &def);
                 }
                 done(QueryResult::status(format!("Dropped index '{name}'")))
             }
@@ -2238,14 +2307,10 @@ impl Session {
                                 (Vec::new(), Vec::new(), true)
                             }
                         } else {
-                            // GG22: Infer from graph data (labels used in graph)
-                            let nt = self.catalog.all_node_type_names();
-                            let et = self.catalog.all_edge_type_names();
-                            if nt.is_empty() && et.is_empty() {
-                                (Vec::new(), Vec::new(), true)
-                            } else {
-                                (nt, et, false)
-                            }
+                            // An untyped graph's type is the open graph type,
+                            // which declares nothing: the catalog's node and
+                            // edge types are not the graph's.
+                            (Vec::new(), Vec::new(), true)
                         }
                     } else {
                         // Prefix element type names with schema for consistency
@@ -2265,28 +2330,64 @@ impl Session {
                 // The properties of every inline element type, with their
                 // default values, first, so a property type the catalog
                 // refuses declares none of them.
-                let inline_properties = stmt
+                let mut inline_properties = stmt
                     .inline_types
                     .iter()
                     .map(|inline| {
                         let (InlineElementType::Node { properties, .. }
                         | InlineElementType::Edge { properties, .. }) = inline;
-                        typed_properties(properties)
+                        typed_properties(properties).map(Some)
                     })
                     .collect::<Result<Vec<_>>>()?;
+                // A node type declared more than once (`(:City)-[:R]->(:City
+                // {name STRING})`) is one type with the properties and key
+                // labels of every occurrence, put at its first one.
+                let mut key_labels: Vec<Vec<String>> = Vec::new();
+                let mut first_occurrence: grafeo_common::utils::hash::FxHashMap<String, usize> =
+                    grafeo_common::utils::hash::FxHashMap::default();
+                for (index, inline) in stmt.inline_types.iter().enumerate() {
+                    let labels = match inline {
+                        InlineElementType::Node {
+                            name,
+                            key_labels: labels,
+                            is_reference: false,
+                            ..
+                        } => {
+                            let name = self.effective_type_key(name);
+                            if let Some(&first) = first_occurrence.get(&name) {
+                                let more = inline_properties[index].take().unwrap_or_default();
+                                let into = inline_properties[first].get_or_insert_default();
+                                merge_occurrence(into, more, &name)?;
+                                for label in labels {
+                                    if !key_labels[first].contains(label) {
+                                        key_labels[first].push(label.clone());
+                                    }
+                                }
+                            } else {
+                                first_occurrence.insert(name, index);
+                            }
+                            labels.clone()
+                        }
+                        InlineElementType::Node { key_labels, .. }
+                        | InlineElementType::Edge { key_labels, .. } => key_labels.clone(),
+                    };
+                    key_labels.push(labels);
+                }
 
                 // GG03: Process inline element type entries. Per ISO/IEC 39075,
                 // a bare `NODE TYPE Name` or `EDGE TYPE Name` inside a graph
                 // type body is a reference; anything with a property block or
                 // a KEY clause is an inline declaration, which registers or
                 // replaces the type. See issue #316.
-                for (inline, typed_properties) in stmt.inline_types.iter().zip(inline_properties) {
+                for ((inline, typed_properties), key_labels) in stmt
+                    .inline_types
+                    .iter()
+                    .zip(inline_properties)
+                    .zip(&key_labels)
+                {
                     match inline {
                         InlineElementType::Node {
-                            name,
-                            key_labels,
-                            is_reference,
-                            ..
+                            name, is_reference, ..
                         } => {
                             let inline_effective = self.effective_type_key(name);
                             if *is_reference {
@@ -2296,7 +2397,7 @@ impl Session {
                                         "Referenced node type '{inline_effective}' does not exist"
                                     )));
                                 }
-                            } else {
+                            } else if let Some(typed_properties) = typed_properties {
                                 // The key labels are also the type's parent
                                 // types, as before they were stored.
                                 let def = NodeTypeDefinition {
@@ -2316,7 +2417,6 @@ impl Session {
                         }
                         InlineElementType::Edge {
                             name,
-                            key_labels,
                             source_node_types,
                             target_node_types,
                             is_reference,
@@ -2332,7 +2432,7 @@ impl Session {
                             } else {
                                 let def = EdgeTypeDefinition {
                                     name: inline_effective.clone(),
-                                    properties: typed_properties,
+                                    properties: typed_properties.unwrap_or_default(),
                                     constraints: Vec::new(),
                                     source_node_types: source_node_types.clone(),
                                     target_node_types: target_node_types.clone(),
@@ -2592,7 +2692,7 @@ impl Session {
                         return done(QueryResult::empty());
                     }
                     return Err(semantic(
-                        CatalogError::TypeAlreadyExists(stmt.name.clone()).to_string(),
+                        CatalogError::ProcedureAlreadyExists(stmt.name.clone()).to_string(),
                     ));
                 }
                 let def = ProcedureDefinition {
@@ -2623,7 +2723,7 @@ impl Session {
                         return done(QueryResult::empty());
                     }
                     return Err(invalid_reference(
-                        CatalogError::TypeNotFound(name).to_string(),
+                        CatalogError::ProcedureNotFound(name).to_string(),
                     ));
                 }
                 change.push(StandaloneOp::DropCatalog(CatalogKey::Procedure(
@@ -2769,6 +2869,135 @@ impl Session {
     /// An invalid-value error for options no text index takes, and an error
     /// in a build without the `text-index` feature.
     #[cfg(feature = "gql")]
+    /// Whether `CREATE INDEX` of `stmt` would give its name a second
+    /// meaning: the name stands for another label, property set or kind, or
+    /// the active graph has the index already. The same definition in
+    /// another graph is not a second meaning: index names are the catalog's,
+    /// the indexes each graph's.
+    #[cfg(feature = "gql")]
+    fn index_name_in_use(
+        &self,
+        stmt: &grafeo_adapters::query::gql::ast::CreateIndexStatement,
+    ) -> bool {
+        use crate::catalog::IndexType;
+        use grafeo_adapters::query::gql::ast::IndexKind;
+
+        let named: Vec<_> = self
+            .catalog
+            .all_indexes()
+            .into_iter()
+            .filter(|def| def.name == stmt.name)
+            .collect();
+        if named.is_empty() {
+            return false;
+        }
+        let index_type = match stmt.index_kind {
+            IndexKind::Property | IndexKind::Vector => IndexType::Hash,
+            IndexKind::BTree => IndexType::BTree,
+            IndexKind::Text => IndexType::FullText,
+        };
+        let same_definition = named.len() == stmt.properties.len()
+            && named.iter().all(|def| {
+                def.index_type == index_type
+                    && self
+                        .catalog
+                        .get_label_name(def.label)
+                        .is_some_and(|label| *label == *stmt.label)
+                    && self
+                        .catalog
+                        .get_property_key_name(def.property_key)
+                        .is_some_and(|key| stmt.properties.iter().any(|p| **p == *key))
+            });
+        if !same_definition {
+            return true;
+        }
+        let Some(store) = self.active_lpg_store() else {
+            return false;
+        };
+        stmt.properties
+            .iter()
+            .all(|property| match stmt.index_kind {
+                IndexKind::Property | IndexKind::BTree => store.has_property_index(property),
+                IndexKind::Text => {
+                    #[cfg(feature = "text-index")]
+                    {
+                        store.get_text_index(&stmt.label, property).is_some()
+                    }
+                    #[cfg(not(feature = "text-index"))]
+                    {
+                        false
+                    }
+                }
+                IndexKind::Vector => {
+                    #[cfg(feature = "vector-index")]
+                    {
+                        store.get_vector_index(&stmt.label, property).is_some()
+                    }
+                    #[cfg(not(feature = "vector-index"))]
+                    {
+                        false
+                    }
+                }
+            })
+    }
+
+    /// Drops the index of the active graph that `def`, a named index
+    /// `DROP INDEX` drops, stands for: the text index of its label and
+    /// property for a full-text one, else the property index of its
+    /// property, unless another name still stands for that one (property
+    /// indexes are per key, not per label).
+    #[cfg(feature = "gql")]
+    fn drop_named_index(
+        &self,
+        change: &mut crate::transaction::StandaloneChange,
+        def: &crate::catalog::IndexDefinition,
+    ) {
+        use crate::catalog::IndexType;
+        use grafeo_common::storage::catalog_record::IndexKeyRecord;
+        let Some(property) = self.catalog.get_property_key_name(def.property_key) else {
+            return;
+        };
+        let Some(store) = self.active_lpg_store() else {
+            return;
+        };
+        let key = match def.index_type {
+            IndexType::FullText => {
+                #[cfg(feature = "text-index")]
+                {
+                    let Some(label) = self.catalog.get_label_name(def.label) else {
+                        return;
+                    };
+                    if store.get_text_index(&label, &property).is_none() {
+                        return;
+                    }
+                    IndexKeyRecord::Text {
+                        label: label.to_string(),
+                        property: property.to_string(),
+                    }
+                }
+                #[cfg(not(feature = "text-index"))]
+                return;
+            }
+            IndexType::Hash | IndexType::BTree => {
+                let shared = self.catalog.all_indexes().into_iter().any(|other| {
+                    other.name != def.name
+                        && other.property_key == def.property_key
+                        && matches!(other.index_type, IndexType::Hash | IndexType::BTree)
+                });
+                if shared || !store.has_property_index(&property) {
+                    return;
+                }
+                IndexKeyRecord::Property {
+                    key: property.to_string(),
+                }
+            }
+        };
+        change.push(crate::database::index::drop_index(
+            self.active_lpg_graph_key().as_deref(),
+            key,
+        ));
+    }
+
     fn text_index_change(
         &self,
         change: &mut crate::transaction::StandaloneChange,
@@ -2914,7 +3143,7 @@ impl Session {
                     })
                     .collect();
                 let constraints: Vec<String> =
-                    def.constraints.iter().map(|c| format!("{c:?}")).collect();
+                    def.constraints.iter().map(ToString::to_string).collect();
                 let parents = def.parent_types.join(", ");
                 Some(vec![
                     Value::from(name),
@@ -4988,6 +5217,23 @@ impl Session {
             })?;
         savepoints.remove(pos);
         Ok(())
+    }
+
+    /// Refuses the statements that start or end a transaction (`START
+    /// TRANSACTION`, `COMMIT` and `ROLLBACK`) from now on, with an invalid
+    /// transaction state (GQLSTATUS 25000). For the session of a binding's transaction object, which
+    /// commits or rolls back with its own call: a `COMMIT` run through it
+    /// would end the transaction behind the object's back. Savepoints stay
+    /// allowed.
+    pub fn refuse_transaction_statements(&mut self) {
+        self.transaction_statements = TransactionStatements::Refused;
+    }
+
+    /// Sets the query timeout of this session's queries, in place of the
+    /// database's (`None`: no timeout).
+    #[cfg(query_language)]
+    pub fn set_query_timeout(&mut self, timeout: Option<Duration>) {
+        self.query_timeout = timeout;
     }
 
     /// Returns whether a transaction is active.

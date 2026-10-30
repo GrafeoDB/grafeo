@@ -14,13 +14,19 @@ use crate::query::QueryResult;
 
 /// A database transaction with explicit commit/rollback.
 ///
-/// In Node.js 22+, use with `using` for automatic cleanup:
+/// `tx[Symbol.dispose]()` rolls back a transaction that is still active, so
+/// where `using` is supported (Node.js 24+, or TypeScript compiling it down)
+/// it cleans up on its own:
 /// ```js
 /// using tx = db.beginTransaction();
 /// await tx.execute("INSERT (:Person {name: 'Alix'})");
 /// tx.commit();
 /// // auto-rollback if commit not called
 /// ```
+///
+/// A commit that fails (a write conflict, for example) ends the transaction
+/// all the same: `isActive` is `false` after it and `rollback()` does
+/// nothing, so a `catch` that rolls back sees the commit's error.
 #[napi]
 pub struct Transaction {
     db: Arc<RwLock<GrafeoDB>>,
@@ -29,14 +35,16 @@ pub struct Transaction {
     /// query still queued on a worker finds it closed instead of running
     /// outside the transaction.
     session: Arc<parking_lot::Mutex<Option<grafeo_engine::session::Session>>>,
-    /// One of `ACTIVE`, `COMMITTED`, `ROLLED_BACK`. Atomic because async
-    /// execute futures read it off the JS thread.
+    /// One of `ACTIVE`, `COMMITTED`, `ROLLED_BACK`, `COMMIT_FAILED`. Atomic
+    /// because async execute futures read it off the JS thread.
     state: AtomicU8,
 }
 
 const ACTIVE: u8 = 0;
 const COMMITTED: u8 = 1;
 const ROLLED_BACK: u8 = 2;
+/// A commit was tried and failed: the transaction ended without its changes.
+const COMMIT_FAILED: u8 = 3;
 
 #[napi]
 impl Transaction {
@@ -63,9 +71,13 @@ impl Transaction {
     /// Roll back the transaction.
     ///
     /// Throws if a query from this transaction is still running: await it
-    /// first.
+    /// first. After a commit that failed it does nothing: that commit ended
+    /// the transaction.
     #[napi]
     pub fn rollback(&self) -> Result<()> {
+        if self.state.load(Ordering::Acquire) == COMMIT_FAILED {
+            return Ok(());
+        }
         self.finish(ROLLED_BACK)
     }
 
@@ -81,30 +93,50 @@ impl Transaction {
     fn finish(&self, target: u8) -> Result<()> {
         match self.state.load(Ordering::Acquire) {
             COMMITTED => {
-                return Err(NodeGrafeoError::Transaction("Already committed".into()).into());
+                return Err(NodeGrafeoError::transaction_state("Already committed").into());
             }
             ROLLED_BACK => {
-                return Err(NodeGrafeoError::Transaction("Already rolled back".into()).into());
+                return Err(NodeGrafeoError::transaction_state("Already rolled back").into());
+            }
+            COMMIT_FAILED => {
+                return Err(NodeGrafeoError::transaction_state(
+                    "Transaction is no longer active: its commit failed",
+                )
+                .into());
             }
             _ => {}
         }
         // try_lock: the lock is held only while a query runs on a worker,
         // and blocking here would stall the whole event loop until it ends.
         let mut session_guard = self.session.try_lock().ok_or_else(|| {
-            napi::Error::from(NodeGrafeoError::Transaction(
-                "A query is still running in this transaction; await it before calling commit() or rollback()".into(),
+            napi::Error::from(NodeGrafeoError::transaction_state(
+                "A query is still running in this transaction; await it before calling commit() or rollback()",
             ))
         })?;
-        if let Some(session) = session_guard.as_mut() {
-            if target == COMMITTED {
-                session.commit().map_err(NodeGrafeoError::from)?;
-            } else {
-                session.rollback().map_err(NodeGrafeoError::from)?;
+        let outcome = match session_guard.as_mut() {
+            Some(session) if target == COMMITTED => {
+                let outcome = session.commit();
+                // A commit refused before it began leaves the transaction
+                // open: end it, as a failed commit does.
+                if outcome.is_err() && session.in_transaction() {
+                    let _ = session.rollback();
+                }
+                outcome
             }
+            Some(session) => session.rollback(),
+            None => Ok(()),
+        };
+        // A commit ends the transaction whether it succeeds or fails.
+        if outcome.is_ok() || target == COMMITTED {
+            *session_guard = None;
+            let state = if outcome.is_ok() {
+                target
+            } else {
+                COMMIT_FAILED
+            };
+            self.state.store(state, Ordering::Release);
         }
-        *session_guard = None;
-        self.state.store(target, Ordering::Release);
-        Ok(())
+        outcome.map_err(|error| NodeGrafeoError::from(error).into())
     }
 
     /// Shared implementation for all language-specific execute methods.
@@ -119,7 +151,7 @@ impl Transaction {
     ) -> Result<QueryResult> {
         if self.state.load(Ordering::Acquire) != ACTIVE {
             return Err(
-                NodeGrafeoError::Transaction("Transaction is no longer active".into()).into(),
+                NodeGrafeoError::transaction_state("Transaction is no longer active").into(),
             );
         }
         let param_map = params.map(crate::types::Params::into_map).transpose()?;
@@ -128,8 +160,8 @@ impl Transaction {
         let mut result = tokio::task::spawn_blocking(move || -> Result<_> {
             let session_guard = session.lock();
             let session = session_guard.as_ref().ok_or_else(|| {
-                napi::Error::from(NodeGrafeoError::Transaction(
-                    "Transaction is no longer active".into(),
+                napi::Error::from(NodeGrafeoError::transaction_state(
+                    "Transaction is no longer active",
                 ))
             })?;
             Ok(session
@@ -194,6 +226,8 @@ impl Transaction {
         } else {
             session.begin_transaction().map_err(NodeGrafeoError::from)?;
         }
+        // It ends with commit() or rollback(), never with a statement.
+        session.refuse_transaction_statements();
 
         Ok(Self {
             db,

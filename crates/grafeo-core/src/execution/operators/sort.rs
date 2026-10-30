@@ -163,6 +163,7 @@ impl SortOperator {
     fn sort(&mut self) -> Result<(), OperatorError> {
         // Materialize all input
         while let Some(chunk) = self.child.next()? {
+            crate::execution::deadline::check()?;
             let chunk_idx = self.chunks.len();
             for row_idx in chunk.selected_indices() {
                 self.sorted_rows.push(SortRow {

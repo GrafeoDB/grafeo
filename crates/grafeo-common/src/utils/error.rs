@@ -80,6 +80,9 @@ pub enum ErrorCode {
     StorageCorrupted,
     /// Recovery from WAL failed.
     StorageRecoveryFailed,
+    /// The database file is open elsewhere: in another handle of this
+    /// process, or in another process.
+    DatabaseLocked,
 
     // Validation errors (V)
     /// Request validation failed.
@@ -131,6 +134,7 @@ impl ErrorCode {
             Self::StorageFull => "GRAFEO-S001",
             Self::StorageCorrupted => "GRAFEO-S002",
             Self::StorageRecoveryFailed => "GRAFEO-S003",
+            Self::DatabaseLocked => "GRAFEO-S004",
 
             Self::InvalidInput => "GRAFEO-V001",
             Self::NodeNotFound => "GRAFEO-V002",
@@ -608,6 +612,11 @@ pub enum StorageError {
 
     /// Checkpoint failed.
     CheckpointFailed(String),
+
+    /// The database file is open elsewhere, so it cannot be opened here
+    /// (what holds it follows): another handle of this process, or another
+    /// process.
+    Locked(String),
 }
 
 impl StorageError {
@@ -618,6 +627,7 @@ impl StorageError {
             Self::Full => ErrorCode::StorageFull,
             Self::InvalidWalEntry(_) | Self::CheckpointFailed(_) => ErrorCode::StorageCorrupted,
             Self::RecoveryFailed(_) => ErrorCode::StorageRecoveryFailed,
+            Self::Locked(_) => ErrorCode::DatabaseLocked,
         }
     }
 }
@@ -629,6 +639,7 @@ impl fmt::Display for StorageError {
             StorageError::InvalidWalEntry(msg) => write!(f, "Invalid WAL entry: {msg}"),
             StorageError::RecoveryFailed(msg) => write!(f, "Recovery failed: {msg}"),
             StorageError::CheckpointFailed(msg) => write!(f, "Checkpoint failed: {msg}"),
+            StorageError::Locked(msg) => write!(f, "Database locked: {msg}"),
         }
     }
 }

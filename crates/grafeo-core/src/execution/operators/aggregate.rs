@@ -1166,6 +1166,7 @@ impl HashAggregateOperator {
     /// Performs the aggregation.
     fn aggregate(&mut self) -> Result<(), OperatorError> {
         while let Some(chunk) = self.child.next()? {
+            crate::execution::deadline::check()?;
             self.input_types.add(&chunk);
             for row in chunk.selected_indices() {
                 // Get or create aggregate states for this group; a new group
@@ -1374,6 +1375,7 @@ impl Operator for SimpleAggregateOperator {
 
         // Process all input
         while let Some(chunk) = self.child.next()? {
+            crate::execution::deadline::check()?;
             for row in chunk.selected_indices() {
                 for (i, agg) in self.aggregates.iter().enumerate() {
                     // Binary set functions: read two column values

@@ -610,9 +610,11 @@ impl GqlTranslator {
             ast::Statement::CompositeQuery { left, op, right } => {
                 self.translate_composite_query(left, *op, right)
             }
-            ast::Statement::SessionCommand(_) => Err(Error::Internal(
-                "Session commands cannot be executed as queries".to_string(),
-            )),
+            // A command inside a statement, such as `RETURN 1 AS x NEXT COMMIT`.
+            ast::Statement::SessionCommand(_) => Err(Error::from(QueryError::semantic(
+                "a transaction or session command cannot be part of another statement, such as \
+                 a NEXT chain: run it as a statement of its own",
+            ))),
             ast::Statement::Explain(inner) | ast::Statement::Profile(inner) => {
                 self.translate_statement(inner)
             }

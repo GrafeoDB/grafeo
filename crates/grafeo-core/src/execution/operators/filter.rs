@@ -5,6 +5,7 @@ use super::project::{
     field_type, holds_entities, item_type_at, list_type, reversed_type, slice_type, struct_type,
 };
 use super::{Operator, OperatorError, OperatorResult};
+use crate::execution::chunk::DEFAULT_CHUNK_SIZE;
 use crate::execution::{ChunkZoneHints, DataChunk, SelectionVector, ValueVector};
 use crate::graph::Direction;
 use crate::graph::GraphStore;
@@ -403,6 +404,26 @@ fn sign_of_a_non_number(sign: char, value: &Value) -> OperatorError {
         "unary {sign} takes a number or a duration, got a {} value: {sign}{value}",
         value.type_name()
     ))
+}
+
+/// Whether a value of `shape`, which holds nodes or edges (see
+/// `ExpressionPredicate::shape`), is of `data_type`: a node of NODE, an edge
+/// of EDGE, a list of LIST and of `LIST<t>` when each item is of `t`, and
+/// anything of ANY.
+fn entity_shape_is_of(data_type: &PropertyDataType, shape: &LogicalType) -> bool {
+    match (data_type, shape) {
+        (PropertyDataType::Any, _)
+        | (PropertyDataType::Node, LogicalType::Node)
+        | (PropertyDataType::Edge, LogicalType::Edge)
+        | (PropertyDataType::List, LogicalType::List(_) | LogicalType::Tuple(_)) => true,
+        (PropertyDataType::ListTyped(item), LogicalType::List(inner)) => {
+            entity_shape_is_of(item, inner)
+        }
+        (PropertyDataType::ListTyped(item), LogicalType::Tuple(items)) => {
+            items.iter().all(|inner| entity_shape_is_of(item, inner))
+        }
+        _ => false,
+    }
 }
 
 /// Text without the spaces around it, as SQL casts a character string.
@@ -2877,6 +2898,13 @@ impl ExpressionPredicate {
                 let matches = match (&value_type, &shape) {
                     (ValueType::Property(PropertyDataType::Node), _) => shape == LogicalType::Node,
                     (ValueType::Property(PropertyDataType::Edge), _) => shape == LogicalType::Edge,
+                    // A value that holds nodes or edges (a list of them) is
+                    // of a type by what its shape says it holds.
+                    (ValueType::Property(data_type), _)
+                        if super::project::holds_entities(&shape) =>
+                    {
+                        entity_shape_is_of(data_type, &shape)
+                    }
                     (_, LogicalType::Node | LogicalType::Edge) => {
                         value_type == ValueType::Property(PropertyDataType::Any)
                     }
@@ -3205,18 +3233,27 @@ impl ExpressionPredicate {
                 } else {
                     1
                 };
+                // The integers from the start towards the end, up to the last
+                // one before a step would overflow
+                // (`range(9223372036854775806, 9223372036854775807)` gives
+                // two). A long list checks the query deadline as it grows.
+                let in_range = |item: i64| {
+                    if step > 0 {
+                        item <= end_val
+                    } else {
+                        item >= end_val
+                    }
+                };
                 let mut result = Vec::new();
-                let mut current = start_val;
-                if step > 0 {
-                    while current <= end_val {
-                        result.push(Value::Int64(current));
-                        current += step;
+                let mut current = Some(start_val).filter(|&item| in_range(item));
+                while let Some(item) = current {
+                    result.push(Value::Int64(item));
+                    if result.len().is_multiple_of(DEFAULT_CHUNK_SIZE)
+                        && let Err(error) = crate::execution::deadline::check()
+                    {
+                        return self.fail(error);
                     }
-                } else {
-                    while current >= end_val {
-                        result.push(Value::Int64(current));
-                        current += step;
-                    }
+                    current = item.checked_add(step).filter(|&next| in_range(next));
                 }
                 Some(Value::List(result.into()))
             }
@@ -5031,6 +5068,7 @@ impl FilterOperator {
 impl Operator for FilterOperator {
     fn next(&mut self) -> OperatorResult {
         loop {
+            crate::execution::deadline::check()?;
             // Get next chunk from child
             let Some(mut chunk) = self.child.next()? else {
                 return Ok(None);
@@ -7796,6 +7834,63 @@ mod tests {
         let op = FilterOperator::new(Box::new(mock), Box::new(predicate));
         let (mut child, _predicate) = op.into_parts();
         assert!(child.next().unwrap().is_none());
+    }
+
+    /// `range` stops at the last integer before a step that overflows, and
+    /// a long range fails with the timeout once the query's deadline has
+    /// passed.
+    #[test]
+    fn range_stops_before_an_overflow_and_at_the_deadline() {
+        let store: Arc<dyn GraphStore> = Arc::new(crate::graph::rowgroup::RowGroupStore::new());
+        let chunk = DataChunkBuilder::new(&[LogicalType::Int64]).finish();
+        let range = |bounds: &[i64]| {
+            ExpressionPredicate::new(
+                FilterExpression::FunctionCall {
+                    function: BuiltinFunction::Range,
+                    args: bounds
+                        .iter()
+                        .map(|&bound| FilterExpression::Literal(Value::Int64(bound)))
+                        .collect(),
+                },
+                HashMap::new(),
+                Arc::clone(&store),
+                ReadView::latest(),
+            )
+            .eval_at(&chunk, 0)
+        };
+        let ints = |items: &[i64]| {
+            Some(Value::List(
+                items
+                    .iter()
+                    .map(|&item| Value::Int64(item))
+                    .collect::<Vec<_>>()
+                    .into(),
+            ))
+        };
+        assert_eq!(
+            range(&[i64::MAX - 1, i64::MAX]).unwrap(),
+            ints(&[i64::MAX - 1, i64::MAX])
+        );
+        assert_eq!(
+            range(&[i64::MAX - 3, i64::MAX, 2]).unwrap(),
+            ints(&[i64::MAX - 3, i64::MAX - 1])
+        );
+        assert_eq!(
+            range(&[i64::MIN + 1, i64::MIN, -1]).unwrap(),
+            ints(&[i64::MIN + 1, i64::MIN])
+        );
+        assert_eq!(range(&[1, 10, 3]).unwrap(), ints(&[1, 4, 7, 10]));
+        assert_eq!(range(&[5, 1]).unwrap(), ints(&[]));
+        assert_eq!(range(&[1, 5, 0]).unwrap(), None);
+
+        let _deadline =
+            crate::execution::deadline::enter(Some(grafeo_common::clock::Instant::now()));
+        assert!(matches!(
+            range(&[1, 1_000_000]),
+            Err(OperatorError::Timeout)
+        ));
+        // A range shorter than a chunk is made before any check.
+        assert_eq!(range(&[1, 3]).unwrap(), ints(&[1, 2, 3]));
     }
 }
 

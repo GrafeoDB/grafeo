@@ -73,6 +73,7 @@ impl DistinctOperator {
 impl Operator for DistinctOperator {
     fn next(&mut self) -> OperatorResult {
         loop {
+            crate::execution::deadline::check()?;
             let Some(chunk) = self.child.next()? else {
                 return Ok(None);
             };

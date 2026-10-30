@@ -784,7 +784,10 @@ public sealed class GrafeoDB : IGrafeoDB, IDisposable, IAsyncDisposable
         GrafeoException.ThrowIfFailed(NativeMethods.grafeo_backup_incremental(Handle, path));
     }
 
-    /// <summary>Restore database to a specific epoch from a backup directory.</summary>
+    /// <summary>
+    /// Restore database to a specific epoch from a backup directory. An epoch
+    /// past the end of the chain restores the latest state the chain holds.
+    /// </summary>
     /// <param name="backupDir">Directory containing backup files.</param>
     /// <param name="epoch">Target epoch to restore to.</param>
     /// <param name="outputPath">Path for the restored database.</param>

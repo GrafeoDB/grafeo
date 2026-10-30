@@ -381,6 +381,12 @@ impl RdfPlanner {
                 let op: Box<dyn Operator> = Box::new(SingleRowOperator::new());
                 Ok((op, vec![], vec![]))
             }
+            // A stub must not report success: LOAD fails until it reads
+            // files, also with SILENT.
+            LogicalOperator::LoadGraph(_) => Err(Error::from(QueryError::new(
+                QueryErrorKind::Unsupported,
+                "SPARQL LOAD is not supported yet: insert the data with INSERT DATA, or load                  files with the Rust API's load_turtle and load_ntriples",
+            ))),
             _ => Err(Error::Internal(format!(
                 "Unsupported RDF operator: {:?}",
                 std::mem::discriminant(op)

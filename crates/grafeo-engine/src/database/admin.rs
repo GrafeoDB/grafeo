@@ -2,10 +2,9 @@
 
 use std::path::Path;
 
-use grafeo_common::types::{ArcStr, EdgeId};
+use grafeo_common::types::EdgeId;
 use grafeo_common::utils::error::Result;
-use grafeo_common::utils::hash::FxHashMap;
-use grafeo_core::graph::{Direction, GraphStore};
+use grafeo_core::graph::GraphStore;
 
 impl super::GrafeoDB {
     // =========================================================================
@@ -314,53 +313,20 @@ impl super::GrafeoDB {
         })
     }
 
-    /// Returns schema information (labels, edge types, property keys).
+    /// Returns schema information: the labels, edge types and property keys
+    /// in use, each label and edge type with its count and its properties'
+    /// value types, and the labels each edge type connects.
     ///
-    /// For LPG mode, returns label and edge type information.
-    /// For RDF mode, returns predicate and named graph information.
+    /// It reads the whole graph, as a committed reader at the current epoch
+    /// sees it, all of the report in one pinned state.
     ///
     /// # Errors
     ///
     /// As [`node_count`](Self::node_count).
     pub fn schema(&self) -> Result<crate::admin::SchemaInfo> {
-        // The nodes that have each label as a committed reader at the
-        // current epoch sees them, without building them (#546), all of the
-        // report in one pinned state.
         let snapshot = self.default_snapshot();
-        let (store, view) = (snapshot.store(), snapshot.view());
-        let mut labels = Vec::new();
-        for name in store.all_labels()? {
-            labels.push(crate::admin::LabelInfo {
-                count: store.nodes_by_label_count(&name, view)?,
-                name,
-            });
-        }
-
-        // One pass over the edges counts every type, at the current epoch.
-        let mut edges_per_type: FxHashMap<ArcStr, usize> = FxHashMap::default();
-        for node in store.node_ids(view)? {
-            for (_, edge) in store.edges(node, Direction::Outgoing, &[], view)? {
-                if let Some(edge_type) = store.edge_type(edge, view)? {
-                    *edges_per_type.entry(edge_type).or_default() += 1;
-                }
-            }
-        }
-        let edge_types = store
-            .all_edge_types()?
-            .into_iter()
-            .map(|name| crate::admin::EdgeTypeInfo {
-                count: edges_per_type.get(name.as_str()).copied().unwrap_or(0),
-                name,
-            })
-            .collect();
-
-        let property_keys = store.all_property_keys()?;
-
-        Ok(crate::admin::SchemaInfo::Lpg(crate::admin::LpgSchemaInfo {
-            labels,
-            edge_types,
-            property_keys,
-        }))
+        let summary = crate::admin::LpgSchemaInfo::in_use(snapshot.store(), snapshot.view())?;
+        Ok(crate::admin::SchemaInfo::Lpg(summary))
     }
 
     /// Returns detailed information about all indexes.

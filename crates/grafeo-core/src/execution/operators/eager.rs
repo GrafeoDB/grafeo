@@ -34,6 +34,7 @@ impl Operator for EagerOperator {
         if self.chunks.is_none() {
             let mut chunks = VecDeque::new();
             while let Some(chunk) = self.input.next()? {
+                crate::execution::deadline::check()?;
                 chunks.push_back(chunk);
             }
             self.chunks = Some(chunks);

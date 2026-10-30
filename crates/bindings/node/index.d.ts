@@ -117,6 +117,8 @@ export declare class GrafeoDB {
    * ORDER BY in random order: for tests, to find code that relies on a row
    * order that is unspecified. `options.walSalvage` opens a database whose
    * WAL is damaged with the commits before the damage.
+   * `options.queryTimeout` sets how many milliseconds a query may run
+   * (`null` for no limit).
    */
   static create(path?: string | undefined | null, options?: CreateOptions | undefined | null): GrafeoDB
   /** Open an existing database at the given path. */
@@ -228,7 +230,11 @@ export declare class GrafeoDB {
   getNodeLabels(id: number): Array<string> | null
   /** Returns high-level database information as a JSON object. */
   info(): any
-  /** Returns schema information (labels, edge types, property keys) as a JSON object. */
+  /**
+   * Returns schema information as a JSON object: `{ mode: 'lpg', labels,
+   * edge_types, property_keys }`, each label and edge type with its count
+   * and properties, each edge type with the labels it connects.
+   */
   schema(): any
   /** Returns the Grafeo engine version string. */
   version(): string
@@ -271,7 +277,10 @@ export declare class GrafeoDB {
   backupFull(backupDir: string): void
   /** Create an incremental backup (WAL records since last backup). */
   backupIncremental(backupDir: string): void
-  /** Restore a database to a specific epoch from a backup chain. */
+  /**
+   * Restore a database to a specific epoch from a backup chain. An epoch
+   * past the end of the chain restores the latest state the chain holds.
+   */
   static restoreToEpoch(backupDir: string, epoch: number, outputPath: string): void
   /** Close the database. */
   close(): void
@@ -684,13 +693,19 @@ export type JsResultStream = ResultStream
 /**
  * A database transaction with explicit commit/rollback.
  *
- * In Node.js 22+, use with `using` for automatic cleanup:
+ * `tx[Symbol.dispose]()` rolls back a transaction that is still active, so
+ * where `using` is supported (Node.js 24+, or TypeScript compiling it down)
+ * it cleans up on its own:
  * ```js
  * using tx = db.beginTransaction();
  * await tx.execute("INSERT (:Person {name: 'Alix'})");
  * tx.commit();
  * // auto-rollback if commit not called
  * ```
+ *
+ * A commit that fails (a write conflict, for example) ends the transaction
+ * all the same: `isActive` is `false` after it and `rollback()` does
+ * nothing, so a `catch` that rolls back sees the commit's error.
  */
 export declare class Transaction {
   /** Execute a GQL query within this transaction. */
@@ -707,7 +722,8 @@ export declare class Transaction {
    * Roll back the transaction.
    *
    * Throws if a query from this transaction is still running: await it
-   * first.
+   * first. After a commit that failed it does nothing: that commit ended
+   * the transaction.
    */
   rollback(): void
   /** Whether the transaction is still active. */
@@ -787,6 +803,11 @@ export interface CreateOptions {
    * database file stores it; leave it out to keep the stored one.
    */
   historyRetention?: 'off' | 'forever' | number
+  /**
+   * How many milliseconds a query may run before it fails (30 000 by
+   * default); `null` or `Infinity` runs queries without a limit.
+   */
+  queryTimeout?: number | null
 }
 
 /** Options for CSV import. */

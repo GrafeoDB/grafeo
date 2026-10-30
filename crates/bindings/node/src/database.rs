@@ -175,6 +175,30 @@ pub struct CreateOptions {
     /// database file stores it; leave it out to keep the stored one.
     #[napi(ts_type = "'off' | 'forever' | number")]
     pub history_retention: Option<Either<String, f64>>,
+    /// How many milliseconds a query may run before it fails (30 000 by
+    /// default); `null` or `Infinity` runs queries without a limit.
+    #[napi(ts_type = "number | null")]
+    pub query_timeout: Option<Either<f64, Null>>,
+}
+
+/// The query timeout `options.queryTimeout` sets: `None` for `null` or
+/// `Infinity` (no limit), an error for a number of milliseconds that is not
+/// positive.
+fn query_timeout(value: Either<f64, Null>) -> Result<Option<std::time::Duration>> {
+    match value {
+        Either::B(_) => Ok(None),
+        Either::A(millis) if millis == f64::INFINITY => Ok(None),
+        Either::A(millis) => std::time::Duration::try_from_secs_f64(millis / 1000.0)
+            .ok()
+            .filter(|timeout| !timeout.is_zero())
+            .map(Some)
+            .ok_or_else(|| {
+                NodeGrafeoError::InvalidArgument(format!(
+                    "queryTimeout must be a positive number of milliseconds, null or Infinity: {millis}"
+                ))
+                .into()
+            }),
+    }
 }
 
 #[napi]
@@ -185,6 +209,8 @@ impl JsGrafeoDB {
     /// ORDER BY in random order: for tests, to find code that relies on a row
     /// order that is unspecified. `options.walSalvage` opens a database whose
     /// WAL is damaged with the commits before the damage.
+    /// `options.queryTimeout` sets how many milliseconds a query may run
+    /// (`null` for no limit).
     #[napi(factory)]
     pub fn create(path: Option<String>, options: Option<CreateOptions>) -> Result<Self> {
         let config = match path {
@@ -196,11 +222,22 @@ impl JsGrafeoDB {
             .and_then(|options| options.shuffle_unordered)
             .unwrap_or(false);
         let mut config = config.with_shuffle_unordered(shuffle_unordered);
-        let (wal_salvage, history_retention) = options.map_or((None, None), |options| {
-            (options.wal_salvage, options.history_retention)
-        });
+        let (wal_salvage, history_retention, timeout) =
+            options.map_or((None, None, None), |options| {
+                (
+                    options.wal_salvage,
+                    options.history_retention,
+                    options.query_timeout,
+                )
+            });
         if wal_salvage.unwrap_or(false) {
             config = config.with_wal_salvage();
+        }
+        if let Some(timeout) = timeout {
+            config = match query_timeout(timeout)? {
+                Some(timeout) => config.with_query_timeout(timeout),
+                None => config.without_query_timeout(),
+            };
         }
         if let Some(retention) = history_retention {
             config =
@@ -716,7 +753,9 @@ impl JsGrafeoDB {
         serde_json::to_value(&info).map_err(|e| NodeGrafeoError::Database(e.to_string()).into())
     }
 
-    /// Returns schema information (labels, edge types, property keys) as a JSON object.
+    /// Returns schema information as a JSON object: `{ mode: 'lpg', labels,
+    /// edge_types, property_keys }`, each label and edge type with its count
+    /// and properties, each edge type with the labels it connects.
     #[napi]
     pub fn schema(&self) -> Result<serde_json::Value> {
         let db = self.inner.read();
@@ -827,7 +866,8 @@ impl JsGrafeoDB {
             .map_err(napi::Error::from)
     }
 
-    /// Restore a database to a specific epoch from a backup chain.
+    /// Restore a database to a specific epoch from a backup chain. An epoch
+    /// past the end of the chain restores the latest state the chain holds.
     #[napi]
     pub fn restore_to_epoch(backup_dir: String, epoch: f64, output_path: String) -> Result<()> {
         let epoch_id = validate_epoch(epoch)?;

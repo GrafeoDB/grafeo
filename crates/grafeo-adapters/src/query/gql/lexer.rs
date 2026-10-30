@@ -501,9 +501,11 @@ impl<'a> Lexer<'a> {
                     self.position += c.len_utf8();
                 }
             } else {
-                // Line comment: "-- " (with space/tab) to disambiguate from undirected edge "--"
+                // Line comment: `//` or "-- " (with space/tab, to disambiguate
+                // from the undirected edge "--"), ISO GQL's simple comments
                 let rest = self.rest();
-                let is_line_comment = rest.starts_with("-- ")
+                let is_line_comment = rest.starts_with("//")
+                    || rest.starts_with("-- ")
                     || rest.starts_with("--\t")
                     || rest.starts_with("--\n")
                     || rest.starts_with("--\r");

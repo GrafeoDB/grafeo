@@ -16,7 +16,9 @@ use grafeo_common::types::rdf::Term;
 use grafeo_common::types::{Decimal, HashableValue, LogicalType, TemporalComparison, Value};
 
 use super::{Operator, OperatorError, OperatorResult};
-use crate::execution::chunk::{ColumnTypes, DataChunkBuilder, copied_column_types};
+use crate::execution::chunk::{
+    ColumnTypes, DEFAULT_CHUNK_SIZE, DataChunkBuilder, copied_column_types,
+};
 use crate::execution::{DataChunk, ValueVector};
 
 /// The type of join to perform.
@@ -475,6 +477,7 @@ impl HashJoinOperator {
     /// Builds the hash table from the build side.
     fn build_hash_table(&mut self) -> Result<(), OperatorError> {
         while let Some(chunk) = self.build_side.next()? {
+            crate::execution::deadline::check()?;
             let chunk_idx = self.build_chunks.len();
 
             // Initialize match tracking for outer joins
@@ -676,6 +679,8 @@ impl HashJoinOperator {
     /// Gets the next probe chunk, from the buffer when the probe side was read
     /// first.
     fn get_next_probe_chunk(&mut self) -> Result<bool, OperatorError> {
+        // A probe that matches nothing reads chunk after chunk here.
+        crate::execution::deadline::check()?;
         let chunk = match &mut self.probe_input {
             ProbeInput::ReadFirst(Some(chunks)) => chunks.pop_front(),
             ProbeInput::ReadFirst(None) | ProbeInput::Streamed => self.probe_side.next()?,
@@ -765,6 +770,7 @@ impl Operator for HashJoinOperator {
         if let ProbeInput::ReadFirst(read @ None) = &mut self.probe_input {
             let mut chunks = VecDeque::new();
             while let Some(chunk) = self.probe_side.next()? {
+                crate::execution::deadline::check()?;
                 chunks.push_back(chunk);
             }
             *read = Some(chunks);
@@ -1258,6 +1264,7 @@ impl NestedLoopJoinOperator {
     /// Materializes the right side.
     fn materialize_right(&mut self) -> Result<(), OperatorError> {
         while let Some(chunk) = self.right.next()? {
+            crate::execution::deadline::check()?;
             self.right_types.add(&chunk);
             self.right_chunks.push(chunk);
         }
@@ -1362,6 +1369,7 @@ impl Operator for NestedLoopJoinOperator {
         if self.left_first && self.left_chunks.is_none() {
             let mut chunks = VecDeque::new();
             while let Some(chunk) = self.left.next()? {
+                crate::execution::deadline::check()?;
                 chunks.push_back(chunk);
             }
             self.left_chunks = Some(chunks);
@@ -1380,6 +1388,7 @@ impl Operator for NestedLoopJoinOperator {
         loop {
             // Get current left chunk
             if self.current_left_chunk.is_none() {
+                crate::execution::deadline::check()?;
                 self.current_left_chunk = self.next_left()?;
                 self.current_left_row = 0;
                 self.current_right_chunk = 0;
@@ -1410,6 +1419,10 @@ impl Operator for NestedLoopJoinOperator {
                     .saturating_sub(left_chunk.column_count())
             };
 
+            // The pairs compared since the deadline was last checked: a
+            // condition few pairs pass makes no output for a long time.
+            let mut pairs = 0;
+
             // Process current left row against all right rows
             while self.current_left_row < left_rows.len() {
                 let left_row = left_rows[self.current_left_row];
@@ -1423,6 +1436,11 @@ impl Operator for NestedLoopJoinOperator {
                 while self.current_right_chunk < self.right_chunks.len() {
                     let right_chunk = &self.right_chunks[self.current_right_chunk];
                     let right_rows: Vec<usize> = right_chunk.selected_indices().collect();
+                    pairs += right_rows.len();
+                    if pairs >= DEFAULT_CHUNK_SIZE {
+                        pairs = 0;
+                        crate::execution::deadline::check()?;
+                    }
 
                     while self.current_right_row < right_rows.len() {
                         let right_row = right_rows[self.current_right_row];

@@ -263,6 +263,7 @@ impl Operator for ApplyOperator {
         if self.outer_first && self.outer_chunks.is_none() {
             let mut chunks = VecDeque::new();
             while let Some(chunk) = self.outer.next()? {
+                crate::execution::deadline::check()?;
                 chunks.push_back(chunk);
             }
             self.outer_chunks = Some(chunks);
@@ -336,7 +337,9 @@ impl Operator for ApplyOperator {
                             // Unit mode: run the inner plan to its end for its
                             // writes, keep the outer row once
                             RowMode::Unit => {
-                                while self.inner.next()?.is_some() {}
+                                while self.inner.next()?.is_some() {
+                                    crate::execution::deadline::check()?;
+                                }
                                 output.push(outer_values);
                             }
                             RowMode::Join | RowMode::Optional { .. } => {

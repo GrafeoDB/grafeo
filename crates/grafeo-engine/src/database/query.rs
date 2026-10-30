@@ -12,10 +12,21 @@ impl super::GrafeoDB {
     where
         F: FnOnce(&crate::session::Session) -> Result<QueryResult>,
     {
+        self.with_configured_session(|_| {}, func)
+    }
+
+    /// [`with_session`](Self::with_session), with the one-shot session set
+    /// up by `configure` first.
+    fn with_configured_session<C, F>(&self, configure: C, func: F) -> Result<QueryResult>
+    where
+        C: FnOnce(&mut crate::session::Session),
+        F: FnOnce(&crate::session::Session) -> Result<QueryResult>,
+    {
         let mut session = self.session();
         // One-shot calls share the database's graph context like one long session,
         // whose home stays the default graph and schema.
         session.set_home(None, None);
+        configure(&mut session);
         let result = func(&session);
         // Sync graph, schema and time zone state back, even on error (the session
         // command may have succeeded before a subsequent query failed in the same
@@ -220,6 +231,28 @@ impl super::GrafeoDB {
         params: Option<std::collections::HashMap<String, grafeo_common::types::Value>>,
     ) -> Result<QueryResult> {
         self.with_session(|s| s.execute_language(query, language, params))
+    }
+
+    /// Executes a query in the specified language by name, as
+    /// [`execute_language`](Self::execute_language) does, with `timeout` in
+    /// place of the database's query timeout (`None`: no timeout).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the language is unknown/disabled, if the query
+    /// fails, or if it runs past `timeout`.
+    #[cfg(query_language)]
+    pub fn execute_language_with_timeout(
+        &self,
+        query: &str,
+        language: &str,
+        params: Option<std::collections::HashMap<String, grafeo_common::types::Value>>,
+        timeout: Option<std::time::Duration>,
+    ) -> Result<QueryResult> {
+        self.with_configured_session(
+            |session| session.set_query_timeout(timeout),
+            |s| s.execute_language(query, language, params),
+        )
     }
 
     /// Executes a query and returns a single scalar value.

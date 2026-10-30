@@ -29,6 +29,7 @@ fn materialize(
     let mut rows = Vec::new();
     let mut column_types = ColumnTypes::default();
     while let Some(chunk) = op.next()? {
+        crate::execution::deadline::check()?;
         column_types.add(&chunk);
         let columns: Vec<usize> = (0..chunk.num_columns()).collect();
         for row in chunk.selected_indices() {

@@ -20,8 +20,8 @@
 use grafeo_common::clock::Instant;
 use grafeo_common::types::{LogicalType, Value};
 use grafeo_common::utils::error::{Error, QueryError, Result};
-use grafeo_core::execution::DataChunk;
 use grafeo_core::execution::operators::Operator;
+use grafeo_core::execution::{DataChunk, deadline};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use crate::database::QueryResult;
@@ -118,6 +118,8 @@ impl<'s> ResultStream<'s> {
             return Ok(None);
         }
         check_deadline(self.deadline)?;
+        // The operators check the deadline in their own loops too.
+        let _deadline = deadline::enter(self.deadline);
         match self.operator.next() {
             Ok(Some(chunk)) => {
                 refine_column_types(&chunk, &mut self.column_types);
@@ -289,6 +291,8 @@ impl OwnedResultStream {
             return Ok(None);
         }
         check_deadline(self.deadline)?;
+        // The operators check the deadline in their own loops too.
+        let _deadline = deadline::enter(self.deadline);
         match self.operator.next() {
             Ok(Some(chunk)) => {
                 refine_column_types(&chunk, &mut self.column_types);

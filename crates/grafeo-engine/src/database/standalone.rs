@@ -93,6 +93,8 @@ impl Applying<'_> {
                 error,
                 CatalogError::TypeAlreadyExists(_)
                     | CatalogError::TypeNotFound(_)
+                    | CatalogError::ProcedureAlreadyExists(_)
+                    | CatalogError::ProcedureNotFound(_)
                     | CatalogError::SchemaAlreadyExists(_)
                     | CatalogError::SchemaNotFound(_)
                     | CatalogError::ConstraintAlreadyExists
@@ -435,6 +437,8 @@ pub(crate) fn apply<S: RootStore>(
                 unbuilt.retain(|graph| graph.graph.as_deref() != Some(name.as_str()));
             }
             if built_in(store, op)?.drop_graph(name) {
+                // The graph's type goes with it.
+                catalog.unbind_graph(name);
                 Ok(())
             } else {
                 applying.missing(op, "the graph does not exist")

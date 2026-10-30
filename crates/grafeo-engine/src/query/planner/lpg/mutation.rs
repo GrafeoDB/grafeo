@@ -15,10 +15,10 @@ use super::{CallProcedureOp, StaticResultOperator};
 use crate::query::plan::{Callee, PathMode, PathSelection};
 use grafeo_common::utils::error::{QueryError, QueryErrorKind};
 use grafeo_core::execution::DataChunk;
+use grafeo_core::execution::operators::{BuiltinFunction, FilterExpression, Volatility};
 use grafeo_core::execution::operators::{
     ExecutionPathMode, ExecutionPathSelection, JoinCondition, JoinedRowCondition,
 };
-use grafeo_core::execution::operators::{FilterExpression, Volatility};
 
 impl super::Planner {
     /// Plans a CREATE NODE operator (Gremlin `addV`, a GraphQL mutation): a
@@ -313,11 +313,25 @@ impl super::Planner {
         &self,
         unwind: &UnwindOp,
     ) -> Result<(Box<dyn Operator>, Vec<String>)> {
+        // An UNWIND of `range(start, stop[, step])` computes only the bounds,
+        // as a list, and the operator makes the integers as it unwinds them
+        // (see `UnwindOperator::range_bounds`): the range can be far longer
+        // than a list in memory.
+        let range_bounds = match &unwind.expression {
+            LogicalExpression::FunctionCall {
+                callee: Callee::Builtin(BuiltinFunction::Range),
+                args,
+                ..
+            } if (2..=3).contains(&args.len()) => Some(LogicalExpression::List(args.clone())),
+            _ => None,
+        };
+        let list_expression = range_bounds.as_ref().unwrap_or(&unwind.expression);
+
         // An UNWIND that comes first unwinds a list it computes once, in a
         // column of its own on the one empty row (see `plan_input`).
         let unwinds_a_constant = matches!(&*unwind.input, LogicalOperator::Empty);
         let (input_op, input_columns): (Box<dyn Operator>, Vec<String>) = if unwinds_a_constant {
-            let literal_list = self.convert_expression(&unwind.expression)?;
+            let literal_list = self.convert_expression(list_expression)?;
             let (single_row_op, _) = self.plan_input(&unwind.input)?;
             let project_op: Box<dyn Operator> = Box::new(
                 ProjectOperator::with_store(
@@ -360,7 +374,7 @@ impl super::Planner {
             (input_op, input_columns, idx)
         } else {
             // Wrap input in a ProjectOperator that adds the list as an extra column
-            let literal_list = self.convert_expression(&unwind.expression)?;
+            let literal_list = self.convert_expression(list_expression)?;
             let mut proj_exprs: Vec<ProjectExpr> =
                 (0..input_columns.len()).map(ProjectExpr::Column).collect();
             let var_cols: HashMap<String, usize> = input_columns
@@ -444,6 +458,11 @@ impl super::Planner {
             unwind_op
         } else {
             unwind_op.without_the_list()
+        };
+        let unwind_op = if range_bounds.is_some() {
+            unwind_op.range_bounds()
+        } else {
+            unwind_op
         };
         // In a statement that writes, a row sees the writes of the rows before
         // it, so the rows go one at a time; a read gets them in full chunks.

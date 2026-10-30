@@ -265,8 +265,9 @@ fn an_average_follows_the_division_rule() {
 }
 
 /// What does not change: a float row makes the result a float, no rows give
-/// NULL, DISTINCT follows the same rules, and integers before, between and
-/// after decimals join the exact sum in any order.
+/// a null average and a null sum in GQL (the integer 0 in Cypher, as
+/// openCypher), DISTINCT follows the same rules, and integers before,
+/// between and after decimals join the exact sum in any order.
 #[test]
 fn floats_empty_input_distinct_and_integers_keep_their_rules() {
     let db = GrafeoDB::new_in_memory();
@@ -290,7 +291,12 @@ fn floats_empty_input_distinct_and_integers_keep_their_rules() {
             "UNWIND $xs AS x WITH x WHERE x > 100 RETURN sum(x) AS s, avg(x) AS a",
             &[d("1.5"), d("2.5")],
         );
-        assert_eq!(empty, [Value::Null, Value::Null], "{language} no rows");
+        let empty_sum = if language == "cypher" {
+            Value::Int64(0)
+        } else {
+            Value::Null
+        };
+        assert_eq!(empty, [empty_sum, Value::Null], "{language} no rows");
 
         for xs in [
             [a.clone(), a.clone(), minus_a.clone(), a.clone()],

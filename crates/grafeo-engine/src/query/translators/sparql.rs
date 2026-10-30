@@ -126,7 +126,11 @@ struct SparqlTranslator {
 impl SparqlTranslator {
     fn new() -> Self {
         Self {
-            prefixes: HashMap::new(),
+            // The predefined prefixes, which a query's PREFIX redefines.
+            prefixes: sparql::PREDEFINED_PREFIXES
+                .iter()
+                .map(|(prefix, namespace)| ((*prefix).to_string(), (*namespace).to_string()))
+                .collect(),
             base: None,
             anon_counter: 0,
             graph_context_stack: Vec::new(),
@@ -2903,7 +2907,14 @@ mod tests {
     #[test]
     fn test_translator_new() {
         let translator = SparqlTranslator::new();
-        assert!(translator.prefixes.is_empty());
+        // It starts with the predefined prefixes (rdf, rdfs, xsd, owl, fn).
+        assert_eq!(translator.prefixes.len(), sparql::PREDEFINED_PREFIXES.len());
+        for (prefix, namespace) in sparql::PREDEFINED_PREFIXES {
+            assert_eq!(
+                translator.prefixes.get(prefix).map(String::as_str),
+                Some(namespace)
+            );
+        }
         assert!(translator.base.is_none());
         assert_eq!(translator.anon_counter, 0);
     }

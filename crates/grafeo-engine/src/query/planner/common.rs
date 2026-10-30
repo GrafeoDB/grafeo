@@ -8,7 +8,7 @@
 use crate::query::plan::{
     BinaryOp, ListPredicateKind, LogicalExpression, LogicalOperator, MapProjectionEntry, UnaryOp,
 };
-use grafeo_common::types::{LogicalType, Value};
+use grafeo_common::types::{LogicalType, TemporalComparison, Value};
 use grafeo_common::utils::error::{Error, Result};
 use grafeo_core::execution::operators::{
     DistinctOperator, ExceptOperator, HashJoinOperator, IntersectOperator,
@@ -39,25 +39,26 @@ pub(crate) fn build_skip(
 /// Builds a DISTINCT physical operator.
 ///
 /// Handles both full-row dedup and column-specific dedup (when `distinct.columns` is set).
+/// The keys read a local datetime against a zoned one as `temporal` reads it
+/// (the statement's `=`; `TypesApart` for SPARQL, which compares its terms as
+/// they are).
 pub(crate) fn build_distinct(
     input: Box<dyn Operator>,
     columns: Vec<String>,
     distinct_columns: Option<&[String]>,
+    temporal: TemporalComparison,
 ) -> (Box<dyn Operator>, Vec<String>) {
-    let operator: Box<dyn Operator> = if let Some(dist_cols) = distinct_columns {
-        let col_indices: Vec<usize> = dist_cols
-            .iter()
-            .filter_map(|name| columns.iter().position(|c| c == name))
-            .collect();
-        if col_indices.is_empty() {
-            Box::new(DistinctOperator::new(input))
-        } else {
-            Box::new(DistinctOperator::on_columns(input, col_indices))
-        }
+    let col_indices: Vec<usize> = distinct_columns
+        .into_iter()
+        .flatten()
+        .filter_map(|name| columns.iter().position(|c| c == name))
+        .collect();
+    let operator = if col_indices.is_empty() {
+        DistinctOperator::new(input)
     } else {
-        Box::new(DistinctOperator::new(input))
+        DistinctOperator::on_columns(input, col_indices)
     };
-    (operator, columns)
+    (Box::new(operator.with_temporal(temporal)), columns)
 }
 
 /// Builds a UNION physical operator from multiple pre-planned inputs.
@@ -75,25 +76,29 @@ pub(crate) fn build_union(
     Ok((operator, columns))
 }
 
-/// Builds an EXCEPT physical operator.
+/// Builds an EXCEPT physical operator whose rows read a local datetime
+/// against a zoned one as `temporal` reads it (the statement's `=`).
 pub(crate) fn build_except(
     left: Box<dyn Operator>,
     right: Box<dyn Operator>,
     columns: Vec<String>,
     all: bool,
+    temporal: TemporalComparison,
 ) -> (Box<dyn Operator>, Vec<String>) {
-    let operator = Box::new(ExceptOperator::new(left, right, all));
+    let operator = Box::new(ExceptOperator::new(left, right, all).with_temporal(temporal));
     (operator, columns)
 }
 
-/// Builds an INTERSECT physical operator.
+/// Builds an INTERSECT physical operator whose rows read a local datetime
+/// against a zoned one as `temporal` reads it (the statement's `=`).
 pub(crate) fn build_intersect(
     left: Box<dyn Operator>,
     right: Box<dyn Operator>,
     columns: Vec<String>,
     all: bool,
+    temporal: TemporalComparison,
 ) -> (Box<dyn Operator>, Vec<String>) {
-    let operator = Box::new(IntersectOperator::new(left, right, all));
+    let operator = Box::new(IntersectOperator::new(left, right, all).with_temporal(temporal));
     (operator, columns)
 }
 

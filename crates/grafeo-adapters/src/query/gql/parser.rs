@@ -233,6 +233,15 @@ impl<'a> Parser<'a> {
                 | TokenKind::By
                 | TokenKind::Skip
                 | TokenKind::Limit
+                // ISO GQL non-reserved words (<non-reserved word>): path
+                // modes and the rest, names wherever a name may stand
+                | TokenKind::Acyclic
+                | TokenKind::Groups
+                | TokenKind::Ordinality
+                | TokenKind::Shortest
+                | TokenKind::Simple
+                | TokenKind::Trail
+                | TokenKind::Walk
         )
     }
 

@@ -279,6 +279,7 @@ impl super::Planner {
             input_op,
             columns,
             distinct.columns.as_deref(),
+            self.session_context.temporal_comparison,
         ))
     }
 
@@ -290,7 +291,13 @@ impl super::Planner {
         let mut planned = self.plan_branches([except.left.as_ref(), except.right.as_ref()])?;
         let (right_op, _) = planned.pop().expect("two branches planned");
         let (left_op, columns) = planned.pop().expect("two branches planned");
-        Ok(common::build_except(left_op, right_op, columns, except.all))
+        Ok(common::build_except(
+            left_op,
+            right_op,
+            columns,
+            except.all,
+            self.session_context.temporal_comparison,
+        ))
     }
 
     /// Plans an INTERSECT operator.
@@ -307,6 +314,7 @@ impl super::Planner {
             right_op,
             columns,
             intersect.all,
+            self.session_context.temporal_comparison,
         ))
     }
 

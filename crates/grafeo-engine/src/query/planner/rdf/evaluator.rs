@@ -274,7 +274,7 @@ impl RdfExpressionPredicate {
             | BinaryFilterOp::Div => {
                 let a = self.eval_expr(left, chunk, row)?;
                 let b = self.eval_expr(right, chunk, row)?;
-                numeric_op(native(&a)?.as_ref(), op, native(&b)?.as_ref())
+                numeric_op(&a, op, &b)
             }
             _ => None,
         }
@@ -710,7 +710,19 @@ impl RdfExpressionPredicate {
             iri if iri.starts_with("HTTP://WWW.W3.ORG/2001/XMLSCHEMA#") => {
                 let value = self.eval_expr(arg(0)?, chunk, row)?;
                 let target = &iri["HTTP://WWW.W3.ORG/2001/XMLSCHEMA#".len()..];
-                xsd_cast(target, &cast_source(&value)?)
+                // An xsd:float is the double the cast gives, rounded to a
+                // float (there is no float value of its own).
+                match target {
+                    "FLOAT" => match xsd_cast("DOUBLE", &cast_source(&value)?)? {
+                        #[allow(
+                            clippy::cast_possible_truncation,
+                            reason = "XPath casts to xsd:float by rounding to the nearest float"
+                        )]
+                        Value::Float64(f) => Some(float_value(f as f32)),
+                        _ => None,
+                    },
+                    _ => xsd_cast(target, &cast_source(&value)?),
+                }
             }
             _ => None,
         }
@@ -887,11 +899,27 @@ pub(super) fn round_half_up(v: f64) -> f64 {
 enum Numeric {
     Integer(i64),
     Decimal(Decimal),
+    Float(f32),
     Double(f64),
 }
 
+/// `value` as a numeric operand: an `xsd:float` literal is a float, which
+/// its native value (a double) does not say.
+#[allow(
+    clippy::cast_possible_truncation,
+    reason = "an xsd:float literal's value is a float, read through a double"
+)]
 fn numeric(value: &Value) -> Option<Numeric> {
-    match value {
+    if let Value::RdfTerm(term) = value
+        && let Term::Literal(literal) = term.as_ref()
+        && literal.datatype() == Literal::XSD_FLOAT
+    {
+        return match literal.native_value()? {
+            Value::Float64(f) => Some(Numeric::Float(f as f32)),
+            _ => None,
+        };
+    }
+    match native(value)?.as_ref() {
         Value::Int64(i) => Some(Numeric::Integer(*i)),
         Value::Decimal(d) => Some(Numeric::Decimal(*d)),
         Value::Float64(f) => Some(Numeric::Double(*f)),
@@ -899,31 +927,52 @@ fn numeric(value: &Value) -> Option<Numeric> {
     }
 }
 
+/// An `xsd:float` literal of `f`, in the canonical lexical form.
+fn float_value(f: f32) -> Value {
+    Value::RdfTerm(Arc::new(Term::Literal(Literal::typed(
+        super::terms::float_lexical(f),
+        Literal::XSD_FLOAT,
+    ))))
+}
+
 /// `+`, `-`, `*` and `/` by the XPath numeric promotion of SPARQL 1.1
 /// (`op:numeric-add` and the others): a double makes a double; otherwise a
-/// decimal makes a decimal; two integers give an integer, except a division,
-/// which gives a decimal, and a result past the `i64` range, computed as
-/// decimals. Division by zero of integers or decimals and decimal overflow
-/// are errors (`None`).
+/// float makes a float; otherwise a decimal makes a decimal; two integers
+/// give an integer, except a division, which gives a decimal, and a result
+/// past the `i64` range, computed as decimals. Division by zero of integers
+/// or decimals and decimal overflow are errors (`None`).
 #[allow(
     clippy::cast_precision_loss,
-    reason = "an integer meeting a double is promoted to that double, as XPath promotes it"
+    clippy::cast_possible_truncation,
+    reason = "an integer or decimal meeting a float or a double is promoted to it, as XPath \
+              promotes it"
 )]
 pub(super) fn numeric_op(left: &Value, op: BinaryFilterOp, right: &Value) -> Option<Value> {
     let (l, r) = (numeric(left)?, numeric(right)?);
     let as_double = |n: &Numeric| match n {
         Numeric::Integer(i) => *i as f64,
         Numeric::Decimal(d) => d.to_f64(),
+        Numeric::Float(f) => f64::from(*f),
         Numeric::Double(f) => *f,
     };
+    // IEEE 754: a float or a double divided by zero is INF, -INF or NaN.
     if matches!(l, Numeric::Double(_)) || matches!(r, Numeric::Double(_)) {
         let (a, b) = (as_double(&l), as_double(&r));
         return match op {
             BinaryFilterOp::Add => Some(Value::Float64(a + b)),
             BinaryFilterOp::Sub => Some(Value::Float64(a - b)),
             BinaryFilterOp::Mul => Some(Value::Float64(a * b)),
-            // IEEE 754: a double divided by zero is INF, -INF or NaN.
             BinaryFilterOp::Div => Some(Value::Float64(a / b)),
+            _ => None,
+        };
+    }
+    if matches!(l, Numeric::Float(_)) || matches!(r, Numeric::Float(_)) {
+        let (a, b) = (as_double(&l) as f32, as_double(&r) as f32);
+        return match op {
+            BinaryFilterOp::Add => Some(float_value(a + b)),
+            BinaryFilterOp::Sub => Some(float_value(a - b)),
+            BinaryFilterOp::Mul => Some(float_value(a * b)),
+            BinaryFilterOp::Div => Some(float_value(a / b)),
             _ => None,
         };
     }
@@ -941,7 +990,7 @@ pub(super) fn numeric_op(left: &Value, op: BinaryFilterOp, right: &Value) -> Opt
     let as_decimal = |n: &Numeric| match n {
         Numeric::Integer(i) => Some(Decimal::from_i64(*i)),
         Numeric::Decimal(d) => Some(*d),
-        Numeric::Double(_) => None,
+        Numeric::Float(_) | Numeric::Double(_) => None,
     };
     let (a, b) = (as_decimal(&l)?, as_decimal(&r)?);
     match op {
@@ -1004,7 +1053,7 @@ fn xsd_cast(name: &str, value: &Value) -> Option<Value> {
             Value::String(s) => Decimal::parse(s.trim()).ok().map(Value::Decimal),
             _ => None,
         },
-        "DOUBLE" | "FLOAT" => match value {
+        "DOUBLE" => match value {
             Value::Float64(f) => Some(Value::Float64(*f)),
             Value::Int64(i) => Some(Value::Float64(*i as f64)),
             Value::Decimal(d) => Some(Value::Float64(d.to_f64())),

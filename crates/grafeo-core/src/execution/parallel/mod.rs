@@ -67,7 +67,8 @@ pub use fold::{
 };
 pub use merge::{
     MergeableAccumulator, MergeableOperator, SortKey, concat_parallel_results,
-    merge_distinct_results, merge_sorted_chunks, merge_sorted_runs, rows_to_chunks,
+    merge_distinct_results, merge_sorted_chunks, merge_sorted_chunks_under, merge_sorted_runs,
+    merge_sorted_runs_under, rows_to_chunks,
 };
 pub use morsel::{
     CRITICAL_PRESSURE_MORSEL_SIZE, DEFAULT_MORSEL_SIZE, HIGH_PRESSURE_MORSEL_SIZE, MIN_MORSEL_SIZE,

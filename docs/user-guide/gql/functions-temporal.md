@@ -154,17 +154,17 @@ Extract individual components from temporal values:
 
 ```sql
 -- From a date
-WITH DATE '2024-06-15' AS d
+LET d = DATE '2024-06-15'
 RETURN year(d), month(d), day(d)
 -- 2024, 6, 15
 
 -- From a time
-WITH TIME '14:30:45' AS t
+LET t = TIME '14:30:45'
 RETURN hour(t), minute(t), second(t)
 -- 14, 30, 45
 
 -- From a datetime
-WITH DATETIME '2024-06-15T14:30:45Z' AS dt
+LET dt = DATETIME '2024-06-15T14:30:45Z'
 RETURN year(dt), month(dt), day(dt),
        hour(dt), minute(dt), second(dt)
 -- 2024, 6, 15, 14, 30, 45

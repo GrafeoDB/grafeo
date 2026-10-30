@@ -266,6 +266,7 @@ tx.commit()  # balance = 1000, no bonus property
 1. Names must be unique within a transaction
 2. Rolling back to a savepoint also releases all savepoints created after it
 3. A full `ROLLBACK` undoes everything, including changes before any savepoints
+4. What a rollback to a savepoint undid, or what a failed statement wrote, no longer blocks other transactions: they can write it. What earlier statements of the transaction wrote stays protected
 
 ## Transaction Lifecycle
 
@@ -433,9 +434,12 @@ Transaction errors use standardized `GRAFEO-TXXX` codes:
 | `GRAFEO-T002` | Transaction timeout | Yes |
 | `GRAFEO-T003` | Read-only transaction attempted mutation | No |
 | `GRAFEO-T004` | Invalid transaction state (e.g., already committed or rolled back) | No |
-| `GRAFEO-T005` | Serialization failure (SSI violation) | No |
+| `GRAFEO-T005` | Reserved for Serializable isolation, which is refused for now (`GRAFEO-Q004`) | Yes |
 | `GRAFEO-T006` | Deadlock detected | Yes |
 | `GRAFEO-T007` | Database closed: a write after `close()` of a persistent database | No |
 | `GRAFEO-T008` | Incomplete commit: an earlier commit did not complete, reopen the database | No |
+| `GRAFEO-T009` | The commit could not be written to the write-ahead log and was rolled back | Yes |
+| `GRAFEO-T010` | Commit outcome unknown: the log could not be made durable, reopen the database before retrying | No |
+| `GRAFEO-T011` | The write-ahead log takes no more writes after an earlier failure, reopen the database | No |
 
 In Rust, error codes expose an `is_retryable()` method to indicate whether the operation can be safely retried. This method is not currently exposed in the Python bindings.

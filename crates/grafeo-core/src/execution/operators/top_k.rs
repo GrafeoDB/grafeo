@@ -22,10 +22,10 @@ use std::cmp::Ordering;
 use std::collections::BinaryHeap;
 use std::sync::Arc;
 
-use grafeo_common::types::Value;
+use grafeo_common::types::{TemporalComparison, Value};
 
 use super::sort::SortKey;
-use super::value_utils::compare_sort_values;
+use super::value_utils::{compare_sort_values, normalized};
 use super::{Operator, OperatorResult};
 use crate::execution::DataChunk;
 use crate::execution::chunk::{ColumnTypes, DataChunkBuilder};
@@ -42,6 +42,10 @@ pub struct TopKOperator {
     /// The column types of the input chunks: the output keeps them.
     column_types: ColumnTypes,
     state: TopKState,
+    /// How the sort keys read a local datetime against a zoned one (see
+    /// [`TemporalComparison::normalize`]); `TypesApart` reads every value
+    /// as itself.
+    temporal: TemporalComparison,
     #[cfg(test)]
     materialized_rows: std::sync::atomic::AtomicUsize,
 }
@@ -59,6 +63,8 @@ enum TopKState {
 }
 
 struct HeapEntry {
+    /// The row's sort key values as the operator's temporal reading reads
+    /// them: they are only compared, the output comes from `row_values`.
     sort_values: Vec<Option<Value>>,
     row_values: Vec<Option<Value>>,
     insertion_id: u64,
@@ -121,9 +127,24 @@ impl TopKOperator {
                 heap: BinaryHeap::new(),
                 next_insertion_id: 0,
             },
+            temporal: TemporalComparison::TypesApart,
             #[cfg(test)]
             materialized_rows: std::sync::atomic::AtomicUsize::new(0),
         }
+    }
+
+    /// The operator with `temporal` as the reading of its sort keys (the
+    /// statement's `<`). The rows keep their values.
+    #[must_use]
+    pub fn with_temporal(mut self, temporal: TemporalComparison) -> Self {
+        self.temporal = temporal;
+        self
+    }
+
+    /// How the sort keys read temporal values (see [`Self::with_temporal`]).
+    #[must_use]
+    pub fn temporal(&self) -> TemporalComparison {
+        self.temporal
     }
 
     /// Decomposes this operator into its child, sort keys, and limit.
@@ -157,8 +178,12 @@ impl Operator for TopKOperator {
                 let width = self.column_types.types().len();
 
                 for row_idx in chunk.selected_indices() {
-                    let new_sort_values =
-                        extract_sort_values(&chunk, row_idx, self.sort_keys.as_slice());
+                    let new_sort_values = extract_sort_values(
+                        &chunk,
+                        row_idx,
+                        self.sort_keys.as_slice(),
+                        self.temporal,
+                    );
 
                     let should_push = if heap.len() < self.limit {
                         true
@@ -254,14 +279,22 @@ impl TopKOperator {
     }
 }
 
+/// The sort key values of a row, as `temporal` reads them (see
+/// [`TemporalComparison::normalize`]).
 fn extract_sort_values(
     chunk: &DataChunk,
     row_idx: usize,
     sort_keys: &[SortKey],
+    temporal: TemporalComparison,
 ) -> Vec<Option<Value>> {
     sort_keys
         .iter()
-        .map(|k| chunk.column(k.column).and_then(|c| c.get_value(row_idx)))
+        .map(|k| {
+            chunk
+                .column(k.column)
+                .and_then(|c| c.get_value(row_idx))
+                .map(|value| normalized(value, temporal))
+        })
         .collect()
 }
 

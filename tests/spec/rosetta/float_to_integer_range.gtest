@@ -1,0 +1,73 @@
+# Rosetta: toInteger of a float outside the integer range fails
+#
+# A float outside the 64-bit integer range, or an infinity, fails with
+# 22003 (numeric value out of range), as the integer operators do since
+# #639; it gave the largest or smallest integer. The largest float below
+# 2^63 and -2^63 itself convert; 2^63 does not. toInteger(NaN) is null
+# (numeric_functions.gtest); GQL's CAST is in lpg/gql/cast_conversions.gtest.
+
+meta:
+  model: lpg
+  section: rosetta
+  title: toInteger of a float out of range
+  dataset: empty
+  requires: [cypher]
+
+tests:
+
+  - name: to_integer_of_a_float_above_the_range_fails
+    variants:
+      gql: "RETURN toInteger(1.0e19) AS v"
+      cypher: "RETURN toInteger(1.0e19) AS v"
+    expect:
+      error: ""
+      gql_status: "22003"
+
+  - name: to_integer_of_a_float_below_the_range_fails
+    variants:
+      gql: "RETURN toInteger(-1.0e19) AS v"
+      cypher: "RETURN toInteger(-1.0e19) AS v"
+    expect:
+      error: ""
+      gql_status: "22003"
+
+  - name: to_integer_of_two_to_the_63_fails
+    variants:
+      gql: "RETURN toInteger(9223372036854775808.0e0) AS v"
+      cypher: "RETURN toInteger(9223372036854775808.0) AS v"
+    expect:
+      error: ""
+      gql_status: "22003"
+
+  - name: to_integer_of_infinity_fails
+    variants:
+      gql: "RETURN toInteger(Infinity) AS v"
+      cypher: "RETURN toInteger(Infinity) AS v"
+    expect:
+      error: ""
+      gql_status: "22003"
+
+  - name: to_integer_of_negative_infinity_fails
+    variants:
+      gql: "RETURN toInteger(-Infinity) AS v"
+      cypher: "RETURN toInteger(-Infinity) AS v"
+    expect:
+      error: ""
+      gql_status: "22003"
+
+  - name: to_integer_of_a_computed_float_out_of_range_fails
+    variants:
+      gql: "UNWIND [1.0e18, 1.0e19] AS f RETURN toInteger(f * 1) AS v"
+      cypher: "UNWIND [1.0e18, 1.0e19] AS f RETURN toInteger(f * 1) AS v"
+    expect:
+      error: ""
+      gql_status: "22003"
+
+  - name: to_integer_of_the_floats_at_the_range_ends_converts
+    # 9223372036854774784 is the largest float below 2^63.
+    variants:
+      gql: "RETURN toInteger(9223372036854774784.0e0) AS hi, toInteger(-9223372036854775808.0e0) AS lo, toInteger(-2.5e0) AS neg"
+      cypher: "RETURN toInteger(9223372036854774784.0) AS hi, toInteger(-9223372036854775808.0) AS lo, toInteger(-2.5) AS neg"
+    expect:
+      rows:
+        - [9223372036854774784, -9223372036854775808, -2]

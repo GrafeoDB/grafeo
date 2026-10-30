@@ -89,7 +89,7 @@ tests:
         - [null]
 
   - name: a_count_subquery_with_no_input_rows_sums_to_zero_in_cypher
-    skip: "openCypher sums no values to 0 (Neo4j: sum(null) is 0); Grafeo's Cypher returns null"
+    # openCypher sums no values to 0 (sum_of_no_values.gtest).
     variants:
       cypher: "UNWIND [] AS i RETURN sum(COUNT { MATCH (t:T) WHERE t.k = i }) AS s"
     expect:

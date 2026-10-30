@@ -965,21 +965,21 @@ impl GqlTranslator {
                         plan = self.translate_merge(merge_clause, plan)?;
                     }
                     ast::QueryClause::Let(bindings) => {
-                        // LET var = expr translates to a Project that adds the bound
-                        // variables as additional columns in the current pipeline.
-                        let mut projections = Vec::new();
+                        // `LET a = e1, b = e2` is `LET a = e1 LET b = e2` (ISO
+                        // GQL, let statement): each definition is a Project
+                        // that adds its column, so a later one reads the
+                        // earlier ones.
                         for (name, expr) in bindings {
                             let logical_expr = self.translate_expression(expr)?;
-                            projections.push(Projection {
-                                expression: logical_expr,
-                                alias: Some(name.clone()),
+                            plan = LogicalOperator::Project(ProjectOp {
+                                projections: vec![Projection {
+                                    expression: logical_expr,
+                                    alias: Some(name.clone()),
+                                }],
+                                input: Box::new(plan),
+                                pass_through_input: true,
                             });
                         }
-                        plan = LogicalOperator::Project(ProjectOp {
-                            projections,
-                            input: Box::new(plan),
-                            pass_through_input: true,
-                        });
                     }
                     ast::QueryClause::Remove(remove_clause) => {
                         plan = Self::apply_remove(plan, remove_clause);

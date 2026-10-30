@@ -117,15 +117,25 @@ tests:
       rows:
         - [3.5, 1.75, 2]
 
+  # GQL follows SQL: the sum of no values is null. openCypher makes it 0;
+  # the average of no values is null in both.
   - name: sum_and_avg_of_no_values_are_null
     setup:
       - "INSERT (:P {w: 3})"
     variants:
       gql: "MATCH (n:P) RETURN sum(n.v) AS s, avg(n.v) AS a"
-      cypher: "MATCH (n:P) RETURN sum(n.v) AS s, avg(n.v) AS a"
     expect:
       rows:
         - [null, null]
+
+  - name: sum_of_no_values_is_zero_and_avg_null_in_cypher
+    setup:
+      - "INSERT (:P {w: 3})"
+    variants:
+      cypher: "MATCH (n:P) RETURN sum(n.v) AS s, avg(n.v) AS a"
+    expect:
+      rows:
+        - [0, null]
 
   - name: sum_and_avg_of_durations
     variants:

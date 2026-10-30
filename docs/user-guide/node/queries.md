@@ -68,7 +68,7 @@ await db.executeGremlin("g.V().hasLabel('Person').values('name')");
 await db.executeGraphql('{ Person { name age } }');
 
 // SPARQL (for RDF data)
-await db.executeSparql('SELECT ?name WHERE { ?p a :Person ; :name ?name }');
+await db.executeSparql('PREFIX : <http://example.org/> SELECT ?name WHERE { ?p a :Person ; :name ?name }');
 
 // SQL/PGQ (SQL:2023 GRAPH_TABLE)
 await db.executeSql("SELECT name FROM GRAPH_TABLE(g MATCH (p:Person) COLUMNS (p.name))");

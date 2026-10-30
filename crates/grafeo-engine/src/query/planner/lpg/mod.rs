@@ -1127,7 +1127,8 @@ impl Planner {
                 input_column_count,
                 self.read_view(),
             )
-            .with_aggregate_options(ha.distinct, ha.percentile, ha.separator.clone()),
+            .with_aggregate_options(ha.distinct, ha.percentile, ha.separator.clone())
+            .with_temporal(self.session_context.temporal_comparison),
         );
 
         let mut columns = child_columns;

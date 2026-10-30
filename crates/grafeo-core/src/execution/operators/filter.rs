@@ -405,24 +405,21 @@ fn sign_of_a_non_number(sign: char, value: &Value) -> OperatorError {
     ))
 }
 
-/// The value CAST gives the conversion function of the `target` category
-/// (`INTEGER`, `FLOAT`, `DECIMAL`, `BOOLEAN` or a temporal type, as the
-/// parsers name it): a text without its leading and trailing spaces, as SQL
-/// casts a character string; a boolean is 1 or 0 to a number, and a number
-/// is true unless it is 0 to a boolean, in every direction, as DuckDB casts
-/// them. Every other value is the value itself.
-fn cast_operand(value: Value, target: &str) -> Value {
-    match (target, value) {
-        (_, Value::String(text)) => match text.trim_matches(' ') {
-            trimmed if trimmed.len() == text.len() => Value::String(text),
-            trimmed => Value::String(trimmed.into()),
-        },
-        ("INTEGER" | "FLOAT" | "DECIMAL", Value::Bool(b)) => Value::Int64(i64::from(b)),
-        ("BOOLEAN", Value::Int64(i)) => Value::Bool(i != 0),
-        ("BOOLEAN", Value::Float64(f)) => Value::Bool(f != 0.0),
-        ("BOOLEAN", Value::Decimal(d)) => Value::Bool(d.signum() != 0),
-        (_, value) => value,
+/// Text without the spaces around it, as SQL casts a character string.
+fn trim_spaces(text: &str) -> &str {
+    text.trim_matches(' ')
+}
+
+/// Text as a number: an integer, else a decimal, else a float (exponent
+/// text, `NaN`, `Infinity`); `None` for text that is no number.
+fn number_of_text(text: &str) -> Option<Value> {
+    if let Ok(integer) = text.parse::<i64>() {
+        return Some(Value::Int64(integer));
     }
+    if let Ok(decimal) = Decimal::parse(text) {
+        return Some(Value::Decimal(decimal));
+    }
+    text.parse::<f64>().ok().map(Value::Float64)
 }
 
 /// What a comparison operand is, as far as the evaluator can tell (see
@@ -1958,7 +1955,7 @@ impl ExpressionPredicate {
                     (Value::String(a), other) => {
                         let b = match other {
                             Value::Int64(i) => i.to_string(),
-                            Value::Float64(f) => f.to_string(),
+                            Value::Float64(f) => super::value_utils::float_text(*f),
                             Value::Decimal(d) => d.to_string(),
                             Value::Bool(b) => b.to_string(),
                             Value::Null => return Some(Value::Null),
@@ -2290,9 +2287,95 @@ impl ExpressionPredicate {
         }
     }
 
+    /// The value CAST gives the conversion function of the `target` category
+    /// (`INTEGER`, `FLOAT`, `DECIMAL`, `BOOLEAN` or a temporal type, as the
+    /// parsers name it): a text without its leading and trailing spaces, as
+    /// SQL casts a character string, read as a number for a number target;
+    /// a boolean is 1 or 0 to a number, and a number is true unless it is 0
+    /// to a boolean, in every direction, as DuckDB casts them. Every other
+    /// value is the value itself. Text that is no number fails a cast to an
+    /// integer, a float or a decimal (22018), and NaN one to an integer
+    /// (22003), as SQL and DuckDB refuse them.
+    fn cast_operand(&self, value: Value, target: &str) -> Option<Value> {
+        match (target, value) {
+            ("INTEGER" | "FLOAT" | "DECIMAL", Value::String(text)) => {
+                let trimmed = trim_spaces(&text);
+                let number = match target {
+                    "INTEGER" => number_of_text(trimmed),
+                    // A number past 38 digits is out of range, not text that
+                    // is no number.
+                    "DECIMAL" => match to_decimal(&Value::from(trimmed)) {
+                        Some(decimal) => Some(Value::Decimal(decimal)),
+                        None if trimmed.parse::<f64>().is_ok_and(f64::is_finite) => {
+                            return self.fail(OperatorError::numeric_out_of_range(format!(
+                                "CAST('{text}' AS DECIMAL)"
+                            )));
+                        }
+                        None => None,
+                    },
+                    _ => trimmed.parse::<f64>().ok().map(Value::Float64),
+                };
+                match number {
+                    Some(number) => self.cast_operand(number, target),
+                    None => self.fail(OperatorError::invalid_cast_text(format!(
+                        "CAST('{text}' AS {target})"
+                    ))),
+                }
+            }
+            (_, Value::String(text)) => match trim_spaces(&text) {
+                trimmed if trimmed.len() == text.len() => Some(Value::String(text)),
+                trimmed => Some(Value::String(trimmed.into())),
+            },
+            ("INTEGER", Value::Float64(f)) if f.is_nan() => {
+                self.fail(OperatorError::numeric_out_of_range("CAST(NaN AS INTEGER)"))
+            }
+            ("INTEGER" | "FLOAT" | "DECIMAL", Value::Bool(b)) => Some(Value::Int64(i64::from(b))),
+            ("BOOLEAN", Value::Int64(i)) => Some(Value::Bool(i != 0)),
+            ("BOOLEAN", Value::Float64(f)) => Some(Value::Bool(f != 0.0)),
+            ("BOOLEAN", Value::Decimal(d)) => Some(Value::Bool(d.signum() != 0)),
+            (_, value) => Some(value),
+        }
+    }
+
+    /// A number as an integer, truncated toward zero (toInteger): null for
+    /// NaN, and a failed query (22003) for an infinity or a value past the
+    /// range of an integer, as the integer operators fail. Null for a value
+    /// that is no number.
+    fn number_to_integer(&self, number: Value) -> Option<Value> {
+        let out_of_range = |shown: String| {
+            self.fail(OperatorError::numeric_out_of_range(format!(
+                "toInteger({shown})"
+            )))
+        };
+        match number {
+            Value::Int64(i) => Some(Value::Int64(i)),
+            Value::Decimal(d) => match d.trunc_to_i64() {
+                Some(i) => Some(Value::Int64(i)),
+                None => out_of_range(d.to_string()),
+            },
+            Value::Float64(f) if f.is_nan() => None,
+            Value::Float64(f) => {
+                // -2^63 is a float exactly; 2^63 is the first one past the range.
+                let truncated = f.trunc();
+                if (-9_223_372_036_854_775_808.0..9_223_372_036_854_775_808.0).contains(&truncated)
+                {
+                    #[allow(
+                        clippy::cast_possible_truncation,
+                        reason = "the range check above keeps the truncated float in i64"
+                    )]
+                    Some(Value::Int64(truncated as i64))
+                } else {
+                    out_of_range(super::value_utils::float_text(f))
+                }
+            }
+            _ => None,
+        }
+    }
+
     /// `%` on two numbers, typed as [`eval_arithmetic`](Self::eval_arithmetic)
     /// types its results. An integer or decimal remainder by zero fails the
-    /// query; a float one gives null.
+    /// query; a float one is NaN (IEEE `fmod`), as a float `/` by zero keeps
+    /// its IEEE result.
     fn eval_modulo(&self, left: &Value, right: &Value) -> Option<Value> {
         let op = BinaryFilterOp::Mod;
         let decimal = |a: &Decimal, b: &Decimal| match a.checked_rem(b) {
@@ -2309,17 +2392,11 @@ impl ExpressionPredicate {
             (Value::Decimal(a), Value::Decimal(b)) => decimal(a, b),
             (Value::Decimal(a), Value::Int64(b)) => decimal(a, &Decimal::from_i64(*b)),
             (Value::Int64(a), Value::Decimal(b)) => decimal(&Decimal::from_i64(*a), b),
-            (Value::Decimal(a), Value::Float64(b)) if *b != 0.0 => {
-                Some(Value::Float64(a.to_f64() % b))
-            }
-            (Value::Float64(a), Value::Decimal(b)) if b.signum() != 0 => {
-                Some(Value::Float64(a % b.to_f64()))
-            }
-            (Value::Float64(a), Value::Float64(b)) if *b != 0.0 => Some(Value::Float64(a % b)),
-            (Value::Int64(a), Value::Float64(b)) if *b != 0.0 => {
-                Some(Value::Float64(*a as f64 % b))
-            }
-            (Value::Float64(a), Value::Int64(b)) if *b != 0 => Some(Value::Float64(a % *b as f64)),
+            (Value::Decimal(a), Value::Float64(b)) => Some(Value::Float64(a.to_f64() % b)),
+            (Value::Float64(a), Value::Decimal(b)) => Some(Value::Float64(a % b.to_f64())),
+            (Value::Float64(a), Value::Float64(b)) => Some(Value::Float64(a % b)),
+            (Value::Int64(a), Value::Float64(b)) => Some(Value::Float64(*a as f64 % b)),
+            (Value::Float64(a), Value::Int64(b)) => Some(Value::Float64(a % *b as f64)),
             _ => None,
         }
     }
@@ -2647,7 +2724,7 @@ impl ExpressionPredicate {
                 let s = match &val {
                     Value::String(s) => s.to_string(),
                     Value::Int64(i) => i.to_string(),
-                    Value::Float64(f) => f.to_string(),
+                    Value::Float64(f) => super::value_utils::float_text(*f),
                     Value::Bool(b) => b.to_string(),
                     Value::Null => return Some(Value::Null),
                     // A LOCAL DATETIME has no zone, so its text has none
@@ -2664,13 +2741,15 @@ impl ExpressionPredicate {
                 let val = self.eval_expr(&args[0], chunk, row)?;
                 match val {
                     Value::Int64(i) => Some(Value::Int64(i)),
-                    // reason: toInteger() intentionally truncates float to int per GQL spec
-                    #[allow(clippy::cast_possible_truncation)]
-                    Value::Float64(f) => Some(Value::Int64(f as i64)),
-                    Value::Decimal(d) => d.trunc_to_i64().map(Value::Int64),
                     Value::Bool(b) => Some(Value::Int64(i64::from(b))),
-                    Value::String(s) => s.parse::<i64>().ok().map(Value::Int64),
-                    _ => None,
+                    // Text is read as a number first: `' 42 '` is 42 and
+                    // `'4.2'` is 4, as openCypher's toInteger reads it; text
+                    // that is no number is null.
+                    Value::String(text) => match number_of_text(trim_spaces(&text)) {
+                        Some(number) => self.number_to_integer(number),
+                        None => None,
+                    },
+                    number => self.number_to_integer(number),
                 }
             }
             BuiltinFunction::ToFloat => {
@@ -2682,7 +2761,7 @@ impl ExpressionPredicate {
                     Value::Int64(i) => Some(Value::Float64(i as f64)),
                     Value::Float64(f) => Some(Value::Float64(f)),
                     Value::Decimal(d) => Some(Value::Float64(d.to_f64())),
-                    Value::String(s) => s.parse::<f64>().ok().map(Value::Float64),
+                    Value::String(s) => trim_spaces(&s).parse::<f64>().ok().map(Value::Float64),
                     _ => None,
                 }
             }
@@ -2701,10 +2780,15 @@ impl ExpressionPredicate {
                 };
                 let precision = digits(self.eval_expr(&args[1], chunk, row)?)?;
                 let scale = digits(self.eval_expr(&args[2], chunk, row)?)?;
-                decimal
-                    .with_precision(precision, scale)
-                    .ok()
-                    .map(Value::Decimal)
+                // A value with more integer digits than the type holds is out
+                // of range, as SQL refuses it (22003).
+                match decimal.with_precision(precision, scale) {
+                    Ok(fitted) => Some(Value::Decimal(fitted)),
+                    Err(DecimalError::Overflow) => self.fail(OperatorError::numeric_out_of_range(
+                        format!("{decimal} as DECIMAL({precision}, {scale})"),
+                    )),
+                    Err(_) => None,
+                }
             }
             BuiltinFunction::ToBoolean => {
                 if args.len() != 1 {
@@ -2731,7 +2815,7 @@ impl ExpressionPredicate {
                 let Value::String(target) = self.eval_expr(&args[1], chunk, row)? else {
                     return None;
                 };
-                Some(cast_operand(val, &target))
+                self.cast_operand(val, &target)
             }
             BuiltinFunction::ToList => {
                 // toList(value) - wraps a scalar in a single-element list, or returns list as-is
@@ -3021,11 +3105,12 @@ impl ExpressionPredicate {
                     // Single-argument: treat as list check
                     let val = self.eval_expr(&args[0], chunk, row)?;
                     return match val {
+                        // Items compare by their identity, as DISTINCT and
+                        // grouping do (`3` and `3.0` are one value).
                         Value::List(items) => {
                             let mut seen = std::collections::HashSet::new();
                             let all_diff = items.iter().all(|item| {
-                                let key = format!("{item:?}");
-                                seen.insert(key)
+                                seen.insert(super::accumulator::HashableValue::from(item))
                             });
                             Some(Value::Bool(all_diff))
                         }
@@ -3063,12 +3148,13 @@ impl ExpressionPredicate {
                     // Single-argument: treat as list check
                     let val = self.eval_expr(&args[0], chunk, row)?;
                     return match val {
+                        // Items compare by their identity, as in `all_different`.
                         Value::List(items) => {
-                            let all_same = if items.is_empty() {
-                                true
-                            } else {
-                                items.iter().all(|item| item == &items[0])
-                            };
+                            let mut identities =
+                                items.iter().map(super::accumulator::HashableValue::from);
+                            let all_same = identities
+                                .next()
+                                .is_none_or(|first| identities.all(|item| item == first));
                             Some(Value::Bool(all_same))
                         }
                         _ => Some(Value::Bool(true)),
@@ -4660,6 +4746,7 @@ impl ExpressionPredicate {
             "STRING" => match val {
                 Value::String(_) => Some(val),
                 Value::Timestamp(ts) => Some(Value::String(ts.to_local_text().into())),
+                Value::Float64(f) => Some(Value::String(super::value_utils::float_text(f).into())),
                 other => Some(Value::String(other.to_string().into())),
             },
             "BOOLEAN" | "BOOL" => match val {
@@ -5011,7 +5098,7 @@ fn regex_escape_char(ch: char, out: &mut String) {
 fn value_to_string(val: &Value) -> Option<String> {
     match val {
         Value::Int64(i) => Some(i.to_string()),
-        Value::Float64(f) => Some(f.to_string()),
+        Value::Float64(f) => Some(super::value_utils::float_text(*f)),
         Value::Bool(b) => Some(b.to_string()),
         Value::String(s) => Some(s.to_string()),
         Value::Null => None,
@@ -7426,7 +7513,8 @@ mod tests {
             BinaryFilterOp::Mod,
             Value::Float64(0.0),
         ));
-        assert_eq!(result, None);
+        // A float remainder by zero is NaN, as IEEE fmod gives it.
+        assert!(matches!(result, Some(Value::Float64(f)) if f.is_nan()));
     }
 
     // === String addition with type coercion ===

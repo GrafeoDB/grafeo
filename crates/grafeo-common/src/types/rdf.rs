@@ -510,6 +510,9 @@ impl Literal {
     /// xsd:double datatype IRI.
     pub const XSD_DOUBLE: &'static str = "http://www.w3.org/2001/XMLSchema#double";
 
+    /// xsd:float datatype IRI.
+    pub const XSD_FLOAT: &'static str = "http://www.w3.org/2001/XMLSchema#float";
+
     /// xsd:boolean datatype IRI.
     pub const XSD_BOOLEAN: &'static str = "http://www.w3.org/2001/XMLSchema#boolean";
 

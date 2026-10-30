@@ -107,7 +107,7 @@ grafeo-server                        # in-memory
 | `POST /cypher` | Cypher | `{"query": "MATCH (n) RETURN count(n)"}` |
 | `POST /graphql` | GraphQL | `{"query": "{ Person { name age } }"}` |
 | `POST /gremlin` | Gremlin | `{"query": "g.V().hasLabel('Person').values('name')"}` |
-| `POST /sparql` | SPARQL | `{"query": "SELECT ?s WHERE { ?s a foaf:Person }"}` |
+| `POST /sparql` | SPARQL | `{"query": "PREFIX foaf: <http://xmlns.com/foaf/0.1/> SELECT ?s WHERE { ?s a foaf:Person }"}` |
 | `POST /sql` | SQL/PGQ | `{"query": "CALL grafeo.procedures() YIELD name"}` |
 | `POST /batch` | Mixed | Multiple queries in one atomic transaction |
 

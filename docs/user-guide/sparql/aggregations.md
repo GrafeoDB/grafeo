@@ -36,6 +36,7 @@ WHERE {
 }
 
 # Count distinct values
+PREFIX foaf: <http://xmlns.com/foaf/0.1/>
 SELECT (COUNT(DISTINCT ?country) AS ?countries)
 WHERE {
     ?person foaf:based_near ?country
@@ -45,6 +46,7 @@ WHERE {
 ## SUM and AVG
 
 ```sparql
+PREFIX foaf: <http://xmlns.com/foaf/0.1/>
 PREFIX ex: <http://example.org/>
 
 # Total price
@@ -55,6 +57,7 @@ WHERE {
 }
 
 # Average age
+PREFIX foaf: <http://xmlns.com/foaf/0.1/>
 SELECT (AVG(?age) AS ?avgAge)
 WHERE {
     ?person foaf:age ?age
@@ -74,6 +77,7 @@ WHERE {
 }
 
 # Price range
+PREFIX ex: <http://example.org/>
 SELECT (MIN(?price) AS ?minPrice) (MAX(?price) AS ?maxPrice)
 WHERE {
     ?product ex:price ?price
@@ -97,6 +101,7 @@ WHERE {
 GROUP BY ?country
 
 # Multiple grouping keys
+PREFIX ex: <http://example.org/>
 SELECT ?country ?city (COUNT(?person) AS ?count)
 WHERE {
     ?person ex:country ?country .
@@ -123,6 +128,7 @@ GROUP BY ?country
 HAVING (COUNT(?person) > 100)
 
 # Categories with average price over 50
+PREFIX ex: <http://example.org/>
 SELECT ?category (AVG(?price) AS ?avgPrice)
 WHERE {
     ?product ex:category ?category .
@@ -138,6 +144,7 @@ ORDER BY DESC(?avgPrice)
 Concatenate values within a group:
 
 ```sparql
+PREFIX ex: <http://example.org/>
 PREFIX foaf: <http://xmlns.com/foaf/0.1/>
 
 # List all friends as a comma-separated string
@@ -150,6 +157,7 @@ WHERE {
 GROUP BY ?person
 
 # With DISTINCT
+PREFIX ex: <http://example.org/>
 SELECT ?category (GROUP_CONCAT(DISTINCT ?tag; separator="; ") AS ?tags)
 WHERE {
     ?product ex:category ?category .

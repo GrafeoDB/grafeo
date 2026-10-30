@@ -11,6 +11,7 @@
 use std::collections::HashMap;
 
 use grafeo_common::types::{Decimal, Value};
+use grafeo_common::utils::GqlStatus;
 use grafeo_engine::GrafeoDB;
 
 const LANGUAGES: [&str; 2] = ["gql", "cypher"];
@@ -343,7 +344,6 @@ fn to_decimal_makes_decimals() {
             // 1.005 is the shortest text of its float, so it rounds up.
             ("RETURN toDecimal(1.005e0, 5, 2) AS x", "Decimal(1.01)"),
             ("RETURN toDecimal($a, 5, 0) AS x", "Decimal(2)"),
-            ("RETURN toDecimal(1234.5e0, 5, 2) AS x", "Null"),
             ("RETURN toDecimal(1, 0, 0) AS x", "Null"),
             ("RETURN toDecimal(1, 5, 6) AS x", "Null"),
         ] {
@@ -353,6 +353,14 @@ fn to_decimal_makes_decimals() {
                 "{language} `{query}`"
             );
         }
+        // A value that does not fit the precision fails with 22003.
+        let query = "RETURN toDecimal(1234.5e0, 5, 2) AS x";
+        let error = db.execute_language(query, language, None).expect_err(query);
+        assert_eq!(
+            GqlStatus::from(&error),
+            GqlStatus::DATA_NUMERIC_OUT_OF_RANGE,
+            "{language}: {error}"
+        );
     }
 }
 
@@ -366,7 +374,6 @@ fn gql_casts_to_decimal() {
         ("RETURN CAST(1.5e0 AS DEC) AS x", "Decimal(1.5)"),
         ("RETURN CAST(2.345 AS DECIMAL(10, 2)) AS x", "Decimal(2.35)"),
         ("RETURN CAST(2.5 AS dec(3)) AS x", "Decimal(3)"),
-        ("RETURN CAST(123.4 AS DECIMAL(4, 2)) AS x", "Null"),
         (
             "RETURN CAST([1, '2.5', 0.5e0] AS LIST<DECIMAL>) AS x",
             "List([Decimal(1), Decimal(2.5), Decimal(0.5)])",
@@ -374,6 +381,14 @@ fn gql_casts_to_decimal() {
     ] {
         assert_eq!(one(&db, "gql", query, &[]), expected, "`{query}`");
     }
+    // A value that does not fit the precision fails with 22003.
+    let query = "RETURN CAST(123.4 AS DECIMAL(4, 2)) AS x";
+    let error = db.execute(query).expect_err(query);
+    assert_eq!(
+        GqlStatus::from(&error),
+        GqlStatus::DATA_NUMERIC_OUT_OF_RANGE,
+        "{error}"
+    );
     for query in [
         "RETURN CAST(1 AS DECIMAL(0)) AS x",
         "RETURN CAST(1 AS DECIMAL(39, 2)) AS x",
@@ -408,7 +423,6 @@ fn sql_pgq_literals_and_casts() {
         ("CAST('2.345' AS DECIMAL(10, 2))", "Decimal(2.35)"),
         ("CAST(2.5 AS NUMERIC)", "Decimal(2.5)"),
         ("CAST(2.5 AS DEC(3))", "Decimal(3)"),
-        ("CAST(123.4 AS NUMERIC(4, 2))", "Null"),
         ("CAST(1.5 AS DOUBLE)", "Float64(1.5)"),
         ("CAST(1.5 AS DOUBLE PRECISION)", "Float64(1.5)"),
         ("CAST(1.5 AS REAL)", "Float64(1.5)"),
@@ -425,6 +439,16 @@ fn sql_pgq_literals_and_casts() {
             "`{expression}`"
         );
     }
+    // A value that does not fit the precision fails with 22003.
+    let overflow = query("CAST(123.4 AS NUMERIC(4, 2))");
+    let error = db
+        .execute_language(&overflow, "sql", None)
+        .expect_err(&overflow);
+    assert_eq!(
+        GqlStatus::from(&error),
+        GqlStatus::DATA_NUMERIC_OUT_OF_RANGE,
+        "{error}"
+    );
     for (expression, word) in [
         ("CAST(1 AS DECIMAL(39))", "precision"),
         ("CAST(1 AS WIDGET)", "WIDGET"),
@@ -644,7 +668,8 @@ fn sparql_scans_give_literals_as_stored_and_numbers_of_their_type() {
             "\"abc\"^^xsd:integer",
         ]
     );
-    // Arithmetic on stored numbers follows their types.
+    // Arithmetic on stored numbers follows their types: a float times an
+    // integer stays a float (XPath numeric promotion).
     assert_eq!(
         values("(?v * 2 AS ?x)")[..5],
         [
@@ -652,7 +677,7 @@ fn sparql_scans_give_literals_as_stored_and_numbers_of_their_type() {
             "\"14\"^^xsd:integer",
             "\"5\"^^xsd:decimal",
             "\"3.0E0\"^^xsd:double",
-            "\"5.0E-1\"^^xsd:double",
+            "\"5.0E-1\"^^xsd:float",
         ]
     );
     // STR gives the lexical form, DATATYPE the type.

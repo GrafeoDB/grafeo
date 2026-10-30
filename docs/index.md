@@ -239,6 +239,8 @@ Choose the query language that fits the project:
 === "SPARQL"
 
     ```sparql
+    PREFIX foaf: <http://xmlns.com/foaf/0.1/>
+
     SELECT DISTINCT ?fofName WHERE {
       ?me foaf:name "Alix" .
       ?me foaf:knows ?friend .

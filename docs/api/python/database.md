@@ -134,7 +134,7 @@ def explain_sparql(self, query: str) -> QueryResult
 
 ```python
 # View the query plan without executing
-result = db.explain_sparql("EXPLAIN SELECT ?name WHERE { ?p a :Person ; :name ?name }")
+result = db.explain_sparql("EXPLAIN SELECT ?name WHERE { ?p a <http://example.org/Person> ; <http://example.org/name> ?name }")
 for row in result:
     print(row)
 
@@ -792,7 +792,7 @@ for node_id, score in results:
 
 ### hybrid_search()
 
-Combined text and vector search using Reciprocal Rank Fusion (RRF) or weighted fusion. Requires the `hybrid-search` feature. For best results, create both a text index (`create_text_index()`) and a vector index (`create_vector_index()`). If either index is missing, that source is silently omitted from fusion.
+Combined text and vector search using Reciprocal Rank Fusion (RRF) or weighted fusion. Requires the `hybrid-search` feature. For best results, create both a text index (`create_text_index()`) and a vector index (`create_vector_index()`). If either index is missing, that source is silently omitted from fusion. With neither (no text index, and no vector index or no `query_vector`), it raises an error naming the indexes.
 
 ```python
 def hybrid_search(

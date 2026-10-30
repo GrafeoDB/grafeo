@@ -139,6 +139,39 @@ pub(crate) fn label_union(
         .then(|| labels.into_iter().map(str::to_string).collect())
 }
 
+/// The check `variable:L1 OR variable:L2 ...` of the labels `predicate`
+/// requires of `variable` (see [`any_label`]), when it requires some: a
+/// filter whose subqueries run per row adds it to its plain conjuncts, so a
+/// scan of every node reads only those labels' nodes (see [`label_union`]).
+/// The check is implied by `predicate`, so the rows are the same.
+pub(crate) fn implied_label_check(
+    predicate: &LogicalExpression,
+    variable: &str,
+) -> Option<LogicalExpression> {
+    let mut labels: Vec<&str> = Vec::new();
+    for label in any_label(predicate, variable)? {
+        if !labels.contains(&label) {
+            labels.push(label);
+        }
+    }
+    labels
+        .into_iter()
+        .map(|label| {
+            LogicalExpression::builtin(
+                BuiltinFunction::HasLabel,
+                vec![
+                    LogicalExpression::Variable(variable.to_string()),
+                    LogicalExpression::Literal(Value::String(label.into())),
+                ],
+            )
+        })
+        .reduce(|left, right| LogicalExpression::Binary {
+            left: Box::new(left),
+            op: BinaryOp::Or,
+            right: Box::new(right),
+        })
+}
+
 /// How many nodes have `label` by the store's statistics: none for a label
 /// they do not list. Plans choose by it; the reads at a view answer the
 /// same whichever label a plan scans.
@@ -164,8 +197,9 @@ fn and_conjuncts<'a>(predicate: &'a LogicalExpression, out: &mut Vec<&'a Logical
 }
 
 /// The labels of which `expression` requires one of `variable`: label checks
-/// joined by `OR`, or `any(l IN labels(variable) WHERE ...)` over equalities
-/// of `l` and `IN` lists of label names.
+/// joined by `OR` (each branch a check or a conjunction holding one), or
+/// `any(l IN labels(variable) WHERE ...)` over equalities of `l` and `IN`
+/// lists of label names.
 fn any_label<'a>(expression: &'a LogicalExpression, variable: &str) -> Option<Vec<&'a str>> {
     if let Some(label) = label_check(expression, variable) {
         return Some(vec![label]);
@@ -180,6 +214,19 @@ fn any_label<'a>(expression: &'a LogicalExpression, variable: &str) -> Option<Ve
             labels.extend(any_label(right, variable)?);
             Some(labels)
         }
+        // A conjunction requires the labels one of its conjuncts requires,
+        // so `(n:Tag AND ...) OR (n:Topic AND ...)` reads only the nodes of
+        // the two labels (the filter above the scan still checks the rest).
+        // Of two conjuncts that each require labels, the fewer labels.
+        LogicalExpression::Binary {
+            left,
+            op: BinaryOp::And,
+            right,
+        } => match (any_label(left, variable), any_label(right, variable)) {
+            (Some(left), Some(right)) if right.len() < left.len() => Some(right),
+            (Some(labels), _) | (None, Some(labels)) => Some(labels),
+            (None, None) => None,
+        },
         LogicalExpression::ListPredicate {
             kind: ListPredicateKind::Any,
             variable: element,

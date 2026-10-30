@@ -10,9 +10,7 @@ use hashbrown::HashSet;
 
 use crate::config::Config;
 
-use crate::catalog::{
-    EdgeTypeDefinition, GraphTypeDefinition, NodeTypeDefinition, ProcedureDefinition,
-};
+use crate::catalog::{GraphTypeDefinition, ProcedureDefinition};
 
 /// Current snapshot version: 5 holds the catalog as its records (the
 /// catalog section's own, see `catalog_record`); 4, which 0.5.x and
@@ -178,8 +176,8 @@ struct Snapshot {
 /// Schema metadata within a snapshot.
 #[derive(serde::Serialize, serde::Deserialize, Default)]
 struct SnapshotSchema {
-    node_types: Vec<NodeTypeDefinition>,
-    edge_types: Vec<EdgeTypeDefinition>,
+    node_types: Vec<super::catalog_records::LegacyNodeType>,
+    edge_types: Vec<super::catalog_records::LegacyEdgeType>,
     graph_types: Vec<GraphTypeDefinition>,
     procedures: Vec<ProcedureDefinition>,
     schemas: Vec<String>,
@@ -670,10 +668,12 @@ fn restore_schema_from_snapshot<S: super::catalog_section::CatalogStore>(
 
     let damaged = |what: String| Error::corruption(format!("the snapshot's schema: {what}"));
     for def in &schema.node_types {
-        catalog.register_or_replace_node_type(def.clone());
+        let def = def.definition()?;
+        catalog.register_or_replace_node_type(def);
     }
     for def in &schema.edge_types {
-        catalog.register_or_replace_edge_type_def(def.clone());
+        let def = def.definition()?;
+        catalog.register_or_replace_edge_type_def(def);
     }
     for def in &schema.graph_types {
         let name = def.name.clone();

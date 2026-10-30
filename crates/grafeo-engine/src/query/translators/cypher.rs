@@ -2251,11 +2251,22 @@ impl CypherTranslator {
                     crate::query::planner::common::aggregate_column_name(&agg_expr)
                 });
                 agg_expr.alias = Some(column.clone());
+                let reads_as_zero = agg_expr.function == AggregateFunction::Sum;
                 aggregates.push(agg_expr);
-                post_return_items.push(ReturnItem {
-                    expression: LogicalExpression::Variable(column),
-                    alias: item.alias.clone(),
-                });
+                if reads_as_zero {
+                    needs_post_return = true;
+                    post_return_items.push(ReturnItem {
+                        expression: sum_of_no_values_is_zero(LogicalExpression::Variable(
+                            column.clone(),
+                        )),
+                        alias: item.alias.clone().or(Some(column)),
+                    });
+                } else {
+                    post_return_items.push(ReturnItem {
+                        expression: LogicalExpression::Variable(column),
+                        alias: item.alias.clone(),
+                    });
+                }
                 seen_aggregate = true;
             } else if contains_aggregate(&item.expression) {
                 // Wrapped aggregate (e.g. `count(n) > 0 AS exists`)
@@ -2377,8 +2388,21 @@ impl CypherTranslator {
                     )));
                 }
                 *agg_counter += 1;
+                // The sum of no values is 0 in openCypher (see
+                // `sum_of_no_values_is_zero`).
+                *expr = if aggregate.function == AggregateFunction::Sum {
+                    ast::Expression::FunctionCall {
+                        name: "coalesce".to_string(),
+                        args: vec![
+                            ast::Expression::Variable(alias),
+                            ast::Expression::Literal(ast::Literal::Integer(0)),
+                        ],
+                        distinct: false,
+                    }
+                } else {
+                    ast::Expression::Variable(alias)
+                };
                 aggregates_out.push(aggregate);
-                *expr = ast::Expression::Variable(alias);
                 return Ok(());
             }
         }
@@ -4030,6 +4054,16 @@ fn resolve_cypher_call(name: &str, args: Vec<LogicalExpression>) -> Result<Logic
         *called = name.to_string();
     }
     Ok(call)
+}
+
+/// The column of a `sum`, read as openCypher reads it: the sum of no values
+/// (no rows, or only nulls) is 0, where GQL and SQL give null, so the column
+/// reads as `coalesce(column, 0)`.
+fn sum_of_no_values_is_zero(column: LogicalExpression) -> LogicalExpression {
+    LogicalExpression::builtin(
+        BuiltinFunction::Coalesce,
+        vec![column, LogicalExpression::Literal(Value::Int64(0))],
+    )
 }
 
 #[cfg(test)]

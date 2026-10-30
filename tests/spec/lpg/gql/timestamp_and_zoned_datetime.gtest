@@ -1,0 +1,210 @@
+# A TIMESTAMP and a ZONED DATETIME are one instant everywhere
+#
+# A timestamp (datetime('...Z')) and a zoned datetime (zoned_datetime) of
+# the same instant are equal (#584, 21.3b_temporal_extended.gtest). They
+# also order, aggregate and group as that instant: ORDER BY, min and max,
+# GROUP BY and DISTINCT over a column holding both, and a property index
+# lookup on such a column. They ordered the zoned values before the
+# timestamps and kept two groups for one instant.
+#
+# The events: Jules 09:00Z (zoned, 10:00+01:00), Gus 10:00Z (timestamp),
+# Alix 10:30Z (zoned, 11:30+01:00), Mia 10:30Z (timestamp), Vincent 11:00Z
+# (zoned, 13:00+02:00). Jules's wall clock 10:00 is Gus's, an hour earlier.
+
+meta:
+  language: gql
+  model: lpg
+  section: "21.3"
+  title: TIMESTAMP and ZONED DATETIME as one instant
+  dataset: empty
+
+tests:
+
+  # ---------------------------------------------------------------------------
+  # ORDER BY, min and max
+  # ---------------------------------------------------------------------------
+
+  - name: order_by_a_mixed_column_orders_by_instant
+    setup:
+      - "INSERT (:Event {name: 'Alix', at: zoned_datetime('2024-03-15T11:30:00+01:00')})"
+      - "INSERT (:Event {name: 'Gus', at: datetime('2024-03-15T10:00:00Z')})"
+      - "INSERT (:Event {name: 'Mia', at: datetime('2024-03-15T10:30:00Z')})"
+      - "INSERT (:Event {name: 'Vincent', at: zoned_datetime('2024-03-15T13:00:00+02:00')})"
+      - "INSERT (:Event {name: 'Jules', at: zoned_datetime('2024-03-15T10:00:00+01:00')})"
+    query: "MATCH (e:Event) RETURN e.name AS n ORDER BY e.at, e.name"
+    expect:
+      ordered: true
+      rows:
+        - [Jules]
+        - [Gus]
+        - [Alix]
+        - [Mia]
+        - [Vincent]
+
+  - name: order_by_a_mixed_column_descending
+    setup:
+      - "INSERT (:Event {name: 'Alix', at: zoned_datetime('2024-03-15T11:30:00+01:00')})"
+      - "INSERT (:Event {name: 'Gus', at: datetime('2024-03-15T10:00:00Z')})"
+      - "INSERT (:Event {name: 'Mia', at: datetime('2024-03-15T10:30:00Z')})"
+      - "INSERT (:Event {name: 'Vincent', at: zoned_datetime('2024-03-15T13:00:00+02:00')})"
+      - "INSERT (:Event {name: 'Jules', at: zoned_datetime('2024-03-15T10:00:00+01:00')})"
+    query: "MATCH (e:Event) RETURN e.name AS n ORDER BY e.at DESC, e.name"
+    expect:
+      ordered: true
+      rows:
+        - [Vincent]
+        - [Alix]
+        - [Mia]
+        - [Gus]
+        - [Jules]
+
+  - name: min_and_max_of_a_mixed_column_are_the_earliest_and_latest_instants
+    setup:
+      - "INSERT (:Event {name: 'Alix', at: zoned_datetime('2024-03-15T11:30:00+01:00')})"
+      - "INSERT (:Event {name: 'Gus', at: datetime('2024-03-15T10:00:00Z')})"
+      - "INSERT (:Event {name: 'Mia', at: datetime('2024-03-15T10:30:00Z')})"
+      - "INSERT (:Event {name: 'Vincent', at: zoned_datetime('2024-03-15T13:00:00+02:00')})"
+      - "INSERT (:Event {name: 'Jules', at: zoned_datetime('2024-03-15T10:00:00+01:00')})"
+    query: "MATCH (e:Event) RETURN min(e.at) = zoned_datetime('2024-03-15T09:00:00Z') AS earliest, max(e.at) = zoned_datetime('2024-03-15T11:00:00Z') AS latest"
+    expect:
+      rows:
+        - [true, true]
+
+  # ---------------------------------------------------------------------------
+  # Equality, GROUP BY and DISTINCT
+  # ---------------------------------------------------------------------------
+
+  - name: stored_values_of_one_instant_are_equal
+    setup:
+      - "INSERT (:Event {name: 'Alix', at: zoned_datetime('2024-03-15T11:30:00+01:00')})"
+      - "INSERT (:Event {name: 'Gus', at: datetime('2024-03-15T10:00:00Z')})"
+      - "INSERT (:Event {name: 'Mia', at: datetime('2024-03-15T10:30:00Z')})"
+      - "INSERT (:Event {name: 'Vincent', at: zoned_datetime('2024-03-15T13:00:00+02:00')})"
+      - "INSERT (:Event {name: 'Jules', at: zoned_datetime('2024-03-15T10:00:00+01:00')})"
+    query: "MATCH (a:Event {name: 'Alix'}), (m:Event {name: 'Mia'}) RETURN a.at = m.at AS eq, a.at <> m.at AS ne"
+    expect:
+      rows:
+        - [true, false]
+
+  - name: group_by_puts_one_instant_in_one_group
+    setup:
+      - "INSERT (:Event {name: 'Alix', at: zoned_datetime('2024-03-15T11:30:00+01:00')})"
+      - "INSERT (:Event {name: 'Gus', at: datetime('2024-03-15T10:00:00Z')})"
+      - "INSERT (:Event {name: 'Mia', at: datetime('2024-03-15T10:30:00Z')})"
+      - "INSERT (:Event {name: 'Vincent', at: zoned_datetime('2024-03-15T13:00:00+02:00')})"
+      - "INSERT (:Event {name: 'Jules', at: zoned_datetime('2024-03-15T10:00:00+01:00')})"
+    query: "MATCH (e:Event) WITH e.at AS t, count(*) AS c RETURN count(*) AS instants, max(c) AS biggest"
+    expect:
+      rows:
+        - [4, 2]
+
+  - name: distinct_counts_one_instant_once
+    setup:
+      - "INSERT (:Event {name: 'Alix', at: zoned_datetime('2024-03-15T11:30:00+01:00')})"
+      - "INSERT (:Event {name: 'Gus', at: datetime('2024-03-15T10:00:00Z')})"
+      - "INSERT (:Event {name: 'Mia', at: datetime('2024-03-15T10:30:00Z')})"
+      - "INSERT (:Event {name: 'Vincent', at: zoned_datetime('2024-03-15T13:00:00+02:00')})"
+      - "INSERT (:Event {name: 'Jules', at: zoned_datetime('2024-03-15T10:00:00+01:00')})"
+    query: "MATCH (e:Event) RETURN count(DISTINCT e.at) AS instants"
+    expect:
+      rows:
+        - [4]
+
+  - name: return_distinct_gives_one_row_per_instant
+    setup:
+      - "INSERT (:Event {name: 'Alix', at: zoned_datetime('2024-03-15T11:30:00+01:00')})"
+      - "INSERT (:Event {name: 'Gus', at: datetime('2024-03-15T10:00:00Z')})"
+      - "INSERT (:Event {name: 'Mia', at: datetime('2024-03-15T10:30:00Z')})"
+      - "INSERT (:Event {name: 'Vincent', at: zoned_datetime('2024-03-15T13:00:00+02:00')})"
+      - "INSERT (:Event {name: 'Jules', at: zoned_datetime('2024-03-15T10:00:00+01:00')})"
+    query: "MATCH (e:Event) RETURN DISTINCT e.at AS t"
+    expect:
+      count: 4
+
+  # ---------------------------------------------------------------------------
+  # Filters, without and with a property index
+  # ---------------------------------------------------------------------------
+
+  - name: equality_filters_find_both_kinds
+    setup:
+      - "INSERT (:Event {name: 'Alix', at: zoned_datetime('2024-03-15T11:30:00+01:00')})"
+      - "INSERT (:Event {name: 'Gus', at: datetime('2024-03-15T10:00:00Z')})"
+      - "INSERT (:Event {name: 'Mia', at: datetime('2024-03-15T10:30:00Z')})"
+      - "INSERT (:Event {name: 'Vincent', at: zoned_datetime('2024-03-15T13:00:00+02:00')})"
+      - "INSERT (:Event {name: 'Jules', at: zoned_datetime('2024-03-15T10:00:00+01:00')})"
+    query: "MATCH (e:Event) WHERE e.at = datetime('2024-03-15T10:30:00Z') OR e.at = zoned_datetime('2024-03-15T10:00:00+01:00') RETURN e.name AS n"
+    expect:
+      rows:
+        - [Alix]
+        - [Mia]
+        - [Jules]
+
+  - name: a_range_filter_finds_both_kinds
+    setup:
+      - "INSERT (:Event {name: 'Alix', at: zoned_datetime('2024-03-15T11:30:00+01:00')})"
+      - "INSERT (:Event {name: 'Gus', at: datetime('2024-03-15T10:00:00Z')})"
+      - "INSERT (:Event {name: 'Mia', at: datetime('2024-03-15T10:30:00Z')})"
+      - "INSERT (:Event {name: 'Vincent', at: zoned_datetime('2024-03-15T13:00:00+02:00')})"
+      - "INSERT (:Event {name: 'Jules', at: zoned_datetime('2024-03-15T10:00:00+01:00')})"
+    # Gus 10:00Z to Vincent 11:00Z (12:00+01:00), both ends included.
+    query: "MATCH (e:Event) WHERE e.at >= datetime('2024-03-15T10:00:00Z') AND e.at <= zoned_datetime('2024-03-15T12:00:00+01:00') RETURN e.name AS n"
+    expect:
+      rows:
+        - [Gus]
+        - [Alix]
+        - [Mia]
+        - [Vincent]
+
+  - name: an_indexed_equality_lookup_finds_both_kinds
+    setup:
+      - "CREATE INDEX event_at FOR (e:Event) ON (e.at)"
+      - "INSERT (:Event {name: 'Alix', at: zoned_datetime('2024-03-15T11:30:00+01:00')})"
+      - "INSERT (:Event {name: 'Gus', at: datetime('2024-03-15T10:00:00Z')})"
+      - "INSERT (:Event {name: 'Mia', at: datetime('2024-03-15T10:30:00Z')})"
+      - "INSERT (:Event {name: 'Vincent', at: zoned_datetime('2024-03-15T13:00:00+02:00')})"
+      - "INSERT (:Event {name: 'Jules', at: zoned_datetime('2024-03-15T10:00:00+01:00')})"
+    query: "MATCH (e:Event {at: datetime('2024-03-15T10:30:00Z')}) RETURN e.name AS n"
+    expect:
+      rows:
+        - [Alix]
+        - [Mia]
+
+  - name: an_indexed_equality_lookup_by_a_zoned_value_finds_both_kinds
+    setup:
+      - "CREATE INDEX event_at FOR (e:Event) ON (e.at)"
+      - "INSERT (:Event {name: 'Alix', at: zoned_datetime('2024-03-15T11:30:00+01:00')})"
+      - "INSERT (:Event {name: 'Gus', at: datetime('2024-03-15T10:00:00Z')})"
+      - "INSERT (:Event {name: 'Mia', at: datetime('2024-03-15T10:30:00Z')})"
+    query: "MATCH (e:Event) WHERE e.at = zoned_datetime('2024-03-15T12:30:00+02:00') RETURN e.name AS n"
+    expect:
+      rows:
+        - [Alix]
+        - [Mia]
+
+  - name: an_indexed_range_filter_finds_both_kinds
+    setup:
+      - "CREATE INDEX event_at FOR (e:Event) ON (e.at)"
+      - "INSERT (:Event {name: 'Alix', at: zoned_datetime('2024-03-15T11:30:00+01:00')})"
+      - "INSERT (:Event {name: 'Gus', at: datetime('2024-03-15T10:00:00Z')})"
+      - "INSERT (:Event {name: 'Mia', at: datetime('2024-03-15T10:30:00Z')})"
+      - "INSERT (:Event {name: 'Vincent', at: zoned_datetime('2024-03-15T13:00:00+02:00')})"
+      - "INSERT (:Event {name: 'Jules', at: zoned_datetime('2024-03-15T10:00:00+01:00')})"
+    query: "MATCH (e:Event) WHERE e.at > datetime('2024-03-15T10:00:00Z') AND e.at <= zoned_datetime('2024-03-15T11:30:00+01:00') RETURN e.name AS n"
+    expect:
+      rows:
+        - [Alix]
+        - [Mia]
+
+  - name: an_indexed_order_by_orders_by_instant
+    setup:
+      - "CREATE INDEX event_at FOR (e:Event) ON (e.at)"
+      - "INSERT (:Event {name: 'Alix', at: zoned_datetime('2024-03-15T11:30:00+01:00')})"
+      - "INSERT (:Event {name: 'Gus', at: datetime('2024-03-15T10:00:00Z')})"
+      - "INSERT (:Event {name: 'Jules', at: zoned_datetime('2024-03-15T10:00:00+01:00')})"
+    query: "MATCH (e:Event) RETURN e.name AS n ORDER BY e.at"
+    expect:
+      ordered: true
+      rows:
+        - [Jules]
+        - [Gus]
+        - [Alix]

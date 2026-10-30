@@ -64,7 +64,7 @@ All query languages work inside transactions:
 const tx = db.beginTransaction();
 await tx.execute("INSERT (:Person {name: 'Alix'})");           // GQL
 await tx.executeCypher("CREATE (:Person {name: 'Gus'})");      // Cypher
-await tx.executeSparql("INSERT DATA { :s :p :o }");            // SPARQL
+await tx.executeSparql("PREFIX : <http://example.org/> INSERT DATA { :s :p :o }"); // SPARQL
 await tx.executeGremlin("g.addV('Person').property('name','Harm')"); // Gremlin
 tx.commit();
 ```

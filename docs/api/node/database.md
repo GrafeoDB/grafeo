@@ -531,7 +531,7 @@ With `filters`, only matching nodes are searched, so up to `k` of them come back
 
 ### hybridSearch()
 
-Combine text (BM25) and vector similarity search. For best results, create both a text index (`createTextIndex()`) and a vector index (`createVectorIndex()`). If either index is missing, that source is silently omitted from fusion.
+Combine text (BM25) and vector similarity search. For best results, create both a text index (`createTextIndex()`) and a vector index (`createVectorIndex()`). If either index is missing, that source is silently omitted from fusion. With neither (no text index, and no vector index or no `queryVector`), it rejects with an error naming the indexes.
 
 Returns `[[nodeId, score], ...]` sorted by fused score **descending** (higher = more relevant). These are fusion scores, **not** distances.
 

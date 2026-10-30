@@ -2246,4 +2246,20 @@ for case_id, query in [
 ]:
     case(case_id, RDF_PREFIXES + query, SPARQL, "rdf")
 
+# DM: expression results. Cypher sums no values to 0, GQL keeps null (DM1 to DM3); a float
+#     remainder by zero is NaN (DM4, DM5); toString spells the infinities Infinity and
+#     -Infinity (DM6); toInteger trims text and truncates decimal text (DM7); toInteger of
+#     NaN is null (DM8)
+for case_id, query, languages in [
+    ("DM1", "UNWIND [] AS x RETURN sum(x) AS s, count(x) AS c, avg(x) AS a", CYPHER),
+    ("DM2", "UNWIND [[1, null], [2, 5], [2, null]] AS r RETURN r[0] AS g, sum(r[1]) AS s ORDER BY g", CYPHER),
+    ("DM3", "UNWIND [] AS x RETURN sum(x) AS s, count(x) AS c, avg(x) AS a", GQL),
+    ("DM4", "RETURN 1.5e0 % 0 AS a, toFloat(1) % 0 AS b", GQL),
+    ("DM5", "RETURN 1.5 % 0 AS a, toFloat(1) % 0.0 AS b", CYPHER),
+    ("DM6", "RETURN toString(Infinity) AS a, toString(-Infinity) AS b, toString(NaN) AS c", BOTH),
+    ("DM7", "RETURN toInteger(' 42 ') AS a, toInteger('4.2') AS b, toInteger('-4.7') AS c, toFloat(' 1.5 ') AS d, toInteger('x') AS e", BOTH),
+    ("DM8", "RETURN toInteger(NaN) AS a", BOTH),
+]:
+    case(case_id, query, languages, "empty")
+
 # fmt: on

@@ -638,7 +638,12 @@ impl RdfPlanner {
     ) -> Result<(Box<dyn Operator>, Vec<String>, Vec<LogicalType>)> {
         use crate::query::planner::common;
         let (input_op, columns, types) = self.plan_operator(&distinct.input)?;
-        let (op, cols) = common::build_distinct(input_op, columns, distinct.columns.as_deref());
+        let (op, cols) = common::build_distinct(
+            input_op,
+            columns,
+            distinct.columns.as_deref(),
+            grafeo_common::types::TemporalComparison::TypesApart,
+        );
         Ok((op, cols, types))
     }
 
@@ -1003,6 +1008,8 @@ impl RdfPlanner {
                     agg_expr.function,
                     LogicalAggregateFunction::Sum | LogicalAggregateFunction::Avg
                 ),
+                // SPARQL compares its terms as they are.
+                temporal: grafeo_common::types::TemporalComparison::TypesApart,
             });
         }
 

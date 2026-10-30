@@ -6,7 +6,7 @@
 use std::cmp::Ordering;
 use std::collections::HashMap;
 
-use grafeo_common::types::{Decimal, Value};
+use grafeo_common::types::{Decimal, TemporalComparison, Value};
 
 use super::sort::{NullOrder, SortDirection};
 
@@ -193,6 +193,23 @@ fn type_rank(value: &Value) -> u8 {
 /// Compares two floats numerically, with NaN after every other number and
 /// equal to itself; `-0.0` equals `0.0`. A total order, so floats can be
 /// sorted with it (`partial_cmp` with NaN as equal is not: a sort may panic).
+/// The text of a float in a string: Rust's, except the infinities, which are
+/// `Infinity` and `-Infinity` (the openCypher spelling, as `NaN` is; Rust
+/// writes `inf`).
+#[must_use]
+pub(crate) fn float_text(f: f64) -> String {
+    if f.is_infinite() {
+        if f.is_sign_positive() {
+            "Infinity"
+        } else {
+            "-Infinity"
+        }
+        .to_string()
+    } else {
+        f.to_string()
+    }
+}
+
 pub(crate) fn compare_floats(a: f64, b: f64) -> Ordering {
     match (a.is_nan(), b.is_nan()) {
         (true, true) => Ordering::Equal,
@@ -369,6 +386,50 @@ pub(crate) fn order_by(
             if descending { order.reverse() } else { order }
         }
     }
+}
+
+/// [`compare_sort_values`] with both values read as `temporal` reads them
+/// (see [`order_by_under`]).
+pub(crate) fn compare_sort_values_under(
+    a: Option<&Value>,
+    b: Option<&Value>,
+    direction: SortDirection,
+    null_order: NullOrder,
+    temporal: TemporalComparison,
+) -> Ordering {
+    order_by_under(
+        a,
+        b,
+        direction == SortDirection::Descending,
+        null_order == NullOrder::NullsFirst,
+        temporal,
+    )
+}
+
+/// [`order_by`] with both values read as `temporal` reads them (see
+/// [`TemporalComparison::normalize`]): under the reading of GQL and SQL/PGQ a
+/// local datetime sorts among zoned datetimes by its instant at the session
+/// offset, as `<` orders them. The sorted values themselves do not change.
+pub(crate) fn order_by_under(
+    a: Option<&Value>,
+    b: Option<&Value>,
+    descending: bool,
+    nulls_first: bool,
+    temporal: TemporalComparison,
+) -> Ordering {
+    let a = a.map(|value| temporal.normalize(value));
+    let b = b.map(|value| temporal.normalize(value));
+    order_by(a.as_deref(), b.as_deref(), descending, nulls_first)
+}
+
+/// `value` as `temporal` reads it (see [`TemporalComparison::normalize`]),
+/// without a copy when the reading leaves it as it is.
+pub(crate) fn normalized(value: Value, temporal: TemporalComparison) -> Value {
+    let changed = match temporal.normalize(&value) {
+        std::borrow::Cow::Owned(changed) => Some(changed),
+        std::borrow::Cow::Borrowed(_) => None,
+    };
+    changed.unwrap_or(value)
 }
 
 /// Returns `true` if `new` is less than `current` in the order of ORDER BY

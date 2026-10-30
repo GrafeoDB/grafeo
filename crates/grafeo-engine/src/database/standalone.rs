@@ -531,7 +531,7 @@ fn put<S: RootStore>(
             applying.catalog(op, outcome)
         }
         CatalogRecord::NodeType(record) => {
-            catalog.register_or_replace_node_type(node_type_definition(record.clone()));
+            catalog.register_or_replace_node_type(node_type_definition(record.clone())?);
             Ok(())
         }
         CatalogRecord::EdgeType(record) => {

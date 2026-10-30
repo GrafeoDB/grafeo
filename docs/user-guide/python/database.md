@@ -253,6 +253,8 @@ grafeo.GrafeoDB.restore_to_epoch("/backups", epoch=100, output_path="./restored.
 
 An incremental backup needs a full backup in its directory, and continues from the last backup there. The chain survives restarts: once a backup has been taken, `close()` keeps the write-ahead log written since the last backup (in `<file>.wal/`), and the next incremental backup after a reopen takes it.
 
+An incremental backup goes to the directory of the last full backup: one to another directory fails with an error naming it, also when a schema statement or graph command came between the two. Backups of one database run one at a time, also to different directories, and a backup directory that another process uses gives a busy error. A backup is on disk before the database lets go of the log it covers. A restore leaves either a complete database or nothing at its output path, so a failed restore can be retried to the same path.
+
 ## Persistence
 
 ```python

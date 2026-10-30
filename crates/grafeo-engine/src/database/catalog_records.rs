@@ -142,22 +142,24 @@ fn type_constraint_record(constraint: &TypeConstraint) -> TypeConstraintRecord {
         }
         TypeConstraint::Unique(properties) => TypeConstraintRecord::Unique(properties.clone()),
         TypeConstraint::NotNull(property) => TypeConstraintRecord::NotNull(property.clone()),
-        TypeConstraint::Check { name, expression } => TypeConstraintRecord::Check {
-            name: name.clone(),
-            expression: expression.clone(),
-        },
     }
 }
 
-fn type_constraint(record: TypeConstraintRecord) -> TypeConstraint {
-    match record {
+/// The constraint of a record of the type `type_name`. A CHECK record is
+/// refused: no version wrote one through DDL, and CHECK constraints are not
+/// supported (the record kind stays in the format until its next revision).
+fn type_constraint(type_name: &str, record: TypeConstraintRecord) -> Result<TypeConstraint> {
+    Ok(match record {
         TypeConstraintRecord::PrimaryKey(properties) => TypeConstraint::PrimaryKey(properties),
         TypeConstraintRecord::Unique(properties) => TypeConstraint::Unique(properties),
         TypeConstraintRecord::NotNull(property) => TypeConstraint::NotNull(property),
-        TypeConstraintRecord::Check { name, expression } => {
-            TypeConstraint::Check { name, expression }
+        TypeConstraintRecord::Check { expression, .. } => {
+            return Err(Error::Serialization(format!(
+                "type '{type_name}' has a CHECK constraint ({expression}), which this version \
+                 does not support"
+            )));
         }
-    }
+    })
 }
 
 // ── Node, edge and graph types ──────────────────────────────────────
@@ -174,20 +176,96 @@ pub(crate) fn node_type_record(def: &NodeTypeDefinition) -> NodeTypeRecord {
     }
 }
 
+/// A node type as the 0.5.x catalog layouts hold it (catalog section
+/// version 1, snapshot v4): bincode of these fields in this order. Its
+/// constraints keep the variant a CHECK constraint had, which
+/// [`TypeConstraintRecord`] still has, so such a file reads and is refused by
+/// name (see [`type_constraint`]) instead of failing as damaged.
+#[derive(serde::Serialize, serde::Deserialize)]
+pub(crate) struct LegacyNodeType {
+    name: String,
+    properties: Vec<crate::catalog::TypedProperty>,
+    constraints: Vec<TypeConstraintRecord>,
+    parent_types: Vec<String>,
+}
+
+impl LegacyNodeType {
+    /// The node type it holds.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Serialization`] naming the type when it has a CHECK
+    /// constraint (see [`type_constraint`]).
+    pub(crate) fn definition(&self) -> Result<NodeTypeDefinition> {
+        let constraints = self
+            .constraints
+            .iter()
+            .map(|constraint| type_constraint(&self.name, constraint.clone()))
+            .collect::<Result<_>>()?;
+        Ok(NodeTypeDefinition {
+            name: self.name.clone(),
+            properties: self.properties.clone(),
+            constraints,
+            parent_types: self.parent_types.clone(),
+            key_labels: Vec::new(),
+        })
+    }
+}
+
+/// An edge type as the 0.5.x catalog layouts hold it (see
+/// [`LegacyNodeType`]).
+#[derive(serde::Serialize, serde::Deserialize)]
+pub(crate) struct LegacyEdgeType {
+    name: String,
+    properties: Vec<crate::catalog::TypedProperty>,
+    constraints: Vec<TypeConstraintRecord>,
+    source_node_types: Vec<String>,
+    target_node_types: Vec<String>,
+}
+
+impl LegacyEdgeType {
+    /// The edge type it holds.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Serialization`] naming the type when it has a CHECK
+    /// constraint (see [`type_constraint`]).
+    pub(crate) fn definition(&self) -> Result<EdgeTypeDefinition> {
+        let constraints = self
+            .constraints
+            .iter()
+            .map(|constraint| type_constraint(&self.name, constraint.clone()))
+            .collect::<Result<_>>()?;
+        Ok(EdgeTypeDefinition {
+            name: self.name.clone(),
+            properties: self.properties.clone(),
+            constraints,
+            source_node_types: self.source_node_types.clone(),
+            target_node_types: self.target_node_types.clone(),
+            key_labels: Vec::new(),
+        })
+    }
+}
+
 /// The node type of a record.
-#[must_use]
-pub(crate) fn node_type_definition(record: NodeTypeRecord) -> NodeTypeDefinition {
-    NodeTypeDefinition {
+///
+/// # Errors
+///
+/// Returns [`Error::Serialization`] naming the type when it has a CHECK
+/// constraint (see [`type_constraint`]).
+pub(crate) fn node_type_definition(record: NodeTypeRecord) -> Result<NodeTypeDefinition> {
+    let constraints = record
+        .constraints
+        .into_iter()
+        .map(|constraint| type_constraint(&record.name, constraint))
+        .collect::<Result<_>>()?;
+    Ok(NodeTypeDefinition {
         name: record.name,
         properties: record.properties.into_iter().map(typed_property).collect(),
-        constraints: record
-            .constraints
-            .into_iter()
-            .map(type_constraint)
-            .collect(),
+        constraints,
         parent_types: record.parent_types,
         key_labels: record.key_labels,
-    }
+    })
 }
 
 /// The record of an edge type: its endpoint lists as single-type pairs
@@ -212,17 +290,19 @@ pub(crate) fn edge_type_record(def: &EdgeTypeDefinition) -> Result<EdgeTypeRecor
 /// # Errors
 ///
 /// Returns [`Error::Serialization`] naming the edge type when its endpoint
-/// pairs are not the product of two lists ([`endpoint_lists`]).
+/// pairs are not the product of two lists ([`endpoint_lists`]), or when it
+/// has a CHECK constraint (see [`type_constraint`]).
 pub(crate) fn edge_type_definition(record: EdgeTypeRecord) -> Result<EdgeTypeDefinition> {
     let (source_node_types, target_node_types) = endpoint_lists(&record.name, &record.endpoints)?;
+    let constraints = record
+        .constraints
+        .into_iter()
+        .map(|constraint| type_constraint(&record.name, constraint))
+        .collect::<Result<_>>()?;
     Ok(EdgeTypeDefinition {
         name: record.name,
         properties: record.properties.into_iter().map(typed_property).collect(),
-        constraints: record
-            .constraints
-            .into_iter()
-            .map(type_constraint)
-            .collect(),
+        constraints,
         source_node_types,
         target_node_types,
         key_labels: record.key_labels,
@@ -984,25 +1064,50 @@ mod tests {
                 TypeConstraint::PrimaryKey(names(&["name"])),
                 TypeConstraint::Unique(names(&["name", "founded"])),
                 TypeConstraint::NotNull("name".to_string()),
-                TypeConstraint::Check {
-                    name: Some("named".to_string()),
-                    expression: "size(name) > 3".to_string(),
-                },
-                TypeConstraint::Check {
-                    name: None,
-                    expression: "founded IS NOT NULL".to_string(),
-                },
             ],
             parent_types: names(&["Place", "CityKey"]),
             key_labels: names(&["CityKey"]),
         }
     }
 
+    /// A node or edge type record with a CHECK constraint is refused with a
+    /// serialization error naming the type and the expression: the record
+    /// kind stays in the format, but no version supports CHECK.
+    #[test]
+    fn a_check_constraint_record_is_refused() {
+        let check = TypeConstraintRecord::Check {
+            name: Some("named".to_string()),
+            expression: "size(name) > 3".to_string(),
+        };
+        let mut node = node_type_record(&city());
+        node.constraints.push(check.clone());
+        let error = node_type_definition(node).unwrap_err();
+        assert!(matches!(error, Error::Serialization(_)), "{error:?}");
+        let message = error.to_string();
+        assert!(
+            message.contains("type 'City'") && message.contains("size(name) > 3"),
+            "{message}"
+        );
+
+        let mut edge = edge_type_record(&EdgeTypeDefinition {
+            name: "ROUTE".to_string(),
+            properties: Vec::new(),
+            constraints: Vec::new(),
+            source_node_types: Vec::new(),
+            target_node_types: Vec::new(),
+            key_labels: Vec::new(),
+        })
+        .unwrap();
+        edge.constraints.push(check);
+        let error = edge_type_definition(edge).unwrap_err();
+        assert!(error.to_string().contains("type 'ROUTE'"), "{error}");
+    }
+
     /// Node, edge and graph types, constraints and procedures come back from
     /// their records as they were, key labels and defaults included.
     #[test]
     fn definitions_round_trip_through_records() {
-        let node = node_type_definition(node_type_record(&city()));
+        let node = node_type_definition(node_type_record(&city())).unwrap();
         assert_eq!(format!("{node:?}"), format!("{:?}", city()));
 
         let route = EdgeTypeDefinition {

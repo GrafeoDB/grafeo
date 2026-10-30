@@ -56,11 +56,13 @@ tests:
   # Unknown prefix
   # ---------------------------------------------------------------------------
 
+  # A prefix other than rdf, rdfs, xsd, owl and fn must be declared
+  # (rdf/sparql/prefixes.gtest).
   - name: undefined_prefix
-    skip: "Parser expands prefixes lazily, unresolved prefix is not caught at parse time"
     query: "SELECT ?s WHERE { ?s foaf:name ?o }"
     expect:
-      error: ""
+      error: "foaf"
+      gql_status: "42001"
 
   # ---------------------------------------------------------------------------
   # Invalid expressions

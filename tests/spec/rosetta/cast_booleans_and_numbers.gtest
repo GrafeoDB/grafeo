@@ -74,11 +74,11 @@ tests:
       rows:
         - [42, false, true]
 
-  - name: cypher_to_integer_does_not_trim
+  - name: cypher_to_integer_trims
     setup:
       - "INSERT (:P {n: ' 42 '})"
     variants:
       cypher: "MATCH (p:P) RETURN toInteger(p.n) AS n"
     expect:
       rows:
-        - [null]
+        - [42]

@@ -729,6 +729,7 @@ impl QueryError {
             QueryErrorKind::Optimization => ErrorCode::QueryOptimization,
             QueryErrorKind::Execution
             | QueryErrorKind::NumericOutOfRange
+            | QueryErrorKind::InvalidCharacterValueForCast
             | QueryErrorKind::DivisionByZero
             | QueryErrorKind::NegativeLimit
             | QueryErrorKind::InvalidValueType
@@ -851,6 +852,9 @@ pub enum QueryErrorKind {
     /// A computation left the range of its type: an integer overflow, or a
     /// decimal of more than 38 digits (GQLSTATUS 22003).
     NumericOutOfRange,
+    /// Text a cast cannot read as a value of its target type, such as
+    /// `CAST('Alix' AS INT64)` (GQLSTATUS 22018).
+    InvalidCharacterValueForCast,
     /// An integer or decimal division or modulo by zero (GQLSTATUS 22012).
     DivisionByZero,
     /// A negative `SKIP`, `OFFSET` or `LIMIT` value (GQLSTATUS 22G02).
@@ -879,6 +883,9 @@ impl fmt::Display for QueryErrorKind {
             QueryErrorKind::Timeout => write!(f, "timeout error"),
             QueryErrorKind::Unsupported => write!(f, "unsupported"),
             QueryErrorKind::NumericOutOfRange => write!(f, "numeric value out of range"),
+            QueryErrorKind::InvalidCharacterValueForCast => {
+                write!(f, "invalid character value for cast")
+            }
             QueryErrorKind::DivisionByZero => write!(f, "division by zero"),
             QueryErrorKind::NegativeLimit => write!(f, "negative limit value"),
             QueryErrorKind::InvalidValueType => write!(f, "invalid value type"),

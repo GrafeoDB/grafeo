@@ -4,9 +4,34 @@ All notable changes to Grafeo, for future reference (and enjoyment).
 
 ## [0.6.1] - Unreleased
 
+### Changed
+
+Queries and calls that ran in 0.6.0 and now fail, because their result was wrong (each is described under Fixed):
+
+- `CAST` of text that is no number to an integer, float or decimal fails with `22018`; it gave null. `toInteger` and `toFloat` still give null.
+- A float outside the integer range, or an infinity, converted to an integer (`toInteger`, `CAST`) fails with `22003`, and `CAST(NaN AS INT64)` too; they gave the largest integer or 0.
+- SPARQL `BIND` to a variable already in scope in its group is a syntax error; it overwrote the variable.
+- `SERIALIZABLE` isolation is refused with `GRAFEO-Q004`; it ran as snapshot isolation.
+- `hybrid_search` with no index it can read fails; it returned an empty list.
+- A GQL quantified pattern of more than one edge without an upper bound, or with more than 16 repetitions, fails; an unbounded walk around a cycle fails at the path search's budget instead of stopping at 100 hops.
+- An incremental backup into another directory than the last full backup's is refused.
+- A restore of a snapshot whose catalog does not apply, and parameters nested more than 128 levels deep, are refused.
+- N-Triples loading, `INSERT DATA` and `batch_insert_rdf` refuse a triple with a literal subject or a predicate that is not an IRI.
+
 ### Fixed
 
 - **Triples with a literal subject or a predicate that is not an IRI are refused**: N-Triples loading, SPARQL `INSERT DATA` and `batch_insert_rdf` fail with an error naming the triple, instead of storing it in release builds (and panicking in debug builds); an `INSERT` template still skips such a triple, as SPARQL 1.1 Update says.
+- **Text to number reads the number, and casts that cannot convert fail**: `toInteger(' 42 ')` is 42 and `toInteger('4.2')` is 4, as openCypher reads them, `toFloat` trims too, and `CAST` does the same in GQL and SQL/PGQ; they gave null. `CAST` of text that is no number fails with `22018`, as SQL does, where `toInteger` and `toFloat` still give null.
+- **A float to an integer no longer wraps around**: `toInteger(1.0e19)`, `toInteger(Infinity)` and `CAST(1.0e19 AS INT64)` fail with `22003` instead of returning the largest integer, as the integer operators do; `toInteger(NaN)` is null instead of 0, and `CAST(NaN AS INT64)` fails.
+- **Cypher `sum()` of no values is 0**: over no rows or only nulls, as openCypher defines it; it was null. GQL and SQL/PGQ keep null, as SQL does.
+- **A float `%` by zero is NaN**: `1.5e0 % 0` gives NaN, as a float `/` by zero keeps its IEEE result; it was null. An integer or decimal `%` by zero still fails with `22012`.
+- **`all_different` and `same` compare list items by value**: `all_different` said two different paths of one length, or two vectors or byte strings with the same first item, were equal, and both functions now treat `1` and `1.0` as one value, as `=` and `DISTINCT` do.
+- **Infinite floats are written as `Infinity` and `-Infinity` in text**: `toString`, string concatenation, `CAST ... AS STRING` and `GROUP_CONCAT` wrote `inf`.
+- **The most similar rows above a similarity threshold come first**: `WHERE cosine_similarity(d.emb, $q) >= 0.5 RETURN d ORDER BY cosine_similarity(d.emb, $q) DESC LIMIT 5` returned the least similar rows above the threshold when it ran through the vector index (since 0.6.0); `ORDER BY` and `RETURN` of a vector function now give the function's value on every path.
+- **GQL and SQL/PGQ order and group a TIMESTAMP and a ZONED DATETIME of one instant together**: `ORDER BY`, `min`, `max`, `GROUP BY`, `DISTINCT` and the set operations compare them as `=` and `<` do, reading a timestamp at the session time zone; they ordered every zoned value before every timestamp and kept equal instants in two groups. Cypher keeps the two types apart, as openCypher does.
+- **A vector similarity filter gives the same rows with and without the index**: `cosine_similarity(n.v, $q) >= t` and the distance filters could leave out the node exactly at the threshold when they ran through the vector index.
+- **SPARQL `xsd:float` stays a float**: `xsd:float("1.5")` and arithmetic over `xsd:float` values (with each other, an integer or a decimal) give `xsd:float`, as XPath promotes them; they gave `xsd:double`.
+- **A SPARQL syntax error no longer aborts the process**: a token that starts no pattern inside a group (a quoted triple `<< ... >>`, or a stray `)`) made the parser read the same token forever until memory ran out, which killed the host process in every binding; it is now a syntax error. Quoted triples (RDF-star) come with SPARQL 1.2.
 - **A SPARQL `FILTER` inside `OPTIONAL` reads the whole solution** ([#701](https://github.com/GrafeoDB/grafeo/issues/701)): in `OPTIONAL { P FILTER(F) }`, `F` decides which matches of `P` extend a row, over the row and the match together, as SPARQL 1.1 defines it, so it reads the variables bound before the `OPTIONAL` too; it was checked over `P` alone, where those are unbound, so `FILTER(!BOUND(?o))` always extended and `FILTER(?z > ?o)` never did. A `FILTER` in a group nested inside the `OPTIONAL` still reads that group alone.
 - **A SPARQL group that opens with `OPTIONAL` or `MINUS` starts from one empty solution** ([#702](https://github.com/GrafeoDB/grafeo/issues/702)): `{ OPTIONAL { P } ... }` keeps that solution when `P` has no match, and `{ MINUS { P } }` is one empty solution, as SPARQL 1.1 defines them; the first gave no rows, the second every match of `P` (so a `DELETE` with such a `WHERE` deleted all of them).
 - **SPARQL `FILTER EXISTS` and `NOT EXISTS` only filter**: `FILTER EXISTS { P }` gave a row per match of `P` and added its variables to the result, and `{ FILTER NOT EXISTS { P } }` with no variable in common kept its row when `P` matched; they now keep or drop each row once.
@@ -49,6 +74,10 @@ All notable changes to Grafeo, for future reference (and enjoyment).
 - **Gremlin branching steps run for each traverser** ([#668](https://github.com/GrafeoDB/grafeo/issues/668)): `coalesce()`, `optional()`, `choose()`, `union()` and `bothV()` plan their input once, so a chain of them no longer takes exponential time and memory to plan (20 steps took 30 s and 5 GB). `coalesce()` and `optional()` now choose a branch per traverser instead of once for all of them, so `g.V().coalesce(out('E'), constant('none'))` keeps the vertices without an `E` edge.
 - **A subquery that returns an edge in one part and a node in another** (`CALL (a) { ... RETURN r AS x UNION ALL ... RETURN b AS x }`, GQL and Cypher) returns each as what it is; the node came back as the edge with its ID.
 - **Compound property types in Cypher DDL** ([#678](https://github.com/GrafeoDB/grafeo/issues/678)): `ALTER CURRENT GRAPH TYPE SET`, `ADD` and `DROP` take `ZONED DATETIME`, `LOCAL DATETIME` and nested `LIST<...>` property types, as GQL does; they were a syntax error.
+
+### Deprecated
+
+- **`CatalogError::InvalidCheck`**: nothing returns it. CHECK constraints could be built only through the engine's internal catalog API, never through DDL or a binding, and are removed; they come back later as DDL. It goes in 0.7.0.
 
 ### Contributors
 

@@ -182,7 +182,7 @@ Per the standard, minimum conformance requires:
 | `*` (0 or more) | Supported | Normalized to `{0,}` |
 | `+` (1 or more) | Supported | Normalized to `{1,}` |
 | `?` questioned | Supported | 0 or 1 hop |
-| Parenthesized quantified `((a)-[e]->(b)){2,5}` | Supported | |
+| Parenthesized quantified `((a)-[e]->(b)){2,5}` | Supported | A pattern of more than one edge needs an upper bound of at most 16 repetitions |
 
 ### Pattern Composition
 
@@ -313,7 +313,7 @@ refuses `=~` and LIKE with an error that says so.
 | G050 | Parenthesized path: WHERE clause | Supported |
 | G051 | Parenthesized path: non-local predicates | **Not yet** |
 | G060 | Bounded graph pattern quantifiers | Supported |
-| G061 | Unbounded graph pattern quantifiers | Supported |
+| G061 | Unbounded graph pattern quantifiers | Partial (not over a parenthesized pattern of more than one edge) |
 | G074 | Label expression: wildcard label | Supported |
 | G080 | Simplified path pattern: basic defaulting | Supported |
 | G081 | Simplified path pattern: full overrides | Supported |

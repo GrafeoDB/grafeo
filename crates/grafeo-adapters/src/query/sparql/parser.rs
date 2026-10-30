@@ -21,7 +21,26 @@ pub struct Parser<'a> {
     /// How deep the query parsed so far nests (see
     /// [`MAX_NESTING_DEPTH`](crate::query::limits::MAX_NESTING_DEPTH)).
     nesting: Nesting,
+    /// The prefixes in scope: the predefined ones ([`PREDEFINED_PREFIXES`])
+    /// and those the query declared so far.
+    prefixes: std::collections::HashSet<String>,
+    /// Whether the parser is reading a `PREFIX` declaration, whose name is
+    /// not a use of the prefix.
+    declaring_prefix: bool,
+    /// The first prefixed name whose prefix is not in scope, with its token:
+    /// the query is refused with it once parsed.
+    undeclared: Option<Token>,
 }
+
+/// The prefixes a query can use without declaring them, as Jena and GraphDB
+/// predefine them; a query's own `PREFIX` redefines one.
+pub const PREDEFINED_PREFIXES: [(&str, &str); 5] = [
+    ("rdf", "http://www.w3.org/1999/02/22-rdf-syntax-ns#"),
+    ("rdfs", "http://www.w3.org/2000/01/rdf-schema#"),
+    ("xsd", "http://www.w3.org/2001/XMLSchema#"),
+    ("owl", "http://www.w3.org/2002/07/owl#"),
+    ("fn", "http://www.w3.org/2005/xpath-functions#"),
+];
 
 impl<'a> Parser<'a> {
     /// Creates a new parser for the given query string.
@@ -35,6 +54,12 @@ impl<'a> Parser<'a> {
             collection_counter: 0,
             anon_blank_counter: 0,
             nesting: Nesting::default(),
+            prefixes: PREDEFINED_PREFIXES
+                .iter()
+                .map(|(prefix, _)| (*prefix).to_string())
+                .collect(),
+            declaring_prefix: false,
+            undeclared: None,
         }
     }
 
@@ -68,6 +93,15 @@ impl<'a> Parser<'a> {
                 self.current.text
             )));
         }
+        // A prefix must be declared (SPARQL 1.1, 4.1.1), or be one of the
+        // predefined ones.
+        if let Some(token) = self.undeclared.take() {
+            let prefix = token.text.split(':').next().unwrap_or_default().to_string();
+            self.current = token;
+            return Err(self.error(&format!(
+                "the prefix '{prefix}:' is not declared (add PREFIX {prefix}: <...>)"
+            )));
+        }
 
         Ok(Query {
             base,
@@ -91,16 +125,21 @@ impl<'a> Parser<'a> {
     fn parse_prefixes(&mut self) -> Result<Vec<PrefixDeclaration>> {
         let mut prefixes = Vec::new();
         while self.current.kind == TokenKind::Prefix {
+            self.declaring_prefix = true;
             self.advance();
+            self.declaring_prefix = false;
 
             // Parse prefix name (can be empty for default prefix)
             let prefix = if self.current.kind == TokenKind::PrefixedName {
                 let text = self.current.text.clone();
                 self.advance();
                 // Remove trailing colon if present
-                text.trim_end_matches(':').to_string()
+                let prefix = text.trim_end_matches(':').to_string();
+                self.prefixes.insert(prefix.clone());
+                prefix
             } else if self.current.kind == TokenKind::Colon {
                 self.advance();
+                self.prefixes.insert(String::new());
                 String::new() // Default prefix
             } else {
                 return Err(self.error("expected prefix name or ':'"));
@@ -789,9 +828,21 @@ impl<'a> Parser<'a> {
                 let subquery = self.parse_select_query()?;
                 Ok(GraphPattern::SubSelect(Box::new(subquery)))
             }
+            // A quoted triple (`<< s p o >>`) is SPARQL 1.2 (RDF-star).
+            TokenKind::LessThan => Err(self.error(
+                "quoted triples (<< ... >>) are SPARQL 1.2, which this version does not support",
+            )),
             _ => {
-                // Triple patterns
+                // Triple patterns. A token that starts none is an error: an
+                // element that consumed nothing would be parsed again and
+                // again by its group.
                 let triples = self.parse_triples_block()?;
+                if triples.is_empty() {
+                    return Err(self.error(&format!(
+                        "unexpected '{}' in a graph pattern",
+                        self.current.text
+                    )));
+                }
                 Ok(GraphPattern::Basic(triples))
             }
         }
@@ -2288,6 +2339,19 @@ impl<'a> Parser<'a> {
 
     fn advance(&mut self) {
         self.current = self.lexer.next_token();
+        // Notes the first use of a prefix not in scope (see `parse`).
+        if self.current.kind == TokenKind::PrefixedName
+            && !self.declaring_prefix
+            && self.undeclared.is_none()
+        {
+            // The lexer reads a bare name (a function such as `STRLEN`) as a
+            // prefixed name too: only one with a colon uses a prefix.
+            if let Some((prefix, _)) = self.current.text.split_once(':')
+                && !self.prefixes.contains(prefix)
+            {
+                self.undeclared = Some(self.current.clone());
+            }
+        }
     }
 
     fn expect(&mut self, kind: TokenKind) -> Result<()> {
@@ -2581,7 +2645,10 @@ mod tests {
 
     #[test]
     fn test_property_path() {
-        let query = parse("SELECT ?x WHERE { ?x foaf:knows+ ?y }").unwrap();
+        let query = parse(
+            "PREFIX foaf: <http://xmlns.com/foaf/0.1/> SELECT ?x WHERE { ?x foaf:knows+ ?y }",
+        )
+        .unwrap();
         assert!(matches!(query.query_form, QueryForm::Select(_)));
     }
 

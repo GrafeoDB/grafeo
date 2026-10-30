@@ -1083,28 +1083,32 @@ mod gql_shared_let_scope {
         );
     }
 
+    /// The definitions of one LET are sequential (ISO GQL): `x = n` reads
+    /// the `n` defined before it, not the enclosing one.
     #[test]
-    fn ordinary_simultaneous_let_values_read_the_enclosing_scope() {
+    fn ordinary_let_definitions_read_the_ones_before_them() {
         let query = "UNWIND [3, 1, 2] AS n RETURN n AS input, LET n = 10, x = n IN x + n END AS value ORDER BY input";
         assert_eq!(
             rows(query),
             vec![
-                vec![Value::Int64(1), Value::Int64(11)],
-                vec![Value::Int64(2), Value::Int64(12)],
-                vec![Value::Int64(3), Value::Int64(13)],
+                vec![Value::Int64(1), Value::Int64(20)],
+                vec![Value::Int64(2), Value::Int64(20)],
+                vec![Value::Int64(3), Value::Int64(20)],
             ]
         );
     }
 
+    /// A nested LET shadows the outer `x`; its `y = x` reads the inner `x`
+    /// defined before it, and the outer `x` is unchanged outside.
     #[test]
-    fn ordinary_nested_let_preserves_shadowed_binding_values() {
-        let query = "UNWIND [3, 1, 2] AS n RETURN n AS input, LET x = n IN LET x = x + 10, y = x IN [x, y] END END AS value ORDER BY input";
+    fn ordinary_nested_let_reads_its_own_earlier_definitions() {
+        let query = "UNWIND [3, 1, 2] AS n RETURN n AS input, LET x = n IN LET x = x + 10, y = x IN [x, y] END END AS value, LET x = n IN LET x = x + 10 IN x END + x END AS outer ORDER BY input";
         assert_eq!(
             rows(query),
             vec![
-                vec![Value::Int64(1), ints(&[11, 1])],
-                vec![Value::Int64(2), ints(&[12, 2])],
-                vec![Value::Int64(3), ints(&[13, 3])],
+                vec![Value::Int64(1), ints(&[11, 11]), Value::Int64(12)],
+                vec![Value::Int64(2), ints(&[12, 12]), Value::Int64(14)],
+                vec![Value::Int64(3), ints(&[13, 13]), Value::Int64(16)],
             ]
         );
     }

@@ -165,20 +165,52 @@ tests:
   # Known gaps
   # ---------------------------------------------------------------------------
 
+  # toInteger of NaN is null (no integer stands for it); of an infinity it
+  # is out of range (float_to_integer_range.gtest).
   - name: to_integer_of_nan_is_null
-    skip: "toInteger(NaN) gives 0 and toInteger(Infinity) the largest integer (inbox value-kinds/numeric-error-followups-from-639.md)"
     variants:
-      gql: "RETURN toInteger(NaN) AS nan, toInteger(Infinity) AS inf"
-      cypher: "RETURN toInteger(NaN) AS nan, toInteger(Infinity) AS inf"
+      gql: "RETURN toInteger(NaN) AS nan, toInteger(0.0e0 / 0) AS computed"
+      cypher: "RETURN toInteger(NaN) AS nan, toInteger(0.0 / 0) AS computed"
     expect:
       rows:
         - [null, null]
 
+  # toString spells the infinities as openCypher does, as it spells NaN.
   - name: to_string_of_infinity
-    skip: "toString(Infinity) is 'inf' while toString(NaN) is 'NaN' (inbox value-kinds/numeric-error-followups-from-639.md)"
     variants:
       gql: "RETURN toString(Infinity) AS pos, toString(-Infinity) AS neg, toString(NaN) AS nan"
       cypher: "RETURN toString(Infinity) AS pos, toString(-Infinity) AS neg, toString(NaN) AS nan"
+    expect:
+      rows:
+        - [Infinity, -Infinity, NaN]
+
+  - name: to_string_of_a_computed_infinity
+    variants:
+      gql: "RETURN toString(1.0e308 * 10) AS pos, toString(-1.5e0 / 0) AS neg"
+      cypher: "RETURN toString(1.0e308 * 10) AS pos, toString(-1.5 / 0) AS neg"
+    expect:
+      rows:
+        - [Infinity, -Infinity]
+
+  - name: a_string_built_from_an_infinity_spells_it
+    variants:
+      gql: "RETURN 'x' || toString(Infinity) AS a, 'x' + toString(-Infinity) AS b"
+      cypher: "RETURN 'x' + toString(Infinity) AS a, 'x' + toString(-Infinity) AS b"
+    expect:
+      rows:
+        - [xInfinity, x-Infinity]
+
+  - name: a_string_plus_an_infinite_float_spells_it_in_cypher
+    # Cypher's + of a string and a number concatenates the number's text.
+    variants:
+      cypher: "RETURN 'x' + Infinity AS a, 'x' + (-1.5 / 0) AS b"
+    expect:
+      rows:
+        - [xInfinity, x-Infinity]
+
+  - name: a_cast_of_an_infinity_to_string_spells_it
+    variants:
+      gql: "RETURN CAST(Infinity AS STRING) AS pos, CAST(-Infinity AS STRING) AS neg, CAST(NaN AS STRING) AS nan"
     expect:
       rows:
         - [Infinity, -Infinity, NaN]

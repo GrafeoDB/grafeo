@@ -51,13 +51,14 @@ tests:
       rows:
         - [null, null, null]
 
-  - name: to_decimal_with_too_many_integer_digits_is_null
+  # A value that does not fit the precision fails with 22003, as a CAST does.
+  - name: to_decimal_with_too_many_integer_digits_fails
     variants:
       gql: "RETURN toDecimal(12345.6e0, 5, 2) AS d"
       cypher: "RETURN toDecimal(12345.6, 5, 2) AS d"
     expect:
-      rows:
-        - [null]
+      error: "numeric value out of range"
+      gql_status: "22003"
 
   # ---------------------------------------------------------------------------
   # Arithmetic

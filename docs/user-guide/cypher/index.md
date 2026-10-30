@@ -11,6 +11,8 @@ Cypher is a declarative graph query language originally developed by Neo4j. Graf
 
 Cypher uses ASCII-art style pattern matching to query and manipulate graph data. It's designed to be intuitive and readable.
 
+Moving queries to GQL? [Coming from Cypher](../gql/coming-from-cypher.md) lists what reads differently: path modes, numbers with a point, quantifiers, `WITH` and `LET`, comments, reserved words, `sum()` of no values and zoned datetimes.
+
 ## Quick Reference
 
 | Operation | Syntax |

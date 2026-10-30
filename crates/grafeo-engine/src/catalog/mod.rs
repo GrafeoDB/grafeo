@@ -11,9 +11,6 @@
 //! | Edge types | Maps "KNOWS" → EdgeTypeId |
 //! | Indexes | Which properties are indexed for fast lookups |
 
-mod check_eval;
-
-use check_eval::CheckExpression;
 use grafeo_common::types::ReadView;
 
 use std::collections::{HashMap, HashSet};
@@ -317,7 +314,6 @@ impl Catalog {
     ///
     /// * `CatalogError::SchemaNotEnabled` if schema is disabled.
     /// * `CatalogError::TypeAlreadyExists` if a type with the same name exists.
-    /// * `CatalogError::InvalidCheck` if a CHECK expression does not parse.
     pub fn register_node_type(&self, def: NodeTypeDefinition) -> Result<(), CatalogError> {
         match &self.schema {
             Some(schema) => schema.register_node_type(def),
@@ -404,7 +400,6 @@ impl Catalog {
     ///
     /// * `CatalogError::SchemaNotEnabled` if schema is disabled.
     /// * `CatalogError::TypeAlreadyExists` if an edge type with the same name exists.
-    /// * `CatalogError::InvalidCheck` if a CHECK expression does not parse.
     pub fn register_edge_type_def(&self, def: EdgeTypeDefinition) -> Result<(), CatalogError> {
         match &self.schema {
             Some(schema) => schema.register_edge_type(def),
@@ -532,30 +527,17 @@ impl Catalog {
     /// # Errors
     ///
     /// * `CatalogError::SchemaNotEnabled` if schema is disabled.
-    /// * `CatalogError::InvalidCheck` if the constraint is a CHECK whose
-    ///   expression does not parse.
     pub fn add_constraint_to_type(
         &self,
         label: &str,
         constraint: TypeConstraint,
     ) -> Result<(), CatalogError> {
         match &self.schema {
-            Some(schema) => schema.add_constraint_to_type(label, constraint),
+            Some(schema) => {
+                schema.add_constraint_to_type(label, constraint);
+                Ok(())
+            }
             None => Err(CatalogError::SchemaNotEnabled),
-        }
-    }
-
-    /// Whether `properties` (an entity's properties) satisfy the CHECK
-    /// expression `expression`, which is parsed on its first use and kept:
-    /// see [`CheckExpression::evaluate`].
-    fn evaluate_check(
-        &self,
-        expression: &str,
-        properties: &[(String, Value)],
-    ) -> Result<bool, String> {
-        match &self.schema {
-            Some(schema) => schema.check_expression(expression)?.evaluate(properties),
-            None => CheckExpression::parse(expression)?.evaluate(properties),
         }
     }
 
@@ -1361,13 +1343,6 @@ pub enum TypeConstraint {
     Unique(Vec<String>),
     /// NOT NULL constraint on a single property.
     NotNull(String),
-    /// CHECK constraint with a named expression string.
-    Check {
-        /// Optional constraint name.
-        name: Option<String>,
-        /// Expression (stored as string for now).
-        expression: String,
-    },
 }
 
 /// What a named constraint (`CREATE CONSTRAINT`) requires.
@@ -1622,9 +1597,6 @@ pub struct SchemaCatalog {
     procedures: RwLock<HashMap<String, ProcedureDefinition>>,
     /// Named constraints (`CREATE CONSTRAINT`), by name.
     constraints: RwLock<HashMap<String, ConstraintDefinition>>,
-    /// The CHECK expressions parsed so far, by their text: each is parsed
-    /// once, not on every write it checks.
-    checks: RwLock<HashMap<String, Arc<CheckExpression>>>,
 }
 
 impl SchemaCatalog {
@@ -1639,39 +1611,7 @@ impl SchemaCatalog {
             graph_type_bindings: RwLock::new(HashMap::new()),
             procedures: RwLock::new(HashMap::new()),
             constraints: RwLock::new(HashMap::new()),
-            checks: RwLock::new(HashMap::new()),
         }
-    }
-
-    /// The parsed CHECK expression `expression`, parsed on its first use.
-    fn check_expression(&self, expression: &str) -> Result<Arc<CheckExpression>, String> {
-        if let Some(parsed) = self.checks.read().get(expression) {
-            return Ok(Arc::clone(parsed));
-        }
-        let parsed = Arc::new(CheckExpression::parse(expression)?);
-        self.checks
-            .write()
-            .insert(expression.to_string(), Arc::clone(&parsed));
-        Ok(parsed)
-    }
-
-    /// Parses the CHECK expressions among `constraints`, so one that does
-    /// not parse is refused when it is declared, not by every write it
-    /// would check.
-    fn parse_checks<'a>(
-        &self,
-        constraints: impl IntoIterator<Item = &'a TypeConstraint>,
-    ) -> Result<(), CatalogError> {
-        for constraint in constraints {
-            if let TypeConstraint::Check { expression, .. } = constraint {
-                self.check_expression(expression)
-                    .map_err(|reason| CatalogError::InvalidCheck {
-                        expression: expression.clone(),
-                        reason,
-                    })?;
-            }
-        }
-        Ok(())
     }
 
     // --- Node type operations ---
@@ -1681,9 +1621,7 @@ impl SchemaCatalog {
     /// # Errors
     ///
     /// * `CatalogError::TypeAlreadyExists` if a type with the same name exists.
-    /// * `CatalogError::InvalidCheck` if a CHECK expression does not parse.
     pub fn register_node_type(&self, def: NodeTypeDefinition) -> Result<(), CatalogError> {
-        self.parse_checks(&def.constraints)?;
         let mut types = self.node_types.write();
         if types.contains_key(&def.name) {
             return Err(CatalogError::TypeAlreadyExists(def.name));
@@ -1733,7 +1671,6 @@ impl SchemaCatalog {
         self.graph_type_bindings.write().clear();
         self.procedures.write().clear();
         self.constraints.write().clear();
-        self.checks.write().clear();
     }
 
     /// Gets a resolved node type with inherited properties and constraints from parents.
@@ -1815,9 +1752,7 @@ impl SchemaCatalog {
     /// # Errors
     ///
     /// * `CatalogError::TypeAlreadyExists` if an edge type with the same name exists.
-    /// * `CatalogError::InvalidCheck` if a CHECK expression does not parse.
     pub fn register_edge_type(&self, def: EdgeTypeDefinition) -> Result<(), CatalogError> {
-        self.parse_checks(&def.constraints)?;
         let mut types = self.edge_types.write();
         if types.contains_key(&def.name) {
             return Err(CatalogError::TypeAlreadyExists(def.name));
@@ -1973,16 +1908,7 @@ impl SchemaCatalog {
 
     /// Adds a constraint to an existing node type, creating a minimal type if needed.
     ///
-    /// # Errors
-    ///
-    /// `CatalogError::InvalidCheck` if the constraint is a CHECK whose
-    /// expression does not parse; nothing changes then.
-    pub fn add_constraint_to_type(
-        &self,
-        label: &str,
-        constraint: TypeConstraint,
-    ) -> Result<(), CatalogError> {
-        self.parse_checks([&constraint])?;
+    pub fn add_constraint_to_type(&self, label: &str, constraint: TypeConstraint) {
         let mut types = self.node_types.write();
         if let Some(def) = types.get_mut(label) {
             def.constraints.push(constraint);
@@ -1999,7 +1925,6 @@ impl SchemaCatalog {
                 },
             );
         }
-        Ok(())
     }
 
     /// Adds a property to an existing node type.
@@ -2254,7 +2179,7 @@ impl SchemaCatalog {
             return Err(CatalogError::ConstraintAlreadyExists);
         }
         for constraint in def.type_constraints() {
-            self.add_constraint_to_type(&def.label, constraint)?;
+            self.add_constraint_to_type(&def.label, constraint);
         }
         constraints.insert(def.name.clone(), def);
         Ok(())
@@ -2334,7 +2259,12 @@ pub enum CatalogError {
         /// The most levels they may nest.
         limit: usize,
     },
-    /// The expression of a CHECK constraint does not parse.
+    /// The expression of a CHECK constraint does not parse. No constraint
+    /// is a CHECK one any more, so nothing returns it.
+    #[deprecated(
+        since = "0.6.1",
+        note = "CHECK constraints are not supported; nothing returns this"
+    )]
     InvalidCheck {
         /// The expression.
         expression: String,
@@ -2371,6 +2301,7 @@ impl std::fmt::Display for CatalogError {
                 "The property types of a node or edge type nest at most {limit} LIST<...> \
                  levels in all, not {levels}"
             ),
+            #[allow(deprecated, reason = "the variant is deprecated but still displays")]
             Self::InvalidCheck { expression, reason } => {
                 write!(f, "Invalid CHECK constraint ({expression}): {reason}")
             }
@@ -2758,23 +2689,6 @@ impl ConstraintValidator for CatalogConstraintValidator {
                                 }
                             }
                         }
-                        TypeConstraint::Check { name, expression } => {
-                            let constraint_name = name.as_deref().unwrap_or("unnamed");
-                            match self.catalog.evaluate_check(expression, properties) {
-                                Ok(true) => {}
-                                Ok(false) => {
-                                    return Err(OperatorError::schema_violation(format!(
-                                        "CHECK constraint '{constraint_name}' violated on :{label}"
-                                    )));
-                                }
-                                Err(err) => {
-                                    return Err(OperatorError::schema_violation(format!(
-                                        "CHECK constraint '{constraint_name}' on :{label} \
-                                         cannot be evaluated: {err}"
-                                    )));
-                                }
-                            }
-                        }
                         TypeConstraint::Unique(_) => {}
                     }
                 }
@@ -2931,26 +2845,6 @@ impl ConstraintValidator for CatalogConstraintValidator {
                         "missing required property '{}' on :{edge_type}",
                         typed_prop.name
                     )));
-                }
-            }
-
-            for constraint in &type_def.constraints {
-                if let TypeConstraint::Check { name, expression } = constraint {
-                    let constraint_name = name.as_deref().unwrap_or("unnamed");
-                    match self.catalog.evaluate_check(expression, properties) {
-                        Ok(true) => {}
-                        Ok(false) => {
-                            return Err(OperatorError::schema_violation(format!(
-                                "CHECK constraint '{constraint_name}' violated on :{edge_type}"
-                            )));
-                        }
-                        Err(err) => {
-                            return Err(OperatorError::schema_violation(format!(
-                                "CHECK constraint '{constraint_name}' on :{edge_type} \
-                                 cannot be evaluated: {err}"
-                            )));
-                        }
-                    }
                 }
             }
         }

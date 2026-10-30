@@ -7,6 +7,7 @@
 //! Shared types ([`AggregateFunction`], [`AggregateExpr`], [`HashableValue`]) live in
 //! the [`super::accumulator`] module.
 
+use grafeo_common::types::TemporalComparison;
 use grafeo_common::utils::hash::FxHashSet as HashSet;
 use indexmap::IndexMap;
 
@@ -325,6 +326,13 @@ impl AggregateState {
     /// aggregates, pass `Some(value)`. A null operand leaves every state as it
     /// was: aggregates skip nulls, also as the first operand of a group.
     pub fn update(&mut self, value: Option<Value>) {
+        self.update_under(value, TemporalComparison::TypesApart);
+    }
+
+    /// Updates the state with a new value (see [`Self::update`]), DISTINCT,
+    /// MIN and MAX reading a local datetime against a zoned one as
+    /// `temporal` reads it (the statement's `=` and `<`).
+    pub fn update_under(&mut self, value: Option<Value>, temporal: TemporalComparison) {
         if matches!(value, Some(Value::Null)) {
             return;
         }
@@ -340,7 +348,7 @@ impl AggregateState {
             }
             AggregateState::CountDistinct(count, seen) => {
                 if let Some(ref v) = value {
-                    let hashable = HashableValue::from(v);
+                    let hashable = HashableValue::under(v, temporal);
                     if seen.insert(hashable) {
                         *count += 1;
                     }
@@ -366,7 +374,7 @@ impl AggregateState {
             }
             AggregateState::SumIntDistinct(sum, count, seen) => {
                 if let Some(ref v) = value {
-                    let hashable = HashableValue::from(v);
+                    let hashable = HashableValue::under(v, temporal);
                     if seen.insert(hashable) {
                         if let Value::Int64(i) = v {
                             *sum += i128::from(*i);
@@ -432,7 +440,7 @@ impl AggregateState {
             }
             AggregateState::SumFloatDistinct(sum, comp, count, seen) => {
                 if let Some(ref v) = value {
-                    let hashable = HashableValue::from(v);
+                    let hashable = HashableValue::under(v, temporal);
                     if seen.insert(hashable)
                         && let Some(num) = value_to_f64(v)
                     {
@@ -485,7 +493,7 @@ impl AggregateState {
             }
             AggregateState::AvgDistinct(sum, count, seen) => {
                 if let Some(ref v) = value {
-                    let hashable = HashableValue::from(v);
+                    let hashable = HashableValue::under(v, temporal);
                     if let Value::Decimal(d) = v
                         && let Some(whole) = exact_whole(*sum)
                     {
@@ -511,18 +519,20 @@ impl AggregateState {
             // order of the input (a value never replaced one of another type).
             AggregateState::Min(min) => {
                 if let Some(v) = value
-                    && min
-                        .as_ref()
-                        .is_none_or(|current| compare_values_total(&v, current).is_lt())
+                    && min.as_ref().is_none_or(|current| {
+                        compare_values_total(&temporal.normalize(&v), &temporal.normalize(current))
+                            .is_lt()
+                    })
                 {
                     *min = Some(v);
                 }
             }
             AggregateState::Max(max) => {
                 if let Some(v) = value
-                    && max
-                        .as_ref()
-                        .is_none_or(|current| compare_values_total(&v, current).is_gt())
+                    && max.as_ref().is_none_or(|current| {
+                        compare_values_total(&temporal.normalize(&v), &temporal.normalize(current))
+                            .is_gt()
+                    })
                 {
                     *max = Some(v);
                 }
@@ -544,7 +554,7 @@ impl AggregateState {
             }
             AggregateState::CollectDistinct(list, seen) => {
                 if let Some(v) = value {
-                    let hashable = HashableValue::from(&v);
+                    let hashable = HashableValue::under(&v, temporal);
                     if seen.insert(hashable) {
                         list.push(v);
                     }
@@ -580,7 +590,7 @@ impl AggregateState {
             }
             AggregateState::GroupConcatDistinct(list, _sep, seen) => {
                 if let Some(v) = value {
-                    let hashable = HashableValue::from(&v);
+                    let hashable = HashableValue::under(&v, temporal);
                     if seen.insert(hashable) {
                         list.push(agg_value_to_string(&v));
                     }
@@ -597,11 +607,11 @@ impl AggregateState {
             }
             AggregateState::Distinct { seen, inner } => match &value {
                 Some(operand) => {
-                    if seen.insert(HashableValue::from(operand)) {
-                        inner.update(value);
+                    if seen.insert(HashableValue::under(operand, temporal)) {
+                        inner.update_under(value, temporal);
                     }
                 }
-                None => inner.update(None),
+                None => inner.update_under(None, temporal),
             },
             AggregateState::SumDuration(total, count)
             | AggregateState::AvgDuration(total, count) => {
@@ -613,7 +623,7 @@ impl AggregateState {
             AggregateState::InvalidOperand(_) => {}
             AggregateState::SparqlNumbers(inner) => match value {
                 Some(Value::Int64(_) | Value::Float64(_) | Value::Decimal(_)) | None => {
-                    inner.update(value);
+                    inner.update_under(value, temporal);
                 }
                 Some(_) => *self = AggregateState::SparqlError,
             },
@@ -777,8 +787,9 @@ impl AggregateState {
     ///
     /// # Errors
     ///
-    /// An integer sum outside the 64-bit range, and a decimal sum or average
-    /// whose sum needs more than 38 digits, are out of range (22003).
+    /// An integer sum outside the 64-bit range, a decimal sum whose value
+    /// needs more than 38 digits and a duration sum that does not fit are
+    /// out of range (22003); a decimal average always fits.
     pub fn finalize(&self) -> Result<Value, OperatorError> {
         Ok(match self {
             AggregateState::Count(count) | AggregateState::CountDistinct(count, _) => {
@@ -1045,7 +1056,7 @@ fn agg_value_to_string(val: &Value) -> String {
     match val {
         Value::String(s) => s.to_string(),
         Value::Int64(i) => i.to_string(),
-        Value::Float64(f) => f.to_string(),
+        Value::Float64(f) => super::value_utils::float_text(*f),
         Value::Bool(b) => b.to_string(),
         Value::Null => String::new(),
         other => format!("{other:?}"),
@@ -1083,6 +1094,10 @@ pub struct HashAggregateOperator {
     aggregation_complete: bool,
     /// Results iterator.
     results: Option<std::vec::IntoIter<(RowKey, Group)>>,
+    /// How the keys read a local datetime against a zoned one (see
+    /// [`TemporalComparison::normalize`]); `TypesApart` reads every value
+    /// as itself.
+    temporal: TemporalComparison,
 }
 
 impl HashAggregateOperator {
@@ -1108,7 +1123,25 @@ impl HashAggregateOperator {
             groups: IndexMap::new(),
             aggregation_complete: false,
             results: None,
+            temporal: TemporalComparison::TypesApart,
         }
+    }
+
+    /// The operator with `temporal` as the reading of its group keys and of
+    /// its aggregates' DISTINCT, MIN and MAX (the statement's `=`).
+    #[must_use]
+    pub fn with_temporal(mut self, temporal: TemporalComparison) -> Self {
+        self.temporal = temporal;
+        for aggregate in &mut self.aggregates {
+            aggregate.temporal = temporal;
+        }
+        self
+    }
+
+    /// How the group keys read temporal values (see [`Self::with_temporal`]).
+    #[must_use]
+    pub fn temporal(&self) -> TemporalComparison {
+        self.temporal
     }
 
     /// The output column types: the group keys' input types (see
@@ -1141,7 +1174,7 @@ impl HashAggregateOperator {
                 let aggregates = &self.aggregates;
                 let states = &mut self
                     .groups
-                    .entry(RowKey::from_row(&chunk, row, group_columns))
+                    .entry(RowKey::from_row(&chunk, row, group_columns, self.temporal))
                     .or_insert_with(|| Group {
                         key_values: RowKey::values_of(&chunk, row, group_columns),
                         states: aggregates.iter().map(AggregateState::for_expr).collect(),
@@ -1176,21 +1209,23 @@ impl HashAggregateOperator {
 
                     // For COUNT without DISTINCT, always update. For others, skip nulls.
                     match (agg.function, agg.distinct) {
-                        (AggregateFunction::Count, false) => states[i].update(None),
+                        (AggregateFunction::Count, false) => {
+                            states[i].update_under(None, agg.temporal);
+                        }
                         (AggregateFunction::Count, true) => {
                             // COUNT DISTINCT needs the value to track unique values
                             if value.is_some() && !matches!(value, Some(Value::Null)) {
-                                states[i].update(value);
+                                states[i].update_under(value, agg.temporal);
                             }
                         }
                         (AggregateFunction::CountNonNull, _) => {
                             if value.is_some() && !matches!(value, Some(Value::Null)) {
-                                states[i].update(value);
+                                states[i].update_under(value, agg.temporal);
                             }
                         }
                         _ => {
                             if value.is_some() && !matches!(value, Some(Value::Null)) {
-                                states[i].update(value);
+                                states[i].update_under(value, agg.temporal);
                             }
                         }
                     }
@@ -1319,6 +1354,16 @@ impl SimpleAggregateOperator {
             done: false,
         }
     }
+
+    /// The operator with `temporal` as the reading of its aggregates'
+    /// DISTINCT, MIN and MAX (the statement's `=` and `<`).
+    #[must_use]
+    pub fn with_temporal(mut self, temporal: TemporalComparison) -> Self {
+        for aggregate in &mut self.aggregates {
+            aggregate.temporal = temporal;
+        }
+        self
+    }
 }
 
 impl Operator for SimpleAggregateOperator {
@@ -1356,21 +1401,23 @@ impl Operator for SimpleAggregateOperator {
                     };
 
                     match (agg.function, agg.distinct) {
-                        (AggregateFunction::Count, false) => self.states[i].update(None),
+                        (AggregateFunction::Count, false) => {
+                            self.states[i].update_under(None, agg.temporal);
+                        }
                         (AggregateFunction::Count, true) => {
                             // COUNT DISTINCT needs the value to track unique values
                             if value.is_some() && !matches!(value, Some(Value::Null)) {
-                                self.states[i].update(value);
+                                self.states[i].update_under(value, agg.temporal);
                             }
                         }
                         (AggregateFunction::CountNonNull, _) => {
                             if value.is_some() && !matches!(value, Some(Value::Null)) {
-                                self.states[i].update(value);
+                                self.states[i].update_under(value, agg.temporal);
                             }
                         }
                         _ => {
                             if value.is_some() && !matches!(value, Some(Value::Null)) {
-                                self.states[i].update(value);
+                                self.states[i].update_under(value, agg.temporal);
                             }
                         }
                     }
@@ -2048,6 +2095,7 @@ mod tests {
             percentile: None,
             separator: None,
             rdf_literals: false,
+            temporal: TemporalComparison::TypesApart,
         };
 
         let mut agg =
@@ -2071,6 +2119,7 @@ mod tests {
             percentile: None,
             separator: None,
             rdf_literals: false,
+            temporal: TemporalComparison::TypesApart,
         };
 
         let mut agg =
@@ -2219,6 +2268,7 @@ mod tests {
             percentile: None,
             separator: None,
             rdf_literals: false,
+            temporal: TemporalComparison::TypesApart,
         };
 
         let mut agg = SimpleAggregateOperator::new(
@@ -2246,6 +2296,7 @@ mod tests {
             percentile: None,
             separator: None,
             rdf_literals: false,
+            temporal: TemporalComparison::TypesApart,
         };
 
         let mut agg = SimpleAggregateOperator::new(
@@ -2277,6 +2328,7 @@ mod tests {
             percentile: None,
             separator: None,
             rdf_literals: false,
+            temporal: TemporalComparison::TypesApart,
         };
 
         let mut agg = SimpleAggregateOperator::new(

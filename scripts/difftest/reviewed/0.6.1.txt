@@ -1,5 +1,6 @@
 # Reviewed differences between 0.6.0 and 0.6.1: case key, fingerprint of the reviewed result, why it changed.
 # A `~` before the fingerprint: the case's result in 0.6.0 varies from run to run, so it may also not differ.
+CX3|cypher 9e9e9e76a9 toInteger trims the text first; 0.6.0 gave null for text with surrounding spaces.
 DE1|gql 5103ef079d Shortest paths read a decimal edge weight; 0.6.0 read it as 1.0 (#678).
 DE2|gql 003bcbe071 Spanning trees read a decimal edge weight; 0.6.0 read it as 1.0, so it kept the wrong edges (#678).
 DE3|gql 57bb8d0e4e Max flow reads a decimal capacity; 0.6.0 read it as 1.0 (#678).
@@ -45,3 +46,13 @@ DL8|sparql fe72c08082 FILTER EXISTS keeps a solution once and binds none of its 
 DL9|sparql 97f0e95745 FILTER NOT EXISTS without a shared variable removes every solution when its pattern matches; 0.6.0 kept them.
 DL10|sparql 1a5ada6bbb A group of only FILTER NOT EXISTS is false when its pattern matches; 0.6.0 gave true.
 DL11|sparql 77f2a18238 A variable an OPTIONAL leaves unbound joins with every value of a later pattern; 0.6.0 dropped the rows without the OPTIONAL's match.
+DM1|cypher 50e0e87aef The Cypher sum of no values is 0, as openCypher gives it; 0.6.0 gave null.
+DM2|cypher fec3a71c3b The Cypher sum of a group of only nulls is 0, as openCypher gives it; 0.6.0 gave null.
+DM4|gql 4fbceb9a5a A float remainder by zero is NaN, as IEEE fmod gives it; 0.6.0 gave null.
+DM5|cypher 4fbceb9a5a A float remainder by zero is NaN, as IEEE fmod gives it; 0.6.0 gave null.
+DM6|cypher bd5b5b2c26 toString spells the infinities Infinity and -Infinity, as openCypher does; 0.6.0 gave inf and -inf.
+DM6|gql bd5b5b2c26 toString spells the infinities Infinity and -Infinity, as openCypher does; 0.6.0 gave inf and -inf.
+DM7|cypher 0d27618820 toInteger and toFloat trim the text, and toInteger truncates decimal text; 0.6.0 gave null for both.
+DM7|gql 0d27618820 toInteger and toFloat trim the text, and toInteger truncates decimal text; 0.6.0 gave null for both.
+DM8|cypher aec59ef631 toInteger of NaN is null; 0.6.0 gave 0.
+DM8|gql aec59ef631 toInteger of NaN is null; 0.6.0 gave 0.

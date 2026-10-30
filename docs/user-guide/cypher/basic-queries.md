@@ -15,15 +15,15 @@ This guide covers the fundamentals of querying graphs with Cypher.
 The `MATCH` clause finds patterns in the graph:
 
 ```cypher
--- Match all nodes
+// Match all nodes
 MATCH (n)
 RETURN n
 
--- Match nodes with a label
+// Match nodes with a label
 MATCH (p:Person)
 RETURN p
 
--- Match nodes with properties
+// Match nodes with properties
 MATCH (p:Person {name: 'Alix'})
 RETURN p
 ```
@@ -33,15 +33,15 @@ RETURN p
 The `RETURN` clause specifies what to return:
 
 ```cypher
--- Return entire nodes
+// Return entire nodes
 MATCH (p:Person)
 RETURN p
 
--- Return specific properties
+// Return specific properties
 MATCH (p:Person)
 RETURN p.name, p.age
 
--- Return with aliases
+// Return with aliases
 MATCH (p:Person)
 RETURN p.name AS name, p.age AS age
 ```
@@ -49,16 +49,16 @@ RETURN p.name AS name, p.age AS age
 ## Combining MATCH and RETURN
 
 ```cypher
--- Find all people and return their names
+// Find all people and return their names
 MATCH (p:Person)
 RETURN p.name
 
--- Find people over 30
+// Find people over 30
 MATCH (p:Person)
 WHERE p.age > 30
 RETURN p.name, p.age
 
--- Find Alix's friends
+// Find Alix's friends
 MATCH (a:Person {name: 'Alix'})-[:KNOWS]->(friend)
 RETURN friend.name
 ```
@@ -66,17 +66,17 @@ RETURN friend.name
 ## Ordering Results
 
 ```cypher
--- Order by property
+// Order by property
 MATCH (p:Person)
 RETURN p.name, p.age
 ORDER BY p.age
 
--- Descending order
+// Descending order
 MATCH (p:Person)
 RETURN p.name, p.age
 ORDER BY p.age DESC
 
--- Multiple sort keys
+// Multiple sort keys
 MATCH (p:Person)
 RETURN p.name, p.age
 ORDER BY p.age DESC, p.name ASC
@@ -89,12 +89,12 @@ Values of different types in one sort key, such as a property that holds a numbe
 ## Limiting Results
 
 ```cypher
--- Return first 10 results
+// Return first 10 results
 MATCH (p:Person)
 RETURN p.name
 LIMIT 10
 
--- Skip and limit (pagination)
+// Skip and limit (pagination)
 MATCH (p:Person)
 RETURN p.name
 ORDER BY p.name
@@ -104,7 +104,7 @@ SKIP 20 LIMIT 10
 ## DISTINCT Results
 
 ```cypher
--- Remove duplicates
+// Remove duplicates
 MATCH (p:Person)-[:LIVES_IN]->(c:City)
 RETURN DISTINCT c.name
 ```

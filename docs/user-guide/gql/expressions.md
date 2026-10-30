@@ -71,7 +71,7 @@ RETURN CAST('42' AS INT)        -- 42
 RETURN CAST(42 AS FLOAT)        -- 42.0
 RETURN CAST('1.50' AS DECIMAL)  -- 1.50, exact with its scale
 RETURN CAST(2.345 AS DECIMAL(10, 2))  -- 2.35, rounded half away from zero
-RETURN CAST(123.4 AS DEC(4, 2)) -- NULL: more integer digits than DEC(4, 2) holds
+RETURN CAST(123.4 AS DEC(4, 2)) -- fails with 22003: more integer digits than DEC(4, 2) holds
 RETURN CAST(42 AS STRING)       -- '42'
 RETURN CAST('true' AS BOOLEAN)  -- true
 
@@ -90,6 +90,13 @@ RETURN CAST(42 AS LIST)         -- [42]
 ```
 
 Supported target types: `INT`/`INTEGER`, `FLOAT`, `DECIMAL`/`DEC` (bare, or with a precision from 1 to 38 and a scale up to it: `DECIMAL(10, 2)`, `DEC(5)`), `STRING`, `BOOLEAN`, `DATE`, `TIME`, `DATETIME`, `DURATION`, `ZONED DATETIME`, `ZONED TIME`, `LIST`, `LIST<type>`.
+
+A cast of text to an integer, a float or a decimal trims the spaces around it and reads the number it spells; to an
+integer it is truncated toward zero (`CAST(' 4.7 ' AS INT)` is 4). Text that spells no number fails with `22018`
+(`CAST('Alix' AS INT)`), as SQL does, where `toInteger('Alix')` is `NULL`. A float outside the integer range, an
+infinity or NaN cast to an integer fails with `22003`, and so does a value with more integer digits than a declared
+decimal holds (`CAST(12345.6 AS DECIMAL(5, 2))`). A value that cannot convert otherwise, such as a date cast to an
+integer, is `NULL`.
 
 ## Dynamic Parameters
 
@@ -117,6 +124,9 @@ const result = await db.execute(
     { name: "Alix" }
 );
 ```
+
+A list or map parameter nests at most 128 levels deep, the limit of a stored value. A deeper one is refused with an
+error before the query runs, in every binding.
 
 ## LET ... IN ... END
 
@@ -262,7 +272,7 @@ Create and access map (dictionary) values:
 RETURN {name: 'Alix', age: 30, active: true} AS person
 
 -- Access map properties
-WITH {name: 'Alix', age: 30} AS person
+LET person = {name: 'Alix', age: 30}
 RETURN person.name, person.age
 
 -- Maps in mutations
@@ -281,7 +291,7 @@ RETURN d.meta.score, d.meta.source.kind, d.meta['route']
 -- columns: d.meta.score, d.meta.source.kind, d.meta['route']
 ```
 
-Dotted access reads a key of a map value (a property, a variable, a parameter, a map literal or `properties(n)`), and the property of a node or edge that an expression returns, such as `startNode(r).name`. On an aggregate in the same clause, such as `head(collect(n)).name`, it is an error: name the aggregate with `WITH` first.
+Dotted access reads a key of a map value (a property, a variable, a parameter, a map literal or `properties(n)`), and the property of a node or edge that an expression returns, such as `startNode(r).name`. It also reads the result of an aggregate in the same clause: in `head(collect(n)).name`, `collect(n.name)[0]` and `{names: collect(n.name)}` the aggregate is computed first, also inside `LET ... IN ... END`.
 
 ## SESSION_USER
 

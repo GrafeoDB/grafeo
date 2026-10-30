@@ -59,6 +59,10 @@ MATCH (p:Product)
 RETURN min(p.price), max(p.price)
 ```
 
+`sum()` of no values, or of only nulls, is `NULL`, as in SQL (Cypher gives 0, as openCypher defines it). A `sum` of
+decimals is exact in any row order and fails with `22003` only when its final value needs more than 38 digits; an
+`avg` of decimals never fails.
+
 ## Collect
 
 ```sql

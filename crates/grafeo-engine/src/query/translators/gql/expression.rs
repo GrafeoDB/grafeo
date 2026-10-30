@@ -258,13 +258,18 @@ impl GqlTranslator {
                 })
             }
             ast::Expression::LetIn { bindings, body } => {
-                // LET x = expr1, y = expr2 IN body END
-                // All values read the enclosing scope; the shared path then
-                // substitutes safely or retains one lexical binding per value.
-                let binding_exprs: Vec<(String, LogicalExpression)> = bindings
-                    .iter()
-                    .map(|(name, expr)| Ok((name.clone(), self.translate_expression(expr)?)))
-                    .collect::<Result<_>>()?;
+                // `LET x = e1, y = e2 IN body END` is `LET x = e1 IN LET y =
+                // e2 IN body END END` (ISO GQL, let value expression): each
+                // value reads the ones before it, and a later definition of a
+                // name shadows the earlier one. The shared path substitutes
+                // safely or retains one lexical binding per value.
+                let mut binding_exprs: Vec<(String, LogicalExpression)> = Vec::new();
+                for (name, expr) in bindings {
+                    let value = self.translate_expression(expr)?;
+                    let value = self.substitute_let_bindings(value, &binding_exprs)?;
+                    binding_exprs.retain(|(earlier, _)| earlier != name);
+                    binding_exprs.push((name.clone(), value));
+                }
                 let body_expr = self.translate_expression(body)?;
                 self.substitute_let_bindings(body_expr, &binding_exprs)
             }

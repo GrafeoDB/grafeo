@@ -437,3 +437,73 @@ fn a_failed_restore_of_a_persistent_database_survives_a_reopen() {
     }
     assert!(failures.is_empty(), "\n{}", failures.join("\n\n"));
 }
+
+/// A node type and an edge type whose records carry a CHECK constraint, the
+/// record kind the format keeps though no version supports CHECK any more.
+fn types_with_a_check() -> [(&'static str, CatalogRecord); 2] {
+    use grafeo_common::storage::catalog_record::{
+        EdgeTypeRecord, NodeTypeRecord, TypeConstraintRecord,
+    };
+
+    [
+        (
+            "City",
+            CatalogRecord::NodeType(NodeTypeRecord {
+                name: "City".into(),
+                properties: Vec::new(),
+                constraints: vec![TypeConstraintRecord::Check {
+                    name: Some("populated".into()),
+                    expression: "population > 3".into(),
+                }],
+                parent_types: Vec::new(),
+                key_labels: Vec::new(),
+            }),
+        ),
+        (
+            "ROAD",
+            CatalogRecord::EdgeType(EdgeTypeRecord {
+                name: "ROAD".into(),
+                properties: Vec::new(),
+                constraints: vec![TypeConstraintRecord::Check {
+                    name: None,
+                    expression: "km > 0".into(),
+                }],
+                endpoints: Vec::new(),
+                key_labels: Vec::new(),
+            }),
+        ),
+    ]
+}
+
+/// A snapshot whose node or edge type has a CHECK constraint fails the
+/// import and the restore with a serialization error naming the type, the
+/// expression and the lack of support; the restore leaves the database as
+/// it was.
+#[test]
+fn a_check_constraint_record_fails_the_import_and_the_restore() {
+    let mut failures = Vec::new();
+    for (type_name, record) in types_with_a_check() {
+        let snapshot = snapshot_v5(&[record]);
+        let check = |what: &str, outcome: grafeo_common::utils::error::Result<()>| match outcome {
+            Ok(()) => Some(format!("{type_name}, {what}: accepted")),
+            Err(error) => {
+                let message = error.to_string();
+                let named = message.contains(type_name)
+                    && message.contains("CHECK")
+                    && message.contains("does not support");
+                (!named).then(|| format!("{type_name}, {what}: {message}"))
+            }
+        };
+        failures.extend(check(
+            "import",
+            GrafeoDB::import_snapshot(&snapshot).map(|_| ()),
+        ));
+        let db = GrafeoDB::new_in_memory();
+        db.execute("INSERT (:City {name: 'Amsterdam'})").unwrap();
+        failures.extend(check("restore", db.restore_snapshot(&snapshot)));
+        if rows(&db, "MATCH (c:City) RETURN c.name") != rows(&db, "RETURN 'Amsterdam' AS n") {
+            failures.push(format!("{type_name}: the refused restore changed the data"));
+        }
+    }
+    assert!(failures.is_empty(), "\n{}", failures.join("\n"));
+}

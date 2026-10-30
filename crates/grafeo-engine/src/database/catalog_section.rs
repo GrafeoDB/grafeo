@@ -100,6 +100,28 @@ struct CatalogSnapshot {
     epoch: u64,
 }
 
+/// The version 1 layout as its reader takes it: [`CatalogSnapshot`] with
+/// the node and edge types as 0.5.x wrote them, CHECK constraints included
+/// (see [`LegacyNodeType`](super::catalog_records::LegacyNodeType)).
+#[derive(Deserialize)]
+struct CatalogSnapshotV1 {
+    _version: u8,
+    schema: SnapshotSchemaV1,
+    indexes: SnapshotIndexes,
+    epoch: u64,
+}
+
+/// [`SnapshotSchema`] as the version 1 reader takes it.
+#[derive(Deserialize)]
+struct SnapshotSchemaV1 {
+    node_types: Vec<super::catalog_records::LegacyNodeType>,
+    edge_types: Vec<super::catalog_records::LegacyEdgeType>,
+    graph_types: Vec<GraphTypeDefinition>,
+    procedures: Vec<ProcedureDefinition>,
+    schemas: Vec<String>,
+    graph_type_bindings: Vec<(String, String)>,
+}
+
 #[derive(Serialize, Deserialize, Default)]
 struct SnapshotSchema {
     node_types: Vec<NodeTypeDefinition>,
@@ -607,7 +629,7 @@ impl<S: CatalogStore> CatalogSection<S> {
             }
             CatalogRecord::NodeType(record) => self
                 .catalog
-                .register_or_replace_node_type(node_type_definition(record)),
+                .register_or_replace_node_type(node_type_definition(record)?),
             CatalogRecord::EdgeType(record) => self
                 .catalog
                 .register_or_replace_edge_type_def(edge_type_definition(record)?),
@@ -1063,17 +1085,19 @@ impl<S: CatalogStore> Section for CatalogSection<S> {
     /// Reads the version 1 layout of 0.5.x files.
     fn deserialize(&mut self, data: &[u8]) -> Result<()> {
         let config = bincode::config::standard();
-        let (snapshot, read): (CatalogSnapshot, _) =
+        let (snapshot, read): (CatalogSnapshotV1, _) =
             bincode::serde::decode_from_slice(data, config).map_err(|e| {
                 Error::corruption(format!("Catalog section deserialization failed: {e}"))
             })?;
 
         // Restore schema definitions
         for def in &snapshot.schema.node_types {
-            self.catalog.register_or_replace_node_type(def.clone());
+            self.catalog
+                .register_or_replace_node_type(def.definition()?);
         }
         for def in &snapshot.schema.edge_types {
-            self.catalog.register_or_replace_edge_type_def(def.clone());
+            self.catalog
+                .register_or_replace_edge_type_def(def.definition()?);
         }
         // A definition that does not apply is damage; a schema listed twice
         // is not, and a binding to a graph type the section lacks is left
@@ -1646,10 +1670,6 @@ mod tests {
                 TypeConstraint::PrimaryKey(vec!["name".to_string()]),
                 TypeConstraint::Unique(vec!["name".to_string(), "founded".to_string()]),
                 TypeConstraint::NotNull("population".to_string()),
-                TypeConstraint::Check {
-                    name: Some("populated".to_string()),
-                    expression: "population > 3".to_string(),
-                },
             ],
             parent_types: vec!["Place".to_string()],
             key_labels: Vec::new(),
@@ -1662,10 +1682,7 @@ mod tests {
                 nullable: false,
                 default_value: Some(Value::Float64(19.0)),
             }],
-            constraints: vec![TypeConstraint::Check {
-                name: None,
-                expression: "km > 0".to_string(),
-            }],
+            constraints: vec![TypeConstraint::NotNull("km".to_string())],
             source_node_types: vec!["City".to_string()],
             target_node_types: vec!["City".to_string(), "Place".to_string()],
             key_labels: Vec::new(),
@@ -1734,33 +1751,90 @@ mod tests {
             115, 116, 114, 105, 99, 116, 115, 8, 1, 0, 9, 122, 105, 112, 95, 99, 111, 100, 101,
             115, 9, 1, 1, 0, 7, 100, 101, 116, 97, 105, 108, 115, 10, 1, 0, 4, 102, 108, 97, 103,
             11, 1, 0, 5, 109, 97, 121, 111, 114, 12, 1, 0, 4, 114, 111, 97, 100, 13, 1, 0, 5, 110,
-            111, 116, 101, 115, 14, 1, 0, 8, 0, 1, 4, 110, 97, 109, 101, 1, 2, 4, 110, 97, 109,
+            111, 116, 101, 115, 14, 1, 0, 7, 0, 1, 4, 110, 97, 109, 101, 1, 2, 4, 110, 97, 109,
             101, 7, 102, 111, 117, 110, 100, 101, 100, 2, 10, 112, 111, 112, 117, 108, 97, 116,
-            105, 111, 110, 3, 1, 9, 112, 111, 112, 117, 108, 97, 116, 101, 100, 14, 112, 111, 112,
-            117, 108, 97, 116, 105, 111, 110, 32, 62, 32, 51, 2, 4, 110, 97, 109, 101, 0, 1, 4,
-            110, 97, 109, 101, 1, 1, 4, 110, 97, 109, 101, 2, 4, 110, 97, 109, 101, 1, 5, 80, 108,
-            97, 99, 101, 1, 4, 82, 79, 65, 68, 1, 2, 107, 109, 2, 0, 1, 3, 0, 0, 0, 0, 0, 0, 51,
-            64, 1, 3, 0, 6, 107, 109, 32, 62, 32, 48, 1, 4, 67, 105, 116, 121, 2, 4, 67, 105, 116,
-            121, 5, 80, 108, 97, 99, 101, 1, 5, 65, 116, 108, 97, 115, 1, 4, 67, 105, 116, 121, 1,
-            4, 82, 79, 65, 68, 0, 1, 11, 99, 105, 116, 105, 101, 115, 95, 110, 101, 97, 114, 1, 4,
-            99, 105, 116, 121, 6, 83, 84, 82, 73, 78, 71, 1, 4, 110, 97, 109, 101, 6, 83, 84, 82,
-            73, 78, 71, 36, 77, 65, 84, 67, 72, 32, 40, 99, 58, 67, 105, 116, 121, 41, 32, 82, 69,
-            84, 85, 82, 78, 32, 99, 46, 110, 97, 109, 101, 32, 65, 83, 32, 110, 97, 109, 101, 1, 6,
-            116, 114, 97, 118, 101, 108, 1, 6, 101, 117, 114, 111, 112, 101, 5, 65, 116, 108, 97,
-            115, 1, 4, 110, 97, 109, 101, 0, 0, 42, 4, 11, 99, 105, 116, 121, 95, 101, 120, 105,
-            115, 116, 115, 4, 67, 105, 116, 121, 1, 4, 110, 97, 109, 101, 3, 8, 99, 105, 116, 121,
-            95, 107, 101, 121, 4, 67, 105, 116, 121, 1, 4, 110, 97, 109, 101, 1, 9, 99, 105, 116,
-            121, 95, 110, 97, 109, 101, 4, 67, 105, 116, 121, 1, 4, 110, 97, 109, 101, 0, 12, 99,
-            105, 116, 121, 95, 112, 114, 101, 115, 101, 110, 116, 4, 67, 105, 116, 121, 1, 4, 110,
-            97, 109, 101, 2, 1, 0, 1, 4, 110, 97, 109, 101, 0, 0, 3, 10, 99, 105, 116, 121, 95, 98,
-            116, 114, 101, 101, 4, 67, 105, 116, 121, 4, 110, 97, 109, 101, 1, 9, 99, 105, 116,
-            121, 95, 104, 97, 115, 104, 4, 67, 105, 116, 121, 4, 110, 97, 109, 101, 0, 9, 99, 105,
-            116, 121, 95, 116, 101, 120, 116, 4, 67, 105, 116, 121, 4, 110, 97, 109, 101, 2,
+            105, 111, 110, 2, 4, 110, 97, 109, 101, 0, 1, 4, 110, 97, 109, 101, 1, 1, 4, 110, 97,
+            109, 101, 2, 4, 110, 97, 109, 101, 1, 5, 80, 108, 97, 99, 101, 1, 4, 82, 79, 65, 68, 1,
+            2, 107, 109, 2, 0, 1, 3, 0, 0, 0, 0, 0, 0, 51, 64, 1, 2, 2, 107, 109, 1, 4, 67, 105,
+            116, 121, 2, 4, 67, 105, 116, 121, 5, 80, 108, 97, 99, 101, 1, 5, 65, 116, 108, 97,
+            115, 1, 4, 67, 105, 116, 121, 1, 4, 82, 79, 65, 68, 0, 1, 11, 99, 105, 116, 105, 101,
+            115, 95, 110, 101, 97, 114, 1, 4, 99, 105, 116, 121, 6, 83, 84, 82, 73, 78, 71, 1, 4,
+            110, 97, 109, 101, 6, 83, 84, 82, 73, 78, 71, 36, 77, 65, 84, 67, 72, 32, 40, 99, 58,
+            67, 105, 116, 121, 41, 32, 82, 69, 84, 85, 82, 78, 32, 99, 46, 110, 97, 109, 101, 32,
+            65, 83, 32, 110, 97, 109, 101, 1, 6, 116, 114, 97, 118, 101, 108, 1, 6, 101, 117, 114,
+            111, 112, 101, 5, 65, 116, 108, 97, 115, 1, 4, 110, 97, 109, 101, 0, 0, 42, 4, 11, 99,
+            105, 116, 121, 95, 101, 120, 105, 115, 116, 115, 4, 67, 105, 116, 121, 1, 4, 110, 97,
+            109, 101, 3, 8, 99, 105, 116, 121, 95, 107, 101, 121, 4, 67, 105, 116, 121, 1, 4, 110,
+            97, 109, 101, 1, 9, 99, 105, 116, 121, 95, 110, 97, 109, 101, 4, 67, 105, 116, 121, 1,
+            4, 110, 97, 109, 101, 0, 12, 99, 105, 116, 121, 95, 112, 114, 101, 115, 101, 110, 116,
+            4, 67, 105, 116, 121, 1, 4, 110, 97, 109, 101, 2, 1, 0, 1, 4, 110, 97, 109, 101, 0, 0,
+            3, 10, 99, 105, 116, 121, 95, 98, 116, 114, 101, 101, 4, 67, 105, 116, 121, 4, 110, 97,
+            109, 101, 1, 9, 99, 105, 116, 121, 95, 104, 97, 115, 104, 4, 67, 105, 116, 121, 4, 110,
+            97, 109, 101, 0, 9, 99, 105, 116, 121, 95, 116, 101, 120, 116, 4, 67, 105, 116, 121, 4,
+            110, 97, 109, 101, 2,
         ];
         let section = make_section();
         populate_every_0_5_entry(&section);
         let bytes = section.serialize().unwrap();
         assert_eq!(bytes, EXPECTED, "today's layout: {bytes:?}");
+    }
+
+    /// The bytes 0.6.0 pinned for `populate_every_0_5_entry`, when its City
+    /// and ROAD types carried a CHECK constraint (`population > 3`, `km > 0`):
+    /// a 0.5.x catalog as a file holds it.
+    const LAYOUT_WITH_CHECK_CONSTRAINTS: &[u8] = &[
+        1, 1, 4, 67, 105, 116, 121, 15, 4, 110, 97, 109, 101, 0, 0, 1, 4, 9, 65, 109, 115, 116,
+        101, 114, 100, 97, 109, 10, 112, 111, 112, 117, 108, 97, 116, 105, 111, 110, 1, 1, 1, 2,
+        176, 4, 97, 114, 101, 97, 2, 1, 0, 7, 99, 97, 112, 105, 116, 97, 108, 3, 1, 0, 7, 102, 111,
+        117, 110, 100, 101, 100, 4, 1, 0, 5, 111, 112, 101, 110, 115, 5, 1, 0, 7, 117, 112, 100,
+        97, 116, 101, 100, 6, 1, 0, 4, 116, 114, 105, 112, 7, 1, 0, 9, 100, 105, 115, 116, 114,
+        105, 99, 116, 115, 8, 1, 0, 9, 122, 105, 112, 95, 99, 111, 100, 101, 115, 9, 1, 1, 0, 7,
+        100, 101, 116, 97, 105, 108, 115, 10, 1, 0, 4, 102, 108, 97, 103, 11, 1, 0, 5, 109, 97,
+        121, 111, 114, 12, 1, 0, 4, 114, 111, 97, 100, 13, 1, 0, 5, 110, 111, 116, 101, 115, 14, 1,
+        0, 8, 0, 1, 4, 110, 97, 109, 101, 1, 2, 4, 110, 97, 109, 101, 7, 102, 111, 117, 110, 100,
+        101, 100, 2, 10, 112, 111, 112, 117, 108, 97, 116, 105, 111, 110, 3, 1, 9, 112, 111, 112,
+        117, 108, 97, 116, 101, 100, 14, 112, 111, 112, 117, 108, 97, 116, 105, 111, 110, 32, 62,
+        32, 51, 2, 4, 110, 97, 109, 101, 0, 1, 4, 110, 97, 109, 101, 1, 1, 4, 110, 97, 109, 101, 2,
+        4, 110, 97, 109, 101, 1, 5, 80, 108, 97, 99, 101, 1, 4, 82, 79, 65, 68, 1, 2, 107, 109, 2,
+        0, 1, 3, 0, 0, 0, 0, 0, 0, 51, 64, 1, 3, 0, 6, 107, 109, 32, 62, 32, 48, 1, 4, 67, 105,
+        116, 121, 2, 4, 67, 105, 116, 121, 5, 80, 108, 97, 99, 101, 1, 5, 65, 116, 108, 97, 115, 1,
+        4, 67, 105, 116, 121, 1, 4, 82, 79, 65, 68, 0, 1, 11, 99, 105, 116, 105, 101, 115, 95, 110,
+        101, 97, 114, 1, 4, 99, 105, 116, 121, 6, 83, 84, 82, 73, 78, 71, 1, 4, 110, 97, 109, 101,
+        6, 83, 84, 82, 73, 78, 71, 36, 77, 65, 84, 67, 72, 32, 40, 99, 58, 67, 105, 116, 121, 41,
+        32, 82, 69, 84, 85, 82, 78, 32, 99, 46, 110, 97, 109, 101, 32, 65, 83, 32, 110, 97, 109,
+        101, 1, 6, 116, 114, 97, 118, 101, 108, 1, 6, 101, 117, 114, 111, 112, 101, 5, 65, 116,
+        108, 97, 115, 1, 4, 110, 97, 109, 101, 0, 0, 42, 4, 11, 99, 105, 116, 121, 95, 101, 120,
+        105, 115, 116, 115, 4, 67, 105, 116, 121, 1, 4, 110, 97, 109, 101, 3, 8, 99, 105, 116, 121,
+        95, 107, 101, 121, 4, 67, 105, 116, 121, 1, 4, 110, 97, 109, 101, 1, 9, 99, 105, 116, 121,
+        95, 110, 97, 109, 101, 4, 67, 105, 116, 121, 1, 4, 110, 97, 109, 101, 0, 12, 99, 105, 116,
+        121, 95, 112, 114, 101, 115, 101, 110, 116, 4, 67, 105, 116, 121, 1, 4, 110, 97, 109, 101,
+        2, 1, 0, 1, 4, 110, 97, 109, 101, 0, 0, 3, 10, 99, 105, 116, 121, 95, 98, 116, 114, 101,
+        101, 4, 67, 105, 116, 121, 4, 110, 97, 109, 101, 1, 9, 99, 105, 116, 121, 95, 104, 97, 115,
+        104, 4, 67, 105, 116, 121, 4, 110, 97, 109, 101, 0, 9, 99, 105, 116, 121, 95, 116, 101,
+        120, 116, 4, 67, 105, 116, 121, 4, 110, 97, 109, 101, 2,
+    ];
+
+    /// A 0.5.x catalog whose types carry CHECK constraints is refused with a
+    /// serialization error: no version supports CHECK any more.
+    #[test]
+    fn a_0_5_catalog_with_check_constraints_is_refused() {
+        let mut section = make_section();
+        let error = section
+            .deserialize(LAYOUT_WITH_CHECK_CONSTRAINTS)
+            .expect_err("a catalog with CHECK constraints");
+        // The file is not damaged: the error says what it holds that this
+        // version does not support, as the record path does.
+        assert!(
+            matches!(error, grafeo_common::utils::error::Error::Serialization(_)),
+            "{error:?}"
+        );
+        let message = error.to_string();
+        assert!(
+            message.contains("type 'City'")
+                && message.contains("CHECK")
+                && message.contains("does not support"),
+            "{message}"
+        );
     }
 
     // ── Version 2: catalog records ──────────────────────────────────

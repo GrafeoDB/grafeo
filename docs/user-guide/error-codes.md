@@ -38,9 +38,9 @@ Categories:
 | `GRAFEO-Q001` | QuerySyntax         | no        | Parser rejected the query. Check the reported line/column. |
 | `GRAFEO-Q002` | QuerySemantic       | no        | Parsed but invalid: unknown label, graph or procedure, a variable nothing binds (in a stored procedure's body too), a call with another number of arguments, an unknown `YIELD` column, etc. GQLSTATUS `42002` for a name that resolves to nothing, `42000` for the rest. |
 | `GRAFEO-Q003` | QueryTimeout        | **yes**   | Query exceeded its deadline. Raise `query_timeout` or narrow the pattern. |
-| `GRAFEO-Q004` | QueryUnsupported    | no        | The database or this build cannot run the statement: a feature the build leaves out (vector or text indexes, procedures, RDF, an import format), a language of another graph model (GQL on an RDF database), or an operation the database cannot do (a backup of an in-memory database). |
+| `GRAFEO-Q004` | QueryUnsupported    | no        | The database or this build cannot run the statement: a feature the build leaves out (vector or text indexes, procedures, RDF, an import format), a language of another graph model (GQL on an RDF database), an operation the database cannot do (a backup of an in-memory database), or an isolation level that is not available yet (`SERIALIZABLE`). |
 | `GRAFEO-Q005` | QueryOptimization   | no        | Optimizer could not produce a plan. Report with the query text if you hit this. |
-| `GRAFEO-Q006` | QueryExecution      | no        | A valid statement failed while it ran, on its data: a file to load that cannot be read, a SPARQL graph that exists already or does not exist, a write to a node the transaction deleted, an integer or decimal result out of range or a division by zero (GQLSTATUS `22003` and `22012`). |
+| `GRAFEO-Q006` | QueryExecution      | no        | A valid statement failed while it ran, on its data: a file to load that cannot be read, a SPARQL graph that exists already or does not exist, a write to a node the transaction deleted, an integer or decimal result out of range, a float converted to an integer outside its range, a division by zero, or text a cast cannot read as a number (GQLSTATUS `22003`, `22012` and `22018`). |
 
 ## Transaction (T)
 
@@ -50,7 +50,7 @@ Categories:
 | `GRAFEO-T002` | TransactionTimeout       | **yes**   | Transaction exceeded its TTL. |
 | `GRAFEO-T003` | TransactionReadOnly      | no        | Attempted a write inside `START TRANSACTION READ ONLY`. |
 | `GRAFEO-T004` | TransactionInvalidState  | no        | `COMMIT` / `ROLLBACK` without an active transaction, or a transaction command outside GQL. |
-| `GRAFEO-T005` | TransactionSerialization | **yes**   | SSI validation rejected the commit. Retry under a fresh snapshot. |
+| `GRAFEO-T005` | TransactionSerialization | **yes**   | Reserved for Serializable isolation, which is refused for now (`GRAFEO-Q004`): no commit fails with this code until it returns. |
 | `GRAFEO-T006` | TransactionDeadlock      | **yes**   | Lock manager detected a cycle. Retry. |
 | `GRAFEO-T007` | DatabaseClosed           | no        | A write to a database whose `close()` started (persistent databases), or a checkpoint, backup or save after it. Open it again to write. Python raises `DatabaseClosedError`, a subclass of `GrafeoError`; the C API returns `GRAFEO_ERROR_DATABASE`. |
 | `GRAFEO-T008` | IncompleteCommit         | no        | An earlier commit did not complete, so nothing commits, checkpoints, saves or copies the database (`to_memory()`, snapshots) until it is reopened (reads still work). Python raises `GrafeoError`; the C API returns `GRAFEO_ERROR_DATABASE`. |
@@ -93,12 +93,15 @@ GQLSTATUS says what kind of condition it is, as SQL's SQLSTATE does:
 
 | GQLSTATUS | Condition                      | Example                                          |
 | --------- | ------------------------------ | ------------------------------------------------ |
-| `22003`   | numeric value out of range     | `RETURN 9223372036854775807 + 1`, a `sum` past 64 bits |
+| `22003`   | numeric value out of range     | `RETURN 9223372036854775807 + 1`, an integer `sum` past 64 bits, a decimal `sum` past 38 digits, `CAST(1.0e19 AS INT64)`, `toInteger(Infinity)` |
+| `22009`   | invalid time zone displacement value | `SESSION SET TIME ZONE 'Europe/Amsterdam'`: a time zone that is not a UTC offset, or one past 14 hours |
 | `22012`   | division by zero               | `RETURN 10 / 0`, `RETURN 10 % 0`                 |
+| `22018`   | invalid character value for cast | `CAST('Alix' AS INT64)`: text that spells no number, cast to an integer, a float or a decimal (`toInteger('Alix')` is null instead) |
 | `22G02`   | negative limit value           | `LIMIT $k` with `k = -1`                         |
 | `22G03`   | invalid value type             | `LIMIT $k` with `k = 'three'`, a procedure argument of another type |
+| `22G04`   | values not comparable          | two values a comparison cannot compare, such as a node and a number in GQL |
 | `22000`   | data exception                 | other failures on the statement's data, such as a vector of another size than its index or a property value past its size limit |
-| `G2000`   | graph type violation           | a write the graph's schema refuses: a property of another type than its node or edge type declares, a missing `NOT NULL` property, a label, edge type or property a closed graph type does not declare, a `UNIQUE`, `NOT NULL`, key or `CHECK` constraint |
+| `G2000`   | graph type violation           | a write the graph's schema refuses: a property of another type than its node or edge type declares, a missing `NOT NULL` property, a label, edge type or property a closed graph type does not declare, a `UNIQUE`, `NOT NULL` or key constraint |
 | `G1001`   | dependent object error: edges still exist | `DELETE` of a node that still has edges (use `DETACH DELETE`) |
 | `02000`   | no data                        | a node or edge that does not exist               |
 | `25000`   | invalid transaction state      | a write to a closed database                     |
@@ -111,10 +114,10 @@ GQLSTATUS says what kind of condition it is, as SQL's SQLSTATE does:
 `42000` is the code ISO GQL gives a violated syntax or access rule that names no condition of its own; the
 message says which rule it is.
 
-Python has it as `GrafeoError.gql_status`, WASM as the `gqlStatus` property of the thrown `Error`, C as
+Python has it as `GrafeoError.gql_status`, Node.js and WASM as the `gqlStatus` property of the thrown `Error`, C as
 `grafeo_last_error_gql_status()` (next to `grafeo_last_error()`), Go as the `GQLStatus` field of `*grafeo.Error`
 (get it with `errors.As`), C# as `GrafeoException.GqlStatus` and Dart as `GrafeoException.gqlStatus`. A
-float operation keeps its IEEE result (`toFloat(1) / 0` is infinity), and SPARQL leaves a variable unbound
+float operation keeps its IEEE result (`toFloat(1) / 0` is `Infinity`, `1.5e0 % 0` is NaN), and SPARQL leaves a variable unbound
 when its expression fails, as SPARQL 1.1 specifies, instead of raising one of these errors.
 
 ## Retry guidance

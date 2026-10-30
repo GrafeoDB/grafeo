@@ -272,6 +272,7 @@ impl super::Planner {
                     percentile: agg_expr.percentile,
                     separator: agg_expr.separator.clone(),
                     rdf_literals: false,
+                    temporal: self.session_context.temporal_comparison,
                 })
             })
             .collect::<Result<Vec<_>>>()?;
@@ -358,18 +359,20 @@ impl super::Planner {
 
         // Choose operator based on whether there are group-by columns
         let mut operator: Box<dyn Operator> = if group_columns.is_empty() {
-            Box::new(SimpleAggregateOperator::new(
-                input_op,
-                physical_aggregates,
-                output_schema,
-            ))
+            Box::new(
+                SimpleAggregateOperator::new(input_op, physical_aggregates, output_schema)
+                    .with_temporal(self.session_context.temporal_comparison),
+            )
         } else {
-            Box::new(HashAggregateOperator::new(
-                input_op,
-                group_columns,
-                physical_aggregates,
-                output_schema,
-            ))
+            Box::new(
+                HashAggregateOperator::new(
+                    input_op,
+                    group_columns,
+                    physical_aggregates,
+                    output_schema,
+                )
+                .with_temporal(self.session_context.temporal_comparison),
+            )
         };
 
         // Apply HAVING clause filter if present

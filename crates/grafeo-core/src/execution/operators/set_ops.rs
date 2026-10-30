@@ -5,14 +5,15 @@
 
 use grafeo_common::utils::hash::FxHashSet as HashSet;
 
-use grafeo_common::types::{LogicalType, Value};
+use grafeo_common::types::{LogicalType, TemporalComparison, Value};
 
 use super::accumulator::RowKey;
 use super::{DataChunk, Operator, OperatorError, OperatorResult};
 use crate::execution::chunk::{ColumnTypes, DataChunkBuilder};
 
 /// A row of a set operation: its values, and its key, which two rows share
-/// when their values are the same values (`3` and `3.0`, see [`RowKey`]).
+/// when their values are the same values (`3` and `3.0`, see [`RowKey`]), as
+/// the operation's temporal reading reads them.
 #[derive(Clone)]
 struct Row {
     key: RowKey,
@@ -20,8 +21,11 @@ struct Row {
 }
 
 /// Materializes all rows from an operator, with the column types of its
-/// chunks.
-fn materialize(op: &mut dyn Operator) -> Result<(Vec<Row>, Vec<LogicalType>), OperatorError> {
+/// chunks, their keys read as `temporal` reads them.
+fn materialize(
+    op: &mut dyn Operator,
+    temporal: TemporalComparison,
+) -> Result<(Vec<Row>, Vec<LogicalType>), OperatorError> {
     let mut rows = Vec::new();
     let mut column_types = ColumnTypes::default();
     while let Some(chunk) = op.next()? {
@@ -30,7 +34,7 @@ fn materialize(op: &mut dyn Operator) -> Result<(Vec<Row>, Vec<LogicalType>), Op
         for row in chunk.selected_indices() {
             let values = RowKey::values_of(&chunk, row, &columns);
             rows.push(Row {
-                key: RowKey::of(&values),
+                key: RowKey::of_under(&values, temporal),
                 values,
             });
         }
@@ -65,6 +69,10 @@ pub struct ExceptOperator {
     column_types: Vec<LogicalType>,
     result: Option<Vec<Row>>,
     position: usize,
+    /// How the row keys read a local datetime against a zoned one (see
+    /// [`TemporalComparison::normalize`]); `TypesApart` reads every value
+    /// as itself.
+    temporal: TemporalComparison,
 }
 
 impl ExceptOperator {
@@ -77,12 +85,21 @@ impl ExceptOperator {
             column_types: Vec::new(),
             result: None,
             position: 0,
+            temporal: TemporalComparison::TypesApart,
         }
     }
 
+    /// The operator with `temporal` as the reading of its row keys (the
+    /// statement's `=`). The rows keep their values.
+    #[must_use]
+    pub fn with_temporal(mut self, temporal: TemporalComparison) -> Self {
+        self.temporal = temporal;
+        self
+    }
+
     fn compute(&mut self) -> Result<(), OperatorError> {
-        let (left_rows, column_types) = materialize(self.left.as_mut())?;
-        let (right_rows, _) = materialize(self.right.as_mut())?;
+        let (left_rows, column_types) = materialize(self.left.as_mut(), self.temporal)?;
+        let (right_rows, _) = materialize(self.right.as_mut(), self.temporal)?;
         self.column_types = column_types;
 
         if self.all {
@@ -156,6 +173,10 @@ pub struct IntersectOperator {
     column_types: Vec<LogicalType>,
     result: Option<Vec<Row>>,
     position: usize,
+    /// How the row keys read a local datetime against a zoned one (see
+    /// [`TemporalComparison::normalize`]); `TypesApart` reads every value
+    /// as itself.
+    temporal: TemporalComparison,
 }
 
 impl IntersectOperator {
@@ -168,12 +189,21 @@ impl IntersectOperator {
             column_types: Vec::new(),
             result: None,
             position: 0,
+            temporal: TemporalComparison::TypesApart,
         }
     }
 
+    /// The operator with `temporal` as the reading of its row keys (the
+    /// statement's `=`). The rows keep their values.
+    #[must_use]
+    pub fn with_temporal(mut self, temporal: TemporalComparison) -> Self {
+        self.temporal = temporal;
+        self
+    }
+
     fn compute(&mut self) -> Result<(), OperatorError> {
-        let (left_rows, column_types) = materialize(self.left.as_mut())?;
-        let (right_rows, _) = materialize(self.right.as_mut())?;
+        let (left_rows, column_types) = materialize(self.left.as_mut(), self.temporal)?;
+        let (right_rows, _) = materialize(self.right.as_mut(), self.temporal)?;
         self.column_types = column_types;
 
         if self.all {

@@ -286,6 +286,18 @@ impl super::Planner {
                 pending
                     || self.has_subquery_to_lift(conjunct, input_columns.as_deref(), input_writes)
             });
+        // The labels a conjunct with subqueries requires (`(n:A AND EXISTS
+        // {...}) OR (n:B AND ...)`) filter first too, so a scan of every node
+        // reads only those labels' nodes and the subqueries run for them
+        // alone; the check is implied, the rows are the same.
+        let mut plain = plain;
+        if !pending && let LogicalOperator::NodeScan(scan) = filter.input.as_ref() {
+            plain.extend(
+                with_subqueries.iter().filter_map(|conjunct| {
+                    super::scan::implied_label_check(conjunct, &scan.variable)
+                }),
+            );
+        }
         let (input_op, columns) = match join_conjuncts(plain) {
             Some(predicate) => self.plan_filter(&FilterOp {
                 predicate,
@@ -1442,13 +1454,13 @@ pub(crate) fn scan_hint(
 
 /// Extracted vector predicate from a filter expression.
 ///
-/// `remaining` carries the residual predicate that must run in a
-/// `FilterOperator` above the `VectorScanOperator`. It is required for
-/// strict operators (`>` / `<`): the scan compares inclusively
-/// (`>=` / `<=`) when applying `min_similarity` / `max_distance`, so without
-/// the residual the boundary row at exactly `threshold` leaks through.
-/// Construct via [`Self::inclusive`] or [`Self::strict`] to make that
-/// invariant explicit at every call site.
+/// `remaining` carries the predicate that runs in a `FilterOperator` above
+/// the `VectorScanOperator`: the comparison itself, which decides each row
+/// as the per-row path does. The scan's `min_similarity` and `max_distance`
+/// only narrow the candidates, by the index's own arithmetic (`1 - distance`
+/// is not the similarity bit for bit, so a row exactly at the threshold
+/// could fall on either side), with a margin that keeps every row the
+/// comparison keeps.
 #[cfg(feature = "vector-index")]
 pub(super) struct ExtractedVectorPredicate {
     pub(super) property: String,
@@ -1459,24 +1471,23 @@ pub(super) struct ExtractedVectorPredicate {
     pub(super) metric: super::VectorMetric,
     pub(super) min_similarity: Option<f32>,
     pub(super) max_distance: Option<f32>,
-    /// Residual predicate to apply above the scan. `Some` for strict
-    /// operators; `None` for inclusive operators (the scan's own
-    /// comparison is sufficient).
+    /// Predicate to apply above the scan: the comparison, and the
+    /// conditions the vector predicate was found next to.
     pub(super) remaining: Option<LogicalExpression>,
 }
 
 #[cfg(feature = "vector-index")]
 impl ExtractedVectorPredicate {
-    /// Builds a predicate for an inclusive operator (`>=` / `<=`). No
-    /// residual is needed because the scan's internal comparison uses the
-    /// same inclusive bound.
-    fn inclusive(
+    /// Builds the predicate of a comparison: `comparison` runs above the
+    /// scan and decides every row.
+    fn new(
         property: String,
         variable: String,
         query_vector: LogicalExpression,
         metric: super::VectorMetric,
         min_similarity: Option<f32>,
         max_distance: Option<f32>,
+        comparison: LogicalExpression,
     ) -> Self {
         Self {
             property,
@@ -1485,31 +1496,7 @@ impl ExtractedVectorPredicate {
             metric,
             min_similarity,
             max_distance,
-            remaining: None,
-        }
-    }
-
-    /// Builds a predicate for a strict operator (`>` / `<`). The caller
-    /// must supply the residual predicate; the planner threads it into a
-    /// `FilterOperator` above the `VectorScanOperator` so rows exactly at
-    /// the threshold are rejected.
-    fn strict(
-        property: String,
-        variable: String,
-        query_vector: LogicalExpression,
-        metric: super::VectorMetric,
-        min_similarity: Option<f32>,
-        max_distance: Option<f32>,
-        residual: LogicalExpression,
-    ) -> Self {
-        Self {
-            property,
-            variable,
-            query_vector,
-            metric,
-            min_similarity,
-            max_distance,
-            remaining: Some(residual),
+            remaining: Some(comparison),
         }
     }
 }
@@ -1686,23 +1673,13 @@ impl super::Planner {
             _ => return None,
         };
 
-        // Both strict (>, <) and inclusive (>=, <=) operators push down. The
-        // index-level threshold is applied inclusively (apply_filters uses
-        // >= / <=), so for strict operators we attach a residual filter that
-        // re-applies the strict comparison to exclude boundary rows (scores
-        // exactly at the threshold).
-        let (valid_op, is_strict) = if is_similarity {
-            match op {
-                BinaryOp::Gt => (true, true),
-                BinaryOp::Ge => (true, false),
-                _ => (false, false),
-            }
+        // Strict (>, <) and inclusive (>=, <=) comparisons push down; the
+        // comparison itself runs above the scan (see
+        // `ExtractedVectorPredicate`).
+        let valid_op = if is_similarity {
+            matches!(op, BinaryOp::Gt | BinaryOp::Ge)
         } else {
-            match op {
-                BinaryOp::Lt => (true, true),
-                BinaryOp::Le => (true, false),
-                _ => (false, false),
-            }
+            matches!(op, BinaryOp::Lt | BinaryOp::Le)
         };
         if !valid_op {
             return None;
@@ -1730,40 +1707,25 @@ impl super::Planner {
             (None, Some(threshold_val))
         };
 
-        // For strict ops, reconstruct the original predicate as the residual
-        // filter. The planner threads it into a FilterOperator above the
-        // VectorScan (see `plan_filter_with_vector_pushdown`) to strip
-        // boundary rows that the scan's inclusive comparison would let through.
-        if is_strict {
-            let residual = LogicalExpression::Binary {
-                left: Box::new(LogicalExpression::FunctionCall {
-                    callee,
-                    name: name.to_string(),
-                    args: args.to_vec(),
-                    distinct: false,
-                }),
-                op,
-                right: Box::new(threshold.clone()),
-            };
-            Some(ExtractedVectorPredicate::strict(
-                property,
-                variable,
-                query_vector,
-                metric,
-                min_similarity,
-                max_distance,
-                residual,
-            ))
-        } else {
-            Some(ExtractedVectorPredicate::inclusive(
-                property,
-                variable,
-                query_vector,
-                metric,
-                min_similarity,
-                max_distance,
-            ))
-        }
+        let comparison = LogicalExpression::Binary {
+            left: Box::new(LogicalExpression::FunctionCall {
+                callee,
+                name: name.to_string(),
+                args: args.to_vec(),
+                distinct: false,
+            }),
+            op,
+            right: Box::new(threshold.clone()),
+        };
+        Some(ExtractedVectorPredicate::new(
+            property,
+            variable,
+            query_vector,
+            metric,
+            min_similarity,
+            max_distance,
+            comparison,
+        ))
     }
 }
 

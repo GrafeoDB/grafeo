@@ -65,6 +65,9 @@ impl GqlStatus {
     /// `22004` - null value not allowed.
     pub const DATA_NULL_NOT_ALLOWED: Self = Self::from_bytes(*b"22004");
 
+    /// `22018` - invalid character value for cast.
+    pub const DATA_INVALID_CHARACTER_VALUE_FOR_CAST: Self = Self::from_bytes(*b"22018");
+
     /// `22009` - invalid time zone displacement value.
     pub const DATA_INVALID_TIME_ZONE_DISPLACEMENT: Self = Self::from_bytes(*b"22009");
 
@@ -219,6 +222,9 @@ impl From<&super::error::Error> for GqlStatus {
                 QueryErrorKind::Execution => GqlStatus::DATA_EXCEPTION,
                 QueryErrorKind::Timeout => GqlStatus::DATA_EXCEPTION,
                 QueryErrorKind::NumericOutOfRange => GqlStatus::DATA_NUMERIC_OUT_OF_RANGE,
+                QueryErrorKind::InvalidCharacterValueForCast => {
+                    GqlStatus::DATA_INVALID_CHARACTER_VALUE_FOR_CAST
+                }
                 QueryErrorKind::DivisionByZero => GqlStatus::DATA_DIVISION_BY_ZERO,
                 QueryErrorKind::NegativeLimit => GqlStatus::DATA_NEGATIVE_LIMIT,
                 QueryErrorKind::InvalidValueType => GqlStatus::DATA_INVALID_VALUE_TYPE,

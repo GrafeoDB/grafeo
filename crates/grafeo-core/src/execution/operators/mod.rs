@@ -492,6 +492,16 @@ impl OperatorError {
         )
     }
 
+    /// Text a cast cannot read as a value of its target type (GQLSTATUS
+    /// 22018); `operation` says which, such as `CAST('Alix' AS INT64)`.
+    #[must_use]
+    pub fn invalid_cast_text(operation: impl Into<String>) -> Self {
+        Self::query_data(
+            grafeo_common::utils::error::QueryErrorKind::InvalidCharacterValueForCast,
+            operation,
+        )
+    }
+
     /// An integer or decimal division by zero (GQLSTATUS 22012); `operation`
     /// says which, such as `10 / 0`.
     #[must_use]

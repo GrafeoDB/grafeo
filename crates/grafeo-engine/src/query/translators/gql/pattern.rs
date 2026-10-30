@@ -301,6 +301,17 @@ impl GqlTranslator {
         plan: LogicalOperator,
     ) -> Result<LogicalOperator> {
         let mut bound = insert_input_variables(&plan);
+        // When the input's variables are known exactly, a bare variable of a
+        // path that none of them binds is a new node, as in an INSERT that
+        // starts the statement (`INSERT (a) INSERT (a)-[:R]->(b)` creates
+        // `b`); when they are not, it refers to a node of the input rows.
+        let bare_is_new = match plan.bound_variables(None) {
+            Some(known) => {
+                bound.extend(known);
+                true
+            }
+            None => false,
+        };
         let mut elements = Vec::new();
         for pattern in patterns {
             match pattern {
@@ -311,17 +322,15 @@ impl GqlTranslator {
                     }
                 }
                 ast::Pattern::Path(path) => {
-                    // A bare variable of a path refers to a node of the input
-                    // rows, even one `bound` does not list.
                     let (mut source_var, is_new) =
-                        insert_endpoint(&path.source, &mut bound, false, &self.names)?;
+                        insert_endpoint(&path.source, &mut bound, bare_is_new, &self.names)?;
                     if is_new {
                         elements.push(self.created_node(&source_var, &path.source)?);
                     }
 
                     for edge in &path.edges {
                         let (target_var, is_new) =
-                            insert_endpoint(&edge.target, &mut bound, false, &self.names)?;
+                            insert_endpoint(&edge.target, &mut bound, bare_is_new, &self.names)?;
                         if is_new {
                             elements.push(self.created_node(&target_var, &edge.target)?);
                         }

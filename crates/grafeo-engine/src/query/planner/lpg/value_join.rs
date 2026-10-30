@@ -58,21 +58,72 @@ fn enabled() -> bool {
     }
 }
 
-/// Whether the statement being planned writes, from its root: the operator
+/// How the statement being planned writes (see [`StatementScope`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct StatementWrites {
+    /// Whether it writes at all.
+    pub writes: bool,
+    /// Whether a write of it sees what its own earlier rows wrote while it
+    /// runs (see [`writes_per_row`]).
+    pub per_row: bool,
+}
+
+/// How the statement being planned writes, from its root: the operator
 /// `plan_operator` plans first. While the root is planned the cell holds it,
 /// and it is cleared again when the root is planned, so a planner that plans
 /// another statement looks again.
-pub(super) struct StatementScope<'a>(Option<&'a Cell<Option<bool>>>);
+pub(super) struct StatementScope<'a>(Option<&'a Cell<Option<StatementWrites>>>);
 
 impl<'a> StatementScope<'a> {
-    /// Records whether `op` writes when it is the root (the cell is empty);
-    /// an operator below the root leaves the record as it is.
-    pub(super) fn enter(writes: &'a Cell<Option<bool>>, op: &LogicalOperator) -> Self {
+    /// Records how `op` writes when it is the root (the cell is empty); an
+    /// operator below the root leaves the record as it is.
+    pub(super) fn enter(writes: &'a Cell<Option<StatementWrites>>, op: &LogicalOperator) -> Self {
         if writes.get().is_some() {
             return Self(None);
         }
-        writes.set(Some(op.has_mutations()));
+        writes.set(Some(StatementWrites {
+            writes: op.has_mutations(),
+            per_row: writes_per_row(op),
+        }));
         Self(Some(writes))
+    }
+}
+
+/// Whether a write of the statement `op` sees what its own earlier rows
+/// wrote while it runs: a `MERGE`, a subquery that writes (`CALL`,
+/// `FOREACH`), and any write but the ones that read their whole input before
+/// their first row and then write row by row (`CREATE`, `SET`, `REMOVE`,
+/// `DELETE` and the label changes, see `read_before_writing`). Above those,
+/// every row a join below gives is read before anything is written, so the
+/// join may key its rows once (see [`value_join`]).
+pub(crate) fn writes_per_row(op: &LogicalOperator) -> bool {
+    match op {
+        LogicalOperator::CreateNode(_)
+        | LogicalOperator::CreateEdge(_)
+        | LogicalOperator::Create(_)
+        | LogicalOperator::DeleteNode(_)
+        | LogicalOperator::DeleteEdge(_)
+        | LogicalOperator::SetProperty(_)
+        | LogicalOperator::AddLabel(_)
+        | LogicalOperator::RemoveLabel(_) => op.children().into_iter().any(writes_per_row),
+        LogicalOperator::Apply(apply) => {
+            apply.subplan.has_mutations() || writes_per_row(&apply.input)
+        }
+        LogicalOperator::Merge(_)
+        | LogicalOperator::MergeRelationship(_)
+        | LogicalOperator::InsertTriple(_)
+        | LogicalOperator::DeleteTriple(_)
+        | LogicalOperator::Modify(_)
+        | LogicalOperator::ClearGraph(_)
+        | LogicalOperator::CreateGraph(_)
+        | LogicalOperator::DropGraph(_)
+        | LogicalOperator::LoadGraph(_)
+        | LogicalOperator::CopyGraph(_)
+        | LogicalOperator::MoveGraph(_)
+        | LogicalOperator::AddGraph(_)
+        | LogicalOperator::CreatePropertyGraph(_)
+        | LogicalOperator::DropPropertyGraph(_) => true,
+        other => other.children().into_iter().any(writes_per_row),
     }
 }
 
@@ -94,14 +145,17 @@ impl Drop for StatementScope<'_> {
 /// (the scan reads its whole input first, to see the writes; see
 /// `plan_node_scan`), nor when the filter has a subquery or a function whose
 /// value changes between calls: such a filter runs on each pair of the scan
-/// per row. Nor when the statement writes anywhere (`statement_writes`): a
-/// write above the join can change the keys the scan per row reads when the
-/// later input rows arrive, which a hash join would have keyed once.
+/// per row. Nor when a write of the statement sees what its own earlier
+/// rows wrote (`writes_per_row`, a `MERGE` above the join): it could change
+/// the keys the scan per row reads when the later input rows arrive, which a
+/// hash join would have keyed once. A `CREATE`, `SET`, `REMOVE` or `DELETE`
+/// above it reads every row of the join before its first write, so the keys
+/// are the store's as the statement found it either way.
 ///
 /// The planner tries the seek of the filter first (see `plan_filter`): an
 /// indexed key or an ID keeps the lookup per row.
-pub(crate) fn value_join(filter: &FilterOp, statement_writes: bool) -> Option<ValueJoin<'_>> {
-    if statement_writes || !enabled() {
+pub(crate) fn value_join(filter: &FilterOp, writes_per_row: bool) -> Option<ValueJoin<'_>> {
+    if writes_per_row || !enabled() {
         return None;
     }
     let checked = checked_scan(filter)?;
@@ -203,7 +257,12 @@ impl super::Planner {
                 },
             input,
             keys,
-        }) = value_join(filter, self.statement_writes.get().unwrap_or(true))
+        }) = value_join(
+            filter,
+            self.statement_writes
+                .get()
+                .is_none_or(|writes| writes.per_row),
+        )
         else {
             return Ok(None);
         };

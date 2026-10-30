@@ -703,13 +703,14 @@ impl QueryProcessor {
 /// the planner scans, below any operator, as the planner chooses it for every
 /// filter it plans (see
 /// [`with_smallest_scan_label`](crate::query::planner::lpg::scan::with_smallest_scan_label)).
-/// `op` is the statement's root: a statement that writes plans no hash join
-/// on values.
+/// `op` is the statement's root: a statement with a write that sees what
+/// its own earlier rows wrote plans no hash join on values (see
+/// [`writes_per_row`](crate::query::planner::lpg::value_join::writes_per_row)).
 pub(crate) fn annotate_pushdown_hints(
     op: &mut LogicalOperator,
     store: &dyn grafeo_core::graph::GraphStore,
 ) {
-    let writes = op.has_mutations();
+    let writes = crate::query::planner::lpg::value_join::writes_per_row(op);
     annotate_hints(op, store, writes, false);
 }
 

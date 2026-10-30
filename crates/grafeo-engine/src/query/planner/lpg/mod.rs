@@ -274,9 +274,9 @@ pub struct Planner {
     /// Variables from variable-length expand patterns (group-list variables).
     /// Used by the aggregate planner to detect horizontal aggregation (GE09).
     pub(super) group_list_variables: std::cell::RefCell<std::collections::HashSet<String>>,
-    /// Whether the statement being planned writes, known while its root is
+    /// How the statement being planned writes, known while its root is
     /// planned (see [`value_join::StatementScope`]).
-    pub(super) statement_writes: std::cell::Cell<Option<bool>>,
+    pub(super) statement_writes: std::cell::Cell<Option<value_join::StatementWrites>>,
     /// Whether the operator being planned runs after a write of its
     /// statement that does not come to it through its input (the right side
     /// of a join whose left side writes, a subquery, see

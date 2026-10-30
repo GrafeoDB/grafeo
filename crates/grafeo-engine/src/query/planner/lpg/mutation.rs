@@ -610,7 +610,7 @@ impl super::Planner {
         // In a statement that writes, a row sees the writes of the rows before
         // it, so the rows go one at a time; a read gets them in full chunks.
         let operator: Box<dyn Operator> =
-            Box::new(if self.statement_writes.get().unwrap_or(true) {
+            Box::new(if self.statement_writes.get().is_none_or(|w| w.writes) {
                 unwind_op.row_at_a_time()
             } else {
                 unwind_op

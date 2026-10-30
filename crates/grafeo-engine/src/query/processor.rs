@@ -771,6 +771,22 @@ fn annotate_hints(
         let replaced = crate::query::planner::lpg::seek::checked_scan(filter).and_then(|below| {
             seek_hint(&filter.predicate, below.scan, store, after_a_write)
                 .or_else(|| value_join_hint(filter, writes))
+                // The index lookup made while planning takes over checks of
+                // the scanned node between the filter and the scan too.
+                .or_else(|| {
+                    (!below.checks.is_empty() && below.scan.input.is_none() && !after_a_write)
+                        .then(|| {
+                            crate::query::planner::lpg::filter::scan_hint(
+                                &filter.predicate,
+                                below.scan,
+                                store,
+                            )
+                        })
+                        .flatten()
+                        .filter(|hint| {
+                            matches!(hint, crate::query::plan::PushdownHint::IndexLookup { .. })
+                        })
+                })
         });
         if let Some(hint) = replaced {
             // It takes over the checks between it and the scan: they run in

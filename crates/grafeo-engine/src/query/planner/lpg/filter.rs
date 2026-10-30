@@ -757,15 +757,18 @@ impl super::Planner {
         &self,
         filter: &FilterOp,
     ) -> Result<Option<(Box<dyn Operator>, Vec<String>)>> {
-        // Only optimize if input is a simple NodeScan (not nested)
-        let (scan_variable, scan_label) = match filter.input.as_ref() {
-            LogicalOperator::NodeScan(scan)
-                if scan.input.is_none() && self.reads_the_store_as_planned() =>
-            {
-                (scan.variable.clone(), scan.label.clone())
-            }
-            _ => return Ok(None),
+        // A scan without input, directly below or below filters that check
+        // the scanned node alone (`MATCH (m {id: $id}) WHERE m:Post OR
+        // m:Comment`): the lookup takes their place, and the nodes it finds
+        // are checked against them too.
+        let Some(checked) = super::seek::checked_scan(filter) else {
+            return Ok(None);
         };
+        if checked.scan.input.is_some() || !self.reads_the_store_as_planned() {
+            return Ok(None);
+        }
+        let (scan_variable, scan_label) =
+            (checked.scan.variable.clone(), checked.scan.label.clone());
 
         // Extract property equality conditions from the predicate
         // Handles both simple (n.prop = val) and compound (n.a = 1 AND n.b = 2)
@@ -811,12 +814,28 @@ impl super::Planner {
 
         let columns = vec![scan_variable];
 
-        // Absorbed-scan PROFILE entry: see `record_absorbed_scan_entry`.
-        self.record_absorbed_scan_entry("NodeScan", &filter.input);
+        // Absorbed-scan PROFILE entries (see `record_absorbed_scan_entry`):
+        // the scan, then the checks, as the plan's tree lists them.
+        self.record_absorbed_scan_entry("NodeScan", checked.operator);
+        for (check, _) in &checked.checks {
+            self.record_absorbed_scan_entry("Filter", check);
+        }
 
-        // The index finds candidates: the whole predicate decides each, with
-        // the same `=` as a scan.
-        let found = self.found_nodes(matching_nodes, &columns, &filter.predicate)?;
+        // The index finds candidates: the checks and the whole predicate
+        // decide each, in the order the chain of filters runs them, with the
+        // same `=` as a scan.
+        let predicate = checked
+            .checks
+            .iter()
+            .map(|(_, check)| (*check).clone())
+            .chain(std::iter::once(filter.predicate.clone()))
+            .reduce(|left, right| LogicalExpression::Binary {
+                left: Box::new(left),
+                op: BinaryOp::And,
+                right: Box::new(right),
+            })
+            .expect("the filter's own predicate");
+        let found = self.found_nodes(matching_nodes, &columns, &predicate)?;
         Ok(Some((found, columns)))
     }
 

@@ -36,9 +36,11 @@ for row in result:
 ### Database
 
 ```python
-db = GrafeoDB()              # in-memory
-db = GrafeoDB("./path")      # persistent
-db = GrafeoDB.open("./path") # open existing
+# Create or open: one of
+db = GrafeoDB()                # in-memory
+# db = GrafeoDB("./path")      # persistent: created, or opened if it exists
+# db = GrafeoDB.open("./path") # open existing
+# db = GrafeoDB("./path", query_timeout=5)  # queries fail after 5 s (None: no limit)
 
 db.node_count   # number of nodes
 db.edge_count   # number of edges
@@ -80,9 +82,8 @@ with db.begin_transaction() as tx:
     tx.execute("INSERT (:Person {name: 'Harm'})")
     tx.commit()
 
-# With isolation levels (string or enum)
-from grafeo import IsolationLevel
-with db.begin_transaction(IsolationLevel.READ_COMMITTED) as tx:
+# With an isolation level: "read_committed" or "snapshot" (the default)
+with db.begin_transaction("read_committed") as tx:
     tx.execute("MATCH (n:Person) SET n.verified = true")
     tx.commit()
 
@@ -91,6 +92,11 @@ with db.begin_transaction_with_cdc(True) as tx:
     tx.execute("INSERT (:AuditedEvent {action: 'login'})")
     tx.commit()
 ```
+
+A commit that fails (a write conflict, `gql_status` `40000`, `is_retryable` True) ends the transaction:
+`tx.is_active` is False after it and `tx.rollback()` does nothing. Transaction control statements (`START
+TRANSACTION`, `COMMIT`, `ROLLBACK`) are refused inside `tx.execute()` (`gql_status` `25000`): end a transaction with
+`tx.commit()` or `tx.rollback()`.
 
 ### Named Graphs and Schemas
 
@@ -102,6 +108,7 @@ print(db.current_graph())     # 'social'
 db.reset_graph()
 db.drop_graph("social")
 
+db.execute("CREATE SCHEMA v1")
 db.set_schema("v1")
 print(db.current_schema())    # 'v1'
 db.reset_schema()
@@ -129,6 +136,12 @@ db.backup_full("/backups/full")
 db.backup_incremental("/backups/incr")
 GrafeoDB.restore_to_epoch("/backups/full", epoch=100, output_path="./restored")
 ```
+
+### Errors
+
+Errors from the database raise `grafeo.GrafeoError`, with `error_code` (such as `GRAFEO-T001`), `gql_status` (the
+ISO GQL status, such as `22012`) and `is_retryable`. A database file that another handle of this process or another
+process holds raises `grafeo.GrafeoLockedError` (`GRAFEO-S004`, `gql_status` `08000`), a subclass of `GrafeoError`.
 
 ### QueryResult
 

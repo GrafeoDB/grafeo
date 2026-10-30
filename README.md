@@ -223,14 +223,16 @@ uv add grafeo[cli]
 
 ### Node.js / TypeScript
 
+As an ES module, with top-level `await` (CommonJS: `const { GrafeoDB } = require('@grafeo-db/js')`):
+
 ```js
-const { GrafeoDB } = require('@grafeo-db/js');
+import { GrafeoDB } from '@grafeo-db/js';
 
 // Create an in-memory database
-const db = await GrafeoDB.create();
+const db = GrafeoDB.create();
 
 // Or open a persistent database
-// const db = await GrafeoDB.create({ path: './my-graph.db' });
+// const db = GrafeoDB.create('./my-graph');
 
 // Create nodes and relationships
 await db.execute("INSERT (:Person {name: 'Alix', age: 30})");
@@ -245,9 +247,9 @@ const result = await db.execute(`
     MATCH (p:Person)-[:KNOWS]->(friend)
     RETURN p.name, friend.name
 `);
-console.log(result.toArray());
+console.log(result.toArray()); // [ { 'p.name': 'Alix', 'friend.name': 'Gus' } ]
 
-await db.close();
+db.close();
 ```
 
 ### Python

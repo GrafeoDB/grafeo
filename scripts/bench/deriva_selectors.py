@@ -63,7 +63,9 @@ OR_SCAN_FACTOR = (
 )
 LABELS_COUNT_FACTOR = 1.5  # labels(n) grouped against a string property grouped
 COUNT_FROM_STATS_FACTOR = 0.1  # count(*) of a label against reading its ids
-TYPED_EXISTS_FACTOR = 1.5  # an edge check on busy nodes against reading their ids
+TYPED_EXISTS_FACTOR = (
+    2.0  # an edge check on hubs with 2000 other edges against reading them
+)
 MULTI_LABEL_SEEK_FACTOR = 1.3  # (n:Graph:Method {id}) against (n:Graph {id}), id index
 # With --compare: what Grafeo already does well must not get slower.
 GUARD_RAILS = [
@@ -301,6 +303,43 @@ def run_social(results, failures, ic13):
         )
 
 
+def hubs(count=200, leaves=2000):
+    """`count` Hub nodes (i 0 to count-1), each with an OTHER edge to every one
+    of `leaves` Leaf nodes; the even hubs then get one WANTED edge to a Target,
+    after their OTHER edges."""
+    db = grafeo.GrafeoDB()
+    db.execute("UNWIND range(0, $n - 1) AS i INSERT (:Hub {i: i})", {"n": count})
+    db.execute("UNWIND range(1, $n) AS i INSERT (:Leaf {i: i})", {"n": leaves})
+    db.execute("INSERT (:Target)")
+    db.execute("MATCH (h:Hub), (l:Leaf) INSERT (h)-[:OTHER]->(l)")
+    db.execute("MATCH (h:Hub), (t:Target) WHERE h.i % 2 = 0 INSERT (h)-[:WANTED]->(t)")
+    return db
+
+
+def run_hubs(results, failures):
+    """An edge check that one WANTED edge among 2000 OTHER edges decides,
+    against counting the same hubs, reading each, without the check."""
+    db = hubs()
+    typed_exists = (
+        "MATCH (n:Hub) WHERE EXISTS { MATCH (n)-[:WANTED]->() } RETURN count(n) AS c"
+    )
+    counted = (
+        "MATCH (n:Hub) WHERE COUNT { MATCH (n)-[:WANTED]->() } > 0 RETURN count(n) AS c"
+    )
+    # count(n.i), not count(n): a label's count(n) comes from the statistics.
+    hub_count = "MATCH (n:Hub) RETURN count(n.i) AS c"
+    got = db.execute(typed_exists).to_list()[0]["c"]
+    if got != 100 or db.execute(counted).to_list()[0]["c"] != got:
+        failures.append(f"typed_exists_on_hubs: {got} hubs, not the 100 with WANTED")
+    if db.execute(hub_count).to_list()[0]["c"] != 200:
+        failures.append("hub_count: not the 200 hubs")
+    for name, query in [
+        ("typed_exists_on_hubs", typed_exists),
+        ("hub_count", hub_count),
+    ]:
+        results[name] = {"ms": median_ms(lambda q=query: list(db.execute(q)))}
+
+
 def run(ic13=True):
     db, _ids = build()
     results, failures = {}, []
@@ -438,7 +477,7 @@ def run(ic13=True):
         ("or_of_labels_under_graph", "or_of_labels_union", OR_SCAN_FACTOR),
         ("labels_count", "kind_count", LABELS_COUNT_FACTOR),
         ("count_star", "read_ids", COUNT_FROM_STATS_FACTOR),
-        ("typed_exists_on_busy_nodes", "busy_ids", TYPED_EXISTS_FACTOR),
+        ("typed_exists_on_hubs", "hub_count", TYPED_EXISTS_FACTOR),
         ("multi_label_point_lookups", "point_lookups_by_id", MULTI_LABEL_SEEK_FACTOR),
     ]:
         if name in results:
@@ -454,6 +493,7 @@ def run(ic13=True):
             f"EXISTS short-circuit guard: {guard:.1f}x the query without the EXISTS (limit {GUARD_FACTOR}x)"
         )
     run_social(results, failures, ic13)
+    run_hubs(results, failures)
     return results, failures
 
 

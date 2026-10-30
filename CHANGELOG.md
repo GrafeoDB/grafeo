@@ -13,6 +13,7 @@ Queries and calls that ran in 0.6.0 and now fail, because their result was wrong
 - A SPARQL prefix used without a `PREFIX` line, other than `rdf`, `rdfs`, `xsd`, `owl` and `fn`, is a syntax error naming it; it was kept as text and matched nothing.
 - SPARQL `INSERT DATA` and `DELETE DATA` with a variable or a quoted triple are a syntax error.
 - `CREATE INDEX` with a name that stands for another index fails; `IF NOT EXISTS` keeps the existing index.
+- A database file with a named vector index cannot be opened by 0.6.0: the index name is a new kind of catalog record. Files without one open in both.
 - `START TRANSACTION`, `COMMIT` and `ROLLBACK` run through a transaction object's `execute` fail with `25000`; they ended or nested the transaction behind the object's back.
 - A database file already open in this process or another one fails with `GRAFEO-S004` and GQLSTATUS `08000`, and the missing manifest, cursor or full backup of a restore with `GRAFEO-V001`; they were storage or internal errors.
 - In Python, `node["k"]` and `node.get("k")` (and the same on edges) return native values.
@@ -24,6 +25,11 @@ Queries and calls that ran in 0.6.0 and now fail, because their result was wrong
 - An incremental backup into another directory than the last full backup's is refused.
 - A restore of a snapshot whose catalog does not apply, and parameters nested more than 128 levels deep, are refused.
 - N-Triples loading, `INSERT DATA` and `batch_insert_rdf` refuse a triple with a literal subject or a predicate that is not an IRI.
+
+### WASM: faster, and larger
+
+- **Both WASM packages are built for speed**: queries run about 1.6 times as fast as in 0.6.0 and inserts about 4.8 times, for larger downloads: `@grafeo-db/wasm-lite` grows from about 940 KB to 1.1 MB gzipped and `@grafeo-db/wasm` from about 1.6 MB to 1.7 MB.
+- **The full WASM package uses the lightweight regex engine**, as lite does, which keeps it about 260 KB smaller: on its own that engine is about 1.5 times slower, which the faster build makes up, so `=~` and SPARQL `REGEX` run about as fast as in 0.6.0. The native bindings and grafeo-server keep the full engine.
 
 ### Added
 
@@ -38,6 +44,7 @@ Queries and calls that ran in 0.6.0 and now fail, because their result was wrong
 - **Node.js ES module imports name every export**: `import { GrafeoDB } from '@grafeo-db/js'` works, where Node's lexer did not find the names of the wrapper.
 
 - **`schema()` and `db.labels()` list only what is in use**: a label no node has any more, an edge type with no edge left and a property key nothing holds are left out of `schema()`, `CALL db.labels()`, `db.relationshipTypes()` and `db.propertyKeys()`; they stayed listed after their last element was deleted or changed, and `schema()` gave them a count of 0.
+- **Vector indexes keep their name**: `CREATE VECTOR INDEX docs_emb ...` and `CREATE INDEX docs_emb ... USING VECTOR` record the name, so `SHOW INDEXES` lists the index as a vector index and `DROP INDEX docs_emb` drops it; the first kept no name, so `DROP INDEX` failed, and the second recorded a hash index, so `SHOW INDEXES` called it one and `DROP INDEX` reported success but left the vector index in place.
 - **An index name stands for one index**: `CREATE INDEX` with a name that stands for another label, property or kind, or for an index the graph already has, fails naming it, and `IF NOT EXISTS` keeps the existing index; a second index was added under the same name. The same index under its name in another graph is still fine. `DROP INDEX` of a text index drops the text index, which went on searching while the property index on its key was dropped instead, and a property index stays while another name still covers its key. `SHOW INDEXES` lists the indexes by name.
 - **A node type that occurs more than once in a graph type takes every occurrence's properties**: in `CREATE GRAPH TYPE t ((:City)-[:R]->(:City {name STRING NOT NULL}))` the type `City` has `name`, which only the first occurrence counted; one property declared with two types fails naming both.
 - **A graph typed by another schema's graph type is checked against that graph type**: `CREATE GRAPH g TYPED s1.shop` from schema `s2` checks its nodes and edges against `s1`'s types, not the current schema's ones of the same name.

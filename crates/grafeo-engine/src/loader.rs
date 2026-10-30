@@ -19,7 +19,7 @@
 //! may be added.
 
 use std::borrow::Cow;
-use std::collections::{BTreeMap, HashMap};
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use arcstr::ArcStr;
@@ -27,6 +27,7 @@ use grafeo_common::types::{
     Date, LogicalType, NodeId, PropertyKey, Time, Timestamp, Value, ZonedDatetime,
 };
 use grafeo_common::utils::error::{Error, QueryError, QueryErrorKind};
+use grafeo_common::utils::hash::FxHashMap;
 use grafeo_core::execution::DataChunk;
 use grafeo_core::execution::operators::{
     GraphWriter, HashKey, NewEdge, Operator, OperatorError, OperatorResult,
@@ -227,7 +228,7 @@ pub(crate) fn load_nodes(
         .as_deref()
         .map(|key| layout.position(key, path))
         .transpose()?;
-    let mut seen_keys: HashMap<(std::mem::Discriminant<Value>, HashKey), u64> = HashMap::new();
+    let mut seen_keys: FxHashMap<ExactKey, u64> = FxHashMap::default();
     let mut rows = Vec::new();
     let mut count = 0_u64;
     while let Some((line, fields)) = records.next_record()? {
@@ -334,11 +335,11 @@ pub(crate) fn load_edges(
 fn key_map(
     writer: &GraphWriter,
     end: &EndKey,
-) -> Result<HashMap<(std::mem::Discriminant<Value>, HashKey), NodeId>, OperatorError> {
+) -> Result<FxHashMap<ExactKey, NodeId>, OperatorError> {
     let store = writer.store();
     let view = writer.view();
     let nodes = store.nodes_by_label(&end.label, view)?;
-    let mut keys = HashMap::with_capacity(nodes.len());
+    let mut keys = FxHashMap::with_capacity_and_hasher(nodes.len(), Default::default());
     for node in nodes {
         if let Some(value) = store.node_property(node, &end.property, view)? {
             keys.entry(exact_key(&value)).or_insert(node);
@@ -349,8 +350,12 @@ fn key_map(
 
 /// A key that tells values of different kinds apart (a date and an
 /// integer of the same number, a float and an integer of the same bits):
-/// [`HashKey`] alone joins some of them.
-fn exact_key(value: &Value) -> (std::mem::Discriminant<Value>, HashKey) {
+/// [`HashKey`] alone joins some of them. Hashed with the fast hasher: a load
+/// looks two of them up per edge.
+type ExactKey = (std::mem::Discriminant<Value>, HashKey);
+
+/// The [`ExactKey`] of `value`.
+fn exact_key(value: &Value) -> ExactKey {
     (std::mem::discriminant(value), HashKey::from_value(value))
 }
 

@@ -34,6 +34,9 @@ Queries and calls that ran in 0.6.0 and now fail, because their result was wrong
 ### Added
 
 - **`schema()` describes the data's shape**: each label and edge type lists its properties with the types of their values, and each edge type the labels it connects with a count per pair, in Rust and every binding, so a tool or an LLM prompt can read what to query without a sample.
+- **Bulk updates and reads in Python**: `update_nodes(labels, rows, key="id")` updates existing nodes by a key property and creates none, in time linear in the rows and nodes also without a property index (about 20 times faster than the equivalent `UNWIND ... MATCH ... SET` query on 1,500 rows); `get_properties_batch(ids, keys)` reads several properties of many nodes in one call. Both are in Rust too (`update_nodes` on the database, graph handles and sessions).
+- **Whole nodes from Python queries cost less**: a result copies its nodes and edges out only when `nodes()` or `edges()` is called, so `MATCH (n) RETURN n` read row by row costs about 1.4 times what `get_nodes_by_label` does, against 1.8 times in 0.6.0.
+- **`grafeo[arrow]`**: the Python package's `arrow` extra installs pyarrow for `nodes_to_arrow()`, `edges_to_arrow()` and `to_arrow()`.
 - **Query timeouts in Python and Node.js**: `GrafeoDB(..., query_timeout=seconds)` and `execute(..., timeout=seconds)` in Python, `queryTimeout` in Node.js's create options; `None` keeps the database's timeout and `math.inf` (or `Infinity`) turns it off.
 - **Errors say what to do in every binding**: Python raises `GrafeoLockedError` for a database open elsewhere; Node.js errors carry `errorCode`, `gqlStatus` and `isRetryable`, also the binding's own transaction errors, and WASM errors their GQLSTATUS. A `Transaction` in Node.js rolls back when disposed (`using`, Node.js 24 or later).
 

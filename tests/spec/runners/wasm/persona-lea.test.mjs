@@ -16,14 +16,16 @@ const pkg = resolve(import.meta.dirname, '..', '..', '..', '..', 'crates', 'bind
 const available = existsSync(join(pkg, 'grafeo_wasm.js')) && existsSync(join(pkg, 'grafeo_wasm_bg.wasm'))
 
 let Database
-// The checks of what the edge build leaves out run on that build only; the
-// full package (built into the same pkg/) has those features.
+// The checks of what the edge build leaves out run on that build only, the
+// one whose features are exactly GQL: the full and rdf packages (built into
+// the same pkg/) have more languages, and some of those features.
 let edge = false
 if (available) {
   const mod = await import('../../../../crates/bindings/wasm/pkg/grafeo_wasm.js')
   mod.initSync({ module: readFileSync(join(pkg, 'grafeo_wasm_bg.wasm')) })
   Database = mod.Database
-  edge = !new Database().info().features.includes('cypher')
+  const features = new Database().info().features
+  edge = features.length === 1 && features[0] === 'gql'
 }
 
 function notes() {

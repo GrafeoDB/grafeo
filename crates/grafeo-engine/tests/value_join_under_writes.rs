@@ -273,28 +273,63 @@ fn a_scan_whose_input_writes_keeps_todays_rows() {
     }
 }
 
-/// With an `id` index the lookup stays the index's: EXPLAIN shows it, and
-/// the rows are the same.
+fn explain_text(db: &GrafeoDB, language: &str, ids: &[i64]) -> String {
+    let plan = run(
+        db,
+        language,
+        &format!("EXPLAIN {BULK}"),
+        Some(update_rows(ids)),
+    );
+    match &plan[0][0] {
+        Value::String(text) => text.to_string(),
+        other => panic!("{language}: {other:?}"),
+    }
+}
+
+/// With an `id` index the plan is chosen by cost: the hash join when the
+/// rows times 3 exceed the scanned label's nodes, the seek otherwise. 3
+/// rows seek; against 1500 Methods, 500 rows (1500, not more) seek, and 501
+/// and 1500 rows build one hash join. The rows are the same either way.
 #[test]
-fn an_id_index_keeps_the_index_lookup() {
-    let ids: Vec<i64> = (0..METHODS).step_by(3).collect();
+fn an_id_index_seeks_for_few_rows_and_hash_joins_for_many() {
     for language in LANGUAGES {
         let db = database(true);
+        let few = [1, 2, 3];
         assert_eq!(
-            run(&db, language, BULK, Some(update_rows(&ids))),
-            ints(&ids),
+            run(&db, language, BULK, Some(update_rows(&few))),
+            ints(&few),
             "{language}"
         );
-        let plan = run(
-            &db,
-            language,
-            &format!("EXPLAIN {BULK}"),
-            Some(update_rows(&ids)),
+        let text = explain_text(&db, language, &few);
+        assert!(
+            text.contains("[index: id]"),
+            "{language}: 3 rows seek: {text}"
         );
-        let Value::String(text) = &plan[0][0] else {
-            panic!("{language}: {plan:?}");
-        };
-        assert!(text.contains("[index: id]"), "{language}: {text}");
+
+        let big = GrafeoDB::new_in_memory();
+        big.create_property_index("id").unwrap();
+        big.execute("UNWIND range(0, 1499) AS i INSERT (:Graph:Method {id: i, p0: 'old'})")
+            .unwrap();
+        for (count, hash) in [(500, false), (501, true), (1500, true)] {
+            let ids: Vec<i64> = (0..count).collect();
+            assert_eq!(
+                run(&big, language, BULK, Some(update_rows(&ids))),
+                ints(&ids),
+                "{language} {count} rows"
+            );
+            let text = explain_text(&big, language, &ids);
+            if hash {
+                assert!(
+                    text.contains("[hash join: n.id = r.id]") && !text.contains("[index: id]"),
+                    "{language}: {count} rows against 1500 Methods hash join: {text}"
+                );
+            } else {
+                assert!(
+                    text.contains("[index: id]"),
+                    "{language}: {count} rows against 1500 Methods seek: {text}"
+                );
+            }
+        }
     }
 }
 

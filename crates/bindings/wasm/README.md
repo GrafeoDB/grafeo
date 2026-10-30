@@ -37,7 +37,7 @@ const result = db.execute(`MATCH (n:Person) RETURN n.name`);
 - [x] In-memory database support
 - [x] GQL query language (default via `browser` profile)
 - [x] TypeScript type definitions
-- [x] Size optimization (513 KB gzipped lite, 531 KB AI variant)
+- [x] Built for speed at a small size (about 1.1 MB gzipped lite, 1.7 MB full)
 - [x] Vector search bindings (k-NN, MMR)
 - [x] Snapshot export/import for IndexedDB persistence
 - [x] Batch import (importLpg, importRdf, importRows)
@@ -55,10 +55,12 @@ const result = db.execute(`MATCH (n:Person) RETURN n.name`);
 
 ## Bundle Size
 
-| Build | Size (gzip) |
-|-------|-------------|
-| AI variant (GQL + vector/text/hybrid search) | 531 KB |
-| Lite variant (GQL only) | 513 KB |
+| Package | Contents | Size (gzip) |
+|---------|----------|-------------|
+| `@grafeo-db/wasm-lite` | property graphs, GQL | about 1.1 MB |
+| `@grafeo-db/wasm` | every query language, RDF, vector and text search, graph algorithms | about 1.7 MB |
+
+Both are built for speed (opt-level `s`): about 1.6 times as fast as the smallest build, and 4.8 times on inserts. Regular expressions use the lightweight `regex-lite` engine in both.
 
 ## Runtime Support
 

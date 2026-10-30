@@ -76,25 +76,33 @@ impl super::Planner {
         // Not below a write: the join reads the subquery before its input, so
         // the subquery would miss what the input writes; per row (below), it
         // runs after the whole input.
+        // A predicate without a subquery (most) skips both checks, which list
+        // the input's variables: every filter is planned on every execution.
         let input_writes = filter.input.has_mutations();
-        let outer = filter.input.bound_variables(None);
-        if !input_writes
-            && let Some((subquery, is_negated, remaining)) =
-                self.extract_complex_exists(&filter.predicate, outer.as_ref())
-        {
-            return self.plan_exists_as_semi_join(&filter.input, subquery, is_negated, remaining);
-        }
+        if crate::query::plan::has_subquery(&filter.predicate) {
+            let outer = filter.input.bound_variables(None);
+            if !input_writes
+                && let Some((subquery, is_negated, remaining)) =
+                    self.extract_complex_exists(&filter.predicate, outer.as_ref())
+            {
+                return self.plan_exists_as_semi_join(
+                    &filter.input,
+                    subquery,
+                    is_negated,
+                    remaining,
+                );
+            }
 
-        // EXISTS and COUNT subqueries the edge check cannot answer run per row
-        // of the input (see `subquery.rs`), and below a write all of them.
-        // With the variables the input's rows hold, a subquery that shares
-        // none of them is lifted too (counted once instead of per row).
-        let input_columns: Option<Vec<String>> = filter
-            .input
-            .bound_variables(None)
-            .map(|names| names.into_iter().collect());
-        if self.has_subquery_to_lift(&filter.predicate, input_columns.as_deref(), input_writes) {
-            return self.plan_filter_with_subqueries(filter);
+            // EXISTS and COUNT subqueries the edge check cannot answer run per
+            // row of the input (see `subquery.rs`), and below a write all of
+            // them. With the variables the input's rows hold, a subquery that
+            // shares none of them is lifted too (counted once instead of per
+            // row).
+            let input_columns: Option<Vec<String>> = outer.map(|names| names.into_iter().collect());
+            if self.has_subquery_to_lift(&filter.predicate, input_columns.as_deref(), input_writes)
+            {
+                return self.plan_filter_with_subqueries(filter);
+            }
         }
 
         // Check zone maps for simple property predicates before scanning
@@ -102,7 +110,7 @@ impl super::Planner {
         // Not below a mutation, nor after one (see `after_write`): zone maps
         // describe the store as it is before this query runs, not values the
         // query writes first.
-        if !filter.input.has_mutations()
+        if !input_writes
             && self.reads_the_store_as_planned()
             && let Some(false) = self.check_zone_map_for_predicate(&filter.predicate, &filter.input)
         {

@@ -2178,16 +2178,11 @@ impl GqlTranslator {
         let of_optional_match = after_optional_match && !where_clause.filter;
         Ok(
             if of_optional_match && let LogicalOperator::LeftJoin(left_join) = plan {
-                let (join, post_filter) = build_left_join_with_predicates(
+                build_left_join_with_predicates(
                     left_join,
                     Some(predicate),
                     self.call_scope.borrow().as_ref(),
-                );
-                if let Some(pf) = post_filter {
-                    wrap_filter(join, pf)
-                } else {
-                    join
-                }
+                )
             } else {
                 wrap_filter(plan, predicate)
             },

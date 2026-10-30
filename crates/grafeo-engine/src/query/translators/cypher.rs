@@ -1155,6 +1155,21 @@ impl CypherTranslator {
         if let Some(name) = &edge_variable {
             self.register_edge_variable(name);
         }
+        // A shortest path of at least one relationship from a node to itself
+        // is no path: a pattern uses a relationship once, so the walk back
+        // over the one it came along does not count, and a shortest path
+        // joins two ends rather than finding a cycle. The search does not
+        // start for such a row.
+        if min_hops >= 1 {
+            plan = wrap_filter(
+                plan,
+                LogicalExpression::Binary {
+                    left: Box::new(LogicalExpression::Id(source_var.clone())),
+                    op: BinaryOp::Ne,
+                    right: Box::new(LogicalExpression::Id(target_var.clone())),
+                },
+            );
+        }
 
         plan = LogicalOperator::ShortestPath(ShortestPathOp {
             input: Box::new(plan),
@@ -1351,16 +1366,11 @@ impl CypherTranslator {
         // predicate so right-side references become join conditions rather
         // than post-filters (which would incorrectly eliminate NULL rows).
         if let LogicalOperator::LeftJoin(left_join) = input {
-            let (join, post_filter) = build_left_join_with_predicates(
+            Ok(build_left_join_with_predicates(
                 left_join,
                 Some(predicate),
                 self.call_scope.borrow().as_ref(),
-            );
-            if let Some(pf) = post_filter {
-                Ok(wrap_filter(join, pf))
-            } else {
-                Ok(join)
-            }
+            ))
         } else {
             Ok(wrap_filter(input, predicate))
         }

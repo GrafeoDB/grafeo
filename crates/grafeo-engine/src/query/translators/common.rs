@@ -1351,18 +1351,15 @@ fn split_conjuncts_recursive(expr: LogicalExpression, out: &mut Vec<LogicalExpre
 /// the join condition.
 #[cfg(any(feature = "gql", feature = "cypher", test))]
 pub(crate) struct ClassifiedPredicates {
-    /// Conjuncts with a subquery or a pattern comprehension whose reads are
-    /// not known, or that read a variable only the left side binds without
-    /// one only the optional side binds (see
-    /// [`classify_optional_predicates`]): a Filter above the LeftJoin.
-    pub post_filters: Vec<LogicalExpression>,
     /// Conjuncts that read no variable only the left side binds (the optional
     /// side's own variables, the variables both sides share, or none): a
     /// filter on the right input of the LeftJoin.
     pub right_filters: Vec<LogicalExpression>,
-    /// Conjuncts that read a variable only the left side binds: conditions
-    /// of the LeftJoin, which reads the joined row (a left row none of whose
-    /// pairs pass them keeps nulls).
+    /// Conjuncts that read a variable only the left side binds, and those
+    /// with a subquery whose reads are not known here: conditions of the
+    /// LeftJoin, which decide the matches of each left row before a row
+    /// without one keeps nulls (one with a subquery runs per left row, see
+    /// `Planner::plan_left_join`).
     pub cross_filters: Vec<LogicalExpression>,
 }
 
@@ -1375,11 +1372,10 @@ pub(crate) struct ClassifiedPredicates {
 /// (see [`subquery_reads`]): one that reads no variable only the left side
 /// binds is a filter on the optional side, like any other such conjunct
 /// (`OPTIONAL MATCH (n)-[:R]->(t) WHERE n.id = 6 OR EXISTS { MATCH
-/// (n)-[:R]->(u) }` keeps every `n`, with nulls where none matches). The
-/// join condition cannot run a subquery, so one whose reads are not known
-/// keeps the placement it had before: a right filter when it reads a
-/// variable only the optional side binds, a filter above the join
-/// otherwise.
+/// (n)-[:R]->(u) }` keeps every `n`, with nulls where none matches), which
+/// runs once over the optional side's rows. Any other one (it reads a left
+/// variable, or what it reads is not known) is a condition of the join,
+/// which the planner runs per left row. No conjunct filters above the join.
 #[cfg(any(feature = "gql", feature = "cypher", test))]
 pub(crate) fn classify_optional_predicates(
     predicate: LogicalExpression,
@@ -1387,7 +1383,6 @@ pub(crate) fn classify_optional_predicates(
     right_vars: &HashSet<String>,
 ) -> ClassifiedPredicates {
     let conjuncts = split_conjuncts(predicate);
-    let mut post_filters = Vec::new();
     let mut right_filters = Vec::new();
     let mut cross_filters = Vec::new();
 
@@ -1395,9 +1390,6 @@ pub(crate) fn classify_optional_predicates(
         let mut referenced = HashSet::new();
         collect_expression_variables(&conjunct, &mut referenced);
 
-        let has_right_only_var = referenced
-            .iter()
-            .any(|v| right_vars.contains(v) && !left_vars.contains(v));
         let has_left_only_var = referenced
             .iter()
             .any(|v| left_vars.contains(v) && !right_vars.contains(v));
@@ -1410,18 +1402,10 @@ pub(crate) fn classify_optional_predicates(
                 .any(|v| left_vars.contains(v) && !right_vars.contains(v))
         {
             right_filters.push(conjunct);
-        } else if has_subquery(&conjunct) {
-            let all_in_right = referenced.iter().all(|v| right_vars.contains(v));
-            if has_right_only_var && all_in_right {
-                right_filters.push(conjunct);
-            } else if has_left_only_var && has_right_only_var {
-                cross_filters.push(conjunct);
-            } else {
-                post_filters.push(conjunct);
-            }
-        } else if has_left_only_var {
+        } else if has_subquery(&conjunct) || has_left_only_var {
             // `p.id IN xs`, `forum.id = x`, `x = 3`: the joined row has the
-            // left side's value
+            // left side's value. A subquery that may read it runs on the
+            // joined row too, inside the optional match.
             cross_filters.push(conjunct);
         } else {
             // `p.name = 'Gus'`, a condition on a variable both sides share
@@ -1432,7 +1416,6 @@ pub(crate) fn classify_optional_predicates(
     }
 
     ClassifiedPredicates {
-        post_filters,
         right_filters,
         cross_filters,
     }
@@ -1817,16 +1800,16 @@ fn join_conjuncts(conjuncts: Vec<LogicalExpression>) -> Option<LogicalExpression
 /// 2. Classifies the conjuncts (see [`classify_optional_predicates`])
 /// 3. Pushes those that read no left-only variable as a Filter on the right
 ///    input
-/// 4. Adds those that read a left-only variable to `LeftJoinOp.condition`,
-///    which decides which pairs of rows are matches (a left row without one
-///    keeps nulls)
-/// 5. Returns the LeftJoin and any remaining post-filters to apply above
+/// 4. Adds the others (a left-only variable, a subquery whose reads are not
+///    known) to `LeftJoinOp.condition`, which decides which pairs of rows
+///    are matches (a left row without one keeps nulls); no WHERE conjunct
+///    filters above the join
 #[cfg(any(feature = "gql", feature = "cypher", test))]
 pub(crate) fn build_left_join_with_predicates(
     left_join: LeftJoinOp,
     predicate: Option<LogicalExpression>,
     imports: Option<&HashSet<String>>,
-) -> (LogicalOperator, Option<LogicalExpression>) {
+) -> LogicalOperator {
     let LeftJoinOp {
         left,
         right,
@@ -1834,12 +1817,11 @@ pub(crate) fn build_left_join_with_predicates(
     } = left_join;
     let (left, right) = (*left, *right);
     let Some(predicate) = predicate else {
-        let join = LogicalOperator::LeftJoin(LeftJoinOp {
+        return LogicalOperator::LeftJoin(LeftJoinOp {
             left: Box::new(left),
             right: Box::new(right),
             condition,
         });
-        return (join, None);
     };
 
     // Collect variables from each side
@@ -1867,16 +1849,11 @@ pub(crate) fn build_left_join_with_predicates(
             .collect(),
     );
 
-    let join = LogicalOperator::LeftJoin(LeftJoinOp {
+    LogicalOperator::LeftJoin(LeftJoinOp {
         left: Box::new(left),
         right: Box::new(filtered_right),
         condition: cross_condition,
-    });
-
-    // Combine remaining post-filters
-    let post_filter = LogicalExpression::conjunction(classified.post_filters);
-
-    (join, post_filter)
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -2733,7 +2710,6 @@ mod tests {
             1,
             "left-only should be a join condition"
         );
-        assert!(result.post_filters.is_empty());
         assert!(result.right_filters.is_empty());
     }
 
@@ -2754,7 +2730,6 @@ mod tests {
 
         let result = classify_optional_predicates(combined, &left_vars, &right_vars);
         assert_eq!(result.right_filters.len(), 2, "both filter the matches");
-        assert!(result.post_filters.is_empty());
         assert!(result.cross_filters.is_empty());
     }
 
@@ -2768,7 +2743,6 @@ mod tests {
         };
 
         let result = classify_optional_predicates(pred, &left_vars, &right_vars);
-        assert!(result.post_filters.is_empty());
         assert_eq!(
             result.right_filters.len(),
             1,
@@ -2796,7 +2770,6 @@ mod tests {
         };
 
         let result = classify_optional_predicates(pred, &left_vars, &right_vars);
-        assert!(result.post_filters.is_empty());
         assert_eq!(
             result.right_filters.len(),
             1,
@@ -2806,7 +2779,7 @@ mod tests {
 
     #[test]
     fn classify_mixed_and_predicate() {
-        // n.active AND m.age > 30 should split into post-filter and right-filter
+        // Both n.active and m.age read the optional side's variables.
         let left_vars: HashSet<String> = ["n".into()].into_iter().collect();
         let right_vars: HashSet<String> = ["n".into(), "m".into()].into_iter().collect();
 
@@ -2830,18 +2803,8 @@ mod tests {
 
         let result = classify_optional_predicates(combined, &left_vars, &right_vars);
 
-        // n.active -> n is in both left and right, so all_in_right = true
-        // It should be classified as right_filter since n is available on right side.
-        // Actually n.active references only n, which IS in right_vars too.
-        // So both predicates should be right_filters.
-        // BUT we also need to check: n.active only references n, which is in left_vars.
-        // Since n is in BOTH sets, all_in_left AND all_in_right are true.
-        // The logic checks all_in_right FIRST, so it goes to right_filters.
-        assert_eq!(
-            result.right_filters.len() + result.post_filters.len(),
-            2,
-            "two conjuncts should be classified"
-        );
+        assert_eq!(result.right_filters.len(), 2, "both filter the matches");
+        assert!(result.cross_filters.is_empty());
     }
 
     // --- collect_expression_variables ---

@@ -660,7 +660,7 @@ info(): object
 
 ### schema()
 
-Returns schema information: the labels, edge types and property keys the data holds, each sorted by name, as `{ lpg: { labels, edge_types, property_keys } }`. A label is `{ name, count, properties }`, an edge type `{ name, count, properties, endpoints }`, a property `{ name, types }` (`types` such as `["STRING"]`) and an endpoint `{ source, target, count }`. A label, edge type or property key nothing holds any more is left out. It reads the whole graph.
+Returns schema information: the labels, edge types and property keys the data holds, each sorted by name, as `{ mode: 'lpg', labels, edge_types, property_keys }`. A label is `{ name, count, properties }`, an edge type `{ name, count, properties, endpoints }`, a property `{ name, types }` (`types` such as `["STRING"]`) and an endpoint `{ source, target, count }`. A label, edge type or property key nothing holds any more is left out. It reads the whole graph.
 
 ```typescript
 schema(): object

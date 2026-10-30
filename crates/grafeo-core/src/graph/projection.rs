@@ -409,6 +409,10 @@ impl GraphStore for GraphProjection {
         Ok(self.nodes_by_label(label, view)?.len())
     }
 
+    fn label_count_is_kept(&self, label: &str, view: ReadView) -> bool {
+        self.label_is_projected(label) && self.inner.label_count_is_kept(label, view)
+    }
+
     fn node_count(&self, view: ReadView) -> Result<usize> {
         if !self.spec.filters_labels() {
             return self.inner.node_count(view);

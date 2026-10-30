@@ -762,6 +762,10 @@ impl GraphStore for RowGroupStore {
         Ok(inner.nodes_with_labels_at(&[label], Read::view(view)).len())
     }
 
+    fn label_count_is_kept(&self, _label: &str, view: ReadView) -> bool {
+        self.counts_answer(view)
+    }
+
     /// From the count the store keeps when it answers for `view`, by a scan
     /// otherwise.
     fn node_count(&self, view: ReadView) -> Result<usize> {

@@ -33,6 +33,7 @@ mod filter;
 mod functions;
 mod horizontal_aggregate;
 mod join;
+mod label_count;
 mod leapfrog_join;
 mod limit;
 mod load_data;
@@ -95,6 +96,7 @@ pub use join::{
     CompatibleCondition, EqualityCondition, HashJoinOperator, HashKey, JoinCondition, JoinType,
     JoinedRowCondition, NestedLoopJoinOperator,
 };
+pub use label_count::LabelCountOperator;
 pub use leapfrog_join::LeapfrogJoinOperator;
 pub use limit::{LimitOperator, LimitSkipOperator, SkipOperator};
 pub use load_data::{LoadDataFormat, LoadDataOperator};

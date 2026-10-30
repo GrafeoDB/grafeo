@@ -45,6 +45,11 @@ pub(crate) fn always_bound(op: &LogicalOperator) -> Option<HashSet<String>> {
         }
         LogicalOperator::LeftJoin(join) => always_bound(&join.left)?,
         LogicalOperator::AntiJoin(join) => always_bound(&join.left)?,
+        LogicalOperator::MarkJoin(join) => {
+            let mut bound = always_bound(&join.left)?;
+            bound.insert(join.column.clone());
+            bound
+        }
         LogicalOperator::Union(union) => {
             let mut branches = union.inputs.iter();
             let Some(first) = branches.next() else {

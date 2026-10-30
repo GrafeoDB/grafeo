@@ -509,6 +509,19 @@ impl Binder {
                 Ok(())
             }
             LogicalOperator::AntiJoin(aj) => self.bind_join_inputs(&aj.left, &aj.right),
+            LogicalOperator::MarkJoin(mark) => {
+                self.bind_join_inputs(&mark.left, &mark.right)?;
+                self.context.add_variable(
+                    mark.column.clone(),
+                    VariableInfo {
+                        name: mark.column.clone(),
+                        data_type: LogicalType::Bool,
+                        is_node: false,
+                        is_edge: false,
+                    },
+                );
+                Ok(())
+            }
             LogicalOperator::Bind(bind) => {
                 self.bind_operator(&bind.input)?;
                 self.validate_expression(&bind.expression)?;

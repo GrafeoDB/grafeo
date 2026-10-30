@@ -260,6 +260,11 @@ pub enum LogicalOperator {
     /// Anti-join for MINUS patterns.
     AntiJoin(AntiJoinOp),
 
+    /// Every left row, with a boolean column that says whether the right
+    /// side, a decorrelated `EXISTS` subquery, matches it: an `EXISTS` inside
+    /// an `OR` or `NOT` (see `optimizer::delim`).
+    MarkJoin(MarkJoinOp),
+
     /// SPARQL CONSTRUCT: evaluate WHERE, substitute bindings into template,
     /// output (subject, predicate, object) columns.
     Construct(ConstructOp),
@@ -427,6 +432,7 @@ impl LogicalOperator {
             Self::Join(op) => op.left.has_mutations() || op.right.has_mutations(),
             Self::LeftJoin(op) => op.left.has_mutations() || op.right.has_mutations(),
             Self::AntiJoin(op) => op.left.has_mutations() || op.right.has_mutations(),
+            Self::MarkJoin(op) => op.left.has_mutations() || op.right.has_mutations(),
             Self::Except(op) => op.left.has_mutations() || op.right.has_mutations(),
             Self::Intersect(op) => op.left.has_mutations() || op.right.has_mutations(),
             Self::Otherwise(op) => op.left.has_mutations() || op.right.has_mutations(),
@@ -503,6 +509,7 @@ impl LogicalOperator {
             Self::Join(op) => vec![&*op.left, &*op.right],
             Self::LeftJoin(op) => vec![&*op.left, &*op.right],
             Self::AntiJoin(op) => vec![&*op.left, &*op.right],
+            Self::MarkJoin(op) => vec![&*op.left, &*op.right],
             Self::Except(op) => vec![&*op.left, &*op.right],
             Self::Intersect(op) => vec![&*op.left, &*op.right],
             Self::Otherwise(op) => vec![&*op.left, &*op.right],
@@ -697,6 +704,11 @@ impl LogicalOperator {
                 op.right = Box::new(f(*op.right));
                 Self::AntiJoin(op)
             }
+            Self::MarkJoin(mut op) => {
+                op.left = Box::new(f(*op.left));
+                op.right = Box::new(f(*op.right));
+                Self::MarkJoin(op)
+            }
             Self::Except(mut op) => {
                 op.left = Box::new(f(*op.left));
                 op.right = Box::new(f(*op.right));
@@ -860,6 +872,7 @@ impl LogicalOperator {
             }
             Self::LeftJoin(_) => String::new(),
             Self::AntiJoin(_) => String::new(),
+            Self::MarkJoin(op) => op.column.clone(),
             Self::Unwind(op) => op.variable.clone(),
             Self::Bind(op) => op.variable.clone(),
             Self::MapCollect(op) => op.alias.clone(),
@@ -1159,6 +1172,11 @@ impl LogicalOperator {
             // The rows of a filtering join are the left side's; those of a
             // set operation have the columns of every branch.
             Self::AntiJoin(join) => return join.left.bound_variables(imports),
+            Self::MarkJoin(join) => {
+                let mut bound = join.left.bound_variables(imports)?;
+                bound.insert(join.column.clone());
+                return Some(bound);
+            }
             Self::Except(op) => return op.left.bound_variables(imports),
             Self::Intersect(op) => return op.left.bound_variables(imports),
             Self::Otherwise(op) => return op.left.bound_variables(imports),
@@ -1372,6 +1390,17 @@ impl LogicalOperator {
                         }
                     })
                     .collect();
+                // A count of a label's nodes reads the store's count.
+                if let (Some(label), Self::NodeScan(scan)) = (op.counted_label(), op.input.as_ref())
+                {
+                    let _ = writeln!(
+                        out,
+                        "{indent}LabelCount ({var}:{label}, aggs: [{aggs}]){after}",
+                        var = scan.variable,
+                        aggs = aggs.join(", "),
+                    );
+                    return;
+                }
                 let _ = writeln!(
                     out,
                     "{indent}Aggregate (group: [{groups}], aggs: [{aggs}]){after}",
@@ -1455,6 +1484,16 @@ impl LogicalOperator {
             }
             Self::AntiJoin(op) => {
                 let _ = writeln!(out, "{indent}AntiJoin");
+                op.left.fmt_tree(out, depth + 1);
+                op.right.fmt_tree(out, depth + 1);
+            }
+            Self::MarkJoin(op) => {
+                let _ = writeln!(
+                    out,
+                    "{indent}MarkJoin ({column} on {shared})",
+                    column = op.column,
+                    shared = op.shared.join(", ")
+                );
                 op.left.fmt_tree(out, depth + 1);
                 op.right.fmt_tree(out, depth + 1);
             }
@@ -1721,10 +1760,18 @@ fn fmt_expr(expr: &LogicalExpression) -> String {
         LogicalExpression::MapAccess { base, key } => format!("{}.{key}", fmt_expr(base)),
         LogicalExpression::Literal(val) => format!("{val}"),
         LogicalExpression::Binary { left, op, right } => {
-            format!("{} {op:?} {}", fmt_expr(left), fmt_expr(right))
+            format!(
+                "{} {op:?} {}",
+                fmt_operand(left, *op, false),
+                fmt_operand(right, *op, true)
+            )
         }
         LogicalExpression::Unary { op, operand } => {
-            format!("{op:?} {}", fmt_expr(operand))
+            if matches!(operand.as_ref(), LogicalExpression::Binary { .. }) {
+                format!("{op:?} ({})", fmt_expr(operand))
+            } else {
+                format!("{op:?} {}", fmt_expr(operand))
+            }
         }
         LogicalExpression::FunctionCall { name, args, .. }
         | LogicalExpression::SparqlCall { name, args } => {
@@ -1745,7 +1792,88 @@ fn fmt_expr(expr: &LogicalExpression) -> String {
         LogicalExpression::IndexAccess { base, index } => {
             format!("{}[{}]", fmt_expr(base), fmt_expr(index))
         }
+        LogicalExpression::Case {
+            operand,
+            when_clauses,
+            else_clause,
+        } => {
+            use std::fmt::Write as _;
+
+            let mut text = String::from("CASE");
+            if let Some(operand) = operand {
+                text.push(' ');
+                text.push_str(&fmt_expr(operand));
+            }
+            for (condition, result) in when_clauses {
+                let _ = write!(
+                    text,
+                    " WHEN {} THEN {}",
+                    fmt_expr(condition),
+                    fmt_expr(result)
+                );
+            }
+            if let Some(else_clause) = else_clause {
+                let _ = write!(text, " ELSE {}", fmt_expr(else_clause));
+            }
+            text.push_str(" END");
+            text
+        }
+        LogicalExpression::ExistsSubquery(plan) => format!("EXISTS {{ {} }}", fmt_inline(plan)),
+        LogicalExpression::CountSubquery(plan) => format!("COUNT {{ {} }}", fmt_inline(plan)),
+        LogicalExpression::ValueSubquery(plan) => format!("VALUE {{ {} }}", fmt_inline(plan)),
         _ => format!("{expr:?}"),
+    }
+}
+
+/// The plan of a subquery on one line, from its top operator down to its
+/// scan: `Expand (n)->[:USES]->(_anon_0) <- NodeScan (n:Method)`.
+fn fmt_inline(plan: &LogicalOperator) -> String {
+    plan.explain_tree()
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .collect::<Vec<_>>()
+        .join(" <- ")
+}
+
+/// An operand of `parent` for EXPLAIN, in parentheses where the order of
+/// the operators would otherwise read differently: `n:A And (n:B Or n:C)`,
+/// `a Sub (b Sub c)`.
+fn fmt_operand(expr: &LogicalExpression, parent: BinaryOp, right: bool) -> String {
+    let text = fmt_expr(expr);
+    let LogicalExpression::Binary { op, .. } = expr else {
+        return text;
+    };
+    let (child, outer) = (binding_strength(*op), binding_strength(parent));
+    let associative = *op == parent
+        && matches!(
+            op,
+            BinaryOp::And
+                | BinaryOp::Or
+                | BinaryOp::Xor
+                | BinaryOp::Add
+                | BinaryOp::Mul
+                | BinaryOp::Concat
+        );
+    if child < outer || (right && child == outer && !associative) {
+        format!("({text})")
+    } else {
+        text
+    }
+}
+
+/// How tightly `op` binds its operands, higher binding tighter.
+fn binding_strength(op: BinaryOp) -> u8 {
+    match op {
+        BinaryOp::Or => 1,
+        BinaryOp::Xor => 2,
+        BinaryOp::And => 3,
+        BinaryOp::Eq | BinaryOp::Ne | BinaryOp::Lt | BinaryOp::Le | BinaryOp::Gt | BinaryOp::Ge => {
+            4
+        }
+        BinaryOp::Add | BinaryOp::Sub => 6,
+        BinaryOp::Mul | BinaryOp::Div | BinaryOp::Mod => 7,
+        _ => 5,
     }
 }
 
@@ -1916,6 +2044,40 @@ pub struct AggregateOp {
     pub input: Box<LogicalOperator>,
     /// HAVING clause filter (applied after aggregation).
     pub having: Option<LogicalExpression>,
+}
+
+impl AggregateOp {
+    /// The label whose nodes this aggregate only counts: `count(*)` and
+    /// `count(n)` of the scanned node, none distinct, with no grouping and no
+    /// `HAVING`, over a scan of one label and nothing else (`MATCH (n:Graph)
+    /// RETURN count(*)`). The planner reads the store's count of the label
+    /// for it, without the scan, and EXPLAIN shows that.
+    #[must_use]
+    pub fn counted_label(&self) -> Option<&str> {
+        let LogicalOperator::NodeScan(scan) = self.input.as_ref() else {
+            return None;
+        };
+        let (Some(label), None) = (&scan.label, &scan.input) else {
+            return None;
+        };
+        let counts_nodes = |aggregate: &AggregateExpr| {
+            !aggregate.distinct
+                && aggregate.expression2.is_none()
+                && match (aggregate.function, &aggregate.expression) {
+                    (AggregateFunction::Count, None) => true,
+                    (
+                        AggregateFunction::Count | AggregateFunction::CountNonNull,
+                        Some(LogicalExpression::Variable(variable)),
+                    ) => *variable == scan.variable,
+                    _ => false,
+                }
+        };
+        (self.group_by.is_empty()
+            && self.having.is_none()
+            && !self.aggregates.is_empty()
+            && self.aggregates.iter().all(counts_nodes))
+        .then_some(label.as_str())
+    }
 }
 
 /// Whether a horizontal aggregate operates on edges or nodes.
@@ -2659,6 +2821,22 @@ pub struct LeftJoinOp {
     pub right: Box<LogicalOperator>,
     /// Optional filter condition.
     pub condition: Option<LogicalExpression>,
+}
+
+/// Every row of `left`, with `column`: whether `right`, a decorrelated
+/// `EXISTS` subquery that starts from a [`DelimScanOp`] of the `shared`
+/// columns, gives a row with the same values of them. A row with a null
+/// there matches nothing. DuckDB calls it a mark join.
+#[derive(Debug, Clone)]
+pub struct MarkJoinOp {
+    /// The rows, each kept once.
+    pub left: Box<LogicalOperator>,
+    /// The subquery, from the distinct values of `shared` among the rows.
+    pub right: Box<LogicalOperator>,
+    /// The columns the rows and the subquery match on.
+    pub shared: Vec<String>,
+    /// The boolean column it adds.
+    pub column: String,
 }
 
 /// Anti-join for MINUS patterns.

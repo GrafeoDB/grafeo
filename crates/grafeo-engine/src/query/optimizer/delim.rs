@@ -10,55 +10,82 @@
 //! reads the rows once, gives the subquery the rows' distinct values of the
 //! shared variables to start from, and keeps the rows whose values it
 //! matched: one run, over exactly the values the rows hold.
+//!
+//! An `EXISTS` inside an `OR` or `NOT` cannot drop rows: it becomes a mark
+//! join, which keeps every row and adds whether the subquery matched it as a
+//! boolean column that the filter reads in its place. Its guard (the other
+//! conditions of its `AND`, see `visit_guarded_subqueries`) filters the
+//! values it starts from, so a row whose other condition is false starts no
+//! run of it.
 
 use std::collections::HashSet;
 
 use crate::query::plan::{
     BinaryOp, DelimScanOp, FilterOp, JoinCondition, JoinOp, JoinType, LogicalExpression,
-    LogicalOperator, UnaryOp,
+    LogicalOperator, MarkJoinOp, UnaryOp,
 };
-use crate::query::planner::lpg::subquery::subplan_variables;
+use crate::query::planner::lpg::subquery::{
+    expression_names, subplan_variables, visit_guarded_subqueries,
+};
 
 /// `op` with each top-level `EXISTS` and `NOT EXISTS` of its filters that
 /// reads the filtered rows' variables planned as a delim join (a semi or
-/// anti join whose right side starts from a [`DelimScanOp`]). A filter keeps
+/// anti join whose right side starts from a [`DelimScanOp`]), and each other
+/// such `EXISTS` of them as a mark join ([`MarkJoinOp`]). A filter keeps
 /// what does not fit: an `EXISTS` the node's own edges answer (the edge
-/// check, which is faster), one under an `OR` or `NOT` of more (planned per
-/// row), any above a write, and shapes the rewrite does not know.
+/// check, which is faster), one whose guard reads more than the variables
+/// it shares (planned per row, where the guard skips rows), any above a
+/// write, and shapes the rewrite does not know.
 pub(super) fn decorrelate_exists(op: LogicalOperator) -> LogicalOperator {
+    let mut marks = 0;
+    decorrelate(op, &mut marks)
+}
+
+/// [`decorrelate_exists`], naming the mark columns from `marks` on.
+fn decorrelate(op: LogicalOperator, marks: &mut usize) -> LogicalOperator {
     // This frame is on the stack once per level of the plan (see
     // `crate::query::limits`): the rewrite runs in a frame of its own, and
-    // only for a filter whose own predicate holds an `EXISTS` conjunct.
-    let op = op.map_children(decorrelate_exists);
+    // only for a filter whose predicate holds an `EXISTS`.
+    let op = op.map_children(|child| decorrelate(child, marks));
     match op {
-        LogicalOperator::Filter(filter) if has_exists_conjunct(&filter.predicate) => {
-            decorrelate_filter(filter)
+        LogicalOperator::Filter(filter) if has_exists(&filter.predicate) => {
+            decorrelate_filter(filter, marks)
         }
         other => other,
     }
 }
 
-/// Whether a conjunct of `predicate`'s top `AND` chain is an `EXISTS` or
-/// `NOT EXISTS`: the only filters [`decorrelate_filter`] can change.
-fn has_exists_conjunct(predicate: &LogicalExpression) -> bool {
+/// Whether `predicate` holds an `EXISTS` in an expression the rewrite
+/// reaches: a conjunct, or under `AND`, `OR`, `NOT`, other operators, a
+/// function's arguments and `CASE`. Read without a copy: every filter of
+/// every plan asks. An `EXISTS` elsewhere runs per row, as before.
+#[inline(never)]
+fn has_exists(predicate: &LogicalExpression) -> bool {
     match predicate {
-        LogicalExpression::Binary {
-            left,
-            op: BinaryOp::And,
-            right,
-        } => has_exists_conjunct(left) || has_exists_conjunct(right),
         LogicalExpression::ExistsSubquery(_) => true,
-        LogicalExpression::Unary {
-            op: UnaryOp::Not,
+        LogicalExpression::Binary { left, right, .. } => has_exists(left) || has_exists(right),
+        LogicalExpression::Unary { operand, .. } => has_exists(operand),
+        LogicalExpression::FunctionCall { args, .. } | LogicalExpression::List(args) => {
+            args.iter().any(has_exists)
+        }
+        LogicalExpression::Case {
             operand,
-        } => matches!(operand.as_ref(), LogicalExpression::ExistsSubquery(_)),
+            when_clauses,
+            else_clause,
+        } => {
+            operand.as_deref().is_some_and(has_exists)
+                || when_clauses
+                    .iter()
+                    .any(|(condition, result)| has_exists(condition) || has_exists(result))
+                || else_clause.as_deref().is_some_and(has_exists)
+        }
         _ => false,
     }
 }
 
-/// [`decorrelate_exists`] of one filter that holds an `EXISTS` conjunct.
+/// [`decorrelate_exists`] of one filter that holds an `EXISTS`.
 #[inline(never)]
-fn decorrelate_filter(filter: FilterOp) -> LogicalOperator {
+fn decorrelate_filter(filter: FilterOp, marks: &mut usize) -> LogicalOperator {
     // The RDF planner has its own EXISTS (and no delim join).
     if filter.input.has_mutations() || holds_triples(&filter.input) {
         return LogicalOperator::Filter(filter);
@@ -71,14 +98,33 @@ fn decorrelate_filter(filter: FilterOp) -> LogicalOperator {
     let mut joins = Vec::new();
     let mut plain = Vec::new();
     let mut other = Vec::new();
+    let mut marked = Vec::new();
     for conjunct in conjuncts {
         match delim_join_of(&conjunct, &bound) {
             Some(join) => joins.push(join),
-            None if has_subquery(&conjunct) => other.push(conjunct),
+            None if has_subquery(&conjunct) => {
+                let before = marked.len();
+                let conjunct = mark_exists(conjunct, &bound, marks, &mut marked);
+                // The labels a branch of it requires (`(n:A AND EXISTS
+                // {...}) OR (n:B AND ...)`) filter first, so a scan of
+                // every node reads only those labels' nodes and the mark
+                // join starts from them alone (as the planner does for a
+                // subquery it runs per row).
+                if marked.len() > before
+                    && let LogicalOperator::NodeScan(scan) = filter.input.as_ref()
+                    && let Some(check) = crate::query::planner::lpg::scan::implied_label_check(
+                        &conjunct,
+                        &scan.variable,
+                    )
+                {
+                    plain.push(check);
+                }
+                other.push(conjunct);
+            }
             None => plain.push(conjunct),
         }
     }
-    if joins.is_empty() {
+    if joins.is_empty() && marked.is_empty() {
         return LogicalOperator::Filter(filter);
     }
     // The plain conjuncts filter first, so the subqueries start from the
@@ -105,6 +151,14 @@ fn decorrelate_filter(filter: FilterOp) -> LogicalOperator {
                 .collect(),
         });
     }
+    for (right, shared, column) in marked {
+        input = LogicalOperator::MarkJoin(MarkJoinOp {
+            left: Box::new(input),
+            right: Box::new(right),
+            shared,
+            column,
+        });
+    }
     match and_of(other) {
         Some(predicate) => LogicalOperator::Filter(FilterOp {
             predicate,
@@ -112,6 +166,66 @@ fn decorrelate_filter(filter: FilterOp) -> LogicalOperator {
             pushdown_hint: None,
         }),
         None => input,
+    }
+}
+
+/// `conjunct` with each `EXISTS` in it that fits a delim join (see
+/// [`delim_join_of`]) read from the column of a mark join, which it adds to
+/// `marked` as (right side, shared variables, column). An `EXISTS` with a
+/// guard that reads only the shared variables starts from the values the
+/// guard passes; one whose guard reads more stays, to run per row.
+fn mark_exists(
+    mut conjunct: LogicalExpression,
+    bound: &HashSet<String>,
+    marks: &mut usize,
+    marked: &mut Vec<(LogicalOperator, Vec<String>, String)>,
+) -> LogicalExpression {
+    let _ = visit_guarded_subqueries(&mut conjunct, None, &mut |subquery, guard| {
+        if !matches!(subquery, LogicalExpression::ExistsSubquery(_)) {
+            return Ok(());
+        }
+        let Some((mut right, _, shared)) = delim_join_of(subquery, bound) else {
+            return Ok(());
+        };
+        if let Some(guard) = guard {
+            let mut names = HashSet::new();
+            if !expression_names(guard, &mut names)
+                || !names.iter().all(|name| shared.contains(name))
+            {
+                return Ok(());
+            }
+            right = guard_values(right, guard);
+        }
+        let column = mark_column(marks, bound);
+        marked.push((right, shared, column.clone()));
+        *subquery = LogicalExpression::Variable(column);
+        Ok(())
+    });
+    conjunct
+}
+
+/// `plan` with its [`DelimScanOp`] under a filter by `guard`: the values a
+/// guard rejects start no run of the subquery. A row of such a value is
+/// marked unmatched, which its `AND` makes false anyway.
+fn guard_values(plan: LogicalOperator, guard: &LogicalExpression) -> LogicalOperator {
+    match plan {
+        LogicalOperator::DelimScan(scan) => LogicalOperator::Filter(FilterOp {
+            predicate: guard.clone(),
+            input: Box::new(LogicalOperator::DelimScan(scan)),
+            pushdown_hint: None,
+        }),
+        other => other.map_children(|child| guard_values(child, guard)),
+    }
+}
+
+/// The next mark column's name, not one of the rows' variables.
+fn mark_column(marks: &mut usize, bound: &HashSet<String>) -> String {
+    loop {
+        let name = format!("__mark_{marks}");
+        *marks += 1;
+        if !bound.contains(&name) {
+            return name;
+        }
     }
 }
 

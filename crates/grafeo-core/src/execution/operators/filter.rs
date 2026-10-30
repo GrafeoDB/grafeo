@@ -783,8 +783,9 @@ pub enum FilterExpression {
         edge_var: Option<String>,
         /// Direction of edge traversal, from the start.
         direction: Direction,
-        /// Edge type filter (empty = match all types, multiple = match any).
-        edge_types: Vec<String>,
+        /// Edge type filter (empty = match all types, multiple = match any),
+        /// as the store names the types.
+        edge_types: Vec<arcstr::ArcStr>,
         /// Labels the other end must have (single-edge patterns only).
         end_labels: Option<Vec<String>>,
         /// `Some(1)` for a variable-length pattern, `None` for one edge.
@@ -805,8 +806,9 @@ pub enum FilterExpression {
         edge_var: Option<String>,
         /// Direction of edge traversal, from the start.
         direction: Direction,
-        /// Edge type filter (empty = match all types, multiple = match any).
-        edge_types: Vec<String>,
+        /// Edge type filter (empty = match all types, multiple = match any),
+        /// as the store names the types.
+        edge_types: Vec<arcstr::ArcStr>,
         /// Labels the other end must have.
         end_labels: Option<Vec<String>>,
     },
@@ -988,6 +990,15 @@ impl ExpressionPredicate {
         self.seen(self.store.node_labels(id, self.view), None)
     }
 
+    /// `labels(n)` of node `id`: its labels as a list, sorted so that nodes
+    /// with the same labels give the same list, whatever order they were
+    /// written in.
+    fn labels_list(&self, id: NodeId) -> Option<Value> {
+        let mut labels = self.resolve_labels(id)?;
+        labels.sort();
+        Some(Value::List(labels.into_iter().map(Value::String).collect()))
+    }
+
     /// Whether node `id` has `label` as this query sees the node: a label
     /// check, `None` for a node the query does not see.
     fn resolve_has_label(&self, id: NodeId, label: &str) -> Option<bool> {
@@ -999,36 +1010,31 @@ impl ExpressionPredicate {
         self.seen(self.store.node(node_id, self.view), None)
     }
 
-    /// Returns true if an edge (and its other endpoint) matches the type and label filters.
-    ///
-    /// Used by both `ExistsSubquery` and `CountSubquery` fast-path evaluation.
-    fn edge_matches(
-        &self,
-        other_node_id: NodeId,
-        edge_id: EdgeId,
-        edge_types: &[String],
-        end_labels: &Option<Vec<String>>,
-    ) -> bool {
-        self.edge_type_matches(edge_id, edge_types) && self.has_labels(other_node_id, end_labels)
-    }
-
     /// Whether the edge has one of `edge_types` (any type when empty), as
     /// stored: the planner resolved the pattern's names to the stored ones.
     /// The type is read as this query sees the edge, so a transaction finds
     /// the type of an edge it created.
-    fn edge_type_matches(&self, edge_id: EdgeId, edge_types: &[String]) -> bool {
+    fn edge_type_matches(&self, edge_id: EdgeId, edge_types: &[arcstr::ArcStr]) -> bool {
         if edge_types.is_empty() {
             return true;
         }
         self.seen(self.store.edge_type(edge_id, self.view), None)
-            .is_some_and(|actual| edge_types.iter().any(|t| actual.as_str() == t.as_str()))
+            .is_some_and(|actual| edge_types.contains(&actual))
     }
 
-    /// The edges of `node` in `direction` that this query sees, with the
-    /// node at their other end (see [`GraphStore::edges`]).
-    fn visible_edges_from(&self, node: NodeId, direction: Direction) -> Vec<(NodeId, EdgeId)> {
+    /// The edges of `node` in `direction` of one of `edge_types` (any type
+    /// when empty) that this query sees, with the node at their other end
+    /// (see [`GraphStore::edges`]): the store reads only those types' part
+    /// of the node's edges, where a check of each edge's type would read
+    /// all of them.
+    fn visible_edges_from(
+        &self,
+        node: NodeId,
+        direction: Direction,
+        edge_types: &[arcstr::ArcStr],
+    ) -> Vec<(NodeId, EdgeId)> {
         self.seen(
-            self.store.edges(node, direction, &[], self.view),
+            self.store.edges(node, direction, edge_types, self.view),
             Vec::new(),
         )
     }
@@ -1110,11 +1116,10 @@ impl ExpressionPredicate {
         }
         match (start, end) {
             (Some(start), end) => self
-                .visible_edges_from(start, pattern.direction)
+                .visible_edges_from(start, pattern.direction, pattern.edge_types)
                 .into_iter()
-                .filter(|&(other, id)| {
-                    end.is_none_or(|end| end == other)
-                        && self.edge_matches(other, id, pattern.edge_types, pattern.end_labels)
+                .filter(|&(other, _)| {
+                    end.is_none_or(|end| end == other) && self.has_labels(other, pattern.end_labels)
                 })
                 .take(limit)
                 .count(),
@@ -1122,9 +1127,8 @@ impl ExpressionPredicate {
                 if !self.has_labels(end, pattern.end_labels) {
                     return 0;
                 }
-                self.visible_edges_from(end, pattern.direction.reverse())
+                self.visible_edges_from(end, pattern.direction.reverse(), pattern.edge_types)
                     .into_iter()
-                    .filter(|&(_, id)| self.edge_type_matches(id, pattern.edge_types))
                     .take(limit)
                     .count()
             }
@@ -1132,11 +1136,9 @@ impl ExpressionPredicate {
                 let mut found = 0;
                 for start in self.visible_nodes() {
                     found += self
-                        .visible_edges_from(start, pattern.direction)
+                        .visible_edges_from(start, pattern.direction, pattern.edge_types)
                         .into_iter()
-                        .filter(|&(other, id)| {
-                            self.edge_matches(other, id, pattern.edge_types, pattern.end_labels)
-                        })
+                        .filter(|&(other, _)| self.has_labels(other, pattern.end_labels))
                         .take(limit - found)
                         .count();
                     if found == limit {
@@ -1205,9 +1207,9 @@ impl ExpressionPredicate {
             }
         }
         let has_edge = |node: NodeId, direction: Direction| {
-            self.visible_edges_from(node, direction)
-                .into_iter()
-                .any(|(_, id)| self.edge_type_matches(id, pattern.edge_types))
+            !self
+                .visible_edges_from(node, direction, pattern.edge_types)
+                .is_empty()
         };
         match (start, end) {
             (Some(start), Some(end)) => self.reaches(start, end, pattern, max_hops),
@@ -1236,10 +1238,9 @@ impl ExpressionPredicate {
             hops += 1;
             let mut next = Vec::new();
             for node in frontier {
-                for (other, id) in self.visible_edges_from(node, pattern.direction) {
-                    if !self.edge_type_matches(id, pattern.edge_types) {
-                        continue;
-                    }
+                for (other, _) in
+                    self.visible_edges_from(node, pattern.direction, pattern.edge_types)
+                {
                     if other == to {
                         return true;
                     }
@@ -1305,25 +1306,39 @@ impl ExpressionPredicate {
     /// node taken from a list, a map or a function (`head(ns)`, `x.msg`,
     /// `startNode(r)`, see [`shape`](Self::shape)).
     fn node_of(&self, expr: &FilterExpression, chunk: &DataChunk, row: usize) -> Option<Node> {
-        let id = match expr {
+        self.resolve_node(self.node_id_of(expr, chunk, row)?)
+    }
+
+    /// The ID of the node [`node_of`](Self::node_of) finds, without
+    /// building the node.
+    fn node_id_of(&self, expr: &FilterExpression, chunk: &DataChunk, row: usize) -> Option<NodeId> {
+        match expr {
             FilterExpression::Variable(var) => chunk
                 .column(*self.variable_columns.get(var)?)?
-                .get_node_id(row)?,
-            _ => NodeId::new(self.entity_id(expr, &LogicalType::Node, chunk, row)?),
-        };
-        self.resolve_node(id)
+                .get_node_id(row),
+            _ => self
+                .entity_id(expr, &LogicalType::Node, chunk, row)
+                .map(NodeId::new),
+        }
     }
 
     /// The edge `expr` yields at `row`, as [`node_of`](Self::node_of) finds
     /// a node.
     fn edge_of(&self, expr: &FilterExpression, chunk: &DataChunk, row: usize) -> Option<Edge> {
-        let id = match expr {
+        self.resolve_edge(self.edge_id_of(expr, chunk, row)?)
+    }
+
+    /// The ID of the edge [`edge_of`](Self::edge_of) finds, without
+    /// building the edge.
+    fn edge_id_of(&self, expr: &FilterExpression, chunk: &DataChunk, row: usize) -> Option<EdgeId> {
+        match expr {
             FilterExpression::Variable(var) => chunk
                 .column(*self.variable_columns.get(var)?)?
-                .get_edge_id(row)?,
-            _ => EdgeId::new(self.entity_id(expr, &LogicalType::Edge, chunk, row)?),
-        };
-        self.resolve_edge(id)
+                .get_edge_id(row),
+            _ => self
+                .entity_id(expr, &LogicalType::Edge, chunk, row)
+                .map(EdgeId::new),
+        }
     }
 
     /// The ID `expr` yields at `row` when it yields a `kind` (a node or an
@@ -1618,16 +1633,7 @@ impl ExpressionPredicate {
                 let col_idx = *self.variable_columns.get(variable)?;
                 let col = chunk.column(col_idx)?;
                 let node_id = col.get_node_id(row)?;
-                let labels = self.resolve_labels(node_id)?;
-                // Sort labels so sets with the same members always produce
-                // the same list, regardless of internal storage order.
-                let mut sorted: Vec<&arcstr::ArcStr> = labels.iter().collect();
-                sorted.sort();
-                let labels: Vec<Value> = sorted
-                    .into_iter()
-                    .map(|l| Value::String(l.clone()))
-                    .collect();
-                Some(Value::List(labels.into()))
+                self.labels_list(node_id)
             }
             FilterExpression::Type(variable) => {
                 let col_idx = *self.variable_columns.get(variable)?;
@@ -2535,21 +2541,15 @@ impl ExpressionPredicate {
                 if args.len() != 1 {
                     return None;
                 }
-                let node = self.node_of(&args[0], chunk, row)?;
-                let mut sorted: Vec<&arcstr::ArcStr> = node.labels.iter().collect();
-                sorted.sort();
-                let labels: Vec<Value> = sorted
-                    .into_iter()
-                    .map(|l| Value::String(l.clone()))
-                    .collect();
-                Some(Value::List(labels.into()))
+                self.labels_list(self.node_id_of(&args[0], chunk, row)?)
             }
             BuiltinFunction::Type => {
                 if args.len() != 1 {
                     return None;
                 }
-                let edge = self.edge_of(&args[0], chunk, row)?;
-                Some(Value::String(edge.edge_type.clone()))
+                let edge_id = self.edge_id_of(&args[0], chunk, row)?;
+                self.seen(self.store.edge_type(edge_id, self.view), None)
+                    .map(Value::String)
             }
             // startNode(edge) and endNode(edge): the edge's source and
             // destination node, as the node's ID in a node column (RETURN
@@ -4819,7 +4819,7 @@ struct SubqueryPattern<'a> {
     end: &'a str,
     edge: Option<&'a str>,
     direction: Direction,
-    edge_types: &'a [String],
+    edge_types: &'a [arcstr::ArcStr],
     end_labels: &'a Option<Vec<String>>,
     hops: Hops,
 }

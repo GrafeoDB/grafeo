@@ -11,6 +11,36 @@ use super::{
 
 impl super::Planner {
     /// Plans an AGGREGATE operator.
+    /// `count(*)` and `count(n)` of a scan of one label and nothing else
+    /// (`MATCH (n:Graph) RETURN count(*)`): the store's count of the label's
+    /// nodes, read when the query runs (see `LabelCountOperator`), without
+    /// a scan. `None` for any other aggregate.
+    fn plan_label_count(&self, agg: &AggregateOp) -> Option<(Box<dyn Operator>, Vec<String>)> {
+        let label = agg.counted_label()?;
+        let columns: Vec<String> = agg
+            .aggregates
+            .iter()
+            .map(|aggregate| {
+                aggregate.alias.clone().unwrap_or_else(|| {
+                    crate::query::planner::common::aggregate_column_name(aggregate)
+                })
+            })
+            .collect();
+        for column in &columns {
+            self.scalar_columns.borrow_mut().insert(column.clone());
+        }
+        // PROFILE names the scan the count stands in for.
+        self.record_absorbed_scan_entry("NodeScan", &agg.input);
+        let operator = grafeo_core::execution::operators::LabelCountOperator::new(
+            Arc::clone(&self.store) as Arc<dyn GraphStore>,
+            label.to_string(),
+            self.read_view(),
+            columns.len(),
+        )
+        .with_read_counter(self.read_counter());
+        Some((Box::new(operator), columns))
+    }
+
     pub(super) fn plan_aggregate(
         &self,
         agg: &AggregateOp,
@@ -39,6 +69,10 @@ impl super::Planner {
             return Ok((op, cols));
         }
         // Fall through to regular aggregate if factorized planning fails
+
+        if let Some(counted) = self.plan_label_count(agg) {
+            return Ok(counted);
+        }
 
         // An aggregate that comes first (`RETURN count(*)`) aggregates the
         // one empty row.

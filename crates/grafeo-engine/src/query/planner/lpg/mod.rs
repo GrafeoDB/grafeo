@@ -981,13 +981,13 @@ impl Planner {
     /// Plans a single logical operator.
     fn plan_operator(&self, op: &LogicalOperator) -> Result<(Box<dyn Operator>, Vec<String>)> {
         let _statement = value_join::StatementScope::enter(&self.statement_writes, op);
-        // A chain of filters over a node scan reads the label with the fewest
-        // nodes (see `scan.rs`); PROFILE then shows the plan that runs.
+        // A chain of filters over a node scan reads the labels with the
+        // fewest nodes (see `scan.rs`); PROFILE then shows the plan that runs.
         // Boxed: this frame is on the stack once per level of the plan (see
         // `crate::query::limits`), an operator in it would make it larger.
         let reordered = match op {
             LogicalOperator::Filter(filter) => self
-                .scan_smallest_label(filter)
+                .scan_fewest_nodes(filter)
                 .map(|filter| Box::new(LogicalOperator::Filter(filter))),
             _ => None,
         };
@@ -1041,6 +1041,7 @@ impl Planner {
             LogicalOperator::DeleteEdge(delete) => self.plan_delete_edge(delete),
             LogicalOperator::LeftJoin(left_join) => self.plan_left_join(left_join),
             LogicalOperator::AntiJoin(anti_join) => self.plan_anti_join(anti_join),
+            LogicalOperator::MarkJoin(mark) => self.plan_mark_join(mark),
             LogicalOperator::Unwind(unwind) => self.plan_unwind(unwind),
             LogicalOperator::Merge(merge) => self.plan_merge(merge),
             LogicalOperator::MergeRelationship(merge_rel) => {

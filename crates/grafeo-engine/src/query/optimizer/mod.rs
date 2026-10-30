@@ -1052,6 +1052,11 @@ impl Optimizer {
                 anti_join.right = Box::new(self.push_filters_down(*anti_join.right));
                 LogicalOperator::AntiJoin(anti_join)
             }
+            LogicalOperator::MarkJoin(mut mark) => {
+                mark.left = Box::new(self.push_filters_down(*mark.left));
+                mark.right = Box::new(self.push_filters_down(*mark.right));
+                LogicalOperator::MarkJoin(mark)
+            }
             LogicalOperator::Apply(mut apply) => {
                 apply.input = Box::new(self.push_filters_down(*apply.input));
                 apply.subplan = Box::new(self.push_filters_down(*apply.subplan));

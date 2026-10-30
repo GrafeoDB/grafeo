@@ -396,6 +396,14 @@ pub trait GraphStore: Send + Sync {
         Ok(self.nodes_by_label(label, view)?.len())
     }
 
+    /// Whether [`nodes_by_label_count`](Self::nodes_by_label_count) of
+    /// `label` answers for `view` from a count the store keeps, without
+    /// reading the label's nodes: what a query that counts reports as read.
+    /// `false` unless the store keeps such counts.
+    fn label_count_is_kept(&self, _label: &str, _view: ReadView) -> bool {
+        false
+    }
+
     /// How many nodes `view` sees.
     ///
     /// # Errors

@@ -484,7 +484,7 @@ pub(crate) fn visit_subqueries(
 /// them is false, the chain is false whatever the subquery gives, in any
 /// context (`OR`, `NOT`, `CASE`), so a row the guard rejects need not run
 /// it. A null member passes: `NOT (null AND x)` depends on `x`.
-fn visit_guarded_subqueries(
+pub(crate) fn visit_guarded_subqueries(
     expression: &mut LogicalExpression,
     guard: Option<&LogicalExpression>,
     f: &mut dyn FnMut(&mut LogicalExpression, Option<&LogicalExpression>) -> Result<()>,
@@ -728,6 +728,7 @@ fn seed_with_parameters(plan: &mut LogicalOperator, parameters: LogicalOperator)
         LogicalOperator::Join(join) => seed_with_parameters(&mut join.left, parameters),
         LogicalOperator::LeftJoin(join) => seed_with_parameters(&mut join.left, parameters),
         LogicalOperator::AntiJoin(join) => seed_with_parameters(&mut join.left, parameters),
+        LogicalOperator::MarkJoin(join) => seed_with_parameters(&mut join.left, parameters),
         LogicalOperator::Unwind(unwind) => {
             if matches!(*unwind.input, LogicalOperator::Empty) {
                 *unwind.input = parameters;
@@ -924,6 +925,11 @@ fn plan_names(plan: &LogicalOperator, names: &mut HashSet<String>) -> bool {
         LogicalOperator::AntiJoin(join) => {
             plan_names(&join.left, names) && plan_names(&join.right, names)
         }
+        LogicalOperator::MarkJoin(join) => {
+            names.extend(join.shared.iter().cloned());
+            names.insert(join.column.clone());
+            plan_names(&join.left, names) && plan_names(&join.right, names)
+        }
         LogicalOperator::Apply(apply) => {
             names.extend(apply.shared_variables.iter().cloned());
             plan_names(&apply.input, names) && plan_names(&apply.subplan, names)
@@ -938,7 +944,10 @@ fn plan_names(plan: &LogicalOperator, names: &mut HashSet<String>) -> bool {
     }
 }
 
-fn expression_names(expression: &LogicalExpression, names: &mut HashSet<String>) -> bool {
+pub(crate) fn expression_names(
+    expression: &LogicalExpression,
+    names: &mut HashSet<String>,
+) -> bool {
     match expression {
         LogicalExpression::Variable(name)
         | LogicalExpression::Labels(name)

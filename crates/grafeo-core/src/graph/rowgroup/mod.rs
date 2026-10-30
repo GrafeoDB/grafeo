@@ -491,7 +491,7 @@ impl Inner {
             .filter_map(|(key, value)| {
                 self.keys
                     .get_name(key)
-                    .map(|name| (PropertyKey::new(name.as_str()), value))
+                    .map(|name| (PropertyKey::new(name.clone()), value))
             })
             .collect();
         values.sort_by(|(a, _), (b, _)| a.cmp(b));
@@ -529,10 +529,7 @@ impl Inner {
         Some(Node {
             id: NodeId::new(id),
             labels: self.label_names(&group.labels_at(row, read)),
-            properties: self
-                .values_at(&group.columns, row, read)
-                .into_iter()
-                .collect::<PropertyMap>(),
+            properties: PropertyMap::from_distinct(self.values_at(&group.columns, row, read)),
         })
     }
 
@@ -548,10 +545,7 @@ impl Inner {
             src: NodeId::new(src),
             dst: NodeId::new(dst),
             edge_type: self.edge_types.get_name(edge_type)?.clone(),
-            properties: self
-                .values_at(&group.columns, row, read)
-                .into_iter()
-                .collect::<PropertyMap>(),
+            properties: PropertyMap::from_distinct(self.values_at(&group.columns, row, read)),
         })
     }
 

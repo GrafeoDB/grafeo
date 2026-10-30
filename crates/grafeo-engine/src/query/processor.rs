@@ -747,9 +747,7 @@ fn annotate_hints(
     }
     if let LogicalOperator::Filter(filter) = op {
         // The label the planner scans, chosen at the top of a chain of filters
-        if let Some(reordered) =
-            crate::query::planner::lpg::scan::with_smallest_scan_label(filter, store)
-        {
+        if let Some(reordered) = crate::query::planner::lpg::scan::with_scan_labels(filter, store) {
             *filter = reordered;
         }
         // Recurse into children first
@@ -1146,6 +1144,10 @@ fn substitute_in_operator(op: &mut LogicalOperator, params: &QueryParams) -> Res
         LogicalOperator::AntiJoin(anti) => {
             substitute_in_operator(&mut anti.left, params)?;
             substitute_in_operator(&mut anti.right, params)?;
+        }
+        LogicalOperator::MarkJoin(mark) => {
+            substitute_in_operator(&mut mark.left, params)?;
+            substitute_in_operator(&mut mark.right, params)?;
         }
         LogicalOperator::Bind(bind) => {
             substitute_in_expression(&mut bind.expression, params)?;

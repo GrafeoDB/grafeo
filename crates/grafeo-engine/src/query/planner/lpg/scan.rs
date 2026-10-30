@@ -93,6 +93,70 @@ pub(crate) fn with_smallest_scan_label(
     Some(reordered)
 }
 
+/// The copy of `filter` with the labels its node scan reads chosen: the
+/// label with the fewest nodes (see [`with_smallest_scan_label`]), then,
+/// over a scan of one label, the `OR` of labels the predicate requires
+/// when they hold fewer nodes (see [`with_label_union_scan`]). `None` when
+/// the scan stays as it is. EXPLAIN and the planner choose the same.
+pub(crate) fn with_scan_labels(filter: &FilterOp, store: &dyn GraphStore) -> Option<FilterOp> {
+    let smallest = with_smallest_scan_label(filter, store);
+    with_label_union_scan(smallest.as_ref().unwrap_or(filter), store).or(smallest)
+}
+
+/// The copy of `filter` that scans every node and checks the label its
+/// scan read, when the predicate requires an `OR` of other labels whose
+/// nodes are at most half the scanned label's: `MATCH (n:Graph) WHERE (n:File
+/// OR n:TypeDefinition) AND ...` reads the File and TypeDefinition nodes (see
+/// [`label_union`]) and checks `n:Graph` of each, where the scan read every
+/// Graph node. The rows are the same. The scan keeps its label when a seek
+/// by id or a property index answers the predicate (a lookup reads fewer
+/// nodes still), and when a vector or text index on it covers a property
+/// the predicate reads (see [`with_smallest_scan_label`]).
+fn with_label_union_scan(filter: &FilterOp, store: &dyn GraphStore) -> Option<FilterOp> {
+    let LogicalOperator::NodeScan(scan) = filter.input.as_ref() else {
+        return None;
+    };
+    let (Some(label), None) = (scan.label.as_deref(), scan.input.as_ref()) else {
+        return None;
+    };
+    let (nodes, _, statistics) = fewest_label_union(&filter.predicate, &scan.variable, store)?;
+    if nodes.saturating_mul(2) > label_estimate(&statistics, label)
+        || super::seek::choose_seek(
+            &filter.predicate,
+            scan,
+            |property| store.has_property_index(property),
+            false,
+        )
+        .is_some()
+    {
+        return None;
+    }
+    #[cfg(any(feature = "vector-index", feature = "text-index"))]
+    if search_index_covers(&filter.predicate, &scan.variable, [label, label], store) {
+        return None;
+    }
+    let check = LogicalExpression::builtin(
+        BuiltinFunction::HasLabel,
+        vec![
+            LogicalExpression::Variable(scan.variable.clone()),
+            LogicalExpression::Literal(Value::String(label.into())),
+        ],
+    );
+    Some(FilterOp {
+        predicate: LogicalExpression::Binary {
+            left: Box::new(check),
+            op: BinaryOp::And,
+            right: Box::new(filter.predicate.clone()),
+        },
+        input: Box::new(LogicalOperator::NodeScan(NodeScanOp {
+            variable: scan.variable.clone(),
+            label: None,
+            input: None,
+        })),
+        pushdown_hint: filter.pushdown_hint.clone(),
+    })
+}
+
 /// The labels of the `OR` of labels that `predicate` requires of the node a
 /// scan of every node reads (`n:Tag OR n:Topic`, `'Tag' IN labels(n) OR ...`,
 /// `any(l IN labels(n) WHERE l IN ['Tag', 'Topic'])`), when the scan may read
@@ -109,34 +173,54 @@ pub(crate) fn label_union(
     if scan.label.is_some() || scan.input.is_some() {
         return None;
     }
+    let (nodes, labels, statistics) = fewest_label_union(predicate, &scan.variable, store)?;
+    (nodes.saturating_mul(2) <= statistics.total_nodes).then_some(labels)
+}
+
+/// Of the conjuncts of `predicate` that require an `OR` of two or more
+/// labels of `variable`, the one whose labels hold the fewest nodes: those
+/// nodes, the labels, each once, in their written order, and the store's
+/// statistics they were counted by. The statistics are read only when such
+/// a conjunct exists: building them walks every label, which a point lookup
+/// planned many times a second should not pay for.
+fn fewest_label_union(
+    predicate: &LogicalExpression,
+    variable: &str,
+    store: &dyn GraphStore,
+) -> Option<(u64, Vec<String>, Arc<grafeo_core::statistics::Statistics>)> {
     let mut conjuncts = Vec::new();
     and_conjuncts(predicate, &mut conjuncts);
-    let statistics = store.statistics();
-    let mut best: Option<(u64, Vec<&str>)> = None;
-    for conjunct in conjuncts {
-        let Some(found) = any_label(conjunct, &scan.variable) else {
-            continue;
-        };
-        let mut labels: Vec<&str> = Vec::with_capacity(found.len());
-        for label in found {
-            if !labels.contains(&label) {
-                labels.push(label);
+    let unions: Vec<Vec<&str>> = conjuncts
+        .into_iter()
+        .filter_map(|conjunct| {
+            let mut labels: Vec<&str> = Vec::new();
+            for label in any_label(conjunct, variable)? {
+                if !labels.contains(&label) {
+                    labels.push(label);
+                }
             }
-        }
-        if labels.len() < 2 {
-            continue;
-        }
-        let nodes: u64 = labels
-            .iter()
-            .map(|label| label_estimate(&statistics, label))
-            .sum();
-        if best.as_ref().is_none_or(|(fewest, _)| nodes < *fewest) {
-            best = Some((nodes, labels));
-        }
+            (labels.len() >= 2).then_some(labels)
+        })
+        .collect();
+    if unions.is_empty() {
+        return None;
     }
-    let (nodes, labels) = best?;
-    (nodes.saturating_mul(2) <= statistics.total_nodes)
-        .then(|| labels.into_iter().map(str::to_string).collect())
+    let statistics = store.statistics();
+    let (nodes, labels) = unions
+        .into_iter()
+        .map(|labels| {
+            let nodes: u64 = labels
+                .iter()
+                .map(|label| label_estimate(&statistics, label))
+                .sum();
+            (nodes, labels)
+        })
+        .reduce(|best, next| if next.0 < best.0 { next } else { best })?;
+    Some((
+        nodes,
+        labels.into_iter().map(str::to_string).collect(),
+        statistics,
+    ))
 }
 
 /// The check `variable:L1 OR variable:L2 ...` of the labels `predicate`
@@ -434,11 +518,11 @@ fn reads_property(
 }
 
 impl super::Planner {
-    /// The copy of `filter` whose node scan reads the label with the fewest
-    /// nodes (see [`with_smallest_scan_label`]): a scan of any of the
+    /// The copy of `filter` whose node scan reads the labels with the
+    /// fewest nodes (see [`with_scan_labels`]): a scan of any of the
     /// pattern's labels finds the same nodes at the query's view.
-    pub(super) fn scan_smallest_label(&self, filter: &FilterOp) -> Option<FilterOp> {
-        with_smallest_scan_label(filter, self.store.as_ref())
+    pub(super) fn scan_fewest_nodes(&self, filter: &FilterOp) -> Option<FilterOp> {
+        with_scan_labels(filter, self.store.as_ref())
     }
 
     /// Plans a node scan operator.
@@ -748,11 +832,11 @@ mod tests {
                 EpochId::new(epoch),
             )
         };
-        assert!(planner(1, None).scan_smallest_label(&written).is_some());
-        assert!(planner(3, None).scan_smallest_label(&written).is_some());
+        assert!(planner(1, None).scan_fewest_nodes(&written).is_some());
+        assert!(planner(3, None).scan_fewest_nodes(&written).is_some());
         assert!(
             planner(1, Some(TransactionId::new(19)))
-                .scan_smallest_label(&written)
+                .scan_fewest_nodes(&written)
                 .is_some()
         );
     }

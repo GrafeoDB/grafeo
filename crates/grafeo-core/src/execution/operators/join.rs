@@ -39,6 +39,10 @@ pub enum JoinType {
     Semi,
     /// Anti join: rows from left that have no match in right.
     Anti,
+    /// Mark join: every row from left once, with a boolean column after its
+    /// own that says whether it has a match in right (a row with a null key
+    /// has none). An `EXISTS` inside an `OR` reads the column.
+    Mark,
 }
 
 /// A hash key that can be hashed and compared for join operations.
@@ -522,6 +526,10 @@ impl HashJoinOperator {
         if matches!(self.join_type, JoinType::Semi | JoinType::Anti) {
             return copied_column_types(&types, &self.output_schema);
         }
+        if self.join_type == JoinType::Mark {
+            types.push(LogicalType::Bool);
+            return copied_column_types(&types, &self.output_schema);
+        }
         if self.build_chunks.is_empty() {
             types.extend(
                 self.output_schema
@@ -887,6 +895,27 @@ impl Operator for HashJoinOperator {
                                 builder.advance_row();
                             }
                             self.current_probe_row += 1;
+                            continue;
+                        }
+                        JoinType::Mark => {
+                            let matched = has_match()?;
+                            let width = probe_chunk.column_count();
+                            for col_idx in 0..width {
+                                if let (Some(src_col), Some(dst_col)) =
+                                    (probe_chunk.column(col_idx), builder.column_mut(col_idx))
+                                    && let Some(value) = src_col.get_value(probe_row)
+                                {
+                                    dst_col.push_value(value);
+                                }
+                            }
+                            if let Some(mark) = builder.column_mut(width) {
+                                mark.push_value(Value::Bool(matched));
+                            }
+                            builder.advance_row();
+                            self.current_probe_row += 1;
+                            if builder.is_full() {
+                                return Ok(chunk_builder.take().map(DataChunkBuilder::finish));
+                            }
                             continue;
                         }
                         _ => {

@@ -90,6 +90,24 @@ impl PropertyMap {
         None
     }
 
+    /// A map of `entries` whose keys are known to be distinct (the columns
+    /// of one stored row), without the check for an earlier entry of the
+    /// same key that [`insert`](Self::insert) makes: building a node of
+    /// 30 properties so is linear instead of quadratic. The entries keep
+    /// their order.
+    #[must_use]
+    pub fn from_distinct(entries: impl IntoIterator<Item = (PropertyKey, Value)>) -> Self {
+        let entries: SmallVec<[(PropertyKey, Value); INLINE_CAP]> = entries.into_iter().collect();
+        debug_assert!(
+            entries
+                .iter()
+                .enumerate()
+                .all(|(i, (key, _))| entries[..i].iter().all(|(earlier, _)| earlier != key)),
+            "PropertyMap::from_distinct with a repeated key"
+        );
+        Self { entries }
+    }
+
     /// Removes a property by key, returning its value if present.
     pub fn remove(&mut self, key: &PropertyKey) -> Option<Value> {
         if let Some(pos) = self.entries.iter().position(|(k, _)| k == key) {

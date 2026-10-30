@@ -1,5 +1,8 @@
 # Reviewed differences between 0.6.0 and 0.6.1: case key, fingerprint of the reviewed result, why it changed.
 # A `~` before the fingerprint: the case's result in 0.6.0 varies from run to run, so it may also not differ.
+BW2|cypher 7b077158c6 toDecimal of a value that does not fit the precision fails with 22003, as a CAST does; 0.6.0 gave null.
+BW2|gql 7b077158c6 toDecimal of a value that does not fit the precision fails with 22003, as a CAST does; 0.6.0 gave null.
+BW4|gql 86740c1269 A CAST to DECIMAL(p, s) of a value that does not fit fails with 22003, as SQL; 0.6.0 gave null.
 CX3|cypher 9e9e9e76a9 toInteger trims the text first; 0.6.0 gave null for text with surrounding spaces.
 DE1|gql 5103ef079d Shortest paths read a decimal edge weight; 0.6.0 read it as 1.0 (#678).
 DE2|gql 003bcbe071 Spanning trees read a decimal edge weight; 0.6.0 read it as 1.0, so it kept the wrong edges (#678).

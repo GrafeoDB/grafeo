@@ -14,6 +14,7 @@
 pub mod cardinality;
 pub mod cost;
 mod cycles;
+mod scanned_labels;
 pub(crate) use cycles::{close_cycles, plan_names};
 pub mod join_order;
 
@@ -295,6 +296,8 @@ impl Optimizer {
             // target a filter pins starts there.
             root = self.start_at_the_sought_end(root, false);
         }
+        // A label check the node scan below makes true is no filter.
+        root = scanned_labels::drop_scanned_label_checks(root);
 
         if self.enable_join_reorder {
             root = self.reorder_joins(root);

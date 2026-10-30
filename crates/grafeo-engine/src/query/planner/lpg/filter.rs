@@ -508,7 +508,7 @@ impl super::Planner {
     ) -> Result<(Box<dyn Operator>, Vec<String>)> {
         let input_writes = outer_input.has_mutations();
         let (left_op, left_columns) = self.plan_operator(outer_input)?;
-        let (right_op, right_columns) = self.plan_operator(subquery)?;
+        let (right_op, right_columns) = self.without_profiling(|| self.plan_operator(subquery))?;
 
         // Semi/anti join only outputs left (outer) columns
         let output_columns = left_columns.clone();
@@ -577,7 +577,7 @@ impl super::Planner {
         remaining_predicate: Option<LogicalExpression>,
         input_writes: bool,
     ) -> Result<(Box<dyn Operator>, Vec<String>)> {
-        let (right_op, right_columns) = self.plan_operator(subquery)?;
+        let (right_op, right_columns) = self.without_profiling(|| self.plan_operator(subquery))?;
 
         let output_columns = left_columns.to_vec();
 

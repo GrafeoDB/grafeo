@@ -278,7 +278,10 @@ fn element_labels<'a>(predicate: &'a LogicalExpression, element: &str) -> Option
 
 /// The label of a `hasLabel(variable, 'Label')` check, or of its spelling
 /// `'Label' IN labels(variable)`.
-fn label_check<'a>(expression: &'a LogicalExpression, variable: &str) -> Option<&'a str> {
+pub(crate) fn label_check<'a>(
+    expression: &'a LogicalExpression,
+    variable: &str,
+) -> Option<&'a str> {
     match expression {
         LogicalExpression::FunctionCall {
             callee: Callee::Builtin(BuiltinFunction::HasLabel),

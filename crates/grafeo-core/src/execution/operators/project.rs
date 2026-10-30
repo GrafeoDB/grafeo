@@ -144,11 +144,12 @@ impl EntityValue {
     }
 
     /// What the items `start..end` of a list that holds this hold (a slice,
-    /// `tail`; `end` `None` is the end): a list holds the same, a list
+    /// `tail`; a bound `None` is the start or the end, a negative one counts
+    /// from the end, see [`slice_range`]): a list holds the same, a list
     /// literal what its items in that range hold. `None` for a value that is
     /// not a list.
     #[must_use]
-    pub fn slice(&self, start: usize, end: Option<usize>) -> Option<Self> {
+    pub fn slice(&self, start: Option<i64>, end: Option<i64>) -> Option<Self> {
         Self::of_type(&slice_type(self.logical_type(), start, end))
     }
 
@@ -242,16 +243,33 @@ pub(crate) fn item_type_at(list: &LogicalType, index: i64) -> LogicalType {
     }
 }
 
+/// The positions the slice `[start..end]` of a list or string of `len` items
+/// takes, as openCypher and GQL read its bounds: a negative bound counts from
+/// the end (`-2` is `len - 2`), a missing one is the start or the end, each
+/// is clamped to `0..=len`, and a start at or past the end gives no items.
+pub(crate) fn slice_range(
+    len: usize,
+    start: Option<i64>,
+    end: Option<i64>,
+) -> std::ops::Range<usize> {
+    let position = |bound: i64| match usize::try_from(bound) {
+        Ok(from_start) => from_start.min(len),
+        Err(_) => usize::try_from(bound.unsigned_abs()).map_or(0, |back| len.saturating_sub(back)),
+    };
+    let start = start.map_or(0, position);
+    let end = end.map_or(len, position);
+    start..end.max(start)
+}
+
 /// The type of the items `start..end` of a list of type `list` (a slice,
 /// `tail`; `end` `None` is the end): a list keeps its type, a tuple keeps
 /// the types of the items in that range. `Any` for a type that is not a
 /// list.
-pub(crate) fn slice_type(list: LogicalType, start: usize, end: Option<usize>) -> LogicalType {
+pub(crate) fn slice_type(list: LogicalType, start: Option<i64>, end: Option<i64>) -> LogicalType {
     match list {
         LogicalType::Tuple(items) => {
-            let end = end.unwrap_or(items.len()).min(items.len());
-            let start = start.min(end);
-            list_type(items[start..end].to_vec())
+            let range = slice_range(items.len(), start, end);
+            list_type(items[range].to_vec())
         }
         list @ LogicalType::List(_) => list,
         _ => LogicalType::Any,

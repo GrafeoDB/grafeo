@@ -622,7 +622,7 @@ impl super::Planner {
                 // pattern (see `translators::common::whole_path`).
                 (BuiltinFunction::Path, [_, _]) => Some(EntityValue::Nested(LogicalType::Path)),
                 (BuiltinFunction::Reverse, [inner]) => self.entity_value(inner)?.reversed(),
-                (BuiltinFunction::Tail, [inner]) => self.entity_value(inner)?.slice(1, None),
+                (BuiltinFunction::Tail, [inner]) => self.entity_value(inner)?.slice(Some(1), None),
                 (BuiltinFunction::Head, [inner]) => self.entity_value(inner)?.item_at(0),
                 (BuiltinFunction::Last, [inner]) => self.entity_value(inner)?.item_at(-1),
                 _ => None,
@@ -640,15 +640,13 @@ impl super::Planner {
                 // leaves out (`Some(None)`); `None` when it is not known
                 // before the query runs.
                 let bound = |bound: &Option<Box<LogicalExpression>>| match bound.as_deref() {
-                    Some(LogicalExpression::Literal(Value::Int64(i))) => {
-                        usize::try_from(*i).ok().map(Some)
-                    }
+                    Some(LogicalExpression::Literal(Value::Int64(i))) => Some(Some(*i)),
                     None => Some(None),
                     _ => None,
                 };
                 let base = self.entity_value(base)?;
                 match (bound(start), bound(end)) {
-                    (Some(start), Some(end)) => base.slice(start.unwrap_or(0), end),
+                    (Some(start), Some(end)) => base.slice(start, end),
                     // Bounds known only when the query runs: the items'
                     // common kind, if they share one.
                     _ => base.item().map(|item| item.list()),

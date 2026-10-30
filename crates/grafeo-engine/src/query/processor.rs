@@ -754,6 +754,20 @@ fn annotate_hints(
         }
         // Recurse into children first
         annotate_hints(&mut filter.input, store, writes, after_a_write);
+        // A subquery of the predicate is planned like any plan, with the
+        // labels it scans chosen the same way.
+        let _ = crate::query::planner::lpg::subquery::visit_subqueries(
+            &mut filter.predicate,
+            &mut |subquery| {
+                if let crate::query::plan::LogicalExpression::ExistsSubquery(plan)
+                | crate::query::plan::LogicalExpression::CountSubquery(plan)
+                | crate::query::plan::LogicalExpression::ValueSubquery(plan) = subquery
+                {
+                    annotate_hints(plan, store, writes, after_a_write);
+                }
+                Ok(())
+            },
+        );
 
         // A seek or a hash join replaces the scan below the filter
         let replaced = crate::query::planner::lpg::seek::checked_scan(filter).and_then(|below| {

@@ -1561,68 +1561,25 @@ impl ExpressionPredicate {
             }
             FilterExpression::SliceAccess { base, start, end } => {
                 let base_val = self.eval_expr(base, chunk, row)?;
-                let start_idx = start
-                    .as_ref()
-                    .and_then(|s| self.eval_expr(s, chunk, row))
-                    .and_then(|v| {
-                        if let Value::Int64(i) = v {
-                            // reason: slice index from user query, non-negative for valid slices
-                            #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-                            Some(i as usize)
-                        } else {
-                            None
-                        }
-                    })
-                    .unwrap_or(0);
-
+                let bound = |bound: &Option<Box<FilterExpression>>| match bound
+                    .as_deref()
+                    .and_then(|bound| self.eval_expr(bound, chunk, row))
+                {
+                    Some(Value::Int64(i)) => Some(i),
+                    _ => None,
+                };
+                let (start, end) = (bound(start), bound(end));
                 match &base_val {
                     Value::List(items) => {
-                        let end_idx = end
-                            .as_ref()
-                            .and_then(|e| self.eval_expr(e, chunk, row))
-                            .and_then(|v| {
-                                if let Value::Int64(i) = v {
-                                    // reason: slice end index from user query
-                                    #[allow(
-                                        clippy::cast_possible_truncation,
-                                        clippy::cast_sign_loss
-                                    )]
-                                    Some(i as usize)
-                                } else {
-                                    None
-                                }
-                            })
-                            .unwrap_or(items.len());
-                        let sliced: Vec<Value> = items
-                            .get(start_idx..end_idx.min(items.len()))
-                            .unwrap_or(&[])
-                            .to_vec();
-                        Some(Value::List(sliced.into()))
+                        let range = super::project::slice_range(items.len(), start, end);
+                        Some(Value::List(items[range].to_vec().into()))
                     }
                     Value::String(s) => {
                         let chars: Vec<char> = s.chars().collect();
-                        let end_idx = end
-                            .as_ref()
-                            .and_then(|e| self.eval_expr(e, chunk, row))
-                            .and_then(|v| {
-                                if let Value::Int64(i) = v {
-                                    // reason: slice end index from user query
-                                    #[allow(
-                                        clippy::cast_possible_truncation,
-                                        clippy::cast_sign_loss
-                                    )]
-                                    Some(i as usize)
-                                } else {
-                                    None
-                                }
-                            })
-                            .unwrap_or(chars.len());
-                        let sliced: String = chars
-                            .get(start_idx..end_idx.min(chars.len()))
-                            .unwrap_or(&[])
-                            .iter()
-                            .collect();
-                        Some(Value::String(sliced.into()))
+                        let range = super::project::slice_range(chars.len(), start, end);
+                        Some(Value::String(
+                            chars[range].iter().collect::<String>().into(),
+                        ))
                     }
                     _ => None,
                 }
@@ -1869,10 +1826,10 @@ impl ExpressionPredicate {
                     .as_deref()
                     .and_then(|bound| self.eval_expr(bound, chunk, row))
                 {
-                    Some(Value::Int64(i)) => usize::try_from(i).ok(),
+                    Some(Value::Int64(i)) => Some(i),
                     _ => None,
                 };
-                slice_type(base, bound(start).unwrap_or(0), bound(end))
+                slice_type(base, bound(start), bound(end))
             }
             FilterExpression::FunctionCall { function, args } => {
                 let argument = || {
@@ -1885,7 +1842,7 @@ impl ExpressionPredicate {
                     BuiltinFunction::StartNode | BuiltinFunction::EndNode => LogicalType::Node,
                     BuiltinFunction::Head => item_type_at(&argument(), 0),
                     BuiltinFunction::Last => item_type_at(&argument(), -1),
-                    BuiltinFunction::Tail => slice_type(argument(), 1, None),
+                    BuiltinFunction::Tail => slice_type(argument(), Some(1), None),
                     BuiltinFunction::Reverse => reversed_type(argument()),
                     _ => LogicalType::Any,
                 }

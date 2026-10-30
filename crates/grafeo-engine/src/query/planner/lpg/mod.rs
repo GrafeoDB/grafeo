@@ -106,7 +106,7 @@ mod project;
 pub(crate) mod reachability;
 pub(crate) mod scan;
 pub(crate) mod seek;
-mod subquery;
+pub(crate) mod subquery;
 pub(crate) mod value_join;
 
 #[cfg(feature = "algos")]
@@ -916,6 +916,19 @@ impl Planner {
             .iter()
             .find(|(found, _)| *found == address)
             .map(|(_, mode)| *mode)
+    }
+
+    /// Runs `plan` with profiling off. A subquery inside an expression
+    /// (`EXISTS`, `COUNT`, `VALUE`) has no node of its own in the logical
+    /// tree PROFILE walks: PROFILE shows it in the predicate of the operator
+    /// that holds it, as EXPLAIN does, and its rows and time count in that
+    /// operator's. Recording its entries would shift every later one onto
+    /// the wrong operator.
+    pub(super) fn without_profiling<T>(&self, plan: impl FnOnce() -> Result<T>) -> Result<T> {
+        let profiling = self.profiling.replace(false);
+        let planned = plan();
+        self.profiling.set(profiling);
+        planned
     }
 
     /// If profiling is enabled, wraps a planned result in `ProfiledOperator`

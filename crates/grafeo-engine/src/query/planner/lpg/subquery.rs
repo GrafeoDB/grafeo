@@ -74,13 +74,15 @@ impl super::Planner {
                 )),
             );
             if let LogicalExpression::ValueSubquery(subplan) = subquery {
-                input = self.plan_value_subquery(
-                    outer,
-                    &columns,
-                    subplan.as_ref().clone(),
-                    &column,
-                    input_writes,
-                )?;
+                input = self.without_profiling(|| {
+                    self.plan_value_subquery(
+                        outer,
+                        &columns,
+                        subplan.as_ref().clone(),
+                        &column,
+                        input_writes,
+                    )
+                })?;
                 columns.push(column.clone());
                 *subquery = LogicalExpression::Variable(column);
                 return Ok(());
@@ -90,14 +92,9 @@ impl super::Planner {
                 LogicalExpression::CountSubquery(subplan) => (subplan.as_ref().clone(), false),
                 _ => return Ok(()),
             };
-            input = self.plan_counted_subquery(
-                outer,
-                &columns,
-                subplan,
-                exists,
-                &column,
-                input_writes,
-            )?;
+            input = self.without_profiling(|| {
+                self.plan_counted_subquery(outer, &columns, subplan, exists, &column, input_writes)
+            })?;
             columns.push(column.clone());
             let count = LogicalExpression::Variable(column);
             *subquery = if exists {
@@ -437,7 +434,7 @@ fn returned_column(plan: &LogicalOperator) -> Option<String> {
 /// Calls `f` on every `EXISTS`, `COUNT` and `VALUE` subquery in `expression`,
 /// outside the bodies of list comprehensions, list predicates and `reduce`,
 /// which read their item variable (not a column of the row).
-fn visit_subqueries(
+pub(crate) fn visit_subqueries(
     expression: &mut LogicalExpression,
     f: &mut dyn FnMut(&mut LogicalExpression) -> Result<()>,
 ) -> Result<()> {

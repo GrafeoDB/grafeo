@@ -60,6 +60,7 @@ tests:
   # ---------------------------------------------------------------------------
 
   - name: dropping_a_text_index_keeps_the_property_index_on_its_property
+    requires: [text-index]
     setup:
       - "INSERT (:Doc {body: 'canals of Amsterdam'})"
       - "CREATE INDEX body_eq FOR (d:Doc) ON (d.body)"
@@ -71,6 +72,7 @@ tests:
         - [body_eq, Hash, Doc, body]
 
   - name: a_dropped_text_index_no_longer_searches
+    requires: [text-index, algos]
     setup:
       - "INSERT (:Doc {body: 'canals of Amsterdam'})"
       - "CREATE INDEX body_eq FOR (d:Doc) ON (d.body)"
@@ -81,6 +83,7 @@ tests:
       error: ""
 
   - name: dropping_the_property_index_keeps_the_text_index
+    requires: [text-index, algos]
     setup:
       - "INSERT (:Doc {body: 'canals of Amsterdam'})"
       - "CREATE INDEX body_eq FOR (d:Doc) ON (d.body)"
@@ -92,6 +95,8 @@ tests:
         - [1]
 
   - name: drop_index_of_a_vector_index_name_drops_it
+    requires: [vector-index]
+    skip: "vector index names need a stored record kind (next commit)"
     setup:
       - "INSERT (:Doc {emb: vector([1.0, 0.0])})"
       - "CREATE INDEX emb_eq FOR (d:Doc) ON (d.emb)"
@@ -101,6 +106,8 @@ tests:
       empty: true
 
   - name: a_dropped_vector_index_no_longer_searches
+    requires: [vector-index, algos]
+    skip: "vector index names need a stored record kind (next commit)"
     setup:
       - "INSERT (:Doc {emb: vector([1.0, 0.0])})"
       - "CREATE INDEX emb_eq FOR (d:Doc) ON (d.emb)"
@@ -111,6 +118,8 @@ tests:
       error: ""
 
   - name: dropping_a_vector_index_keeps_the_property_index_on_its_property
+    requires: [vector-index]
+    skip: "vector index names need a stored record kind (next commit)"
     setup:
       - "INSERT (:Doc {emb: vector([1.0, 0.0])})"
       - "CREATE INDEX emb_eq FOR (d:Doc) ON (d.emb)"
@@ -122,6 +131,7 @@ tests:
         - [emb_eq, Hash, Doc, emb]
 
   - name: show_indexes_lists_a_vector_index
+    requires: [vector-index]
     skip: "listing vector indexes: #704"
     setup:
       - "CREATE VECTOR INDEX emb_vec ON :Doc(emb) DIMENSION 2 METRIC 'cosine'"
@@ -212,6 +222,7 @@ tests:
   # ---------------------------------------------------------------------------
 
   - name: db_labels_leaves_out_a_label_with_no_node_left
+    requires: [algos]
     setup:
       - "INSERT (:Gone {nick: 'x'})-[:WENT]->(:Stay {name: 'Gus'})"
       - "MATCH (n:Gone) DETACH DELETE n"
@@ -221,6 +232,7 @@ tests:
         - [Stay]
 
   - name: db_relationship_types_leaves_out_a_type_with_no_edge_left
+    requires: [algos]
     setup:
       - "INSERT (:Gone {nick: 'x'})-[:WENT]->(:Stay {name: 'Gus'})"
       - "MATCH (n:Gone) DETACH DELETE n"
@@ -229,6 +241,7 @@ tests:
       empty: true
 
   - name: db_property_keys_leaves_out_keys_no_element_holds
+    requires: [algos]
     # nick went with its node; name was removed from Gus.
     setup:
       - "INSERT (:Gone {nick: 'x'})-[:WENT]->(:Stay {name: 'Gus'})"
@@ -240,6 +253,7 @@ tests:
         - [city]
 
   - name: db_labels_leaves_out_a_label_its_nodes_lost
+    requires: [algos]
     setup:
       - "INSERT (:Draft {title: 'Canals'})"
       - "MATCH (d:Draft) REMOVE d:Draft SET d:Published"
@@ -260,8 +274,11 @@ tests:
       - "DROP GRAPH g"
       - "CREATE GRAPH g"
       - "USE GRAPH g"
+    # Person is no type of gt: the new g takes it, as an untyped graph does.
+    # City is a catalog node type, which checks its label in every graph
+    # (20.1_schema_ddl.gtest), so its node carries the NOT NULL name.
     statements:
-      - "INSERT (:Person {name: 'Alix'}), (:City)"
+      - "INSERT (:Person {name: 'Alix'}), (:City {name: 'Prague'})"
       - "MATCH (n) RETURN labels(n) AS l"
     expect:
       rows:

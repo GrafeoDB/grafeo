@@ -62,14 +62,6 @@ const NON_RESERVED: [&str; 47] = [
     "zone",
 ];
 
-/// The cases the parser does not take yet, left out until it does: a path
-/// mode word as a node variable (`MATCH (trail:P)` reads TRAIL as the path
-/// mode), and an upper-case TYPE as a variable (it is lowercased).
-fn waiting(name: &str, shape: &str) -> bool {
-    let path_mode = ["acyclic", "simple", "trail", "walk"].contains(&name.to_lowercase().as_str());
-    (path_mode && shape == "a node variable") || (name == "TYPE" && shape != "an alias")
-}
-
 /// Every word as an alias, a LET variable, a node variable and an edge
 /// variable, lower and upper case: the cases that fail.
 #[test]
@@ -103,9 +95,6 @@ fn every_non_reserved_word_is_a_name() {
                     Value::Int64(4),
                 ),
             ] {
-                if waiting(&name, shape) {
-                    continue;
-                }
                 match db.execute(&query) {
                     Ok(result) => {
                         let got = result.rows().first().map(|row| row[0].clone());

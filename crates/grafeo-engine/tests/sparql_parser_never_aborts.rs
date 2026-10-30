@@ -57,6 +57,11 @@ const QUERIES: &[(&str, &str, &str)] = &[
         "SPARQL 1.2",
     ),
     (
+        "a quoted triple as an object",
+        "SELECT ?s WHERE { ?s <http://ex.org/says> << ?a ?b ?c >> }",
+        "SPARQL 1.2",
+    ),
+    (
         "a nested quoted triple",
         "SELECT ?s WHERE { << << ?a ?b ?c >> ?d ?e >> ?p ?s }",
         "SPARQL 1.2",
@@ -110,7 +115,22 @@ const QUERIES: &[(&str, &str, &str)] = &[
     (
         "a quoted triple in INSERT DATA",
         "INSERT DATA { << <http://ex.org/a> <http://ex.org/b> <http://ex.org/c> >> <http://ex.org/since> 2020 }",
-        "",
+        "SPARQL 1.2",
+    ),
+    (
+        "a quoted triple as an object in INSERT DATA",
+        "INSERT DATA { <http://ex.org/a> <http://ex.org/says> << <http://ex.org/a> <http://ex.org/b> <http://ex.org/c> >> }",
+        "SPARQL 1.2",
+    ),
+    (
+        "a quoted triple in DELETE DATA",
+        "DELETE DATA { << <http://ex.org/a> <http://ex.org/b> <http://ex.org/c> >> <http://ex.org/since> 2020 }",
+        "SPARQL 1.2",
+    ),
+    (
+        "a quoted triple in a GRAPH block of INSERT DATA",
+        "INSERT DATA { GRAPH <http://ex.org/g> { << <http://ex.org/a> <http://ex.org/b> <http://ex.org/c> >> <http://ex.org/since> 2020 } }",
+        "SPARQL 1.2",
     ),
     (
         "a quoted triple in a DELETE WHERE",
@@ -199,10 +219,36 @@ fn well_formed_queries_with_those_tokens_run() {
         "SELECT ?o WHERE { <http://ex.org/alix> <http://ex.org/knows> ?o . }",
         "SELECT ?o WHERE { <http://ex.org/alix> <http://ex.org/name> ?n ; <http://ex.org/knows> ?o }",
         "SELECT ?s WHERE { ?s ?p ?o FILTER(?p = <http://ex.org/name>) }",
+        "SELECT ?s WHERE { [] <http://ex.org/knows> ?s }",
         "SELECT ?s WHERE { ?s <http://ex.org/knows> ?o MINUS { ?s <http://ex.org/name> \"Gus\" } }",
         "SELECT ?x WHERE { BIND((1 + 2) AS ?x) }",
     ] {
         db.execute_sparql(query)
             .unwrap_or_else(|error| panic!("{query}: {error}"));
+    }
+}
+
+/// An INSERT DATA or DELETE DATA that a variable or a quoted triple makes
+/// fail changes nothing: the ground triples next to it are not stored or
+/// removed either.
+#[test]
+fn a_refused_data_block_changes_nothing() {
+    let db = GrafeoDB::new_in_memory();
+    db.execute_sparql("INSERT DATA { <http://ex.org/gus> <http://ex.org/name> \"Gus\" . }")
+        .unwrap();
+    let count = |db: &GrafeoDB| {
+        db.execute_sparql("SELECT (COUNT(*) AS ?c) WHERE { ?s ?p ?o }")
+            .unwrap()
+            .rows()[0][0]
+            .clone()
+    };
+    let before = count(&db);
+    for update in [
+        "INSERT DATA { <http://ex.org/alix> <http://ex.org/name> \"Alix\" . ?x <http://ex.org/name> \"X\" }",
+        "INSERT DATA { <http://ex.org/alix> <http://ex.org/name> \"Alix\" . << <http://ex.org/a> <http://ex.org/b> <http://ex.org/c> >> <http://ex.org/since> 2020 }",
+        "DELETE DATA { <http://ex.org/gus> <http://ex.org/name> \"Gus\" . ?x <http://ex.org/name> \"X\" }",
+    ] {
+        assert!(db.execute_sparql(update).is_err(), "{update}");
+        assert_eq!(count(&db), before, "{update}");
     }
 }

@@ -63,11 +63,23 @@ const WRITTEN: [(&str, &[&str]); 5] = [
 /// Every label a check scans for: those of the fixture, and one no node has.
 const LABELS: [&str; 5] = ["Archive", "Graph", "Missing", "Repository", "Starred"];
 
-/// The labels the database lists: each label of the folded nodes (`Archive`
-/// also once a write removed it from Mia, as for any label whose nodes lost
-/// it), and none of the joined names the fold split (`Graph|Repository`,
-/// `Archive|Graph|Repository`).
-const LISTED: [&str; 4] = ["Archive", "Graph", "Repository", "Starred"];
+/// The names the label dictionary holds: each label of the folded nodes, and
+/// none of the joined names the fold split (`Graph|Repository`,
+/// `Archive|Graph|Repository`). `Archive` stays after a write removed it from
+/// Mia: `label_count()` counts the dictionary, while `CALL db.labels()` and
+/// `schema()` list only the labels some node has.
+const DICTIONARY: [&str; 4] = ["Archive", "Graph", "Repository", "Starred"];
+
+/// The labels some node of `nodes` has, sorted.
+fn in_use(nodes: &[(&str, &[&str])]) -> Vec<String> {
+    let mut labels: Vec<String> = nodes
+        .iter()
+        .flat_map(|(_, labels)| labels.iter().map(|label| (*label).to_string()))
+        .collect();
+    labels.sort();
+    labels.dedup();
+    labels
+}
 
 /// A copy of the fixture in a new directory, so the committed file stays as
 /// 0.5.44 wrote it.
@@ -267,19 +279,21 @@ fn assert_each_label_reads_its_nodes(db: &GrafeoDB, stage: &str, nodes: &[(&str,
     assert_the_listed_labels(db, stage, nodes);
 }
 
-/// Checks that `CALL db.labels()`, `label_count()` and `schema()` list
-/// exactly [`LISTED`], `schema()` with the number of `nodes` of each.
+/// Checks that `CALL db.labels()` and `schema()` list the labels some node
+/// of `nodes` has, `schema()` with the number of `nodes` of each, and that
+/// `label_count()` counts the [`DICTIONARY`].
 fn assert_the_listed_labels(db: &GrafeoDB, stage: &str, nodes: &[(&str, &[&str])]) {
     let mut listed: Vec<String> = rows(db, "CALL db.labels()")
         .iter()
         .map(|row| text(&row[0]))
         .collect();
     listed.sort();
-    assert_eq!(listed, LISTED, "{stage}: CALL db.labels()");
+    let expected_labels = in_use(nodes);
+    assert_eq!(listed, expected_labels, "{stage}: CALL db.labels()");
     assert_eq!(
         db.label_count().unwrap(),
-        LISTED.len(),
-        "{stage}: label_count()"
+        DICTIONARY.len(),
+        "{stage}: label_count(), the dictionary's names"
     );
     let SchemaInfo::Lpg(schema) = db.schema().unwrap() else {
         panic!("{stage}: an LPG schema");
@@ -290,9 +304,9 @@ fn assert_the_listed_labels(db: &GrafeoDB, stage: &str, nodes: &[(&str, &[&str])
         .map(|label| (label.name.clone(), label.count))
         .collect();
     counts.sort();
-    let expected: Vec<(String, usize)> = LISTED
+    let expected: Vec<(String, usize)> = expected_labels
         .iter()
-        .map(|label| ((*label).to_string(), named_with(nodes, &[label]).len()))
+        .map(|label| (label.clone(), named_with(nodes, &[label.as_str()]).len()))
         .collect();
     assert_eq!(counts, expected, "{stage}: schema()");
 }

@@ -508,7 +508,9 @@ fn a_statement_that_writes_sees_the_keys_of_its_start() {
     keys.sort_by_key(|key| format!("{key:?}"));
     assert_eq!(keys, (2048..2058).map(Value::Int64).collect::<Vec<_>>());
 
-    // Writes that do not touch the keys keep the scan per row too.
+    // CREATE, INSERT and DETACH DELETE read their input whole before the
+    // first write, so the keys are those of the start and the join is the
+    // hash join.
     for (language, query, expected) in [
         (
             Language::Cypher,
@@ -531,7 +533,28 @@ fn a_statement_that_writes_sees_the_keys_of_its_start() {
     ] {
         let db = files();
         let session = db.session();
-        assert_rows_and_plan(&session, language, query, &expected, None);
+        assert_rows_and_plan(
+            &session,
+            language,
+            query,
+            &expected,
+            Some("t.filePath = f.path"),
+        );
+    }
+
+    // MERGE writes row by row and sees its own earlier rows: the scan stays
+    // per row.
+    for language in LANGUAGES {
+        let db = files();
+        let session = db.session();
+        assert_rows_and_plan(
+            &session,
+            language,
+            "MATCH (f:File) MATCH (t:TypeDefinition) WHERE t.filePath = f.path \
+             MERGE (:Seen {path: f.path}) RETURN f.path, t.name",
+            &definitions(),
+            None,
+        );
     }
 }
 

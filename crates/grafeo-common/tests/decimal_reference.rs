@@ -252,7 +252,8 @@ fn an_empty_sum() {
 
 proptest! {
     #![proptest_config(Config {
-        cases: 1024,
+        // Miri checks memory safety; these cases test arithmetic, so a few do there.
+        cases: if cfg!(miri) { 8 } else { 1024 },
         failure_persistence: None,
         rng_seed: RngSeed::Fixed(0x6690_0000_0000_0002),
         ..Config::default()

@@ -1351,8 +1351,9 @@ fn split_conjuncts_recursive(expr: LogicalExpression, out: &mut Vec<LogicalExpre
 /// the join condition.
 #[cfg(any(feature = "gql", feature = "cypher", test))]
 pub(crate) struct ClassifiedPredicates {
-    /// Conjuncts with an `EXISTS`, `COUNT` or value subquery or a pattern
-    /// comprehension that read no variable only the optional side binds (see
+    /// Conjuncts with a subquery or a pattern comprehension whose reads are
+    /// not known, or that read a variable only the left side binds without
+    /// one only the optional side binds (see
     /// [`classify_optional_predicates`]): a Filter above the LeftJoin.
     pub post_filters: Vec<LogicalExpression>,
     /// Conjuncts that read no variable only the left side binds (the optional
@@ -1370,12 +1371,15 @@ pub(crate) struct ClassifiedPredicates {
 /// goes on from, `right_vars` those of its pattern (see
 /// [`ClassifiedPredicates`]).
 ///
-/// A conjunct with a subquery or pattern comprehension keeps the placement it
-/// had before: [`collect_expression_variables`] does not see what the
-/// subquery reads, so it cannot be placed by its variables, and the join
-/// condition cannot run a subquery. One that reads a variable only the
-/// optional side binds is a right filter, any other one stays a filter above
-/// the join.
+/// A conjunct with a subquery is placed by what its subqueries read too
+/// (see [`subquery_reads`]): one that reads no variable only the left side
+/// binds is a filter on the optional side, like any other such conjunct
+/// (`OPTIONAL MATCH (n)-[:R]->(t) WHERE n.id = 6 OR EXISTS { MATCH
+/// (n)-[:R]->(u) }` keeps every `n`, with nulls where none matches). The
+/// join condition cannot run a subquery, so one whose reads are not known
+/// keeps the placement it had before: a right filter when it reads a
+/// variable only the optional side binds, a filter above the join
+/// otherwise.
 #[cfg(any(feature = "gql", feature = "cypher", test))]
 pub(crate) fn classify_optional_predicates(
     predicate: LogicalExpression,
@@ -1398,7 +1402,15 @@ pub(crate) fn classify_optional_predicates(
             .iter()
             .any(|v| left_vars.contains(v) && !right_vars.contains(v));
 
-        if has_subquery(&conjunct) {
+        if has_subquery(&conjunct)
+            && let Some(read) = subquery_reads(&conjunct)
+            && !referenced
+                .iter()
+                .chain(&read)
+                .any(|v| left_vars.contains(v) && !right_vars.contains(v))
+        {
+            right_filters.push(conjunct);
+        } else if has_subquery(&conjunct) {
             let all_in_right = referenced.iter().all(|v| right_vars.contains(v));
             if has_right_only_var && all_in_right {
                 right_filters.push(conjunct);
@@ -1424,6 +1436,36 @@ pub(crate) fn classify_optional_predicates(
         right_filters,
         cross_filters,
     }
+}
+
+/// The variables the `EXISTS`, `COUNT` and `VALUE` subqueries of
+/// `expression` name (see `subplan_variables`), or `None` when one names
+/// what is not known here or `expression` holds another kind (a pattern
+/// comprehension, a subquery inside a list comprehension).
+#[cfg(any(feature = "gql", feature = "cypher", test))]
+fn subquery_reads(expression: &LogicalExpression) -> Option<HashSet<String>> {
+    let mut rest = expression.clone();
+    let mut read = Some(HashSet::new());
+    let _ = crate::query::planner::lpg::subquery::visit_subqueries(&mut rest, &mut |subquery| {
+        if let LogicalExpression::ExistsSubquery(plan)
+        | LogicalExpression::CountSubquery(plan)
+        | LogicalExpression::ValueSubquery(plan) = subquery
+        {
+            match (
+                read.as_mut(),
+                crate::query::planner::lpg::subquery::subplan_variables(plan),
+            ) {
+                (Some(read), Some(names)) => read.extend(names),
+                _ => read = None,
+            }
+        }
+        *subquery = LogicalExpression::Literal(Value::Null);
+        Ok(())
+    });
+    if has_subquery(&rest) {
+        return None;
+    }
+    read
 }
 
 #[cfg(any(feature = "gql", feature = "cypher", test))]

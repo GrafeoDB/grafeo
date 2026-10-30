@@ -57,7 +57,7 @@ fn a_failed_second_index_of_one_name_leaves_the_first() {
 /// graph's type; it made a graph type named `__current__` instead.
 #[cfg(feature = "cypher")]
 #[test]
-#[ignore = "Cypher ALTER CURRENT GRAPH TYPE with a pattern: not built yet (next commit)"]
+#[ignore = "Cypher ALTER CURRENT GRAPH TYPE SET with a pattern makes a graph type named __current__ instead of declaring the pattern's types"]
 fn cypher_alter_current_graph_type_declares_the_pattern_types() {
     let db = GrafeoDB::new_in_memory();
     for statement in [
@@ -105,7 +105,7 @@ fn cypher_alter_current_graph_type_declares_the_pattern_types() {
 /// A projection's labels are the labels its nodes carry: an `Admin` label on
 /// projected `Person` nodes is one, a spec label no node has is not.
 #[test]
-#[ignore = "a projection's labels from its nodes: not built yet (next commit)"]
+#[ignore = "a projection reports the labels of its spec (Person, Robot), not the labels its nodes carry (Admin, Person)"]
 fn a_projection_reports_the_labels_of_its_nodes() {
     let db = GrafeoDB::new_in_memory();
     db.execute(

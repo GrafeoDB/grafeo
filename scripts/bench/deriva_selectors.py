@@ -68,7 +68,9 @@ MULTI_LABEL_SEEK_FACTOR = 1.3  # (n:Graph:Method {id}) against (n:Graph {id}), i
 # With --compare: what Grafeo already does well must not get slower.
 GUARD_RAILS = [
     "point_lookups_by_id",
+    "label_or_point_lookups",
     "expand_one_hop",
+    "optional_expand_all",
     "two_hops",
     "read_ids",
     "kind_count",
@@ -77,9 +79,14 @@ GUARD_RAILS = [
     "match_return_n",
     "update_nodes",
     "unwind_match_set",
+    "unwind_match_set_with_id_index",
     "upsert_nodes_with_id_index",
 ]
 REGRESSION_FACTOR = 1.25
+# UNWIND $rows MATCH (n {id: r.id}) SET ... without an index against the same with an
+# id index: a hash join on the key keeps it near the index seek.
+UNWIND_JOIN_FACTOR = 3.0
+IC13_LIMIT_MS = 10.0  # one LDBC IC13 query (both ends bound) on 1000 Person, 18k KNOWS
 
 
 def build(seed=6):
@@ -218,7 +225,83 @@ def median_ms(func, runs=RUNS):
     return statistics.median(times)
 
 
-def run():
+def social(people=1000, knows=18_000, seed=13):
+    """People 0 to people-1 with an id index and `knows` KNOWS edges, no self
+    loops; the first 600 know only each other, so some pairs are unreachable."""
+    rng = random.Random(seed)
+    edges = []
+    while len(edges) < knows:
+        a, b = rng.randrange(people), rng.randrange(people)
+        if a < 600 or b < 600:
+            a, b = a % 600, b % 600
+        if a != b:
+            edges.append((a, b))
+    db = grafeo.GrafeoDB()
+    db.create_property_index("id")
+    db.execute(
+        "UNWIND $ids AS i INSERT (:Person {id: i})", {"ids": list(range(people))}
+    )
+    db.execute(
+        "UNWIND $edges AS e MATCH (a:Person {id: e[0]}), (b:Person {id: e[1]}) "
+        "INSERT (a)-[:KNOWS]->(b)",
+        {"edges": [list(e) for e in edges]},
+    )
+    return db, edges
+
+
+def hops(people, edges, start, end):
+    """Breadth-first hops from start to end over KNOWS in both directions; -1 when none."""
+    near = [[] for _ in range(people)]
+    for a, b in edges:
+        near[a].append(b)
+        near[b].append(a)
+    seen = {start: 0}
+    queue = [start]
+    for node in queue:
+        for other in near[node]:
+            if other not in seen:
+                seen[other] = seen[node] + 1
+                if other == end:
+                    return seen[other]
+                queue.append(other)
+    return -1
+
+
+def run_social(results, failures, ic13):
+    db, edges = social()
+    optional = "MATCH (n:Person) OPTIONAL MATCH (n)-[:KNOWS]->(m) RETURN count(m) AS c"
+    if db.execute(optional).to_list()[0]["c"] != len(edges):
+        failures.append("optional_expand_all: not one row per KNOWS edge")
+    results["optional_expand_all"] = {"ms": median_ms(lambda: db.execute(optional))}
+    if not ic13:
+        return
+    query = (
+        "MATCH (a:Person {id: $a}), (b:Person {id: $b}) "
+        "OPTIONAL MATCH p = shortestPath((a)-[:KNOWS*]-(b)) "
+        "RETURN CASE WHEN p IS NULL THEN -1 ELSE length(p) END AS hops"
+    )
+    rng = random.Random(7)
+    pairs = []
+    while len(pairs) < 20:
+        a, b = rng.randrange(1000), rng.randrange(1000)
+        if a != b:
+            pairs.append((a, b))
+    for a, b in pairs:
+        got = db.execute_cypher(query, {"a": a, "b": b}).to_list()[0]["hops"]
+        if got != hops(1000, edges, a, b):
+            failures.append(f"ic13_both_ends_bound: {a} to {b} gave {got}")
+    total = median_ms(
+        lambda: [db.execute_cypher(query, {"a": a, "b": b}) for a, b in pairs]
+    )
+    results["ic13_both_ends_bound"] = {"ms": total / len(pairs)}
+    if total / len(pairs) > IC13_LIMIT_MS:
+        failures.append(
+            f"ic13_both_ends_bound: {total / len(pairs):.2f} ms per query "
+            f"(limit {IC13_LIMIT_MS} ms)"
+        )
+
+
+def run(ic13=True):
     db, _ids = build()
     results, failures = {}, []
     for name, query, reference in SELECTORS:
@@ -310,6 +393,9 @@ def run():
 
     # Last, as the index changes the plans of everything after it.
     db.create_property_index("id")
+    results["unwind_match_set_with_id_index"] = {
+        "ms": median_ms(lambda: db.execute(set_query, {"rows": method_rows}))
+    }
     results["upsert_nodes_with_id_index"] = {
         "ms": median_ms(lambda: db.upsert_nodes(["Graph", "Method"], method_rows))
     }
@@ -320,6 +406,14 @@ def run():
 
     results["point_lookups_by_id"] = {
         "ms": median_ms(each_id("MATCH (n:Graph {id: $id}) RETURN n.name AS name"))
+    }
+    # The LDBC short query 4 shape: an unlabelled lookup by id under label checks.
+    results["label_or_point_lookups"] = {
+        "ms": median_ms(
+            each_id(
+                "MATCH (n {id: $id}) WHERE n:Method OR n:File RETURN n.name AS name"
+            )
+        )
     }
     results["multi_label_point_lookups"] = {
         "ms": median_ms(
@@ -340,6 +434,7 @@ def run():
     for name, against, limit in [
         ("update_nodes", "unwind_match_set", UPDATE_FACTOR),
         ("match_return_n", "get_nodes_by_label", RETURN_N_FACTOR),
+        ("unwind_match_set", "unwind_match_set_with_id_index", UNWIND_JOIN_FACTOR),
         ("or_of_labels_under_graph", "or_of_labels_union", OR_SCAN_FACTOR),
         ("labels_count", "kind_count", LABELS_COUNT_FACTOR),
         ("count_star", "read_ids", COUNT_FROM_STATS_FACTOR),
@@ -358,6 +453,7 @@ def run():
         failures.append(
             f"EXISTS short-circuit guard: {guard:.1f}x the query without the EXISTS (limit {GUARD_FACTOR}x)"
         )
+    run_social(results, failures, ic13)
     return results, failures
 
 
@@ -365,8 +461,11 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--save")
     parser.add_argument("--compare")
+    parser.add_argument(
+        "--no-ic13", action="store_true", help="skip IC13 (0.6.0 times out on it)"
+    )
     args = parser.parse_args()
-    results, failures = run()
+    results, failures = run(ic13=not args.no_ic13)
     base = {}
     if args.compare:
         with open(args.compare, encoding="utf-8") as f:

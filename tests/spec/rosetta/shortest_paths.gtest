@@ -44,6 +44,8 @@ tests:
     expect:
       empty: true
 
+  # GQL ANY SHORTEST is a WALK: Berlin reaches itself around the cycle (3).
+  # Cypher shortestPath has no path between a node and itself.
   - name: optional_match_keeps_a_pair_without_a_path
     setup:
       - "INSERT (:City {name: 'Amsterdam'})-[:ROUTE]->(:City {name: 'Berlin'})-[:ROUTE]->(:City {name: 'Prague'})"
@@ -51,7 +53,6 @@ tests:
       - "INSERT (:City {name: 'Paris'})"
     variants:
       gql: "MATCH (a:City), (b:City {name: 'Berlin'}) OPTIONAL MATCH p = ANY SHORTEST (a)-[:ROUTE]->+(b) RETURN a.name, b.name, length(p)"
-      cypher: "MATCH (a:City), (b:City {name: 'Berlin'}) OPTIONAL MATCH p = shortestPath((a)-[:ROUTE*]->(b)) RETURN a.name, b.name, length(p)"
     expect:
       rows:
         - [Amsterdam, Berlin, 1]
@@ -59,10 +60,26 @@ tests:
         - [Paris, Berlin, null]
         - [Prague, Berlin, 2]
 
+  - name: optional_match_keeps_a_pair_without_a_path_and_the_same_ends
+    setup:
+      - "INSERT (:City {name: 'Amsterdam'})-[:ROUTE]->(:City {name: 'Berlin'})-[:ROUTE]->(:City {name: 'Prague'})"
+      - "MATCH (p:City {name: 'Prague'}), (a:City {name: 'Amsterdam'}) INSERT (p)-[:ROUTE]->(a)"
+      - "INSERT (:City {name: 'Paris'})"
+    variants:
+      cypher: "MATCH (a:City), (b:City {name: 'Berlin'}) OPTIONAL MATCH p = shortestPath((a)-[:ROUTE*]->(b)) RETURN a.name, b.name, length(p)"
+    expect:
+      rows:
+        - [Amsterdam, Berlin, 1]
+        - [Berlin, Berlin, null]
+        - [Paris, Berlin, null]
+        - [Prague, Berlin, 2]
+
   # ---------------------------------------------------------------------------
   # A node paired with itself
   # ---------------------------------------------------------------------------
 
+  # GQL ANY SHORTEST with `+` walks the cycle back (3); Cypher shortestPath
+  # has no path from a node to itself.
   - name: one_hop_minimum_finds_the_cycle_back
     setup:
       - "INSERT (:City {name: 'Amsterdam'})-[:ROUTE]->(:City {name: 'Berlin'})-[:ROUTE]->(:City {name: 'Prague'})"
@@ -70,10 +87,19 @@ tests:
       - "INSERT (:City {name: 'Paris'})"
     variants:
       gql: "MATCH p = ANY SHORTEST (a:City {name: 'Amsterdam'})-[:ROUTE]->+(b:City {name: 'Amsterdam'}) RETURN length(p)"
-      cypher: "MATCH p = shortestPath((a:City {name: 'Amsterdam'})-[:ROUTE*]->(b:City {name: 'Amsterdam'})) RETURN length(p)"
     expect:
       rows:
         - [3]
+
+  - name: shortest_path_has_no_path_to_its_start
+    setup:
+      - "INSERT (:City {name: 'Amsterdam'})-[:ROUTE]->(:City {name: 'Berlin'})-[:ROUTE]->(:City {name: 'Prague'})"
+      - "MATCH (p:City {name: 'Prague'}), (a:City {name: 'Amsterdam'}) INSERT (p)-[:ROUTE]->(a)"
+      - "INSERT (:City {name: 'Paris'})"
+    variants:
+      cypher: "MATCH p = shortestPath((a:City {name: 'Amsterdam'})-[:ROUTE*]->(b:City {name: 'Amsterdam'})) RETURN length(p)"
+    expect:
+      empty: true
 
   - name: one_hop_minimum_has_no_zero_length_self_path
     setup:
@@ -98,6 +124,8 @@ tests:
       rows:
         - [0]
 
+  # GQL ALL SHORTEST reaches Amsterdam around the cycle; Cypher
+  # allShortestPaths leaves out the start itself.
   - name: all_shortest_with_a_one_hop_minimum
     setup:
       - "INSERT (:City {name: 'Amsterdam'})-[:ROUTE]->(:City {name: 'Berlin'})-[:ROUTE]->(:City {name: 'Prague'})"
@@ -105,10 +133,21 @@ tests:
       - "INSERT (:City {name: 'Paris'})"
     variants:
       gql: "MATCH p = ALL SHORTEST (a:City {name: 'Amsterdam'})-[:ROUTE]->+(b:City) RETURN b.name, length(p)"
-      cypher: "MATCH p = allShortestPaths((a:City {name: 'Amsterdam'})-[:ROUTE*]->(b:City)) RETURN b.name, length(p)"
     expect:
       rows:
         - [Amsterdam, 3]
+        - [Berlin, 1]
+        - [Prague, 2]
+
+  - name: all_shortest_paths_leave_out_the_start
+    setup:
+      - "INSERT (:City {name: 'Amsterdam'})-[:ROUTE]->(:City {name: 'Berlin'})-[:ROUTE]->(:City {name: 'Prague'})"
+      - "MATCH (p:City {name: 'Prague'}), (a:City {name: 'Amsterdam'}) INSERT (p)-[:ROUTE]->(a)"
+      - "INSERT (:City {name: 'Paris'})"
+    variants:
+      cypher: "MATCH p = allShortestPaths((a:City {name: 'Amsterdam'})-[:ROUTE*]->(b:City)) RETURN b.name, length(p)"
+    expect:
+      rows:
         - [Berlin, 1]
         - [Prague, 2]
 

@@ -267,7 +267,6 @@ tests:
   # Prague (Mia, active, past 3) the WHERE holds and her KNOWS edge is kept;
   # for the other cities it does not, and every row stays with a null.
   - name: optional_match_where_with_exists_over_a_variable_bound_before_it
-    skip: "an OPTIONAL MATCH WHERE whose subquery reads a variable bound only before it filters the outer rows"
     setup:
       - "INSERT (alix:Person {i: 1, name: 'Alix', active: true, zero: 1}), (gus:Person {i: 2, name: 'Gus', active: false, zero: 1}), (vincent:Person {i: 3, name: 'Vincent', active: true, zero: 0}), (jules:Person {i: 4, name: 'Jules', active: false, zero: 0}), (mia:Person {i: 5, name: 'Mia', active: true, zero: 1}), (butch:Person {i: 6, name: 'Butch', active: false}), (django:Person {i: 7, name: 'Django', active: true, zero: 1}), (shosanna:Person {i: 8, name: 'Shosanna', active: false, zero: 1}), (ams:City {name: 'Amsterdam', pop: 900}), (ber:City {name: 'Berlin', pop: 3700}), (par:City {name: 'Paris', pop: 2100}), (pra:City {name: 'Prague', pop: 1300}), (bcn:City {name: 'Barcelona', pop: 1600}), (alix)-[:KNOWS]->(gus), (alix)-[:KNOWS]->(vincent), (gus)-[:KNOWS]->(vincent), (vincent)-[:KNOWS]->(jules), (jules)-[:KNOWS]->(alix), (mia)-[:KNOWS]->(mia), (butch)-[:KNOWS]->(mia), (django)-[:KNOWS]->(gus), (alix)-[:LIVES_IN]->(ams), (gus)-[:LIVES_IN]->(ber), (vincent)-[:LIVES_IN]->(par), (jules)-[:LIVES_IN]->(par), (mia)-[:LIVES_IN]->(pra), (butch)-[:LIVES_IN]->(ber), (django)-[:LIVES_IN]->(bcn)"
     variants:

@@ -5,9 +5,9 @@
 //! in an OR and alone, COUNT, VALUE, an uncorrelated EXISTS, and a pattern
 //! comprehension. In GQL and Cypher (VALUE in GQL only).
 //!
-//! The known remaining case: a subquery that reads a variable bound before
-//! the OPTIONAL MATCH and not shared with its pattern (`m` beside `n`) is
-//! still placed above the join and drops rows (ignored test below).
+//! A subquery that reads a variable bound before the OPTIONAL MATCH and not
+//! shared with its pattern (`m` beside `n`) runs per row, as a condition of
+//! the optional part.
 //!
 //! ```bash
 //! cargo test -p grafeo-engine --all-features --test optional_match_subquery_where
@@ -151,12 +151,11 @@ fn a_pattern_comprehension_over_the_outer_variable() {
     );
 }
 
-/// The known remaining case: the subquery reads `m`, bound before the
+/// The subquery reads `m`, bound before the
 /// OPTIONAL MATCH and not in its pattern. For M 1 (with an S edge) the
 /// WHERE holds and P 1 and 2 get their T; for M 2 it does not, and every P
 /// stays with a null T.
 #[test]
-#[ignore = "an OPTIONAL MATCH WHERE whose subquery reads a variable bound only before it filters the outer rows: the M 2 rows are dropped"]
 fn a_subquery_over_a_variable_bound_only_before_the_optional_match() {
     let db = database();
     let query = "MATCH (n:P), (m:M) OPTIONAL MATCH (n)-[:R]->(t) \

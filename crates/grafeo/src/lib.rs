@@ -108,6 +108,7 @@ pub use grafeo_engine::cdc;
 pub use grafeo_engine::database;
 #[cfg(feature = "gql")]
 pub use grafeo_engine::import;
+pub use grafeo_engine::loader;
 pub use grafeo_engine::memory_usage;
 pub use grafeo_engine::session;
 

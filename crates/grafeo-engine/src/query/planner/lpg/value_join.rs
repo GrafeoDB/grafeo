@@ -123,6 +123,7 @@ pub(crate) fn writes_per_row(op: &LogicalOperator) -> bool {
         | LogicalOperator::AddGraph(_)
         | LogicalOperator::CreatePropertyGraph(_)
         | LogicalOperator::DropPropertyGraph(_) => true,
+        LogicalOperator::CallProcedure(call) => call.writes(),
         other => other.children().into_iter().any(writes_per_row),
     }
 }

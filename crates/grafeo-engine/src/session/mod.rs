@@ -6448,6 +6448,44 @@ impl Session {
         self.write(|writer| direct::create_edges(writer, edges))
     }
 
+    /// Loads the CSV file at `path` as nodes, as `spec` describes (see
+    /// [`GrafeoDB::load_nodes_csv`](crate::GrafeoDB::load_nodes_csv)), in
+    /// the session's open transaction, or in one of its own.
+    ///
+    /// # Errors
+    ///
+    /// As [`GrafeoDB::load_nodes_csv`](crate::GrafeoDB::load_nodes_csv).
+    ///
+    /// # Stability: Experimental
+    ///
+    /// New in 0.6.1.
+    pub fn load_nodes_csv(
+        &self,
+        path: impl AsRef<std::path::Path>,
+        spec: &crate::loader::NodeLoad,
+    ) -> Result<crate::loader::LoadReport> {
+        self.write(|writer| crate::loader::load_nodes(writer, path.as_ref(), spec))
+    }
+
+    /// Loads the CSV file at `path` as edges, as `spec` describes (see
+    /// [`GrafeoDB::load_edges_csv`](crate::GrafeoDB::load_edges_csv)), in
+    /// the session's open transaction, or in one of its own.
+    ///
+    /// # Errors
+    ///
+    /// As [`GrafeoDB::load_edges_csv`](crate::GrafeoDB::load_edges_csv).
+    ///
+    /// # Stability: Experimental
+    ///
+    /// New in 0.6.1.
+    pub fn load_edges_csv(
+        &self,
+        path: impl AsRef<std::path::Path>,
+        spec: &crate::loader::EdgeLoad,
+    ) -> Result<crate::loader::LoadReport> {
+        self.write(|writer| crate::loader::load_edges(writer, path.as_ref(), spec))
+    }
+
     /// Finds the nodes of the session's graph that have a property value.
     ///
     /// With a property index on `property` this is a lookup, otherwise a scan

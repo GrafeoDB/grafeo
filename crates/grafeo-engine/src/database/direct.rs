@@ -944,6 +944,22 @@ impl DirectCalls<'_> {
         self.write_batch(|writer| create_edges(writer, edges))
     }
 
+    pub(crate) fn load_nodes_csv(
+        &self,
+        path: &std::path::Path,
+        spec: &crate::loader::NodeLoad,
+    ) -> Result<crate::loader::LoadReport> {
+        self.write_batch(|writer| crate::loader::load_nodes(writer, path, spec))
+    }
+
+    pub(crate) fn load_edges_csv(
+        &self,
+        path: &std::path::Path,
+        spec: &crate::loader::EdgeLoad,
+    ) -> Result<crate::loader::LoadReport> {
+        self.write_batch(|writer| crate::loader::load_edges(writer, path, spec))
+    }
+
     pub(crate) fn get_node(&self, id: NodeId) -> Result<Option<Node>> {
         let view = ReadView::committed(self.db.read_epoch());
         self.store()?.node(id, view)

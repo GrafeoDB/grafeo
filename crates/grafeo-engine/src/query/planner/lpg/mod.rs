@@ -101,6 +101,7 @@ mod expression;
 pub(crate) mod filter;
 mod filter_hybrid;
 mod join;
+mod load;
 mod mutation;
 mod project;
 pub(crate) mod reachability;
@@ -1052,6 +1053,9 @@ impl Planner {
             LogicalOperator::SetProperty(set_prop) => self.plan_set_property(set_prop),
             LogicalOperator::ShortestPath(sp) => self.plan_shortest_path(sp),
             LogicalOperator::MapCollect(mc) => self.plan_map_collect(mc),
+            LogicalOperator::CallProcedure(call) if load::is_load(call) => {
+                self.plan_load_call(call)
+            }
             #[cfg(feature = "algos")]
             LogicalOperator::CallProcedure(call) => self.plan_call_procedure(call),
             #[cfg(not(feature = "algos"))]

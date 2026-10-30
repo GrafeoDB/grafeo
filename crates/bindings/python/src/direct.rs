@@ -358,6 +358,53 @@ pub(crate) fn labels(value: &Bound<'_, PyAny>) -> PyResult<Vec<String>> {
     })
 }
 
+/// The columns of a load from its `types` dict (name to type name, in
+/// any case), in the dict's order: the file order for a file without a
+/// header.
+pub(crate) fn load_columns(
+    types: Option<&Bound<'_, pyo3::types::PyDict>>,
+) -> PyResult<Vec<grafeo_engine::loader::Column>> {
+    let Some(types) = types else {
+        return Ok(Vec::new());
+    };
+    types
+        .iter()
+        .map(|(name, kind)| {
+            let name: String = name.extract()?;
+            let kind: String = kind.extract()?;
+            let kind = grafeo_engine::loader::ColumnKind::from_name(&kind).ok_or_else(|| {
+                pyo3::exceptions::PyValueError::new_err(format!(
+                    "column '{name}' has type '{kind}', which is none of string, int64, \
+                     float64, bool, date, timestamp, skip"
+                ))
+            })?;
+            Ok(grafeo_engine::loader::Column { name, kind })
+        })
+        .collect()
+}
+
+/// The field separator of a load: one character.
+pub(crate) fn load_delimiter(delimiter: &str) -> PyResult<u8> {
+    match delimiter.as_bytes() {
+        [byte] => Ok(*byte),
+        _ => Err(pyo3::exceptions::PyValueError::new_err(
+            "delimiter must be one character",
+        )),
+    }
+}
+
+/// A load's report as a dict: rows, created, skipped.
+pub(crate) fn load_report(
+    py: Python<'_>,
+    report: grafeo_engine::loader::LoadReport,
+) -> PyResult<Py<PyAny>> {
+    let dict = pyo3::types::PyDict::new(py);
+    dict.set_item("rows", report.rows)?;
+    dict.set_item("created", report.created)?;
+    dict.set_item("skipped", report.skipped)?;
+    Ok(dict.into_any().unbind())
+}
+
 /// The direction of `get_node_edges`: `"out"`, `"in"` or `"both"`.
 pub(crate) fn direction(value: &str) -> PyResult<grafeo_engine::Direction> {
     match value {

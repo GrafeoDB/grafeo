@@ -1960,6 +1960,129 @@ impl PyGrafeoDB {
         Ok(ids.into_iter().map(|id| id.as_u64()).collect())
     }
 
+    /// Load a CSV file as nodes, parsed and typed in Rust and written in
+    /// bulk, in one transaction: if one record cannot be loaded, nothing is.
+    ///
+    /// Args:
+    ///     path: The file, as a string or a path.
+    ///     labels: The label of every node, or a list of labels.
+    ///     key: A column every record has, unique in the file (and among the
+    ///         nodes, with a UNIQUE constraint on it).
+    ///     types: Column name to type: "string", "int64", "float64", "bool",
+    ///         "date", "timestamp" or "skip" (not stored), in any case. A
+    ///         column not named is a string. Without a header, the columns in
+    ///         file order.
+    ///     delimiter: The field separator.
+    ///     header: Whether the first record names the columns.
+    ///     nulls: Fields that stand for no value, besides an empty one.
+    ///
+    /// Returns:
+    ///     A dict: rows (records read), created, skipped.
+    ///
+    /// Example:
+    ///     db.load_nodes_csv("people.csv", "Person", key="id",
+    ///                       types={"id": "int64", "born": "date"})
+    #[pyo3(signature = (path, labels, key=None, types=None, delimiter=",", header=true, nulls=None))]
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "each argument is one keyword option of the Python method"
+    )]
+    fn load_nodes_csv(
+        &self,
+        path: std::path::PathBuf,
+        labels: &Bound<'_, PyAny>,
+        key: Option<String>,
+        types: Option<&Bound<'_, pyo3::types::PyDict>>,
+        delimiter: &str,
+        header: bool,
+        nulls: Option<Vec<String>>,
+        py: Python<'_>,
+    ) -> PyResult<Py<PyAny>> {
+        let spec = grafeo_engine::loader::NodeLoad {
+            labels: crate::direct::labels(labels)?,
+            key,
+            columns: crate::direct::load_columns(types)?,
+            delimiter: crate::direct::load_delimiter(delimiter)?,
+            header,
+            nulls: nulls.unwrap_or_default(),
+        };
+        let report = self.released(py, |db| Ok(db.load_nodes_csv(&path, &spec)?))?;
+        crate::direct::load_report(py, report)
+    }
+
+    /// Load a CSV file as edges, each end found by its key among the nodes
+    /// of a label, in one transaction.
+    ///
+    /// Args:
+    ///     path: The file, as a string or a path.
+    ///     edge_type: The type of every edge.
+    ///     source: (label, property, column): the source is the node of
+    ///         label whose property equals the record's value in column.
+    ///     target: (label, property, column), as source.
+    ///     types: As in load_nodes_csv; the key columns' types too (a key
+    ///         read as text finds only text keys). The key columns are not
+    ///         stored on the edge.
+    ///     missing: "error" (the default: a key no node has fails the load)
+    ///         or "skip" (no edge for that record).
+    ///     delimiter: The field separator.
+    ///     header: Whether the first record names the columns.
+    ///     nulls: Fields that stand for no value, besides an empty one.
+    ///
+    /// Returns:
+    ///     A dict: rows, created, skipped.
+    ///
+    /// Example:
+    ///     db.load_edges_csv("knows.csv", "KNOWS",
+    ///                       source=("Person", "id", "src"),
+    ///                       target=("Person", "id", "dst"),
+    ///                       types={"src": "int64", "dst": "int64"})
+    #[pyo3(signature = (path, edge_type, source, target, types=None, missing="error", delimiter=",", header=true, nulls=None))]
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "each argument is one keyword option of the Python method"
+    )]
+    fn load_edges_csv(
+        &self,
+        path: std::path::PathBuf,
+        edge_type: String,
+        source: (String, String, String),
+        target: (String, String, String),
+        types: Option<&Bound<'_, pyo3::types::PyDict>>,
+        missing: &str,
+        delimiter: &str,
+        header: bool,
+        nulls: Option<Vec<String>>,
+        py: Python<'_>,
+    ) -> PyResult<Py<PyAny>> {
+        let end =
+            |(label, property, column): (String, String, String)| grafeo_engine::loader::EndKey {
+                label,
+                property,
+                column,
+            };
+        let missing = match missing {
+            "error" => grafeo_engine::loader::MissingEnd::Error,
+            "skip" => grafeo_engine::loader::MissingEnd::Skip,
+            other => {
+                return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                    "missing must be 'error' or 'skip', not '{other}'"
+                )));
+            }
+        };
+        let spec = grafeo_engine::loader::EdgeLoad {
+            edge_type,
+            source: end(source),
+            target: end(target),
+            columns: crate::direct::load_columns(types)?,
+            delimiter: crate::direct::load_delimiter(delimiter)?,
+            header,
+            nulls: nulls.unwrap_or_default(),
+            missing,
+        };
+        let report = self.released(py, |db| Ok(db.load_edges_csv(&path, &spec)?))?;
+        crate::direct::load_report(py, report)
+    }
+
     /// Batch search for nearest neighbors of multiple query vectors.
     ///
     /// Executes searches in parallel using all available CPU cores.

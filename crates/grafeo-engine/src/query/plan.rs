@@ -455,8 +455,9 @@ impl LogicalOperator {
             | Self::Empty
             | Self::ParameterScan(_)
             | Self::DelimScan(_)
-            | Self::CallProcedure(_)
             | Self::LoadData(_) => false,
+            // A load procedure writes the nodes or edges of its file.
+            Self::CallProcedure(op) => op.writes(),
             Self::Construct(op) => op.input.has_mutations(),
         }
     }
@@ -3413,6 +3414,17 @@ pub struct CallProcedureOp {
     pub arguments: Vec<LogicalExpression>,
     /// Optional YIELD clause: which columns to expose + aliases.
     pub yield_items: Option<Vec<ProcedureYield>>,
+}
+
+impl CallProcedureOp {
+    /// Whether the procedure writes: the load procedures
+    /// (`grafeo.load_nodes_csv`, `grafeo.load_edges_csv`, see
+    /// [`crate::loader`]); every other one reads.
+    #[must_use]
+    pub fn writes(&self) -> bool {
+        let name = self.name.join(".");
+        name == crate::loader::NODES_PROCEDURE || name == crate::loader::EDGES_PROCEDURE
+    }
 }
 
 /// A single YIELD item in a procedure call.

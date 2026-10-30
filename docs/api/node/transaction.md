@@ -72,7 +72,7 @@ Throws if already committed or rolled back.
 
 ## Auto-rollback
 
-If a transaction is dropped (garbage collected) without being committed or rolled back, it automatically rolls back. In Node.js 22+, you can use `using` for deterministic cleanup:
+If a transaction is dropped (garbage collected) without being committed or rolled back, it automatically rolls back. Where `using` is supported (Node.js 24+, or TypeScript compiled to an older target), it rolls back at the end of its block through `tx[Symbol.dispose]()`:
 
 ```typescript
 using tx = db.beginTransaction();

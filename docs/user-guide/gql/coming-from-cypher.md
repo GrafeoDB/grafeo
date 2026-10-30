@@ -140,31 +140,23 @@ is a null value in both.
 
 ## Comments
 
-In Grafeo's GQL a line comment starts with `--` and a space (`--` without one is an undirected edge), and a block
-comment is `/* ... */`. openCypher writes a line comment with `//`, which Grafeo's GQL does not read as a comment:
-change it to `--` and a space when you move a query.
+A line comment starts with `//` in both languages, and a block comment is `/* ... */`, so Cypher comments move to
+GQL as they are. GQL also reads `--` and a space as a line comment (`--` without one is an undirected edge); Cypher
+has no such comment, so keep `//` in a query that must run in both.
 
-=== "Cypher"
-
-    ```cypher
-    // People in Amsterdam
-    MATCH (p:Person {city: 'Amsterdam'}) /* any age */
-    RETURN p.name
-    ```
-
-=== "GQL"
-
-    ```sql
-    -- People in Amsterdam
-    MATCH (p:Person {city: 'Amsterdam'}) /* any age */
-    RETURN p.name
-    ```
+```sql
+// People in Amsterdam
+MATCH (p:Person {city: 'Amsterdam'}) /* any age */
+RETURN p.name -- one row per person
+```
 
 ## Reserved Words as Names
 
 GQL reserves more words than openCypher, among them `LIKE` and `EXISTS`, so they cannot stand as a variable or an
 alias as they are. `LIKE` is a common one: a Cypher variable `like` must be renamed or quoted as `` `like` `` in
-GQL. Rename such a name, or quote it in backticks:
+GQL. Rename such a name, or quote it in backticks; the error for a reserved word names it and says to quote it.
+After `AS` and as a `LET` or `FOR` variable a double-quoted name works too (`RETURN 1 AS "two words"`); in an
+expression a double-quoted sequence is a string, so read such a name back with backticks:
 
 === "Cypher"
 

@@ -1117,10 +1117,25 @@ print(f"Store: {usage['store']['total_bytes']} bytes")
 
 ### schema()
 
-Get schema information. Returns a dict with keys: `labels` (list of dicts with `name` and `count`), `edge_types` (list of dicts), `property_keys` (list of strings).
+Get schema information: the labels, edge types and property keys the data holds, each sorted by name. A label no node has any more, an edge type with no edge left and a property key nothing holds are left out. Returns a dict with keys:
+
+- `labels`: dicts with `name`, `count` and `properties`
+- `edge_types`: dicts with `name`, `count`, `properties` and `endpoints`
+- `property_keys`: strings
+
+Each property is a dict with its `name` and the `types` of its values (`["STRING"]`, `["INT64", "FLOAT64"]`). Each endpoint is a dict with a `source` label, a `target` label and the `count` of edges between nodes with them. It reads the whole graph, so call it once and keep the result rather than per query.
 
 ```python
 def schema(self) -> Dict[str, Any]
+```
+
+```python
+db.execute("INSERT (:Person {name: 'Alix'})-[:LIVES_IN {since: 2020}]->(:City {name: 'Amsterdam'})")
+schema = db.schema()
+schema["labels"][1]
+# {'name': 'Person', 'count': 1, 'properties': [{'name': 'name', 'types': ['STRING']}]}
+schema["edge_types"][0]["endpoints"]
+# [{'source': 'Person', 'target': 'City', 'count': 1}]
 ```
 
 ### validate()

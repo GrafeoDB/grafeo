@@ -25,9 +25,9 @@ try {
 }
 ```
 
-## Using `using` (Node.js 22+)
+## Using `using` (Node.js 24+)
 
-With explicit resource management, the transaction auto-rolls back if `commit()` is not called:
+With explicit resource management (Node.js 24+, or TypeScript compiled to an older target), the transaction rolls back at the end of its block if `commit()` is not called:
 
 ```typescript
 {

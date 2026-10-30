@@ -771,6 +771,14 @@ fn annotate_hints(
         // A seek or a hash join replaces the scan below the filter
         let replaced = crate::query::planner::lpg::seek::checked_scan(filter).and_then(|below| {
             seek_hint(&filter.predicate, below.scan, store, after_a_write)
+                // Many rows against a small label join faster than they seek
+                // (see `beats_a_seek`), as the planner chooses.
+                .filter(|hint| {
+                    !matches!(hint, crate::query::plan::PushdownHint::IndexLookup { .. })
+                        || !crate::query::planner::lpg::value_join::beats_a_seek(
+                            filter, writes, store,
+                        )
+                })
                 .or_else(|| value_join_hint(filter, writes))
                 // The index lookup made while planning takes over checks of
                 // the scanned node between the filter and the scan too.

@@ -288,7 +288,18 @@ impl super::Planner {
             scan,
             |property| self.store.has_property_index(property),
             after_a_write,
-        ) else {
+        )
+        .filter(|seek| {
+            // Many rows against a small label join faster than they seek.
+            !matches!(seek.key, SeekKey::Property(_))
+                || !super::value_join::beats_a_seek(
+                    filter,
+                    self.statement_writes
+                        .get()
+                        .is_none_or(|writes| writes.per_row),
+                    self.store.as_ref(),
+                )
+        }) else {
             return Ok(None);
         };
 

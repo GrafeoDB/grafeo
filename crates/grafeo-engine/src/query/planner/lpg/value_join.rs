@@ -187,6 +187,57 @@ pub(crate) fn value_join(filter: &FilterOp, writes_per_row: bool) -> Option<Valu
     })
 }
 
+/// Whether the value join of `filter` beats a seek per row through the
+/// index of its key: when the rows it starts from, known while planning
+/// (an `UNWIND` of a list), are more than a third of the scanned label's
+/// nodes. A seek costs about the same per row as a hash join's probe plus
+/// build (about 4 against 3.2 microseconds), and the join also reads each
+/// node of the label once (about 0.3 microseconds a node), so many rows
+/// against a small label (`UNWIND $rows AS r MATCH (n:Method {id: r.id})`
+/// with as many rows as Methods) join faster, while a few rows seek. An ID
+/// seek always stays. The store's statistics are read only for a filter
+/// that has both a value join and a known number of rows.
+pub(crate) fn beats_a_seek(
+    filter: &FilterOp,
+    writes_per_row: bool,
+    store: &dyn GraphStore,
+) -> bool {
+    let Some(join) = value_join(filter, writes_per_row) else {
+        return false;
+    };
+    let Some(rows) = known_rows(join.input) else {
+        return false;
+    };
+    let statistics = store.statistics();
+    let nodes = match &join.checked.scan.label {
+        Some(label) => statistics
+            .get_label(label)
+            .map_or(0, |label| label.node_count),
+        None => statistics.total_nodes,
+    };
+    u64::try_from(rows).unwrap_or(u64::MAX).saturating_mul(3) > nodes
+}
+
+/// At most how many rows `op` gives, when it is known while planning: an
+/// `UNWIND` of a list (parameters are filled in by then) that starts the
+/// statement, and the filters and projections above one.
+fn known_rows(op: &LogicalOperator) -> Option<usize> {
+    match op {
+        LogicalOperator::Unwind(unwind) if matches!(*unwind.input, LogicalOperator::Empty) => {
+            match &unwind.expression {
+                LogicalExpression::Literal(grafeo_common::types::Value::List(items)) => {
+                    Some(items.len())
+                }
+                LogicalExpression::List(items) => Some(items.len()),
+                _ => None,
+            }
+        }
+        LogicalOperator::Filter(filter) => known_rows(&filter.input),
+        LogicalOperator::Project(project) => known_rows(&project.input),
+        _ => None,
+    }
+}
+
 /// The key a conjunct gives the scan of `variable` over rows that bind
 /// `bound` (see [`value_join`]).
 fn join_key<'a>(

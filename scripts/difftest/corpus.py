@@ -357,6 +357,43 @@ WRITE_FIXTURES = {
     "typed": {"BB", "CP"},
 }
 
+
+def codegraph(grafeo):
+    """A code graph for the selector plans: 200 `Graph` nodes (`i` 1 to 200, `zero: 0`);
+    six `Graph:Method` nodes (`i` 1001 to 1006, 1001 to 1004 active with `zero: 1`, 1005
+    and 1006 inactive with `zero: 0`), each with an `R` edge to a `Target` (`i` 1 to 6)
+    and three CALLS edges to `Call` nodes (`k` 1 to 3); four `Graph:File` nodes (`i` 2001
+    to 2004, active but 2004, `zero: 0`) CONTAINing Methods; USES between Methods: 1001 and 1002
+    both ways, 1002 to 1003, 1003 to 1004, 1004 to itself, 1005 to 1001."""
+    db = grafeo.GrafeoDB()
+    db.execute("UNWIND range(1, 200) AS i INSERT (:Graph {i: i, zero: 0, w: 100 + i})")
+    db.execute(
+        "UNWIND range(1, 6) AS k INSERT (:Graph:Method {i: 1000 + k, active: k <= 4, "
+        "zero: CASE WHEN k <= 4 THEN 1 ELSE 0 END, w: 1000 + k})-[:R {w: k}]->(:Target {i: k, w: 300 + k})"
+    )
+    db.execute(
+        "MATCH (n:Method) UNWIND range(1, 3) AS k INSERT (n)-[:CALLS {w: k}]->(:Call {k: k, w: 400 + k})"
+    )
+    db.execute(
+        "UNWIND range(1, 4) AS k INSERT (:Graph:File {i: 2000 + k, active: k <= 3, zero: 0, w: 2000 + k})"
+    )
+    for source, target, edge_type in [
+        (2001, 1001, "CONTAINS"),
+        (2001, 1002, "CONTAINS"),
+        (2002, 1003, "CONTAINS"),
+        (1001, 1002, "USES"),
+        (1002, 1001, "USES"),
+        (1002, 1003, "USES"),
+        (1003, 1004, "USES"),
+        (1004, 1004, "USES"),
+        (1005, 1001, "USES"),
+    ]:
+        db.execute(
+            f"MATCH (a {{i: {source}}}), (b {{i: {target}}}) INSERT (a)-[:{edge_type} {{w: 1}}]->(b)"
+        )
+    return db
+
+
 FIXTURES = {
     "rdf": rdf,
     "rdf_writes": rdf_writes,
@@ -380,6 +417,7 @@ FIXTURES = {
     "leads": leads,
     "quoted": quoted,
     "graphs": graphs,
+    "codegraph": codegraph,
 }
 
 CASES: list[Case] = []
@@ -2261,5 +2299,47 @@ for case_id, query, languages in [
     ("DM8", "RETURN toInteger(NaN) AS a", BOTH),
 ]:
     case(case_id, query, languages, "empty")
+
+# DN: selector plans (0.6.1, Deriva). An OR of labels scans each label (DN1, DN2); a
+#     top-level EXISTS runs once over the distinct values of the variables it shares:
+#     several EXISTS sharing n (DN3), one sharing n and m (DN4), NOT EXISTS (DN5), outer rows
+#     that repeat n stay once each (DN6), an empty outer (DN7), and a subquery that divides
+#     by zero for nodes no outer row holds does not run for them (DN8, DN9; 0.6.0 failed
+#     with division by zero); an EXISTS inside an OR waits for its sibling conjuncts (DN10,
+#     DN11; 0.6.0 failed with division by zero); a pattern with several labels scans the
+#     smallest, also in an EXISTS (DN12, DN13); a label test the scan holds is no filter
+#     (DN14), one on another label is that label (DN15); a negative slice bound counts from
+#     the end (DN16, DN17; 0.6.0 gave an empty or the whole list)
+for case_id, query, languages in [
+    ("DN1", "MATCH (n:Graph) WHERE n:Method OR n:File RETURN n.i AS i", BOTH),
+    ("DN2", "MATCH (n:Graph) WHERE n.active AND ((n:Method AND NOT EXISTS { MATCH (n)-[:USES]->(m) WHERE m.i > 1003 }) OR (n:File AND EXISTS { MATCH (n)-[:CONTAINS]->() })) RETURN n.i AS i", BOTH),
+    ("DN3", "MATCH (n:Method) WHERE n.active AND EXISTS { MATCH (n)-[:R]->(t) WHERE t.i > 1 } AND EXISTS { MATCH (n)-[:USES]->() } RETURN n.i AS i", BOTH),
+    ("DN4", "MATCH (n:Method)-[:USES]->(m:Method) WHERE EXISTS { MATCH (m)-[:USES]->(n) } RETURN n.i AS a, m.i AS b", BOTH),
+    ("DN5", "MATCH (n:Method) WHERE NOT EXISTS { MATCH (n)-[:USES]->(m) WHERE m.i > 1003 } RETURN n.i AS i", BOTH),
+    ("DN6", "MATCH (n:Method)-[:CALLS]->(c) WHERE EXISTS { MATCH (n)<-[:USES]-() } RETURN n.i AS i, c.k AS k", BOTH),
+    ("DN7", "MATCH (n:Method) WHERE n.i > 5000 AND EXISTS { MATCH (m:Graph) WHERE 10 / m.zero > n.i } RETURN count(n) AS c", BOTH),
+    ("DN8", "MATCH (n:Method) WHERE n.active AND EXISTS { MATCH (n)-[:R]->(t) WHERE 10 / n.zero > 0 } RETURN count(n) AS c", BOTH),
+    ("DN9", "MATCH (n:Method)-[:CALLS]->(c) WHERE n.active AND EXISTS { MATCH (t:Target) WHERE t.i = n.i - 1000 AND 10 / n.zero > 0 } RETURN count(*) AS c", BOTH),
+    ("DN10", "MATCH (n:Graph) WHERE n.active AND ((n:Method AND EXISTS { MATCH (n)-[:CALLS|CONTAINS]->(c) WHERE 10 / n.zero > 0 }) OR n.zz = 1) RETURN count(n) AS c", BOTH),
+    ("DN11", "MATCH (n:Graph) WHERE ((EXISTS { MATCH (n)-[:CALLS|CONTAINS]->(c) WHERE 10 / n.zero > 0 } AND n:Method) OR n.zz = 1) AND n.active RETURN count(n) AS c", BOTH),
+    ("DN12", "MATCH (e:Graph:Method) RETURN e.i AS i", BOTH),
+    ("DN13", "MATCH (t:Target) WHERE EXISTS { MATCH (e:Graph:Method)-[:R]->(t) } RETURN t.i AS i", BOTH),
+    ("DN14", "MATCH (n:Method) WHERE 'Method' IN labels(n) RETURN count(n) AS c", BOTH),
+    ("DN15", "MATCH (n:Graph) WHERE 'File' IN labels(n) RETURN n.i AS i", BOTH),
+]:
+    case(case_id, query, languages, "codegraph")
+for case_id, query in [
+    ("DN16", "RETURN [1, 2, 3, 4, 5][-2..] AS a, [1, 2, 3, 4, 5][..-2] AS b, [1, 2, 3, 4, 5][-3..-1] AS c, [1, 2, 3, 4, 5][1..-1] AS d, [1, 2, 3][-10..2] AS e"),
+    ("DN17", "UNWIND range(1, 5) AS x WITH collect(x) AS xs RETURN xs[-2..] AS a, xs[..-3] AS b, xs[1..3] AS c"),
+]:
+    case(case_id, query, BOTH, "empty")
+# DN18, DN19: a subquery in an AND chain whose other conjuncts are false is skipped for that row,
+#     and the same subquery outside the chain still gives its real value (DN18); a null
+#     conjunct does not skip it (DN19)
+for case_id, query in [
+    ("DN18", "MATCH (n:Method) RETURN n.i AS i, (n.active AND COUNT { MATCH (n)-[:USES]->() } > 0) AS a, COUNT { MATCH (n)-[:USES]->() } AS c"),
+    ("DN19", "MATCH (n:Method) WHERE NOT (n.missing = 1 AND EXISTS { MATCH (n)-[:USES]->() }) RETURN n.i AS i"),
+]:
+    case(case_id, query, BOTH, "codegraph")
 
 # fmt: on

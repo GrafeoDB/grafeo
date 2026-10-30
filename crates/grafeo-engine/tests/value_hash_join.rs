@@ -748,7 +748,11 @@ fn a_subquery_beside_the_key_filters_the_joined_rows() {
             );
             let plan = explain(&session, language, query);
             let lines = lines(&plan);
-            let subquery = lines.iter().position(|line| line.contains("Subquery("));
+            // The subquery filters the joined rows: its filter, or the semi
+            // join of a delim join, sits above the hash join.
+            let subquery = lines
+                .iter()
+                .position(|line| line.contains("Subquery(") || line.contains("Join (Semi)"));
             let join = lines.iter().position(|line| line.contains("[hash join"));
             assert!(
                 subquery.is_some() && subquery < join,

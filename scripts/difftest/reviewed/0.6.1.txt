@@ -59,3 +59,13 @@ DM7|cypher 0d27618820 toInteger and toFloat trim the text, and toInteger truncat
 DM7|gql 0d27618820 toInteger and toFloat trim the text, and toInteger truncates decimal text; 0.6.0 gave null for both.
 DM8|cypher aec59ef631 toInteger of NaN is null; 0.6.0 gave 0.
 DM8|gql aec59ef631 toInteger of NaN is null; 0.6.0 gave 0.
+DN8|cypher 81f980f851 A top-level EXISTS runs once over the outer rows' distinct values (delim join), never for a node no outer row holds; 0.6.0 ran it for every Method and failed with division by zero.
+DN8|gql 81f980f851 A top-level EXISTS runs once over the outer rows' distinct values (delim join), never for a node no outer row holds; 0.6.0 ran it for every Method and failed with division by zero.
+DN10|cypher 81f980f851 An EXISTS inside an OR waits for its sibling conjuncts (n.active, the label), so it does not run where they are false; 0.6.0 ran it and failed with division by zero.
+DN10|gql 81f980f851 An EXISTS inside an OR waits for its sibling conjuncts (n.active, the label), so it does not run where they are false; 0.6.0 ran it and failed with division by zero.
+DN11|cypher 81f980f851 An EXISTS inside an OR waits for its sibling conjuncts also when it is written first; 0.6.0 ran it and failed with division by zero.
+DN11|gql 81f980f851 An EXISTS inside an OR waits for its sibling conjuncts also when it is written first; 0.6.0 ran it and failed with division by zero.
+DN16|cypher 9f11c8c76a A negative slice bound counts from the end, as openCypher: [-2..] is the last two elements; 0.6.0 gave an empty list or the whole list.
+DN16|gql 9f11c8c76a A negative slice bound counts from the end, as openCypher: [-2..] is the last two elements; 0.6.0 gave an empty list or the whole list.
+DN17|cypher 4151b9b220 A negative slice bound counts from the end also on a collected list; 0.6.0 gave an empty list or the whole list.
+DN17|gql 4151b9b220 A negative slice bound counts from the end also on a collected list; 0.6.0 gave an empty list or the whole list.

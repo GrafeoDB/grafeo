@@ -44,7 +44,7 @@ use grafeo_common::change::{
     Before, BulkRange, Change, ChangeMark, ChangeSet, DataModel, DataOp, Entity, GraphRef,
     GraphSlot, PendingVersion, Table,
 };
-use grafeo_common::types::{ArcStr, EpochId, TransactionId};
+use grafeo_common::types::{ArcStr, EpochId, NodeId, TransactionId};
 use grafeo_common::utils::error::{Error, Result, TransactionError};
 use grafeo_core::execution::operators::{
     BulkRows, ChangeRecorder, OperatorError, Recording, WriteClaim, WriteClaims, WriteInProgress,
@@ -735,6 +735,20 @@ impl ChangeRecorder for GraphRecorder {
         self.changes
             .record_bulk_rows(self.slot, rows)
             .map_err(|error| self.refused("the rows of a bulk write", &error))
+    }
+
+    fn change_mark(&self) -> Option<ChangeMark> {
+        Some(self.changes.mark())
+    }
+
+    fn nodes_written_after(&self, mark: ChangeMark, nodes: &mut Vec<NodeId>) -> Option<ChangeMark> {
+        Some(
+            self.changes
+                .state
+                .lock()
+                .set
+                .nodes_written_after(self.slot, mark, nodes),
+        )
     }
 }
 

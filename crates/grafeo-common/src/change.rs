@@ -855,6 +855,35 @@ impl ChangeSet {
         self.entries.get(mark.0..).unwrap_or_default()
     }
 
+    /// Adds to `nodes` each node of `graph` that an entry recorded after
+    /// `mark` writes (creates, deletes, relabels or changes a property of),
+    /// once per entry, a bulk range's nodes included, and returns the mark
+    /// after the last entry: what changed since a reader last looked, in
+    /// O(entries since).
+    pub fn nodes_written_after(
+        &self,
+        graph: GraphSlot,
+        mark: ChangeMark,
+        nodes: &mut Vec<NodeId>,
+    ) -> ChangeMark {
+        for change in self.after(mark) {
+            match change {
+                Change::Data {
+                    graph: written, op, ..
+                } if *written == graph => {
+                    if let Some(Entity::Node(id)) = op.entity() {
+                        nodes.push(id);
+                    }
+                }
+                Change::Bulk(range) if range.graph == graph && range.table == Table::Nodes => {
+                    nodes.extend(range.ids.clone().map(NodeId));
+                }
+                Change::Data { .. } | Change::Bulk(_) => {}
+            }
+        }
+        self.mark()
+    }
+
     /// Removes the entries recorded after `mark` and returns them in
     /// recorded order, for the caller to undo in reverse. A mark at or past
     /// the end (one taken after entries a rollback already removed) returns

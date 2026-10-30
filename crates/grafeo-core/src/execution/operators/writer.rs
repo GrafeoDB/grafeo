@@ -25,7 +25,9 @@ use std::borrow::Cow;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use grafeo_common::change::{Before, DataOp, Labels, PendingVersion, Properties, Table};
+use grafeo_common::change::{
+    Before, ChangeMark, DataOp, Labels, PendingVersion, Properties, Table,
+};
 use grafeo_common::storage::value_codec::{MAX_PROPERTY_VALUE_DEPTH, nests_too_deep};
 use grafeo_common::types::{
     ArcStr, EdgeId, NodeId, PropertyKey, PropertyMap, ReadView, TransactionId, Value,
@@ -289,6 +291,23 @@ impl GraphWriter {
     #[must_use]
     pub fn transaction_id(&self) -> Option<TransactionId> {
         self.view.transaction
+    }
+
+    /// The position after the transaction's last change, see
+    /// [`ChangeRecorder::change_mark`].
+    #[must_use]
+    pub fn change_mark(&self) -> Option<ChangeMark> {
+        self.recording.recorder.change_mark()
+    }
+
+    /// The nodes the transaction's changes after `mark` write, see
+    /// [`ChangeRecorder::nodes_written_after`].
+    pub fn nodes_written_after(
+        &self,
+        mark: ChangeMark,
+        nodes: &mut Vec<NodeId>,
+    ) -> Option<ChangeMark> {
+        self.recording.recorder.nodes_written_after(mark, nodes)
     }
 
     /// The node as this writer's transaction sees it, its own writes included.

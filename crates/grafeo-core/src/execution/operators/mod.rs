@@ -145,7 +145,7 @@ pub use writer::{GraphWriter, MAP_ASSIGNMENT, NewEdge, Recording, WriteCounter, 
 
 use std::ops::Range;
 
-use grafeo_common::change::{Before, DataOp, PendingVersion, Table};
+use grafeo_common::change::{Before, ChangeMark, DataOp, PendingVersion, Table};
 use grafeo_common::types::{EdgeId, NodeId};
 use thiserror::Error;
 
@@ -277,6 +277,25 @@ pub trait ChangeRecorder: WriteClaims {
         Err(OperatorError::Execution(
             "this change recorder takes no bulk writes".to_string(),
         ))
+    }
+
+    /// The position after the transaction's last change, from which
+    /// [`nodes_written_after`](Self::nodes_written_after) reads. `None`, the
+    /// default, for a recorder that keeps no changes to read back: a reader
+    /// that keeps nodes by their values then reads the store each time.
+    fn change_mark(&self) -> Option<ChangeMark> {
+        None
+    }
+
+    /// Adds to `nodes` each node of the recorder's graph that a change
+    /// recorded after `mark` writes (creates, deletes, relabels or changes a
+    /// property of), and returns the mark after the last change: what the
+    /// transaction's writes changed since a reader last looked, in
+    /// O(changes since). `None`, the default, as for
+    /// [`change_mark`](Self::change_mark).
+    fn nodes_written_after(&self, mark: ChangeMark, nodes: &mut Vec<NodeId>) -> Option<ChangeMark> {
+        let _ = (mark, nodes);
+        None
     }
 }
 

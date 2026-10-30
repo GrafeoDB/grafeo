@@ -65,6 +65,7 @@ Categories:
 | `GRAFEO-S001` | StorageFull           | no        | Buffer budget, disk, or memory limit reached. |
 | `GRAFEO-S002` | StorageCorrupted      | no        | A file Grafeo wrote is damaged: a checksum, a header, a section or a WAL record that does not read back as written. The message names the file and, when known, the byte. Python raises `GrafeoCorruptionError`, a subclass of `GrafeoError`; the C API returns `GRAFEO_ERROR_STORAGE`. The database may need a restore from a backup. |
 | `GRAFEO-S003` | StorageRecoveryFailed | no        | WAL replay failed during `GrafeoDB::open`. Inspect the logs. |
+| `GRAFEO-S004` | DatabaseLocked        | no        | The database file is open elsewhere: in this process (close the other handle first) or in another process (close it there). Python raises `GrafeoLockedError`, a subclass of `GrafeoError`. For several processes on one database, run grafeo-server. |
 
 ## Validation (V)
 
@@ -104,7 +105,8 @@ GQLSTATUS says what kind of condition it is, as SQL's SQLSTATE does:
 | `G2000`   | graph type violation           | a write the graph's schema refuses: a property of another type than its node or edge type declares, a missing `NOT NULL` property, a label, edge type or property a closed graph type does not declare, a `UNIQUE`, `NOT NULL` or key constraint |
 | `G1001`   | dependent object error: edges still exist | `DELETE` of a node that still has edges (use `DETACH DELETE`) |
 | `02000`   | no data                        | a node or edge that does not exist               |
-| `25000`   | invalid transaction state      | a write to a closed database                     |
+| `25000`   | invalid transaction state      | a write to a closed database, `COMMIT` inside a transaction object (end it with its `commit()` call), a commit or rollback of a transaction that already ended |
+| `08000`   | connection exception           | a database file another handle or process holds open (`GRAFEO-S004`) |
 | `25G03`   | read-only transaction          | a write or DDL in a read-only transaction or database |
 | `40000`   | transaction rollback           | a write conflict                                 |
 | `42001`   | syntax error                   | `MATCH (n RETURN n`                              |

@@ -12,6 +12,10 @@ Queries and calls that ran in 0.6.0 and now fail, because their result was wrong
 - `CAST` to a `DECIMAL(p, s)` of a value with more integer digits than the type holds fails with `22003`; it gave null.
 - A SPARQL prefix used without a `PREFIX` line, other than `rdf`, `rdfs`, `xsd`, `owl` and `fn`, is a syntax error naming it; it was kept as text and matched nothing.
 - SPARQL `INSERT DATA` and `DELETE DATA` with a variable or a quoted triple are a syntax error.
+- `CREATE INDEX` with a name that stands for another index fails; `IF NOT EXISTS` keeps the existing index.
+- `START TRANSACTION`, `COMMIT` and `ROLLBACK` run through a transaction object's `execute` fail with `25000`; they ended or nested the transaction behind the object's back.
+- A database file already open in this process or another one fails with `GRAFEO-S004` and GQLSTATUS `08000`, and the missing manifest, cursor or full backup of a restore with `GRAFEO-V001`; they were storage or internal errors.
+- In Python, `node["k"]` and `node.get("k")` (and the same on edges) return native values.
 - A float outside the integer range, or an infinity, converted to an integer (`toInteger`, `CAST`) fails with `22003`, and `CAST(NaN AS INT64)` too; they gave the largest integer or 0.
 - SPARQL `BIND` to a variable already in scope in its group is a syntax error; it overwrote the variable.
 - `SERIALIZABLE` isolation is refused with `GRAFEO-Q004`; it ran as snapshot isolation.
@@ -24,10 +28,24 @@ Queries and calls that ran in 0.6.0 and now fail, because their result was wrong
 ### Added
 
 - **`schema()` describes the data's shape**: each label and edge type lists its properties with the types of their values, and each edge type the labels it connects with a count per pair, in Rust and every binding, so a tool or an LLM prompt can read what to query without a sample.
+- **Query timeouts in Python and Node.js**: `GrafeoDB(..., query_timeout=seconds)` and `execute(..., timeout=seconds)` in Python, `queryTimeout` in Node.js's create options; `None` keeps the database's timeout and `math.inf` (or `Infinity`) turns it off.
+- **Errors say what to do in every binding**: Python raises `GrafeoLockedError` for a database open elsewhere; Node.js errors carry `errorCode`, `gqlStatus` and `isRetryable`, also the binding's own transaction errors, and WASM errors their GQLSTATUS. A `Transaction` in Node.js rolls back when disposed (`using`, Node.js 24 or later).
 
 ### Fixed
 
+- **A failed commit ends the transaction in every binding**: after a commit that fails, the transaction is no longer active, `rollback()` does nothing and another `commit()` fails, in Python, Node.js, WASM, C, Go and Dart; it still counted as open after the commit failed.
+- **A write conflict says so once**: its message read "Write conflict" twice.
+- **Node.js ES module imports name every export**: `import { GrafeoDB } from '@grafeo-db/js'` works, where Node's lexer did not find the names of the wrapper.
+
 - **`schema()` and `db.labels()` list only what is in use**: a label no node has any more, an edge type with no edge left and a property key nothing holds are left out of `schema()`, `CALL db.labels()`, `db.relationshipTypes()` and `db.propertyKeys()`; they stayed listed after their last element was deleted or changed, and `schema()` gave them a count of 0.
+- **An index name stands for one index**: `CREATE INDEX` with a name that stands for another label, property or kind, or for an index the graph already has, fails naming it, and `IF NOT EXISTS` keeps the existing index; a second index was added under the same name. The same index under its name in another graph is still fine. `DROP INDEX` of a text index drops the text index, which went on searching while the property index on its key was dropped instead, and a property index stays while another name still covers its key. `SHOW INDEXES` lists the indexes by name.
+- **A node type that occurs more than once in a graph type takes every occurrence's properties**: in `CREATE GRAPH TYPE t ((:City)-[:R]->(:City {name STRING NOT NULL}))` the type `City` has `name`, which only the first occurrence counted; one property declared with two types fails naming both.
+- **A graph typed by another schema's graph type is checked against that graph type**: `CREATE GRAPH g TYPED s1.shop` from schema `s2` checks its nodes and edges against `s1`'s types, not the current schema's ones of the same name.
+- **`DROP GRAPH` forgets the graph's type**: a graph created again under the name is untyped; it kept the dropped graph's closed type.
+- **`CREATE GRAPH TYPE ... LIKE` an untyped graph is the open graph type**: it copied every node and edge type of the catalog, closed, so a graph of that type refused labels the untyped graph took.
+- **`SHOW NODE TYPES` writes constraints as DDL**: `UNIQUE (email)`, `NOT NULL name` and `PRIMARY KEY (id)`, where it printed internal names.
+- **Stored procedure errors say procedure**: `CREATE PROCEDURE` of a name in use and `DROP PROCEDURE` of a missing one fail with "Procedure already exists" and "Procedure not found"; they said "Type".
+- **`IS TYPED LIST<NODE>` and `LIST<EDGE>` hold for lists of nodes and edges**: `[n, m] IS TYPED LIST<NODE>` and `collect(n) IS TYPED LIST<NODE>` were false.
 - **The query timeout stops every query**: a sort, an aggregate, a join, `DISTINCT`, a set operation or a large `UNWIND` fails at `query_timeout` with `GRAFEO-Q003` and its hint, instead of running on until it returned its first row (a cross product of two large lists with `count(*)` ran for minutes past a 1 s limit). `UNWIND range(...)` now produces its numbers as it goes instead of building the list first, and `range()` near the largest integer stops at its end instead of wrapping around.
 - **Triples with a literal subject or a predicate that is not an IRI are refused**: N-Triples loading, SPARQL `INSERT DATA` and `batch_insert_rdf` fail with an error naming the triple, instead of storing it in release builds (and panicking in debug builds); an `INSERT` template still skips such a triple, as SPARQL 1.1 Update says.
 - **Text to number reads the number, and casts that cannot convert fail**: `toInteger(' 42 ')` is 42 and `toInteger('4.2')` is 4, as openCypher reads them, `toFloat` trims too, and `CAST` does the same in GQL and SQL/PGQ; they gave null. `CAST` of text that is no number fails with `22018`, as SQL does, where `toInteger` and `toFloat` still give null.

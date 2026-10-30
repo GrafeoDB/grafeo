@@ -352,6 +352,11 @@ pub enum LogicalOperator {
     /// from the outer Apply operator. The column names match `ApplyOp.shared_variables`.
     ParameterScan(ParameterScanOp),
 
+    /// The distinct values of some columns of the left input of the nearest
+    /// semi or anti join above: the leaf a decorrelated `EXISTS` subquery
+    /// starts from (see `optimizer::delim`).
+    DelimScan(DelimScanOp),
+
     // ==================== DDL Operators ====================
     /// Define a property graph schema (SQL/PGQ DDL).
     CreatePropertyGraph(CreatePropertyGraphOp),
@@ -443,6 +448,7 @@ impl LogicalOperator {
             | Self::NamedGraphs(_)
             | Self::Empty
             | Self::ParameterScan(_)
+            | Self::DelimScan(_)
             | Self::CallProcedure(_)
             | Self::LoadData(_) => false,
             Self::Construct(op) => op.input.has_mutations(),
@@ -513,6 +519,7 @@ impl LogicalOperator {
             | Self::PropertyPath(_)
             | Self::NamedGraphs(_)
             | Self::ParameterScan(_)
+            | Self::DelimScan(_)
             | Self::CallProcedure(_)
             | Self::ClearGraph(_)
             | Self::CreateGraph(_)
@@ -728,6 +735,7 @@ impl LogicalOperator {
             | Self::PropertyPath(_)
             | Self::NamedGraphs(_)
             | Self::ParameterScan(_)
+            | Self::DelimScan(_)
             | Self::CallProcedure(_)
             | Self::ClearGraph(_)
             | Self::CreateGraph(_)
@@ -889,6 +897,7 @@ impl LogicalOperator {
             Self::VectorScan(op) => op.variable.clone(),
             Self::VectorJoin(op) => op.right_variable.clone(),
             Self::TextScan(op) => format!("{}:{}", op.variable, op.label),
+            Self::DelimScan(op) => op.columns.join(", "),
             _ => String::new(),
         }
     }
@@ -1054,6 +1063,7 @@ impl LogicalOperator {
                 }
                 bound.extend(scan.columns.iter().cloned());
             }
+            Self::DelimScan(scan) => bound.extend(scan.columns.iter().cloned()),
             // `CALL { ... }` adds the columns its subquery returns to each row.
             Self::Apply(apply) => {
                 bound = apply.input.bound_variables(imports)?;
@@ -1668,6 +1678,10 @@ impl LogicalOperator {
             }
             Self::Empty => {
                 let _ = writeln!(out, "{indent}Empty");
+            }
+            // The distinct values of the delim join's left input it starts from.
+            Self::DelimScan(op) => {
+                let _ = writeln!(out, "{indent}DelimScan ({})", op.columns.join(", "));
             }
             // `HorizontalAggregate (total := Sum(e.w))`: per row, over the list
             Self::HorizontalAggregate(op) => {
@@ -2623,6 +2637,16 @@ pub struct ApplyOp {
 #[derive(Debug, Clone)]
 pub struct ParameterScanOp {
     /// Column names for the injected parameters.
+    pub columns: Vec<String>,
+}
+
+/// The leaf of a decorrelated subquery: one row per distinct value of
+/// `columns` among the rows of the left input of the nearest semi or anti
+/// join above, so the subquery runs once over those values and never over
+/// rows no outer row holds.
+#[derive(Debug, Clone)]
+pub struct DelimScanOp {
+    /// The left input's columns whose distinct values it gives.
     pub columns: Vec<String>,
 }
 

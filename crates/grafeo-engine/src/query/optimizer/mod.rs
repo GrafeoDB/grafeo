@@ -14,6 +14,7 @@
 pub mod cardinality;
 pub mod cost;
 mod cycles;
+mod delim;
 mod scanned_labels;
 pub(crate) use cycles::{close_cycles, plan_names};
 pub mod join_order;
@@ -279,9 +280,12 @@ impl Optimizer {
     /// Returns an error if optimization fails.
     pub fn optimize(&self, plan: LogicalPlan) -> Result<LogicalPlan> {
         let _span = grafeo_debug_span!("grafeo::query::optimize");
+        // An EXISTS over the rows' variables runs once over their distinct
+        // values (before the cycles: an expand into a shared variable is one).
+        let root = delim::decorrelate_exists(plan.root);
         // Correctness first: a pattern through a node or edge that was bound
         // before must be checked.
-        let mut root = cycles::close_cycles(plan.root);
+        let mut root = cycles::close_cycles(root);
 
         // Apply optimization rules
         if self.enable_filter_pushdown {
@@ -3366,9 +3370,12 @@ mod tests {
             assert_eq!(optimized(written), expected.explain_tree());
         }
 
-        /// Subquery and volatile conjuncts stay where they are written, also
-        /// when they read only the input: they would run a different number
-        /// of times below the scan.
+        /// Subquery and volatile conjuncts stay above the scans, also when
+        /// they read only the input: they would run a different number of
+        /// times below a scan. The EXISTS, correlated in its WHERE only, is a
+        /// delim join: the subquery runs once over the distinct `f` of the
+        /// scans' rows, and the volatile conjunct filters those rows below the
+        /// join, above both scans; the plain conjunct still goes onto `f`.
         #[test]
         fn subqueries_and_volatile_conjuncts_stay_above_the_scan() {
             let input_only = compare(
@@ -3391,21 +3398,40 @@ mod tests {
                 scan("m", Some("Model"), None),
             )));
             let written = filter(
-                and(vec![random.clone(), input_only.clone(), exists.clone()]),
+                and(vec![random.clone(), input_only.clone(), exists]),
                 scan(
                     "t",
                     Some("TypeDefinition"),
                     Some(scan("f", Some("File"), None)),
                 ),
             );
-            let expected = filter(
-                and(vec![random, exists]),
+            let rows = filter(
+                random,
                 scan(
                     "t",
                     Some("TypeDefinition"),
                     Some(filter(input_only, scan("f", Some("File"), None))),
                 ),
             );
+            let subquery = filter(
+                equals(property("m", "path"), property("f", "path")),
+                LogicalOperator::Join(JoinOp {
+                    left: Box::new(LogicalOperator::DelimScan(
+                        crate::query::plan::DelimScanOp {
+                            columns: vec!["f".to_string()],
+                        },
+                    )),
+                    right: Box::new(scan("m", Some("Model"), None)),
+                    join_type: JoinType::Cross,
+                    conditions: Vec::new(),
+                }),
+            );
+            let expected = LogicalOperator::Join(JoinOp {
+                left: Box::new(rows),
+                right: Box::new(subquery),
+                join_type: JoinType::Semi,
+                conditions: Vec::new(),
+            });
             assert_eq!(optimized(written), expected.explain_tree());
         }
 

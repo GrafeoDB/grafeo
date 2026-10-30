@@ -1254,8 +1254,8 @@ fn substitute_in_operator(op: &mut LogicalOperator, params: &QueryParams) -> Res
             substitute_in_operator(&mut apply.input, params)?;
             substitute_in_operator(&mut apply.subplan, params)?;
         }
-        // ParameterScan has no expressions to substitute
-        LogicalOperator::ParameterScan(_) => {}
+        // ParameterScan and DelimScan have no expressions to substitute
+        LogicalOperator::ParameterScan(_) | LogicalOperator::DelimScan(_) => {}
         LogicalOperator::MultiWayJoin(mwj) => {
             for input in &mut mwj.inputs {
                 substitute_in_operator(input, params)?;

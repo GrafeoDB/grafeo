@@ -10,7 +10,7 @@
 //! Below a write, every subquery runs so, after the whole input is read: it
 //! then sees what all the rows wrote, also those after its own.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use super::{Arc, Error, LogicalExpression, LogicalOperator, Operator, Result, Value};
 use crate::query::plan::{
@@ -21,8 +21,9 @@ use crate::query::planner::common::output_column_name;
 use grafeo_common::types::LogicalType;
 use grafeo_common::utils::error::{QueryError, QueryErrorKind};
 use grafeo_core::execution::operators::{
-    ApplyOperator, JoinType, NestedLoopJoinOperator, ParameterState,
+    ApplyOperator, ExpressionPredicate, JoinType, NestedLoopJoinOperator, ParameterState,
 };
+use grafeo_core::graph::GraphStore;
 
 impl super::Planner {
     /// Whether `expression` has an `EXISTS` or `COUNT` subquery that the edge
@@ -62,7 +63,7 @@ impl super::Planner {
         input_writes: bool,
     ) -> Result<(LogicalExpression, Box<dyn Operator>, Vec<String>)> {
         let mut expression = expression.clone();
-        visit_subqueries(&mut expression, &mut |subquery| {
+        visit_guarded_subqueries(&mut expression, None, &mut |subquery, guard| {
             if !input_writes && self.edge_check_answers(subquery, Some(&columns)) {
                 return Ok(());
             }
@@ -73,15 +74,16 @@ impl super::Planner {
                     vec![],
                 )),
             );
+            let run = PerRow {
+                outer,
+                outer_columns: &columns,
+                column: &column,
+                input_writes,
+                guard,
+            };
             if let LogicalExpression::ValueSubquery(subplan) = subquery {
                 input = self.without_profiling(|| {
-                    self.plan_value_subquery(
-                        outer,
-                        &columns,
-                        subplan.as_ref().clone(),
-                        &column,
-                        input_writes,
-                    )
+                    self.plan_value_subquery(run, subplan.as_ref().clone())
                 })?;
                 columns.push(column.clone());
                 *subquery = LogicalExpression::Variable(column);
@@ -92,9 +94,7 @@ impl super::Planner {
                 LogicalExpression::CountSubquery(subplan) => (subplan.as_ref().clone(), false),
                 _ => return Ok(()),
             };
-            input = self.without_profiling(|| {
-                self.plan_counted_subquery(outer, &columns, subplan, exists, &column, input_writes)
-            })?;
+            input = self.without_profiling(|| self.plan_counted_subquery(run, subplan, exists))?;
             columns.push(column.clone());
             let count = LogicalExpression::Variable(column);
             *subquery = if exists {
@@ -221,14 +221,11 @@ impl super::Planner {
     /// the rows are read, so the count sees what they wrote.
     fn plan_counted_subquery(
         &self,
-        outer: Box<dyn Operator>,
-        outer_columns: &[String],
+        run: PerRow<'_>,
         subplan: LogicalOperator,
         exists: bool,
-        column: &str,
-        input_writes: bool,
     ) -> Result<Box<dyn Operator>> {
-        let (seeded, shared) = seed_with_row(outer_columns, subplan)?;
+        let (seeded, shared) = seed_with_row(run.outer_columns, subplan)?;
         let counted_input = if exists {
             LogicalOperator::Limit(LimitOp {
                 count: 1.into(),
@@ -244,7 +241,7 @@ impl super::Planner {
                 expression: None,
                 expression2: None,
                 distinct: false,
-                alias: Some(column.to_string()),
+                alias: Some(run.column.to_string()),
                 percentile: None,
                 separator: None,
             }],
@@ -252,11 +249,11 @@ impl super::Planner {
             having: None,
         });
         let added = AddedColumn {
-            name: column,
             logical_type: LogicalType::Int64,
             optional: false,
+            skipped: Value::Int64(0),
         };
-        self.join_per_row(outer, outer_columns, &counted, shared, &added, input_writes)
+        self.join_per_row(run, &counted, shared, &added)
     }
 
     /// Plans a `VALUE` subquery once per row of `outer`: the value of the one
@@ -264,11 +261,8 @@ impl super::Planner {
     /// as `column` (see [`Self::plan_counted_subquery`] for the rest).
     fn plan_value_subquery(
         &self,
-        outer: Box<dyn Operator>,
-        outer_columns: &[String],
+        run: PerRow<'_>,
         subplan: LogicalOperator,
-        column: &str,
-        input_writes: bool,
     ) -> Result<Box<dyn Operator>> {
         let returned = returned_column(&subplan).ok_or_else(|| {
             Error::from(QueryError::new(
@@ -279,7 +273,7 @@ impl super::Planner {
         let valued = LogicalOperator::Project(ProjectOp {
             projections: vec![Projection {
                 expression: LogicalExpression::Variable(returned),
-                alias: Some(column.to_string()),
+                alias: Some(run.column.to_string()),
             }],
             input: Box::new(LogicalOperator::Limit(LimitOp {
                 count: 1.into(),
@@ -287,35 +281,38 @@ impl super::Planner {
             })),
             pass_through_input: false,
         });
-        let (seeded, shared) = seed_with_row(outer_columns, valued)?;
+        let (seeded, shared) = seed_with_row(run.outer_columns, valued)?;
         let added = AddedColumn {
-            name: column,
             logical_type: LogicalType::Any,
             optional: true,
+            skipped: Value::Null,
         };
-        self.join_per_row(outer, outer_columns, &seeded, shared, &added, input_writes)
+        self.join_per_row(run, &seeded, shared, &added)
     }
 
     /// Joins `inner`, which gives the `added` column and at most one row, to
-    /// each row of `outer`, with the `shared` columns of the row as its
-    /// parameters (with nothing shared it runs once). Below a write
-    /// (`input_writes`) it runs after all the rows are read, so it sees what
-    /// they wrote.
+    /// each row of `run.outer`, with the `shared` columns of the row as its
+    /// parameters (with nothing shared it runs once). Below a write it runs
+    /// after all the rows are read, so it sees what they wrote. A row the
+    /// guard rejects does not run it.
     fn join_per_row(
         &self,
-        outer: Box<dyn Operator>,
-        outer_columns: &[String],
+        run: PerRow<'_>,
         inner: &LogicalOperator,
         shared: Vec<String>,
-        added: &AddedColumn<'_>,
-        input_writes: bool,
+        added: &AddedColumn,
     ) -> Result<Box<dyn Operator>> {
+        let PerRow {
+            outer,
+            outer_columns,
+            column,
+            input_writes,
+            guard,
+        } = run;
         // After a write the subquery reads the store as the write left it.
         if shared.is_empty() {
             let (inner, _) = self.plan_after_a_write(input_writes, inner)?;
-            self.scalar_columns
-                .borrow_mut()
-                .insert(added.name.to_string());
+            self.scalar_columns.borrow_mut().insert(column.to_string());
             let mut schema = self.derive_schema_from_columns(outer_columns);
             schema.push(added.logical_type.clone());
             let join_type = if added.optional {
@@ -343,29 +340,62 @@ impl super::Planner {
         let planned = self.plan_after_a_write(input_writes, inner);
         *self.correlated_param_state.borrow_mut() = previous;
         let (inner, _) = planned?;
-        self.scalar_columns
-            .borrow_mut()
-            .insert(added.name.to_string());
+        self.scalar_columns.borrow_mut().insert(column.to_string());
         let mut apply = ApplyOperator::new_correlated(outer, inner, state, indices);
         if added.optional {
             apply = apply.with_optional(1);
+        }
+        if let Some(guard) = self.row_guard(guard, outer_columns)? {
+            apply = apply.with_guard(Box::new(guard), vec![added.skipped.clone()]);
         }
         if input_writes {
             apply = apply.with_outer_first();
         }
         Ok(Box::new(apply))
     }
+
+    /// The guard (see [`visit_guarded_subqueries`]) as a predicate over the
+    /// outer row, when every variable it reads is known and a column of it.
+    fn row_guard(
+        &self,
+        guard: Option<&LogicalExpression>,
+        outer_columns: &[String],
+    ) -> Result<Option<ExpressionPredicate>> {
+        let Some(guard) = guard else {
+            return Ok(None);
+        };
+        let mut names = HashSet::new();
+        if !expression_names(guard, &mut names)
+            || !names.iter().all(|name| outer_columns.contains(name))
+        {
+            return Ok(None);
+        }
+        let variable_columns: HashMap<String, usize> = outer_columns
+            .iter()
+            .enumerate()
+            .map(|(i, name)| (name.clone(), i))
+            .collect();
+        Ok(Some(
+            ExpressionPredicate::new(
+                self.convert_expression(guard)?,
+                variable_columns,
+                Arc::clone(&self.store) as Arc<dyn GraphStore>,
+                self.read_view(),
+            )
+            .with_session_context(self.session_context.clone()),
+        ))
+    }
 }
 
 /// The column a subquery planned per row adds to each row.
-struct AddedColumn<'a> {
-    /// Its name.
-    name: &'a str,
+struct AddedColumn {
     /// Its type.
     logical_type: LogicalType,
     /// Whether a row the subquery gives no row keeps a null (`VALUE`); a
     /// count always gives one.
     optional: bool,
+    /// Its value in a row the guard rejects: what the subquery would give.
+    skipped: Value,
 }
 
 /// The outer variables `subplan` uses (those it names, as far as they are
@@ -392,14 +422,10 @@ fn seed_with_row(
             .collect(),
     };
     let mut seeded = subplan;
-    if !shared.is_empty()
-        && !seed_with_parameters(
-            &mut seeded,
-            LogicalOperator::ParameterScan(ParameterScanOp {
-                columns: shared.clone(),
-            }),
-        )
-    {
+    let parameters = LogicalOperator::ParameterScan(ParameterScanOp {
+        columns: shared.clone(),
+    });
+    if !shared.is_empty() && !seed_with_parameters(&mut seeded, parameters) {
         return Err(Error::Internal(
             "Unsupported subquery: no pattern to start from the outer row".to_string(),
         ));
@@ -431,42 +457,70 @@ fn returned_column(plan: &LogicalOperator) -> Option<String> {
     }
 }
 
-/// Calls `f` on every `EXISTS`, `COUNT` and `VALUE` subquery in `expression`,
-/// outside the bodies of list comprehensions, list predicates and `reduce`,
-/// which read their item variable (not a column of the row).
+/// Where a lifted subquery runs: once per row of `outer` (whose columns are
+/// `outer_columns`), adding `column`; after all the rows are read when the
+/// input writes (`input_writes`); and not for a row its `guard` rejects (see
+/// [`visit_guarded_subqueries`]).
+struct PerRow<'a> {
+    outer: Box<dyn Operator>,
+    outer_columns: &'a [String],
+    column: &'a str,
+    input_writes: bool,
+    guard: Option<&'a LogicalExpression>,
+}
+
+/// Calls `f` on every subquery of `expression` (`EXISTS`, `COUNT` and
+/// `VALUE`), outside in.
 pub(crate) fn visit_subqueries(
     expression: &mut LogicalExpression,
     f: &mut dyn FnMut(&mut LogicalExpression) -> Result<()>,
 ) -> Result<()> {
+    visit_guarded_subqueries(expression, None, &mut |subquery, _| f(subquery))
+}
+
+/// Calls `f` on every subquery of `expression`, as [`visit_subqueries`] does,
+/// with the guard it may run under: the conjunction of "is not false" tests
+/// of the subquery-free members of each `AND` chain it sits in. When one of
+/// them is false, the chain is false whatever the subquery gives, in any
+/// context (`OR`, `NOT`, `CASE`), so a row the guard rejects need not run
+/// it. A null member passes: `NOT (null AND x)` depends on `x`.
+fn visit_guarded_subqueries(
+    expression: &mut LogicalExpression,
+    guard: Option<&LogicalExpression>,
+    f: &mut dyn FnMut(&mut LogicalExpression, Option<&LogicalExpression>) -> Result<()>,
+) -> Result<()> {
     match expression {
         LogicalExpression::ExistsSubquery(_)
         | LogicalExpression::CountSubquery(_)
-        | LogicalExpression::ValueSubquery(_) => f(expression),
+        | LogicalExpression::ValueSubquery(_) => f(expression, guard),
+        LogicalExpression::Binary {
+            op: BinaryOp::And, ..
+        } => visit_and_chain(expression, guard, f),
         LogicalExpression::Binary { left, right, .. } => {
-            visit_subqueries(left, f)?;
-            visit_subqueries(right, f)
+            visit_guarded_subqueries(left, guard, f)?;
+            visit_guarded_subqueries(right, guard, f)
         }
-        LogicalExpression::Unary { operand, .. } => visit_subqueries(operand, f),
+        LogicalExpression::Unary { operand, .. } => visit_guarded_subqueries(operand, guard, f),
         LogicalExpression::FunctionCall { args, .. }
         | LogicalExpression::SparqlCall { args, .. }
-        | LogicalExpression::List(args) => {
-            args.iter_mut().try_for_each(|arg| visit_subqueries(arg, f))
-        }
+        | LogicalExpression::List(args) => args
+            .iter_mut()
+            .try_for_each(|arg| visit_guarded_subqueries(arg, guard, f)),
         LogicalExpression::Map(entries) => entries
             .iter_mut()
-            .try_for_each(|(_, value)| visit_subqueries(value, f)),
+            .try_for_each(|(_, value)| visit_guarded_subqueries(value, guard, f)),
         LogicalExpression::IndexAccess { base, index } => {
-            visit_subqueries(base, f)?;
-            visit_subqueries(index, f)
+            visit_guarded_subqueries(base, guard, f)?;
+            visit_guarded_subqueries(index, guard, f)
         }
-        LogicalExpression::MapAccess { base, .. } => visit_subqueries(base, f),
+        LogicalExpression::MapAccess { base, .. } => visit_guarded_subqueries(base, guard, f),
         LogicalExpression::SliceAccess { base, start, end } => {
-            visit_subqueries(base, f)?;
+            visit_guarded_subqueries(base, guard, f)?;
             if let Some(start) = start {
-                visit_subqueries(start, f)?;
+                visit_guarded_subqueries(start, guard, f)?;
             }
             if let Some(end) = end {
-                visit_subqueries(end, f)?;
+                visit_guarded_subqueries(end, guard, f)?;
             }
             Ok(())
         }
@@ -476,26 +530,30 @@ pub(crate) fn visit_subqueries(
             else_clause,
         } => {
             if let Some(operand) = operand {
-                visit_subqueries(operand, f)?;
+                visit_guarded_subqueries(operand, guard, f)?;
             }
             for (condition, result) in when_clauses {
-                visit_subqueries(condition, f)?;
-                visit_subqueries(result, f)?;
+                visit_guarded_subqueries(condition, guard, f)?;
+                visit_guarded_subqueries(result, guard, f)?;
             }
             if let Some(else_clause) = else_clause {
-                visit_subqueries(else_clause, f)?;
+                visit_guarded_subqueries(else_clause, guard, f)?;
             }
             Ok(())
         }
         LogicalExpression::ListComprehension { list_expr, .. }
-        | LogicalExpression::ListPredicate { list_expr, .. } => visit_subqueries(list_expr, f),
+        | LogicalExpression::ListPredicate { list_expr, .. } => {
+            visit_guarded_subqueries(list_expr, guard, f)
+        }
         LogicalExpression::Reduce { initial, list, .. } => {
-            visit_subqueries(initial, f)?;
-            visit_subqueries(list, f)
+            visit_guarded_subqueries(initial, guard, f)?;
+            visit_guarded_subqueries(list, guard, f)
         }
         LogicalExpression::MapProjection { entries, .. } => {
             entries.iter_mut().try_for_each(|entry| match entry {
-                MapProjectionEntry::LiteralEntry(_, value) => visit_subqueries(value, f),
+                MapProjectionEntry::LiteralEntry(_, value) => {
+                    visit_guarded_subqueries(value, guard, f)
+                }
                 MapProjectionEntry::PropertySelector(_) | MapProjectionEntry::AllProperties => {
                     Ok(())
                 }
@@ -509,6 +567,106 @@ pub(crate) fn visit_subqueries(
         | LogicalExpression::Type(_)
         | LogicalExpression::Id(_)
         | LogicalExpression::PatternComprehension { .. } => Ok(()),
+    }
+}
+
+/// [`visit_guarded_subqueries`] of an `AND` chain: each member with the
+/// guard plus the tests of the chain's other subquery-free members.
+fn visit_and_chain(
+    chain: &mut LogicalExpression,
+    guard: Option<&LogicalExpression>,
+    f: &mut dyn FnMut(&mut LogicalExpression, Option<&LogicalExpression>) -> Result<()>,
+) -> Result<()> {
+    let mut members = Vec::new();
+    and_chain(chain, &mut members);
+    let tests: Vec<Option<LogicalExpression>> = members
+        .iter()
+        .map(|member| (!has_subquery(member)).then(|| is_not_false((*member).clone())))
+        .collect();
+    let mut members = Vec::new();
+    and_chain_mut(chain, &mut members);
+    for (index, member) in members.into_iter().enumerate() {
+        if tests[index].is_some() {
+            continue;
+        }
+        let mut inner = guard.cloned();
+        for test in tests
+            .iter()
+            .enumerate()
+            .filter(|(other, _)| *other != index)
+            .filter_map(|(_, test)| test.as_ref())
+        {
+            inner = Some(match inner {
+                Some(guard) => LogicalExpression::Binary {
+                    left: Box::new(guard),
+                    op: BinaryOp::And,
+                    right: Box::new(test.clone()),
+                },
+                None => test.clone(),
+            });
+        }
+        visit_guarded_subqueries(member, inner.as_ref(), f)?;
+    }
+    Ok(())
+}
+
+/// The members of the `AND` chain `expression`, in order.
+fn and_chain<'a>(expression: &'a LogicalExpression, out: &mut Vec<&'a LogicalExpression>) {
+    match expression {
+        LogicalExpression::Binary {
+            left,
+            op: BinaryOp::And,
+            right,
+        } => {
+            and_chain(left, out);
+            and_chain(right, out);
+        }
+        member => out.push(member),
+    }
+}
+
+/// [`and_chain`], to change the members.
+fn and_chain_mut<'a>(
+    expression: &'a mut LogicalExpression,
+    out: &mut Vec<&'a mut LogicalExpression>,
+) {
+    match expression {
+        LogicalExpression::Binary {
+            left,
+            op: BinaryOp::And,
+            right,
+        } => {
+            and_chain_mut(left, out);
+            and_chain_mut(right, out);
+        }
+        member => out.push(member),
+    }
+}
+
+/// Whether `expression` holds a subquery.
+fn has_subquery(expression: &LogicalExpression) -> bool {
+    let mut found = false;
+    let mut probe = expression.clone();
+    let _ = visit_subqueries(&mut probe, &mut |_| {
+        found = true;
+        Ok(())
+    });
+    found
+}
+
+/// `expression IS NOT FALSE`: false only when `expression` is false.
+fn is_not_false(expression: LogicalExpression) -> LogicalExpression {
+    LogicalExpression::Case {
+        operand: None,
+        when_clauses: vec![(
+            LogicalExpression::Binary {
+                left: Box::new(expression),
+                op: BinaryOp::Eq,
+                right: Box::new(LogicalExpression::Literal(Value::Bool(false))),
+            },
+            LogicalExpression::Literal(Value::Bool(false)),
+        )],
+        else_clause: Some(Box::new(LogicalExpression::Literal(Value::Bool(true)))),
     }
 }
 
@@ -672,7 +830,7 @@ fn bound_names(plan: &LogicalOperator, names: &mut HashSet<String>) {
 
 /// Every variable name `plan` binds or reads, also in the subqueries of its
 /// expressions; `None` when it has an operator this does not look into.
-fn subplan_variables(plan: &LogicalOperator) -> Option<HashSet<String>> {
+pub(crate) fn subplan_variables(plan: &LogicalOperator) -> Option<HashSet<String>> {
     let mut names = HashSet::new();
     plan_names(plan, &mut names).then_some(names)
 }

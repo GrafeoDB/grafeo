@@ -7,7 +7,7 @@ use super::{
     UnionOp, Value, common,
 };
 use crate::query::plan::{
-    LimitOp, ParameterScanOp, ProjectOp, Projection, ReturnOp, SkipOp, SortKey, SortOp,
+    DelimScanOp, LimitOp, ParameterScanOp, ProjectOp, Projection, ReturnOp, SkipOp, SortKey, SortOp,
 };
 use grafeo_common::types::LogicalType;
 
@@ -18,6 +18,11 @@ impl super::Planner {
     /// columns by projecting out the right-side copies (whose values are equal
     /// to the left-side copies due to the join condition).
     pub(super) fn plan_join(&self, join: &JoinOp) -> Result<(Box<dyn Operator>, Vec<String>)> {
+        if matches!(join.join_type, JoinType::Semi | JoinType::Anti)
+            && let Some(shared) = delim_columns(&join.right)
+        {
+            return self.plan_delim_join(join, shared);
+        }
         let (left_op, left_columns) = self.plan_operator(&join.left)?;
         // After a write the right side reads the store as the write left it.
         let left_writes = super::after_write::right_side_runs_after_a_write(&join.left);
@@ -335,6 +340,77 @@ impl super::Planner {
     /// columns in `plan_apply`); a scan that names some of them (a `UNION`
     /// branch that imports less than another) passes on only those, so the
     /// others stay free names in its plan.
+    /// Plans a semi or anti join whose right side is a decorrelated subquery
+    /// (see `optimizer::delim`): the left input is read once into a
+    /// [`DelimBuffer`](grafeo_core::execution::operators::DelimBuffer), the
+    /// right side starts from its distinct values of the `shared` columns
+    /// (its `DelimScan`), and the join keeps the left rows whose values the
+    /// right side gives (semi) or does not (anti).
+    fn plan_delim_join(
+        &self,
+        join: &JoinOp,
+        shared: &[String],
+    ) -> Result<(Box<dyn Operator>, Vec<String>)> {
+        use grafeo_core::execution::operators::{DelimBuffer, DelimReplayOperator};
+
+        let (left_op, left_columns) = self.plan_operator(&join.left)?;
+        let position = |columns: &[String], name: &String| {
+            columns
+                .iter()
+                .position(|column| column == name)
+                .ok_or_else(|| Error::Internal(format!("a delim join without the column '{name}'")))
+        };
+        let probe_keys = shared
+            .iter()
+            .map(|name| position(&left_columns, name))
+            .collect::<Result<Vec<_>>>()?;
+        let buffer = DelimBuffer::new(left_op, probe_keys.clone());
+        self.delim_buffers
+            .borrow_mut()
+            .push(std::sync::Arc::clone(&buffer));
+        let right = self.plan_operator(&join.right);
+        self.delim_buffers.borrow_mut().pop();
+        let (right_op, right_columns) = right?;
+        let build_keys = shared
+            .iter()
+            .map(|name| position(&right_columns, name))
+            .collect::<Result<Vec<_>>>()?;
+        let join_type = if join.join_type == JoinType::Anti {
+            PhysicalJoinType::Anti
+        } else {
+            PhysicalJoinType::Semi
+        };
+        let schema = self.derive_schema_from_columns(&left_columns);
+        let operator: Box<dyn Operator> = Box::new(HashJoinOperator::new(
+            Box::new(DelimReplayOperator::new(buffer)),
+            right_op,
+            probe_keys,
+            build_keys,
+            join_type,
+            schema,
+        ));
+        Ok((operator, left_columns))
+    }
+
+    /// Plans the `DelimScan` of the innermost delim join being planned.
+    pub(super) fn plan_delim_scan(
+        &self,
+        scan: &DelimScanOp,
+    ) -> Result<(Box<dyn Operator>, Vec<String>)> {
+        let buffer = self
+            .delim_buffers
+            .borrow()
+            .last()
+            .cloned()
+            .ok_or_else(|| Error::Internal("a DelimScan outside a delim join".to_string()))?;
+        Ok((
+            Box::new(grafeo_core::execution::operators::DelimValuesOperator::new(
+                buffer,
+            )),
+            scan.columns.clone(),
+        ))
+    }
+
     pub(super) fn plan_parameter_scan(
         &self,
         scan: &ParameterScanOp,
@@ -580,4 +656,13 @@ fn return_as_projection(ret: &ReturnOp) -> Option<LogicalOperator> {
     } else {
         project
     })
+}
+
+/// The columns of the `DelimScan` in `plan`, the right side of a delim join,
+/// when it has one.
+fn delim_columns(plan: &LogicalOperator) -> Option<&[String]> {
+    if let LogicalOperator::DelimScan(scan) = plan {
+        return Some(&scan.columns);
+    }
+    plan.children().into_iter().find_map(delim_columns)
 }

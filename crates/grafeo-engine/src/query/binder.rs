@@ -916,6 +916,9 @@ impl Binder {
                 }
                 Ok(())
             }
+            // The optimizer makes these after binding: its columns are the
+            // left input's, bound there.
+            LogicalOperator::DelimScan(_) => Ok(()),
             LogicalOperator::ParameterScan(param_scan) => {
                 // Register parameter columns as variables (injected by outer
                 // Apply). A variable of the outer query keeps what it is, so a

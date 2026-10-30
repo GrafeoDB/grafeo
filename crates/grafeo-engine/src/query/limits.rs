@@ -238,6 +238,7 @@ fn operator_expressions<'a>(
         | LogicalOperator::Otherwise(_)
         | LogicalOperator::Apply(_)
         | LogicalOperator::ParameterScan(_)
+        | LogicalOperator::DelimScan(_)
         | LogicalOperator::CreatePropertyGraph(_)
         | LogicalOperator::DropPropertyGraph(_)
         | LogicalOperator::LoadData(_) => {}
@@ -434,6 +435,7 @@ fn take_operator_expressions(op: &mut LogicalOperator, out: &mut Vec<LogicalExpr
         | LogicalOperator::Otherwise(_)
         | LogicalOperator::Apply(_)
         | LogicalOperator::ParameterScan(_)
+        | LogicalOperator::DelimScan(_)
         | LogicalOperator::CreatePropertyGraph(_)
         | LogicalOperator::DropPropertyGraph(_)
         | LogicalOperator::LoadData(_) => {}

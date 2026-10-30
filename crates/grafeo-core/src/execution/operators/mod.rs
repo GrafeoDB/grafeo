@@ -22,6 +22,7 @@
 pub mod accumulator;
 mod aggregate;
 mod apply;
+mod delim;
 mod distinct;
 mod eager;
 mod expand;
@@ -66,6 +67,7 @@ mod writer;
 pub use accumulator::{AggregateExpr, AggregateFunction, HashableValue};
 pub use aggregate::{HashAggregateOperator, SimpleAggregateOperator};
 pub use apply::ApplyOperator;
+pub use delim::{DelimBuffer, DelimReplayOperator, DelimValuesOperator};
 pub use distinct::DistinctOperator;
 pub use eager::EagerOperator;
 pub use expand::ExpandOperator;

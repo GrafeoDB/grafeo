@@ -266,6 +266,11 @@ pub struct Planner {
     /// `plan_operator` when encountering `ParameterScan`.
     pub(super) correlated_param_state:
         std::cell::RefCell<Option<Arc<grafeo_core::execution::operators::ParameterState>>>,
+    /// The left inputs of the delim joins being planned, innermost last: a
+    /// `DelimScan` reads the distinct values of the innermost (see
+    /// `plan_delim_join`).
+    pub(super) delim_buffers:
+        std::cell::RefCell<Vec<Arc<grafeo_core::execution::operators::DelimBuffer>>>,
     /// Variables from variable-length expand patterns (group-list variables).
     /// Used by the aggregate planner to detect horizontal aggregation (GE09).
     pub(super) group_list_variables: std::cell::RefCell<std::collections::HashSet<String>>,
@@ -350,6 +355,7 @@ impl Planner {
             store_kind: StoreKind::BuiltIn,
             projections: None,
             correlated_param_state: std::cell::RefCell::new(None),
+            delim_buffers: std::cell::RefCell::new(Vec::new()),
             group_list_variables: std::cell::RefCell::new(std::collections::HashSet::new()),
             statement_writes: std::cell::Cell::new(None),
             after_a_write: std::cell::Cell::new(false),
@@ -410,6 +416,7 @@ impl Planner {
             store_kind: StoreKind::BuiltIn,
             projections: None,
             correlated_param_state: std::cell::RefCell::new(None),
+            delim_buffers: std::cell::RefCell::new(Vec::new()),
             group_list_variables: std::cell::RefCell::new(std::collections::HashSet::new()),
             statement_writes: std::cell::Cell::new(None),
             after_a_write: std::cell::Cell::new(false),
@@ -1053,6 +1060,7 @@ impl Planner {
                 ),
             )),
             LogicalOperator::ParameterScan(param_scan) => self.plan_parameter_scan(param_scan),
+            LogicalOperator::DelimScan(scan) => self.plan_delim_scan(scan),
             LogicalOperator::MultiWayJoin(mwj) => self.plan_multi_way_join(mwj),
             LogicalOperator::HorizontalAggregate(ha) => self.plan_horizontal_aggregate(ha),
             LogicalOperator::LoadData(load) => self.plan_load_data(load),

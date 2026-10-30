@@ -2,7 +2,10 @@
 
 use std::collections::VecDeque;
 
+use grafeo_common::types::Value;
+
 use super::{DataChunk, Operator, OperatorResult};
+use crate::execution::chunk::DataChunkBuilder;
 
 /// Reads its whole input before it returns the first chunk, then returns the
 /// input's chunks unchanged, in order.
@@ -49,6 +52,65 @@ impl Operator for EagerOperator {
 
     fn name(&self) -> &'static str {
         "Eager"
+    }
+
+    fn into_any(self: Box<Self>) -> Box<dyn std::any::Any + Send> {
+        self
+    }
+}
+
+/// Gives the rows of its input one chunk each, in order: for a write
+/// below another write (`SET n.b = n.a, n.a = x` plans two), so each row
+/// passes through the whole chain before the next row starts, as the
+/// statement's rows apply one after the other. The input above it runs in
+/// full chunks.
+pub struct OneRowAtATimeOperator {
+    input: Box<dyn Operator>,
+    /// The chunk being given out, its selected rows, and the next of them.
+    chunk: Option<(DataChunk, Vec<usize>, usize)>,
+}
+
+impl OneRowAtATimeOperator {
+    /// Gives the rows of `input` one at a time.
+    pub fn new(input: Box<dyn Operator>) -> Self {
+        Self { input, chunk: None }
+    }
+}
+
+impl Operator for OneRowAtATimeOperator {
+    fn next(&mut self) -> OperatorResult {
+        loop {
+            if let Some((chunk, rows, next)) = &mut self.chunk
+                && let Some(&row) = rows.get(*next)
+            {
+                *next += 1;
+                let mut builder = DataChunkBuilder::with_capacity(&chunk.column_types(), 1);
+                for column in 0..chunk.column_count() {
+                    if let (Some(source), Some(target)) =
+                        (chunk.column(column), builder.column_mut(column))
+                    {
+                        target.push_value(source.get_value(row).unwrap_or(Value::Null));
+                    }
+                }
+                builder.advance_row();
+                return Ok(Some(builder.finish()));
+            }
+            let Some(chunk) = self.input.next()? else {
+                self.chunk = None;
+                return Ok(None);
+            };
+            let rows = chunk.selected_indices().collect();
+            self.chunk = Some((chunk, rows, 0));
+        }
+    }
+
+    fn reset(&mut self) {
+        self.input.reset();
+        self.chunk = None;
+    }
+
+    fn name(&self) -> &'static str {
+        "OneRowAtATime"
     }
 
     fn into_any(self: Box<Self>) -> Box<dyn std::any::Any + Send> {

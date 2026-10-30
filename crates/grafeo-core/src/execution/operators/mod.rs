@@ -70,7 +70,7 @@ pub use aggregate::{HashAggregateOperator, SimpleAggregateOperator};
 pub use apply::ApplyOperator;
 pub use delim::{DelimBuffer, DelimReplayOperator, DelimValuesOperator};
 pub use distinct::DistinctOperator;
-pub use eager::EagerOperator;
+pub use eager::{EagerOperator, OneRowAtATimeOperator};
 pub use expand::ExpandOperator;
 pub use factorized_aggregate::{
     FactorizedAggregate, FactorizedAggregateOperator, FactorizedOperator,

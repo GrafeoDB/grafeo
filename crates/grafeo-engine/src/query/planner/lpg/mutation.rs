@@ -69,10 +69,7 @@ impl super::Planner {
         elements: &[CreateElement],
     ) -> Result<(Box<dyn Operator>, Vec<String>)> {
         let input = match input {
-            Some(input) => {
-                let (op, columns) = self.plan_operator(input)?;
-                Some((read_before_writing(op, input), columns))
-            }
+            Some(input) => Some(self.plan_write_input(input)?),
             None => None,
         };
         self.build_creation(input, elements)
@@ -168,8 +165,7 @@ impl super::Planner {
         &self,
         delete: &DeleteNodeOp,
     ) -> Result<(Box<dyn Operator>, Vec<String>)> {
-        let (input_op, columns) = self.plan_operator(&delete.input)?;
-        let input_op = read_before_writing(input_op, &delete.input);
+        let (input_op, columns) = self.plan_write_input(&delete.input)?;
 
         let col_idx = columns
             .iter()
@@ -205,8 +201,7 @@ impl super::Planner {
         &self,
         delete: &DeleteEdgeOp,
     ) -> Result<(Box<dyn Operator>, Vec<String>)> {
-        let (input_op, columns) = self.plan_operator(&delete.input)?;
-        let input_op = read_before_writing(input_op, &delete.input);
+        let (input_op, columns) = self.plan_write_input(&delete.input)?;
 
         let edge_column = columns
             .iter()
@@ -607,10 +602,14 @@ impl super::Planner {
         } else {
             unwind_op
         };
-        // In a statement that writes, a row sees the writes of the rows before
-        // it, so the rows go one at a time; a read gets them in full chunks.
+        // Under a write that sees what its own earlier rows wrote (a MERGE,
+        // a CALL or FOREACH that writes), a row is read after the rows before
+        // it wrote, so the rows go one at a time. Every other statement gets
+        // them in full chunks: a CREATE, SET, REMOVE or DELETE reads its
+        // whole input first and takes its rows one at a time just below
+        // itself (see `plan_write_input`).
         let operator: Box<dyn Operator> =
-            Box::new(if self.statement_writes.get().is_none_or(|w| w.writes) {
+            Box::new(if self.statement_writes.get().is_none_or(|w| w.per_row) {
                 unwind_op.row_at_a_time()
             } else {
                 unwind_op
@@ -1284,8 +1283,7 @@ impl super::Planner {
         &self,
         add_label: &AddLabelOp,
     ) -> Result<(Box<dyn Operator>, Vec<String>)> {
-        let (input_op, columns) = self.plan_operator(&add_label.input)?;
-        let input_op = read_before_writing(input_op, &add_label.input);
+        let (input_op, columns) = self.plan_write_input(&add_label.input)?;
 
         // Find the node column
         let node_column = columns
@@ -1320,8 +1318,7 @@ impl super::Planner {
         &self,
         remove_label: &RemoveLabelOp,
     ) -> Result<(Box<dyn Operator>, Vec<String>)> {
-        let (input_op, columns) = self.plan_operator(&remove_label.input)?;
-        let input_op = read_before_writing(input_op, &remove_label.input);
+        let (input_op, columns) = self.plan_write_input(&remove_label.input)?;
 
         // Find the node column
         let node_column = columns
@@ -1356,8 +1353,7 @@ impl super::Planner {
         &self,
         set_prop: &SetPropertyOp,
     ) -> Result<(Box<dyn Operator>, Vec<String>)> {
-        let (input_op, columns) = self.plan_operator(&set_prop.input)?;
-        let input_op = read_before_writing(input_op, &set_prop.input);
+        let (input_op, columns) = self.plan_write_input(&set_prop.input)?;
 
         // Find the entity column (node or edge variable)
         let entity_column = columns
@@ -1743,6 +1739,49 @@ pub(super) fn read_first_after_a_write(
     } else {
         op
     }
+}
+
+impl super::Planner {
+    /// Plans `input`, the input of a write (a `CREATE`, `SET`, `REMOVE`,
+    /// `DELETE` or label change), read whole before the write's first row
+    /// when it is not one pass (see [`read_before_writing`]), then given to
+    /// the write one row at a time: the rows of a statement apply one after
+    /// the other, so each row's values (`SET p.n = coalesce(p.n, 0) + x`,
+    /// computed in a projection above this input) and each write of a chain
+    /// (`SET n.b = n.a, n.a = x` plans two) see what the rows before it
+    /// wrote. Everything below runs in full chunks. The input of a write
+    /// that is itself a write already comes one row at a time.
+    fn plan_write_input(
+        &self,
+        input: &LogicalOperator,
+    ) -> Result<(Box<dyn Operator>, Vec<String>)> {
+        let (op, columns) = self.plan_operator(input)?;
+        let op = read_before_writing(op, input);
+        Ok(if writes_row_by_row(input) {
+            (op, columns)
+        } else {
+            (
+                Box::new(grafeo_core::execution::operators::OneRowAtATimeOperator::new(op)),
+                columns,
+            )
+        })
+    }
+}
+
+/// Whether `op` is a write that resolves and writes its rows one at a time
+/// from a whole input: the ones [`Planner::plan_write_input`] plans.
+fn writes_row_by_row(op: &LogicalOperator) -> bool {
+    matches!(
+        op,
+        LogicalOperator::CreateNode(_)
+            | LogicalOperator::CreateEdge(_)
+            | LogicalOperator::Create(_)
+            | LogicalOperator::DeleteNode(_)
+            | LogicalOperator::DeleteEdge(_)
+            | LogicalOperator::SetProperty(_)
+            | LogicalOperator::AddLabel(_)
+            | LogicalOperator::RemoveLabel(_)
+    )
 }
 
 /// The planned input `op` of a write (a `CREATE`, `SET`, `REMOVE` or

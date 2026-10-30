@@ -39,7 +39,9 @@ DL2|sparql cc3ebc43e3 A FILTER inside OPTIONAL reads the outer pattern's variabl
 DL3|sparql 317dd143a9 A FILTER inside OPTIONAL reads the joined solution, so a count over the optional variable sees no extension; 0.6.0 counted 2 (#701).
 DL4|sparql cd2c972924 A group that opens with MINUS is one empty solution; 0.6.0 gave the MINUS pattern's solutions (#702).
 DL5|sparql cd2c972924 A group that opens with an OPTIONAL without a match is one empty solution; 0.6.0 gave none (#702).
+DL6|sparql 1b34b3884d A variable a leading OPTIONAL without a match leaves unbound joins with every value of a later pattern; 0.6.0 joined the OPTIONAL's pattern and found no row (#702).
 DL7|sparql 209042b955 A BIND to a variable already in scope is a syntax error; 0.6.0 overwrote the variable (#703).
 DL8|sparql fe72c08082 FILTER EXISTS keeps a solution once and binds none of its pattern's variables; 0.6.0 gave one row per match with the pattern's variables.
 DL9|sparql 97f0e95745 FILTER NOT EXISTS without a shared variable removes every solution when its pattern matches; 0.6.0 kept them.
 DL10|sparql 1a5ada6bbb A group of only FILTER NOT EXISTS is false when its pattern matches; 0.6.0 gave true.
+DL11|sparql 77f2a18238 A variable an OPTIONAL leaves unbound joins with every value of a later pattern; 0.6.0 dropped the rows without the OPTIONAL's match.

@@ -9,6 +9,8 @@
 //!   (18.2.2.6: every group starts from the empty pattern).
 //! - A BIND to a variable already in scope is a syntax error (10.1, 18.2.1),
 //!   so the update fails and changes nothing.
+//! - `GRAPH ?g` ranges over the named graphs the transaction sees, its own
+//!   uncommitted ones included (18.6).
 //!
 //! ```bash
 //! cargo test -p grafeo-engine --all-features --test sparql_update_group_algebra
@@ -280,4 +282,59 @@ fn an_update_whose_where_binds_a_fresh_variable_runs() {
         3,
         0,
     )]);
+}
+
+// =========================================================================
+// GRAPH ?g over the named graphs a transaction sees
+// =========================================================================
+
+/// The named graphs `GRAPH ?g { }` lists in `session`, one row each, as
+/// their IRIs, sorted.
+fn graphs(session: &grafeo_engine::Session) -> Vec<String> {
+    let mut graphs: Vec<String> = session
+        .execute_sparql("SELECT ?g WHERE { GRAPH ?g { } }")
+        .unwrap()
+        .rows()
+        .iter()
+        .map(|row| format!("{:?}", row[0]))
+        .collect();
+    graphs.sort();
+    graphs
+}
+
+/// A graph a transaction created by `INSERT DATA` is a named graph of its
+/// own reads before the commit, and of no other session's; a rollback
+/// leaves it out, a commit gives it to everyone.
+#[test]
+fn a_graph_variable_lists_the_graphs_a_transaction_wrote() {
+    const NEW_GRAPH: &str = r#"INSERT DATA {
+        GRAPH <http://ex.org/trips> { <http://ex.org/alix> <http://ex.org/city> "Prague" . }
+    }"#;
+    let db = GrafeoDB::new_in_memory();
+    db.execute_sparql(
+        r#"INSERT DATA {
+            GRAPH <http://ex.org/people> { <http://ex.org/alix> <http://ex.org/name> "Alix" . }
+        }"#,
+    )
+    .unwrap();
+    let people = vec!["RdfTerm(<http://ex.org/people>)".to_string()];
+    let both = vec![
+        "RdfTerm(<http://ex.org/people>)".to_string(),
+        "RdfTerm(<http://ex.org/trips>)".to_string(),
+    ];
+    let other = db.session();
+
+    let mut writer = db.session();
+    writer.begin_transaction().unwrap();
+    writer.execute_sparql(NEW_GRAPH).unwrap();
+    assert_eq!(graphs(&writer), both, "the writer sees its new graph");
+    assert_eq!(graphs(&other), people, "no other session sees it yet");
+    writer.rollback().unwrap();
+    assert_eq!(graphs(&writer), people, "a rollback leaves it out");
+
+    writer.begin_transaction().unwrap();
+    writer.execute_sparql(NEW_GRAPH).unwrap();
+    assert_eq!(graphs(&writer), both);
+    writer.commit().unwrap();
+    assert_eq!(graphs(&other), both, "after the commit everyone sees it");
 }

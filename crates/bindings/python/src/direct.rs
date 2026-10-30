@@ -61,27 +61,17 @@ pub(crate) fn properties_list(
         .collect()
 }
 
-/// A query result for Python, with the nodes and edges it returns.
+/// A query result for Python; it finds the nodes and edges it returns when
+/// first asked for them.
 pub(crate) fn query_result(mut result: QueryResult) -> PyQueryResult {
-    let (nodes, edges) = grafeo_bindings_common::entity::extract_and_map(
-        &result,
-        |n| PyNode::new(n.id, n.labels, n.properties),
-        |e| PyEdge::new(e.id, e.edge_type, e.source_id, e.target_id, e.properties),
-    );
     let columns = std::mem::take(&mut result.columns);
     let execution_time = result.execution_time_ms;
     let rows_scanned = result.rows_scanned;
     let counters = result.counters;
     let profile = result.profile.take();
     let kind = result.kind;
-    let mut query_result = PyQueryResult::with_metrics(
-        columns,
-        result.into_rows(),
-        nodes,
-        edges,
-        execution_time,
-        rows_scanned,
-    );
+    let mut query_result =
+        PyQueryResult::with_metrics(columns, result.into_rows(), execution_time, rows_scanned);
     query_result.counters = counters;
     query_result.profile = profile;
     query_result.kind = kind;
@@ -148,6 +138,13 @@ pub(crate) trait DirectTarget {
         replace: bool,
     ) -> grafeo_common::utils::error::Result<UpsertSummary>;
 
+    fn update_nodes(
+        &self,
+        labels: &[&str],
+        key: &str,
+        rows: Vec<HashMap<PropertyKey, Value>>,
+    ) -> grafeo_common::utils::error::Result<UpsertSummary>;
+
     fn upsert_edges(
         &self,
         edge_type: &str,
@@ -191,6 +188,15 @@ impl DirectTarget for Session {
         replace: bool,
     ) -> grafeo_common::utils::error::Result<UpsertSummary> {
         Session::upsert_nodes(self, labels, key, rows, replace)
+    }
+
+    fn update_nodes(
+        &self,
+        labels: &[&str],
+        key: &str,
+        rows: Vec<HashMap<PropertyKey, Value>>,
+    ) -> grafeo_common::utils::error::Result<UpsertSummary> {
+        Session::update_nodes(self, labels, key, rows)
     }
 
     fn upsert_edges(
@@ -240,6 +246,15 @@ impl DirectTarget for GrafeoDB {
         GrafeoDB::upsert_nodes(self, labels, key, rows, replace)
     }
 
+    fn update_nodes(
+        &self,
+        labels: &[&str],
+        key: &str,
+        rows: Vec<HashMap<PropertyKey, Value>>,
+    ) -> grafeo_common::utils::error::Result<UpsertSummary> {
+        GrafeoDB::update_nodes(self, labels, key, rows)
+    }
+
     fn upsert_edges(
         &self,
         edge_type: &str,
@@ -287,6 +302,15 @@ impl DirectTarget for GraphHandle<'_> {
         GraphHandle::upsert_nodes(self, labels, key, rows, replace)
     }
 
+    fn update_nodes(
+        &self,
+        labels: &[&str],
+        key: &str,
+        rows: Vec<HashMap<PropertyKey, Value>>,
+    ) -> grafeo_common::utils::error::Result<UpsertSummary> {
+        GraphHandle::update_nodes(self, labels, key, rows)
+    }
+
     fn upsert_edges(
         &self,
         edge_type: &str,
@@ -305,6 +329,19 @@ pub(crate) fn upsert_summary<'py>(
 ) -> PyResult<Bound<'py, PyDict>> {
     let dict = PyDict::new(py);
     dict.set_item("created", summary.created)?;
+    dict.set_item("updated", summary.updated)?;
+    dict.set_item("skipped", summary.skipped)?;
+    dict.set_item("skipped_rows", summary.skipped_rows.clone())?;
+    Ok(dict)
+}
+
+/// An update summary as a dict: `updated`, `skipped` and `skipped_rows` (an
+/// update creates nothing, so it has no `created`).
+pub(crate) fn update_summary<'py>(
+    py: Python<'py>,
+    summary: &UpsertSummary,
+) -> PyResult<Bound<'py, PyDict>> {
+    let dict = PyDict::new(py);
     dict.set_item("updated", summary.updated)?;
     dict.set_item("skipped", summary.skipped)?;
     dict.set_item("skipped_rows", summary.skipped_rows.clone())?;

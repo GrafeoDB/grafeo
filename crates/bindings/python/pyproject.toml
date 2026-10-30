@@ -41,6 +41,12 @@ Repository = "https://github.com/GrafeoDB/grafeo"
 Issues = "https://github.com/GrafeoDB/grafeo/issues"
 
 [project.optional-dependencies]
+# nodes_to_arrow(), edges_to_arrow(), QueryResult.to_arrow() and the fast
+# path of nodes_df() and edges_df(). They read plain Arrow IPC streams; 14 is
+# the first pyarrow with wheels for Python 3.12.
+arrow = [
+    "pyarrow>=14",
+]
 cli = [
     "grafeo-cli>=0.6.0,<0.7",
 ]

@@ -1,11 +1,13 @@
-//! Upserts: create or update nodes and edges by a key property.
+//! Upserts: create or update nodes and edges by a key property, and updates
+//! of existing nodes by a key property.
 //!
-//! Each call writes with one `UNWIND $rows ... MERGE ... SET ...` statement
+//! Each upsert writes with one `UNWIND $rows ... MERGE ... SET ...` statement
 //! (an edge upsert looks up its endpoints first), so the rows are checked,
 //! logged, reported to CDC and counted like any query. Rows
 //! apply in order and see the writes of the rows before them: a key repeated
 //! within one call behaves like repeated calls (the first creates, the next
-//! update).
+//! update). An update finds its nodes with one statement and sets them with
+//! a second, in one write (see [`GrafeoDB::update_nodes`]).
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
@@ -185,6 +187,86 @@ fn upsert_nodes(
         key = quote(key),
     );
     summarize(run, &query, items, total, |counters| counters.nodes_created)
+}
+
+/// Updates the nodes that have `key` and all of `labels`, one row at a time,
+/// and creates none: the row's properties are merged into each node its key
+/// matches, as `UNWIND $rows AS r MATCH (n:Labels {key: r.key}) SET n += r`
+/// does. A row whose key matches no node, or without the key, is skipped.
+///
+/// Two statements in one write: the first finds the nodes of every row in
+/// one pass (a hash join on the key, or a seek per row when the key has a
+/// property index), the second sets each row on its nodes by ID. Statement
+/// by statement the keys would be scanned per row, as a statement that
+/// writes does not hash its input. A row writes its own key value only, so
+/// no row changes which nodes another row matches, and finding them all
+/// first gives what the rows one by one would.
+fn update_nodes(
+    session: &Session,
+    labels: &[&str],
+    key: &str,
+    rows: Vec<HashMap<PropertyKey, Value>>,
+) -> Result<UpsertSummary> {
+    check_name("key", key)?;
+    let label_pattern = labels
+        .iter()
+        .map(|label| check_name("label", label).map(|()| format!(":{}", quote(label))))
+        .collect::<Result<String>>()?;
+    let total = rows.len();
+    let key_property = PropertyKey::new(key);
+    let keys: Vec<Value> = rows
+        .iter()
+        .enumerate()
+        .filter_map(|(index, row)| {
+            let value = row.get(&key_property).filter(|value| !value.is_null())?;
+            Some(item(index, [("key", value.clone())]))
+        })
+        .collect();
+    if keys.is_empty() {
+        return Ok(summary(total, &BTreeSet::new(), 0));
+    }
+    let rows: Vec<Value> = rows.into_iter().map(map_value).collect();
+    let find = format!(
+        "UNWIND $rows AS item \
+         MATCH (n{label_pattern}) WHERE n.{key} = item.key \
+         RETURN item.i, id(n)",
+        key = quote(key),
+    );
+    let set = "UNWIND $rows AS item \
+               MATCH (n) WHERE id(n) = item.node \
+               SET n += item.row \
+               RETURN item.i";
+    let result = session.as_one_write(|| {
+        let found = session.execute_with_params(
+            &find,
+            HashMap::from([("rows".to_string(), Value::List(keys.into()))]),
+        )?;
+        let updates: Vec<Value> = found
+            .rows()
+            .iter()
+            .filter_map(|found| match (found.first(), found.get(1)) {
+                (Some(Value::Int64(index)), Some(node @ Value::Int64(_))) => {
+                    let index = usize::try_from(*index).ok()?;
+                    let row = rows.get(index)?.clone();
+                    Some(item(index, [("node", node.clone()), ("row", row)]))
+                }
+                _ => None,
+            })
+            .collect();
+        if updates.is_empty() {
+            return Ok(None);
+        }
+        session
+            .execute_with_params(
+                set,
+                HashMap::from([("rows".to_string(), Value::List(updates.into()))]),
+            )
+            .map(Some)
+    })?;
+    Ok(match result {
+        Some(result) => count(&result, total, 0),
+        None => summary(total, &BTreeSet::new(), 0),
+    })
 }
 
 /// Creates or updates one edge per row between the nodes whose
@@ -452,6 +534,31 @@ impl GrafeoDB {
     ) -> Result<UpsertSummary> {
         upsert_edges(&self.session(), edge_type, rows, options)
     }
+
+    /// Updates the existing nodes in the current graph that have `key` and
+    /// all of `labels`, one row at a time, and creates none.
+    ///
+    /// A row's properties are merged into each node its key matches (the
+    /// others stay), as `UNWIND $rows AS r MATCH (n:Labels {key: r.key}) SET
+    /// n += r` does. A row whose key matches no such node, or without the
+    /// key, is skipped. The call is one write. It takes time linear in the
+    /// rows and the nodes of `labels`: a property index on `key` is used
+    /// when there is one, and is not needed.
+    ///
+    /// The summary counts the updated and the skipped rows; `created` is 0.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if a row breaks a constraint or the schema; nothing
+    /// of the call is written then.
+    pub fn update_nodes(
+        &self,
+        labels: &[&str],
+        key: &str,
+        rows: Vec<HashMap<PropertyKey, Value>>,
+    ) -> Result<UpsertSummary> {
+        update_nodes(&self.session(), labels, key, rows)
+    }
 }
 
 impl GraphHandle<'_> {
@@ -491,6 +598,21 @@ impl GraphHandle<'_> {
     ) -> Result<UpsertSummary> {
         upsert_edges(&self.session()?, edge_type, rows, options)
     }
+
+    /// [`GrafeoDB::update_nodes`] in this graph.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the graph no longer exists or a row breaks a
+    /// constraint or the schema.
+    pub fn update_nodes(
+        &self,
+        labels: &[&str],
+        key: &str,
+        rows: Vec<HashMap<PropertyKey, Value>>,
+    ) -> Result<UpsertSummary> {
+        update_nodes(&self.session()?, labels, key, rows)
+    }
 }
 
 impl Session {
@@ -529,5 +651,20 @@ impl Session {
         options: &EdgeUpsertOptions,
     ) -> Result<UpsertSummary> {
         upsert_edges(self, edge_type, rows, options)
+    }
+
+    /// [`GrafeoDB::update_nodes`] in the session's graph, inside its
+    /// transaction when one is open.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if a row breaks a constraint or the schema.
+    pub fn update_nodes(
+        &self,
+        labels: &[&str],
+        key: &str,
+        rows: Vec<HashMap<PropertyKey, Value>>,
+    ) -> Result<UpsertSummary> {
+        update_nodes(self, labels, key, rows)
     }
 }

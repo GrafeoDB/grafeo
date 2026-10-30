@@ -1376,6 +1376,58 @@ impl PyGrafeoDB {
             .collect()
     }
 
+    /// Get several properties for multiple nodes at once.
+    ///
+    /// One read of the database for all `keys`, so the lists hold the values
+    /// of one committed state. Returns one list per key, aligned
+    /// with `node_ids`: None where the node lacks the property or no node has
+    /// the ID. IDs may repeat and keep their order.
+    ///
+    /// Example:
+    /// ```python
+    /// columns = db.get_properties_batch(node_ids, ["name", "city"])
+    /// for node_id, name, city in zip(node_ids, columns["name"], columns["city"]):
+    ///     print(node_id, name, city)
+    /// ```
+    fn get_properties_batch<'py>(
+        &self,
+        py: Python<'py>,
+        node_ids: Vec<u64>,
+        keys: Vec<String>,
+    ) -> PyResult<Bound<'py, pyo3::types::PyDict>> {
+        let ids: Vec<NodeId> = node_ids.into_iter().map(NodeId).collect();
+        // Each key once: a repeated key is one entry of the dict.
+        let mut seen = std::collections::HashSet::with_capacity(keys.len());
+        let keys: Vec<grafeo_common::types::PropertyKey> = keys
+            .into_iter()
+            .filter(|key| seen.insert(key.clone()))
+            .map(grafeo_common::types::PropertyKey::new)
+            .collect();
+        // One pinned read for every key: the values of one committed state.
+        // The store keeps a property's values together, so a column per key
+        // reads them without building a map per node.
+        let values_per_key = self.released(py, |db| {
+            let snapshot = db.snapshot()?;
+            let (store, view) = (snapshot.store(), snapshot.view());
+            Ok(keys
+                .iter()
+                .map(|key| store.node_property_batch(&ids, key, view))
+                .collect::<grafeo_common::utils::error::Result<Vec<_>>>()?)
+        })?;
+        let columns = pyo3::types::PyDict::new(py);
+        for (key, values) in keys.iter().zip(values_per_key) {
+            let list = pyo3::types::PyList::empty(py);
+            for value in values {
+                match value {
+                    Some(value) => list.append(PyValue::to_py(&value, py)?)?,
+                    None => list.append(py.None())?,
+                }
+            }
+            columns.set_item(key.as_str(), list)?;
+        }
+        Ok(columns)
+    }
+
     /// Delete a node by ID.
     ///
     /// Returns False if the node does not exist. Raises if the node still
@@ -1746,6 +1798,40 @@ impl PyGrafeoDB {
             )?)
         })?;
         crate::direct::upsert_summary(py, &summary)
+    }
+
+    /// Updates existing nodes, one per row, matched by `key` and all of
+    /// `labels`; creates nothing.
+    ///
+    /// Each row is a dict of properties holding `key`. Its properties are
+    /// merged into the node's and the others stay, as
+    /// `UNWIND $rows AS r MATCH (n:Labels {key: r.key}) SET n += r` does. A
+    /// row whose key matches no node with every label, or without the key,
+    /// is skipped. The call writes all rows or none, and its time grows with
+    /// the rows and the nodes, also without a property index on `key`.
+    ///
+    /// Returns:
+    ///     dict with `updated`, `skipped` and `skipped_rows` (the indices of
+    ///     the skipped rows, at most 1,000).
+    ///
+    /// Example:
+    ///     db.update_nodes(["Graph", "File"], [{"id": "f1", "size": 4}])
+    #[pyo3(signature = (labels, rows, key="id"))]
+    fn update_nodes<'py>(
+        &self,
+        py: Python<'py>,
+        labels: Vec<String>,
+        rows: &Bound<'_, pyo3::types::PyList>,
+        key: &str,
+    ) -> PyResult<Bound<'py, pyo3::types::PyDict>> {
+        let labels: Vec<&str> = labels.iter().map(String::as_str).collect();
+        let rows = crate::direct::properties_list(rows)?;
+        let summary = self.released(py, |db| {
+            Ok(crate::direct::DirectTarget::update_nodes(
+                db, &labels, key, rows,
+            )?)
+        })?;
+        crate::direct::update_summary(py, &summary)
     }
 
     /// Creates or updates one edge of `edge_type` per row between existing

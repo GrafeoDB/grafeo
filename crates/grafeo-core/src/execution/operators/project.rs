@@ -145,7 +145,7 @@ impl EntityValue {
 
     /// What the items `start..end` of a list that holds this hold (a slice,
     /// `tail`; a bound `None` is the start or the end, a negative one counts
-    /// from the end, see [`slice_range`]): a list holds the same, a list
+    /// from the end, as `slice_range` reads them): a list holds the same, a list
     /// literal what its items in that range hold. `None` for a value that is
     /// not a list.
     #[must_use]

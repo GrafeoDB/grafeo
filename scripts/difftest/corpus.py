@@ -394,6 +394,20 @@ def codegraph(grafeo):
     return db
 
 
+def unlabeled(grafeo):
+    """Three labeled nodes and one without a label: `Message:Post` (`id` 1),
+    `Message:Comment` (2), `Person` (3) and none (4), `w` 100 to 103; the person KNOWS the
+    post and LIKES the unlabeled node."""
+    db = grafeo.GrafeoDB()
+    db.execute(
+        "INSERT (:Message:Post {id: 1, w: 100}), (:Message:Comment {id: 2, w: 101}), "
+        "(:Person {id: 3, w: 102}), ({id: 4, w: 103})"
+    )
+    db.execute("MATCH (p {id: 3}), (m {id: 1}) INSERT (p)-[:KNOWS {w: 1}]->(m)")
+    db.execute("MATCH (p {id: 3}), (n {id: 4}) INSERT (p)-[:LIKES {w: 2}]->(n)")
+    return db
+
+
 FIXTURES = {
     "rdf": rdf,
     "rdf_writes": rdf_writes,
@@ -418,6 +432,7 @@ FIXTURES = {
     "quoted": quoted,
     "graphs": graphs,
     "codegraph": codegraph,
+    "unlabeled": unlabeled,
 }
 
 CASES: list[Case] = []
@@ -2359,5 +2374,28 @@ for case_id, query in [
     ("DN27", "MATCH (n:Method) OPTIONAL MATCH (n)-[:R]->(t) WHERE EXISTS { MATCH (n)-[:USES]->(m) WHERE m.i > 1003 } RETURN n.i AS i, t.i AS t"),
 ]:
     case(case_id, query, BOTH, "codegraph")
+
+# DO: the wildcard label `%` is "has a label" (ISO/IEC 39075 16.8), so it leaves out a node
+#     without one: IS % (DO1; 0.6.0 matched every node), :% (DO2), IS !% and :!% (DO3, DO4);
+#     a label expression after `:` that starts with `!` or `(` (DO5 to DO7, syntax errors in
+#     0.6.0), and on a node an edge reaches (DO8, DO9); SQL/PGQ the same (DO10 to DO12)
+for case_id, query in [
+    ("DO1", "MATCH (n IS %) RETURN n.id AS id"),
+    ("DO2", "MATCH (n:%) RETURN n.id AS id"),
+    ("DO3", "MATCH (n IS !%) RETURN n.id AS id"),
+    ("DO4", "MATCH (n:!%) RETURN n.id AS id"),
+    ("DO5", "MATCH (n:!Comment) RETURN n.id AS id"),
+    ("DO6", "MATCH (n:(Post|Comment)&Message) RETURN n.id AS id"),
+    ("DO7", "MATCH (n:!(Post|Comment)) RETURN n.id AS id"),
+    ("DO8", "MATCH (:Person)-[]->(m:%) RETURN m.id AS id"),
+    ("DO9", "MATCH (:Person)-[]->(m:!%) RETURN m.id AS id"),
+]:
+    case(case_id, query, GQL, "unlabeled")
+for case_id, query in [
+    ("DO10", "SELECT id FROM GRAPH_TABLE (MATCH (n IS %) COLUMNS (n.id AS id))"),
+    ("DO11", "SELECT id FROM GRAPH_TABLE (MATCH (n:!%) COLUMNS (n.id AS id))"),
+    ("DO12", "SELECT id FROM GRAPH_TABLE (MATCH (n:!(Post|Comment)) COLUMNS (n.id AS id))"),
+]:
+    case(case_id, query, SQL, "unlabeled")
 
 # fmt: on

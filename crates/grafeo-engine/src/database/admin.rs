@@ -39,7 +39,8 @@ impl super::GrafeoDB {
     ///
     /// As [`node_count`](Self::node_count).
     pub fn label_count(&self) -> Result<usize> {
-        Ok(self.graph_store().all_labels()?.len())
+        let snapshot = self.default_snapshot();
+        Ok(snapshot.store().labels_in_use(snapshot.view())?.len())
     }
 
     /// Returns the number of distinct property keys in the database, of
@@ -58,7 +59,8 @@ impl super::GrafeoDB {
     ///
     /// As [`node_count`](Self::node_count).
     pub fn edge_type_count(&self) -> Result<usize> {
-        Ok(self.graph_store().all_edge_types()?.len())
+        let snapshot = self.default_snapshot();
+        Ok(snapshot.store().edge_types_in_use(snapshot.view())?.len())
     }
 
     // =========================================================================
@@ -252,8 +254,8 @@ impl super::GrafeoDB {
         Ok(crate::admin::DatabaseStats {
             node_count: store.node_count(view)?,
             edge_count: store.edge_count(view)?,
-            label_count: store.all_labels()?.len(),
-            edge_type_count: store.all_edge_types()?.len(),
+            label_count: store.labels_in_use(view)?.len(),
+            edge_type_count: store.edge_types_in_use(view)?.len(),
             property_key_count: store.all_property_keys()?.len(),
             index_count: self.catalog.index_count(),
             memory_bytes: self.memory_usage().total_bytes,

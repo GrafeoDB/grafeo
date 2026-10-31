@@ -885,6 +885,56 @@ impl GraphStore for RowGroupStore {
             .collect())
     }
 
+    /// From the counts the store keeps when they answer for `view` (see
+    /// `counts_answer`), as the default reads them otherwise.
+    fn labels_in_use(&self, view: ReadView) -> Result<Vec<String>> {
+        let inner = self.inner.read();
+        if !self.counts_answer(view) {
+            let read = Read::view(view);
+            return Ok(inner
+                .labels
+                .iter()
+                .filter(|&(id, _)| !inner.nodes_with_labels_at(&[id], read).is_empty())
+                .map(|(_, name)| name.to_string())
+                .collect());
+        }
+        Ok(inner
+            .labels
+            .iter()
+            .filter(|&(id, _)| inner.counts.labels.get(id as usize).is_some_and(|&n| n > 0))
+            .map(|(_, name)| name.to_string())
+            .collect())
+    }
+
+    /// From the counts the store keeps when they answer for `view`, by
+    /// reading the edges otherwise.
+    fn edge_types_in_use(&self, view: ReadView) -> Result<Vec<String>> {
+        if !self.counts_answer(view) {
+            let mut in_use = std::collections::BTreeSet::new();
+            for node in self.node_ids(view)? {
+                for (_, edge) in self.edges(node, Direction::Outgoing, &[], view)? {
+                    if let Some(edge_type) = self.edge_type(edge, view)? {
+                        in_use.insert(edge_type.to_string());
+                    }
+                }
+            }
+            return Ok(in_use.into_iter().collect());
+        }
+        let inner = self.inner.read();
+        Ok(inner
+            .edge_types
+            .iter()
+            .filter(|&(id, _)| {
+                inner
+                    .counts
+                    .edge_types
+                    .get(id as usize)
+                    .is_some_and(|&n| n > 0)
+            })
+            .map(|(_, name)| name.to_string())
+            .collect())
+    }
+
     fn all_property_keys(&self) -> Result<Vec<String>> {
         Ok(self
             .inner

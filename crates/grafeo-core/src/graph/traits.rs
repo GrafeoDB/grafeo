@@ -491,6 +491,40 @@ pub trait GraphStore: Send + Sync {
     /// Returns the error of a read the store cannot do.
     fn all_edge_types(&self) -> Result<Vec<String>>;
 
+    /// The labels of [`all_labels`](Self::all_labels) that a node `view`
+    /// sees has: a label whose last node went is no longer one.
+    ///
+    /// # Errors
+    ///
+    /// Returns the error of a read the store cannot do.
+    fn labels_in_use(&self, view: ReadView) -> Result<Vec<String>> {
+        let mut in_use = Vec::new();
+        for label in self.all_labels()? {
+            if self.nodes_by_label_count(&label, view)? > 0 {
+                in_use.push(label);
+            }
+        }
+        Ok(in_use)
+    }
+
+    /// The edge types of [`all_edge_types`](Self::all_edge_types) that an
+    /// edge `view` sees has. The default reads every node's outgoing edges.
+    ///
+    /// # Errors
+    ///
+    /// Returns the error of a read the store cannot do.
+    fn edge_types_in_use(&self, view: ReadView) -> Result<Vec<String>> {
+        let mut in_use = std::collections::BTreeSet::new();
+        for node in self.node_ids(view)? {
+            for (_, edge) in self.edges(node, Direction::Outgoing, &[], view)? {
+                if let Some(edge_type) = self.edge_type(edge, view)? {
+                    in_use.insert(edge_type.to_string());
+                }
+            }
+        }
+        Ok(in_use.into_iter().collect())
+    }
+
     /// Every property key the store holds, of nodes and edges (see
     /// [`all_labels`](Self::all_labels)).
     ///

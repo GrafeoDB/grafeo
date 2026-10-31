@@ -35,8 +35,8 @@ use grafeo_common::types::ReadView;
 use std::path::{Path, PathBuf};
 
 use grafeo_common::types::Value;
-use grafeo_engine::GrafeoDB;
 use grafeo_engine::admin::SchemaInfo;
+use grafeo_engine::{GrafeoDB, GraphStore};
 
 /// The fixture's file name.
 const FILE: &str = "labels.grafeo";
@@ -65,9 +65,9 @@ const LABELS: [&str; 5] = ["Archive", "Graph", "Missing", "Repository", "Starred
 
 /// The names the label dictionary holds: each label of the folded nodes, and
 /// none of the joined names the fold split (`Graph|Repository`,
-/// `Archive|Graph|Repository`). `Archive` stays after a write removed it from
-/// Mia: `label_count()` counts the dictionary, while `CALL db.labels()` and
-/// `schema()` list only the labels some node has.
+/// `Archive|Graph|Repository`). `Archive` stays in it after a write removed
+/// it from Mia, while `label_count()`, `CALL db.labels()` and `schema()`
+/// count and list only the labels some node has.
 const DICTIONARY: [&str; 4] = ["Archive", "Graph", "Repository", "Starred"];
 
 /// The labels some node of `nodes` has, sorted.
@@ -281,7 +281,8 @@ fn assert_each_label_reads_its_nodes(db: &GrafeoDB, stage: &str, nodes: &[(&str,
 
 /// Checks that `CALL db.labels()` and `schema()` list the labels some node
 /// of `nodes` has, `schema()` with the number of `nodes` of each, and that
-/// `label_count()` counts the [`DICTIONARY`].
+/// `label_count()` counts those labels, while the store's dictionary holds
+/// the [`DICTIONARY`].
 fn assert_the_listed_labels(db: &GrafeoDB, stage: &str, nodes: &[(&str, &[&str])]) {
     let mut listed: Vec<String> = rows(db, "CALL db.labels()")
         .iter()
@@ -292,9 +293,12 @@ fn assert_the_listed_labels(db: &GrafeoDB, stage: &str, nodes: &[(&str, &[&str])
     assert_eq!(listed, expected_labels, "{stage}: CALL db.labels()");
     assert_eq!(
         db.label_count().unwrap(),
-        DICTIONARY.len(),
-        "{stage}: label_count(), the dictionary's names"
+        expected_labels.len(),
+        "{stage}: label_count(), the labels in use"
     );
+    let mut dictionary = db.store().unwrap().all_labels().unwrap();
+    dictionary.sort();
+    assert_eq!(dictionary, DICTIONARY, "{stage}: the label dictionary");
     let SchemaInfo::Lpg(schema) = db.schema().unwrap() else {
         panic!("{stage}: an LPG schema");
     };

@@ -1,14 +1,15 @@
 package grafeo
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"math"
 	"strconv"
 	"strings"
 )
 
-// marshalJSON encodes v as encoding/json does, but writes every float64 and
-// float32 as a JSON float: encoding/json writes float64(3) as "3", which
+// marshalJSON encodes v as encoding/json does, but writes every []byte as
+// the {"$bytes": "..."} tag and every float64 and float32 as a JSON float: encoding/json writes float64(3) as "3", which
 // Grafeo reads as an INT64, and float64(1<<63) as "9223372036854775808", a
 // DECIMAL. A whole float keeps a fraction or an exponent ("3.0",
 // "9.223372036854776e+18") and arrives as a FLOAT64, alone and inside lists
@@ -48,6 +49,14 @@ func jsonFloats(v any) any {
 			s[i] = floatNumber(float64(e))
 		}
 		return s
+	case []byte:
+		// encoding/json writes []byte as a base64 string, which Grafeo reads
+		// as a STRING; the $bytes tag arrives as BYTES. A nil slice stays
+		// null, as encoding/json writes it.
+		if x == nil {
+			return nil
+		}
+		return map[string]string{"$bytes": base64.StdEncoding.EncodeToString(x)}
 	default:
 		return v
 	}

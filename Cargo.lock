@@ -1568,6 +1568,7 @@ dependencies = [
 name = "grafeo-bindings-common"
 version = "0.6.0"
 dependencies = [
+ "base64 0.22.1",
  "grafeo-common",
  "grafeo-engine",
  "serde_json",

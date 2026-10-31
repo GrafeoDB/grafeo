@@ -80,7 +80,7 @@ internal static class ValueConverter
             {
                 ["$duration"] = System.Xml.XmlConvert.ToString(duration)
             },
-            byte[] bytes => JsonValue.Create(Convert.ToBase64String(bytes)),
+            byte[] bytes => new JsonObject { ["$bytes"] = Convert.ToBase64String(bytes) },
             float[] vector => VectorToJsonArray(vector),
             ReadOnlyMemory<float> mem => VectorToJsonArray(mem.Span),
             IList<object?> list => ListToJsonArray(list),
@@ -232,6 +232,20 @@ internal static class ValueConverter
         // An RDF term: the "$term" tag as the object's only key
         if (RdfTerm.FromJson(element) is { } term)
             return term;
+
+        // Bytes: the "$bytes" tag, standard base64, as the object's only key
+        if (element.TryGetProperty("$bytes", out var bytesElement)
+            && element.EnumerateObject().Count() == 1
+            && bytesElement.ValueKind == JsonValueKind.String)
+        {
+            // Canonical standard base64 only, as the engine reads it: a text it
+            // kept as a map (whitespace, unused bits set) stays a map
+            var text = bytesElement.GetString()!;
+            var buffer = new byte[text.Length];
+            if (Convert.TryFromBase64String(text, buffer, out var written)
+                && Convert.ToBase64String(buffer, 0, written) == text)
+                return buffer[..written];
+        }
 
         // A float JSON cannot write: the "$float" tag as the object's only key
         if (element.TryGetProperty("$float", out var floatElement)

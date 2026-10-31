@@ -7,6 +7,8 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
+use base64::Engine as _;
+
 use grafeo_common::types::rdf::{Literal, Term, UnsupportedTermKind};
 use grafeo_common::types::{PropertyKey, Value};
 
@@ -73,6 +75,11 @@ pub fn tagged_value(map: &BTreeMap<PropertyKey, Value>) -> Option<Value> {
     if let Some(float) = map.get(&PropertyKey::new(FLOAT_TAG)).and_then(tagged_float) {
         return Some(Value::Float64(float));
     }
+    if let Some(Value::String(text)) = map.get(&PropertyKey::new(BYTES_TAG))
+        && let Ok(bytes) = base64::engine::general_purpose::STANDARD.decode(text.as_str())
+    {
+        return Some(Value::Bytes(bytes.into()));
+    }
     if let Some(Value::Int64(micros)) = map.get(&PropertyKey::new("$timestamp_us")) {
         return Some(Value::Timestamp(
             grafeo_common::types::Timestamp::from_micros(*micros),
@@ -96,6 +103,10 @@ pub fn tagged_value(map: &BTreeMap<PropertyKey, Value>) -> Option<Value> {
     }
     None
 }
+
+/// The key of the tag bytes travel in as JSON: `{"$bytes": "AQL/"}`, their
+/// standard base64 with padding. Text that is no base64 leaves the map a map.
+pub const BYTES_TAG: &str = "$bytes";
 
 /// The key of the tag a float travels in as JSON when JSON cannot write it
 /// (`NaN`, `Infinity`, `-Infinity`) or the sender's JSON would write it as an
@@ -247,9 +258,7 @@ pub fn value_to_json(v: &Value) -> Result<serde_json::Value, UnsupportedTermKind
         }
         Value::String(s) => serde_json::Value::String(s.to_string()),
         Value::Bytes(b) => {
-            let arr: Vec<serde_json::Value> =
-                b.iter().map(|&byte| serde_json::json!(byte)).collect();
-            serde_json::Value::Array(arr)
+            serde_json::json!({ BYTES_TAG: base64::engine::general_purpose::STANDARD.encode(b) })
         }
         Value::Timestamp(ts) => serde_json::json!({ "$timestamp_us": ts.as_micros() }),
         Value::Date(d) => serde_json::json!({ "$date": d.to_string() }),
@@ -600,10 +609,12 @@ mod tests {
     fn roundtrip_bytes() {
         let v = Value::Bytes(Arc::new([1u8, 2, 3, 255]));
         let json = value_to_json(&v);
-        // Bytes encode as array of integers
-        assert!(json.is_array());
-        assert_eq!(json[0], serde_json::json!(1u8));
-        assert_eq!(json[3], serde_json::json!(255u8));
+        // Bytes travel as the `$bytes` tag, standard base64, and back
+        assert_eq!(json, serde_json::json!({ "$bytes": "AQID/w==" }));
+        assert_eq!(json_to_value(&json), v);
+        // Text that is no base64 leaves the map a map
+        let not_bytes = json_to_value(&serde_json::json!({ "$bytes": "not base64!" }));
+        assert!(matches!(not_bytes, Value::Map(_)), "{not_bytes:?}");
     }
 
     #[test]

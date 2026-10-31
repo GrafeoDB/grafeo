@@ -82,7 +82,7 @@ dynamic _encodeValue(dynamic value) {
     Duration dur => {r'$duration': _formatIsoDuration(dur)},
     Float32List vec => vec.toList(),
     Float64List vec => vec.toList(),
-    Uint8List bytes => base64Encode(bytes),
+    Uint8List bytes => {r'$bytes': base64Encode(bytes)},
     List list => list.map(_encodeValue).toList(),
     Map map => {
         for (final e in map.entries) e.key.toString(): _encodeValue(e.value),
@@ -214,6 +214,18 @@ dynamic _decodeMap(Map m) {
   // An RDF term: the `$term` tag as the map's only key
   final term = RdfTerm.fromJson(m);
   if (term != null) return term;
+  // Bytes: the `$bytes` tag, standard base64, as the map's only key
+  if (m.length == 1 && m[r'$bytes'] is String) {
+    // Canonical standard base64 only, as the engine reads it: a text it kept
+    // as a map (the URL-safe alphabet, unused bits set) stays a map
+    final text = m[r'$bytes'] as String;
+    try {
+      final bytes = base64Decode(text);
+      if (base64Encode(bytes) == text) return bytes;
+    } on FormatException {
+      // Not base64: the map stays a map
+    }
+  }
   // A float JSON cannot write: the `$float` tag as the map's only key
   if (m.length == 1 && m[r'$float'] is String) {
     switch (m[r'$float'] as String) {

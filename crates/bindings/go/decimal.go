@@ -1,6 +1,7 @@
 package grafeo
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"math"
@@ -54,7 +55,8 @@ func (d Decimal) MarshalJSON() ([]byte, error) {
 }
 
 // decodeTags turns every {"$decimal": "..."} map (the tag as its only key)
-// inside value into a Decimal, every {"$float": "NaN"} (or "Infinity",
+// inside value into a Decimal, every {"$bytes": "..."} map into its
+// []byte, every {"$float": "NaN"} (or "Infinity",
 // "-Infinity") map into that float64, and every {"$term": {...}} map into an
 // RdfTerm, through lists and maps.
 func decodeTags(value any) any {
@@ -63,6 +65,14 @@ func decodeTags(value any) any {
 		if text, ok := v["$decimal"].(string); ok && len(v) == 1 {
 			if d, err := ParseDecimal(text); err == nil {
 				return d
+			}
+		}
+		if text, ok := v["$bytes"].(string); ok && len(v) == 1 {
+			// Canonical standard base64 only, as the engine reads it: a text
+			// it kept as a map (whitespace, unused bits set) stays a map
+			if b, err := base64.StdEncoding.DecodeString(text); err == nil &&
+				base64.StdEncoding.EncodeToString(b) == text {
+				return b
 			}
 		}
 		if text, ok := v["$float"].(string); ok && len(v) == 1 {

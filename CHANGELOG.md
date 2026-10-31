@@ -133,6 +133,11 @@ Queries and calls that ran in 0.6.0 and now fail, because their result was wrong
 - **A crash on two-hop patterns through a node with many edges**: a filter over `(a)-->(b)-->(c)`, and any two-hop Cypher query, panicked once one node gave more than 65,536 paths; the rows now come a chunk at a time.
 - **Errors of the right kind**: a unique-key conflict is one write conflict, no longer wrapped in a second; an argument of a procedure that fails (`CALL grafeo.pagerank({damping: 1 / 0})`) keeps its GQLSTATUS (`22012`, or `22018` for a failed cast) and names the argument; a damaged incremental backup is a corruption error (`GRAFEO-S002`) naming its file, where it was an internal error.
 - **An incremental backup with nothing new succeeds**: it writes nothing and returns the chain's newest segment, where it failed with an internal error. When the log a chain continues from was removed, it fails with the new `GRAFEO-S005` (backup chain broken): take a new full backup.
+- **Undirected variable-length counts in Cypher**: `MATCH (s:Person {id: $p})-[:KNOWS*1..3]-(f) RETURN count(DISTINCT f)` from a person with hundreds of friends failed on the path search's budget (`GRAFEO-Q006`), as did the same GQL `MATCH TRAIL`; it now visits each node once, as SQL/PGQ does, and counts the start node only when a cycle through it fits in the pattern's length.
+- **SPARQL IRIs with `\u` escapes**: `<http://example.org/Krak\u00F3w>` and `<http://example.org/Kraków>` are one IRI, as SPARQL 1.1 decodes these escapes and the N-Triples and Turtle loaders read them; the escaped form was stored as written and matched nothing loaded.
+- **SQL/PGQ count errors name their clause**: a negative, fractional or text `OFFSET $n` or `LIMIT $n` names OFFSET or LIMIT in its error, not GQL's SKIP/LIMIT; the GQLSTATUS and code are unchanged.
+- **Go frees finished transactions**: a transaction's native handle is freed when it commits or rolls back; it stayed allocated, with its session, for the life of the process.
+- **Dart rollback after a failed commit**: `rollback()` after a failed `commit()` does nothing, as in the other bindings, where it threw "Transaction already finished".
 - **DDL gaps**: `CREATE GRAPH TYPE t LIKE g` inside a schema takes the graph type of `g`, where it made an empty open type; `CREATE VECTOR INDEX` takes `IF NOT EXISTS`; `DROP INDEX` of an index over several properties drops all of them, where it left all but one and kept the name taken.
 - **SQL/PGQ**: `ORDER BY` can name an alias of the outer `SELECT` (`SELECT age + 1 AS older ... ORDER BY older`), and the alias wins over a `COLUMNS` column of the same name; a parameter may be named after a keyword (`$from`, `$order`); `LIMIT` and `OFFSET` take a parameter (`LIMIT $n`).
 - **SPARQL alternative paths with an inverse branch**: `?s (ex:knows|^ex:knows) ?o`, and alternatives with a sequence or repeated branch, run where they were refused with `GRAFEO-Q004`; under `GRAPH ?g` they bind `?g`.
@@ -164,6 +169,10 @@ Queries and calls that ran in 0.6.0 and now fail, because their result was wrong
 
 ### Deprecated
 
+- **`GrafeoDB::store()`**: its writes skip the write-ahead log, transactions and change capture. Write through a session or the direct API (`batch_create_nodes`, `batch_create_edges`, the `import_*` calls for bulk loads), and read through `snapshot()`. Removed in 0.7.0.
+- **The `async-storage` feature**, with `GrafeoDB::async_wal_checkpoint` and `async_write_snapshot`: both only wrapped a blocking call. Call `wal_checkpoint()`, which writes the same file, from `tokio::task::spawn_blocking`. Removed in 0.7.0; from then the `enterprise` profile is metrics and tracing.
+- **`Config::with_threads`, `with_query_logging`, `with_schema_constraints`, `without_schema_constraints`** and their getters: they never had an effect. Nothing sizes a pool from the thread count, nothing logs queries, and the catalog enforces declared constraints either way. Removed in 0.7.0.
+- **`RdfStore::copy_graph`**: use SPARQL `COPY` in a session, which is logged. Removed in 0.7.0.
 - **`CatalogError::InvalidCheck`**: nothing returns it. CHECK constraints could be built only through the engine's internal catalog API, never through DDL or a binding, and are removed; they come back later as DDL. It goes in 0.7.0.
 
 ### Contributors

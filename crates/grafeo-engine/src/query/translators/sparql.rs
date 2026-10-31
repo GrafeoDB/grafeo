@@ -333,6 +333,15 @@ impl SparqlTranslator {
             }
         }
 
+        // A trailing VALUES joins the solutions after GROUP BY and HAVING
+        // (SPARQL 1.1 sec 18.2.4.3), before the SELECT expressions and the
+        // ORDER BY read them.
+        if let Some(values) = &select.solution_modifiers.values {
+            let data =
+                self.translate_graph_pattern(&ast::GraphPattern::InlineData(values.clone()))?;
+            plan = self.join_patterns(plan, data)?;
+        }
+
         let sort_keys = match &select.solution_modifiers.order_by {
             Some(order_by) => Some(
                 order_by

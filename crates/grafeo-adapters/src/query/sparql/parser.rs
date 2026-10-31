@@ -220,7 +220,8 @@ impl<'a> Parser<'a> {
         let template = self.parse_construct_template()?;
         let dataset = self.parse_dataset_clause()?;
         let where_clause = self.parse_where_clause()?;
-        let solution_modifiers = self.parse_solution_modifiers()?;
+        let mut solution_modifiers = self.parse_solution_modifiers()?;
+        let where_clause = Self::with_values(where_clause, solution_modifiers.values.take());
 
         Ok(ConstructQuery {
             template,
@@ -235,6 +236,8 @@ impl<'a> Parser<'a> {
 
         let dataset = self.parse_dataset_clause()?;
         let where_clause = self.parse_where_clause()?;
+        let values = self.parse_trailing_values()?;
+        let where_clause = Self::with_values(where_clause, values);
 
         Ok(AskQuery {
             dataset,
@@ -254,6 +257,10 @@ impl<'a> Parser<'a> {
             } else {
                 None
             };
+        let where_clause = match (where_clause, self.parse_trailing_values()?) {
+            (Some(pattern), values) => Some(Self::with_values(pattern, values)),
+            (None, values) => values.map(GraphPattern::InlineData),
+        };
 
         Ok(DescribeQuery {
             resources,
@@ -931,8 +938,10 @@ impl<'a> Parser<'a> {
 
         let mut variables = Vec::new();
 
-        // Parse variable list
-        if self.current.kind == TokenKind::LeftParen {
+        // Parse variable list: `?x` takes its values bare, `(?x ...)` in
+        // parenthesized rows, also for one variable (SPARQL 1.1 rule [62]).
+        let rows_in_parens = self.current.kind == TokenKind::LeftParen;
+        if rows_in_parens {
             self.advance();
             while self.current.kind == TokenKind::Variable {
                 variables.push(self.expect_variable_name()?);
@@ -947,7 +956,7 @@ impl<'a> Parser<'a> {
         let mut values = Vec::new();
 
         while self.current.kind != TokenKind::RightBrace {
-            if variables.len() == 1 {
+            if !rows_in_parens {
                 // Single variable - values listed directly
                 let value = self.parse_data_value()?;
                 values.push(vec![value]);
@@ -1473,6 +1482,7 @@ impl<'a> Parser<'a> {
         let having = self.parse_having()?;
         let order_by = self.parse_order_by()?;
         let (limit, offset) = self.parse_limit_offset()?;
+        let values = self.parse_trailing_values()?;
 
         Ok(SolutionModifiers {
             group_by,
@@ -1480,7 +1490,30 @@ impl<'a> Parser<'a> {
             order_by,
             limit,
             offset,
+            values,
         })
+    }
+
+    /// The VALUES clause after a query's pattern and modifiers (SPARQL 1.1
+    /// sec 10.2.2), if there is one.
+    fn parse_trailing_values(&mut self) -> Result<Option<InlineDataClause>> {
+        if self.current.kind != TokenKind::Values {
+            return Ok(None);
+        }
+        match self.parse_inline_data()? {
+            GraphPattern::InlineData(data) => Ok(Some(data)),
+            _ => Err(self.error("expected a VALUES data block")),
+        }
+    }
+
+    /// `pattern` joined with a trailing VALUES clause: for a query form
+    /// without grouping (ASK, CONSTRUCT, DESCRIBE), the same as a VALUES at
+    /// the end of its WHERE clause.
+    fn with_values(pattern: GraphPattern, values: Option<InlineDataClause>) -> GraphPattern {
+        match values {
+            Some(data) => GraphPattern::Group(vec![pattern, GraphPattern::InlineData(data)]),
+            None => pattern,
+        }
     }
 
     fn parse_group_by(&mut self) -> Result<Option<Vec<GroupCondition>>> {
@@ -1563,6 +1596,18 @@ impl<'a> Parser<'a> {
                 let expr = self.parse_expression()?;
                 self.expect(TokenKind::RightParen)?;
                 (expr, SortDirection::Ascending)
+            } else if self.starts_call() {
+                // A Constraint (SPARQL 1.1 rule [24]): a built-in call
+                // (`STR(?x)`) or a function call (`xsd:double(?price)`).
+                match self.parse_primary_expression()? {
+                    Expression::Iri(_) => {
+                        return Err(self.error(
+                            "an ORDER BY condition is a variable, a bracketed expression or a \
+                             function call, not an IRI",
+                        ));
+                    }
+                    call => (call, SortDirection::Ascending),
+                }
             } else {
                 break;
             };
@@ -1880,6 +1925,25 @@ impl<'a> Parser<'a> {
 
             _ => Err(self.error("expected expression")),
         }
+    }
+
+    /// Whether the current token starts a built-in call (an aggregate,
+    /// EXISTS, NOT EXISTS or a function name) or an IRI function call.
+    fn starts_call(&self) -> bool {
+        matches!(
+            self.current.kind,
+            TokenKind::Iri
+                | TokenKind::PrefixedName
+                | TokenKind::Count
+                | TokenKind::Sum
+                | TokenKind::Avg
+                | TokenKind::Min
+                | TokenKind::Max
+                | TokenKind::Sample
+                | TokenKind::GroupConcat
+                | TokenKind::Exists
+                | TokenKind::Not
+        ) || self.is_built_in_function()
     }
 
     fn is_built_in_function(&self) -> bool {

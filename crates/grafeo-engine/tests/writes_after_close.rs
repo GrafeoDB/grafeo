@@ -969,6 +969,13 @@ fn imports_after_close_fail_before_reading_their_input() {
             "import_tsv_rdf of a missing file",
             db.import_tsv_rdf(&missing, "http://ex.org/knows", "http://ex.org/"),
         );
+        assert_closed_error(
+            "load_rdf of a missing file",
+            db.load_rdf(dir.path().join("missing.nt"), None),
+        );
+        let malformed = dir.path().join("malformed.ttl");
+        std::fs::write(&malformed, "<http://ex.org/gus> is no triple\n").unwrap();
+        assert_closed_error("load_rdf of malformed data", db.load_rdf(&malformed, None));
         assert_eq!(db.rdf_store().len(), 0, "no triple was added");
     }
     assert_closed_error(
@@ -995,7 +1002,7 @@ type Import = (
     usize,
 );
 
-/// The bulk imports and the RDF batch insert.
+/// The bulk imports, the RDF batch insert and the RDF file loader.
 fn imports() -> Vec<Import> {
     let imports: Vec<Import> = vec![
         (
@@ -1021,7 +1028,7 @@ fn imports() -> Vec<Import> {
         ),
     ];
     #[cfg(feature = "triple-store")]
-    let imports = imports.into_iter().chain::<[Import; 2]>([
+    let imports = imports.into_iter().chain::<[Import; 3]>([
         (
             "import_tsv_rdf",
             |db, dir| {
@@ -1045,6 +1052,22 @@ fn imports() -> Vec<Import> {
                 };
                 db.batch_insert_rdf([city("gus", "Berlin"), city("mia", "Prague")])
                     .map(drop)
+            },
+            2,
+        ),
+        (
+            "load_rdf",
+            |db, dir| {
+                let file = dir.join("cities.nt");
+                std::fs::write(
+                    &file,
+                    concat!(
+                        "<http://ex.org/gus> <http://ex.org/city> \"Berlin\" .\n",
+                        "<http://ex.org/mia> <http://ex.org/city> \"Prague\" .\n",
+                    ),
+                )
+                .unwrap();
+                db.load_rdf(&file, None).map(drop)
             },
             2,
         ),

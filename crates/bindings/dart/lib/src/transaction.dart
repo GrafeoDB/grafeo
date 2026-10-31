@@ -24,6 +24,10 @@ class Transaction implements Finalizable {
   Pointer<Void> _handle;
   bool _finished = false;
 
+  /// A commit was tried and failed: it ended the transaction without its
+  /// changes, so a rollback has nothing to do.
+  bool _commitFailed = false;
+
   static NativeFinalizer? _finalizer;
 
   /// Create a transaction wrapper around a native handle.
@@ -115,7 +119,9 @@ class Transaction implements Finalizable {
     }
   }
 
-  /// Commit the transaction, making all changes permanent.
+  /// Commit the transaction, making all changes permanent. A commit that
+  /// fails (a write conflict, GQLSTATUS 40000) ends the transaction all the
+  /// same.
   void commit() {
     _checkActive();
     _finished = true;
@@ -124,13 +130,18 @@ class Transaction implements Finalizable {
     _bindings.grafeoFreeTransaction(_handle);
     _handle = nullptr;
     if (status != GrafeoStatus.ok.code) {
+      _commitFailed = true;
       throw classifyError(status, lastError(_bindings),
           gqlStatus: lastGqlStatus(_bindings));
     }
   }
 
-  /// Rollback the transaction, discarding all changes.
+  /// Rollback the transaction, discarding all changes. After a [commit]
+  /// that failed it does nothing, as in the other bindings: that commit
+  /// ended the transaction, so a rollback in a catch block does not hide
+  /// the commit's error.
   void rollback() {
+    if (_commitFailed) return;
     _checkActive();
     _finished = true;
     _finalizer!.detach(this);

@@ -938,24 +938,36 @@ impl PathSearch<'_> {
         // meet, the edge from a forward node to a backward node
         let mut best: Option<i64> = None;
         let mut meeting: Option<(NodeId, EdgeId, NodeId)> = None;
+        let mut last_forward = false;
 
         loop {
-            // Decide which frontier to expand, or stop
+            // Expand the smaller frontier, the sides taking turns on a tie, so
+            // that a side with nothing left is seen at once. A side that runs
+            // out before the sides met has expanded everything it reaches,
+            // which holds the node next to the other end on any path: there is
+            // none.
             let expand_forward = match (forward_queue.front(), backward_queue.front()) {
-                (Some(_), Some(_)) => forward_queue.len() <= backward_queue.len(),
+                (Some(_), Some(_)) => match forward_queue.len().cmp(&backward_queue.len()) {
+                    std::cmp::Ordering::Less => true,
+                    std::cmp::Ordering::Greater => false,
+                    std::cmp::Ordering::Equal => !last_forward,
+                },
+                _ if best.is_none() => break,
                 (Some(_), None) => true,
                 (None, Some(_)) => false,
                 (None, None) => break,
             };
+            last_forward = expand_forward;
 
             if expand_forward {
                 let Some((current, depth)) = forward_queue.pop_front() else {
                     break;
                 };
 
-                // If this depth alone exceeds best, this frontier is exhausted
+                // A node at this depth finds paths of depth + 1 or more, and a
+                // better one must be shorter than the best: this side is done
                 if let Some(b) = best
-                    && depth + 1 > b
+                    && depth + 1 >= b
                 {
                     // Clear the queue; no further expansion can improve
                     forward_queue.clear();
@@ -987,7 +999,7 @@ impl PathSearch<'_> {
                 };
 
                 if let Some(b) = best
-                    && depth + 1 > b
+                    && depth + 1 >= b
                 {
                     backward_queue.clear();
                     continue;
@@ -2987,5 +2999,169 @@ mod tests {
             (600, 1),
             "one chunk within the default budget"
         );
+    }
+
+    /// A ring of `size` nodes, each with an edge to the next (the last to the
+    /// first), and one node without any edge: the ring's first node and the
+    /// isolated one.
+    fn ring_and_isolated(size: usize) -> (Arc<RowGroupStore>, NodeId, NodeId) {
+        let store = Arc::new(RowGroupStore::new());
+        let ring: Vec<NodeId> = (0..size).map(|_| store.create_node(&["Person"])).collect();
+        for (i, &node) in ring.iter().enumerate() {
+            store.create_edge(node, ring[(i + 1) % size], "KNOWS");
+        }
+        let isolated = store.create_node(&["Person"]);
+        (store, ring[0], isolated)
+    }
+
+    /// The rows and the edges read of the shortest path from `source` to
+    /// `target` in `direction`.
+    fn counted_search(
+        store: &Arc<RowGroupStore>,
+        (source, target): (NodeId, NodeId),
+        direction: Direction,
+    ) -> (Vec<(NodeId, NodeId, Value)>, u64) {
+        let reads = Arc::new(ReadCounter::default());
+        let mut op = ShortestPathOperator::new(
+            Arc::clone(store) as Arc<dyn GraphStore>,
+            Box::new(MockPairOperator::new(vec![(source, target)])),
+            0,
+            1,
+            vec![],
+            direction,
+            ReadView::latest(),
+        )
+        .with_read_counter(Arc::clone(&reads));
+        let found = rows(&mut op);
+        (found, reads.get())
+    }
+
+    #[test]
+    fn a_search_to_an_isolated_target_stops_when_the_target_side_runs_out() {
+        // The target has no edge, so no path exists once its side is read:
+        // the search reads the source's own edges at most, not the ring.
+        let (store, source, isolated) = ring_and_isolated(200);
+        for (direction, degree) in [(Direction::Outgoing, 1), (Direction::Both, 2)] {
+            let (found, reads) = counted_search(&store, (source, isolated), direction);
+            assert!(found.is_empty(), "{direction:?}: {found:?}");
+            assert!(
+                reads <= degree,
+                "{direction:?}: {reads} edges read for an isolated target"
+            );
+        }
+    }
+
+    #[test]
+    fn a_search_from_an_isolated_source_stops_when_the_source_side_runs_out() {
+        // The mirror: the source has no edge, the target sits in the ring.
+        let (store, in_ring, isolated) = ring_and_isolated(200);
+        for (direction, degree) in [(Direction::Incoming, 1), (Direction::Both, 2)] {
+            let (found, reads) = counted_search(&store, (isolated, in_ring), direction);
+            assert!(found.is_empty(), "{direction:?}: {found:?}");
+            assert!(
+                reads <= degree,
+                "{direction:?}: {reads} edges read from an isolated source"
+            );
+        }
+    }
+
+    #[test]
+    fn a_path_into_a_target_with_one_in_edge_is_still_found() {
+        // The source is a hub (100 leaves), so the target's side, one in-edge
+        // and then a chain, is the one expanded most; its frontier stays at
+        // one node until the sides meet 41 hops from the source.
+        let store = Arc::new(RowGroupStore::new());
+        let source = store.create_node(&["Person"]);
+        for _ in 0..100 {
+            let leaf = store.create_node(&["Person"]);
+            store.create_edge(source, leaf, "KNOWS");
+        }
+        let mut previous = source;
+        for _ in 0..40 {
+            let next = store.create_node(&["Person"]);
+            store.create_edge(previous, next, "KNOWS");
+            previous = next;
+        }
+        let target = store.create_node(&["Person"]);
+        store.create_edge(previous, target, "KNOWS");
+        for direction in [Direction::Outgoing, Direction::Both] {
+            let (found, _) = counted_search(&store, (source, target), direction);
+            assert_eq!(found, [(source, target, Value::Int64(41))], "{direction:?}");
+        }
+        // And the other way round, from the target's side.
+        let (found, _) = counted_search(&store, (target, source), Direction::Incoming);
+        assert_eq!(found, [(target, source, Value::Int64(41))]);
+    }
+
+    #[test]
+    fn a_path_that_ends_one_side_after_the_sides_meet_is_still_found() {
+        // a -> b -> c: the target's side has nothing past b, the source's
+        // nothing before a; each side empties once, after the meeting.
+        let store = Arc::new(RowGroupStore::new());
+        let a = store.create_node(&["Person"]);
+        let b = store.create_node(&["Person"]);
+        let c = store.create_node(&["Person"]);
+        store.create_edge(a, b, "KNOWS");
+        store.create_edge(b, c, "KNOWS");
+        let (found, _) = counted_search(&store, (a, c), Direction::Outgoing);
+        assert_eq!(found, [(a, c, Value::Int64(2))]);
+        let (found, _) = counted_search(&store, (c, a), Direction::Both);
+        assert_eq!(found, [(c, a, Value::Int64(2))]);
+    }
+
+    /// Two trees joined by one bridge: the source reaches ten nodes, each ten
+    /// more; ten nodes reach the target, each reached from ten more; every
+    /// second-level node has twenty more edges (leaves). One bridge, from the
+    /// source's first child to the target's first parent, makes the shortest
+    /// path three edges long.
+    fn bridged_trees() -> (Arc<RowGroupStore>, NodeId, NodeId) {
+        let store = Arc::new(RowGroupStore::new());
+        let node = || store.create_node(&["Person"]);
+        let leaves = |from: NodeId, outgoing: bool| {
+            for _ in 0..20 {
+                let leaf = store.create_node(&["Person"]);
+                if outgoing {
+                    store.create_edge(from, leaf, "KNOWS");
+                } else {
+                    store.create_edge(leaf, from, "KNOWS");
+                }
+            }
+        };
+        let source = node();
+        let target = node();
+        let mut children = Vec::new();
+        let mut parents = Vec::new();
+        for _ in 0..10 {
+            let child = node();
+            store.create_edge(source, child, "KNOWS");
+            for _ in 0..10 {
+                let grandchild = node();
+                store.create_edge(child, grandchild, "KNOWS");
+                leaves(grandchild, true);
+            }
+            children.push(child);
+            let parent = node();
+            store.create_edge(parent, target, "KNOWS");
+            for _ in 0..10 {
+                let grandparent = node();
+                store.create_edge(grandparent, parent, "KNOWS");
+                leaves(grandparent, false);
+            }
+            parents.push(parent);
+        }
+        store.create_edge(children[0], parents[0], "KNOWS");
+        (store, source, target)
+    }
+
+    #[test]
+    fn a_search_stops_expanding_nodes_that_cannot_shorten_the_path() {
+        // Once the sides meet at three edges, a node two edges from either
+        // end can at best tie it: expanding the second levels (their 20
+        // leaves each, 4,000 edges) finds nothing shorter. The search needs
+        // the two first levels: about 10 + 10 + 10 x 11 + 10 x 11 edges.
+        let (store, source, target) = bridged_trees();
+        let (found, reads) = counted_search(&store, (source, target), Direction::Outgoing);
+        assert_eq!(found, [(source, target, Value::Int64(3))]);
+        assert!(reads <= 500, "{reads} edges read for a path of three edges");
     }
 }

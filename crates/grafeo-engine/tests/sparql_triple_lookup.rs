@@ -345,7 +345,8 @@ fn two_triple_patterns() {
     );
 }
 
-/// An OPTIONAL left side holds ?n without always binding it: the plain join.
+/// An OPTIONAL left side holds ?n without always binding it: the plain join
+/// for `?p e:name ?n` (the OPTIONAL itself looks its pattern up from ?p).
 #[test]
 fn an_optional_left_side_holding_the_free_variable() {
     let db = database();
@@ -366,7 +367,11 @@ fn an_optional_left_side_holding_the_free_variable() {
         &db,
         "SELECT ?p ?n WHERE { ?p e:age 7 . OPTIONAL { ?p e:nick ?n } ?p e:name ?n . }",
     );
-    assert!(!text.contains("RdfTripleLookup"), "{text}");
+    assert_eq!(
+        text.matches("RdfTripleLookup").count(),
+        1,
+        "only the OPTIONAL looks up: {text}"
+    );
 }
 
 /// A constant GRAPH; FROM over g1 and g2, which both hold `e:q1 e:name "q1"`

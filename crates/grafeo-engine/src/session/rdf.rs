@@ -159,7 +159,7 @@ impl Session {
 
         // Optimize the plan
         let rdf_stats = self.rdf_store.get_or_collect_statistics();
-        let optimizer = Optimizer::from_rdf_statistics((*rdf_stats).clone());
+        let optimizer = Optimizer::from_rdf_statistics(rdf_stats);
         let optimized_plan = optimizer.optimize(logical_plan)?;
         self.run_rdf_plan(&optimized_plan, "graphql")
     }
@@ -185,7 +185,7 @@ impl Session {
 
         let logical_plan = sparql::translate(query)?;
         let rdf_stats = self.rdf_store.get_or_collect_statistics();
-        let optimizer = Optimizer::from_rdf_statistics((*rdf_stats).clone());
+        let optimizer = Optimizer::from_rdf_statistics(rdf_stats);
         let optimized_plan = optimizer.optimize(logical_plan)?;
         self.run_rdf_plan(&optimized_plan, "sparql")
     }
@@ -216,7 +216,7 @@ impl Session {
         let logical_plan = sparql::translate_with_bindings(query, &params)?;
 
         let rdf_stats = self.rdf_store.get_or_collect_statistics();
-        let optimizer = Optimizer::from_rdf_statistics((*rdf_stats).clone());
+        let optimizer = Optimizer::from_rdf_statistics(rdf_stats);
         let optimized_plan = optimizer.optimize(logical_plan)?;
         self.run_rdf_plan(&optimized_plan, "sparql")
     }

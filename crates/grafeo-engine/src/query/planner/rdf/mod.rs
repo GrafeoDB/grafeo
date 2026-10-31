@@ -694,6 +694,7 @@ impl RdfPlanner {
         columns: Vec<String>,
         types: Vec<LogicalType>,
         cardinalities: Option<(f64, f64)>,
+        left: bool,
     ) -> (Box<dyn Operator>, Vec<String>, Vec<LogicalType>) {
         let mut out_columns = columns.clone();
         let mut out_types = types.clone();
@@ -709,6 +710,7 @@ impl RdfPlanner {
                 columns,
                 types,
                 cardinalities,
+                left,
             },
             Arc::clone(&self.terms),
             self.chunk_size,
@@ -1543,7 +1545,7 @@ impl RdfPlanner {
             if let Some(entry) = self.profile_entries.borrow_mut().get_mut(scan_entry) {
                 entry.absorbed = true;
             }
-            return Ok(self.lookup_join(parts, input, columns, types, cardinalities));
+            return Ok(self.lookup_join(parts, input, columns, types, cardinalities, false));
         }
         let loose = loosely_shared(
             crate::query::plan::always_bound(&join.left),
@@ -1594,7 +1596,39 @@ impl RdfPlanner {
         use crate::query::planner::common;
         use grafeo_core::execution::operators::{JoinCondition, JoinedRowCondition};
         let (left_op, left_columns, left_types) = self.plan_operator(&join.left)?;
+        let right_entry = self.profile_entries.borrow().len();
         let (right_op, right_columns, right_types) = self.plan_operator(&join.right)?;
+
+        // `OPTIONAL { ?s p ?o }` whose subject or object the left side binds,
+        // with no condition: a lookup per left row, which keeps a row with
+        // no triple (see `triple_lookup`).
+        if join.condition.is_none()
+            && let LogicalOperator::TripleScan(scan) = join.right.as_ref()
+        {
+            let left_estimate = estimate_operator_cardinality(&join.left, &self.store);
+            let right_estimate = estimate_operator_cardinality(&join.right, &self.store);
+            if let Some(parts) = self.triple_lookup(
+                scan,
+                &join.left,
+                &left_columns,
+                right_estimate,
+                left_estimate,
+            ) {
+                // The scan's PROFILE line joins the lookup's.
+                if let Some(entry) = self.profile_entries.borrow_mut().get_mut(right_entry) {
+                    entry.absorbed = true;
+                }
+                let cardinalities = left_estimate.zip(right_estimate);
+                return Ok(self.lookup_join(
+                    parts,
+                    left_op,
+                    left_columns,
+                    left_types,
+                    cardinalities,
+                    true,
+                ));
+            }
+        }
         let residual = match &join.condition {
             Some(condition) => {
                 let mut variable_columns: HashMap<String, usize> = HashMap::new();

@@ -70,6 +70,9 @@ pub(super) struct HashJoinInputs {
     pub(super) columns: Vec<String>,
     pub(super) types: Vec<LogicalType>,
     pub(super) cardinalities: Option<(f64, f64)>,
+    /// Whether the join keeps a row no triple joins (an `OPTIONAL` pattern),
+    /// with the pattern's variables unbound.
+    pub(super) left: bool,
 }
 
 /// How the operator joins.
@@ -160,6 +163,7 @@ impl TripleLookupOperator {
     fn look_up(&mut self, chunk: &DataChunk) -> Result<(), OperatorError> {
         for row in chunk.selected_indices() {
             let Some(key) = self.key(chunk, row)? else {
+                self.unmatched(chunk, row);
                 continue;
             };
             let mut pattern: TriplePattern = self.lookup.pattern.clone();
@@ -177,8 +181,10 @@ impl TripleLookupOperator {
                 }
             }
             if !known {
+                self.unmatched(chunk, row);
                 continue;
             }
+            let queued = self.pending.len();
             let mut scan = self.lookup.with_pattern(pattern);
             while let Some(found) = scan.next()? {
                 for at in found.selected_indices() {
@@ -199,8 +205,29 @@ impl TripleLookupOperator {
                     self.pending.push_back(out);
                 }
             }
+            if self.pending.len() == queued {
+                self.unmatched(chunk, row);
+            }
         }
         Ok(())
+    }
+
+    /// Queues row `row` of `chunk`, which no triple joins, with the
+    /// pattern's variables unbound, for a left join (an inner join drops it).
+    fn unmatched(&mut self, chunk: &DataChunk, row: usize) {
+        if !self.hash_join.left {
+            return;
+        }
+        let mut out: Vec<Value> = (0..chunk.column_count())
+            .map(|column| {
+                chunk
+                    .column(column)
+                    .and_then(|c| c.get_value(row))
+                    .unwrap_or(Value::Null)
+            })
+            .collect();
+        out.extend(std::iter::repeat_n(Value::Null, self.plan.added.len()));
+        self.pending.push_back(out);
     }
 
     /// Hands the rows read so far and the rest of the input to the hash
@@ -215,15 +242,27 @@ impl TripleLookupOperator {
             .take()
             .expect("the full scan until the join hashes");
         let full_types = vec![LogicalType::RdfTermId; self.full_columns.len()];
-        let (join, _, _) = crate::query::planner::common::build_inner_join(
-            input,
-            Box::new(full),
-            &self.hash_join.columns,
-            &self.full_columns,
-            &self.hash_join.types,
-            &full_types,
-            self.hash_join.cardinalities,
-        );
+        let (join, _, _) = if self.hash_join.left {
+            crate::query::planner::common::build_left_join(
+                input,
+                Box::new(full),
+                &self.hash_join.columns,
+                &self.full_columns,
+                &self.hash_join.types,
+                &full_types,
+                |join| join,
+            )
+        } else {
+            crate::query::planner::common::build_inner_join(
+                input,
+                Box::new(full),
+                &self.hash_join.columns,
+                &self.full_columns,
+                &self.hash_join.types,
+                &full_types,
+                self.hash_join.cardinalities,
+            )
+        };
         join
     }
 

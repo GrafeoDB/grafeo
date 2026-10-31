@@ -605,7 +605,7 @@ impl QueryProcessor {
         // 3. Optimize the plan (use RDF statistics for cost-based optimization)
         let rdf_optimizer = {
             let stats = rdf_store.get_or_collect_statistics();
-            Optimizer::from_rdf_statistics((*stats).clone())
+            Optimizer::from_rdf_statistics(stats)
         };
         let optimized_plan = rdf_optimizer.optimize(logical_plan)?;
 

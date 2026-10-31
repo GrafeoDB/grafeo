@@ -15,6 +15,8 @@ pub mod cardinality;
 pub mod cost;
 mod cycles;
 mod delim;
+#[cfg(feature = "triple-store")]
+mod rdf_order;
 mod scanned_labels;
 pub(crate) use cycles::{close_cycles, plan_names};
 pub mod join_order;
@@ -76,6 +78,10 @@ pub struct Optimizer {
     indexed_properties: HashSet<String>,
     /// Whether the store keeps the incoming edges of each node.
     incoming_edges: IncomingEdges,
+    /// The order of SPARQL groups' patterns, for an optimizer made from RDF
+    /// statistics (see `rdf_order`).
+    #[cfg(feature = "triple-store")]
+    rdf_order: Option<rdf_order::RdfOrder>,
 }
 
 /// Whether a store keeps the incoming edges of each node (its backward
@@ -122,6 +128,8 @@ impl Optimizer {
             cyclic_joins: CyclicJoins::Binary,
             indexed_properties: HashSet::new(),
             incoming_edges: IncomingEdges::Kept,
+            #[cfg(feature = "triple-store")]
+            rdf_order: None,
         }
     }
 
@@ -155,8 +163,11 @@ impl Optimizer {
     /// of SPARQL queries. Maps total triples to graph totals for the cost model.
     #[cfg(feature = "triple-store")]
     #[must_use]
-    pub fn from_rdf_statistics(rdf_stats: grafeo_core::statistics::RdfStatistics) -> Self {
+    pub fn from_rdf_statistics(
+        rdf_stats: std::sync::Arc<grafeo_core::statistics::RdfStatistics>,
+    ) -> Self {
         let total = rdf_stats.total_triples;
+        let rdf_order = rdf_order::RdfOrder::new(std::sync::Arc::clone(&rdf_stats));
         let estimator = CardinalityEstimator::from_rdf_statistics(rdf_stats);
         Self {
             enable_filter_pushdown: true,
@@ -167,6 +178,7 @@ impl Optimizer {
             cyclic_joins: CyclicJoins::MultiWay,
             indexed_properties: HashSet::new(),
             incoming_edges: IncomingEdges::NotKept,
+            rdf_order: Some(rdf_order),
         }
     }
 
@@ -209,6 +221,8 @@ impl Optimizer {
             cyclic_joins: CyclicJoins::Binary,
             indexed_properties: HashSet::new(),
             incoming_edges: IncomingEdges::Kept,
+            #[cfg(feature = "triple-store")]
+            rdf_order: None,
         }
     }
 
@@ -305,6 +319,12 @@ impl Optimizer {
 
         if self.enable_join_reorder {
             root = self.reorder_joins(root);
+            // A SPARQL group's patterns, which the join graph above cannot
+            // tell apart, by their selectivity.
+            #[cfg(feature = "triple-store")]
+            if let Some(order) = &self.rdf_order {
+                root = order.order(root);
+            }
         }
 
         if self.enable_projection_pushdown {
@@ -3058,8 +3078,7 @@ mod tests {
     #[cfg(feature = "triple-store")]
     #[test]
     fn test_rdf_cyclic_join_produces_multi_way_join() {
-        let optimizer =
-            Optimizer::from_rdf_statistics(grafeo_core::statistics::RdfStatistics::default());
+        let optimizer = Optimizer::from_rdf_statistics(std::sync::Arc::default());
         let optimized = optimizer.optimize(triangle_join_plan()).unwrap();
         assert!(has_multi_way_join(&optimized.root));
     }

@@ -85,7 +85,7 @@ impl GrafeoDB {
 
         // Optimize the plan using RDF-specific statistics
         let rdf_stats = self.rdf_store.get_or_collect_statistics();
-        let optimizer = Optimizer::from_rdf_statistics((*rdf_stats).clone());
+        let optimizer = Optimizer::from_rdf_statistics(rdf_stats);
         let optimized_plan = optimizer.optimize(logical_plan)?;
 
         // An update on a read-only database fails, as in a session.

@@ -424,37 +424,13 @@ impl GqlTranslator {
         Ok(plan)
     }
 
-    /// Translates a label expression into a filter predicate using hasLabel() calls.
+    /// Translates a label expression into a filter predicate using hasLabel() calls
+    /// (see [`common::label_expression_predicate`](super::super::common::label_expression_predicate)).
     pub(super) fn translate_label_expression(
         variable: &str,
         expr: &ast::LabelExpression,
     ) -> LogicalExpression {
-        match expr {
-            ast::LabelExpression::Label(name) => LogicalExpression::builtin(
-                BuiltinFunction::HasLabel,
-                vec![
-                    LogicalExpression::Variable(variable.to_string()),
-                    LogicalExpression::Literal(Value::from(name.as_str())),
-                ],
-            ),
-            ast::LabelExpression::Conjunction(operands) => LogicalExpression::conjunction(
-                operands
-                    .iter()
-                    .map(|operand| Self::translate_label_expression(variable, operand)),
-            )
-            .expect("conjunction has at least one operand"),
-            ast::LabelExpression::Disjunction(operands) => LogicalExpression::disjunction(
-                operands
-                    .iter()
-                    .map(|operand| Self::translate_label_expression(variable, operand)),
-            )
-            .expect("disjunction has at least one operand"),
-            ast::LabelExpression::Negation(inner) => LogicalExpression::Unary {
-                op: UnaryOp::Not,
-                operand: Box::new(Self::translate_label_expression(variable, inner)),
-            },
-            ast::LabelExpression::Wildcard => LogicalExpression::Literal(Value::Bool(true)),
-        }
+        super::super::common::label_expression_predicate(variable, expr)
     }
 
     /// Wraps a plan with AND-combined `hasLabel` filters for extra labels beyond the

@@ -2207,6 +2207,45 @@ pub(crate) fn no_result(input: LogicalOperator) -> LogicalOperator {
     wrap_return(input, Vec::new(), false)
 }
 
+/// The `hasLabel` predicate of a label expression on `variable`: `A|B` any
+/// of them, `A&B` all, `!A` not, `%` any label (ISO/IEC 39075:2024 16.8, and
+/// the label expressions of SQL/PGQ, which reads GQL's element patterns).
+#[cfg(any(feature = "gql", feature = "sql-pgq"))]
+pub(crate) fn label_expression_predicate(
+    variable: &str,
+    expr: &grafeo_adapters::query::gql::ast::LabelExpression,
+) -> LogicalExpression {
+    use grafeo_adapters::query::gql::ast::LabelExpression;
+    match expr {
+        LabelExpression::Label(name) => LogicalExpression::builtin(
+            crate::query::plan::BuiltinFunction::HasLabel,
+            vec![
+                LogicalExpression::Variable(variable.to_string()),
+                LogicalExpression::Literal(grafeo_common::types::Value::from(name.as_str())),
+            ],
+        ),
+        LabelExpression::Conjunction(operands) => LogicalExpression::conjunction(
+            operands
+                .iter()
+                .map(|operand| label_expression_predicate(variable, operand)),
+        )
+        .expect("conjunction has at least one operand"),
+        LabelExpression::Disjunction(operands) => LogicalExpression::disjunction(
+            operands
+                .iter()
+                .map(|operand| label_expression_predicate(variable, operand)),
+        )
+        .expect("disjunction has at least one operand"),
+        LabelExpression::Negation(inner) => LogicalExpression::Unary {
+            op: crate::query::plan::UnaryOp::Not,
+            operand: Box::new(label_expression_predicate(variable, inner)),
+        },
+        LabelExpression::Wildcard => {
+            LogicalExpression::Literal(grafeo_common::types::Value::Bool(true))
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -206,6 +206,10 @@ pub enum TokenKind {
     Slash,
     /// %
     Percent,
+    /// & (a label conjunction)
+    Ampersand,
+    /// ! (a label negation)
+    Bang,
 
     // Arrows (for GQL pattern syntax inside MATCH)
     /// ->
@@ -286,6 +290,7 @@ impl<'a> Lexer<'a> {
             '|' => TokenKind::Pipe,
             '$' => TokenKind::Dollar,
             '%' => TokenKind::Percent,
+            '&' => TokenKind::Ampersand,
             '*' => TokenKind::Star,
             '/' => TokenKind::Slash,
             '+' => TokenKind::Plus,
@@ -318,7 +323,7 @@ impl<'a> Lexer<'a> {
                     self.advance();
                     TokenKind::Ne
                 } else {
-                    TokenKind::Error
+                    TokenKind::Bang
                 }
             }
             '-' => {

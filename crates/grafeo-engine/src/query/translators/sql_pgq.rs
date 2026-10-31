@@ -690,10 +690,23 @@ impl SqlPgqTranslator {
             plan = wrap_filter(plan, predicate);
         }
 
+        // A label expression (`(m:Post|Comment)`)
+        if let Some(expression) = &node.label_expression {
+            plan = wrap_filter(
+                plan,
+                super::common::label_expression_predicate(&variable, expression),
+            );
+        }
+
         // Add filters for inline properties (e.g., {city: 'NYC'})
         if !node.properties.is_empty() {
             let predicate = self.build_property_predicate(&variable, &node.properties)?;
             plan = wrap_filter(plan, predicate);
+        }
+
+        // The element pattern's WHERE (`(m WHERE m.id = $id)`)
+        if let Some(condition) = &node.where_clause {
+            plan = wrap_filter(plan, self.translate_expression(condition, None)?);
         }
 
         Ok(plan)
@@ -768,9 +781,15 @@ impl SqlPgqTranslator {
             path_mode: PathMode::Walk,
         });
 
-        // Every label of the target node must hold
+        // Every label of the target node must hold, and its label expression
         if let Some(predicate) = has_all_labels(&to_variable, &edge.target.labels) {
             plan = wrap_filter(plan, predicate);
+        }
+        if let Some(expression) = &edge.target.label_expression {
+            plan = wrap_filter(
+                plan,
+                super::common::label_expression_predicate(&to_variable, expression),
+            );
         }
 
         // The property map of the edge (ISO/IEC 39075:2024 16.7, which
@@ -796,11 +815,30 @@ impl SqlPgqTranslator {
             plan = wrap_filter(plan, predicate);
         }
 
+        // The edge pattern's WHERE (`-[e:KNOWS WHERE e.since > 3]->`). On a
+        // quantified edge it holds for each edge of the path (ISO/IEC
+        // 39075:2024 16.7), which this does not do yet: refused.
+        if let Some(condition) = &edge.where_clause {
+            if path_alias.is_some() {
+                return Err(Error::from(QueryError::new(
+                    QueryErrorKind::Unsupported,
+                    "a WHERE inside a quantified edge pattern is not supported yet: \
+                     write the condition in the GRAPH_TABLE's WHERE",
+                )));
+            }
+            plan = wrap_filter(plan, self.translate_expression(condition, None)?);
+        }
+
         // The property map of the target node, like the one of the first
         // node of the pattern (see `translate_node_pattern`)
         if !edge.target.properties.is_empty() {
             let predicate = self.build_property_predicate(&to_variable, &edge.target.properties)?;
             plan = wrap_filter(plan, predicate);
+        }
+
+        // The target node's WHERE
+        if let Some(condition) = &edge.target.where_clause {
+            plan = wrap_filter(plan, self.translate_expression(condition, None)?);
         }
 
         Ok(plan)

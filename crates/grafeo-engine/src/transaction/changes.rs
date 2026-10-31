@@ -483,23 +483,52 @@ impl TransactionChanges {
             return Ok(());
         }
         let mut unchanged = Vec::new();
+        // A run of inserts into one graph goes in as one batch (one pass per
+        // index); a delete or another graph ends it, so the order holds.
+        let mut run: Option<GraphSlot> = None;
+        let mut positions = Vec::new();
+        let mut triples = Vec::new();
+        let flush = |slot: Option<GraphSlot>,
+                     positions: &mut Vec<usize>,
+                     triples: &mut Vec<Triple>,
+                     unchanged: &mut Vec<usize>| {
+            let Some(slot) = slot else { return };
+            let key = state.set.graph(slot).and_then(|graph| graph.key.as_deref());
+            let new = store.insert_each_into(key, std::mem::take(triples));
+            unchanged.extend(
+                positions
+                    .drain(..)
+                    .zip(new)
+                    .filter_map(|(at, new)| (!new).then_some(at)),
+            );
+        };
         for (at, change) in state.set.entries().iter().enumerate() {
             let Change::Data { graph, op, .. } = change else {
                 continue;
             };
-            let key = state
-                .set
-                .graph(*graph)
-                .and_then(|graph| graph.key.as_deref());
-            let changed = match op {
-                DataOp::InsertTriple { triple } => store.insert_into(key, Triple::from(&**triple)),
-                DataOp::DeleteTriple { triple } => store.remove_from(key, &Triple::from(&**triple)),
-                _ => continue,
-            };
-            if !changed {
-                unchanged.push(at);
+            match op {
+                DataOp::InsertTriple { triple } => {
+                    if run != Some(*graph) {
+                        flush(run, &mut positions, &mut triples, &mut unchanged);
+                        run = Some(*graph);
+                    }
+                    positions.push(at);
+                    triples.push(Triple::from(&**triple));
+                }
+                DataOp::DeleteTriple { triple } => {
+                    flush(run.take(), &mut positions, &mut triples, &mut unchanged);
+                    let key = state
+                        .set
+                        .graph(*graph)
+                        .and_then(|graph| graph.key.as_deref());
+                    if !store.remove_from(key, &Triple::from(&**triple)) {
+                        unchanged.push(at);
+                    }
+                }
+                _ => {}
             }
         }
+        flush(run, &mut positions, &mut triples, &mut unchanged);
         if unchanged.is_empty() {
             return Ok(());
         }

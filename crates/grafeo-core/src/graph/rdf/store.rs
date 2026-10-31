@@ -459,7 +459,10 @@ impl RdfStore {
     /// Returns the number of triples that were newly inserted (duplicates are
     /// skipped).
     pub fn batch_insert(&self, triples: impl IntoIterator<Item = Triple>) -> usize {
-        self.insert_stored(triples.into_iter().map(|triple| self.stored(triple)))
+        self.insert_stored(
+            triples.into_iter().map(|triple| self.stored(triple)),
+            |_| {},
+        )
     }
 
     /// Inserts triples whose ids this dataset's dictionary gave (a section
@@ -467,18 +470,47 @@ impl RdfStore {
     /// terms up again. Returns how many were new.
     pub(crate) fn batch_insert_with_dataset_ids(&self, triples: Vec<Triple>) -> usize {
         debug_assert!(triples.iter().all(|triple| triple.ids().is_some()));
-        self.insert_stored(triples.into_iter().map(Arc::new))
+        self.insert_stored(triples.into_iter().map(Arc::new), |_| {})
     }
 
-    /// Inserts stored triples (with their ids) in one pass per index.
-    fn insert_stored(&self, triples: impl Iterator<Item = Arc<Triple>>) -> usize {
+    /// Inserts `triples` in one batch, as [`batch_insert`](Self::batch_insert)
+    /// does, and returns for each, in order, whether it is new, as
+    /// [`insert`](Self::insert) one by one would: a triple the store holds,
+    /// one repeated in the batch after its first, and one that is no RDF
+    /// triple are not.
+    pub fn insert_each(&self, triples: Vec<Triple>) -> Vec<bool> {
+        let valid: Vec<bool> = triples.iter().map(Triple::is_valid).collect();
+        let mut new = Vec::with_capacity(triples.len());
+        self.insert_stored(
+            triples
+                .into_iter()
+                .filter(Triple::is_valid)
+                .map(|triple| self.stored(triple)),
+            |inserted| new.push(inserted),
+        );
+        let mut new = new.into_iter();
+        valid
+            .into_iter()
+            .map(|valid| valid && new.next().unwrap_or(false))
+            .collect()
+    }
+
+    /// Inserts stored triples (with their ids) in one pass per index,
+    /// telling `each` for every triple, in order, whether it was new.
+    fn insert_stored(
+        &self,
+        triples: impl Iterator<Item = Arc<Triple>>,
+        mut each: impl FnMut(bool),
+    ) -> usize {
         // Phase 1: deduplicate against primary storage (single lock)
         let mut new_triples = Vec::with_capacity(triples.size_hint().0);
         {
             let mut primary = self.triples.write();
             primary.reserve(triples.size_hint().0);
             for arc in triples {
-                if primary.insert(Arc::clone(&arc)) {
+                let inserted = primary.insert(Arc::clone(&arc));
+                each(inserted);
+                if inserted {
                     new_triples.push(arc);
                 }
             }
@@ -1730,6 +1762,15 @@ impl RdfStore {
         match graph {
             None => self.insert(triple),
             Some(name) => self.graph_or_create(name).insert(triple),
+        }
+    }
+
+    /// Inserts `triples` into `graph` as [`insert_each`](Self::insert_each)
+    /// does, creating a named graph that does not exist.
+    pub fn insert_each_into(&self, graph: Option<&str>, triples: Vec<Triple>) -> Vec<bool> {
+        match graph {
+            None => self.insert_each(triples),
+            Some(name) => self.graph_or_create(name).insert_each(triples),
         }
     }
 

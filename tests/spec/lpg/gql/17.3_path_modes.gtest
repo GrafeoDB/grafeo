@@ -338,3 +338,36 @@ tests:
         - ["[x, w]"]
         - ["[x, y, x]"]
         - ["[x, y]"]
+
+  # ---------------------------------------------------------------------------
+  # TRAIL, undirected, distinct targets (0.6.1): the start is a target only
+  # over a closed trail, never back over the edge it left by.
+  # ---------------------------------------------------------------------------
+
+  - name: trail_undirected_reach_leaves_out_the_start_on_a_path
+    setup:
+      - "INSERT (a:Spot {name: 'a'}), (b:Spot {name: 'b'}), (c:Spot {name: 'c'}), (a)-[:K]->(b), (c)-[:K]->(b)"
+    query: "MATCH TRAIL (s:Spot {name: 'a'})-[:K]-{1,3}(f:Spot) RETURN count(DISTINCT f) AS c"
+    expect:
+      rows:
+        - [2]
+
+  - name: trail_undirected_reach_takes_the_start_back_over_a_square
+    # s-a-c-b-s: the closed trail through s has 4 edges
+    setup:
+      - "INSERT (s:Spot {name: 's'}), (a:Spot {name: 'a'}), (b:Spot {name: 'b'}), (c:Spot {name: 'c'}), (s)-[:K]->(a), (a)-[:K]->(c), (b)-[:K]->(c), (s)-[:K]->(b)"
+    query: "MATCH TRAIL (s:Spot {name: 's'})-[:K]-{1,3}(f:Spot) WITH count(DISTINCT f) AS three MATCH TRAIL (s:Spot {name: 's'})-[:K]-{1,4}(f:Spot) RETURN three, count(DISTINCT f) AS four"
+    expect:
+      rows:
+        - [3, 4]
+
+  - name: trail_undirected_reach_leaves_out_the_start_of_a_lollipop
+    setup:
+      - "INSERT (s:Spot {name: 's'}), (a:Spot {name: 'a'}), (b:Spot {name: 'b'}), (c:Spot {name: 'c'}), (s)-[:K]->(a), (a)-[:K]->(b), (c)-[:K]->(b), (c)-[:K]->(a)"
+    query: "MATCH TRAIL (s:Spot {name: 's'})-[:K]-{1,4}(f:Spot) RETURN DISTINCT f.name AS name ORDER BY name"
+    expect:
+      ordered: true
+      rows:
+        - [a]
+        - [b]
+        - [c]

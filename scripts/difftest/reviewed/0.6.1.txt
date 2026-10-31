@@ -1,5 +1,7 @@
 # Reviewed differences between 0.6.0 and 0.6.1: case key, fingerprint of the reviewed result, why it changed.
 # A `~` before the fingerprint: the case's result in 0.6.0 varies from run to run, so it may also not differ.
+BK5|cypher 572542923e A failed argument of a procedure names the argument and the procedure; 0.6.0 gave the bare division-by-zero message.
+BK5|gql 572542923e A failed argument of a procedure names the argument and the procedure; 0.6.0 gave the bare division-by-zero message.
 BW2|cypher 7b077158c6 toDecimal of a value that does not fit the precision fails with 22003, as a CAST does; 0.6.0 gave null.
 BW2|gql 7b077158c6 toDecimal of a value that does not fit the precision fails with 22003, as a CAST does; 0.6.0 gave null.
 BW4|gql 86740c1269 A CAST to DECIMAL(p, s) of a value that does not fit fails with 22003, as SQL; 0.6.0 gave null.
@@ -36,6 +38,31 @@ DK3|gql ab0bd9ec5c A GQL quantified pattern of two edges repeats within its boun
 DK4|gql 2aba91d6f9 A GQL quantified pattern of two edges repeats within its bounds; 0.6.0 took the segment once and ignored them (#678).
 DK5|gql 6354c87d40 An unbounded GQL walk has no hop cap; 0.6.0 stopped after min + 100 hops (#678).
 DK6|gql 1dc1b27e0f An unbounded GQL walk has no hop cap; 0.6.0 stopped after min + 100 hops (#678).
+DO1|gql acda94c115 IS % (any label) leaves out a node without a label (ISO/IEC 39075 16.8); 0.6.0 matched every node.
+DO2|gql acda94c115 A label expression after a colon may be the wildcard `%`; 0.6.0 failed with a syntax error.
+DO3|gql 0d5db62899 IS !% matches the nodes without a label; 0.6.0 matched none.
+DO4|gql 0d5db62899 A label expression after a colon may start with `!`; 0.6.0 failed with a syntax error.
+DO5|gql 286bbfe399 A label expression after a colon may start with `!`; 0.6.0 failed with a syntax error.
+DO6|gql 3f51f261dd A label expression after a colon may start with `(`; 0.6.0 failed with a syntax error.
+DO7|gql 0311432cc3 A label expression after a colon may start with `!` and a parenthesis; 0.6.0 failed with a syntax error.
+DO8|gql 45c9c095a7 The label wildcard on the node an edge reaches; 0.6.0 failed with a syntax error.
+DO9|gql 0d5db62899 A negated wildcard on the node an edge reaches; 0.6.0 failed with a syntax error.
+DO10|sql acda94c115 SQL/PGQ takes IS % as GQL does; 0.6.0 failed with a syntax error.
+DO11|sql 0d5db62899 SQL/PGQ takes :!% as GQL does; 0.6.0 failed with a syntax error.
+DO12|sql 0311432cc3 SQL/PGQ takes a negated label expression as GQL does; 0.6.0 failed with a syntax error.
+DP1|sql ef2cd12dcf SQL/PGQ ORDER BY may name an alias of the outer SELECT; 0.6.0 failed with an undefined variable.
+DP2|sql 5e81a85b56 SQL/PGQ ORDER BY may name a computed alias of the outer SELECT; 0.6.0 failed with an undefined variable.
+DP3|sql 56c9603e9e SQL/PGQ ORDER BY names the output alias, not the COLUMNS column it hides; 0.6.0 sorted by the hidden column.
+DP4|sql 12f119d2f6 SQL/PGQ ORDER BY may name an alias of a path function; 0.6.0 failed with a syntax error.
+DP5|sql 792313fb51 A SQL/PGQ parameter may be named after a reserved word ($from); 0.6.0 failed with a syntax error.
+DP6|sql 0dab6077c0 SQL/PGQ parameters named $order and $select bind; 0.6.0 failed with a syntax error.
+DP7|sql fc0e173de6 SQL/PGQ parameters named $WHERE and $null bind; 0.6.0 failed with a syntax error.
+DP8|sql d2dbc8421e SQL/PGQ LIMIT takes a parameter; 0.6.0 failed with a syntax error.
+DP9|sql fc0e173de6 SQL/PGQ OFFSET takes a parameter; 0.6.0 failed with a syntax error.
+DP10|sql 38a89b4633 SQL/PGQ LIMIT and OFFSET take one parameter each; 0.6.0 failed with a syntax error.
+DP11|sql f15e3b9cb5 A negative SQL/PGQ LIMIT parameter fails as GQL's does (22G02), naming LIMIT; 0.6.0 took no parameter there.
+DP12|sql f2c2951599 A fractional SQL/PGQ LIMIT parameter fails as GQL's does, naming LIMIT; 0.6.0 took no parameter there.
+DP13|sql 712a1101c0 A text SQL/PGQ OFFSET parameter fails as GQL's does, naming OFFSET; 0.6.0 took no parameter there.
 N12|cypher 603b79d5f3 A subquery that returns an edge in one part and a node in another returns each as what it is; 0.6.0 read the node as the edge with its ID (#668).
 N12|gql 603b79d5f3 A subquery that returns an edge in one part and a node in another returns each as what it is; 0.6.0 read the node as the edge with its ID (#668).
 DL1|sparql 6527675bc9 A FILTER inside OPTIONAL reads the joined solution, so !BOUND of an outer variable keeps the OPTIONAL from extending; 0.6.0 read the optional pattern alone (#701).

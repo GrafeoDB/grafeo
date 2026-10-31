@@ -97,16 +97,38 @@ public sealed class TransactionTests : IDisposable
         Assert.Throws<TransactionException>(() => tx.Commit());
     }
 
+    /// A commit that succeeded leaves nothing to roll back: as in every
+    /// binding, a rollback after it is an error, and the commit stands.
     [Fact]
-    public void RollbackAfterCommitIsNoOp()
+    public void RollbackAfterCommitThrows()
     {
         using var tx = _db.BeginTransaction();
         tx.Execute("INSERT (:Person {name: 'Hans'})");
         tx.Commit();
 
-        // Rollback after commit: finished flag prevents action
-        tx.Rollback(); // no-op
+        var error = Assert.Throws<TransactionException>(() => tx.Rollback());
+        Assert.Equal("Transaction already committed", error.Message);
+        Assert.Equal(GrafeoStatus.Transaction, error.Status);
         Assert.Equal(1, _db.NodeCount);
+    }
+
+    /// A commit that failed ended the transaction, so a rollback after it
+    /// (a catch block's) does nothing and does not hide the commit's error.
+    [Fact]
+    public void RollbackAfterAFailedCommitDoesNothing()
+    {
+        _db.Execute("INSERT (:Account {name: 'Vincent', balance: 1})");
+        using var first = _db.BeginTransaction();
+        using var second = _db.BeginTransaction();
+        first.Execute("MATCH (a:Account) SET a.balance = 2");
+        first.Commit();
+        second.Execute("MATCH (a:Account) SET a.balance = 3");
+
+        var conflict = Assert.Throws<TransactionException>(() => second.Commit());
+        Assert.Contains("Write-write conflict", conflict.Message);
+        second.Rollback();
+        var result = _db.Execute("MATCH (a:Account) RETURN a.balance");
+        Assert.Equal(2L, result.Rows[0]["a.balance"]);
     }
 
     [Fact]

@@ -933,4 +933,93 @@ mod tests {
             }
         }
     }
+
+    /// Parquet files, uncompressed and Snappy-compressed (the default of
+    /// pyarrow, pandas and Spark), load the same rows.
+    #[cfg(feature = "parquet-import")]
+    mod parquet_records {
+        use super::*;
+        use parquet::basic::Compression;
+        use parquet::data_type::{ByteArray, ByteArrayType, Int64Type};
+        use parquet::file::properties::WriterProperties;
+        use parquet::file::reader::{FileReader, SerializedFileReader};
+        use parquet::file::writer::SerializedFileWriter;
+        use parquet::schema::parser::parse_message_type;
+
+        /// Alix (31) and Gus (no age), in one row group, with `compression`.
+        fn write_people(compression: Compression) -> tempfile::NamedTempFile {
+            let schema = parse_message_type(
+                "message people { REQUIRED BYTE_ARRAY name (UTF8); OPTIONAL INT64 age; }",
+            )
+            .unwrap();
+            let properties = WriterProperties::builder()
+                .set_compression(compression)
+                .build();
+            let file = tempfile::NamedTempFile::new().unwrap();
+            let mut writer = SerializedFileWriter::new(
+                file.reopen().unwrap(),
+                Arc::new(schema),
+                Arc::new(properties),
+            )
+            .unwrap();
+            let mut row_group = writer.next_row_group().unwrap();
+            let mut names = row_group.next_column().unwrap().unwrap();
+            names
+                .typed::<ByteArrayType>()
+                .write_batch(
+                    &[ByteArray::from("Alix"), ByteArray::from("Gus")],
+                    None,
+                    None,
+                )
+                .unwrap();
+            names.close().unwrap();
+            let mut ages = row_group.next_column().unwrap().unwrap();
+            ages.typed::<Int64Type>()
+                .write_batch(&[31], Some(&[1, 0]), None)
+                .unwrap();
+            ages.close().unwrap();
+            row_group.close().unwrap();
+            writer.close().unwrap();
+            file
+        }
+
+        fn load(file: &tempfile::NamedTempFile) -> Vec<(Option<Value>, Option<Value>)> {
+            let mut op = LoadDataOperator::new(
+                file.path().to_str().unwrap().to_string(),
+                LoadDataFormat::Parquet,
+                true,
+                None,
+                "row".to_string(),
+            );
+            let mut rows = Vec::new();
+            while let Some(chunk) = op.next().unwrap() {
+                match chunk.column(0).unwrap().get_value(0).unwrap() {
+                    Value::Map(map) => rows.push((
+                        map.get(&PropertyKey::from("name")).cloned(),
+                        map.get(&PropertyKey::from("age")).cloned(),
+                    )),
+                    other => panic!("expected Map, got {other:?}"),
+                }
+            }
+            rows
+        }
+
+        #[test]
+        fn snappy_and_uncompressed_files_load_the_same_rows() {
+            let want = vec![
+                (Some(Value::from("Alix")), Some(Value::Int64(31))),
+                (Some(Value::from("Gus")), Some(Value::Null)),
+            ];
+            for compression in [Compression::UNCOMPRESSED, Compression::SNAPPY] {
+                let file = write_people(compression);
+                // The writer compressed what it was asked to.
+                let reader = SerializedFileReader::new(file.reopen().unwrap()).unwrap();
+                let row_group = reader.metadata().row_group(0);
+                for column in row_group.columns() {
+                    assert_eq!(column.compression(), compression);
+                }
+                assert_eq!(load(&file), want, "{compression:?}");
+            }
+        }
+    }
 }

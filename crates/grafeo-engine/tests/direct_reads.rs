@@ -172,6 +172,50 @@ fn schema_counts_committed_data_only() {
     assert_eq!(counts(&db), (3, 2, 3, 2), "after the commit");
 }
 
+/// `property_key_count` counts the keys ever written, not the keys in use
+/// (as its docs say): a key stays counted once no node or edge holds it, and
+/// after the transaction that wrote it rolled back. The label and edge type
+/// counts are of what is in use.
+#[test]
+fn property_key_count_counts_every_key_ever_written() {
+    let db = GrafeoDB::new_in_memory();
+    db.execute("INSERT (:Person {name: 'Alix', city: 'Amsterdam'})-[:KNOWS {since: 2020}]->(:Person {name: 'Gus'})")
+        .unwrap();
+    let counts = |db: &GrafeoDB| {
+        let stats = db.detailed_stats().unwrap();
+        assert_eq!(stats.property_key_count, db.property_key_count().unwrap());
+        (db.label_count().unwrap(), stats.property_key_count)
+    };
+    assert_eq!(counts(&db), (1, 3), "name, city and since");
+
+    db.execute("MATCH (p:Person {name: 'Alix'}) REMOVE p.city")
+        .unwrap();
+    assert_eq!(
+        counts(&db),
+        (1, 3),
+        "city is held by no node, still counted"
+    );
+
+    db.execute("MATCH ()-[k:KNOWS]->() DELETE k").unwrap();
+    assert_eq!(
+        counts(&db),
+        (1, 3),
+        "since is held by no edge, still counted"
+    );
+
+    let mut session = db.session();
+    session.begin_transaction().unwrap();
+    session
+        .execute("INSERT (:Film {title: 'Pulp Fiction'})")
+        .unwrap();
+    session.rollback().unwrap();
+    assert_eq!(
+        counts(&db),
+        (1, 4),
+        "title, of a rolled back write, is counted"
+    );
+}
+
 #[test]
 fn direct_reads_on_an_external_store() {
     let store = Arc::new(RowGroupStore::new());

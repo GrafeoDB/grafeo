@@ -409,3 +409,114 @@ tests:
     expect:
       rows:
         - [true, false]
+
+  # ---------------------------------------------------------------------------
+  # CREATE GRAPH TYPE x LIKE g inside a schema takes g's type (0.6.1): it read
+  # the graph by its bare name, found no type and made an empty open one
+  # ---------------------------------------------------------------------------
+
+  - name: a_graph_type_like_a_typed_graph_in_a_schema_takes_its_type
+    statements:
+      - "CREATE SCHEMA s1"
+      - "SESSION SET SCHEMA s1"
+      - "CREATE NODE TYPE Customer (customerId STRING NOT NULL)"
+      - "CREATE GRAPH TYPE shop (NODE TYPE Customer)"
+      - "CREATE GRAPH g TYPED shop"
+      - "CREATE GRAPH TYPE copy LIKE g"
+      - "SHOW GRAPH TYPES"
+    expect:
+      rows:
+        - [shop, false, Customer, ""]
+        - [copy, false, Customer, ""]
+
+  - name: a_graph_typed_like_a_typed_graph_in_a_schema_is_closed
+    statements:
+      - "CREATE SCHEMA s1"
+      - "SESSION SET SCHEMA s1"
+      - "CREATE NODE TYPE Customer (customerId STRING NOT NULL)"
+      - "CREATE GRAPH TYPE shop (NODE TYPE Customer)"
+      - "CREATE GRAPH g TYPED shop"
+      - "CREATE GRAPH TYPE copy LIKE g"
+      - "CREATE GRAPH h TYPED copy"
+      - "USE GRAPH h"
+      - "INSERT (:Spaceship {id: 'x'})"
+    expect:
+      # The type is named with its schema.
+      error: "label 'Spaceship' is not a node type of closed graph type 's1/copy'"
+
+  - name: a_graph_typed_like_a_typed_graph_outside_a_schema_is_closed
+    # Control: the default schema.
+    statements:
+      - "CREATE NODE TYPE Customer (customerId STRING NOT NULL)"
+      - "CREATE GRAPH TYPE shop (NODE TYPE Customer)"
+      - "CREATE GRAPH g TYPED shop"
+      - "CREATE GRAPH TYPE copy LIKE g"
+      - "CREATE GRAPH h TYPED copy"
+      - "USE GRAPH h"
+      - "INSERT (:Spaceship {id: 'x'})"
+    expect:
+      error: "label 'Spaceship' is not a node type of closed graph type 'copy'"
+
+  # ---------------------------------------------------------------------------
+  # CREATE VECTOR INDEX IF NOT EXISTS (0.6.1), as CREATE INDEX IF NOT EXISTS
+  # ---------------------------------------------------------------------------
+
+  - name: create_vector_index_if_not_exists_keeps_the_existing_index
+    requires: [vector-index]
+    setup:
+      - "CREATE VECTOR INDEX emb_vec ON :Doc(emb) DIMENSION 2 METRIC 'cosine'"
+      - "CREATE VECTOR INDEX IF NOT EXISTS emb_vec ON :Doc(emb) DIMENSION 3 METRIC 'euclidean'"
+    query: "SHOW INDEXES"
+    expect:
+      rows:
+        - [emb_vec, Vector, Doc, emb]
+
+  - name: create_vector_index_if_not_exists_creates_a_new_one
+    requires: [vector-index]
+    setup:
+      - "CREATE VECTOR INDEX IF NOT EXISTS emb_vec ON :Doc(emb) DIMENSION 2 METRIC 'cosine'"
+    query: "SHOW INDEXES"
+    expect:
+      rows:
+        - [emb_vec, Vector, Doc, emb]
+
+  - name: create_vector_index_of_a_taken_name_still_fails
+    requires: [vector-index]
+    setup:
+      - "CREATE VECTOR INDEX emb_vec ON :Doc(emb) DIMENSION 2 METRIC 'cosine'"
+    query: "CREATE VECTOR INDEX emb_vec ON :Doc(emb) DIMENSION 3 METRIC 'euclidean'"
+    expect:
+      error: "emb_vec"
+
+  # ---------------------------------------------------------------------------
+  # DROP INDEX of an index over several properties drops all of them (0.6.1):
+  # it dropped one and left the name taken
+  # ---------------------------------------------------------------------------
+
+  - name: drop_index_over_two_properties_drops_both
+    setup:
+      - "CREATE INDEX pair FOR (n:L) ON (n.a, n.b)"
+      - "DROP INDEX pair"
+    query: "SHOW INDEXES"
+    expect:
+      empty: true
+
+  - name: a_dropped_index_over_two_properties_frees_its_name
+    setup:
+      - "CREATE INDEX pair FOR (n:L) ON (n.a, n.b)"
+      - "DROP INDEX pair"
+      - "CREATE INDEX pair FOR (n:L) ON (n.c)"
+    query: "SHOW INDEXES"
+    expect:
+      rows:
+        - [pair, Hash, L, c]
+
+  - name: drop_index_over_three_properties_keeps_other_indexes
+    setup:
+      - "CREATE INDEX other FOR (n:L) ON (n.a)"
+      - "CREATE INDEX trio FOR (n:M) ON (n.a, n.b, n.c)"
+      - "DROP INDEX trio"
+    query: "SHOW INDEXES"
+    expect:
+      rows:
+        - [other, Hash, L, a]

@@ -34,6 +34,8 @@ class Case:
     languages: tuple[str, ...] = BOTH
     fixture: str = "social"
     ordered: bool = False
+    # Parameters as (name, value) pairs; empty runs the query without any.
+    params: tuple[tuple[str, object], ...] = ()
 
 
 def social(grafeo):
@@ -444,14 +446,20 @@ def case(
     languages: tuple[str, ...] = BOTH,
     fixture: str = "social",
     ordered: bool = False,
+    params: dict | None = None,
 ) -> None:
-    CASES.append(Case(case_id, query, languages, fixture, ordered))
+    pairs = tuple((params or {}).items())
+    CASES.append(Case(case_id, query, languages, fixture, ordered, pairs))
 
 
 def ordered(
-    case_id: str, query: str, languages: tuple[str, ...] = BOTH, fixture: str = "social"
+    case_id: str,
+    query: str,
+    languages: tuple[str, ...] = BOTH,
+    fixture: str = "social",
+    params: dict | None = None,
 ):
-    case(case_id, query, languages, fixture, ordered=True)
+    case(case_id, query, languages, fixture, ordered=True, params=params)
 
 
 # The cases, one per line.
@@ -2397,5 +2405,23 @@ for case_id, query in [
     ("DO12", "SELECT id FROM GRAPH_TABLE (MATCH (n:!(Post|Comment)) COLUMNS (n.id AS id))"),
 ]:
     case(case_id, query, SQL, "unlabeled")
+
+# DP: SQL/PGQ ORDER BY names an alias of the outer SELECT (DP1 to DP4; 0.6.0 failed with an
+#     unknown column, or sorted by the COLUMNS column the alias hides, DP3); a parameter named
+#     after a reserved word (DP5 to DP7; a syntax error in 0.6.0); LIMIT and OFFSET take a
+#     parameter (DP8 to DP10), and a negative, fractional or text one fails as in GQL (DP11 to DP13)
+ordered("DP1", "SELECT p.age AS years FROM GRAPH_TABLE (MATCH (a:Person) COLUMNS (a.age AS age)) AS p ORDER BY years", SQL)
+ordered("DP2", "SELECT age + 1 AS older FROM GRAPH_TABLE (MATCH (a:Person) COLUMNS (a.age AS age)) ORDER BY older DESC", SQL)
+ordered("DP3", "SELECT 100 - age AS age FROM GRAPH_TABLE (MATCH (a:Person) COLUMNS (a.age AS age)) ORDER BY age", SQL)
+ordered("DP4", "SELECT name, CARDINALITY(NODES(p)) AS nodes FROM GRAPH_TABLE (MATCH p = (a:Person WHERE a.name = 'Alix')-[:KNOWS]->{1,2}(b:Person) COLUMNS (p AS p, b.name AS name)) ORDER BY nodes DESC, name", SQL)
+ordered("DP5", "SELECT n FROM GRAPH_TABLE (MATCH (a:Person) WHERE a.age >= $from COLUMNS (a.name AS n)) ORDER BY n", SQL, params={"from": 30})
+ordered("DP6", "SELECT n, age + $order AS next FROM GRAPH_TABLE (MATCH (a:Person) WHERE a.age >= $select COLUMNS (a.name AS n, a.age AS age)) ORDER BY next", SQL, params={"order": 1, "select": 30})
+case("DP7", "SELECT n FROM GRAPH_TABLE (MATCH (a:Person) WHERE a.name = $WHERE OR a.age = $null COLUMNS (a.name AS n))", SQL, params={"WHERE": "Mia", "null": 40})
+ordered("DP8", "SELECT n FROM GRAPH_TABLE (MATCH (a:Person) COLUMNS (a.name AS n)) ORDER BY n LIMIT $limit", SQL, params={"limit": 2})
+ordered("DP9", "SELECT n FROM GRAPH_TABLE (MATCH (a:Person) COLUMNS (a.name AS n)) ORDER BY n OFFSET $offset", SQL, params={"offset": 3})
+ordered("DP10", "SELECT n FROM GRAPH_TABLE (MATCH (a:Person) COLUMNS (a.name AS n)) ORDER BY n LIMIT $n OFFSET $n", SQL, params={"n": 1})
+case("DP11", "SELECT n FROM GRAPH_TABLE (MATCH (a:Person) COLUMNS (a.name AS n)) LIMIT $limit", SQL, params={"limit": -1})
+case("DP12", "SELECT n FROM GRAPH_TABLE (MATCH (a:Person) COLUMNS (a.name AS n)) LIMIT $limit", SQL, params={"limit": 1.5})
+case("DP13", "SELECT n FROM GRAPH_TABLE (MATCH (a:Person) COLUMNS (a.name AS n)) OFFSET $offset", SQL, params={"offset": "two"})
 
 # fmt: on

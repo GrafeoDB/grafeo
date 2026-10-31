@@ -114,7 +114,7 @@ def error_text(error: Exception) -> str:
     return lines[0][:ERROR_LENGTH] if lines else type(error).__name__
 
 
-def run_case(db, language: str, query: str) -> dict:
+def run_case(db, language: str, query: str, params: dict | None = None) -> dict:
     """The result of one query: its columns and rows, or the first line of its error."""
     execute = {
         "gql": db.execute,
@@ -123,7 +123,7 @@ def run_case(db, language: str, query: str) -> dict:
         "sparql": db.execute_sparql,
     }[language]
     try:
-        result = execute(query)
+        result = execute(query, params) if params else execute(query)
         if getattr(result, "kind", None) == "boolean":
             return {"boolean": result.boolean}
         records = [dict(row) for row in result]
@@ -145,10 +145,12 @@ def run_corpus(out: Path) -> None:
         if case.fixture not in databases:
             databases[case.fixture] = FIXTURES[case.fixture](grafeo)
         for language in case.languages:
-            result = run_case(databases[case.fixture], language, case.query)
+            params = dict(case.params)
+            result = run_case(databases[case.fixture], language, case.query, params)
             results[f"{case.id}|{language}"] = {
                 "query": case.query,
                 "ordered": case.ordered,
+                **({"params": params} if params else {}),
                 **result,
             }
     build_info = getattr(grafeo, "build_info", None)

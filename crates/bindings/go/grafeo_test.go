@@ -371,6 +371,38 @@ func TestTransactionRollback(t *testing.T) {
 	}
 }
 
+// A commit that succeeded leaves nothing to roll back: as in every binding,
+// a Rollback after it is an error, and the commit stands.
+func TestRollbackAfterCommitIsAnError(t *testing.T) {
+	db, err := OpenInMemory()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	tx, err := db.BeginTransaction()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tx.Execute("INSERT (:Person {name: 'Jules'})"); err != nil {
+		t.Fatal(err)
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatal(err)
+	}
+
+	err = tx.Rollback()
+	if err == nil {
+		t.Fatal("a rollback after a commit succeeded")
+	}
+	if !strings.Contains(err.Error(), "Transaction already committed") {
+		t.Errorf("the error says the transaction is committed: %v", err)
+	}
+	if got := mustCount(t, db.NodeCount); got != 1 {
+		t.Errorf("expected the committed node, got %d nodes", got)
+	}
+}
+
 // Serializable is refused until queries record their reads (#671).
 func TestSerializableIsRefused(t *testing.T) {
 	db, err := OpenInMemory()

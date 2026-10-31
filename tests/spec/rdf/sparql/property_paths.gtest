@@ -1257,3 +1257,141 @@ tests:
       rows:
         - [http://ex.org/c]
         - [http://ex.org/d]
+
+  # ---------------------------------------------------------------------------
+  # 9.3  Alternative with a branch that is not a plain predicate (0.6.1): an
+  # inverse, sequence or repeated branch was refused. Vincent knows Alix,
+  # Alix knows Gus.
+  # ---------------------------------------------------------------------------
+
+  - name: alternative_with_an_inverse_branch_from_a_bound_subject
+    setup:
+      - |
+        INSERT DATA {
+          <http://ex.org/vincent> <http://ex.org/knows> <http://ex.org/alix> .
+          <http://ex.org/alix> <http://ex.org/knows> <http://ex.org/gus> .
+        }
+    query: |
+      SELECT ?o WHERE { <http://ex.org/alix> (<http://ex.org/knows>|^<http://ex.org/knows>) ?o }
+    expect:
+      columns: [o]
+      rows:
+        - [http://ex.org/gus]
+        - [http://ex.org/vincent]
+
+  - name: alternative_with_an_inverse_branch_both_ends_free
+    setup:
+      - |
+        INSERT DATA {
+          <http://ex.org/vincent> <http://ex.org/knows> <http://ex.org/alix> .
+          <http://ex.org/alix> <http://ex.org/knows> <http://ex.org/gus> .
+        }
+    query: |
+      SELECT ?s ?o WHERE { ?s (<http://ex.org/knows>|^<http://ex.org/knows>) ?o }
+    expect:
+      columns: [s, o]
+      rows:
+        - [http://ex.org/alix, http://ex.org/gus]
+        - [http://ex.org/vincent, http://ex.org/alix]
+        - [http://ex.org/gus, http://ex.org/alix]
+        - [http://ex.org/alix, http://ex.org/vincent]
+
+  - name: alternative_with_a_sequence_branch_keeps_only_the_endpoints
+    # ^knows/knows pairs two people someone knows; SELECT * shows s and o only
+    setup:
+      - |
+        INSERT DATA {
+          <http://ex.org/vincent> <http://ex.org/knows> <http://ex.org/alix> .
+          <http://ex.org/alix> <http://ex.org/knows> <http://ex.org/gus> .
+        }
+    query: |
+      SELECT * WHERE { ?s (<http://ex.org/knows>|^<http://ex.org/knows>/<http://ex.org/knows>) ?o }
+    expect:
+      columns: [s, o]
+      rows:
+        - [http://ex.org/alix, http://ex.org/gus]
+        - [http://ex.org/vincent, http://ex.org/alix]
+        - [http://ex.org/gus, http://ex.org/gus]
+        - [http://ex.org/alix, http://ex.org/alix]
+
+  - name: alternative_with_a_repeated_inverse_branch
+    setup:
+      - |
+        INSERT DATA {
+          <http://ex.org/vincent> <http://ex.org/knows> <http://ex.org/alix> .
+          <http://ex.org/alix> <http://ex.org/knows> <http://ex.org/gus> .
+        }
+    query: |
+      SELECT ?s ?o WHERE { ?s (<http://ex.org/knows>|^<http://ex.org/knows>+) ?o }
+    expect:
+      columns: [s, o]
+      rows:
+        - [http://ex.org/alix, http://ex.org/gus]
+        - [http://ex.org/vincent, http://ex.org/alix]
+        - [http://ex.org/gus, http://ex.org/alix]
+        - [http://ex.org/gus, http://ex.org/vincent]
+        - [http://ex.org/alix, http://ex.org/vincent]
+
+  - name: alternative_with_an_inverse_branch_gives_a_pair_from_both_branches_twice
+    # A bag union: Mia and Butch know each other, so both branches find Butch
+    setup:
+      - |
+        INSERT DATA {
+          <http://ex.org/mia> <http://ex.org/knows> <http://ex.org/butch> .
+          <http://ex.org/butch> <http://ex.org/knows> <http://ex.org/mia> .
+        }
+    query: |
+      SELECT ?o WHERE { <http://ex.org/mia> (<http://ex.org/knows>|^<http://ex.org/knows>) ?o }
+    expect:
+      rows:
+        - [http://ex.org/butch]
+        - [http://ex.org/butch]
+
+  - name: alternative_with_an_inverse_branch_in_a_named_graph
+    # The default graph and Berlin hold decoys the Paris graph must not see
+    setup:
+      - |
+        INSERT DATA {
+          GRAPH <http://ex.org/paris> {
+            <http://ex.org/vincent> <http://ex.org/knows> <http://ex.org/alix> .
+            <http://ex.org/alix> <http://ex.org/knows> <http://ex.org/gus> .
+          }
+          <http://ex.org/alix> <http://ex.org/knows> <http://ex.org/jules> .
+          GRAPH <http://ex.org/berlin> {
+            <http://ex.org/mia> <http://ex.org/knows> <http://ex.org/alix> .
+          }
+        }
+    query: |
+      SELECT ?o WHERE {
+        GRAPH <http://ex.org/paris> { <http://ex.org/alix> (<http://ex.org/knows>|^<http://ex.org/knows>) ?o }
+      }
+    expect:
+      columns: [o]
+      rows:
+        - [http://ex.org/gus]
+        - [http://ex.org/vincent]
+
+  - name: alternative_with_an_inverse_branch_over_every_named_graph
+    # GRAPH ?g binds each row's graph; no pair crosses two graphs
+    setup:
+      - |
+        INSERT DATA {
+          GRAPH <http://ex.org/paris> {
+            <http://ex.org/vincent> <http://ex.org/knows> <http://ex.org/alix> .
+            <http://ex.org/alix> <http://ex.org/knows> <http://ex.org/gus> .
+          }
+          <http://ex.org/alix> <http://ex.org/knows> <http://ex.org/jules> .
+          GRAPH <http://ex.org/berlin> {
+            <http://ex.org/mia> <http://ex.org/knows> <http://ex.org/alix> .
+          }
+        }
+    query: |
+      SELECT ?g ?o WHERE {
+        GRAPH ?g { <http://ex.org/alix> (<http://ex.org/knows>|^<http://ex.org/knows>) ?o }
+      }
+    expect:
+      columns: [g, o]
+      rows:
+        - [http://ex.org/paris, http://ex.org/gus]
+        - [http://ex.org/paris, http://ex.org/vincent]
+        - [http://ex.org/berlin, http://ex.org/mia]

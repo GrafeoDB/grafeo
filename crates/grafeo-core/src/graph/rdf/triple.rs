@@ -120,6 +120,13 @@ impl Triple {
         Some([subject?, predicate?, object?])
     }
 
+    /// The raw ids of a triple a store holds, which its indexes key it by
+    /// (see [`ids`](Self::ids)); [`NO_IDS`] for one no store took.
+    #[must_use]
+    pub(crate) fn raw_ids(&self) -> &[u64; 3] {
+        &self.ids
+    }
+
     /// Returns the subject of the triple.
     #[inline]
     #[must_use]

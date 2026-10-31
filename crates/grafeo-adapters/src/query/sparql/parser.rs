@@ -2402,9 +2402,18 @@ impl<'a> Parser<'a> {
             return Err(self.error("expected IRI"));
         }
         let text = self.current.text.clone();
+        // Between the angle brackets, a `\u` or `\U` escape stands for its
+        // code point (SPARQL 1.1, section 19.2), so both spellings of an IRI
+        // are one IRI, as the N-Triples and Turtle loaders read them. The
+        // lexer took only escapes with all their digits, so what can still
+        // fail is a code point that is no character.
+        let iri = grafeo_common::types::rdf::unescape_iri(&text[1..text.len() - 1])
+            .map_err(|_| {
+                let reason = "an escape that spells no Unicode scalar value (a surrogate, or above U+10FFFF)";
+                self.error(&format!("the IRI {text} has {reason}"))
+            })?
+            .into_owned();
         self.advance();
-        // Remove angle brackets
-        let iri = &text[1..text.len() - 1];
         Ok(Iri::new(iri))
     }
 
@@ -2647,6 +2656,75 @@ mod tests {
     fn test_simple_select() {
         let query = parse("SELECT ?x WHERE { ?x ?y ?z }").unwrap();
         assert!(matches!(query.query_form, QueryForm::Select(_)));
+    }
+
+    /// `text` with every `~` a backslash, so an escape reads as written.
+    fn escaped(text: &str) -> String {
+        text.replace('~', "\\")
+    }
+
+    /// The subject, predicate and object of `query`, a SELECT of one triple
+    /// pattern.
+    fn the_pattern(query: &str) -> (TripleTerm, PropertyPath, TripleTerm) {
+        let query = parse(query).unwrap();
+        let QueryForm::Select(select) = query.query_form else {
+            panic!("expected SELECT query");
+        };
+        let GraphPattern::Basic(patterns) = select.where_clause else {
+            panic!(
+                "expected one basic graph pattern: {:?}",
+                select.where_clause
+            );
+        };
+        let [pattern] = patterns.as_slice() else {
+            panic!("expected one triple pattern: {patterns:?}");
+        };
+        (
+            pattern.subject.clone(),
+            pattern.predicate.clone(),
+            pattern.object.clone(),
+        )
+    }
+
+    /// A `\u` or `\U` escape in an IRI stands for its code point (SPARQL
+    /// 1.1, section 19.2), wherever the IRI stands, so both spellings are one
+    /// IRI.
+    #[test]
+    fn an_escape_in_an_iri_is_its_code_point() {
+        let (subject, predicate, object) = the_pattern(&escaped(
+            "SELECT * WHERE { <http://example.org/Krak~u00F3w> \
+             <http://example.org/~u0070> <http://example.org/~U0001F6B2> }",
+        ));
+        assert_eq!(
+            subject,
+            TripleTerm::Iri(Iri::new("http://example.org/Kraków"))
+        );
+        assert_eq!(
+            predicate,
+            PropertyPath::Predicate(Iri::new("http://example.org/p"))
+        );
+        assert_eq!(
+            object,
+            TripleTerm::Iri(Iri::new("http://example.org/\u{1F6B2}"))
+        );
+
+        let (subject, ..) = the_pattern("SELECT * WHERE { <http://example.org/Kraków> ?p ?o }");
+        assert_eq!(
+            subject,
+            TripleTerm::Iri(Iri::new("http://example.org/Kraków"))
+        );
+    }
+
+    /// An escape that spells no Unicode scalar value (a surrogate) is a parse
+    /// error naming it, not an IRI that keeps the escape.
+    #[test]
+    fn an_iri_escape_of_a_surrogate_is_a_parse_error() {
+        let query = escaped("SELECT * WHERE { <http://example.org/~uD800> ?p ?o }");
+        let error = parse(&query).unwrap_err().to_string();
+        assert!(
+            error.contains("uD800") && error.contains("IRI"),
+            "the error names the escape and the IRI: {error}"
+        );
     }
 
     #[test]

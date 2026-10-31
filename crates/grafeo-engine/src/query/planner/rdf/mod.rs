@@ -32,6 +32,7 @@ use crate::query::planner::{PhysicalPlan, convert_aggregate_function, convert_fi
 use crate::transaction::RdfWriter;
 
 mod evaluator;
+mod exists_pair;
 mod named_graphs;
 mod order;
 mod path_per_row;
@@ -839,6 +840,78 @@ impl RdfPlanner {
         Ok((result_op, result_columns, left_types))
     }
 
+    /// The condition of an `OPTIONAL`'s left join, over the merged solution
+    /// of a pair (SPARQL 1.1 sec 18.5): a variable both sides have reads the
+    /// right side's value where the left leaves it unbound, and each
+    /// conjunct that is an `EXISTS` or `NOT EXISTS` is decided per pair (see
+    /// [`exists_pair`]).
+    fn left_join_condition(
+        &self,
+        condition: &LogicalExpression,
+        left_columns: &[String],
+        right_columns: &[String],
+    ) -> Result<Box<dyn grafeo_core::execution::operators::JoinCondition>> {
+        use grafeo_core::execution::operators::{JoinCondition, JoinedRowCondition};
+
+        let mut conjuncts = Vec::new();
+        conjuncts_of(condition, &mut conjuncts);
+        let mut tests = Vec::new();
+        let mut rest = Vec::new();
+        for conjunct in conjuncts {
+            match self.extract_exists_pattern(conjunct) {
+                Some((subquery, negated)) => {
+                    let (op, columns, _) = self.plan_operator(subquery)?;
+                    let (keys, subquery_columns) = columns
+                        .iter()
+                        .enumerate()
+                        .filter_map(|(at, name)| {
+                            let left = left_columns.iter().position(|c| c == name);
+                            let right = right_columns.iter().position(|c| c == name);
+                            (left.is_some() || right.is_some()).then_some(((left, right), at))
+                        })
+                        .unzip();
+                    tests.push(exists_pair::ExistsTest::new(
+                        op,
+                        negated,
+                        keys,
+                        subquery_columns,
+                    ));
+                }
+                None => rest.push(conjunct.clone()),
+            }
+        }
+        let rest = LogicalExpression::conjunction(rest)
+            .map(|rest| -> Result<Box<dyn JoinCondition>> {
+                let mut variable_columns: HashMap<String, usize> = HashMap::new();
+                for (i, name) in left_columns.iter().chain(right_columns).enumerate() {
+                    variable_columns.entry(name.clone()).or_insert(i);
+                }
+                // A variable both sides have reads the right side's value
+                // where the left leaves it unbound (sec 18.5, LeftJoin).
+                let fallback_columns: HashMap<String, usize> = right_columns
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, name)| left_columns.contains(name))
+                    .map(|(i, name)| (name.clone(), left_columns.len() + i))
+                    .collect();
+                let predicate = RdfExpressionPredicate::new(
+                    convert_filter_expression(&rest)?,
+                    variable_columns,
+                    Arc::clone(&self.terms),
+                    self.clock,
+                )
+                .with_fallback_columns(fallback_columns);
+                Ok(Box::new(JoinedRowCondition::new(Box::new(predicate))))
+            })
+            .transpose()?;
+        if tests.is_empty() {
+            return rest.ok_or_else(|| {
+                Error::Internal("a left join condition with no conjunct".to_string())
+            });
+        }
+        Ok(Box::new(exists_pair::ExistsPairCondition::new(tests, rest)))
+    }
+
     /// Plans a DISTINCT operator.
     fn plan_distinct(
         &self,
@@ -1593,7 +1666,6 @@ impl RdfPlanner {
         join: &LeftJoinOp,
     ) -> Result<(Box<dyn Operator>, Vec<String>, Vec<LogicalType>)> {
         use crate::query::planner::common;
-        use grafeo_core::execution::operators::{JoinCondition, JoinedRowCondition};
         let (left_op, left_columns, left_types) = self.plan_operator(&join.left)?;
         let right_entry = self.profile_entries.borrow().len();
         let (right_op, right_columns, right_types) = self.plan_operator(&join.right)?;
@@ -1630,29 +1702,7 @@ impl RdfPlanner {
         }
         let residual = match &join.condition {
             Some(condition) => {
-                let mut variable_columns: HashMap<String, usize> = HashMap::new();
-                for (i, name) in left_columns.iter().chain(&right_columns).enumerate() {
-                    variable_columns.entry(name.clone()).or_insert(i);
-                }
-                // A variable both sides have reads the right side's value
-                // where the left leaves it unbound: the condition reads the
-                // merged solution (SPARQL 1.1 sec 18.5, LeftJoin).
-                let fallback_columns: HashMap<String, usize> = right_columns
-                    .iter()
-                    .enumerate()
-                    .filter(|(_, name)| left_columns.contains(name))
-                    .map(|(i, name)| (name.clone(), left_columns.len() + i))
-                    .collect();
-                let predicate = RdfExpressionPredicate::new(
-                    convert_filter_expression(condition)?,
-                    variable_columns,
-                    Arc::clone(&self.terms),
-                    self.clock,
-                )
-                .with_fallback_columns(fallback_columns);
-                let condition: Box<dyn JoinCondition> =
-                    Box::new(JoinedRowCondition::new(Box::new(predicate)));
-                Some(condition)
+                Some(self.left_join_condition(condition, &left_columns, &right_columns)?)
             }
             None => None,
         };
@@ -3987,6 +4037,21 @@ fn loosely_shared(
         .filter(|name| !(bound(&left, name) && bound(&right, name)))
         .cloned()
         .collect()
+}
+
+/// The conjuncts of `expression`, its `AND`s taken apart.
+fn conjuncts_of<'a>(expression: &'a LogicalExpression, into: &mut Vec<&'a LogicalExpression>) {
+    match expression {
+        LogicalExpression::Binary {
+            left,
+            op: crate::query::plan::BinaryOp::And,
+            right,
+        } => {
+            conjuncts_of(left, into);
+            conjuncts_of(right, into);
+        }
+        other => into.push(other),
+    }
 }
 
 #[cfg(test)]

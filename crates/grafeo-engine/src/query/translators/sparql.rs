@@ -1056,6 +1056,17 @@ impl SparqlTranslator {
         &mut self,
         patterns: &[ast::GraphPattern],
     ) -> Result<(LogicalOperator, Vec<LogicalExpression>)> {
+        self.translate_group_returning(patterns, false)
+    }
+
+    /// [`translate_group`](Self::translate_group), returning the FILTER
+    /// EXISTS and NOT EXISTS among the filters too when `exists_too`: an
+    /// OPTIONAL decides them per pair, in its left join's condition.
+    fn translate_group_returning(
+        &mut self,
+        patterns: &[ast::GraphPattern],
+        exists_too: bool,
+    ) -> Result<(LogicalOperator, Vec<LogicalExpression>)> {
         // Process patterns in document order so that BIND, OPTIONAL,
         // MINUS, etc. see the variables introduced by preceding
         // patterns. FILTER and FILTER NOT EXISTS/EXISTS scope over
@@ -1076,7 +1087,9 @@ impl SparqlTranslator {
                 ast::GraphPattern::Filter(expr) => {
                     // Collect filters for group-level application
                     match expr {
-                        ast::Expression::NotExists(_) | ast::Expression::Exists(_) => {
+                        ast::Expression::NotExists(_) | ast::Expression::Exists(_)
+                            if !exists_too =>
+                        {
                             exists_filters.push(expr);
                         }
                         _ => filter_exprs.push(expr),
@@ -1176,8 +1189,8 @@ impl SparqlTranslator {
     /// `OPTIONAL { P }` after `left`, the group so far, is LeftJoin(left, P,
     /// F) (SPARQL 1.1 sec 18.2.2.6), F the FILTERs at the top of P's group.
     /// F decides which pairs match over the merged solution, so it reads the
-    /// variables bound before the OPTIONAL too; a FILTER with an EXISTS stays
-    /// inside P, where it runs as a join. An empty `left` is Z, the empty
+    /// variables bound before the OPTIONAL too, an `EXISTS` or `NOT EXISTS`
+    /// among them; a FILTER with a subquery elsewhere in it stays inside P. An empty `left` is Z, the empty
     /// group's one solution: an OPTIONAL that opens a group keeps it when P
     /// has no solution.
     fn translate_optional(
@@ -1186,10 +1199,12 @@ impl SparqlTranslator {
         inner: &ast::GraphPattern,
     ) -> Result<LogicalOperator> {
         let (right, condition) = if let ast::GraphPattern::Group(patterns) = inner {
-            let (plan, filters) = self.translate_group(patterns)?;
-            let (inside, merged): (Vec<_>, Vec<_>) = filters
-                .into_iter()
-                .partition(crate::query::plan::has_subquery);
+            let (plan, filters) = self.translate_group_returning(patterns, true)?;
+            // An EXISTS or NOT EXISTS conjunct is decided per pair too, in
+            // the condition; any other filter with a subquery stays inside.
+            let (inside, merged): (Vec<_>, Vec<_>) = filters.into_iter().partition(|filter| {
+                crate::query::plan::has_subquery(filter) && !is_exists_test(filter)
+            });
             let plan = match LogicalExpression::conjunction(inside) {
                 Some(predicate) => wrap_filter(plan, predicate),
                 None => plan,
@@ -2675,6 +2690,18 @@ impl SparqlTranslator {
 /// An IRI as the constant of an expression.
 fn iri_term(iri: &str) -> Value {
     Value::RdfTerm(Arc::new(Term::iri(iri)))
+}
+
+/// Whether `filter` is an `EXISTS` or `NOT EXISTS` test as a whole.
+fn is_exists_test(filter: &LogicalExpression) -> bool {
+    match filter {
+        LogicalExpression::ExistsSubquery(_) => true,
+        LogicalExpression::Unary {
+            op: crate::query::plan::UnaryOp::Not,
+            operand,
+        } => matches!(operand.as_ref(), LogicalExpression::ExistsSubquery(_)),
+        _ => false,
+    }
 }
 
 #[cfg(test)]

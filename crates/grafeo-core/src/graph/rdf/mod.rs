@@ -60,6 +60,6 @@ pub use dictionary::{DictionaryEntry, DictionaryFull, TermDictionary};
 pub use graph_store_adapter::RdfGraphStoreAdapter;
 pub use section::RdfStoreSection;
 pub use sink::{BatchInsertSink, CountSink, TripleSink, VecSink};
-pub use store::{BulkLoadResult, NTriplesError, RdfStore, RdfStoreConfig};
+pub use store::{BulkLoadResult, NTriplesError, RdfStore, RdfStoreConfig, parse_ntriples};
 pub use term::{BlankNode, Iri, Literal, Term, TermParseError};
 pub use triple::{Triple, TriplePattern};

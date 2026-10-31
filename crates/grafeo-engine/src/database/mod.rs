@@ -68,6 +68,8 @@ mod sections;
 mod time_index_section;
 // Time travel: reads at an earlier epoch or time (H2c).
 mod time_travel;
+#[cfg(feature = "triple-store")]
+pub use rdf_ops::RdfFormat;
 pub use time_travel::{AsOfView, TimePoint};
 // Checkpoint and load of the row-group store.
 mod row_group_sections;

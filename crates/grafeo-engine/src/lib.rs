@@ -68,6 +68,9 @@ pub use catalog::{Catalog, CatalogError, IndexDefinition, IndexType};
 pub use config::{AccessMode, Config, ConfigError, DurabilityMode, GraphModel, HistoryRetention};
 pub use database::GrafeoDB;
 pub use database::GraphHandle;
+/// The syntax `GrafeoDB::load_rdf` reads.
+#[cfg(feature = "triple-store")]
+pub use database::RdfFormat;
 pub use database::{AsOfView, TimePoint};
 pub use grafeo_core::graph::{Direction, GraphStore, ProjectionSpec};
 /// The options `GrafeoDB::create_text_index_with` takes.

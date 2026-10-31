@@ -2083,6 +2083,39 @@ impl PyGrafeoDB {
         crate::direct::load_report(py, report)
     }
 
+    /// Load an RDF file into the default graph, in one bulk write: nothing
+    /// is inserted when a line does not parse.
+    ///
+    /// Args:
+    ///     path: The file, as a string or a path.
+    ///     format: "turtle" or "ntriples" (also "ttl", "nt"); by default the
+    ///         one the file's extension names (.ttl, .nt).
+    ///
+    /// Returns:
+    ///     How many triples were new.
+    ///
+    /// Example:
+    ///     db.load_rdf("people.ttl")
+    #[cfg(feature = "triple-store")]
+    #[pyo3(signature = (path, format=None))]
+    fn load_rdf(
+        &self,
+        path: std::path::PathBuf,
+        format: Option<&str>,
+        py: Python<'_>,
+    ) -> PyResult<usize> {
+        let format = format
+            .map(|name| {
+                grafeo_engine::RdfFormat::from_name(name).ok_or_else(|| {
+                    pyo3::exceptions::PyValueError::new_err(format!(
+                        "format must be 'turtle' or 'ntriples', not '{name}'"
+                    ))
+                })
+            })
+            .transpose()?;
+        self.released(py, |db| Ok(db.load_rdf(&path, format)?))
+    }
+
     /// Batch search for nearest neighbors of multiple query vectors.
     ///
     /// Executes searches in parallel using all available CPU cores.

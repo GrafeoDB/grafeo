@@ -1390,20 +1390,7 @@ impl RdfStore {
         &self,
         reader: impl std::io::BufRead,
     ) -> Result<BulkLoadResult, NTriplesError> {
-        let mut triples = Vec::new();
-        for (line_no, line) in reader.lines().enumerate() {
-            let line = line.map_err(NTriplesError::Io)?;
-            let trimmed = line.trim();
-            if trimmed.is_empty() || trimmed.starts_with('#') {
-                continue;
-            }
-            let triple = parse_ntriples_line(trimmed).map_err(|reason| NTriplesError::Parse {
-                line: line_no + 1,
-                content: format!("{reason}: {line}"),
-            })?;
-            triples.push(triple);
-        }
-        Ok(self.bulk_load(triples))
+        Ok(self.bulk_load(parse_ntriples(reader)?))
     }
 
     /// Parses and loads a Turtle document, replacing all existing data.
@@ -2154,6 +2141,31 @@ fn next_ntriples_term(s: &str) -> Option<(&str, &str)> {
     } else {
         None
     }
+}
+
+/// The triples of an N-Triples document, in document order, without
+/// loading them: empty lines and comment lines (starting with `#`) are
+/// skipped.
+///
+/// # Errors
+///
+/// Returns an error on I/O failure or if a line cannot be parsed, naming the
+/// line.
+pub fn parse_ntriples(reader: impl std::io::BufRead) -> Result<Vec<Triple>, NTriplesError> {
+    let mut triples = Vec::new();
+    for (line_no, line) in reader.lines().enumerate() {
+        let line = line.map_err(NTriplesError::Io)?;
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            continue;
+        }
+        let triple = parse_ntriples_line(trimmed).map_err(|reason| NTriplesError::Parse {
+            line: line_no + 1,
+            content: format!("{reason}: {line}"),
+        })?;
+        triples.push(triple);
+    }
+    Ok(triples)
 }
 
 /// Parses a single N-Triples line into a `Triple`.

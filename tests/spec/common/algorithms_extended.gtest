@@ -123,7 +123,7 @@ tests:
       - "MATCH (a:City {name: 'Amsterdam'}), (b:City {name: 'Paris'}) INSERT (a)-[:ROUTE {km: 500}]->(b)"
     query: "CALL grafeo.kruskal({weight: 'km'})"
     expect:
-      columns: [source, target, weight]
+      columns: [source, target, weight, total_weight]
       count: 2
 
   - name: kruskal_unweighted_chain
@@ -175,7 +175,7 @@ tests:
       - "MATCH (a:City {name: 'Amsterdam'}), (b:City {name: 'Paris'}) INSERT (a)-[:ROUTE {km: 500}]->(b)"
     query: "CALL grafeo.prim({weight: 'km'})"
     expect:
-      columns: [source, target, weight]
+      columns: [source, target, weight, total_weight]
       count: 2
 
   - name: prim_with_start_node
@@ -272,7 +272,7 @@ tests:
       - "MATCH (a:Station {name: 'Alix'}), (b:Station {name: 'Vincent'}) INSERT (a)-[:PIPE {capacity: 2, cost: 5}]->(b)"
     query: "CALL grafeo.min_cost_max_flow({source: 0, sink: 2, capacity: 'capacity', cost: 'cost'})"
     expect:
-      columns: [source, target, flow, cost, max_flow]
+      columns: [source, target, flow, cost, max_flow, total_cost]
 
   - name: min_cost_max_flow_chain
     setup:
@@ -302,3 +302,106 @@ tests:
     expect:
       columns: [flow, cost]
       count: 1
+
+  # ---------------------------------------------------------------------------
+  # Columns follow the arguments (0.6.1): a target, a k or a normalized score
+  # gives that shape's columns, a mistyped map key or an extra positional
+  # argument is an error naming the parameters.
+  # Routes: Amsterdam (0) -> Berlin (1) 650, Berlin -> Paris (2) 1050,
+  # Amsterdam -> Paris 500, Berlin -> Prague (3) 350, Paris -> Prague 1030.
+  # ---------------------------------------------------------------------------
+
+  - name: dijkstra_to_a_target_yields_the_one_path
+    setup:
+      - "INSERT (a:City {name: 'Amsterdam'}), (b:City {name: 'Berlin'}), (c:City {name: 'Paris'}), (d:City {name: 'Prague'}), (a)-[:ROUTE {km: 650}]->(b), (b)-[:ROUTE {km: 1050}]->(c), (a)-[:ROUTE {km: 500}]->(c), (b)-[:ROUTE {km: 350}]->(d), (c)-[:ROUTE {km: 1030}]->(d)"
+    query: "CALL grafeo.dijkstra({source: 0, target: 3, weight: 'km'}) YIELD source, target, distance, path RETURN source, target, CAST(distance AS INTEGER) AS km, path"
+    expect:
+      columns: [source, target, km, path]
+      rows:
+        - [0, 3, 1000, "0 -> 1 -> 3"]
+
+  - name: dijkstra_to_a_target_has_no_node_id_column
+    setup:
+      - "INSERT (a:City {name: 'Amsterdam'}), (b:City {name: 'Berlin'}), (a)-[:ROUTE {km: 650}]->(b)"
+    query: "CALL grafeo.dijkstra({source: 0, target: 1}) YIELD node_id"
+    expect:
+      error: "YIELD column 'node_id' is no column of the procedure (it has: source, target, distance, path)"
+
+  - name: kcore_with_k_yields_its_members
+    # A triangle and Hans on Django alone: the 2-core is the triangle
+    setup:
+      - "INSERT (m:P {name: 'Mia'})-[:K]->(b:P {name: 'Butch'})-[:K]->(d:P {name: 'Django'}), (d)-[:K]->(m), (:P {name: 'Hans'})-[:K]->(d)"
+    query: "CALL grafeo.kcore({k: 2}) YIELD node_id, in_k_core RETURN node_id, in_k_core ORDER BY node_id"
+    expect:
+      ordered: true
+      columns: [node_id, in_k_core]
+      rows:
+        - [0, true]
+        - [1, true]
+        - [2, true]
+
+  - name: kcore_with_k_has_no_core_number_column
+    setup:
+      - "INSERT (m:P {name: 'Mia'})-[:K]->(b:P {name: 'Butch'})"
+    query: "CALL grafeo.kcore({k: 1}) YIELD core_number"
+    expect:
+      error: "YIELD column 'core_number' is no column of the procedure (it has: node_id, in_k_core)"
+
+  - name: degree_centrality_normalized_yields_one_score
+    setup:
+      - "INSERT (a:City {name: 'Amsterdam'}), (b:City {name: 'Berlin'}), (c:City {name: 'Paris'}), (a)-[:ROUTE]->(b), (a)-[:ROUTE]->(c)"
+    query: "CALL grafeo.degree_centrality({normalized: true})"
+    expect:
+      columns: [node_id, centrality]
+      count: 3
+
+  - name: kruskal_yields_the_total_weight_on_every_row
+    setup:
+      - "INSERT (a:City {name: 'Amsterdam'}), (b:City {name: 'Berlin'}), (c:City {name: 'Paris'}), (d:City {name: 'Prague'}), (a)-[:ROUTE {km: 650}]->(b), (b)-[:ROUTE {km: 1050}]->(c), (a)-[:ROUTE {km: 500}]->(c), (b)-[:ROUTE {km: 350}]->(d), (c)-[:ROUTE {km: 1030}]->(d)"
+    query: "CALL grafeo.kruskal({weight: 'km'}) YIELD weight, total_weight RETURN CAST(weight AS INTEGER) AS km, CAST(total_weight AS INTEGER) AS total ORDER BY km"
+    expect:
+      ordered: true
+      columns: [km, total]
+      rows:
+        - [350, 1500]
+        - [500, 1500]
+        - [650, 1500]
+
+  - name: prim_yields_the_total_weight_on_every_row
+    setup:
+      - "INSERT (a:City {name: 'Amsterdam'}), (b:City {name: 'Berlin'}), (c:City {name: 'Paris'}), (d:City {name: 'Prague'}), (a)-[:ROUTE {km: 650}]->(b), (b)-[:ROUTE {km: 1050}]->(c), (a)-[:ROUTE {km: 500}]->(c), (b)-[:ROUTE {km: 350}]->(d), (c)-[:ROUTE {km: 1030}]->(d)"
+    query: "CALL grafeo.prim({weight: 'km'}) YIELD total_weight RETURN DISTINCT CAST(total_weight AS INTEGER) AS total"
+    expect:
+      rows:
+        - [1500]
+
+  - name: min_cost_max_flow_yields_the_total_cost_on_every_row
+    # 3 to Berlin at 2 and 1 to Paris at 5, then 3 at 1 and 1 at 3 to Prague
+    setup:
+      - "INSERT (a:City {name: 'Amsterdam'}), (b:City {name: 'Berlin'}), (c:City {name: 'Paris'}), (d:City {name: 'Prague'}), (a)-[:ROUTE {capacity: 3, cost: 2}]->(b), (b)-[:ROUTE {capacity: 2, cost: 1}]->(c), (a)-[:ROUTE {capacity: 1, cost: 5}]->(c), (b)-[:ROUTE {capacity: 4, cost: 1}]->(d), (c)-[:ROUTE {capacity: 2, cost: 3}]->(d)"
+    query: "CALL grafeo.min_cost_max_flow({source: 0, sink: 3, capacity: 'capacity', cost: 'cost'}) YIELD max_flow, total_cost RETURN DISTINCT CAST(max_flow AS INTEGER) AS flow, CAST(total_cost AS INTEGER) AS cost"
+    expect:
+      rows:
+        - [4, 17]
+
+  - name: a_mistyped_map_key_names_the_parameters
+    setup:
+      - "INSERT (a:City {name: 'Amsterdam'}), (b:City {name: 'Berlin'}), (a)-[:ROUTE {km: 650}]->(b)"
+    query: "CALL grafeo.kruskal({weightt: 'km'})"
+    expect:
+      error: "Argument 'weightt' is no parameter of grafeo.kruskal (it has: weight)"
+
+  - name: an_extra_positional_argument_names_the_parameters
+    setup:
+      - "INSERT (a:City {name: 'Amsterdam'}), (b:City {name: 'Berlin'}), (a)-[:ROUTE {km: 650}]->(b)"
+    query: "CALL grafeo.dijkstra(0, 1, 'km', 1)"
+    expect:
+      error: "grafeo.dijkstra takes at most 3 arguments, got 4 (its parameters: source, target, weight)"
+
+  - name: kcore_with_k_without_yield_gives_its_columns
+    setup:
+      - "INSERT (m:P {name: 'Mia'})-[:K]->(b:P {name: 'Butch'})-[:K]->(d:P {name: 'Django'}), (d)-[:K]->(m), (:P {name: 'Hans'})-[:K]->(d)"
+    query: "CALL grafeo.kcore({k: 2})"
+    expect:
+      columns: [node_id, in_k_core]
+      count: 3

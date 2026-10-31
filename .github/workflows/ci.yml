@@ -601,6 +601,10 @@ jobs:
           - profile: sparql-only
             features: "--features sparql,triple-store"
             engine_features: "--features sparql,triple-store"
+          # The triple store without a query language: the code that runs
+          # RDF queries comes with SPARQL or GraphQL, not with the store.
+          - profile: triple-store-only
+            features: "--features triple-store"
           - profile: graphql-only
             features: "--features graphql"
             engine_features: "--features lpg,graphql"

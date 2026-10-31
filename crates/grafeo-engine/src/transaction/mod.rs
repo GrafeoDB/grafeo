@@ -227,7 +227,9 @@ pub use manager::{
 #[doc(hidden)]
 pub use mvcc::{VersionChain, VersionInfo};
 pub use prepared::{CommitInfo, PreparedCommit};
+#[cfg(feature = "triple-store")]
+pub(crate) use rdf::RdfWriter;
 #[cfg(all(feature = "triple-store", feature = "cdc"))]
 pub(crate) use rdf::ntriples_terms;
-#[cfg(feature = "triple-store")]
-pub(crate) use rdf::{RdfWriter, update_privately};
+#[cfg(any(rdf_language, test))]
+pub(crate) use rdf::update_privately;

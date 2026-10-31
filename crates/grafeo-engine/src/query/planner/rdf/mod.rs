@@ -192,6 +192,7 @@ impl RdfPlanner {
     /// Returns results as the values GraphQL reads for terms (an IRI as its
     /// text, a numeric literal as its number) instead of RDF terms.
     #[must_use]
+    #[cfg(rdf_language)]
     pub(crate) fn with_query_values(mut self, query_values: bool) -> Self {
         self.query_values = query_values;
         self
@@ -199,7 +200,9 @@ impl RdfPlanner {
 
     /// Plans with the writer of the transaction the plan runs in: its
     /// updates record their triples through it, and its scans see them.
+    /// Only an RDF query runs in a transaction that writes triples.
     #[must_use]
+    #[cfg(any(rdf_language, test))]
     pub(crate) fn with_writer(mut self, writer: Option<RdfWriter>) -> Self {
         self.writer = writer;
         self

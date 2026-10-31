@@ -305,11 +305,11 @@ impl QueryProcessor {
         if language.is_lpg() {
             self.process_lpg(query, language, params)
         } else {
-            #[cfg(feature = "triple-store")]
+            #[cfg(rdf_language)]
             {
                 self.process_rdf(query, language, params)
             }
-            #[cfg(not(feature = "triple-store"))]
+            #[cfg(not(rdf_language))]
             {
                 Err(grafeo_common::utils::error::Error::from(
                     grafeo_common::utils::error::QueryError::unsupported(
@@ -577,7 +577,11 @@ impl QueryProcessor {
     pub fn rdf_store(&self) -> Option<&Arc<grafeo_core::graph::rdf::RdfStore>> {
         self.rdf_store.as_ref()
     }
+}
 
+// The RDF query languages add the processing of their queries.
+#[cfg(rdf_language)]
+impl QueryProcessor {
     /// Processes an RDF query (SPARQL, GraphQL-RDF).
     fn process_rdf(
         &self,
@@ -908,7 +912,7 @@ pub(crate) fn explain_result(plan: &LogicalPlan) -> QueryResult {
 
 /// Formats a physical EXPLAIN result showing both the logical plan and the
 /// physical operator names mapped to each logical operator.
-#[cfg(feature = "triple-store")]
+#[cfg(rdf_language)]
 pub(crate) fn physical_explain_result(
     plan: &LogicalPlan,
     entries: Vec<crate::query::profile::ProfileEntry>,
@@ -933,7 +937,7 @@ pub(crate) fn physical_explain_result(
 }
 
 /// Recursively formats a physical plan node showing operator name and label.
-#[cfg(feature = "triple-store")]
+#[cfg(rdf_language)]
 fn format_physical_node(out: &mut String, node: &crate::query::profile::ProfileNode, depth: usize) {
     use std::fmt::Write;
     let indent = "  ".repeat(depth);
@@ -951,7 +955,7 @@ fn format_physical_node(out: &mut String, node: &crate::query::profile::ProfileN
 /// # Errors
 ///
 /// As [`substitute_params`].
-#[cfg(feature = "triple-store")]
+#[cfg(rdf_language)]
 pub(crate) fn substitute_with_defaults(
     plan: &mut LogicalPlan,
     params: Option<&QueryParams>,

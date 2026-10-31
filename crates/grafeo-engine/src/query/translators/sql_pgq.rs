@@ -3,8 +3,8 @@
 //! Translates parsed SQL/PGQ `GRAPH_TABLE` queries into the common logical plan
 //! representation. The `GRAPH_TABLE`'s `MATCH` and `OPTIONAL MATCH` and the
 //! expressions over their variables are translated as GQL translates them
-//! (see [`GraphPatternTranslator`](super::gql::GraphPatternTranslator)):
-//! SQL/PGQ takes its graph patterns from GQL.
+//! (see `GraphPatternTranslator` in the GQL translator): SQL/PGQ takes its
+//! graph patterns from GQL.
 
 use std::collections::HashSet;
 

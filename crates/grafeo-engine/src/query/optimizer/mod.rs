@@ -359,6 +359,7 @@ impl Optimizer {
             default_params: plan.default_params,
             graph: plan.graph,
             result_kind: plan.result_kind,
+            count_clauses: plan.count_clauses,
         })
     }
 

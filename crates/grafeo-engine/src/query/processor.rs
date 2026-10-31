@@ -1030,11 +1030,22 @@ pub fn substitute_params(plan: &mut LogicalPlan, params: &QueryParams) -> Result
             grafeo_common::storage::MAX_PROPERTY_VALUE_DEPTH
         )));
     }
-    substitute_in_operator(&mut plan.root, params)
+    let params = Substitution {
+        values: params,
+        clauses: plan.count_clauses,
+    };
+    substitute_in_operator(&mut plan.root, &params)
+}
+
+/// The values a plan's parameters take, and what its statement calls the
+/// clauses that skip and limit rows, which the error of a bad count names.
+struct Substitution<'a> {
+    values: &'a QueryParams,
+    clauses: crate::query::plan::CountClauses,
 }
 
 /// Recursively substitutes parameters in an operator.
-fn substitute_in_operator(op: &mut LogicalOperator, params: &QueryParams) -> Result<()> {
+fn substitute_in_operator(op: &mut LogicalOperator, params: &Substitution<'_>) -> Result<()> {
     #[allow(clippy::wildcard_imports)]
     use crate::query::plan::*;
 
@@ -1118,11 +1129,11 @@ fn substitute_in_operator(op: &mut LogicalOperator, params: &QueryParams) -> Res
             substitute_in_operator(&mut sort.input, params)?;
         }
         LogicalOperator::Limit(limit) => {
-            resolve_count_param(&mut limit.count, params)?;
+            resolve_count_param(&mut limit.count, params.values, params.clauses.limit())?;
             substitute_in_operator(&mut limit.input, params)?;
         }
         LogicalOperator::Skip(skip) => {
-            resolve_count_param(&mut skip.count, params)?;
+            resolve_count_param(&mut skip.count, params.values, params.clauses.skip())?;
             substitute_in_operator(&mut skip.input, params)?;
         }
         LogicalOperator::Distinct(distinct) => {
@@ -1313,10 +1324,12 @@ fn substitute_in_operator(op: &mut LogicalOperator, params: &QueryParams) -> Res
     Ok(())
 }
 
-/// Resolves a `CountExpr::Parameter` by looking up the parameter value.
+/// Resolves a `CountExpr::Parameter` by looking up the parameter value; its
+/// errors name the clause `clause` (`SKIP/LIMIT`, or SQL's `OFFSET`).
 fn resolve_count_param(
     count: &mut crate::query::plan::CountExpr,
     params: &QueryParams,
+    clause: &str,
 ) -> Result<()> {
     use crate::query::plan::CountExpr;
     use grafeo_common::utils::error::QueryError;
@@ -1324,21 +1337,21 @@ fn resolve_count_param(
     if let CountExpr::Parameter(name) = count {
         let value = params.get(name.as_str()).ok_or_else(|| {
             Error::from(QueryError::invalid_reference(format!(
-                "Missing parameter for SKIP/LIMIT: ${name}"
+                "Missing parameter for {clause}: ${name}"
             )))
         })?;
-        *count = CountExpr::Literal(CountExpr::count_of(value)?);
+        *count = CountExpr::Literal(CountExpr::count_in(value, clause)?);
     }
     Ok(())
 }
 
 /// Substitutes parameters in an expression with their values.
-fn substitute_in_expression(expr: &mut LogicalExpression, params: &QueryParams) -> Result<()> {
+fn substitute_in_expression(expr: &mut LogicalExpression, params: &Substitution<'_>) -> Result<()> {
     use crate::query::plan::LogicalExpression;
 
     match expr {
         LogicalExpression::Parameter(name) => {
-            if let Some(value) = params.get(name) {
+            if let Some(value) = params.values.get(name) {
                 *expr = LogicalExpression::Literal(value.clone());
             } else {
                 return Err(Error::from(grafeo_common::utils::error::QueryError::new(

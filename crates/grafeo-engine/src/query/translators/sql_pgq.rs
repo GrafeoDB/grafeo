@@ -63,6 +63,8 @@ pub fn translate(query: &str) -> Result<LogicalPlan> {
     plan.explain = explain;
     plan.profile = profile;
     plan.graph = statement_graph(&statement)?;
+    // A bad OFFSET or LIMIT count names the clause the query wrote.
+    plan.count_clauses = crate::query::plan::CountClauses::OffsetLimit;
     Ok(plan)
 }
 

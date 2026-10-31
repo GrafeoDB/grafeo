@@ -61,18 +61,28 @@ impl CountExpr {
     ///
     /// As above.
     pub fn count_of(value: &Value) -> grafeo_common::utils::error::Result<usize> {
+        Self::count_in(value, CountClauses::SkipLimit.skip())
+    }
+
+    /// [`count_of`](Self::count_of) for the clause named `clause` in its
+    /// errors (`OFFSET` in SQL/PGQ, see [`CountClauses`]).
+    ///
+    /// # Errors
+    ///
+    /// As [`count_of`](Self::count_of).
+    pub fn count_in(value: &Value, clause: &str) -> grafeo_common::utils::error::Result<usize> {
         use grafeo_common::utils::error::{Error, QueryError, QueryErrorKind};
 
         match value {
             Value::Int64(n) => usize::try_from(*n).map_err(|_| {
                 Error::from(QueryError::new(
                     QueryErrorKind::NegativeLimit,
-                    format!("SKIP/LIMIT must be non-negative, got {n}"),
+                    format!("{clause} must be non-negative, got {n}"),
                 ))
             }),
             other => Err(Error::from(QueryError::new(
                 QueryErrorKind::InvalidValueType,
-                format!("SKIP/LIMIT must be an integer, got {other}"),
+                format!("{clause} must be an integer, got {other}"),
             ))),
         }
     }
@@ -107,6 +117,40 @@ impl PartialEq<usize> for CountExpr {
     }
 }
 
+/// What a statement calls its clauses that skip and limit rows, for the
+/// errors of their counts: GQL and Cypher write `SKIP` and `LIMIT`, SQL/PGQ
+/// `OFFSET` and `LIMIT`. The errors' status and code are the same either
+/// way.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum CountClauses {
+    /// `SKIP` and `LIMIT`, named together as `SKIP/LIMIT`.
+    #[default]
+    SkipLimit,
+    /// SQL's `OFFSET` and `LIMIT`, each named by itself.
+    OffsetLimit,
+}
+
+impl CountClauses {
+    /// The name of the clause that skips rows, in an error.
+    #[must_use]
+    pub fn skip(self) -> &'static str {
+        match self {
+            Self::SkipLimit => "SKIP/LIMIT",
+            Self::OffsetLimit => "OFFSET",
+        }
+    }
+
+    /// The name of the clause that limits rows, in an error.
+    #[must_use]
+    pub fn limit(self) -> &'static str {
+        match self {
+            Self::SkipLimit => "SKIP/LIMIT",
+            Self::OffsetLimit => "LIMIT",
+        }
+    }
+}
+
 /// A logical query plan.
 #[derive(Debug, Clone)]
 pub struct LogicalPlan {
@@ -126,6 +170,9 @@ pub struct LogicalPlan {
     /// What executing the plan returns (set by the SPARQL translator for ASK,
     /// CONSTRUCT and DESCRIBE).
     pub result_kind: crate::database::ResultKind,
+    /// What the statement calls its SKIP and LIMIT clauses, for the errors
+    /// of a count given as a parameter (set by the SQL/PGQ translator).
+    pub count_clauses: CountClauses,
 }
 
 impl LogicalPlan {
@@ -138,6 +185,7 @@ impl LogicalPlan {
             default_params: HashMap::new(),
             graph: None,
             result_kind: crate::database::ResultKind::Rows,
+            count_clauses: CountClauses::SkipLimit,
         }
     }
 
@@ -150,6 +198,7 @@ impl LogicalPlan {
             default_params: HashMap::new(),
             graph: None,
             result_kind: crate::database::ResultKind::Rows,
+            count_clauses: CountClauses::SkipLimit,
         }
     }
 
@@ -169,6 +218,7 @@ impl LogicalPlan {
             default_params: HashMap::new(),
             graph: None,
             result_kind: crate::database::ResultKind::Rows,
+            count_clauses: CountClauses::SkipLimit,
         }
     }
 }

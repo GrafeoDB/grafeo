@@ -34,6 +34,7 @@ use crate::transaction::RdfWriter;
 mod evaluator;
 mod named_graphs;
 mod order;
+mod path_per_row;
 mod term_ids;
 mod terms;
 
@@ -399,7 +400,30 @@ impl RdfPlanner {
         &self,
         path: &crate::query::plan::PropertyPathOp,
     ) -> Result<(Box<dyn Operator>, Vec<String>, Vec<LogicalType>)> {
-        use grafeo_core::execution::operators::{RdfPathConfig, RdfPathGraph, RdfPathOperator};
+        let operator = self.path_source().operator(self.path_config(path)?);
+        let columns = operator.columns();
+        let types = vec![LogicalType::RdfTermId; columns.len()];
+        let operator = self.intern(Box::new(operator), (0..columns.len()).collect());
+        Ok((operator, columns, types))
+    }
+
+    /// What the query's path searches read with (see
+    /// [`path_per_row::PathSource`]).
+    fn path_source(&self) -> path_per_row::PathSource {
+        path_per_row::PathSource {
+            store: Arc::clone(&self.store),
+            budget: self.path_search_budget,
+            deadline: self.deadline,
+            overlay: self.writer.as_ref().map(RdfWriter::path_overlay),
+        }
+    }
+
+    /// The search of `path`: its ends, graph and step.
+    fn path_config(
+        &self,
+        path: &crate::query::plan::PropertyPathOp,
+    ) -> Result<grafeo_core::execution::operators::RdfPathConfig> {
+        use grafeo_core::execution::operators::{RdfPathConfig, RdfPathGraph};
         let graph = match path.graph.as_ref() {
             Some(TripleComponent::Variable(_)) => {
                 RdfPathGraph::NamedGraphs(path.dataset.as_ref().map(|ds| ds.named_graphs.clone()))
@@ -429,32 +453,76 @@ impl RdfPlanner {
                 RdfPathGraph::Union(ds.default_graphs.clone())
             }),
         };
-        let operator = RdfPathOperator::new(
+        Ok(RdfPathConfig {
+            subject: component_to_term(&path.subject),
+            object: component_to_term(&path.object),
+            subject_var: path.subject.as_variable().map(str::to_string),
+            object_var: path.object.as_variable().map(str::to_string),
+            graph_var: path
+                .graph
+                .as_ref()
+                .and_then(TripleComponent::as_variable)
+                .map(str::to_string),
+            min_hops: !path.zero_length,
+            path: path.path.clone(),
+            graph,
+            transaction_id: None,
+            chunk_capacity: self.chunk_size,
+            zero_length_in_graph: false,
+        })
+    }
+
+    /// The search per row of a join of a property path with `other`, the
+    /// join's other side, when `other` always binds the path's subject or
+    /// object (see [`path_per_row`]): the path's config with those ends left
+    /// open, their columns in `other_columns`, and the path's own columns.
+    /// `None` when `other` binds neither end, or holds a column of the path's
+    /// free end or graph variable without always binding it (a join then
+    /// checks the pairs).
+    fn path_per_row(
+        &self,
+        path: &crate::query::plan::PropertyPathOp,
+        other: &LogicalOperator,
+        other_columns: &[String],
+    ) -> Result<Option<path_per_row::PathPerRowPlan>> {
+        let Some(bound) = crate::query::plan::always_bound(other) else {
+            return Ok(None);
+        };
+        let column = |component: &TripleComponent| {
+            component
+                .as_variable()
+                .filter(|variable| bound.contains(*variable))
+                .and_then(|variable| other_columns.iter().position(|c| c == variable))
+        };
+        let (subject_column, object_column) = (column(&path.subject), column(&path.object));
+        if subject_column.is_none() && object_column.is_none() {
+            return Ok(None);
+        }
+        let mut config = self.path_config(path)?;
+        // Between two variables the zero-length solutions are the graph's
+        // terms: a row's term outside the graph has none.
+        config.zero_length_in_graph =
+            path.subject.as_variable().is_some() && path.object.as_variable().is_some();
+        if subject_column.is_some() {
+            config.subject_var = None;
+        }
+        if object_column.is_some() {
+            config.object_var = None;
+        }
+        let columns = grafeo_core::execution::operators::RdfPathOperator::new(
             Arc::clone(&self.store),
-            RdfPathConfig {
-                subject: component_to_term(&path.subject),
-                object: component_to_term(&path.object),
-                subject_var: path.subject.as_variable().map(str::to_string),
-                object_var: path.object.as_variable().map(str::to_string),
-                graph_var: path
-                    .graph
-                    .as_ref()
-                    .and_then(TripleComponent::as_variable)
-                    .map(str::to_string),
-                min_hops: !path.zero_length,
-                path: path.path.clone(),
-                graph,
-                transaction_id: None,
-                chunk_capacity: self.chunk_size,
-            },
+            config.clone(),
         )
-        .with_memory_budget(self.path_search_budget)
-        .with_deadline(self.deadline)
-        .with_read_overlay(self.writer.as_ref().map(RdfWriter::path_overlay));
-        let columns = operator.columns();
-        let types = vec![LogicalType::RdfTermId; columns.len()];
-        let operator = self.intern(Box::new(operator), (0..columns.len()).collect());
-        Ok((operator, columns, types))
+        .columns();
+        if columns.iter().any(|name| other_columns.contains(name)) {
+            return Ok(None);
+        }
+        Ok(Some(path_per_row::PathPerRowPlan {
+            config,
+            subject_column,
+            object_column,
+            columns,
+        }))
     }
 
     /// Plans a triple scan operator.
@@ -1218,8 +1286,49 @@ impl RdfPlanner {
         join: &crate::query::plan::JoinOp,
     ) -> Result<(Box<dyn Operator>, Vec<String>, Vec<LogicalType>)> {
         use crate::query::planner::common;
+        let first_entry = self.profile_entries.borrow().len();
         let (left_op, left_columns, left_types) = self.plan_operator(&join.left)?;
+        let right_entry = self.profile_entries.borrow().len();
         let (right_op, right_columns, right_types) = self.plan_operator(&join.right)?;
+
+        // A path with an end the other side binds: one search per row from
+        // that end (the path's operator planned above reads nothing until it
+        // runs, and is dropped).
+        let per_row = match (join.left.as_ref(), join.right.as_ref()) {
+            (_, LogicalOperator::PropertyPath(path)) => self
+                .path_per_row(path, &join.left, &left_columns)?
+                .map(|plan| (plan, true)),
+            (LogicalOperator::PropertyPath(path), _) => self
+                .path_per_row(path, &join.right, &right_columns)?
+                .map(|plan| (plan, false)),
+            _ => None,
+        };
+        if let Some((plan, path_on_right)) = per_row {
+            let (input, mut columns, mut types, path_entry) = if path_on_right {
+                (left_op, left_columns, left_types, right_entry)
+            } else {
+                (right_op, right_columns, right_types, first_entry)
+            };
+            // The path's PROFILE line joins the search's.
+            if let Some(entry) = self.profile_entries.borrow_mut().get_mut(path_entry) {
+                entry.absorbed = true;
+            }
+            types.extend(std::iter::repeat_n(
+                LogicalType::RdfTermId,
+                plan.columns.len(),
+            ));
+            let operator = path_per_row::PathPerRowOperator {
+                input,
+                source: self.path_source(),
+                config: plan.config,
+                subject_column: plan.subject_column,
+                object_column: plan.object_column,
+                path_columns: plan.columns.len(),
+                terms: Arc::clone(&self.terms),
+            };
+            columns.extend(plan.columns);
+            return Ok((Box::new(operator), columns, types));
+        }
         let loose = loosely_shared(
             crate::query::plan::always_bound(&join.left),
             crate::query::plan::always_bound(&join.right),

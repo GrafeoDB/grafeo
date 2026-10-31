@@ -1292,6 +1292,7 @@ mod path_overlay_tests {
             graph: RdfPathGraph::Default,
             transaction_id: None,
             chunk_capacity: 16,
+            zero_length_in_graph: false,
         };
         (
             RdfPathOperator::new(store, config)

@@ -139,13 +139,14 @@ pub(crate) fn build_inner_join(
         PhysicalJoinType::Inner
     };
 
-    // Decide whether to swap sides: build on the smaller input.
-    // Only swap for equi-joins (not cross joins) and when left is significantly larger.
+    // Decide whether to swap sides: build on the smaller input. The right
+    // side is the build side, so swap for an equi-join (not a cross join)
+    // whose left side is clearly the smaller.
     let swap_sides = matches!(join_type, PhysicalJoinType::Inner)
-        && cardinalities.is_some_and(|(left_card, right_card)| right_card < left_card * 0.8);
+        && cardinalities.is_some_and(|(left_card, right_card)| left_card < right_card * 0.8);
 
     if swap_sides {
-        // Swap: right becomes probe, left becomes build
+        // Swap: right becomes probe, left (the smaller) becomes build
         // Output order is right+left from the join, then we project back to left+right
         let mut join_columns: Vec<String> = right_columns.to_vec();
         join_columns.extend(left_columns.iter().cloned());
@@ -924,7 +925,8 @@ mod tests {
         chunk
     }
 
-    /// Cardinalities where right (100) < left (1000) * 0.8 trigger the swap branch.
+    /// Cardinalities where left (100) < right (1000) * 0.8 trigger the swap
+    /// branch, which builds on the smaller left side.
     #[test]
     fn test_inner_join_swap_sides_preserves_types() {
         let left_cols = vec!["s".to_string(), "name".to_string()];
@@ -942,7 +944,7 @@ mod tests {
             &right_cols,
             &left_types,
             &right_types,
-            Some((1000.0, 100.0)),
+            Some((100.0, 1000.0)),
         );
 
         assert_eq!(output_columns, vec!["s", "name", "age"]);
@@ -953,7 +955,8 @@ mod tests {
         );
     }
 
-    /// Cardinalities where left (100) < right (1000) skip the swap.
+    /// Cardinalities where right (100) is the smaller skip the swap: the
+    /// right side is the build side already.
     #[test]
     fn test_inner_join_no_swap_preserves_types() {
         let left_cols = vec!["s".to_string(), "name".to_string()];
@@ -971,7 +974,7 @@ mod tests {
             &right_cols,
             &left_types,
             &right_types,
-            Some((100.0, 1000.0)),
+            Some((1000.0, 100.0)),
         );
 
         assert_eq!(output_columns, vec!["s", "name", "age"]);

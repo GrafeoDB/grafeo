@@ -37,6 +37,7 @@ mod order;
 mod path_per_row;
 mod term_ids;
 mod terms;
+mod triple_lookup;
 
 use evaluator::RdfExpressionPredicate;
 use grafeo_common::types::TermId;
@@ -533,6 +534,19 @@ impl RdfPlanner {
         &self,
         scan: &TripleScanOp,
     ) -> Result<(Box<dyn Operator>, Vec<String>, Vec<LogicalType>)> {
+        let (scan_op, columns) = self.triple_scan(scan, [false; 3]);
+        let types = vec![LogicalType::RdfTermId; columns.len()];
+        Ok((Box::new(scan_op), columns, types))
+    }
+
+    /// The scan of `scan`'s pattern and its columns, its variables in
+    /// subject, predicate, object and graph order, without the positions
+    /// `left_out` marks (which a row fills in, see [`triple_lookup`]).
+    fn triple_scan(
+        &self,
+        scan: &TripleScanOp,
+        left_out: [bool; 3],
+    ) -> (RdfTripleScanOperator, Vec<String>) {
         // Build the triple pattern for querying the store
         let pattern = self.build_triple_pattern(scan);
 
@@ -540,17 +554,16 @@ impl RdfPlanner {
         let mut columns = Vec::new();
         let mut output_mask = [false, false, false, false]; // s, p, o, g
 
-        if let TripleComponent::Variable(name) = &scan.subject {
-            columns.push(name.clone());
-            output_mask[0] = true;
-        }
-        if let TripleComponent::Variable(name) = &scan.predicate {
-            columns.push(name.clone());
-            output_mask[1] = true;
-        }
-        if let TripleComponent::Variable(name) = &scan.object {
-            columns.push(name.clone());
-            output_mask[2] = true;
+        for (position, component) in [&scan.subject, &scan.predicate, &scan.object]
+            .into_iter()
+            .enumerate()
+        {
+            if let TripleComponent::Variable(name) = component
+                && !left_out[position]
+            {
+                columns.push(name.clone());
+                output_mask[position] = true;
+            }
         }
         if let Some(TripleComponent::Variable(name)) = &scan.graph {
             columns.push(name.clone());
@@ -580,8 +593,127 @@ impl RdfPlanner {
         )
         .with_writer(self.writer.clone())
         .with_read_counter(self.read_counter());
-        let types = vec![LogicalType::RdfTermId; columns.len()];
-        Ok((Box::new(scan_op), columns, types))
+        (scan_op, columns)
+    }
+
+    /// The lookup join of `scan` with `other`, the join's other side, when
+    /// `other` always binds a variable of the pattern (see
+    /// [`triple_lookup`]): the full scan, the scan a row fills in, the plan
+    /// and the columns the join adds. `None` when `other` binds none, holds
+    /// a free variable of the pattern without always binding it (a join
+    /// then checks the pairs), the pattern repeats a variable, or has a
+    /// graph variable or an input.
+    fn triple_lookup(
+        &self,
+        scan: &TripleScanOp,
+        other: &LogicalOperator,
+        other_columns: &[String],
+        scan_estimate: Option<f64>,
+        other_estimate: Option<f64>,
+    ) -> Option<Box<triple_lookup::TripleLookupParts>> {
+        if scan.input.is_some() || matches!(scan.graph, Some(TripleComponent::Variable(_))) {
+            return None;
+        }
+        // More rows than look up, known while planning: the hash join, without
+        // reading the first rows to find out. Only a scan's or a VALUES
+        // block's estimate counts: a join's (left x right / 10) overstates a
+        // star of patterns on one subject, which the switch at run time
+        // handles.
+        let other_estimate = other_estimate.filter(|_| {
+            matches!(
+                other,
+                LogicalOperator::TripleScan(_)
+                    | LogicalOperator::Union(_)
+                    | LogicalOperator::Bind(_)
+                    | LogicalOperator::Empty
+            )
+        });
+        let limit = triple_lookup::lookup_limit(scan_estimate);
+        #[expect(
+            clippy::cast_precision_loss,
+            reason = "the limit is at most LOOKUP_ROWS, which an f64 holds exactly"
+        )]
+        let limit_rows = limit as f64;
+        if other_estimate.is_some_and(|rows| rows > limit_rows) {
+            return None;
+        }
+        let bound_names = crate::query::plan::always_bound(other)?;
+        let variables: Vec<(usize, &str)> = [&scan.subject, &scan.predicate, &scan.object]
+            .into_iter()
+            .enumerate()
+            .filter_map(|(position, component)| match component {
+                TripleComponent::Variable(name) => Some((position, name.as_str())),
+                _ => None,
+            })
+            .collect();
+        let mut seen = std::collections::HashSet::new();
+        if !variables.iter().all(|(_, name)| seen.insert(*name)) {
+            return None;
+        }
+        let mut left_out = [false; 3];
+        let mut bound = Vec::new();
+        let mut added = Vec::new();
+        let mut added_names = Vec::new();
+        for (full_column, &(position, name)) in variables.iter().enumerate() {
+            match other_columns.iter().position(|column| column == name) {
+                Some(column) if bound_names.contains(name) => {
+                    left_out[position] = true;
+                    bound.push((position, column, full_column));
+                }
+                Some(_) => return None,
+                None => {
+                    added.push(full_column);
+                    added_names.push(name.to_string());
+                }
+            }
+        }
+        if bound.is_empty() {
+            return None;
+        }
+        let (full, full_columns) = self.triple_scan(scan, [false; 3]);
+        let (lookup, _) = self.triple_scan(scan, left_out);
+        Some(Box::new(triple_lookup::TripleLookupParts {
+            full,
+            lookup,
+            plan: triple_lookup::TripleLookupPlan { bound, added },
+            full_columns,
+            added_names,
+            limit,
+        }))
+    }
+
+    /// The lookup join of `parts` over `input` (see [`triple_lookup`]), its
+    /// columns those of `input`, then the added ones. Out of line: it holds
+    /// two scans, which would enlarge `plan_join`'s frame at every join of a
+    /// chain.
+    #[inline(never)]
+    fn lookup_join(
+        &self,
+        parts: Box<triple_lookup::TripleLookupParts>,
+        input: Box<dyn Operator>,
+        columns: Vec<String>,
+        types: Vec<LogicalType>,
+        cardinalities: Option<(f64, f64)>,
+    ) -> (Box<dyn Operator>, Vec<String>, Vec<LogicalType>) {
+        let mut out_columns = columns.clone();
+        let mut out_types = types.clone();
+        out_types.extend(std::iter::repeat_n(
+            LogicalType::RdfTermId,
+            parts.added_names.len(),
+        ));
+        out_columns.extend(parts.added_names.iter().cloned());
+        let operator = triple_lookup::TripleLookupOperator::new(
+            input,
+            *parts,
+            triple_lookup::HashJoinInputs {
+                columns,
+                types,
+                cardinalities,
+            },
+            Arc::clone(&self.terms),
+            self.chunk_size,
+        );
+        (Box::new(operator), out_columns, out_types)
     }
 
     /// Builds a TriplePattern from a TripleScanOp.
@@ -1328,6 +1460,90 @@ impl RdfPlanner {
             };
             columns.extend(plan.columns);
             return Ok((Box::new(operator), columns, types));
+        }
+
+        // A triple pattern with a variable the other side binds: a lookup
+        // per row of that side (the scan planned above reads nothing until
+        // it runs, and is dropped). Of two patterns, the one estimated to
+        // match more triples is looked up; a wrong guess costs at most
+        // `LOOKUP_ROWS` lookups before the join hashes the scan.
+        let left_estimate = estimate_operator_cardinality(&join.left, &self.store);
+        let right_estimate = estimate_operator_cardinality(&join.right, &self.store);
+        let lookup = match (join.left.as_ref(), join.right.as_ref()) {
+            (LogicalOperator::TripleScan(left), LogicalOperator::TripleScan(right)) => {
+                if left_estimate > right_estimate {
+                    self.triple_lookup(
+                        left,
+                        &join.right,
+                        &right_columns,
+                        left_estimate,
+                        right_estimate,
+                    )
+                    .map(|plan| (plan, false))
+                    .or_else(|| {
+                        self.triple_lookup(
+                            right,
+                            &join.left,
+                            &left_columns,
+                            right_estimate,
+                            left_estimate,
+                        )
+                        .map(|plan| (plan, true))
+                    })
+                } else {
+                    self.triple_lookup(
+                        right,
+                        &join.left,
+                        &left_columns,
+                        right_estimate,
+                        left_estimate,
+                    )
+                    .map(|plan| (plan, true))
+                    .or_else(|| {
+                        self.triple_lookup(
+                            left,
+                            &join.right,
+                            &right_columns,
+                            left_estimate,
+                            right_estimate,
+                        )
+                        .map(|plan| (plan, false))
+                    })
+                }
+            }
+            (_, LogicalOperator::TripleScan(right)) => self
+                .triple_lookup(
+                    right,
+                    &join.left,
+                    &left_columns,
+                    right_estimate,
+                    left_estimate,
+                )
+                .map(|plan| (plan, true)),
+            (LogicalOperator::TripleScan(left), _) => self
+                .triple_lookup(
+                    left,
+                    &join.right,
+                    &right_columns,
+                    left_estimate,
+                    right_estimate,
+                )
+                .map(|plan| (plan, false)),
+            _ => None,
+        };
+        if let Some((parts, scan_on_right)) = lookup {
+            let (input, columns, types, scan_entry, cardinalities) = if scan_on_right {
+                let estimates = left_estimate.zip(right_estimate);
+                (left_op, left_columns, left_types, right_entry, estimates)
+            } else {
+                let estimates = right_estimate.zip(left_estimate);
+                (right_op, right_columns, right_types, first_entry, estimates)
+            };
+            // The scan's PROFILE line joins the lookup's.
+            if let Some(entry) = self.profile_entries.borrow_mut().get_mut(scan_entry) {
+                entry.absorbed = true;
+            }
+            return Ok(self.lookup_join(parts, input, columns, types, cardinalities));
         }
         let loose = loosely_shared(
             crate::query::plan::always_bound(&join.left),
@@ -2740,6 +2956,7 @@ fn copy_column(input: &DataChunk, from: usize, rows: &[usize], output: &mut Data
 ///
 /// Groups the graph IRI, scan-all flag, and SPARQL dataset restriction
 /// to keep the operator constructor argument count manageable.
+#[derive(Clone)]
 struct GraphContext {
     /// Named graph to query. `None` = default graph.
     graph: Option<String>,
@@ -3239,6 +3456,23 @@ impl RdfTripleScanOperator {
         }
     }
 
+    /// The same scan of `pattern`, nothing read yet (a lookup per row, see
+    /// [`triple_lookup`]).
+    fn with_pattern(&self, pattern: TriplePattern) -> Self {
+        Self {
+            store: Arc::clone(&self.store),
+            pattern,
+            output_mask: self.output_mask,
+            graph_context: self.graph_context.clone(),
+            chunk_size: self.chunk_size,
+            triples: None,
+            position: 0,
+            terms: Arc::clone(&self.terms),
+            writer: self.writer.clone(),
+            reads: self.reads.clone(),
+        }
+    }
+
     /// Makes the scan see the writes of the transaction of `writer`
     /// (read-your-writes).
     fn with_writer(mut self, writer: Option<RdfWriter>) -> Self {
@@ -3620,6 +3854,22 @@ fn estimate_operator_cardinality(
                     | crate::query::plan::TripleComponent::LangLiteral { .. }
             );
 
+            // With a predicate, its own counts from the optimizer's
+            // statistics (cached, see `RdfStore::get_or_collect_statistics`).
+            if let crate::query::plan::TripleComponent::Iri(predicate) = &scan.predicate
+                && let Some(counted) = store
+                    .get_or_collect_statistics()
+                    .get_predicate(&format!("<{predicate}>"))
+            {
+                let triples = counted.triple_count as f64;
+                let estimate = match (s_bound, o_bound) {
+                    (true, true) => 1.0,
+                    (true, false) => triples / counted.distinct_subjects.max(1) as f64,
+                    (false, true) => triples / counted.distinct_objects.max(1) as f64,
+                    (false, false) => triples,
+                };
+                return Some(estimate.max(1.0));
+            }
             let estimate = match (s_bound, p_bound, o_bound) {
                 (true, true, true) => 1.0,
                 (true, true, false) => total / stats.subject_count.max(1) as f64,
@@ -3647,6 +3897,14 @@ fn estimate_operator_cardinality(
                 estimate_operator_cardinality(&l.input, store)
             }
         }
+        // A VALUES block is a union of one row each (see the translator).
+        LogicalOperator::Empty => Some(1.0),
+        LogicalOperator::Bind(bind) => estimate_operator_cardinality(&bind.input, store),
+        LogicalOperator::Union(union) => union
+            .inputs
+            .iter()
+            .map(|input| estimate_operator_cardinality(input, store))
+            .sum::<Option<f64>>(),
         _ => None,
     }
 }

@@ -27,7 +27,8 @@ afterAll(() => {
 
 function firstExample(readme) {
   const text = readFileSync(readme, 'utf8')
-  const blocks = [...text.matchAll(/```(?:javascript|js|typescript|ts)\n([\s\S]*?)```/g)].map((m) => m[1])
+  // `\r?\n`: a Windows checkout ends the README's lines with CRLF.
+  const blocks = [...text.matchAll(/```(?:javascript|js|typescript|ts)\r?\n([\s\S]*?)```/g)].map((m) => m[1])
   return blocks.find((block) => block.includes('GrafeoDB.create'))
 }
 

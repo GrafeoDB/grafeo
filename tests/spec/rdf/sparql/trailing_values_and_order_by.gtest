@@ -1,0 +1,407 @@
+# SPARQL trailing VALUES and ORDER BY constraints (SPARQL 1.1 sec 10.2.2,
+# 15.1, 18.2.4.3; grammar rules [7], [24], [28])
+#
+# A VALUES block after the solution modifiers joins the query's solutions
+# after GROUP BY and HAVING and before the SELECT expressions, ORDER BY,
+# OFFSET and LIMIT; in ASK, CONSTRUCT and DESCRIBE it joins the WHERE
+# pattern. ORDER BY takes a variable, a bracketed expression, a built-in
+# call or an IRI function call, not a bare IRI. Both were syntax errors
+# before 0.6.1, as was `VALUES (?x) { (a) }` with one variable.
+
+meta:
+  language: sparql
+  model: rdf
+  section: "10.2.2"
+  title: Trailing VALUES and ORDER BY constraints
+  dataset: empty
+  requires: [sparql, rdf]
+
+tests:
+
+  # ---------------------------------------------------------------------------
+  # Trailing VALUES (rules [7] and [28])
+  # ---------------------------------------------------------------------------
+
+  - name: trailing_values_with_one_variable
+    setup:
+      - |
+        PREFIX ex: <http://ex.org/>
+        INSERT DATA {
+          ex:alix ex:city "Amsterdam" ; ex:age 30 ; ex:price "10.5" .
+          ex:gus ex:city "Berlin" ; ex:age 25 ; ex:price "9" .
+          ex:vincent ex:city "Amsterdam" ; ex:age 41 ; ex:price "12.25" .
+        }
+    query: |
+      PREFIX ex: <http://ex.org/>
+      SELECT ?age WHERE { ?p ex:city ?c ; ex:age ?age }
+      VALUES ?c { "Amsterdam" }
+    expect:
+      rows:
+        - [30]
+        - [41]
+
+  - name: trailing_values_with_two_variables_and_undef
+    # UNDEF leaves a variable free: Amsterdam at any age, any city at 25.
+    setup:
+      - |
+        PREFIX ex: <http://ex.org/>
+        INSERT DATA {
+          ex:alix ex:city "Amsterdam" ; ex:age 30 ; ex:price "10.5" .
+          ex:gus ex:city "Berlin" ; ex:age 25 ; ex:price "9" .
+          ex:vincent ex:city "Amsterdam" ; ex:age 41 ; ex:price "12.25" .
+        }
+    query: |
+      PREFIX ex: <http://ex.org/>
+      SELECT ?age WHERE { ?p ex:city ?c ; ex:age ?age }
+      VALUES (?c ?age) { ("Amsterdam" UNDEF) (UNDEF 25) }
+    expect:
+      rows:
+        - [25]
+        - [30]
+        - [41]
+
+  - name: trailing_values_joins_an_aggregate_alias
+    # The trailing VALUES joins after GROUP BY and HAVING (sec 18.2.4.3), so it
+    # sees the aggregate's alias.
+    setup:
+      - |
+        PREFIX ex: <http://ex.org/>
+        INSERT DATA {
+          ex:alix ex:city "Amsterdam" ; ex:age 30 ; ex:price "10.5" .
+          ex:gus ex:city "Berlin" ; ex:age 25 ; ex:price "9" .
+          ex:vincent ex:city "Amsterdam" ; ex:age 41 ; ex:price "12.25" .
+        }
+    query: |
+      PREFIX ex: <http://ex.org/>
+      SELECT ?c (COUNT(?p) AS ?n) WHERE { ?p ex:city ?c }
+      GROUP BY ?c
+      VALUES ?n { 2 }
+    expect:
+      rows:
+        - [Amsterdam, 2]
+
+  - name: trailing_values_joins_a_group_key
+    setup:
+      - |
+        PREFIX ex: <http://ex.org/>
+        INSERT DATA {
+          ex:alix ex:city "Amsterdam" ; ex:age 30 ; ex:price "10.5" .
+          ex:gus ex:city "Berlin" ; ex:age 25 ; ex:price "9" .
+          ex:vincent ex:city "Amsterdam" ; ex:age 41 ; ex:price "12.25" .
+        }
+    query: |
+      PREFIX ex: <http://ex.org/>
+      SELECT ?c (COUNT(?p) AS ?n) WHERE { ?p ex:city ?c }
+      GROUP BY ?c
+      VALUES ?c { "Berlin" }
+    expect:
+      rows:
+        - [Berlin, 1]
+
+  - name: trailing_values_joins_before_limit
+    # The join comes before ORDER BY and LIMIT: the youngest in Amsterdam, not
+    # Gus (25) cut away after the limit.
+    setup:
+      - |
+        PREFIX ex: <http://ex.org/>
+        INSERT DATA {
+          ex:alix ex:city "Amsterdam" ; ex:age 30 ; ex:price "10.5" .
+          ex:gus ex:city "Berlin" ; ex:age 25 ; ex:price "9" .
+          ex:vincent ex:city "Amsterdam" ; ex:age 41 ; ex:price "12.25" .
+        }
+    query: |
+      PREFIX ex: <http://ex.org/>
+      SELECT ?age WHERE { ?p ex:city ?c ; ex:age ?age }
+      ORDER BY ?age LIMIT 1
+      VALUES ?c { "Amsterdam" }
+    expect:
+      ordered: true
+      rows:
+        - [30]
+
+  - name: trailing_values_joins_before_offset
+    setup:
+      - |
+        PREFIX ex: <http://ex.org/>
+        INSERT DATA {
+          ex:alix ex:city "Amsterdam" ; ex:age 30 ; ex:price "10.5" .
+          ex:gus ex:city "Berlin" ; ex:age 25 ; ex:price "9" .
+          ex:vincent ex:city "Amsterdam" ; ex:age 41 ; ex:price "12.25" .
+        }
+    query: |
+      PREFIX ex: <http://ex.org/>
+      SELECT ?age WHERE { ?p ex:city ?c ; ex:age ?age }
+      ORDER BY ?age OFFSET 1
+      VALUES ?c { "Amsterdam" }
+    expect:
+      ordered: true
+      rows:
+        - [41]
+
+  - name: trailing_values_in_a_subselect
+    setup:
+      - |
+        PREFIX ex: <http://ex.org/>
+        INSERT DATA {
+          ex:alix ex:city "Amsterdam" ; ex:age 30 ; ex:price "10.5" .
+          ex:gus ex:city "Berlin" ; ex:age 25 ; ex:price "9" .
+          ex:vincent ex:city "Amsterdam" ; ex:age 41 ; ex:price "12.25" .
+        }
+    query: |
+      PREFIX ex: <http://ex.org/>
+      SELECT ?age WHERE {
+        { SELECT ?age ?c WHERE { ?p ex:age ?age ; ex:city ?c } VALUES ?c { "Berlin" } }
+      }
+    expect:
+      rows:
+        - [25]
+
+  - name: trailing_values_in_ask_true
+    setup:
+      - |
+        PREFIX ex: <http://ex.org/>
+        INSERT DATA {
+          ex:alix ex:city "Amsterdam" ; ex:age 30 ; ex:price "10.5" .
+          ex:gus ex:city "Berlin" ; ex:age 25 ; ex:price "9" .
+          ex:vincent ex:city "Amsterdam" ; ex:age 41 ; ex:price "12.25" .
+        }
+    query: |
+      PREFIX ex: <http://ex.org/>
+      ASK { ?p ex:city ?c }
+      VALUES ?c { "Berlin" }
+    expect:
+      columns: [boolean]
+      rows:
+        - [true]
+
+  - name: trailing_values_in_ask_false
+    setup:
+      - |
+        PREFIX ex: <http://ex.org/>
+        INSERT DATA {
+          ex:alix ex:city "Amsterdam" ; ex:age 30 ; ex:price "10.5" .
+          ex:gus ex:city "Berlin" ; ex:age 25 ; ex:price "9" .
+          ex:vincent ex:city "Amsterdam" ; ex:age 41 ; ex:price "12.25" .
+        }
+    query: |
+      PREFIX ex: <http://ex.org/>
+      ASK { ?p ex:city ?c }
+      VALUES ?c { "Paris" }
+    expect:
+      columns: [boolean]
+      rows:
+        - [false]
+
+  - name: trailing_values_in_construct
+    setup:
+      - |
+        PREFIX ex: <http://ex.org/>
+        INSERT DATA {
+          ex:alix ex:city "Amsterdam" ; ex:age 30 ; ex:price "10.5" .
+          ex:gus ex:city "Berlin" ; ex:age 25 ; ex:price "9" .
+          ex:vincent ex:city "Amsterdam" ; ex:age 41 ; ex:price "12.25" .
+        }
+    query: |
+      PREFIX ex: <http://ex.org/>
+      CONSTRUCT { ?p ex:lives ?c } WHERE { ?p ex:city ?c }
+      VALUES ?c { "Berlin" }
+    expect:
+      columns: [subject, predicate, object]
+      terms:
+        - ['<http://ex.org/gus>', '<http://ex.org/lives>', '"Berlin"']
+
+  - name: trailing_values_in_describe
+    # Gus's three triples.
+    setup:
+      - |
+        PREFIX ex: <http://ex.org/>
+        INSERT DATA {
+          ex:alix ex:city "Amsterdam" ; ex:age 30 ; ex:price "10.5" .
+          ex:gus ex:city "Berlin" ; ex:age 25 ; ex:price "9" .
+          ex:vincent ex:city "Amsterdam" ; ex:age 41 ; ex:price "12.25" .
+        }
+    query: |
+      PREFIX ex: <http://ex.org/>
+      DESCRIBE ?p WHERE { ?p ex:city ?c }
+      VALUES ?c { "Berlin" }
+    expect:
+      count: 3
+
+  - name: one_parenthesized_variable_inline
+    # `VALUES (?x) { (a) }`: a parenthesized variable list reads rows in
+    # parentheses, also with one variable (it failed before 0.6.1).
+    setup:
+      - |
+        PREFIX ex: <http://ex.org/>
+        INSERT DATA {
+          ex:alix ex:city "Amsterdam" ; ex:age 30 ; ex:price "10.5" .
+          ex:gus ex:city "Berlin" ; ex:age 25 ; ex:price "9" .
+          ex:vincent ex:city "Amsterdam" ; ex:age 41 ; ex:price "12.25" .
+        }
+    query: |
+      PREFIX ex: <http://ex.org/>
+      SELECT ?age WHERE { VALUES (?c) { ("Berlin") } ?p ex:city ?c ; ex:age ?age }
+    expect:
+      rows:
+        - [25]
+
+  - name: one_parenthesized_variable_trailing
+    setup:
+      - |
+        PREFIX ex: <http://ex.org/>
+        INSERT DATA {
+          ex:alix ex:city "Amsterdam" ; ex:age 30 ; ex:price "10.5" .
+          ex:gus ex:city "Berlin" ; ex:age 25 ; ex:price "9" .
+          ex:vincent ex:city "Amsterdam" ; ex:age 41 ; ex:price "12.25" .
+        }
+    query: |
+      PREFIX ex: <http://ex.org/>
+      SELECT ?age WHERE { ?p ex:city ?c ; ex:age ?age }
+      VALUES (?c) { ("Amsterdam") ("Berlin") }
+    expect:
+      rows:
+        - [25]
+        - [30]
+        - [41]
+
+
+  # ---------------------------------------------------------------------------
+  # ORDER BY a constraint (rule [24]): a built-in or an IRI function call
+  # ---------------------------------------------------------------------------
+
+  - name: order_by_str
+    # Alix, Gus, Vincent by their IRI's text.
+    setup:
+      - |
+        PREFIX ex: <http://ex.org/>
+        INSERT DATA {
+          ex:alix ex:city "Amsterdam" ; ex:age 30 ; ex:price "10.5" .
+          ex:gus ex:city "Berlin" ; ex:age 25 ; ex:price "9" .
+          ex:vincent ex:city "Amsterdam" ; ex:age 41 ; ex:price "12.25" .
+        }
+    query: |
+      PREFIX ex: <http://ex.org/>
+      SELECT ?age WHERE { ?p ex:age ?age }
+      ORDER BY STR(?p)
+    expect:
+      ordered: true
+      rows:
+        - [30]
+        - [25]
+        - [41]
+
+  - name: order_by_desc_of_a_cast
+    # 12.25, 10.5, 9 as numbers; as text DESC gives 9, 12.25, 10.5.
+    setup:
+      - |
+        PREFIX ex: <http://ex.org/>
+        INSERT DATA {
+          ex:alix ex:city "Amsterdam" ; ex:age 30 ; ex:price "10.5" .
+          ex:gus ex:city "Berlin" ; ex:age 25 ; ex:price "9" .
+          ex:vincent ex:city "Amsterdam" ; ex:age 41 ; ex:price "12.25" .
+        }
+    query: |
+      PREFIX ex: <http://ex.org/>
+      PREFIX xsd: <http://www.w3.org/2001/XMLSchema#>
+      SELECT ?age WHERE { ?p ex:age ?age ; ex:price ?price }
+      ORDER BY DESC(xsd:double(?price))
+    expect:
+      ordered: true
+      rows:
+        - [41]
+        - [30]
+        - [25]
+
+  - name: order_by_an_iri_function_without_a_prefix
+    # BSBM Q10's shape, `xsd:double(str(?price))`, with the full IRI.
+    setup:
+      - |
+        PREFIX ex: <http://ex.org/>
+        INSERT DATA {
+          ex:alix ex:city "Amsterdam" ; ex:age 30 ; ex:price "10.5" .
+          ex:gus ex:city "Berlin" ; ex:age 25 ; ex:price "9" .
+          ex:vincent ex:city "Amsterdam" ; ex:age 41 ; ex:price "12.25" .
+        }
+    query: |
+      PREFIX ex: <http://ex.org/>
+      SELECT ?age WHERE { ?p ex:age ?age ; ex:price ?price }
+      ORDER BY <http://www.w3.org/2001/XMLSchema#double>(str(?price))
+    expect:
+      ordered: true
+      rows:
+        - [25]
+        - [30]
+        - [41]
+
+  - name: order_by_an_aggregate_with_group_by
+    setup:
+      - |
+        PREFIX ex: <http://ex.org/>
+        INSERT DATA {
+          ex:alix ex:city "Amsterdam" ; ex:age 30 ; ex:price "10.5" .
+          ex:gus ex:city "Berlin" ; ex:age 25 ; ex:price "9" .
+          ex:vincent ex:city "Amsterdam" ; ex:age 41 ; ex:price "12.25" .
+        }
+    query: |
+      PREFIX ex: <http://ex.org/>
+      SELECT ?c WHERE { ?p ex:city ?c }
+      GROUP BY ?c
+      ORDER BY DESC(COUNT(?p))
+    expect:
+      ordered: true
+      rows:
+        - [Amsterdam]
+        - [Berlin]
+
+  - name: order_by_a_variable_and_a_call
+    setup:
+      - |
+        PREFIX ex: <http://ex.org/>
+        INSERT DATA {
+          ex:alix ex:city "Amsterdam" ; ex:age 30 ; ex:price "10.5" .
+          ex:gus ex:city "Berlin" ; ex:age 25 ; ex:price "9" .
+          ex:vincent ex:city "Amsterdam" ; ex:age 41 ; ex:price "12.25" .
+        }
+    query: |
+      PREFIX ex: <http://ex.org/>
+      SELECT ?age WHERE { ?p ex:city ?c ; ex:age ?age }
+      ORDER BY ?c STR(?p)
+    expect:
+      ordered: true
+      rows:
+        - [30]
+        - [41]
+        - [25]
+
+  - name: order_by_an_iri_alone_is_an_error
+    # An IRI without arguments is no constraint (rule [24]).
+    setup:
+      - |
+        PREFIX ex: <http://ex.org/>
+        INSERT DATA {
+          ex:alix ex:city "Amsterdam" ; ex:age 30 ; ex:price "10.5" .
+          ex:gus ex:city "Berlin" ; ex:age 25 ; ex:price "9" .
+          ex:vincent ex:city "Amsterdam" ; ex:age 41 ; ex:price "12.25" .
+        }
+    query: |
+      PREFIX ex: <http://ex.org/>
+      SELECT ?age WHERE { ?p ex:age ?age }
+      ORDER BY <http://www.w3.org/2001/XMLSchema#double>
+    expect:
+      error: ""
+
+  - name: order_by_a_prefixed_name_alone_is_an_error
+    setup:
+      - |
+        PREFIX ex: <http://ex.org/>
+        INSERT DATA {
+          ex:alix ex:city "Amsterdam" ; ex:age 30 ; ex:price "10.5" .
+          ex:gus ex:city "Berlin" ; ex:age 25 ; ex:price "9" .
+          ex:vincent ex:city "Amsterdam" ; ex:age 41 ; ex:price "12.25" .
+        }
+    query: |
+      PREFIX ex: <http://ex.org/>
+      SELECT ?age WHERE { ?p ex:age ?age }
+      ORDER BY ex:age
+    expect:
+      error: ""

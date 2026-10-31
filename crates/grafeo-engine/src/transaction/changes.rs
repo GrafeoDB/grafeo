@@ -860,6 +860,7 @@ impl<'wal> StreamingChanges<'wal> {
 
     /// Whether it writes a WAL: without one, a caller need not build the
     /// records it would log.
+    #[cfg(feature = "triple-store")]
     pub(crate) fn is_logged(&self) -> bool {
         self.log.is_some()
     }

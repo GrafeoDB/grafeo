@@ -193,6 +193,8 @@ impl GrafeoDB {
     ) -> Result<usize> {
         use grafeo_common::utils::error::Error;
 
+        // Refused before the file is read, as every import is.
+        self.check_import_allowed()?;
         let path = path.as_ref();
         let format = match format {
             Some(format) => format,
